@@ -3801,26 +3801,37 @@ function renderSessions() {
 
   const pinned = getPinnedSessions();
 
+  // Get collapsed groups from localStorage
+  var collapsed = {};
+  try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-groups") || "{}"); } catch(e) {}
+
   // Group ALL sessions by "group" field; default group = "chat"
-  var groups = {};  // {groupName: [sessions]}
+  var groups = {};
   state.sessions.forEach(function (s) {
     var g = (s.group || "").trim() || "chat";
     if (!groups[g]) groups[g] = [];
     groups[g].push(s);
   });
 
-  // Within each group: pinned first, then unpinned
+  // Within each group: sort by updatedAt desc, then pinned first
   var sorted = [];
-  var groupLabels = [];  // [{name, firstIdx}]
-  // Order: custom groups (alpha), then "chat" last
+  var groupDefs = [];  // [{name, displayName, firstIdx, count, collapsed}]
   var names = Object.keys(groups).filter(function(n) { return n !== "chat"; }).sort();
   names.push("chat");
 
   names.forEach(function (gn) {
-    var items = groups[gn];
+    var items = groups[gn].slice();
+    // Sort by updatedAt descending (most recent first)
+    items.sort(function (a, b) { return (b.updatedAt || "").localeCompare(a.updatedAt || ""); });
     var pinnedItems = items.filter(function (s) { return pinned.includes(s.id); });
     var unpinnedItems = items.filter(function (s) { return !pinned.includes(s.id); });
-    groupLabels.push({name: gn, firstIdx: sorted.length});
+    groupDefs.push({
+      name: gn,
+      displayName: gn === "chat" ? t("chatLabel") : gn,
+      firstIdx: sorted.length,
+      count: items.length,
+      collapsed: !!collapsed[gn]
+    });
     sorted = sorted.concat(pinnedItems).concat(unpinnedItems);
   });
 
@@ -3829,13 +3840,21 @@ function renderSessions() {
     .map(function (session, idx) {
 
       var labelHtml = "";
-      for (var gi = 0; gi < groupLabels.length; gi++) {
-        if (idx === groupLabels[gi].firstIdx) {
-          var gn = groupLabels[gi].name;
-          var displayName = gn === "chat" ? t("chatLabel") : gn;
-          labelHtml = `<div class="session-group-label">${displayName}</div>`;
+      for (var gi = 0; gi < groupDefs.length; gi++) {
+        if (idx === groupDefs[gi].firstIdx) {
+          var gd = groupDefs[gi];
+          var arrow = gd.collapsed ? "&#9654;" : "&#9660;";
+          labelHtml = `<div class="session-group-label" data-group="${escapeHtml(gd.name)}" style="cursor:pointer;user-select:none">
+            <span class="group-arrow">${arrow}</span> ${escapeHtml(gd.displayName)}
+            <span style="font-weight:400;color:var(--muted);font-size:11px;margin-left:4px">${gd.count}</span>
+          </div>`;
         }
       }
+
+      // Hide sessions in collapsed groups
+      var sessionGroup = (session.group || "").trim() || "chat";
+      var isCollapsed = !!collapsed[sessionGroup];
+      if (isCollapsed) return "";
 
       var title = session.title || t("untitledSession");
 
@@ -4012,6 +4031,27 @@ function renderSessions() {
   });
 
 }
+
+// Group collapse/expand — accordion: only one group open at a time
+if (els.sessionList) els.sessionList.addEventListener("click", function (e) {
+  var label = e.target.closest(".session-group-label");
+  if (!label) return;
+  var gn = label.dataset.group;
+  if (!gn) return;
+  var collapsed = {};
+  try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-groups") || "{}"); } catch(e) {}
+  // Accordion: collapse all groups, then toggle the clicked one
+  var allNames = Object.keys(collapsed);
+  // Build list of all group names from current sessions
+  var currentGroups = {};
+  state.sessions.forEach(function(s){ var g=(s.group||"").trim()||"chat"; currentGroups[g]=true; });
+  // Collapse all, then expand only the clicked one (if it was collapsed)
+  var wasCollapsed = !!collapsed[gn];
+  Object.keys(currentGroups).forEach(function(g){ collapsed[g]=true; });
+  collapsed[gn] = !wasCollapsed;
+  localStorage.setItem("code-collapsed-groups", JSON.stringify(collapsed));
+  renderSessions();
+});
 
 
 
