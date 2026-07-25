@@ -4035,6 +4035,10 @@ function renderSessions() {
 
   });
 
+  // Sync group info in session panel
+  var cur = state.sessions.find(function (s) { return s.id === state.sessionId; });
+  updateGroupBadge(cur || {});
+
 }
 
 // Group collapse/expand — accordion: only one group open at a time
@@ -4214,6 +4218,7 @@ async function loadSession(sessionId) {
   state.sessionUpdated = session.lastMessageTime || session.updatedAt || "";
   state._sessionFilePath = session._filePath || "";
   state._sessionMessageFilePath = session._messageFilePath || "";
+  updateGroupBadge(session);
 
   // Load from active run (streaming) > cache > server
   const cached = state._sessionMsgs && state._sessionMsgs[session.id];
