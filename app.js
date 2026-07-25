@@ -3835,6 +3835,16 @@ function renderSessions() {
     sorted = sorted.concat(pinnedItems).concat(unpinnedItems);
   });
 
+  // Build group header HTML first, then session list
+  var groupHeaders = {};
+  groupDefs.forEach(function (gd) {
+    var arrow = gd.collapsed ? "&#9654;" : "&#9660;";
+    groupHeaders[gd.name] = `<div class="session-group-label" data-group="${escapeHtml(gd.name)}" style="cursor:pointer;user-select:none">
+      <span class="group-arrow">${arrow}</span> ${escapeHtml(gd.displayName)}
+      <span style="font-weight:400;color:var(--muted);font-size:11px;margin-left:4px">${gd.count}</span>
+    </div>`;
+  });
+
   els.sessionList.innerHTML = sorted
 
     .map(function (session, idx) {
@@ -3842,19 +3852,14 @@ function renderSessions() {
       var labelHtml = "";
       for (var gi = 0; gi < groupDefs.length; gi++) {
         if (idx === groupDefs[gi].firstIdx) {
-          var gd = groupDefs[gi];
-          var arrow = gd.collapsed ? "&#9654;" : "&#9660;";
-          labelHtml = `<div class="session-group-label" data-group="${escapeHtml(gd.name)}" style="cursor:pointer;user-select:none">
-            <span class="group-arrow">${arrow}</span> ${escapeHtml(gd.displayName)}
-            <span style="font-weight:400;color:var(--muted);font-size:11px;margin-left:4px">${gd.count}</span>
-          </div>`;
+          labelHtml = groupHeaders[groupDefs[gi].name];
         }
       }
 
-      // Hide sessions in collapsed groups
+      // Hide sessions in collapsed groups (but keep the group header!)
       var sessionGroup = (session.group || "").trim() || "chat";
       var isCollapsed = !!collapsed[sessionGroup];
-      if (isCollapsed) return "";
+      if (isCollapsed) return labelHtml;  // show header even when collapsed
 
       var title = session.title || t("untitledSession");
 
@@ -10614,11 +10619,8 @@ async function openImportModal() {
 }
 
 function updateGroupBadge(session) {
-  var badge = document.getElementById("sessionGroupBadge");
-  if (!badge) return;
-  var g = (session.group || "").trim();
-  badge.style.display = g ? "inline" : "none";
-  badge.textContent = g;
+  var el = document.getElementById("sessionGroup");
+  if (el) el.textContent = (session.group || "").trim() || "-";
 }
 
 function closeImportModal() {
