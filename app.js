@@ -4122,6 +4122,7 @@ async function createSession(title = t("sessionTitleDefault")) {
   state.sessionUpdated = session.lastMessageTime || session.updatedAt || "";
   state._sessionFilePath = session._filePath || "";
   state._sessionMessageFilePath = session._messageFilePath || "";
+  updateGroupBadge(session);
 
   state.messages = session.messages || [];
   setSessionMessages(session.id, state.messages);
@@ -10610,6 +10611,14 @@ async function openImportModal() {
   _importSessions = [];
   renderImportList();
   await loadImportSessions();
+}
+
+function updateGroupBadge(session) {
+  var badge = document.getElementById("sessionGroupBadge");
+  if (!badge) return;
+  var g = (session.group || "").trim();
+  badge.style.display = g ? "inline" : "none";
+  badge.textContent = g;
 }
 
 function closeImportModal() {
