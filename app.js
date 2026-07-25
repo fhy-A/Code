@@ -10470,24 +10470,39 @@ function preloadImportSessions() {
   ["claude-code", "codex"].forEach(function (src) {
     fetch("/api/import/sessions?source=" + encodeURIComponent(src))
       .then(function (r) { return r.json(); })
-      .then(function (data) { _importCache[src] = Array.isArray(data) ? data : []; })
+      .then(function (data) {
+        _importCache[src] = Array.isArray(data) ? data : [];
+        _updateSourceTabCount(src);
+      })
       .catch(function () { _importCache[src] = []; });
   });
 }
+
+function _updateSourceTabCount(src) {
+  var tabs = document.querySelectorAll(".import-source-tab");
+  tabs.forEach(function (tab) {
+    if (tab.dataset.source !== src) return;
+    var cached = _importCache[src];
+    var count = cached ? cached.length : 0;
+    var base = src === "codex" ? "Codex" : "Claude Code";
+    tab.textContent = count ? base + " (" + count + ")" : base;
+  });
+}
+
+var _searchTimer = 0;
 
 function _bindImportEvents() {
   if (_importEventsBound) return;
   _importEventsBound = true;
   var modal = document.getElementById("importModal");
   if (!modal) return;
-  // Close button
+  // Close
   var closeBtn = document.getElementById("importClose");
   if (closeBtn) closeBtn.addEventListener("click", closeImportModal);
-  // Click outside modal
   modal.addEventListener("click", function (e) {
     if (e.target === modal) closeImportModal();
   });
-  // Source tab switching via event delegation
+  // Source tabs
   modal.addEventListener("click", function (e) {
     var tab = e.target.closest(".import-source-tab");
     if (!tab) return;
@@ -10497,7 +10512,19 @@ function _bindImportEvents() {
     _importSessions = [];
     var selAll = document.getElementById("importSelectAll");
     if (selAll) selAll.checked = false;
+    var search = document.getElementById("importSearch");
+    if (search) search.value = "";
     loadImportSessions();
+  });
+  // Search (debounced)
+  var search = document.getElementById("importSearch");
+  if (search) search.addEventListener("input", function () {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(function () {
+      var selAll = document.getElementById("importSelectAll");
+      if (selAll) selAll.checked = false;
+      loadImportSessions();
+    }, 300);
   });
   // Select all
   var selAll = document.getElementById("importSelectAll");
@@ -10506,7 +10533,7 @@ function _bindImportEvents() {
     cbs.forEach(function (c) { c.checked = selAll.checked; });
     updateImportButton();
   });
-  // Do import
+  // Import
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) doBtn.addEventListener("click", doImport);
 }
@@ -10516,12 +10543,12 @@ async function openImportModal() {
   var modal = document.getElementById("importModal");
   if (!modal) return;
   modal.style.display = "flex";
-  var status = document.getElementById("importStatus");
-  if (status) status.textContent = "正在加载...";
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) doBtn.disabled = true;
   var selAll = document.getElementById("importSelectAll");
   if (selAll) selAll.checked = false;
+  var search = document.getElementById("importSearch");
+  if (search) search.value = "";
   _importSessions = [];
   renderImportList();
   await loadImportSessions();
@@ -10533,24 +10560,27 @@ function closeImportModal() {
 }
 
 async function loadImportSessions() {
-  var status = document.getElementById("importStatus");
+  var searchEl = document.getElementById("importSearch");
+  var q = searchEl ? searchEl.value.trim() : "";
   var cached = _importCache[_importSource];
-  if (cached && cached.length) {
+
+  // Use cache when no search query
+  if (!q && cached && cached.length) {
     _importSessions = cached;
-    if (status) status.textContent = cached.length + " 个会话（已缓存）";
     renderImportList();
+    _updateSourceTabCount(_importSource);
     return;
   }
   try {
-    var resp = await fetch("/api/import/sessions?source=" + encodeURIComponent(_importSource));
+    var url = "/api/import/sessions?source=" + encodeURIComponent(_importSource);
+    if (q) url += "&q=" + encodeURIComponent(q);
+    var resp = await fetch(url);
     var data = await resp.json();
     if (!Array.isArray(data)) { data = []; }
-    _importCache[_importSource] = data;
+    if (!q) { _importCache[_importSource] = data; _updateSourceTabCount(_importSource); }
     _importSessions = data;
-    if (status) status.textContent = data.length + " 个会话";
   } catch (e) {
     _importSessions = [];
-    if (status) status.textContent = "加载失败: " + (e.message || "network error");
   }
   renderImportList();
 }
@@ -10565,7 +10595,7 @@ function renderImportList() {
   }
   _importSessions.forEach(function (s, i) {
     var row = document.createElement("label");
-    row.style.cssText = "display:flex;align-items:flex-start;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--line)";
+    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--line)";
     row.onmouseenter = function () { row.style.background = "var(--hover)"; };
     row.onmouseleave = function () { row.style.background = ""; };
     var cb = document.createElement("input");
@@ -10573,19 +10603,14 @@ function renderImportList() {
     cb.dataset.index = i;
     cb.addEventListener("change", updateImportButton);
     row.appendChild(cb);
-    var info = document.createElement("div");
-    info.style.cssText = "overflow:hidden";
-    var title = document.createElement("div");
-    title.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+    var title = document.createElement("span");
+    title.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1";
     title.textContent = s.title || "未命名";
-    info.appendChild(title);
-    var meta = document.createElement("div");
-    meta.style.cssText = "font-size:11px;color:var(--muted)";
-    var date = (s.createdAt || "").slice(0, 10);
-    meta.textContent = date + " · " + s.messageCount + " 条消息";
-    if (s.project) { meta.textContent = s.project + " · " + date + " · " + s.messageCount + " 条消息"; }
-    info.appendChild(meta);
-    row.appendChild(info);
+    row.appendChild(title);
+    var date = document.createElement("span");
+    date.style.cssText = "font-size:11px;color:var(--muted);flex-shrink:0";
+    date.textContent = (s.createdAt || "").slice(0, 10);
+    row.appendChild(date);
     list.appendChild(row);
   });
   updateImportButton();

@@ -498,7 +498,9 @@
         <button class="import-source-tab active" data-source="claude-code">Claude Code</button>
         <button class="import-source-tab" data-source="codex">Codex</button>
       </div>
-      <div id="importStatus" style="font-size:12px;color:var(--muted);margin:0 0 8px">正在加载...</div>
+      <div style="margin:0 0 8px">
+        <input id="importSearch" type="text" placeholder="搜索标题或会话ID..." style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:var(--panel);color:var(--text)">
+      </div>
       <div class="import-toolbar" style="display:flex;justify-content:space-between;align-items:center;margin:0 0 8px">
         <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="importSelectAll"> 全选</label>
         <button id="importDoBtn" class="primary-btn" type="button" disabled>导入到 Code</button>

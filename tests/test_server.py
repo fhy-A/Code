@@ -1264,7 +1264,7 @@ class TestCodexImport(unittest.TestCase):
                 sessions = server.list_codex_sessions()
         self.assertGreaterEqual(len(sessions), 1)
         self.assertIn("Python 脚本", sessions[0]["title"])
-        self.assertEqual(sessions[0]["messageCount"], 2)
+        self.assertGreater(sessions[0]["messageCount"], 0)  # estimated from file size
         self.assertEqual(sessions[0]["sourceId"], "test-session")
         self.assertTrue(sessions[0]["sourcePath"].endswith(".jsonl"))
 
@@ -1299,7 +1299,7 @@ class TestCodexImport(unittest.TestCase):
         self.assertEqual(sessions, [])
 
     def test_read_codex_session_meta_extracts_title_and_count(self):
-        """_read_codex_session_meta returns title and message_count."""
+        """_read_codex_session_meta returns title and estimated count."""
         with tempfile.TemporaryDirectory() as td:
             jsonl = Path(td) / "test.jsonl"
             jsonl.write_text(self._make_codex_jsonl([
@@ -1310,7 +1310,7 @@ class TestCodexImport(unittest.TestCase):
             ]), encoding="utf-8")
             meta = server._read_codex_session_meta(jsonl)
         self.assertEqual(meta["title"], "项目交接测试")
-        self.assertEqual(meta["message_count"], 4)
+        self.assertGreater(meta["message_count"], 0)  # estimated from file size
 
     def test_import_codex_session_creates_code_files(self):
         """Import creates .jsonl, .json, and updates index."""
@@ -1366,19 +1366,19 @@ class TestCodexImport(unittest.TestCase):
         self.assertEqual(id1, id2)
         self.assertTrue(id1.startswith("codex-"))
 
-    def test_list_codex_sessions_skips_empty_files(self):
-        """Session with 0 messages is excluded from the list."""
+    def test_list_codex_sessions_includes_small_files(self):
+        """Even small Codex session files appear (count estimated from file size)."""
         with tempfile.TemporaryDirectory() as td:
             codex_dir = Path(td) / "2026" / "07" / "24"
             codex_dir.mkdir(parents=True)
-            jsonl = codex_dir / "empty.jsonl"
-            jsonl.write_text(
-                '{"type":"session_meta","payload":{"session_id":"x"}}\n',
-                encoding="utf-8")
-            with mock.patch.object(server, "CODEX_SESSIONS_DIR",
-                                   Path(td)):
+            jsonl = codex_dir / "small.jsonl"
+            jsonl.write_text(self._make_codex_jsonl([
+                ("user", "hi"),
+                ("assistant", "hello"),
+            ]), encoding="utf-8")
+            with mock.patch.object(server, "CODEX_SESSIONS_DIR", Path(td)):
                 sessions = server.list_codex_sessions()
-        self.assertEqual(len(sessions), 0)
+        self.assertEqual(len(sessions), 1)
 
     # ── Claude Code import tests ──
 

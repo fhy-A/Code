@@ -5043,51 +5043,68 @@ def _read_codex_title(jsonl_path):
 
 
 def _read_codex_session_meta(jsonl_path):
-    """Parse a Codex JSONL to extract metadata without loading all messages.
+    """Fast metadata extraction from a Codex JSONL.
 
-    Returns dict with title, message_count, created_at, or None on failure.
+    Only reads until a title is found and a rough message count is estimated
+    (from total line count, capped).  Returns dict with title, message_count,
+    created_at, or None on failure.
     """
     title = None
-    message_count = 0
+    line_count = 0
     created_at = ""
+    try:
+        # Quick line count from file size (approx 200 bytes/line average)
+        size = jsonl_path.stat().st_size
+        est_lines = max(1, size // 200)
+    except OSError:
+        est_lines = 100
+
     try:
         with open(jsonl_path, "r", encoding="utf-8") as fh:
             for line in fh:
+                line_count += 1
+                if line_count > 200:
+                    break  # enough to find title + session_meta
                 line = line.strip()
                 if not line:
                     continue
+                if title and created_at:
+                    break
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValueError):
                     continue
                 rtype = record.get("type", "")
                 payload = record.get("payload") or {}
 
-                if rtype == "session_meta":
+                if rtype == "session_meta" and not created_at:
                     created_at = str(payload.get("timestamp") or "")[:19]
 
-                if rtype == "response_item" and payload.get("type") == "message":
+                if rtype == "response_item" and payload.get("type") == "message" and not title:
                     role = payload.get("role", "")
-                    content_blocks = payload.get("content") or []
-                    text = ""
-                    for block in content_blocks:
+                    if role != "user":
+                        continue
+                    for block in (payload.get("content") or []):
                         if isinstance(block, dict) and block.get("type") == "input_text":
-                            text += str(block.get("text") or "")
-                    if role == "user" and title is None and text.strip() and not _is_system_text(text):
-                        title = text.strip()[:80].replace("\n", " ")
-                    if role in ("user", "assistant"):
-                        # Count system messages for total but don't use them as titles
-                        if not _is_system_text(text):
-                            message_count += 1
+                            text = str(block.get("text") or "").strip()
+                            if text and not _is_system_text(text):
+                                title = text[:80].replace("\n", " ")
+                                break
     except Exception:
         return None
-    if not created_at and jsonl_path.parent.name.isdigit():
-        # Fallback: use directory structure YYYY/MM/DD as date
+
+    if not created_at:
         parts = jsonl_path.parts
-        created_at = "-".join(parts[-4:-1]) if len(parts) >= 4 else ""
+        if len(parts) >= 4 and parts[-4].isdigit():
+            created_at = "-".join(parts[-4:-1])
+        else:
+            created_at = now_iso()[:19]
+
+    # Use file-size estimate for message count (faster than reading every line)
+    msg_count = max(1, est_lines)
     return {
-        "title": title,
-        "message_count": message_count,
+        "title": title or jsonl_path.stem,
+        "message_count": msg_count,
         "created_at": created_at,
     }
 
@@ -5293,19 +5310,27 @@ def _read_claude_title(jsonl_path, project_name=""):
 
 
 def _read_claude_session_meta(jsonl_path):
-    """Parse a Claude Code JSONL to extract metadata."""
+    """Fast metadata extraction from a Claude Code JSONL."""
     title = None
-    message_count = 0
     created_at = ""
+    line_count = 0
+    try:
+        size = jsonl_path.stat().st_size
+        est_lines = max(1, size // 200)
+    except OSError:
+        est_lines = 100
     try:
         with open(jsonl_path, "r", encoding="utf-8") as fh:
             for line in fh:
+                line_count += 1
+                if title and created_at and line_count > 200:
+                    break
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValueError):
                     continue
                 rtype = record.get("type", "")
                 if rtype not in ("user", "assistant"):
@@ -5313,19 +5338,20 @@ def _read_claude_session_meta(jsonl_path):
                 timestamp = str(record.get("timestamp") or "")
                 if not created_at and timestamp:
                     created_at = timestamp[:19]
+                if title:
+                    continue
                 msg = record.get("message") or {}
                 role = msg.get("role", "")
-                if role in ("user", "assistant"):
+                if role == "user":
                     text = _claude_content_text(msg.get("content", "")).strip()
-                    if role == "user" and title is None and text and len(text) > 2:
+                    if text and len(text) > 2:
                         title = text[:80].replace("\n", " ")
-                    if text:
-                        message_count += 1
     except Exception:
         return None
     if not created_at:
         created_at = now_iso()[:19]
-    return {"title": title, "message_count": message_count, "created_at": created_at}
+    return {"title": title, "message_count": max(1, est_lines),
+            "created_at": created_at}
 
 
 def import_claude_session(source_path, target_session_id=None):
