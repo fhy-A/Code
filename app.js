@@ -3801,53 +3801,40 @@ function renderSessions() {
 
   const pinned = getPinnedSessions();
 
-  const pinnedSessions = state.sessions.filter((s) => pinned.includes(s.id));
-  const unpinnedSessions = state.sessions.filter((s) => !pinned.includes(s.id));
-
-  // Group unpinned sessions by their "group" field
-  var groups = {};
-  var ungrouped = [];
-  unpinnedSessions.forEach(function (s) {
-    var g = (s.group || "").trim();
-    if (g) { if (!groups[g]) groups[g] = []; groups[g].push(s); }
-    else { ungrouped.push(s); }
+  // Group ALL sessions by "group" field; default group = "chat"
+  var groups = {};  // {groupName: [sessions]}
+  state.sessions.forEach(function (s) {
+    var g = (s.group || "").trim() || "chat";
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(s);
   });
 
-  // Build sorted list: pinned → grouped (by name) → ungrouped
-  var sorted = pinnedSessions.slice();
-  var groupNames = Object.keys(groups).sort();
-  groupNames.forEach(function (gn) {
-    sorted = sorted.concat(groups[gn]);
-  });
-  sorted = sorted.concat(ungrouped);
+  // Within each group: pinned first, then unpinned
+  var sorted = [];
+  var groupLabels = [];  // [{name, firstIdx}]
+  // Order: custom groups (alpha), then "chat" last
+  var names = Object.keys(groups).filter(function(n) { return n !== "chat"; }).sort();
+  names.push("chat");
 
-  // Track group label positions
-  var groupFirstIdx = {};
-  groupNames.forEach(function (gn, gi) {
-    var pos = pinnedSessions.length;
-    for (var k = 0; k < gi; k++) { pos += groups[groupNames[k]].length; }
-    groupFirstIdx[gn] = pos;
+  names.forEach(function (gn) {
+    var items = groups[gn];
+    var pinnedItems = items.filter(function (s) { return pinned.includes(s.id); });
+    var unpinnedItems = items.filter(function (s) { return !pinned.includes(s.id); });
+    groupLabels.push({name: gn, firstIdx: sorted.length});
+    sorted = sorted.concat(pinnedItems).concat(unpinnedItems);
   });
-  var ungroupedStart = pinnedSessions.length;
-  groupNames.forEach(function (gn) { ungroupedStart += groups[gn].length; });
 
   els.sessionList.innerHTML = sorted
 
     .map(function (session, idx) {
 
-      var isFirstPinned = idx === 0 && pinnedSessions.length > 0;
-      var isFirstUngrouped = idx === ungroupedStart && ungrouped.length > 0;
       var labelHtml = "";
-      if (isFirstPinned) {
-        labelHtml = `<div class="session-group-label">${t("pinnedLabel")}</div>`;
-      }
-      for (var gi = 0; gi < groupNames.length; gi++) {
-        if (idx === groupFirstIdx[groupNames[gi]]) {
-          labelHtml = `<div class="session-group-label">${groupNames[gi]}</div>`;
+      for (var gi = 0; gi < groupLabels.length; gi++) {
+        if (idx === groupLabels[gi].firstIdx) {
+          var gn = groupLabels[gi].name;
+          var displayName = gn === "chat" ? t("chatLabel") : gn;
+          labelHtml = `<div class="session-group-label">${displayName}</div>`;
         }
-      }
-      if (isFirstUngrouped) {
-        labelHtml = `<div class="session-group-label">${t("chatLabel")}</div>`;
       }
 
       var title = session.title || t("untitledSession");
