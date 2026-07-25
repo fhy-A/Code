@@ -7930,6 +7930,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "_branches": [],
                     "_branchMsgCount": None,
                     "runState": {},
+                    "group": entry.get("group", ""),
                 })
             else:
                 orphans.append(sid)
