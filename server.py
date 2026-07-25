@@ -5123,6 +5123,7 @@ def import_codex_session(source_path, target_session_id=None):
     safe_id = safe_session_id(session_id)
     messages = []
 
+    current_model = ""
     with open(source, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -5134,6 +5135,13 @@ def import_codex_session(source_path, target_session_id=None):
                 continue
             rtype = record.get("type", "")
             payload = record.get("payload") or {}
+
+            # Track model from turn_context events
+            if rtype == "turn_context" and isinstance(payload, dict):
+                m = payload.get("model", "")
+                if m:
+                    current_model = str(m)
+
             if rtype != "response_item" or payload.get("type") != "message":
                 continue
             role = payload.get("role", "")
@@ -5149,7 +5157,7 @@ def import_codex_session(source_path, target_session_id=None):
             ts = str(record.get("timestamp") or "")[:19]
             msg = {"role": role, "content": text, "meta": {},
                    "_time": (ts + "Z") if ts and not ts.endswith("Z") else ts,
-                   "_model": ""}
+                   "_model": current_model}
             messages.append(msg)
 
     if not messages:
