@@ -10679,10 +10679,9 @@ async function doImport() {
     } catch (e) { /* continue */ }
   }
   if (status) status.textContent = "已导入 " + okCount + " / " + checked.length + " 个会话";
-  if (doBtn) doBtn.textContent = "完成";
-  // Refresh session list
-  await loadSessions();
-  renderSessionList();
+  // Close modal and reload page so new sessions appear immediately
+  closeImportModal();
+  location.reload();
 }
 
 if (els.importSessions) els.importSessions.addEventListener("click", openImportModal);
