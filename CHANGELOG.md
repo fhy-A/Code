@@ -4,7 +4,28 @@
 
 ## 2026-07-25 · Claude Code
 
-### Agent 空承诺检测与三分类完成逻辑 (v0.5.29)
+### 会话导入功能 (v0.5.29)
+
+- **后端**：`list_importable_sessions(source, query)` 统一扫描 Codex（`~/.codex/sessions/`）和 Claude Code（`~/.claude/projects/*/`）
+- **格式转换**：Codex（`response_item` → Code JSONL）、Claude Code（`type:user/assistant` → Code JSONL）
+- **API**：`GET/POST /api/import/sessions?source=codex|claude-code&q=`
+- **前端**：工具栏导入按钮 → 弹窗 → 来源标签（显示数量）→ 搜索 → 勾选 → 导入 → 自动刷新
+- **分组**：导入的会话自动标记 `group`（Codex/Claude Code），侧栏按分组显示，手风琴折叠
+- **优化**：元数据扫描用文件大小估算（200B/行），不逐行解析
+- **Bug 修复**：Codex content block 类型兼容（input_text/output_text/text）、model 名从 turn_context 提取、batch 更新脚本 f-string `%%` 转义、`get_sessions` 透传 group 字段
+- **实测**：61 个 Codex 会话 + 116 个 Claude Code 会话可导入
+- **架构研究**：三家公司（Claude Code / Codex / Code）的会话-项目-分组模型对比已存档
+
+**涉及文件**：`server.py`、`app.js`、`index.html`、`styles.css`、`i18n.js`、`tests/`
+
+### 待完成（导入收尾）
+- 侧栏分组折叠稳定性
+- 导入窗口交互打磨
+
+### 待规划（架构重构）
+- 左侧栏会话列表 + 项目/分组架构重构（参考 Claude Code 项目模型 + Codex local-projects）
+
+### Agent 空承诺检测与三分类完成逻辑
 
 - **`_is_empty_promise(content)` 检测**：识别模型只回复承诺文本（"我来检查一下"/"I'll check..."）但未执行操作的模式，支持中英文，200 字上限
 - **Agent 主循环三分类**：
