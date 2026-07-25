@@ -4948,6 +4948,7 @@ def session_summary(session):
         "_branches": session.get("_branches", []),
         "_branchMsgCount": session.get("_branchMsgCount") if "_branchMsgCount" in session else None,
         "runState": session.get("runState") or {},
+        "group": session.get("group") or "",
     }
 
 
@@ -5141,8 +5142,8 @@ def import_codex_session(source_path, target_session_id=None):
             content_blocks = payload.get("content") or []
             text = ""
             for block in content_blocks:
-                if isinstance(block, dict) and block.get("type") == "input_text":
-                    text += str(block.get("text") or "")
+                if isinstance(block, dict) and block.get("type") in ("input_text", "output_text", "text"):
+                    text += str(block.get("text") or block.get("content") or "")
             if not text.strip():
                 continue
             ts = str(record.get("timestamp") or "")[:19]
@@ -5175,32 +5176,34 @@ def import_codex_session(source_path, target_session_id=None):
         "id": safe_id,
         "title": title,
         "createdAt": created_at,
-        "updatedAt": updated_at,
+        "updatedAt": now_iso()[:19],  # use import time so it appears at top
         "stats": {"input": 0, "output": 0, "cache": 0},
         "lastUsage": {},
         "runState": {},
         "messageCount": msg_count,
-        "lastMessageTime": updated_at,
+        "lastMessageTime": now_iso()[:19],
+        "group": "Codex",
     }
     json_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                          encoding="utf-8")
-
-    # Update index
-    append_index(safe_id, title, updated_at, msg_count)
+    append_index(safe_id, title, meta["updatedAt"], msg_count, group="Codex")
     return meta
 
 
-def append_index(session_id, title, updated_at, message_count):
+def append_index(session_id, title, updated_at, message_count, group=None):
     """Append a session entry to the sessions index."""
     idx_path = SESSIONS_DIR / "index.jsonl"
-    entry = json.dumps({
+    entry_dict = {
         "id": session_id,
         "title": title,
         "updatedAt": updated_at,
         "messageCount": message_count,
         "_parentId": None,
         "_branchDepth": 0,
-    }, ensure_ascii=False)
+    }
+    if group:
+        entry_dict["group"] = group
+    entry = json.dumps(entry_dict, ensure_ascii=False)
     try:
         with open(idx_path, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
@@ -5409,14 +5412,17 @@ def import_claude_session(source_path, target_session_id=None):
     write_jsonl(jsonl_path_out, messages)
     meta = {
         "id": safe_id, "title": title,
-        "createdAt": created_at, "updatedAt": updated_at,
+        "createdAt": created_at,
+        "updatedAt": now_iso()[:19],
         "stats": {"input": 0, "output": 0, "cache": 0},
         "lastUsage": {}, "runState": {},
-        "messageCount": msg_count, "lastMessageTime": updated_at,
+        "messageCount": msg_count,
+        "lastMessageTime": now_iso()[:19],
+        "group": "Claude Code",
     }
     json_path_out.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                              encoding="utf-8")
-    append_index(safe_id, title, updated_at, msg_count)
+    append_index(safe_id, title, meta["updatedAt"], msg_count, group="Claude Code")
     return meta
 
 

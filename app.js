@@ -3802,24 +3802,55 @@ function renderSessions() {
   const pinned = getPinnedSessions();
 
   const pinnedSessions = state.sessions.filter((s) => pinned.includes(s.id));
-
   const unpinnedSessions = state.sessions.filter((s) => !pinned.includes(s.id));
 
-  const sorted = [...pinnedSessions, ...unpinnedSessions];
+  // Group unpinned sessions by their "group" field
+  var groups = {};
+  var ungrouped = [];
+  unpinnedSessions.forEach(function (s) {
+    var g = (s.group || "").trim();
+    if (g) { if (!groups[g]) groups[g] = []; groups[g].push(s); }
+    else { ungrouped.push(s); }
+  });
+
+  // Build sorted list: pinned → grouped (by name) → ungrouped
+  var sorted = pinnedSessions.slice();
+  var groupNames = Object.keys(groups).sort();
+  groupNames.forEach(function (gn) {
+    sorted = sorted.concat(groups[gn]);
+  });
+  sorted = sorted.concat(ungrouped);
+
+  // Track group label positions
+  var groupFirstIdx = {};
+  groupNames.forEach(function (gn, gi) {
+    var pos = pinnedSessions.length;
+    for (var k = 0; k < gi; k++) { pos += groups[groupNames[k]].length; }
+    groupFirstIdx[gn] = pos;
+  });
+  var ungroupedStart = pinnedSessions.length;
+  groupNames.forEach(function (gn) { ungroupedStart += groups[gn].length; });
 
   els.sessionList.innerHTML = sorted
 
-    .map((session, idx) => {
+    .map(function (session, idx) {
 
-      const isFirstPinned = idx === 0 && pinnedSessions.length > 0;
+      var isFirstPinned = idx === 0 && pinnedSessions.length > 0;
+      var isFirstUngrouped = idx === ungroupedStart && ungrouped.length > 0;
+      var labelHtml = "";
+      if (isFirstPinned) {
+        labelHtml = `<div class="session-group-label">${t("pinnedLabel")}</div>`;
+      }
+      for (var gi = 0; gi < groupNames.length; gi++) {
+        if (idx === groupFirstIdx[groupNames[gi]]) {
+          labelHtml = `<div class="session-group-label">${groupNames[gi]}</div>`;
+        }
+      }
+      if (isFirstUngrouped) {
+        labelHtml = `<div class="session-group-label">${t("chatLabel")}</div>`;
+      }
 
-      const isFirstUnpinned = idx === pinnedSessions.length && unpinnedSessions.length > 0;
-
-      const title = session.title || t("untitledSession");
-
-      const labelHtml = isFirstPinned ? `<div class="session-group-label">${t("pinnedLabel")}</div>`
-
-        : isFirstUnpinned ? `<div class="session-group-label">${t("chatLabel")}</div>` : "";
+      var title = session.title || t("untitledSession");
 
       if (state.renamingSessionId === session.id) {
 
