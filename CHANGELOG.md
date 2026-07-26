@@ -2,6 +2,23 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-26 22:39 · Codex
+
+### 侧栏置顶与添加文件夹图标统一
+
+- 会话和项目的黄色星形置顶标记统一替换为 12px 中性色线性图钉，继续复用原有置顶状态、提示文案和中英文即时切换逻辑。
+- “编辑项目”窗口的“添加文件夹”图标重绘为标准文件夹轮廓与内置加号，保持原有按钮尺寸和交互区域不变。
+- 新增前端源码回归守卫，防止星形字符回退，并固定两类图标的共享渲染和标准路径。
+- 验证：
+  - `node --check app.js` 通过；
+  - `python -m pytest tests/test_frontend_modules.py tests/test_p2_coverage.py -q`：**146 passed, 4 subtests passed**；
+  - `python -m unittest discover -s tests`：**762 tests passed**；
+  - 浏览器实际检查了会话/项目置顶及项目编辑窗口，无控制台错误；用户已确认视觉效果。
+
+**涉及文件**：`app.js`、`index.html`、`styles.css`、`tests/test_frontend_modules.py`
+
+---
+
 ## 2026-07-26 22:19 · Codex
 
 ### Codex 风格项目/会话闭环（第二阶段，开发版本基线仍为 v0.5.28）

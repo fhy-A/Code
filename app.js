@@ -3984,6 +3984,12 @@ function renderSessionSourceBadge(session) {
   return "";
 }
 
+function renderPinIcon() {
+  return '<svg class="pin-icon" aria-hidden="true" viewBox="0 0 24 24">' +
+    '<path d="M9 3.75h6M10 3.75V8.5l-2.5 3v1.75h9V11.5l-2.5-3V3.75M12 13.25v7"/>' +
+    '</svg>';
+}
+
 function renderProjectSessionRow(session, pinnedIds) {
   const title = session.title || t("untitledSession");
   const active = session.id === state.sessionId;
@@ -4005,7 +4011,8 @@ function renderProjectSessionRow(session, pinnedIds) {
   }
 
   const pinBadge = pinnedIds.includes(session.id)
-    ? '<span class="session-pin-badge" title="' + t("pinnedLabel") + '">&#9733;</span>'
+    ? '<span class="session-pin-badge" title="' + t("pinnedLabel") + '">' +
+      renderPinIcon() + '</span>'
     : "";
   return '<div class="session-row' + (active ? ' active' : '') +
     '" data-session-id="' + escapeHtml(session.id) + '">' +
@@ -4045,7 +4052,7 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   html += '<span class="project-arrow">' + (collapsed ? "&#9654;" : "&#9660;") + '</span>';
   if (isProjectPinned) {
     html += '<span class="project-pin-indicator" title="' + t("pinnedLabel") +
-      '" aria-hidden="true">&#9733;</span>';
+      '">' + renderPinIcon() + '</span>';
   }
   html += '<span class="project-name">' + escapeHtml(name) + '</span>';
   if (!isUnassigned) {

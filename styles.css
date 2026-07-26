@@ -3795,9 +3795,11 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .project-pin-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  color: var(--yellow);
-  font-size: 10px;
+  color: var(--muted);
 }
 
 .project-header-action {
@@ -3851,10 +3853,23 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .session-pin-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   margin-right: 2px;
-  color: var(--yellow);
-  font-size: 10px;
+  color: var(--muted);
+}
+
+.pin-icon {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
 }
 
 .session-source-badge {

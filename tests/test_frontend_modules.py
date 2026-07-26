@@ -3102,6 +3102,12 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn("project-new-session", APP_SOURCE)
         self.assertIn("@media (hover: none), (max-width: 700px)", STYLE_SOURCE)
 
+    def test_pinned_state_uses_a_shared_outline_pin_icon(self):
+        self.assertIn("function renderPinIcon()", APP_SOURCE)
+        self.assertIn('class="pin-icon"', APP_SOURCE)
+        self.assertIn(".pin-icon", STYLE_SOURCE)
+        self.assertNotIn("&#9733;", APP_SOURCE)
+
     def test_project_menu_contains_edit_and_pin_only(self):
         menu_start = APP_SOURCE.index("function openProjectContextMenu")
         menu_end = APP_SOURCE.index("function attachProjectSessionListeners", menu_start)
@@ -3132,6 +3138,13 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn('data-project-folder-action="primary"', APP_SOURCE)
         self.assertIn("project-edit-card", STYLE_SOURCE)
         self.assertIn("project-delete-confirm-card", STYLE_SOURCE)
+
+    def test_add_folder_uses_a_conventional_folder_plus_icon(self):
+        self.assertIn(
+            "M3.5 7A2 2 0 0 1 5.5 5h3.75L11 7h7.5a2 2 0 0 1 2 2v8",
+            INDEX_SOURCE,
+        )
+        self.assertIn("M15.5 11.5v5M13 14h5", INDEX_SOURCE)
 
     def test_sidebar_does_not_render_session_counts(self):
         render_start = APP_SOURCE.index("function renderProjectSection")
