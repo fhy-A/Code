@@ -7374,7 +7374,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
 
             // tool-call messages are filtered out, but we still track them
 
-            if (msg.role === "tool-call" && msg.meta?.toolCallId) {
+            if (msg.role === "tool-call" && msg.meta?.toolCallId && !msg.meta?.skipApi) {
 
               pendingToolCallIds.add(msg.meta.toolCallId);
 
@@ -9694,7 +9694,19 @@ async function compactConversation() {
 
   if (state.isStreaming) { showToast("Please wait for the current task to finish before compacting.", "warning"); return; }
 
-  if (state.messages.length < 6) { showToast("There are too few messages to compact.", "warning"); return; }
+  const durableSystemMessages = state.messages.filter(
+    (msg) => msg?.meta?.kind === "import-boundary",
+  );
+
+  const compactableMessages = state.messages.filter(
+    (msg) => msg?.meta?.kind !== "import-boundary",
+  );
+
+  const compactableApiMessages = compactableMessages
+    .map((msg) => mapMessageForApi(msg, false))
+    .filter(Boolean);
+
+  if (compactableApiMessages.length < 6) { showToast("There are too few messages to compact.", "warning"); return; }
 
 
 
@@ -9708,13 +9720,16 @@ async function compactConversation() {
 
   // Show confirmation dialog
 
-  const totalMsgs = state.messages.length;
+  const totalMsgs = compactableApiMessages.length;
 
   const keepCount = Math.max(2, Math.min(6, Math.floor(totalMsgs / 4)));
 
   const compressCount = totalMsgs - keepCount;
 
-  const totalChars = state.messages.slice(0, compressCount).reduce((s, m) => s + (m.content || "").length, 0);
+  const totalChars = compactableApiMessages.slice(0, compressCount).reduce(
+    (sum, message) => sum + getMsgText(message).length,
+    0,
+  );
 
   const estimatedTokens = Math.ceil(totalChars / 3.2);
 
@@ -9766,13 +9781,9 @@ async function compactConversation() {
 
           model,
 
-          messages: state.messages.map((msg) => ({
-
-            role: msg.role,
-
-            content: getMsgText(msg),
-
-          })),
+          messages: [...durableSystemMessages, ...compactableMessages]
+            .map((msg) => mapMessageForApi(msg, false))
+            .filter(Boolean),
 
         }),
 
@@ -9792,11 +9803,21 @@ async function compactConversation() {
         });
       } catch (_) { /* non-critical */ }
 
-      const kept = state.messages.slice(-keepCount);
+      let keepStartIndex = compactableMessages.length;
+      let remainingKept = keepCount;
+      for (let index = compactableMessages.length - 1; index >= 0; index -= 1) {
+        if (!mapMessageForApi(compactableMessages[index], false)) continue;
+        remainingKept -= 1;
+        if (remainingKept <= 0) {
+          keepStartIndex = index;
+          break;
+        }
+      }
+      const kept = compactableMessages.slice(keepStartIndex);
 
       const summaryMsg = createCompactSummaryMessage(result);
 
-      state.messages = [summaryMsg, ...kept];
+      state.messages = [...durableSystemMessages, summaryMsg, ...kept];
 
       state.stats = { input: 0, output: 0, cache: 0 };
 
@@ -10274,6 +10295,8 @@ function clearCurrentSession() {
 function exportMarkdown() {
 
   const text = state.messages
+
+    .filter((msg) => !msg?.meta?._system && !msg?.meta?.skipExport)
 
     .map((msg) => {
 

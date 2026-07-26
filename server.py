@@ -5490,7 +5490,18 @@ CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 _CODEX_SYSTEM_PREFIXES = (
     "<environment_context>", "<recommended_plugins>", "<skills_instructions>",
     "<permissions instructions>", "<apps_instructions>", "<plugins_instructions>",
-    "<collaboration_mode>",
+    "<collaboration_mode>", "<turn_aborted>",
+)
+
+_IMPORT_TRACE_CONTENT_LIMIT = 12000
+_IMPORT_BOUNDARY_VERSION = 1
+_CODEX_CONTEXT_BLOCK_RE = re.compile(
+    r"^\s*<(?P<tag>"
+    r"in-app-browser-context|environment_context|recommended_plugins|"
+    r"skills_instructions|apps_instructions|plugins_instructions|"
+    r"collaboration_mode|app-context"
+    r")(?:\s[^>]*)?>[\s\S]*?</(?P=tag)>\s*",
+    re.IGNORECASE,
 )
 
 
@@ -5501,6 +5512,274 @@ def _is_system_text(text):
         if stripped.startswith(prefix):
             return True
     return False
+
+
+def _sanitize_codex_user_text(text):
+    """Remove Codex-injected wrappers while retaining the actual user request."""
+    value = str(text or "").strip()
+    command = re.fullmatch(
+        r"<command-name>(?P<name>[\s\S]*?)</command-name>\s*"
+        r"<command-message>[\s\S]*?</command-message>\s*"
+        r"<command-args>[\s\S]*?</command-args>",
+        value,
+        re.IGNORECASE,
+    )
+    if command:
+        return command.group("name").strip()
+    request_marker = "## My request for Codex:"
+    if request_marker in value:
+        value = value.rsplit(request_marker, 1)[1].strip()
+
+    previous = None
+    while value and value != previous:
+        previous = value
+        value = _CODEX_CONTEXT_BLOCK_RE.sub("", value, count=1).strip()
+
+        if value.startswith("# AGENTS.md instructions for "):
+            environment_end = re.search(
+                r"</environment_context>\s*",
+                value,
+                re.IGNORECASE,
+            )
+            instructions_end = re.search(
+                r"</INSTRUCTIONS>\s*",
+                value,
+                re.IGNORECASE,
+            )
+            boundary = environment_end or instructions_end
+            value = value[boundary.end():].strip() if boundary else ""
+
+    if _is_system_text(value):
+        return ""
+    return value
+
+
+def _import_boundary_message(source):
+    """Return the hidden, durable safety boundary for an imported session."""
+    normalized = _normalize_session_source(source)
+    label = "Codex" if normalized == "codex" else "Claude Code"
+    return {
+        "role": "system",
+        "content": (
+            f"This session was migrated from {label} into Code. Continue the task "
+            "using only the tools that Code currently makes available. Historical "
+            "tool calls, tool results, reasoning, permissions, and workspace state "
+            "are archival context only: do not replay them, do not assume they are "
+            "still available or succeeded, and verify the current workspace before "
+            "acting. Some imported tool payloads may be truncated."
+        ),
+        "meta": {
+            "_system": True,
+            "kind": "import-boundary",
+            "version": _IMPORT_BOUNDARY_VERSION,
+            "importSource": normalized,
+        },
+    }
+
+
+def _import_timestamp(value):
+    """Preserve a source ISO timestamp without inventing a timezone."""
+    return str(value or "").strip()
+
+
+def _import_payload_text(value):
+    """Extract readable text from common imported tool payload shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_import_payload_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        block_type = value.get("type")
+        if block_type in ("text", "input_text", "output_text"):
+            return str(value.get("text") or value.get("content") or "")
+        if len(value) == 1:
+            key = next(iter(value), "")
+            if key in ("text", "content", "output", "result"):
+                return _import_payload_text(value.get(key))
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _bounded_import_trace(value, limit=_IMPORT_TRACE_CONTENT_LIMIT):
+    """Bound imported traces while retaining both ends and an integrity hash."""
+    text = _import_payload_text(value)
+    if len(text) <= limit:
+        return text, {}
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    marker = (
+        f"\n\n... [imported trace truncated: {len(text)} chars; "
+        f"sha256={digest[:16]}] ...\n\n"
+    )
+    available = max(2, limit - len(marker))
+    head_size = max(1, (available * 2) // 3)
+    tail_size = max(1, available - head_size)
+    return (
+        text[:head_size] + marker + text[-tail_size:],
+        {
+            "importedPayloadTruncated": True,
+            "importedOriginalChars": len(text),
+            "importedSha256": digest,
+        },
+    )
+
+
+def _import_tool_trace_message(
+    role,
+    source,
+    action,
+    call_id,
+    payload,
+    timestamp="",
+):
+    """Project a foreign tool event into a non-replayable Code audit record."""
+    action = str(action or "tool")
+    call_id = str(call_id or "")
+    bounded, trace_meta = _bounded_import_trace(payload)
+    meta = {
+        "kind": "imported-tool-trace",
+        "action": action,
+        "toolCallId": call_id,
+        "importSource": _normalize_session_source(source),
+        "imported": True,
+        "native": False,
+        "replayable": False,
+        "skipApi": True,
+        **trace_meta,
+    }
+    if role == "tool-call":
+        parsed_payload = payload
+        if isinstance(payload, str):
+            try:
+                parsed_payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                parsed_payload = bounded
+        tool = {"action": action, "_toolCallId": call_id}
+        if isinstance(parsed_payload, dict) and not trace_meta:
+            tool.update(parsed_payload)
+        elif bounded:
+            tool["arguments"] = bounded
+        meta["tool"] = tool
+        content = action + (f"\n{bounded}" if bounded else "")
+    else:
+        content = bounded or "(no tool output)"
+    message = {"role": role, "content": content, "meta": meta}
+    if timestamp:
+        message["_time"] = timestamp
+    return message
+
+
+def _import_usage(usage):
+    """Normalize Codex/Claude usage fields to Code's compact usage schema."""
+    if not isinstance(usage, dict):
+        return {}
+    def _token_count(*keys):
+        for key in keys:
+            value = usage.get(key)
+            if value is None:
+                continue
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    return {
+        "input": _token_count("input_tokens", "prompt_tokens", "input"),
+        "output": _token_count(
+            "output_tokens",
+            "completion_tokens",
+            "output",
+        ),
+        "cache": _token_count(
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cache_read_tokens",
+            "prompt_cache_hit_tokens",
+            "cache",
+        ),
+    }
+
+
+def _add_import_usage(total, usage):
+    """Add a normalized usage record to an import ledger in-place."""
+    normalized = _import_usage(usage)
+    for key in ("input", "output", "cache"):
+        total[key] = int(total.get(key) or 0) + int(normalized.get(key) or 0)
+    return normalized
+
+
+def _import_message_text(message):
+    """Return the readable text projection of a Code message."""
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    return "".join(parts)
+
+
+def _import_data_image(image_url, index):
+    """Return Code API/UI projections for an imported data URL image."""
+    value = str(image_url or "")
+    if not value.startswith("data:") or "," not in value:
+        return (
+            {"type": "image_url", "image_url": {"url": value}} if value else None,
+            None,
+        )
+    header, encoded = value.split(",", 1)
+    mime = header[5:].split(";", 1)[0] or "image/png"
+    if ";base64" not in header.lower():
+        return {"type": "image_url", "image_url": {"url": value}}, None
+    return (
+        {"type": "image_url", "image_url": {"url": value}},
+        {
+            "name": f"imported-image-{index}",
+            "mime": mime,
+            "base64": encoded,
+        },
+    )
+
+
+def _import_message_content(text, image_urls):
+    """Build a Code-compatible text/image message without losing UI previews."""
+    images = []
+    blocks = []
+    if text:
+        blocks.append({"type": "text", "text": text})
+    for index, image_url in enumerate(image_urls or [], 1):
+        api_block, ui_image = _import_data_image(image_url, index)
+        if api_block:
+            blocks.append(api_block)
+        if ui_image:
+            images.append(ui_image)
+    if image_urls:
+        return blocks, images
+    return text, images
+
+
+def _codex_reasoning_summary(payload):
+    """Extract readable Codex reasoning summaries; encrypted content is ignored."""
+    if not isinstance(payload, dict):
+        return ""
+    summary = payload.get("summary")
+    if not isinstance(summary, list):
+        return ""
+    parts = []
+    for item in summary:
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("summary_text") or "").strip()
+            if text:
+                parts.append(text)
+        elif isinstance(item, str) and item.strip():
+            parts.append(item.strip())
+    return "\n".join(parts)
 
 
 def list_codex_sessions(query=None):
@@ -5563,11 +5842,13 @@ def _read_codex_title(jsonl_path):
                 payload = record.get("payload") or {}
                 if payload.get("type") != "message" or payload.get("role") != "user":
                     continue
-                for block in (payload.get("content") or []):
-                    if isinstance(block, dict) and block.get("type") == "input_text":
-                        text = str(block.get("text") or "").strip()
-                        if text and not _is_system_text(text):
-                            return text[:80].replace("\n", " ")
+                text = _sanitize_codex_user_text("".join(
+                    str(block.get("text") or "")
+                    for block in (payload.get("content") or [])
+                    if isinstance(block, dict) and block.get("type") == "input_text"
+                ))
+                if text:
+                    return text[:80].replace("\n", " ")
     except Exception:
         pass
     return jsonl_path.stem
@@ -5619,12 +5900,13 @@ def _read_codex_session_meta(jsonl_path):
                     role = payload.get("role", "")
                     if role != "user":
                         continue
-                    for block in (payload.get("content") or []):
-                        if isinstance(block, dict) and block.get("type") == "input_text":
-                            text = str(block.get("text") or "").strip()
-                            if text and not _is_system_text(text):
-                                title = text[:80].replace("\n", " ")
-                                break
+                    text = _sanitize_codex_user_text("".join(
+                        str(block.get("text") or "")
+                        for block in (payload.get("content") or [])
+                        if isinstance(block, dict) and block.get("type") == "input_text"
+                    ))
+                    if text:
+                        title = text[:80].replace("\n", " ")
     except Exception:
         return None
 
@@ -5656,10 +5938,32 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
 
     session_id = target_session_id or _generate_codex_import_id(source)
     safe_id = safe_session_id(session_id)
-    messages = []
-
+    messages = [_import_boundary_message("codex")]
+    conversation_messages = []
     current_model = ""
     source_cwd = ""
+    pending_reasoning = []
+    tool_names = {}
+    total_usage = {"input": 0, "output": 0, "cache": 0}
+    last_usage = {}
+    last_assistant = None
+    synthetic_call_number = 0
+
+    def remember_reasoning(value):
+        text = str(value or "").strip()
+        if not text or (pending_reasoning and pending_reasoning[-1] == text):
+            return
+        pending_reasoning.append(text)
+
+    def next_call_id(payload):
+        nonlocal synthetic_call_number
+        if isinstance(payload, dict):
+            value = payload.get("call_id") or payload.get("id")
+            if value:
+                return str(value)
+        synthetic_call_number += 1
+        return f"codex-import-{synthetic_call_number}"
+
     with open(source, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -5681,36 +5985,171 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
                 if m:
                     current_model = str(m)
 
-            if rtype != "response_item" or payload.get("type") != "message":
+            if rtype == "event_msg" and isinstance(payload, dict):
+                event_type = payload.get("type")
+                if event_type == "agent_reasoning":
+                    remember_reasoning(payload.get("text"))
+                elif event_type == "token_count":
+                    info = payload.get("info") or {}
+                    total = info.get("total_token_usage") or {}
+                    latest = info.get("last_token_usage") or {}
+                    if total:
+                        total_usage = _import_usage(total)
+                    if latest:
+                        last_usage = _import_usage(latest)
+                        if last_assistant is not None:
+                            last_assistant.setdefault("meta", {})["_usage"] = last_usage
+                continue
+
+            if rtype != "response_item" or not isinstance(payload, dict):
+                continue
+
+            item_type = payload.get("type")
+            timestamp = _import_timestamp(record.get("timestamp"))
+            if item_type == "reasoning":
+                remember_reasoning(_codex_reasoning_summary(payload))
+                continue
+
+            call_specs = {
+                "function_call": (
+                    payload.get("name") or "function",
+                    payload.get("arguments"),
+                ),
+                "custom_tool_call": (
+                    payload.get("name") or "custom_tool",
+                    payload.get("input"),
+                ),
+                "tool_search_call": (
+                    "tool_search",
+                    payload.get("arguments"),
+                ),
+                "web_search_call": (
+                    "web_search",
+                    payload.get("action"),
+                ),
+                "image_generation_call": (
+                    "image_generation",
+                    {"revised_prompt": payload.get("revised_prompt")},
+                ),
+            }
+            if item_type in call_specs:
+                action, call_payload = call_specs[item_type]
+                call_id = next_call_id(payload)
+                tool_names[call_id] = str(action)
+                messages.append(_import_tool_trace_message(
+                    "tool-call",
+                    "codex",
+                    action,
+                    call_id,
+                    call_payload,
+                    timestamp,
+                ))
+                if item_type == "image_generation_call" and payload.get("result") is not None:
+                    messages.append(_import_tool_trace_message(
+                        "tool-result",
+                        "codex",
+                        action,
+                        call_id,
+                        payload.get("result"),
+                        timestamp,
+                    ))
+                continue
+
+            output_specs = {
+                "function_call_output": payload.get("output"),
+                "custom_tool_call_output": payload.get("output"),
+                "tool_search_output": payload.get("tools"),
+            }
+            if item_type in output_specs:
+                call_id = next_call_id(payload)
+                action = tool_names.get(call_id, item_type.removesuffix("_output"))
+                messages.append(_import_tool_trace_message(
+                    "tool-result",
+                    "codex",
+                    action,
+                    call_id,
+                    output_specs[item_type],
+                    timestamp,
+                ))
+                continue
+
+            if item_type != "message":
                 continue
             role = payload.get("role", "")
             if role not in ("user", "assistant"):
                 continue
-            content_blocks = payload.get("content") or []
-            text = ""
-            for block in content_blocks:
-                if isinstance(block, dict) and block.get("type") in ("input_text", "output_text", "text"):
-                    text += str(block.get("text") or block.get("content") or "")
-            if not text.strip():
+            text_parts = []
+            image_urls = []
+            for block in (payload.get("content") or []):
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type in ("input_text", "output_text", "text"):
+                    text_parts.append(str(
+                        block.get("text") or block.get("content") or ""
+                    ))
+                elif block_type in ("input_image", "image_url"):
+                    image_value = block.get("image_url") or block.get("url")
+                    if isinstance(image_value, dict):
+                        image_value = image_value.get("url")
+                    if image_value:
+                        image_urls.append(str(image_value))
+            text = "".join(text_parts).strip()
+            if role == "user":
+                text = _sanitize_codex_user_text(text)
+            if not text and not image_urls:
                 continue
-            ts = str(record.get("timestamp") or "")[:19]
-            msg = {"role": role, "content": text, "meta": {},
-                   "_time": (ts + "Z") if ts and not ts.endswith("Z") else ts,
-                   "_model": current_model}
+            content, ui_images = _import_message_content(text, image_urls)
+            msg = {
+                "role": role,
+                "content": content,
+                "meta": {},
+                "_time": timestamp,
+                "_model": current_model,
+            }
+            if ui_images:
+                msg["_images"] = ui_images
+            if role == "assistant":
+                if pending_reasoning:
+                    thought, thought_meta = _bounded_import_trace(
+                        "\n\n".join(pending_reasoning)
+                    )
+                    msg["thought"] = thought
+                    msg["meta"].update(thought_meta)
+                    pending_reasoning.clear()
+                last_assistant = msg
             messages.append(msg)
+            conversation_messages.append(msg)
 
-    if not messages:
+    if pending_reasoning and last_assistant is not None:
+        trailing, thought_meta = _bounded_import_trace("\n\n".join(pending_reasoning))
+        existing = str(last_assistant.get("thought") or "")
+        last_assistant["thought"] = "\n\n".join(
+            part for part in (existing, trailing) if part
+        )
+        last_assistant.setdefault("meta", {}).update(thought_meta)
+
+    if not conversation_messages:
         raise ValueError("Codex session contains no importable messages")
 
     # Determine title and timestamps (skip system messages for title)
-    first_user = next((m for m in messages
-                       if m["role"] == "user" and not _is_system_text(m["content"])), None)
+    first_user = next(
+        (
+            m for m in conversation_messages
+            if m["role"] == "user" and not _is_system_text(_import_message_text(m))
+        ),
+        None,
+    )
     if first_user is None:
-        first_user = next((m for m in messages if m["role"] == "user"), messages[0])
-    title = first_user["content"][:80].replace("\n", " ")
-    created_at = (messages[0]["_time"] or now_iso())[:19]
-    updated_at = (messages[-1]["_time"] or now_iso())[:19]
-    msg_count = len(messages)
+        first_user = next(
+            (m for m in conversation_messages if m["role"] == "user"),
+            conversation_messages[0],
+        )
+    title = _import_message_text(first_user)[:80].replace("\n", " ")
+    created_at = (
+        conversation_messages[0].get("_time") or now_iso()
+    )[:19]
+    msg_count = len(messages) - 1
     resolved_project_id, resolved_cwd = _import_session_location(
         source_cwd,
         project_id,
@@ -5728,8 +6167,8 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
         "title": title,
         "createdAt": created_at,
         "updatedAt": now_iso()[:19],  # use import time so it appears at top
-        "stats": {"input": 0, "output": 0, "cache": 0},
-        "lastUsage": {},
+        "stats": total_usage,
+        "lastUsage": last_usage,
         "runState": {},
         "messageCount": msg_count,
         "lastMessageTime": now_iso()[:19],
@@ -5816,6 +6255,17 @@ def _claude_content_text(content):
     return str(content or "")
 
 
+_CLAUDE_SYSTEM_REMINDER_RE = re.compile(
+    r"<system-reminder>[\s\S]*?</system-reminder>",
+    re.IGNORECASE,
+)
+
+
+def _strip_claude_system_reminders(text):
+    """Remove Claude Code's injected reminder blocks from imported user text."""
+    return _CLAUDE_SYSTEM_REMINDER_RE.sub("", str(text or "")).strip()
+
+
 def list_claude_sessions(query=None):
     """Scan ~/.claude/projects/*/ for .jsonl sessions and return a list."""
     if not CLAUDE_PROJECTS_DIR.exists():
@@ -5865,8 +6315,12 @@ def _read_claude_title(jsonl_path, project_name=""):
                     continue
                 if record.get("type") != "user":
                     continue
+                if record.get("isSidechain") or record.get("isMeta"):
+                    continue
                 msg = record.get("message") or {}
-                text = _claude_content_text(msg.get("content", "")).strip()
+                text = _strip_claude_system_reminders(
+                    _claude_content_text(msg.get("content", ""))
+                )
                 if text and len(text) > 2:
                     return text[:80].replace("\n", " ")
     except Exception:
@@ -5880,6 +6334,7 @@ def _read_claude_session_meta(jsonl_path):
     created_at = ""
     cwd = ""
     line_count = 0
+    found_main_record = False
     try:
         size = jsonl_path.stat().st_size
         est_lines = max(1, size // 200)
@@ -5901,6 +6356,9 @@ def _read_claude_session_meta(jsonl_path):
                 rtype = record.get("type", "")
                 if rtype not in ("user", "assistant"):
                     continue
+                if record.get("isSidechain") or record.get("isMeta"):
+                    continue
+                found_main_record = True
                 if not cwd:
                     cwd = _normalize_local_path(record.get("cwd"))
                 timestamp = str(record.get("timestamp") or "")
@@ -5911,10 +6369,14 @@ def _read_claude_session_meta(jsonl_path):
                 msg = record.get("message") or {}
                 role = msg.get("role", "")
                 if role == "user":
-                    text = _claude_content_text(msg.get("content", "")).strip()
+                    text = _strip_claude_system_reminders(
+                        _claude_content_text(msg.get("content", ""))
+                    )
                     if text and len(text) > 2:
                         title = text[:80].replace("\n", " ")
     except Exception:
+        return None
+    if not found_main_record:
         return None
     if not created_at:
         created_at = now_iso()[:19]
@@ -5937,8 +6399,14 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
             str(source).replace("\\", "/").encode()
         ).hexdigest()[:16])
     safe_id = safe_session_id(session_id)
-    messages = []
+    messages = [_import_boundary_message("claude-code")]
+    conversation_messages = []
     source_cwd = ""
+    tool_names = {}
+    total_usage = {"input": 0, "output": 0, "cache": 0}
+    last_usage = {}
+    pending_thinking = []
+    last_assistant = None
 
     with open(source, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -5952,28 +6420,143 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
             rtype = record.get("type", "")
             if rtype not in ("user", "assistant"):
                 continue
+            if record.get("isSidechain") or record.get("isMeta"):
+                continue
             source_cwd = source_cwd or _normalize_local_path(record.get("cwd"))
             msg = record.get("message") or {}
             role = msg.get("role", "")
             if role not in ("user", "assistant"):
                 continue
-            text = _claude_content_text(msg.get("content", "")).strip()
-            if not text:
-                continue
-            ts = str(record.get("timestamp") or "")[:19]
-            new_msg = {"role": role, "content": text, "meta": {},
-                       "_time": (ts + "Z") if ts and not ts.endswith("Z") else ts,
-                       "_model": str(msg.get("model") or "")}
-            messages.append(new_msg)
+            timestamp = _import_timestamp(record.get("timestamp"))
+            model = str(msg.get("model") or "")
+            content = msg.get("content", "")
+            blocks = content if isinstance(content, list) else [content]
+            text_parts = []
+            image_urls = []
+            thinking_parts = []
+            tool_calls = []
+            tool_results = []
+            for block in blocks:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                    continue
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    text_parts.append(str(block.get("text") or ""))
+                elif block_type == "thinking":
+                    thinking = str(block.get("thinking") or "").strip()
+                    if thinking:
+                        thinking_parts.append(thinking)
+                elif block_type == "tool_use":
+                    call_id = str(block.get("id") or "")
+                    action = str(block.get("name") or "tool")
+                    tool_names[call_id] = action
+                    tool_calls.append((action, call_id, block.get("input")))
+                elif block_type == "tool_result":
+                    call_id = str(block.get("tool_use_id") or "")
+                    result_payload = block.get("content")
+                    if "is_error" in block:
+                        result_payload = {
+                            "content": result_payload,
+                            "is_error": bool(block.get("is_error")),
+                        }
+                    tool_results.append((
+                        tool_names.get(call_id, "tool"),
+                        call_id,
+                        result_payload,
+                    ))
+                elif block_type == "image":
+                    image_source = block.get("source") or {}
+                    if not isinstance(image_source, dict):
+                        continue
+                    source_type = image_source.get("type")
+                    if source_type == "base64" and image_source.get("data"):
+                        mime = image_source.get("media_type") or "image/png"
+                        image_urls.append(
+                            f"data:{mime};base64,{image_source.get('data')}"
+                        )
+                    elif source_type == "url" and image_source.get("url"):
+                        image_urls.append(str(image_source.get("url")))
 
-    if not messages:
+            if role == "assistant" and thinking_parts:
+                pending_thinking.extend(thinking_parts)
+            text = _strip_claude_system_reminders("".join(text_parts))
+            if text or image_urls:
+                message_content, ui_images = _import_message_content(
+                    text,
+                    image_urls,
+                )
+                new_msg = {
+                    "role": role,
+                    "content": message_content,
+                    "meta": {},
+                    "_time": timestamp,
+                    "_model": model,
+                }
+                if ui_images:
+                    new_msg["_images"] = ui_images
+                if role == "assistant" and pending_thinking:
+                    thought, thought_meta = _bounded_import_trace(
+                        "\n\n".join(pending_thinking)
+                    )
+                    new_msg["thought"] = thought
+                    new_msg["meta"].update(thought_meta)
+                    pending_thinking.clear()
+                if role == "assistant":
+                    last_assistant = new_msg
+                messages.append(new_msg)
+                conversation_messages.append(new_msg)
+
+            for action, call_id, call_payload in tool_calls:
+                messages.append(_import_tool_trace_message(
+                    "tool-call",
+                    "claude-code",
+                    action,
+                    call_id,
+                    call_payload,
+                    timestamp,
+                ))
+            for action, call_id, result_payload in tool_results:
+                messages.append(_import_tool_trace_message(
+                    "tool-result",
+                    "claude-code",
+                    action,
+                    call_id,
+                    result_payload,
+                    timestamp,
+                ))
+
+            if role == "assistant":
+                usage = msg.get("usage") or {}
+                if usage:
+                    last_usage = _add_import_usage(total_usage, usage)
+                    if text or image_urls:
+                        new_msg["meta"]["_usage"] = last_usage
+
+    if pending_thinking and last_assistant is not None:
+        trailing, thought_meta = _bounded_import_trace(
+            "\n\n".join(pending_thinking)
+        )
+        existing = str(last_assistant.get("thought") or "")
+        last_assistant["thought"] = "\n\n".join(
+            part for part in (existing, trailing) if part
+        )
+        last_assistant.setdefault("meta", {}).update(thought_meta)
+
+    if not conversation_messages:
         raise ValueError("Claude Code session contains no importable messages")
 
-    first_user = next((m for m in messages if m["role"] == "user"), messages[0])
-    title = first_user["content"][:80].replace("\n", " ")
-    created_at = (messages[0]["_time"] or now_iso())[:19]
-    updated_at = (messages[-1]["_time"] or now_iso())[:19]
-    msg_count = len(messages)
+    first_user = next(
+        (m for m in conversation_messages if m["role"] == "user"),
+        conversation_messages[0],
+    )
+    title = _import_message_text(first_user)[:80].replace("\n", " ")
+    created_at = (
+        conversation_messages[0].get("_time") or now_iso()
+    )[:19]
+    msg_count = len(messages) - 1
     resolved_project_id, resolved_cwd = _import_session_location(
         source_cwd,
         project_id,
@@ -5989,8 +6572,8 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
         "id": safe_id, "title": title,
         "createdAt": created_at,
         "updatedAt": now_iso()[:19],
-        "stats": {"input": 0, "output": 0, "cache": 0},
-        "lastUsage": {}, "runState": {},
+        "stats": total_usage,
+        "lastUsage": last_usage, "runState": {},
         "messageCount": msg_count,
         "lastMessageTime": now_iso()[:19],
         "projectId": resolved_project_id,

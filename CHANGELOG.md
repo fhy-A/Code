@@ -2,6 +2,29 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-26 23:48 · Codex
+
+### Codex / Claude Code 导入消息兼容与迁移安全边界（开发版本基线仍为 v0.5.28）
+
+- Codex 与 Claude Code 导入会话新增不可见且可持久化的迁移边界，明确告知后续模型该会话来自迁移，并要求只使用 Code 当前实际提供的工具；历史工具、权限和工作区状态仅作为审计记录，不得重放或假定仍然有效。
+- 导入转换从纯文本扩展为兼容消息协议：
+  - 保留正常用户/助手文本、图片、模型名、原始时间戳、usage 和可读 reasoning/thinking 摘要；
+  - Codex `function/custom/tool_search/web_search/image_generation` 与 Claude `tool_use/tool_result` 转换为配对的历史工具轨迹；
+  - 所有导入工具轨迹统一标记 `imported / native:false / replayable:false / skipApi:true`，不会混入后续模型请求或当前工具时序；
+  - 超过 12,000 字符的工具载荷保留首尾，并记录原始长度与 SHA-256，兼顾审计与会话体积。
+- 清理外部运行时注入内容：Codex 的 AGENTS、环境、浏览器状态、文件包装和命令包装只保留其中真实用户请求；Claude 的 `system-reminder`、`isMeta` 与 `isSidechain` 内容不进入主会话，纯 `agent-*` 旁路文件不再出现在导入列表。
+- 会话压缩按实际模型消息计数，排除不可发送的历史工具轨迹；压缩后继续保留迁移边界。Markdown 导出过滤隐藏系统消息，但仍忠实保留普通对话与工具审计内容。
+- 验证：
+  - `python -m pytest tests/test_server.py tests/test_frontend_modules.py tests/test_p2_coverage.py -q`：**330 passed, 17 subtests passed**；
+  - `python -m unittest discover -s tests`：**768 tests passed**；
+  - `node --check app.js` 与 `git diff --check` 通过；
+  - 真实 Codex / Claude Code 样本验证了文本、图片、reasoning、工具配对、截断、usage 和旁路会话排除，导入工具轨迹可重放数量为 0；
+  - 用户人工确认导入展示、工具日志、继续对话、当前工具约束与压缩后约束均正常；导出文件中的关键词命中经结构核验仅位于历史 `Tool Call / Tool Result` 代码 diff 和测试说明，隐藏系统消息命中为 0。
+
+**涉及文件**：`server.py`、`app.js`、`tests/test_server.py`、`tests/test_frontend_modules.py`、`tests/test_p2_coverage.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
 ## 2026-07-26 22:39 · Codex
 
 ### 侧栏置顶与添加文件夹图标统一

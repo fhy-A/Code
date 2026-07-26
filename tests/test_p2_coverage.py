@@ -298,8 +298,14 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertIn('compactMarker: "Context compacted"', self.i18n_source)
 
     def test_manual_compaction_keeps_marker_chronology(self):
-        self.assertIn("const kept = state.messages.slice(-keepCount)", self.source)
-        self.assertIn("state.messages = [summaryMsg, ...kept]", self.source)
+        self.assertIn(
+            "const kept = compactableMessages.slice(keepStartIndex)",
+            self.source,
+        )
+        self.assertIn(
+            "state.messages = [...durableSystemMessages, summaryMsg, ...kept]",
+            self.source,
+        )
         self.assertIn("await saveSessionState(state.sessionId, state.messages, state.stats)", self.source)
         self.assertNotIn("_compactPrefix", self.source)
 

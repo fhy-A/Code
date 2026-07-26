@@ -30,6 +30,37 @@ LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_import_boundary_survives_compaction_and_stays_out_of_exports(self):
+        self.assertIn("if (msg.meta?.skipApi) return null;", APP_SOURCE)
+        self.assertIn(
+            'msg.role === "tool-call" && msg.meta?.toolCallId && !msg.meta?.skipApi',
+            APP_SOURCE,
+        )
+        compact_start = APP_SOURCE.index("async function compactConversation()")
+        compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
+        compact_source = APP_SOURCE[compact_start:compact_end]
+        self.assertIn(
+            'msg?.meta?.kind === "import-boundary"',
+            compact_source,
+        )
+        self.assertIn(
+            ".map((msg) => mapMessageForApi(msg, false))",
+            compact_source,
+        )
+        self.assertIn(".filter(Boolean)", compact_source)
+        self.assertIn(
+            "state.messages = [...durableSystemMessages, summaryMsg, ...kept]",
+            compact_source,
+        )
+
+        export_start = APP_SOURCE.index("function exportMarkdown()")
+        export_end = APP_SOURCE.index("let sidebarDragState", export_start)
+        export_source = APP_SOURCE[export_start:export_end]
+        self.assertIn(
+            ".filter((msg) => !msg?.meta?._system && !msg?.meta?.skipExport)",
+            export_source,
+        )
+
     def test_settings_shell_is_responsive_and_navigation_is_grouped(self):
         for key in (
             "settingsGroupAgent",

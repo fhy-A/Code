@@ -1318,6 +1318,65 @@ class TestCodexImport(unittest.TestCase):
         self.assertGreater(meta["message_count"], 0)  # estimated from file size
         self.assertEqual(meta["cwd"], server._normalize_local_path("/home/test"))
 
+    def test_codex_user_wrapper_sanitizer_retains_only_actual_request(self):
+        ambient = (
+            '<in-app-browser-context source="ambient-ui-state">\n'
+            "# In app browser:\n- Current URL: http://127.0.0.1:3010/\n"
+            "</in-app-browser-context>\n\n"
+            "## My request for Codex:\nContinue the import task"
+        )
+        self.assertEqual(
+            server._sanitize_codex_user_text(ambient),
+            "Continue the import task",
+        )
+        injected_only = (
+            "<recommended_plugins>\n- Example\n</recommended_plugins>"
+            "# AGENTS.md instructions for C:\\workspace\n"
+            "<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>"
+            "<environment_context>\n<cwd>C:\\workspace</cwd>\n</environment_context>"
+        )
+        self.assertEqual(server._sanitize_codex_user_text(injected_only), "")
+        self.assertEqual(
+            server._sanitize_codex_user_text(
+                "<environment_context>\n<cwd>C:\\workspace</cwd>\n"
+                "</environment_context>"
+            ),
+            "",
+        )
+        self.assertEqual(
+            server._sanitize_codex_user_text("<turn_aborted>Stopped</turn_aborted>"),
+            "",
+        )
+        self.assertEqual(
+            server._sanitize_codex_user_text(
+                "<command-name>/login</command-name>"
+                "<command-message>login</command-message>"
+                "<command-args></command-args>"
+            ),
+            "/login",
+        )
+
+    def test_read_codex_title_uses_request_inside_ambient_wrapper(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "wrapped.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                (
+                    "user",
+                    '<in-app-browser-context source="ambient-ui-state">\n'
+                    "browser state\n</in-app-browser-context>\n"
+                    "## My request for Codex:\nActual imported title",
+                ),
+                ("assistant", "OK"),
+            ]), encoding="utf-8")
+            self.assertEqual(
+                server._read_codex_title(source),
+                "Actual imported title",
+            )
+            self.assertEqual(
+                server._read_codex_session_meta(source)["title"],
+                "Actual imported title",
+            )
+
     def test_import_codex_session_creates_code_files(self):
         """Import creates .jsonl, .json, and updates index."""
         with tempfile.TemporaryDirectory() as td:
@@ -1348,9 +1407,12 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(len(json_files), 1)
 
             msgs = server.read_jsonl(jsonl_files[0])
-            self.assertEqual(len(msgs), 2)
-            self.assertEqual(msgs[0]["role"], "user")
-            self.assertEqual(msgs[0]["content"], "这是第一条消息")
+            self.assertEqual(len(msgs), 3)
+            self.assertEqual(msgs[0]["role"], "system")
+            self.assertEqual(msgs[0]["meta"]["kind"], "import-boundary")
+            self.assertTrue(msgs[0]["meta"]["_system"])
+            self.assertEqual(msgs[1]["role"], "user")
+            self.assertEqual(msgs[1]["content"], "这是第一条消息")
             stored = server.read_json(json_files[0], {})
             self.assertNotIn("group", stored)
             index_entry = {
@@ -1364,6 +1426,165 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(index_entry["source"], "codex")
             self.assertNotIn("group", index_entry)
             self.assertNotIn("project", index_entry)
+
+    def test_import_codex_preserves_safe_history_and_usage(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "codex-complex.jsonl"
+            timestamp = "2026-07-24T10:00:00.123Z"
+            image_data = "aGVsbG8="
+            large_output = "HEAD-" + ("x" * 14000) + "-TAIL"
+            records = [
+                {
+                    "type": "session_meta",
+                    "timestamp": timestamp,
+                    "payload": {"cwd": "/home/test/codex"},
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": timestamp,
+                    "payload": {"model": "gpt-test"},
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Inspect this image"},
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/png;base64,{image_data}",
+                            },
+                        ],
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": timestamp,
+                    "payload": {"type": "agent_reasoning", "text": "Check the file first."},
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "Use a safe read."}],
+                        "encrypted_content": "must-not-be-imported",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "arguments": '{"path":"example.txt"}',
+                        "call_id": "call-1",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": large_output,
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Inspection complete."}],
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 101,
+                                "cached_input_tokens": 11,
+                                "output_tokens": 20,
+                            },
+                            "last_token_usage": {
+                                "input_tokens": 12,
+                                "cached_input_tokens": 3,
+                                "output_tokens": 4,
+                            },
+                        },
+                    },
+                },
+            ]
+            source.write_text(
+                "\n".join(json.dumps(item) for item in records) + "\n",
+                encoding="utf-8",
+            )
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir):
+                meta = server.import_codex_session(str(source))
+                # Re-importing the same source replaces the deterministic target.
+                server.import_codex_session(str(source))
+
+            stored_path = next(sessions_dir.rglob(f"{meta['id']}.jsonl"))
+            messages = server.read_jsonl(stored_path)
+            boundaries = [
+                item for item in messages
+                if item.get("meta", {}).get("kind") == "import-boundary"
+            ]
+            self.assertEqual(len(boundaries), 1)
+            self.assertIn("migrated from Codex", boundaries[0]["content"])
+            self.assertIn(
+                "using only the tools that Code currently makes available",
+                boundaries[0]["content"],
+            )
+
+            user = next(item for item in messages if item.get("role") == "user")
+            self.assertEqual(server._import_message_text(user), "Inspect this image")
+            self.assertEqual(user["_model"], "gpt-test")
+            self.assertEqual(user["_time"], timestamp)
+            self.assertEqual(user["_images"][0]["base64"], image_data)
+            self.assertEqual(user["content"][1]["type"], "image_url")
+
+            call = next(item for item in messages if item.get("role") == "tool-call")
+            result = next(item for item in messages if item.get("role") == "tool-result")
+            for trace in (call, result):
+                self.assertTrue(trace["meta"]["skipApi"])
+                self.assertTrue(trace["meta"]["imported"])
+                self.assertFalse(trace["meta"]["native"])
+                self.assertFalse(trace["meta"]["replayable"])
+                self.assertEqual(trace["meta"]["toolCallId"], "call-1")
+            self.assertEqual(call["meta"]["action"], "read_file")
+            self.assertTrue(result["meta"]["importedPayloadTruncated"])
+            self.assertEqual(result["meta"]["importedOriginalChars"], len(large_output))
+            self.assertEqual(len(result["meta"]["importedSha256"]), 64)
+            self.assertIn("HEAD-", result["content"])
+            self.assertIn("-TAIL", result["content"])
+            self.assertNotIn("must-not-be-imported", json.dumps(messages))
+
+            assistant = next(
+                item for item in messages if item.get("role") == "assistant"
+            )
+            self.assertIn("Check the file first.", assistant["thought"])
+            self.assertIn("Use a safe read.", assistant["thought"])
+            self.assertEqual(
+                assistant["meta"]["_usage"],
+                {"input": 12, "output": 4, "cache": 3},
+            )
+            self.assertEqual(
+                meta["stats"],
+                {"input": 101, "output": 20, "cache": 11},
+            )
+            self.assertEqual(meta["lastUsage"], {"input": 12, "output": 4, "cache": 3})
+            self.assertEqual(meta["messageCount"], len(messages) - 1)
 
     def test_import_codex_session_rejects_nonexistent_file(self):
         with self.assertRaises(ValueError):
@@ -1440,6 +1661,31 @@ class TestCodexImport(unittest.TestCase):
         )
         self.assertTrue(sessions[0]["id"].startswith("claude-"))
 
+    def test_list_claude_sessions_excludes_sidechain_agent_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "my-project"
+            project.mkdir(parents=True)
+            main = project / "main-session.jsonl"
+            main.write_text(self._make_claude_jsonl([
+                ("user", "Main session"),
+                ("assistant", "Main reply"),
+            ]), encoding="utf-8")
+            sidechain = project / "agent-worker.jsonl"
+            sidechain.write_text(
+                json.dumps({
+                    "type": "user",
+                    "isSidechain": True,
+                    "agentId": "worker",
+                    "message": {"role": "user", "content": "Worker task"},
+                    "timestamp": "2026-07-24T10:00:00.000Z",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(server, "CLAUDE_PROJECTS_DIR", Path(td)):
+                sessions = server.list_claude_sessions()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["sourceId"], "main-session")
+
     def test_import_claude_session(self):
         with tempfile.TemporaryDirectory() as td:
             jsonl = Path(td) / "session.jsonl"
@@ -1482,6 +1728,162 @@ class TestCodexImport(unittest.TestCase):
                 )
             }[meta["id"]]
             self.assertEqual(index_entry["source"], "claude-code")
+
+    def test_import_claude_preserves_main_trace_images_and_usage(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "claude-complex.jsonl"
+            timestamp = "2026-07-24T10:00:00.000Z"
+            records = [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "<system-reminder>foreign rules</system-reminder>"
+                                    "Claude image task"
+                                ),
+                            },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "aW1hZ2U=",
+                                },
+                            },
+                        ],
+                    },
+                    "timestamp": timestamp,
+                    "cwd": "/home/test/claude",
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-test",
+                        "content": [
+                            {"type": "thinking", "thinking": "Read the request."},
+                        ],
+                    },
+                    "timestamp": timestamp,
+                    "cwd": "/home/test/claude",
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-test",
+                        "content": [
+                            {"type": "thinking", "thinking": "Inspect safely."},
+                            {"type": "text", "text": "I will inspect it."},
+                            {
+                                "type": "tool_use",
+                                "id": "tool-1",
+                                "name": "Read",
+                                "input": {"file_path": "example.txt"},
+                            },
+                        ],
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 5,
+                            "cache_read_input_tokens": 3,
+                        },
+                    },
+                    "timestamp": timestamp,
+                    "cwd": "/home/test/claude",
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tool-1",
+                                "content": "file contents",
+                                "is_error": False,
+                            },
+                        ],
+                    },
+                    "timestamp": timestamp,
+                    "cwd": "/home/test/claude",
+                },
+                {
+                    "type": "user",
+                    "isSidechain": True,
+                    "message": {"role": "user", "content": "sidechain must be skipped"},
+                    "timestamp": timestamp,
+                },
+                {
+                    "type": "user",
+                    "isMeta": True,
+                    "message": {"role": "user", "content": "meta must be skipped"},
+                    "timestamp": timestamp,
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-test",
+                        "content": [{"type": "text", "text": "Done."}],
+                        "usage": {"input_tokens": 4, "output_tokens": 2},
+                    },
+                    "timestamp": timestamp,
+                    "cwd": "/home/test/claude",
+                },
+            ]
+            source.write_text(
+                "\n".join(json.dumps(item) for item in records) + "\n",
+                encoding="utf-8",
+            )
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir):
+                meta = server.import_claude_session(str(source))
+
+            messages = server.read_jsonl(
+                next(sessions_dir.rglob(f"{meta['id']}.jsonl"))
+            )
+            boundary = messages[0]
+            self.assertEqual(boundary["meta"]["kind"], "import-boundary")
+            self.assertEqual(boundary["meta"]["importSource"], "claude-code")
+            self.assertIn("migrated from Claude Code", boundary["content"])
+            serialized = json.dumps(messages)
+            self.assertNotIn("foreign rules", serialized)
+            self.assertNotIn("sidechain must be skipped", serialized)
+            self.assertNotIn("meta must be skipped", serialized)
+
+            user = next(item for item in messages if item.get("role") == "user")
+            self.assertEqual(server._import_message_text(user), "Claude image task")
+            self.assertEqual(user["_images"][0]["base64"], "aW1hZ2U=")
+            assistant = next(
+                item for item in messages
+                if item.get("role") == "assistant" and item.get("thought")
+            )
+            self.assertEqual(
+                assistant["thought"],
+                "Read the request.\n\nInspect safely.",
+            )
+            self.assertEqual(
+                assistant["meta"]["_usage"],
+                {"input": 12, "output": 5, "cache": 3},
+            )
+            call = next(item for item in messages if item.get("role") == "tool-call")
+            result = next(item for item in messages if item.get("role") == "tool-result")
+            self.assertEqual(call["meta"]["action"], "Read")
+            self.assertEqual(result["meta"]["action"], "Read")
+            self.assertEqual(call["meta"]["toolCallId"], result["meta"]["toolCallId"])
+            self.assertTrue(call["meta"]["skipApi"])
+            self.assertTrue(result["meta"]["skipApi"])
+            self.assertIn('"is_error": false', result["content"])
+            self.assertEqual(meta["stats"], {"input": 16, "output": 7, "cache": 3})
+            self.assertEqual(meta["lastUsage"], {"input": 4, "output": 2, "cache": 0})
+            self.assertEqual(meta["messageCount"], len(messages) - 1)
 
     def test_unified_list_api(self):
         """list_importable_sessions dispatches correctly."""
