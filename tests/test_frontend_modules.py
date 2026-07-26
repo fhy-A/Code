@@ -22,6 +22,7 @@ PANELS_SOURCE = (ROOT / "src" / "ui" / "panels.js").read_text(encoding="utf-8")
 PREVIEW_SOURCE = (ROOT / "src" / "features" / "preview.js").read_text(encoding="utf-8")
 FILES_SOURCE = (ROOT / "src" / "features" / "files.js").read_text(encoding="utf-8")
 SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_text(encoding="utf-8")
+SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
@@ -407,6 +408,7 @@ eval(source);
             "src/features/preview.js",
             "src/features/files.js",
             "src/features/skills-memory.js",
+            "src/features/session-import.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
@@ -428,6 +430,7 @@ eval(source);
             "./src/features/skills-memory.js",
             "./src/features/preview.js",
             "./src/features/files.js",
+            "./src/features/session-import.js",
             "./agent-runtime.js",
             "./app.js",
         )
@@ -3033,6 +3036,12 @@ process.stdout.write(JSON.stringify({
         self.assertIn('id="importStatus"', html)
         self.assertIn('aria-live="polite"', html)
         self.assertIn('id="importDoBtn"', html)
+        self.assertIn('id="importProgress"', html)
+        self.assertIn('id="importProgressTrack"', html)
+        self.assertIn('role="progressbar"', html)
+        self.assertIn('id="importCancelBtn"', html)
+        self.assertIn('id="importRetryBtn"', html)
+        self.assertIn('id="importFailures"', html)
         self.assertIn('import-source-tab', html)
 
     def test_import_functions_in_app_js(self):
@@ -3040,6 +3049,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn("function openImportModal", APP_SOURCE)
         self.assertIn("function loadImportSessions", APP_SOURCE)
         self.assertIn("function renderImportList", APP_SOURCE)
+        self.assertIn("function renderImportBatchState", APP_SOURCE)
+        self.assertIn("function cancelImportBatch", APP_SOURCE)
+        self.assertIn("function retryFailedImports", APP_SOURCE)
         self.assertIn("function doImport", APP_SOURCE)
 
     def test_import_els_references(self):
@@ -3048,6 +3060,10 @@ process.stdout.write(JSON.stringify({
         self.assertIn("importModal:", APP_SOURCE)
         self.assertIn("importList:", APP_SOURCE)
         self.assertIn("importDoBtn:", APP_SOURCE)
+        self.assertIn("importProgress:", APP_SOURCE)
+        self.assertIn("importCancelBtn:", APP_SOURCE)
+        self.assertIn("importRetryBtn:", APP_SOURCE)
+        self.assertIn("importFailures:", APP_SOURCE)
 
     def test_import_source_switching(self):
         """Source tab switching updates _importSource."""
@@ -3067,6 +3083,23 @@ process.stdout.write(JSON.stringify({
             "importStatusUpdateConflict",
             "importResultSnapshot",
             "importResultFailed",
+            "importCancel",
+            "importStopping",
+            "importProgress",
+            "importRetryProgress",
+            "importFinalizing",
+            "importResultCancelled",
+            "importRetryResultPrefix",
+            "importRetryFailed",
+            "importFailureDetails",
+            "importFailureRetryable",
+            "importFailureNeedsFix",
+            "importErrorSourceChanged",
+            "importErrorSourceIncomplete",
+            "importErrorSourceMissing",
+            "importErrorPermissionDenied",
+            "importErrorInvalidJsonl",
+            "importErrorNetwork",
         ):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2, key)
 
@@ -3076,6 +3109,10 @@ process.stdout.write(JSON.stringify({
         self.assertIn(".import-session-row", STYLE_SOURCE)
         self.assertIn(".import-session-state", STYLE_SOURCE)
         self.assertIn(".import-result", STYLE_SOURCE)
+        self.assertIn(".import-progress", STYLE_SOURCE)
+        self.assertIn(".import-progress-bar", STYLE_SOURCE)
+        self.assertIn(".import-result-actions", STYLE_SOURCE)
+        self.assertIn(".import-failure-item", STYLE_SOURCE)
 
     def test_import_picker_disables_already_imported_sessions(self):
         """Only safe, actionable rows can be selected for import."""
@@ -3083,32 +3120,138 @@ process.stdout.write(JSON.stringify({
         render_end = APP_SOURCE.index("function importResultText", render_start)
         render_source = APP_SOURCE[render_start:render_end]
         self.assertIn('var canImport = s.canImport !== false;', render_source)
-        self.assertIn("cb.disabled = !canImport;", render_source)
+        self.assertIn('cb.dataset.importable = canImport ? "true" : "false";', render_source)
+        self.assertIn("cb.disabled = !canImport || _importBusy;", render_source)
         self.assertIn('"update-conflict": "importStatusUpdateConflict"', render_source)
         self.assertIn('className = "import-session-state"', render_source)
         self.assertIn("if (!c.disabled) c.checked", APP_SOURCE)
 
     def test_import_completion_refreshes_without_reloading_page(self):
         """Import actions stay visible and refresh the sidebar and picker in place."""
-        import_start = APP_SOURCE.index("async function doImport()")
+        import_start = APP_SOURCE.index("async function runImportBatch(")
         import_end = APP_SOURCE.index(
             "if (els.importSessions)",
             import_start,
         )
         import_source = APP_SOURCE[import_start:import_end]
-        self.assertIn('data.action === "updated"', import_source)
-        self.assertIn('data.action === "snapshot-created"', import_source)
-        self.assertIn("var selectedSessions = checked.map", import_source)
-        self.assertIn("var importSource = _importSource;", import_source)
+        self.assertIn("_importBatchRunner.run", import_source)
         self.assertIn("source: importSource", import_source)
+        self.assertIn("items: selectedSessions", import_source)
         self.assertIn("setImportBusy(true);", import_source)
         self.assertIn("setImportBusy(false);", import_source)
         self.assertIn("delete _importCache[importSource];", import_source)
         self.assertIn("await refreshSessions();", import_source)
         self.assertIn("await loadImportSessions(true);", import_source)
-        self.assertIn("status.textContent = importResultText(counts);", import_source)
+        self.assertIn("renderImportBatchState();", import_source)
         self.assertNotIn("location.reload()", import_source)
         self.assertNotIn("closeImportModal()", import_source)
+
+    def test_import_batch_cancel_retry_and_error_details_are_wired(self):
+        import_start = APP_SOURCE.index("function importFailureMessage(")
+        import_end = APP_SOURCE.index("if (els.importSessions)", import_start)
+        import_source = APP_SOURCE[import_start:import_end]
+        self.assertIn("_importBatchRunner.cancel()", import_source)
+        self.assertIn(".filter(function (failure) { return failure.retryable; })", import_source)
+        self.assertIn('mode: mode || "import"', import_source)
+        self.assertIn("importFailureMessage(failure)", import_source)
+        self.assertIn("failure.errorCode", import_source)
+        self.assertIn("failure.retryable", import_source)
+        self.assertIn("_importFinalizing = true;", import_source)
+        self.assertIn("_importFinalizing = false;", import_source)
+
+    def test_import_batch_runner_stops_after_current_item_and_classifies_failures(self):
+        script = r"""
+global.window = {setTimeout};
+require("./src/core/namespace.js");
+require("./src/features/session-import.js");
+const {createImportBatchRunner} = window.Code.features.sessionImport;
+
+(async () => {
+  const calls = [];
+  const resolvers = [];
+  const progress = [];
+  const cancelRunner = createImportBatchRunner({
+    importOne: (source, item) => {
+      calls.push({source, id: item.id});
+      return new Promise((resolve) => resolvers.push(resolve));
+    },
+    onProgress: (snapshot) => progress.push({
+      phase: snapshot.phase,
+      processed: snapshot.processed,
+      cancelRequested: snapshot.cancelRequested,
+    }),
+    yieldControl: async () => {},
+  });
+  const pending = cancelRunner.run({
+    source: "codex",
+    items: [{id: "one"}, {id: "two"}, {id: "three"}],
+  });
+  const cancelAccepted = cancelRunner.cancel();
+  resolvers[0]({action: "created"});
+  const cancelled = await pending;
+
+  const failureRunner = createImportBatchRunner({
+    importOne: async (source, item) => {
+      if (item.id === "retry") {
+        const error = new Error("changed");
+        error.errorCode = "import_source_changed";
+        error.retryable = true;
+        throw error;
+      }
+      if (item.id === "broken") {
+        const error = new Error("invalid");
+        error.errorCode = "import_source_invalid_jsonl";
+        error.retryable = false;
+        throw error;
+      }
+      return {action: "updated"};
+    },
+    yieldControl: async () => {},
+  });
+  const classified = await failureRunner.run({
+    source: "claude-code",
+    mode: "retry",
+    items: [{id: "ok"}, {id: "retry"}, {id: "broken"}],
+  });
+  process.stdout.write(JSON.stringify({
+    calls,
+    cancelAccepted,
+    cancelled,
+    progress,
+    classified,
+  }));
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["cancelAccepted"])
+        self.assertEqual(data["calls"], [{"source": "codex", "id": "one"}])
+        self.assertEqual(data["cancelled"]["processed"], 1)
+        self.assertEqual(data["cancelled"]["cancelled"], 2)
+        self.assertEqual(data["cancelled"]["counts"]["created"], 1)
+        self.assertTrue(data["cancelled"]["cancelRequested"])
+        self.assertEqual(data["progress"][-1]["phase"], "cancelled")
+        self.assertEqual(data["classified"]["mode"], "retry")
+        self.assertEqual(data["classified"]["counts"]["updated"], 1)
+        self.assertEqual(data["classified"]["counts"]["failed"], 2)
+        self.assertEqual(
+            [failure["errorCode"] for failure in data["classified"]["failures"]],
+            ["import_source_changed", "import_source_invalid_jsonl"],
+        )
+        self.assertEqual(
+            [failure["retryable"] for failure in data["classified"]["failures"]],
+            [True, False],
+        )
 
     def test_import_picker_revalidates_preloaded_source_state(self):
         """Opening or switching sources never trusts stale preload metadata."""

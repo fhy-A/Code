@@ -33,6 +33,7 @@ const {
 } = window.Code.features.skillsMemory;
 const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
+const { createImportBatchRunner } = window.Code.features.sessionImport;
 
 function upgradeStaticIcons() {
   const iconOnly = (id, name) => {
@@ -211,6 +212,7 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (typeof updateSendButtonState === "function") updateSendButtonState();
     if (typeof renderImportList === "function" && document.getElementById("importModal")?.style.display !== "none") {
       renderImportList();
+      if (typeof renderImportBatchState === "function") renderImportBatchState();
     }
   },
 });
@@ -673,6 +675,13 @@ const els = {
   importSelectAll: document.getElementById("importSelectAll"),
   importDoBtn: document.getElementById("importDoBtn"),
   importStatus: document.getElementById("importStatus"),
+  importProgress: document.getElementById("importProgress"),
+  importProgressText: document.getElementById("importProgressText"),
+  importProgressTrack: document.getElementById("importProgressTrack"),
+  importProgressBar: document.getElementById("importProgressBar"),
+  importCancelBtn: document.getElementById("importCancelBtn"),
+  importRetryBtn: document.getElementById("importRetryBtn"),
+  importFailures: document.getElementById("importFailures"),
 
   sessionList: document.getElementById("sessionList"),
 
@@ -11093,6 +11102,22 @@ var _importCache = {};
 var _importPreloaded = false;
 var _importEventsBound = false;
 var _importBusy = false;
+var _importFinalizing = false;
+var _importBatchView = null;
+var _importLastResult = null;
+var _importBatchRunner = createImportBatchRunner({
+  importOne: importOneSession,
+  onProgress: function (batch) {
+    _importBatchView = batch;
+    renderImportBatchState();
+  },
+});
+
+function clearImportResult() {
+  _importLastResult = null;
+  if (!_importBusy) _importBatchView = null;
+  renderImportBatchState();
+}
 
 function preloadImportSessions() {
   if (_importPreloaded) return;
@@ -11145,11 +11170,7 @@ function _bindImportEvents() {
     if (selAll) selAll.checked = false;
     var search = document.getElementById("importSearch");
     if (search) search.value = "";
-    var status = document.getElementById("importStatus");
-    if (status) {
-      status.textContent = "";
-      status.className = "import-result";
-    }
+    clearImportResult();
     loadImportSessions(true);
   });
   // Search (debounced)
@@ -11176,6 +11197,10 @@ function _bindImportEvents() {
   // Import
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) doBtn.addEventListener("click", doImport);
+  var cancelBtn = document.getElementById("importCancelBtn");
+  if (cancelBtn) cancelBtn.addEventListener("click", cancelImportBatch);
+  var retryBtn = document.getElementById("importRetryBtn");
+  if (retryBtn) retryBtn.addEventListener("click", retryFailedImports);
 }
 
 async function openImportModal() {
@@ -11183,17 +11208,18 @@ async function openImportModal() {
   var modal = document.getElementById("importModal");
   if (!modal) return;
   modal.style.display = "flex";
+  if (_importBusy) {
+    updateImportButton();
+    renderImportBatchState();
+    return;
+  }
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) doBtn.disabled = true;
   var selAll = document.getElementById("importSelectAll");
   if (selAll) selAll.checked = false;
   var search = document.getElementById("importSearch");
   if (search) search.value = "";
-  var status = document.getElementById("importStatus");
-  if (status) {
-    status.textContent = "";
-    status.className = "import-result";
-  }
+  clearImportResult();
   _importSessions = _importCache[_importSource] || [];
   renderImportList();
   await loadImportSessions(true);
@@ -11266,7 +11292,8 @@ function renderImportList() {
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.dataset.index = i;
-    cb.disabled = !canImport;
+    cb.dataset.importable = canImport ? "true" : "false";
+    cb.disabled = !canImport || _importBusy;
     cb.addEventListener("change", updateImportButton);
     row.appendChild(cb);
     var title = document.createElement("span");
@@ -11311,10 +11338,14 @@ function setImportBusy(busy) {
   if (search) search.disabled = _importBusy;
   var selAll = document.getElementById("importSelectAll");
   if (selAll) selAll.disabled = _importBusy;
+  document.querySelectorAll("#importList input[type=checkbox]").forEach(function (checkbox) {
+    checkbox.disabled = _importBusy || checkbox.dataset.importable !== "true";
+  });
   updateImportButton();
+  renderImportBatchState();
 }
 
-function importResultText(counts) {
+function importResultText(counts, cancelled, mode) {
   var parts = [];
   if (counts.created) parts.push(t("importResultCreated", { count: counts.created }));
   if (counts.updated) parts.push(t("importResultUpdated", { count: counts.updated }));
@@ -11322,7 +11353,256 @@ function importResultText(counts) {
   if (counts.unchanged) parts.push(t("importResultUnchanged", { count: counts.unchanged }));
   if (counts.continued) parts.push(t("importResultContinued", { count: counts.continued }));
   if (counts.failed) parts.push(t("importResultFailed", { count: counts.failed }));
-  return t("importResultPrefix") + parts.join(state.lang === "en" ? ", " : "，");
+  if (cancelled) parts.push(t("importResultCancelled", { count: cancelled }));
+  var prefix = mode === "retry" ? t("importRetryResultPrefix") : t("importResultPrefix");
+  return prefix + parts.join(state.lang === "en" ? ", " : "，");
+}
+
+function importFailureMessage(failure) {
+  var errorKeys = {
+    import_source_changed: "importErrorSourceChanged",
+    import_source_incomplete_jsonl: "importErrorSourceIncomplete",
+    import_source_missing: "importErrorSourceMissing",
+    import_source_missing_path: "importErrorSourceMissing",
+    import_source_permission_denied: "importErrorPermissionDenied",
+    import_source_unavailable: "importErrorSourceUnavailable",
+    import_source_invalid_encoding: "importErrorInvalidEncoding",
+    import_source_invalid_jsonl: "importErrorInvalidJsonl",
+    import_source_no_messages: "importErrorNoMessages",
+    import_source_outside_root: "importErrorOutsideRoot",
+    import_source_invalid_type: "importErrorInvalidType",
+    import_network_error: "importErrorNetwork",
+  };
+  return t(errorKeys[failure?.errorCode] || "importErrorUnknown");
+}
+
+function importFailureTitle(failure) {
+  if (failure?.title) return failure.title;
+  var parts = String(failure?.sourcePath || "").split(/[\\/]+/);
+  return parts[parts.length - 1] || t("importUnnamed");
+}
+
+function renderImportFailures(failures) {
+  var root = document.getElementById("importFailures");
+  if (!root) return;
+  root.replaceChildren();
+  if (!failures?.length) return;
+
+  var details = document.createElement("details");
+  var summary = document.createElement("summary");
+  summary.textContent = t("importFailureDetails", { count: failures.length });
+  details.appendChild(summary);
+  var list = document.createElement("ul");
+  list.className = "import-failure-list";
+  failures.forEach(function (failure) {
+    var item = document.createElement("li");
+    item.className = "import-failure-item";
+    var title = document.createElement("span");
+    title.className = "import-failure-title";
+    title.textContent = importFailureTitle(failure);
+    title.title = title.textContent;
+    item.appendChild(title);
+
+    var kind = document.createElement("span");
+    kind.className = "import-failure-kind" + (failure.retryable ? " is-retryable" : "");
+    kind.textContent = t(failure.retryable ? "importFailureRetryable" : "importFailureNeedsFix");
+    item.appendChild(kind);
+
+    var message = document.createElement("span");
+    message.className = "import-failure-message";
+    message.textContent = importFailureMessage(failure);
+    var code = document.createElement("code");
+    code.className = "import-failure-code";
+    code.textContent = failure.errorCode || "import_failed";
+    message.appendChild(code);
+    item.appendChild(message);
+    list.appendChild(item);
+  });
+  details.appendChild(list);
+  root.appendChild(details);
+}
+
+function renderImportBatchState() {
+  var batch = _importBatchView;
+  var progress = document.getElementById("importProgress");
+  var progressText = document.getElementById("importProgressText");
+  var progressTrack = document.getElementById("importProgressTrack");
+  var progressBar = document.getElementById("importProgressBar");
+  var cancelBtn = document.getElementById("importCancelBtn");
+  var showProgress = !!(_importBusy && (batch?.running || _importFinalizing));
+
+  if (progress) progress.hidden = !showProgress;
+  if (showProgress) {
+    var total = Math.max(0, Number(batch?.total || 0));
+    var processed = Math.min(total, Math.max(0, Number(batch?.processed || 0)));
+    var current = Math.min(total, processed + (batch?.current ? 1 : 0));
+    if (_importFinalizing) {
+      if (progressText) progressText.textContent = t("importFinalizing");
+    } else if (batch?.cancelRequested) {
+      if (progressText) progressText.textContent = t("importStopping");
+    } else if (progressText) {
+      progressText.textContent = t(
+        batch?.mode === "retry" ? "importRetryProgress" : "importProgress",
+        { current: current || Math.min(1, total), total: total },
+      );
+    }
+    if (progressTrack) {
+      progressTrack.setAttribute("aria-valuemax", String(total));
+      progressTrack.setAttribute("aria-valuenow", String(processed));
+    }
+    if (progressBar) {
+      progressBar.style.width = (total ? (processed / total) * 100 : 0) + "%";
+    }
+    if (cancelBtn) {
+      cancelBtn.style.display = _importFinalizing ? "none" : "";
+      cancelBtn.disabled = !!batch?.cancelRequested;
+      cancelBtn.textContent = batch?.cancelRequested ? t("importStopping") : t("importCancel");
+    }
+  } else if (cancelBtn) {
+    cancelBtn.style.display = "";
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = t("importCancel");
+  }
+
+  var status = document.getElementById("importStatus");
+  var actions = document.getElementById("importResultActions");
+  var retryBtn = document.getElementById("importRetryBtn");
+  if (_importBusy || !_importLastResult) {
+    if (actions) actions.hidden = true;
+    renderImportFailures([]);
+    if (!status) return;
+    status.textContent = "";
+    status.className = "import-result";
+    return;
+  }
+
+  var result = _importLastResult;
+  var counts = result.counts || {};
+  var succeeded = Number(counts.created || 0)
+    + Number(counts.updated || 0)
+    + Number(counts.snapshot || 0)
+    + Number(counts.unchanged || 0)
+    + Number(counts.continued || 0);
+  if (status) {
+    status.textContent = importResultText(counts, result.cancelled, result.mode);
+    status.className = "import-result " + (
+      counts.failed && !succeeded
+        ? "is-error"
+        : (counts.failed || result.cancelled ? "is-warning" : "is-success")
+    );
+  }
+
+  var retryableFailures = (result.failures || []).filter(function (failure) {
+    return failure.retryable;
+  });
+  if (actions) actions.hidden = retryableFailures.length === 0;
+  if (retryBtn) {
+    retryBtn.disabled = retryableFailures.length === 0;
+    retryBtn.textContent = t("importRetryFailed", { count: retryableFailures.length });
+  }
+  renderImportFailures(result.failures || []);
+}
+
+function cancelImportBatch() {
+  if (!_importBusy || _importFinalizing) return;
+  _importBatchRunner.cancel();
+}
+
+async function importOneSession(source, session) {
+  var response;
+  try {
+    response = await fetch("/api/import/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: source, sourcePath: session.sourcePath }),
+    });
+  } catch (cause) {
+    var networkError = new Error("Import request failed");
+    networkError.errorCode = "import_network_error";
+    networkError.retryable = true;
+    throw networkError;
+  }
+
+  var data = {};
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = {};
+  }
+  if (!response.ok || !data.ok) {
+    var importError = new Error(data.error || "Import failed");
+    importError.errorCode = data.errorCode || "import_failed";
+    importError.retryable = typeof data.retryable === "boolean"
+      ? data.retryable
+      : (response.status === 409 || response.status === 429 || response.status >= 500);
+    throw importError;
+  }
+  return data;
+}
+
+async function runImportBatch(selectedSessions, importSource, mode) {
+  if (!selectedSessions.length || _importBusy) return;
+  _importLastResult = null;
+  _importBatchView = null;
+  _importFinalizing = false;
+  setImportBusy(true);
+
+  var result;
+  try {
+    result = await _importBatchRunner.run({
+      source: importSource,
+      items: selectedSessions,
+      mode: mode || "import",
+    });
+  } catch (error) {
+    result = {
+      source: importSource,
+      mode: mode || "import",
+      running: false,
+      cancelRequested: false,
+      total: selectedSessions.length,
+      processed: 0,
+      cancelled: 0,
+      counts: {
+        created: 0,
+        updated: 0,
+        snapshot: 0,
+        unchanged: 0,
+        continued: 0,
+        failed: selectedSessions.length,
+      },
+      failures: selectedSessions.map(function (session) {
+        return {
+          item: session,
+          sourcePath: session.sourcePath || "",
+          title: session.title || "",
+          errorCode: error.errorCode || "import_failed",
+          message: error.message || "Import failed",
+          retryable: error.retryable === true,
+        };
+      }),
+    };
+    _importBatchView = result;
+  }
+
+  _importLastResult = result;
+  _importFinalizing = true;
+  renderImportBatchState();
+  try {
+    delete _importCache[importSource];
+    var selAll = document.getElementById("importSelectAll");
+    if (selAll) selAll.checked = false;
+    try {
+      await refreshSessions();
+    } catch (error) {
+      console.error("Failed to refresh sessions after import:", error);
+    }
+    await loadImportSessions(true);
+  } finally {
+    _importFinalizing = false;
+    setImportBusy(false);
+    renderImportBatchState();
+  }
 }
 
 async function doImport() {
@@ -11333,55 +11613,17 @@ async function doImport() {
     return _importSessions[Number(checkbox.dataset.index)];
   }).filter(Boolean);
   if (!selectedSessions.length) return;
-  var importSource = _importSource;
-  var status = document.getElementById("importStatus");
-  var counts = {
-    created: 0,
-    updated: 0,
-    snapshot: 0,
-    unchanged: 0,
-    continued: 0,
-    failed: 0,
-  };
-  setImportBusy(true);
-  if (status) {
-    status.textContent = "";
-    status.className = "import-result";
-  }
-  for (var i = 0; i < selectedSessions.length; i++) {
-    var s = selectedSessions[i];
-    try {
-      var resp = await fetch("/api/import/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: importSource, sourcePath: s.sourcePath }),
-      });
-      var data = await resp.json();
-      if (!resp.ok || !data.ok) {
-        counts.failed++;
-        continue;
-      }
-      if (data.action === "updated") counts.updated++;
-      else if (data.action === "snapshot-created") counts.snapshot++;
-      else if (data.action === "unchanged") counts.unchanged++;
-      else if (data.action === "continued") counts.continued++;
-      else counts.created++;
-    } catch (e) {
-      counts.failed++;
-    }
-  }
-  delete _importCache[importSource];
-  var selAll = document.getElementById("importSelectAll");
-  if (selAll) selAll.checked = false;
-  await refreshSessions();
-  await loadImportSessions(true);
-  setImportBusy(false);
-  if (status) {
-    status.textContent = importResultText(counts);
-    status.className = "import-result " + (
-      counts.failed === selectedSessions.length ? "is-error" : "is-success"
-    );
-  }
+  await runImportBatch(selectedSessions, _importSource, "import");
+}
+
+async function retryFailedImports() {
+  if (_importBusy || !_importLastResult) return;
+  var retryableItems = (_importLastResult.failures || [])
+    .filter(function (failure) { return failure.retryable; })
+    .map(function (failure) { return failure.item; })
+    .filter(Boolean);
+  if (!retryableItems.length) return;
+  await runImportBatch(retryableItems, _importLastResult.source, "retry");
 }
 
 if (els.importSessions) els.importSessions.addEventListener("click", openImportModal);

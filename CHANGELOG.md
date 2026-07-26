@@ -4,6 +4,29 @@
 
 ## 2026-07-27 · Codex
 
+### 导入批次主动停止与失败项一键重试（开发版本基线仍为 v0.5.28）
+
+- 新增独立、可测试的会话导入批次运行器，保持逐项串行和来源快照锁定；用户请求停止后允许当前单项确定性完成，只阻止尚未开始的项目，不中断后端请求、不回滚已成功结果，也不会因取消时序造成来源状态未知。
+- 导入弹窗新增批次进度、进度条和“停止导入”操作；运行期间锁定来源、搜索、全选与会话复选框，停止阶段明确显示“等待当前项完成”，刷新侧栏与来源列表期间显示独立收尾状态，关闭后重新打开弹窗仍能恢复当前批次视图。
+- 批次结果扩展为新增、更新、新快照、无变化、已续聊、失败和已停止分类；成功、部分失败及停止使用不同结果色，未开始的项目刷新后继续保持可导入。
+- 失败项保留标题、来源路径、稳定 `errorCode` 和 `retryable`：
+  - 可重试失败会出现“一键重试失败项”，新批次只包含这些失败项目，不重复处理已成功或已停止项目；
+  - 不可重试失败标记为“需修复来源”，详情区提供本地化原因和原始错误码；
+  - 网络失败默认视为可重试，后端明确返回的 `retryable` 仍为最终判断依据。
+- 新增导入运行、停止、重试、失败详情和常见来源错误的中英文文案；语言切换时正在运行的进度、停止状态、结果和失败详情会即时更新。
+- 验证：
+  - `python -m pytest tests/test_frontend_modules.py tests/test_server.py tests/test_p2_coverage.py -q`：**355 passed, 17 subtests passed**；
+  - `python -m unittest discover -s tests`：**793 tests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/core/i18n.js`、`node --check src/features/session-import.js` 与 `git diff --check` 通过；
+  - 浏览器可控时序验证：3 项批次停止后仅首项发出请求，结果为新增 1 / 已停止 2；临时失败重试仅再次请求失败项；中英文进度和结果即时切换，控制台无错误；
+  - 用户人工确认批次进度、停止后续项目、剩余项继续导入与界面状态均正常。
+
+**涉及文件**：`app.js`、`index.html`、`styles.css`、`src/core/i18n.js`、`src/features/session-import.js`、`tests/test_frontend_modules.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
 ### 导入来源一致性快照与异常路径稳健性（开发版本基线仍为 v0.5.28）
 
 - Codex / Claude Code 导入改为单次一致性快照：先将来源流式复制到 `SpooledTemporaryFile`，4 MiB 以内保留内存、超过后自动落临时文件；消息解析、来源 SHA-256 和持久化元数据全部使用同一快照，不再解析一次、重新打开来源再哈希。
