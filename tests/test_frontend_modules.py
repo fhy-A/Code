@@ -2083,7 +2083,32 @@ const pending = feature.renderFinalAssistantProjection({
   _streamProjection: "pending",
 }, 10);
 const usageOnly = feature.renderCompletedRunStatus("model-1", "", {input: 8});
-process.stdout.write(JSON.stringify({html, streaming, pending, usageOnly}));
+const claudeUsage = feature.normalizeResponseUsage({
+  input_tokens: 12,
+  output_tokens: 4,
+  cache_read_input_tokens: 100,
+  cache_creation_input_tokens: 3,
+});
+const openAIUsage = feature.normalizeResponseUsage({
+  prompt_tokens: 100,
+  completion_tokens: 4,
+  prompt_tokens_details: {cached_tokens: 80},
+});
+const cacheStatus = feature.renderCompletedRunStatus("model-1", "", {
+  input: 115,
+  output: 4,
+  cache: 100,
+  cacheWrite: 3,
+});
+process.stdout.write(JSON.stringify({
+  html,
+  streaming,
+  pending,
+  usageOnly,
+  claudeUsage,
+  openAIUsage,
+  cacheStatus,
+}));
 """
         completed = subprocess.run(
             ["node", "-e", script],
@@ -2112,6 +2137,21 @@ process.stdout.write(JSON.stringify({html, streaming, pending, usageOnly}));
         self.assertIn('data-stream-kind="pending"', data["pending"])
         self.assertNotIn("unclassified first frame", data["pending"])
         self.assertNotIn("0s", data["usageOnly"])
+        self.assertEqual(data["claudeUsage"], {
+            "input": 115,
+            "output": 4,
+            "cache": 100,
+            "cacheWrite": 3,
+        })
+        self.assertEqual(data["openAIUsage"], {
+            "input": 100,
+            "output": 4,
+            "cache": 80,
+        })
+        self.assertIn('data-usage-kind="input"', data["cacheStatus"])
+        self.assertIn('data-usage-kind="cache-read"', data["cacheStatus"])
+        self.assertIn('data-usage-kind="cache-write"', data["cacheStatus"])
+        self.assertIn('title="statCacheWriteTitle"', data["cacheStatus"])
 
     def test_messages_ui_defers_pending_fifo_rows_below_active_output(self):
         script = r"""
@@ -2305,7 +2345,7 @@ const elementNames = [
   "toggleBranches", "copySessionPath", "statInput", "statOutput", "statCache",
   "statContext", "ctxRingFill", "sessionCreated", "sessionUpdated", "sessionFile",
   "msgUser", "msgAssistant", "msgTools", "msgTotal", "tokenInput", "tokenOutput",
-  "tokenCache", "tokenTotal", "tokenContext",
+  "tokenCache", "tokenCacheWriteRow", "tokenCacheWrite", "tokenTotal", "tokenContext",
 ];
 const elements = Object.fromEntries(elementNames.map((name) => [name, makeElement(name)]));
 const documentListeners = {};
@@ -2314,6 +2354,7 @@ let branchOpen = false;
 let branchRenders = 0;
 let toolRenders = 0;
 let systemPromptReads = 0;
+let usageStats = {input: 120, output: 30, cache: 10, cacheWrite: 5};
 const messages = [
   {role: "user", content: "one"},
   {role: "assistant", content: "two"},
@@ -2327,7 +2368,7 @@ const feature = createPanelsFeature({
   formatNumber: (value) => `${value}n`,
   estimateTokens: (value) => String(value).length,
   getMessages: () => messages,
-  getStats: () => ({input: 120, output: 30, cache: 10}),
+  getStats: () => usageStats,
   getSessionId: () => "session-1",
   getSession: () => ({
     id: "session-1",
@@ -2350,6 +2391,11 @@ const feature = createPanelsFeature({
 feature.bind();
 feature.bind();
 const stats = feature.updateStatsPanel();
+const cacheWriteText = elements.tokenCacheWrite.textContent;
+const cacheWriteHidden = elements.tokenCacheWriteRow.hidden;
+usageStats = {input: 120, output: 30, cache: 10};
+const statsWithoutCacheWrite = feature.updateStatsPanel();
+const cacheWriteHiddenWhenMissing = elements.tokenCacheWriteRow.hidden;
 const systemPromptReadsWithLastUsage = systemPromptReads;
 feature.toggleStatsPanel();
 const statsWasOpen = elements.statsPanel.classes.has("open") && elements.usageStrip.classes.has("active");
@@ -2384,6 +2430,9 @@ process.stdout.write(JSON.stringify({
     msgTotal: elements.msgTotal.textContent,
     msgTools: elements.msgTools.textContent,
     tokenTotal: elements.tokenTotal.textContent,
+    tokenCacheWrite: cacheWriteText,
+    cacheWriteHidden,
+    cacheWriteHiddenWhenMissing,
     tokenContext: elements.tokenContext.textContent,
     usageTitle: elements.usageStrip.title,
     ringStroke: elements.ctxRingFill.attrs.stroke,
@@ -2396,6 +2445,7 @@ process.stdout.write(JSON.stringify({
   branchRenders,
   toolRenders,
   fallback,
+  statsWithoutCacheWrite,
   absolutePath: resolveSessionFilePath({id: "s1"}, {sessionId: "s1", absolutePath: "D:/sessions/s1.jsonl"}),
   fallbackPath: resolveSessionFilePath({id: "s2"}),
   registeredDocumentClick: Boolean(documentListeners.click),
@@ -2429,6 +2479,9 @@ process.stdout.write(JSON.stringify({
             "msgTotal": 4,
             "msgTools": 2,
             "tokenTotal": "150n",
+            "tokenCacheWrite": "5n",
+            "cacheWriteHidden": False,
+            "cacheWriteHiddenWhenMissing": True,
             "tokenContext": "60%（600c / 1000c）",
             "usageTitle": "ctx 600c/1000c",
             "ringStroke": "var(--muted)",
@@ -2441,6 +2494,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["branchRenders"], 1)
         self.assertEqual(data["toolRenders"], 1)
         self.assertEqual(data["fallback"]["contextTokens"], 14)
+        self.assertFalse(data["fallback"]["cacheWriteReported"])
+        self.assertFalse(data["statsWithoutCacheWrite"]["cacheWriteReported"])
         self.assertEqual(data["absolutePath"], "D:/sessions/s1.jsonl")
         self.assertEqual(data["fallbackPath"], "code/data/sessions/s2.jsonl")
         self.assertTrue(data["registeredDocumentClick"])

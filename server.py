@@ -5676,10 +5676,11 @@ def _import_tool_trace_message(
     return message
 
 
-def _import_usage(usage):
-    """Normalize Codex/Claude usage fields to Code's compact usage schema."""
+def _import_usage(usage, *, input_includes_cache=True):
+    """Normalize imported usage to total input, output, and cache breakdowns."""
     if not isinstance(usage, dict):
         return {}
+
     def _token_count(*keys):
         for key in keys:
             value = usage.get(key)
@@ -5691,28 +5692,56 @@ def _import_usage(usage):
                 continue
         return 0
 
-    return {
-        "input": _token_count("input_tokens", "prompt_tokens", "input"),
+    raw_input = _token_count("input_tokens", "prompt_tokens", "input")
+    cache_read = _token_count(
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_read_tokens",
+        "prompt_cache_hit_tokens",
+        "cache",
+    )
+    cache_write_keys = (
+        "cache_creation_input_tokens",
+        "cache_write_input_tokens",
+        "cache_write_tokens",
+        "cacheWrite",
+    )
+    cache_write_reported = any(
+        key in usage and usage.get(key) is not None
+        for key in cache_write_keys
+    )
+    cache_write = _token_count(*cache_write_keys)
+    normalized = {
+        "input": (
+            raw_input
+            if input_includes_cache
+            else raw_input + cache_read + cache_write
+        ),
         "output": _token_count(
             "output_tokens",
             "completion_tokens",
             "output",
         ),
-        "cache": _token_count(
-            "cached_input_tokens",
-            "cache_read_input_tokens",
-            "cache_read_tokens",
-            "prompt_cache_hit_tokens",
-            "cache",
-        ),
+        "cache": cache_read,
     }
+    if cache_write_reported:
+        normalized["cacheWrite"] = cache_write
+    return normalized
 
 
-def _add_import_usage(total, usage):
+def _add_import_usage(total, usage, *, input_includes_cache=True):
     """Add a normalized usage record to an import ledger in-place."""
-    normalized = _import_usage(usage)
+    normalized = _import_usage(
+        usage,
+        input_includes_cache=input_includes_cache,
+    )
     for key in ("input", "output", "cache"):
         total[key] = int(total.get(key) or 0) + int(normalized.get(key) or 0)
+    if "cacheWrite" in normalized:
+        total["cacheWrite"] = (
+            int(total.get("cacheWrite") or 0)
+            + int(normalized.get("cacheWrite") or 0)
+        )
     return normalized
 
 
@@ -7247,7 +7276,11 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
             if role == "assistant":
                 usage = msg.get("usage") or {}
                 if usage:
-                    last_usage = _add_import_usage(total_usage, usage)
+                    last_usage = _add_import_usage(
+                        total_usage,
+                        usage,
+                        input_includes_cache=False,
+                    )
                     if text or image_urls:
                         new_msg["meta"]["_usage"] = last_usage
 

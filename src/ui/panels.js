@@ -35,10 +35,16 @@
     const input = usageStats.input;
     const output = usageStats.output;
     const cache = usageStats.cache || 0;
+    const cacheWriteReported = Object.prototype.hasOwnProperty.call(
+      usageStats,
+      "cacheWrite",
+    );
+    const cacheWrite = cacheWriteReported ? Number(usageStats.cacheWrite || 0) : 0;
     const lastUsage = options.lastUsage || null;
     let contextTokens;
-    if (lastUsage?.prompt_tokens) {
-      contextTokens = lastUsage.prompt_tokens;
+    const reportedContextTokens = lastUsage?.prompt_tokens ?? lastUsage?.input;
+    if (reportedContextTokens != null) {
+      contextTokens = Number(reportedContextTokens) || 0;
     } else {
       const getContextMessages = options.getContextMessages || ((items) => items);
       const estimateTokens = options.estimateTokens || (() => 0);
@@ -57,7 +63,17 @@
     const getContextLimit = options.getContextLimit || (() => 128000);
     const ctxLimit = getContextLimit(options.model || "");
     const contextPct = Math.min(100, (contextTokens / ctxLimit) * 100);
-    return { counts, input, output, cache, contextTokens, ctxLimit, contextPct };
+    return {
+      counts,
+      input,
+      output,
+      cache,
+      cacheWrite,
+      cacheWriteReported,
+      contextTokens,
+      ctxLimit,
+      contextPct,
+    };
   }
 
   function createPanelsFeature(options = {}) {
@@ -166,6 +182,12 @@
       elements.tokenInput.textContent = formatNumber(stats.input);
       elements.tokenOutput.textContent = formatNumber(stats.output);
       elements.tokenCache.textContent = formatNumber(stats.cache);
+      if (elements.tokenCacheWriteRow) {
+        elements.tokenCacheWriteRow.hidden = !stats.cacheWriteReported;
+      }
+      if (elements.tokenCacheWrite) {
+        elements.tokenCacheWrite.textContent = formatNumber(stats.cacheWrite);
+      }
       elements.tokenTotal.textContent = formatNumber((stats.input || 0) + (stats.output || 0));
       elements.tokenContext.textContent = `${stats.contextPct.toFixed(0)}%（${formatCompact(stats.contextTokens || 0)} / ${formatCompact(stats.ctxLimit || 200000)}）`;
       return stats;

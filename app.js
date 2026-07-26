@@ -839,6 +839,10 @@ const els = {
 
   tokenCache: document.getElementById("tokenCache"),
 
+  tokenCacheWriteRow: document.getElementById("tokenCacheWriteRow"),
+
+  tokenCacheWrite: document.getElementById("tokenCacheWrite"),
+
   tokenTotal: document.getElementById("tokenTotal"),
 
   tokenContext: document.getElementById("tokenContext"),
@@ -2712,11 +2716,15 @@ function syncActiveRunBanner(sessionId = state.sessionId) {
 function cloneUsageStats(usage) {
   const normalized = normalizeResponseUsage(usage);
   if (!normalized) return { input: 0, output: 0, cache: 0 };
-  return {
+  const result = {
     input: normalized.input || 0,
     output: normalized.output || 0,
     cache: normalized.cache || 0,
   };
+  if (Object.prototype.hasOwnProperty.call(normalized, "cacheWrite")) {
+    result.cacheWrite = normalized.cacheWrite || 0;
+  }
+  return result;
 }
 
 function attachTaskUsageToAssistant(ctx, assistantIndex) {
@@ -5926,19 +5934,24 @@ function updateUsage(usage, sessionId = state.sessionId, ctx = null) {
 
   if (!usage) return;
 
-  const input = usage.prompt_tokens ?? usage.input ?? 0;
+  const normalized = normalizeResponseUsage(usage);
+  if (!normalized) return;
 
-  const output = usage.completion_tokens ?? usage.output ?? 0;
-
-  const cache = usage.prompt_cache_hit_tokens ?? usage.cache_read_tokens ?? usage.cache ?? 0;
+  const addToLedger = (ledger) => {
+    if (!ledger) return;
+    ledger.input = Number(ledger.input || 0) + Number(normalized.input || 0);
+    ledger.output = Number(ledger.output || 0) + Number(normalized.output || 0);
+    ledger.cache = Number(ledger.cache || 0) + Number(normalized.cache || 0);
+    if (Object.prototype.hasOwnProperty.call(normalized, "cacheWrite")) {
+      ledger.cacheWrite = (
+        Number(ledger.cacheWrite || 0)
+        + Number(normalized.cacheWrite || 0)
+      );
+    }
+  };
 
   const stats = ctx?.stats || getSessionStats(sessionId);
-
-  stats.input = (stats.input || 0) + input;
-
-  stats.output = (stats.output || 0) + output;
-
-  stats.cache = (stats.cache || 0) + cache;
+  addToLedger(stats);
 
   // Sub-agents own a private usage ledger while they run. Publishing their
   // partial totals here would replace the parent session ledger and race with
@@ -5946,26 +5959,8 @@ function updateUsage(usage, sessionId = state.sessionId, ctx = null) {
   if (!ctx?.isSubAgent) setSessionStats(sessionId, stats);
 
   const responseUsage = ctx?.responseUsage || state.responseUsage;
-
-  if (responseUsage) {
-
-    responseUsage.input += input;
-
-    responseUsage.output += output;
-
-    responseUsage.cache += cache;
-
-  }
-
-  if (ctx?.taskUsage) {
-
-    ctx.taskUsage.input += input;
-
-    ctx.taskUsage.output += output;
-
-    ctx.taskUsage.cache += cache;
-
-  }
+  addToLedger(responseUsage);
+  addToLedger(ctx?.taskUsage);
 
 }
 
@@ -8640,6 +8635,12 @@ function mergeBackgroundUsage(sessionId, childStats) {
   for (const key of ["input", "output", "cache", "cost"]) {
     stats[key] = Number(stats[key] || 0) + Number(childStats[key] || 0);
   }
+  if (Object.prototype.hasOwnProperty.call(childStats, "cacheWrite")) {
+    stats.cacheWrite = (
+      Number(stats.cacheWrite || 0)
+      + Number(childStats.cacheWrite || 0)
+    );
+  }
   setSessionStats(sessionId, stats);
 }
 
@@ -9200,11 +9201,7 @@ function projectAgentModelCompleted(ctx, event) {
 
   if (!assistant.meta._usage) {
     const usage = data.usage || {};
-    assistant.meta._usage = {
-      input: Number(usage.prompt_tokens ?? usage.input ?? 0),
-      output: Number(usage.completion_tokens ?? usage.output ?? 0),
-      cache: Number(usage.prompt_cache_hit_tokens ?? usage.cache_read_tokens ?? usage.cache ?? 0),
-    };
+    assistant.meta._usage = cloneUsageStats(usage);
     setSessionLastUsage(ctx.sessionId, usage);
     updateUsage(usage, ctx.sessionId, ctx);
   }

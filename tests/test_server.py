@@ -2386,6 +2386,7 @@ class TestCodexImport(unittest.TestCase):
                             "input_tokens": 12,
                             "output_tokens": 5,
                             "cache_read_input_tokens": 3,
+                            "cache_creation_input_tokens": 2,
                         },
                     },
                     "timestamp": timestamp,
@@ -2467,7 +2468,12 @@ class TestCodexImport(unittest.TestCase):
             )
             self.assertEqual(
                 assistant["meta"]["_usage"],
-                {"input": 12, "output": 5, "cache": 3},
+                {
+                    "input": 17,
+                    "output": 5,
+                    "cache": 3,
+                    "cacheWrite": 2,
+                },
             )
             call = next(item for item in messages if item.get("role") == "tool-call")
             result = next(item for item in messages if item.get("role") == "tool-result")
@@ -2477,7 +2483,15 @@ class TestCodexImport(unittest.TestCase):
             self.assertTrue(call["meta"]["skipApi"])
             self.assertTrue(result["meta"]["skipApi"])
             self.assertIn('"is_error": false', result["content"])
-            self.assertEqual(meta["stats"], {"input": 16, "output": 7, "cache": 3})
+            self.assertEqual(
+                meta["stats"],
+                {
+                    "input": 21,
+                    "output": 7,
+                    "cache": 3,
+                    "cacheWrite": 2,
+                },
+            )
             self.assertEqual(meta["lastUsage"], {"input": 4, "output": 2, "cache": 0})
             self.assertEqual(meta["messageCount"], len(messages) - 1)
 

@@ -1001,6 +1001,10 @@ input:focus, select:focus, textarea:focus {
   font-size: 12px;
 }
 
+.metric[hidden] {
+  display: none;
+}
+
 .metric b {
   color: var(--muted);
   font-family: Consolas, "Cascadia Mono", monospace;

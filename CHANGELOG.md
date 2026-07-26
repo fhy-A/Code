@@ -4,6 +4,28 @@
 
 ## 2026-07-27 · Codex
 
+### Token 总输入与缓存读写语义收口（开发版本基线仍为 v0.5.28）
+
+- 统一实时响应、后台任务、子 Agent、会话账本和导入会话的 Token 协议：`input` 表示包含缓存命中部分在内的总输入，`cache` 表示总输入中的缓存读取子集；缓存读取不再被重复加入 Token 合计，合计继续使用“总输入 + 输出”。
+- 按上游协议分别归一化：
+  - OpenAI 兼容接口的 `prompt_tokens` 直接作为总输入，读取嵌套或顶层缓存命中字段时不再次累加；
+  - Claude 原始 usage 将 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 计算为总输入，并把缓存创建单独投影为可选 `cacheWrite`；
+  - Codex 导入保持其输入字段已包含缓存的现有语义，Claude Code 导入按 Claude 原始拆分字段重算；旧会话快照不做破坏性迁移。
+- 顶部统计和 Session Info 的“输入 / 缓存”明确改为“总输入 / 缓存读取”；仅当上游明确报告缓存写入字段时显示“缓存写入”明细，单条响应仅在缓存写入大于零时显示紧凑标记。
+- 单条响应的输入、输出、缓存读取和缓存写入均增加可区分的本地化悬停说明；中英文切换继续即时更新。上下文统计同时兼容规范化后的 `lastUsage.input` 与原始 `prompt_tokens`。
+- 验证：
+  - `python -m pytest tests/test_server.py::TestCodexImport tests/test_frontend_modules.py -q`：**138 passed**；
+  - `python -m pytest tests/test_server.py tests/test_frontend_modules.py tests/test_p2_coverage.py tests/test_subagent_frontend.py tests/test_concurrency.py -q`：**403 passed, 17 subtests passed**；
+  - `python -m unittest discover -s tests`：**793 tests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/ui/messages.js`、`node --check src/ui/panels.js`、`node --check src/core/i18n.js` 与 `git diff --check` 通过；
+  - 用户人工确认 Token 统计、字段展示与界面状态正常。
+
+**涉及文件**：`server.py`、`app.js`、`index.html`、`styles.css`、`src/core/i18n.js`、`src/ui/messages.js`、`src/ui/panels.js`、`tests/test_server.py`、`tests/test_frontend_modules.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
 ### 导入批次主动停止与失败项一键重试（开发版本基线仍为 v0.5.28）
 
 - 新增独立、可测试的会话导入批次运行器，保持逐项串行和来源快照锁定；用户请求停止后允许当前单项确定性完成，只阻止尚未开始的项目，不中断后端请求、不回滚已成功结果，也不会因取消时序造成来源状态未知。

@@ -7,18 +7,78 @@
   const COPY_SVG = '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M761.088 715.3152a38.7072 38.7072 0 0 1 0-77.4144 37.4272 37.4272 0 0 0 37.4272-37.4272V265.0112a37.4272 37.4272 0 0 0-37.4272-37.4272H425.6256a37.4272 37.4272 0 0 0-37.4272 37.4272 38.7072 38.7072 0 1 1-77.4144 0 115.0976 115.0976 0 0 1 114.8416-114.8416h335.4624a115.0976 115.0976 0 0 1 114.8416 114.8416v335.4624a115.0976 115.0976 0 0 1-114.8416 114.8416z"/><path d="M589.4656 883.0976H268.1856a121.1392 121.1392 0 0 1-121.2928-121.2928v-322.56a121.1392 121.1392 0 0 1 121.2928-121.344h321.28a121.1392 121.1392 0 0 1 121.2928 121.2928v322.56c1.28 67.1232-54.1696 121.344-121.2928 121.344zM268.1856 395.3152a43.52 43.52 0 0 0-43.8784 43.8784v322.56a43.52 43.52 0 0 0 43.8784 43.8784h321.28a43.52 43.52 0 0 0 43.8784-43.8784v-322.56a43.52 43.52 0 0 0-43.8784-43.8784z"/></svg>';
   const COPY_DONE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
 
+  function tokenCount(value) {
+    const count = Number(value);
+    return Number.isFinite(count) ? Math.max(0, count) : 0;
+  }
+
+  function firstReportedToken(usage, keys) {
+    for (const key of keys) {
+      if (usage?.[key] != null) return tokenCount(usage[key]);
+    }
+    return 0;
+  }
+
+  function hasReportedToken(usage, keys) {
+    return keys.some((key) => usage?.[key] != null);
+  }
+
   function normalizeResponseUsage(usage) {
     if (!usage) return null;
-    return {
-      input: usage.input ?? usage.prompt_tokens ?? 0,
-      output: usage.output ?? usage.completion_tokens ?? 0,
-      cache: usage.cache ?? usage.prompt_cache_hit_tokens ?? usage.cache_read_tokens ?? 0,
+    const cacheRead = firstReportedToken(usage, [
+      "cache",
+      "prompt_cache_hit_tokens",
+      "cache_read_tokens",
+      "cache_read_input_tokens",
+      "cached_input_tokens",
+    ]) || tokenCount(
+      usage.prompt_tokens_details?.cached_tokens
+      ?? usage.input_tokens_details?.cached_tokens,
+    );
+    const cacheWriteKeys = [
+      "cacheWrite",
+      "cache_creation_input_tokens",
+      "cache_write_input_tokens",
+      "cache_write_tokens",
+    ];
+    const cacheWriteReported = hasReportedToken(usage, cacheWriteKeys);
+    const cacheWrite = firstReportedToken(usage, cacheWriteKeys);
+    let input;
+    if (usage.input != null) {
+      input = tokenCount(usage.input);
+    } else if (usage.prompt_tokens != null) {
+      // OpenAI-compatible prompt_tokens already includes cached input.
+      input = tokenCount(usage.prompt_tokens);
+    } else {
+      const rawInput = tokenCount(usage.input_tokens);
+      const anthropicBreakdown = hasReportedToken(usage, [
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+      ]);
+      input = anthropicBreakdown
+        ? rawInput + cacheRead + cacheWrite
+        : rawInput;
+    }
+    const normalized = {
+      input,
+      output: firstReportedToken(usage, ["output", "completion_tokens", "output_tokens"]),
+      cache: cacheRead,
     };
+    if (cacheWriteReported) normalized.cacheWrite = cacheWrite;
+    return normalized;
   }
 
   function hasUsageStats(usage) {
     const normalized = normalizeResponseUsage(usage);
-    return !!(normalized && (normalized.input || normalized.output || normalized.cache));
+    return !!(
+      normalized
+      && (
+        normalized.input
+        || normalized.output
+        || normalized.cache
+        || normalized.cacheWrite
+      )
+    );
   }
 
   function isInternalMessage(msg) {
@@ -132,9 +192,10 @@
       const normalized = normalizeResponseUsage(usage);
       if (!normalized) return [];
       const parts = [];
-      if (normalized.input) parts.push(`<span class="response-token"><svg class="stat-icon stat-arrow-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M478.3 927.5V175.2L259 394.5c-10.7 10.7-28.1 10.7-38.7 0l-6.5-6.5c-10.7-10.7-10.7-28.1 0-38.7L481.6 81.4c4.5-9.2 13.4-16 23.9-17.6 7.1-1.5 14.7-0.1 21 4 4 2.4 7.5 5.6 10.1 9.4l0.5 0.5c2.6 2.6 4.6 5.6 5.9 8.8l266.7 266.7c10.7 10.7 10.7 28.1 0 38.7l-6.5 6.5c-10.7 10.7-28.1 10.7-38.7 0l-222.3-222v751.1c0 17.6-14.4 32-32 32-17.5 0-31.9-14.4-31.9-32z" fill="currentColor"/></svg>${formatCompact(normalized.input)}</span>`);
-      if (normalized.output) parts.push(`<span class="response-token"><svg class="stat-icon stat-arrow-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M512 858.7a32 32 0 01-32-32V124.8a32 32 0 1164 0v701.9a32 32 0 01-32 32z" fill="currentColor"/><path d="M512 901.7L234.9 624.6a32 32 0 1145.3-45.3L512 811.2l231.8-231.8a32 32 0 0145.3 45.3z" fill="currentColor"/></svg>${formatCompact(normalized.output)}</span>`);
-      if (normalized.cache) parts.push(`<span class="response-token"><svg class="stat-icon stat-cache-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M241.8 881.5a127 127 0 01-127-127v-85.3a13 13 0 0113-13h14.3a13 13 0 0113 13v85.3a86.6 86.6 0 0086.5 86.5h540.4a86.6 86.6 0 0086.5-86.5v-85.4a13 13 0 0113-13H896a13 13 0 0113 13v85.4a127 127 0 01-126.9 126.9zM273.4 455.7a13 13 0 010-18.5l10.2-10.3a13 13 0 0118.5 0l164.9 164.3a15.4 15.4 0 0026.2-10.9v-404.5a13 13 0 0113-13h14.3a13 13 0 0113 13v404.5a15.4 15.4 0 009.5 14.2 15.4 15.4 0 0016.7-3.3l166.3-164.6a13 13 0 0118.5 0l10.2 10.2a13 13 0 010 18.5L512 695z" fill="currentColor"/></svg>${formatCompact(normalized.cache)}</span>`);
+      if (normalized.input) parts.push(`<span class="response-token" data-usage-kind="input" title="${escapeHtml(t("statInputTitle"))}"><svg class="stat-icon stat-arrow-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M478.3 927.5V175.2L259 394.5c-10.7 10.7-28.1 10.7-38.7 0l-6.5-6.5c-10.7-10.7-10.7-28.1 0-38.7L481.6 81.4c4.5-9.2 13.4-16 23.9-17.6 7.1-1.5 14.7-0.1 21 4 4 2.4 7.5 5.6 10.1 9.4l0.5 0.5c2.6 2.6 4.6 5.6 5.9 8.8l266.7 266.7c10.7 10.7 10.7 28.1 0 38.7l-6.5 6.5c-10.7 10.7-28.1 10.7-38.7 0l-222.3-222v751.1c0 17.6-14.4 32-32 32-17.5 0-31.9-14.4-31.9-32z" fill="currentColor"/></svg>${formatCompact(normalized.input)}</span>`);
+      if (normalized.output) parts.push(`<span class="response-token" data-usage-kind="output" title="${escapeHtml(t("statOutputTitle"))}"><svg class="stat-icon stat-arrow-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M512 858.7a32 32 0 01-32-32V124.8a32 32 0 1164 0v701.9a32 32 0 01-32 32z" fill="currentColor"/><path d="M512 901.7L234.9 624.6a32 32 0 1145.3-45.3L512 811.2l231.8-231.8a32 32 0 0145.3 45.3z" fill="currentColor"/></svg>${formatCompact(normalized.output)}</span>`);
+      if (normalized.cache) parts.push(`<span class="response-token" data-usage-kind="cache-read" title="${escapeHtml(t("statCacheTitle"))}"><svg class="stat-icon stat-cache-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M241.8 881.5a127 127 0 01-127-127v-85.3a13 13 0 0113-13h14.3a13 13 0 0113 13v85.3a86.6 86.6 0 0086.5 86.5h540.4a86.6 86.6 0 0086.5-86.5v-85.4a13 13 0 0113-13H896a13 13 0 0113 13v85.4a127 127 0 01-126.9 126.9zM273.4 455.7a13 13 0 010-18.5l10.2-10.3a13 13 0 0118.5 0l164.9 164.3a15.4 15.4 0 0026.2-10.9v-404.5a13 13 0 0113-13h14.3a13 13 0 0113 13v404.5a15.4 15.4 0 009.5 14.2 15.4 15.4 0 0016.7-3.3l166.3-164.6a13 13 0 0118.5 0l10.2 10.2a13 13 0 010 18.5L512 695z" fill="currentColor"/></svg>${formatCompact(normalized.cache)}</span>`);
+      if (normalized.cacheWrite) parts.push(`<span class="response-token" data-usage-kind="cache-write" title="${escapeHtml(t("statCacheWriteTitle"))}"><svg class="stat-icon stat-cache-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M241.8 881.5a127 127 0 01-127-127v-85.3a13 13 0 0113-13h14.3a13 13 0 0113 13v85.3a86.6 86.6 0 0086.5 86.5h540.4a86.6 86.6 0 0086.5-86.5v-85.4a13 13 0 0113-13H896a13 13 0 0113 13v85.4a127 127 0 01-126.9 126.9zM273.4 455.7a13 13 0 010-18.5l10.2-10.3a13 13 0 0118.5 0l164.9 164.3a15.4 15.4 0 0026.2-10.9v-404.5a13 13 0 0113-13h14.3a13 13 0 0113 13v404.5a15.4 15.4 0 009.5 14.2 15.4 15.4 0 0016.7-3.3l166.3-164.6a13 13 0 0118.5 0l10.2 10.2a13 13 0 010 18.5L512 695z" fill="currentColor"/></svg>${formatCompact(normalized.cacheWrite)}</span>`);
       return parts;
     }
 
