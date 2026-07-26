@@ -4,6 +4,29 @@
 
 ## 2026-07-27 · Codex
 
+### 导入来源一致性快照与异常路径稳健性（开发版本基线仍为 v0.5.28）
+
+- Codex / Claude Code 导入改为单次一致性快照：先将来源流式复制到 `SpooledTemporaryFile`，4 MiB 以内保留内存、超过后自动落临时文件；消息解析、来源 SHA-256 和持久化元数据全部使用同一快照，不再解析一次、重新打开来源再哈希。
+- 复制前后以及解析完成后核对文件设备、inode、大小和纳秒级修改时间；来源在读取/解析期间被写入、替换、移动或删除时停止导入并返回可重试的 `409 import_source_changed`，不会写入半截会话。无换行的损坏尾记录单独标记为可重试的 `import_source_incomplete_jsonl`。
+- JSONL 转换改为严格记录边界：
+  - 非法 JSON、非对象记录和无效 UTF-8 不再被静默跳过；
+  - 空会话、文件缺失、权限拒绝、来源不可用、非法文件类型和来源根目录越界均使用稳定 `errorCode / retryable / HTTP status`；
+  - 失败发生在持久化之前，不创建会话文件或索引记录，为后续“失败项重试”提供可靠错误语义。
+- `/api/import/sessions` 只接受所选运行时会话目录内的 `.jsonl`，解析后的真实路径仍必须位于 Codex 或 Claude Code 来源根目录，阻止通过手工请求读取范围外文件。
+- 扫描列表按来源运行时自身的稳定会话 ID 去重；同一 ID 存在多份文件时确定性选择内容更完整（文件更大）、随后更新时间更晚、最后规范路径排序更高的候选，并以 `duplicateCount` 暴露合并数量。无稳定 ID 时继续按规范路径区分。
+- 单个损坏、无权限或扫描中消失的文件只会被隔离，不影响其他来源；标题和元数据合并为一次前缀扫描，避免列表阶段重复打开每个文件。
+- 验证：
+  - `python -m pytest tests/test_server.py tests/test_p2_coverage.py -q`：**254 passed, 17 subtests passed**；
+  - `python -m unittest discover -s tests`：**791 tests passed**；
+  - `python -m py_compile server.py`、`node --check app.js` 与 `git diff --check` 通过；
+  - 真实来源只读扫描：Codex 60 条约 512 ms、Claude Code 74 条约 879 ms，当前均未发现重复来源组。
+
+**涉及文件**：`server.py`、`tests/test_server.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
 ### Codex / Claude Code 重复导入幂等与安全更新快照（开发版本基线仍为 v0.5.28）
 
 - 导入会话新增持久化 `importState`：记录来源类型、稳定来源会话 ID、规范路径、文件大小/时间、来源 SHA-256、转换后消息快照 SHA-256、根会话和 Code 侧是否已修改，用于区分同一路径、移动后的路径、来源更新与 Code 续聊。

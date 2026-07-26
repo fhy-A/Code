@@ -4,6 +4,7 @@ Run: python -m unittest tests.test_server -v
    or: python tests/test_server.py
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -1282,12 +1283,12 @@ class TestCodexImport(unittest.TestCase):
             jsonl_a.write_text(self._make_codex_jsonl([
                 ("user", "Alpha project task"),
                 ("assistant", "OK"),
-            ]), encoding="utf-8")
+            ], session_id="codex-alpha-session"), encoding="utf-8")
             jsonl_b = codex_dir / "project-beta.jsonl"
             jsonl_b.write_text(self._make_codex_jsonl([
                 ("user", "Beta project task"),
                 ("assistant", "OK"),
-            ]), encoding="utf-8")
+            ], session_id="codex-beta-session"), encoding="utf-8")
             with mock.patch.object(server, "CODEX_SESSIONS_DIR", Path(td)):
                 all_sessions = server.list_codex_sessions()
                 alpha_only = server.list_codex_sessions(query="alpha")
@@ -1302,6 +1303,59 @@ class TestCodexImport(unittest.TestCase):
                                    Path(td) / "nonexistent"):
                 sessions = server.list_codex_sessions()
         self.assertEqual(sessions, [])
+
+    def test_codex_scanner_isolates_invalid_file(self):
+        """One malformed source never hides other importable sessions."""
+        with tempfile.TemporaryDirectory() as td:
+            codex_dir = Path(td) / "2026" / "07" / "24"
+            codex_dir.mkdir(parents=True)
+            (codex_dir / "broken.jsonl").write_text(
+                '{"type":"response_item"',
+                encoding="utf-8",
+            )
+            (codex_dir / "healthy.jsonl").write_text(
+                self._make_codex_jsonl([
+                    ("user", "Healthy session"),
+                    ("assistant", "OK"),
+                ], session_id="healthy-source-session"),
+                encoding="utf-8",
+            )
+            with mock.patch.object(server, "CODEX_SESSIONS_DIR", Path(td)):
+                sessions = server.list_codex_sessions()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["sourceId"], "healthy")
+
+    def test_codex_scanner_deduplicates_stable_source_session_id(self):
+        """The most complete copy wins when one source id has multiple files."""
+        with tempfile.TemporaryDirectory() as td:
+            codex_dir = Path(td) / "2026" / "07" / "24"
+            codex_dir.mkdir(parents=True)
+            source_id = "duplicate-source-session"
+            older = codex_dir / "older-copy.jsonl"
+            older.write_text(self._make_codex_jsonl([
+                ("user", "Older copy"),
+                ("assistant", "Old response"),
+            ], session_id=source_id), encoding="utf-8")
+            newer = codex_dir / "complete-copy.jsonl"
+            newer.write_text(self._make_codex_jsonl([
+                ("user", "Complete copy"),
+                ("assistant", "First response"),
+                ("user", "Later turn"),
+                ("assistant", "Latest response"),
+            ], session_id=source_id), encoding="utf-8")
+
+            with mock.patch.object(server, "CODEX_SESSIONS_DIR", Path(td)):
+                sessions = server.list_codex_sessions()
+                hidden_alternate = server.list_codex_sessions(query="older-copy")
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["duplicateCount"], 2)
+        self.assertEqual(sessions[0]["title"], "Complete copy")
+        self.assertEqual(
+            Path(sessions[0]["sourcePath"]),
+            newer.resolve(),
+        )
+        self.assertEqual(hidden_alternate, [])
 
     def test_read_codex_session_meta_extracts_title_and_count(self):
         """_read_codex_session_meta returns title and estimated count."""
@@ -1836,8 +1890,11 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(meta["messageCount"], len(messages) - 1)
 
     def test_import_codex_session_rejects_nonexistent_file(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(server.ImportSourceError) as raised:
             server.import_codex_session("/nonexistent/path.jsonl")
+        self.assertEqual(raised.exception.code, "import_source_missing")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.http_status, 404)
 
     def test_import_codex_session_rejects_empty(self):
         """A file with no valid messages raises ValueError."""
@@ -1848,6 +1905,204 @@ class TestCodexImport(unittest.TestCase):
                 encoding="utf-8")
             with self.assertRaises(ValueError):
                 server.import_codex_session(str(empty))
+
+    def test_import_codex_rejects_invalid_jsonl_without_persisting(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "broken.jsonl"
+            source.write_text(
+                self._make_codex_jsonl([
+                    ("user", "Valid prefix"),
+                    ("assistant", "Valid response"),
+                ]) + '{"type":"response_item"\n',
+                encoding="utf-8",
+            )
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir), \
+                 self.assertRaises(server.ImportSourceError) as raised:
+                server.import_codex_session(str(source))
+
+            self.assertEqual(
+                raised.exception.code,
+                "import_source_invalid_jsonl",
+            )
+            self.assertFalse(raised.exception.retryable)
+            self.assertIn("line 4", str(raised.exception))
+            self.assertEqual(list(sessions_dir.rglob("*.json")), [])
+            self.assertEqual(
+                (sessions_dir / "index.jsonl").read_text(encoding="utf-8"),
+                "",
+            )
+
+    def test_import_codex_rejects_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "invalid-encoding.jsonl"
+            source.write_bytes(b"\xff\xfe\x00")
+            with self.assertRaises(server.ImportSourceError) as raised:
+                server.import_codex_session(str(source))
+        self.assertEqual(
+            raised.exception.code,
+            "import_source_invalid_encoding",
+        )
+        self.assertFalse(raised.exception.retryable)
+
+    def test_import_codex_marks_incomplete_tail_as_retryable(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "still-writing.jsonl"
+            source.write_text(
+                self._make_codex_jsonl([
+                    ("user", "Valid prefix"),
+                    ("assistant", "Valid response"),
+                ]) + '{"type":"response_item"',
+                encoding="utf-8",
+            )
+            with self.assertRaises(server.ImportSourceError) as raised:
+                server.import_codex_session(str(source))
+
+        self.assertEqual(
+            raised.exception.code,
+            "import_source_incomplete_jsonl",
+        )
+        self.assertEqual(raised.exception.http_status, 409)
+        self.assertTrue(raised.exception.retryable)
+
+    def test_import_codex_classifies_permission_denied(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "permission.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Permission test"),
+                ("assistant", "OK"),
+            ]), encoding="utf-8")
+            real_open = open
+
+            def guarded_open(path, *args, **kwargs):
+                if Path(path).resolve() == source.resolve():
+                    raise PermissionError("denied")
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch("builtins.open", side_effect=guarded_open), \
+                 self.assertRaises(server.ImportSourceError) as raised:
+                server.import_codex_session(str(source))
+
+        self.assertEqual(
+            raised.exception.code,
+            "import_source_permission_denied",
+        )
+        self.assertEqual(raised.exception.http_status, 403)
+        self.assertFalse(raised.exception.retryable)
+
+    def test_import_codex_rejects_source_changed_during_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "changing.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Changing source"),
+                ("assistant", "OK"),
+            ]), encoding="utf-8")
+            with mock.patch.object(
+                server,
+                "_import_source_path_signature",
+                return_value=(-1, -1, -1, -1),
+            ), self.assertRaises(server.ImportSourceError) as raised:
+                server.import_codex_session(str(source))
+
+        self.assertEqual(raised.exception.code, "import_source_changed")
+        self.assertEqual(raised.exception.http_status, 409)
+        self.assertTrue(raised.exception.retryable)
+
+    def test_import_codex_persists_the_parsed_snapshot_hash(self):
+        """Persistence reuses the parsed snapshot instead of reopening source."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "single-read.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Single read"),
+                ("assistant", "OK"),
+            ]), encoding="utf-8")
+            expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir), \
+                 mock.patch.object(
+                     server,
+                     "_import_source_state",
+                     side_effect=AssertionError("source reopened"),
+                 ):
+                imported = server.import_codex_session(str(source))
+
+        self.assertEqual(imported["importAction"], "created")
+        self.assertEqual(
+            imported["importState"]["sourceSha256"],
+            expected_hash,
+        )
+
+    def test_import_api_source_path_must_stay_inside_runtime_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            codex_root = Path(td) / "codex"
+            codex_root.mkdir()
+            outside = Path(td) / "outside.jsonl"
+            outside.write_text(self._make_codex_jsonl([
+                ("user", "Outside"),
+                ("assistant", "OK"),
+            ]), encoding="utf-8")
+
+            with mock.patch.object(server, "CODEX_SESSIONS_DIR", codex_root), \
+                 self.assertRaises(server.ImportSourceError) as raised:
+                server.import_session("codex", str(outside))
+
+        self.assertEqual(
+            raised.exception.code,
+            "import_source_outside_root",
+        )
+        self.assertEqual(raised.exception.http_status, 403)
+        self.assertFalse(raised.exception.retryable)
+
+    def test_import_api_returns_structured_source_error(self):
+        handler = object.__new__(server.CodeHandler)
+        handler.path = "/api/import/sessions"
+        handler.read_body_json = mock.Mock(return_value={
+            "source": "codex",
+            "sourcePath": "C:/missing/session.jsonl",
+        })
+        handler.send_json = mock.Mock()
+        failure = server.ImportSourceError(
+            "import_source_changed",
+            "source changed",
+            retryable=True,
+            http_status=409,
+        )
+
+        with mock.patch.object(server, "import_session", side_effect=failure):
+            server.CodeHandler.do_POST(handler)
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "source changed")
+        self.assertEqual(payload["errorCode"], "import_source_changed")
+        self.assertTrue(payload["retryable"])
+
+    def test_stable_import_source_spools_large_sessions(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "large.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Large snapshot"),
+                ("assistant", "x" * 2048),
+            ]), encoding="utf-8")
+            expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+            with mock.patch.object(server, "_IMPORT_SOURCE_MEMORY_LIMIT", 64):
+                with server._stable_import_source(source, "Codex") as (
+                    fh,
+                    source_info,
+                ):
+                    records = list(server._iter_import_json_records(fh, "Codex"))
+                    rolled_to_disk = bool(getattr(fh.buffer, "_rolled", False))
+
+        self.assertTrue(rolled_to_disk)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(source_info["sourceSha256"], expected_hash)
 
     def test_generate_import_id_is_stable(self):
         """Same path produces same import ID."""
@@ -1935,6 +2190,35 @@ class TestCodexImport(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["sourceId"], "main-session")
 
+    def test_list_claude_sessions_deduplicates_source_session_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "my-project"
+            project.mkdir(parents=True)
+            (project / "short-copy.jsonl").write_text(
+                self._make_claude_jsonl([
+                    ("user", "Short copy"),
+                    ("assistant", "Old response"),
+                ]),
+                encoding="utf-8",
+            )
+            complete = project / "complete-copy.jsonl"
+            complete.write_text(
+                self._make_claude_jsonl([
+                    ("user", "Complete Claude copy"),
+                    ("assistant", "First response"),
+                    ("user", "Later turn"),
+                    ("assistant", "Latest response"),
+                ]),
+                encoding="utf-8",
+            )
+            with mock.patch.object(server, "CLAUDE_PROJECTS_DIR", Path(td)):
+                sessions = server.list_claude_sessions()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["duplicateCount"], 2)
+        self.assertEqual(sessions[0]["title"], "Complete Claude copy")
+        self.assertEqual(Path(sessions[0]["sourcePath"]), complete.resolve())
+
     def test_import_claude_session(self):
         with tempfile.TemporaryDirectory() as td:
             jsonl = Path(td) / "session.jsonl"
@@ -2021,6 +2305,25 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(updated["importAction"], "updated")
             self.assertEqual(updated["id"], first["id"])
             self.assertEqual(settled_row["importStatus"], "imported")
+
+    def test_import_claude_rejects_partial_invalid_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "broken-claude.jsonl"
+            source.write_text(
+                self._make_claude_jsonl([
+                    ("user", "Valid Claude prefix"),
+                    ("assistant", "Valid response"),
+                ]) + "not-json\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(server.ImportSourceError) as raised:
+                server.import_claude_session(str(source))
+
+        self.assertEqual(
+            raised.exception.code,
+            "import_source_invalid_jsonl",
+        )
+        self.assertIn("line 3", str(raised.exception))
 
     def test_import_claude_preserves_main_trace_images_and_usage(self):
         with tempfile.TemporaryDirectory() as td:

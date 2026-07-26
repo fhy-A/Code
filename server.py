@@ -3,16 +3,19 @@ from pathlib import Path
 from urllib import error, parse, request
 import base64
 import codecs
+from contextlib import contextmanager
 import ctypes
 import datetime as dt
 import difflib
 import hashlib
+import io
 import json
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 import sys
 import threading
@@ -5496,6 +5499,7 @@ _CODEX_SYSTEM_PREFIXES = (
 _IMPORT_TRACE_CONTENT_LIMIT = 12000
 _IMPORT_BOUNDARY_VERSION = 1
 _IMPORT_SNAPSHOT_VERSION = 1
+_IMPORT_SOURCE_MEMORY_LIMIT = 4 * 1024 * 1024
 _CODEX_CONTEXT_BLOCK_RE = re.compile(
     r"^\s*<(?P<tag>"
     r"in-app-browser-context|environment_context|recommended_plugins|"
@@ -5783,6 +5787,179 @@ def _codex_reasoning_summary(payload):
     return "\n".join(parts)
 
 
+class ImportSourceError(ValueError):
+    """A stable, API-safe failure raised while reading an import source."""
+
+    def __init__(self, code, message, *, retryable=False, http_status=422):
+        super().__init__(message)
+        self.code = str(code)
+        self.retryable = bool(retryable)
+        self.http_status = int(http_status)
+
+
+def _import_source_signature(stat_result):
+    """Return the file identity fields needed to detect in-flight changes."""
+    return (
+        int(getattr(stat_result, "st_dev", 0) or 0),
+        int(getattr(stat_result, "st_ino", 0) or 0),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+    )
+
+
+def _import_source_path_signature(source):
+    return _import_source_signature(Path(source).stat())
+
+
+def _raise_import_source_os_error(exc, source, label):
+    source_text = str(source)
+    if isinstance(exc, FileNotFoundError):
+        raise ImportSourceError(
+            "import_source_missing",
+            f"{label} session no longer exists: {source_text}",
+            retryable=True,
+            http_status=404,
+        ) from exc
+    if isinstance(exc, PermissionError):
+        raise ImportSourceError(
+            "import_source_permission_denied",
+            f"Permission denied while reading {label} session: {source_text}",
+            retryable=False,
+            http_status=403,
+        ) from exc
+    raise ImportSourceError(
+        "import_source_unavailable",
+        f"Unable to read {label} session: {source_text}",
+        retryable=True,
+        http_status=503,
+    ) from exc
+
+
+@contextmanager
+def _stable_import_source(source_path, label):
+    """Yield a consistent UTF-8 snapshot and its source fingerprint.
+
+    The source is copied into a spooled temporary file before parsing.  Small
+    sessions stay in memory while large sessions roll to a temporary file, so
+    import never mixes parser output from one version with a hash from another.
+    """
+    source = Path(source_path).resolve()
+    try:
+        source_fh = open(source, "rb")
+    except OSError as exc:
+        _raise_import_source_os_error(exc, source, label)
+
+    snapshot = tempfile.SpooledTemporaryFile(
+        max_size=_IMPORT_SOURCE_MEMORY_LIMIT,
+        mode="w+b",
+    )
+    text_fh = None
+    try:
+        with source_fh:
+            initial_stat = os.fstat(source_fh.fileno())
+            initial_signature = _import_source_signature(initial_stat)
+            hasher = hashlib.sha256()
+            copied = 0
+            try:
+                for chunk in iter(lambda: source_fh.read(1024 * 1024), b""):
+                    copied += len(chunk)
+                    hasher.update(chunk)
+                    snapshot.write(chunk)
+                final_handle_signature = _import_source_signature(
+                    os.fstat(source_fh.fileno())
+                )
+                final_path_signature = _import_source_path_signature(source)
+            except OSError as exc:
+                _raise_import_source_os_error(exc, source, label)
+
+        if (
+            initial_signature != final_handle_signature
+            or initial_signature != final_path_signature
+            or copied != initial_signature[2]
+        ):
+            raise ImportSourceError(
+                "import_source_changed",
+                f"{label} session changed while it was being read; retry the import",
+                retryable=True,
+                http_status=409,
+            )
+
+        source_info = {
+            "sourcePath": str(source),
+            "sourcePathKey": _path_identity(source),
+            "sourceSize": initial_signature[2],
+            "sourceMtimeNs": initial_signature[3],
+            "sourceSha256": hasher.hexdigest(),
+        }
+        snapshot.seek(0)
+        text_fh = io.TextIOWrapper(snapshot, encoding="utf-8", errors="strict")
+        try:
+            yield text_fh, source_info
+        except UnicodeDecodeError as exc:
+            raise ImportSourceError(
+                "import_source_invalid_encoding",
+                f"{label} session is not valid UTF-8 near byte {exc.start}",
+                retryable=False,
+                http_status=422,
+            ) from exc
+        else:
+            try:
+                if _import_source_path_signature(source) != initial_signature:
+                    raise ImportSourceError(
+                        "import_source_changed",
+                        f"{label} session changed while it was being parsed; retry the import",
+                        retryable=True,
+                        http_status=409,
+                    )
+            except ImportSourceError:
+                raise
+            except OSError as exc:
+                _raise_import_source_os_error(exc, source, label)
+    finally:
+        if text_fh is not None:
+            text_fh.close()
+        else:
+            snapshot.close()
+
+
+def _iter_import_json_records(fh, label):
+    """Yield strict JSON object records from an import snapshot."""
+    for line_number, line in enumerate(fh, 1):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            incomplete_tail = not line.endswith(("\n", "\r"))
+            raise ImportSourceError(
+                (
+                    "import_source_incomplete_jsonl"
+                    if incomplete_tail
+                    else "import_source_invalid_jsonl"
+                ),
+                (
+                    f"{label} session has an incomplete JSONL record at line "
+                    f"{line_number}; retry after the source finishes writing"
+                    if incomplete_tail
+                    else (
+                        f"{label} session contains invalid JSONL at line "
+                        f"{line_number}"
+                    )
+                ),
+                retryable=incomplete_tail,
+                http_status=409 if incomplete_tail else 422,
+            ) from exc
+        if not isinstance(record, dict):
+            raise ImportSourceError(
+                "import_source_invalid_jsonl",
+                f"{label} session record at line {line_number} is not an object",
+                retryable=False,
+                http_status=422,
+            )
+        yield record
+
+
 def _import_source_state(source_path, include_hash=False):
     """Return stable source-file metadata, optionally including a content hash."""
     source = Path(source_path).resolve()
@@ -5975,6 +6152,7 @@ def _persist_import_snapshot(
     *,
     source,
     source_path,
+    source_info=None,
     source_session_id,
     requested_session_id,
     force_requested_id,
@@ -5988,7 +6166,11 @@ def _persist_import_snapshot(
 ):
     """Persist an import without overwriting Code-side divergent history."""
     source = _normalize_session_source(source)
-    source_info = _import_source_state(source_path, include_hash=True)
+    source_info = (
+        dict(source_info)
+        if isinstance(source_info, dict) and source_info.get("sourceSha256")
+        else _import_source_state(source_path, include_hash=True)
+    )
     snapshot_hash = _import_message_snapshot_hash(messages)
     registry = _import_session_registry(source)
     candidate = None if force_requested_id else _matching_import_record(
@@ -6203,6 +6385,45 @@ def _persist_import_snapshot(
     return _import_result_record(meta, action, root_session_id)
 
 
+def _deduplicate_import_rows(rows):
+    """Keep one deterministic candidate for each stable foreign session id."""
+    winners = {}
+    counts = {}
+    for row in rows:
+        source_session_id = str(row.get("_sourceSessionId") or "").strip()
+        if source_session_id:
+            key = f"{row.get('source')}:{source_session_id}"
+        else:
+            key = f"path:{_path_identity(row.get('sourcePath'))}"
+        counts[key] = counts.get(key, 0) + 1
+        rank = (
+            int(row.get("_sourceSize") or 0),
+            int(row.get("_sourceMtimeNs") or 0),
+            _path_identity(row.get("sourcePath")),
+        )
+        current = winners.get(key)
+        if current is None or rank > current[0]:
+            winners[key] = (rank, row)
+
+    result = []
+    for key, (_, row) in winners.items():
+        duplicate_count = counts.get(key, 1)
+        if duplicate_count > 1:
+            row["duplicateCount"] = duplicate_count
+        row.pop("_sourceSessionId", None)
+        row.pop("_sourceSize", None)
+        row.pop("_sourceMtimeNs", None)
+        result.append(row)
+    result.sort(
+        key=lambda item: (
+            str(item.get("createdAt") or ""),
+            _path_identity(item.get("sourcePath")),
+        ),
+        reverse=True,
+    )
+    return result
+
+
 def list_codex_sessions(query=None):
     """Scan the Codex sessions directory and return a list of importable sessions.
 
@@ -6219,18 +6440,17 @@ def list_codex_sessions(query=None):
     for jsonl_path in sorted(CODEX_SESSIONS_DIR.rglob("*.jsonl"), reverse=True):
         try:
             source_id = jsonl_path.stem
-            if q and q not in source_id.lower() and q not in _read_codex_title(jsonl_path).lower():
-                continue
             meta = _read_codex_session_meta(jsonl_path)
             if not meta:
                 continue
             if meta.get("message_count", 0) == 0:
                 continue
+            title = meta.get("title") or "Codex 会话"
             import_id = _generate_codex_import_id(jsonl_path)
             sessions.append({
                 "id": import_id,
                 "sourceId": source_id,
-                "title": meta.get("title") or "Codex 会话",
+                "title": title,
                 "messageCount": meta["message_count"],
                 "createdAt": meta.get("created_at", ""),
                 "cwd": meta.get("cwd", ""),
@@ -6243,9 +6463,19 @@ def list_codex_sessions(query=None):
                     import_id,
                     registry,
                 ),
+                "_sourceSessionId": meta.get("source_session_id", ""),
+                "_sourceSize": meta.get("source_size", 0),
+                "_sourceMtimeNs": meta.get("source_mtime_ns", 0),
             })
         except Exception:
             continue
+    sessions = _deduplicate_import_rows(sessions)
+    if q:
+        sessions = [
+            item for item in sessions
+            if q in str(item.get("sourceId") or "").lower()
+            or q in str(item.get("title") or "").lower()
+        ]
     return sessions
 
 
@@ -6296,10 +6526,15 @@ def _read_codex_session_meta(jsonl_path):
     created_at = ""
     cwd = ""
     source_session_id = ""
+    found_message_record = False
+    source_size = 0
+    source_mtime_ns = 0
     try:
         # Quick line count from file size (approx 200 bytes/line average)
-        size = jsonl_path.stat().st_size
-        est_lines = max(1, size // 200)
+        source_stat = jsonl_path.stat()
+        source_size = int(source_stat.st_size)
+        source_mtime_ns = int(source_stat.st_mtime_ns)
+        est_lines = max(1, source_size // 200)
     except OSError:
         est_lines = 100
 
@@ -6332,6 +6567,9 @@ def _read_codex_session_meta(jsonl_path):
 
                 if rtype == "response_item" and payload.get("type") == "message" and not title:
                     role = payload.get("role", "")
+                    if role not in ("user", "assistant"):
+                        continue
+                    found_message_record = True
                     if role != "user":
                         continue
                     text = _sanitize_codex_user_text("".join(
@@ -6342,6 +6580,9 @@ def _read_codex_session_meta(jsonl_path):
                     if text:
                         title = text[:80].replace("\n", " ")
     except Exception:
+        return None
+
+    if not found_message_record:
         return None
 
     if not created_at:
@@ -6359,6 +6600,8 @@ def _read_codex_session_meta(jsonl_path):
         "created_at": created_at,
         "cwd": cwd,
         "source_session_id": source_session_id,
+        "source_size": source_size,
+        "source_mtime_ns": source_mtime_ns,
     }
 
 
@@ -6368,8 +6611,6 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
     Returns the new session dict on success, or raises ValueError.
     """
     source = Path(source_path).resolve()
-    if not source.is_file():
-        raise ValueError(f"Codex session not found: {source_path}")
 
     session_id = target_session_id or _generate_codex_import_id(source)
     safe_id = safe_session_id(session_id)
@@ -6384,6 +6625,7 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
     last_usage = {}
     last_assistant = None
     synthetic_call_number = 0
+    source_info = {}
 
     def remember_reasoning(value):
         text = str(value or "").strip()
@@ -6400,15 +6642,8 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
         synthetic_call_number += 1
         return f"codex-import-{synthetic_call_number}"
 
-    with open(source, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    with _stable_import_source(source, "Codex") as (fh, source_info):
+        for record in _iter_import_json_records(fh, "Codex"):
             rtype = record.get("type", "")
             payload = record.get("payload") or {}
 
@@ -6569,7 +6804,12 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
         last_assistant.setdefault("meta", {}).update(thought_meta)
 
     if not conversation_messages:
-        raise ValueError("Codex session contains no importable messages")
+        raise ImportSourceError(
+            "import_source_no_messages",
+            "Codex session contains no importable messages",
+            retryable=False,
+            http_status=422,
+        )
 
     # Determine title and timestamps (skip system messages for title)
     first_user = next(
@@ -6595,6 +6835,7 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
     return _persist_import_snapshot(
         source="codex",
         source_path=source,
+        source_info=source_info,
         source_session_id=source_session_id,
         requested_session_id=safe_id,
         force_requested_id=target_session_id is not None,
@@ -6646,12 +6887,44 @@ def list_importable_sessions(source, query=None):
     raise ValueError(f"Unknown import source: {source}")
 
 
+def _validated_import_source_path(source, source_path):
+    """Resolve an API import path inside the selected runtime's session root."""
+    if source == "codex":
+        root = CODEX_SESSIONS_DIR.resolve()
+        label = "Codex"
+    elif source == "claude-code":
+        root = CLAUDE_PROJECTS_DIR.resolve()
+        label = "Claude Code"
+    else:
+        raise ValueError(f"Unknown import source: {source}")
+    candidate = Path(source_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ImportSourceError(
+            "import_source_outside_root",
+            f"{label} import source is outside its session directory",
+            retryable=False,
+            http_status=403,
+        ) from exc
+    if candidate.suffix.lower() != ".jsonl":
+        raise ImportSourceError(
+            "import_source_invalid_type",
+            f"{label} import source must be a JSONL file",
+            retryable=False,
+            http_status=422,
+        )
+    return candidate
+
+
 def import_session(source, source_path, project_id=None):
     """Import a session from *source* and return the new session metadata."""
     if source == "codex":
-        return import_codex_session(source_path, project_id=project_id)
+        source = _validated_import_source_path(source, source_path)
+        return import_codex_session(source, project_id=project_id)
     if source == "claude-code":
-        return import_claude_session(source_path, project_id=project_id)
+        source = _validated_import_source_path(source, source_path)
+        return import_claude_session(source, project_id=project_id)
     raise ValueError(f"Unknown import source: {source}")
 
 
@@ -6695,14 +6968,12 @@ def list_claude_sessions(query=None):
     for jsonl_path in sorted(CLAUDE_PROJECTS_DIR.rglob("*.jsonl"), reverse=True):
         try:
             source_id = jsonl_path.stem
-            title = _read_claude_title(jsonl_path, jsonl_path.parent.name)
-            if q and q not in source_id.lower() and q not in title.lower():
-                continue
             meta = _read_claude_session_meta(jsonl_path)
             if not meta:
                 continue
             if meta.get("message_count", 0) == 0:
                 continue
+            title = meta.get("title") or jsonl_path.parent.name or "Claude 会话"
             import_id = "claude-" + hashlib.sha256(
                     str(jsonl_path.resolve()).replace("\\", "/").encode()
                 ).hexdigest()[:16]
@@ -6723,9 +6994,19 @@ def list_claude_sessions(query=None):
                     import_id,
                     registry,
                 ),
+                "_sourceSessionId": meta.get("source_session_id", ""),
+                "_sourceSize": meta.get("source_size", 0),
+                "_sourceMtimeNs": meta.get("source_mtime_ns", 0),
             })
         except Exception:
             continue
+    sessions = _deduplicate_import_rows(sessions)
+    if q:
+        sessions = [
+            item for item in sessions
+            if q in str(item.get("sourceId") or "").lower()
+            or q in str(item.get("title") or "").lower()
+        ]
     return sessions
 
 
@@ -6764,9 +7045,13 @@ def _read_claude_session_meta(jsonl_path):
     line_count = 0
     found_main_record = False
     source_session_id = ""
+    source_size = 0
+    source_mtime_ns = 0
     try:
-        size = jsonl_path.stat().st_size
-        est_lines = max(1, size // 200)
+        source_stat = jsonl_path.stat()
+        source_size = int(source_stat.st_size)
+        source_mtime_ns = int(source_stat.st_mtime_ns)
+        est_lines = max(1, source_size // 200)
     except OSError:
         est_lines = 100
     try:
@@ -6818,14 +7103,14 @@ def _read_claude_session_meta(jsonl_path):
         "created_at": created_at,
         "cwd": cwd,
         "source_session_id": source_session_id,
+        "source_size": source_size,
+        "source_mtime_ns": source_mtime_ns,
     }
 
 
 def import_claude_session(source_path, target_session_id=None, project_id=None):
     """Convert a Claude Code JSONL session to Code format and persist it."""
     source = Path(source_path).resolve()
-    if not source.is_file():
-        raise ValueError(f"Claude Code session not found: {source_path}")
 
     session_id = target_session_id or (
         "claude-" + hashlib.sha256(
@@ -6841,16 +7126,10 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
     last_usage = {}
     pending_thinking = []
     last_assistant = None
+    source_info = {}
 
-    with open(source, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    with _stable_import_source(source, "Claude Code") as (fh, source_info):
+        for record in _iter_import_json_records(fh, "Claude Code"):
             rtype = record.get("type", "")
             if rtype not in ("user", "assistant"):
                 continue
@@ -6983,7 +7262,12 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
         last_assistant.setdefault("meta", {}).update(thought_meta)
 
     if not conversation_messages:
-        raise ValueError("Claude Code session contains no importable messages")
+        raise ImportSourceError(
+            "import_source_no_messages",
+            "Claude Code session contains no importable messages",
+            retryable=False,
+            http_status=422,
+        )
 
     first_user = next(
         (m for m in conversation_messages if m["role"] == "user"),
@@ -7000,6 +7284,7 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
     return _persist_import_snapshot(
         source="claude-code",
         source_path=source,
+        source_info=source_info,
         source_session_id=source_session_id,
         requested_session_id=safe_id,
         force_requested_id=target_session_id is not None,
@@ -9169,7 +9454,11 @@ class CodeHandler(BaseHTTPRequestHandler):
                 src = (body.get("source") or "codex").strip()
                 source_path = (body.get("sourcePath") or "").strip()
                 if not source_path:
-                    self.send_json({"error": "Missing sourcePath"}, 400)
+                    self.send_json({
+                        "error": "Missing sourcePath",
+                        "errorCode": "import_source_missing_path",
+                        "retryable": False,
+                    }, 400)
                     return
                 try:
                     meta = import_session(
@@ -9182,6 +9471,12 @@ class CodeHandler(BaseHTTPRequestHandler):
                         "action": meta.get("importAction") or "created",
                         "session": meta,
                     })
+                except ImportSourceError as exc:
+                    self.send_json({
+                        "error": str(exc),
+                        "errorCode": exc.code,
+                        "retryable": exc.retryable,
+                    }, exc.http_status)
                 except ValueError as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
