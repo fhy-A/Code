@@ -3860,6 +3860,19 @@ def _normalize_session_source(value=None, legacy_group=""):
     return source
 
 
+def _source_badge_visible(record):
+    """Show provenance only while an imported snapshot is pristine in Code."""
+    if not isinstance(record, dict):
+        return False
+    source = _normalize_session_source(record.get("source"), record.get("group"))
+    state = record.get("importState")
+    return bool(
+        source in {"codex", "claude-code"}
+        and isinstance(state, dict)
+        and not state.get("codeModified")
+    )
+
+
 def _legacy_group_for_source(source):
     source = _normalize_session_source(source)
     if source == "codex":
@@ -3949,11 +3962,15 @@ def _session_api_record(session):
     """Expose canonical session fields plus a temporary legacy group alias."""
     record = dict(session or {})
     source = _normalize_session_source(record.get("source"), record.get("group"))
+    source_badge_visible = record.get("sourceBadgeVisible")
+    if not isinstance(source_badge_visible, bool):
+        source_badge_visible = _source_badge_visible(record)
     record["projectId"] = (
         str(record.get("projectId") or record.get("project") or "").strip() or None
     )
     record["cwd"] = _normalize_local_path(record.get("cwd"))
     record["source"] = source
+    record["sourceBadgeVisible"] = source_badge_visible
     record["group"] = _legacy_group_for_source(source)
     record.pop("project", None)
     return record
@@ -3992,6 +4009,7 @@ def _write_session_index_entry(
     project_id=None,
     cwd="",
     source="code",
+    source_badge_visible=False,
 ):
     """Upsert an entry in session_index.jsonl (append-only, newest wins)."""
     entry = json.dumps({
@@ -4004,6 +4022,7 @@ def _write_session_index_entry(
         "projectId": str(project_id or "").strip() or None,
         "cwd": _normalize_local_path(cwd),
         "source": _normalize_session_source(source),
+        "sourceBadgeVisible": bool(source_badge_visible),
     }, ensure_ascii=False)
     ipath = _session_index_path()
     ipath.parent.mkdir(parents=True, exist_ok=True)
@@ -4106,6 +4125,7 @@ def _migrate_sessions_to_hierarchy():
                 project_id=meta.get("projectId"),
                 cwd=meta.get("cwd"),
                 source=_normalize_session_source(meta.get("source"), meta.get("group")),
+                source_badge_visible=_source_badge_visible(meta),
             )
             migrated += 1
         except Exception:
@@ -6170,7 +6190,33 @@ def _refresh_import_divergence(meta, messages):
         state.pop("codeModifiedAt", None)
 
 
+def _sync_import_source_badge_index(meta):
+    """Update the compact index only when an import badge state changed."""
+    if not isinstance(meta, dict) or not meta.get("id"):
+        return
+    visible = _source_badge_visible(meta)
+    current = _read_session_index().get(meta["id"])
+    if (
+        isinstance(current, dict)
+        and current.get("sourceBadgeVisible") is visible
+    ):
+        return
+    _write_session_index_entry(
+        meta["id"],
+        meta.get("title", ""),
+        meta.get("updatedAt", ""),
+        meta.get("messageCount", 0),
+        meta.get("_parentId"),
+        meta.get("_branchDepth", 0),
+        project_id=meta.get("projectId"),
+        cwd=meta.get("cwd"),
+        source=meta.get("source"),
+        source_badge_visible=visible,
+    )
+
+
 def _import_result_record(meta, action, root_session_id):
+    _sync_import_source_badge_index(meta)
     record = _session_api_record(meta)
     record["importAction"] = action
     record["importRootSessionId"] = root_session_id
@@ -6410,6 +6456,7 @@ def _persist_import_snapshot(
         project_id=project_id,
         cwd=cwd,
         source=source,
+        source_badge_visible=_source_badge_visible(meta),
     )
     return _import_result_record(meta, action, root_session_id)
 
@@ -6886,6 +6933,7 @@ def append_index(
     project_id=None,
     cwd="",
     source="code",
+    source_badge_visible=False,
 ):
     """Append a session entry to the sessions index."""
     _write_session_index_entry(
@@ -6896,6 +6944,7 @@ def append_index(
         project_id=project_id,
         cwd=cwd,
         source=source,
+        source_badge_visible=source_badge_visible,
     )
 
 
@@ -10082,6 +10131,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             project_id=project_id,
             cwd=cwd,
             source=meta["source"],
+            source_badge_visible=_source_badge_visible(meta),
         )
         self.send_json({"ok": True, "projectId": project_id, "cwd": cwd})
 
@@ -10089,6 +10139,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         index = _read_session_index()
         sessions = []
         orphans = []
+        index_dirty = False
         for sid, entry in index.items():
             meta_path = session_path(sid)
             if meta_path.exists():
@@ -10096,6 +10147,15 @@ class CodeHandler(BaseHTTPRequestHandler):
                     entry.get("source"),
                     entry.get("group"),
                 )
+                source_badge_visible = entry.get("sourceBadgeVisible")
+                if not isinstance(source_badge_visible, bool):
+                    source_badge_visible = (
+                        _source_badge_visible(read_json(meta_path, {}))
+                        if source in {"codex", "claude-code"}
+                        else False
+                    )
+                    entry["sourceBadgeVisible"] = source_badge_visible
+                    index_dirty = True
                 sessions.append(_session_api_record({
                     "id": sid,
                     "title": entry.get("title", ""),
@@ -10111,11 +10171,12 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "projectId": entry.get("projectId") or entry.get("project"),
                     "cwd": entry.get("cwd"),
                     "source": source,
+                    "sourceBadgeVisible": source_badge_visible,
                 }))
             else:
                 orphans.append(sid)
-        # Purge orphan entries to keep index clean
-        if orphans:
+        # Purge orphan entries and persist the one-time source badge projection.
+        if orphans or index_dirty:
             for sid in orphans:
                 index.pop(sid, None)
             entries = list(index.values())
@@ -10177,6 +10238,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             project_id=project_id,
             cwd=cwd,
             source=source,
+            source_badge_visible=_source_badge_visible(meta),
         )
         meta["_filePath"] = str(session_path(session_id).resolve())
         meta["_messageFilePath"] = str(messages_path(session_id).resolve())
@@ -10252,6 +10314,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 project_id=session.get("projectId"),
                 cwd=session.get("cwd"),
                 source=session.get("source"),
+                source_badge_visible=_source_badge_visible(session),
             )
         session["_filePath"] = str(path.resolve())
         session["_messageFilePath"] = str(messages_path(session_id).resolve())
@@ -10381,6 +10444,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             project_id=parent_project,
             cwd=parent_cwd,
             source=parent_source,
+            source_badge_visible=_source_badge_visible(child_meta),
         )
         _write_session_index_entry(
             parent_id,
@@ -10392,6 +10456,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             project_id=parent_project,
             cwd=parent_cwd,
             source=parent_source,
+            source_badge_visible=_source_badge_visible(parent),
         )
         child_meta["_filePath"] = str(session_path(child_id).resolve())
         child_meta["_messageFilePath"] = str(messages_path(child_id).resolve())
@@ -10440,6 +10505,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 project_id=meta.get("projectId"),
                 cwd=meta.get("cwd"),
                 source=meta.get("source"),
+                source_badge_visible=_source_badge_visible(meta),
             )
         self.send_json({"ok": True, "appended": len(new_msgs)})
 

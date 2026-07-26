@@ -5665,7 +5665,8 @@ body.theme-dark .syn-fn { color: #61afef; }
   background: color-mix(in srgb, var(--accent) 6%, var(--panel));
 }
 .import-progress[hidden],
-.import-result-actions[hidden] { display: none; }
+.import-result-actions[hidden],
+.import-badge-hint[hidden] { display: none; }
 .import-progress-header {
   display: flex;
   align-items: center;
@@ -5770,6 +5771,12 @@ body.theme-dark .syn-fn { color: #61afef; }
 .import-result.is-success { color: var(--green); }
 .import-result.is-warning { color: var(--yellow); }
 .import-result.is-error { color: var(--red); }
+.import-badge-hint {
+  margin: 1px 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
 .import-result-actions {
   display: flex;
   justify-content: flex-end;

@@ -369,7 +369,7 @@ async function clearRunCheckpoint(ctx) {
       _model: msg._model || undefined,
       _time: msg._time || undefined,
     }));
-    await apiJson(`/api/sessions/${encodeURIComponent(ctx.sessionId)}`, {
+    const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(ctx.sessionId)}`, {
       method: "PUT",
       body: JSON.stringify({
         title: sessionTitle || "Untitled",
@@ -378,7 +378,8 @@ async function clearRunCheckpoint(ctx) {
         lastUsage: getSessionLastUsage(ctx.sessionId),
         runState: clearedRunState,
       }),
-    }).catch(() => {});
+    }).catch(() => null);
+    syncSessionSourceBadgeState(ctx.sessionId, savedSession, { notify: true });
   }
 }
 
@@ -486,7 +487,9 @@ function cacheActiveSessionState() {
         lastUsage: state.lastUsage,
         runState: { ...getSessionRunState(prevId) },
       }),
-    }).catch(() => {});
+    })
+      .then((savedSession) => syncSessionSourceBadgeState(prevId, savedSession))
+      .catch(() => {});
   }
 }
 
@@ -818,6 +821,7 @@ const els = {
 
   sessionCreated: document.getElementById("sessionCreated"),
   sessionUpdated: document.getElementById("sessionUpdated"),
+  sessionSource: document.getElementById("sessionSource"),
 
   sessionFile: document.getElementById("sessionFile"),
 
@@ -946,13 +950,17 @@ const panelsFeature = createPanelsFeature({
   getMessages: () => state.messages,
   getStats: () => state.stats,
   getSessionId: () => state.sessionId,
-  getSession: () => ({
-    id: state.sessionId,
-    createdAt: state.sessionCreated,
-    updatedAt: state.sessionUpdated,
-    _sessionFilePath: state._sessionFilePath,
-    _sessionMessageFilePath: state._sessionMessageFilePath,
-  }),
+  getSession: () => {
+    const summary = state.sessions.find((session) => session.id === state.sessionId);
+    return {
+      id: state.sessionId,
+      createdAt: state.sessionCreated,
+      updatedAt: state.sessionUpdated,
+      source: summary?.source || "code",
+      _sessionFilePath: state._sessionFilePath,
+      _sessionMessageFilePath: state._sessionMessageFilePath,
+    };
+  },
   getSessionLastUsage,
   getContextMessages: getModelContextMessages,
   getContextLimit: getModelContextLimit,
@@ -3753,7 +3761,7 @@ async function renameSession(sessionId, title) {
 
   const session = isCurrent ? null : await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
 
-  await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+  const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
 
     method: "PUT",
 
@@ -3768,6 +3776,7 @@ async function renameSession(sessionId, title) {
     }),
 
   });
+  syncSessionSourceBadgeState(sessionId, savedSession);
 
   if (isCurrent) els.sessionTitle.value = nextTitle;
 
@@ -3994,12 +4003,15 @@ async function refreshProjects() {
 }
 
 function renderSessionSourceBadge(session) {
+  if (session?.sourceBadgeVisible !== true) return "";
   const source = String(session?.source || "").toLowerCase();
   if (source === "codex") {
-    return '<span class="session-source-badge source-codex" title="Codex">Codex</span>';
+    return '<span class="session-source-badge source-codex" title="' +
+      escapeHtml(t("sourceBadgeCodexTitle")) + '">Codex</span>';
   }
   if (source === "claude-code") {
-    return '<span class="session-source-badge source-claude" title="Claude Code">Claude</span>';
+    return '<span class="session-source-badge source-claude" title="' +
+      escapeHtml(t("sourceBadgeClaudeTitle")) + '">Claude</span>';
   }
   return "";
 }
@@ -4801,6 +4813,33 @@ async function loadSession(sessionId) {
 
 
 
+const SOURCE_BADGE_NOTICE_KEY = "code-source-badge-lifecycle-notice-v1";
+
+function syncSessionSourceBadgeState(sessionId, savedSession, options = {}) {
+  if (!sessionId || typeof savedSession?.sourceBadgeVisible !== "boolean") return;
+  const local = state.sessions.find((session) => session.id === sessionId);
+  if (!local) return;
+  const wasVisible = local.sourceBadgeVisible === true;
+  const isVisible = savedSession.sourceBadgeVisible === true;
+  local.sourceBadgeVisible = isVisible;
+  if (savedSession.source) local.source = savedSession.source;
+  if (wasVisible === isVisible) return;
+  renderSessions();
+  if (!wasVisible || isVisible || !options.notify || sessionId !== state.sessionId) return;
+
+  let alreadyExplained = false;
+  try {
+    alreadyExplained = localStorage.getItem(SOURCE_BADGE_NOTICE_KEY) === "1";
+    if (!alreadyExplained) localStorage.setItem(SOURCE_BADGE_NOTICE_KEY, "1");
+  } catch (error) {
+    // Storage can be unavailable in restricted browser contexts; the notice
+    // is still safe to show for the current transition.
+  }
+  if (!alreadyExplained) {
+    showToast(t("importBadgeHiddenToast"), "info", { duration: 7000 });
+  }
+}
+
 async function saveSessionState(sessionId, messages, stats, title, options = {}) {
 
   if (!sessionId) return;
@@ -4840,7 +4879,10 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
   state._sessionSaveChains[sessionId] = savePromise;
 
   try {
-    await savePromise;
+    const savedSession = await savePromise;
+    syncSessionSourceBadgeState(sessionId, savedSession, {
+      notify: options.persistMessages === true,
+    });
   } finally {
     if (state._sessionSaveChains[sessionId] === savePromise) {
       delete state._sessionSaveChains[sessionId];
@@ -4857,7 +4899,7 @@ async function saveCurrentSession() {
 
   if (!state.sessionId) await createSession("New session");
 
-  await apiJson(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
+  const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
 
     method: "PUT",
 
@@ -4887,6 +4929,7 @@ async function saveCurrentSession() {
     }),
 
   });
+  syncSessionSourceBadgeState(state.sessionId, savedSession, { notify: true });
 
   await refreshSessions();
 
@@ -11462,10 +11505,12 @@ function renderImportBatchState() {
   }
 
   var status = document.getElementById("importStatus");
+  var badgeHint = document.getElementById("importBadgeHint");
   var actions = document.getElementById("importResultActions");
   var retryBtn = document.getElementById("importRetryBtn");
   if (_importBusy || !_importLastResult) {
     if (actions) actions.hidden = true;
+    if (badgeHint) badgeHint.hidden = true;
     renderImportFailures([]);
     if (!status) return;
     status.textContent = "";
@@ -11487,6 +11532,15 @@ function renderImportBatchState() {
         ? "is-error"
         : (counts.failed || result.cancelled ? "is-warning" : "is-success")
     );
+  }
+  if (badgeHint) {
+    const hasFreshSnapshot = (
+      Number(counts.created || 0)
+      + Number(counts.updated || 0)
+      + Number(counts.snapshot || 0)
+    ) > 0;
+    badgeHint.hidden = !hasFreshSnapshot;
+    badgeHint.textContent = t("importBadgeLifecycleHint");
   }
 
   var retryableFailures = (result.failures || []).filter(function (failure) {

@@ -28,6 +28,17 @@
     return String(value || "").slice(0, 16).replace("T", " ") || "-";
   }
 
+  function sessionSourceI18nKey(session = {}) {
+    const source = String(session?.source || "code").toLowerCase();
+    if (source === "codex") return "sessionSourceCodex";
+    if (source === "claude-code") return "sessionSourceClaude";
+    return "sessionSourceCode";
+  }
+
+  function formatSessionSource(session = {}, t = (key) => key) {
+    return t(sessionSourceI18nKey(session));
+  }
+
   function calculateSessionStats(options = {}) {
     const messages = Array.isArray(options.messages) ? options.messages.filter(Boolean) : [];
     const usageStats = options.stats || {};
@@ -173,6 +184,13 @@
       const session = getSession() || {};
       elements.sessionCreated.textContent = formatSessionTimestamp(session.createdAt);
       elements.sessionUpdated.textContent = formatSessionTimestamp(session.updatedAt);
+      if (elements.sessionSource) {
+        elements.sessionSource.setAttribute?.(
+          "data-i18n",
+          sessionSourceI18nKey(session),
+        );
+        elements.sessionSource.textContent = formatSessionSource(session, t);
+      }
       elements.sessionFile.textContent = sessionFilePath(session);
       elements.sessionFile.title = `ID: ${getSessionId() || "-"}`;
       elements.msgUser.textContent = stats.counts.user;
@@ -269,7 +287,9 @@
     calculateSessionStats,
     countSessionMessages,
     createPanelsFeature,
+    formatSessionSource,
     formatSessionTimestamp,
     resolveSessionFilePath,
+    sessionSourceI18nKey,
   });
 })(window);

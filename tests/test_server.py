@@ -1451,6 +1451,7 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(meta["title"], "这是第一条消息")
             self.assertEqual(meta["messageCount"], 2)
             self.assertEqual(meta["source"], "codex")
+            self.assertTrue(meta["sourceBadgeVisible"])
             self.assertEqual(meta["cwd"], server._normalize_local_path("/home/test"))
             self.assertIsNone(meta["projectId"])
             self.assertTrue(meta["id"])
@@ -1478,6 +1479,7 @@ class TestCodexImport(unittest.TestCase):
                 )
             }[meta["id"]]
             self.assertEqual(index_entry["source"], "codex")
+            self.assertTrue(index_entry["sourceBadgeVisible"])
             self.assertNotIn("group", index_entry)
             self.assertNotIn("project", index_entry)
 
@@ -1513,6 +1515,7 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(stored_meta["importState"]["source"], "codex")
             self.assertEqual(len(stored_meta["importState"]["sourceSha256"]), 64)
             self.assertFalse(stored_meta["importState"]["codeModified"])
+            self.assertTrue(second["sourceBadgeVisible"])
             self.assertEqual(
                 len(list(sessions_dir.rglob(f"{first['id']}.json"))),
                 1,
@@ -1646,6 +1649,12 @@ class TestCodexImport(unittest.TestCase):
 
                 unchanged = server.import_codex_session(str(source))
                 self.assertEqual(unchanged["importAction"], "continued")
+                self.assertFalse(unchanged["sourceBadgeVisible"])
+                self.assertFalse(
+                    server._read_session_index()[first["id"]][
+                        "sourceBadgeVisible"
+                    ]
+                )
 
                 source.write_text(self._make_codex_jsonl([
                     ("user", "Initial request"),
@@ -1658,6 +1667,7 @@ class TestCodexImport(unittest.TestCase):
                 repeated = server.import_codex_session(str(source))
 
             self.assertEqual(snapshot["importAction"], "snapshot-created")
+            self.assertTrue(snapshot["sourceBadgeVisible"])
             self.assertNotEqual(snapshot["id"], first["id"])
             self.assertEqual(snapshot["importRootSessionId"], first["id"])
             self.assertEqual(

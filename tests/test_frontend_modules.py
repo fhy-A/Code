@@ -754,6 +754,36 @@ process.stdout.write(JSON.stringify({zh, en, persisted, changed, missingKeys}));
         self.assertIn("services.notifications = Object.freeze", source)
         self.assertIn("showToast", source)
         self.assertIn("notify", source)
+        script = """
+const scheduled = [];
+const children = [];
+global.window = {
+  Code: {services: {}},
+  document: {
+    getElementById: () => ({appendChild: (child) => children.push(child)}),
+    createElement: () => ({style: {}, remove: () => {}}),
+  },
+  setTimeout: (_callback, delay) => scheduled.push(delay),
+};
+require("./src/services/notifications.js");
+const {showToast} = window.Code.services.notifications;
+showToast("default");
+showToast("long", "info", {duration: 7000});
+showToast("bounded", "info", {duration: 99999});
+process.stdout.write(JSON.stringify({scheduled, childCount: children.length}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"scheduled": [3000, 7000, 15000], "childCount": 3},
+        )
 
     def test_api_client_exports_and_preserves_json_request_behavior(self):
         self.assertIn("services.apiClient = Object.freeze", API_CLIENT_SOURCE)
@@ -2314,7 +2344,12 @@ process.stdout.write(JSON.stringify({
         script = r"""
 global.window = {Code: {ui: {}}, setTimeout: (callback) => callback()};
 require("./src/ui/panels.js");
-const {calculateSessionStats, createPanelsFeature, resolveSessionFilePath} = window.Code.ui.panels;
+const {
+  calculateSessionStats,
+  createPanelsFeature,
+  formatSessionSource,
+  resolveSessionFilePath,
+} = window.Code.ui.panels;
 const makeElement = (id) => {
   const classes = new Set();
   const listeners = {};
@@ -2343,7 +2378,7 @@ const makeElement = (id) => {
 const elementNames = [
   "statsPanel", "toolLogPanel", "branchPanel", "usageStrip", "toolLogToggle",
   "toggleBranches", "copySessionPath", "statInput", "statOutput", "statCache",
-  "statContext", "ctxRingFill", "sessionCreated", "sessionUpdated", "sessionFile",
+  "statContext", "ctxRingFill", "sessionCreated", "sessionUpdated", "sessionSource", "sessionFile",
   "msgUser", "msgAssistant", "msgTools", "msgTotal", "tokenInput", "tokenOutput",
   "tokenCache", "tokenCacheWriteRow", "tokenCacheWrite", "tokenTotal", "tokenContext",
 ];
@@ -2374,6 +2409,7 @@ const feature = createPanelsFeature({
     id: "session-1",
     createdAt: "2026-07-19T10:11:12Z",
     updatedAt: "2026-07-19T12:13:14Z",
+    source: "claude-code",
     _sessionMessageFilePath: "C:/data/session-1.jsonl",
   }),
   getSessionLastUsage: () => ({prompt_tokens: 600}),
@@ -2425,6 +2461,8 @@ process.stdout.write(JSON.stringify({
     statContext: elements.statContext.textContent,
     sessionCreated: elements.sessionCreated.textContent,
     sessionUpdated: elements.sessionUpdated.textContent,
+    sessionSource: elements.sessionSource.textContent,
+    sessionSourceKey: elements.sessionSource.attrs["data-i18n"],
     sessionFile: elements.sessionFile.textContent,
     sessionFileTitle: elements.sessionFile.title,
     msgTotal: elements.msgTotal.textContent,
@@ -2448,6 +2486,8 @@ process.stdout.write(JSON.stringify({
   statsWithoutCacheWrite,
   absolutePath: resolveSessionFilePath({id: "s1"}, {sessionId: "s1", absolutePath: "D:/sessions/s1.jsonl"}),
   fallbackPath: resolveSessionFilePath({id: "s2"}),
+  codexSource: formatSessionSource({source: "codex"}, (key) => `t:${key}`),
+  codeSource: formatSessionSource({}, (key) => `t:${key}`),
   registeredDocumentClick: Boolean(documentListeners.click),
 }));
 """
@@ -2474,6 +2514,8 @@ process.stdout.write(JSON.stringify({
             "statContext": "60%",
             "sessionCreated": "2026-07-19 10:11",
             "sessionUpdated": "2026-07-19 12:13",
+            "sessionSource": "sessionSourceClaude",
+            "sessionSourceKey": "sessionSourceClaude",
             "sessionFile": "C:/data/session-1.jsonl",
             "sessionFileTitle": "ID: session-1",
             "msgTotal": 4,
@@ -2498,6 +2540,8 @@ process.stdout.write(JSON.stringify({
         self.assertFalse(data["statsWithoutCacheWrite"]["cacheWriteReported"])
         self.assertEqual(data["absolutePath"], "D:/sessions/s1.jsonl")
         self.assertEqual(data["fallbackPath"], "code/data/sessions/s2.jsonl")
+        self.assertEqual(data["codexSource"], "t:sessionSourceCodex")
+        self.assertEqual(data["codeSource"], "t:sessionSourceCode")
         self.assertTrue(data["registeredDocumentClick"])
 
     def test_preview_feature_exports_parsing_urls_and_width_rules(self):
@@ -3144,6 +3188,10 @@ process.stdout.write(JSON.stringify({
             "importRetryProgress",
             "importFinalizing",
             "importResultCancelled",
+            "importBadgeLifecycleHint",
+            "importBadgeHiddenToast",
+            "sourceBadgeCodexTitle",
+            "sourceBadgeClaudeTitle",
             "importRetryResultPrefix",
             "importRetryFailed",
             "importFailureDetails",
@@ -3167,7 +3215,102 @@ process.stdout.write(JSON.stringify({
         self.assertIn(".import-progress", STYLE_SOURCE)
         self.assertIn(".import-progress-bar", STYLE_SOURCE)
         self.assertIn(".import-result-actions", STYLE_SOURCE)
+        self.assertIn(".import-badge-hint", STYLE_SOURCE)
         self.assertIn(".import-failure-item", STYLE_SOURCE)
+        self.assertIn('id="importBadgeHint"', INDEX_SOURCE)
+
+    def test_import_source_badge_explains_and_follows_snapshot_lifecycle(self):
+        badge_start = APP_SOURCE.index("function renderSessionSourceBadge(")
+        badge_end = APP_SOURCE.index("function renderPinIcon(", badge_start)
+        badge_source = APP_SOURCE[badge_start:badge_end]
+        sync_start = APP_SOURCE.index("function syncSessionSourceBadgeState(")
+        sync_end = APP_SOURCE.index("async function saveSessionState(", sync_start)
+        sync_source = APP_SOURCE[sync_start:sync_end]
+        render_start = APP_SOURCE.index("function renderImportBatchState(")
+        render_end = APP_SOURCE.index("function cancelImportBatch(", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+
+        self.assertIn("session?.sourceBadgeVisible !== true", badge_source)
+        self.assertIn('t("sourceBadgeCodexTitle")', badge_source)
+        self.assertIn('t("sourceBadgeClaudeTitle")', badge_source)
+        self.assertIn("SOURCE_BADGE_NOTICE_KEY", sync_source)
+        self.assertIn(
+            'showToast(t("importBadgeHiddenToast"), "info", { duration: 7000 })',
+            sync_source,
+        )
+        self.assertIn("renderSessions();", sync_source)
+        self.assertIn('t("importBadgeLifecycleHint")', render_source)
+        self.assertIn("counts.snapshot", render_source)
+
+    def test_source_badge_transition_hides_once_and_notifies_once(self):
+        sync_start = APP_SOURCE.index("const SOURCE_BADGE_NOTICE_KEY")
+        sync_end = APP_SOURCE.index("async function saveSessionState(", sync_start)
+        sync_source = APP_SOURCE[sync_start:sync_end]
+        script = f"""
+const vm = require("vm");
+const stored = new Map();
+const renders = [];
+const toasts = [];
+const context = {{
+  state: {{
+    sessionId: "session-1",
+    sessions: [
+      {{id: "session-1", source: "codex", sourceBadgeVisible: true}},
+      {{id: "session-2", source: "claude-code", sourceBadgeVisible: true}},
+    ],
+  }},
+  localStorage: {{
+    getItem: (key) => stored.get(key) || null,
+    setItem: (key, value) => stored.set(key, String(value)),
+  }},
+  renderSessions: () => renders.push("render"),
+  showToast: (...args) => toasts.push(args),
+  t: (key) => key,
+}};
+vm.runInNewContext({json.dumps(sync_source)}, context);
+context.syncSessionSourceBadgeState(
+  "session-1",
+  {{source: "codex", sourceBadgeVisible: false}},
+  {{notify: true}},
+);
+context.state.sessionId = "session-2";
+context.syncSessionSourceBadgeState(
+  "session-2",
+  {{source: "claude-code", sourceBadgeVisible: false}},
+  {{notify: true}},
+);
+context.syncSessionSourceBadgeState(
+  "session-2",
+  {{source: "claude-code", sourceBadgeVisible: false}},
+  {{notify: true}},
+);
+process.stdout.write(JSON.stringify({{
+  sessions: context.state.sessions,
+  renders,
+  toasts,
+  stored: Array.from(stored.entries()),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertFalse(data["sessions"][0]["sourceBadgeVisible"])
+        self.assertFalse(data["sessions"][1]["sourceBadgeVisible"])
+        self.assertEqual(data["renders"], ["render", "render"])
+        self.assertEqual(
+            data["toasts"],
+            [["importBadgeHiddenToast", "info", {"duration": 7000}]],
+        )
+        self.assertEqual(
+            data["stored"],
+            [["code-source-badge-lifecycle-notice-v1", "1"]],
+        )
 
     def test_import_picker_disables_already_imported_sessions(self):
         """Only safe, actionable rows can be selected for import."""

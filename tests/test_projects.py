@@ -323,8 +323,91 @@ class TestSessionContract(ProjectSessionTestCase):
         self.assertEqual(entry["projectId"], "project-1")
         self.assertEqual(entry["cwd"], str(self.project_root.resolve()))
         self.assertEqual(entry["source"], "codex")
+        self.assertFalse(entry["sourceBadgeVisible"])
         self.assertNotIn("project", entry)
         self.assertNotIn("group", entry)
+
+    def test_session_list_backfills_pristine_import_badge_state(self):
+        self.write_session(
+            "session-imported",
+            {
+                "source": "claude-code",
+                "importState": {
+                    "source": "claude-code",
+                    "codeModified": False,
+                },
+            },
+        )
+        handler = self.make_handler()
+
+        server.CodeHandler.get_sessions(handler)
+
+        response = handler.send_json.call_args.args[0]
+        listed = next(
+            item for item in response["data"]
+            if item["id"] == "session-imported"
+        )
+        self.assertTrue(listed["sourceBadgeVisible"])
+        self.assertTrue(
+            server._read_session_index()["session-imported"]["sourceBadgeVisible"]
+        )
+
+    def test_first_code_message_hides_import_badge_and_keeps_source(self):
+        original_messages = [
+            {
+                "role": "system",
+                "content": "Imported boundary",
+                "meta": {"_system": True, "kind": "import-boundary"},
+            },
+            {"role": "user", "content": "Imported request"},
+        ]
+        snapshot_hash = server._import_message_snapshot_hash(original_messages)
+        self.write_session(
+            "session-continued",
+            {
+                "source": "codex",
+                "messageCount": len(original_messages),
+                "importState": {
+                    "source": "codex",
+                    "snapshotSha256": snapshot_hash,
+                    "codeModified": False,
+                },
+            },
+            index_entry=False,
+        )
+        server.write_jsonl(
+            server.messages_path("session-continued"),
+            original_messages,
+        )
+        server._write_session_index_entry(
+            "session-continued",
+            "Session",
+            "2026-07-20T10:00:00",
+            len(original_messages),
+            source="codex",
+            source_badge_visible=True,
+        )
+        continued_messages = [
+            *original_messages,
+            {"role": "user", "content": "Continue in Code"},
+        ]
+        handler = self.make_handler({
+            "title": "Session",
+            "messages": continued_messages,
+        })
+
+        server.CodeHandler.save_session(handler, "session-continued")
+
+        response = handler.send_json.call_args.args[0]
+        stored = server.read_json(
+            server.session_path("session-continued"),
+            {},
+        )
+        index_entry = server._read_session_index()["session-continued"]
+        self.assertEqual(response["source"], "codex")
+        self.assertFalse(response["sourceBadgeVisible"])
+        self.assertTrue(stored["importState"]["codeModified"])
+        self.assertFalse(index_entry["sourceBadgeVisible"])
 
     def test_create_and_save_session_persist_canonical_context(self):
         self.write_project()
@@ -425,6 +508,10 @@ class TestSessionContract(ProjectSessionTestCase):
                 "cwd": str(self.project_root),
                 "source": "codex",
                 "messageCount": 0,
+                "importState": {
+                    "source": "codex",
+                    "codeModified": False,
+                },
             },
         )
         handler = self.make_handler({"title": "Branch"})
@@ -436,6 +523,13 @@ class TestSessionContract(ProjectSessionTestCase):
         self.assertEqual(stored["projectId"], "project-1")
         self.assertEqual(stored["cwd"], str(self.project_root.resolve()))
         self.assertEqual(stored["source"], "codex")
+        self.assertFalse(child["sourceBadgeVisible"])
+        self.assertFalse(
+            server._read_session_index()[child["id"]]["sourceBadgeVisible"]
+        )
+        self.assertTrue(
+            server._read_session_index()["session004"]["sourceBadgeVisible"]
+        )
         self.assertNotIn("group", stored)
 
 

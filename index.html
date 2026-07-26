@@ -112,6 +112,7 @@
           <h3 data-i18n="sessionInfo">会话信息</h3>
           <div class="kv"><span data-i18n="sessionName">名称</span><input id="sessionTitle" value="新会话" data-i18n="sessionTitleDefault" /></div>
           <div class="kv"><span data-i18n="sessionProject">项目</span><code id="sessionGroup">-</code></div>
+          <div class="kv"><span data-i18n="sessionSource">来源</span><code id="sessionSource">Code</code></div>
           <div class="kv"><span data-i18n="created">创建</span><code id="sessionCreated">-</code></div>
           <div class="kv"><span data-i18n="active">活跃</span><code id="sessionUpdated">-</code></div>
           <div class="kv"><span data-i18n="file">文件</span><code id="sessionFile" title="">-</code><button id="copySessionPath" class="copy-mini" type="button" data-i18n="copyBtn">copy</button></div>
@@ -569,6 +570,7 @@
       </div>
       <div id="importList" class="import-list"></div>
       <div id="importStatus" class="import-result" aria-live="polite"></div>
+      <div id="importBadgeHint" class="import-badge-hint" hidden data-i18n="importBadgeLifecycleHint"></div>
       <div id="importResultActions" class="import-result-actions" hidden>
         <button id="importRetryBtn" class="mini-btn" type="button"></button>
       </div>

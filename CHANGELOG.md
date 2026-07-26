@@ -4,6 +4,25 @@
 
 ## 2026-07-27 · Codex
 
+### 导入来源徽标生命周期收口（开发版本基线仍为 v0.5.28）
+
+- Codex / Claude Code 来源徽标改为“刚导入快照”状态，而非永久会话属性：首次导入、未续聊的原地更新和新更新快照显示徽标；重命名、置顶和调整项目归属不会误清除；用户在 Code 中继续对话后即时隐藏，创建分支时新分支不继承短期徽标，未修改的原会话保持原状态。
+- 后端新增稳定的 `sourceBadgeVisible` 投影并同步写入会话索引，统一覆盖新建、保存、追加消息、项目调整、迁移、分支和重复导入路径；旧索引缺少字段时按持久化 `importState` 惰性回填，避免重启或旧数据导致徽标重新出现、无法消除或状态失真。
+- 前端在会话保存响应后同步本地徽标状态，无需刷新页面；徽标悬停说明其临时含义，导入结果区提供可持续查看的生命周期提示，首次隐藏时显示一次轻量说明。该说明单独延长至 7 秒，其他通知仍保持默认 3 秒。
+- Session Info 新增永久“来源”字段：徽标隐藏或创建分支后仍可查看 `Code / 源自 Codex / 源自 Claude Code`，避免短期状态承担长期溯源职责。
+- 补齐上述状态、悬停说明、导入提示、Session Info 和通知的中英文即时切换；同时在 `TODO.md` 记录低优先级“从文件导入”方案，仅自动识别任意位置的已知 Codex / Claude Code JSONL，并继续遵守只读预检和现有导入安全闭环。
+- 验证：
+  - `python -m pytest tests/test_server.py tests/test_projects.py tests/test_frontend_modules.py tests/test_p2_coverage.py tests/test_subagent_frontend.py tests/test_concurrency.py -q`：**427 passed, 17 subtests passed**；
+  - `python -m unittest discover -s tests`：**797 tests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/core/i18n.js`、`node --check src/services/notifications.js`、`node --check src/ui/panels.js` 与 `git diff --check` 通过；`server.py:3176` 仍仅报告既有的无效转义 `SyntaxWarning`；
+  - 用户人工确认来源徽标隐藏时机、长期来源展示和延长后的轻量提示均正常。
+
+**涉及文件**：`server.py`、`app.js`、`index.html`、`styles.css`、`src/core/i18n.js`、`src/services/notifications.js`、`src/ui/panels.js`、`tests/test_server.py`、`tests/test_projects.py`、`tests/test_frontend_modules.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
 ### Token 总输入与缓存读写语义收口（开发版本基线仍为 v0.5.28）
 
 - 统一实时响应、后台任务、子 Agent、会话账本和导入会话的 Token 协议：`input` 表示包含缓存命中部分在内的总输入，`cache` 表示总输入中的缓存读取子集；缓存读取不再被重复加入 Token 合计，合计继续使用“总输入 + 输出”。
