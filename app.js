@@ -5194,7 +5194,7 @@ function isAutoSessionTitle(title = "") {
 
 
 
-function applySidebarWidth(width = state.sidebarWidth) {
+function applySidebarWidth(width = state.sidebarWidth, persist = true) {
 
   const next = Math.min(Math.max(Number(width) || 264, 220), 480);
 
@@ -5204,7 +5204,9 @@ function applySidebarWidth(width = state.sidebarWidth) {
 
   document.documentElement.style.setProperty("--sidebar-width", `${next}px`);
 
-  localStorage.setItem("code-sidebar-width", String(next));
+  if (persist) localStorage.setItem("code-sidebar-width", String(next));
+
+  return next;
 
 }
 
@@ -10393,6 +10395,8 @@ function exportMarkdown() {
 let sidebarDragState = null;
 
 let sidebarMainDragState = null;
+let sidebarMainResizeFrame = 0;
+let pendingSidebarWidth = null;
 
 
 
@@ -10818,15 +10822,40 @@ function finishSidebarMainDrag(event) {
 
   }
 
+  if (sidebarMainResizeFrame) {
+
+    cancelAnimationFrame(sidebarMainResizeFrame);
+
+    sidebarMainResizeFrame = 0;
+
+  }
+
+  applySidebarWidth(pendingSidebarWidth ?? state.sidebarWidth, true);
+
+  pendingSidebarWidth = null;
+
   sidebarMainDragState = null;
 
   document.body.classList.remove("resizing-sidebar-main");
+
+  document.documentElement.style.removeProperty("--drag-message-list-width");
 
 }
 
 els.sidebarResizer.addEventListener("pointerdown", (event) => {
 
+  event.preventDefault();
+
   sidebarMainDragState = { startX: event.clientX, startWidth: state.sidebarWidth };
+  pendingSidebarWidth = state.sidebarWidth;
+
+  const messageListWidth = els.messageList?.getBoundingClientRect?.().width || 0;
+
+  if (messageListWidth) {
+
+    document.documentElement.style.setProperty("--drag-message-list-width", `${messageListWidth}px`);
+
+  }
 
   els.sidebarResizer.setPointerCapture(event.pointerId);
 
@@ -10838,7 +10867,17 @@ els.sidebarResizer.addEventListener("pointermove", (event) => {
 
   if (!sidebarMainDragState) return;
 
-  applySidebarWidth(sidebarMainDragState.startWidth + (event.clientX - sidebarMainDragState.startX));
+  pendingSidebarWidth = sidebarMainDragState.startWidth + (event.clientX - sidebarMainDragState.startX);
+
+  if (sidebarMainResizeFrame) return;
+
+  sidebarMainResizeFrame = requestAnimationFrame(() => {
+
+    applySidebarWidth(pendingSidebarWidth, false);
+
+    sidebarMainResizeFrame = 0;
+
+  });
 
 });
 

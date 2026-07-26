@@ -2234,13 +2234,15 @@ process.stdout.write(feature.projectMessages(messages, {hasActiveRun: true}));
         script = r"""
 global.window = {Code: {ui: {}}};
 require("./src/ui/timeline.js");
-const {createTimelineFeature, getCompactSummaryStats, syncSessionBranchMetadata} = window.Code.ui.timeline;
+const {createTimelineFeature, DEFAULT_MIN_TIMELINE_WIDTH, TIMELINE_MARKER_PITCH, TIMELINE_MAX_VIEWPORT_RATIO, getCompactSummaryStats, syncSessionBranchMetadata} = window.Code.ui.timeline;
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 let messages = [
   {role: "user", content: "first task"},
-  {role: "assistant", content: "answer"},
-  {role: "user", content: "hidden", meta: {_system: true}},
+  {role: "assistant", content: "tool planning", meta: {toolCalls: [{id: "call-1"}]}},
+  {role: "assistant", content: "## First paragraph\n\n### Second paragraph\n\n\n**Third paragraph**\n- Fourth paragraph"},
   {role: "user", content: "second task " + "x".repeat(90)},
+  {role: "assistant", content: "partial", streaming: true},
+  {role: "assistant", content: "[final response](https://example.com) with `code`"},
 ];
 const sessions = [
   {id: "parent", title: "Parent <one>", _branches: ["child"]},
@@ -2248,22 +2250,93 @@ const sessions = [
 ];
 const loadedBranch = {id: "child", _parentId: "parent", _branchDepth: 1, _branches: [], _branchMsgCount: 3.8};
 const visible = new Set();
-const listeners = [];
-const dots = [
-  {dataset: {index: "0"}, addEventListener: (_type, callback) => listeners.push(callback)},
-  {dataset: {index: "3"}, addEventListener: (_type, callback) => listeners.push(callback)},
-];
+const clickListeners = [];
+const markerStates = new Map();
+const makeMarker = (index) => {
+  const state = {active: false, visible: false, ariaCurrent: null, classes: new Set(), listeners: {}};
+  const marker = {
+    dataset: {index},
+    classList: {
+      toggle: (name, enabled) => {
+        if (enabled) state.classes.add(name);
+        else state.classes.delete(name);
+        if (name === "is-active") state.active = enabled;
+        if (name === "is-visible") state.visible = enabled;
+      },
+    },
+    setAttribute: (name, value) => {
+      if (name === "aria-current") state.ariaCurrent = value;
+    },
+    removeAttribute: (name) => {
+      if (name === "aria-current") state.ariaCurrent = null;
+    },
+    addEventListener: (type, callback) => {
+      if (type === "click") clickListeners.push(callback);
+      state.listeners[type] = callback;
+    },
+  };
+  markerStates.set(index, state);
+  return marker;
+};
+let markers = [];
+let timelineHtmlValue = "";
+let wheelListener = null;
+const timelineAttributes = new Map();
 const timeline = {
-  innerHTML: "",
+  clientHeight: 534,
+  get innerHTML() {
+    return timelineHtmlValue;
+  },
+  set innerHTML(value) {
+    timelineHtmlValue = value;
+    clickListeners.length = 0;
+    markerStates.clear();
+    markers = Array.from(value.matchAll(/data-index="(\d+)"/g), (match) => makeMarker(match[1]));
+  },
   classList: {
     add: (name) => visible.add(name),
     remove: (name) => visible.delete(name),
+    toggle: (name, enabled) => {
+      if (enabled) visible.add(name);
+      else visible.delete(name);
+    },
   },
-  querySelectorAll: () => dots,
+  setAttribute: (name, value) => timelineAttributes.set(name, value),
+  removeAttribute: (name) => timelineAttributes.delete(name),
+  querySelectorAll: (selector) => selector === ".tl-marker" ? markers : [],
+  addEventListener: (type, callback) => {
+    if (type === "wheel") wheelListener = callback;
+  },
+  removeEventListener: () => {},
 };
 let scrolled = null;
+let scrollListener = null;
+let resizeCallback = null;
+let viewportHeight = 720;
+class FakeResizeObserver {
+  constructor(callback) {
+    resizeCallback = callback;
+  }
+  observe() {}
+  disconnect() {}
+}
 const messageContainer = {
-  querySelector: (selector) => ({scrollIntoView: (options) => { scrolled = {selector, options}; }}),
+  scrollTop: 0,
+  clientHeight: 400,
+  clientWidth: 800,
+  addEventListener: (type, callback) => {
+    if (type === "scroll") scrollListener = callback;
+  },
+  removeEventListener: () => {},
+  querySelector: (selector) => {
+    const index = selector.match(/"(\d+)"/)?.[1] || "0";
+    const target = {
+      offsetTop: index === "3" ? 500 : Number(index) * 100,
+      offsetParent: messageContainer,
+      scrollIntoView: (options) => { scrolled = {selector, options}; },
+    };
+    return target;
+  },
 };
 const t = (key, params = {}) => `${key}:${Object.values(params).join("|")}`;
 const feature = createTimelineFeature({
@@ -2276,6 +2349,9 @@ const feature = createTimelineFeature({
   getSessionId: () => "child",
   getTimelineElement: () => timeline,
   getMessageContainer: () => messageContainer,
+  requestAnimationFrame: (callback) => callback(),
+  ResizeObserver: FakeResizeObserver,
+  getViewportHeight: () => viewportHeight,
 });
 const metaStats = feature.getCompactSummaryStats({meta: {compressed: 5, estimatedSaved: 9000}});
 const legacyStats = getCompactSummaryStats({content: "自动压缩 4 条，节省 ~1.5k"});
@@ -2287,10 +2363,69 @@ const nodes = feature.projectTimelineNodes(messages);
 feature.renderTimeline();
 const timelineHtml = timeline.innerHTML;
 const wasVisible = visible.has("visible");
-listeners[1]();
+const initialActive = markerStates.get("0").active;
+const initialVisible = markerStates.get("0").visible;
+messageContainer.scrollTop = 450;
+scrollListener();
+const activeAfterScroll = markerStates.get("3").active;
+const activeAria = markerStates.get("3").ariaCurrent;
+const firstVisibleAfterScroll = markerStates.get("0").visible;
+const secondVisibleAfterScroll = markerStates.get("3").visible;
+clickListeners[1]();
+messageContainer.clientWidth = 500;
+resizeCallback();
+const hiddenWhenNarrow = visible.has("is-space-constrained");
+const narrowAriaHidden = timelineAttributes.get("aria-hidden");
+messageContainer.clientWidth = 700;
+resizeCallback();
+const restoredWhenWide = !visible.has("is-space-constrained");
+const restoredAriaHidden = timelineAttributes.has("aria-hidden");
+messages = Array.from({length: 70}, (_, index) => ({role: "user", content: `task ${index}`}));
+messageContainer.scrollTop = 450;
+feature.renderTimeline();
+const longMarkerCount = markers.length;
+const longWindowStart = timeline.innerHTML.match(/data-window-start="(\d+)"/)?.[1];
+const longFirstIndex = markers[0].dataset.index;
+markerStates.get("4").listeners.mouseenter();
+const hoverCascade = {
+  main: markerStates.get("4").classes.has("is-hover-main"),
+  upperNear1: markerStates.get("3").classes.has("is-hover-near-1"),
+  lowerNear1: markerStates.get("5").classes.has("is-hover-near-1"),
+  upperNear2: markerStates.get("2").classes.has("is-hover-near-2"),
+  lowerNear2: markerStates.get("6").classes.has("is-hover-near-2"),
+  outside: markerStates.get("1").classes.has("is-hover-near-2"),
+};
+markerStates.get("4").listeners.mouseleave();
+const hoverCascadeCleared = !Array.from(markerStates.values())
+  .some((state) => Array.from(state.classes).some((name) => name.startsWith("is-hover-")));
+let wheelPrevented = 0;
+let wheelStopped = 0;
+const wheelEvent = {
+  deltaY: 100,
+  preventDefault: () => { wheelPrevented += 1; },
+  stopPropagation: () => { wheelStopped += 1; },
+};
+wheelListener(wheelEvent);
+const afterWheelStart = timeline.innerHTML.match(/data-window-start="(\d+)"/)?.[1];
+const afterWheelFirstIndex = markers[0].dataset.index;
+for (let index = 0; index < 10; index += 1) wheelListener(wheelEvent);
+const endWindowStart = timeline.innerHTML.match(/data-window-start="(\d+)"/)?.[1];
+wheelListener(wheelEvent);
+const boundaryWindowStart = timeline.innerHTML.match(/data-window-start="(\d+)"/)?.[1];
+timeline.clientHeight = 214;
+viewportHeight = 400;
+resizeCallback();
+const smallViewportMarkerCount = markers.length;
+timeline.clientHeight = 534;
+viewportHeight = 720;
+resizeCallback();
+const restoredViewportMarkerCount = markers.length;
 messages = [{role: "user", content: "only one"}];
 feature.renderTimeline();
 process.stdout.write(JSON.stringify({
+  defaultMinTimelineWidth: DEFAULT_MIN_TIMELINE_WIDTH,
+  timelineMarkerPitch: TIMELINE_MARKER_PITCH,
+  timelineMaxViewportRatio: TIMELINE_MAX_VIEWPORT_RATIO,
   metaStats,
   legacyStats,
   compact,
@@ -2300,7 +2435,30 @@ process.stdout.write(JSON.stringify({
   nodes,
   timelineHtml,
   wasVisible,
+  initialActive,
+  initialVisible,
+  activeAfterScroll,
+  activeAria,
+  firstVisibleAfterScroll,
+  secondVisibleAfterScroll,
   scrolled,
+  hiddenWhenNarrow,
+  narrowAriaHidden,
+  restoredWhenWide,
+  restoredAriaHidden,
+  longMarkerCount,
+  longWindowStart,
+  longFirstIndex,
+  hoverCascade,
+  hoverCascadeCleared,
+  afterWheelStart,
+  afterWheelFirstIndex,
+  endWindowStart,
+  boundaryWindowStart,
+  smallViewportMarkerCount,
+  restoredViewportMarkerCount,
+  wheelPrevented,
+  wheelStopped,
   clearedHtml: timeline.innerHTML,
   visibleAfterClear: visible.has("visible"),
 }));
@@ -2314,6 +2472,9 @@ process.stdout.write(JSON.stringify({
             check=True,
         )
         data = json.loads(completed.stdout)
+        self.assertEqual(data["defaultMinTimelineWidth"], 560)
+        self.assertEqual(data["timelineMarkerPitch"], 9)
+        self.assertEqual(data["timelineMaxViewportRatio"], 0.7)
         self.assertEqual(data["metaStats"], {"compressed": 5, "estimatedSaved": 9000})
         self.assertEqual(data["legacyStats"], {"compressed": 4, "estimatedSaved": 1500})
         self.assertIn('class="msg branch-indicator compact-indicator"', data["compact"])
@@ -2323,14 +2484,89 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["branchMarker"], {"messageCount": 3, "parentTitle": "Parent <one>"})
         self.assertIn("Parent &lt;one&gt;", data["branch"])
         self.assertEqual([node["index"] for node in data["nodes"]], [0, 3])
-        self.assertTrue(data["nodes"][1]["label"].endswith("..."))
+        self.assertTrue(data["nodes"][1]["label"].endswith("…"))
+        self.assertEqual(
+            data["nodes"][0]["assistantPreview"],
+            "First paragraph\nSecond paragraph\nThird paragraph…",
+        )
+        self.assertEqual(data["nodes"][1]["assistantPreview"], "final response with code")
         self.assertIn('data-index="0"', data["timelineHtml"])
         self.assertIn('data-index="3"', data["timelineHtml"])
+        self.assertIn('class="tl-marker is-edge-start"', data["timelineHtml"])
+        self.assertIn('class="tl-line"', data["timelineHtml"])
+        self.assertIn('role="list"', data["timelineHtml"])
+        self.assertIn("--timeline-visible-count:2", data["timelineHtml"])
+        self.assertIn("timelineJumpTo:first task", data["timelineHtml"])
+        self.assertIn('class="tl-bubble-title">first task</strong>', data["timelineHtml"])
+        self.assertIn('class="tl-bubble-answer">First paragraph', data["timelineHtml"])
+        self.assertIn("Second paragraph", data["timelineHtml"])
+        self.assertIn("Third paragraph…", data["timelineHtml"])
+        self.assertNotIn("## First paragraph", data["timelineHtml"])
+        self.assertNotIn("### Second paragraph", data["timelineHtml"])
+        self.assertNotIn("**Third paragraph**", data["timelineHtml"])
+        self.assertNotIn("https://example.com", data["timelineHtml"])
+        self.assertNotIn("`code`", data["timelineHtml"])
+        self.assertIn('aria-describedby="timeline-preview-0"', data["timelineHtml"])
+        self.assertNotIn("tl-dot", data["timelineHtml"])
         self.assertTrue(data["wasVisible"])
+        self.assertTrue(data["initialActive"])
+        self.assertTrue(data["initialVisible"])
+        self.assertTrue(data["activeAfterScroll"])
+        self.assertEqual(data["activeAria"], "location")
+        self.assertTrue(data["firstVisibleAfterScroll"])
+        self.assertTrue(data["secondVisibleAfterScroll"])
         self.assertEqual(data["scrolled"]["selector"], '[data-msg-index="3"]')
         self.assertEqual(data["scrolled"]["options"], {"behavior": "smooth", "block": "start"})
+        self.assertTrue(data["hiddenWhenNarrow"])
+        self.assertEqual(data["narrowAriaHidden"], "true")
+        self.assertTrue(data["restoredWhenWide"])
+        self.assertFalse(data["restoredAriaHidden"])
+        self.assertEqual(data["longMarkerCount"], 56)
+        self.assertEqual(data["longWindowStart"], "0")
+        self.assertEqual(data["longFirstIndex"], "0")
+        self.assertEqual(
+            data["hoverCascade"],
+            {
+                "main": True,
+                "upperNear1": True,
+                "lowerNear1": True,
+                "upperNear2": True,
+                "lowerNear2": True,
+                "outside": False,
+            },
+        )
+        self.assertTrue(data["hoverCascadeCleared"])
+        self.assertEqual(data["afterWheelStart"], "3")
+        self.assertEqual(data["afterWheelFirstIndex"], "3")
+        self.assertEqual(data["endWindowStart"], "14")
+        self.assertEqual(data["boundaryWindowStart"], "14")
+        self.assertEqual(data["smallViewportMarkerCount"], 24)
+        self.assertEqual(data["restoredViewportMarkerCount"], 56)
+        self.assertGreaterEqual(data["wheelPrevented"], 1)
+        self.assertEqual(data["wheelPrevented"], data["wheelStopped"])
         self.assertEqual(data["clearedHtml"], "")
         self.assertFalse(data["visibleAfterClear"])
+        self.assertIn('id="chatTimeline" role="navigation"', INDEX_SOURCE)
+        self.assertIn('data-i18n-aria-label="timelineNavigation"', INDEX_SOURCE)
+        for key in (
+            "timelineNavigation",
+            "timelineJumpTo",
+            "timelineUntitled",
+            "timelineNoFinalAnswer",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2, key)
+        self.assertIn(".tl-marker.is-visible .tl-line", STYLE_SOURCE)
+        self.assertIn(".tl-marker.is-active .tl-line", STYLE_SOURCE)
+        self.assertIn(".tl-marker:hover .tl-line", STYLE_SOURCE)
+        self.assertIn("width: 19px", STYLE_SOURCE)
+        self.assertIn("left: 9px", STYLE_SOURCE)
+        self.assertIn(".chat-timeline.visible.is-space-constrained", STYLE_SOURCE)
+        self.assertIn("max-height: min(70vh, 100%)", STYLE_SOURCE)
+        self.assertIn("grid-template-rows: repeat(var(--timeline-visible-count)", STYLE_SOURCE)
+        self.assertIn("row-gap: 2px", STYLE_SOURCE)
+        self.assertIn("-webkit-line-clamp: 3", STYLE_SOURCE)
+        self.assertIn("white-space: pre-line", STYLE_SOURCE)
+        self.assertNotIn(".tl-dot {", STYLE_SOURCE)
 
     def test_panels_ui_owns_session_stats_fields_and_top_panel_interactions(self):
         self.assertIn("Code.ui.panels = Object.freeze", PANELS_SOURCE)
@@ -2597,6 +2833,129 @@ process.stdout.write(JSON.stringify({
             data["raw"],
             "/api/file?path=folder%2Fa%20b.pdf&raw=1&v=version%201",
         )
+
+    def test_sidebar_resizers_coalesce_layout_updates_and_defer_persistence(self):
+        script = """
+const frames = [];
+const windowListeners = {};
+global.window = {
+  Code: {features: {}},
+  innerWidth: 1000,
+  addEventListener: (type, callback) => { windowListeners[type] = callback; },
+  requestAnimationFrame: (callback) => {
+    frames.push(callback);
+    return frames.length;
+  },
+  cancelAnimationFrame: () => {},
+};
+require("./src/features/preview.js");
+const {createPreviewFeature} = window.Code.features.preview;
+const handlers = {};
+const makeEventElement = (name) => ({
+  addEventListener: (type, callback) => { handlers[`${name}:${type}`] = callback; },
+});
+const workbenchClasses = new Set(["preview-open"]);
+const bodyClasses = new Set();
+const styleWrites = [];
+const styleRemovals = [];
+const storageWrites = [];
+const previewResizer = {
+  ...makeEventElement("resizer"),
+  setPointerCapture: () => {},
+  hasPointerCapture: () => true,
+  releasePointerCapture: () => {},
+};
+const elements = {
+  refreshPreview: makeEventElement("refresh"),
+  copyPreview: makeEventElement("copy"),
+  togglePreview: makeEventElement("toggle"),
+  previewResizer,
+  workbench: {classList: {contains: (name) => workbenchClasses.has(name)}},
+  messageList: {getBoundingClientRect: () => ({width: 640})},
+  filePreview: {getBoundingClientRect: () => ({width: 420})},
+};
+const documentRef = {
+  documentElement: {
+    style: {
+      setProperty: (...args) => styleWrites.push(args),
+      removeProperty: (name) => styleRemovals.push(name),
+    },
+  },
+  body: {
+    classList: {
+      add: (name) => bodyClasses.add(name),
+      remove: (name) => bodyClasses.delete(name),
+    },
+  },
+};
+const feature = createPreviewFeature({
+  state: {previewWidth: 420},
+  elements,
+  apiJson: async () => ({}),
+  renderMarkdown: (value) => value,
+  document: documentRef,
+  storage: {
+    setItem: (...args) => storageWrites.push(args),
+    removeItem: () => {},
+  },
+});
+feature.bind();
+handlers["resizer:pointerdown"]({clientX: 600, pointerId: 7, preventDefault: () => {}});
+handlers["resizer:pointermove"]({clientX: 570});
+handlers["resizer:pointermove"]({clientX: 540});
+const framesBeforeFlush = frames.length;
+const writesBeforeFlush = styleWrites.slice();
+const storageBeforeFlush = storageWrites.slice();
+frames.shift()();
+const writesAfterFlush = styleWrites.slice();
+const storageAfterFlush = storageWrites.slice();
+handlers["resizer:pointerup"]({pointerId: 7});
+process.stdout.write(JSON.stringify({
+  framesBeforeFlush,
+  writesBeforeFlush,
+  storageBeforeFlush,
+  writesAfterFlush,
+  storageAfterFlush,
+  storageWrites,
+  styleRemovals,
+  resizingAfterFinish: bodyClasses.has("resizing-preview"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["framesBeforeFlush"], 1)
+        self.assertEqual(
+            data["writesBeforeFlush"],
+            [
+                ["--drag-message-list-width", "640px"],
+                ["--drag-preview-content-width", "420px"],
+            ],
+        )
+        self.assertEqual(data["storageBeforeFlush"], [])
+        self.assertEqual(data["writesAfterFlush"][-1], ["--preview-width", "480px"])
+        self.assertEqual(data["storageAfterFlush"], [])
+        self.assertEqual(data["storageWrites"], [["code-preview-width", "480"]])
+        self.assertEqual(
+            data["styleRemovals"],
+            ["--drag-message-list-width", "--drag-preview-content-width"],
+        )
+        self.assertFalse(data["resizingAfterFinish"])
+
+        self.assertIn("function applySidebarWidth(width = state.sidebarWidth, persist = true)", APP_SOURCE)
+        self.assertIn("applySidebarWidth(pendingSidebarWidth, false)", APP_SOURCE)
+        self.assertIn("applySidebarWidth(pendingSidebarWidth ?? state.sidebarWidth, true)", APP_SOURCE)
+        self.assertIn('removeProperty("--drag-message-list-width")', APP_SOURCE)
+        self.assertIn(".resizing-sidebar-main :where(.message-list)", STYLE_SOURCE)
+        self.assertIn(".resizing-preview .file-preview", STYLE_SOURCE)
+        self.assertIn("contain: layout paint", STYLE_SOURCE)
+        self.assertIn(".workbench.preview-open {\n    grid-template-columns: minmax(0, 1fr) 0;", STYLE_SOURCE)
 
     def test_app_uses_extracted_modules_without_duplicate_definitions(self):
         self.assertIn("const { uiIcon } = window.Code.core.icons", APP_SOURCE)

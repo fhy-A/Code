@@ -461,6 +461,8 @@
       pendingWidth = null;
       dragState = null;
       documentRef.body.classList.remove("resizing-preview");
+      documentRef?.documentElement?.style?.removeProperty?.("--drag-message-list-width");
+      documentRef?.documentElement?.style?.removeProperty?.("--drag-preview-content-width");
     }
 
     function bind() {
@@ -480,7 +482,22 @@
       els.closePreview?.addEventListener("click", close);
       els.previewResizer.addEventListener("pointerdown", (event) => {
         if (!els.workbench.classList.contains("preview-open")) return;
+        event.preventDefault();
         dragState = { startX: event.clientX, startWidth: state.previewWidth };
+        const messageListWidth = els.messageList?.getBoundingClientRect?.().width || 0;
+        const previewContentWidth = els.filePreview?.getBoundingClientRect?.().width || 0;
+        if (messageListWidth) {
+          documentRef?.documentElement?.style?.setProperty(
+            "--drag-message-list-width",
+            `${messageListWidth}px`,
+          );
+        }
+        if (previewContentWidth) {
+          documentRef?.documentElement?.style?.setProperty(
+            "--drag-preview-content-width",
+            `${previewContentWidth}px`,
+          );
+        }
         els.previewResizer.setPointerCapture(event.pointerId);
         documentRef.body.classList.add("resizing-preview");
       });

@@ -146,6 +146,7 @@ input:focus, select:focus, textarea:focus {
   z-index: 5;
   width: 8px;
   cursor: col-resize;
+  touch-action: none;
 }
 .sidebar-resizer::after {
   content: "";
@@ -1069,6 +1070,31 @@ input:focus, select:focus, textarea:focus {
 
 .resizing-sidebar-main .pi-shell {
   transition: none;
+}
+
+.resizing-sidebar-main .pi-sidebar,
+.resizing-sidebar-main .chat-pane,
+.resizing-preview .chat-pane,
+.resizing-preview .preview-pane {
+  contain: layout paint;
+}
+
+.resizing-sidebar-main .messages,
+.resizing-preview .messages {
+  overflow-x: hidden;
+  pointer-events: none;
+}
+
+.resizing-sidebar-main :where(.message-list),
+.resizing-preview :where(.message-list) {
+  width: var(--drag-message-list-width, 100%);
+  min-width: var(--drag-message-list-width, 0);
+}
+
+.resizing-preview .file-preview {
+  width: var(--drag-preview-content-width, 100%);
+  min-width: var(--drag-preview-content-width, 0);
+  max-width: none;
 }
 
 .chat-pane {
@@ -2395,6 +2421,7 @@ input:focus, select:focus, textarea:focus {
   z-index: 5;
   width: 8px;
   cursor: col-resize;
+  touch-action: none;
 }
 
 .preview-resizer::after {
@@ -3112,6 +3139,10 @@ input:focus, select:focus, textarea:focus {
 
   .preview-pane {
     display: none !important;
+  }
+
+  .workbench.preview-open {
+    grid-template-columns: minmax(0, 1fr) 0;
   }
 
   .top-panel {
@@ -5038,74 +5069,195 @@ body.theme-dark .syn-fn { color: #61afef; }
 
 .chat-timeline {
   position: absolute;
-  left: 14px;
-  top: 52px;
+  left: 9px;
+  top: 58px;
   bottom: 128px;
+  width: 32px;
   z-index: 2;
   overflow: visible;
   display: none;
   align-items: center;
+  justify-content: center;
   pointer-events: none;
-  opacity: .45;
-  transition: opacity .12s;
 }
 .chat-timeline.visible {
   display: flex;
 }
-.chat-timeline:hover {
-  opacity: 1;
+.chat-timeline.visible.is-space-constrained {
+  display: none;
 }
 .tl-track {
-  display: flex;
-  flex-direction: column;
+  position: relative;
+  width: 100%;
+  height: var(--timeline-window-height);
+  max-height: min(70vh, 100%);
+  display: grid;
+  grid-template-rows: repeat(var(--timeline-visible-count), minmax(1px, 7px));
+  row-gap: 2px;
   align-items: center;
-  gap: 6px;
+  justify-items: start;
   pointer-events: auto;
 }
-.tl-dot-wrap {
+.tl-track.has-before,
+.tl-track.has-after {
+  cursor: ns-resize;
+}
+.tl-marker {
   position: relative;
-  flex-shrink: 0;
+  width: 30px;
+  min-width: 30px;
+  height: 100%;
+  min-height: 1px;
+  max-height: 7px;
+  padding: 0 1px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--muted);
   cursor: pointer;
 }
-.tl-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--faint) 50%, var(--bg));
-  transition: transform .12s;
+.tl-marker:hover,
+.tl-marker:focus-visible {
+  outline: 0;
+  background: transparent;
 }
-.tl-dot.compact {
-  border-radius: 1px;
-  width: 4px;
-  height: 4px;
-  background: var(--muted);
+.tl-line {
+  width: 7px;
+  height: 2px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--faint) 62%, var(--bg));
+  opacity: .48;
+  transform-origin: left center;
+  transition:
+    width .14s ease,
+    background-color .14s ease,
+    opacity .14s ease;
 }
-.tl-dot-wrap:hover .tl-dot {
-  transform: scale(2.2);
+.chat-timeline:hover .tl-line {
+  opacity: .62;
+}
+.tl-marker.is-visible .tl-line {
+  width: 11px;
+  background: color-mix(in srgb, var(--muted) 78%, var(--bg));
+  opacity: .82;
+}
+.tl-marker.is-active .tl-line {
+  width: 14px;
+  background: color-mix(in srgb, var(--text) 82%, var(--bg));
+  opacity: .92;
+}
+.tl-marker:hover .tl-line,
+.tl-marker:focus-visible .tl-line,
+.tl-marker.is-hover-main .tl-line {
+  width: 19px;
+  background: var(--text);
+  opacity: .96;
+}
+.tl-marker.is-hover-near-1 .tl-line {
+  width: 14px;
+  background: color-mix(in srgb, var(--text) 66%, var(--bg));
+  opacity: .86;
+}
+.tl-marker.is-hover-near-2 .tl-line {
+  width: 10px;
+  background: color-mix(in srgb, var(--muted) 76%, var(--bg));
+  opacity: .74;
 }
 .tl-bubble {
   position: absolute;
-  left: 12px;
+  left: 25px;
   top: 50%;
-  transform: translateY(-50%);
+  z-index: 4;
+  transform: translate(-4px, -50%);
   padding: 5px 8px;
   border-radius: 5px;
   background: var(--panel-3);
   border: 1px solid var(--line);
   box-shadow: 0 1px 4px rgba(0,0,0,.05);
-  width: max-content;
-  max-width: 300px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: min(340px, calc(100vw - 96px));
+  max-width: none;
+  text-align: left;
+  white-space: normal;
   font-size: 12px;
   font-weight: 450;
+  line-height: 1.45;
   color: var(--text);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity .12s;
+  transition: opacity .12s ease, transform .12s ease, visibility 0s linear .12s;
 }
-.tl-dot-wrap:hover .tl-bubble { opacity: 1; }
+.tl-bubble-title {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 750;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-bubble-answer {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-weight: 450;
+  line-height: 1.45;
+  white-space: pre-line;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.tl-bubble-answer.is-empty {
+  color: var(--faint);
+  font-style: italic;
+}
+.tl-marker:hover .tl-bubble,
+.tl-marker:focus-visible .tl-bubble {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(0, -50%);
+  transition-delay: 0s;
+}
+.tl-marker.is-edge-start .tl-bubble {
+  top: 0;
+  transform: translate(-4px, 0);
+}
+.tl-marker.is-edge-start:hover .tl-bubble,
+.tl-marker.is-edge-start:focus-visible .tl-bubble {
+  transform: translate(0, 0);
+}
+.tl-marker.is-edge-end .tl-bubble {
+  top: auto;
+  bottom: 0;
+  transform: translate(-4px, 0);
+}
+.tl-marker.is-edge-end:hover .tl-bubble,
+.tl-marker.is-edge-end:focus-visible .tl-bubble {
+  transform: translate(0, 0);
+}
+
+@media (max-width: 760px) {
+  .chat-timeline {
+    left: 4px;
+    width: 26px;
+  }
+
+  .tl-marker {
+    width: 24px;
+    min-width: 24px;
+  }
+
+  .tl-bubble {
+    left: 21px;
+    width: min(300px, calc(100vw - 70px));
+  }
+}
 
 /* ── Skills two-panel layout ── */
 
