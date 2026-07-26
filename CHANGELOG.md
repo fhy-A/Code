@@ -2,9 +2,32 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-26 · Codex
+
+### Codex 风格项目/会话数据协议（第一阶段，开发版本基线仍为 v0.5.28）
+
+- 项目注册表改为最小字段 `id / label / path`；`name / rootPath` 只作为当前开发界面的临时 API 兼容别名，不再写入磁盘。
+- 会话元数据和 `sessions/index.jsonl` 统一使用 `projectId / cwd / source`；`source` 仅记录 `code / codex / claude-code` 来源，不再作为二级分组实体。
+- 新建、保存、增量保存和分支会话都会持久化同一份项目上下文；分支继承父会话的 `projectId / cwd / source`。
+- 项目与会话工作目录强绑定：归属项目的会话必须使用项目路径；取消归属时保留原 `cwd`，删除项目只解除关联，不删除会话。
+- Codex / Claude Code 导入会读取源会话的 `cwd`；目录真实存在时自动复用或创建对应项目，不存在时仍保留 `cwd` 但保持未归属。
+- 新增幂等迁移 `_migrate_codex_project_sessions_support()`：
+  - 兼容旧 `name / rootPath`、索引 `project` 和会话 `group`；
+  - 移除魔法项目 `__unclassified__`；
+  - 以索引和磁盘会话文件的并集重建规范索引，避免漏掉未入索引的会话；
+  - 使用 `data/.codex_projects_migrated` 防止重复执行。
+- 项目 CRUD、会话项目分配以及导入 API 已接入新协议；为避免第一阶段破坏当前未提交界面，响应暂时保留 `name / rootPath / group` 兼容字段。
+- 运行时项目数据和迁移标记已加入 `.gitignore`，不会把用户本地项目注册表提交进仓库。
+- 测试：新增 12 个项目/会话协议测试，扩充 Codex / Claude Code 导入断言；全量 **745 passed, 226 subtests passed**。
+- 本阶段未提交 Claude Code 留下的侧栏两级分组界面实验；下一阶段按“项目 → 有限数量会话”重做，并在人工验证后再提交。
+
+**涉及文件**：`.gitignore`、`server.py`、`tests/test_projects.py`、`tests/test_server.py`
+
+---
+
 ## 2026-07-25 · Claude Code
 
-### 会话导入功能 (v0.5.29)
+### 会话导入功能（开发中，版本基线仍为 v0.5.28）
 
 - **后端**：`list_importable_sessions(source, query)` 统一扫描 Codex（`~/.codex/sessions/`）和 Claude Code（`~/.claude/projects/*/`）
 - **格式转换**：Codex（`response_item` → Code JSONL）、Claude Code（`type:user/assistant` → Code JSONL）

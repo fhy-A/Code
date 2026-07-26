@@ -5,6 +5,9 @@ data/attachments/
 data/file-backups/
 data/config.json
 data/runtime/
+data/projects.json
+data/.projects_migrated
+data/.codex_projects_migrated
 
 # Python
 __pycache__/

@@ -1266,6 +1266,11 @@ class TestCodexImport(unittest.TestCase):
         self.assertIn("Python 脚本", sessions[0]["title"])
         self.assertGreater(sessions[0]["messageCount"], 0)  # estimated from file size
         self.assertEqual(sessions[0]["sourceId"], "test-session")
+        self.assertEqual(sessions[0]["source"], "codex")
+        self.assertEqual(
+            sessions[0]["cwd"],
+            server._normalize_local_path("/home/test"),
+        )
         self.assertTrue(sessions[0]["sourcePath"].endswith(".jsonl"))
 
     def test_list_codex_sessions_search_by_filename(self):
@@ -1311,6 +1316,7 @@ class TestCodexImport(unittest.TestCase):
             meta = server._read_codex_session_meta(jsonl)
         self.assertEqual(meta["title"], "项目交接测试")
         self.assertGreater(meta["message_count"], 0)  # estimated from file size
+        self.assertEqual(meta["cwd"], server._normalize_local_path("/home/test"))
 
     def test_import_codex_session_creates_code_files(self):
         """Import creates .jsonl, .json, and updates index."""
@@ -1331,6 +1337,9 @@ class TestCodexImport(unittest.TestCase):
 
             self.assertEqual(meta["title"], "这是第一条消息")
             self.assertEqual(meta["messageCount"], 2)
+            self.assertEqual(meta["source"], "codex")
+            self.assertEqual(meta["cwd"], server._normalize_local_path("/home/test"))
+            self.assertIsNone(meta["projectId"])
             self.assertTrue(meta["id"])
 
             jsonl_files = list(date_dir.glob("*.jsonl"))
@@ -1342,6 +1351,19 @@ class TestCodexImport(unittest.TestCase):
             self.assertEqual(len(msgs), 2)
             self.assertEqual(msgs[0]["role"], "user")
             self.assertEqual(msgs[0]["content"], "这是第一条消息")
+            stored = server.read_json(json_files[0], {})
+            self.assertNotIn("group", stored)
+            index_entry = {
+                item["id"]: item
+                for item in (
+                    json.loads(line)
+                    for line in idx.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+            }[meta["id"]]
+            self.assertEqual(index_entry["source"], "codex")
+            self.assertNotIn("group", index_entry)
+            self.assertNotIn("project", index_entry)
 
     def test_import_codex_session_rejects_nonexistent_file(self):
         with self.assertRaises(ValueError):
@@ -1411,6 +1433,11 @@ class TestCodexImport(unittest.TestCase):
         self.assertEqual(sessions[0]["title"], "帮我优化数据库查询")
         self.assertEqual(sessions[0]["messageCount"], 2)
         self.assertEqual(sessions[0]["project"], "my-project")
+        self.assertEqual(sessions[0]["source"], "claude-code")
+        self.assertEqual(
+            sessions[0]["cwd"],
+            server._normalize_local_path("/home/test/project"),
+        )
         self.assertTrue(sessions[0]["id"].startswith("claude-"))
 
     def test_import_claude_session(self):
@@ -1430,10 +1457,31 @@ class TestCodexImport(unittest.TestCase):
                 meta = server.import_claude_session(str(jsonl))
             self.assertEqual(meta["title"], "Claude 导入测试")
             self.assertEqual(meta["messageCount"], 4)
+            self.assertEqual(meta["source"], "claude-code")
+            self.assertEqual(
+                meta["cwd"],
+                server._normalize_local_path("/home/test/project"),
+            )
+            self.assertIsNone(meta["projectId"])
             # Find the created jsonl file (may be in any subdirectory)
             created = list(sessions_dir.rglob(f"{meta['id']}.jsonl"))
             self.assertEqual(len(created), 1,
                             f"Expected 1 jsonl for {meta['id']}, found {len(created)} in {list(sessions_dir.rglob('*'))}")
+            stored_files = list(sessions_dir.rglob(f"{meta['id']}.json"))
+            self.assertEqual(len(stored_files), 1)
+            stored = server.read_json(stored_files[0], {})
+            self.assertNotIn("group", stored)
+            index_entry = {
+                item["id"]: item
+                for item in (
+                    json.loads(line)
+                    for line in (sessions_dir / "index.jsonl").read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    if line.strip()
+                )
+            }[meta["id"]]
+            self.assertEqual(index_entry["source"], "claude-code")
 
     def test_unified_list_api(self):
         """list_importable_sessions dispatches correctly."""

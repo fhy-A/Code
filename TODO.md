@@ -1,6 +1,6 @@
 ﻿# Code TODO
 
-_上次更新：2026-07-25_
+_上次更新：2026-07-26_
 
 本清单只保留尚未完成的工作；已交付内容统一查阅 `CHANGELOG.md`。
 
@@ -27,11 +27,10 @@ _上次更新：2026-07-25_
 
 ## P1.5 · 会话导入收尾
 
-- 导入后分组折叠/展开稳定性修复
+- 在新侧栏中把 `source` 仅作为来源徽标/筛选信息，不再生成 Codex / Claude Code 二级分组
 - Codex 导入的模型名提取（turn_context.model） ✅
 - 导入时更新时间戳为当前时间 ✅
 - Codex 导入内容块类型兼容（input_text/output_text/text） ✅
-- 导入的会话正确归入来源分组（group 字段） ✅
 - 导入窗口交互：标签切换即时 + 搜索 + 全选/多选 ✅
 
 ## P1 · Code 核心能力
@@ -43,7 +42,9 @@ _上次更新：2026-07-25_
 - ~~增强错误分类与恢复建议~~ ✅ v0.5.29 后端 error_code 7 分类 + 前端 _errorCodeDisplay 映射 + _formatAgentError 差异化展示
 - 重做登录后的新手指引，使 workbar 授权、Key 获取、模型选择与首次任务形成连续流程；旧版指引已移除。
 - 加强 Skill 执行证据校验，避免只输出结论而未实际完成 Skill 要求。
-- **左侧栏会话列表 + 项目/分组架构重构**：参考 Claude Code（项目=工作目录）和 Codex（显式项目实体 + thread-project-assignments）的模型。当前只有扁平 `group` 字段，需要增加 Project 一层（id/name/rootPath），会话可归属项目 + 分组。涉及：`data/projects.json`、session 元数据加 `projectId`、`index.jsonl` 加 `project`、sidebar 改两级树、项目选择器、未分类会话、重构 `renderSessions()`
+- **完成 Codex 风格项目/会话界面第二阶段**：移除 `Project > Source Group > Session` 和 `__unclassified__`；改为 `Project > Session`，每个项目默认显示 3 条最近会话，当前会话始终可见，并提供“显示全部/收起”
+- **完成会话运行目录闭环**：项目选择、当前会话、文件树根目录和 Agent 工具 `cwd` 必须保持一致；未归属会话继续使用自身 `cwd`
+- 为上述界面补齐中英文即时切换、窄屏布局和来源徽标，并按人工测试步骤验证后提交
 - 继续拆分 `app.js` 第四阶段，迁移剩余高耦合的会话与运行时逻辑。
 - 补全 workbar 用量体验：在不暴露敏感信息的前提下展示账号、会话和任务维度的 Token / 成本信息。
 - ~~**EXE 安装路径与桌面快捷方式**~~ ✅✅✅ v0.5.27→v0.5.28 端到端更新重启验证通过

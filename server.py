@@ -45,6 +45,8 @@ except ImportError:
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("CODE_DATA_DIR") or (APP_DIR / "data"))
 SESSIONS_DIR = DATA_DIR / "sessions"
+PROJECTS_PATH = DATA_DIR / "projects.json"
+PROJECTS_MIGRATION_FLAG = DATA_DIR / ".codex_projects_migrated"
 FILE_BACKUP_DIR = DATA_DIR / "file-backups"
 ATTACHMENTS_DIR = DATA_DIR / "attachments"
 MEMORY_DIR = DATA_DIR / "memory"
@@ -3566,6 +3568,207 @@ def _session_index_path():
     return SESSIONS_DIR / "index.jsonl"
 
 
+# ── Project helpers ──
+
+_SESSION_SOURCE_KINDS = {"code", "codex", "claude-code"}
+
+
+def _normalize_local_path(value):
+    """Return a stable absolute path string without requiring it to exist."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return os.path.abspath(os.path.expanduser(raw))
+
+
+def _path_identity(value):
+    """Return a case-normalized key for comparing local project paths."""
+    normalized = _normalize_local_path(value)
+    if not normalized:
+        return ""
+    return os.path.normcase(os.path.normpath(normalized))
+
+
+def _normalize_project_record(project):
+    """Normalize legacy and current project records to the Codex-style schema."""
+    if not isinstance(project, dict):
+        return None
+    project_id = str(project.get("id") or "").strip()
+    if project_id == "__unclassified__":
+        return None
+    path = _normalize_local_path(project.get("path") or project.get("rootPath"))
+    if not path:
+        return None
+    if not project_id:
+        project_id = hashlib.sha256(
+            f"code-project\0{_path_identity(path)}".encode("utf-8")
+        ).hexdigest()[:16]
+    label = str(project.get("label") or project.get("name") or Path(path).name or path).strip()
+    return {
+        "id": project_id,
+        "label": label,
+        "path": path,
+    }
+
+
+def _read_projects():
+    """Return normalized Codex-style project records."""
+    raw = read_json(PROJECTS_PATH, [])
+    if isinstance(raw, dict):
+        raw = raw.get("projects") or raw.get("items") or []
+    if not isinstance(raw, list):
+        return []
+    projects = []
+    seen_ids = set()
+    seen_paths = set()
+    for item in raw:
+        project = _normalize_project_record(item)
+        if not project:
+            continue
+        path_key = _path_identity(project["path"])
+        if project["id"] in seen_ids or path_key in seen_paths:
+            continue
+        seen_ids.add(project["id"])
+        seen_paths.add(path_key)
+        projects.append(project)
+    projects.sort(
+        key=lambda item: (
+            str(item.get("label") or "").casefold(),
+            _path_identity(item.get("path")),
+        ),
+    )
+    return projects
+
+
+def _write_projects(projects):
+    """Atomically write normalized Codex-style project records."""
+    normalized = []
+    for item in projects or []:
+        project = _normalize_project_record(item)
+        if project:
+            normalized.append(project)
+    write_json(PROJECTS_PATH, normalized)
+
+
+def _project_api_record(project):
+    """Expose the new schema plus temporary aliases for the current dev UI."""
+    if not project:
+        return None
+    return {
+        **project,
+        "name": project["label"],
+        "rootPath": project["path"],
+    }
+
+
+def _find_project(project_id):
+    """Return project dict or None."""
+    for p in _read_projects():
+        if p.get("id") == project_id:
+            return p
+    return None
+
+
+def _find_project_by_path(path):
+    path_key = _path_identity(path)
+    if not path_key:
+        return None
+    for project in _read_projects():
+        if _path_identity(project.get("path")) == path_key:
+            return project
+    return None
+
+
+def _ensure_project_for_path(path, label=None):
+    """Return the matching project, creating one for an existing directory."""
+    normalized = _normalize_local_path(path)
+    if not normalized:
+        return None
+    root = Path(normalized)
+    if not root.exists() or not root.is_dir():
+        return None
+    existing = _find_project_by_path(normalized)
+    if existing:
+        return existing
+    project = {
+        "id": uuid.uuid4().hex[:16],
+        "label": str(label or root.name or normalized).strip(),
+        "path": normalized,
+    }
+    projects = _read_projects()
+    projects.append(project)
+    _write_projects(projects)
+    return project
+
+
+def _normalize_session_source(value=None, legacy_group=""):
+    if isinstance(value, dict):
+        value = value.get("kind") or value.get("type")
+    source = str(value or "").strip().lower()
+    if not source:
+        legacy = str(legacy_group or "").strip().lower()
+        if legacy == "codex":
+            source = "codex"
+        elif legacy in {"claude", "claude code", "claude-code"}:
+            source = "claude-code"
+        else:
+            source = "code"
+    if source not in _SESSION_SOURCE_KINDS:
+        return "code"
+    return source
+
+
+def _legacy_group_for_source(source):
+    source = _normalize_session_source(source)
+    if source == "codex":
+        return "Codex"
+    if source == "claude-code":
+        return "Claude Code"
+    return ""
+
+
+def _session_location(project_id=None, cwd=None, use_config_fallback=False):
+    """Resolve a session's project and cwd without allowing them to diverge."""
+    project_id = str(project_id or "").strip() or None
+    project = _find_project(project_id) if project_id else None
+    if project_id and not project:
+        raise ValueError("project not found")
+    project_path = project.get("path") if project else ""
+    requested_cwd = _normalize_local_path(cwd)
+    if project_path and requested_cwd and _path_identity(project_path) != _path_identity(requested_cwd):
+        raise ValueError("session cwd must match the project path")
+    resolved_cwd = project_path or requested_cwd
+    if not resolved_cwd and use_config_fallback:
+        resolved_cwd = _normalize_local_path(load_config().get("projectRoot"))
+    return project_id, resolved_cwd
+
+
+def _import_session_location(cwd=None, project_id=None):
+    """Resolve imported source context, optionally overriding it with a project."""
+    if str(project_id or "").strip():
+        return _session_location(project_id, None)
+    resolved_cwd = _normalize_local_path(cwd)
+    project = _ensure_project_for_path(resolved_cwd)
+    return (project.get("id") if project else None), resolved_cwd
+
+
+def _session_api_record(session):
+    """Expose canonical session fields plus a temporary legacy group alias."""
+    record = dict(session or {})
+    source = _normalize_session_source(record.get("source"), record.get("group"))
+    record["projectId"] = (
+        str(record.get("projectId") or record.get("project") or "").strip() or None
+    )
+    record["cwd"] = _normalize_local_path(record.get("cwd"))
+    record["source"] = source
+    record["group"] = _legacy_group_for_source(source)
+    record.pop("project", None)
+    return record
+
+
 def _read_session_index():
     """Read session_index.jsonl into a dict {id: entry}. Missing/corrupt → {}."""
     ipath = _session_index_path()
@@ -3589,7 +3792,17 @@ def _read_session_index():
     return index
 
 
-def _write_session_index_entry(session_id, title, updated_at, message_count, parent_id=None, branch_depth=0):
+def _write_session_index_entry(
+    session_id,
+    title,
+    updated_at,
+    message_count,
+    parent_id=None,
+    branch_depth=0,
+    project_id=None,
+    cwd="",
+    source="code",
+):
     """Upsert an entry in session_index.jsonl (append-only, newest wins)."""
     entry = json.dumps({
         "id": session_id,
@@ -3598,6 +3811,9 @@ def _write_session_index_entry(session_id, title, updated_at, message_count, par
         "messageCount": message_count,
         "_parentId": parent_id,
         "_branchDepth": branch_depth,
+        "projectId": str(project_id or "").strip() or None,
+        "cwd": _normalize_local_path(cwd),
+        "source": _normalize_session_source(source),
     }, ensure_ascii=False)
     ipath = _session_index_path()
     ipath.parent.mkdir(parents=True, exist_ok=True)
@@ -3640,6 +3856,12 @@ def _rebuild_index_if_needed():
                     "messageCount": meta.get("messageCount", 0),
                     "_parentId": meta.get("_parentId"),
                     "_branchDepth": meta.get("_branchDepth", 0),
+                    "projectId": meta.get("projectId"),
+                    "cwd": _normalize_local_path(meta.get("cwd")),
+                    "source": _normalize_session_source(
+                        meta.get("source"),
+                        meta.get("group"),
+                    ),
                 })
         except Exception:
             pass
@@ -3684,11 +3906,112 @@ def _migrate_sessions_to_hierarchy():
                 if not new_jl.exists():
                     shutil.move(str(jl_path), str(new_jl))
             # Index entry
-            _write_session_index_entry(sid, meta.get("title", ""), meta.get("updatedAt", ""), meta.get("messageCount", 0), meta.get("_parentId"), meta.get("_branchDepth", 0))
+            _write_session_index_entry(
+                sid,
+                meta.get("title", ""),
+                meta.get("updatedAt", ""),
+                meta.get("messageCount", 0),
+                meta.get("_parentId"),
+                meta.get("_branchDepth", 0),
+                project_id=meta.get("projectId"),
+                cwd=meta.get("cwd"),
+                source=_normalize_session_source(meta.get("source"), meta.get("group")),
+            )
             migrated += 1
         except Exception:
             pass
     print(f"[migrate] Moved {migrated} sessions, index built.")
+
+
+def _migrate_codex_project_sessions_support():
+    """Normalize projects and sessions to projectId + cwd + source."""
+    if PROJECTS_MIGRATION_FLAG.exists():
+        return False
+
+    projects = _read_projects()
+    _write_projects(projects)
+    projects_by_id = {item["id"]: item for item in projects}
+    index = _read_session_index()
+    meta_paths = {}
+    for pattern in ("*/*/*/*.json", "*.json"):
+        for path in SESSIONS_DIR.glob(pattern):
+            if path.name == "index.jsonl":
+                continue
+            meta_paths[path.stem] = path
+    session_ids = set(index) | set(meta_paths)
+    fallback_cwd = _normalize_local_path(load_config().get("projectRoot"))
+    updated = 0
+    entries = []
+    for sid in session_ids:
+        index_entry = index.get(sid) or {}
+        mp = meta_paths.get(sid)
+        if mp is None:
+            try:
+                mp = session_path(sid)
+            except ValueError:
+                continue
+        if not mp.exists():
+            continue
+        meta = read_json(mp, {})
+        if not meta.get("id"):
+            continue
+        before = json.dumps(meta, ensure_ascii=False, sort_keys=True)
+        project_id = (
+            str(
+                meta.get("projectId")
+                or index_entry.get("projectId")
+                or index_entry.get("project")
+                or ""
+            ).strip()
+            or None
+        )
+        if project_id not in projects_by_id:
+            project_id = None
+        cwd = _normalize_local_path(
+            meta.get("cwd")
+            or index_entry.get("cwd")
+            or ((projects_by_id.get(project_id) or {}).get("path"))
+            or fallback_cwd
+        )
+        source = _normalize_session_source(
+            meta.get("source") or index_entry.get("source"),
+            meta.get("group") or index_entry.get("group"),
+        )
+        meta["projectId"] = project_id
+        meta["cwd"] = cwd
+        meta["source"] = source
+        meta.pop("group", None)
+        after = json.dumps(meta, ensure_ascii=False, sort_keys=True)
+        if after != before:
+            write_json(mp, meta)
+            updated += 1
+        entries.append({
+            "id": sid,
+            "title": meta.get("title", ""),
+            "updatedAt": meta.get("updatedAt", ""),
+            "messageCount": meta.get("messageCount", 0),
+            "_parentId": meta.get("_parentId"),
+            "_branchDepth": meta.get("_branchDepth", 0),
+            "projectId": project_id,
+            "cwd": cwd,
+            "source": source,
+        })
+
+    entries.sort(key=lambda entry: entry.get("updatedAt", ""), reverse=True)
+    payload = "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries)
+    if payload:
+        payload += "\n"
+    _session_index_path().parent.mkdir(parents=True, exist_ok=True)
+    with _json_write_lock:
+        _session_index_path().write_text(payload, encoding="utf-8")
+
+    PROJECTS_MIGRATION_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    PROJECTS_MIGRATION_FLAG.write_text(now_iso(), encoding="utf-8")
+    print(
+        f"[migrate] Codex-style projects: {len(projects)} project(s), "
+        f"updated {updated} session(s), rebuilt {len(entries)} index entries"
+    )
+    return True
 
 
 def read_jsonl(path):
@@ -4936,7 +5259,7 @@ def session_summary(session):
     last_time = session.get("lastMessageTime") or ""
     if not last_time:
         last_time = session.get("updatedAt") or session.get("createdAt") or ""
-    return {
+    return _session_api_record({
         "id": sid,
         "title": session.get("title") or "未命名会话",
         "createdAt": session.get("createdAt"),
@@ -4948,8 +5271,10 @@ def session_summary(session):
         "_branches": session.get("_branches", []),
         "_branchMsgCount": session.get("_branchMsgCount") if "_branchMsgCount" in session else None,
         "runState": session.get("runState") or {},
-        "group": session.get("group") or "",
-    }
+        "projectId": session.get("projectId"),
+        "cwd": session.get("cwd"),
+        "source": _normalize_session_source(session.get("source"), session.get("group")),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -5003,6 +5328,8 @@ def list_codex_sessions(query=None):
                 "title": meta.get("title") or "Codex 会话",
                 "messageCount": meta["message_count"],
                 "createdAt": meta.get("created_at", ""),
+                "cwd": meta.get("cwd", ""),
+                "source": "codex",
                 "sourcePath": str(jsonl_path.resolve()),
             })
         except Exception:
@@ -5048,11 +5375,12 @@ def _read_codex_session_meta(jsonl_path):
 
     Only reads until a title is found and a rough message count is estimated
     (from total line count, capped).  Returns dict with title, message_count,
-    created_at, or None on failure.
+    created_at, cwd, or None on failure.
     """
     title = None
     line_count = 0
     created_at = ""
+    cwd = ""
     try:
         # Quick line count from file size (approx 200 bytes/line average)
         size = jsonl_path.stat().st_size
@@ -5069,7 +5397,7 @@ def _read_codex_session_meta(jsonl_path):
                 line = line.strip()
                 if not line:
                     continue
-                if title and created_at:
+                if title and created_at and cwd:
                     break
                 try:
                     record = json.loads(line)
@@ -5078,8 +5406,11 @@ def _read_codex_session_meta(jsonl_path):
                 rtype = record.get("type", "")
                 payload = record.get("payload") or {}
 
-                if rtype == "session_meta" and not created_at:
-                    created_at = str(payload.get("timestamp") or "")[:19]
+                if rtype == "session_meta":
+                    if not created_at:
+                        created_at = str(payload.get("timestamp") or "")[:19]
+                    if not cwd:
+                        cwd = _normalize_local_path(payload.get("cwd"))
 
                 if rtype == "response_item" and payload.get("type") == "message" and not title:
                     role = payload.get("role", "")
@@ -5107,10 +5438,11 @@ def _read_codex_session_meta(jsonl_path):
         "title": title or jsonl_path.stem,
         "message_count": msg_count,
         "created_at": created_at,
+        "cwd": cwd,
     }
 
 
-def import_codex_session(source_path, target_session_id=None):
+def import_codex_session(source_path, target_session_id=None, project_id=None):
     """Convert a Codex JSONL session to Code format and persist it.
 
     Returns the new session dict on success, or raises ValueError.
@@ -5124,6 +5456,7 @@ def import_codex_session(source_path, target_session_id=None):
     messages = []
 
     current_model = ""
+    source_cwd = ""
     with open(source, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -5135,6 +5468,9 @@ def import_codex_session(source_path, target_session_id=None):
                 continue
             rtype = record.get("type", "")
             payload = record.get("payload") or {}
+
+            if rtype == "session_meta" and isinstance(payload, dict):
+                source_cwd = source_cwd or _normalize_local_path(payload.get("cwd"))
 
             # Track model from turn_context events
             if rtype == "turn_context" and isinstance(payload, dict):
@@ -5172,6 +5508,10 @@ def import_codex_session(source_path, target_session_id=None):
     created_at = (messages[0]["_time"] or now_iso())[:19]
     updated_at = (messages[-1]["_time"] or now_iso())[:19]
     msg_count = len(messages)
+    resolved_project_id, resolved_cwd = _import_session_location(
+        source_cwd,
+        project_id,
+    )
 
     # Write files under the date derived from the first message timestamp
     date_dir = SESSIONS_DIR / created_at[:4] / created_at[5:7] / created_at[8:10]
@@ -5190,33 +5530,42 @@ def import_codex_session(source_path, target_session_id=None):
         "runState": {},
         "messageCount": msg_count,
         "lastMessageTime": now_iso()[:19],
-        "group": "Codex",
+        "projectId": resolved_project_id,
+        "cwd": resolved_cwd,
+        "source": "codex",
     }
-    json_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
-    append_index(safe_id, title, meta["updatedAt"], msg_count, group="Codex")
-    return meta
+    write_json(json_path, meta)
+    append_index(
+        safe_id,
+        title,
+        meta["updatedAt"],
+        msg_count,
+        project_id=resolved_project_id,
+        cwd=resolved_cwd,
+        source="codex",
+    )
+    return _session_api_record(meta)
 
 
-def append_index(session_id, title, updated_at, message_count, group=None):
+def append_index(
+    session_id,
+    title,
+    updated_at,
+    message_count,
+    project_id=None,
+    cwd="",
+    source="code",
+):
     """Append a session entry to the sessions index."""
-    idx_path = SESSIONS_DIR / "index.jsonl"
-    entry_dict = {
-        "id": session_id,
-        "title": title,
-        "updatedAt": updated_at,
-        "messageCount": message_count,
-        "_parentId": None,
-        "_branchDepth": 0,
-    }
-    if group:
-        entry_dict["group"] = group
-    entry = json.dumps(entry_dict, ensure_ascii=False)
-    try:
-        with open(idx_path, "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
-    except OSError:
-        pass
+    _write_session_index_entry(
+        session_id,
+        title,
+        updated_at,
+        message_count,
+        project_id=project_id,
+        cwd=cwd,
+        source=source,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -5236,12 +5585,12 @@ def list_importable_sessions(source, query=None):
     raise ValueError(f"Unknown import source: {source}")
 
 
-def import_session(source, source_path):
+def import_session(source, source_path, project_id=None):
     """Import a session from *source* and return the new session metadata."""
     if source == "codex":
-        return import_codex_session(source_path)
+        return import_codex_session(source_path, project_id=project_id)
     if source == "claude-code":
-        return import_claude_session(source_path)
+        return import_claude_session(source_path, project_id=project_id)
     raise ValueError(f"Unknown import source: {source}")
 
 
@@ -5289,6 +5638,8 @@ def list_claude_sessions(query=None):
                 "title": title or "Claude 会话",
                 "messageCount": meta["message_count"],
                 "createdAt": meta.get("created_at", ""),
+                "cwd": meta.get("cwd", ""),
+                "source": "claude-code",
                 "sourcePath": str(jsonl_path.resolve()),
                 "project": jsonl_path.parent.name,
             })
@@ -5324,6 +5675,7 @@ def _read_claude_session_meta(jsonl_path):
     """Fast metadata extraction from a Claude Code JSONL."""
     title = None
     created_at = ""
+    cwd = ""
     line_count = 0
     try:
         size = jsonl_path.stat().st_size
@@ -5334,7 +5686,7 @@ def _read_claude_session_meta(jsonl_path):
         with open(jsonl_path, "r", encoding="utf-8") as fh:
             for line in fh:
                 line_count += 1
-                if title and created_at and line_count > 200:
+                if title and created_at and cwd and line_count > 200:
                     break
                 line = line.strip()
                 if not line:
@@ -5346,6 +5698,8 @@ def _read_claude_session_meta(jsonl_path):
                 rtype = record.get("type", "")
                 if rtype not in ("user", "assistant"):
                     continue
+                if not cwd:
+                    cwd = _normalize_local_path(record.get("cwd"))
                 timestamp = str(record.get("timestamp") or "")
                 if not created_at and timestamp:
                     created_at = timestamp[:19]
@@ -5361,11 +5715,15 @@ def _read_claude_session_meta(jsonl_path):
         return None
     if not created_at:
         created_at = now_iso()[:19]
-    return {"title": title, "message_count": max(1, est_lines),
-            "created_at": created_at}
+    return {
+        "title": title,
+        "message_count": max(1, est_lines),
+        "created_at": created_at,
+        "cwd": cwd,
+    }
 
 
-def import_claude_session(source_path, target_session_id=None):
+def import_claude_session(source_path, target_session_id=None, project_id=None):
     """Convert a Claude Code JSONL session to Code format and persist it."""
     source = Path(source_path).resolve()
     if not source.is_file():
@@ -5377,6 +5735,7 @@ def import_claude_session(source_path, target_session_id=None):
         ).hexdigest()[:16])
     safe_id = safe_session_id(session_id)
     messages = []
+    source_cwd = ""
 
     with open(source, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -5390,6 +5749,7 @@ def import_claude_session(source_path, target_session_id=None):
             rtype = record.get("type", "")
             if rtype not in ("user", "assistant"):
                 continue
+            source_cwd = source_cwd or _normalize_local_path(record.get("cwd"))
             msg = record.get("message") or {}
             role = msg.get("role", "")
             if role not in ("user", "assistant"):
@@ -5411,6 +5771,10 @@ def import_claude_session(source_path, target_session_id=None):
     created_at = (messages[0]["_time"] or now_iso())[:19]
     updated_at = (messages[-1]["_time"] or now_iso())[:19]
     msg_count = len(messages)
+    resolved_project_id, resolved_cwd = _import_session_location(
+        source_cwd,
+        project_id,
+    )
 
     date_dir = _session_date_dir(session_id)
     date_dir.mkdir(parents=True, exist_ok=True)
@@ -5426,12 +5790,21 @@ def import_claude_session(source_path, target_session_id=None):
         "lastUsage": {}, "runState": {},
         "messageCount": msg_count,
         "lastMessageTime": now_iso()[:19],
-        "group": "Claude Code",
+        "projectId": resolved_project_id,
+        "cwd": resolved_cwd,
+        "source": "claude-code",
     }
-    json_path_out.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
-    append_index(safe_id, title, meta["updatedAt"], msg_count, group="Claude Code")
-    return meta
+    write_json(json_path_out, meta)
+    append_index(
+        safe_id,
+        title,
+        meta["updatedAt"],
+        msg_count,
+        project_id=resolved_project_id,
+        cwd=resolved_cwd,
+        source="claude-code",
+    )
+    return _session_api_record(meta)
 
 
 def resolve_project_path(relative_path=""):
@@ -7523,6 +7896,19 @@ class CodeHandler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
+            if route == "/api/projects":
+                self.send_json({
+                    "data": [_project_api_record(project) for project in _read_projects()]
+                })
+                return
+            if route.startswith("/api/projects/"):
+                pid = route.rsplit("/", 1)[-1]
+                proj = _find_project(pid)
+                if proj:
+                    self.send_json(_project_api_record(proj))
+                else:
+                    self.send_json({"error": "project not found"}, 404)
+                return
             if route == "/api/sessions":
                 self.get_sessions()
                 return
@@ -7581,7 +7967,11 @@ class CodeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Missing sourcePath"}, 400)
                     return
                 try:
-                    meta = import_session(src, source_path)
+                    meta = import_session(
+                        src,
+                        source_path,
+                        project_id=body.get("projectId"),
+                    )
                     self.send_json({"ok": True, "session": meta})
                 except ValueError as exc:
                     self.send_json({"error": str(exc)}, 400)
@@ -7720,6 +8110,12 @@ class CodeHandler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/sessions/") and self.path.endswith("/branch"):
                 self.branch_session(self.path.rsplit("/", 2)[-2])
                 return
+            if self.path == "/api/projects":
+                self.create_project()
+                return
+            if self.path.startswith("/api/projects/") and self.path.endswith("/rename"):
+                self.rename_project(self.path.rsplit("/", 2)[-2])
+                return
             if self.path == "/api/sessions":
                 self.create_session()
                 return
@@ -7794,6 +8190,9 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         try:
+            if self.path.startswith("/api/sessions/") and self.path.endswith("/project"):
+                self.assign_session_project(self.path.rsplit("/", 2)[-2])
+                return
             if self.path.startswith("/api/sessions/") and self.path.endswith("/archive"):
                 self.archive_session(self.path.rsplit("/", 2)[-2])
                 return
@@ -7844,6 +8243,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                 if skill_name:
                     self.send_json(delete_skill(skill_name))
                     return
+            if self.path.startswith("/api/projects/"):
+                pid = self.path.rsplit("/", 1)[-1]
+                self.delete_project(pid)
+                return
             if self.path.startswith("/api/sessions/"):
                 self.delete_session(self.path.rsplit("/", 1)[-1])
                 return
@@ -7919,6 +8322,123 @@ class CodeHandler(BaseHTTPRequestHandler):
         result = execute_registered_tool("read_skill_resource", self.read_body_json())
         self.send_json(result, 200 if result.get("ok") else 404)
 
+    # ── Project API handlers ──
+
+    def create_project(self):
+        """POST /api/projects — create a project for an existing directory."""
+        body = self.read_body_json()
+        raw_path = str(body.get("path") or body.get("rootPath") or "").strip()
+        if not raw_path:
+            self.send_json({"error": "path required"}, 400)
+            return
+        root = Path(raw_path).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            self.send_json({"error": "Directory does not exist"}, 400)
+            return
+        label = str(body.get("label") or body.get("name") or "").strip() or root.name
+        projects = _read_projects()
+        for p in projects:
+            if _path_identity(p.get("path")) == _path_identity(root):
+                self.send_json({"error": "Project already exists for this directory"}, 409)
+                return
+        proj = {
+            "id": uuid.uuid4().hex[:16],
+            "label": label,
+            "path": str(root),
+        }
+        projects.append(proj)
+        _write_projects(projects)
+        self.send_json(_project_api_record(proj), 201)
+
+    def rename_project(self, project_id):
+        """POST /api/projects/:id/rename — rename a project."""
+        body = self.read_body_json()
+        label = str(body.get("label") or body.get("name") or "").strip()
+        if not label:
+            self.send_json({"error": "label required"}, 400)
+            return
+        projects = _read_projects()
+        for p in projects:
+            if p.get("id") == project_id:
+                p["label"] = label
+                _write_projects(projects)
+                self.send_json(_project_api_record(p))
+                return
+        self.send_json({"error": "project not found"}, 404)
+
+    def delete_project(self, project_id):
+        """DELETE /api/projects/:id — unassign sessions, remove project."""
+        projects = _read_projects()
+        proj = next((p for p in projects if p.get("id") == project_id), None)
+        if not proj:
+            self.send_json({"error": "project not found"}, 404)
+            return
+        index = _read_session_index()
+        for sid, entry in index.items():
+            entry_project_id = entry.get("projectId") or entry.get("project")
+            source = _normalize_session_source(entry.get("source"), entry.get("group"))
+            cwd = _normalize_local_path(entry.get("cwd"))
+            if entry_project_id == project_id:
+                mp = session_path(sid)
+                if mp.exists():
+                    meta = read_json(mp, {})
+                    meta["projectId"] = None
+                    meta["cwd"] = _normalize_local_path(meta.get("cwd") or proj.get("path"))
+                    meta["source"] = _normalize_session_source(
+                        meta.get("source"),
+                        meta.get("group"),
+                    )
+                    meta.pop("group", None)
+                    write_json(mp, meta)
+                    cwd = meta["cwd"]
+                    source = meta["source"]
+                entry_project_id = None
+            entry["projectId"] = entry_project_id
+            entry["cwd"] = cwd
+            entry["source"] = source
+            entry.pop("project", None)
+            entry.pop("group", None)
+        entries = list(index.values())
+        entries.sort(key=lambda e: e.get("updatedAt", ""), reverse=True)
+        payload = "\n".join(
+            json.dumps(e, ensure_ascii=False) for e in entries
+        ) + ("\n" if entries else "")
+        with _json_write_lock:
+            _session_index_path().write_text(payload, encoding="utf-8")
+        # Remove project
+        projects = [p for p in projects if p.get("id") != project_id]
+        _write_projects(projects)
+        self.send_json({"ok": True})
+
+    def assign_session_project(self, session_id):
+        """PUT /api/sessions/:id/project — assign session to a project."""
+        body = self.read_body_json()
+        requested_project_id = str(body.get("projectId") or "").strip() or None
+        path = session_path(session_id)
+        if not path.exists():
+            self.send_json({"error": "session not found"}, 404)
+            return
+        meta = read_json(path, {})
+        project_id, cwd = _session_location(
+            requested_project_id,
+            None if requested_project_id else meta.get("cwd"),
+        )
+        meta["projectId"] = project_id
+        meta["cwd"] = cwd
+        meta["source"] = _normalize_session_source(meta.get("source"), meta.get("group"))
+        meta.pop("group", None)
+        write_json(path, meta)
+        _write_session_index_entry(
+            session_id,
+            meta.get("title", ""),
+            meta.get("updatedAt", ""), meta.get("messageCount", 0),
+            meta.get("_parentId"), meta.get("_branchDepth", 0),
+            project_id=project_id,
+            cwd=cwd,
+            source=meta["source"],
+        )
+        self.send_json({"ok": True, "projectId": project_id, "cwd": cwd})
+
     def get_sessions(self):
         index = _read_session_index()
         sessions = []
@@ -7926,7 +8446,11 @@ class CodeHandler(BaseHTTPRequestHandler):
         for sid, entry in index.items():
             meta_path = session_path(sid)
             if meta_path.exists():
-                sessions.append({
+                source = _normalize_session_source(
+                    entry.get("source"),
+                    entry.get("group"),
+                )
+                sessions.append(_session_api_record({
                     "id": sid,
                     "title": entry.get("title", ""),
                     "createdAt": "",
@@ -7938,8 +8462,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "_branches": [],
                     "_branchMsgCount": None,
                     "runState": {},
-                    "group": entry.get("group", ""),
-                })
+                    "projectId": entry.get("projectId") or entry.get("project"),
+                    "cwd": entry.get("cwd"),
+                    "source": source,
+                }))
             else:
                 orphans.append(sid)
         # Purge orphan entries to keep index clean
@@ -7963,12 +8489,18 @@ class CodeHandler(BaseHTTPRequestHandler):
         session["messages"] = read_jsonl(messages_path(session_id))
         session["_filePath"] = str(path.resolve())
         session["_messageFilePath"] = str(messages_path(session_id).resolve())
-        self.send_json(session)
+        self.send_json(_session_api_record(session))
 
     def create_session(self):
         body = self.read_body_json()
         session_id = uuid.uuid4().hex[:16]
         messages = body.get("messages") or []
+        project_id, cwd = _session_location(
+            body.get("projectId"),
+            body.get("cwd"),
+            use_config_fallback=True,
+        )
+        source = _normalize_session_source(body.get("source"), body.get("group"))
         meta = {
             "id": session_id,
             "title": body.get("title") or "新会话",
@@ -7979,6 +8511,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             "runState": body.get("runState") or {},
             "messageCount": len(messages),
             "lastMessageTime": _last_msg_time(messages),
+            "projectId": project_id,
+            "cwd": cwd,
+            "source": source,
         }
         parent_id = body.get("_parentId")
         if parent_id:
@@ -7986,11 +8521,21 @@ class CodeHandler(BaseHTTPRequestHandler):
             meta["_branchDepth"] = body.get("_branchDepth", 1)
         write_json(session_path(session_id), meta)
         write_jsonl(messages_path(session_id), messages)
-        _write_session_index_entry(session_id, meta["title"], meta["updatedAt"], len(messages), parent_id, body.get("_branchDepth", 0))
+        _write_session_index_entry(
+            session_id,
+            meta["title"],
+            meta["updatedAt"],
+            len(messages),
+            parent_id,
+            body.get("_branchDepth", 0),
+            project_id=project_id,
+            cwd=cwd,
+            source=source,
+        )
         meta["_filePath"] = str(session_path(session_id).resolve())
         meta["_messageFilePath"] = str(messages_path(session_id).resolve())
         meta["messages"] = messages
-        self.send_json(meta, 201)
+        self.send_json(_session_api_record(meta), 201)
 
     def save_session(self, session_id):
         body = self.read_body_json()
@@ -8009,6 +8554,39 @@ class CodeHandler(BaseHTTPRequestHandler):
                 session["lastUsage"] = body.get("lastUsage")
             if "runState" in body:
                 session["runState"] = body.get("runState") or {}
+            if "projectId" in body:
+                requested_project_id = str(body.get("projectId") or "").strip() or None
+                requested_cwd = (
+                    body.get("cwd")
+                    if "cwd" in body
+                    else (session.get("cwd") if requested_project_id is None else None)
+                )
+                session["projectId"], session["cwd"] = _session_location(
+                    requested_project_id,
+                    requested_cwd,
+                )
+            elif "cwd" in body:
+                session["projectId"], session["cwd"] = _session_location(
+                    session.get("projectId"),
+                    body.get("cwd"),
+                )
+            else:
+                session["projectId"], session["cwd"] = _session_location(
+                    session.get("projectId"),
+                    session.get("cwd"),
+                    use_config_fallback=True,
+                )
+            if "source" in body or "group" in body:
+                session["source"] = _normalize_session_source(
+                    body.get("source"),
+                    body.get("group"),
+                )
+            else:
+                session["source"] = _normalize_session_source(
+                    session.get("source"),
+                    session.get("group"),
+                )
+            session.pop("group", None)
             session["updatedAt"] = now_iso()
             # Messages → JSONL (full overwrite for Phase 1)
             messages = body.get("messages")
@@ -8017,11 +8595,21 @@ class CodeHandler(BaseHTTPRequestHandler):
                 session["messageCount"] = len(messages)
                 session["lastMessageTime"] = _last_msg_time(messages)
             write_json(path, session)
-            _write_session_index_entry(session_id, session["title"], session["updatedAt"], session.get("messageCount", 0), session.get("_parentId"), session.get("_branchDepth", 0))
+            _write_session_index_entry(
+                session_id,
+                session["title"],
+                session["updatedAt"],
+                session.get("messageCount", 0),
+                session.get("_parentId"),
+                session.get("_branchDepth", 0),
+                project_id=session.get("projectId"),
+                cwd=session.get("cwd"),
+                source=session.get("source"),
+            )
         session["_filePath"] = str(path.resolve())
         session["_messageFilePath"] = str(messages_path(session_id).resolve())
         session["messages"] = read_jsonl(messages_path(session_id))
-        self.send_json(session)
+        self.send_json(_session_api_record(session))
 
     def archive_session(self, session_id):
         """Save a full-history backup before compaction."""
@@ -8096,6 +8684,16 @@ class CodeHandler(BaseHTTPRequestHandler):
         child_title = body.get("title") or parent.get("title", "Untitled")
         child_depth = (parent.get("_branchDepth") or 0) + 1
         parent_msg_count = parent.get("messageCount", 0)
+        parent_project = parent.get("projectId")
+        parent_cwd = _normalize_local_path(parent.get("cwd"))
+        parent_source = _normalize_session_source(
+            parent.get("source"),
+            parent.get("group"),
+        )
+        parent["projectId"] = parent_project
+        parent["cwd"] = parent_cwd
+        parent["source"] = parent_source
+        parent.pop("group", None)
         child_meta = {
             "id": child_id,
             "title": child_title,
@@ -8108,6 +8706,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             "_parentId": parent_id,
             "_branchDepth": child_depth,
             "_branchMsgCount": parent_msg_count,
+            "projectId": parent_project,
+            "cwd": parent_cwd,
+            "source": parent_source,
         }
         write_json(session_path(child_id), child_meta)
         # Copy messages JSONL
@@ -8123,13 +8724,33 @@ class CodeHandler(BaseHTTPRequestHandler):
         parent["_branches"] = branches
         write_json(parent_path, parent)
         # Sync index for both child and parent
-        _write_session_index_entry(child_id, child_title, child_meta["updatedAt"], parent_msg_count, parent_id, child_depth)
-        _write_session_index_entry(parent_id, parent.get("title", ""), now_iso(), parent.get("messageCount", 0), parent.get("_parentId"), parent.get("_branchDepth", 0))
+        _write_session_index_entry(
+            child_id,
+            child_title,
+            child_meta["updatedAt"],
+            parent_msg_count,
+            parent_id,
+            child_depth,
+            project_id=parent_project,
+            cwd=parent_cwd,
+            source=parent_source,
+        )
+        _write_session_index_entry(
+            parent_id,
+            parent.get("title", ""),
+            now_iso(),
+            parent.get("messageCount", 0),
+            parent.get("_parentId"),
+            parent.get("_branchDepth", 0),
+            project_id=parent_project,
+            cwd=parent_cwd,
+            source=parent_source,
+        )
         child_meta["_filePath"] = str(session_path(child_id).resolve())
         child_meta["_messageFilePath"] = str(messages_path(child_id).resolve())
         # Include messages in response for frontend
         child_meta["messages"] = read_jsonl(child_jpath)
-        self.send_json(child_meta, 201)
+        self.send_json(_session_api_record(child_meta), 201)
 
     def append_messages(self, session_id):
         """Append messages to an existing session's JSONL (incremental save)."""
@@ -8147,8 +8768,28 @@ class CodeHandler(BaseHTTPRequestHandler):
             meta["messageCount"] = total
             meta["updatedAt"] = now_iso()
             meta["lastMessageTime"] = _last_msg_time(new_msgs) or meta.get("lastMessageTime", "")
+            meta["projectId"], meta["cwd"] = _session_location(
+                meta.get("projectId"),
+                meta.get("cwd"),
+                use_config_fallback=True,
+            )
+            meta["source"] = _normalize_session_source(
+                meta.get("source"),
+                meta.get("group"),
+            )
+            meta.pop("group", None)
             write_json(meta_path, meta)
-            _write_session_index_entry(session_id, meta.get("title", ""), meta["updatedAt"], total, meta.get("_parentId"), meta.get("_branchDepth", 0))
+            _write_session_index_entry(
+                session_id,
+                meta.get("title", ""),
+                meta["updatedAt"],
+                total,
+                meta.get("_parentId"),
+                meta.get("_branchDepth", 0),
+                project_id=meta.get("projectId"),
+                cwd=meta.get("cwd"),
+                source=meta.get("source"),
+            )
         self.send_json({"ok": True, "appended": len(new_msgs)})
 
     def save_memory(self):
@@ -8952,6 +9593,7 @@ if __name__ == "__main__":
 
     ThreadingHTTPServer.daemon_threads = True
     _migrate_sessions_to_hierarchy()
+    _migrate_codex_project_sessions_support()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), CodeHandler)
     server.socket.settimeout(2.0)
     start_tray(PORT, server)
