@@ -3142,6 +3142,26 @@ process.stdout.write(JSON.stringify({
         self.assertIn('id="importRetryBtn"', html)
         self.assertIn('id="importFailures"', html)
         self.assertIn('import-source-tab', html)
+        self.assertIn('class="modal-panel import-dialog"', html)
+        self.assertIn('role="dialog"', html)
+        self.assertIn('aria-modal="true"', html)
+        self.assertIn('id="importRefreshBtn"', html)
+        self.assertIn('data-import-filter="importable"', html)
+        self.assertIn('data-import-filter="all"', html)
+        self.assertIn('id="importSelectionSummary"', html)
+        self.assertIn('id="importDismissBtn"', html)
+        self.assertIn(
+            "从本机 Claude Code 或 Codex 导入历史会话",
+            html,
+        )
+        self.assertIn(
+            'importDialogSubtitle: "从本机 Claude Code 或 Codex 导入历史会话"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'importDialogSubtitle: "Import local Claude Code or Codex session history"',
+            I18N_SOURCE,
+        )
 
     def test_import_functions_in_app_js(self):
         """Import functions are defined in app.js."""
@@ -3173,13 +3193,34 @@ process.stdout.write(JSON.stringify({
         """Import i18n keys exist in both languages."""
         for key in (
             "importSessions",
+            "sessionTransferActions",
+            "importSessionsTip",
+            "exportBtnTip",
+            "importDialogSubtitle",
+            "closeImport",
+            "importSourceTabsLabel",
+            "importSourceCount",
+            "importRefresh",
+            "importRefreshTip",
+            "importRefreshing",
+            "importSearchLabel",
             "importSearchPlaceholder",
             "importSelectAll",
+            "importSelectVisible",
+            "importFilterLabel",
+            "importFilterImportable",
+            "importFilterAll",
+            "importVisibleSummary",
+            "importSelectedCount",
             "importToCode",
+            "importLoading",
+            "importLoadFailed",
+            "importNoMatching",
             "importStatusImported",
             "importStatusContinued",
             "importStatusUpdateAvailable",
             "importStatusUpdateConflict",
+            "importStatusUpdateConflictHint",
             "importResultSnapshot",
             "importResultFailed",
             "importCancel",
@@ -3217,7 +3258,73 @@ process.stdout.write(JSON.stringify({
         self.assertIn(".import-result-actions", STYLE_SOURCE)
         self.assertIn(".import-badge-hint", STYLE_SOURCE)
         self.assertIn(".import-failure-item", STYLE_SOURCE)
+        self.assertIn(".import-search-field", STYLE_SOURCE)
+        self.assertIn(".import-filter-tabs", STYLE_SOURCE)
+        self.assertIn(".import-dialog-footer", STYLE_SOURCE)
+        self.assertIn(".modal-panel.import-dialog", STYLE_SOURCE)
+        self.assertIn("@media (max-width: 640px)", STYLE_SOURCE)
         self.assertIn('id="importBadgeHint"', INDEX_SOURCE)
+        refresh_css = re.search(
+            r"\.import-refresh-btn\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(refresh_css)
+        self.assertIn("display: inline-flex", refresh_css.group("body"))
+        self.assertIn("align-items: center", refresh_css.group("body"))
+        self.assertIn("justify-content: center", refresh_css.group("body"))
+        search_input_css = re.search(
+            r"\.import-search-field input\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(search_input_css)
+        self.assertIn("box-shadow: none", search_input_css.group("body"))
+        primary_css_blocks = re.findall(
+            r"\.import-dialog-actions \.primary-btn\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertTrue(primary_css_blocks)
+        primary_css = "\n".join(primary_css_blocks)
+        self.assertIn("background: var(--accent)", primary_css)
+        self.assertIn("color: var(--bg)", primary_css)
+
+    def test_session_transfer_toolbar_uses_distinct_accessible_icons(self):
+        toolbar_start = INDEX_SOURCE.index('class="session-transfer-actions"')
+        toolbar_end = INDEX_SOURCE.index('id="usageStrip"', toolbar_start)
+        toolbar_source = INDEX_SOURCE[toolbar_start:toolbar_end]
+        self.assertIn('id="importSessions"', toolbar_source)
+        self.assertIn('class="tool-btn transfer-icon-btn import-entry-btn"', toolbar_source)
+        self.assertIn('id="exportChat"', toolbar_source)
+        self.assertIn('class="tool-btn transfer-icon-btn export-entry-btn"', toolbar_source)
+        self.assertIn('data-i18n-aria-label="importSessionsTip"', toolbar_source)
+        self.assertIn('data-i18n-aria-label="exportBtnTip"', toolbar_source)
+        self.assertIn(
+            'title="从本机 Claude Code 或 Codex 导入历史会话"',
+            toolbar_source,
+        )
+        self.assertIn(
+            'importSessionsTip: "从本机 Claude Code 或 Codex 导入历史会话"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'importSessionsTip: "Import local Claude Code or Codex session history"',
+            I18N_SOURCE,
+        )
+        self.assertEqual(toolbar_source.count('width="18" height="18"'), 2)
+        self.assertNotIn("export-icon-btn", toolbar_source)
+        transfer_actions_css = re.search(
+            r"\.session-transfer-actions\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(transfer_actions_css)
+        self.assertNotIn("border-right", transfer_actions_css.group("body"))
+        self.assertNotRegex(
+            STYLE_SOURCE,
+            r"\.usage-strip\s*\{[^}]*border-left",
+        )
 
     def test_import_source_badge_explains_and_follows_snapshot_lifecycle(self):
         badge_start = APP_SOURCE.index("function renderSessionSourceBadge(")
@@ -3317,12 +3424,79 @@ process.stdout.write(JSON.stringify({{
         render_start = APP_SOURCE.index("function renderImportList()")
         render_end = APP_SOURCE.index("function importResultText", render_start)
         render_source = APP_SOURCE[render_start:render_end]
-        self.assertIn('var canImport = s.canImport !== false;', render_source)
+        self.assertIn("var canImport = importSessionCanImport(s);", render_source)
+        self.assertIn("var sessionKey = importSessionKey(s);", render_source)
         self.assertIn('cb.dataset.importable = canImport ? "true" : "false";', render_source)
+        self.assertIn("cb.dataset.sessionKey = sessionKey;", render_source)
         self.assertIn("cb.disabled = !canImport || _importBusy;", render_source)
         self.assertIn('"update-conflict": "importStatusUpdateConflict"', render_source)
         self.assertIn('className = "import-session-state"', render_source)
-        self.assertIn("if (!c.disabled) c.checked", APP_SOURCE)
+        self.assertIn("_importSelectedKeys.add(c.dataset.sessionKey)", APP_SOURCE)
+        self.assertIn("_importSelectedKeys.delete(c.dataset.sessionKey)", APP_SOURCE)
+
+    def test_import_search_and_filters_use_cached_sessions_locally(self):
+        helper_start = APP_SOURCE.index("function importSessionKey(")
+        helper_end = APP_SOURCE.index("function _bindImportEvents(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const vm = require("vm");
+const search = {{value: "alpha"}};
+const context = {{
+  _importSource: "codex",
+  _importFilter: "importable",
+  _importSessions: [
+    {{id: "one", sourceId: "alpha-1", title: "Alpha task", canImport: true}},
+    {{id: "two", sourceId: "beta-2", title: "Beta task", canImport: false}},
+    {{id: "three", sourceId: "gamma-3", title: "Gamma alpha", canImport: false}},
+    {{id: "four", sourceId: "delta-4", title: "Delta task", canImport: true}},
+  ],
+  document: {{
+    getElementById: (id) => id === "importSearch" ? search : null,
+    querySelectorAll: () => [],
+  }},
+  t: (key, params) => `${{key}}:${{params?.count ?? ""}}`,
+}};
+vm.runInNewContext({json.dumps(helper_source)}, context);
+const searched = context.filteredImportSessions().map((item) => item.id);
+search.value = "";
+const importable = context.filteredImportSessions().map((item) => item.id);
+context._importFilter = "all";
+const all = context.filteredImportSessions().map((item) => item.id);
+process.stdout.write(JSON.stringify({{
+  searched,
+  importable,
+  all,
+  key: context.importSessionKey(context._importSessions[0]),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "searched": ["one"],
+                "importable": ["one", "four"],
+                "all": ["one", "two", "three", "four"],
+                "key": "codex:alpha-1",
+            },
+        )
+        self.assertIn("if (!force && Array.isArray(cached))", APP_SOURCE)
+        search_handler_start = APP_SOURCE.index(
+            'if (search) search.addEventListener("input"',
+        )
+        search_handler_end = APP_SOURCE.index(
+            'modal.addEventListener("click", function (event)',
+            search_handler_start,
+        )
+        search_handler = APP_SOURCE[search_handler_start:search_handler_end]
+        self.assertIn("renderImportList();", search_handler)
+        self.assertNotIn("loadImportSessions", search_handler)
 
     def test_import_completion_refreshes_without_reloading_page(self):
         """Import actions stay visible and refresh the sidebar and picker in place."""

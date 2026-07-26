@@ -11145,6 +11145,12 @@ var _importBusy = false;
 var _importFinalizing = false;
 var _importBatchView = null;
 var _importLastResult = null;
+var _importFilter = "importable";
+var _importSelectedKeys = new Set();
+var _importLoading = false;
+var _importLoadFailed = false;
+var _importLoadGeneration = 0;
+var _importReturnFocus = null;
 var _importBatchRunner = createImportBatchRunner({
   importOne: importOneSession,
   onProgress: function (batch) {
@@ -11179,64 +11185,176 @@ function _updateSourceTabCount(src) {
     if (tab.dataset.source !== src) return;
     var cached = _importCache[src];
     var count = cached ? cached.length : 0;
-    var base = src === "codex" ? "Codex" : "Claude Code";
-    tab.textContent = count ? base + " (" + count + ")" : base;
+    var countEl = tab.querySelector(".import-source-count");
+    if (countEl) countEl.textContent = String(count);
+    tab.setAttribute("aria-label", (
+      (src === "codex" ? "Codex" : "Claude Code") + " · " +
+      t("importSourceCount", { count: count })
+    ));
   });
 }
 
-var _searchTimer = 0;
+function importSessionKey(session) {
+  var stableId = session?.sourcePath || session?.sourceId || session?.id || "";
+  return _importSource + ":" + String(stableId);
+}
+
+function importSessionCanImport(session) {
+  return session?.canImport !== false;
+}
+
+function filteredImportSessions() {
+  var search = document.getElementById("importSearch");
+  var query = String(search?.value || "").trim().toLocaleLowerCase();
+  return _importSessions.filter(function (session) {
+    if (_importFilter === "importable" && !importSessionCanImport(session)) return false;
+    if (!query) return true;
+    return [
+      session?.title,
+      session?.sourceId,
+      session?.id,
+    ].some(function (value) {
+      return String(value || "").toLocaleLowerCase().includes(query);
+    });
+  });
+}
+
+function syncImportSourceTabs() {
+  document.querySelectorAll(".import-source-tab").forEach(function (tab) {
+    var active = tab.dataset.source === _importSource;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+  });
+}
+
+function updateImportFilterControls(visibleSessions) {
+  var importableCount = _importSessions.filter(importSessionCanImport).length;
+  document.querySelectorAll(".import-filter-btn").forEach(function (button) {
+    var filter = button.dataset.importFilter;
+    var active = filter === _importFilter;
+    var label = button.querySelector("[data-filter-label]");
+    var count = button.querySelector("[data-filter-count]");
+    if (label) {
+      label.textContent = t(
+        filter === "importable" ? "importFilterImportable" : "importFilterAll",
+      );
+    }
+    if (count) {
+      count.textContent = String(filter === "importable" ? importableCount : _importSessions.length);
+    }
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.disabled = _importBusy;
+  });
+
+  var visibleSummary = document.getElementById("importVisibleSummary");
+  if (visibleSummary) {
+    visibleSummary.textContent = t("importVisibleSummary", {
+      visible: visibleSessions.length,
+      total: _importSessions.length,
+    });
+  }
+}
 
 function _bindImportEvents() {
   if (_importEventsBound) return;
   _importEventsBound = true;
   var modal = document.getElementById("importModal");
   if (!modal) return;
-  // Close
+
   var closeBtn = document.getElementById("importClose");
   if (closeBtn) closeBtn.addEventListener("click", closeImportModal);
+  var dismissBtn = document.getElementById("importDismissBtn");
+  if (dismissBtn) dismissBtn.addEventListener("click", closeImportModal);
   modal.addEventListener("click", function (e) {
     if (e.target === modal) closeImportModal();
   });
-  // Source tabs
+
+  modal.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeImportModal();
+      return;
+    }
+
+    var sourceTab = event.target.closest?.(".import-source-tab");
+    if (sourceTab && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      var tabs = Array.from(document.querySelectorAll(".import-source-tab"));
+      var index = tabs.indexOf(sourceTab);
+      var direction = event.key === "ArrowRight" ? 1 : -1;
+      var next = tabs[(index + direction + tabs.length) % tabs.length];
+      event.preventDefault();
+      next?.focus();
+      next?.click();
+      return;
+    }
+
+    if (event.key !== "Tab") return;
+    var focusable = Array.from(modal.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter(function (element) {
+      return element.offsetParent !== null;
+    });
+    if (!focusable.length) return;
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
   modal.addEventListener("click", function (e) {
     var tab = e.target.closest(".import-source-tab");
     if (!tab || _importBusy) return;
-    document.querySelectorAll(".import-source-tab").forEach(function (b) { b.classList.remove("active"); });
-    tab.classList.add("active");
+    if (tab.dataset.source === _importSource) return;
     _importSource = tab.dataset.source;
+    _importFilter = "importable";
+    _importSelectedKeys.clear();
     _importSessions = _importCache[_importSource] || [];
-    renderImportList();
-    var selAll = document.getElementById("importSelectAll");
-    if (selAll) selAll.checked = false;
     var search = document.getElementById("importSearch");
     if (search) search.value = "";
+    syncImportSourceTabs();
     clearImportResult();
+    renderImportList();
     loadImportSessions(true);
   });
-  // Search (debounced)
+
   var search = document.getElementById("importSearch");
   if (search) search.addEventListener("input", function () {
     if (_importBusy) return;
-    clearTimeout(_searchTimer);
-    _searchTimer = setTimeout(function () {
-      var selAll = document.getElementById("importSelectAll");
-      if (selAll) selAll.checked = false;
-      loadImportSessions();
-    }, 300);
+    renderImportList();
   });
-  // Select all
+
+  modal.addEventListener("click", function (event) {
+    var filterBtn = event.target.closest(".import-filter-btn");
+    if (!filterBtn || _importBusy) return;
+    _importFilter = filterBtn.dataset.importFilter === "all" ? "all" : "importable";
+    renderImportList();
+  });
+
   var selAll = document.getElementById("importSelectAll");
   if (selAll) selAll.addEventListener("change", function () {
     if (_importBusy) return;
     var cbs = document.querySelectorAll("#importList input[type=checkbox]");
     cbs.forEach(function (c) {
-      if (!c.disabled) c.checked = selAll.checked;
+      if (c.disabled) return;
+      c.checked = selAll.checked;
+      if (selAll.checked) _importSelectedKeys.add(c.dataset.sessionKey);
+      else _importSelectedKeys.delete(c.dataset.sessionKey);
     });
     updateImportButton();
   });
-  // Import
+
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) doBtn.addEventListener("click", doImport);
+  var refreshBtn = document.getElementById("importRefreshBtn");
+  if (refreshBtn) refreshBtn.addEventListener("click", refreshImportSessions);
   var cancelBtn = document.getElementById("importCancelBtn");
   if (cancelBtn) cancelBtn.addEventListener("click", cancelImportBatch);
   var retryBtn = document.getElementById("importRetryBtn");
@@ -11247,21 +11365,28 @@ async function openImportModal() {
   _bindImportEvents();
   var modal = document.getElementById("importModal");
   if (!modal) return;
+  _importReturnFocus = document.activeElement;
   modal.style.display = "flex";
+  modal.setAttribute("aria-hidden", "false");
+  syncImportSourceTabs();
   if (_importBusy) {
     updateImportButton();
     renderImportBatchState();
+    requestAnimationFrame(function () {
+      document.getElementById("importClose")?.focus();
+    });
     return;
   }
-  var doBtn = document.getElementById("importDoBtn");
-  if (doBtn) doBtn.disabled = true;
-  var selAll = document.getElementById("importSelectAll");
-  if (selAll) selAll.checked = false;
+  _importFilter = "importable";
+  _importSelectedKeys.clear();
   var search = document.getElementById("importSearch");
   if (search) search.value = "";
   clearImportResult();
   _importSessions = _importCache[_importSource] || [];
   renderImportList();
+  requestAnimationFrame(function () {
+    search?.focus();
+  });
   await loadImportSessions(true);
 }
 
@@ -11275,43 +11400,70 @@ function updateGroupBadge(session) {
 
 function closeImportModal() {
   var modal = document.getElementById("importModal");
-  if (modal) modal.style.display = "none";
+  if (!modal) return;
+  modal.style.display = "none";
+  modal.setAttribute("aria-hidden", "true");
+  if (_importReturnFocus?.focus) _importReturnFocus.focus();
+  _importReturnFocus = null;
 }
 
 async function loadImportSessions(force) {
-  var searchEl = document.getElementById("importSearch");
-  var q = searchEl ? searchEl.value.trim() : "";
-  var cached = _importCache[_importSource];
-
-  // Use cache when no search query
-  if (!force && !q && cached && cached.length) {
+  var source = _importSource;
+  var cached = _importCache[source];
+  if (!force && Array.isArray(cached)) {
     _importSessions = cached;
     renderImportList();
-    _updateSourceTabCount(_importSource);
+    _updateSourceTabCount(source);
     return;
   }
+
+  var generation = ++_importLoadGeneration;
+  _importLoading = true;
+  _importLoadFailed = false;
+  renderImportList();
   try {
-    var url = "/api/import/sessions?source=" + encodeURIComponent(_importSource);
-    if (q) url += "&q=" + encodeURIComponent(q);
+    var url = "/api/import/sessions?source=" + encodeURIComponent(source);
     var resp = await fetch(url);
+    if (!resp.ok) throw new Error("Import source scan failed");
     var data = await resp.json();
     if (!Array.isArray(data)) { data = []; }
-    if (!q) { _importCache[_importSource] = data; _updateSourceTabCount(_importSource); }
-    _importSessions = data;
+    _importCache[source] = data;
+    _updateSourceTabCount(source);
+    if (source === _importSource) _importSessions = data;
   } catch (e) {
-    _importSessions = [];
+    if (source === _importSource) {
+      _importSessions = Array.isArray(cached) ? cached : [];
+      _importLoadFailed = true;
+    }
+  } finally {
+    if (generation === _importLoadGeneration) _importLoading = false;
   }
-  renderImportList();
+  if (source === _importSource) renderImportList();
+}
+
+async function refreshImportSessions() {
+  if (_importBusy || _importLoading) return;
+  _importSelectedKeys.clear();
+  clearImportResult();
+  await loadImportSessions(true);
 }
 
 function renderImportList() {
   var list = document.getElementById("importList");
   if (!list) return;
+  ["claude-code", "codex"].forEach(_updateSourceTabCount);
   list.innerHTML = "";
-  if (!_importSessions.length) {
+  list.setAttribute("aria-busy", _importLoading ? "true" : "false");
+  var visibleSessions = filteredImportSessions();
+  updateImportFilterControls(visibleSessions);
+  if (_importLoading || !visibleSessions.length) {
     var empty = document.createElement("div");
     empty.className = "import-session-empty";
-    empty.textContent = t("importEmpty");
+    empty.textContent = _importLoading
+      ? t("importLoading")
+      : (_importLoadFailed
+        ? t("importLoadFailed")
+        : (_importSessions.length ? t("importNoMatching") : t("importEmpty")));
     list.appendChild(empty);
     updateImportButton();
     return;
@@ -11324,48 +11476,100 @@ function renderImportList() {
     "update-conflict": "importStatusUpdateConflict",
     "legacy": "importStatusLegacy",
   };
-  _importSessions.forEach(function (s, i) {
+  visibleSessions.forEach(function (s) {
     var importState = s.importStatus || "available";
-    var canImport = s.canImport !== false;
+    var canImport = importSessionCanImport(s);
+    var sessionKey = importSessionKey(s);
+    if (!canImport) _importSelectedKeys.delete(sessionKey);
     var row = document.createElement("label");
     row.className = "import-session-row" + (canImport ? "" : " is-disabled");
+    row.setAttribute("role", "listitem");
     var cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.dataset.index = i;
+    cb.dataset.sessionKey = sessionKey;
     cb.dataset.importable = canImport ? "true" : "false";
+    cb.checked = canImport && _importSelectedKeys.has(sessionKey);
     cb.disabled = !canImport || _importBusy;
-    cb.addEventListener("change", updateImportButton);
+    cb.addEventListener("change", function () {
+      if (cb.checked) _importSelectedKeys.add(sessionKey);
+      else _importSelectedKeys.delete(sessionKey);
+      updateImportButton();
+    });
     row.appendChild(cb);
+
+    var main = document.createElement("span");
+    main.className = "import-session-main";
     var title = document.createElement("span");
     title.className = "import-session-title";
     title.textContent = s.title || t("importUnnamed");
     title.title = title.textContent;
-    row.appendChild(title);
+    main.appendChild(title);
+
+    var meta = document.createElement("span");
+    meta.className = "import-session-meta";
+    var date = document.createElement("span");
+    date.className = "import-session-date";
+    date.textContent = (s.createdAt || "").slice(0, 10);
+    meta.appendChild(date);
+    main.appendChild(meta);
+    row.appendChild(main);
+
     var badge = document.createElement("span");
     badge.className = "import-session-state";
     badge.dataset.state = importState;
     badge.textContent = t(statusKeys[importState] || "importStatusAvailable");
+    if (importState === "update-conflict") {
+      badge.title = t("importStatusUpdateConflictHint");
+    }
     row.appendChild(badge);
-    var date = document.createElement("span");
-    date.className = "import-session-date";
-    date.textContent = (s.createdAt || "").slice(0, 10);
-    row.appendChild(date);
     list.appendChild(row);
   });
   updateImportButton();
 }
 
 function updateImportButton() {
-  var cbs = document.querySelectorAll("#importList input[type=checkbox]");
-  var checked = Array.from(cbs).filter(function (c) { return c.checked && !c.disabled; });
+  var validKeys = new Set(
+    _importSessions.filter(importSessionCanImport).map(importSessionKey),
+  );
+  Array.from(_importSelectedKeys).forEach(function (key) {
+    if (!validKeys.has(key)) _importSelectedKeys.delete(key);
+  });
+  var selectedCount = _importSelectedKeys.size;
+  var cbs = Array.from(document.querySelectorAll("#importList input[type=checkbox]"))
+    .filter(function (checkbox) { return !checkbox.disabled; });
+  var visibleChecked = cbs.filter(function (checkbox) {
+    return _importSelectedKeys.has(checkbox.dataset.sessionKey);
+  });
+  var selAll = document.getElementById("importSelectAll");
+  if (selAll) {
+    selAll.disabled = _importBusy || _importLoading || cbs.length === 0;
+    selAll.checked = cbs.length > 0 && visibleChecked.length === cbs.length;
+    selAll.indeterminate = visibleChecked.length > 0 && visibleChecked.length < cbs.length;
+  }
+
+  var selectionSummary = document.getElementById("importSelectionSummary");
+  if (selectionSummary) {
+    selectionSummary.textContent = t("importSelectedCount", { count: selectedCount });
+  }
+
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) {
-    doBtn.disabled = checked.length === 0 || _importBusy;
+    doBtn.disabled = selectedCount === 0 || _importBusy || _importLoading;
     doBtn.textContent = _importBusy
       ? t("importProcessing")
-      : (checked.length
-        ? t("importToCodeCount", { count: checked.length })
+      : (selectedCount
+        ? t("importToCodeCount", { count: selectedCount })
         : t("importToCode"));
+  }
+
+  var refreshBtn = document.getElementById("importRefreshBtn");
+  if (refreshBtn) {
+    refreshBtn.disabled = _importBusy || _importLoading;
+    refreshBtn.classList.toggle("is-loading", _importLoading);
+    var refreshLabel = refreshBtn.querySelector("span");
+    if (refreshLabel) {
+      refreshLabel.textContent = t(_importLoading ? "importRefreshing" : "importRefresh");
+    }
   }
 }
 
@@ -11376,11 +11580,10 @@ function setImportBusy(busy) {
   });
   var search = document.getElementById("importSearch");
   if (search) search.disabled = _importBusy;
-  var selAll = document.getElementById("importSelectAll");
-  if (selAll) selAll.disabled = _importBusy;
   document.querySelectorAll("#importList input[type=checkbox]").forEach(function (checkbox) {
     checkbox.disabled = _importBusy || checkbox.dataset.importable !== "true";
   });
+  updateImportFilterControls(filteredImportSessions());
   updateImportButton();
   renderImportBatchState();
 }
@@ -11638,6 +11841,7 @@ async function runImportBatch(selectedSessions, importSource, mode) {
 
   _importLastResult = result;
   _importFinalizing = true;
+  _importSelectedKeys.clear();
   renderImportBatchState();
   try {
     delete _importCache[importSource];
@@ -11657,12 +11861,10 @@ async function runImportBatch(selectedSessions, importSource, mode) {
 }
 
 async function doImport() {
-  var cbs = document.querySelectorAll("#importList input[type=checkbox]");
-  var checked = Array.from(cbs).filter(function (c) { return c.checked && !c.disabled; });
-  if (!checked.length || _importBusy) return;
-  var selectedSessions = checked.map(function (checkbox) {
-    return _importSessions[Number(checkbox.dataset.index)];
-  }).filter(Boolean);
+  if (!_importSelectedKeys.size || _importBusy) return;
+  var selectedSessions = _importSessions.filter(function (session) {
+    return importSessionCanImport(session) && _importSelectedKeys.has(importSessionKey(session));
+  });
   if (!selectedSessions.length) return;
   await runImportBatch(selectedSessions, _importSource, "import");
 }
