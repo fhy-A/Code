@@ -459,13 +459,17 @@ class TestDispatcherLimits(unittest.TestCase):
         start = self.source.index('els.newChat.addEventListener("click"')
         end = self.source.index('els.exportChat.addEventListener', start)
         handler = self.source[start:end]
-        self.assertIn('cacheActiveSessionState();', handler)
-        self.assertIn('invalidateForegroundSessionNavigation();', handler)
-        self.assertIn('rememberWelcomeForeground();', handler)
-        self.assertIn('syncActiveStreamingState();', handler)
-        self.assertNotIn('state.isStreaming) { showToast', handler)
-        self.assertNotIn('run.abortController.abort()', handler)
-        self.assertNotIn('run.messageQueue = []', handler)
+        helper_start = self.source.index("function beginNewConversation(")
+        helper_end = self.source.index("// Close any context menu", helper_start)
+        new_session_flow = handler + self.source[helper_start:helper_end]
+        self.assertIn('cacheActiveSessionState();', new_session_flow)
+        self.assertIn('invalidateForegroundSessionNavigation();', new_session_flow)
+        self.assertIn('rememberWelcomeForeground();', new_session_flow)
+        self.assertIn('syncActiveStreamingState();', new_session_flow)
+        self.assertIn("beginNewConversation(projectIdForNewConversation());", handler)
+        self.assertNotIn('state.isStreaming) { showToast', new_session_flow)
+        self.assertNotIn('run.abortController.abort()', new_session_flow)
+        self.assertNotIn('run.messageQueue = []', new_session_flow)
 
     def test_welcome_refresh_only_changes_foreground_navigation(self):
         load_start = self.source.index('async function loadSession(sessionId)')

@@ -20,6 +20,8 @@ class ProjectSessionTestCase(unittest.TestCase):
         self.project_root.mkdir()
         self.other_root = self.data_dir / "other"
         self.other_root.mkdir()
+        self.third_root = self.data_dir / "third"
+        self.third_root.mkdir()
 
         self.patchers = [
             mock.patch.object(server, "DATA_DIR", self.data_dir),
@@ -29,6 +31,11 @@ class ProjectSessionTestCase(unittest.TestCase):
                 server,
                 "PROJECTS_MIGRATION_FLAG",
                 self.data_dir / ".codex_projects_migrated",
+            ),
+            mock.patch.object(
+                server,
+                "PROJECT_ROOTS_MIGRATION_FLAG",
+                self.data_dir / ".codex_project_roots_migrated",
             ),
             mock.patch.object(server, "CONFIG_PATH", self.data_dir / "config.json"),
         ]
@@ -43,11 +50,19 @@ class ProjectSessionTestCase(unittest.TestCase):
         handler.send_json = mock.Mock()
         return handler
 
-    def write_project(self, project_id="project-1", root=None, label="Workspace"):
+    def write_project(
+        self,
+        project_id="project-1",
+        root=None,
+        roots=None,
+        label="Workspace",
+    ):
         project = {
             "id": project_id,
             "label": label,
-            "path": str(root or self.project_root),
+            "rootPaths": [
+                str(path) for path in (roots or [root or self.project_root])
+            ],
         }
         server._write_projects([project])
         return server._find_project(project_id)
@@ -103,7 +118,8 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0]["id"], "legacy-project")
         self.assertEqual(projects[0]["label"], "Legacy")
-        self.assertEqual(projects[0]["path"], str(self.project_root.resolve()))
+        self.assertEqual(projects[0]["rootPaths"], [str(self.project_root.resolve())])
+        self.assertNotIn("path", projects[0])
         self.assertNotIn("name", projects[0])
         self.assertNotIn("rootPath", projects[0])
 
@@ -114,8 +130,9 @@ class TestProjectSchema(ProjectSessionTestCase):
 
         self.assertEqual(
             set(stored),
-            {"id", "label", "path"},
+            {"id", "label", "rootPaths"},
         )
+        self.assertEqual(api_record["rootPaths"], [str(self.project_root.resolve())])
         self.assertEqual(api_record["name"], api_record["label"])
         self.assertEqual(api_record["rootPath"], api_record["path"])
 
@@ -138,11 +155,18 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(missing_cwd, str((self.data_dir / "missing").resolve()))
         self.assertEqual(len(server._read_projects()), 1)
 
-    def test_session_location_rejects_project_cwd_divergence(self):
-        self.write_project()
+    def test_session_location_accepts_attached_roots_and_rejects_other_folders(self):
+        self.write_project(roots=[self.project_root, self.other_root])
 
-        with self.assertRaisesRegex(ValueError, "cwd must match"):
-            server._session_location("project-1", self.other_root)
+        project_id, secondary_cwd = server._session_location(
+            "project-1",
+            self.other_root,
+        )
+        self.assertEqual(project_id, "project-1")
+        self.assertEqual(secondary_cwd, str(self.other_root.resolve()))
+
+        with self.assertRaisesRegex(ValueError, "source folders"):
+            server._session_location("project-1", self.third_root)
 
         project_id, cwd = server._session_location("project-1", None)
         self.assertEqual(project_id, "project-1")
@@ -160,6 +184,7 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(created["label"], "Code")
         self.assertEqual(created["name"], "Code")
         self.assertEqual(created["path"], str(self.project_root.resolve()))
+        self.assertEqual(created["rootPaths"], [str(self.project_root.resolve())])
 
         rename_handler = self.make_handler({"name": "Renamed"})
         server.CodeHandler.rename_project(rename_handler, created["id"])
@@ -167,6 +192,119 @@ class TestProjectSchema(ProjectSessionTestCase):
 
         self.assertEqual(renamed["label"], "Renamed")
         self.assertEqual(server._find_project(created["id"])["label"], "Renamed")
+
+    def test_update_project_migrates_only_sessions_on_removed_roots(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-on-removed-root",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "codex",
+            },
+        )
+        self.write_session(
+            "session-on-retained-root",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+            },
+        )
+        handler = self.make_handler({
+            "label": "Moved workspace",
+            "rootPaths": [str(self.other_root), str(self.third_root)],
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        response = handler.send_json.call_args.args[0]
+        project = server._find_project("project-1")
+        session = server.read_json(
+            server.session_path("session-on-removed-root"),
+            {},
+        )
+        retained_session = server.read_json(
+            server.session_path("session-on-retained-root"),
+            {},
+        )
+        index_entry = server._read_session_index()["session-on-removed-root"]
+        self.assertEqual(project["label"], "Moved workspace")
+        self.assertEqual(
+            project["rootPaths"],
+            [str(self.other_root.resolve()), str(self.third_root.resolve())],
+        )
+        self.assertEqual(response["rootPath"], str(self.other_root.resolve()))
+        self.assertEqual(session["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(retained_session["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(index_entry["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(server.load_config()["projectRoot"], str(self.other_root.resolve()))
+
+    def test_reordering_primary_preserves_session_cwds_and_active_config(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-primary-reorder",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+            },
+        )
+        handler = self.make_handler({
+            "label": "Reordered",
+            "rootPaths": [str(self.other_root), str(self.project_root)],
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        session = server.read_json(server.session_path("session-primary-reorder"), {})
+        self.assertEqual(session["cwd"], str(self.project_root.resolve()))
+        self.assertEqual(server.load_config()["projectRoot"], str(self.project_root.resolve()))
+        self.assertEqual(
+            server._find_project("project-1")["rootPaths"],
+            [str(self.other_root.resolve()), str(self.project_root.resolve())],
+        )
+
+    def test_update_project_rejects_a_source_folder_used_by_another_project(self):
+        server._write_projects([
+            {
+                "id": "project-1",
+                "label": "Workspace",
+                "rootPaths": [str(self.project_root)],
+            },
+            {
+                "id": "project-2",
+                "label": "Other",
+                "rootPaths": [str(self.other_root)],
+            },
+        ])
+        handler = self.make_handler({
+            "label": "Duplicate",
+            "rootPaths": [str(self.other_root), str(self.third_root)],
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        self.assertEqual(handler.send_json.call_args.args[1], 409)
+        self.assertEqual(
+            server._find_project("project-1")["rootPaths"],
+            [str(self.project_root.resolve())],
+        )
+
+    def test_project_folder_picker_starts_from_the_project_source_folder(self):
+        handler = self.make_handler()
+        with mock.patch.object(
+            server,
+            "open_native_folder_picker",
+            return_value=None,
+        ) as picker:
+            server.CodeHandler.pick_folder(handler, str(self.other_root))
+
+        picker.assert_called_once_with(self.other_root.resolve())
+        self.assertEqual(
+            handler.send_json.call_args.args[0],
+            {"cancelled": True},
+        )
 
 
 class TestSessionContract(ProjectSessionTestCase):
@@ -233,6 +371,27 @@ class TestSessionContract(ProjectSessionTestCase):
         unassigned = server.read_json(server.session_path("session002"), {})
         self.assertIsNone(unassigned["projectId"])
         self.assertEqual(unassigned["cwd"], str(self.other_root.resolve()))
+
+    def test_unassign_project_can_move_session_to_selected_file_tree_root(self):
+        self.write_project()
+        self.write_session(
+            "session-unassign-cwd",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+            },
+        )
+        handler = self.make_handler({
+            "projectId": None,
+            "cwd": str(self.third_root),
+        })
+
+        server.CodeHandler.assign_session_project(handler, "session-unassign-cwd")
+
+        stored = server.read_json(server.session_path("session-unassign-cwd"), {})
+        self.assertIsNone(stored["projectId"])
+        self.assertEqual(stored["cwd"], str(self.third_root.resolve()))
 
     def test_delete_project_unassigns_sessions_without_losing_cwd(self):
         self.write_project()
@@ -337,6 +496,107 @@ class TestProjectMigration(ProjectSessionTestCase):
             self.assertIn("source", entry)
             self.assertNotIn("project", entry)
             self.assertNotIn("group", entry)
+
+    def test_multi_folder_migration_persists_root_paths_once(self):
+        server.write_json(server.PROJECTS_PATH, [{
+            "id": "legacy-project",
+            "label": "Legacy",
+            "path": str(self.project_root),
+        }])
+
+        first_result = server._migrate_project_root_paths()
+        second_result = server._migrate_project_root_paths()
+
+        stored = server.read_json(server.PROJECTS_PATH, [])
+        self.assertTrue(first_result)
+        self.assertFalse(second_result)
+        self.assertTrue(server.PROJECT_ROOTS_MIGRATION_FLAG.exists())
+        self.assertEqual(stored, [{
+            "id": "legacy-project",
+            "label": "Legacy",
+            "rootPaths": [str(self.project_root.resolve())],
+        }])
+
+
+class TestAgentRunWorkspace(ProjectSessionTestCase):
+    def test_agent_run_uses_session_cwd_and_attached_project_roots(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-agent-workspace",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+            },
+        )
+        run = server._create_agent_run(
+            "session-agent-workspace",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "test"}],
+            },
+            "",
+            [],
+            allowed_tools=[],
+            start_worker=False,
+            cwd=str(self.third_root),
+        )
+        self.addCleanup(lambda: server._agent_runs.pop(run["id"], None))
+
+        snapshot = server._agent_snapshot(run)
+        record = server._agent_run_record(run)
+        restored = server._agent_run_from_record(record)
+
+        self.assertEqual(run["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(
+            run["workspace_roots"],
+            [str(self.project_root.resolve()), str(self.other_root.resolve())],
+        )
+        self.assertEqual(snapshot["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(restored["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(restored["workspace_roots"], run["workspace_roots"])
+
+    def test_background_tool_resolves_relative_paths_from_captured_session_cwd(self):
+        (self.other_root / "secondary-only.txt").write_text("secondary", encoding="utf-8")
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-agent-tool-root",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+            },
+        )
+        run = server._create_agent_run(
+            "session-agent-tool-root",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "list"}],
+            },
+            "",
+            [],
+            allowed_tools=["list_files"],
+            start_worker=False,
+        )
+        self.addCleanup(lambda: server._agent_runs.pop(run["id"], None))
+        run["pending_tool_calls"] = server._normalize_agent_tool_calls(
+            run,
+            [{
+                "id": "call-list-secondary",
+                "type": "function",
+                "function": {"name": "list_files", "arguments": {"path": ""}},
+            }],
+            1,
+        )
+
+        completed = server._execute_agent_pending_tools(run)
+
+        result = run["tool_executions"]["call-list-secondary"]["result"]
+        self.assertTrue(completed)
+        self.assertIn(
+            "secondary-only.txt",
+            [item["name"] for item in result["items"]],
+        )
 
 
 if __name__ == "__main__":

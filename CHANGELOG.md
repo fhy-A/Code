@@ -2,6 +2,31 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-26 22:19 · Codex
+
+### Codex 风格项目/会话闭环（第二阶段，开发版本基线仍为 v0.5.28）
+
+- 左侧栏完成 `Project → Session` 收口：每个项目默认显示 3 条最近会话，置顶会话优先且当前会话始终可见；支持“显示全部/收起”，移除项目内会话数量和旧来源二级分组，Codex / Claude Code 只保留来源徽标。
+- 项目菜单统一为“编辑项目、置顶/取消置顶”；编辑窗口支持重命名、删除项目和管理多个有序源文件夹。“无项目会话”用于表达未设定项目归属、目录随文件树变化的会话。
+- 项目磁盘协议从单一 `path` 升级为 `id / label / rootPaths`；`rootPaths[0]` 是主文件夹，API 暂时保留 `path / rootPath` 作为主文件夹兼容别名。新增一次性迁移 `_migrate_project_root_paths()` 和忽略标记 `data/.codex_project_roots_migrated`。
+- 项目编辑支持添加文件夹、设为主文件夹和移除文件夹：
+  - 调整主文件夹顺序不会改变仍位于已挂载源文件夹中的既有会话；
+  - 删除某个源文件夹时，仅将 `cwd` 位于被删除目录的会话迁移到新主文件夹；
+  - 新会话默认从主文件夹开始，删除项目只解除会话归属，不删除磁盘文件。
+- 会话、文件树与运行目录形成闭环：加载会话会切换文件树到该会话 `cwd`；在同一项目的挂载目录间切换时保持项目归属，切到项目外目录时会话自动转为未归属。
+- AgentRun 持久化协议升级为 v2，在创建时固定 `cwd / workspaceRoots`；读写、编辑、命令、记忆和 Child Agent 均使用运行级目录上下文，不再依赖可被其他会话切换的全局 `projectRoot`，避免并行/后台任务串目录。
+- 项目指令上下文按项目主文件夹独立加载并缓存，新增 `AGENTS.md` 识别；主 Agent、后台 Agent 和恢复任务使用各自项目上下文。
+- 项目编辑窗口和新增交互补齐中英文即时切换及响应式布局。
+- 验证：
+  - `python -m unittest discover -s tests`：**760 tests passed**；
+  - `python -m pytest tests/test_frontend_modules.py tests/test_p2_coverage.py -q`：**144 passed, 4 subtests passed**；
+  - 浏览器真实交互验证了主文件夹重排、删除目录后的定向会话迁移、项目删除和中英文切换，无控制台错误；
+  - 用户已通过实际 Code 对话确认会话/文件树切换逻辑无误。
+
+**涉及文件**：`.gitignore`、`agent-runtime.js`、`app.js`、`index.html`、`server.py`、`src/core/i18n.js`、`styles.css`、`tests/test_concurrency.py`、`tests/test_frontend_modules.py`、`tests/test_projects.py`
+
+---
+
 ## 2026-07-26 · Codex
 
 ### Codex 风格项目/会话数据协议（第一阶段，开发版本基线仍为 v0.5.28）

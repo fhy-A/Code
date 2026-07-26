@@ -8,6 +8,7 @@ data/runtime/
 data/projects.json
 data/.projects_migrated
 data/.codex_projects_migrated
+data/.codex_project_roots_migrated
 
 # Python
 __pycache__/

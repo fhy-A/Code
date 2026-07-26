@@ -78,6 +78,12 @@ const state = {
 
   sessions: [],
 
+  projects: [],
+
+  projectsMap: {},
+
+  pendingProjectId: null,
+
   messages: [],
 
   mode: "build",
@@ -197,6 +203,9 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (typeof renderSessions === "function") renderSessions();
     if (typeof renderMessages === "function") renderMessages();
     if (typeof renderToolLog === "function") renderToolLog();
+    if (typeof renderProjectEditFolders === "function" && editingProjectId) {
+      renderProjectEditFolders();
+    }
     if (typeof updateProjectContextIndicator === "function") updateProjectContextIndicator();
     if (typeof updateMemoryContextIndicator === "function") updateMemoryContextIndicator();
     if (typeof updateSendButtonState === "function") updateSendButtonState();
@@ -546,6 +555,16 @@ function setupComposerSafeArea() {
 function buildRunContext(sessionId, options = {}) {
   const run = ensureSessionRun(sessionId);
   const messages = getSessionMessages(sessionId);
+  const session = state.sessions.find((item) => item.id === sessionId) || {};
+  const project = session.projectId ? state.projectsMap[session.projectId] : null;
+  const cwd = String(
+    options.cwd
+    || session.cwd
+    || (sessionId === state.sessionId ? els.projectRoot?.value : "")
+    || projectPrimaryPath(project)
+    || "",
+  ).trim();
+  const rootPaths = projectRootPaths(project);
   const model = String(options.model || getSelectedModel());
   const toolPreset = String(options.toolPreset || els.toolPreset.value || "default");
   const permissionProfile = String(options.permissionProfile || getPermissionProfile());
@@ -554,6 +573,9 @@ function buildRunContext(sessionId, options = {}) {
   if (run) run.model = model;
   return {
     sessionId,
+    cwd,
+    primaryRoot: projectPrimaryPath(project) || cwd,
+    rootPaths: rootPaths.length ? rootPaths : (cwd ? [cwd] : []),
     run,
     messages,
     stats: getSessionStats(sessionId),
@@ -1974,6 +1996,11 @@ async function getSystemPrompt(options = {}) {
   const explicitSkill = options.explicitSkill ?? state.explicitSkill;
   const toolPreset = options.toolPreset || els.toolPreset.value;
   const allowedToolNames = options.allowedToolNames || getAllowedToolNames(toolPreset);
+  const activeCwd = String(options.cwd || els.projectRoot?.value || "").trim();
+  const primaryRoot = String(options.primaryRoot || activeCwd).trim();
+  const sourceFolders = Array.isArray(options.rootPaths)
+    ? options.rootPaths.map((path) => String(path || "").trim()).filter(Boolean)
+    : (activeCwd ? [activeCwd] : []);
 
   // Detect user language from the latest user message
   const lastUserMsg = [...promptMessages].reverse().find((m) => m.role === "user");
@@ -1982,7 +2009,15 @@ async function getSystemPrompt(options = {}) {
   const now = new Date();
   const dateStr = now.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", weekday: "long" });
   const timeStr = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-  const parts = [SYSTEM_SECURITY_LAYER, customPrompt, `当前时间：${dateStr} ${timeStr}（北京时间） · 项目：${els.projectRoot?.value || "未设置"} · v${state.appVersion || "unknown"}`, `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`];
+  const parts = [
+    SYSTEM_SECURITY_LAYER,
+    customPrompt,
+    `当前时间：${dateStr} ${timeStr}（北京时间） · 当前工作目录：${activeCwd || "未设置"} · v${state.appVersion || "unknown"}`,
+    sourceFolders.length > 1
+      ? `当前项目主文件夹：${primaryRoot || sourceFolders[0]}\n项目源文件夹（均可搜索、读取和编辑）：\n${sourceFolders.map((path) => `- ${path}`).join("\n")}`
+      : "",
+    `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
+  ].filter(Boolean);
 
   if (allowedToolNames.has("task")) {
     parts.push(SUBAGENT_DELEGATION_RULES);
@@ -1993,9 +2028,10 @@ async function getSystemPrompt(options = {}) {
     parts.push(`## Response Language\nThe user is writing in ${userLang}. Reply in ${userLang} unless the user explicitly asks for another language.`);
   }
 
-  if (state.projectContext?.found) {
+  const projectContext = options.projectContext ?? state.projectContext;
+  if (projectContext?.found) {
 
-    parts.push(`=== 项目上下文（仅本项目，来自 ${state.projectContext.name}） ===\n${state.projectContext.content}`);
+    parts.push(`=== 项目上下文（仅本项目，来自 ${projectContext.name}） ===\n${projectContext.content}`);
 
   }
 
@@ -2050,8 +2086,12 @@ async function getSystemPrompt(options = {}) {
 async function loadProjectContext() {
 
   try {
-
-    state.projectContext = await apiJson("/api/project-context");
+    const active = state.sessions.find((session) => session.id === state.sessionId);
+    const project = active?.projectId
+      ? state.projectsMap[active.projectId]
+      : (state.pendingProjectId ? state.projectsMap[state.pendingProjectId] : projectForCurrentRoot());
+    const contextRoot = projectPrimaryPath(project) || els.projectRoot?.value || "";
+    state.projectContext = await loadProjectContextForRoot(contextRoot, true);
 
   } catch {
 
@@ -2061,6 +2101,21 @@ async function loadProjectContext() {
 
   updateProjectContextIndicator();
 
+}
+
+const projectContextCache = new Map();
+
+async function loadProjectContextForRoot(rootPath, force = false) {
+  const root = String(rootPath || "").trim();
+  const key = normalizePathIdentity(root);
+  if (!force && projectContextCache.has(key)) {
+    return projectContextCache.get(key);
+  }
+  const context = await apiJson(
+    "/api/project-context?path=" + encodeURIComponent(root),
+  );
+  projectContextCache.set(key, context);
+  return context;
 }
 
 
@@ -3777,6 +3832,25 @@ function togglePinSession(id) {
 
 }
 
+function getPinnedProjects() {
+  try {
+    const value = JSON.parse(localStorage.getItem("code-pinned-projects") || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function togglePinProject(id) {
+  const pinned = getPinnedProjects();
+  const index = pinned.indexOf(id);
+  if (index >= 0) pinned.splice(index, 1);
+  else pinned.unshift(id);
+  localStorage.setItem("code-pinned-projects", JSON.stringify(pinned));
+  renderSessions();
+}
+
+
 
 
 function formatSessionTime(iso) {
@@ -3789,286 +3863,690 @@ function formatSessionTime(iso) {
   return `${y}-${m}-${day}`;
 }
 
+const PROJECT_SESSION_PREVIEW_LIMIT = 3;
+const UNASSIGNED_PROJECT_KEY = "__unassigned_sessions__";
+
+function normalizePathIdentity(path) {
+  return String(path || "")
+    .trim()
+    .replace(/\//g, "\\")
+    .replace(/\\+$/, "")
+    .toLowerCase();
+}
+
+function projectRootPaths(project) {
+  const rawPaths = Array.isArray(project?.rootPaths)
+    ? project.rootPaths
+    : [project?.path || project?.rootPath || ""];
+  const seen = new Set();
+  return rawPaths.map((path) => String(path || "").trim()).filter((path) => {
+    const key = normalizePathIdentity(path);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function projectPrimaryPath(project) {
+  return projectRootPaths(project)[0] || "";
+}
+
+function projectContainsPath(project, path) {
+  const key = normalizePathIdentity(path);
+  return Boolean(key && projectRootPaths(project).some(
+    (rootPath) => normalizePathIdentity(rootPath) === key,
+  ));
+}
+
+function projectForRoot(path) {
+  return (state.projects || []).find((project) => projectContainsPath(project, path)) || null;
+}
+
+function projectDisplayName(project) {
+  return String(
+    project?.label || project?.name || projectFolderName(projectPrimaryPath(project)) || "",
+  ).trim();
+}
+
+function projectForCurrentRoot() {
+  return projectForRoot(els.projectRoot?.value);
+}
+
+function orderProjectSessions(sessions, pinnedIds = []) {
+  const pinned = new Set(pinnedIds);
+  return (sessions || []).slice().sort((left, right) => {
+    const pinDiff = Number(pinned.has(right.id)) - Number(pinned.has(left.id));
+    if (pinDiff) return pinDiff;
+    return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+  });
+}
+
+function orderProjects(projects, pinnedIds = []) {
+  const pinned = new Set(pinnedIds);
+  return (projects || []).slice().sort((left, right) => {
+    const pinDiff = Number(pinned.has(right.id)) - Number(pinned.has(left.id));
+    if (pinDiff) return pinDiff;
+    return projectDisplayName(left).localeCompare(projectDisplayName(right));
+  });
+}
+
+function selectProjectSessionPreview(
+  sessions,
+  pinnedIds = [],
+  activeSessionId = "",
+  expanded = false,
+) {
+  const ordered = orderProjectSessions(sessions, pinnedIds);
+  if (expanded || ordered.length <= PROJECT_SESSION_PREVIEW_LIMIT) {
+    return { items: ordered, total: ordered.length, hiddenCount: 0 };
+  }
+  const items = ordered.slice(0, PROJECT_SESSION_PREVIEW_LIMIT);
+  const active = ordered.find((session) => session.id === activeSessionId);
+  if (active && !items.some((session) => session.id === active.id)) {
+    items.push(active);
+  }
+  return {
+    items,
+    total: ordered.length,
+    hiddenCount: ordered.filter(
+      (session) => !items.some((visible) => visible.id === session.id),
+    ).length,
+  };
+}
+
+async function refreshProjects() {
+  try {
+    var data = await apiJson("/api/projects");
+    state.projects = data.data || [];
+    state.projectsMap = {};
+    state.projects.forEach(function (p) {
+      state.projectsMap[p.id] = p;
+    });
+    if (!state.sessionId) {
+      const currentProject = state.pendingProjectId
+        ? state.projectsMap[state.pendingProjectId]
+        : projectForCurrentRoot();
+      state.pendingProjectId = currentProject?.id || null;
+    }
+  } catch (err) {
+    console.error("Failed to refresh projects:", err);
+  }
+}
+
+function renderSessionSourceBadge(session) {
+  const source = String(session?.source || "").toLowerCase();
+  if (source === "codex") {
+    return '<span class="session-source-badge source-codex" title="Codex">Codex</span>';
+  }
+  if (source === "claude-code") {
+    return '<span class="session-source-badge source-claude" title="Claude Code">Claude</span>';
+  }
+  return "";
+}
+
+function renderProjectSessionRow(session, pinnedIds) {
+  const title = session.title || t("untitledSession");
+  const active = session.id === state.sessionId;
+  if (state.renamingSessionId === session.id) {
+    return '<div class="session-row active" data-session-id="' + escapeHtml(session.id) + '">' +
+      '<input class="session-rename-inline" value="' + escapeHtml(title) +
+      '" data-session-id="' + escapeHtml(session.id) +
+      '" data-original="' + escapeHtml(title) +
+      '" aria-label="' + t("sessionNameAria") + '" /></div>';
+  }
+
+  let dotHtml = "";
+  if (!active) {
+    if (isSessionStreaming(session.id)) {
+      dotHtml = '<span class="session-dot streaming" title="' + t("modelRunning") + '"></span>';
+    } else if (session._unread) {
+      dotHtml = '<span class="session-dot unread" title="' + t("unreadMessage") + '"></span>';
+    }
+  }
+
+  const pinBadge = pinnedIds.includes(session.id)
+    ? '<span class="session-pin-badge" title="' + t("pinnedLabel") + '">&#9733;</span>'
+    : "";
+  return '<div class="session-row' + (active ? ' active' : '') +
+    '" data-session-id="' + escapeHtml(session.id) + '">' +
+    '<button class="session-main" type="button" data-session-id="' +
+    escapeHtml(session.id) + '">' +
+    pinBadge + '<span class="session-title-text">' + escapeHtml(title) + '</span>' +
+    renderSessionSourceBadge(session) + dotHtml + '</button>' +
+    '<div class="session-more-wrap"><button class="session-more-btn" type="button" title="' +
+    t("more") + '" data-session-id="' + escapeHtml(session.id) + '">&#8942;</button></div></div>';
+}
+
+function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, expandedProjects) {
+  const projectId = project?.id || "";
+  const sectionKey = projectId || UNASSIGNED_PROJECT_KEY;
+  const isUnassigned = !projectId;
+  const name = isUnassigned ? t("otherSessions") : projectDisplayName(project);
+  const isProjectPinned = projectId && getPinnedProjects().includes(projectId);
+  const expanded = Boolean(expandedProjects[sectionKey]);
+  const preview = selectProjectSessionPreview(
+    sessions,
+    pinnedIds,
+    state.sessionId,
+    expanded,
+  );
+  const collapsed = Boolean(collapsedProjects[sectionKey]);
+  const pending = state.pendingProjectId === (projectId || null) && !state.sessionId;
+  let html = '<div class="project-block' +
+    (isUnassigned ? ' unassigned-project' : '') +
+    (pending ? ' pending-project' : '') +
+    '" data-project-key="' + escapeHtml(sectionKey) + '">';
+  const headerTitle = isUnassigned
+    ? t("unassignedSessionsHint")
+    : projectRootPaths(project).join("\n");
+  html += '<div class="project-header" data-project-key="' + escapeHtml(sectionKey) + '"' +
+    (projectId ? ' data-project-id="' + escapeHtml(projectId) + '"' : '') +
+    (headerTitle ? ' title="' + escapeHtml(headerTitle) + '"' : '') + '>';
+  html += '<span class="project-arrow">' + (collapsed ? "&#9654;" : "&#9660;") + '</span>';
+  if (isProjectPinned) {
+    html += '<span class="project-pin-indicator" title="' + t("pinnedLabel") +
+      '" aria-hidden="true">&#9733;</span>';
+  }
+  html += '<span class="project-name">' + escapeHtml(name) + '</span>';
+  if (!isUnassigned) {
+    html += '<button class="project-header-action project-new-session" type="button" data-project-id="' +
+      escapeHtml(projectId) + '" title="' + t("newSessionInProject") +
+      '" aria-label="' + t("newSessionInProject") + '">+</button>';
+    html += '<button class="project-header-action project-more-btn" type="button" data-project-id="' +
+      escapeHtml(projectId) + '" title="' + t("projectActions") +
+      '" aria-label="' + t("projectActions") + '">&#8942;</button>';
+  }
+  html += '</div>';
+  html += '<div class="project-children' + (collapsed ? ' collapsed' : '') +
+    '" data-project-children="' + escapeHtml(sectionKey) + '">';
+  if (preview.items.length) {
+    html += preview.items.map(
+      (session) => renderProjectSessionRow(session, pinnedIds),
+    ).join("");
+  } else {
+    html += '<div class="project-empty-sessions">' + t("noProjectSessions") + '</div>';
+  }
+  if (preview.total > PROJECT_SESSION_PREVIEW_LIMIT) {
+    html += '<button class="project-sessions-toggle" type="button" data-project-key="' +
+      escapeHtml(sectionKey) + '">' +
+      (expanded
+        ? t("collapseSessions")
+        : t("showAllSessions")) +
+      '</button>';
+  }
+  html += '</div></div>';
+  return html;
+}
+
 function renderSessions() {
-
-  if (state.sessions.length === 0) {
-
+  const projects = orderProjects(state.projects, getPinnedProjects());
+  if (!state.sessions.length && !projects.length) {
     els.sessionList.innerHTML = `<div class="muted-line" style="padding:12px;">${t("noSessions")}</div>`;
-
+    updateGroupBadge({});
     return;
-
   }
 
   const pinned = getPinnedSessions();
+  let collapsedProjects = {};
+  let expandedProjects = {};
+  try {
+    collapsedProjects = JSON.parse(localStorage.getItem("code-collapsed-projects") || "{}");
+    expandedProjects = JSON.parse(localStorage.getItem("code-expanded-project-sessions") || "{}");
+  } catch (_) {}
 
-  // Get collapsed groups from localStorage
-  var collapsed = {};
-  try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-groups") || "{}"); } catch(e) {}
-
-  // Group ALL sessions by "group" field; default group = "chat"
-  var groups = {};
-  state.sessions.forEach(function (s) {
-    var g = (s.group || "").trim() || "chat";
-    if (!groups[g]) groups[g] = [];
-    groups[g].push(s);
+  const sessionsByProject = {};
+  const unassigned = [];
+  state.sessions.forEach((session) => {
+    if (session.projectId) {
+      if (!sessionsByProject[session.projectId]) sessionsByProject[session.projectId] = [];
+      sessionsByProject[session.projectId].push(session);
+    } else {
+      unassigned.push(session);
+    }
   });
 
-  // Within each group: sort by updatedAt desc, then pinned first
-  var sorted = [];
-  var groupDefs = [];  // [{name, displayName, firstIdx, count, collapsed}]
-  var names = Object.keys(groups).filter(function(n) { return n !== "chat"; }).sort();
-  names.push("chat");
-
-  names.forEach(function (gn) {
-    var items = groups[gn].slice();
-    // Sort by updatedAt descending (most recent first)
-    items.sort(function (a, b) { return (b.updatedAt || "").localeCompare(a.updatedAt || ""); });
-    var pinnedItems = items.filter(function (s) { return pinned.includes(s.id); });
-    var unpinnedItems = items.filter(function (s) { return !pinned.includes(s.id); });
-    groupDefs.push({
-      name: gn,
-      displayName: gn === "chat" ? t("chatLabel") : gn,
-      firstIdx: sorted.length,
-      count: items.length,
-      collapsed: !!collapsed[gn]
-    });
-    sorted = sorted.concat(pinnedItems).concat(unpinnedItems);
+  const knownProjectIds = new Set(projects.map((project) => project.id));
+  Object.keys(sessionsByProject).forEach((projectId) => {
+    if (!knownProjectIds.has(projectId)) {
+      projects.push({ id: projectId, label: projectId, path: "" });
+    }
   });
 
-  // Build group header HTML first, then session list
-  var groupHeaders = {};
-  groupDefs.forEach(function (gd) {
-    var arrow = gd.collapsed ? "&#9654;" : "&#9660;";
-    groupHeaders[gd.name] = `<div class="session-group-label" data-group="${escapeHtml(gd.name)}" style="cursor:pointer;user-select:none">
-      <span class="group-arrow">${arrow}</span> ${escapeHtml(gd.displayName)}
-      <span style="font-weight:400;color:var(--muted);font-size:11px;margin-left:4px">${gd.count}</span>
-    </div>`;
+  let html = projects.map((project) => renderProjectSection(
+    project,
+    sessionsByProject[project.id] || [],
+    pinned,
+    collapsedProjects,
+    expandedProjects,
+  )).join("");
+  if (unassigned.length) {
+    html += renderProjectSection(
+      null,
+      unassigned,
+      pinned,
+      collapsedProjects,
+      expandedProjects,
+    );
+  }
+  els.sessionList.innerHTML = html;
+  updateGroupBadge(
+    state.sessions.find((session) => session.id === state.sessionId) || {},
+  );
+
+  document.querySelectorAll(".session-main").forEach((button) => {
+    button.addEventListener("click", () => loadSession(button.dataset.sessionId));
   });
 
-  els.sessionList.innerHTML = sorted
-
-    .map(function (session, idx) {
-
-      var labelHtml = "";
-      for (var gi = 0; gi < groupDefs.length; gi++) {
-        if (idx === groupDefs[gi].firstIdx) {
-          labelHtml = groupHeaders[groupDefs[gi].name];
-        }
-      }
-
-      // Hide sessions in collapsed groups (but keep the group header!)
-      var sessionGroup = (session.group || "").trim() || "chat";
-      var isCollapsed = !!collapsed[sessionGroup];
-      if (isCollapsed) return labelHtml;  // show header even when collapsed
-
-      var title = session.title || t("untitledSession");
-
-      if (state.renamingSessionId === session.id) {
-
-        return `
-
-          ${labelHtml}
-
-          <div class="session-row active" data-session-id="${escapeHtml(session.id)}">
-
-            <input class="session-rename-inline" value="${escapeHtml(title)}" data-session-id="${escapeHtml(session.id)}" data-original="${escapeHtml(title)}" aria-label="${t("sessionNameAria")}" />
-
-          </div>
-
-        `;
-
-      }
-
-      return `
-
-        ${labelHtml}
-
-        <div class="session-row ${session.id === state.sessionId ? "active" : ""}" data-session-id="${escapeHtml(session.id)}">
-
-          <button class="session-main" type="button" data-session-id="${escapeHtml(session.id)}">
-
-            <span>${escapeHtml(title)}</span>
-
-            ${session.id !== state.sessionId ? (
-              isSessionStreaming(session.id)
-                ? `<span class="session-dot streaming" title="${t("modelRunning")}"></span>`
-                : session._unread
-                  ? `<span class="session-dot unread" title="${t("unreadMessage")}"></span>`
-                  : ''
-            ) : ''}
-
-          </button>
-
-          <div class="session-more-wrap">
-
-            <button class="session-more-btn" type="button" title="${t("more")}" data-session-id="${escapeHtml(session.id)}">&#8942;</button>
-
-          </div>
-
-        </div>
-
-      `;
-
-    })
-
-    .join("");
-
-
-
-  document.querySelectorAll(".session-main").forEach((btn) => {
-
-    btn.addEventListener("click", () => loadSession(btn.dataset.sessionId));
-
-  });
-
-  // Session more menu - render to body to avoid overflow clipping
-
-  document.querySelectorAll(".session-more-btn").forEach((btn) => {
-
-    btn.addEventListener("click", (e) => {
-
+  document.querySelectorAll(".session-more-btn").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      const btn = button;
+      const e = event;
       e.stopPropagation();
-
       closeAllSessionMenus();
-
       const id = btn.dataset.sessionId;
-
       const rect = btn.getBoundingClientRect();
-
       const menu = document.createElement("div");
-
       menu.className = "session-more-menu";
-
       menu.style.position = "fixed";
-
       menu.style.left = (rect.right - 90) + "px";
-
       menu.style.top = (rect.bottom + 2) + "px";
-
-      menu.innerHTML = `
-
-        <button class="session-more-item pin ${getPinnedSessions().includes(id) ? 'is-pinned' : ''}" data-action="pin">${getPinnedSessions().includes(id) ? t('unpin') : t('pin')}</button>
-
-        <button class="session-more-item" data-action="rename">${t("rename")}</button>
-
-        <button class="session-more-item danger" data-action="delete">${t("delete")}</button>
-
-      `;
-
+      menu.innerHTML = '<button class="session-more-item pin ' + (getPinnedSessions().includes(id) ? 'is-pinned' : '') + '" data-action="pin">' + (getPinnedSessions().includes(id) ? t('unpin') : t('pin')) + '</button>' +
+        '<button class="session-more-item" data-action="rename">' + t("rename") + '</button>' +
+        '<button class="session-more-item danger" data-action="delete">' + t("delete") + '</button>';
       menu.querySelectorAll(".session-more-item").forEach((item) => {
-
         item.addEventListener("click", () => {
-
           if (item.dataset.action === "rename") {
-
             state.renamingSessionId = id;
-
             renderSessions();
-
-            document.querySelector(".session-rename-inline")?.select();
-
+            const renameInput = document.querySelector(".session-rename-inline");
+            if (renameInput) renameInput.select();
           } else if (item.dataset.action === "pin") {
-
             togglePinSession(id);
-
           } else if (item.dataset.action === "delete") {
-
             deleteSession(id).catch((err) => appendSystemError(err.message));
-
           }
-
           menu.remove();
-
         });
-
       });
-
       document.body.appendChild(menu);
-
     });
-
   });
-
-
 
   document.querySelectorAll(".session-rename-inline").forEach((input) => {
-
     input.select();
-
     input.focus();
-
     const save = () => {
-
       const id = input.dataset.sessionId;
-
       const val = input.value.trim();
-
       const original = input.dataset.original || "";
-
       if (val && val !== original) {
-
         renameSession(id, val).catch(() => {});
-
       }
-
       state.renamingSessionId = null;
-
       renderSessions();
-
     };
-
     input.addEventListener("blur", save);
-
     input.addEventListener("keydown", (e) => {
-
       if (e.key === "Enter") { e.preventDefault(); save(); }
-
       if (e.key === "Escape") {
-
         input.value = input.dataset.original || "";
-
         save();
-
       }
-
     });
-
   });
 
-  // Sync group info in session panel
-  var cur = state.sessions.find(function (s) { return s.id === state.sessionId; });
-  updateGroupBadge(cur || {});
-
+  attachProjectSessionListeners();
 }
 
-// Group collapse/expand — accordion: only one group open at a time
-if (els.sessionList) els.sessionList.addEventListener("click", function (e) {
-  var label = e.target.closest(".session-group-label");
-  if (!label) return;
-  var gn = label.dataset.group;
-  if (!gn) return;
-  var collapsed = {};
-  try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-groups") || "{}"); } catch(e) {}
-  // Accordion: collapse all groups, then toggle the clicked one
-  var allNames = Object.keys(collapsed);
-  // Build list of all group names from current sessions
-  var currentGroups = {};
-  state.sessions.forEach(function(s){ var g=(s.group||"").trim()||"chat"; currentGroups[g]=true; });
-  // Collapse all, then expand only the clicked one (if it was collapsed)
-  var wasCollapsed = !!collapsed[gn];
-  Object.keys(currentGroups).forEach(function(g){ collapsed[g]=true; });
-  collapsed[gn] = !wasCollapsed;
-  localStorage.setItem("code-collapsed-groups", JSON.stringify(collapsed));
-  renderSessions();
-});
+function openProjectContextMenu(projectId, rect) {
+  closeProjectMenus();
+  const isPinned = getPinnedProjects().includes(projectId);
+  const menu = document.createElement("div");
+  menu.className = "project-context-menu";
+  menu.style.left = rect.left + "px";
+  menu.style.top = (rect.bottom + 2) + "px";
+  menu.innerHTML = '<button class="project-context-item" data-action="edit">' + t("editProject") + '</button>' +
+    '<button class="project-context-item" data-action="pin">' +
+    (isPinned ? t("unpin") : t("pin")) + '</button>';
+  menu.querySelectorAll(".project-context-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      if (item.dataset.action === "edit") openProjectEditModal(projectId);
+      if (item.dataset.action === "pin") togglePinProject(projectId);
+      menu.remove();
+    });
+  });
+  document.body.appendChild(menu);
+}
 
+function attachProjectSessionListeners() {
+  document.querySelectorAll(".project-header").forEach((header) => {
+    header.addEventListener("click", (event) => {
+      if (event.target.closest(".project-header-action")) return;
+      const projectKey = header.dataset.projectKey;
+      if (!projectKey) return;
+      let collapsed = {};
+      try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-projects") || "{}"); } catch (e) {}
+      collapsed[projectKey] = !collapsed[projectKey];
+      localStorage.setItem("code-collapsed-projects", JSON.stringify(collapsed));
+      renderSessions();
+    });
+    header.addEventListener("contextmenu", (event) => {
+      const projectId = header.dataset.projectId;
+      if (!projectId) return;
+      event.preventDefault();
+      openProjectContextMenu(projectId, header.getBoundingClientRect());
+    });
+  });
 
+  document.querySelectorAll(".project-new-session").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      beginNewConversation(button.dataset.projectId || null);
+    });
+  });
+
+  document.querySelectorAll(".project-more-btn").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openProjectContextMenu(
+        button.dataset.projectId,
+        button.getBoundingClientRect(),
+      );
+    });
+  });
+
+  document.querySelectorAll(".project-sessions-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.projectKey;
+      let expanded = {};
+      try { expanded = JSON.parse(localStorage.getItem("code-expanded-project-sessions") || "{}"); } catch (_) {}
+      expanded[key] = !expanded[key];
+      localStorage.setItem("code-expanded-project-sessions", JSON.stringify(expanded));
+      renderSessions();
+    });
+  });
+
+  const createBtn = document.getElementById("projectCreateBtn");
+  if (createBtn && !createBtn._hasCreateHandler) {
+    createBtn._hasCreateHandler = true;
+    createBtn.addEventListener("click", () => {
+      apiJson("/api/pick-folder")
+        .then((result) => {
+          if (result.cancelled || !result.path) return;
+          return apiJson("/api/projects", {
+            method: "POST",
+            body: JSON.stringify({ path: result.path }),
+          });
+        })
+        .then(async (project) => {
+          if (!project) return;
+          await refreshProjects();
+          beginNewConversation(project.id);
+        })
+        .catch((err) => console.error("Create project failed:", err));
+    });
+  }
+}
 
 function closeAllSessionMenus() {
 
   document.querySelectorAll(".session-more-menu").forEach((m) => m.remove());
 
 }
+
+function closeProjectMenus() {
+  document.querySelectorAll(".project-context-menu").forEach(function (m) { m.remove(); });
+}
+
+let editingProjectId = null;
+let editingProjectRootPaths = [];
+let pendingProjectDeleteId = null;
+let projectModalListenersBound = false;
+
+function projectFolderName(path) {
+  const parts = String(path || "").replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || path || "";
+}
+
+function renderProjectEditFolders() {
+  const list = document.getElementById("projectSourceFolderList");
+  if (!list) return;
+  const onlyOne = editingProjectRootPaths.length <= 1;
+  list.innerHTML = editingProjectRootPaths.map((path, index) => (
+    '<div class="project-source-folder-row" title="' + escapeHtml(path) + '">' +
+      '<span class="project-edit-folder-icon" aria-hidden="true">' +
+        '<svg viewBox="0 0 24 24"><path d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.8 2h7.6a1.75 1.75 0 0 1 1.75 1.75v8.5A1.75 1.75 0 0 1 18.75 19H5.25a1.75 1.75 0 0 1-1.75-1.75Z"/></svg>' +
+      '</span>' +
+      '<span class="project-source-folder-name">' + escapeHtml(projectFolderName(path)) + '</span>' +
+      (index === 0
+        ? '<span class="project-primary-badge">' + escapeHtml(t("primaryFolder")) + '</span>'
+        : '<button class="project-make-primary" type="button" data-project-folder-action="primary" data-index="' +
+          index + '">' + escapeHtml(t("makePrimary")) + '</button>') +
+      '<button class="project-source-folder-remove" type="button" data-project-folder-action="remove" data-index="' +
+        index + '" title="' + escapeHtml(t("removeSourceFolder")) + '" aria-label="' +
+        escapeHtml(t("removeSourceFolder")) + '"' + (onlyOne ? ' disabled' : '') + '>&times;</button>' +
+    '</div>'
+  )).join("");
+}
+
+function closeProjectEditModal() {
+  document.getElementById("projectEditModal")?.classList.add("hidden");
+  editingProjectId = null;
+  editingProjectRootPaths = [];
+}
+
+function closeProjectDeleteConfirm() {
+  document.getElementById("projectDeleteConfirmModal")?.classList.add("hidden");
+  pendingProjectDeleteId = null;
+}
+
+function setProjectEditBusy(busy) {
+  ["projectEditName", "addProjectFolder", "deleteProjectFromEdit",
+    "cancelProjectEdit", "closeProjectEdit", "saveProjectEdit"].forEach((id) => {
+    const element = document.getElementById(id);
+    if (element) element.disabled = busy;
+  });
+  document.querySelectorAll("[data-project-folder-action]").forEach((element) => {
+    element.disabled = busy || (
+      element.dataset.projectFolderAction === "remove"
+      && editingProjectRootPaths.length <= 1
+    );
+  });
+}
+
+function ensureProjectModalListeners() {
+  if (projectModalListenersBound) return;
+  projectModalListenersBound = true;
+  const editModal = document.getElementById("projectEditModal");
+  const deleteModal = document.getElementById("projectDeleteConfirmModal");
+
+  document.getElementById("closeProjectEdit")?.addEventListener("click", closeProjectEditModal);
+  document.getElementById("cancelProjectEdit")?.addEventListener("click", closeProjectEditModal);
+  editModal?.addEventListener("click", (event) => {
+    if (event.target === editModal) closeProjectEditModal();
+  });
+
+  document.getElementById("projectSourceFolderList")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-project-folder-action]");
+    if (!button) return;
+    const index = Number(button.dataset.index);
+    if (!Number.isInteger(index) || !editingProjectRootPaths[index]) return;
+    if (button.dataset.projectFolderAction === "primary" && index > 0) {
+      const next = editingProjectRootPaths.slice();
+      const [primary] = next.splice(index, 1);
+      next.unshift(primary);
+      editingProjectRootPaths = next;
+    } else if (
+      button.dataset.projectFolderAction === "remove"
+      && editingProjectRootPaths.length > 1
+    ) {
+      editingProjectRootPaths = editingProjectRootPaths.filter((_, itemIndex) => itemIndex !== index);
+    }
+    renderProjectEditFolders();
+  });
+
+  document.getElementById("addProjectFolder")?.addEventListener("click", async () => {
+    try {
+      const pickerUrl = "/api/pick-folder?path=" + encodeURIComponent(
+        editingProjectRootPaths[0] || "",
+      );
+      const result = await apiJson(pickerUrl);
+      if (!result.cancelled && result.path) {
+        if (editingProjectRootPaths.some(
+          (path) => normalizePathIdentity(path) === normalizePathIdentity(result.path),
+        )) {
+          showToast(t("sourceFolderAlreadyAdded"), "warning");
+          return;
+        }
+        editingProjectRootPaths = [...editingProjectRootPaths, result.path];
+        renderProjectEditFolders();
+      }
+    } catch (error) {
+      showToast(error.message || String(error), "error");
+    }
+  });
+
+  document.getElementById("saveProjectEdit")?.addEventListener("click", async () => {
+    const project = state.projectsMap[editingProjectId];
+    const label = document.getElementById("projectEditName")?.value.trim() || "";
+    if (!project || !label || !editingProjectRootPaths.length) {
+      showToast(t("fillRequired"), "warning");
+      return;
+    }
+    const projectId = editingProjectId;
+    const oldRootPaths = projectRootPaths(project);
+    setProjectEditBusy(true);
+    try {
+      await apiJson("/api/projects/" + encodeURIComponent(projectId) + "/update", {
+        method: "POST",
+        body: JSON.stringify({ label, rootPaths: editingProjectRootPaths }),
+      });
+      closeProjectEditModal();
+      await refreshSessions();
+      const active = state.sessions.find((session) => session.id === state.sessionId);
+      if (active?.cwd && normalizePathIdentity(active.cwd) !== normalizePathIdentity(els.projectRoot?.value)) {
+        await saveProjectRoot(active.cwd, { syncSession: false });
+      } else if (
+        !state.sessionId
+        && oldRootPaths.some(
+          (path) => normalizePathIdentity(path) === normalizePathIdentity(els.projectRoot?.value),
+        )
+        && !projectContainsPath(state.projectsMap[projectId], els.projectRoot?.value)
+      ) {
+        await loadConfig();
+        await loadProjectContext();
+      }
+      showToast(t("projectSaved"), "success");
+    } catch (error) {
+      showToast(error.message || String(error), "error");
+    } finally {
+      setProjectEditBusy(false);
+    }
+  });
+
+  document.getElementById("deleteProjectFromEdit")?.addEventListener("click", () => {
+    const project = state.projectsMap[editingProjectId];
+    if (!project) return;
+    pendingProjectDeleteId = editingProjectId;
+    const title = document.getElementById("projectDeleteConfirmTitle");
+    if (title) title.textContent = t("removeProjectTitle", { name: projectDisplayName(project) });
+    document.getElementById("projectEditModal")?.classList.add("hidden");
+    editingProjectId = null;
+    editingProjectRootPaths = [];
+    document.getElementById("projectDeleteConfirmModal")?.classList.remove("hidden");
+  });
+
+  document.getElementById("closeProjectDeleteConfirm")?.addEventListener("click", closeProjectDeleteConfirm);
+  document.getElementById("cancelProjectDelete")?.addEventListener("click", closeProjectDeleteConfirm);
+  deleteModal?.addEventListener("click", (event) => {
+    if (event.target === deleteModal) closeProjectDeleteConfirm();
+  });
+  document.getElementById("confirmProjectDelete")?.addEventListener("click", async () => {
+    const projectId = pendingProjectDeleteId;
+    if (!projectId) return;
+    const button = document.getElementById("confirmProjectDelete");
+    if (button) button.disabled = true;
+    try {
+      await deleteProject(projectId);
+      closeProjectDeleteConfirm();
+    } catch (error) {
+      showToast(error.message || String(error), "error");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!deleteModal?.classList.contains("hidden")) closeProjectDeleteConfirm();
+    else if (!editModal?.classList.contains("hidden")) closeProjectEditModal();
+  });
+}
+
+function openProjectEditModal(projectId) {
+  const project = state.projectsMap[projectId];
+  if (!project) return;
+  ensureProjectModalListeners();
+  editingProjectId = projectId;
+  editingProjectRootPaths = projectRootPaths(project);
+  const input = document.getElementById("projectEditName");
+  if (input) input.value = projectDisplayName(project);
+  renderProjectEditFolders();
+  setProjectEditBusy(false);
+  document.getElementById("projectEditModal")?.classList.remove("hidden");
+  setTimeout(() => input?.select(), 0);
+}
+
+async function deleteProject(pid) {
+  await apiJson("/api/projects/" + encodeURIComponent(pid), { method: "DELETE" });
+  if (state.pendingProjectId === pid) state.pendingProjectId = null;
+  const pinned = getPinnedProjects().filter((projectId) => projectId !== pid);
+  localStorage.setItem("code-pinned-projects", JSON.stringify(pinned));
+  await refreshSessions();
+}
+
+function projectIdForNewConversation() {
+  const active = state.sessions.find((session) => session.id === state.sessionId);
+  return active?.projectId || projectForCurrentRoot()?.id || null;
+}
+
+function beginNewConversation(projectId = null) {
+  cacheActiveSessionState();
+  invalidateForegroundSessionNavigation();
+  state.pendingProjectId = projectId || null;
+  state.sessionId = null;
+  state.messages = [];
+  state._lastRenderedHtml = null;
+  state.stats = { input: 0, output: 0, cache: 0 };
+  state.pendingEdits = {};
+  els.sessionTitle.value = "";
+  rememberWelcomeForeground();
+  syncActiveStreamingState();
+  renderMessages();
+  renderSessions();
+  updateGroupBadge({});
+  updateStatsPanel();
+  updateSendButtonState();
+  const primaryPath = projectPrimaryPath(state.projectsMap[projectId]);
+  if (
+    primaryPath
+    && normalizePathIdentity(primaryPath) !== normalizePathIdentity(els.projectRoot?.value)
+  ) {
+    saveProjectRoot(primaryPath, { syncSession: false }).catch((error) => {
+      showToast(error.message || String(error), "error");
+    });
+  }
+}
+
+// Close any context menu on outside click
+document.addEventListener("click", function (e) {
+  if (!e.target.closest(".project-context-menu") && !e.target.closest(".project-header")) {
+    closeProjectMenus();
+  }
+  if (!e.target.closest(".session-more-menu") && !e.target.closest(".session-more-btn")) {
+    closeAllSessionMenus();
+  }
+});
 
 function invalidateForegroundSessionNavigation() {
   state._foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
@@ -4104,15 +4582,20 @@ async function refreshSessions() {
     // Keep existing sessions on error — don't wipe the list
   }
 
+  await refreshProjects();
   renderSessions();
 
 }
 
-
-
 async function createSession(title = t("sessionTitleDefault")) {
 
   cacheActiveSessionState();
+  var body = { title: title };
+  const projectId = state.pendingProjectId || projectForCurrentRoot()?.id || null;
+  if (projectId) {
+    body.projectId = projectId;
+    body.cwd = projectPrimaryPath(state.projectsMap[projectId]);
+  }
   const loadSeq = (state._sessionLoadSeq || 0) + 1;
   state._sessionLoadSeq = loadSeq;
 
@@ -4120,12 +4603,13 @@ async function createSession(title = t("sessionTitleDefault")) {
 
     method: "POST",
 
-    body: JSON.stringify({ title }),
+    body: JSON.stringify(body),
 
   });
   if (loadSeq !== state._sessionLoadSeq) return session;
 
   state.sessionId = session.id;
+  state.pendingProjectId = session.projectId || null;
 
   state.sessionCreated = session.createdAt || "";
   state.sessionUpdated = session.lastMessageTime || session.updatedAt || "";
@@ -4148,6 +4632,7 @@ async function createSession(title = t("sessionTitleDefault")) {
 
   rememberSessionForeground(session.id);
 
+  if (session.cwd) await saveProjectRoot(session.cwd, { syncSession: false });
   await refreshSessions();
 
   syncActiveStreamingState();
@@ -4181,6 +4666,14 @@ async function loadSession(sessionId) {
   state._keepBranchOpen = false;
 
   if (sessionId === state.sessionId) {
+    const current = state.sessions.find((item) => item.id === sessionId);
+    state.pendingProjectId = current?.projectId || null;
+    if (
+      current?.cwd
+      && normalizePathIdentity(current.cwd) !== normalizePathIdentity(els.projectRoot?.value)
+    ) {
+      await saveProjectRoot(current.cwd, { syncSession: false });
+    }
     rememberSessionForeground(sessionId);
     syncActiveStreamingState();
     resetRenderCache();
@@ -4213,6 +4706,7 @@ async function loadSession(sessionId) {
 
   // Switch session — prefer cache (has in-flight streaming content) over server
   state.sessionId = session.id;
+  state.pendingProjectId = session.projectId || null;
 
   state.sessionCreated = session.createdAt || "";
   state.sessionUpdated = session.lastMessageTime || session.updatedAt || "";
@@ -4268,6 +4762,7 @@ async function loadSession(sessionId) {
 
   rememberSessionForeground(session.id);
 
+  if (session.cwd) await saveProjectRoot(session.cwd, { syncSession: false });
   renderSessions();
 
   syncActiveStreamingState();
@@ -4396,7 +4891,7 @@ async function loadConfig() {
 
 
 
-async function saveProjectRoot(newPath) {
+async function saveProjectRoot(newPath, options = {}) {
 
   // Use newPath explicitly (empty string = user home), fallback to current value if undefined
   const path = (newPath !== undefined ? newPath : (els.projectRoot ? els.projectRoot.value : "")).trim();
@@ -4419,9 +4914,45 @@ async function saveProjectRoot(newPath) {
 
   addRecentFolder(config.projectRoot);
 
+  if (state.sessionId && options.syncSession !== false) {
+    const summary = state.sessions.find((session) => session.id === state.sessionId);
+    const currentProject = summary?.projectId
+      ? state.projectsMap[summary.projectId]
+      : null;
+    const nextProjectId = currentProject && projectContainsPath(currentProject, config.projectRoot)
+      ? currentProject.id
+      : null;
+    const location = await apiJson(
+      "/api/sessions/" + encodeURIComponent(state.sessionId) + "/project",
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          projectId: nextProjectId,
+          cwd: config.projectRoot || "",
+        }),
+      },
+    );
+    if (summary) {
+      summary.projectId = location.projectId || null;
+      summary.cwd = location.cwd || config.projectRoot || "";
+    }
+    state.pendingProjectId = location.projectId || null;
+    if (currentProject && !nextProjectId) {
+      showToast(t("sessionDetachedFromProject"), "warning");
+    }
+    renderSessions();
+    updateGroupBadge(summary || {});
+  }
+
   await loadFiles("");
 
   await loadProjectContext();
+
+  if (!state.sessionId) {
+    state.pendingProjectId = projectForCurrentRoot()?.id || null;
+    renderSessions();
+    updateGroupBadge({});
+  }
 
 }
 
@@ -6782,6 +7313,12 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
   const modelMessages = ctx?.isSubAgent
     ? streamMessages
     : getModelContextMessages(streamMessages);
+  if (ctx && !ctx.projectContextResolved) {
+    ctx.projectContext = await loadProjectContextForRoot(
+      ctx.primaryRoot || ctx.cwd || "",
+    ).catch(() => ({ found: false, path: null, name: null, content: null }));
+    ctx.projectContextResolved = true;
+  }
 
   const payload = {
 
@@ -6806,6 +7343,10 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
           toolPreset: ctx?.toolPreset,
           permissionProfile: ctx?.permissionProfile,
           allowedToolNames: ctx?.allowedToolNames,
+          cwd: ctx?.cwd,
+          primaryRoot: ctx?.primaryRoot,
+          rootPaths: ctx?.rootPaths,
+          projectContext: ctx?.projectContext,
         }),
       }]),
 
@@ -7680,7 +8221,7 @@ function createSubContext(parentCtx, taskPrompt) {
   const subSystem = [
     SYSTEM_SECURITY_LAYER,
     `你是一个编程子 Agent，负责亲自完成主 Agent 分配的子任务。你只能使用主 Agent 当前权限策略开放给你的工具，不得尝试提升权限。`,
-    `环境：Windows + PowerShell。项目根目录：${els.projectRoot?.value || "未设置"}`,
+    `环境：Windows + PowerShell。当前工作目录：${parentCtx.cwd || "未设置"}。主文件夹：${parentCtx.primaryRoot || parentCtx.cwd || "未设置"}。`,
     `禁止再次委派子 Agent。禁止用 JSON、代码块或文字模拟工具调用；需要操作时必须真正调用可用工具。`,
     `完成前验证任务目标是否达成；完成后只返回简洁的结果摘要、验证结果和必要的路径。`,
     `如果执行过程中遇到必须由用户决定的岔路口（如方案取舍、参数选择），你无法直接弹问卷。此时应停止操作，在结果中按以下格式输出：\n\n[DECISION_POINT]\n需要决定：<一句话描述>\n可选方案：\n- 方案A：<说明>\n- 方案B：<说明>\n推荐：<推荐哪个>\n\n主 Agent 看到后会接管并向用户询问。如果主 Agent 后续重新派发你来继续这个任务，它会在任务描述中附带用户的决定，你直接按决定执行，不要再上报同一个决策点。`,
@@ -8000,6 +8541,11 @@ function backgroundJobCheckpoint(job) {
     thinkingLevel: String(job.thinkingLevel || "auto"),
     temperature: Number(job.temperature ?? 0.2),
     maxTokens: Number(job.maxTokens || 0),
+    cwd: String(job.cwd || job.parentCtx?.cwd || ""),
+    primaryRoot: String(job.primaryRoot || job.parentCtx?.primaryRoot || ""),
+    rootPaths: Array.isArray(job.rootPaths || job.parentCtx?.rootPaths)
+      ? [...(job.rootPaths || job.parentCtx.rootPaths)]
+      : [],
     parentTaskStartedAt: Number(job.parentTaskStartedAt || 0),
     queuedAt: Number(job.queuedAt || Date.now()),
     startedAt: Number(job.startedAt || 0),
@@ -8086,6 +8632,9 @@ function backgroundJobElapsed(job, finishedAt = Date.now()) {
 function createBackgroundServerContext(job) {
   const parentCtx = job.parentCtx || {
     sessionId: job.sessionId,
+    cwd: job.cwd || "",
+    primaryRoot: job.primaryRoot || job.cwd || "",
+    rootPaths: Array.isArray(job.rootPaths) ? job.rootPaths : [],
     model: job.model,
     temperature: job.temperature,
     maxTokens: job.maxTokens,
@@ -8159,6 +8708,7 @@ async function runBackgroundSubAgentJob(job) {
       allowedTools: serverToolNames,
       maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: job.permissionProfile,
+      cwd: subCtx.cwd || "",
       signal: subCtx.run.abortController.signal,
     });
     job.agentRunId = String(created.agentRunId || "");
@@ -8356,6 +8906,9 @@ async function dispatchBackgroundSubAgent(sessionId, userText, images = []) {
     thinkingLevel: parentCtx.thinkingLevel || getThinkingLevel(),
     temperature: Number(parentCtx.temperature ?? els.temperature.value ?? 0.2),
     maxTokens: Number(parentCtx.maxTokens || getEffectiveMaxTokens(parentCtx.model || getSelectedModel())),
+    cwd: parentCtx.cwd || "",
+    primaryRoot: parentCtx.primaryRoot || parentCtx.cwd || "",
+    rootPaths: Array.isArray(parentCtx.rootPaths) ? [...parentCtx.rootPaths] : [],
     parentTaskStartedAt,
     status: "pending",
     queuedAt: submittedAt,
@@ -9048,6 +9601,7 @@ async function runServerAgentLoop(ctx) {
       toolBudgets: skillToolBudgets,
       maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: ctx.permissionProfile || "read",
+      cwd: ctx.cwd || "",
       signal: ctx.run.abortController.signal,
     });
     ctx.agentRunId = String(created.agentRunId || "");
@@ -10489,36 +11043,9 @@ els.chatForm.addEventListener("submit", async (event) => {
 
 
 els.newChat.addEventListener("click", () => {
-
-  // Starting a new conversation only changes the foreground view. Any task
-  // bound to the previous session keeps its own controller and cache.
-  cacheActiveSessionState();
-  invalidateForegroundSessionNavigation();
-
-  state.sessionId = null;
-
-  state.messages = [];
-
-  state._lastRenderedHtml = null;
-
-  state.stats = { input: 0, output: 0, cache: 0 };
-
-  state.pendingEdits = {};
-
-  els.sessionTitle.value = "";
-
-  rememberWelcomeForeground();
-
-  syncActiveStreamingState();
-
-  renderMessages();
-
-  renderSessions();
-
-  updateStatsPanel();
-
-  updateSendButtonState();
-
+  // A new conversation inherits the active session's project, or the project
+  // matching the current file-tree root when no session is active.
+  beginNewConversation(projectIdForNewConversation());
 });
 
 
@@ -10625,7 +11152,10 @@ async function openImportModal() {
 
 function updateGroupBadge(session) {
   var el = document.getElementById("sessionGroup");
-  if (el) el.textContent = (session.group || "").trim() || "-";
+  if (!el) return;
+  const projectId = session.projectId || (!session.id ? state.pendingProjectId : null);
+  const project = projectId ? state.projectsMap?.[projectId] : null;
+  el.textContent = project ? projectDisplayName(project) : t("noProject");
 }
 
 function closeImportModal() {
@@ -10859,8 +11389,6 @@ async function init() {
     els.fileTree.innerHTML = `<div class="muted-line" style="padding:8px;">${escapeHtml(err.message)}</div>`;
   });
 
-  await loadProjectContext();
-
   await loadMemoryContext();
 
   await loadSkills();
@@ -10873,6 +11401,7 @@ async function init() {
   void checkForUpdates({ silent: true });
 
   await refreshSessions();
+  await loadProjectContext();
   setTimeout(preloadImportSessions, 3000);  // background: preload Codex + Claude Code session lists
 
   // Restore the last foreground session only when the user last left a

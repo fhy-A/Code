@@ -3030,5 +3030,228 @@ process.stdout.write(JSON.stringify({
         self.assertIn("import-source-tab", STYLE_SOURCE)
 
 
+class TestSidebarProjectArchitecture(unittest.TestCase):
+    """Regression guards for the Codex-style project/session sidebar."""
+
+    def test_project_css_classes_exist(self):
+        """The sidebar has one project level and direct session children."""
+        for cls_name in (
+            "project-toolbar",
+            "project-block",
+            "project-header",
+            "project-arrow",
+            "project-name",
+            "project-pin-indicator",
+            "project-children",
+            "project-empty-sessions",
+            "project-sessions-toggle",
+            "project-header-action",
+            "session-source-badge",
+        ):
+            self.assertIn(
+                "." + cls_name, STYLE_SOURCE,
+                f"CSS class .{cls_name} missing from styles.css"
+            )
+        self.assertNotIn(".project-group-label", STYLE_SOURCE)
+        self.assertNotIn(".project-group-children", STYLE_SOURCE)
+        self.assertNotIn(".project-count", STYLE_SOURCE)
+
+    def test_collapsed_css_exists(self):
+        """Projects retain independent collapse state without source groups."""
+        self.assertIn("project-children.collapsed", STYLE_SOURCE)
+        self.assertIn("code-collapsed-projects", APP_SOURCE)
+        self.assertNotIn("code-collapsed-groups", APP_SOURCE)
+
+    def test_project_toolbar_replaces_independent_filter(self):
+        """There is one project context model, not a second project filter."""
+        self.assertIn('id="projectToolbar"', INDEX_SOURCE)
+        self.assertIn('id="projectCreateBtn"', INDEX_SOURCE)
+        self.assertNotIn('id="projectSelect"', INDEX_SOURCE)
+        self.assertNotIn('id="projectFilter"', INDEX_SOURCE)
+
+    def test_project_api_referenced_in_app_js(self):
+        """Project API endpoint is referenced in app.js."""
+        self.assertIn("/api/projects", APP_SOURCE)
+
+    def test_agent_run_and_prompt_capture_the_session_workspace(self):
+        self.assertIn("cwd: ctx.cwd ||", APP_SOURCE)
+        self.assertIn("cwd: subCtx.cwd ||", APP_SOURCE)
+        self.assertIn("cwd,", RUNTIME_SOURCE)
+        self.assertIn("primaryRoot: projectPrimaryPath(project) || cwd", APP_SOURCE)
+        self.assertIn("loadProjectContextForRoot(", APP_SOURCE)
+        self.assertIn("projectContext: ctx?.projectContext", APP_SOURCE)
+
+    def test_render_sessions_has_no_source_group_projection(self):
+        """Source remains metadata and is never projected as a second tree level."""
+        render_start = APP_SOURCE.index("function renderSessions()")
+        render_end = APP_SOURCE.index("function openProjectContextMenu", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        self.assertIn("sessionsByProject", render_source)
+        self.assertNotIn("buildGroupMap", render_source)
+        self.assertNotIn("session.group", render_source)
+        self.assertIn("renderSessionSourceBadge", APP_SOURCE)
+
+    def test_refreshProjects_function_exists(self):
+        """Projects use canonical labels with compatibility fallback."""
+        self.assertIn("async function refreshProjects", APP_SOURCE)
+        self.assertIn("project?.label || project?.name", APP_SOURCE)
+
+    def test_project_actions_are_keyboard_and_touch_reachable(self):
+        self.assertIn("function attachProjectSessionListeners", APP_SOURCE)
+        self.assertIn("project-more-btn", APP_SOURCE)
+        self.assertIn("project-new-session", APP_SOURCE)
+        self.assertIn("@media (hover: none), (max-width: 700px)", STYLE_SOURCE)
+
+    def test_project_menu_contains_edit_and_pin_only(self):
+        menu_start = APP_SOURCE.index("function openProjectContextMenu")
+        menu_end = APP_SOURCE.index("function attachProjectSessionListeners", menu_start)
+        menu_source = APP_SOURCE[menu_start:menu_end]
+        self.assertIn('data-action="edit"', menu_source)
+        self.assertIn('data-action="pin"', menu_source)
+        self.assertNotIn('data-action="rename"', menu_source)
+        self.assertNotIn('data-action="delete"', menu_source)
+        self.assertIn("code-pinned-projects", APP_SOURCE)
+
+    def test_project_editor_owns_rename_multi_folder_edit_and_delete(self):
+        for element_id in (
+            "projectEditModal",
+            "projectEditName",
+            "projectSourceFolderList",
+            "addProjectFolder",
+            "deleteProjectFromEdit",
+            "saveProjectEdit",
+            "projectDeleteConfirmModal",
+            "confirmProjectDelete",
+        ):
+            self.assertIn(f'id="{element_id}"', INDEX_SOURCE)
+        self.assertIn("/api/projects/", APP_SOURCE)
+        self.assertIn('"/update"', APP_SOURCE)
+        self.assertIn("/api/pick-folder", APP_SOURCE)
+        self.assertIn("editingProjectRootPaths", APP_SOURCE)
+        self.assertIn("rootPaths: editingProjectRootPaths", APP_SOURCE)
+        self.assertIn('data-project-folder-action="primary"', APP_SOURCE)
+        self.assertIn("project-edit-card", STYLE_SOURCE)
+        self.assertIn("project-delete-confirm-card", STYLE_SOURCE)
+
+    def test_sidebar_does_not_render_session_counts(self):
+        render_start = APP_SOURCE.index("function renderProjectSection")
+        render_end = APP_SOURCE.index("function renderSessions()", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        self.assertNotIn("project-count", render_source)
+        self.assertNotIn('t("showAllSessions", { count:', render_source)
+        self.assertEqual(I18N_SOURCE.count('showAllSessions: "显示全部"'), 1)
+        self.assertEqual(I18N_SOURCE.count('showAllSessions: "Show all"'), 1)
+
+    def test_unassigned_sessions_have_concise_explanatory_copy(self):
+        self.assertEqual(I18N_SOURCE.count('otherSessions: "无项目会话"'), 1)
+        self.assertEqual(I18N_SOURCE.count('otherSessions: "No-project sessions"'), 1)
+        self.assertEqual(I18N_SOURCE.count("unassignedSessionsHint:"), 2)
+        self.assertIn('t("unassignedSessionsHint")', APP_SOURCE)
+
+    def test_session_info_shows_project_not_group(self):
+        self.assertIn('data-i18n="sessionProject"', INDEX_SOURCE)
+        self.assertIn("projectDisplayName(project)", APP_SOURCE)
+
+    def test_i18n_keys_exist(self):
+        """Dynamic project controls switch language immediately."""
+        for key in (
+            "projectsLabel",
+            "otherSessions",
+            "noProject",
+            "newSessionInProject",
+            "projectActions",
+            "noProjectSessions",
+            "showAllSessions",
+            "collapseSessions",
+            "sessionProject",
+            "editProject",
+            "sourceFolder",
+            "sourceFolders",
+            "addSourceFolder",
+            "primaryFolder",
+            "makePrimary",
+            "removeSourceFolder",
+            "sourceFolderAlreadyAdded",
+            "sessionDetachedFromProject",
+            "changeSourceFolder",
+            "deleteProject",
+            "removeProjectTitle",
+            "removeProjectDescription",
+        ):
+            self.assertEqual(I18N_SOURCE.count(key + ":"), 2)
+
+    def test_project_preview_limits_recent_sessions_and_keeps_active_visible(self):
+        helper_start = APP_SOURCE.index("const PROJECT_SESSION_PREVIEW_LIMIT")
+        helper_end = APP_SOURCE.index("async function refreshProjects", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+{helper_source}
+const sessions = [
+  {{ id: "s1", updatedAt: "2026-07-26T12:00:00" }},
+  {{ id: "s2", updatedAt: "2026-07-26T11:00:00" }},
+  {{ id: "s3", updatedAt: "2026-07-26T10:00:00" }},
+  {{ id: "s4", updatedAt: "2026-07-26T09:00:00" }},
+  {{ id: "s5", updatedAt: "2026-07-26T08:00:00" }},
+];
+const limited = selectProjectSessionPreview(sessions, ["s4"], "s5", false);
+const expanded = selectProjectSessionPreview(sessions, ["s4"], "s5", true);
+process.stdout.write(JSON.stringify({{
+  limited: limited.items.map((item) => item.id),
+  hiddenCount: limited.hiddenCount,
+  expanded: expanded.items.map((item) => item.id),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["limited"], ["s4", "s1", "s2", "s5"])
+        self.assertEqual(data["hiddenCount"], 1)
+        self.assertEqual(data["expanded"], ["s4", "s1", "s2", "s3", "s5"])
+
+    def test_pinned_projects_sort_before_unpinned_projects(self):
+        helper_start = APP_SOURCE.index("const PROJECT_SESSION_PREVIEW_LIMIT")
+        helper_end = APP_SOURCE.index("async function refreshProjects", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+{helper_source}
+const projects = [
+  {{ id: "a", label: "Alpha", path: "C:/Alpha" }},
+  {{ id: "b", label: "Beta", path: "C:/Beta" }},
+  {{ id: "c", label: "Charlie", path: "C:/Charlie" }},
+];
+process.stdout.write(JSON.stringify(orderProjects(projects, ["c"]).map((item) => item.id)));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), ["c", "a", "b"])
+
+    def test_preview_expansion_is_persisted_per_project(self):
+        self.assertIn("code-expanded-project-sessions", APP_SOURCE)
+        self.assertIn("PROJECT_SESSION_PREVIEW_LIMIT = 3", APP_SOURCE)
+
+    def test_new_session_inherits_project_without_filter_dropdown(self):
+        create_start = APP_SOURCE.index("async function createSession(")
+        create_end = APP_SOURCE.index("async function loadSession(", create_start)
+        create_source = APP_SOURCE[create_start:create_end]
+        self.assertIn("state.pendingProjectId", create_source)
+        self.assertIn("body.projectId = projectId", create_source)
+        self.assertNotIn("projectSelect", create_source)
+
+    def test_session_restore_waits_for_sidebar_refresh(self):
+        init_start = APP_SOURCE.index("async function init()")
+        init_end = APP_SOURCE.index("const foregroundView", init_start)
+        self.assertIn("await refreshSessions();", APP_SOURCE[init_start:init_end])
+
+
 if __name__ == "__main__":
     unittest.main()

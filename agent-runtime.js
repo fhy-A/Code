@@ -56,6 +56,7 @@
     toolBudgets,
     maxRounds,
     permissionProfile = "read",
+    cwd = "",
     signal,
   }) {
     return apiJson("/api/agent/runs", {
@@ -71,6 +72,7 @@
         toolBudgets,
         maxRounds,
         permissionProfile,
+        cwd,
       }),
       signal,
     });

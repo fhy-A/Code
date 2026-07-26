@@ -3702,6 +3702,486 @@ body.theme-dark .syn-fn { color: #61afef; }
   text-transform: uppercase;
 }
 
+/* ── Codex-style project → session list ── */
+
+.project-toolbar {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 5px 9px 3px 11px;
+  gap: 6px;
+}
+
+.project-toolbar-title {
+  flex: 1;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+.project-create-btn,
+.project-header-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.project-create-btn:hover,
+.project-header-action:hover,
+.project-header-action:focus-visible {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.project-block {
+  margin: 2px 0 7px;
+}
+
+.project-block + .project-block {
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.project-header {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 5px 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text);
+  gap: 4px;
+}
+
+.project-header:hover,
+.project-block.pending-project > .project-header {
+  background: color-mix(in srgb, var(--panel-2) 78%, transparent);
+}
+
+.project-block.pending-project > .project-header {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.project-arrow {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+}
+
+.project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-pin-indicator {
+  flex-shrink: 0;
+  color: var(--yellow);
+  font-size: 10px;
+}
+
+.project-header-action {
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+  font-size: 15px;
+}
+
+.project-header:hover .project-header-action,
+.project-header-action:focus-visible {
+  opacity: 1;
+}
+
+.project-children.collapsed {
+  display: none;
+}
+
+.project-block .session-row .session-main {
+  padding-left: 24px;
+}
+
+.project-empty-sessions {
+  padding: 5px 10px 7px 25px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.project-sessions-toggle {
+  display: block;
+  width: calc(100% - 22px);
+  margin: 2px 7px 0 15px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.project-sessions-toggle:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.session-title-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.session-pin-badge {
+  flex: 0 0 auto;
+  margin-right: 2px;
+  color: var(--yellow);
+  font-size: 10px;
+}
+
+.session-source-badge {
+  flex: 0 0 auto;
+  margin-left: 5px;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 9px !important;
+  font-weight: 600 !important;
+  line-height: 1.35 !important;
+}
+
+.session-source-badge.source-codex {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  color: var(--accent);
+}
+
+.session-source-badge.source-claude {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--line));
+  color: color-mix(in srgb, var(--yellow) 80%, var(--text));
+}
+
+/* Project context menu */
+.project-context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 132px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.project-context-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.project-context-item:hover {
+  background: var(--panel-1);
+}
+
+@media (hover: none), (max-width: 700px) {
+  .project-header-action {
+    opacity: 1;
+  }
+
+  .project-header {
+    min-height: 36px;
+  }
+}
+
+/* Project editor */
+.project-edit-card {
+  width: min(640px, calc(100vw - 28px));
+  padding: 26px 28px 24px;
+  border-radius: 18px;
+}
+
+.project-edit-card header {
+  margin-bottom: 24px;
+}
+
+.project-edit-card h2,
+.project-delete-confirm-card h2 {
+  font-size: 24px;
+  letter-spacing: -.4px;
+}
+
+.project-edit-name {
+  display: flex;
+  align-items: center;
+  min-height: 54px;
+  margin-bottom: 22px;
+  border: 1px solid var(--accent);
+  border-radius: 14px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.project-edit-name:focus-within {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.project-edit-folder-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  align-self: stretch;
+  flex-shrink: 0;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 24px;
+}
+
+.project-edit-folder-icon svg,
+.project-source-folder-add svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.project-edit-name input {
+  min-width: 0;
+  flex: 1;
+  height: 52px;
+  padding: 0 14px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.project-edit-section-label {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.project-source-folder-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.project-source-folder-row,
+.project-source-folder-add {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 54px;
+}
+
+.project-source-folder-row {
+  gap: 10px;
+  padding: 0 12px 0 0;
+}
+
+.project-source-folder-row + .project-source-folder-row {
+  border-top: 1px solid var(--line);
+}
+
+.project-source-folder-row .project-edit-folder-icon {
+  width: 56px;
+  border-right: 0;
+  font-size: 21px;
+}
+
+.project-source-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-source-folder-row .project-source-folder-name {
+  flex: 1;
+}
+
+.project-primary-badge,
+.project-make-primary,
+.project-source-folder-remove {
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+}
+
+.project-primary-badge,
+.project-make-primary {
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-primary-badge {
+  border: 1px solid var(--line);
+}
+
+.project-make-primary,
+.project-source-folder-remove {
+  cursor: pointer;
+}
+
+.project-make-primary:hover,
+.project-source-folder-remove:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.project-source-folder-remove {
+  width: 32px;
+  height: 32px;
+  font-size: 21px;
+  line-height: 1;
+}
+
+.project-source-folder-remove:disabled {
+  cursor: not-allowed;
+  opacity: .35;
+}
+
+.project-source-folder-add {
+  gap: 12px;
+  padding: 0 20px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+}
+
+.project-source-folder-add svg {
+  flex-shrink: 0;
+}
+
+.project-source-folder-add:hover {
+  background: var(--panel-2);
+}
+
+.project-source-folder-add:disabled,
+.project-make-primary:disabled,
+.project-source-folder-remove:disabled {
+  pointer-events: none;
+}
+
+.project-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.project-edit-actions-right {
+  display: flex;
+  gap: 10px;
+}
+
+.project-edit-actions .primary-btn,
+.project-edit-actions .ghost-btn,
+.project-edit-actions .danger-btn {
+  min-height: 42px;
+  padding: 0 20px;
+  border-radius: 11px;
+}
+
+.project-edit-actions .primary-btn {
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--panel);
+  font-weight: 750;
+}
+
+.project-edit-actions .primary-btn:hover {
+  opacity: .88;
+}
+
+.project-edit-actions .primary-btn:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.project-delete-confirm-card {
+  width: min(600px, calc(100vw - 28px));
+  padding: 26px 28px 24px;
+  border-radius: 18px;
+}
+
+.project-delete-confirm-card .confirm-body {
+  color: var(--muted);
+}
+
+.project-delete-confirm-card .confirm-actions {
+  margin-top: 22px;
+}
+
+@media (max-width: 560px) {
+  .project-edit-card,
+  .project-delete-confirm-card {
+    padding: 20px;
+  }
+
+  .project-edit-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .project-edit-actions-right {
+    justify-content: flex-end;
+  }
+
+  .project-edit-actions > .danger-btn {
+    align-self: flex-start;
+  }
+}
+
 .sidebar-icon-btn {
   position: relative;
 }

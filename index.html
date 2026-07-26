@@ -24,6 +24,10 @@
 
       <button id="newChat" class="new-session-bar" type="button" data-i18n="newSession">+ 新建会话</button>
 
+      <div class="project-toolbar" id="projectToolbar">
+        <span class="project-toolbar-title" data-i18n="projectsLabel">项目</span>
+        <button id="projectCreateBtn" class="project-create-btn" type="button" title="新建项目" data-i18n-title="newProject">+</button>
+      </div>
       <section class="sessions" id="sessionList"></section>
       <div class="sidebar-splitter" id="sidebarSplitter" title="拖拽调整会话与文件区域高度" data-i18n-title="dragSessions"></div>
 
@@ -107,7 +111,7 @@
         <div class="sys-col wide">
           <h3 data-i18n="sessionInfo">会话信息</h3>
           <div class="kv"><span data-i18n="sessionName">名称</span><input id="sessionTitle" value="新会话" data-i18n="sessionTitleDefault" /></div>
-          <div class="kv"><span data-i18n="group">分组</span><code id="sessionGroup">-</code></div>
+          <div class="kv"><span data-i18n="sessionProject">项目</span><code id="sessionGroup">-</code></div>
           <div class="kv"><span data-i18n="created">创建</span><code id="sessionCreated">-</code></div>
           <div class="kv"><span data-i18n="active">活跃</span><code id="sessionUpdated">-</code></div>
           <div class="kv"><span data-i18n="file">文件</span><code id="sessionFile" title="">-</code><button id="copySessionPath" class="copy-mini" type="button" data-i18n="copyBtn">copy</button></div>
@@ -320,6 +324,52 @@
         <footer class="confirm-actions">
           <button id="cancelDeleteSession" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
           <button id="confirmDeleteSession" class="danger-btn" type="button" data-i18n="confirmDeleteAction">确认删除</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="settings-modal hidden" id="projectEditModal">
+      <div class="modal-card project-edit-card" role="dialog" aria-modal="true" aria-labelledby="projectEditTitle">
+        <header>
+          <h2 id="projectEditTitle" data-i18n="editProject">编辑项目</h2>
+          <button id="closeProjectEdit" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">&times;</button>
+        </header>
+        <label class="project-edit-name">
+          <span class="project-edit-folder-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.8 2h7.6a1.75 1.75 0 0 1 1.75 1.75v8.5A1.75 1.75 0 0 1 18.75 19H5.25a1.75 1.75 0 0 1-1.75-1.75Z"/></svg>
+          </span>
+          <input id="projectEditName" type="text" maxlength="60" autocomplete="off" data-i18n-aria-label="projectName" aria-label="项目名称" />
+        </label>
+        <div class="project-edit-section-label" data-i18n="sourceFolders">源文件夹</div>
+        <div class="project-source-folder-card">
+          <div id="projectSourceFolderList" class="project-source-folder-list"></div>
+          <button id="addProjectFolder" class="project-source-folder-add" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7.25A1.75 1.75 0 0 1 5.25 5.5h4l1.7 2h7.8a1.75 1.75 0 0 1 1.75 1.75v2.25M7 18.5h5m-2.5-2.5v5m6-7v7m-3.5-3.5h7"/></svg>
+            <span data-i18n="addSourceFolder">添加文件夹</span>
+          </button>
+        </div>
+        <footer class="project-edit-actions">
+          <button id="deleteProjectFromEdit" class="danger-btn" type="button" data-i18n="deleteProject">删除项目</button>
+          <div class="project-edit-actions-right">
+            <button id="cancelProjectEdit" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
+            <button id="saveProjectEdit" class="primary-btn" type="button" data-i18n="save">保存</button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <div class="settings-modal hidden" id="projectDeleteConfirmModal">
+      <div class="modal-card confirm-card project-delete-confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="projectDeleteConfirmTitle">
+        <header>
+          <h2 id="projectDeleteConfirmTitle"></h2>
+          <button id="closeProjectDeleteConfirm" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">&times;</button>
+        </header>
+        <div class="confirm-body">
+          <p data-i18n="removeProjectDescription">这会将该项目从边栏中移除。磁盘上的文件不会被删除。</p>
+        </div>
+        <footer class="confirm-actions">
+          <button id="cancelProjectDelete" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
+          <button id="confirmProjectDelete" class="danger-btn" type="button" data-i18n="removeProject">移除</button>
         </footer>
       </div>
     </div>

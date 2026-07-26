@@ -92,7 +92,7 @@
       copyBtn: "copy", copiedBtn: "copied", failedBtn: "failed",
       appliedLabel: "已应用", rejectedLabel: "已拒绝",
       sessionInfo: "会话信息", messages: "消息", tokens: "Token",
-      sessionName: "名称", group: "分组", created: "创建", active: "活跃", file: "文件",
+      sessionName: "名称", group: "分组", sessionProject: "项目", created: "创建", active: "活跃", file: "文件",
       totalLabel: "合计",
       input: "输入", output: "输出", cache: "缓存", context: "上下文",
       user: "用户", agent: "Agent",
@@ -130,6 +130,20 @@
       addFile: "选择项目文件并插入路径",
       pin: "置顶", unpin: "取消置顶", rename: "重命名", delete: "删除",
       chatLabel: "聊天", pinnedLabel: "置顶",
+      projectsLabel: "项目", newProject: "新建项目",
+      otherSessions: "无项目会话", noProject: "未归属项目",
+      unassignedSessionsHint: "未归属项目，源文件夹跟随下方文件树",
+      newSessionInProject: "在此项目中新建会话", projectActions: "项目操作",
+      noProjectSessions: "暂无会话", showAllSessions: "显示全部", collapseSessions: "收起",
+      editProject: "编辑项目", projectName: "项目名称", sourceFolder: "源文件夹",
+      sourceFolders: "源文件夹", addSourceFolder: "添加文件夹",
+      primaryFolder: "主文件夹", makePrimary: "设为主文件夹",
+      removeSourceFolder: "移除源文件夹", sourceFolderAlreadyAdded: "该文件夹已添加",
+      sessionDetachedFromProject: "所选文件夹不属于当前项目，会话已移出项目",
+      changeSourceFolder: "更改文件夹", deleteProject: "删除项目",
+      removeProject: "移除", removeProjectTitle: "移除 {name}？",
+      removeProjectDescription: "这会将该项目从边栏中移除。磁盘上的文件不会被删除。",
+      projectSaved: "项目已保存", close: "关闭",
       dragSidebar: "拖拽调整侧栏宽度", dragSessions: "拖拽调整会话与文件区域高度", toggleSidebar: "收起/展开侧栏", goUp: "上一层",
       manageProjectDir: "点击管理项目目录", filePreview: "文件预览",
       selectModel: "选择模型", reasoningEffort: "推理强度", pauseBtn: "暂停", sendTip: "发送消息", queueSendTip: "加入等待队列", emptyTip: "请输入内容",
@@ -344,7 +358,7 @@
       copyBtn: "copy", copiedBtn: "copied", failedBtn: "failed",
       appliedLabel: "Applied", rejectedLabel: "Rejected",
       sessionInfo: "Session Info", messages: "Messages", tokens: "Tokens",
-      sessionName: "Name", group: "Group", created: "Created", active: "Active", file: "File",
+      sessionName: "Name", group: "Group", sessionProject: "Project", created: "Created", active: "Active", file: "File",
       totalLabel: "Total",
       input: "Input", output: "Output", cache: "Cache", context: "Context",
       user: "User", agent: "Agent",
@@ -381,6 +395,20 @@
       permTitle: "Permissions", addFile: "Select a project file to insert its path",
       pin: "Pin", unpin: "Unpin", rename: "Rename", delete: "Delete",
       chatLabel: "Chats", pinnedLabel: "Pinned",
+      projectsLabel: "Projects", newProject: "New Project",
+      otherSessions: "No-project sessions", noProject: "No project",
+      unassignedSessionsHint: "Not assigned to a project; the source folder follows the file tree below",
+      newSessionInProject: "New session in this project", projectActions: "Project actions",
+      noProjectSessions: "No sessions yet", showAllSessions: "Show all", collapseSessions: "Show less",
+      editProject: "Edit project", projectName: "Project name", sourceFolder: "Source folder",
+      sourceFolders: "Source folders", addSourceFolder: "Add folder",
+      primaryFolder: "Primary", makePrimary: "Make primary",
+      removeSourceFolder: "Remove source folder", sourceFolderAlreadyAdded: "This folder has already been added",
+      sessionDetachedFromProject: "The selected folder is outside this project, so the session was moved out",
+      changeSourceFolder: "Change folder", deleteProject: "Delete project",
+      removeProject: "Remove", removeProjectTitle: "Remove {name}?",
+      removeProjectDescription: "This removes the project from the sidebar. Files on disk will not be deleted.",
+      projectSaved: "Project saved", close: "Close",
       dragSidebar: "Drag to resize sidebar", dragSessions: "Drag to resize sections", toggleSidebar: "Toggle sidebar", goUp: "Go up",
       manageProjectDir: "Manage project directory", filePreview: "File preview",
       selectModel: "Select model", reasoningEffort: "Reasoning effort", pauseBtn: "Pause", sendTip: "Send", queueSendTip: "Add to queue", emptyTip: "Type a message",
@@ -638,6 +666,10 @@
 
       documentRoot.querySelectorAll("[data-i18n-title]").forEach((element) => {
         element.title = t(element.dataset.i18nTitle);
+      });
+
+      documentRoot.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
+        element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
       });
 
       for (const [id, key] of Object.entries(ELEMENT_TRANSLATION_KEYS)) {

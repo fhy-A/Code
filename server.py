@@ -47,6 +47,7 @@ DATA_DIR = Path(os.environ.get("CODE_DATA_DIR") or (APP_DIR / "data"))
 SESSIONS_DIR = DATA_DIR / "sessions"
 PROJECTS_PATH = DATA_DIR / "projects.json"
 PROJECTS_MIGRATION_FLAG = DATA_DIR / ".codex_projects_migrated"
+PROJECT_ROOTS_MIGRATION_FLAG = DATA_DIR / ".codex_project_roots_migrated"
 FILE_BACKUP_DIR = DATA_DIR / "file-backups"
 ATTACHMENTS_DIR = DATA_DIR / "attachments"
 MEMORY_DIR = DATA_DIR / "memory"
@@ -93,6 +94,7 @@ _AGENT_DELEGATION_MAX_CONCURRENCY = 3
 _AGENT_CREDENTIAL_FIELDS = {
     "apikey", "authorization", "accesstoken", "bearertoken", "token", "keys",
 }
+_agent_workspace_context = threading.local()
 
 
 def _runtime_stream_text(value):
@@ -684,9 +686,11 @@ def _agent_model_tools(run):
 def _agent_run_record(run):
     """Return the credential-free durable representation of an Agent run."""
     return {
-        "version": 1,
+        "version": 2,
         "id": run["id"],
         "sessionId": run["session_id"],
+        "cwd": run.get("cwd", ""),
+        "workspaceRoots": list(run.get("workspace_roots") or []),
         "clientRequestId": run.get("client_request_id", ""),
         "parentAgentRunId": run.get("parent_agent_run_id", ""),
         "parentToolCallId": run.get("parent_tool_call_id", ""),
@@ -791,6 +795,8 @@ def _agent_snapshot(run, cursor=0):
         return {
             "agentRunId": run["id"],
             "sessionId": run["session_id"],
+            "cwd": run.get("cwd", ""),
+            "workspaceRoots": list(run.get("workspace_roots") or []),
             "clientRequestId": run.get("client_request_id", ""),
             "parentAgentRunId": run.get("parent_agent_run_id", ""),
             "parentToolCallId": run.get("parent_tool_call_id", ""),
@@ -991,9 +997,16 @@ def _agent_run_from_record(record):
         execution["result"] = result
         execution["error"] = result["error"]
         execution["completedAt"] = now_iso()
+    cwd, workspace_roots = _agent_run_workspace(
+        record.get("sessionId"),
+        record.get("cwd"),
+        record.get("workspaceRoots") if int(record.get("version") or 1) >= 2 else None,
+    )
     return {
         "id": run_id,
         "session_id": str(record.get("sessionId") or ""),
+        "cwd": cwd,
+        "workspace_roots": workspace_roots,
         "client_request_id": _agent_client_request_id(record.get("clientRequestId") or ""),
         "parent_agent_run_id": str(record.get("parentAgentRunId") or ""),
         "parent_tool_call_id": str(record.get("parentToolCallId") or ""),
@@ -2012,6 +2025,8 @@ def _ensure_agent_delegation_child(run, call, execution):
             parent_tool_call_id=call["id"],
             agent_depth=int(run.get("agent_depth") or 0) + 1,
             start_worker=False,
+            cwd=run.get("cwd") or "",
+            workspace_roots=list(run.get("workspace_roots") or []),
         )
         execution["childAgentRunId"] = child["id"]
         execution["prompt"] = prompt
@@ -2338,6 +2353,16 @@ def _execute_agent_pending_tools(run):
                     "arguments": execution["arguments"],
                 })
             try:
+                previous_project_root = getattr(
+                    _agent_workspace_context, "project_root", None,
+                )
+                previous_workspace_roots = getattr(
+                    _agent_workspace_context, "workspace_roots", None,
+                )
+                _agent_workspace_context.project_root = str(run.get("cwd") or "")
+                _agent_workspace_context.workspace_roots = list(
+                    run.get("workspace_roots") or []
+                )
                 spec = SERVER_TOOL_REGISTRY.get(name) or {}
                 if name not in allowed_names:
                     raise ValueError(f"tool is not allowed for this Agent run: {name}")
@@ -2533,6 +2558,21 @@ def _execute_agent_pending_tools(run):
             except Exception as exc:
                 result = {"ok": False, "action": name, "error": str(exc)[:2000]}
                 execution["error"] = result["error"]
+            finally:
+                if previous_project_root is None:
+                    try:
+                        delattr(_agent_workspace_context, "project_root")
+                    except AttributeError:
+                        pass
+                else:
+                    _agent_workspace_context.project_root = previous_project_root
+                if previous_workspace_roots is None:
+                    try:
+                        delattr(_agent_workspace_context, "workspace_roots")
+                    except AttributeError:
+                        pass
+                else:
+                    _agent_workspace_context.workspace_roots = previous_workspace_roots
             if run["cancel_event"].is_set() or run["status"] in _AGENT_RUN_TERMINAL:
                 return False
             execution["status"] = "completed"
@@ -2740,6 +2780,8 @@ def _create_agent_run(
     start_worker=True,
     client_request_id="",
     tool_budgets=None,
+    cwd="",
+    workspace_roots=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -2764,6 +2806,11 @@ def _create_agent_run(
         raise ValueError("maxRounds must be an integer")
     rounds_limit = max(1, min(rounds_limit, _AGENT_RUN_MAX_ROUNDS))
     client_request_id = _agent_client_request_id(client_request_id)
+    resolved_cwd, resolved_workspace_roots = _agent_run_workspace(
+        session_id,
+        cwd,
+        workspace_roots,
+    )
     run_id = (
         _agent_run_id_for_client_request(session_id, client_request_id)
         if client_request_id
@@ -2777,6 +2824,8 @@ def _create_agent_run(
     run = {
         "id": run_id,
         "session_id": str(session_id or ""),
+        "cwd": resolved_cwd,
+        "workspace_roots": resolved_workspace_roots,
         "client_request_id": client_request_id,
         "parent_agent_run_id": str(parent_run_id or ""),
         "parent_tool_call_id": str(parent_tool_call_id or ""),
@@ -2828,6 +2877,8 @@ def _create_agent_run(
             "maxRounds": rounds_limit,
             "permissionProfile": permission_profile,
             "toolBudgets": _json_clone(normalized_tool_budgets),
+            "cwd": resolved_cwd,
+            "workspaceRoots": list(resolved_workspace_roots),
         })
         if start_worker:
             _start_agent_worker(run)
@@ -3592,6 +3643,72 @@ def _path_identity(value):
     return os.path.normcase(os.path.normpath(normalized))
 
 
+def _normalize_project_root_paths(project):
+    """Return a project's ordered, unique source folders with primary first."""
+    if not isinstance(project, dict):
+        return []
+    raw_paths = project.get("rootPaths")
+    if not isinstance(raw_paths, list):
+        legacy_path = project.get("path") or project.get("rootPath")
+        raw_paths = [legacy_path] if legacy_path else []
+    roots = []
+    seen = set()
+    for value in raw_paths:
+        path = _normalize_local_path(value)
+        path_key = _path_identity(path)
+        if not path or not path_key or path_key in seen:
+            continue
+        seen.add(path_key)
+        roots.append(path)
+    return roots
+
+
+def _project_primary_path(project):
+    roots = _normalize_project_root_paths(project)
+    return roots[0] if roots else ""
+
+
+def _project_root_key_set(project):
+    return {
+        _path_identity(root_path)
+        for root_path in _normalize_project_root_paths(project)
+        if _path_identity(root_path)
+    }
+
+
+def _project_request_root_paths(body, current_project=None):
+    """Validate source folders from a project create/update request."""
+    if "rootPaths" in body:
+        raw_paths = body.get("rootPaths")
+        if not isinstance(raw_paths, list):
+            raise ValueError("rootPaths must be an array")
+    elif "path" in body or "rootPath" in body:
+        raw_paths = [body.get("path") or body.get("rootPath")]
+    else:
+        raw_paths = _normalize_project_root_paths(current_project)
+    if not raw_paths:
+        raise ValueError("at least one source folder is required")
+
+    roots = []
+    seen = set()
+    for value in raw_paths:
+        raw_path = str(value or "").strip()
+        if not raw_path:
+            continue
+        root = Path(raw_path).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            raise ValueError(f"Directory does not exist: {raw_path}")
+        root_path = str(root)
+        root_key = _path_identity(root_path)
+        if root_key in seen:
+            continue
+        seen.add(root_key)
+        roots.append(root_path)
+    if not roots:
+        raise ValueError("at least one source folder is required")
+    return roots
+
+
 def _normalize_project_record(project):
     """Normalize legacy and current project records to the Codex-style schema."""
     if not isinstance(project, dict):
@@ -3599,18 +3716,23 @@ def _normalize_project_record(project):
     project_id = str(project.get("id") or "").strip()
     if project_id == "__unclassified__":
         return None
-    path = _normalize_local_path(project.get("path") or project.get("rootPath"))
-    if not path:
+    root_paths = _normalize_project_root_paths(project)
+    if not root_paths:
         return None
     if not project_id:
         project_id = hashlib.sha256(
-            f"code-project\0{_path_identity(path)}".encode("utf-8")
+            f"code-project\0{_path_identity(root_paths[0])}".encode("utf-8")
         ).hexdigest()[:16]
-    label = str(project.get("label") or project.get("name") or Path(path).name or path).strip()
+    label = str(
+        project.get("label")
+        or project.get("name")
+        or Path(root_paths[0]).name
+        or root_paths[0]
+    ).strip()
     return {
         "id": project_id,
         "label": label,
-        "path": path,
+        "rootPaths": root_paths,
     }
 
 
@@ -3628,16 +3750,24 @@ def _read_projects():
         project = _normalize_project_record(item)
         if not project:
             continue
-        path_key = _path_identity(project["path"])
-        if project["id"] in seen_ids or path_key in seen_paths:
+        if project["id"] in seen_ids:
             continue
+        unique_roots = []
+        for root_path in project["rootPaths"]:
+            path_key = _path_identity(root_path)
+            if not path_key or path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            unique_roots.append(root_path)
+        if not unique_roots:
+            continue
+        project["rootPaths"] = unique_roots
         seen_ids.add(project["id"])
-        seen_paths.add(path_key)
         projects.append(project)
     projects.sort(
         key=lambda item: (
             str(item.get("label") or "").casefold(),
-            _path_identity(item.get("path")),
+            _path_identity(_project_primary_path(item)),
         ),
     )
     return projects
@@ -3655,12 +3785,15 @@ def _write_projects(projects):
 
 def _project_api_record(project):
     """Expose the new schema plus temporary aliases for the current dev UI."""
-    if not project:
+    normalized = _normalize_project_record(project)
+    if not normalized:
         return None
+    primary_path = _project_primary_path(normalized)
     return {
-        **project,
-        "name": project["label"],
-        "rootPath": project["path"],
+        **normalized,
+        "path": primary_path,
+        "name": normalized["label"],
+        "rootPath": primary_path,
     }
 
 
@@ -3677,7 +3810,10 @@ def _find_project_by_path(path):
     if not path_key:
         return None
     for project in _read_projects():
-        if _path_identity(project.get("path")) == path_key:
+        if any(
+            _path_identity(root_path) == path_key
+            for root_path in project.get("rootPaths") or []
+        ):
             return project
     return None
 
@@ -3696,7 +3832,7 @@ def _ensure_project_for_path(path, label=None):
     project = {
         "id": uuid.uuid4().hex[:16],
         "label": str(label or root.name or normalized).strip(),
-        "path": normalized,
+        "rootPaths": [normalized],
     }
     projects = _read_projects()
     projects.append(project)
@@ -3731,19 +3867,70 @@ def _legacy_group_for_source(source):
 
 
 def _session_location(project_id=None, cwd=None, use_config_fallback=False):
-    """Resolve a session's project and cwd without allowing them to diverge."""
+    """Resolve a session project and keep cwd inside its attached source folders."""
     project_id = str(project_id or "").strip() or None
     project = _find_project(project_id) if project_id else None
     if project_id and not project:
         raise ValueError("project not found")
-    project_path = project.get("path") if project else ""
+    project_roots = _normalize_project_root_paths(project)
     requested_cwd = _normalize_local_path(cwd)
-    if project_path and requested_cwd and _path_identity(project_path) != _path_identity(requested_cwd):
-        raise ValueError("session cwd must match the project path")
-    resolved_cwd = project_path or requested_cwd
+    if project_roots and requested_cwd:
+        root_keys = {_path_identity(root_path) for root_path in project_roots}
+        if _path_identity(requested_cwd) not in root_keys:
+            raise ValueError("session cwd must be one of the project source folders")
+    resolved_cwd = requested_cwd or (project_roots[0] if project_roots else "")
     if not resolved_cwd and use_config_fallback:
         resolved_cwd = _normalize_local_path(load_config().get("projectRoot"))
     return project_id, resolved_cwd
+
+
+def _agent_run_workspace(session_id=None, requested_cwd=None, requested_roots=None):
+    """Capture the working directory and attached roots for one Agent run."""
+    if isinstance(requested_roots, list) and requested_roots:
+        roots = []
+        seen = set()
+        for value in requested_roots:
+            root = _normalize_local_path(value)
+            root_key = _path_identity(root)
+            if not root or not root_key or root_key in seen:
+                continue
+            seen.add(root_key)
+            roots.append(root)
+        cwd = _normalize_local_path(requested_cwd)
+        if cwd and _path_identity(cwd) not in seen:
+            roots.insert(0, cwd)
+        if roots:
+            return cwd or roots[0], roots
+
+    safe_id = str(session_id or "").strip()
+    if safe_id:
+        try:
+            meta_path = session_path(safe_id)
+            if meta_path.exists():
+                meta = read_json(meta_path, {})
+                project_id, cwd = _session_location(
+                    meta.get("projectId") or meta.get("project"),
+                    meta.get("cwd") or requested_cwd,
+                    use_config_fallback=True,
+                )
+                project = _find_project(project_id) if project_id else None
+                roots = _normalize_project_root_paths(project)
+                return cwd, roots or ([cwd] if cwd else [])
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+    cwd = _normalize_local_path(requested_cwd)
+    if not cwd:
+        cwd = _normalize_local_path(load_config().get("projectRoot"))
+    return cwd, [cwd] if cwd else []
+
+
+def _effective_agent_project_root():
+    """Return the run-scoped cwd while a background Agent tool is executing."""
+    return (
+        _normalize_local_path(getattr(_agent_workspace_context, "project_root", ""))
+        or _normalize_local_path(load_config().get("projectRoot"))
+    )
 
 
 def _import_session_location(cwd=None, project_id=None):
@@ -3970,7 +4157,7 @@ def _migrate_codex_project_sessions_support():
         cwd = _normalize_local_path(
             meta.get("cwd")
             or index_entry.get("cwd")
-            or ((projects_by_id.get(project_id) or {}).get("path"))
+            or _project_primary_path(projects_by_id.get(project_id))
             or fallback_cwd
         )
         source = _normalize_session_source(
@@ -4011,6 +4198,18 @@ def _migrate_codex_project_sessions_support():
         f"[migrate] Codex-style projects: {len(projects)} project(s), "
         f"updated {updated} session(s), rebuilt {len(entries)} index entries"
     )
+    return True
+
+
+def _migrate_project_root_paths():
+    """Persist legacy single-path projects as ordered rootPaths exactly once."""
+    if PROJECT_ROOTS_MIGRATION_FLAG.exists():
+        return False
+    projects = _read_projects()
+    _write_projects(projects)
+    PROJECT_ROOTS_MIGRATION_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    PROJECT_ROOTS_MIGRATION_FLAG.write_text(now_iso(), encoding="utf-8")
+    print(f"[migrate] Multi-folder projects: normalized {len(projects)} project(s)")
     return True
 
 
@@ -4131,13 +4330,17 @@ def save_config(config):
     return current
 
 
-PROJECT_CONTEXT_FILES = ["CLAUDE.md", "AGENT.md", "CLAUDE.MD", "AGENT.MD"]
+PROJECT_CONTEXT_FILES = [
+    "AGENTS.md", "CLAUDE.md", "AGENT.md",
+    "AGENTS.MD", "CLAUDE.MD", "AGENT.MD",
+]
 
 
-def load_project_context():
-    """Scan project root for CLAUDE.md / AGENT.md and return its content."""
-    config = load_config()
-    root = Path(config["projectRoot"]).expanduser().resolve()
+def load_project_context(root_path=None):
+    """Scan the primary project root for supported project instruction files."""
+    root = Path(
+        _normalize_local_path(root_path) or _effective_agent_project_root()
+    ).expanduser().resolve()
     for name in PROJECT_CONTEXT_FILES:
         candidate = root / name
         if candidate.is_file():
@@ -4955,7 +5158,7 @@ def execute_save_memory_tool(payload):
 
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = MEMORY_DIR / f"{safe}.md"
-    project = str(load_config().get("projectRoot") or "")
+    project = _effective_agent_project_root()
     if path.is_file():
         existing_meta, existing_body = parse_memory_frontmatter(
             path.read_text(encoding="utf-8-sig")
@@ -5808,8 +6011,7 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
 
 
 def resolve_project_path(relative_path=""):
-    config = load_config()
-    root = Path(config["projectRoot"]).expanduser().resolve()
+    root = Path(_effective_agent_project_root()).expanduser().resolve()
     home = Path.home().resolve()
     rel = (relative_path or "").strip()
 
@@ -7780,7 +7982,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 self.send_json(load_config())
                 return
             if route == "/api/project-context":
-                self.send_json(load_project_context())
+                self.send_json(load_project_context((query.get("path") or [""])[0]))
                 return
             if route == "/api/memory-context":
                 self.send_json(load_memory_context())
@@ -7925,7 +8127,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 self.pick_file()
                 return
             if route.rstrip("/") == "/api/pick-folder":
-                self.pick_folder()
+                self.pick_folder(query.get("path", [None])[0])
                 return
         except Exception as exc:
             self.send_json({"error": str(exc)}, 400)
@@ -7996,6 +8198,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     body.get("permissionProfile") or "read",
                     client_request_id=body.get("clientRequestId") or "",
                     tool_budgets=body.get("toolBudgets"),
+                    cwd=body.get("cwd") or "",
                 )
                 self.send_json({
                     "agentRunId": run["id"],
@@ -8112,6 +8315,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/projects":
                 self.create_project()
+                return
+            if self.path.startswith("/api/projects/") and self.path.endswith("/update"):
+                self.update_project(self.path.rsplit("/", 2)[-2])
                 return
             if self.path.startswith("/api/projects/") and self.path.endswith("/rename"):
                 self.rename_project(self.path.rsplit("/", 2)[-2])
@@ -8325,26 +8531,26 @@ class CodeHandler(BaseHTTPRequestHandler):
     # ── Project API handlers ──
 
     def create_project(self):
-        """POST /api/projects — create a project for an existing directory."""
+        """POST /api/projects — create a project with ordered source folders."""
         body = self.read_body_json()
-        raw_path = str(body.get("path") or body.get("rootPath") or "").strip()
-        if not raw_path:
-            self.send_json({"error": "path required"}, 400)
+        try:
+            root_paths = _project_request_root_paths(body)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
             return
-        root = Path(raw_path).expanduser().resolve()
-        if not root.exists() or not root.is_dir():
-            self.send_json({"error": "Directory does not exist"}, 400)
-            return
-        label = str(body.get("label") or body.get("name") or "").strip() or root.name
+        label = (
+            str(body.get("label") or body.get("name") or "").strip()
+            or Path(root_paths[0]).name
+        )
         projects = _read_projects()
-        for p in projects:
-            if _path_identity(p.get("path")) == _path_identity(root):
-                self.send_json({"error": "Project already exists for this directory"}, 409)
-                return
+        existing_roots = set().union(*(_project_root_key_set(project) for project in projects))
+        if any(_path_identity(root_path) in existing_roots for root_path in root_paths):
+            self.send_json({"error": "Project already exists for one of these directories"}, 409)
+            return
         proj = {
             "id": uuid.uuid4().hex[:16],
             "label": label,
-            "path": str(root),
+            "rootPaths": root_paths,
         }
         projects.append(proj)
         _write_projects(projects)
@@ -8366,6 +8572,104 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
         self.send_json({"error": "project not found"}, 404)
 
+    def update_project(self, project_id):
+        """POST /api/projects/:id/update — update label and ordered source folders."""
+        body = self.read_body_json()
+        projects = _read_projects()
+        project = next((p for p in projects if p.get("id") == project_id), None)
+        if not project:
+            self.send_json({"error": "project not found"}, 404)
+            return
+
+        label_value = (
+            body.get("label")
+            if "label" in body
+            else body.get("name", project.get("label"))
+        )
+        label = str(label_value or "").strip()
+        if not label:
+            self.send_json({"error": "label required"}, 400)
+            return
+
+        try:
+            new_root_paths = _project_request_root_paths(body, project)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
+            return
+        new_root_keys = {_path_identity(root_path) for root_path in new_root_paths}
+        for other in projects:
+            if other.get("id") == project_id:
+                continue
+            if new_root_keys & _project_root_key_set(other):
+                self.send_json(
+                    {"error": "Project already exists for one of these directories"},
+                    409,
+                )
+                return
+
+        old_root_paths = _normalize_project_root_paths(project)
+        old_root_keys = {_path_identity(root_path) for root_path in old_root_paths}
+        old_primary = old_root_paths[0] if old_root_paths else ""
+        new_primary = new_root_paths[0]
+        project["label"] = label
+        project["rootPaths"] = new_root_paths
+        _write_projects(projects)
+
+        roots_changed = old_root_paths != new_root_paths
+        if roots_changed:
+            index = _read_session_index()
+            for sid, entry in index.items():
+                entry_project_id = entry.get("projectId") or entry.get("project")
+                if entry_project_id != project_id:
+                    continue
+                source = _normalize_session_source(
+                    entry.get("source"),
+                    entry.get("group"),
+                )
+                meta_path = session_path(sid)
+                session_cwd = _normalize_local_path(entry.get("cwd") or old_primary)
+                if meta_path.exists():
+                    meta = read_json(meta_path, {})
+                    session_cwd = _normalize_local_path(
+                        meta.get("cwd") or session_cwd or old_primary
+                    )
+                    if _path_identity(session_cwd) not in new_root_keys:
+                        session_cwd = new_primary
+                    meta["projectId"] = project_id
+                    meta["cwd"] = session_cwd
+                    meta["source"] = _normalize_session_source(
+                        meta.get("source"),
+                        meta.get("group"),
+                    )
+                    meta.pop("group", None)
+                    write_json(meta_path, meta)
+                    source = meta["source"]
+                elif _path_identity(session_cwd) not in new_root_keys:
+                    session_cwd = new_primary
+                entry["projectId"] = project_id
+                entry["cwd"] = session_cwd
+                entry["source"] = source
+                entry.pop("project", None)
+                entry.pop("group", None)
+
+            entries = sorted(
+                index.values(),
+                key=lambda entry: entry.get("updatedAt", ""),
+                reverse=True,
+            )
+            payload = "\n".join(
+                json.dumps(entry, ensure_ascii=False) for entry in entries
+            ) + ("\n" if entries else "")
+            with _json_write_lock:
+                _session_index_path().write_text(payload, encoding="utf-8")
+
+            config = load_config()
+            config_root_key = _path_identity(config.get("projectRoot"))
+            if config_root_key in old_root_keys and config_root_key not in new_root_keys:
+                save_config({"projectRoot": new_primary})
+
+        self.send_json(_project_api_record(project))
+
     def delete_project(self, project_id):
         """DELETE /api/projects/:id — unassign sessions, remove project."""
         projects = _read_projects()
@@ -8383,7 +8687,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 if mp.exists():
                     meta = read_json(mp, {})
                     meta["projectId"] = None
-                    meta["cwd"] = _normalize_local_path(meta.get("cwd") or proj.get("path"))
+                    meta["cwd"] = _normalize_local_path(
+                        meta.get("cwd") or _project_primary_path(proj)
+                    )
                     meta["source"] = _normalize_session_source(
                         meta.get("source"),
                         meta.get("group"),
@@ -8419,9 +8725,14 @@ class CodeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "session not found"}, 404)
             return
         meta = read_json(path, {})
+        requested_cwd = (
+            body.get("cwd")
+            if "cwd" in body
+            else (None if requested_project_id else meta.get("cwd"))
+        )
         project_id, cwd = _session_location(
             requested_project_id,
-            None if requested_project_id else meta.get("cwd"),
+            requested_cwd,
         )
         meta["projectId"] = project_id
         meta["cwd"] = cwd
@@ -8888,9 +9199,11 @@ class CodeHandler(BaseHTTPRequestHandler):
             "updatedAt": dt.datetime.fromtimestamp(stat.st_mtime).replace(microsecond=0).isoformat(),
         })
 
-    def pick_folder(self):
+    def pick_folder(self, initial_path=None):
         config = load_config()
-        root = Path(config["projectRoot"]).expanduser().resolve()
+        root = Path(initial_path or config["projectRoot"]).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            root = Path(config["projectRoot"]).expanduser().resolve()
         if not root.exists() or not root.is_dir():
             raise ValueError("项目目录不存在")
         selected = open_native_folder_picker(root)
@@ -9594,6 +9907,7 @@ if __name__ == "__main__":
     ThreadingHTTPServer.daemon_threads = True
     _migrate_sessions_to_hierarchy()
     _migrate_codex_project_sessions_support()
+    _migrate_project_root_paths()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), CodeHandler)
     server.socket.settimeout(2.0)
     start_tray(PORT, server)
