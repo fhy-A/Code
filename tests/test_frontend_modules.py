@@ -3030,6 +3030,8 @@ process.stdout.write(JSON.stringify({
         html = (ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn('id="importModal"', html)
         self.assertIn('id="importList"', html)
+        self.assertIn('id="importStatus"', html)
+        self.assertIn('aria-live="polite"', html)
         self.assertIn('id="importDoBtn"', html)
         self.assertIn('import-source-tab', html)
 
@@ -3054,11 +3056,72 @@ process.stdout.write(JSON.stringify({
 
     def test_import_i18n_keys(self):
         """Import i18n keys exist in both languages."""
-        self.assertIn("importSessions", I18N_SOURCE)
+        for key in (
+            "importSessions",
+            "importSearchPlaceholder",
+            "importSelectAll",
+            "importToCode",
+            "importStatusImported",
+            "importStatusContinued",
+            "importStatusUpdateAvailable",
+            "importStatusUpdateConflict",
+            "importResultSnapshot",
+            "importResultFailed",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2, key)
 
     def test_import_modal_css_exists(self):
         """Import modal styles are defined."""
         self.assertIn("import-source-tab", STYLE_SOURCE)
+        self.assertIn(".import-session-row", STYLE_SOURCE)
+        self.assertIn(".import-session-state", STYLE_SOURCE)
+        self.assertIn(".import-result", STYLE_SOURCE)
+
+    def test_import_picker_disables_already_imported_sessions(self):
+        """Only safe, actionable rows can be selected for import."""
+        render_start = APP_SOURCE.index("function renderImportList()")
+        render_end = APP_SOURCE.index("function importResultText", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        self.assertIn('var canImport = s.canImport !== false;', render_source)
+        self.assertIn("cb.disabled = !canImport;", render_source)
+        self.assertIn('"update-conflict": "importStatusUpdateConflict"', render_source)
+        self.assertIn('className = "import-session-state"', render_source)
+        self.assertIn("if (!c.disabled) c.checked", APP_SOURCE)
+
+    def test_import_completion_refreshes_without_reloading_page(self):
+        """Import actions stay visible and refresh the sidebar and picker in place."""
+        import_start = APP_SOURCE.index("async function doImport()")
+        import_end = APP_SOURCE.index(
+            "if (els.importSessions)",
+            import_start,
+        )
+        import_source = APP_SOURCE[import_start:import_end]
+        self.assertIn('data.action === "updated"', import_source)
+        self.assertIn('data.action === "snapshot-created"', import_source)
+        self.assertIn("var selectedSessions = checked.map", import_source)
+        self.assertIn("var importSource = _importSource;", import_source)
+        self.assertIn("source: importSource", import_source)
+        self.assertIn("setImportBusy(true);", import_source)
+        self.assertIn("setImportBusy(false);", import_source)
+        self.assertIn("delete _importCache[importSource];", import_source)
+        self.assertIn("await refreshSessions();", import_source)
+        self.assertIn("await loadImportSessions(true);", import_source)
+        self.assertIn("status.textContent = importResultText(counts);", import_source)
+        self.assertNotIn("location.reload()", import_source)
+        self.assertNotIn("closeImportModal()", import_source)
+
+    def test_import_picker_revalidates_preloaded_source_state(self):
+        """Opening or switching sources never trusts stale preload metadata."""
+        open_start = APP_SOURCE.index("async function openImportModal()")
+        open_end = APP_SOURCE.index("function updateGroupBadge", open_start)
+        open_source = APP_SOURCE[open_start:open_end]
+        bind_start = APP_SOURCE.index("function _bindImportEvents()")
+        bind_end = APP_SOURCE.index("async function openImportModal()", bind_start)
+        bind_source = APP_SOURCE[bind_start:bind_end]
+        self.assertIn("_importSessions = _importCache[_importSource] || [];", open_source)
+        self.assertIn("await loadImportSessions(true);", open_source)
+        self.assertIn("_importSessions = _importCache[_importSource] || [];", bind_source)
+        self.assertIn("loadImportSessions(true);", bind_source)
 
 
 class TestSidebarProjectArchitecture(unittest.TestCase):

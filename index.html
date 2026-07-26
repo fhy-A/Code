@@ -550,13 +550,14 @@
         <button class="import-source-tab" data-source="codex">Codex</button>
       </div>
       <div style="margin:0 0 8px">
-        <input id="importSearch" type="text" placeholder="搜索标题或会话ID..." style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:var(--panel);color:var(--text)">
+        <input id="importSearch" type="text" data-i18n="importSearchPlaceholder" placeholder="搜索标题或会话 ID..." style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:var(--panel);color:var(--text)">
       </div>
       <div class="import-toolbar" style="display:flex;justify-content:space-between;align-items:center;margin:0 0 8px">
-        <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="importSelectAll"> 全选</label>
-        <button id="importDoBtn" class="primary-btn" type="button" disabled>导入到 Code</button>
+        <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="importSelectAll"> <span data-i18n="importSelectAll">全选可导入项</span></label>
+        <button id="importDoBtn" class="primary-btn" type="button" data-i18n="importToCode" disabled>导入到 Code</button>
       </div>
-      <div id="importList" style="max-height:360px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px 0"></div>
+      <div id="importList" class="import-list"></div>
+      <div id="importStatus" class="import-result" aria-live="polite"></div>
     </div>
   </div>
   <script src="./app.js"></script>

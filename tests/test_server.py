@@ -1427,6 +1427,255 @@ class TestCodexImport(unittest.TestCase):
             self.assertNotIn("group", index_entry)
             self.assertNotIn("project", index_entry)
 
+    def test_reimport_unchanged_codex_session_is_idempotent(self):
+        """An unchanged source is a no-op and does not duplicate the index."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "codex-session.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Initial request"),
+                ("assistant", "Initial response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            index_path = sessions_dir / "index.jsonl"
+            index_path.write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir):
+                first = server.import_codex_session(str(source))
+                index_after_first = index_path.read_text(encoding="utf-8")
+                second = server.import_codex_session(str(source))
+
+            self.assertEqual(first["importAction"], "created")
+            self.assertEqual(second["importAction"], "unchanged")
+            self.assertEqual(second["id"], first["id"])
+            self.assertEqual(
+                index_path.read_text(encoding="utf-8"),
+                index_after_first,
+            )
+            stored_meta = server.read_json(
+                next(sessions_dir.rglob(f"{first['id']}.json")),
+                {},
+            )
+            self.assertEqual(stored_meta["importState"]["source"], "codex")
+            self.assertEqual(len(stored_meta["importState"]["sourceSha256"]), 64)
+            self.assertFalse(stored_meta["importState"]["codeModified"])
+            self.assertEqual(
+                len(list(sessions_dir.rglob(f"{first['id']}.json"))),
+                1,
+            )
+
+    def test_reimport_updated_pristine_codex_session_refreshes_in_place(self):
+        """A source update replaces a pristine imported snapshot in place."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "codex-session.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Initial request"),
+                ("assistant", "Initial response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir):
+                first = server.import_codex_session(str(source))
+                source.write_text(self._make_codex_jsonl([
+                    ("user", "Initial request"),
+                    ("assistant", "Initial response"),
+                    ("user", "Source follow-up"),
+                    ("assistant", "Updated source response"),
+                ]), encoding="utf-8")
+                second = server.import_codex_session(str(source))
+
+            self.assertEqual(second["importAction"], "updated")
+            self.assertEqual(second["id"], first["id"])
+            stored = server.read_jsonl(
+                next(sessions_dir.rglob(f"{first['id']}.jsonl"))
+            )
+            self.assertIn(
+                "Source follow-up",
+                [item.get("content") for item in stored],
+            )
+            self.assertEqual(
+                len(list(sessions_dir.rglob(f"{first['id']}.json"))),
+                1,
+            )
+
+    def test_reimport_touched_codex_source_refreshes_locator_only(self):
+        """Metadata-only source changes settle after one authoritative recheck."""
+        with tempfile.TemporaryDirectory() as td:
+            codex_dir = Path(td) / "codex"
+            codex_dir.mkdir()
+            source = codex_dir / "codex-session.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Initial request"),
+                ("assistant", "Initial response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir), \
+                 mock.patch.object(server, "CODEX_SESSIONS_DIR", codex_dir):
+                first = server.import_codex_session(str(source))
+                source_stat = source.stat()
+                os.utime(
+                    source,
+                    ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1_000_000),
+                )
+                touched = server.list_codex_sessions()[0]
+                second = server.import_codex_session(str(source))
+                settled = server.list_codex_sessions()[0]
+
+            self.assertEqual(touched["importStatus"], "update-available")
+            self.assertEqual(second["importAction"], "unchanged")
+            self.assertEqual(second["id"], first["id"])
+            self.assertEqual(settled["importStatus"], "imported")
+            self.assertFalse(settled["canImport"])
+
+    def test_reimport_moved_codex_source_matches_stable_source_session_id(self):
+        """Moving a source file does not create a second imported session."""
+        with tempfile.TemporaryDirectory() as td:
+            first_dir = Path(td) / "first"
+            second_dir = Path(td) / "second"
+            first_dir.mkdir()
+            second_dir.mkdir()
+            source = first_dir / "codex-session.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Initial request"),
+                ("assistant", "Initial response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir):
+                first = server.import_codex_session(str(source))
+                moved = second_dir / source.name
+                source.rename(moved)
+                second = server.import_codex_session(str(moved))
+
+            self.assertEqual(second["importAction"], "unchanged")
+            self.assertEqual(second["id"], first["id"])
+            self.assertEqual(
+                second["importState"]["sourcePathKey"],
+                server._path_identity(moved),
+            )
+            self.assertEqual(
+                len(list(sessions_dir.rglob("codex-*.json"))),
+                1,
+            )
+
+    def test_reimport_updated_continued_codex_session_creates_one_snapshot(self):
+        """A source update never overwrites messages added later in Code."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "codex-session.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Initial request"),
+                ("assistant", "Initial response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            index_path = sessions_dir / "index.jsonl"
+            index_path.write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir):
+                first = server.import_codex_session(str(source))
+                root_messages_path = next(
+                    sessions_dir.rglob(f"{first['id']}.jsonl")
+                )
+                root_messages = server.read_jsonl(root_messages_path)
+                root_messages.extend([
+                    {"role": "user", "content": "Continued in Code"},
+                    {"role": "assistant", "content": "Code-side response"},
+                ])
+                server.write_jsonl(root_messages_path, root_messages)
+
+                unchanged = server.import_codex_session(str(source))
+                self.assertEqual(unchanged["importAction"], "continued")
+
+                source.write_text(self._make_codex_jsonl([
+                    ("user", "Initial request"),
+                    ("assistant", "Initial response"),
+                    ("user", "New source turn"),
+                    ("assistant", "New source response"),
+                ]), encoding="utf-8")
+                snapshot = server.import_codex_session(str(source))
+                index_after_snapshot = index_path.read_text(encoding="utf-8")
+                repeated = server.import_codex_session(str(source))
+
+            self.assertEqual(snapshot["importAction"], "snapshot-created")
+            self.assertNotEqual(snapshot["id"], first["id"])
+            self.assertEqual(snapshot["importRootSessionId"], first["id"])
+            self.assertEqual(
+                snapshot["importState"]["previousSessionId"],
+                first["id"],
+            )
+            self.assertEqual(repeated["importAction"], "unchanged")
+            self.assertEqual(repeated["id"], snapshot["id"])
+            self.assertEqual(
+                index_path.read_text(encoding="utf-8"),
+                index_after_snapshot,
+            )
+
+            preserved_root = server.read_jsonl(root_messages_path)
+            self.assertIn(
+                "Continued in Code",
+                [item.get("content") for item in preserved_root],
+            )
+            snapshot_messages = server.read_jsonl(
+                next(sessions_dir.rglob(f"{snapshot['id']}.jsonl"))
+            )
+            snapshot_contents = [item.get("content") for item in snapshot_messages]
+            self.assertIn("New source turn", snapshot_contents)
+            self.assertNotIn("Continued in Code", snapshot_contents)
+
+    def test_codex_import_listing_reports_repeated_import_state(self):
+        """The picker distinguishes imported, continued, and conflict states."""
+        with tempfile.TemporaryDirectory() as td:
+            codex_dir = Path(td) / "codex"
+            codex_dir.mkdir()
+            source = codex_dir / "codex-session.jsonl"
+            source.write_text(self._make_codex_jsonl([
+                ("user", "Initial request"),
+                ("assistant", "Initial response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir), \
+                 mock.patch.object(server, "CODEX_SESSIONS_DIR", codex_dir):
+                before = server.list_codex_sessions()[0]
+                imported = server.import_codex_session(str(source))
+                after = server.list_codex_sessions()[0]
+
+                meta_path = next(sessions_dir.rglob(f"{imported['id']}.json"))
+                messages_path = meta_path.with_suffix(".jsonl")
+                messages = server.read_jsonl(messages_path)
+                messages.append({"role": "user", "content": "Continued in Code"})
+                server.write_jsonl(messages_path, messages)
+                meta = server.read_json(meta_path, {})
+                server._refresh_import_divergence(meta, messages)
+                server.write_json(meta_path, meta)
+                continued = server.list_codex_sessions()[0]
+
+                source.write_text(self._make_codex_jsonl([
+                    ("user", "Initial request"),
+                    ("assistant", "Initial response"),
+                    ("user", "New source turn"),
+                    ("assistant", "New source response"),
+                ]), encoding="utf-8")
+                conflict = server.list_codex_sessions()[0]
+
+            self.assertEqual(before["importStatus"], "available")
+            self.assertTrue(before["canImport"])
+            self.assertEqual(after["importStatus"], "imported")
+            self.assertFalse(after["canImport"])
+            self.assertEqual(continued["importStatus"], "continued")
+            self.assertFalse(continued["canImport"])
+            self.assertEqual(conflict["importStatus"], "update-conflict")
+            self.assertTrue(conflict["canImport"])
+
     def test_import_codex_preserves_safe_history_and_usage(self):
         with tempfile.TemporaryDirectory() as td:
             source = Path(td) / "codex-complex.jsonl"
@@ -1728,6 +1977,50 @@ class TestCodexImport(unittest.TestCase):
                 )
             }[meta["id"]]
             self.assertEqual(index_entry["source"], "claude-code")
+
+    def test_reimport_claude_session_uses_shared_idempotent_flow(self):
+        """Claude imports expose the same unchanged and update states as Codex."""
+        with tempfile.TemporaryDirectory() as td:
+            claude_dir = Path(td) / "claude" / "project"
+            claude_dir.mkdir(parents=True)
+            source = claude_dir / "session.jsonl"
+            source.write_text(self._make_claude_jsonl([
+                ("user", "Initial Claude request"),
+                ("assistant", "Initial Claude response"),
+            ]), encoding="utf-8")
+            sessions_dir = Path(td) / "sessions"
+            sessions_dir.mkdir()
+            (sessions_dir / "index.jsonl").write_text("", encoding="utf-8")
+
+            with mock.patch.object(server, "SESSIONS_DIR", sessions_dir), \
+                 mock.patch.object(
+                     server,
+                     "CLAUDE_PROJECTS_DIR",
+                     claude_dir.parent,
+                 ):
+                first = server.import_claude_session(str(source))
+                unchanged = server.import_claude_session(str(source))
+                imported_row = server.list_claude_sessions()[0]
+                source.write_text(self._make_claude_jsonl([
+                    ("user", "Initial Claude request"),
+                    ("assistant", "Initial Claude response"),
+                    ("user", "New Claude turn"),
+                    ("assistant", "New Claude response"),
+                ]), encoding="utf-8")
+                update_row = server.list_claude_sessions()[0]
+                updated = server.import_claude_session(str(source))
+                settled_row = server.list_claude_sessions()[0]
+
+            self.assertEqual(first["importAction"], "created")
+            self.assertEqual(unchanged["importAction"], "unchanged")
+            self.assertEqual(unchanged["id"], first["id"])
+            self.assertEqual(imported_row["importStatus"], "imported")
+            self.assertFalse(imported_row["canImport"])
+            self.assertEqual(update_row["importStatus"], "update-available")
+            self.assertTrue(update_row["canImport"])
+            self.assertEqual(updated["importAction"], "updated")
+            self.assertEqual(updated["id"], first["id"])
+            self.assertEqual(settled_row["importStatus"], "imported")
 
     def test_import_claude_preserves_main_trace_images_and_usage(self):
         with tempfile.TemporaryDirectory() as td:

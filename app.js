@@ -209,6 +209,9 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (typeof updateProjectContextIndicator === "function") updateProjectContextIndicator();
     if (typeof updateMemoryContextIndicator === "function") updateMemoryContextIndicator();
     if (typeof updateSendButtonState === "function") updateSendButtonState();
+    if (typeof renderImportList === "function" && document.getElementById("importModal")?.style.display !== "none") {
+      renderImportList();
+    }
   },
 });
 
@@ -11089,6 +11092,7 @@ var _importSessions = [];
 var _importCache = {};
 var _importPreloaded = false;
 var _importEventsBound = false;
+var _importBusy = false;
 
 function preloadImportSessions() {
   if (_importPreloaded) return;
@@ -11131,20 +11135,27 @@ function _bindImportEvents() {
   // Source tabs
   modal.addEventListener("click", function (e) {
     var tab = e.target.closest(".import-source-tab");
-    if (!tab) return;
+    if (!tab || _importBusy) return;
     document.querySelectorAll(".import-source-tab").forEach(function (b) { b.classList.remove("active"); });
     tab.classList.add("active");
     _importSource = tab.dataset.source;
-    _importSessions = [];
+    _importSessions = _importCache[_importSource] || [];
+    renderImportList();
     var selAll = document.getElementById("importSelectAll");
     if (selAll) selAll.checked = false;
     var search = document.getElementById("importSearch");
     if (search) search.value = "";
-    loadImportSessions();
+    var status = document.getElementById("importStatus");
+    if (status) {
+      status.textContent = "";
+      status.className = "import-result";
+    }
+    loadImportSessions(true);
   });
   // Search (debounced)
   var search = document.getElementById("importSearch");
   if (search) search.addEventListener("input", function () {
+    if (_importBusy) return;
     clearTimeout(_searchTimer);
     _searchTimer = setTimeout(function () {
       var selAll = document.getElementById("importSelectAll");
@@ -11155,8 +11166,11 @@ function _bindImportEvents() {
   // Select all
   var selAll = document.getElementById("importSelectAll");
   if (selAll) selAll.addEventListener("change", function () {
+    if (_importBusy) return;
     var cbs = document.querySelectorAll("#importList input[type=checkbox]");
-    cbs.forEach(function (c) { c.checked = selAll.checked; });
+    cbs.forEach(function (c) {
+      if (!c.disabled) c.checked = selAll.checked;
+    });
     updateImportButton();
   });
   // Import
@@ -11175,9 +11189,14 @@ async function openImportModal() {
   if (selAll) selAll.checked = false;
   var search = document.getElementById("importSearch");
   if (search) search.value = "";
-  _importSessions = [];
+  var status = document.getElementById("importStatus");
+  if (status) {
+    status.textContent = "";
+    status.className = "import-result";
+  }
+  _importSessions = _importCache[_importSource] || [];
   renderImportList();
-  await loadImportSessions();
+  await loadImportSessions(true);
 }
 
 function updateGroupBadge(session) {
@@ -11193,13 +11212,13 @@ function closeImportModal() {
   if (modal) modal.style.display = "none";
 }
 
-async function loadImportSessions() {
+async function loadImportSessions(force) {
   var searchEl = document.getElementById("importSearch");
   var q = searchEl ? searchEl.value.trim() : "";
   var cached = _importCache[_importSource];
 
   // Use cache when no search query
-  if (!q && cached && cached.length) {
+  if (!force && !q && cached && cached.length) {
     _importSessions = cached;
     renderImportList();
     _updateSourceTabCount(_importSource);
@@ -11224,25 +11243,44 @@ function renderImportList() {
   if (!list) return;
   list.innerHTML = "";
   if (!_importSessions.length) {
-    list.innerHTML = "<div style='padding:16px;color:var(--muted);text-align:center'>暂无会话</div>";
+    var empty = document.createElement("div");
+    empty.className = "import-session-empty";
+    empty.textContent = t("importEmpty");
+    list.appendChild(empty);
+    updateImportButton();
     return;
   }
+  var statusKeys = {
+    "available": "importStatusAvailable",
+    "imported": "importStatusImported",
+    "continued": "importStatusContinued",
+    "update-available": "importStatusUpdateAvailable",
+    "update-conflict": "importStatusUpdateConflict",
+    "legacy": "importStatusLegacy",
+  };
   _importSessions.forEach(function (s, i) {
+    var importState = s.importStatus || "available";
+    var canImport = s.canImport !== false;
     var row = document.createElement("label");
-    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--line)";
-    row.onmouseenter = function () { row.style.background = "var(--hover)"; };
-    row.onmouseleave = function () { row.style.background = ""; };
+    row.className = "import-session-row" + (canImport ? "" : " is-disabled");
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.dataset.index = i;
+    cb.disabled = !canImport;
     cb.addEventListener("change", updateImportButton);
     row.appendChild(cb);
     var title = document.createElement("span");
-    title.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1";
-    title.textContent = s.title || "未命名";
+    title.className = "import-session-title";
+    title.textContent = s.title || t("importUnnamed");
+    title.title = title.textContent;
     row.appendChild(title);
+    var badge = document.createElement("span");
+    badge.className = "import-session-state";
+    badge.dataset.state = importState;
+    badge.textContent = t(statusKeys[importState] || "importStatusAvailable");
+    row.appendChild(badge);
     var date = document.createElement("span");
-    date.style.cssText = "font-size:11px;color:var(--muted);flex-shrink:0";
+    date.className = "import-session-date";
     date.textContent = (s.createdAt || "").slice(0, 10);
     row.appendChild(date);
     list.appendChild(row);
@@ -11252,39 +11290,98 @@ function renderImportList() {
 
 function updateImportButton() {
   var cbs = document.querySelectorAll("#importList input[type=checkbox]");
-  var checked = Array.from(cbs).filter(function (c) { return c.checked; });
+  var checked = Array.from(cbs).filter(function (c) { return c.checked && !c.disabled; });
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) {
-    doBtn.disabled = checked.length === 0;
-    doBtn.textContent = checked.length ? "导入到 Code (" + checked.length + ")" : "导入到 Code";
+    doBtn.disabled = checked.length === 0 || _importBusy;
+    doBtn.textContent = _importBusy
+      ? t("importProcessing")
+      : (checked.length
+        ? t("importToCodeCount", { count: checked.length })
+        : t("importToCode"));
   }
+}
+
+function setImportBusy(busy) {
+  _importBusy = !!busy;
+  document.querySelectorAll(".import-source-tab").forEach(function (tab) {
+    tab.disabled = _importBusy;
+  });
+  var search = document.getElementById("importSearch");
+  if (search) search.disabled = _importBusy;
+  var selAll = document.getElementById("importSelectAll");
+  if (selAll) selAll.disabled = _importBusy;
+  updateImportButton();
+}
+
+function importResultText(counts) {
+  var parts = [];
+  if (counts.created) parts.push(t("importResultCreated", { count: counts.created }));
+  if (counts.updated) parts.push(t("importResultUpdated", { count: counts.updated }));
+  if (counts.snapshot) parts.push(t("importResultSnapshot", { count: counts.snapshot }));
+  if (counts.unchanged) parts.push(t("importResultUnchanged", { count: counts.unchanged }));
+  if (counts.continued) parts.push(t("importResultContinued", { count: counts.continued }));
+  if (counts.failed) parts.push(t("importResultFailed", { count: counts.failed }));
+  return t("importResultPrefix") + parts.join(state.lang === "en" ? ", " : "，");
 }
 
 async function doImport() {
   var cbs = document.querySelectorAll("#importList input[type=checkbox]");
-  var checked = Array.from(cbs).filter(function (c) { return c.checked; });
-  if (!checked.length) return;
-  var doBtn = document.getElementById("importDoBtn");
-  if (doBtn) { doBtn.disabled = true; doBtn.textContent = "导入中..."; }
+  var checked = Array.from(cbs).filter(function (c) { return c.checked && !c.disabled; });
+  if (!checked.length || _importBusy) return;
+  var selectedSessions = checked.map(function (checkbox) {
+    return _importSessions[Number(checkbox.dataset.index)];
+  }).filter(Boolean);
+  if (!selectedSessions.length) return;
+  var importSource = _importSource;
   var status = document.getElementById("importStatus");
-  var okCount = 0;
-  for (var i = 0; i < checked.length; i++) {
-    var s = _importSessions[Number(checked[i].dataset.index)];
-    if (!s) continue;
+  var counts = {
+    created: 0,
+    updated: 0,
+    snapshot: 0,
+    unchanged: 0,
+    continued: 0,
+    failed: 0,
+  };
+  setImportBusy(true);
+  if (status) {
+    status.textContent = "";
+    status.className = "import-result";
+  }
+  for (var i = 0; i < selectedSessions.length; i++) {
+    var s = selectedSessions[i];
     try {
       var resp = await fetch("/api/import/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: _importSource, sourcePath: s.sourcePath }),
+        body: JSON.stringify({ source: importSource, sourcePath: s.sourcePath }),
       });
       var data = await resp.json();
-      if (data.ok) { okCount++; }
-    } catch (e) { /* continue */ }
+      if (!resp.ok || !data.ok) {
+        counts.failed++;
+        continue;
+      }
+      if (data.action === "updated") counts.updated++;
+      else if (data.action === "snapshot-created") counts.snapshot++;
+      else if (data.action === "unchanged") counts.unchanged++;
+      else if (data.action === "continued") counts.continued++;
+      else counts.created++;
+    } catch (e) {
+      counts.failed++;
+    }
   }
-  if (status) status.textContent = "已导入 " + okCount + " / " + checked.length + " 个会话";
-  // Close modal and reload page so new sessions appear immediately
-  closeImportModal();
-  location.reload();
+  delete _importCache[importSource];
+  var selAll = document.getElementById("importSelectAll");
+  if (selAll) selAll.checked = false;
+  await refreshSessions();
+  await loadImportSessions(true);
+  setImportBusy(false);
+  if (status) {
+    status.textContent = importResultText(counts);
+    status.className = "import-result " + (
+      counts.failed === selectedSessions.length ? "is-error" : "is-success"
+    );
+  }
 }
 
 if (els.importSessions) els.importSessions.addEventListener("click", openImportModal);

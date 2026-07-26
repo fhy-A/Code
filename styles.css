@@ -5652,6 +5652,81 @@ body.theme-dark .syn-fn { color: #61afef; }
 .import-source-tab.active {
   background: var(--accent); color: #fff; border-color: var(--accent);
 }
+.import-source-tab:disabled { cursor: wait; opacity: .6; }
+.import-list {
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 4px 0;
+}
+.import-session-empty {
+  padding: 18px 16px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+}
+.import-session-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 13px;
+}
+.import-session-row:last-child { border-bottom: 0; }
+.import-session-row:hover { background: var(--hover); }
+.import-session-row.is-disabled {
+  cursor: default;
+  color: var(--muted);
+}
+.import-session-row.is-disabled:hover { background: transparent; }
+.import-session-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-session-date {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.import-session-state {
+  flex: 0 0 auto;
+  max-width: 155px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+.import-session-state[data-state="available"],
+.import-session-state[data-state="update-available"] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.import-session-state[data-state="update-conflict"] {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--line));
+  background: color-mix(in srgb, var(--yellow) 10%, var(--panel));
+  color: var(--yellow);
+}
+.import-result {
+  min-height: 20px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.import-result.is-success { color: var(--green); }
+.import-result.is-error { color: var(--red); }
 .modal-panel { background: var(--bg); border-radius: 12px; padding: 20px; min-width: 400px; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,.3); }
 .modal-header { display: flex; justify-content: space-between; align-items: center; margin: 0 0 12px; font-size: 16px; font-weight: 600; }
 .modal-close-btn { background: none; border: none; font-size: 22px; cursor: pointer; color: var(--muted); padding: 0 4px; line-height: 1; }

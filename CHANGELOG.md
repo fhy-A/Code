@@ -2,6 +2,31 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-27 · Codex
+
+### Codex / Claude Code 重复导入幂等与安全更新快照（开发版本基线仍为 v0.5.28）
+
+- 导入会话新增持久化 `importState`：记录来源类型、稳定来源会话 ID、规范路径、文件大小/时间、来源 SHA-256、转换后消息快照 SHA-256、根会话和 Code 侧是否已修改，用于区分同一路径、移动后的路径、来源更新与 Code 续聊。
+- 重复导入改为四类确定行为：
+  - 首次导入创建会话；
+  - 来源内容未变化时返回 `unchanged`，不重复写消息、不追加索引；
+  - 来源有更新且 Code 侧尚未修改时原地刷新，保留用户重命名、项目归属和 `cwd`；
+  - Code 侧已经续聊、压缩或仍有运行状态时，来源更新会创建按来源哈希确定 ID 的新快照，原会话及 Code 续聊内容不会被覆盖；重复导入同一更新快照仍为幂等操作。
+- 来源匹配优先使用 Codex / Claude Code 自身会话 ID，再回退到规范路径；来源文件移动、仅更新时间变化或重复点击均不会产生无意义副本。旧版已导入会话在首次重新导入时安全补齐状态，存在差异时按冲突快照处理。
+- 导入列表新增“可导入 / 已导入 / 已在 Code 继续 / 有更新 / 有更新·将新建快照 / 旧版导入”状态；无变化和已续聊但来源未更新的会话禁选，打开弹窗或切换来源时会在预加载内容后强制重新检查，避免缓存掩盖来源更新。
+- 批量导入完成后保留弹窗并原地刷新侧栏和来源列表，不再整页重载；结果按新增、更新、新快照、无变化、已续聊和失败分别计数。导入期间冻结来源、搜索、全选和已选会话快照，避免异步切换造成列表索引错位。
+- 补齐中英文即时切换、状态徽标、结果区和可访问性提示。
+- 验证：
+  - `python -m pytest tests/test_frontend_modules.py tests/test_server.py tests/test_p2_coverage.py -q`：**340 passed, 17 subtests passed**；
+  - `python -m unittest discover -s tests`：**778 tests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/core/i18n.js` 与 `git diff --check` 通过；
+  - 浏览器实际验证了弹窗布局、选择计数、状态徽标和中英文即时切换；
+  - 用户人工确认首次导入、原地更新、Code 续聊后的安全快照、无整页刷新及缓存重新检查均正常。
+
+**涉及文件**：`server.py`、`app.js`、`index.html`、`styles.css`、`src/core/i18n.js`、`tests/test_server.py`、`tests/test_frontend_modules.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
 ## 2026-07-26 23:48 · Codex
 
 ### Codex / Claude Code 导入消息兼容与迁移安全边界（开发版本基线仍为 v0.5.28）

@@ -5495,6 +5495,7 @@ _CODEX_SYSTEM_PREFIXES = (
 
 _IMPORT_TRACE_CONTENT_LIMIT = 12000
 _IMPORT_BOUNDARY_VERSION = 1
+_IMPORT_SNAPSHOT_VERSION = 1
 _CODEX_CONTEXT_BLOCK_RE = re.compile(
     r"^\s*<(?P<tag>"
     r"in-app-browser-context|environment_context|recommended_plugins|"
@@ -5782,6 +5783,426 @@ def _codex_reasoning_summary(payload):
     return "\n".join(parts)
 
 
+def _import_source_state(source_path, include_hash=False):
+    """Return stable source-file metadata, optionally including a content hash."""
+    source = Path(source_path).resolve()
+    digest = ""
+    if include_hash:
+        hasher = hashlib.sha256()
+        with open(source, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
+    stat = source.stat()
+    return {
+        "sourcePath": str(source),
+        "sourcePathKey": _path_identity(source),
+        "sourceSize": int(stat.st_size),
+        "sourceMtimeNs": int(stat.st_mtime_ns),
+        "sourceSha256": digest,
+    }
+
+
+def _import_message_snapshot_hash(messages):
+    """Hash only durable message protocol fields, ignoring UI-only omissions."""
+    normalized = []
+    optional_fields = ("thought", "_images", "_model", "_time")
+    for raw in messages or []:
+        message = {
+            "role": raw.get("role"),
+            "content": raw.get("content", ""),
+            "meta": raw.get("meta") or {},
+        }
+        for field in optional_fields:
+            value = raw.get(field)
+            if value not in (None, "", []):
+                message[field] = value
+        normalized.append(message)
+    payload = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _import_session_registry(source):
+    """Return persisted import snapshots for one foreign source."""
+    source = _normalize_session_source(source)
+    paths = list(SESSIONS_DIR.glob("*/*/*/*.json"))
+    paths.extend(SESSIONS_DIR.glob("*.json"))
+    records = []
+    seen = set()
+    for path in paths:
+        path_key = str(path.resolve()).casefold()
+        if path_key in seen:
+            continue
+        seen.add(path_key)
+        meta = read_json(path, {})
+        state = meta.get("importState")
+        if (
+            not isinstance(state, dict)
+            or _normalize_session_source(state.get("source")) != source
+        ):
+            continue
+        records.append({"meta": meta, "metaPath": path, "state": state})
+    records.sort(
+        key=lambda item: (
+            str(item["state"].get("importedAt") or ""),
+            str(item["meta"].get("updatedAt") or ""),
+        ),
+        reverse=True,
+    )
+    return records
+
+
+def _matching_import_record(registry, source_path, source_session_id=""):
+    """Match an import snapshot by stable source id first, then local path."""
+    session_key = str(source_session_id or "").strip()
+    path_key = _path_identity(source_path)
+    if session_key:
+        for item in registry:
+            if str(item["state"].get("sourceSessionId") or "").strip() == session_key:
+                return item
+    if path_key:
+        for item in registry:
+            if (
+                str(item["state"].get("sourcePathKey") or "")
+                or _path_identity(item["state"].get("sourcePath"))
+            ) == path_key:
+                return item
+    return None
+
+
+def _import_listing_state(
+    source,
+    source_path,
+    source_session_id,
+    expected_session_id,
+    registry,
+):
+    """Project safe repeated-import state into one import-list row."""
+    source_stat = _import_source_state(source_path)
+    candidate = _matching_import_record(
+        registry,
+        source_path,
+        source_session_id,
+    )
+    if candidate:
+        state = candidate["state"]
+        same_source_version = (
+            int(state.get("sourceSize") or -1) == source_stat["sourceSize"]
+            and int(state.get("sourceMtimeNs") or -1) == source_stat["sourceMtimeNs"]
+        )
+        code_modified = bool(state.get("codeModified"))
+        if same_source_version:
+            status = "continued" if code_modified else "imported"
+        else:
+            status = "update-conflict" if code_modified else "update-available"
+        return {
+            "importStatus": status,
+            "importedSessionId": candidate["meta"].get("id"),
+            "canImport": status in {"update-available", "update-conflict"},
+        }
+
+    try:
+        legacy_path = session_path(expected_session_id)
+    except ValueError:
+        legacy_path = None
+    if legacy_path and legacy_path.exists():
+        return {
+            "importStatus": "legacy",
+            "importedSessionId": expected_session_id,
+            "canImport": True,
+        }
+    return {
+        "importStatus": "available",
+        "importedSessionId": None,
+        "canImport": True,
+    }
+
+
+def _build_import_state(
+    source,
+    source_info,
+    source_session_id,
+    root_session_id,
+    snapshot_hash,
+    imported_title,
+    previous=None,
+):
+    previous = previous if isinstance(previous, dict) else {}
+    # Import snapshots can be created only milliseconds apart.  Keep enough
+    # precision for the registry to reliably prefer the newest snapshot.
+    imported_at = dt.datetime.now().isoformat(timespec="microseconds")
+    return {
+        "version": _IMPORT_SNAPSHOT_VERSION,
+        "source": _normalize_session_source(source),
+        **source_info,
+        "sourceSessionId": str(source_session_id or ""),
+        "rootSessionId": root_session_id,
+        "snapshotSha256": snapshot_hash,
+        "snapshotMessageCount": int(previous.get("snapshotMessageCount") or 0),
+        "importedTitle": imported_title,
+        "firstImportedAt": previous.get("firstImportedAt") or imported_at,
+        "importedAt": imported_at,
+        "codeModified": False,
+    }
+
+
+def _refresh_import_divergence(meta, messages):
+    """Update the persisted Code-side divergence flag after message writes."""
+    state = meta.get("importState")
+    if not isinstance(state, dict) or not state.get("snapshotSha256"):
+        return
+    modified = _import_message_snapshot_hash(messages) != state["snapshotSha256"]
+    state["codeModified"] = modified
+    if modified:
+        state["codeModifiedAt"] = now_iso()
+    else:
+        state.pop("codeModifiedAt", None)
+
+
+def _import_result_record(meta, action, root_session_id):
+    record = _session_api_record(meta)
+    record["importAction"] = action
+    record["importRootSessionId"] = root_session_id
+    return record
+
+
+def _persist_import_snapshot(
+    *,
+    source,
+    source_path,
+    source_session_id,
+    requested_session_id,
+    force_requested_id,
+    title,
+    created_at,
+    messages,
+    stats,
+    last_usage,
+    resolved_project_id,
+    resolved_cwd,
+):
+    """Persist an import without overwriting Code-side divergent history."""
+    source = _normalize_session_source(source)
+    source_info = _import_source_state(source_path, include_hash=True)
+    snapshot_hash = _import_message_snapshot_hash(messages)
+    registry = _import_session_registry(source)
+    candidate = None if force_requested_id else _matching_import_record(
+        registry,
+        source_path,
+        source_session_id,
+    )
+    root_session_id = safe_session_id(
+        (
+            candidate["state"].get("rootSessionId")
+            or candidate["meta"].get("id")
+        )
+        if candidate
+        else requested_session_id
+    )
+    root_meta_path = session_path(root_session_id)
+    existing = read_json(root_meta_path, {}) if root_meta_path.exists() else {}
+    existing_messages = (
+        read_jsonl(root_meta_path.with_suffix(".jsonl"))
+        if root_meta_path.exists()
+        else []
+    )
+    previous_state = existing.get("importState")
+    current_hash = (
+        _import_message_snapshot_hash(existing_messages)
+        if root_meta_path.exists()
+        else ""
+    )
+    baseline_hash = (
+        str(previous_state.get("snapshotSha256") or "")
+        if isinstance(previous_state, dict)
+        else ""
+    )
+    code_modified = bool(
+        root_meta_path.exists()
+        and (
+            (baseline_hash and current_hash != baseline_hash)
+            or (not baseline_hash and current_hash != snapshot_hash)
+            or existing.get("runState")
+        )
+    )
+    source_same = bool(
+        isinstance(previous_state, dict)
+        and previous_state.get("sourceSha256") == source_info["sourceSha256"]
+        and int(previous_state.get("version") or 0) == _IMPORT_SNAPSHOT_VERSION
+    )
+
+    def state_for(root_id, old_state=None):
+        state = _build_import_state(
+            source,
+            source_info,
+            source_session_id,
+            root_id,
+            snapshot_hash,
+            title,
+            old_state,
+        )
+        state["snapshotMessageCount"] = len(messages)
+        return state
+
+    if root_meta_path.exists() and not previous_state and current_hash == snapshot_hash:
+        existing["importState"] = state_for(root_session_id)
+        write_json(root_meta_path, existing)
+        return _import_result_record(existing, "unchanged", root_session_id)
+
+    if root_meta_path.exists() and previous_state and source_same:
+        # The same source bytes may have moved or only had their timestamp
+        # changed.  Refresh its locator without turning a no-op into a new
+        # import snapshot or disturbing snapshot ordering.
+        previous_state.update(source_info)
+        previous_state["sourceSessionId"] = str(source_session_id or "")
+        previous_state["codeModified"] = code_modified
+        if code_modified:
+            previous_state["codeModifiedAt"] = (
+                previous_state.get("codeModifiedAt") or now_iso()
+            )
+        else:
+            previous_state.pop("codeModifiedAt", None)
+        existing["importState"] = previous_state
+        write_json(root_meta_path, existing)
+        action = "continued" if code_modified else "unchanged"
+        return _import_result_record(existing, action, root_session_id)
+
+    if (
+        root_meta_path.exists()
+        and previous_state
+        and baseline_hash
+        and snapshot_hash == baseline_hash
+    ):
+        next_state = state_for(root_session_id, previous_state)
+        next_state["codeModified"] = code_modified
+        if code_modified:
+            next_state["codeModifiedAt"] = (
+                previous_state.get("codeModifiedAt") or now_iso()
+            )
+        existing["importState"] = next_state
+        write_json(root_meta_path, existing)
+        action = "continued" if code_modified else "unchanged"
+        return _import_result_record(existing, action, root_session_id)
+
+    action = "created"
+    target_id = root_session_id
+    target_meta_path = root_meta_path
+    target_existing = existing
+    target_previous_state = previous_state
+    if root_meta_path.exists() and code_modified:
+        target_id = safe_session_id(
+            f"{root_session_id}-{source_info['sourceSha256'][:10]}"
+        )
+        target_meta_path = session_path(target_id)
+        if target_meta_path.exists():
+            target_existing = read_json(target_meta_path, {})
+            target_messages = read_jsonl(target_meta_path.with_suffix(".jsonl"))
+            if _import_message_snapshot_hash(target_messages) == snapshot_hash:
+                target_existing["importState"] = state_for(
+                    root_session_id,
+                    target_existing.get("importState"),
+                )
+                write_json(target_meta_path, target_existing)
+                return _import_result_record(
+                    target_existing,
+                    "unchanged",
+                    root_session_id,
+                )
+            return _import_result_record(
+                target_existing,
+                "continued",
+                root_session_id,
+            )
+        target_existing = {}
+        target_previous_state = None
+        action = "snapshot-created"
+    elif root_meta_path.exists():
+        action = "updated"
+
+    if target_meta_path.exists():
+        storage_dir = target_meta_path.parent
+    else:
+        storage_date = now_iso()[:10] if action == "snapshot-created" else created_at[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", storage_date or ""):
+            storage_date = now_iso()[:10]
+        year, month, day = storage_date.split("-")
+        storage_dir = SESSIONS_DIR / year / month / day
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        target_meta_path = storage_dir / f"{target_id}.json"
+
+    old_imported_title = (
+        str(target_previous_state.get("importedTitle") or "")
+        if isinstance(target_previous_state, dict)
+        else ""
+    )
+    existing_title = str(target_existing.get("title") or "")
+    preserved_title = (
+        existing_title
+        if existing_title and old_imported_title and existing_title != old_imported_title
+        else title
+    )
+    if action == "snapshot-created":
+        stamp = now_iso()[5:16].replace("T", " ")
+        preserved_title = f"{title} · {stamp}"
+
+    project_id = (
+        target_existing.get("projectId")
+        if "projectId" in target_existing
+        else (
+            existing.get("projectId")
+            if action == "snapshot-created" and existing
+            else resolved_project_id
+        )
+    )
+    cwd = (
+        target_existing.get("cwd")
+        if target_existing.get("cwd")
+        else (
+            existing.get("cwd")
+            if action == "snapshot-created" and existing.get("cwd")
+            else resolved_cwd
+        )
+    )
+    imported_at = now_iso()
+    meta = {
+        **target_existing,
+        "id": target_id,
+        "title": preserved_title,
+        "createdAt": target_existing.get("createdAt") or (
+            imported_at[:19] if action == "snapshot-created" else created_at
+        ),
+        "updatedAt": imported_at[:19],
+        "stats": stats,
+        "lastUsage": last_usage,
+        "runState": {},
+        "messageCount": len(messages) - 1,
+        "lastMessageTime": imported_at[:19],
+        "projectId": project_id,
+        "cwd": cwd,
+        "source": source,
+        "importState": state_for(root_session_id, target_previous_state),
+    }
+    if action == "snapshot-created":
+        meta["importState"]["previousSessionId"] = root_session_id
+    write_jsonl(target_meta_path.with_suffix(".jsonl"), messages)
+    write_json(target_meta_path, meta)
+    append_index(
+        target_id,
+        preserved_title,
+        meta["updatedAt"],
+        meta["messageCount"],
+        project_id=project_id,
+        cwd=cwd,
+        source=source,
+    )
+    return _import_result_record(meta, action, root_session_id)
+
+
 def list_codex_sessions(query=None):
     """Scan the Codex sessions directory and return a list of importable sessions.
 
@@ -5794,6 +6215,7 @@ def list_codex_sessions(query=None):
         return []
     q = (query or "").strip().lower()
     sessions = []
+    registry = _import_session_registry("codex")
     for jsonl_path in sorted(CODEX_SESSIONS_DIR.rglob("*.jsonl"), reverse=True):
         try:
             source_id = jsonl_path.stem
@@ -5804,8 +6226,9 @@ def list_codex_sessions(query=None):
                 continue
             if meta.get("message_count", 0) == 0:
                 continue
+            import_id = _generate_codex_import_id(jsonl_path)
             sessions.append({
-                "id": _generate_codex_import_id(jsonl_path),
+                "id": import_id,
                 "sourceId": source_id,
                 "title": meta.get("title") or "Codex 会话",
                 "messageCount": meta["message_count"],
@@ -5813,6 +6236,13 @@ def list_codex_sessions(query=None):
                 "cwd": meta.get("cwd", ""),
                 "source": "codex",
                 "sourcePath": str(jsonl_path.resolve()),
+                **_import_listing_state(
+                    "codex",
+                    jsonl_path,
+                    meta.get("source_session_id"),
+                    import_id,
+                    registry,
+                ),
             })
         except Exception:
             continue
@@ -5865,6 +6295,7 @@ def _read_codex_session_meta(jsonl_path):
     line_count = 0
     created_at = ""
     cwd = ""
+    source_session_id = ""
     try:
         # Quick line count from file size (approx 200 bytes/line average)
         size = jsonl_path.stat().st_size
@@ -5891,6 +6322,9 @@ def _read_codex_session_meta(jsonl_path):
                 payload = record.get("payload") or {}
 
                 if rtype == "session_meta":
+                    source_session_id = source_session_id or str(
+                        payload.get("id") or payload.get("session_id") or ""
+                    )
                     if not created_at:
                         created_at = str(payload.get("timestamp") or "")[:19]
                     if not cwd:
@@ -5924,6 +6358,7 @@ def _read_codex_session_meta(jsonl_path):
         "message_count": msg_count,
         "created_at": created_at,
         "cwd": cwd,
+        "source_session_id": source_session_id,
     }
 
 
@@ -5942,6 +6377,7 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
     conversation_messages = []
     current_model = ""
     source_cwd = ""
+    source_session_id = ""
     pending_reasoning = []
     tool_names = {}
     total_usage = {"input": 0, "output": 0, "cache": 0}
@@ -5978,6 +6414,9 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
 
             if rtype == "session_meta" and isinstance(payload, dict):
                 source_cwd = source_cwd or _normalize_local_path(payload.get("cwd"))
+                source_session_id = source_session_id or str(
+                    payload.get("id") or payload.get("session_id") or ""
+                )
 
             # Track model from turn_context events
             if rtype == "turn_context" and isinstance(payload, dict):
@@ -6149,44 +6588,24 @@ def import_codex_session(source_path, target_session_id=None, project_id=None):
     created_at = (
         conversation_messages[0].get("_time") or now_iso()
     )[:19]
-    msg_count = len(messages) - 1
     resolved_project_id, resolved_cwd = _import_session_location(
         source_cwd,
         project_id,
     )
-
-    # Write files under the date derived from the first message timestamp
-    date_dir = SESSIONS_DIR / created_at[:4] / created_at[5:7] / created_at[8:10]
-    date_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path = date_dir / f"{safe_id}.jsonl"
-    json_path = date_dir / f"{safe_id}.json"
-
-    write_jsonl(jsonl_path, messages)
-    meta = {
-        "id": safe_id,
-        "title": title,
-        "createdAt": created_at,
-        "updatedAt": now_iso()[:19],  # use import time so it appears at top
-        "stats": total_usage,
-        "lastUsage": last_usage,
-        "runState": {},
-        "messageCount": msg_count,
-        "lastMessageTime": now_iso()[:19],
-        "projectId": resolved_project_id,
-        "cwd": resolved_cwd,
-        "source": "codex",
-    }
-    write_json(json_path, meta)
-    append_index(
-        safe_id,
-        title,
-        meta["updatedAt"],
-        msg_count,
-        project_id=resolved_project_id,
-        cwd=resolved_cwd,
+    return _persist_import_snapshot(
         source="codex",
+        source_path=source,
+        source_session_id=source_session_id,
+        requested_session_id=safe_id,
+        force_requested_id=target_session_id is not None,
+        title=title,
+        created_at=created_at,
+        messages=messages,
+        stats=total_usage,
+        last_usage=last_usage,
+        resolved_project_id=resolved_project_id,
+        resolved_cwd=resolved_cwd,
     )
-    return _session_api_record(meta)
 
 
 def append_index(
@@ -6272,6 +6691,7 @@ def list_claude_sessions(query=None):
         return []
     q = (query or "").strip().lower()
     sessions = []
+    registry = _import_session_registry("claude-code")
     for jsonl_path in sorted(CLAUDE_PROJECTS_DIR.rglob("*.jsonl"), reverse=True):
         try:
             source_id = jsonl_path.stem
@@ -6283,10 +6703,11 @@ def list_claude_sessions(query=None):
                 continue
             if meta.get("message_count", 0) == 0:
                 continue
-            sessions.append({
-                "id": "claude-" + hashlib.sha256(
+            import_id = "claude-" + hashlib.sha256(
                     str(jsonl_path.resolve()).replace("\\", "/").encode()
-                ).hexdigest()[:16],
+                ).hexdigest()[:16]
+            sessions.append({
+                "id": import_id,
                 "sourceId": source_id,
                 "title": title or "Claude 会话",
                 "messageCount": meta["message_count"],
@@ -6295,6 +6716,13 @@ def list_claude_sessions(query=None):
                 "source": "claude-code",
                 "sourcePath": str(jsonl_path.resolve()),
                 "project": jsonl_path.parent.name,
+                **_import_listing_state(
+                    "claude-code",
+                    jsonl_path,
+                    meta.get("source_session_id"),
+                    import_id,
+                    registry,
+                ),
             })
         except Exception:
             continue
@@ -6335,6 +6763,7 @@ def _read_claude_session_meta(jsonl_path):
     cwd = ""
     line_count = 0
     found_main_record = False
+    source_session_id = ""
     try:
         size = jsonl_path.stat().st_size
         est_lines = max(1, size // 200)
@@ -6359,6 +6788,9 @@ def _read_claude_session_meta(jsonl_path):
                 if record.get("isSidechain") or record.get("isMeta"):
                     continue
                 found_main_record = True
+                source_session_id = source_session_id or str(
+                    record.get("sessionId") or ""
+                )
                 if not cwd:
                     cwd = _normalize_local_path(record.get("cwd"))
                 timestamp = str(record.get("timestamp") or "")
@@ -6385,6 +6817,7 @@ def _read_claude_session_meta(jsonl_path):
         "message_count": max(1, est_lines),
         "created_at": created_at,
         "cwd": cwd,
+        "source_session_id": source_session_id,
     }
 
 
@@ -6402,6 +6835,7 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
     messages = [_import_boundary_message("claude-code")]
     conversation_messages = []
     source_cwd = ""
+    source_session_id = ""
     tool_names = {}
     total_usage = {"input": 0, "output": 0, "cache": 0}
     last_usage = {}
@@ -6423,6 +6857,9 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
             if record.get("isSidechain") or record.get("isMeta"):
                 continue
             source_cwd = source_cwd or _normalize_local_path(record.get("cwd"))
+            source_session_id = source_session_id or str(
+                record.get("sessionId") or ""
+            )
             msg = record.get("message") or {}
             role = msg.get("role", "")
             if role not in ("user", "assistant"):
@@ -6556,41 +6993,24 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
     created_at = (
         conversation_messages[0].get("_time") or now_iso()
     )[:19]
-    msg_count = len(messages) - 1
     resolved_project_id, resolved_cwd = _import_session_location(
         source_cwd,
         project_id,
     )
-
-    date_dir = _session_date_dir(session_id)
-    date_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path_out = date_dir / f"{safe_id}.jsonl"
-    json_path_out = date_dir / f"{safe_id}.json"
-
-    write_jsonl(jsonl_path_out, messages)
-    meta = {
-        "id": safe_id, "title": title,
-        "createdAt": created_at,
-        "updatedAt": now_iso()[:19],
-        "stats": total_usage,
-        "lastUsage": last_usage, "runState": {},
-        "messageCount": msg_count,
-        "lastMessageTime": now_iso()[:19],
-        "projectId": resolved_project_id,
-        "cwd": resolved_cwd,
-        "source": "claude-code",
-    }
-    write_json(json_path_out, meta)
-    append_index(
-        safe_id,
-        title,
-        meta["updatedAt"],
-        msg_count,
-        project_id=resolved_project_id,
-        cwd=resolved_cwd,
+    return _persist_import_snapshot(
         source="claude-code",
+        source_path=source,
+        source_session_id=source_session_id,
+        requested_session_id=safe_id,
+        force_requested_id=target_session_id is not None,
+        title=title,
+        created_at=created_at,
+        messages=messages,
+        stats=total_usage,
+        last_usage=last_usage,
+        resolved_project_id=resolved_project_id,
+        resolved_cwd=resolved_cwd,
     )
-    return _session_api_record(meta)
 
 
 def resolve_project_path(relative_path=""):
@@ -8757,7 +9177,11 @@ class CodeHandler(BaseHTTPRequestHandler):
                         source_path,
                         project_id=body.get("projectId"),
                     )
-                    self.send_json({"ok": True, "session": meta})
+                    self.send_json({
+                        "ok": True,
+                        "action": meta.get("importAction") or "created",
+                        "session": meta,
+                    })
                 except ValueError as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
@@ -9488,6 +9912,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 write_jsonl(messages_path(session_id), messages)
                 session["messageCount"] = len(messages)
                 session["lastMessageTime"] = _last_msg_time(messages)
+                _refresh_import_divergence(session, messages)
             write_json(path, session)
             _write_session_index_entry(
                 session_id,
@@ -9672,6 +10097,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                 meta.get("group"),
             )
             meta.pop("group", None)
+            _refresh_import_divergence(
+                meta,
+                read_jsonl(messages_path(session_id)),
+            )
             write_json(meta_path, meta)
             _write_session_index_entry(
                 session_id,
