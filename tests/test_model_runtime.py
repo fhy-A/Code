@@ -24,10 +24,36 @@ class _StreamingUpstream(BaseHTTPRequestHandler):
         type(self).authorizations.append(self.headers.get("Authorization", ""))
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
+        user_content = (payload.get("messages") or [{}])[-1].get("content")
+        if user_content == "always 502":
+            body = json.dumps({
+                "error": {
+                    "message": "Upstream service temporarily unavailable",
+                    "code": "upstream_error",
+                },
+            }).encode("utf-8")
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if user_content == "deny model":
+            body = json.dumps({
+                "error": {
+                    "message": "该令牌无权访问模型 deepseek-v4-pro",
+                    "code": "new_api_error",
+                },
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.end_headers()
-        user_content = (payload.get("messages") or [{}])[-1].get("content")
         if user_content == "call a tool":
             frames = [
                 {
@@ -187,6 +213,45 @@ class TestModelRuntime(unittest.TestCase):
         self.assertEqual(run["status"], "failed")
         self.assertIn("error", run)
         self.assertTrue(run["error"], "error should contain failure reason")
+
+    def test_model_access_denial_is_structured_and_not_transient(self):
+        run = server_mod._create_model_runtime_run(
+            "session-denied",
+            {
+                "model": "deepseek-v4-pro",
+                "messages": [{"role": "user", "content": "deny model"}],
+            },
+            self.base_url,
+            ["restricted-key-a", "restricted-key-b"],
+        )
+        self._wait_for_terminal(run)
+
+        snapshot = server_mod._runtime_snapshot(run, 0)
+        self.assertEqual(_StreamingUpstream.calls, 2)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["upstreamStatus"], 403)
+        self.assertEqual(snapshot["errorCode"], "model_access_denied")
+        self.assertFalse(snapshot["transient"])
+        self.assertIn("无权访问模型", snapshot["error"])
+
+    def test_transient_http_failure_is_structured_without_duplicate_retry(self):
+        run = server_mod._create_model_runtime_run(
+            "session-transient",
+            {
+                "model": "claude-opus-test",
+                "messages": [{"role": "user", "content": "always 502"}],
+            },
+            self.base_url,
+            ["authorized-key"],
+        )
+        self._wait_for_terminal(run)
+        snapshot = server_mod._runtime_snapshot(run, 0)
+        self.assertEqual(_StreamingUpstream.calls, 1)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["upstreamStatus"], 502)
+        self.assertEqual(snapshot["errorCode"], "upstream_error")
+        self.assertTrue(snapshot["transient"])
+        self.assertEqual(snapshot["error"], "Upstream service temporarily unavailable")
 
 
 if __name__ == "__main__":

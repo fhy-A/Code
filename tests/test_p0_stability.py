@@ -58,6 +58,41 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
             self.assertIn(expected, APP_SOURCE)
         self.assertIn("renderNetworkRecoveryStatus(getSessionId())", MESSAGES_SOURCE)
 
+    def test_model_access_denial_is_not_retried_and_refreshes_capabilities(self):
+        self.assertIn('return { code: "model_access_denied", transient: false }', APP_SOURCE)
+        self.assertNotIn('Retry once if New API transient "no access" error', APP_SOURCE)
+        self.assertIn("state.modelKeysMap[model]", APP_SOURCE)
+        self.assertIn('if (err.errorCode === "model_access_denied")', APP_SOURCE)
+        self.assertIn("await refreshModels()", APP_SOURCE)
+        self.assertIn("snapshot.errorCode || `runtime_${snapshot.status}`", RUNTIME_SOURCE)
+        self.assertIn("snapshot.transient", RUNTIME_SOURCE)
+
+    def test_large_text_sse_chunks_receive_bounded_visual_smoothing(self):
+        for expected in (
+            "SSE_VISUAL_CHUNK_CHARS = 48",
+            "SSE_VISUAL_MAX_CHUNKS = 12",
+            "SSE_BATCH_MAX_PAUSES = 8",
+            "expandSseDataForProjection",
+            "Array.from(String(text || \"\"))",
+        ):
+            self.assertIn(expected, RUNTIME_SOURCE)
+        self.assertIn("if (delta.tool_calls || delta.function_call) return [value]", RUNTIME_SOURCE)
+        self.assertIn("if (!isLast) delete projectedFrame.usage", RUNTIME_SOURCE)
+
+    def test_first_model_response_wait_has_visible_escalating_status(self):
+        for expected in (
+            "MODEL_RESPONSE_WAIT_NOTICE_MS = 25000",
+            "MODEL_RESPONSE_SLOW_NOTICE_MS = 60000",
+            'return t("waitingForModelResponse")',
+            'return t("modelResponseSlow")',
+            "run.modelWaitStartedAt = Date.now()",
+            "run.modelResponseStarted = false",
+            "markModelResponseStarted(run, sessionId)",
+        ):
+            self.assertIn(expected, APP_SOURCE)
+        self.assertIn('nodes.label.textContent = getActiveRunLabel(sessionId)', APP_SOURCE)
+        self.assertIn('document.querySelectorAll("[data-active-run-label]")', APP_SOURCE)
+
 
 class TestFrontendRefreshRecovery(unittest.TestCase):
     def test_completed_session_restore_scrolls_after_layout(self):

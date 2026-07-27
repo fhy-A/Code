@@ -2,6 +2,10 @@
   "use strict";
 
   const POLL_DELAYS = [500, 1000, 2000, 4000, 8000];
+  const SSE_VISUAL_CHUNK_CHARS = 48;
+  const SSE_VISUAL_MAX_CHUNKS = 12;
+  const SSE_BATCH_MAX_PAUSES = 8;
+  const SSE_BATCH_PACE_MS = 16;
 
   function sleep(ms, signal) {
     return new Promise((resolve, reject) => {
@@ -35,6 +39,74 @@
 
   function encodeSse(data) {
     return new TextEncoder().encode(`data: ${data}\n\n`);
+  }
+
+  function splitTextForProjection(text) {
+    const codePoints = Array.from(String(text || ""));
+    if (codePoints.length <= SSE_VISUAL_CHUNK_CHARS) return [String(text || "")];
+    const chunkCount = Math.min(
+      SSE_VISUAL_MAX_CHUNKS,
+      Math.ceil(codePoints.length / SSE_VISUAL_CHUNK_CHARS),
+    );
+    const chunkSize = Math.ceil(codePoints.length / chunkCount);
+    const chunks = [];
+    for (let index = 0; index < codePoints.length; index += chunkSize) {
+      chunks.push(codePoints.slice(index, index + chunkSize).join(""));
+    }
+    return chunks;
+  }
+
+  function expandSseDataForProjection(rawData) {
+    const value = String(rawData ?? "");
+    if (!value || value === "[DONE]" || value.startsWith("[ERROR]")) return [value];
+    let frame;
+    try {
+      frame = JSON.parse(value);
+    } catch (_) {
+      return [value];
+    }
+    const choices = Array.isArray(frame?.choices) ? frame.choices : [];
+    if (choices.length !== 1 || !choices[0]?.delta || typeof choices[0].delta !== "object") {
+      return [value];
+    }
+    const delta = choices[0].delta;
+    if (delta.tool_calls || delta.function_call) return [value];
+    const textFields = ["content", "reasoning_content", "reasoning", "thinking", "text"]
+      .filter((field) => typeof delta[field] === "string" && delta[field].length > 0);
+    if (textFields.length !== 1) return [value];
+    const field = textFields[0];
+    const chunks = splitTextForProjection(delta[field]);
+    if (chunks.length === 1) return [value];
+
+    return chunks.map((chunk, index) => {
+      const isFirst = index === 0;
+      const isLast = index === chunks.length - 1;
+      const projectedDelta = { ...delta, [field]: chunk };
+      if (!isFirst) delete projectedDelta.role;
+      const projectedChoice = { ...choices[0], delta: projectedDelta };
+      if (!isLast) {
+        delete projectedChoice.finish_reason;
+        delete projectedChoice.finish_details;
+      }
+      const projectedFrame = {
+        ...frame,
+        choices: [projectedChoice],
+      };
+      if (!isLast) delete projectedFrame.usage;
+      return JSON.stringify(projectedFrame);
+    });
+  }
+
+  function isTextProjectionFrame(data) {
+    if (!data || data === "[DONE]" || String(data).startsWith("[ERROR]")) return false;
+    try {
+      const frame = JSON.parse(data);
+      const delta = frame?.choices?.[0]?.delta;
+      return Boolean(delta && ["content", "reasoning_content", "reasoning", "thinking", "text"]
+        .some((field) => typeof delta[field] === "string" && delta[field].length > 0));
+    } catch (_) {
+      return false;
+    }
   }
 
   async function createRun({ sessionId, payload, baseUrl, keys, signal }) {
@@ -226,11 +298,36 @@
             }
 
             const events = Array.isArray(snapshot.events) ? snapshot.events : [];
-            for (const event of events) {
+            const pendingEvents = events.filter((event) => Number(event?.seq || 0) > cursor);
+            const projectionFrames = pendingEvents.flatMap((event) => (
+              expandSseDataForProjection(event?.data).map((data, index, frames) => ({
+                data,
+                eventSeq: Number(event?.seq || 0),
+                completesEvent: index === frames.length - 1,
+              }))
+            ));
+            const textFrameCount = projectionFrames.filter((frame) => (
+              isTextProjectionFrame(frame.data)
+            )).length;
+            const pauseEvery = textFrameCount > 1
+              ? Math.max(1, Math.ceil((textFrameCount - 1) / SSE_BATCH_MAX_PAUSES))
+              : 0;
+            let projectedTextFrames = 0;
+
+            for (const frame of projectionFrames) {
+              controller.enqueue(encodeSse(frame.data));
+              if (frame.completesEvent) cursor = frame.eventSeq;
+              if (!isTextProjectionFrame(frame.data)) continue;
+              projectedTextFrames += 1;
+              const hasMoreText = projectedTextFrames < textFrameCount;
+              if (hasMoreText && pauseEvery && projectedTextFrames % pauseEvery === 0) {
+                await sleep(SSE_BATCH_PACE_MS, signal);
+              }
+            }
+
+            for (const event of pendingEvents) {
               const seq = Number(event?.seq || 0);
-              if (seq <= cursor) continue;
-              cursor = seq;
-              controller.enqueue(encodeSse(String(event?.data ?? "")));
+              if (seq > cursor) cursor = seq;
             }
 
             if (snapshot.status === "completed") {
@@ -240,8 +337,11 @@
             if (snapshot.status === "failed" || snapshot.status === "cancelled") {
               const detail = JSON.stringify({
                 message: snapshot.error || `Runtime ${snapshot.status}`,
-                code: `runtime_${snapshot.status}`,
+                code: snapshot.errorCode || `runtime_${snapshot.status}`,
                 status: snapshot.upstreamStatus || 0,
+                transient: typeof snapshot.transient === "boolean"
+                  ? snapshot.transient
+                  : [408, 425, 429, 500, 502, 503, 504].includes(Number(snapshot.upstreamStatus || 0)),
               });
               controller.enqueue(encodeSse(`[ERROR]${detail}`));
               controller.close();

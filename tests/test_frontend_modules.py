@@ -227,6 +227,83 @@ const order = [];
         self.assertEqual(data["cursor"], 3)
         self.assertEqual(data["status"], "completed")
 
+    def test_agent_runtime_smooths_large_text_delta_without_changing_content(self):
+        script = f"""
+global.window = {{}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+const original = "x".repeat(145);
+let fetchCount = 0;
+global.fetch = async (url) => {{
+  fetchCount += 1;
+  if (String(url) === "/api/runtime/runs") {{
+    return new Response(JSON.stringify({{runId: "runtime-1"}}), {{
+      status: 201,
+      headers: {{"Content-Type": "application/json"}},
+    }});
+  }}
+  const frame = {{
+    choices: [{{delta: {{content: original}}, finish_reason: "stop"}}],
+    usage: {{completion_tokens: 40}},
+  }};
+  return new Response(JSON.stringify({{
+    status: "completed",
+    events: [
+      {{seq: 1, data: JSON.stringify(frame)}},
+      {{seq: 2, data: "[DONE]"}},
+    ],
+  }}), {{
+    status: 200,
+    headers: {{"Content-Type": "application/json"}},
+  }});
+}};
+eval(source);
+(async () => {{
+  const response = await window.AgentRuntime.openSseResponse({{
+    sessionId: "session-1",
+    payload: {{model: "claude-test", messages: [{{role: "user", content: "hi"}}]}},
+    keys: ["key"],
+  }});
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const dataFrames = [];
+  while (true) {{
+    const packet = await reader.read();
+    if (packet.done) break;
+    const text = decoder.decode(packet.value);
+    for (const line of text.split(/\\r?\\n/)) {{
+      if (line.startsWith("data: ")) dataFrames.push(line.slice(6));
+    }}
+  }}
+  const jsonFrames = dataFrames.filter((item) => item !== "[DONE]").map(JSON.parse);
+  const contentParts = jsonFrames.map((item) => item.choices[0].delta.content);
+  process.stdout.write(JSON.stringify({{
+    fetchCount,
+    frameCount: jsonFrames.length,
+    maxChunk: Math.max(...contentParts.map((item) => Array.from(item).length)),
+    content: contentParts.join(""),
+    finishReasons: jsonFrames.map((item) => item.choices[0].finish_reason || ""),
+    usageFrames: jsonFrames.filter((item) => item.usage).length,
+    doneCount: dataFrames.filter((item) => item === "[DONE]").length,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["fetchCount"], 2)
+        self.assertGreater(data["frameCount"], 1)
+        self.assertLessEqual(data["maxChunk"], 48)
+        self.assertEqual(data["content"], "x" * 145)
+        self.assertEqual(data["finishReasons"][-1], "stop")
+        self.assertEqual(data["finishReasons"][:-1], [""] * (data["frameCount"] - 1))
+        self.assertEqual(data["usageFrames"], 1)
+        self.assertEqual(data["doneCount"], 1)
+
     def test_agent_runtime_sends_background_idempotency_key(self):
         script = f"""
 global.window = {{}};
@@ -3336,7 +3413,7 @@ process.stdout.write(JSON.stringify({
         helper_end = APP_SOURCE.index("function cloneUsageStats", helper_start)
         helper = APP_SOURCE[helper_start:helper_end]
         self.assertEqual(helper.count("banner.innerHTML ="), 1)
-        self.assertIn('nodes.label.textContent = t("processingLabel")', helper)
+        self.assertIn("nodes.label.textContent = getActiveRunLabel(sessionId)", helper)
         self.assertIn("nodes.timer.textContent = getRunTimerDisplay(sessionId)", helper)
         self.assertNotIn("run-model", helper)
         self.assertNotIn("data-active-run-phase", helper)

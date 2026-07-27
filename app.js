@@ -170,6 +170,7 @@ const state = {
   lang: localStorage.getItem("code-lang") || "zh",
 
   modelKeyMap: {},
+  modelKeysMap: {},
 
   stats: {
 
@@ -226,6 +227,8 @@ function ensureSessionRun(sessionId) {
       abortController: null,
       responseStartTime: null,
       taskStartTime: null,      // persisted across tool rounds; cleared only on task end
+      modelWaitStartedAt: null,
+      modelResponseStarted: false,
       timerInterval: null,
       timerDisplay: null,
       recovery: null,
@@ -1043,6 +1046,7 @@ function clearPlatformLocalData() {
   els.apiKey.value = "";
   els.baseUrl.value = WORKBAR_URL;
   state.modelKeyMap = {};
+  state.modelKeysMap = {};
   els.modelListBox.innerHTML = "";
   els.modelPillDropdown.innerHTML = "";
   document.getElementById("settingsModelList")?.replaceChildren();
@@ -1944,6 +1948,10 @@ function getBestKey(model) {
 function getFallbackKeys(model) {
 
   const keys = getApiKeys();
+  const authorizedKeys = Array.isArray(state.modelKeysMap?.[model])
+    ? state.modelKeysMap[model].filter((key) => keys.includes(key))
+    : [];
+  if (authorizedKeys.length > 0) return authorizedKeys;
 
   const best = getBestKey(model);
 
@@ -2495,6 +2503,7 @@ function _toolActionLabel(action) {
 var _errorCodeMeta = {
   upstream_error:     { retry: true },
   config_error:       { retry: false },
+  model_access_denied:{ retry: false },
   permission_denied:  { retry: false },
   tool_error:         { retry: true },
   user_cancelled:     { retry: false },
@@ -2505,9 +2514,14 @@ var _errorCodeMeta = {
 function _errorCodeInfo(code) {
   var meta = _errorCodeMeta[code];
   if (!meta) return null;
+  var suffix = code
+    .split("_")
+    .filter(Boolean)
+    .map(function (part) { return part.charAt(0).toUpperCase() + part.slice(1); })
+    .join("");
   return {
-    label: t("errLabel" + code.replace(/_./g, function (m) { return m[1].toUpperCase(); }).replace(/^_/, "")) || code,
-    suggestion: t("errSug" + code.replace(/_./g, function (m) { return m[1].toUpperCase(); }).replace(/^_/, "")) || "",
+    label: t("errLabel" + suffix) || code,
+    suggestion: t("errSug" + suffix) || "",
     retry: meta.retry,
   };
 }
@@ -2648,6 +2662,26 @@ function getRunTimerDisplay(sessionId = state.sessionId) {
   return formatElapsedMs(Date.now() - startedAt);
 }
 
+const MODEL_RESPONSE_WAIT_NOTICE_MS = 25000;
+const MODEL_RESPONSE_SLOW_NOTICE_MS = 60000;
+
+function getActiveRunLabel(sessionId = state.sessionId) {
+  const run = ensureSessionRun(sessionId);
+  if (run?.modelWaitStartedAt && !run.modelResponseStarted) {
+    const waitingMs = Date.now() - run.modelWaitStartedAt;
+    if (waitingMs >= MODEL_RESPONSE_SLOW_NOTICE_MS) return t("modelResponseSlow");
+    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) return t("waitingForModelResponse");
+  }
+  return t("processingLabel");
+}
+
+function markModelResponseStarted(run, sessionId = state.sessionId) {
+  if (!run || run.modelResponseStarted) return;
+  run.modelResponseStarted = true;
+  run.modelWaitStartedAt = null;
+  if (sessionId === state.sessionId) syncActiveRunBanner(sessionId);
+}
+
 function getRecoveryCountdownSeconds(sessionId = state.sessionId) {
   const recovery = ensureSessionRun(sessionId)?.recovery;
   if (!recovery?.nextRetryAt) return 0;
@@ -2714,7 +2748,7 @@ function syncActiveRunBanner(sessionId = state.sessionId) {
 
   const nodes = ensureActiveRunBannerStructure();
   if (!nodes) return;
-  nodes.label.textContent = t("processingLabel");
+  nodes.label.textContent = getActiveRunLabel(sessionId);
   nodes.timer.textContent = getRunTimerDisplay(sessionId);
   const recoveryHtml = renderNetworkRecoveryStatus(sessionId);
   if (nodes.recovery.innerHTML !== recoveryHtml) nodes.recovery.innerHTML = recoveryHtml;
@@ -5301,6 +5335,8 @@ async function refreshModels() {
   const keys = getApiKeys();
 
   if (keys.length === 0) {
+    state.modelKeyMap = {};
+    state.modelKeysMap = {};
     els.modelListBox.innerHTML = "";
     const settingsList = document.getElementById("settingsModelList");
     if (settingsList) settingsList.innerHTML = "";
@@ -5317,6 +5353,7 @@ async function refreshModels() {
   const allModels = new Set();
 
   const modelKeyMap = {};
+  const modelKeysMap = {};
 
   let successCount = 0;
 
@@ -5349,6 +5386,8 @@ async function refreshModels() {
             allModels.add(cleanId);
 
             if (!modelKeyMap[cleanId]) modelKeyMap[cleanId] = key;
+            if (!modelKeysMap[cleanId]) modelKeysMap[cleanId] = [];
+            if (!modelKeysMap[cleanId].includes(key)) modelKeysMap[cleanId].push(key);
 
           }
 
@@ -5361,6 +5400,7 @@ async function refreshModels() {
   }
 
   state.modelKeyMap = modelKeyMap;
+  state.modelKeysMap = modelKeysMap;
 
 
 
@@ -5519,6 +5559,8 @@ function setStreaming(active, sessionId = state.sessionId) {
     } else {
       run.abortController = null;
       run.responseStartTime = null;
+      run.modelWaitStartedAt = null;
+      run.modelResponseStarted = false;
     }
   }
 
@@ -5577,6 +5619,11 @@ function startLiveTimer() {
 
     document.querySelectorAll(".streaming-timer").forEach((timer) => {
       if (timer.textContent !== display) timer.textContent = display;
+    });
+
+    const activeLabel = getActiveRunLabel(state.sessionId);
+    document.querySelectorAll("[data-active-run-label]").forEach((label) => {
+      if (label.textContent !== activeLabel) label.textContent = activeLabel;
     });
 
     const recoveryDisplay = `${getRecoveryCountdownSeconds(state.sessionId)}s`;
@@ -7202,6 +7249,22 @@ function createModelRequestError(message, details = {}) {
   return error;
 }
 
+function isModelAccessDenied(status = 0, code = "", message = "") {
+  const text = `${code || ""} ${message || ""}`.toLowerCase();
+  return String(code || "") === "model_access_denied"
+    || /no access to model|not authorized to access model|unauthorized model|无权访问模型|无权访问任何模型/.test(text);
+}
+
+function classifyModelRequestFailure(status = 0, code = "", message = "") {
+  const numericStatus = Number(status || 0);
+  if (isModelAccessDenied(numericStatus, code, message)) {
+    return { code: "model_access_denied", transient: false };
+  }
+  const transient = [408, 425, 429, 500, 502, 503, 504].includes(numericStatus)
+    || /upstream error|do request failed|timed out|timeout|network|fetch failed|connection/i.test(message);
+  return { code: String(code || ""), transient };
+}
+
 function isTransientModelError(error) {
   if (!error || error.name === "AbortError") return false;
   if (typeof error.transient === "boolean") return error.transient;
@@ -7209,7 +7272,7 @@ function isTransientModelError(error) {
   if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
   if ([400, 401, 403, 404, 422].includes(status)) return false;
   const text = `${error.code || ""} ${error.message || error}`.toLowerCase();
-  if (/invalid token|insufficient.*quota|quota.*not enough|model_not_found|no available channel|permission denied/.test(text)) return false;
+  if (/invalid token|insufficient.*quota|quota.*not enough|model_not_found|model_access_denied|no access to model|无权访问模型|no available channel|permission denied/.test(text)) return false;
   return /timeout|timed out|network|fetch failed|failed to fetch|upstream error|do request failed|temporar|connection (reset|refused|closed)|econn(reset|refused)|winerror 10061|stream interrupted|unexpected end/.test(text);
 }
 
@@ -7592,6 +7655,9 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
   const { payload, tools, model, sessionId } = prepared;
   const skipRender = ctx?.isSubAgent;
   const run = ctx?.run || ensureSessionRun(sessionId);
+  run.modelWaitStartedAt = Date.now();
+  run.modelResponseStarted = false;
+  if (!ctx?.isSubAgent && sessionId === state.sessionId) syncActiveRunBanner(sessionId);
 
   // Capture messages at stream start (closure survives session switches)
   let _streamMsgs = prepared.streamMessages;
@@ -7701,24 +7767,6 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
     }
 
-    // Retry once if New API transient "no access" error (channel flapping)
-
-    if (errCode === "new_api_error" && errText.includes("no access to model") && !state._retriedModelAccess) {
-
-      state._retriedModelAccess = true;
-
-      await new Promise((r) => setTimeout(r, 2000));
-
-      const retry = await _callModelOnceAttempt(assistantIndex, useNativeTools, ctx);
-
-      state._retriedModelAccess = false;
-
-      return retry;
-
-    }
-
-    state._retriedModelAccess = false;
-
     _streamMsgs = _streamMsgs.filter((m) => m.meta?.kind !== "key-fallback");
 
     if (tools.length > 0 && shouldRetryWithoutNativeTools(errText)) {
@@ -7727,11 +7775,11 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
     }
 
+    const failure = classifyModelRequestFailure(res?.status, errCode, errText);
     throw createModelRequestError(errText, {
       status: res?.status,
-      code: errCode,
-      transient: [408, 425, 429, 500, 502, 503, 504].includes(Number(res?.status))
-        || /no access to model|upstream error|do request failed|timed out|network|fetch failed|connection/i.test(errText),
+      code: failure.code,
+      transient: failure.transient,
     });
 
   }
@@ -7843,6 +7891,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       }
 
       if (receivedToolCallDelta) {
+        markModelResponseStarted(run, sessionId);
         markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
       }
 
@@ -7851,6 +7900,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       if (text) rawContent += text;
 
       if (reasoning || text) {
+        markModelResponseStarted(run, sessionId);
 
         const combined = rawThought ? `<think>${rawThought}</think>\n${rawContent}` : rawContent;
 
@@ -7875,6 +7925,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       streamCompleted = true;
     } else if (data) {
       const { reasoning, text } = extractStreamDelta(data);
+      if (reasoning || text) markModelResponseStarted(run, sessionId);
       if (reasoning) rawThought += reasoning;
       if (text) rawContent += text;
       if (data.usage) {
@@ -9735,6 +9786,11 @@ async function runServerAgentLoop(ctx) {
     const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`);
     err.status = snapshot.status;
     err.errorCode = snapshot.errorCode || "";
+    if (err.errorCode === "model_access_denied") {
+      await refreshModels().catch((refreshError) => {
+        console.warn("Failed to refresh models after authorization changed:", refreshError);
+      });
+    }
     throw err;
   }
 }
@@ -10184,7 +10240,9 @@ async function sendMessage(userText, options = {}) {
       const errMsg = loopError?.message || String(loopError);
       ctx.messages.push({
         role: "assistant",
-        content: `**${t("errorPrefix")}：${escapeHtml(errMsg)}**\n\n> ${t("errorRecoveryHint")}`,
+        content: loopError?.errorCode
+          ? _formatAgentError(loopError)
+          : `**${t("errorPrefix")}：${escapeHtml(errMsg)}**\n\n> ${t("errorRecoveryHint")}`,
         meta: { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
         _time: new Date().toISOString(),
       });

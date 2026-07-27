@@ -259,13 +259,57 @@ def _append_runtime_event(run, data):
         run["condition"].notify_all()
 
 
-def _finish_runtime_run(run, status, error_message="", upstream_status=0):
+def _classify_runtime_failure(upstream_status=0, error_message=""):
+    status = int(upstream_status or 0)
+    text = str(error_message or "").strip().lower()
+    access_denied = (
+        "model_access_denied" in text
+        or "no access to model" in text
+        or "not authorized to access model" in text
+        or "unauthorized model" in text
+        or "无权访问模型" in text
+        or "无权访问任何模型" in text
+    )
+    if access_denied:
+        return "model_access_denied", False
+    if status in {400, 401, 403, 404, 422}:
+        return "config_error", False
+    if status in {408, 425, 429} or status >= 500:
+        return "upstream_error", True
+    if (
+        not status
+        or "timed out" in text
+        or "timeout" in text
+        or "connection" in text
+        or "stream ended before completion" in text
+    ):
+        return "upstream_error", True
+    return "upstream_error", False
+
+
+def _finish_runtime_run(
+    run,
+    status,
+    error_message="",
+    upstream_status=0,
+    error_code="",
+    transient=None,
+):
     with run["condition"]:
         if run["status"] in {"completed", "failed", "cancelled"}:
             return
+        if status == "failed" and (not error_code or transient is None):
+            classified_code, classified_transient = _classify_runtime_failure(
+                upstream_status, error_message,
+            )
+            error_code = error_code or classified_code
+            if transient is None:
+                transient = classified_transient
         run["status"] = status
         run["error"] = str(error_message or "")
         run["upstream_status"] = int(upstream_status or 0)
+        run["error_code"] = str(error_code or "")
+        run["error_transient"] = bool(transient)
         run["updated_at"] = time.time()
         run["condition"].notify_all()
 
@@ -279,6 +323,8 @@ def _runtime_snapshot(run, cursor=0):
             "sessionId": run["session_id"],
             "status": run["status"],
             "error": run["error"],
+            "errorCode": run["error_code"],
+            "transient": run["error_transient"],
             "upstreamStatus": run["upstream_status"],
             "events": events,
             "nextCursor": events[-1]["seq"] if events else cursor,
@@ -361,7 +407,12 @@ def _model_runtime_worker(run):
                 elif saw_done:
                     _finish_runtime_run(run, "completed")
                 else:
-                    _finish_runtime_run(run, "failed", "Stream ended before completion", run["upstream_status"])
+                    _finish_runtime_run(
+                        run,
+                        "failed",
+                        "Stream ended before completion",
+                        run["upstream_status"],
+                    )
                 return
             except Exception as exc:
                 run["upstream_response"] = None
@@ -393,6 +444,8 @@ def _create_model_runtime_run(session_id, payload, base_url, keys):
         "keys": [str(key) for key in (keys or []) if str(key)],
         "status": "running",
         "error": "",
+        "error_code": "",
+        "error_transient": False,
         "upstream_status": 0,
         "events": [],
         "result": {
@@ -2669,7 +2722,12 @@ def _agent_run_worker(run):
                 _finish_agent_run(run, "cancelled")
                 return
             if model_snapshot["status"] != "completed":
-                _finish_agent_run(run, "failed", model_snapshot.get("error") or "model round failed")
+                _finish_agent_run(
+                    run,
+                    "failed",
+                    model_snapshot.get("error") or "model round failed",
+                    error_code=model_snapshot.get("errorCode") or "",
+                )
                 return
 
             model_result = model_snapshot["result"]
