@@ -17,6 +17,7 @@ APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 TIMELINE_SOURCE = (ROOT / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
+I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
 
 
 class TestFrontendNetworkRecovery(unittest.TestCase):
@@ -84,14 +85,21 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
             "MODEL_RESPONSE_WAIT_NOTICE_MS = 25000",
             "MODEL_RESPONSE_SLOW_NOTICE_MS = 60000",
             'return t("waitingForModelResponse")',
+            'return t("modelResponseDelayed")',
             'return t("modelResponseSlow")',
             "run.modelWaitStartedAt = Date.now()",
             "run.modelResponseStarted = false",
             "markModelResponseStarted(run, sessionId)",
+            "function projectAgentModelRecovery(ctx, event)",
+            'eventType === "model_recovery"',
+            'return t("modelRecovery"',
         ):
             self.assertIn(expected, APP_SOURCE)
         self.assertIn('nodes.label.textContent = getActiveRunLabel(sessionId)', APP_SOURCE)
         self.assertIn('document.querySelectorAll("[data-active-run-label]")', APP_SOURCE)
+        self.assertIn("已提交模型，正在等待首个响应", I18N_SOURCE)
+        self.assertIn("模型未给出有效结果，正在自动续行", I18N_SOURCE)
+        self.assertNotIn('"(empty response)"', APP_SOURCE)
 
 
 class TestFrontendRefreshRecovery(unittest.TestCase):

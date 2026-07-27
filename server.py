@@ -755,6 +755,8 @@ def _agent_run_record(run):
         "resumeStatus": run.get("resume_status", ""),
         "permissionProfile": run.get("permission_profile", "read"),
         "error": run.get("error", ""),
+        "errorCode": run.get("error_code", ""),
+        "nonActionCount": int(run.get("non_action_count") or 0),
         "baseUrl": run.get("base_url", ""),
         "request": _json_clone(run.get("request") or {}),
         "messages": _json_clone(run.get("messages") or []),
@@ -861,6 +863,7 @@ def _agent_snapshot(run, cursor=0):
             "permissionProfile": run.get("permission_profile", "read"),
             "error": run.get("error", ""),
             "errorCode": run.get("error_code", ""),
+            "nonActionCount": int(run.get("non_action_count") or 0),
             "model": str((run.get("request") or {}).get("model") or ""),
             "round": len(run.get("rounds") or []),
             "maxRounds": run["max_rounds"],
@@ -926,16 +929,44 @@ def _redact_agent_secrets(run, value):
     return text
 
 
+_AGENT_NON_ACTION_MAX_RECOVERIES = 1
+_EMPTY_PROMISE_ACK_PREFIX = re.compile(
+    r"^(?:好的?|明白(?:了)?|没问题|可以|当然|okay|sure|got it)"
+    r"[\s,，。.!！:：-]*",
+    re.IGNORECASE,
+)
 _EMPTY_PROMISE_PATTERNS = [
-    # Chinese: "我来...", "让我...", "先...", "马上...", "正在..."
-    re.compile(r"^(我来|让我|我先|我先来|马上|正在|这就|立即|立刻)"),
-    # Chinese: "检查一下", "看一下", "确认一下", "试一下"
-    re.compile(r"^(检查|查看|确认|验证|试|试试|尝试).{0,4}(一下|看看|下)"),
-    # English: "I'll", "Let me", "I will", "Let's"
-    re.compile(r"^(I'?ll|Let me|I will|Let'?s)\b", re.IGNORECASE),
-    # English: "First,", "First I'll"
-    re.compile(r"^(First,?\s|To start)"),
+    # Chinese: announces future/progressive work without supplying a result.
+    re.compile(r"^(?:我来|让我|我先(?:来)?|马上|正在|这就|立即|立刻|接下来我?(?:会|将))"),
+    re.compile(r"^(?:检查|查看|确认|验证|试|试试|尝试).{0,8}(?:一下|看看|下)"),
+    # English: keep "First" only when it is followed by an actual commitment.
+    re.compile(r"^(?:I'?ll|Let me|I will|Let'?s)\b", re.IGNORECASE),
+    re.compile(r"^(?:First,?\s+(?:I'?ll|I will|let me)|To start,?\s+(?:I'?ll|I will|let me))\b", re.IGNORECASE),
 ]
+_EMPTY_PROMISE_RESULT_SIGNAL = re.compile(
+    r"(?:已经|已完成|完成了|结果|发现|原因|结论|修复了|修改了|更新了|验证通过|"
+    r"\bdone\b|\bcompleted\b|\bfound\b|\bresult\b|\bcause\b|\bfixed\b|"
+    r"\bupdated\b|\bverified\b|\bhere (?:is|are)\b)",
+    re.IGNORECASE,
+)
+_AGENT_RECOVERY_PROMPTS = {
+    "empty": (
+        "[System recovery] The previous model turn returned no content and no "
+        "tool call. Continue the original task now. Use an available tool when "
+        "action is required, or provide the complete final answer."
+    ),
+    "reasoning_only": (
+        "[System recovery] The previous model turn ended after reasoning but "
+        "did not provide a final answer or tool call. Continue the original "
+        "task now and produce the missing action or complete final answer."
+    ),
+    "promise": (
+        "[System recovery] The previous model turn only announced future work. "
+        "Continue the original task now: perform the required action with an "
+        "available tool, or provide the complete result. Do not only describe "
+        "what you will do."
+    ),
+}
 
 
 def _is_empty_promise(content):
@@ -948,13 +979,48 @@ def _is_empty_promise(content):
     text = (content or "").strip()
     if not text:
         return False
-    # Content too short to be a real answer AND matches a promise pattern
-    if len(text) > 200:
+    if len(text) > 240 or "```" in text or len(text.splitlines()) > 3:
+        return False
+    text = _EMPTY_PROMISE_ACK_PREFIX.sub("", text, count=1).strip()
+    if not text or _EMPTY_PROMISE_RESULT_SIGNAL.search(text):
+        return False
+    # A colon followed by a substantive clause normally introduces the result,
+    # e.g. "我来总结一下：根因是..." or "I'll summarize: ...".
+    if re.search(r"[:：]\s*\S.{8,}", text, re.DOTALL):
         return False
     for pat in _EMPTY_PROMISE_PATTERNS:
         if pat.search(text):
             return True
     return False
+
+
+def _agent_non_action_reason(content, reasoning):
+    """Classify a tool-less model turn that did not finish the task."""
+    normalized_content = str(content or "").strip()
+    if not normalized_content:
+        return "reasoning_only" if str(reasoning or "").strip() else "empty"
+    if _is_empty_promise(normalized_content):
+        return "promise"
+    return ""
+
+
+def _recover_agent_non_action(run, reason, runtime_run_id):
+    """Use one shared, durable recovery budget for all no-action outcomes."""
+    count = int(run.get("non_action_count") or 0) + 1
+    run["non_action_count"] = count
+    if count > _AGENT_NON_ACTION_MAX_RECOVERIES:
+        return False
+    run["messages"].append({
+        "role": "user",
+        "content": _AGENT_RECOVERY_PROMPTS.get(reason, _AGENT_RECOVERY_PROMPTS["empty"]),
+    })
+    _append_agent_event(run, "model_recovery", {
+        "reason": str(reason or "empty"),
+        "attempt": count,
+        "maxAttempts": _AGENT_NON_ACTION_MAX_RECOVERIES,
+        "runtimeRunId": str(runtime_run_id or ""),
+    })
+    return True
 
 
 def _finish_agent_run(run, status, error_message="", error_code=""):
@@ -983,8 +1049,12 @@ def _finish_agent_run(run, status, error_message="", error_code=""):
         }
         run["next_seq"] += 1
         run["events"].append(event)
-        run["condition"].notify_all()
     _persist_agent_run(run)
+    # Terminal state must be durable before waiters are released. Otherwise a
+    # fast reload can observe the in-memory terminal status and read the older
+    # on-disk snapshot before error/recovery metadata has been written.
+    with run["condition"]:
+        run["condition"].notify_all()
     return True
 
 
@@ -1071,6 +1141,8 @@ def _agent_run_from_record(record):
         "resume_status": resume_status,
         "permission_profile": permission_profile,
         "error": str(record.get("error") or ""),
+        "error_code": str(record.get("errorCode") or ""),
+        "non_action_count": max(0, int(record.get("nonActionCount") or 0)),
         "base_url": _agent_base_url(record.get("baseUrl") or ""),
         "request": request_options,
         "messages": list(record.get("messages") or []),
@@ -1474,17 +1546,29 @@ def _submit_agent_input(run, answers):
     if not isinstance(pending_input, dict):
         raise ValueError("Agent run has no pending user input")
 
-    # Handle empty_response type: model produced reasoning but no content.
-    # The user chooses to continue — no tool execution to update.
+    # Compatibility for v0.5.29 runs that paused after reasoning-only output.
+    # New runs recover automatically inside the worker, but an already durable
+    # pending input must also resume without requiring another user click.
     if pending_input.get("type") == "empty_response":
         with run["condition"]:
             run["pending_input"] = None
-            run["messages"].append({"role": "user", "content": "请继续"})
+            run["non_action_count"] = max(1, int(run.get("non_action_count") or 0))
+            run["messages"].append({
+                "role": "user",
+                "content": _AGENT_RECOVERY_PROMPTS["reasoning_only"],
+            })
+            run["keys"] = []
             run["status"] = "waiting_credentials"
             run["resume_status"] = "model"
             run["updated_at"] = now_iso()
-            run["condition"].notify_all()
         _persist_agent_run(run)
+        _append_agent_event(run, "model_recovery", {
+            "reason": "reasoning_only",
+            "attempt": 1,
+            "maxAttempts": _AGENT_NON_ACTION_MAX_RECOVERIES,
+            "runtimeRunId": "",
+            "legacyPendingInput": True,
+        })
         return {"ok": True}
 
     result = _normalize_agent_input_result(pending_input, answers)
@@ -2749,6 +2833,14 @@ def _agent_run_worker(run):
                 "usage": _json_clone(model_result.get("usage") or {}),
                 "completedAt": now_iso(),
             }
+            content = str(model_result.get("content") or "").strip()
+            reasoning = str(model_result.get("reasoning") or "").strip()
+            non_action_reason = "" if tool_calls else _agent_non_action_reason(content, reasoning)
+            round_record["outcome"] = (
+                "tool_calls"
+                if tool_calls
+                else (non_action_reason or "completed")
+            )
             run["rounds"].append(round_record)
             _agent_usage_add(run["usage"], round_record["usage"])
             _append_agent_event(run, "model_completed", round_record)
@@ -2758,47 +2850,26 @@ def _agent_run_worker(run):
                 return
 
             if tool_calls:
+                # A real tool call proves forward progress and clears any prior
+                # no-action recovery debt.
+                run["non_action_count"] = 0
                 run["pending_tool_calls"] = tool_calls
                 _set_agent_status(run, "tools")
                 continue
 
-            # ── No tool calls: classify the model's output ──
-            content = str(model_result.get("content") or "").strip()
-            reasoning = str(model_result.get("reasoning") or "").strip()
-
-            if not content:
-                if reasoning:
-                    # Case 2: model produced thinking but no text / no tools.
-                    # Pause and let the user decide — the reasoning may contain
-                    # the actual response (channel mismatch) or be half-done.
-                    run["empty_promise_count"] = 0
-                    run["pending_input"] = {
-                        "type": "empty_response",
-                        "reasoning": reasoning,
-                        "requestId": str(uuid.uuid4()),
-                    }
-                    _append_agent_event(run, "user_input_required",
-                        run["pending_input"])
-                    _set_agent_status(run, "waiting_user_input")
-                    return
-                # Hard error: completely empty response with no reasoning.
-                _finish_agent_run(run, "failed",
-                    "模型返回空响应，请重试", error_code="empty_response")
+            if non_action_reason:
+                if _recover_agent_non_action(run, non_action_reason, model_run["id"]):
+                    continue
+                _finish_agent_run(
+                    run,
+                    "failed",
+                    "模型连续两轮未生成可执行操作或完整回答，请重试或重新描述任务",
+                    error_code="empty_response",
+                )
                 return
 
-            if _is_empty_promise(content):
-                run["empty_promise_count"] += 1
-                if run["empty_promise_count"] >= 2:
-                    _finish_agent_run(run, "failed",
-                        "模型连续两次未执行操作，请尝试重新描述任务",
-                        error_code="empty_response")
-                    return
-                # Case 3: model made a promise but took no action — auto-continue.
-                run["messages"].append({"role": "user", "content": "请直接执行，不要只是描述计划"})
-                continue
-
-            # Case 1 completion: model produced substantive content with no tools.
-            run["empty_promise_count"] = 0
+            # A substantive final answer also clears prior recovery debt.
+            run["non_action_count"] = 0
             run["result"] = {
                 "content": content,
                 "reasoning": reasoning,
@@ -2896,7 +2967,7 @@ def _create_agent_run(
         "permission_profile": permission_profile,
         "error": "",
         "error_code": "",
-        "empty_promise_count": 0,
+        "non_action_count": 0,
         "base_url": _agent_base_url(base_url),
         "request": request_options,
         "messages": _json_clone(messages),

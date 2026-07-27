@@ -4,6 +4,26 @@
 
 ## 2026-07-27 · Codex
 
+### Agent 无有效动作恢复与首反馈时序复审（开发版本基线 v0.5.29）
+
+- 复审 v0.5.29 的三分类实现后，将“完全空回复、只有 reasoning 没有正式回答、只有过程性承诺”统一为同一个无有效动作闭环：三种结果共用 **1 次**自动续行预算，第一次自动提醒模型立即执行或给出完整答案，第二次无效轮次明确以 `empty_response` 停止；跨类型切换也不会重置预算，避免“空回复 → 仅思考 → 空承诺”无限循环。
+- 工具调用和实质性最终回答被视为真实进展，会清空此前的无动作计数；续行提示只保存在服务端 Agent 上下文，不伪装成用户在会话中手工发送的新消息。每个模型轮新增 `outcome`，并发出可恢复的 `model_recovery` 事件，前端显示“模型未给出有效结果，正在自动续行（1/1）”。
+- 完善过程性承诺识别：兼容“好的 / Okay”等确认前缀，保留真正的短承诺检测；含完成/结果证据、实质性冒号后文、多行结果、代码块和较长回答不再误判，“First, update... Then...”等用户可直接采用的步骤说明也不会被当作空承诺。
+- 修复 Agent 终态持久化竞态：此前 `completed / failed / cancelled` 会先唤醒等待方、再写磁盘，快速刷新可能读到缺少 `errorCode` 的旧快照；现在终态、错误码和无动作计数先落盘再通知。`errorCode / nonActionCount` 同步写入 durable record、重载对象和公开快照，重启不会获得新的续行预算。
+- 模型轮开始后立即显示“已提交模型，正在等待首个响应”，不再先静默显示 25 秒笼统“处理中”；25 秒升级为“首个响应尚未到达”，60 秒继续显示慢上游/可能重试提示。收到首个 reasoning、正文或工具增量后恢复正常处理状态。
+- 空模型轮不再持久化或展示字面量 `(empty response)`；纯 reasoning 保持为思考内容，不再复制成最终回答。兼容已经由 v0.5.29 持久化的 `empty_response` 等待任务，前端会自动转入同一续行闭环，无需用户再次点击旧按钮。
+- 验证：
+  - `python -m pytest tests/test_agent_runtime.py tests/test_p0_stability.py -q`：**86 passed, 13 subtests passed**；
+  - `python -m pytest -q`：**812 passed, 226 subtests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/core/i18n.js` 与 `git diff --check` 通过；`server.py` 仍只报告既有 Windows 路径无效转义 `SyntaxWarning`；
+  - 用户人工确认无有效动作自动续行、首反馈等待状态与整体交互正常。
+
+**涉及文件**：`server.py`、`app.js`、`src/core/i18n.js`、`tests/test_agent_runtime.py`、`tests/test_p0_stability.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
 ### 模型运行时错误分流、流式观感与慢上游反馈收口（v0.5.29）
 
 - 将模型授权失败与上游瞬时故障拆成稳定的结构化语义：模型无权访问返回 `model_access_denied` 且不自动重试，`408 / 425 / 429 / 5xx`、网络和流中断归为可恢复的 `upstream_error`；Agent 运行快照同步保留 `errorCode / transient`，前端按错误类型提供本地化说明和恢复建议。

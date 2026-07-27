@@ -229,6 +229,7 @@ function ensureSessionRun(sessionId) {
       taskStartTime: null,      // persisted across tool rounds; cleared only on task end
       modelWaitStartedAt: null,
       modelResponseStarted: false,
+      modelRecovery: null,
       timerInterval: null,
       timerDisplay: null,
       recovery: null,
@@ -2667,10 +2668,17 @@ const MODEL_RESPONSE_SLOW_NOTICE_MS = 60000;
 
 function getActiveRunLabel(sessionId = state.sessionId) {
   const run = ensureSessionRun(sessionId);
+  if (run?.modelRecovery && !run.modelResponseStarted) {
+    return t("modelRecovery", {
+      attempt: Number(run.modelRecovery.attempt || 1),
+      max: Number(run.modelRecovery.maxAttempts || 1),
+    });
+  }
   if (run?.modelWaitStartedAt && !run.modelResponseStarted) {
     const waitingMs = Date.now() - run.modelWaitStartedAt;
     if (waitingMs >= MODEL_RESPONSE_SLOW_NOTICE_MS) return t("modelResponseSlow");
-    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) return t("waitingForModelResponse");
+    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) return t("modelResponseDelayed");
+    return t("waitingForModelResponse");
   }
   return t("processingLabel");
 }
@@ -2679,6 +2687,7 @@ function markModelResponseStarted(run, sessionId = state.sessionId) {
   if (!run || run.modelResponseStarted) return;
   run.modelResponseStarted = true;
   run.modelWaitStartedAt = null;
+  run.modelRecovery = null;
   if (sessionId === state.sessionId) syncActiveRunBanner(sessionId);
 }
 
@@ -5561,6 +5570,7 @@ function setStreaming(active, sessionId = state.sessionId) {
       run.responseStartTime = null;
       run.modelWaitStartedAt = null;
       run.modelResponseStarted = false;
+      run.modelRecovery = null;
     }
   }
 
@@ -7859,7 +7869,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
         finalizeStreamingAssistantMessage(
           assistantIndex,
-          finalText || toolProgressSummary(toolCalls) || "(empty response)",
+          finalText || toolProgressSummary(toolCalls) || "",
           toolCalls,
           sessionId,
           _streamMsgs,
@@ -7953,7 +7963,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
   finalizeStreamingAssistantMessage(
     assistantIndex,
-    finalCombined || toolProgressSummary(toolCalls) || "(empty response)",
+    finalCombined || toolProgressSummary(toolCalls) || "",
     toolCalls,
     sessionId,
     _streamMsgs,
@@ -9213,8 +9223,11 @@ async function projectAgentModelStarted(ctx, event) {
   const assistantIndex = ctx.messages.indexOf(assistant);
   ctx.runtimeRunId = runtimeRunId;
   ctx.run.runtimeRunId = runtimeRunId;
+  ctx.run.modelWaitStartedAt = Date.now();
+  ctx.run.modelResponseStarted = false;
   setSessionMessages(ctx.sessionId, ctx.messages);
   renderSessionMessages(ctx.sessionId);
+  if (ctx.sessionId === state.sessionId) syncActiveRunBanner(ctx.sessionId);
   await persistRunCheckpoint(ctx, "running", "model", { runtimeRunId });
 
   ctx.responseUsage = { input: 0, output: 0, cache: 0 };
@@ -9265,12 +9278,13 @@ function projectAgentModelCompleted(ctx, event) {
   const projectedContent = splitThoughtContent(combined);
   const completedAt = String(data.completedAt || event?.createdAt || new Date().toISOString());
   let assistant = findAgentAssistantByRuntime(ctx, runtimeRunId);
+  markModelResponseStarted(ctx.run, ctx.sessionId);
 
   if (!assistant) {
     assistant = {
       role: "assistant",
       thought: projectedContent.thought,
-      content: projectedContent.content || toolProgressSummary(toolCalls) || "(empty response)",
+      content: projectedContent.content || toolProgressSummary(toolCalls) || "",
       streaming: false,
       _model: ctx.model || getSelectedModel(),
       _time: completedAt,
@@ -9283,7 +9297,7 @@ function projectAgentModelCompleted(ctx, event) {
     ctx.messages.push(assistant);
   } else {
     assistant.thought = projectedContent.thought || assistant.thought || "";
-    assistant.content = projectedContent.content || assistant.content || toolProgressSummary(toolCalls) || "(empty response)";
+    assistant.content = projectedContent.content || assistant.content || toolProgressSummary(toolCalls) || "";
     assistant.streaming = false;
     assistant._time = assistant._time || completedAt;
     delete assistant._streamProjection;
@@ -9303,6 +9317,31 @@ function projectAgentModelCompleted(ctx, event) {
   }
   ctx.runtimeRunId = "";
   ctx.run.runtimeRunId = "";
+}
+
+function projectAgentModelRecovery(ctx, event) {
+  const data = event?.data || {};
+  const runtimeRunId = String(data.runtimeRunId || "");
+  const assistant = findAgentAssistantByRuntime(ctx, runtimeRunId);
+  if (assistant) {
+    assistant.meta = {
+      ...(assistant.meta || {}),
+      nonActionReason: String(data.reason || "empty"),
+      autoRecoveryAttempt: Number(data.attempt || 1),
+    };
+    if (!String(assistant.content || "").trim() && !String(assistant.thought || "").trim()) {
+      const index = ctx.messages.indexOf(assistant);
+      if (index >= 0) ctx.messages.splice(index, 1);
+    }
+  }
+  ctx.run.modelRecovery = {
+    reason: String(data.reason || "empty"),
+    attempt: Number(data.attempt || 1),
+    maxAttempts: Number(data.maxAttempts || 1),
+  };
+  ctx.run.modelWaitStartedAt = Date.now();
+  ctx.run.modelResponseStarted = false;
+  if (ctx.sessionId === state.sessionId) syncActiveRunBanner(ctx.sessionId);
 }
 
 function projectAgentToolStarted(ctx, event) {
@@ -9433,6 +9472,7 @@ async function projectAgentEvent(ctx, event) {
   const eventType = String(event?.type || "");
   if (eventType === "model_started") await projectAgentModelStarted(ctx, event);
   else if (eventType === "model_completed") projectAgentModelCompleted(ctx, event);
+  else if (eventType === "model_recovery") projectAgentModelRecovery(ctx, event);
   else if (eventType === "tool_started") projectAgentToolStarted(ctx, event);
   else if (eventType === "tool_completed") projectAgentToolCompleted(ctx, event);
 
@@ -9467,39 +9507,19 @@ async function requestServerAgentInput(ctx, pendingInput) {
 }
 
 async function requestEmptyResponseContinue(ctx, pendingInput) {
-  const reasoning = String(pendingInput.reasoning || "").trim();
-  if (reasoning) {
-    ctx.messages.push({
-      role: "assistant",
-      content: reasoning,
-      meta: { reasoningAsContent: true },
-    });
-    renderConversation();
+  if (!window.AgentRuntime || !window.AgentRuntime.submitAgentInput) {
+    throw new Error("Agent input runtime unavailable");
   }
-  return new Promise(function (resolve) {
-    const btn = document.createElement("button");
-    btn.className = "empty-response-continue-btn";
-    btn.textContent = "模型未生成正式回复，点击继续";
-    btn.onclick = async function () {
-      btn.disabled = true;
-      btn.textContent = "正在继续...";
-      try {
-        if (!window.AgentRuntime || !window.AgentRuntime.submitAgentInput) {
-          throw new Error("Agent input runtime unavailable");
-        }
-        await window.AgentRuntime.submitAgentInput(ctx.agentRunId, { answers: {} });
-        resolve({ ok: true });
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = "继续失败，点击重试";
-        console.error("empty_response continue failed:", e);
-      }
-    };
-    const container = document.getElementById("composerInputBar");
-    if (container) {
-      container.appendChild(btn);
-    }
-  });
+  ctx.run.modelRecovery = {
+    reason: "reasoning_only",
+    attempt: 1,
+    maxAttempts: 1,
+  };
+  ctx.run.modelWaitStartedAt = Date.now();
+  ctx.run.modelResponseStarted = false;
+  if (ctx.sessionId === state.sessionId) syncActiveRunBanner(ctx.sessionId);
+  await window.AgentRuntime.submitAgentInput(ctx.agentRunId, { answers: {} });
+  return { ok: true };
 }
 
 function ensureServerAuthorizationProjection(ctx, pendingAuthorization) {
