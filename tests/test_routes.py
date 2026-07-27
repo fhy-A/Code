@@ -294,6 +294,58 @@ class TestFileTools(TestServerFixture):
                 self.assertEqual(status, 200)
                 self.assertEqual(routed, direct)
 
+    def test_registered_tool_protocol_validation_is_strict_and_nested(self):
+        with self.assertRaisesRegex(ValueError, "path is required"):
+            server_mod.execute_registered_tool("read_file", {})
+        with self.assertRaisesRegex(ValueError, "file_path is not supported"):
+            server_mod.execute_registered_tool(
+                "read_file", {"file_path": "src/main.py"},
+            )
+        status, routed_error = _req(
+            "POST",
+            "/api/tools/read_file",
+            json={"file_path": "src/main.py"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("file_path is not supported", routed_error["error"])
+        with self.assertRaisesRegex(ValueError, "maxDepth must be integer"):
+            server_mod.execute_registered_tool(
+                "list_files", {"path": "src", "maxDepth": True},
+            )
+
+        valid_questionnaire = {
+            "questions": [{
+                "id": "target",
+                "prompt": "Choose a target",
+                "type": "single",
+                "options": [{"value": "src", "label": "Source"}],
+            }],
+        }
+        self.assertEqual(
+            server_mod._registered_tool_argument_errors(
+                "request_user_input", valid_questionnaire,
+            ),
+            [],
+        )
+        invalid_questionnaire = {
+            "questions": [{
+                "id": "target",
+                "prompt": "Choose a target",
+                "type": "unsupported",
+                "options": [{"value": "src"}],
+            }],
+        }
+        errors = server_mod._registered_tool_argument_errors(
+            "request_user_input", invalid_questionnaire,
+        )
+        self.assertEqual(
+            {(item["field"], item["reason"]) for item in errors},
+            {
+                ("questions[0].type", "enum"),
+                ("questions[0].options[0].label", "required"),
+            },
+        )
+
     def test_http_network_and_skill_tools_share_registry_results(self):
         skill_dir = self._tmp_data / "skills" / "registered-skill"
         references_dir = skill_dir / "references"

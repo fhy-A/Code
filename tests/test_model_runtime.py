@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 import server as server_mod
 
@@ -54,6 +55,42 @@ class _StreamingUpstream(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.end_headers()
+        if user_content in {"keepalive only", "usage only"}:
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                try:
+                    if user_content == "keepalive only":
+                        self.wfile.write(b": keepalive\n\n")
+                    else:
+                        usage_frame = {
+                            "choices": [],
+                            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                        }
+                        self.wfile.write(
+                            (
+                                "data: "
+                                + json.dumps(usage_frame)
+                                + "\n\n"
+                            ).encode("utf-8")
+                        )
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.01)
+            return
+        if user_content == "content then pause":
+            frame = {"choices": [{"delta": {"content": "started"}}]}
+            self.wfile.write(
+                ("data: " + json.dumps(frame) + "\n\n").encode("utf-8")
+            )
+            self.wfile.flush()
+            time.sleep(0.2)
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except OSError:
+                pass
+            return
         if user_content == "call a tool":
             frames = [
                 {
@@ -252,6 +289,61 @@ class TestModelRuntime(unittest.TestCase):
         self.assertEqual(snapshot["errorCode"], "upstream_error")
         self.assertTrue(snapshot["transient"])
         self.assertEqual(snapshot["error"], "Upstream service temporarily unavailable")
+
+    def test_first_response_timeout_ignores_keepalive_and_usage_only_events(self):
+        for user_content in ("keepalive only", "usage only"):
+            with self.subTest(user_content=user_content):
+                with mock.patch.object(
+                    server_mod,
+                    "_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT",
+                    0.12,
+                ):
+                    started = time.monotonic()
+                    run = server_mod._create_model_runtime_run(
+                        "session-first-response-timeout",
+                        {
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": user_content}],
+                        },
+                        self.base_url,
+                        ["authorized-key"],
+                    )
+                    self._wait_for_terminal(run)
+                    elapsed = time.monotonic() - started
+
+                snapshot = server_mod._runtime_snapshot(run, 0)
+                self.assertEqual(snapshot["status"], "failed")
+                self.assertEqual(snapshot["errorCode"], "model_response_timeout")
+                self.assertTrue(snapshot["transient"])
+                self.assertIn("0.12 seconds", snapshot["error"])
+                self.assertLess(elapsed, 0.5)
+                self.assertEqual(snapshot["result"]["content"], "")
+                self.assertEqual(snapshot["result"]["reasoning"], "")
+                self.assertEqual(snapshot["result"]["toolCalls"], [])
+
+    def test_meaningful_content_releases_first_response_deadline(self):
+        with mock.patch.object(
+            server_mod,
+            "_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT",
+            0.08,
+        ):
+            started = time.monotonic()
+            run = server_mod._create_model_runtime_run(
+                "session-content-before-deadline",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "content then pause"}],
+                },
+                self.base_url,
+                ["authorized-key"],
+            )
+            self._wait_for_terminal(run)
+            elapsed = time.monotonic() - started
+
+        snapshot = server_mod._runtime_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "started")
+        self.assertGreater(elapsed, 0.15)
 
 
 if __name__ == "__main__":

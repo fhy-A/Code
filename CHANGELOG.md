@@ -4,6 +4,61 @@
 
 ## 2026-07-27 · Codex
 
+### Agent 工具过程展示、轮次时序与内容拦截分流（开发版本基线 v0.5.29）
+
+- 将首个模型轮与后续工具续行轮明确分开：第一轮显示“等待模型响应”，工具完成后的后续轮显示“等待模型继续”，延迟提示也按轮次区分；过程状态右侧计时统一表示整项任务总耗时，不会在工具轮之间重置。当前模型轮次写入 durable Agent 快照，刷新恢复后仍能恢复正确文案。
+- 将模型随工具调用返回的过程内容从普通“思考摘要”改为紧凑的工具过程卡：工具名称、规范化参数、运行状态、结构化成功/失败结果和参数别名在同一区域投影；最终回答继续独立展示。连续相同失败折叠显示重复次数，默认收起详细结果，编辑建议等特殊工具结果也能正常终结运行态。
+- 前端事件投影完整保留服务端新增的 `outcome`、结构化 `result` 和 `argumentAliases`；刷新恢复、中英文即时切换、停止任务、SSE 增量以及旧记录回填继续沿用既有兼容边界，不把工具过程内容重复写进最终回答。
+- 修复显式内容策略终止被误判为空回复的问题：上游返回 `finish_reason=content_filter / safety / blocked` 时立即以 `content_filtered` 结束，不再消耗一次无动作续行预算或重复发送完整上下文；前端显示专用的“响应被内容策略拦截”说明与恢复建议。
+- 修复结构化 Agent 错误已经持久化并展示后，外层表单错误处理仍追加第二条纯文本错误的问题；已处理错误会带内部渲染标记，确保同一故障只显示一张错误卡。
+- 验证：
+  - `python -m pytest -q`：**822 passed, 228 subtests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/core/i18n.js`、`node --check src/ui/messages.js` 与 `git diff --check` 通过；`server.py` 仍只报告既有 Windows 路径无效转义 `SyntaxWarning`；
+  - 用户使用真实 Claude 渠道人工确认：`content_filter` 只产生一张结构化错误卡，显示原始 `finish_reason`，没有重复错误或额外空回复重试，任务计时正常结束。
+
+**涉及文件**：`server.py`、`app.js`、`styles.css`、`src/core/i18n.js`、`src/ui/messages.js`、`tests/test_agent_runtime.py`、`tests/test_frontend_modules.py`、`tests/test_model_runtime.py`、`tests/test_p0_stability.py`、`tests/test_routes.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
+### Agent 工具协议校验与重复失败熔断（开发版本基线 v0.5.29）
+
+- 在服务端建立与内置工具定义共源的轻量 JSON Schema 校验，覆盖对象、数组、必填字段、字段类型、枚举、嵌套项、数量限制和 `additionalProperties: false`；Agent 工具轮和直接 `/api/tools/*` 入口均不能再把缺失或未知字段送入执行器。参数错误返回稳定的 `invalid_tool_arguments`、字段路径和原因，不再把“缺少 `path`”误报为“文件不存在”。
+- 为部分 Claude 模型的历史参数习惯增加仅限 Agent 模型边界的窄兼容：`read_file.file_path` 在没有冲突时规范化为正式的 `path`，随后使用规范化参数计算指纹、写入模型历史并执行；直接工具 API 继续严格拒绝 `file_path`，正式协议和 Schema 未改变。兼容转换会记录 `argumentAliases` 供诊断。
+- 保留 `status: completed` 作为“工具生命周期已经终止、不可重放”的既有语义，新增独立的 `outcome: succeeded / failed` 并随 durable record、公开快照和 `tool_completed` 事件传递；旧记录按 `result.ok` 回填，避免破坏授权恢复、幂等重放、命令未知状态和子 Agent 调度。
+- 新增基于“规范化工具指纹 + 相同错误签名”的重复失败保护：前三次真实失败允许模型纠正，第三次结果明确标记重试上限；第四次完全相同的调用不再触碰执行器，并进入一次无工具收尾轮。参数改变、工具改变、错误类型改变或同指纹成功都会解除连续失败判断，避免误伤有效恢复。
+- 重复失败保护和强制收尾状态均可持久恢复；工具调用 ID 重放、写入/删除的 `_operationId` 幂等协议、问卷嵌套参数、四种权限模式、编辑/命令授权和子 Agent 继续沿用既有边界。
+- 验证：
+  - `python -m pytest tests/test_routes.py tests/test_agent_runtime.py tests/test_model_runtime.py -q`：**137 passed, 22 subtests passed**；
+  - `python -m pytest -q`：**821 passed, 228 subtests passed**；
+  - `python -m py_compile server.py`、`node --check app.js`、`node --check src/core/i18n.js` 与 `git diff --check` 通过；`server.py` 仍只报告既有 Windows 路径无效转义 `SyntaxWarning`；
+  - 本阶段未改前端投影和状态文案，相关人工验收留到下一阶段。
+
+**涉及文件**：`server.py`、`tests/test_agent_runtime.py`、`tests/test_routes.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
+### 模型首次有效响应 120 秒硬截止（开发版本基线 v0.5.29）
+
+- 为服务端模型运行时增加 **120 秒首次有效响应硬截止**，从本轮请求开始统一计时，并由同一轮的备用 Key 共用；不会因切换 Key 重新获得一段完整等待时间。只有非空正文、思考增量或工具调用算作有效响应，HTTP 响应头、SSE 注释/心跳、空事件、角色事件和仅 usage 事件均不会解除截止。
+- 截止时间按绝对单调时钟计算，每次读取上游流之前都使用剩余时间约束底层 socket；持续心跳不能再刷新等待窗口。两分钟内收到有效响应后解除首响截止，后续长回答继续沿用原有 180 秒流空闲超时，不把两分钟误当成整条回复的总时长上限。
+- 首响超时会立即关闭子模型流，将模型运行时和父 Agent 一并置为 `failed`，透传可重试的 `model_response_timeout`，清空活动模型轮并触发现有健康快照回滚；前端提供“模型首次响应超时”的中英文错误说明，不再无限停留在慢上游提示。
+- 模型运行终态现在会在通知等待方之前清除请求 payload 和 Key，消除终态已可见但敏感请求字段尚未释放的短暂竞态。
+- 验证：
+  - `python -m pytest tests/test_model_runtime.py tests/test_agent_runtime.py::TestDurableAgentRuntime::test_agent_stops_when_first_meaningful_model_response_times_out tests/test_frontend_modules.py -q`：**116 passed, 2 subtests passed**；
+  - `python -m pytest -q`：**815 passed, 228 subtests passed**；
+  - `python -m py_compile server.py`、`node --check app.js` 与 `node --check src/core/i18n.js` 通过；`server.py` 仍只报告既有 Windows 路径无效转义 `SyntaxWarning`；
+  - 人工真实两分钟时序验收待用户确认后补记。
+
+**涉及文件**：`server.py`、`app.js`、`src/core/i18n.js`、`tests/test_model_runtime.py`、`tests/test_agent_runtime.py`、`tests/test_frontend_modules.py`、`CHANGELOG.md`、`TODO.md`
+
+---
+
+## 2026-07-27 · Codex
+
 ### Agent 无有效动作恢复与首反馈时序复审（开发版本基线 v0.5.29）
 
 - 复审 v0.5.29 的三分类实现后，将“完全空回复、只有 reasoning 没有正式回答、只有过程性承诺”统一为同一个无有效动作闭环：三种结果共用 **1 次**自动续行预算，第一次自动提醒模型立即执行或给出完整答案，第二次无效轮次明确以 `empty_response` 停止；跨类型切换也不会重置预算，避免“空回复 → 仅思考 → 空承诺”无限循环。

@@ -2151,7 +2151,7 @@ const feature = createMessagesFeature({
   escapeHtml,
   formatCompact: (value) => String(value),
   renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
-  t: (key) => key,
+  t: (key, vars = {}) => vars.count == null ? key : `${key}:${vars.count}`,
   getMessageText: (msg) => String(msg?.content || ""),
   getBackgroundJob: (id) => id === "job-1" ? {status: "running"} : null,
   getMessages: () => messages,
@@ -2163,11 +2163,16 @@ const feature = createMessagesFeature({
   renderBranchFlow: (title) => `<branch>${escapeHtml(title)}</branch>`,
   isEditSuggestionMessage: (msg) => Boolean(msg?.meta?.edit),
   renderEditSuggestion: (_msg, index) => `<edit data-index="${index}"></edit>`,
+  getToolActionLabel: (action) => `label:${action}`,
 });
 messages = [
   {role: "user", content: "run <task>", meta: {backgroundDispatch: {id: "job-1"}}},
-  {role: "assistant", content: "inspect project", meta: {toolCalls: [{id: "call-1"}]}},
-  {role: "tool-call", content: "hidden tool"},
+  {role: "assistant", content: "inspect **project**", thought: "secret reasoning", meta: {toolCalls: [{id: "call-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}}]}},
+  {role: "tool-call", content: "hidden tool", meta: {action: "read_file", toolCallId: "call-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "legacy failure text", meta: {action: "read_file", toolCallId: "call-1", outcome: "failed", result: {ok: false, errorCode: "invalid_tool_arguments", error: "missing path"}}},
+  {role: "assistant", content: "inspect **project**", meta: {toolCalls: [{id: "call-2", function: {name: "read_file", arguments: '{"path":"README.md"}'}}]}},
+  {role: "tool-call", content: "hidden tool again", meta: {action: "read_file", toolCallId: "call-2", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "legacy failure text", meta: {action: "read_file", toolCallId: "call-2", outcome: "failed", result: {ok: false, errorCode: "invalid_tool_arguments", error: "missing path"}}},
   {role: "assistant", content: "done", _model: "model-1", meta: {_usage: {input: 12, output: 3}}, _responseTime: "4s"},
   {role: "assistant", content: "background done", meta: {kind: "background-subagent", jobId: "job-1", _usage: {input: 2}}},
   {role: "tool-result", content: "diff", meta: {edit: true}},
@@ -2229,14 +2234,21 @@ process.stdout.write(JSON.stringify({
         html = data["html"]
         self.assertLess(html.index("run &lt;task&gt;"), html.index("data-active-run-anchor"))
         self.assertLess(html.index("data-active-run-anchor"), html.index("<branch>Parent</branch>"))
-        self.assertLess(html.index("<branch>Parent</branch>"), html.index("thinking-process"))
-        self.assertLess(html.index("thinking-process"), html.index("<answer>done</answer>"))
+        self.assertLess(html.index("<branch>Parent</branch>"), html.index("tool-process"))
+        self.assertLess(html.index("tool-process"), html.index("<answer>done</answer>"))
         self.assertLess(html.index("<answer>done</answer>"), html.index("background-reply-reference"))
-        self.assertLess(html.index("background-reply-reference"), html.index("<edit data-index=\"5\">"))
+        self.assertLess(html.index("background-reply-reference"), html.index("<edit data-index=\"9\">"))
         self.assertIn("backgroundRunning", html)
-        self.assertIn("inspect project", html)
+        self.assertIn("inspect **project**", html)
+        self.assertIn("label:read_file", html)
+        self.assertIn("README.md", html)
+        self.assertIn("missing path", html)
+        self.assertIn("toolProcessRepeated:2", html)
+        self.assertIn("toolProcessFailureCount:2", html)
+        self.assertNotIn("secret reasoning", html)
         self.assertIn("background done", html)
         self.assertNotIn("hidden tool", html)
+        self.assertNotIn("<md>inspect", html)
         self.assertNotIn("hidden internal", html)
         self.assertIn('data-stream-session="session-1"', data["streaming"])
         self.assertIn('data-stream-kind="answer"', data["streaming"])
@@ -3295,7 +3307,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("animation: welcomeRevealSlogan", STYLE_SOURCE)
         self.assertNotIn("@keyframes welcomeRevealSlogan", STYLE_SOURCE)
 
-    def test_thought_projection_only_collects_tool_round_summaries(self):
+    def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
         render_start = MESSAGES_SOURCE.index("function projectMessages(")
         assistant_start = MESSAGES_SOURCE.index('if (msg.role === "assistant") {', render_start)
         assistant_end = MESSAGES_SOURCE.index('if (msg.role === "user") {', assistant_start)
@@ -3309,29 +3321,25 @@ process.stdout.write(JSON.stringify({
             "if (msg.meta?.toolCalls?.length || streamingToolRound) {",
             assistant_block,
         )
-        self.assertIn("pendingThoughts.push", assistant_block)
+        self.assertIn("pendingProcess.push", assistant_block)
         self.assertLess(
             assistant_block.index("if (msg.meta?.toolCalls?.length || streamingToolRound) {"),
-            assistant_block.index("pendingThoughts.push"),
+            assistant_block.index("pendingProcess.push"),
         )
-        projection_start = MESSAGES_SOURCE.index("function renderThinkingProjection")
+        projection_start = MESSAGES_SOURCE.index("function renderToolProcessProjection")
         projection_end = MESSAGES_SOURCE.index("function renderAssistantResponseInfo", projection_start)
         projection = MESSAGES_SOURCE[projection_start:projection_end]
         self.assertIn('data-stream-kind="thinking"', projection)
         self.assertIn('data-stream-part="summary"', projection)
-        self.assertNotIn('t("thoughtProcess")', projection)
-        self.assertNotIn(".thinking-process .role", STYLE_SOURCE)
-        self.assertIn("const hasVisibleSummary = summaries.some", projection)
-        self.assertIn('if (!hasVisibleSummary) return ""', projection)
-        self.assertNotIn('thinking-process.is-empty', STYLE_SOURCE)
-        self.assertNotIn("MAX_LEN", projection)
-        self.assertNotIn("truncate", projection)
-        thought_style_start = STYLE_SOURCE.index(".thinking-summary-list {")
-        thought_style_end = STYLE_SOURCE.index("}", thought_style_start)
-        thought_style = STYLE_SOURCE[thought_style_start:thought_style_end]
-        self.assertIn("color: var(--text)", thought_style)
-        self.assertIn("font-size: 14.5px", thought_style)
-        self.assertIn("line-height: 1.76", thought_style)
+        self.assertIn("collapseRepeatedProcessCalls(calls)", projection)
+        self.assertIn("getProcessCallView(call).outcome", projection)
+        self.assertIn('escapeHtml(t("toolProcessModelNote"))', projection)
+        self.assertNotIn("msg.thought", projection)
+        self.assertNotIn("renderMarkdown(", projection)
+        self.assertIn(".tool-process-group {", STYLE_SOURCE)
+        self.assertIn(".tool-process-row.failed", STYLE_SOURCE)
+        self.assertIn("-webkit-line-clamp: 3", STYLE_SOURCE)
+        self.assertIn("max-height: min(360px, 45vh)", STYLE_SOURCE)
         role_style_start = STYLE_SOURCE.rindex(".role {")
         role_style_end = STYLE_SOURCE.index("}", role_style_start)
         role_style = STYLE_SOURCE[role_style_start:role_style_end]
@@ -3345,13 +3353,16 @@ process.stdout.write(JSON.stringify({
         self.assertIn("min-width: 24px", role_rule)
         self.assertIn("flex: 1 1 auto", role_rule)
         self.assertNotIn("\n  width: 24px;", role_rule)
-        self.assertIn(".thinking-summary-item + .thinking-summary-item", STYLE_SOURCE)
-        spacing_start = STYLE_SOURCE.index(".thinking-summary-item + .thinking-summary-item")
-        spacing_end = STYLE_SOURCE.index("}", spacing_start)
-        self.assertIn("margin-top: .65em", STYLE_SOURCE[spacing_start:spacing_end])
-        thought_spacing_start = STYLE_SOURCE.rindex(".thinking-process {")
-        thought_spacing_end = STYLE_SOURCE.index("}", thought_spacing_start)
-        self.assertIn("margin-bottom: 20px", STYLE_SOURCE[thought_spacing_start:thought_spacing_end])
+        process_style_start = STYLE_SOURCE.index(".tool-process {")
+        process_style_end = STYLE_SOURCE.index("}", process_style_start)
+        self.assertIn("margin-bottom: 16px", STYLE_SOURCE[process_style_start:process_style_end])
+
+        tool_projection_start = APP_SOURCE.index("function projectAgentToolCompleted")
+        tool_projection_end = APP_SOURCE.index("async function projectAgentEvent", tool_projection_start)
+        tool_projection = APP_SOURCE[tool_projection_start:tool_projection_end]
+        self.assertIn("outcome:", tool_projection)
+        self.assertIn("result,", tool_projection)
+        self.assertIn("argumentAliases:", tool_projection)
 
     def test_streaming_projection_switches_kind_without_leaking_raw_reasoning(self):
         projection_start = MESSAGES_SOURCE.index("function renderFinalAssistantProjection")
@@ -3415,11 +3426,23 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(helper.count("banner.innerHTML ="), 1)
         self.assertIn("nodes.label.textContent = getActiveRunLabel(sessionId)", helper)
         self.assertIn("nodes.timer.textContent = getRunTimerDisplay(sessionId)", helper)
+        self.assertIn('nodes.timer.title = t("taskElapsedTitle")', helper)
+        self.assertIn("data-task-elapsed", helper)
         self.assertNotIn("run-model", helper)
         self.assertNotIn("data-active-run-phase", helper)
         self.assertNotIn("function setTaskPhase", APP_SOURCE)
         self.assertNotIn("_taskPhase", APP_SOURCE)
         self.assertNotIn("executingTool", APP_SOURCE)
+        label_start = APP_SOURCE.index("function getActiveRunLabel")
+        label_end = APP_SOURCE.index("function markModelResponseStarted", label_start)
+        label_helper = APP_SOURCE[label_start:label_end]
+        self.assertIn("run.modelRound", label_helper)
+        self.assertIn('"waitingForModelContinuation"', label_helper)
+        self.assertIn('"modelContinuationDelayed"', label_helper)
+        self.assertIn('taskElapsedTitle: "任务总耗时"', I18N_SOURCE)
+        self.assertIn('taskElapsedTitle: "Total task time"', I18N_SOURCE)
+        self.assertIn("modelRound: Number(extra.modelRound", APP_SOURCE)
+        self.assertIn("ctx.run.modelRound = Number(runState.modelRound || 0)", APP_SOURCE)
 
     def test_active_run_banner_uses_stable_anchor_above_thought_process(self):
         wrapper = """<div id="messages" class="messages">
@@ -3495,6 +3518,11 @@ process.stdout.write(JSON.stringify({
         self.assertIn('kind: "error-recovery"', APP_SOURCE)
         self.assertIn("errorRecoveryHint", APP_SOURCE)
         self.assertIn("errorRecoveryHint", I18N_SOURCE)
+        self.assertIn("loopError._codeErrorRendered = true", APP_SOURCE)
+        self.assertIn(
+            'if (!err?._codeErrorRendered) appendSystemError(errMsg)',
+            APP_SOURCE,
+        )
 
     def test_error_recovery_preserves_user_message_on_rollback(self):
         """Rollback restores user message content and keeps it at snapshot-1."""
@@ -3505,9 +3533,11 @@ process.stdout.write(JSON.stringify({
     # ── error_code frontend display ──
 
     def test_error_code_meta_has_all_codes(self):
-        """All 7 error codes have entries in _errorCodeMeta."""
-        codes = ["upstream_error", "config_error", "permission_denied",
-                 "tool_error", "user_cancelled", "empty_response", "internal_error"]
+        """All runtime error codes have entries in _errorCodeMeta."""
+        codes = ["upstream_error", "model_response_timeout", "config_error",
+                 "model_access_denied", "permission_denied",
+                 "tool_error", "user_cancelled", "empty_response",
+                 "content_filtered", "internal_error"]
         for code in codes:
             self.assertIn(code + ":", APP_SOURCE.replace(" ", ""),
                          f"Missing error code meta entry: {code}")
@@ -3545,8 +3575,12 @@ process.stdout.write(JSON.stringify({
         """Every error code has both label and suggestion i18n keys."""
         self.assertIn("errLabelUpstreamError", I18N_SOURCE)
         self.assertIn("errSugUpstreamError", I18N_SOURCE)
+        self.assertIn("errLabelModelResponseTimeout", I18N_SOURCE)
+        self.assertIn("errSugModelResponseTimeout", I18N_SOURCE)
         self.assertIn("errLabelEmptyResponse", I18N_SOURCE)
         self.assertIn("errSugEmptyResponse", I18N_SOURCE)
+        self.assertIn("errLabelContentFiltered", I18N_SOURCE)
+        self.assertIn("errSugContentFiltered", I18N_SOURCE)
         self.assertIn("errAgentFailed", I18N_SOURCE)
 
     def test_i18n_keys_have_both_languages(self):
@@ -3555,6 +3589,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Upstream error", I18N_SOURCE)
         self.assertIn("模型未产出回复", I18N_SOURCE)
         self.assertIn("No response generated", I18N_SOURCE)
+        self.assertIn("响应被内容策略拦截", I18N_SOURCE)
+        self.assertIn("Response blocked by content policy", I18N_SOURCE)
 
     # ── Session import UI ──
 

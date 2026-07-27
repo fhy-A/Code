@@ -7487,53 +7487,175 @@ body.theme-dark .chat-pane.empty-chat .composer {
   }
 }
 
-/* Preserve model-authored thought paragraphs and make their boundaries readable. */
-.thinking-process {
-  margin-bottom: 20px;
+/* Tool rounds are a compact, structured process log instead of assistant text. */
+.tool-process {
+  max-width: min(920px, 100%);
+  margin-bottom: 16px;
 }
 
-.thinking-summary-list {
-  color: var(--text);
-  font-size: 14.5px;
-  line-height: 1.76;
+.tool-process-group {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 72%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
 }
 
-.thinking-summary-item > :first-child {
-  margin-top: 0;
-}
-
-.thinking-summary-item > :last-child {
-  margin-bottom: 0;
-}
-
-.thinking-summary-item + .thinking-summary-item {
-  margin-top: .65em;
-}
-
-.thinking-summary-item.is-streaming:empty {
-  min-height: 1em;
-}
-
-/* Fold long thinking summaries */
-.thinking-summary-fold {
-  cursor: pointer;
-}
-.thinking-summary-fold > summary {
+.tool-process-group > summary {
+  min-height: 42px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   list-style: none;
-  display: block;
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
 }
-.thinking-summary-fold > summary::-webkit-details-marker { display: none; }
-.thinking-summary-fold > summary::marker { display: none; content: none; }
-.thinking-expand-hint {
+
+.tool-process-group > summary::-webkit-details-marker { display: none; }
+.tool-process-group > summary::marker { display: none; content: none; }
+.tool-process-group > summary:hover {
+  background: color-mix(in srgb, var(--hover) 62%, transparent);
+  color: var(--text);
+}
+.tool-process-group > summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: -2px;
+}
+
+.tool-process-indicator {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--green);
+}
+.tool-process-indicator.running {
+  background: var(--accent);
+  animation: think-bounce 1.2s infinite ease-in-out;
+}
+.tool-process-indicator.failed { background: var(--red); }
+
+.tool-process-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.tool-process-count {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-2);
+}
+
+.tool-process-chevron {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform .16s ease;
+}
+.tool-process-group[open] .tool-process-chevron {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.tool-process-body {
+  max-height: min(360px, 45vh);
+  overflow: auto;
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.tool-process-notes {
+  padding: 10px 2px 8px;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 500;
-  margin-left: 4px;
+  line-height: 1.55;
 }
-.thinking-summary-full {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
+.tool-process-notes strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted-2);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+.tool-process-notes p {
+  display: -webkit-box;
+  margin: 3px 0 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.tool-process-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  padding: 8px 2px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+.tool-process-row:first-child { border-top: 0; }
+.tool-process-row-status {
+  color: var(--muted-2);
+  text-align: center;
+  font-size: 14px;
+  line-height: 19px;
+}
+.tool-process-row.failed .tool-process-row-status,
+.tool-process-row.failed .tool-process-outcome { color: var(--red); }
+.tool-process-row.succeeded .tool-process-row-status,
+.tool-process-row.completed .tool-process-row-status { color: var(--green); }
+
+.tool-process-row-heading {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.tool-process-row-heading strong { flex: 0 0 auto; }
+.tool-process-row-heading code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.tool-process-outcome {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+.tool-process-repeat {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.tool-process-error {
+  display: -webkit-box;
+  margin-top: 3px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--red);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 /* Write-file preview (code block in edit cards) */

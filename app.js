@@ -229,6 +229,7 @@ function ensureSessionRun(sessionId) {
       taskStartTime: null,      // persisted across tool rounds; cleared only on task end
       modelWaitStartedAt: null,
       modelResponseStarted: false,
+      modelRound: 0,
       modelRecovery: null,
       timerInterval: null,
       timerDisplay: null,
@@ -318,6 +319,7 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     queueItemId: String(extra.queueItemId ?? ctx.queueItemId ?? previous.queueItemId ?? ""),
     agentRunId: String(extra.agentRunId ?? ctx.agentRunId ?? previous.agentRunId ?? ""),
     agentEventCursor: Number(extra.agentEventCursor ?? ctx.agentEventCursor ?? previous.agentEventCursor ?? 0),
+    modelRound: Number(extra.modelRound ?? ctx.run?.modelRound ?? previous.modelRound ?? 0),
     ...(Array.isArray(previous.backgroundRuns) && previous.backgroundRuns.length
       ? { backgroundRuns: previous.backgroundRuns.map((item) => ({ ...item })) }
       : {}),
@@ -933,6 +935,7 @@ messagesFeature = createMessagesFeature({
   renderBranchFlow: renderBranchFlowProjection,
   isEditSuggestionMessage,
   renderEditSuggestion: renderEditSuggestionProjection,
+  getToolActionLabel: _toolActionLabel,
 });
 const {
   copyMessageText,
@@ -2503,12 +2506,14 @@ function _toolActionLabel(action) {
 
 var _errorCodeMeta = {
   upstream_error:     { retry: true },
+  model_response_timeout: { retry: true },
   config_error:       { retry: false },
   model_access_denied:{ retry: false },
   permission_denied:  { retry: false },
   tool_error:         { retry: true },
   user_cancelled:     { retry: false },
   empty_response:     { retry: true },
+  content_filtered:   { retry: false },
   internal_error:     { retry: false },
 };
 
@@ -2677,8 +2682,11 @@ function getActiveRunLabel(sessionId = state.sessionId) {
   if (run?.modelWaitStartedAt && !run.modelResponseStarted) {
     const waitingMs = Date.now() - run.modelWaitStartedAt;
     if (waitingMs >= MODEL_RESPONSE_SLOW_NOTICE_MS) return t("modelResponseSlow");
-    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) return t("modelResponseDelayed");
-    return t("waitingForModelResponse");
+    const isContinuation = Number(run.modelRound || 0) > 1;
+    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) {
+      return t(isContinuation ? "modelContinuationDelayed" : "modelResponseDelayed");
+    }
+    return t(isContinuation ? "waitingForModelContinuation" : "waitingForModelResponse");
   }
   return t("processingLabel");
 }
@@ -2715,7 +2723,7 @@ function ensureActiveRunBannerStructure() {
           <span class="active-run-indicator" aria-hidden="true"></span>
           <span class="active-run-label" data-active-run-label></span>
           <span class="active-run-separator" aria-hidden="true">·</span>
-          <span class="streaming-timer">0s</span>
+          <span class="streaming-timer" data-task-elapsed>0s</span>
         </span>
         <div data-active-run-recovery></div>
       </div>
@@ -2759,6 +2767,8 @@ function syncActiveRunBanner(sessionId = state.sessionId) {
   if (!nodes) return;
   nodes.label.textContent = getActiveRunLabel(sessionId);
   nodes.timer.textContent = getRunTimerDisplay(sessionId);
+  nodes.timer.title = t("taskElapsedTitle");
+  nodes.timer.setAttribute("aria-label", `${t("taskElapsedTitle")} ${nodes.timer.textContent}`);
   const recoveryHtml = renderNetworkRecoveryStatus(sessionId);
   if (nodes.recovery.innerHTML !== recoveryHtml) nodes.recovery.innerHTML = recoveryHtml;
   nodes.banner.classList.add("visible");
@@ -2965,9 +2975,15 @@ function patchStreamingAssistantMessage(sessionId, index) {
     : '[data-stream-part="answer"]');
 
   if (outputNode) {
-    const nextOutputHtml = visibleContent ? renderMarkdownLite(visibleContent) : "";
-    if (outputNode.innerHTML !== nextOutputHtml) outputNode.innerHTML = nextOutputHtml;
-    if (streamKind !== "thinking") {
+    if (streamKind === "thinking") {
+      const run = ensureSessionRun(sessionId);
+      const nextLabel = t(Number(run?.modelRound || 0) > 1
+        ? "toolProcessWaitingForModel"
+        : "toolProcessPreparing");
+      if (outputNode.textContent !== nextLabel) outputNode.textContent = nextLabel;
+    } else {
+      const nextOutputHtml = visibleContent ? renderMarkdownLite(visibleContent) : "";
+      if (outputNode.innerHTML !== nextOutputHtml) outputNode.innerHTML = nextOutputHtml;
       outputNode.classList.toggle("is-empty", !visibleContent);
       article.querySelector("[data-stream-role]")?.classList.toggle(
         "is-empty",
@@ -5564,7 +5580,10 @@ function setStreaming(active, sessionId = state.sessionId) {
       run.responseStartTime = Date.now();
       // taskStartTime anchors the persistent status bar across tool rounds;
       // set it once per task and only clear on final stop.
-      if (!run.taskStartTime) run.taskStartTime = Date.now();
+      if (!run.taskStartTime) {
+        run.taskStartTime = Date.now();
+        run.modelRound = 0;
+      }
     } else {
       run.abortController = null;
       run.responseStartTime = null;
@@ -5628,7 +5647,12 @@ function startLiveTimer() {
     // Update all visible in-message / active-run timers without re-rendering.
 
     document.querySelectorAll(".streaming-timer").forEach((timer) => {
-      if (timer.textContent !== display) timer.textContent = display;
+      if (timer.textContent !== display) {
+        timer.textContent = display;
+        if (timer.matches("[data-task-elapsed]")) {
+          timer.setAttribute("aria-label", `${t("taskElapsedTitle")} ${display}`);
+        }
+      }
     });
 
     const activeLabel = getActiveRunLabel(state.sessionId);
@@ -5670,6 +5694,7 @@ function finalizeRunTiming(sessionId) {
 
   run.taskStartTime = null;
   run.responseStartTime = null;
+  run.modelRound = 0;
   return changed;
 }
 
@@ -6749,6 +6774,7 @@ function buildRecoveredRunContext(session, runState) {
   ctx.run.runtimeRunId = ctx.runtimeRunId;
   ctx.run.agentRunId = ctx.agentRunId;
   ctx.run.agentEventCursor = ctx.agentEventCursor;
+  ctx.run.modelRound = Number(runState.modelRound || 0);
   ctx.run.model = ctx.model;
   ctx.run._activeCtx = ctx;
   return ctx;
@@ -7665,6 +7691,9 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
   const { payload, tools, model, sessionId } = prepared;
   const skipRender = ctx?.isSubAgent;
   const run = ctx?.run || ensureSessionRun(sessionId);
+  if (!isServerOwnedRun(ctx)) {
+    run.modelRound = Math.max(0, Number(run.modelRound || 0)) + 1;
+  }
   run.modelWaitStartedAt = Date.now();
   run.modelResponseStarted = false;
   if (!ctx?.isSubAgent && sessionId === state.sessionId) syncActiveRunBanner(sessionId);
@@ -9223,6 +9252,10 @@ async function projectAgentModelStarted(ctx, event) {
   const assistantIndex = ctx.messages.indexOf(assistant);
   ctx.runtimeRunId = runtimeRunId;
   ctx.run.runtimeRunId = runtimeRunId;
+  const eventRound = Number(event?.data?.round || 0);
+  ctx.run.modelRound = eventRound > 0
+    ? eventRound
+    : Math.max(0, Number(ctx.run.modelRound || 0)) + 1;
   ctx.run.modelWaitStartedAt = Date.now();
   ctx.run.modelResponseStarted = false;
   setSessionMessages(ctx.sessionId, ctx.messages);
@@ -9365,6 +9398,7 @@ function projectAgentToolStarted(ctx, event) {
       tool,
       toolCallId: tool._toolCallId,
       native: true,
+      argumentAliases: Array.isArray(data.argumentAliases) ? data.argumentAliases : [],
     },
   });
 }
@@ -9420,6 +9454,8 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
     serverManaged: true,
     native: true,
     replayed: Boolean(data.replayed),
+    outcome: String(data.outcome || (result?.ok === false ? "failed" : "succeeded")),
+    result: result || null,
     proposalOnly: Boolean(result?.proposalOnly || projection.meta?.proposalOnly),
     applied,
     rejected,
@@ -9444,7 +9480,12 @@ function projectAgentToolCompleted(ctx, event) {
   if (!callMessage) {
     const syntheticStart = {
       ...event,
-      data: { toolCallId, name: data.name || "", arguments: "{}" },
+      data: {
+        toolCallId,
+        name: data.name || "",
+        arguments: data.arguments || "{}",
+        argumentAliases: data.argumentAliases || [],
+      },
     };
     projectAgentToolStarted(ctx, syntheticStart);
     callMessage = ctx.messages.find((message) => (
@@ -9464,6 +9505,9 @@ function projectAgentToolCompleted(ctx, event) {
       toolCallId,
       native: true,
       replayed: Boolean(data.replayed),
+      outcome: String(data.outcome || (result.ok === false ? "failed" : "succeeded")),
+      result,
+      argumentAliases: Array.isArray(data.argumentAliases) ? data.argumentAliases : [],
     },
   });
 }
@@ -10268,6 +10312,9 @@ async function sendMessage(userText, options = {}) {
       });
       setSessionMessages(sessionId, ctx.messages);
       renderSessionMessages(sessionId);
+      if (loopError && typeof loopError === "object") {
+        loopError._codeErrorRendered = true;
+      }
     }
     await persistRunCheckpoint(ctx, status, "model", {
       lastError: loopError?.message || String(loopError),
@@ -11220,7 +11267,7 @@ els.chatForm.addEventListener("submit", async (event) => {
       if (hadImages) {
         errMsg += "\n\n💡 图片已自动移除并重试，但仍失败。请检查 API Key 和模型是否可用。";
       }
-      appendSystemError(errMsg);
+      if (!err?._codeErrorRendered) appendSystemError(errMsg);
 
     }
 

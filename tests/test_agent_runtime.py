@@ -75,6 +75,23 @@ class _AgentUpstream(BaseHTTPRequestHandler):
         ):
             type(self).slow_started.set()
             type(self).release_slow.wait(timeout=3)
+        if any(
+            message.get("role") == "user"
+            and message.get("content") == "never produce a first response"
+            for message in messages
+        ):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.end_headers()
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                try:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.01)
+            return
         tool_result_count = sum(message.get("role") == "tool" for message in messages)
         repeat_id = any(
             message.get("role") == "user" and message.get("content") == "repeat tool id"
@@ -656,6 +673,401 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertNotIn("agent-secret-key", persisted)
         self.assertNotIn("agent-secret-key", json.dumps(snapshot))
         self.assertEqual(_AgentUpstream.authorizations, ["Bearer agent-secret-key"] * 2)
+
+    def test_agent_stops_when_first_meaningful_model_response_times_out(self):
+        with mock.patch.object(
+            server_mod,
+            "_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT",
+            0.12,
+        ):
+            started = time.monotonic()
+            run = server_mod._create_agent_run(
+                "session-first-response-timeout",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": "never produce a first response",
+                    }],
+                },
+                self.base_url,
+                ["agent-secret-key"],
+            )
+            self._wait_terminal(run)
+            elapsed = time.monotonic() - started
+
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "model_response_timeout")
+        self.assertIn("0.12 seconds", snapshot["error"])
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(_AgentUpstream.calls, 1)
+        self.assertEqual(run["active_runtime_id"], "")
+
+    def test_agent_normalizes_read_file_alias_before_execution_and_history(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{
+                    "choices": [{
+                        "delta": {"tool_calls": [{
+                            "index": 0,
+                            "id": "alias-read-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({
+                                    "file_path": "README.md",
+                                }),
+                            },
+                        }]},
+                        "finish_reason": "tool_calls",
+                    }],
+                }],
+                [{
+                    "choices": [{
+                        "delta": {"content": "README starts with Durable Agent."},
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+
+        run = server_mod._create_agent_run(
+            "session-read-alias",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "read README"}],
+            },
+            self.base_url,
+            ["alias-key"],
+            allowed_tools=["read_file"],
+            max_rounds=3,
+        )
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(len(snapshot["toolExecutions"]), 1)
+        execution = snapshot["toolExecutions"][0]
+        self.assertEqual(execution["outcome"], "succeeded")
+        self.assertEqual(json.loads(execution["arguments"]), {
+            "path": "README.md",
+        })
+        self.assertEqual(execution["argumentAliases"], [{
+            "from": "file_path",
+            "to": "path",
+        }])
+        self.assertTrue(execution["result"]["ok"])
+        started_event = next(
+            event for event in snapshot["events"]
+            if event["type"] == "tool_started"
+        )
+        self.assertEqual(json.loads(started_event["data"]["arguments"]), {
+            "path": "README.md",
+        })
+        self.assertEqual(started_event["data"]["argumentAliases"], [{
+            "from": "file_path",
+            "to": "path",
+        }])
+        completed_event = next(
+            event for event in snapshot["events"]
+            if event["type"] == "tool_completed"
+        )
+        self.assertEqual(completed_event["data"]["outcome"], "succeeded")
+        self.assertEqual(completed_event["data"]["argumentAliases"], [{
+            "from": "file_path",
+            "to": "path",
+        }])
+        assistant_tool_call = next(
+            message for message in run["messages"]
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+        self.assertEqual(
+            json.loads(
+                assistant_tool_call["tool_calls"][0]["function"]["arguments"]
+            ),
+            {"path": "README.md"},
+        )
+
+    def test_agent_rejects_invalid_tool_arguments_without_calling_executor(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{
+                    "choices": [{
+                        "delta": {"tool_calls": [{
+                            "index": 0,
+                            "id": "invalid-read-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({
+                                    "unexpected": "README.md",
+                                }),
+                            },
+                        }]},
+                        "finish_reason": "tool_calls",
+                    }],
+                }],
+                [{
+                    "choices": [{
+                        "delta": {
+                            "content": "The tool arguments were invalid."
+                        },
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+
+        with mock.patch.object(
+            server_mod,
+            "execute_registered_tool",
+            wraps=server_mod.execute_registered_tool,
+        ) as execute_mock:
+            run = server_mod._create_agent_run(
+                "session-invalid-tool-arguments",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": "send invalid read arguments",
+                    }],
+                },
+                self.base_url,
+                ["invalid-argument-key"],
+                allowed_tools=["read_file"],
+                max_rounds=3,
+            )
+            self._wait_terminal(run)
+
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(execute_mock.call_count, 0)
+        execution = snapshot["toolExecutions"][0]
+        self.assertEqual(execution["status"], "completed")
+        self.assertEqual(execution["outcome"], "failed")
+        self.assertEqual(
+            execution["result"]["errorCode"], "invalid_tool_arguments",
+        )
+        completed_event = next(
+            event for event in snapshot["events"]
+            if event["type"] == "tool_completed"
+        )
+        self.assertEqual(completed_event["data"]["outcome"], "failed")
+        self.assertEqual(
+            {(item["field"], item["reason"])
+             for item in execution["result"]["fieldErrors"]},
+            {
+                ("path", "required"),
+                ("unexpected", "additional_property"),
+            },
+        )
+
+    def test_agent_blocks_fourth_identical_failure_and_forces_one_final_round(self):
+        tool_rounds = []
+        for index in range(1, 5):
+            tool_rounds.append([{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": f"repeat-failure-{index}",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "missing.txt"}),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }])
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = tool_rounds + [[{
+                "choices": [{
+                    "delta": {
+                        "content": "I could not verify the missing file."
+                    },
+                    "finish_reason": "stop",
+                }],
+            }]]
+
+        failing_executor = mock.Mock(
+            side_effect=ValueError("synthetic file failure"),
+        )
+        with mock.patch.dict(
+            server_mod.SERVER_TOOL_REGISTRY["read_file"],
+            {"execute": failing_executor},
+        ):
+            run = server_mod._create_agent_run(
+                "session-identical-tool-failure",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": "repeat the same failing read",
+                    }],
+                },
+                self.base_url,
+                ["repeat-failure-key"],
+                allowed_tools=["read_file"],
+                max_rounds=6,
+            )
+            self._wait_terminal(run)
+
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(failing_executor.call_count, 3)
+        self.assertEqual(_AgentUpstream.calls, 5)
+        self.assertEqual(len(snapshot["toolExecutions"]), 4)
+        self.assertTrue(
+            snapshot["toolExecutions"][-1]["result"]["retryBlocked"],
+        )
+        self.assertEqual(
+            snapshot["toolExecutions"][-1]["result"]["errorCode"],
+            "repeated_tool_failure",
+        )
+        self.assertEqual(
+            [event["type"] for event in snapshot["events"]].count(
+                "tool_retry_blocked"
+            ),
+            1,
+        )
+        self.assertNotIn("tools", _AgentUpstream.payloads[-1])
+        self.assertTrue(any(
+            message.get("role") == "system"
+            and "identical tool call was blocked" in str(
+                message.get("content") or ""
+            )
+            for message in _AgentUpstream.payloads[-1]["messages"]
+        ))
+        self.assertFalse(snapshot["forceFinalRound"])
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertTrue(all(
+            execution.get("outcome") == "failed"
+            for execution in restored["tool_executions"].values()
+        ))
+
+    def test_agent_allows_changed_arguments_after_three_identical_failures(self):
+        scripted_rounds = []
+        for index in range(1, 4):
+            scripted_rounds.append([{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": f"missing-read-{index}",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "missing.txt"}),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }])
+        scripted_rounds.extend([
+            [{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "corrected-read-4",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "README.md"}),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }],
+            [{
+                "choices": [{
+                    "delta": {"content": "The corrected read succeeded."},
+                    "finish_reason": "stop",
+                }],
+            }],
+        ])
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = scripted_rounds
+
+        def selective_read(payload):
+            if payload.get("path") == "missing.txt":
+                raise ValueError("synthetic file failure")
+            return {
+                "ok": True,
+                "action": "read_file",
+                "path": payload["path"],
+                "content": "# Durable Agent",
+            }
+
+        with mock.patch.dict(
+            server_mod.SERVER_TOOL_REGISTRY["read_file"],
+            {"execute": mock.Mock(side_effect=selective_read)},
+        ):
+            run = server_mod._create_agent_run(
+                "session-changed-tool-arguments",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": "correct a repeated failing read",
+                    }],
+                },
+                self.base_url,
+                ["changed-argument-key"],
+                allowed_tools=["read_file"],
+                max_rounds=6,
+            )
+            self._wait_terminal(run)
+
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(len(snapshot["toolExecutions"]), 4)
+        self.assertEqual(
+            [item["outcome"] for item in snapshot["toolExecutions"]],
+            ["failed", "failed", "failed", "succeeded"],
+        )
+        self.assertTrue(
+            snapshot["toolExecutions"][2]["result"]["retryLimitReached"],
+        )
+        self.assertFalse(snapshot["forceFinalRound"])
+        self.assertNotIn(
+            "tool_retry_blocked",
+            [event["type"] for event in snapshot["events"]],
+        )
+
+    def test_identical_failure_guard_requires_the_same_error_streak(self):
+        fingerprint = "same-tool-and-arguments"
+        run = {"tool_executions": {}}
+        for index, error in enumerate(("first error", "second error", "first error")):
+            result = {
+                "ok": False,
+                "action": "read_file",
+                "error": error,
+            }
+            run["tool_executions"][str(index)] = {
+                "fingerprint": fingerprint,
+                "status": "completed",
+                "outcome": "failed",
+                "failureSignature": server_mod._agent_tool_failure_signature(
+                    result
+                ),
+                "result": result,
+            }
+        self.assertEqual(
+            server_mod._agent_identical_tool_failure_count(run, fingerprint),
+            1,
+        )
+
+        success = {"ok": True, "action": "read_file"}
+        run["tool_executions"]["success"] = {
+            "fingerprint": fingerprint,
+            "status": "completed",
+            "outcome": "succeeded",
+            "result": success,
+        }
+        self.assertEqual(
+            server_mod._agent_identical_tool_failure_count(run, fingerprint),
+            0,
+        )
 
     def test_agent_enforces_and_persists_grouped_tool_budgets(self):
         run = server_mod._create_agent_run(
@@ -2365,6 +2777,48 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(event_types[-1], "cancelled")
         persisted = server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
         self.assertNotIn("cancel-secret-key", persisted)
+
+    def test_content_filter_stops_immediately_without_empty_response_retry(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[
+                {"choices": [{
+                    "delta": {},
+                    "finish_reason": "content_filter",
+                }]},
+                {"choices": [], "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 0,
+                    "total_tokens": 7,
+                }},
+            ]]
+        run = server_mod._create_agent_run(
+            "session-content-filtered",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "complete the task"}],
+            },
+            self.base_url,
+            ["filter-key"],
+            allowed_tools=[],
+            max_rounds=3,
+        )
+
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "content_filtered")
+        self.assertEqual(snapshot["error"], "finish_reason=content_filter")
+        self.assertEqual(snapshot["nonActionCount"], 0)
+        self.assertEqual(_AgentUpstream.calls, 1)
+        self.assertEqual(
+            [item["outcome"] for item in run["rounds"]],
+            ["content_filtered"],
+        )
+        self.assertNotIn(
+            "model_recovery",
+            [event["type"] for event in run["events"]],
+        )
 
     def test_empty_model_round_recovers_once_and_completes(self):
         with _AgentUpstream.scripted_lock:

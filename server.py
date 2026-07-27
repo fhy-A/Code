@@ -84,6 +84,8 @@ _dependency_operation_lock = threading.RLock()
 _DEPENDENCY_OPERATION_TERMINAL = {"completed", "failed", "cancelled"}
 _MODEL_RUNTIME_TERMINAL_TTL = 30 * 60
 _MODEL_RUNTIME_ACTIVE_TTL = 6 * 60 * 60
+_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT = 120.0
+_MODEL_RUNTIME_STREAM_IDLE_TIMEOUT = 180.0
 _agent_runs = {}
 _agent_run_lock = threading.RLock()
 _AGENT_RUN_TERMINAL = {"completed", "failed", "cancelled"}
@@ -92,6 +94,10 @@ _AGENT_RUN_WAITING = {"waiting_credentials", "waiting_user_input", "waiting_auth
 _AGENT_PERMISSION_PROFILES = {"read", "plan", "accept", "bypass"}
 _AGENT_RUN_DEFAULT_MAX_ROUNDS = 12
 _AGENT_RUN_MAX_ROUNDS = 50
+_AGENT_IDENTICAL_TOOL_FAILURE_LIMIT = 3
+_AGENT_CONTENT_FILTER_FINISH_REASONS = {
+    "content_filter", "safety", "blocked",
+}
 _AGENT_TOOL_MESSAGE_LIMIT = 12000
 _AGENT_DELEGATION_MAX_CONCURRENCY = 3
 _AGENT_CREDENTIAL_FIELDS = {
@@ -244,6 +250,43 @@ def _runtime_result_snapshot(run):
     }
 
 
+def _runtime_has_meaningful_output(run):
+    """Return whether the model has emitted content the Agent can act on."""
+    result = run["result"]
+    return bool(
+        str(result.get("content") or "").strip()
+        or str(result.get("reasoning") or "").strip()
+        or run["tool_call_parts"]
+    )
+
+
+def _set_runtime_response_timeout(response, seconds):
+    """Apply a read timeout to the socket wrapped by urllib's HTTPResponse."""
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    candidates = (
+        getattr(fp, "_sock", None),
+        getattr(raw, "_sock", None),
+    )
+    for candidate in candidates:
+        if candidate is not None and hasattr(candidate, "settimeout"):
+            candidate.settimeout(max(0.001, float(seconds)))
+            return True
+    return False
+
+
+class _ModelFirstResponseTimeout(TimeoutError):
+    """Raised when an upstream emits no meaningful model event in time."""
+
+
+def _first_response_timeout_message():
+    seconds = f"{_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT:g}"
+    return (
+        "No model content, reasoning, or tool call was received within "
+        f"{seconds} seconds"
+    )
+
+
 def _normalize_runtime_base_url(base_url):
     value = str(base_url or NEW_API_BASE_URL or "http://localhost:3000").strip().rstrip("/")
     if value.endswith("/v1"):
@@ -310,6 +353,9 @@ def _finish_runtime_run(
         run["upstream_status"] = int(upstream_status or 0)
         run["error_code"] = str(error_code or "")
         run["error_transient"] = bool(transient)
+        # Drop request secrets before publishing the terminal state to waiters.
+        run["keys"] = []
+        run["payload"] = {}
         run["updated_at"] = time.time()
         run["condition"].notify_all()
 
@@ -368,6 +414,8 @@ def _model_runtime_worker(run):
     keys = list(run["keys"] or [""])
     last_error = "Upstream request failed"
     last_status = 0
+    first_response_deadline = time.monotonic() + _MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT
+    received_meaningful_output = False
 
     try:
         for key_index, key in enumerate(keys):
@@ -383,13 +431,36 @@ def _model_runtime_worker(run):
                 method="POST",
                 headers=headers,
             )
+            response = None
             try:
-                response = request.urlopen(req, timeout=180)
+                remaining = first_response_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _ModelFirstResponseTimeout(_first_response_timeout_message())
+                response = request.urlopen(
+                    req,
+                    timeout=min(_MODEL_RUNTIME_STREAM_IDLE_TIMEOUT, remaining),
+                )
                 run["upstream_response"] = response
                 run["upstream_status"] = int(getattr(response, "status", 200) or 200)
                 saw_done = False
                 while not run["cancel_event"].is_set():
-                    raw_line = response.readline()
+                    if received_meaningful_output:
+                        read_timeout = _MODEL_RUNTIME_STREAM_IDLE_TIMEOUT
+                    else:
+                        read_timeout = first_response_deadline - time.monotonic()
+                        if read_timeout <= 0:
+                            raise _ModelFirstResponseTimeout(
+                                _first_response_timeout_message()
+                            )
+                    _set_runtime_response_timeout(response, read_timeout)
+                    try:
+                        raw_line = response.readline()
+                    except TimeoutError as exc:
+                        if not received_meaningful_output:
+                            raise _ModelFirstResponseTimeout(
+                                _first_response_timeout_message()
+                            ) from exc
+                        raise
                     if not raw_line:
                         break
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -397,10 +468,14 @@ def _model_runtime_worker(run):
                         continue
                     data = line[5:].lstrip()
                     _append_runtime_event(run, data)
+                    if (
+                        not received_meaningful_output
+                        and _runtime_has_meaningful_output(run)
+                    ):
+                        received_meaningful_output = True
                     if data == "[DONE]":
                         saw_done = True
                         break
-                response.close()
                 run["upstream_response"] = None
                 if run["cancel_event"].is_set():
                     _finish_runtime_run(run, "cancelled")
@@ -414,12 +489,43 @@ def _model_runtime_worker(run):
                         run["upstream_status"],
                     )
                 return
+            except _ModelFirstResponseTimeout as exc:
+                run["upstream_response"] = None
+                _finish_runtime_run(
+                    run,
+                    "failed",
+                    str(exc),
+                    run["upstream_status"],
+                    error_code="model_response_timeout",
+                    transient=True,
+                )
+                return
             except Exception as exc:
                 run["upstream_response"] = None
                 last_status, last_error = _runtime_error_text(exc)
+                if (
+                    not received_meaningful_output
+                    and time.monotonic() >= first_response_deadline
+                ):
+                    _finish_runtime_run(
+                        run,
+                        "failed",
+                        _first_response_timeout_message(),
+                        run["upstream_status"],
+                        error_code="model_response_timeout",
+                        transient=True,
+                    )
+                    return
                 if run["events"] or key_index >= len(keys) - 1:
                     break
                 continue
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                run["upstream_response"] = None
         if run["cancel_event"].is_set():
             _finish_runtime_run(run, "cancelled")
         else:
@@ -757,6 +863,8 @@ def _agent_run_record(run):
         "error": run.get("error", ""),
         "errorCode": run.get("error_code", ""),
         "nonActionCount": int(run.get("non_action_count") or 0),
+        "forceFinalRound": bool(run.get("force_final_round")),
+        "forceFinalReason": str(run.get("force_final_reason") or ""),
         "baseUrl": run.get("base_url", ""),
         "request": _json_clone(run.get("request") or {}),
         "messages": _json_clone(run.get("messages") or []),
@@ -795,7 +903,14 @@ def _agent_public_tool_executions(run):
             "toolCallId": call_id,
             "name": execution.get("name", ""),
             "arguments": execution.get("arguments", "{}"),
+            "argumentAliases": _json_clone(
+                execution.get("argumentAliases") or []
+            ),
             "status": execution.get("status", ""),
+            "outcome": (
+                execution.get("outcome")
+                or _agent_execution_outcome(execution.get("result"))
+            ),
             "authorizationDecision": execution.get("authorizationDecision", ""),
             "result": public_result,
             "error": execution.get("error", ""),
@@ -864,6 +979,7 @@ def _agent_snapshot(run, cursor=0):
             "error": run.get("error", ""),
             "errorCode": run.get("error_code", ""),
             "nonActionCount": int(run.get("non_action_count") or 0),
+            "forceFinalRound": bool(run.get("force_final_round")),
             "model": str((run.get("request") or {}).get("model") or ""),
             "round": len(run.get("rounds") or []),
             "maxRounds": run["max_rounds"],
@@ -1100,6 +1216,8 @@ def _agent_run_from_record(record):
     for execution in tool_executions.values():
         if not isinstance(execution, dict):
             continue
+        if execution.get("status") == "completed" and not execution.get("outcome"):
+            execution["outcome"] = _agent_execution_outcome(execution.get("result"))
         spec = SERVER_TOOL_REGISTRY.get(str(execution.get("name") or "")) or {}
         if spec.get("effect") != "command" or execution.get("status") != "running":
             continue
@@ -1120,6 +1238,7 @@ def _agent_run_from_record(record):
             "error": "Command was interrupted by a service restart; its external effects are unknown and it was not replayed.",
         }
         execution["status"] = "completed"
+        execution["outcome"] = "failed"
         execution["result"] = result
         execution["error"] = result["error"]
         execution["completedAt"] = now_iso()
@@ -1143,6 +1262,8 @@ def _agent_run_from_record(record):
         "error": str(record.get("error") or ""),
         "error_code": str(record.get("errorCode") or ""),
         "non_action_count": max(0, int(record.get("nonActionCount") or 0)),
+        "force_final_round": bool(record.get("forceFinalRound")),
+        "force_final_reason": str(record.get("forceFinalReason") or ""),
         "base_url": _agent_base_url(record.get("baseUrl") or ""),
         "request": request_options,
         "messages": list(record.get("messages") or []),
@@ -1206,6 +1327,138 @@ def _agent_usage_add(total, usage):
             total[key] = value
 
 
+def _tool_schema_type_matches(value, expected_type):
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
+
+
+def _tool_schema_errors(value, schema, field=""):
+    """Validate the JSON-Schema subset used by the built-in tool protocol."""
+    if not isinstance(schema, dict):
+        return []
+    errors = []
+    expected_type = schema.get("type")
+    if expected_type and not _tool_schema_type_matches(value, expected_type):
+        errors.append({
+            "field": field or "$",
+            "reason": "type",
+            "message": f"must be {expected_type}",
+        })
+        return errors
+
+    if "enum" in schema and value not in schema.get("enum", []):
+        errors.append({
+            "field": field or "$",
+            "reason": "enum",
+            "message": "must be one of the allowed values",
+        })
+
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        for key in required:
+            if key not in value:
+                errors.append({
+                    "field": f"{field}.{key}" if field else str(key),
+                    "reason": "required",
+                    "message": "is required",
+                })
+        if schema.get("additionalProperties") is False:
+            for key in value:
+                if key not in properties:
+                    errors.append({
+                        "field": f"{field}.{key}" if field else str(key),
+                        "reason": "additional_property",
+                        "message": "is not supported",
+                    })
+        for key, item in value.items():
+            child_schema = properties.get(key)
+            if child_schema is None:
+                continue
+            child_field = f"{field}.{key}" if field else str(key)
+            errors.extend(_tool_schema_errors(item, child_schema, child_field))
+
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if min_items is not None and len(value) < int(min_items):
+            errors.append({
+                "field": field or "$",
+                "reason": "min_items",
+                "message": f"must contain at least {int(min_items)} item(s)",
+            })
+        if max_items is not None and len(value) > int(max_items):
+            errors.append({
+                "field": field or "$",
+                "reason": "max_items",
+                "message": f"must contain at most {int(max_items)} item(s)",
+            })
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                child_field = f"{field}[{index}]" if field else f"[{index}]"
+                errors.extend(_tool_schema_errors(item, item_schema, child_field))
+    return errors
+
+
+def _registered_tool_argument_errors(action, payload):
+    spec = SERVER_TOOL_REGISTRY.get(str(action or "")) or {}
+    definition = spec.get("definition") or {}
+    function = definition.get("function") or {}
+    schema = function.get("parameters") or {}
+    if not spec:
+        return [{
+            "field": "$",
+            "reason": "unknown_tool",
+            "message": f"unknown server tool: {action}",
+        }]
+    return _tool_schema_errors(payload, schema)
+
+
+def _format_tool_argument_error(action, errors):
+    details = []
+    for item in list(errors or [])[:4]:
+        field = str(item.get("field") or "$")
+        message = str(item.get("message") or "is invalid")
+        details.append(f"{field} {message}")
+    suffix = "; ".join(details) or "arguments are invalid"
+    return f"{action} received invalid arguments: {suffix}"
+
+
+def _canonicalize_agent_tool_arguments(action, arguments):
+    """Normalize narrowly supported model aliases without changing public schemas."""
+    canonical = dict(arguments or {})
+    aliases = []
+    errors = []
+    if action == "read_file" and "file_path" in canonical:
+        alias_value = canonical.get("file_path")
+        if "path" in canonical and canonical.get("path") != alias_value:
+            errors.append({
+                "field": "file_path",
+                "reason": "conflict",
+                "message": "conflicts with path",
+            })
+        else:
+            if "path" not in canonical:
+                canonical["path"] = alias_value
+            canonical.pop("file_path", None)
+            aliases.append({"from": "file_path", "to": "path"})
+    return canonical, aliases, errors
+
+
 def _normalize_agent_tool_calls(run, tool_calls, round_number):
     normalized = []
     for fallback_index, source in enumerate(tool_calls or []):
@@ -1220,10 +1473,19 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number):
             arguments_text = raw_arguments.strip() or "{}"
         else:
             arguments_text = json.dumps(raw_arguments or {}, ensure_ascii=False, separators=(",", ":"))
+        argument_aliases = []
+        validation_errors = []
         try:
-            arguments = json.loads(arguments_text)
-            if not isinstance(arguments, dict):
+            parsed_arguments = json.loads(arguments_text)
+            if not isinstance(parsed_arguments, dict):
                 raise ValueError("tool arguments must be an object")
+            arguments, argument_aliases, canonical_errors = (
+                _canonicalize_agent_tool_arguments(name, parsed_arguments)
+            )
+            validation_errors.extend(canonical_errors)
+            validation_errors.extend(
+                _registered_tool_argument_errors(name, arguments)
+            )
         except Exception as exc:
             arguments = None
             parse_error = str(exc)
@@ -1245,6 +1507,8 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number):
             "function": {"name": name, "arguments": arguments_text},
             "arguments": arguments,
             "parseError": parse_error,
+            "validationErrors": validation_errors,
+            "argumentAliases": argument_aliases,
             "fingerprint": fingerprint,
         })
     normalized.sort(key=lambda call: call["index"])
@@ -1293,6 +1557,125 @@ def _agent_tool_message_content(result):
         compact["preview"] = compact["preview"][:max(0, len(compact["preview"]) - overflow)]
         compact_serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
     return compact_serialized
+
+
+def _agent_execution_outcome(result):
+    if not isinstance(result, dict):
+        return ""
+    return "failed" if result.get("ok") is False else "succeeded"
+
+
+def _set_agent_execution_result(execution, result):
+    execution["status"] = "completed"
+    execution["outcome"] = _agent_execution_outcome(result)
+    if execution["outcome"] == "failed":
+        execution["failureSignature"] = (
+            execution.get("failureSignature")
+            or _agent_tool_failure_signature(result)
+        )
+    else:
+        execution.pop("failureSignature", None)
+    execution["result"] = _json_clone(result)
+    execution["error"] = (
+        str(result.get("error") or "")
+        if isinstance(result, dict) and result.get("ok") is False
+        else ""
+    )
+    execution["completedAt"] = now_iso()
+
+
+def _agent_tool_failure_signature(result):
+    if not isinstance(result, dict) or result.get("ok") is not False:
+        return ""
+    error_code = str(result.get("errorCode") or "").strip().lower()
+    error_text = " ".join(str(result.get("error") or "").split()).lower()
+    return f"{error_code}\0{error_text}"
+
+
+def _agent_identical_tool_failure_count(
+    run, fingerprint, failure_signature="",
+):
+    if not fingerprint:
+        return 0
+    matching = []
+    for execution in (run.get("tool_executions") or {}).values():
+        if (
+            isinstance(execution, dict)
+            and execution.get("fingerprint") == fingerprint
+        ):
+            matching.append(execution)
+    if not matching:
+        return 0
+    target_signature = str(failure_signature or "")
+    if not target_signature:
+        for execution in reversed(matching):
+            result = execution.get("result")
+            if isinstance(result, dict) and result.get("retryBlocked"):
+                continue
+            target_signature = (
+                str(execution.get("failureSignature") or "")
+                or _agent_tool_failure_signature(result)
+            )
+            if target_signature:
+                break
+            if execution.get("status") == "completed":
+                return 0
+    if not target_signature:
+        return 0
+    count = 0
+    for execution in reversed(matching):
+        result = execution.get("result")
+        if isinstance(result, dict) and result.get("retryBlocked"):
+            continue
+        signature = (
+            str(execution.get("failureSignature") or "")
+            or _agent_tool_failure_signature(result)
+        )
+        if signature == target_signature:
+            count += 1
+            continue
+        if execution.get("status") == "completed":
+            break
+    return count
+
+
+def _agent_invalid_tool_arguments_result(action, parse_error="", errors=None):
+    field_errors = list(errors or [])
+    error = (
+        str(parse_error)
+        if parse_error
+        else _format_tool_argument_error(action, field_errors)
+    )
+    return {
+        "ok": False,
+        "action": action,
+        "errorCode": "invalid_tool_arguments",
+        "error": error[:2000],
+        "fieldErrors": field_errors[:20],
+    }
+
+
+def _agent_repeated_tool_failure_result(action, failure_count):
+    return {
+        "ok": False,
+        "action": action,
+        "errorCode": "repeated_tool_failure",
+        "error": (
+            "This exact tool call was blocked after "
+            f"{failure_count} identical failures. Do not repeat it; "
+            "change the arguments, use another tool, or explain the limitation."
+        ),
+        "failureCount": int(failure_count),
+        "retryBlocked": True,
+    }
+
+
+class _AgentToolResult(Exception):
+    """Carry a structured, non-fatal tool result through the executor."""
+
+    def __init__(self, result):
+        super().__init__(str((result or {}).get("error") or "tool execution failed"))
+        self.result = dict(result or {})
 
 
 def _agent_tool_vision_marker(result, call_id):
@@ -1580,10 +1963,7 @@ def _submit_agent_input(run, answers):
         execution = run.get("tool_executions", {}).get(call_id)
         if not isinstance(execution, dict):
             raise ValueError("Agent user-input tool execution is missing")
-        execution["status"] = "completed"
-        execution["result"] = _json_clone(result)
-        execution["error"] = ""
-        execution["completedAt"] = now_iso()
+        _set_agent_execution_result(execution, result)
         if not _agent_has_current_tool_message(run, call_id):
             run["messages"].append({
                 "role": "tool",
@@ -1610,6 +1990,7 @@ def _submit_agent_input(run, answers):
         "toolCallId": call_id,
         "name": "request_user_input",
         "result": result,
+        "outcome": _agent_execution_outcome(result),
         "replayed": False,
     })
     _append_agent_event(run, "waiting_credentials", {
@@ -1702,10 +2083,7 @@ def _submit_agent_command_authorization(run, pending, normalized_decision):
                 "rejected": True,
                 "error": "User rejected the command.",
             }
-            execution["status"] = "completed"
-            execution["result"] = _json_clone(result)
-            execution["error"] = result["error"]
-            execution["completedAt"] = now_iso()
+            _set_agent_execution_result(execution, result)
             if not _agent_has_current_tool_message(run, call_id):
                 run["messages"].append({
                     "role": "tool",
@@ -1735,6 +2113,7 @@ def _submit_agent_command_authorization(run, pending, normalized_decision):
             "toolCallId": call_id,
             "name": "run_command",
             "result": result,
+            "outcome": _agent_execution_outcome(result),
             "replayed": False,
         })
     _append_agent_event(run, "waiting_credentials", {
@@ -1776,10 +2155,7 @@ def _submit_agent_file_authorization(run, pending, normalized_decision):
                 "rejected": True,
                 "error": f"User rejected {action}.",
             }
-            execution["status"] = "completed"
-            execution["result"] = _json_clone(result)
-            execution["error"] = result["error"]
-            execution["completedAt"] = now_iso()
+            _set_agent_execution_result(execution, result)
             if not _agent_has_current_tool_message(run, call_id):
                 run["messages"].append({
                     "role": "tool",
@@ -1809,6 +2185,7 @@ def _submit_agent_file_authorization(run, pending, normalized_decision):
             "toolCallId": call_id,
             "name": action,
             "result": result,
+            "outcome": _agent_execution_outcome(result),
             "replayed": False,
         })
     _append_agent_event(run, "waiting_credentials", {
@@ -1988,10 +2365,7 @@ def _submit_agent_authorization(run, authorization_id, decision):
         if str(current.get("authorizationId") or "") != expected_id:
             raise ValueError("Agent authorization request changed during submission")
         execution = run.get("tool_executions", {}).get(call_id)
-        execution["status"] = "completed"
-        execution["result"] = _json_clone(result)
-        execution["error"] = "" if result.get("ok") else str(result.get("error") or "")
-        execution["completedAt"] = now_iso()
+        _set_agent_execution_result(execution, result)
         if not _agent_has_current_tool_message(run, call_id):
             run["messages"].append({
                 "role": "tool",
@@ -2020,6 +2394,7 @@ def _submit_agent_authorization(run, authorization_id, decision):
         "toolCallId": call_id,
         "name": "propose_edit",
         "result": result,
+        "outcome": _agent_execution_outcome(result),
         "replayed": bool(result.get("replayed")),
     })
     _append_agent_event(run, "waiting_credentials", {
@@ -2189,10 +2564,7 @@ def _complete_agent_delegation(run, execution, child, prompt):
             run["updated_at"] = now_iso()
         _persist_agent_run(run)
     result = _agent_delegation_result(child, prompt)
-    execution["status"] = "completed"
-    execution["result"] = _json_clone(result)
-    execution["error"] = "" if result.get("ok") else str(result.get("error") or "")
-    execution["completedAt"] = now_iso()
+    _set_agent_execution_result(execution, result)
     _persist_agent_run(run)
     return result
 
@@ -2249,6 +2621,7 @@ def _new_agent_delegation_execution(run, call):
         "arguments": (call.get("function") or {}).get("arguments", "{}"),
         "fingerprint": call.get("fingerprint", ""),
         "status": "queued_child",
+        "outcome": "",
         "result": None,
         "error": "",
         "startedAt": now_iso(),
@@ -2269,10 +2642,7 @@ def _fail_agent_delegation_execution(run, execution, error_message):
         "action": "task",
         "error": str(error_message or "Delegated child Agent failed")[:2000],
     }
-    execution["status"] = "completed"
-    execution["result"] = result
-    execution["error"] = result["error"]
-    execution["completedAt"] = now_iso()
+    _set_agent_execution_result(execution, result)
     _persist_agent_run(run)
     return result
 
@@ -2298,6 +2668,7 @@ def _flush_agent_delegation_results(run, calls):
             "toolCallId": call_id,
             "name": "task",
             "result": result,
+            "outcome": _agent_execution_outcome(result),
             "replayed": bool(execution.get("replayedFromCheckpoint")),
         })
 
@@ -2467,6 +2838,9 @@ def _execute_agent_pending_tools(run):
             }
             and execution.get("childAgentRunId")
         )
+        prior_failure_count = _agent_identical_tool_failure_count(
+            run, call.get("fingerprint", ""),
+        )
         if reused_execution:
             result = execution.get("result") or {}
         else:
@@ -2479,8 +2853,12 @@ def _execute_agent_pending_tools(run):
                 execution = {
                     "name": name,
                     "arguments": (call.get("function") or {}).get("arguments", "{}"),
+                    "argumentAliases": _json_clone(
+                        call.get("argumentAliases") or []
+                    ),
                     "fingerprint": call.get("fingerprint", ""),
                     "status": "running",
+                    "outcome": "",
                     "result": None,
                     "error": "",
                     "startedAt": now_iso(),
@@ -2491,6 +2869,9 @@ def _execute_agent_pending_tools(run):
                     "toolCallId": call_id,
                     "name": name,
                     "arguments": execution["arguments"],
+                    "argumentAliases": _json_clone(
+                        execution.get("argumentAliases") or []
+                    ),
                 })
             try:
                 previous_project_root = getattr(
@@ -2509,6 +2890,27 @@ def _execute_agent_pending_tools(run):
                 budget_error = _agent_tool_budget_error(run, name)
                 if budget_error:
                     raise ValueError(budget_error)
+                if call.get("parseError"):
+                    raise _AgentToolResult(_agent_invalid_tool_arguments_result(
+                        name, parse_error=call.get("parseError"),
+                    ))
+                validation_errors = list(call.get("validationErrors") or [])
+                if validation_errors:
+                    raise _AgentToolResult(_agent_invalid_tool_arguments_result(
+                        name, errors=validation_errors,
+                    ))
+                if prior_failure_count >= _AGENT_IDENTICAL_TOOL_FAILURE_LIMIT:
+                    blocked = _agent_repeated_tool_failure_result(
+                        name, prior_failure_count,
+                    )
+                    run["force_final_round"] = True
+                    run["force_final_reason"] = blocked["error"]
+                    _append_agent_event(run, "tool_retry_blocked", {
+                        "toolCallId": call_id,
+                        "name": name,
+                        "failureCount": prior_failure_count,
+                    })
+                    raise _AgentToolResult(blocked)
                 if spec.get("effect") == "interaction":
                     if len(run.get("pending_tool_calls") or []) != 1:
                         raise ValueError("request_user_input must be the only tool call in its model turn")
@@ -2680,7 +3082,9 @@ def _execute_agent_pending_tools(run):
                     execution["status"] = "applying_file_mutation"
                     _persist_agent_run(run)
                     arguments = {**call["arguments"], "_operationId": operation_id}
-                    result = execute_registered_tool(name, arguments)
+                    result = execute_registered_tool(
+                        name, arguments, _arguments_validated=True,
+                    )
                 elif spec.get("effect") == "delegation":
                     result = _execute_agent_delegation(run, call, execution)
                     if result is None:
@@ -2695,6 +3099,9 @@ def _execute_agent_pending_tools(run):
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
                     result = execute_registered_tool(name, call["arguments"])
+            except _AgentToolResult as exc:
+                result = exc.result
+                execution["error"] = str(result.get("error") or "")
             except Exception as exc:
                 result = {"ok": False, "action": name, "error": str(exc)[:2000]}
                 execution["error"] = result["error"]
@@ -2715,9 +3122,28 @@ def _execute_agent_pending_tools(run):
                     _agent_workspace_context.workspace_roots = previous_workspace_roots
             if run["cancel_event"].is_set() or run["status"] in _AGENT_RUN_TERMINAL:
                 return False
-            execution["status"] = "completed"
-            execution["result"] = _json_clone(result)
-            execution["completedAt"] = now_iso()
+            if (
+                isinstance(result, dict)
+                and result.get("ok") is False
+                and not result.get("retryBlocked")
+            ):
+                failure_signature = _agent_tool_failure_signature(result)
+                failure_count = _agent_identical_tool_failure_count(
+                    run,
+                    call.get("fingerprint", ""),
+                    failure_signature,
+                ) + 1
+                execution["failureSignature"] = failure_signature
+                result = dict(result)
+                result["failureCount"] = failure_count
+                if failure_count >= _AGENT_IDENTICAL_TOOL_FAILURE_LIMIT:
+                    result["retryLimitReached"] = True
+                    result["error"] = (
+                        str(result.get("error") or "Tool execution failed")
+                        + " The identical-call retry limit is now reached; "
+                        "change the arguments, use another tool, or explain the limitation."
+                    )[:2000]
+            _set_agent_execution_result(execution, result)
             _persist_agent_run(run)
 
         if not _agent_has_current_tool_message(run, call_id):
@@ -2740,7 +3166,12 @@ def _execute_agent_pending_tools(run):
         _append_agent_event(run, "tool_completed", {
             "toolCallId": call_id,
             "name": name,
+            "arguments": execution.get("arguments", "{}"),
+            "argumentAliases": _json_clone(
+                execution.get("argumentAliases") or []
+            ),
             "result": result,
+            "outcome": _agent_execution_outcome(result),
             "replayed": reused_execution or bool(result.get("replayed")),
         })
     return True
@@ -2782,7 +3213,18 @@ def _agent_run_worker(run):
             round_number = len(run["rounds"]) + 1
             payload = dict(run["request"])
             payload["messages"] = _agent_model_messages(run)
-            model_tools = _agent_model_tools(run)
+            force_final_round = bool(run.get("force_final_round"))
+            if force_final_round:
+                payload["messages"].append({
+                    "role": "system",
+                    "content": (
+                        "[System recovery] An identical tool call was blocked after "
+                        "repeated failures. Do not call any tool. Give a concise final "
+                        "response that states the verified result or explains the "
+                        "limitation; do not promise further action."
+                    ),
+                })
+            model_tools = [] if force_final_round else _agent_model_tools(run)
             if model_tools:
                 payload["tools"] = _json_clone(model_tools)
                 payload["tool_choice"] = payload.get("tool_choice") or "auto"
@@ -2833,13 +3275,28 @@ def _agent_run_worker(run):
                 "usage": _json_clone(model_result.get("usage") or {}),
                 "completedAt": now_iso(),
             }
+            if force_final_round:
+                round_record["forcedFinal"] = True
             content = str(model_result.get("content") or "").strip()
             reasoning = str(model_result.get("reasoning") or "").strip()
-            non_action_reason = "" if tool_calls else _agent_non_action_reason(content, reasoning)
+            finish_reason = str(model_result.get("finishReason") or "").strip().lower()
+            content_filtered = bool(
+                not tool_calls
+                and finish_reason in _AGENT_CONTENT_FILTER_FINISH_REASONS
+            )
+            non_action_reason = (
+                ""
+                if tool_calls or content_filtered
+                else _agent_non_action_reason(content, reasoning)
+            )
             round_record["outcome"] = (
                 "tool_calls"
                 if tool_calls
-                else (non_action_reason or "completed")
+                else (
+                    "content_filtered"
+                    if content_filtered
+                    else (non_action_reason or "completed")
+                )
             )
             run["rounds"].append(round_record)
             _agent_usage_add(run["usage"], round_record["usage"])
@@ -2847,6 +3304,39 @@ def _agent_run_worker(run):
 
             if run["cancel_event"].is_set() or run["status"] in _AGENT_RUN_TERMINAL:
                 _finish_agent_run(run, "cancelled")
+                return
+
+            if content_filtered:
+                _finish_agent_run(
+                    run,
+                    "failed",
+                    f"finish_reason={finish_reason}",
+                    error_code="content_filtered",
+                )
+                return
+
+            if force_final_round:
+                run["force_final_round"] = False
+                run["force_final_reason"] = ""
+                if tool_calls or non_action_reason:
+                    _finish_agent_run(
+                        run,
+                        "failed",
+                        (
+                            "Model did not provide a usable final response after "
+                            "an identical tool call exceeded its retry limit"
+                        ),
+                        error_code="repeated_tool_failure",
+                    )
+                    return
+                run["non_action_count"] = 0
+                run["result"] = {
+                    "content": content,
+                    "reasoning": reasoning,
+                    "finishReason": str(model_result.get("finishReason") or ""),
+                    "usage": _json_clone(run["usage"]),
+                }
+                _finish_agent_run(run, "completed")
                 return
 
             if tool_calls:
@@ -2968,6 +3458,8 @@ def _create_agent_run(
         "error": "",
         "error_code": "",
         "non_action_count": 0,
+        "force_final_round": False,
+        "force_final_reason": "",
         "base_url": _agent_base_url(base_url),
         "request": request_options,
         "messages": _json_clone(messages),
@@ -8677,12 +9169,19 @@ SERVER_TOOL_REGISTRY = {
 }
 
 
-def execute_registered_tool(action, payload):
+def execute_registered_tool(action, payload, *, _arguments_validated=False):
     spec = SERVER_TOOL_REGISTRY.get(str(action or ""))
     if not spec:
         raise ValueError(f"unknown server tool: {action}")
     if not isinstance(payload, dict):
         raise ValueError("tool payload must be an object")
+    if not _arguments_validated:
+        validation_payload = dict(payload)
+        if action in {"write_file", "delete_file"}:
+            validation_payload.pop("_operationId", None)
+        errors = _registered_tool_argument_errors(action, validation_payload)
+        if errors:
+            raise ValueError(_format_tool_argument_error(action, errors))
     if not callable(spec.get("execute")):
         raise ValueError(f"server tool is controlled by the Agent runtime: {action}")
     return spec["execute"](payload)
