@@ -619,6 +619,7 @@ function buildRunContext(sessionId, options = {}) {
 const els = {
 
   shell: document.querySelector(".pi-shell"),
+  productName: document.getElementById("productName"),
 
   workbench: document.querySelector(".workbench"),
 
@@ -1864,8 +1865,17 @@ function trashIcon() {
 
 // ── Permission notification ──
 
-const _originalTitle = document.title;
+let _baseDocumentTitle = document.title;
+let _instanceProductName = "Code";
 let _pendingPermNotify = false;
+
+function applyInstanceIdentity(instanceMode) {
+  const isDev = instanceMode === "dev";
+  _instanceProductName = isDev ? "Code Dev" : "Code";
+  _baseDocumentTitle = _instanceProductName;
+  if (els.productName) els.productName.textContent = _instanceProductName;
+  if (!_pendingPermNotify) document.title = _baseDocumentTitle;
+}
 
 function isUserAway() {
   return document.visibilityState !== "visible";
@@ -1874,7 +1884,7 @@ function isUserAway() {
 function notifyTaskComplete(sessionId) {
   if (!isUserAway()) return;
   const title = els.sessionTitle.value || t("sessionTitleDefault");
-  document.title = `[${t("permNotifyDone") || "Done"}] ${title}`;
+  document.title = `[${t("permNotifyDone") || "Done"}] ${_instanceProductName} · ${title}`;
   _notify("Code - " + (t("notifyTaskDoneBody") || "已完成"), title);
 }
 
@@ -1882,7 +1892,7 @@ function notifyPermissionNeeded(action, path) {
   if (!isUserAway()) return;
   const label = action === "propose_edit" ? t("permNotifyEdit") : t("permNotifyWrite");
   _pendingPermNotify = true;
-  document.title = `[${t("permNotifyPending")}] ${label} - ${path}`;
+  document.title = `[${t("permNotifyPending")}] ${_instanceProductName} · ${label} - ${path}`;
   if (!state._titleInterval) {
     state._titleInterval = setInterval(() => {
       if (!_pendingPermNotify) { clearInterval(state._titleInterval); state._titleInterval = null; return; }
@@ -1894,7 +1904,7 @@ function notifyPermissionNeeded(action, path) {
 
 function clearPermissionNotify() {
   _pendingPermNotify = false;
-  document.title = _originalTitle;
+  document.title = _baseDocumentTitle;
   if (state._titleInterval) { clearInterval(state._titleInterval); state._titleInterval = null; }
 }
 
@@ -7001,7 +7011,7 @@ async function requestUserInput(tool, ctx = null) {
     .catch((error) => console.error("Failed to persist questionnaire result:", error));
   if (request.sessionId === state.sessionId) renderMessages();
   if (isUserAway()) {
-    document.title = `[${t("questionnaireTitle")}] ${els.sessionTitle?.value || t("sessionTitleDefault")}`;
+    document.title = `[${t("questionnaireTitle")}] ${_instanceProductName} · ${els.sessionTitle?.value || t("sessionTitleDefault")}`;
     _notify(`Code - ${t("questionnaireTitle")}`, request.title);
   }
   return new Promise((resolve) => {
@@ -12082,6 +12092,7 @@ async function init() {
     // Keep the current page connected. When the backend process is replaced,
     // its instance ID changes and this existing page refreshes in place.
     let browserServerInstanceId = null;
+    let browserInstanceMode = null;
     const sendBrowserHeartbeat = async () => {
       try {
         const response = await fetch("/api/browser-heartbeat?_=" + Date.now(), { cache: "no-store" });
@@ -12091,6 +12102,10 @@ async function init() {
           return;
         }
         browserServerInstanceId = data.serverInstanceId || browserServerInstanceId;
+        if (data.instanceMode && data.instanceMode !== browserInstanceMode) {
+          browserInstanceMode = data.instanceMode;
+          applyInstanceIdentity(browserInstanceMode);
+        }
       } catch (_) { /* backend may be restarting */ }
     };
     setInterval(sendBrowserHeartbeat, 3000);

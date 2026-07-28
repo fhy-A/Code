@@ -45,6 +45,17 @@ except ImportError:
     TRAY_AVAILABLE = False
 
 
+def _resolve_instance_settings(environ=None, *, frozen=None):
+    """Resolve instance identity while keeping packaged builds on port 3010."""
+    source = os.environ if environ is None else environ
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else bool(frozen)
+    if is_frozen:
+        return 3010, "release"
+    mode = "dev" if str(source.get("CODE_INSTANCE_MODE") or "").lower() == "dev" else "release"
+    port = int(source.get("CODE_PORT") or "3010")
+    return port, mode
+
+
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("CODE_DATA_DIR") or (APP_DIR / "data"))
 SESSIONS_DIR = DATA_DIR / "sessions"
@@ -59,7 +70,7 @@ SKILLS_DIR = DATA_DIR / "skills"
 CONFIG_PATH = DATA_DIR / "config.json"
 NEW_API_BASE_URL = os.environ.get("NEW_API_BASE_URL", "").rstrip("/")
 WORKBAR_URL = "https://workbar.ai"
-PORT = int(os.environ.get("CODE_PORT", "3010"))
+PORT, INSTANCE_MODE = _resolve_instance_settings()
 _active_downloads = {}   # downloadId -> {progress, done, error, path, total}
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -3825,10 +3836,30 @@ else:
     CodeTrayIcon = pystray.Icon if TRAY_AVAILABLE else None
 
 
+def _instance_labels(port, instance_mode=None):
+    mode = INSTANCE_MODE if instance_mode is None else instance_mode
+    if mode == "dev":
+        return {
+            "product": "Code Dev",
+            "trayTitle": f"Code Dev · {port}",
+            "open": "Open Code Dev",
+            "restart": "Restart Code Dev",
+            "exit": "Exit Code Dev",
+        }
+    return {
+        "product": "Code",
+        "trayTitle": "Code",
+        "open": "Open Code",
+        "restart": "Restart Code",
+        "exit": "Exit",
+    }
+
+
 def _create_tray_icon(port, server_ref=None, img=None):
     """Create the pystray Icon with right-click menu. Returns Icon (not running)."""
     if img is None:
         img = _load_tray_icon()
+    labels = _instance_labels(port)
 
     def on_open(icon=None, item=None):
         webbrowser.open(f"http://127.0.0.1:{port}")
@@ -3840,7 +3871,7 @@ def _create_tray_icon(port, server_ref=None, img=None):
         if icon:
             icon.stop()
 
-    items = [pystray.MenuItem("Open Code", on_open, default=True)]
+    items = [pystray.MenuItem(labels["open"], on_open, default=True)]
 
     # The tray restart item is only available in dev mode —
     # PowerShell Start-Process conflicts with PyInstaller's bootloader.
@@ -3865,18 +3896,32 @@ def _create_tray_icon(port, server_ref=None, img=None):
                 name="tray-restart",
             ).start()
 
-        items.append(pystray.MenuItem("Restart Code", on_restart))
+        items.append(pystray.MenuItem(labels["restart"], on_restart))
 
     items.append(pystray.Menu.SEPARATOR)
-    items.append(pystray.MenuItem("Exit", on_exit))
+    items.append(pystray.MenuItem(labels["exit"], on_exit))
 
     menu = pystray.Menu(*items)
-    return CodeTrayIcon("Code", img, "Code", menu)
+    return CodeTrayIcon(
+        labels["product"], img, labels["trayTitle"], menu,
+    )
 
 
 def _restart_code_process(server_ref=None, icon=None):
     """Schedule dev-mode relaunch after this process exits, then stop server."""
-    command = [sys.executable, str((APP_DIR / "server.py").resolve())]
+    restart_entry = (os.environ.get("CODE_RESTART_ENTRY") or "server.py").strip()
+    restart_path = Path(restart_entry).expanduser()
+    if not restart_path.is_absolute():
+        restart_path = APP_DIR / restart_path
+    restart_path = restart_path.resolve()
+    try:
+        restart_path.relative_to(APP_DIR.resolve())
+    except ValueError as exc:
+        raise ValueError("CODE_RESTART_ENTRY must stay inside the Code directory") from exc
+    if restart_path.suffix.lower() != ".py":
+        raise ValueError(f"Invalid Code restart entry: {restart_path}")
+
+    command = [sys.executable, str(restart_path)]
     working_dir = str(APP_DIR)
     ps_script = (
         f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue\n"
@@ -9925,6 +9970,87 @@ def run_subagent(task_prompt, system_prompt, model, api_key):
     }
 
 
+class _WorkbarSyncFailure(Exception):
+    """A secret-free description of one failed workbar key-sync stage."""
+
+    def __init__(
+        self,
+        stage,
+        kind,
+        *,
+        upstream_status=0,
+        page=None,
+        batch=None,
+    ):
+        super().__init__(f"{stage}:{kind}")
+        self.stage = str(stage)
+        self.kind = str(kind)
+        self.upstream_status = int(upstream_status or 0)
+        self.page = page
+        self.batch = batch
+
+    def public_payload(self):
+        payload = {
+            "error": "workbar_sync_failed",
+            "stage": self.stage,
+            "kind": self.kind,
+        }
+        if self.upstream_status:
+            payload["upstreamStatus"] = self.upstream_status
+        if self.page is not None:
+            payload["page"] = int(self.page)
+        if self.batch is not None:
+            payload["batch"] = int(self.batch)
+        return payload
+
+
+def _read_workbar_sync_json(upstream, *, stage, page=None, batch=None):
+    """Read one workbar sync response without exposing its body on failure."""
+    try:
+        with request.urlopen(upstream, timeout=10) as response:
+            raw_payload = response.read()
+    except error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise
+        raise _WorkbarSyncFailure(
+            stage,
+            "http",
+            upstream_status=exc.code,
+            page=page,
+            batch=batch,
+        ) from exc
+    except TimeoutError as exc:
+        raise _WorkbarSyncFailure(
+            stage, "timeout", page=page, batch=batch,
+        ) from exc
+    except error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        kind = (
+            "timeout"
+            if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower()
+            else "network"
+        )
+        raise _WorkbarSyncFailure(
+            stage, kind, page=page, batch=batch,
+        ) from exc
+    except OSError as exc:
+        raise _WorkbarSyncFailure(
+            stage, "network", page=page, batch=batch,
+        ) from exc
+
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise _WorkbarSyncFailure(
+            stage, "invalid_response", page=page, batch=batch,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise _WorkbarSyncFailure(
+            stage, "invalid_response", page=page, batch=batch,
+        )
+    return payload
+
+
 class CodeHandler(BaseHTTPRequestHandler):
     server_version = "Code/0.4"
     protocol_version = "HTTP/1.1"
@@ -10045,7 +10171,11 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/browser-heartbeat":
                 _browser_heartbeat = int(dt.datetime.now().timestamp())
-                self.send_json({"ok": True, "serverInstanceId": _server_instance_id})
+                self.send_json({
+                    "ok": True,
+                    "serverInstanceId": _server_instance_id,
+                    "instanceMode": INSTANCE_MODE,
+                })
                 return
             if route == "/api/check-path":
                 qs = parse.urlparse(self.path).query
@@ -10064,10 +10194,12 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/version":
                 self.send_json({
-                    "name": "Code",
+                    "name": "Code Dev" if INSTANCE_MODE == "dev" else "Code",
                     "serverVersion": self.server_version,
                     "localVersion": _read_version_file(),
                     "appDir": str(APP_DIR),
+                    "instanceMode": INSTANCE_MODE,
+                    "port": PORT,
                     "features": ["pick-file-path"],
                 })
                 return
@@ -11782,12 +11914,29 @@ class CodeHandler(BaseHTTPRequestHandler):
                     WORKBAR_URL + f"/api/token/?p={page}&size=100",
                     headers=headers,
                 )
-                with request.urlopen(req1, timeout=10) as resp1:
-                    data1 = json.loads(resp1.read().decode("utf-8"))
+                data1 = _read_workbar_sync_json(
+                    req1, stage="list_tokens", page=page,
+                )
                 page_data = data1.get("data") or {}
+                if not isinstance(page_data, dict):
+                    raise _WorkbarSyncFailure(
+                        "list_tokens", "invalid_response", page=page,
+                    )
                 page_tokens = page_data.get("items") or []
+                if (
+                    not isinstance(page_tokens, list)
+                    or any(not isinstance(item, dict) for item in page_tokens)
+                ):
+                    raise _WorkbarSyncFailure(
+                        "list_tokens", "invalid_response", page=page,
+                    )
                 tokens.extend(page_tokens)
-                total = int(page_data.get("total") or 0)
+                try:
+                    total = int(page_data.get("total") or 0)
+                except (TypeError, ValueError) as exc:
+                    raise _WorkbarSyncFailure(
+                        "list_tokens", "invalid_response", page=page,
+                    ) from exc
                 if len(page_tokens) < 100 or (total and len(tokens) >= total):
                     break
                 page += 1
@@ -11797,15 +11946,26 @@ class CodeHandler(BaseHTTPRequestHandler):
             ids = [t.get("id") for t in tokens if t.get("id")]
             full_keys = {}
             for offset in range(0, len(ids), 100):
+                batch = offset // 100 + 1
                 req2 = request.Request(
                     WORKBAR_URL + "/api/token/batch/keys",
                     headers=headers,
                     data=json.dumps({"ids": ids[offset:offset + 100]}).encode(),
                     method="POST",
                 )
-                with request.urlopen(req2, timeout=10) as resp2:
-                    data2 = json.loads(resp2.read().decode("utf-8"))
-                upstream_keys = data2.get("data", {}).get("keys") or {}
+                data2 = _read_workbar_sync_json(
+                    req2, stage="read_keys", batch=batch,
+                )
+                key_data = data2.get("data") or {}
+                if not isinstance(key_data, dict):
+                    raise _WorkbarSyncFailure(
+                        "read_keys", "invalid_response", batch=batch,
+                    )
+                upstream_keys = key_data.get("keys") or {}
+                if not isinstance(upstream_keys, dict):
+                    raise _WorkbarSyncFailure(
+                        "read_keys", "invalid_response", batch=batch,
+                    )
                 for key_id, value in upstream_keys.items():
                     value = str(value or "").strip()
                     if not value or "***" in value:
@@ -11816,8 +11976,8 @@ class CodeHandler(BaseHTTPRequestHandler):
             status = 401 if exc.code in {401, 403} else 502
             message = "Platform authorization is invalid" if status == 401 else "workbar is unavailable"
             self.send_json({"error": message}, status)
-        except (error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
-            self.send_json({"error": "workbar is unavailable"}, 502)
+        except _WorkbarSyncFailure as exc:
+            self.send_json(exc.public_payload(), 502)
 
     def _handle_validate_code_auth(self):
         body = self.read_body_json()

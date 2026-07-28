@@ -8,6 +8,11 @@
 
   const { WORKBAR_URL } = platform;
 
+  function buildPlatformLoginUrl(location = global.location) {
+    const callbackUrl = new global.URL("/", location.href).href;
+    return `${WORKBAR_URL}/code/connect?callback=${encodeURIComponent(callbackUrl)}`;
+  }
+
   const UPDATE_NOTICE_STORAGE_KEYS = Object.freeze({
     settings: "code-update-seen-settings",
     page: "code-update-seen-page",
@@ -301,7 +306,7 @@
     }
 
     function openPlatformLogin() {
-      global.open(`${WORKBAR_URL}/code/connect?callback=${encodeURIComponent("http://127.0.0.1:3010/")}`, "_blank");
+      global.open(buildPlatformLoginUrl(), "_blank");
     }
 
     function showPlatformAuthGate(reason = "missing") {
@@ -882,6 +887,34 @@
       }
     }
 
+    function workbarSyncFailureMessage(payload, responseStatus) {
+      if (payload?.error !== "workbar_sync_failed") {
+        return payload?.error || `Sync failed (${responseStatus})`;
+      }
+      const stage = payload.stage === "list_tokens"
+        ? t("syncStageListTokens")
+        : payload.stage === "read_keys"
+          ? t("syncStageReadKeys")
+          : t("syncStageUnknown");
+      const position = Number.isInteger(payload.page)
+        ? t("syncPositionPage", { index: payload.page + 1 })
+        : Number.isInteger(payload.batch)
+          ? t("syncPositionBatch", { index: payload.batch })
+          : "";
+      const args = {
+        stage,
+        position,
+        status: payload.upstreamStatus || responseStatus,
+      };
+      switch (payload.kind) {
+        case "http": return t("syncFailureHttp", args);
+        case "timeout": return t("syncFailureTimeout", args);
+        case "network": return t("syncFailureNetwork", args);
+        case "invalid_response": return t("syncFailureInvalidResponse", args);
+        default: return t("syncFailureUnknown", args);
+      }
+    }
+
     async function syncKeysFromPlatform({ interactive = true } = {}) {
       const auth = getPlatformAuth();
       if (!auth) {
@@ -906,8 +939,19 @@
           if (interactive) showToast(t("loginExpired"), "error");
           return { ok: false, authExpired: true };
         }
-        if (!response.ok) throw new Error(`Sync failed (${response.status})`);
-        const data = await response.json();
+        let data = null;
+        try {
+          data = await response.json();
+        } catch {
+          if (!response.ok) throw new Error(`Sync failed (${response.status})`);
+          throw new Error(t("syncFailureInvalidResponse", {
+            stage: t("syncStageUnknown"),
+            position: "",
+          }));
+        }
+        if (!response.ok) {
+          throw new Error(workbarSyncFailureMessage(data, response.status));
+        }
         if (data.error) throw new Error(data.error);
         const tokens = data.tokens || [];
         if (!tokens.length) {
@@ -1209,6 +1253,7 @@
   Code.features.settings = Object.freeze({
     UPDATE_NOTICE_STORAGE_KEYS,
     WORKBAR_URL,
+    buildPlatformLoginUrl,
     createSettingsFeature,
     loadKeyConfig,
   });

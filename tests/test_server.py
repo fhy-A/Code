@@ -379,7 +379,93 @@ class TestWorkbarAuthentication(unittest.TestCase):
         handler = self.make_handler({"token": "test-access-token", "userId": "42"})
         with mock.patch.object(server.request, "urlopen", side_effect=server.error.URLError("offline")):
             handler._handle_sync_keys()
-        handler.send_json.assert_called_once_with({"error": "workbar is unavailable"}, 502)
+        handler.send_json.assert_called_once_with({
+            "error": "workbar_sync_failed",
+            "stage": "list_tokens",
+            "kind": "network",
+            "page": 0,
+        }, 502)
+
+    def test_sync_keys_reports_secret_free_stage_and_upstream_status(self):
+        handler = self.make_handler({"token": "must-not-leak", "userId": "42"})
+        upstream_error = server.error.HTTPError(
+            "https://workbar.ai/api/token/?p=0&size=100",
+            503,
+            "secret upstream details",
+            None,
+            None,
+        )
+        with mock.patch.object(server.request, "urlopen", side_effect=upstream_error):
+            handler._handle_sync_keys()
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 502)
+        self.assertEqual(payload, {
+            "error": "workbar_sync_failed",
+            "stage": "list_tokens",
+            "kind": "http",
+            "upstreamStatus": 503,
+            "page": 0,
+        })
+        public_text = json.dumps(payload)
+        self.assertNotIn("must-not-leak", public_text)
+        self.assertNotIn("secret upstream details", public_text)
+
+    def test_sync_keys_distinguishes_timeout_and_invalid_key_batch(self):
+        timeout_handler = self.make_handler({
+            "token": "test-access-token",
+            "userId": "42",
+        })
+        with mock.patch.object(
+            server.request, "urlopen", side_effect=TimeoutError("timed out"),
+        ):
+            timeout_handler._handle_sync_keys()
+        timeout_handler.send_json.assert_called_once_with({
+            "error": "workbar_sync_failed",
+            "stage": "list_tokens",
+            "kind": "timeout",
+            "page": 0,
+        }, 502)
+
+        token_response = mock.MagicMock()
+        token_response.read.return_value = json.dumps({
+            "data": {"items": [{"id": 7, "name": "first"}]},
+        }).encode("utf-8")
+        token_response.__enter__.return_value = token_response
+        invalid_response = mock.MagicMock()
+        invalid_response.read.return_value = b"<html>private upstream error</html>"
+        invalid_response.__enter__.return_value = invalid_response
+        invalid_handler = self.make_handler({
+            "token": "test-access-token",
+            "userId": "42",
+        })
+        with mock.patch.object(
+            server.request,
+            "urlopen",
+            side_effect=[token_response, invalid_response],
+        ):
+            invalid_handler._handle_sync_keys()
+        invalid_handler.send_json.assert_called_once_with({
+            "error": "workbar_sync_failed",
+            "stage": "read_keys",
+            "kind": "invalid_response",
+            "batch": 1,
+        }, 502)
+
+    def test_sync_keys_keeps_authentication_failures_as_unauthorized(self):
+        handler = self.make_handler({"token": "expired", "userId": "42"})
+        upstream_error = server.error.HTTPError(
+            "https://workbar.ai/api/token/?p=0&size=100",
+            401,
+            "unauthorized",
+            None,
+            None,
+        )
+        with mock.patch.object(server.request, "urlopen", side_effect=upstream_error):
+            handler._handle_sync_keys()
+        handler.send_json.assert_called_once_with({
+            "error": "Platform authorization is invalid",
+        }, 401)
 
     def test_sync_keys_paginates_and_batches_all_platform_keys(self):
         handler = self.make_handler({"token": "test-access-token", "userId": "42"})
@@ -412,6 +498,42 @@ class TestWorkbarAuthentication(unittest.TestCase):
 
 
 class TestTrayRestart(unittest.TestCase):
+    def test_instance_settings_keep_packaged_release_on_port_3010(self):
+        self.assertEqual(
+            server._resolve_instance_settings({}, frozen=False),
+            (3010, "release"),
+        )
+        self.assertEqual(
+            server._resolve_instance_settings({
+                "CODE_PORT": "3011",
+                "CODE_INSTANCE_MODE": "dev",
+            }, frozen=False),
+            (3011, "dev"),
+        )
+        self.assertEqual(
+            server._resolve_instance_settings({
+                "CODE_PORT": "3011",
+                "CODE_INSTANCE_MODE": "dev",
+            }, frozen=True),
+            (3010, "release"),
+        )
+
+    def test_instance_labels_distinguish_dev_without_changing_release(self):
+        self.assertEqual(server._instance_labels(3010, "release"), {
+            "product": "Code",
+            "trayTitle": "Code",
+            "open": "Open Code",
+            "restart": "Restart Code",
+            "exit": "Exit",
+        })
+        self.assertEqual(server._instance_labels(3011, "dev"), {
+            "product": "Code Dev",
+            "trayTitle": "Code Dev · 3011",
+            "open": "Open Code Dev",
+            "restart": "Restart Code Dev",
+            "exit": "Exit Code Dev",
+        })
+
     def test_source_restart_closes_server_and_relaunches_server_script(self):
         server_ref = mock.Mock()
         icon = mock.Mock()
@@ -430,9 +552,46 @@ class TestTrayRestart(unittest.TestCase):
         server_ref.server_close.assert_called_once_with()
         icon.stop.assert_called_once_with()
 
+    def test_source_restart_uses_configured_dev_entry(self):
+        server_ref = mock.Mock()
+        icon = mock.Mock()
+        with mock.patch.dict(
+            server.os.environ,
+            {"CODE_RESTART_ENTRY": "dev_server.py"},
+        ), mock.patch.object(server.subprocess, "Popen") as popen:
+            server._restart_code_process(server_ref, icon)
+
+        powershell = popen.call_args.args[0]
+        encoded = powershell[powershell.index("-EncodedCommand") + 1]
+        script = base64.b64decode(encoded).decode("utf-16-le")
+        self.assertIn(str((server.APP_DIR / "dev_server.py").resolve()), script)
+        self.assertNotIn(str((server.APP_DIR / "server.py").resolve()), script)
+
+    def test_source_restart_rejects_entry_outside_code_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            outside = Path(temp_dir) / "dev_server.py"
+            outside.write_text("", encoding="utf-8")
+            with mock.patch.dict(
+                server.os.environ,
+                {"CODE_RESTART_ENTRY": str(outside)},
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must stay inside the Code directory",
+                ):
+                    server._restart_code_process()
+
+    def test_source_restart_rejects_non_python_entry(self):
+        with mock.patch.dict(
+            server.os.environ,
+            {"CODE_RESTART_ENTRY": "dev_server.bat"},
+        ):
+            with self.assertRaisesRegex(ValueError, "Invalid Code restart entry"):
+                server._restart_code_process()
+
     def test_tray_menu_exposes_restart_action(self):
         source = Path(server.__file__).read_text(encoding="utf-8")
-        self.assertIn('pystray.MenuItem("Restart Code", on_restart)', source)
+        self.assertIn('pystray.MenuItem(labels["restart"], on_restart)', source)
 
     def test_restart_cancels_waiter_if_current_server_cannot_stop(self):
         server_ref = mock.Mock()

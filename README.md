@@ -12,10 +12,10 @@
 <p align="center">让 AI 真正进入你的项目，而不是停在对话框里。</p>
 
 <p align="center">
-  <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.5.30-2563EB" alt="Version 0.5.7"></a>
+  <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.5.30-2563EB" alt="Version 0.5.30"></a>
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Windows">
   <img src="https://img.shields.io/badge/python-3.12+-3776AB" alt="Python 3.12+">
-  <img src="https://img.shields.io/badge/tests-614%20passed-16A34A" alt="614 tests passed">
+  <img src="https://img.shields.io/badge/tests-843%20passed-16A34A" alt="843 tests passed">
   <a href="docs/LICENSE"><img src="https://img.shields.io/badge/license-MIT-6B7280" alt="MIT License"></a>
 </p>
 
@@ -98,6 +98,19 @@ python server.py
 
 也可以直接运行 `启动Code.bat`。源码模式默认把运行数据保存在仓库的 `data/` 中；正式 EXE 使用用户目录下的 `.code/`。
 
+### 同时运行正式版与开发版
+
+需要使用正式发布版 Code 开发当前源码时，请通过 `启动Code开发版.bat` 或指向该脚本的 `Code Dev.lnk` 启动开发实例：
+
+| 实例 | 入口 | 地址 | 数据目录 | 界面与托盘标识 |
+|---|---|---|---|---|
+| 正式版 | `Code-v*.exe` / `Code.lnk` | `http://127.0.0.1:3010/` | `%USERPROFILE%\.code\` | `Code` |
+| 开发版 | `dev_server.py` / `启动Code开发版.bat` | `http://127.0.0.1:3011/` | `<项目>/data` | `Code Dev` |
+
+两套实例可以同时运行，进程、端口、数据和重启入口彼此隔离。3010 与 3011 属于不同浏览器来源，因此 workbar 登录态和浏览器本地保存的 Key 配置也分别维护；在一个端口登录或修改设置不会自动同步到另一个端口。
+
+打包后的正式版始终使用 3010 和正式版标识，不受启动开发版时设置的环境变量影响。需要临时调整开发实例时，可使用 `CODE_DEV_PORT` 和 `CODE_DEV_DATA_DIR`，无需修改正式发布配置。
+
 ## 模型与项目配置
 
 首次启动后打开设置：
@@ -111,8 +124,10 @@ python server.py
 
 | 变量 | 作用 | 默认值 |
 |---|---|---|
-| `CODE_PORT` | 本地 Web 服务端口 | `3010` |
+| `CODE_PORT` | 源码服务端口；打包正式版固定使用 3010 | `3010` |
 | `CODE_DATA_DIR` | 源码模式的数据目录 | `<项目>/data` |
+| `CODE_DEV_PORT` | 独立开发实例端口 | `3011` |
+| `CODE_DEV_DATA_DIR` | 独立开发实例数据目录 | `<项目>/data` |
 | `NEW_API_BASE_URL` | 服务端默认模型网关 | `http://localhost:3000` |
 
 ## 数据与隐私
@@ -147,7 +162,9 @@ python server.py
 ```text
 Code/
 ├── server.py                # HTTP 服务、模型代理、任务运行时和本地工具
+├── dev_server.py            # 隔离的 3011 源码开发实例入口
 ├── launcher.py              # EXE 启动、托盘、数据目录与浏览器接管
+├── 启动Code开发版.bat       # Windows 开发实例启动与页面复用
 ├── index.html               # 应用结构
 ├── app.js                   # 前端主流程与状态投影
 ├── agent-runtime.js         # 浏览器侧任务运行时桥接

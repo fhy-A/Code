@@ -1215,6 +1215,43 @@ const feature = createSettingsFeature({
         self.assertEqual(data["replaced"], [[None, "", "/"]])
         self.assertEqual(data["toasts"], [["loggedInAs:Alice", "warning"]])
 
+    def test_workbar_login_callback_follows_current_code_origin(self):
+        self.assertNotIn('encodeURIComponent("http://127.0.0.1:3010/")', SETTINGS_SOURCE)
+        self.assertIn("global.open(buildPlatformLoginUrl(), \"_blank\")", SETTINGS_SOURCE)
+        script = """
+global.window = {
+  Code: {core: {}, features: {}},
+  URL,
+  location: {href: "http://127.0.0.1:3010/"},
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const {buildPlatformLoginUrl} = window.Code.features.settings;
+const hrefs = [
+  "http://127.0.0.1:3010/",
+  "http://127.0.0.1:3011/settings?panel=account#login",
+  "http://localhost:45123/dev/",
+];
+process.stdout.write(JSON.stringify(hrefs.map((href) => buildPlatformLoginUrl({href}))));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        urls = json.loads(completed.stdout)
+        self.assertEqual(
+            urls,
+            [
+                "https://workbar.ai/code/connect?callback=http%3A%2F%2F127.0.0.1%3A3010%2F",
+                "https://workbar.ai/code/connect?callback=http%3A%2F%2F127.0.0.1%3A3011%2F",
+                "https://workbar.ai/code/connect?callback=http%3A%2F%2Flocalhost%3A45123%2F",
+            ],
+        )
+
     def test_settings_feature_validates_callback_and_skips_duplicate_startup_validation(self):
         script = r"""
 const values = new Map([["code-platform-auth", JSON.stringify({token: "access-1", userId: "7", username: "old"})]]);
@@ -1372,6 +1409,85 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertTrue(data["result"]["authExpired"])
         self.assertFalse(data["authExists"])
         self.assertIn("workbarSessionExpired", data["gate"])
+
+    def test_settings_sync_displays_structured_workbar_failure(self):
+        script = r"""
+const values = new Map([["code-platform-auth", JSON.stringify({token: "access-1", userId: "7"})]]);
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+const toasts = [];
+const translations = {
+  syncFailed: "同步失败：{message}",
+  syncStageListTokens: "获取令牌列表",
+  syncStageReadKeys: "读取完整 Key",
+  syncStageUnknown: "同步 workbar Key",
+  syncPositionPage: "（第 {index} 页）",
+  syncPositionBatch: "（第 {index} 批）",
+  syncFailureHttp: "{stage}{position}时 workbar 返回 {status}",
+  syncFailureTimeout: "{stage}{position}超时",
+  syncFailureNetwork: "{stage}{position}网络连接失败",
+  syncFailureInvalidResponse: "{stage}{position}收到无效响应",
+  syncFailureUnknown: "{stage}{position}失败（HTTP {status}）",
+};
+const t = (key, args = {}) => Object.entries(args).reduce(
+  (text, [name, value]) => text.replaceAll(`{${name}}`, value),
+  translations[key] || key,
+);
+global.window = {
+  localStorage: storage,
+  URL,
+  URLSearchParams,
+  location: {href: "http://127.0.0.1:3011/", search: ""},
+  history: {replaceState: () => {}},
+  matchMedia: () => ({matches: false, addEventListener: () => {}}),
+  setTimeout,
+  setInterval,
+  clearInterval,
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const feature = window.Code.features.settings.createSettingsFeature({
+  elements: {apiKey: {value: ""}},
+  t,
+  apiJson: async () => ({}),
+  document: {getElementById: () => null, querySelectorAll: () => []},
+  storage,
+  fetch: async () => ({
+    status: 502,
+    ok: false,
+    json: async () => ({
+      error: "workbar_sync_failed",
+      stage: "read_keys",
+      kind: "http",
+      upstreamStatus: 504,
+      batch: 2,
+    }),
+  }),
+  showToast: (...args) => toasts.push(args),
+});
+(async () => {
+  const result = await feature.syncKeysFromPlatform();
+  process.stdout.write(JSON.stringify({result, toasts}));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        message = "读取完整 Key（第 2 批）时 workbar 返回 504"
+        self.assertEqual(data["result"], {"ok": False, "error": message})
+        self.assertEqual(data["toasts"], [[f"同步失败：{message}", "error"]])
+        self.assertIn('syncFailureTimeout: "{stage}{position}超时"', I18N_SOURCE)
+        self.assertIn('syncFailureTimeout: "{stage}{position} timed out"', I18N_SOURCE)
 
     def test_settings_silent_sync_merges_without_touching_manual_keys_or_ui(self):
         script = r"""

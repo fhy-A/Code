@@ -2,6 +2,25 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-28 18:31 · Codex
+
+### 3011 隔离开发实例、workbar 回跳诊断与 Dev 标识
+
+- 新增 `dev_server.py` 和 `启动Code开发版.bat`：开发实例默认使用 3011、仓库 `data/`、独立重启入口和 `dev` 运行模式，可与 3010 正式版同时运行；桌面 `Code Dev.lnk` 已在本机改为调用该脚本，但快捷方式本身不纳入仓库。
+- 修复 workbar 登录完成后固定回到 3010 的问题，授权回跳地址改为当前页面来源，兼容 3010、3011 和自定义开发端口；两套端口的浏览器登录态与本地配置仍按浏览器同源规则隔离。
+- 为 workbar Key 同步增加不泄露敏感信息的结构化诊断，区分令牌列表、完整 Key 读取阶段以及 HTTP、超时、网络和响应格式错误；前端提供对应的中英文提示，不记录 Access Token、API Key、响应正文或原始异常。
+- 开发实例的侧栏产品名、页面标题、任务状态标题和托盘悬停/菜单改为 `Code Dev`；正式版继续保持 `Code`，未改变图标。冻结打包实例会忽略继承的开发端口与模式环境变量，强制使用 3010 和正式版标识，避免开发启动设置影响发布产物。
+- 重启入口新增应用目录内 Python 文件校验；启动脚本只复用属于当前仓库的 3011 服务，端口被其他程序占用时明确停止，避免误操作其他进程。
+- 在 `TODO.md` 记录低优先级状态提示优化：后续细分平台无令牌、完整 Key 不可读和 Key 已全部添加，不影响现有本地缓存 Key 的继续使用。
+- 验证：
+  - `python -m pytest -q`：**843 passed, 236 subtests passed**；
+  - `python -m py_compile server.py dev_server.py`、`node --check app.js`、`node --check src/features/settings.js`、`node --check src/core/i18n.js` 与 `git diff --check` 通过；
+  - 用户人工确认 3010/3011 可同时运行、workbar 回跳与模型同步恢复、`Code Dev` 网页及托盘标识正确，并确认正式版端口保护符合预期。
+
+**涉及文件**：`dev_server.py`、`启动Code开发版.bat`、`server.py`、`app.js`、`index.html`、`src/features/settings.js`、`src/core/i18n.js`、`tests/test_dev_server.py`、`tests/test_server.py`、`tests/test_routes.py`、`tests/test_frontend_modules.py`、`tests/test_image_vision_and_browser_refresh.py`、`README.md`、`docs/development-handoff.md`、`CHANGELOG.md`、`TODO.md`
+
+---
+
 ## 2026-07-28 12:04 · Codex
 
 ### 发布说明正文保留与占位硬拦截

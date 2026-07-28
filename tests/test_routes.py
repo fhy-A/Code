@@ -131,6 +131,8 @@ class TestHealthAndConfig(TestServerFixture):
         self.assertIn("localVersion", data)
         self.assertIn("serverVersion", data)
         self.assertEqual(data["name"], "Code")
+        self.assertEqual(data["instanceMode"], "release")
+        self.assertEqual(data["port"], 3010)
 
     def test_skill_dependency_preflight_route(self):
         expected = {

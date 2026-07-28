@@ -97,6 +97,14 @@ class TestExistingBrowserRefresh(unittest.TestCase):
         source = (ROOT / "app.js").read_text(encoding="utf-8")
         self.assertIn("data.serverInstanceId !== browserServerInstanceId", source)
         self.assertIn("location.reload()", source)
+        self.assertIn("applyInstanceIdentity(browserInstanceMode)", source)
+        self.assertIn('_instanceProductName = isDev ? "Code Dev" : "Code"', source)
+        self.assertIn('document.getElementById("productName")', source)
+        self.assertIn('id="productName">Code</span>', (ROOT / "index.html").read_text(encoding="utf-8"))
+        self.assertIn(
+            "${_instanceProductName} · ${title}",
+            source,
+        )
 
     def test_dev_launcher_opens_browser_for_fresh_or_headless_service(self):
         source = (ROOT / "启动Code.bat").read_text(encoding="utf-8")

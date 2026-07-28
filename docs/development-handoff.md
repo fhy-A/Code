@@ -47,11 +47,19 @@ git log -8 --oneline
 
 | 项 | 说明 |
 |----|------|
-| 服务入口 | `server.py`，监听 `127.0.0.1:3010`（可通过 `CODE_PORT` 环境变量覆盖） |
+| 服务入口 | 正式版/普通源码入口为 `server.py`；隔离开发入口为 `dev_server.py` |
 | 前端 | 原生 JavaScript / HTML / CSS，主状态在 `app.js`，部分功能已迁入 `src/` |
 | 打包 | PyInstaller 单文件 EXE（`build_exe.py`），入口 `launcher.py` |
-| 数据目录 | 正式 EXE 用 `%USERPROFILE%\.code\`，源码模式用 `data/` |
+| 运行实例 | 打包正式版固定为 `127.0.0.1:3010` / `Code`；`启动Code开发版.bat` 默认为 `127.0.0.1:3011` / `Code Dev` |
+| 数据目录 | 正式 EXE 用 `%USERPROFILE%\.code\`，3011 开发实例用仓库 `data/` |
 | 模型网关 | 固定为 `https://workbar.ai`，前端不展示或编辑 Base URL |
+
+### 正式版与开发版隔离
+
+- `Code-v*.exe`、正式快捷方式和自动更新始终使用 3010；即使父进程继承了开发环境变量，冻结构建也会强制恢复正式端口和 `Code` 标识。
+- `dev_server.py` 设置独立的端口、数据目录、重启入口和 `dev` 实例模式；默认由 `启动Code开发版.bat` 启动，可用 `CODE_DEV_PORT`、`CODE_DEV_DATA_DIR` 覆盖。
+- 3010 与 3011 是不同浏览器来源，workbar 登录态和浏览器本地配置不共享。诊断“平台中没有可用的 API Key”时，必须区分平台登录/令牌读取状态与本机已缓存 Key 状态。
+- 开发实例的网页名称、任务通知标题与托盘悬停提示显示 `Code Dev`；正式版既有名称、菜单和图标保持不变。
 
 ### 发版
 
