@@ -36,6 +36,23 @@ README_FILE = ROOT / "README.md"
 RELEASES_DIR = ROOT / "docs" / "releases"
 BUILD_SCRIPT = ROOT / "build_exe.py"
 DEFAULT_BRANCH = "master"
+RELEASE_NOTES_PLACEHOLDER = "[发布说明待补充 -- 请在此描述本版本的主要改动]"
+RELEASE_NOTES_BODY_START = "<!-- code-release-notes:body:start -->"
+RELEASE_NOTES_BODY_END = "<!-- code-release-notes:body:end -->"
+
+_RELEASE_NOTES_GENERATED_HEADINGS = (
+    "\n## Packaging\n",
+    "\n## 打包信息\n",
+    "\n## Download / verification\n",
+    "\n## 下载与校验\n",
+)
+_RELEASE_NOTES_PLACEHOLDER_PATTERNS = (
+    (re.compile(r"待补充"), "包含“待补充”占位文案"),
+    (re.compile(r"\bTBD\b", re.IGNORECASE), "包含 TBD 占位文案"),
+    (re.compile(r"\[\s*TODO(?:\s|:|\])", re.IGNORECASE), "包含 TODO 占位文案"),
+    (re.compile(r"DRY_RUN_SHA256"), "包含预演 SHA-256 占位值"),
+    (re.compile(r"\bv?X\.Y\.Z\b", re.IGNORECASE), "包含示例版本号 X.Y.Z"),
+)
 
 # 当前脚本级代理设置（由 main() 中的检测/参数设置）
 _proxy_url = None
@@ -424,6 +441,66 @@ def compute_sha256(new_version):
 # Step 7: 生成发布说明
 # ═══════════════════════════════════════════════════════════════
 
+def _extract_release_notes_body(content):
+    """Extract the hand-written body from current or legacy release notes."""
+    text = str(content or "").replace("\r\n", "\n")
+
+    start = text.find(RELEASE_NOTES_BODY_START)
+    end = text.find(RELEASE_NOTES_BODY_END)
+    if start >= 0 and end > start:
+        return text[start + len(RELEASE_NOTES_BODY_START):end].strip()
+
+    generated_at = len(text)
+    for heading in _RELEASE_NOTES_GENERATED_HEADINGS:
+        index = text.find(heading)
+        if index >= 0:
+            generated_at = min(generated_at, index)
+    text = text[:generated_at]
+
+    text = re.sub(
+        r"\A# Code v\d+\.\d+\.\d+ Release Notes\s*\n+"
+        r"(?:(?:Date|日期):[^\n]*\n+)?",
+        "",
+        text,
+        count=1,
+    )
+    return text.strip()
+
+
+def _render_release_notes(new_version, body, sha256, exe_size, date_str):
+    size_mib = exe_size / (1024 * 1024)
+    return f"""# Code v{new_version} Release Notes
+
+日期：{date_str}
+
+{RELEASE_NOTES_BODY_START}
+{body.strip()}
+{RELEASE_NOTES_BODY_END}
+
+## 打包信息
+
+- 版本已更新至 `{new_version}`。
+- `VERSION`、`file_version_info.txt`、`README.md` 与 PyInstaller spec 已同步。
+- 构建命令：
+
+```bash
+python build_exe.py
+```
+
+## 下载与校验
+
+| 文件 | 大小 | SHA-256 |
+|---|---:|---|
+| `Code-v{new_version}.exe` | `{exe_size:,} bytes` (`{size_mib:.2f} MiB`) | `{sha256}` |
+
+请确认应用内显示的版本号为 `{new_version}`。
+
+## 相关记录
+
+- 具体实现时间线与文件级改动见 `CHANGELOG.md`。
+"""
+
+
 def generate_release_notes(new_version, sha256, exe_size):
     RELEASES_DIR.mkdir(parents=True, exist_ok=True)
     release_file = RELEASES_DIR / f"v{new_version}.md"
@@ -431,41 +508,70 @@ def generate_release_notes(new_version, sha256, exe_size):
     from datetime import datetime
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    size_mib = exe_size / (1024 * 1024)
+    body = RELEASE_NOTES_PLACEHOLDER
+    if release_file.exists():
+        existing_body = _extract_release_notes_body(
+            release_file.read_text(encoding="utf-8"),
+        )
+        if existing_body:
+            body = existing_body
+            ok(f"保留已有发布说明正文: {release_file.name}")
 
-    content = f"""# Code v{new_version} Release Notes
-
-Date: {date_str}
-
-[发布说明待补充 -- 请在此描述本版本的主要改动]
-
-## Packaging
-
-- Version updated to `{new_version}`.
-- `VERSION` and `file_version_info.txt` synchronized for the Windows metadata.
-- Build command used:
-
-```bash
-python build_exe.py
-```
-
-## Download / verification
-
-| File | Size | SHA-256 |
-|---|---:|---|
-| `Code-v{new_version}.exe` | `{exe_size:,} bytes` (`{size_mib:.2f} MiB`) | `{sha256}` |
-
-Please ensure version shown by the app is `{new_version}`.
-
-## Related
-
-- See `CHANGELOG.md` for the implementation timeline and file-level changes.
-"""
-
+    content = _render_release_notes(
+        new_version,
+        body,
+        sha256,
+        exe_size,
+        date_str,
+    )
     release_file.write_text(content, encoding="utf-8")
     ok(f"发布说明: {release_file.name}")
-    print(f"\n  !  发布说明包含占位内容，请编辑后继续。")
-    print(f"     文件位置: {release_file}")
+    return release_file
+
+
+def validate_release_notes(release_file, new_version):
+    """Return blocking release-note validation errors."""
+    release_file = Path(release_file)
+    if not release_file.exists():
+        return [f"发布说明不存在: {release_file}"]
+
+    content = release_file.read_text(encoding="utf-8")
+    body = _extract_release_notes_body(content)
+    errors = []
+
+    meaningful_lines = [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and not line.lstrip().startswith("<!--")
+    ]
+    if not meaningful_lines:
+        errors.append("发布说明正文为空")
+
+    for pattern, message in _RELEASE_NOTES_PLACEHOLDER_PATTERNS:
+        if pattern.search(content):
+            errors.append(message)
+
+    expected_header = f"# Code v{new_version} Release Notes"
+    expected_asset = f"Code-v{new_version}.exe"
+    if expected_header not in content:
+        errors.append(f"缺少正确标题: {expected_header}")
+    if expected_asset not in content:
+        errors.append(f"缺少正确发布文件名: {expected_asset}")
+
+    return errors
+
+
+def require_release_notes_ready(release_file, new_version):
+    """Block commit/tag/release when notes are empty or contain placeholders."""
+    errors = validate_release_notes(release_file, new_version)
+    if errors:
+        print("\n  发布说明校验失败:")
+        for error in errors:
+            print(f"    - {error}")
+        die("发布说明未完成，禁止提交、打标签或创建 GitHub Release")
+    ok("发布说明正文与占位检查通过")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -761,17 +867,23 @@ def main():
     print("=" * 60)
 
     if not args.dry_run:
-        generate_release_notes(new_version, sha256, exe_size)
+        release_file = generate_release_notes(new_version, sha256, exe_size)
+        initial_errors = validate_release_notes(release_file, new_version)
 
-        if not ask("发布说明是否已编辑好？"):
+        if initial_errors and args.yes:
+            print(f"\n  请先编辑发布说明后重新运行本脚本:")
+            print(f"    docs/releases/v{new_version}.md")
+        elif not args.yes and not ask("发布说明是否已编辑好？"):
             print(f"\n  请编辑发布说明后重新运行本脚本，或手动完成后续步骤。")
             print(f"  发布说明位置: docs/releases/v{new_version}.md")
             print(f"\n  后续手动步骤:")
             print(f"    git add -A && git commit -m 'chore: prepare v{new_version} release metadata'")
             print(f"    git tag v{new_version}")
-            print(f"    git push origin main && git push origin v{new_version}")
+            print(f"    git push origin {DEFAULT_BRANCH} && git push origin v{new_version}")
             print(f"    gh release create v{new_version} dist/Code-v{new_version}.exe --notes-file docs/releases/v{new_version}.md")
             die("用户暂停以编辑发布说明")
+
+        require_release_notes_ready(release_file, new_version)
     else:
         print("  [DRY RUN] 跳过发布说明生成")
 

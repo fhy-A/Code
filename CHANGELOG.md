@@ -2,6 +2,24 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-28 12:04 · Codex
+
+### 发布说明正文保留与占位硬拦截
+
+- 修复 `release.py` Phase 5 无条件覆盖预写发布说明的问题：已有文件会保留人工正文，仅重新生成日期、版本号、构建信息、文件大小和 SHA-256；旧版英文模板和仅包含正文的预写文件均可兼容提取。
+- 新生成的发布说明改为中文模板，并使用明确的正文边界与自动元数据区；发布前校验正文非空、标题与安装包版本一致，拦截“待补充”、`TBD`、`[TODO]`、`DRY_RUN_SHA256` 和 `vX.Y.Z` 等占位内容。
+- 占位校验位于 Git 提交、打标签和 GitHub Release 之前，`--yes` 只能跳过交互确认，不能绕过校验；人工流程编辑后会重新读取文件，恢复命令中的默认分支名同步修正为 `master`。
+- 新增 `tests/test_release_script.py`，覆盖中文模板与默认拦截、旧模板正文保留及元数据刷新、正文文件保留、五类占位识别和校验门禁顺序。
+- 同步更新 `AGENTS.md`、`CLAUDE.md` 与 `docs/release-guide.md`，并从 `TODO.md` 移除对应已完成事项。
+- 验证：
+  - `python -m pytest tests/test_release_script.py -q`：**5 passed, 5 subtests passed**；
+  - `python -m pytest tests -q`：**822 passed, 233 subtests passed**；
+  - `python release.py 0.5.31 --dry-run`、`python -m py_compile release.py` 与 `git diff --check` 通过。
+
+**涉及文件**：`release.py`、`tests/test_release_script.py`、`AGENTS.md`、`CLAUDE.md`、`docs/release-guide.md`、`CHANGELOG.md`、`TODO.md`
+
+---
+
 ## 2026-07-28 11:54 · Codex
 
 ### 协作授权、实施门禁与发布规范
