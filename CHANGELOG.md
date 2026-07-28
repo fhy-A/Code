@@ -2,6 +2,23 @@
 
 > 记录 Claude Code、Codex 以及其他协作方的重要改动，按时间倒序。
 
+## 2026-07-28 18:55 · Codex
+
+### 淘汰旧版 3010 源码启动入口
+
+- 删除 `启动Code.bat`：该脚本与正式版共同占用 3010，只检查端口占用而不校验服务归属，已被“正式版 3010 / 开发版 3011”的双实例方案取代。
+- 删除 `server-launcher.vbs`：审计确认它不参与 PyInstaller 构建、正式快捷方式、自动更新或发布流程，只是无端口保护地隐藏运行 `pythonw server.py` 的旧入口。
+- 保留 `python server.py` 作为明确的 3010 命令行调试方式；日常源码开发继续统一使用 `启动Code开发版.bat` / `dev_server.py`，避免与正式版进程、数据和浏览器来源混淆。
+- 同步清理 README、使用指南和旧启动脚本专项测试；未修改正式 EXE、开发实例或运行时逻辑。
+- 验证：
+  - `python -m pytest tests/test_image_vision_and_browser_refresh.py tests/test_dev_server.py -q`：**14 passed, 3 subtests passed**；
+  - `python -m pytest -q`：**842 passed, 236 subtests passed**；
+  - `git diff --check` 通过，仓库文档与测试中已无两个旧入口的有效引用。
+
+**涉及文件**：`启动Code.bat`、`server-launcher.vbs`、`README.md`、`docs/GUIDE.md`、`tests/test_image_vision_and_browser_refresh.py`、`CHANGELOG.md`
+
+---
+
 ## 2026-07-28 18:31 · Codex
 
 ### 3011 隔离开发实例、workbar 回跳诊断与 Dev 标识

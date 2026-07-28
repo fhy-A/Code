@@ -106,14 +106,5 @@ class TestExistingBrowserRefresh(unittest.TestCase):
             source,
         )
 
-    def test_dev_launcher_opens_browser_for_fresh_or_headless_service(self):
-        source = (ROOT / "启动Code.bat").read_text(encoding="utf-8")
-        self.assertIn("/api/has-browser", source)
-        self.assertIn("/api/request-browser-refresh", source)
-        self.assertEqual(source.count("/api/request-browser-refresh"), 1)
-        self.assertEqual(source.count('start "" http://127.0.0.1:3010'), 2)
-        self.assertLess(source.index("/api/has-browser"), source.index("/api/request-browser-refresh"))
-
-
 if __name__ == "__main__":
     unittest.main()

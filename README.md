@@ -15,7 +15,7 @@
   <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.5.30-2563EB" alt="Version 0.5.30"></a>
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Windows">
   <img src="https://img.shields.io/badge/python-3.12+-3776AB" alt="Python 3.12+">
-  <img src="https://img.shields.io/badge/tests-843%20passed-16A34A" alt="843 tests passed">
+  <img src="https://img.shields.io/badge/tests-842%20passed-16A34A" alt="842 tests passed">
   <a href="docs/LICENSE"><img src="https://img.shields.io/badge/license-MIT-6B7280" alt="MIT License"></a>
 </p>
 
@@ -96,7 +96,7 @@ python -m pip install pystray pillow pytest
 python server.py
 ```
 
-也可以直接运行 `启动Code.bat`。源码模式默认把运行数据保存在仓库的 `data/` 中；正式 EXE 使用用户目录下的 `.code/`。
+直接运行 `python server.py` 仅作为占用 3010 的命令行调试入口。日常源码开发建议使用下方独立的 3011 开发实例。源码模式默认把运行数据保存在仓库的 `data/` 中；正式 EXE 使用用户目录下的 `.code/`。
 
 ### 同时运行正式版与开发版
 
