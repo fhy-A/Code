@@ -14,6 +14,7 @@ STATE_SOURCE = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
 PLATFORM_SOURCE = (ROOT / "src" / "core" / "platform.js").read_text(encoding="utf-8")
 API_CLIENT_SOURCE = (ROOT / "src" / "services" / "api-client.js").read_text(encoding="utf-8")
+SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 SETTINGS_SOURCE = (ROOT / "src" / "features" / "settings.js").read_text(encoding="utf-8")
 DIFF_SOURCE = (ROOT / "src" / "ui" / "diff.js").read_text(encoding="utf-8")
 MARKDOWN_SOURCE = (ROOT / "src" / "ui" / "markdown.js").read_text(encoding="utf-8")
@@ -479,6 +480,7 @@ eval(source);
             "src/services/notifications.js",
             "src/services/api-client.js",
             "src/services/persistence.js",
+            "src/features/sessions.js",
             "src/ui/diff.js",
             "src/ui/markdown.js",
             "src/ui/timeline.js",
@@ -508,6 +510,7 @@ eval(source);
             "./src/ui/timeline.js",
             "./src/ui/messages.js",
             "./src/ui/panels.js",
+            "./src/features/sessions.js",
             "./src/features/settings.js",
             "./src/features/skills-memory.js",
             "./src/features/preview.js",
@@ -750,6 +753,165 @@ setImmediate(async () => {
             ["first", "second", "parallel"],
         )
         self.assertEqual(result["saveChains"], {})
+
+    def test_sessions_module_owns_crud_requests_and_loaded_data_normalization(self):
+        self.assertTrue((ROOT / "src" / "features" / "sessions.js").is_file())
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+
+const {
+  normalizeSessionMessages,
+  collectPendingEdits,
+  createSessionsFeature,
+} = window.Code.features.sessions;
+const requests = [];
+const requestJson = async (url, options = {}) => {
+  const request = {
+    url,
+    method: options.method || "GET",
+    body: options.body ? JSON.parse(options.body) : null,
+  };
+  requests.push(request);
+  if (url === "/api/sessions" && request.method === "GET") {
+    return {data: [{id: "alpha"}, {id: "beta"}]};
+  }
+  return {id: url.split("/").pop(), ...request};
+};
+const sessions = createSessionsFeature({requestJson});
+
+(async () => {
+  const listed = await sessions.listSessions();
+  await sessions.getSession("alpha / beta");
+  await sessions.createSession({title: "Created", projectId: "project-1"});
+  await sessions.updateSession("alpha", {title: "Renamed", stats: {input: 2}});
+  await sessions.deleteSession("beta");
+
+  const sourceMessages = [
+    {role: "assistant", content: "answer", _images: ["image.png"]},
+    {
+      role: "tool-result",
+      content: "edit",
+      meta: {
+        pendingEditId: "edit-1",
+        path: "app.js",
+        newContent: "updated",
+        applied: true,
+        serverManaged: true,
+        mtime: 42,
+      },
+    },
+    {role: "tool-result", content: "ignored", meta: {}},
+  ];
+  const normalized = normalizeSessionMessages(sourceMessages);
+  const pendingEdits = collectPendingEdits(normalized);
+  let missingIdError = "";
+  try {
+    await sessions.getSession(" ");
+  } catch (error) {
+    missingIdError = error.message;
+  }
+
+  process.stdout.write(JSON.stringify({
+    listed,
+    requests,
+    normalized,
+    pendingEdits,
+    sourceIdentityPreserved: normalized[0] !== sourceMessages[0]
+      && sourceMessages[0]._images[0] === "image.png",
+    missingIdError,
+  }));
+})();
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["listed"], [{"id": "alpha"}, {"id": "beta"}])
+        self.assertEqual(
+            result["requests"],
+            [
+                {"url": "/api/sessions", "method": "GET", "body": None},
+                {
+                    "url": "/api/sessions/alpha%20%2F%20beta",
+                    "method": "GET",
+                    "body": None,
+                },
+                {
+                    "url": "/api/sessions",
+                    "method": "POST",
+                    "body": {"title": "Created", "projectId": "project-1"},
+                },
+                {
+                    "url": "/api/sessions/alpha",
+                    "method": "PUT",
+                    "body": {"title": "Renamed", "stats": {"input": 2}},
+                },
+                {
+                    "url": "/api/sessions/beta",
+                    "method": "DELETE",
+                    "body": None,
+                },
+            ],
+        )
+        self.assertTrue(result["sourceIdentityPreserved"])
+        self.assertEqual(
+            result["pendingEdits"],
+            {
+                "edit-1": {
+                    "path": "app.js",
+                    "newContent": "updated",
+                    "applied": True,
+                    "rejected": False,
+                    "resolved": True,
+                    "serverManaged": True,
+                    "mtime": 42,
+                },
+            },
+        )
+        self.assertEqual(result["missingIdError"], "Session id is required")
+
+        self.assertIn("createSessionsFeature({ requestJson: apiJson })", APP_SOURCE)
+        refresh_start = APP_SOURCE.index("async function refreshSessions()")
+        create_start = APP_SOURCE.index("async function createSession(", refresh_start)
+        load_start = APP_SOURCE.index("async function loadSession(", create_start)
+        save_start = APP_SOURCE.index("async function saveSessionState", load_start)
+        rename_start = APP_SOURCE.index("async function renameSession(")
+        delete_start = APP_SOURCE.index("async function deleteSession(", rename_start)
+        pinned_start = APP_SOURCE.index("function getPinnedSessions()", delete_start)
+        self.assertIn(
+            "state.sessions = await listSessionRecords();",
+            APP_SOURCE[refresh_start:create_start],
+        )
+        self.assertIn(
+            "const session = await createSessionRecord(body);",
+            APP_SOURCE[create_start:load_start],
+        )
+        self.assertIn(
+            "const session = await getSessionRecord(sessionId);",
+            APP_SOURCE[load_start:save_start],
+        )
+        self.assertIn(
+            "normalizeLoadedSessionMessages(session.messages || [])",
+            APP_SOURCE[load_start:save_start],
+        )
+        self.assertIn(
+            "collectSessionPendingEdits(state.messages)",
+            APP_SOURCE[load_start:save_start],
+        )
+        self.assertIn(
+            "await updateSessionRecord(sessionId",
+            APP_SOURCE[rename_start:delete_start],
+        )
+        self.assertIn(
+            "await deleteSessionRecord(sessionId);",
+            APP_SOURCE[delete_start:pinned_start],
+        )
 
     def test_platform_core_normalizes_and_parses_key_config(self):
         self.assertIn('const WORKBAR_URL = "https://workbar.ai"', PLATFORM_SOURCE)

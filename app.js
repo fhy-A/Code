@@ -31,6 +31,11 @@ const {
 const { createMessagesFeature } = window.Code.ui.messages;
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
+const {
+  collectPendingEdits: collectSessionPendingEdits,
+  createSessionsFeature,
+  normalizeSessionMessages: normalizeLoadedSessionMessages,
+} = window.Code.features.sessions;
 const { createSettingsFeature } = window.Code.features.settings;
 const {
   applySkillTaskPolicy,
@@ -101,6 +106,13 @@ const { saveSession: persistSessionPayload } = createSessionPersistence({
   requestJson: apiJson,
   saveChains: state._sessionSaveChains,
 });
+const {
+  listSessions: listSessionRecords,
+  getSession: getSessionRecord,
+  createSession: createSessionRecord,
+  updateSession: updateSessionRecord,
+  deleteSession: deleteSessionRecord,
+} = createSessionsFeature({ requestJson: apiJson });
 
 const { t, setLang, applyI18n } = createI18nRuntime({
   getLanguage: () => state.lang,
@@ -3586,24 +3598,14 @@ async function renameSession(sessionId, title) {
 
   const isCurrent = sessionId === state.sessionId;
 
-  const session = isCurrent ? null : await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  const session = isCurrent ? null : await getSessionRecord(sessionId);
 
-  const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-
-    method: "PUT",
-
-    body: JSON.stringify({
-
-      title: nextTitle,
-
-      messages: isCurrent
-        ? serializeSessionMessages(state.messages)
-        : serializeSessionMessages(session.messages || []),
-
-      stats: isCurrent ? state.stats : (session.stats || {}),
-
-    }),
-
+  const savedSession = await updateSessionRecord(sessionId, {
+    title: nextTitle,
+    messages: isCurrent
+      ? serializeSessionMessages(state.messages)
+      : serializeSessionMessages(session.messages || []),
+    stats: isCurrent ? state.stats : (session.stats || {}),
   });
   syncSessionSourceBadgeState(sessionId, savedSession);
 
@@ -3646,7 +3648,7 @@ function showDeleteConfirm(sessionId, title) {
   const onEsc = (e) => { if (e.key === "Escape") cleanup(); };
   const handler = async () => {
     cleanup();
-    await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    await deleteSessionRecord(sessionId);
     if (state.sessionId === sessionId) {
       invalidateForegroundSessionNavigation();
       state.sessionId = null;
@@ -4436,8 +4438,7 @@ function rememberSessionForeground(sessionId) {
 async function refreshSessions() {
 
   try {
-    const data = await apiJson("/api/sessions");
-    state.sessions = data.data || [];
+    state.sessions = await listSessionRecords();
     for (const session of state.sessions) {
       if (session?.id) {
         if (!isSessionStreaming(session.id)) {
@@ -4482,13 +4483,7 @@ async function createSession(title = t("sessionTitleDefault"), options = {}) {
   const loadSeq = (state._sessionLoadSeq || 0) + 1;
   state._sessionLoadSeq = loadSeq;
 
-  const session = await apiJson("/api/sessions", {
-
-    method: "POST",
-
-    body: JSON.stringify(body),
-
-  });
+  const session = await createSessionRecord(body);
   if (loadSeq !== state._sessionLoadSeq) return session;
 
   state.sessionId = session.id;
@@ -4579,7 +4574,7 @@ async function loadSession(sessionId) {
   const prevId = state.sessionId;
   cacheActiveSessionState();
 
-  const session = await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  const session = await getSessionRecord(sessionId);
   if (loadSeq !== state._sessionLoadSeq
       || foregroundNavigationSeq !== state._foregroundNavigationSeq) return;
 
@@ -4606,42 +4601,14 @@ async function loadSession(sessionId) {
 
   // Load from active run (streaming) > cache > server
   const cached = state._sessionMsgs && state._sessionMsgs[session.id];
-  state.messages = (cached || (session.messages || []).map((msg) => ({
-
-    ...msg,
-
-    _images: msg._images || undefined,
-
-  })));
+  state.messages = cached || normalizeLoadedSessionMessages(session.messages || []);
   setSessionMessages(session.id, state.messages);
   setSessionRunState(session.id, session.runState || getSessionRunState(session.id));
   restoreUserInputRequest(session.id, session.runState?.userInputRequest);
   restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
   if (loaded) loaded._seenCount = state.messages.length;
 
-  state.pendingEdits = {};
-
-  for (const msg of state.messages) {
-
-    if (msg.role === "tool-result" && msg.meta?.pendingEditId) {
-
-      state.pendingEdits[msg.meta.pendingEditId] = {
-
-        path: msg.meta.path,
-
-        newContent: msg.meta.newContent || "",
-
-        applied: Boolean(msg.meta.applied),
-        rejected: Boolean(msg.meta.rejected),
-        resolved: Boolean(msg.meta.applied || msg.meta.rejected),
-        serverManaged: Boolean(msg.meta.serverManaged),
-        mtime: msg.meta.mtime || 0,
-
-      };
-
-    }
-
-  }
+  state.pendingEdits = collectSessionPendingEdits(state.messages);
 
   state.stats = state._sessionStats[session.id] || session.stats || { input: 0, output: 0, cache: 0, cost: 0 };
   setSessionStats(session.id, state.stats);
