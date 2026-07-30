@@ -2298,6 +2298,104 @@ const html = feature.projectMessages(messages, {
   hasActiveRun: true,
   branchMarker: {messageCount: 1, parentTitle: "Parent"},
 });
+const completedHtml = feature.projectMessages(messages, {
+  hasActiveRun: false,
+});
+const simpleCompletedHtml = feature.projectMessages([
+  {role: "user", content: "simple"},
+  {role: "assistant", content: "simple answer", _responseTime: "1s"},
+], {hasActiveRun: false});
+const activeTraceMessages = [
+  {role: "user", content: "active trace"},
+  {role: "assistant", content: "checkpoint", meta: {toolCalls: [
+    {id: "active-1", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "active-1", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "active-1", outcome: "succeeded"}},
+  {role: "assistant", content: "first final chunk", streaming: true, _streamProjection: "answer"},
+];
+const activeAnswerHtml = feature.projectMessages(activeTraceMessages, {
+  hasActiveRun: true,
+});
+const expandedActiveAnswerHtml = feature.projectMessages(activeTraceMessages, {
+  hasActiveRun: true,
+  expandedExecutionTraces: new Set(["0"]),
+});
+const activeThinkingHtml = feature.projectMessages([
+  {role: "user", content: "active thinking"},
+  {role: "assistant", content: "checkpoint", meta: {toolCalls: [
+    {id: "thinking-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "thinking-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "contents", meta: {action: "read_file", toolCallId: "thinking-1", outcome: "succeeded"}},
+  {role: "assistant", content: "next checkpoint", streaming: true, _streamProjection: "thinking"},
+], {hasActiveRun: true});
+const emptyRecoveryHtml = feature.projectMessages([
+  {role: "user", content: "empty recovery"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "empty-1", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "empty-1", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "empty-1", outcome: "succeeded"}},
+  {role: "assistant", content: " ", streaming: true, _streamProjection: "pending"},
+], {hasActiveRun: true});
+const operationalHtml = feature.projectMessages([
+  {role: "user", content: "inspect"},
+  {role: "assistant", content: "正在读取 README.md…\n正在执行 git status --short…", meta: {toolCalls: [
+    {id: "notice-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "notice-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "file contents", meta: {action: "read_file", toolCallId: "notice-1", outcome: "succeeded"}},
+  {role: "assistant", content: "meaningful checkpoint", meta: {toolCalls: [
+    {id: "notice-2", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "notice-2", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "notice-2", outcome: "succeeded"}},
+  {role: "assistant", content: "done", _responseTime: "2s"},
+], {hasActiveRun: false});
+const groupedStageHtml = feature.projectMessages([
+  {role: "user", content: "inspect"},
+  {role: "assistant", content: "正在读取 README.md…", meta: {toolCalls: [
+    {id: "group-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "group-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "file contents", meta: {action: "read_file", toolCallId: "group-1", outcome: "succeeded"}},
+  {role: "assistant", content: "正在执行 git status --short…", meta: {toolCalls: [
+    {id: "group-2", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "group-2", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "group-2", outcome: "succeeded"}},
+  {role: "assistant", content: "done", _responseTime: "2s"},
+], {hasActiveRun: false});
+const runningStage = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [
+    {id: "running-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+    {id: "running-2", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}}, index: 1},
+  {msg: {role: "tool-call", meta: {action: "read_file", toolCallId: "running-1", tool: {action: "read_file", path: "README.md"}}}, index: 2},
+  {msg: {role: "tool-result", content: "file contents", meta: {action: "read_file", toolCallId: "running-1", outcome: "succeeded"}}, index: 3},
+  {msg: {role: "tool-call", meta: {action: "run_command", toolCallId: "running-2", tool: {action: "run_command", command: "git status --short"}}}, index: 4},
+], 9);
+const completedCommands = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [
+    {id: "command-1", function: {name: "run_command", arguments: '{"command":"node --check app.js"}'}},
+    {id: "command-2", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}}, index: 1},
+  {msg: {role: "tool-call", meta: {action: "run_command", toolCallId: "command-1", tool: {action: "run_command", command: "node --check app.js"}}}, index: 2},
+  {msg: {role: "tool-result", content: "ok", meta: {action: "run_command", toolCallId: "command-1", outcome: "succeeded"}}, index: 3},
+  {msg: {role: "tool-call", meta: {action: "run_command", toolCallId: "command-2", tool: {action: "run_command", command: "git status --short"}}}, index: 4},
+  {msg: {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "command-2", outcome: "succeeded"}}, index: 5},
+], 10);
+const completedEdits = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [
+    {id: "edit-1", function: {name: "write_file", arguments: '{"path":"src/a.js","content":"a"}'}},
+    {id: "edit-2", function: {name: "propose_edit", arguments: '{"path":"src/b.js"}'}},
+  ]}}, index: 1},
+  {msg: {role: "tool-call", meta: {action: "write_file", toolCallId: "edit-1", tool: {action: "write_file", path: "src/a.js"}}}, index: 2},
+  {msg: {role: "tool-result", content: "saved", meta: {action: "write_file", toolCallId: "edit-1", outcome: "succeeded"}}, index: 3},
+  {msg: {role: "tool-call", meta: {action: "propose_edit", toolCallId: "edit-2", tool: {action: "propose_edit", path: "src/b.js"}}}, index: 4},
+  {msg: {role: "tool-result", content: "applied", meta: {action: "propose_edit", toolCallId: "edit-2", outcome: "succeeded"}}, index: 5},
+], 11);
 const streaming = feature.renderFinalAssistantProjection({
   role: "assistant",
   content: "streaming answer",
@@ -2310,6 +2408,18 @@ const pending = feature.renderFinalAssistantProjection({
   streaming: true,
   _streamProjection: "pending",
 }, 10);
+const commentary = feature.renderFinalAssistantProjection({
+  role: "assistant",
+  content: "stable checkpoint",
+  streaming: true,
+  _streamProjection: "thinking",
+}, 11);
+const englishOperational = feature.renderFinalAssistantProjection({
+  role: "assistant",
+  content: "Reading README.md...",
+  streaming: true,
+  _streamProjection: "thinking",
+}, 12);
 const usageOnly = feature.renderCompletedRunStatus("model-1", "", {input: 8});
 const claudeUsage = feature.normalizeResponseUsage({
   input_tokens: 12,
@@ -2330,8 +2440,21 @@ const cacheStatus = feature.renderCompletedRunStatus("model-1", "", {
 });
 process.stdout.write(JSON.stringify({
   html,
+  completedHtml,
+  simpleCompletedHtml,
+  activeAnswerHtml,
+  expandedActiveAnswerHtml,
+  activeThinkingHtml,
+  emptyRecoveryHtml,
+  operationalHtml,
+  groupedStageHtml,
+  runningStage,
+  completedCommands,
+  completedEdits,
   streaming,
   pending,
+  commentary,
+  englishOperational,
   usageOnly,
   claudeUsage,
   openAIUsage,
@@ -2348,10 +2471,18 @@ process.stdout.write(JSON.stringify({
         )
         data = json.loads(completed.stdout)
         html = data["html"]
+        completed_html = data["completedHtml"]
         self.assertLess(html.index("run &lt;task&gt;"), html.index("data-active-run-anchor"))
         self.assertLess(html.index("data-active-run-anchor"), html.index("<branch>Parent</branch>"))
-        self.assertLess(html.index("<branch>Parent</branch>"), html.index("tool-process"))
-        self.assertLess(html.index("tool-process"), html.index("<answer>done</answer>"))
+        first_commentary = html.index("<answer>inspect **project**</answer>")
+        first_process = html.index("tool-process", first_commentary)
+        second_commentary = html.index("<answer>inspect **project**</answer>", first_commentary + 1)
+        second_process = html.index("tool-process", second_commentary)
+        self.assertLess(html.index("<branch>Parent</branch>"), first_commentary)
+        self.assertLess(first_commentary, first_process)
+        self.assertLess(first_process, second_commentary)
+        self.assertLess(second_commentary, second_process)
+        self.assertLess(second_process, html.index("<answer>done</answer>"))
         self.assertLess(html.index("<answer>done</answer>"), html.index("background-reply-reference"))
         self.assertLess(html.index("background-reply-reference"), html.index("<edit data-index=\"9\">"))
         self.assertIn("backgroundRunning", html)
@@ -2359,8 +2490,13 @@ process.stdout.write(JSON.stringify({
         self.assertIn("label:read_file", html)
         self.assertIn("README.md", html)
         self.assertIn("missing path", html)
-        self.assertIn("toolProcessRepeated:2", html)
-        self.assertIn("toolProcessFailureCount:2", html)
+        self.assertEqual(html.count('class="tool-process-item failed"'), 2)
+        self.assertGreaterEqual(html.count("<details"), 2)
+        self.assertNotIn("<details open", html)
+        self.assertNotIn("toolProcessRepeated:2", html)
+        self.assertNotIn("toolProcessTitle", html)
+        self.assertIn("toolProcessArguments", html)
+        self.assertIn("toolProcessResult", html)
         self.assertNotIn("secret reasoning", html)
         self.assertIn("background done", html)
         self.assertNotIn("hidden tool", html)
@@ -2371,6 +2507,120 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<recovery></recovery>", data["streaming"])
         self.assertIn('data-stream-kind="pending"', data["pending"])
         self.assertNotIn("unclassified first frame", data["pending"])
+        self.assertIn('data-stream-kind="thinking"', data["commentary"])
+        self.assertIn("stable checkpoint", data["commentary"])
+        self.assertNotIn('class="role', data["commentary"])
+        self.assertNotIn("msg-footer", data["commentary"])
+        self.assertIn('data-completed-run-status', completed_html)
+        self.assertIn('class="completed-run-label">processedLabel</span>', completed_html)
+        self.assertEqual(completed_html.count("4s"), 1)
+        self.assertLess(completed_html.index("run &lt;task&gt;"), completed_html.index("data-completed-run-status"))
+        self.assertIn('class="execution-trace completed"', completed_html)
+        self.assertIn('data-execution-trace="0"', completed_html)
+        self.assertNotIn('class="execution-trace completed" open', completed_html)
+        trace_start = completed_html.index('class="execution-trace completed"')
+        trace_body = completed_html.index('class="execution-trace-body"', trace_start)
+        first_trace_commentary = completed_html.index("<answer>inspect **project**</answer>")
+        first_trace_tools = completed_html.index("data-tool-process-block", first_trace_commentary)
+        final_answer = completed_html.index("<answer>done</answer>")
+        trace_end = completed_html.rfind("</details>", trace_body, final_answer)
+        self.assertLess(completed_html.index("data-completed-run-status"), trace_body)
+        self.assertLess(trace_body, first_trace_commentary)
+        self.assertLess(first_trace_commentary, first_trace_tools)
+        self.assertLess(first_trace_tools, trace_end)
+        self.assertLess(trace_end, final_answer)
+        self.assertNotIn("execution-trace", data["simpleCompletedHtml"])
+        self.assertIn("data-completed-run-status", data["simpleCompletedHtml"])
+        active_answer_html = data["activeAnswerHtml"]
+        self.assertIn('class="execution-trace active"', active_answer_html)
+        self.assertIn('data-execution-trace="0"', active_answer_html)
+        self.assertNotIn(
+            '<details class="execution-trace active" data-execution-trace="0" open',
+            active_answer_html,
+        )
+        active_trace_start = active_answer_html.index('class="execution-trace active"')
+        active_summary = active_answer_html.index('class="execution-trace-summary"', active_trace_start)
+        active_anchor = active_answer_html.index("data-active-run-anchor", active_summary)
+        active_body = active_answer_html.index('class="execution-trace-body"', active_anchor)
+        active_commentary = active_answer_html.index("checkpoint", active_body)
+        active_tools = active_answer_html.index("data-tool-process-block", active_commentary)
+        active_final = active_answer_html.index("first final chunk")
+        active_trace_end = active_answer_html.rfind("</details>", active_tools, active_final)
+        self.assertLess(active_summary, active_anchor)
+        self.assertLess(active_anchor, active_body)
+        self.assertLess(active_body, active_commentary)
+        self.assertLess(active_commentary, active_tools)
+        self.assertLess(active_tools, active_trace_end)
+        self.assertLess(active_trace_end, active_final)
+        self.assertIn(
+            '<details class="execution-trace active" data-execution-trace="0" open',
+            data["expandedActiveAnswerHtml"],
+        )
+        self.assertNotIn("execution-trace", data["activeThinkingHtml"])
+        self.assertLess(
+            data["activeThinkingHtml"].index("data-active-run-anchor"),
+            data["activeThinkingHtml"].index("checkpoint"),
+        )
+        self.assertIn("next checkpoint", data["activeThinkingHtml"])
+        self.assertNotIn("execution-trace", data["emptyRecoveryHtml"])
+        self.assertLess(
+            data["emptyRecoveryHtml"].index("data-active-run-anchor"),
+            data["emptyRecoveryHtml"].index("data-tool-process-block"),
+        )
+        self.assertNotIn("正在读取 README.md", data["operationalHtml"])
+        self.assertNotIn("正在执行 git status --short", data["operationalHtml"])
+        self.assertIn("meaningful checkpoint", data["operationalHtml"])
+        self.assertIn("label:read_file", data["operationalHtml"])
+        self.assertIn("label:run_command", data["operationalHtml"])
+        self.assertEqual(data["operationalHtml"].count("data-tool-process-block"), 2)
+        first_operational_group = data["operationalHtml"].index("data-tool-process-block")
+        checkpoint_index = data["operationalHtml"].index("meaningful checkpoint")
+        second_operational_group = data["operationalHtml"].index("data-tool-process-block", first_operational_group + 1)
+        self.assertLess(first_operational_group, checkpoint_index)
+        self.assertLess(checkpoint_index, second_operational_group)
+        self.assertEqual(data["groupedStageHtml"].count("data-tool-process-block"), 1)
+        self.assertEqual(data["groupedStageHtml"].count('class="tool-process-item succeeded"'), 2)
+        self.assertIn('class="tool-process-stage succeeded"', data["groupedStageHtml"])
+        grouped_stage_summary = data["groupedStageHtml"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn(
+            "<strong>toolProcessInspectedFile · toolProcessRanCommand</strong>",
+            grouped_stage_summary,
+        )
+        self.assertNotIn("tool-process-indicator", grouped_stage_summary)
+        self.assertNotIn("<code>", grouped_stage_summary)
+        self.assertNotIn("<details open", data["groupedStageHtml"])
+        self.assertIn('data-current-action="run_command"', data["runningStage"])
+        self.assertIn('class="tool-process-stage running"', data["runningStage"])
+        running_stage_summary = data["runningStage"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn(
+            "<strong>label:run_command</strong><code>git status --short</code>",
+            running_stage_summary,
+        )
+        self.assertNotIn("tool-process-indicator", running_stage_summary)
+        self.assertIn("tool-process-indicator", data["runningStage"].split('<div class="tool-process-stage-body">', 1)[1])
+        self.assertEqual(data["runningStage"].count("toolProcessRunning"), 1)
+        completed_commands_summary = data["completedCommands"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn("<strong>toolProcessRanCommands</strong>", completed_commands_summary)
+        self.assertNotIn("<code>", completed_commands_summary)
+        completed_edits_summary = data["completedEdits"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn("<strong>toolProcessEditedFiles</strong>", completed_edits_summary)
+        self.assertNotIn("<code>", completed_edits_summary)
+        for expected in (
+            'toolProcessRanCommand: "运行了命令"',
+            'toolProcessRanCommands: "运行了多个命令"',
+            'toolProcessEditedFile: "编辑了文件"',
+            'toolProcessEditedFiles: "编辑了多个文件"',
+            'toolProcessInspectedFile: "查看了文件"',
+            'toolProcessInspectedFiles: "查看了多个文件"',
+            'toolProcessDeletedFile: "删除了文件"',
+            'toolProcessDeletedFiles: "删除了多个文件"',
+            'toolProcessUsedTool: "使用了工具"',
+            'toolProcessUsedTools: "使用了多个工具"',
+            'toolProcessRanCommand: "Ran a command"',
+            'toolProcessEditedFiles: "Edited multiple files"',
+        ):
+            self.assertIn(expected, I18N_SOURCE)
+        self.assertNotIn("Reading README.md", data["englishOperational"])
         self.assertNotIn("0s", data["usageOnly"])
         self.assertEqual(data["claudeUsage"], {
             "input": 115,
@@ -3460,28 +3710,43 @@ process.stdout.write(JSON.stringify({
             assistant_block,
         )
         self.assertIn(
-            "if (msg.meta?.toolCalls?.length || streamingToolRound) {",
+            "if (msg.meta?.toolCalls?.length) {",
             assistant_block,
         )
+        self.assertIn("const hasMeaningfulToolCommentary = Boolean(", assistant_block)
+        self.assertIn("if (hasMeaningfulToolCommentary) {", assistant_block)
+        self.assertIn("rows.push(renderFinalAssistantProjection(msg, index, assistantOptions))", assistant_block)
+        self.assertIn('content: ""', assistant_block)
         self.assertIn("pendingProcess.push", assistant_block)
         self.assertLess(
-            assistant_block.index("if (msg.meta?.toolCalls?.length || streamingToolRound) {"),
+            assistant_block.index("rows.push(renderFinalAssistantProjection(msg, index, assistantOptions))"),
             assistant_block.index("pendingProcess.push"),
+        )
+        self.assertIn("if (streamingToolRound) {", assistant_block)
+        self.assertLess(
+            assistant_block.index("if (streamingToolRound) {"),
+            assistant_block.rindex("rows.push(renderFinalAssistantProjection(msg, index, assistantOptions))"),
         )
         projection_start = MESSAGES_SOURCE.index("function renderToolProcessProjection")
         projection_end = MESSAGES_SOURCE.index("function renderAssistantResponseInfo", projection_start)
         projection = MESSAGES_SOURCE[projection_start:projection_end]
-        self.assertIn('data-stream-kind="thinking"', projection)
-        self.assertIn('data-stream-part="summary"', projection)
-        self.assertIn("collapseRepeatedProcessCalls(calls)", projection)
-        self.assertIn("getProcessCallView(call).outcome", projection)
-        self.assertIn('escapeHtml(t("toolProcessModelNote"))', projection)
+        self.assertIn("calls.map(getProcessCallView)", projection)
+        self.assertIn('class="tool-process-item ${escapeHtml(call.outcome)}"', projection)
+        self.assertIn('escapeHtml(t("toolProcessArguments"))', projection)
+        self.assertIn('escapeHtml(t("toolProcessResult"))', projection)
+        self.assertNotIn('escapeHtml(t("toolProcessModelNote"))', projection)
+        self.assertNotIn("collapseRepeatedProcessCalls(calls)", projection)
         self.assertNotIn("msg.thought", projection)
         self.assertNotIn("renderMarkdown(", projection)
-        self.assertIn(".tool-process-group {", STYLE_SOURCE)
-        self.assertIn(".tool-process-row.failed", STYLE_SOURCE)
-        self.assertIn("-webkit-line-clamp: 3", STYLE_SOURCE)
-        self.assertIn("max-height: min(360px, 45vh)", STYLE_SOURCE)
+        self.assertIn(".tool-process-item {", STYLE_SOURCE)
+        self.assertIn(".tool-process-item.failed", STYLE_SOURCE)
+        self.assertIn(".tool-process-stage:not([open]) > .tool-process-stage-body", STYLE_SOURCE)
+        self.assertIn(".tool-process-stage[open] > summary .tool-process-stage-chevron", STYLE_SOURCE)
+        self.assertIn("max-height: min(320px, 42vh)", STYLE_SOURCE)
+        self.assertIn(".agent-commentary {", STYLE_SOURCE)
+        self.assertIn(".completed-run-status.msg {", STYLE_SOURCE)
+        self.assertNotIn(".active-run-line::after", STYLE_SOURCE)
+        self.assertNotIn(".completed-run-line::after", STYLE_SOURCE)
         role_style_start = STYLE_SOURCE.rindex(".role {")
         role_style_end = STYLE_SOURCE.index("}", role_style_start)
         role_style = STYLE_SOURCE[role_style_start:role_style_end]
@@ -3497,7 +3762,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("\n  width: 24px;", role_rule)
         process_style_start = STYLE_SOURCE.index(".tool-process {")
         process_style_end = STYLE_SOURCE.index("}", process_style_start)
-        self.assertIn("margin-bottom: 16px", STYLE_SOURCE[process_style_start:process_style_end])
+        self.assertIn("margin-bottom: 12px", STYLE_SOURCE[process_style_start:process_style_end])
 
         tool_projection_start = APP_SOURCE.index("function projectAgentToolCompleted")
         tool_projection_end = APP_SOURCE.index("async function projectAgentEvent", tool_projection_start)
@@ -3512,23 +3777,24 @@ process.stdout.write(JSON.stringify({
         projection = MESSAGES_SOURCE[projection_start:projection_end]
 
         self.assertIn('data-stream-session="${escapeHtml(getSessionId() || "")}"', projection)
-        self.assertIn('const streamKind = msg._streamProjection === "answer" ? "answer" : "pending"', projection)
+        self.assertIn('msg._streamProjection === "thinking"', projection)
         self.assertIn('data-stream-kind="${streamKind}"', projection)
         self.assertIn('streamKind === "pending" ? " is-pending" : ""', projection)
         self.assertIn('data-stream-role', projection)
         self.assertIn('streaming-answer-role${showModel ? "" : " is-empty"}', projection)
+        self.assertIn('streamKind !== "pending"', projection)
+        self.assertIn("&& hasVisibleContent", projection)
+        self.assertIn('streamKind === "thinking" && isOperationalToolNotice(content)', projection)
         self.assertNotIn('data-stream-part="thought"', projection)
         self.assertNotIn("msg.thought", projection)
         patch_start = APP_SOURCE.index("function patchStreamingAssistantMessage")
         patch_end = APP_SOURCE.index("function scheduleStreamingAssistantPatch", patch_start)
         patch = APP_SOURCE[patch_start:patch_end]
-        self.assertIn('streamKind === "thinking"', patch)
         self.assertIn('if (streamKind === "pending")', patch)
         self.assertIn("scheduleStreamingAnswerProjection(sessionId, index)", patch)
-        self.assertIn('streamKind !== "answer" || !visibleContent', patch)
-        self.assertIn('data-stream-part="summary"', patch)
-        self.assertIn('msg._streamProjection === "thinking" && visibleContent', patch)
-        self.assertIn("renderSessionMessages(sessionId)", patch)
+        self.assertIn('data-stream-part="answer"', patch)
+        self.assertIn("renderMarkdownLite(visibleContent)", patch)
+        self.assertIn('streamKind === "pending" || !visibleContent', patch)
         self.assertNotIn("preservedNodes", APP_SOURCE)
         self.assertNotIn("appendChild(preservedNode)", APP_SOURCE)
 
@@ -3578,9 +3844,43 @@ process.stdout.write(JSON.stringify({
         label_start = APP_SOURCE.index("function getActiveRunLabel")
         label_end = APP_SOURCE.index("function markModelResponseStarted", label_start)
         label_helper = APP_SOURCE[label_start:label_end]
-        self.assertIn("run.modelRound", label_helper)
-        self.assertIn('"waitingForModelContinuation"', label_helper)
-        self.assertIn('"modelContinuationDelayed"', label_helper)
+        self.assertIn(
+            'if (run?.hasFirstModelResponseStarted) return t("processedLabel");',
+            label_helper,
+        )
+        self.assertNotIn("run.modelRound", label_helper)
+        self.assertNotIn('"waitingForModelContinuation"', label_helper)
+        self.assertNotIn('"modelContinuationDelayed"', label_helper)
+        self.assertNotIn('"processingLabel"', label_helper)
+        self.assertTrue(label_helper.rstrip().endswith('return t("waitingForModelResponse");\n}'))
+
+        response_start = APP_SOURCE.index("function markModelResponseStarted")
+        response_end = APP_SOURCE.index("function getRecoveryCountdownSeconds", response_start)
+        response_helper = APP_SOURCE[response_start:response_end]
+        self.assertIn("run.hasFirstModelResponseStarted = true;", response_helper)
+        self.assertLess(
+            response_helper.index("run.hasFirstModelResponseStarted = true;"),
+            response_helper.index("if (run.modelResponseStarted) return;"),
+        )
+
+        self.assertIn("hasFirstModelResponseStarted: false", APP_SOURCE)
+        self.assertIn(
+            "hasFirstModelResponseStarted: Boolean(ctx.run?.hasFirstModelResponseStarted)",
+            APP_SOURCE,
+        )
+        self.assertIn("function hasRecoveredModelResponse", APP_SOURCE)
+        self.assertIn("ctx.run.hasFirstModelResponseStarted = Boolean(", APP_SOURCE)
+        self.assertIn("runState.hasFirstModelResponseStarted", APP_SOURCE)
+        self.assertIn("hasRecoveredModelResponse(messages, runState)", APP_SOURCE)
+        send_start = APP_SOURCE.index("async function sendMessage")
+        send_end = APP_SOURCE.index("function getSelectedModel", send_start)
+        self.assertIn("run.hasFirstModelResponseStarted = false;", APP_SOURCE[send_start:send_end])
+
+        timer_start = APP_SOURCE.index("function startLiveTimer()")
+        timer_end = APP_SOURCE.index("function finalizeRunTiming", timer_start)
+        timer_helper = APP_SOURCE[timer_start:timer_end]
+        self.assertNotIn("getActiveRunLabel", timer_helper)
+        self.assertNotIn("data-active-run-label", timer_helper)
         self.assertIn('taskElapsedTitle: "任务总耗时"', I18N_SOURCE)
         self.assertIn('taskElapsedTitle: "Total task time"', I18N_SOURCE)
         self.assertIn("modelRound: Number(extra.modelRound", APP_SOURCE)
@@ -3613,7 +3913,10 @@ process.stdout.write(JSON.stringify({
             user_projection.index("insertActiveRunAnchor()"),
         )
         self.assertIn('data-active-run-anchor', MESSAGES_SOURCE)
-        self.assertIn("projectMessages(msgs, { hasActiveRun, branchMarker })", render)
+        self.assertIn("const expandedExecutionTraces = new Set(", render)
+        self.assertIn('details.execution-trace[open][data-execution-trace]', render)
+        self.assertIn("const html = projectMessages(msgs, {", render)
+        self.assertIn("expandedExecutionTraces,", render)
         self.assertLess(render.index("parkActiveRunBanner();\n  els.messageList.innerHTML = html"), render.index("mountActiveRunBanner();", render.index("els.messageList.innerHTML = html")))
         mounted_index = render.index("mountActiveRunBanner();", render.index("els.messageList.innerHTML = html"))
         self.assertLess(mounted_index, render.index("syncActiveRunBanner(state.sessionId);", mounted_index))
@@ -3645,6 +3948,23 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("background:", line)
         self.assertNotIn("border:", line)
         self.assertNotIn("border-radius:", line)
+
+        indicator_start = STYLE_SOURCE.index(".active-run-indicator {")
+        indicator_end = STYLE_SOURCE.index(".active-run-label", indicator_start)
+        indicator = STYLE_SOURCE[indicator_start:indicator_end]
+        self.assertNotIn("animation:", indicator)
+        self.assertNotIn("var(--accent)", indicator)
+
+        timer_style_start = STYLE_SOURCE.index(".streaming-timer {")
+        timer_style_end = STYLE_SOURCE.index(".network-reconnect-status", timer_style_start)
+        timer_style = STYLE_SOURCE[timer_style_start:timer_style_end]
+        self.assertIn("color: inherit", timer_style)
+        self.assertNotIn("var(--accent)", timer_style)
+        self.assertNotIn("font-weight: 700", timer_style)
+
+        timer_start = APP_SOURCE.index("function startLiveTimer()")
+        timer_end = APP_SOURCE.index("function finalizeRunTiming", timer_start)
+        self.assertIn("}, 1000);", APP_SOURCE[timer_start:timer_end])
 
         self.assertIn("--composer-safe-bottom", STYLE_SOURCE)
         self.assertIn("function syncComposerSafeArea()", APP_SOURCE)

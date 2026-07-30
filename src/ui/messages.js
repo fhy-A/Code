@@ -99,6 +99,21 @@
     return false;
   }
 
+  function isOperationalToolNotice(text) {
+    const lines = String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!lines.length) return false;
+    return lines.every((line) => (
+      line.length <= 220
+      && (
+        /^正在.+(?:…|\.{3})$/.test(line)
+        || /^(?:Listing|Reading|Searching|Running|Executing|Checking|Inspecting|Viewing|Editing|Writing|Creating|Deleting|Opening|Calling)\b.+(?:…|\.{3})$/i.test(line)
+      )
+    ));
+  }
+
   function createMessagesFeature(options = {}) {
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
     const formatCompact = options.formatCompact || ((value) => String(value ?? 0));
@@ -207,6 +222,102 @@
         : "";
       const separator = usageHtml && elapsedHtml ? `<span class="run-separator">·</span>` : "";
       return `<span class="run-status completed">${usageHtml}${separator}${elapsedHtml}</span>`;
+    }
+
+    function getResponseElapsed(msg) {
+      return String(msg?._responseTime || msg?.meta?._responseTime || "").trim();
+    }
+
+    function isDetachedProjectionMessage(msg) {
+      return Boolean(
+        msg?.meta?.detachedFromMain
+        || msg?.meta?.kind === "background-subagent",
+      );
+    }
+
+    function renderCompletedRunHeader(elapsed) {
+      if (!elapsed) return "";
+      return `<div class="completed-run-status msg" data-completed-run-status>
+        <span class="completed-run-line">
+          <span class="completed-run-label">${escapeHtml(t("processedLabel"))}</span>
+          <span class="completed-run-timer" title="${escapeHtml(t("taskElapsedTitle"))}">${escapeHtml(elapsed)}</span>
+        </span>
+      </div>`;
+    }
+
+    function collectCompletedTurnStatuses(messages) {
+      const statuses = new Map();
+      let userIndex = -1;
+      messages.forEach((msg, index) => {
+        if (!msg || isInternalMessage(msg)) return;
+        if (msg.role === "user"
+            && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
+            && !msg.meta?.detachedFromMain) {
+          userIndex = index;
+          return;
+        }
+        if (userIndex < 0
+            || msg.role !== "assistant"
+            || msg.streaming
+            || isDetachedProjectionMessage(msg)) return;
+        const elapsed = getResponseElapsed(msg);
+        if (elapsed) statuses.set(userIndex, elapsed);
+      });
+      return statuses;
+    }
+
+    function collectExecutionTraceTurns(messages) {
+      const turns = new Set();
+      let userIndex = -1;
+      messages.forEach((msg, index) => {
+        if (!msg || isInternalMessage(msg)) return;
+        if (msg.role === "user"
+            && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
+            && !msg.meta?.detachedFromMain) {
+          userIndex = index;
+          return;
+        }
+        if (userIndex < 0 || isDetachedProjectionMessage(msg)) return;
+        if (msg.role === "tool-call" || msg.role === "tool-result") {
+          turns.add(userIndex);
+          return;
+        }
+        if (msg.role !== "assistant") return;
+        const content = (getMessageText(msg) || "").trim();
+        if (msg.meta?.toolCalls?.length
+            || (msg._streamProjection === "thinking"
+              && content
+              && !isToolPlanningPlaceholder(content)
+              && !isOperationalToolNotice(content))) {
+          turns.add(userIndex);
+        }
+      });
+      return turns;
+    }
+
+    function collectFinalAnswerTurns(messages) {
+      const turns = new Set();
+      let userIndex = -1;
+      messages.forEach((msg, index) => {
+        if (!msg || isInternalMessage(msg)) return;
+        if (msg.role === "user"
+            && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
+            && !msg.meta?.detachedFromMain) {
+          userIndex = index;
+          return;
+        }
+        if (userIndex < 0
+            || msg.role !== "assistant"
+            || msg.meta?.toolCalls?.length
+            || isDetachedProjectionMessage(msg)) return;
+        const content = (getMessageText(msg) || "").trim();
+        if (!content
+            || isToolPlanningPlaceholder(content)
+            || isOperationalToolNotice(content)
+            || (msg.streaming && msg._streamProjection !== "answer")) return;
+        turns.add(userIndex);
+      });
+      return turns;
     }
 
     function renderUserProjection(msg, index) {
@@ -337,8 +448,6 @@
     function collectToolProcess(items) {
       const calls = [];
       const callsById = new Map();
-      const notes = [];
-      let streamingItem = null;
 
       const ensureCall = (rawCall, fallbackId) => {
         const details = toolCallDetails(rawCall);
@@ -364,9 +473,6 @@
 
       items.forEach(({ msg, index }, itemIndex) => {
         if (msg.role === "assistant") {
-          if (msg.streaming) streamingItem = { msg, index };
-          const note = compactProcessText(getMessageText(msg));
-          if (note && notes[notes.length - 1] !== note) notes.push(note);
           (Array.isArray(msg.meta?.toolCalls) ? msg.meta.toolCalls : []).forEach((call, callIndex) => {
             ensureCall(call, `assistant-${index}-${callIndex}`);
           });
@@ -390,7 +496,7 @@
         }
       });
 
-      return { calls, notes, streamingItem };
+      return { calls };
     }
 
     function getProcessCallView(call) {
@@ -416,23 +522,6 @@
       };
     }
 
-    function collapseRepeatedProcessCalls(calls) {
-      const collapsed = [];
-      calls.forEach((call) => {
-        const view = getProcessCallView(call);
-        const key = view.outcome === "failed"
-          ? [view.action, view.target, view.errorCode, view.error].join("\u0000")
-          : "";
-        const previous = collapsed[collapsed.length - 1];
-        if (key && previous?.repeatKey === key) {
-          previous.repeatCount += 1;
-          return;
-        }
-        collapsed.push({ ...view, repeatKey: key, repeatCount: 1 });
-      });
-      return collapsed;
-    }
-
     function processOutcomeLabel(outcome) {
       if (outcome === "failed") return t("toolProcessFailed");
       if (outcome === "succeeded") return t("toolProcessSucceeded");
@@ -441,55 +530,121 @@
       return t("toolProcessPending");
     }
 
-    function renderToolProcessProjection(items, serial) {
-      const { calls, notes, streamingItem } = collectToolProcess(items);
-      const visibleCalls = collapseRepeatedProcessCalls(calls);
-      if (!visibleCalls.length && !streamingItem) return "";
-
-      const failureCount = calls.filter((call) => getProcessCallView(call).outcome === "failed").length;
-      const latest = visibleCalls[visibleCalls.length - 1] || null;
-      let summaryLabel = t("toolProcessTitle");
-      if (streamingItem) {
-        summaryLabel = visibleCalls.length
-          ? t("toolProcessWaitingForModel")
-          : t("toolProcessPreparing");
-      } else if (visibleCalls.length === 1) {
-        const action = getToolActionLabel(latest.action);
-        summaryLabel = [action, latest.target].filter(Boolean).join(" · ") || t("toolProcessTitle");
+    function boundedProcessDetail(value, maxLength = 1600) {
+      if (value == null || value === "") return "";
+      let text = "";
+      if (typeof value === "string") {
+        text = value;
+      } else {
+        try {
+          text = JSON.stringify(value, null, 2);
+        } catch (_) {
+          text = String(value);
+        }
       }
+      const normalized = text.trim();
+      if (normalized.length <= maxLength) return normalized;
+      return `${normalized.slice(0, maxLength)}\n…`;
+    }
 
-      const countParts = [];
-      if (calls.length > 1) countParts.push(t("toolProcessOperationCount", { count: calls.length }));
-      if (failureCount) countParts.push(t("toolProcessFailureCount", { count: failureCount }));
-      if (!streamingItem && visibleCalls.length === 1) countParts.push(processOutcomeLabel(latest.outcome));
-      const streamAttrs = streamingItem
-        ? ` data-msg-index="${streamingItem.index}" data-streaming-message="true" data-stream-session="${escapeHtml(getSessionId() || "")}" data-stream-kind="thinking"`
-        : "";
+    function processCallArguments(call) {
+      if (!call?.args || !Object.keys(call.args).length) return "";
+      return boundedProcessDetail(call.args, 1200);
+    }
+
+    function processCallResult(call) {
+      if (call?.error) return boundedProcessDetail(call.error);
+      const content = getMessageText(call?.resultMessage);
+      if (content) return boundedProcessDetail(content);
+      if (call?.result) return boundedProcessDetail(call.result);
+      return "";
+    }
+
+    function currentProcessCall(calls) {
+      return calls.find((call) => call.outcome === "running")
+        || calls.find((call) => call.outcome === "pending")
+        || calls[calls.length - 1]
+        || null;
+    }
+
+    function processSummaryFamily(action) {
+      if (action === "run_command") return "command";
+      if (["propose_edit", "apply_edit", "write_file"].includes(action)) return "edit";
+      if (action === "delete_file") return "delete";
+      if (["read_file", "list_files", "search_files", "glob_files"].includes(action)) return "inspect";
+      return "tool";
+    }
+
+    function hasMultipleProcessSubjects(family, calls) {
+      if (family === "command" || family === "tool") return calls.length > 1;
+      const targets = new Set(calls.map((call) => String(call.target || "").trim()).filter(Boolean));
+      return (targets.size || calls.length) > 1;
+    }
+
+    function completedProcessSummary(calls) {
+      const families = new Map();
+      calls.forEach((call) => {
+        const family = processSummaryFamily(call.action);
+        if (!families.has(family)) families.set(family, []);
+        families.get(family).push(call);
+      });
+      const keys = {
+        command: ["toolProcessRanCommand", "toolProcessRanCommands"],
+        edit: ["toolProcessEditedFile", "toolProcessEditedFiles"],
+        inspect: ["toolProcessInspectedFile", "toolProcessInspectedFiles"],
+        delete: ["toolProcessDeletedFile", "toolProcessDeletedFiles"],
+        tool: ["toolProcessUsedTool", "toolProcessUsedTools"],
+      };
+      return [...families.entries()]
+        .map(([family, familyCalls]) => t(keys[family][hasMultipleProcessSubjects(family, familyCalls) ? 1 : 0]))
+        .join(" · ");
+    }
+
+    function stageProcessOutcome(calls) {
+      if (calls.some((call) => call.outcome === "running")) return "running";
+      if (calls.some((call) => call.outcome === "pending")) return "pending";
+      if (calls.some((call) => call.outcome === "failed")) return "failed";
+      if (calls.every((call) => call.outcome === "succeeded")) return "succeeded";
+      return "completed";
+    }
+
+    function renderToolProcessProjection(items, serial) {
+      const { calls } = collectToolProcess(items);
+      const visibleCalls = calls.map(getProcessCallView);
+      if (!visibleCalls.length) return "";
+      const currentCall = currentProcessCall(visibleCalls);
+      const processOutcome = stageProcessOutcome(visibleCalls);
+      const stageIsActive = processOutcome === "running" || processOutcome === "pending";
+      const headingText = stageIsActive
+        ? getToolActionLabel(currentCall.action)
+        : completedProcessSummary(visibleCalls);
+      const headingTarget = stageIsActive ? currentCall.target : "";
 
       return `
-        <article class="msg assistant tool-process${streamingItem ? " is-streaming" : ""}" data-tool-process-block="${serial}"${streamAttrs}>
-          <details class="tool-process-group">
-            <summary>
-              <span class="tool-process-indicator ${escapeHtml(streamingItem ? "running" : (failureCount ? "failed" : "completed"))}" aria-hidden="true"></span>
-              <span class="tool-process-title"${streamingItem ? ' data-stream-part="summary"' : ""}>${escapeHtml(summaryLabel)}</span>
-              ${countParts.length ? `<span class="tool-process-count">${escapeHtml(countParts.join(" · "))}</span>` : ""}
-              <span class="tool-process-chevron" aria-hidden="true"></span>
+        <article class="msg assistant tool-process" data-tool-process-block="${serial}">
+          <details class="tool-process-stage ${escapeHtml(processOutcome)}" data-current-action="${escapeHtml(currentCall.action)}">
+            <summary class="tool-process-stage-summary">
+              <span class="tool-process-stage-heading"><strong>${escapeHtml(headingText)}</strong>${headingTarget ? `<code>${escapeHtml(headingTarget)}</code>` : ""}</span>
+              <span class="tool-process-stage-chevron" aria-hidden="true"></span>
             </summary>
-            <div class="tool-process-body">
-              ${notes.length ? `<div class="tool-process-notes"><strong>${escapeHtml(t("toolProcessModelNote"))}</strong>${notes.map((note) => `<p>${escapeHtml(note)}</p>`).join("")}</div>` : ""}
-              <div class="tool-process-rows">
+            <div class="tool-process-stage-body">
+              <div class="tool-process-list">
                 ${visibleCalls.map((call) => {
                   const action = getToolActionLabel(call.action);
-                  const repeat = call.repeatCount > 1
-                    ? `<span class="tool-process-repeat">${escapeHtml(t("toolProcessRepeated", { count: call.repeatCount }))}</span>`
-                    : "";
-                  return `<div class="tool-process-row ${escapeHtml(call.outcome)}">
-                    <span class="tool-process-row-status" aria-hidden="true">${call.outcome === "failed" ? "×" : (call.outcome === "succeeded" || call.outcome === "completed" ? "✓" : "·")}</span>
-                    <div class="tool-process-row-main">
-                      <div class="tool-process-row-heading"><strong>${escapeHtml(action)}</strong>${call.target ? `<code>${escapeHtml(call.target)}</code>` : ""}${repeat}<span class="tool-process-outcome">${escapeHtml(processOutcomeLabel(call.outcome))}</span></div>
-                      ${call.error ? `<div class="tool-process-error">${escapeHtml(call.error)}</div>` : ""}
+                  const argumentsText = processCallArguments(call);
+                  const resultText = processCallResult(call);
+                  return `<details class="tool-process-item ${escapeHtml(call.outcome)}">
+                    <summary>
+                      <span class="tool-process-indicator ${escapeHtml(call.outcome)}" aria-hidden="true"></span>
+                      <span class="tool-process-row-heading"><strong>${escapeHtml(action)}</strong>${call.target ? `<code>${escapeHtml(call.target)}</code>` : ""}</span>
+                      <span class="tool-process-outcome">${escapeHtml(processOutcomeLabel(call.outcome))}</span>
+                      <span class="tool-process-chevron" aria-hidden="true"></span>
+                    </summary>
+                    <div class="tool-process-body">
+                      ${argumentsText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessArguments"))}</strong><pre>${escapeHtml(argumentsText)}</pre></section>` : ""}
+                      ${resultText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessResult"))}</strong><pre>${escapeHtml(resultText)}</pre></section>` : ""}
                     </div>
-                  </div>`;
+                  </details>`;
                 }).join("")}
               </div>
             </div>
@@ -498,10 +653,10 @@
       `;
     }
 
-    function renderAssistantResponseInfo(msg) {
+    function renderAssistantResponseInfo(msg, options = {}) {
       const meta = msg.meta || {};
       const usage = meta._usage || msg._usage || null;
-      const elapsed = msg._responseTime || meta._responseTime || "";
+      const elapsed = options.includeElapsed === false ? "" : getResponseElapsed(msg);
       if (!hasUsageStats(usage) && !elapsed) return "";
       return `<div class="response-info">${renderCompletedRunStatus(meta._model || msg._model || "", elapsed, usage)}</div>`;
     }
@@ -518,29 +673,44 @@
       return `<button class="background-reply-reference" type="button" data-background-reply-id="${escapeHtml(jobId)}" title="${escapeHtml(rawPreview)}"><span class="background-reply-arrow" aria-hidden="true">↳</span><span class="background-reply-label">${t("backgroundReply")}</span><span class="background-reply-preview">${escapeHtml(preview)}</span></button>`;
     }
 
-    function renderFinalAssistantProjection(msg, index) {
+    function renderFinalAssistantProjection(msg, index, options = {}) {
       const model = msg._model || msg.meta?._model || getSelectedModel() || "Agent";
       const content = (getMessageText(msg) || "").trim();
       if (msg.streaming) {
         const hasVisibleContent = content && !isToolPlanningPlaceholder(content);
-        const streamKind = msg._streamProjection === "answer" ? "answer" : "pending";
-        const showContent = streamKind === "answer" && hasVisibleContent;
+        const streamKind = msg._streamProjection === "thinking"
+          ? "thinking"
+          : (msg._streamProjection === "answer" ? "answer" : "pending");
+        const showContent = (
+          streamKind !== "pending"
+          && hasVisibleContent
+          && !(streamKind === "thinking" && isOperationalToolNotice(content))
+        );
         const showModel = showContent;
         return `
-          <article class="msg assistant is-streaming${streamKind === "pending" ? " is-pending" : ""}" data-msg-index="${index}" data-streaming-message="true" data-stream-session="${escapeHtml(getSessionId() || "")}" data-stream-kind="${streamKind}">
-            <div class="role streaming-answer-role${showModel ? "" : " is-empty"}" data-stream-role>${escapeHtml(model)}</div>
+          <article class="msg assistant is-streaming${streamKind === "pending" ? " is-pending" : ""}${streamKind === "thinking" ? " agent-commentary" : ""}" data-msg-index="${index}" data-streaming-message="true" data-stream-session="${escapeHtml(getSessionId() || "")}" data-stream-kind="${streamKind}">
+            ${streamKind === "thinking" ? "" : `<div class="role streaming-answer-role${showModel ? "" : " is-empty"}" data-stream-role>${escapeHtml(model)}</div>`}
             <div class="bubble streaming-answer-output${showContent ? "" : " is-empty"}" data-stream-part="answer">${showContent ? renderMarkdown(content) : ""}</div>
             ${renderNetworkRecoveryStatus(getSessionId())}
           </article>
         `;
       }
       if (!content || isToolPlanningPlaceholder(content)) return "";
-      const responseInfo = renderAssistantResponseInfo(msg);
+      const isCommentary = Boolean(msg.meta?.toolCalls?.length);
+      if (isCommentary && isOperationalToolNotice(content)) return "";
+      if (isCommentary) {
+        return `
+          <article class="msg assistant agent-commentary" data-msg-index="${index}">
+            ${renderAssistantContent(content)}
+          </article>
+        `;
+      }
+      const responseInfo = renderAssistantResponseInfo(msg, options);
       const replyReference = renderBackgroundReplyReference(msg);
       const copyButton = renderCopyButton(content);
       const time = formatMessageTime(msg._time);
       return `
-        <article class="msg assistant" data-msg-index="${index}">
+        <article class="msg assistant${msg.meta?.toolCalls?.length ? " agent-commentary" : ""}" data-msg-index="${index}">
           <div class="role">${escapeHtml(model)}</div>
           ${replyReference}
           ${renderAssistantContent(content)}
@@ -552,11 +722,19 @@
     function projectMessages(messages = [], projection = {}) {
       const hasActiveRun = Boolean(projection.hasActiveRun);
       const branchMarker = projection.branchMarker || null;
+      const completedTurnStatuses = collectCompletedTurnStatuses(messages);
+      const executionTraceTurns = collectExecutionTraceTurns(messages);
+      const finalAnswerTurns = collectFinalAnswerTurns(messages);
+      const expandedExecutionTraces = projection.expandedExecutionTraces instanceof Set
+        ? projection.expandedExecutionTraces
+        : new Set(projection.expandedExecutionTraces || []);
       const rows = [];
       const queuedTailMessages = [];
       let pendingProcess = [];
       let processSerial = 0;
       let activeUserIndex = -1;
+      let currentUserIndex = -1;
+      let openExecutionTraceUserIndex = -1;
       if (hasActiveRun) {
         for (let index = messages.length - 1; index >= 0; index -= 1) {
           const message = messages[index];
@@ -575,10 +753,14 @@
         : -1;
       let branchMarkerInserted = false;
 
-      const insertActiveRunAnchor = () => {
-        if (!hasActiveRun || activeRunAnchorInserted) return;
-        rows.push('<div class="active-run-anchor msg" data-active-run-anchor></div>');
+      const takeActiveRunAnchor = () => {
+        if (!hasActiveRun || activeRunAnchorInserted) return "";
         activeRunAnchorInserted = true;
+        return '<div class="active-run-anchor msg" data-active-run-anchor></div>';
+      };
+      const insertActiveRunAnchor = () => {
+        const anchor = takeActiveRunAnchor();
+        if (anchor) rows.push(anchor);
       };
       const flushProcess = () => {
         if (!pendingProcess.length) return false;
@@ -586,6 +768,32 @@
         rows.push(renderToolProcessProjection(pendingProcess, processSerial));
         pendingProcess = [];
         return true;
+      };
+      const openCompletedExecutionTrace = (userIndex, elapsed) => {
+        const open = expandedExecutionTraces.has(String(userIndex)) ? " open" : "";
+        rows.push(`<details class="execution-trace completed" data-execution-trace="${userIndex}"${open}>
+          <summary class="execution-trace-summary">
+            ${renderCompletedRunHeader(elapsed)}
+            <span class="execution-trace-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="execution-trace-body">`);
+        openExecutionTraceUserIndex = userIndex;
+      };
+      const openActiveExecutionTrace = (userIndex) => {
+        const open = expandedExecutionTraces.has(String(userIndex)) ? " open" : "";
+        rows.push(`<details class="execution-trace active" data-execution-trace="${userIndex}"${open}>
+          <summary class="execution-trace-summary">
+            ${takeActiveRunAnchor()}
+            <span class="execution-trace-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="execution-trace-body">`);
+        openExecutionTraceUserIndex = userIndex;
+      };
+      const closeExecutionTrace = () => {
+        flushProcess();
+        if (openExecutionTraceUserIndex < 0) return;
+        rows.push("</div></details>");
+        openExecutionTraceUserIndex = -1;
       };
       const insertBranchMarker = () => {
         if (!branchMarker || branchMarkerInserted) return;
@@ -621,25 +829,67 @@
         }
         if (msg.role === "assistant") {
           const streamingToolRound = msg.streaming && msg._streamProjection === "thinking";
-          if (msg.meta?.toolCalls?.length || streamingToolRound) {
-            pendingProcess.push({ msg, index });
+          const toolCommentary = (getMessageText(msg) || "").trim();
+          const hasMeaningfulToolCommentary = Boolean(
+            toolCommentary
+            && !isToolPlanningPlaceholder(toolCommentary)
+            && !isOperationalToolNotice(toolCommentary)
+          );
+          const completedHeaderVisible = (
+            currentUserIndex >= 0
+            && currentUserIndex !== activeUserIndex
+            && completedTurnStatuses.has(currentUserIndex)
+          );
+          const assistantOptions = {
+            includeElapsed: !completedHeaderVisible || isDetachedProjectionMessage(msg),
+          };
+          if (msg.meta?.toolCalls?.length) {
+            if (hasMeaningfulToolCommentary) {
+              flushProcess();
+              rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
+            }
+            pendingProcess.push({
+              msg: { ...msg, content: "" },
+              index,
+            });
             continue;
           }
-          flushProcess();
-          rows.push(renderFinalAssistantProjection(msg, index));
+          if (streamingToolRound) {
+            if (hasMeaningfulToolCommentary) {
+              flushProcess();
+              rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
+            }
+            continue;
+          }
+          closeExecutionTrace();
+          rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
           continue;
         }
         if (msg.role === "user") {
-          flushProcess();
+          closeExecutionTrace();
+          currentUserIndex = index;
           rows.push(renderUserProjection(msg, index));
-          if (index === activeUserIndex) insertActiveRunAnchor();
+          if (index === activeUserIndex) {
+            if (executionTraceTurns.has(index) && finalAnswerTurns.has(index)) {
+              openActiveExecutionTrace(index);
+            } else {
+              insertActiveRunAnchor();
+            }
+          } else {
+            const elapsed = completedTurnStatuses.get(index);
+            if (elapsed && executionTraceTurns.has(index)) {
+              openCompletedExecutionTrace(index, elapsed);
+            } else {
+              rows.push(renderCompletedRunHeader(elapsed));
+            }
+          }
           continue;
         }
         if (msg.role === "tool-call" || msg.role === "tool-result") {
           pendingProcess.push({ msg, index });
         }
       }
-      flushProcess();
+      closeExecutionTrace();
       if (hasActiveRun && !activeRunAnchorInserted) insertActiveRunAnchor();
       insertBranchMarker();
       queuedTailMessages.forEach(({ msg, index }) => {
@@ -653,6 +903,7 @@
       formatMessageTime,
       hasUsageStats,
       isInternalMessage,
+      isOperationalToolNotice,
       isToolPlanningPlaceholder,
       normalizeResponseUsage,
       projectMessages,
@@ -674,6 +925,7 @@
     createMessagesFeature,
     hasUsageStats,
     isInternalMessage,
+    isOperationalToolNotice,
     isToolPlanningPlaceholder,
     normalizeResponseUsage,
   });

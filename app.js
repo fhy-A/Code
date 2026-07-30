@@ -229,6 +229,7 @@ function ensureSessionRun(sessionId) {
       taskStartTime: null,      // persisted across tool rounds; cleared only on task end
       modelWaitStartedAt: null,
       modelResponseStarted: false,
+      hasFirstModelResponseStarted: false,
       modelRound: 0,
       modelRecovery: null,
       timerInterval: null,
@@ -319,6 +320,7 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     queueItemId: String(extra.queueItemId ?? ctx.queueItemId ?? previous.queueItemId ?? ""),
     agentRunId: String(extra.agentRunId ?? ctx.agentRunId ?? previous.agentRunId ?? ""),
     agentEventCursor: Number(extra.agentEventCursor ?? ctx.agentEventCursor ?? previous.agentEventCursor ?? 0),
+    hasFirstModelResponseStarted: Boolean(ctx.run?.hasFirstModelResponseStarted),
     modelRound: Number(extra.modelRound ?? ctx.run?.modelRound ?? previous.modelRound ?? 0),
     ...(Array.isArray(previous.backgroundRuns) && previous.backgroundRuns.length
       ? { backgroundRuns: previous.backgroundRuns.map((item) => ({ ...item })) }
@@ -2683,6 +2685,7 @@ const MODEL_RESPONSE_SLOW_NOTICE_MS = 60000;
 
 function getActiveRunLabel(sessionId = state.sessionId) {
   const run = ensureSessionRun(sessionId);
+  if (run?.hasFirstModelResponseStarted) return t("processedLabel");
   if (run?.modelRecovery && !run.modelResponseStarted) {
     return t("modelRecovery", {
       attempt: Number(run.modelRecovery.attempt || 1),
@@ -2692,17 +2695,16 @@ function getActiveRunLabel(sessionId = state.sessionId) {
   if (run?.modelWaitStartedAt && !run.modelResponseStarted) {
     const waitingMs = Date.now() - run.modelWaitStartedAt;
     if (waitingMs >= MODEL_RESPONSE_SLOW_NOTICE_MS) return t("modelResponseSlow");
-    const isContinuation = Number(run.modelRound || 0) > 1;
-    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) {
-      return t(isContinuation ? "modelContinuationDelayed" : "modelResponseDelayed");
-    }
-    return t(isContinuation ? "waitingForModelContinuation" : "waitingForModelResponse");
+    if (waitingMs >= MODEL_RESPONSE_WAIT_NOTICE_MS) return t("modelResponseDelayed");
+    return t("waitingForModelResponse");
   }
-  return t("processingLabel");
+  return t("waitingForModelResponse");
 }
 
 function markModelResponseStarted(run, sessionId = state.sessionId) {
-  if (!run || run.modelResponseStarted) return;
+  if (!run) return;
+  run.hasFirstModelResponseStarted = true;
+  if (run.modelResponseStarted) return;
   run.modelResponseStarted = true;
   run.modelWaitStartedAt = null;
   run.modelRecovery = null;
@@ -2964,42 +2966,24 @@ function patchStreamingAssistantMessage(sessionId, index) {
   const content = (getMsgText(msg) || "").trim();
   const visibleContent = content && !isToolPlanningPlaceholder(content) ? content : "";
 
-  // Empty thought projections intentionally have no DOM. Mount the block once,
-  // exactly when its first meaningful summary arrives; all later chunks patch
-  // that stable node incrementally.
   const article = els.messages.querySelector(`.msg.assistant[data-msg-index="${index}"][data-streaming-message="true"]`);
-  if (!article) {
-    if (msg._streamProjection === "thinking" && visibleContent) {
-      renderSessionMessages(sessionId);
-    }
-    return;
-  }
+  if (!article) return;
 
   const streamKind = article.dataset.streamKind || "pending";
   if (streamKind === "pending") {
     if (visibleContent) scheduleStreamingAnswerProjection(sessionId, index);
     return;
   }
-  const outputNode = article.querySelector(streamKind === "thinking"
-    ? '[data-stream-part="summary"]'
-    : '[data-stream-part="answer"]');
+  const outputNode = article.querySelector('[data-stream-part="answer"]');
 
   if (outputNode) {
-    if (streamKind === "thinking") {
-      const run = ensureSessionRun(sessionId);
-      const nextLabel = t(Number(run?.modelRound || 0) > 1
-        ? "toolProcessWaitingForModel"
-        : "toolProcessPreparing");
-      if (outputNode.textContent !== nextLabel) outputNode.textContent = nextLabel;
-    } else {
-      const nextOutputHtml = visibleContent ? renderMarkdownLite(visibleContent) : "";
-      if (outputNode.innerHTML !== nextOutputHtml) outputNode.innerHTML = nextOutputHtml;
-      outputNode.classList.toggle("is-empty", !visibleContent);
-      article.querySelector("[data-stream-role]")?.classList.toggle(
-        "is-empty",
-        streamKind !== "answer" || !visibleContent,
-      );
-    }
+    const nextOutputHtml = visibleContent ? renderMarkdownLite(visibleContent) : "";
+    if (outputNode.innerHTML !== nextOutputHtml) outputNode.innerHTML = nextOutputHtml;
+    outputNode.classList.toggle("is-empty", !visibleContent);
+    article.querySelector("[data-stream-role]")?.classList.toggle(
+      "is-empty",
+      streamKind === "pending" || !visibleContent,
+    );
   }
 
   if (state._followOutput !== false) els.messages.scrollTop = els.messages.scrollHeight;
@@ -3545,7 +3529,17 @@ function renderMessages() {
   const run = ensureSessionRun(state.sessionId);
   const hasActiveRun = Boolean(run?.isStreaming && run?.taskStartTime);
   const branchMarker = getBranchFlowMarker();
-  const html = projectMessages(msgs, { hasActiveRun, branchMarker });
+  const expandedExecutionTraces = new Set(
+    Array.from(
+      els.messageList.querySelectorAll("details.execution-trace[open][data-execution-trace]"),
+      (trace) => trace.dataset.executionTrace,
+    ).filter(Boolean),
+  );
+  const html = projectMessages(msgs, {
+    hasActiveRun,
+    branchMarker,
+    expandedExecutionTraces,
+  });
   const stableHtml = html
     .replace(/<span class="streaming-timer">[^<]*<\/span>/g, '<span class="streaming-timer"></span>')
     .replace(/<span class="network-reconnect-countdown">[^<]*<\/span>/g, '<span class="network-reconnect-countdown"></span>');
@@ -5665,17 +5659,12 @@ function startLiveTimer() {
       }
     });
 
-    const activeLabel = getActiveRunLabel(state.sessionId);
-    document.querySelectorAll("[data-active-run-label]").forEach((label) => {
-      if (label.textContent !== activeLabel) label.textContent = activeLabel;
-    });
-
     const recoveryDisplay = `${getRecoveryCountdownSeconds(state.sessionId)}s`;
     document.querySelectorAll(".network-reconnect-countdown").forEach((countdown) => {
       if (countdown.textContent !== recoveryDisplay) countdown.textContent = recoveryDisplay;
     });
 
-  }, 200);
+  }, 1000);
 
 }
 
@@ -6753,6 +6742,21 @@ function prepareMessagesForRunRecovery(messages, runState) {
   return cleaned;
 }
 
+function hasRecoveredModelResponse(messages, runState) {
+  const agentRunId = String(runState?.agentRunId || "");
+  if (!agentRunId) return false;
+  return (Array.isArray(messages) ? messages : []).some((message) => {
+    if (String(message?.meta?.agentRunId || "") !== agentRunId) return false;
+    if (message.role === "tool-call" || message.role === "tool-result") return true;
+    if (message.role !== "assistant") return false;
+    return Boolean(
+      String(message.content || "").trim()
+      || String(message.thought || "").trim()
+      || message.meta?.toolCalls?.length
+    );
+  });
+}
+
 function buildRecoveredRunContext(session, runState) {
   const sessionId = session.id;
   const messages = prepareMessagesForRunRecovery(session.messages, runState);
@@ -6784,6 +6788,10 @@ function buildRecoveredRunContext(session, runState) {
   ctx.run.runtimeRunId = ctx.runtimeRunId;
   ctx.run.agentRunId = ctx.agentRunId;
   ctx.run.agentEventCursor = ctx.agentEventCursor;
+  ctx.run.hasFirstModelResponseStarted = Boolean(
+    runState.hasFirstModelResponseStarted
+    || hasRecoveredModelResponse(messages, runState)
+  );
   ctx.run.modelRound = Number(runState.modelRound || 0);
   ctx.run.model = ctx.model;
   ctx.run._activeCtx = ctx;
@@ -10220,6 +10228,7 @@ async function sendMessage(userText, options = {}) {
   }
 
   run.taskStartTime = submittedAt;
+  run.hasFirstModelResponseStarted = false;
   ctx.taskStartedAt = submittedAt;
   if (!existingMessage) {
     ctx.messages.push({ role: "user", content: messageContent, _images: imageRefs.length > 0 ? imageRefs : undefined, _model: ctx.model || model, _time: new Date(submittedAt).toISOString() });

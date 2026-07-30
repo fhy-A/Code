@@ -80,16 +80,15 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
         self.assertIn("if (delta.tool_calls || delta.function_call) return [value]", RUNTIME_SOURCE)
         self.assertIn("if (!isLast) delete projectedFrame.usage", RUNTIME_SOURCE)
 
-    def test_model_round_wait_has_visible_escalating_status(self):
+    def test_model_wait_escalates_only_before_first_response(self):
         for expected in (
             "MODEL_RESPONSE_WAIT_NOTICE_MS = 25000",
             "MODEL_RESPONSE_SLOW_NOTICE_MS = 60000",
-            "const isContinuation = Number(run.modelRound || 0) > 1",
-            '"waitingForModelContinuation"',
             '"waitingForModelResponse"',
-            '"modelContinuationDelayed"',
             '"modelResponseDelayed"',
             'return t("modelResponseSlow")',
+            'if (run?.hasFirstModelResponseStarted) return t("processedLabel")',
+            "run.hasFirstModelResponseStarted = true",
             "run.modelWaitStartedAt = Date.now()",
             "run.modelResponseStarted = false",
             "markModelResponseStarted(run, sessionId)",
@@ -99,7 +98,7 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
         ):
             self.assertIn(expected, APP_SOURCE)
         self.assertIn('nodes.label.textContent = getActiveRunLabel(sessionId)', APP_SOURCE)
-        self.assertIn('document.querySelectorAll("[data-active-run-label]")', APP_SOURCE)
+        self.assertNotIn('document.querySelectorAll("[data-active-run-label]")', APP_SOURCE)
         self.assertIn("已提交模型，正在等待响应", I18N_SOURCE)
         self.assertIn("工具处理完成，正在等待模型继续", I18N_SOURCE)
         self.assertIn("任务总耗时", I18N_SOURCE)
