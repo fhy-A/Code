@@ -15,6 +15,7 @@ import server as server_mod
 ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
+PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 TIMELINE_SOURCE = (ROOT / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
@@ -176,12 +177,12 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
             'runState: getSessionRunState(sid)',
             'runState: { ...getSessionRunState(prevId) }',
             'persistMessages: ctx.executionOwner === "server-agent"',
-            'if (options.persistMessages)',
             'ctx.executionOwner = runState.executionOwner',
             'ctx.agentRunId = String(runState.agentRunId',
             'await executeRunContext(ctx)',
         ):
             self.assertIn(expected, APP_SOURCE)
+        self.assertIn("if (options.persistMessages === true)", PERSISTENCE_SOURCE)
 
     def test_all_permission_profiles_have_single_server_execution_owner(self):
         self.assertIn('read: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "check_skill_dependencies"])', APP_SOURCE)
@@ -217,7 +218,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
 
     def test_continue_action_cannot_reenter_legacy_browser_loop(self):
         continue_start = APP_SOURCE.index("async function continueAgentRun()")
-        continue_end = APP_SOURCE.index("function serializeSessionMessages", continue_start)
+        continue_end = APP_SOURCE.index("async function renameSession", continue_start)
         continue_action = APP_SOURCE[continue_start:continue_end]
         self.assertIn("await executeRunContext(ctx)", continue_action)
         self.assertNotIn("runAgentLoop(ctx)", continue_action)
@@ -258,10 +259,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         clear_end = APP_SOURCE.index("function isCompactSummaryMessage", clear_start)
         clear_checkpoint = APP_SOURCE[clear_start:clear_end]
         finalize_index = clear_checkpoint.index("finalizeRunTiming(ctx.sessionId)")
-        serialize_index = clear_checkpoint.index("const serialized = msgs.map")
+        serialize_index = clear_checkpoint.index("const serialized = serializeSessionMessages")
 
         self.assertLess(finalize_index, serialize_index)
-        self.assertIn("meta: msg.meta || {}", clear_checkpoint)
+        self.assertIn("meta: message.meta || {}", PERSISTENCE_SOURCE)
 
         timing_start = APP_SOURCE.index("function finalizeRunTiming(sessionId)")
         timing_end = APP_SOURCE.index("function placeMainResultByCompletionOrder", timing_start)

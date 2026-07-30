@@ -18,6 +18,11 @@ const {
 } = window.Code.core.platform;
 const { showToast, notify: _notify } = window.Code.services.notifications;
 const { apiJson } = window.Code.services.apiClient;
+const {
+  serializeSessionMessages,
+  buildSessionSavePayload,
+  createSessionPersistence,
+} = window.Code.services.persistence;
 const { createDiffFeature } = window.Code.ui.diff;
 const {
   createMarkdownFeature,
@@ -92,6 +97,10 @@ const {
   getSessionLastUsage,
   setSessionLastUsage,
 } = createSessionStateAccessors(state);
+const { saveSession: persistSessionPayload } = createSessionPersistence({
+  requestJson: apiJson,
+  saveChains: state._sessionSaveChains,
+});
 
 const { t, setLang, applyI18n } = createI18nRuntime({
   getLanguage: () => state.lang,
@@ -194,15 +203,10 @@ async function clearRunCheckpoint(ctx) {
   // Write all messages to JSONL in one shot (stream is complete)
   const msgs = ctx.messages || [];
   if (msgs.length > 0) {
-    const serialized = msgs.map((msg) => ({
-      role: msg.role,
-      content: msg.content || "",
-      thought: msg.thought || "",
-      meta: msg.meta || {},
-      _images: msg._images || undefined,
-      _model: msg._model || undefined,
-      _time: msg._time || undefined,
-    }));
+    const serialized = serializeSessionMessages(
+      msgs,
+      { includeModel: true, includeTime: true },
+    );
     const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(ctx.sessionId)}`, {
       method: "PUT",
       body: JSON.stringify({
@@ -262,11 +266,10 @@ function cacheActiveSessionState() {
   if (state.lastUsage) state._sessionLastUsage[prevId] = state.lastUsage;
   // Full write of all messages before switching away (fire-and-forget)
   if (msgs.length > 0) {
-    const serialized = msgs.map((msg) => ({
-      role: msg.role, content: msg.content || "", thought: msg.thought || "",
-      meta: msg.meta || {}, _images: msg._images || undefined,
-      _model: msg._model || undefined, _time: msg._time || undefined,
-    }));
+    const serialized = serializeSessionMessages(
+      msgs,
+      { includeModel: true, includeTime: true },
+    );
     apiJson(`/api/sessions/${encodeURIComponent(prevId)}`, {
       method: "PUT",
       body: JSON.stringify({
@@ -3575,26 +3578,6 @@ async function continueAgentRun() {
   }
 }
 
-function serializeSessionMessages(messages = state.messages) {
-
-  return messages.map((msg) => ({
-
-    role: msg.role,
-
-    content: msg.content || "",
-
-    thought: msg.thought || "",
-
-    meta: msg.meta || {},
-
-    _images: msg._images || undefined,
-
-  }));
-
-}
-
-
-
 async function renameSession(sessionId, title) {
 
   const nextTitle = title.trim();
@@ -3613,7 +3596,9 @@ async function renameSession(sessionId, title) {
 
       title: nextTitle,
 
-      messages: isCurrent ? serializeSessionMessages() : serializeSessionMessages(session.messages || []),
+      messages: isCurrent
+        ? serializeSessionMessages(state.messages)
+        : serializeSessionMessages(session.messages || []),
 
       stats: isCurrent ? state.stats : (session.stats || {}),
 
@@ -4717,43 +4702,18 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
 
   // Metadata-only: title, stats, runState → meta JSON.
   // Messages are persisted all at once at stream end / session switch / page close.
-  const payload = {
+  const payload = buildSessionSavePayload({
     title: sessionTitle,
-    stats: { ...(stats || getSessionStats(sessionId) || {}) },
+    stats: stats || getSessionStats(sessionId) || {},
     lastUsage: getSessionLastUsage(sessionId),
-    runState: { ...getSessionRunState(sessionId) },
-  };
-  if (options.persistMessages) {
-    payload.messages = (messages || []).map((msg) => ({
-      role: msg.role,
-      content: msg.content || "",
-      thought: msg.thought || "",
-      meta: msg.meta || {},
-      _images: msg._images || undefined,
-      _model: msg._model || undefined,
-      _time: msg._time || undefined,
-    }));
-  }
-
-  const previous = state._sessionSaveChains[sessionId] || Promise.resolve();
-  const savePromise = previous
-    .catch(() => {})
-    .then(() => apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    }));
-  state._sessionSaveChains[sessionId] = savePromise;
-
-  try {
-    const savedSession = await savePromise;
-    syncSessionSourceBadgeState(sessionId, savedSession, {
-      notify: options.persistMessages === true,
-    });
-  } finally {
-    if (state._sessionSaveChains[sessionId] === savePromise) {
-      delete state._sessionSaveChains[sessionId];
-    }
-  }
+    runState: getSessionRunState(sessionId),
+    messages,
+    persistMessages: options.persistMessages === true,
+  });
+  const savedSession = await persistSessionPayload(sessionId, payload);
+  syncSessionSourceBadgeState(sessionId, savedSession, {
+    notify: options.persistMessages === true,
+  });
 
   if (local) local.messageCount = (messages || []).length;
 
@@ -4773,21 +4733,10 @@ async function saveCurrentSession() {
 
       title: els.sessionTitle.value.trim() || t("untitledSession"),
 
-      messages: state.messages.map((msg) => ({
-
-        role: msg.role,
-
-        content: msg.content || "",
-
-        thought: msg.thought || "",
-
-        meta: msg.meta || {},
-
-        _images: msg._images || undefined,
-
-        _model: msg._model || undefined,
-
-      })),
+      messages: serializeSessionMessages(
+        state.messages,
+        { includeModel: true },
+      ),
 
       stats: state.stats,
       runState: { ...getSessionRunState(state.sessionId) },

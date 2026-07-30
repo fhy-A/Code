@@ -10,6 +10,7 @@ class TestSubAgentFrontend(unittest.TestCase):
     def setUpClass(cls):
         cls.source = (ROOT / "app.js").read_text(encoding="utf-8")
         cls.state_source = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
+        cls.persistence_source = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
         cls.i18n_source = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
         cls.messages_source = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 
@@ -187,8 +188,8 @@ class TestSubAgentFrontend(unittest.TestCase):
 
     def test_session_saves_are_serialized(self):
         self.assertIn('_sessionSaveChains: {}', self.state_source)
-        self.assertIn('const previous = state._sessionSaveChains[sessionId] || Promise.resolve();', self.source)
-        self.assertIn('state._sessionSaveChains[sessionId] = savePromise;', self.source)
+        self.assertIn('const previous = saveChains[sessionId] || Promise.resolve();', self.persistence_source)
+        self.assertIn('saveChains[sessionId] = savePromise;', self.persistence_source)
 
     def test_active_subagent_does_not_block_main_session_updates(self):
         self.assertNotIn('_subAgentDepth', self.source)

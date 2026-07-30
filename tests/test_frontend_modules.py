@@ -478,6 +478,7 @@ eval(source);
             "src/core/platform.js",
             "src/services/notifications.js",
             "src/services/api-client.js",
+            "src/services/persistence.js",
             "src/ui/diff.js",
             "src/ui/markdown.js",
             "src/ui/timeline.js",
@@ -501,6 +502,7 @@ eval(source);
             "./src/core/i18n.js",
             "./src/services/notifications.js",
             "./src/services/api-client.js",
+            "./src/services/persistence.js",
             "./src/ui/diff.js",
             "./src/ui/markdown.js",
             "./src/ui/timeline.js",
@@ -620,6 +622,134 @@ process.stdout.write(JSON.stringify({
                 "queuedMessages": [{"id": "queue-1", "status": "queued"}],
             },
         )
+
+    def test_persistence_module_preserves_payload_profiles_and_serializes_saves(self):
+        persistence_path = ROOT / "src" / "services" / "persistence.js"
+        self.assertTrue(persistence_path.is_file())
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+
+const {
+  serializeSessionMessages,
+  buildSessionSavePayload,
+  createSessionPersistence,
+} = window.Code.services.persistence;
+
+const sourceMessage = {
+  role: "assistant",
+  content: "done",
+  thought: "checked",
+  meta: {kind: "answer"},
+  _images: ["image.png"],
+  _model: "gpt-test",
+  _time: "2026-07-31T06:30:00Z",
+};
+const baseMessages = serializeSessionMessages([sourceMessage]);
+const modelMessages = serializeSessionMessages(
+  [sourceMessage],
+  {includeModel: true},
+);
+const durableMessages = serializeSessionMessages(
+  [sourceMessage],
+  {includeModel: true, includeTime: true},
+);
+const metadataPayload = buildSessionSavePayload({
+  title: "Metadata",
+  stats: {input: 1},
+  lastUsage: {total_tokens: 2},
+  runState: {status: "running"},
+});
+const durablePayload = buildSessionSavePayload({
+  title: "Durable",
+  stats: {input: 3},
+  lastUsage: {total_tokens: 4},
+  runState: {status: "completed"},
+  messages: [sourceMessage],
+  persistMessages: true,
+});
+
+const starts = [];
+const releases = [];
+const saveChains = {};
+const requestJson = (url, options) => {
+  const payload = JSON.parse(options.body);
+  starts.push({url, title: payload.title});
+  return new Promise((resolve) => {
+    releases.push(() => resolve({id: url.split("/").pop(), title: payload.title}));
+  });
+};
+const persistence = createSessionPersistence({requestJson, saveChains});
+const first = persistence.saveSession("alpha", {title: "first"});
+const second = persistence.saveSession("alpha", {title: "second"});
+const parallel = persistence.saveSession("beta", {title: "parallel"});
+
+setImmediate(async () => {
+  const startsBeforeRelease = starts.slice();
+  releases.splice(0).forEach((release) => release());
+  await new Promise((resolve) => setImmediate(resolve));
+  releases.splice(0).forEach((release) => release());
+  const results = await Promise.all([first, second, parallel]);
+  process.stdout.write(JSON.stringify({
+    baseMessages,
+    modelMessages,
+    durableMessages,
+    metadataPayload,
+    durablePayload,
+    sourceUnchanged: sourceMessage._model === "gpt-test"
+      && sourceMessage._time === "2026-07-31T06:30:00Z",
+    startsBeforeRelease,
+    starts,
+    results,
+    saveChains,
+  }));
+});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["baseMessages"],
+            [{
+                "role": "assistant",
+                "content": "done",
+                "thought": "checked",
+                "meta": {"kind": "answer"},
+                "_images": ["image.png"],
+            }],
+        )
+        self.assertEqual(result["modelMessages"][0]["_model"], "gpt-test")
+        self.assertNotIn("_time", result["modelMessages"][0])
+        self.assertEqual(result["durableMessages"][0]["_model"], "gpt-test")
+        self.assertEqual(
+            result["durableMessages"][0]["_time"],
+            "2026-07-31T06:30:00Z",
+        )
+        self.assertNotIn("messages", result["metadataPayload"])
+        self.assertEqual(
+            result["durablePayload"]["messages"],
+            result["durableMessages"],
+        )
+        self.assertTrue(result["sourceUnchanged"])
+        self.assertEqual(
+            [item["title"] for item in result["startsBeforeRelease"]],
+            ["first", "parallel"],
+        )
+        self.assertEqual(
+            [item["title"] for item in result["starts"]],
+            ["first", "parallel", "second"],
+        )
+        self.assertEqual(
+            [item["title"] for item in result["results"]],
+            ["first", "second", "parallel"],
+        )
+        self.assertEqual(result["saveChains"], {})
 
     def test_platform_core_normalizes_and_parses_key_config(self):
         self.assertIn('const WORKBAR_URL = "https://workbar.ai"', PLATFORM_SOURCE)
