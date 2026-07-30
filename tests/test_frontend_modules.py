@@ -3423,6 +3423,32 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("animation: welcomeRevealSlogan", STYLE_SOURCE)
         self.assertNotIn("@keyframes welcomeRevealSlogan", STYLE_SOURCE)
 
+    def test_user_message_meta_reserves_the_standard_followup_gap(self):
+        message_list_start = STYLE_SOURCE.index(".message-list {")
+        message_list_end = STYLE_SOURCE.index("}", message_list_start)
+        message_list_rule = STYLE_SOURCE[message_list_start:message_list_end]
+        self.assertIn("--message-stack-gap: 26px", message_list_rule)
+        self.assertIn("--user-message-meta-height: 26px", message_list_rule)
+        self.assertIn("--user-message-meta-offset: 2px", message_list_rule)
+
+        user_start = STYLE_SOURCE.index(".msg.user {")
+        user_end = STYLE_SOURCE.index("}", user_start)
+        user_rule = STYLE_SOURCE[user_start:user_end]
+        self.assertIn("var(--message-stack-gap)", user_rule)
+        self.assertIn("var(--user-message-meta-height)", user_rule)
+        self.assertIn("var(--user-message-meta-offset)", user_rule)
+
+        meta_start = STYLE_SOURCE.index(".msg-meta {")
+        meta_end = STYLE_SOURCE.index("}", meta_start)
+        meta_rule = STYLE_SOURCE[meta_start:meta_end]
+        self.assertIn("height: var(--user-message-meta-height)", meta_rule)
+        self.assertIn("margin-top: var(--user-message-meta-offset)", meta_rule)
+
+        modern_message_start = STYLE_SOURCE.rindex(".msg {")
+        modern_message_end = STYLE_SOURCE.index("}", modern_message_start)
+        modern_message_rule = STYLE_SOURCE[modern_message_start:modern_message_end]
+        self.assertIn("margin-bottom: var(--message-stack-gap)", modern_message_rule)
+
     def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
         render_start = MESSAGES_SOURCE.index("function projectMessages(")
         assistant_start = MESSAGES_SOURCE.index('if (msg.role === "assistant") {', render_start)

@@ -1115,6 +1115,9 @@ input:focus, select:focus, textarea:focus {
   scrollbar-color: var(--sidebar-scroll-thumb) transparent;
 }
 .message-list {
+  --message-stack-gap: 26px;
+  --user-message-meta-height: 26px;
+  --user-message-meta-offset: 2px;
   display: block;
   width: 100%;
   min-width: 0;
@@ -1207,7 +1210,7 @@ input:focus, select:focus, textarea:focus {
 
 .msg {
   width: min(600px, 88%);
-  margin: 0 auto 22px;
+  margin: 0 auto var(--message-stack-gap);
 }
 
 .msg.user {
@@ -1216,7 +1219,11 @@ input:focus, select:focus, textarea:focus {
   align-items: flex-end;
   justify-content: flex-end;
   position: relative;
-  margin-bottom: 24px;
+  margin-bottom: calc(
+    var(--message-stack-gap)
+    + var(--user-message-meta-offset)
+    + var(--user-message-meta-height)
+  );
 }
 .user-message-hover-area {
   position: relative;
@@ -1974,7 +1981,7 @@ input:focus, select:focus, textarea:focus {
 .msg-image .bubble { padding: 2px; }
 
 /* ── Message meta (timestamp + copy) ── */
-.msg-meta { position: absolute; z-index: 1; top: 100%; right: 0; display: flex; align-items: center; justify-content: flex-end; height: 26px; gap: 5px; margin-top: 2px; font-size: 11px; color: var(--muted); opacity: 0; pointer-events: none; transition: opacity .15s; }
+.msg-meta { position: absolute; z-index: 1; top: 100%; right: 0; display: flex; align-items: center; justify-content: flex-end; height: var(--user-message-meta-height); gap: 5px; margin-top: var(--user-message-meta-offset); font-size: 11px; color: var(--muted); opacity: 0; pointer-events: none; transition: opacity .15s; }
 .user-message-hover-area:hover .msg-meta { opacity: 1; }
 .msg-footer { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .msg-footer .response-info { margin-top: 0; }
@@ -6981,7 +6988,7 @@ button:focus-visible,
 
 .msg {
   width: min(760px, 90%);
-  margin-bottom: 26px;
+  margin-bottom: var(--message-stack-gap);
 }
 
 .msg.tool-msg {
