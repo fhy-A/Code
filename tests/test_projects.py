@@ -327,6 +327,54 @@ class TestSessionContract(ProjectSessionTestCase):
         self.assertNotIn("project", entry)
         self.assertNotIn("group", entry)
 
+    def test_session_list_does_not_resolve_each_index_entry_with_session_path(self):
+        self.write_session("session-fast-a", {"source": "code"})
+        self.write_session("session-fast-b", {"source": "code"})
+        handler = self.make_handler()
+
+        with mock.patch.object(
+            server,
+            "session_path",
+            side_effect=AssertionError("session list must use one metadata snapshot"),
+        ):
+            server.CodeHandler.get_sessions(handler)
+
+        listed_ids = {
+            item["id"]
+            for item in handler.send_json.call_args.args[0]["data"]
+        }
+        self.assertEqual(listed_ids, {"session-fast-a", "session-fast-b"})
+
+    def test_session_list_snapshot_keeps_flat_legacy_metadata_compatible(self):
+        session_id = "legacy-flat-session"
+        server.write_json(
+            self.sessions_dir / f"{session_id}.json",
+            {
+                "id": session_id,
+                "title": "Legacy flat",
+                "createdAt": "2026-07-19T10:00:00",
+                "updatedAt": "2026-07-19T10:00:00",
+                "messageCount": 0,
+                "source": "code",
+            },
+        )
+        server._write_session_index_entry(
+            session_id,
+            "Legacy flat",
+            "2026-07-19T10:00:00",
+            0,
+            source="code",
+        )
+        handler = self.make_handler()
+
+        server.CodeHandler.get_sessions(handler)
+
+        listed_ids = {
+            item["id"]
+            for item in handler.send_json.call_args.args[0]["data"]
+        }
+        self.assertIn(session_id, listed_ids)
+
     def test_session_list_backfills_pristine_import_badge_state(self):
         self.write_session(
             "session-imported",

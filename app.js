@@ -4674,9 +4674,13 @@ async function refreshSessions() {
     state.sessions = data.data || [];
     for (const session of state.sessions) {
       if (session?.id) {
-        setSessionRunState(session.id, session.runState || {});
-        restoreUserInputRequest(session.id, session.runState?.userInputRequest);
-        restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
+        if (!isSessionStreaming(session.id)) {
+          setSessionRunState(session.id, session.runState || {});
+          restoreUserInputRequest(session.id, session.runState?.userInputRequest);
+          restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
+        } else {
+          session.runState = { ...getSessionRunState(session.id) };
+        }
       }
     }
   } catch (err) {
@@ -4689,9 +4693,20 @@ async function refreshSessions() {
 
 }
 
-async function createSession(title = t("sessionTitleDefault")) {
+function scheduleDeferredSessionRefresh(sessionId) {
+  if (!sessionId || state._deferredSessionRefreshId !== sessionId) return;
+  state._deferredSessionRefreshId = null;
+  refreshSessions().catch((error) => {
+    console.error("Failed to refresh deferred session sidebar:", error);
+  });
+}
+
+async function createSession(title = t("sessionTitleDefault"), options = {}) {
 
   cacheActiveSessionState();
+  const initialMessages = Array.isArray(options.initialMessages)
+    ? options.initialMessages
+    : null;
   var body = { title: title };
   const projectId = state.pendingProjectId || projectForCurrentRoot()?.id || null;
   if (projectId) {
@@ -4719,7 +4734,7 @@ async function createSession(title = t("sessionTitleDefault")) {
   state._sessionMessageFilePath = session._messageFilePath || "";
   updateGroupBadge(session);
 
-  state.messages = session.messages || [];
+  state.messages = initialMessages || session.messages || [];
   setSessionMessages(session.id, state.messages);
   setSessionRunState(session.id, session.runState || {});
   setSessionLastUsage(session.id, session.lastUsage || null);
@@ -4734,8 +4749,15 @@ async function createSession(title = t("sessionTitleDefault")) {
 
   rememberSessionForeground(session.id);
 
+  if (options.deferSidebarRefresh === true) {
+    state._deferredSessionRefreshId = session.id;
+  }
+  renderMessages();
+
   if (session.cwd) await saveProjectRoot(session.cwd, { syncSession: false });
-  await refreshSessions();
+  if (options.deferSidebarRefresh !== true) {
+    await refreshSessions();
+  }
 
   syncActiveStreamingState();
 
@@ -10090,6 +10112,41 @@ function hideCompactConfirm() {
 
 }
 
+function projectOptimisticFirstMessage(userText, model, submittedAt, images = []) {
+  const projectedImages = Array.isArray(images) ? images : [];
+  const content = projectedImages.length > 0
+    ? [
+        { type: "text", text: userText },
+        ...projectedImages.map((image) => ({
+          type: "image_url",
+          image_url: { url: `data:${image.mime};base64,${image.base64}` },
+        })),
+      ]
+    : userText;
+  const message = {
+    role: "user",
+    content,
+    _model: model,
+    _time: new Date(submittedAt).toISOString(),
+    meta: { pendingSessionCreation: true },
+  };
+  state.messages.push(message);
+  resetRenderCache();
+  renderMessages();
+  return message;
+}
+
+function reconcileOptimisticFirstMessage(message, content, imageRefs, model) {
+  if (!message) return;
+  message.content = content;
+  message._images = imageRefs.length > 0 ? imageRefs : undefined;
+  message._model = model;
+  if (message.meta) {
+    delete message.meta.pendingSessionCreation;
+    if (Object.keys(message.meta).length === 0) delete message.meta;
+  }
+}
+
 
 
 async function sendMessage(userText, options = {}) {
@@ -10104,7 +10161,25 @@ async function sendMessage(userText, options = {}) {
 
   const submittedAt = Date.now();
 
-  if (!options.sessionId && !state.sessionId) await createSession(userText.slice(0, 24) || "New session");
+  const optimisticMessage = !options.sessionId && !state.sessionId && !options.existingMessage
+    ? projectOptimisticFirstMessage(
+        userText,
+        model,
+        submittedAt,
+        state.attachedImages,
+      )
+    : null;
+  if (!options.sessionId && !state.sessionId) {
+    await createSession(
+      userText.slice(0, 24) || "New session",
+      optimisticMessage
+        ? {
+            initialMessages: state.messages,
+            deferSidebarRefresh: true,
+          }
+        : {},
+    );
+  }
 
   const sessionId = String(options.sessionId || state.sessionId || "");
   if (!sessionId) throw new Error(t("createSessionFirst"));
@@ -10159,6 +10234,14 @@ async function sendMessage(userText, options = {}) {
     delete existingMessage.meta.detachedFromMain;
     ctx.messages.push(existingMessage);
   }
+  if (optimisticMessage) {
+    reconcileOptimisticFirstMessage(
+      optimisticMessage,
+      messageContent,
+      imageRefs,
+      ctx.model || model,
+    );
+  }
 
 
 
@@ -10178,7 +10261,7 @@ async function sendMessage(userText, options = {}) {
 
       const list = active.map((s) => `- /${s.name}: ${s.description || t("noDescription")}`).join("\n");
 
-      if (!existingMessage) {
+      if (!existingMessage && !optimisticMessage) {
         ctx.messages.push({ role: "user", content: "/help", _time: new Date().toISOString() });
       }
 
@@ -10216,7 +10299,7 @@ async function sendMessage(userText, options = {}) {
 
   const shouldAutoTitle = !existingMessage
     && sessionId === state.sessionId
-    && ctx.messages.length === 0
+    && ctx.messages.length === (optimisticMessage ? 1 : 0)
     && isAutoSessionTitle(els.sessionTitle.value);
 
   if (shouldAutoTitle) {
@@ -10230,7 +10313,7 @@ async function sendMessage(userText, options = {}) {
   run.taskStartTime = submittedAt;
   run.hasFirstModelResponseStarted = false;
   ctx.taskStartedAt = submittedAt;
-  if (!existingMessage) {
+  if (!existingMessage && !optimisticMessage) {
     ctx.messages.push({ role: "user", content: messageContent, _images: imageRefs.length > 0 ? imageRefs : undefined, _model: ctx.model || model, _time: new Date(submittedAt).toISOString() });
   }
   // Snapshot the healthy message count so we can rollback on failure
@@ -10245,13 +10328,15 @@ async function sendMessage(userText, options = {}) {
 
   renderSessionMessages(sessionId);
 
+  // Anchor the model name and expose the active state before persistence so
+  // first-send feedback is not blocked on metadata writes.
+  run._model = ctx.model || getSelectedModel();
+  setStreaming(true, sessionId);
+  if (optimisticMessage) scheduleDeferredSessionRefresh(sessionId);
+
   await saveSessionState(sessionId, ctx.messages, ctx.stats);
 
   await persistRunCheckpoint(ctx, "running", "model").catch(() => {});
-
-  // Anchor the model name on the run so the persistent status banner can show it
-  run._model = ctx.model || getSelectedModel();
-  setStreaming(true, sessionId);
 
   let loopError = null;
   try {
@@ -11291,6 +11376,8 @@ els.chatForm.addEventListener("submit", async (event) => {
     }
 
   } finally {
+
+    scheduleDeferredSessionRefresh(state._deferredSessionRefreshId);
 
     syncActiveStreamingState();
 

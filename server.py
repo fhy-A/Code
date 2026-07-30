@@ -4288,6 +4288,24 @@ def _session_index_path():
     return SESSIONS_DIR / "index.jsonl"
 
 
+def _session_meta_path_snapshot():
+    """Locate all session metadata files with one bounded directory scan."""
+    paths = {}
+    try:
+        for meta_path in SESSIONS_DIR.glob("*/*/*/*.json"):
+            if meta_path.is_file():
+                paths.setdefault(meta_path.stem, meta_path)
+        # Hierarchical metadata wins when a legacy flat copy also exists.
+        for meta_path in SESSIONS_DIR.glob("*.json"):
+            if meta_path.is_file():
+                paths.setdefault(meta_path.stem, meta_path)
+    except OSError:
+        # Keep the session list available with whatever was discovered before
+        # a concurrent filesystem change or transient read failure.
+        pass
+    return paths
+
+
 # ── Project helpers ──
 
 _SESSION_SOURCE_KINDS = {"code", "codex", "claude-code"}
@@ -10897,12 +10915,13 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def get_sessions(self):
         index = _read_session_index()
+        meta_paths = _session_meta_path_snapshot()
         sessions = []
         orphans = []
         index_dirty = False
         for sid, entry in index.items():
-            meta_path = session_path(sid)
-            if meta_path.exists():
+            meta_path = meta_paths.get(str(sid))
+            if meta_path is not None and meta_path.exists():
                 source = _normalize_session_source(
                     entry.get("source"),
                     entry.get("group"),

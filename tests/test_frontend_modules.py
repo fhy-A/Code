@@ -3886,6 +3886,99 @@ process.stdout.write(JSON.stringify({
         self.assertIn("modelRound: Number(extra.modelRound", APP_SOURCE)
         self.assertIn("ctx.run.modelRound = Number(runState.modelRound || 0)", APP_SOURCE)
 
+    def test_first_send_projects_user_before_session_creation(self):
+        helper_start = APP_SOURCE.index("function projectOptimisticFirstMessage")
+        helper_end = APP_SOURCE.index("async function sendMessage", helper_start)
+        helper = APP_SOURCE[helper_start:helper_end]
+        self.assertIn("state.messages.push(message);", helper)
+        self.assertIn("renderMessages();", helper)
+        self.assertIn("return message;", helper)
+
+        send_start = APP_SOURCE.index("async function sendMessage")
+        send_end = APP_SOURCE.index("function getSelectedModel", send_start)
+        send = APP_SOURCE[send_start:send_end]
+        projection_index = send.index("projectOptimisticFirstMessage(")
+        create_index = send.index("await createSession(")
+        self.assertLess(projection_index, create_index)
+        self.assertIn("initialMessages: state.messages", send)
+        self.assertIn("deferSidebarRefresh: true", send)
+        self.assertIn("reconcileOptimisticFirstMessage(", send)
+        self.assertIn("if (!existingMessage && !optimisticMessage)", send)
+        self.assertLess(
+            send.index("setStreaming(true, sessionId);"),
+            send.index("scheduleDeferredSessionRefresh(sessionId);"),
+        )
+
+    def test_optimistic_first_message_reuses_one_message_object(self):
+        helper_start = APP_SOURCE.index("function projectOptimisticFirstMessage")
+        helper_end = APP_SOURCE.index("async function sendMessage", helper_start)
+        helper = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const state = {{ messages: [] }};
+let renderCount = 0;
+function resetRenderCache() {{}}
+function renderMessages() {{ renderCount += 1; }}
+{helper}
+const message = projectOptimisticFirstMessage(
+  "hello",
+  "test-model",
+  Date.parse("2026-07-31T04:00:00Z"),
+  [{{ mime: "image/png", base64: "AAAA" }}],
+);
+const projectedContentIsMultimodal = Array.isArray(message.content)
+  && message.content.length === 2;
+const sameObject = state.messages[0] === message;
+reconcileOptimisticFirstMessage(
+  message,
+  "hello",
+  ["attachments/image.png"],
+  "test-model",
+);
+process.stdout.write(JSON.stringify({{
+  projectedContentIsMultimodal,
+  sameObject,
+  messageCount: state.messages.length,
+  renderCount,
+  content: message.content,
+  images: message._images,
+  pending: Boolean(message.meta?.pendingSessionCreation),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["projectedContentIsMultimodal"])
+        self.assertTrue(data["sameObject"])
+        self.assertEqual(data["messageCount"], 1)
+        self.assertEqual(data["renderCount"], 1)
+        self.assertEqual(data["content"], "hello")
+        self.assertEqual(data["images"], ["attachments/image.png"])
+        self.assertFalse(data["pending"])
+
+    def test_deferred_first_send_sidebar_refresh_preserves_active_run(self):
+        create_start = APP_SOURCE.index("async function createSession(")
+        create_end = APP_SOURCE.index("async function loadSession(", create_start)
+        create = APP_SOURCE[create_start:create_end]
+        self.assertIn("const initialMessages = Array.isArray(options.initialMessages)", create)
+        self.assertIn("state.messages = initialMessages || session.messages || [];", create)
+        self.assertIn("if (options.deferSidebarRefresh !== true)", create)
+        self.assertIn("state._deferredSessionRefreshId = session.id;", create)
+        self.assertLess(
+            create.index("renderMessages();"),
+            create.index("if (session.cwd) await saveProjectRoot"),
+        )
+
+        refresh_start = APP_SOURCE.index("async function refreshSessions()")
+        refresh_end = APP_SOURCE.index("async function createSession(", refresh_start)
+        refresh = APP_SOURCE[refresh_start:refresh_end]
+        self.assertIn("if (!isSessionStreaming(session.id))", refresh)
+        self.assertIn("setSessionRunState(session.id, session.runState || {});", refresh)
+
     def test_active_run_banner_uses_stable_anchor_above_thought_process(self):
         wrapper = """<div id="messages" class="messages">
             <div id="messageList" class="message-list"></div>
