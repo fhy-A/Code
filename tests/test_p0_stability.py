@@ -255,7 +255,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
 
     def test_completed_elapsed_is_persisted_before_checkpoint_clear(self):
         clear_start = APP_SOURCE.index("async function clearRunCheckpoint(ctx)")
-        clear_end = APP_SOURCE.index("function getSessionMessages", clear_start)
+        clear_end = APP_SOURCE.index("function isCompactSummaryMessage", clear_start)
         clear_checkpoint = APP_SOURCE[clear_start:clear_end]
         finalize_index = clear_checkpoint.index("finalizeRunTiming(ctx.sessionId)")
         serialize_index = clear_checkpoint.index("const serialized = msgs.map")

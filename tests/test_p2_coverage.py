@@ -280,6 +280,7 @@ class TestCompactSummaryMarker(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).resolve().parent.parent
         cls.source = (root / "app.js").read_text(encoding="utf-8")
+        cls.state_source = (root / "src" / "core" / "state.js").read_text(encoding="utf-8")
         cls.messages_source = (root / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
         cls.timeline_source = (root / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
         cls.i18n_source = (root / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
@@ -310,7 +311,7 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertNotIn("_compactPrefix", self.source)
 
     def test_usage_is_isolated_and_persisted_per_session(self):
-        self.assertIn("_sessionLastUsage: {}", self.source)
+        self.assertIn("_sessionLastUsage: {}", self.state_source)
         self.assertIn("setSessionLastUsage(sessionId, data.usage)", self.source)
         self.assertIn("lastUsage: getSessionLastUsage(sessionId)", self.source)
 

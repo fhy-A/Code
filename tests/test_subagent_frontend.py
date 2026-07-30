@@ -9,6 +9,7 @@ class TestSubAgentFrontend(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = (ROOT / "app.js").read_text(encoding="utf-8")
+        cls.state_source = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
         cls.i18n_source = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
         cls.messages_source = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 
@@ -120,8 +121,8 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertIn("messages.splice(lastCompletedBackground, 0, mainMessage)", self.source)
 
     def test_background_dispatch_uses_bounded_scheduler(self):
-        self.assertIn('globalLimit: 3', self.source)
-        self.assertIn('perSessionLimit: 2', self.source)
+        self.assertIn('globalLimit: 3', self.state_source)
+        self.assertIn('perSessionLimit: 2', self.state_source)
         self.assertIn('function pumpBackgroundDispatcher()', self.source)
         self.assertIn('backgroundActiveForSession(candidate.sessionId) < dispatcher.perSessionLimit', self.source)
 
@@ -142,8 +143,8 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertNotIn("runAgentLoop(", background)
 
     def test_background_run_checkpoint_survives_main_completion_and_reload(self):
-        self.assertIn("function getBackgroundRunCheckpoints(sessionId)", self.source)
-        self.assertIn("backgroundRuns: previous.backgroundRuns.map", self.source)
+        self.assertIn("function getBackgroundRunCheckpoints(sessionId)", self.state_source)
+        self.assertIn("backgroundRuns.push({ ...checkpoint })", self.state_source)
         self.assertIn("runState: clearedRunState", self.source)
         self.assertIn("async function resumePersistedBackgroundRuns()", self.source)
         self.assertIn("restoreBackgroundJobsForSession(summary)", self.source)
@@ -185,7 +186,7 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertIn('if (!ctx?.isSubAgent && sessionId === state.sessionId)', self.source)
 
     def test_session_saves_are_serialized(self):
-        self.assertIn('_sessionSaveChains: {}', self.source)
+        self.assertIn('_sessionSaveChains: {}', self.state_source)
         self.assertIn('const previous = state._sessionSaveChains[sessionId] || Promise.resolve();', self.source)
         self.assertIn('state._sessionSaveChains[sessionId] = savePromise;', self.source)
 

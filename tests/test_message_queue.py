@@ -56,7 +56,7 @@ class TestRunningMessageQueue(unittest.TestCase):
 
     def test_success_atomically_removes_active_queue_item(self):
         clear_start = APP_SOURCE.index("async function clearRunCheckpoint(ctx)")
-        clear_end = APP_SOURCE.index("function getSessionMessages", clear_start)
+        clear_end = APP_SOURCE.index("function isCompactSummaryMessage", clear_start)
         clear = APP_SOURCE[clear_start:clear_end]
         self.assertIn('const queueItemId = String(ctx.queueItemId || "")', clear)
         self.assertIn(".filter((item) => item.id !== queueItemId)", clear)

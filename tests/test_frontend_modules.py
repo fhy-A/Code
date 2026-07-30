@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
+STATE_SOURCE = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
 PLATFORM_SOURCE = (ROOT / "src" / "core" / "platform.js").read_text(encoding="utf-8")
 API_CLIENT_SOURCE = (ROOT / "src" / "services" / "api-client.js").read_text(encoding="utf-8")
@@ -470,6 +471,7 @@ eval(source);
     def test_core_module_files_exist(self):
         for relative_path in (
             "src/core/namespace.js",
+            "src/core/state.js",
             "src/core/icons.js",
             "src/core/utils.js",
             "src/core/i18n.js",
@@ -492,6 +494,7 @@ eval(source);
     def test_scripts_load_before_runtime_and_app(self):
         scripts = (
             "./src/core/namespace.js",
+            "./src/core/state.js",
             "./src/core/platform.js",
             "./src/core/icons.js",
             "./src/core/utils.js",
@@ -518,6 +521,105 @@ eval(source);
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")
         for bucket in ("core", "services", "features", "agent", "ui"):
             self.assertIn(f'Code.{bucket} = Code.{bucket} || {{}}', source)
+
+    def test_state_module_isolates_session_domains_and_checkpoints(self):
+        state_path = ROOT / "src" / "core" / "state.js"
+        self.assertTrue(state_path.is_file())
+        self.assertIn("const state = createAppState(localStorage);", APP_SOURCE)
+        self.assertIn("} = createSessionStateAccessors(state);", APP_SOURCE)
+        self.assertNotIn("function ensureSessionRun(", APP_SOURCE)
+        self.assertNotIn("function getSessionMessages(", APP_SOURCE)
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/core/state.js");
+
+const values = new Map([
+  ["code-permission-profile", "plan"],
+  ["code-preview-width", "512"],
+  ["code-session-height", "240"],
+  ["code-sidebar-width", "300"],
+  ["code-disabled-skills", JSON.stringify(["alpha", "beta"])],
+  ["code-lang", "en"],
+]);
+const storage = {
+  getItem(key) {
+    return values.has(key) ? values.get(key) : null;
+  },
+};
+const {createAppState, createSessionStateAccessors} = window.Code.core.state;
+const state = createAppState(storage);
+const sessions = createSessionStateAccessors(state);
+
+state.sessions = [{id: "alpha"}, {id: "beta"}];
+state.sessionId = "alpha";
+const alphaMessages = [{role: "user", content: "alpha"}];
+const betaMessages = [{role: "user", content: "beta"}];
+sessions.setSessionMessages("alpha", alphaMessages);
+sessions.setSessionMessages("beta", betaMessages);
+sessions.setSessionStats("alpha", {input: 1, output: 2, cache: 3, cost: 4});
+sessions.setSessionStats("beta", {input: 5, output: 6, cache: 7, cost: 8});
+sessions.setSessionLastUsage("alpha", {total_tokens: 11});
+sessions.setSessionLastUsage("beta", {total_tokens: 22});
+
+const alphaRun = sessions.ensureSessionRun("alpha");
+const betaRun = sessions.ensureSessionRun("beta");
+sessions.setSessionRunState("alpha", {status: "running"});
+sessions.setBackgroundRunCheckpoint("alpha", {id: "bg-1", status: "running"});
+sessions.setQueuedMessageCheckpoints("alpha", [{id: "queue-1", status: "queued"}]);
+sessions.removeBackgroundRunCheckpoint("alpha", "bg-1");
+
+process.stdout.write(JSON.stringify({
+  defaults: {
+    permissionProfile: state.permissionProfile,
+    previewWidth: state.previewWidth,
+    sidebarSessionHeight: state.sidebarSessionHeight,
+    sidebarWidth: state.sidebarWidth,
+    disabledSkills: [...state.disabledSkills],
+    lang: state.lang,
+  },
+  activeMessageIdentity: state.messages === alphaMessages,
+  backgroundMessages: sessions.getSessionMessages("beta"),
+  activeStats: state.stats,
+  backgroundStats: sessions.getSessionStats("beta"),
+  activeUsage: state.lastUsage,
+  backgroundUsage: sessions.getSessionLastUsage("beta"),
+  independentRuns: alphaRun !== betaRun && alphaRun.sessionId === "alpha" && betaRun.sessionId === "beta",
+  mirroredRunState: state.sessions[0].runState === sessions.getSessionRunState("alpha"),
+  backgroundRuns: sessions.getBackgroundRunCheckpoints("alpha"),
+  queuedMessages: sessions.getQueuedMessageCheckpoints("alpha"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "defaults": {
+                    "permissionProfile": "plan",
+                    "previewWidth": 512,
+                    "sidebarSessionHeight": 240,
+                    "sidebarWidth": 300,
+                    "disabledSkills": ["alpha", "beta"],
+                    "lang": "en",
+                },
+                "activeMessageIdentity": True,
+                "backgroundMessages": [{"role": "user", "content": "beta"}],
+                "activeStats": {"input": 1, "output": 2, "cache": 3, "cost": 4},
+                "backgroundStats": {"input": 5, "output": 6, "cache": 7, "cost": 8},
+                "activeUsage": {"total_tokens": 11},
+                "backgroundUsage": {"total_tokens": 22},
+                "independentRuns": True,
+                "mirroredRunState": True,
+                "backgroundRuns": [],
+                "queuedMessages": [{"id": "queue-1", "status": "queued"}],
+            },
+        )
 
     def test_platform_core_normalizes_and_parses_key_config(self):
         self.assertIn('const WORKBAR_URL = "https://workbar.ai"', PLATFORM_SOURCE)
@@ -3863,7 +3965,7 @@ process.stdout.write(JSON.stringify({
             response_helper.index("if (run.modelResponseStarted) return;"),
         )
 
-        self.assertIn("hasFirstModelResponseStarted: false", APP_SOURCE)
+        self.assertIn("hasFirstModelResponseStarted: false", STATE_SOURCE)
         self.assertIn(
             "hasFirstModelResponseStarted: Boolean(ctx.run?.hasFirstModelResponseStarted)",
             APP_SOURCE,

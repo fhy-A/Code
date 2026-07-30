@@ -401,11 +401,12 @@ class TestDispatcherLimits(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).resolve().parent.parent
         cls.source = (root / "app.js").read_text(encoding="utf-8")
+        cls.state_source = (root / "src" / "core" / "state.js").read_text(encoding="utf-8")
 
     def test_global_limit_enforced(self):
-        self.assertIn('globalLimit: 3', self.source,
+        self.assertIn('globalLimit: 3', self.state_source,
                       "Global background dispatch limit must be 3")
-        self.assertIn('perSessionLimit: 2', self.source,
+        self.assertIn('perSessionLimit: 2', self.state_source,
                       "Per-session dispatch limit must be 2")
 
     def test_bounded_dispatcher_loop(self):
@@ -425,7 +426,7 @@ class TestDispatcherLimits(unittest.TestCase):
                       "Must enforce per-session limit")
 
     def test_session_save_chaining_prevents_races(self):
-        self.assertIn('_sessionSaveChains: {}', self.source)
+        self.assertIn('_sessionSaveChains: {}', self.state_source)
         self.assertIn('const previous = state._sessionSaveChains[sessionId] || Promise.resolve();', self.source)
         self.assertIn('state._sessionSaveChains[sessionId] = savePromise;', self.source)
 
