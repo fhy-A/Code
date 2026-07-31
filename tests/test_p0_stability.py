@@ -15,6 +15,7 @@ import server as server_mod
 ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
+MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
 SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
@@ -62,7 +63,10 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
         self.assertIn("renderNetworkRecoveryStatus(getSessionId())", MESSAGES_SOURCE)
 
     def test_model_access_denial_is_not_retried_and_refreshes_capabilities(self):
-        self.assertIn('return { code: "model_access_denied", transient: false }', APP_SOURCE)
+        self.assertIn(
+            'return { code: "model_access_denied", transient: false }',
+            MODEL_STREAM_SOURCE,
+        )
         self.assertNotIn('Retry once if New API transient "no access" error', APP_SOURCE)
         self.assertIn("state.modelKeysMap[model]", APP_SOURCE)
         self.assertIn('if (err.errorCode === "model_access_denied")', APP_SOURCE)

@@ -26,6 +26,7 @@ FILES_SOURCE = (ROOT / "src" / "features" / "files.js").read_text(encoding="utf-
 SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_text(encoding="utf-8")
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
+MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
@@ -493,6 +494,7 @@ eval(source);
             "src/features/files.js",
             "src/features/skills-memory.js",
             "src/features/session-import.js",
+            "src/agent/model-stream.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
@@ -519,6 +521,7 @@ eval(source);
             "./src/features/preview.js",
             "./src/features/files.js",
             "./src/features/session-import.js",
+            "./src/agent/model-stream.js",
             "./agent-runtime.js",
             "./app.js",
         )
@@ -529,6 +532,125 @@ eval(source);
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")
         for bucket in ("core", "services", "features", "agent", "ui"):
             self.assertIn(f'Code.{bucket} = Code.{bucket} || {{}}', source)
+
+    def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-stream.js");
+
+const protocol = window.Code.agent.modelStream;
+const toolCalls = new Map();
+protocol.mergeToolCallDelta(toolCalls, {
+  index: 0,
+  id: "call-1",
+  type: "function",
+  function: {name: "read_file", arguments: "{\"path\":"},
+});
+protocol.mergeToolCallDelta(toolCalls, {
+  index: 0,
+  function: {arguments: "\"README.md\"}"},
+});
+
+const requestError = protocol.createModelRequestError("broken", {
+  status: 503,
+  code: "upstream_error",
+  transient: true,
+});
+const result = {
+  frozen: Object.isFrozen(protocol),
+  ignored: protocol.parseSseLine("event: message"),
+  invalid: protocol.parseSseLine("data: {broken"),
+  done: protocol.parseSseLine("data: [DONE]"),
+  parsed: protocol.parseSseLine('data: {"choices":[{"delta":{"content":"ok"}}]}'),
+  openai: protocol.extractStreamDelta({
+    choices: [{delta: {reasoning_content: "think", content: ["a", {text: "b"}]}}],
+  }),
+  anthropicThinking: protocol.extractStreamDelta({
+    type: "content_block_delta",
+    delta: {type: "thinking_delta", thinking: "reason"},
+  }),
+  anthropicText: protocol.extractStreamDelta({
+    type: "content_block_delta",
+    delta: {type: "text_delta", text: "answer"},
+  }),
+  responsesText: protocol.extractStreamDelta({
+    type: "response.output_text.delta",
+    delta: "response",
+  }),
+  toolCall: toolCalls.get(0),
+  accessDenied: protocol.classifyModelRequestFailure(
+    403, "", "Not authorized to access model",
+  ),
+  transient: protocol.classifyModelRequestFailure(503, "", "upstream failed"),
+  permanent: protocol.classifyModelRequestFailure(400, "bad_request", "invalid"),
+  requestError: {
+    message: requestError.message,
+    status: requestError.status,
+    code: requestError.code,
+    transient: requestError.transient,
+    modelRequest: requestError.modelRequest,
+  },
+  retryWithoutTools: protocol.shouldRetryWithoutNativeTools(
+    "function calling is not supported",
+  ),
+  keepTools: protocol.shouldRetryWithoutNativeTools("upstream timeout"),
+};
+process.stdout.write(JSON.stringify(result));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["frozen"])
+        self.assertIsNone(data["ignored"])
+        self.assertIsNone(data["invalid"])
+        self.assertEqual(data["done"], "[DONE]")
+        self.assertEqual(
+            data["parsed"]["choices"][0]["delta"]["content"],
+            "ok",
+        )
+        self.assertEqual(data["openai"]["reasoning"], "think")
+        self.assertEqual(data["openai"]["text"], "ab")
+        self.assertEqual(data["anthropicThinking"]["reasoning"], "reason")
+        self.assertEqual(data["anthropicText"]["text"], "answer")
+        self.assertEqual(data["responsesText"]["text"], "response")
+        self.assertEqual(
+            data["toolCall"],
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+            },
+        )
+        self.assertEqual(
+            data["accessDenied"],
+            {"code": "model_access_denied", "transient": False},
+        )
+        self.assertEqual(data["transient"], {"code": "", "transient": True})
+        self.assertEqual(
+            data["permanent"],
+            {"code": "bad_request", "transient": False},
+        )
+        self.assertEqual(
+            data["requestError"],
+            {
+                "message": "broken",
+                "status": 503,
+                "code": "upstream_error",
+                "transient": True,
+                "modelRequest": True,
+            },
+        )
+        self.assertTrue(data["retryWithoutTools"])
+        self.assertFalse(data["keepTools"])
 
     def test_state_module_isolates_session_domains_and_checkpoints(self):
         state_path = ROOT / "src" / "core" / "state.js"
@@ -4757,7 +4879,7 @@ process.stdout.write(JSON.stringify({
 
     def test_tool_round_finalization_is_atomic(self):
         helper_start = APP_SOURCE.index("function finalizeStreamingAssistantMessage")
-        helper_end = APP_SOURCE.index("function parseSseLine", helper_start)
+        helper_end = APP_SOURCE.index("function updateUsage", helper_start)
         helper = APP_SOURCE[helper_start:helper_end]
         self.assertIn(
             "updateAssistantMessage(index, rawContent, false, sessionId, targetMessages, true)",
