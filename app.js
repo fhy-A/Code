@@ -48,10 +48,9 @@ const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const {
   classifyModelRequestFailure,
+  createSseDataReader,
   createModelTurnAccumulator,
   createModelRequestError,
-  extractStreamDelta,
-  parseSseLine,
   shouldRetryWithoutNativeTools,
 } = window.Code.agent.modelStream;
 
@@ -7244,12 +7243,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
 
 
-  const reader = res.body.getReader();
-
-  const decoder = new TextDecoder();
-
-  let buffer = "";
-
+  const reader = createSseDataReader(res.body);
   const turnAccumulator = createModelTurnAccumulator();
 
 
@@ -7266,135 +7260,71 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
         transient: true,
       });
     }
-    const { value, done } = packet;
+    const { value: data, done } = packet;
 
     if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+    const turnEvent = turnAccumulator.consume(data);
 
-    const lines = buffer.split(/\r?\n/);
+    if (turnEvent.kind === "error") {
+      ctx.runtimeRunId = "";
+      run.runtimeRunId = "";
+      throw turnEvent.error;
+    }
 
-    buffer = lines.pop() || "";
+    if (turnEvent.kind === "done") {
+      ctx.runtimeRunId = "";
+      run.runtimeRunId = "";
 
+      const toolCalls = normalizeToolCallList(turnAccumulator.getToolCallMap());
 
+      finalizeStreamingAssistantMessage(
+        assistantIndex,
+        turnEvent.combinedText || toolProgressSummary(toolCalls) || "",
+        toolCalls,
+        sessionId,
+        _streamMsgs,
+        skipRender,
+      );
 
-    for (const line of lines) {
-
-      const data = parseSseLine(line);
-
-      if (!data) continue;
-
-      const turnEvent = turnAccumulator.consume(data);
-
-      if (turnEvent.kind === "error") {
-        ctx.runtimeRunId = "";
-        run.runtimeRunId = "";
-        throw turnEvent.error;
+      if (!ctx.isSubAgent) {
+        await persistRunCheckpoint(ctx, "running", "model", { runtimeRunId: "" }).catch(() => {});
       }
+      return { content: turnEvent.rawContent, toolCalls };
 
-      if (turnEvent.kind === "done") {
-        ctx.runtimeRunId = "";
-        run.runtimeRunId = "";
+    }
 
-        const toolCalls = normalizeToolCallList(turnAccumulator.getToolCallMap());
+    if (turnEvent.receivedToolCallDelta) {
+      markModelResponseStarted(run, sessionId);
+      markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
+    }
 
-        finalizeStreamingAssistantMessage(
-          assistantIndex,
-          turnEvent.combinedText || toolProgressSummary(toolCalls) || "",
-          toolCalls,
-          sessionId,
-          _streamMsgs,
-          skipRender,
-        );
+    if (turnEvent.reasoning || turnEvent.text) {
+      markModelResponseStarted(run, sessionId);
 
-        if (!ctx.isSubAgent) {
-          await persistRunCheckpoint(ctx, "running", "model", { runtimeRunId: "" }).catch(() => {});
-        }
-        return { content: turnEvent.rawContent, toolCalls };
+      updateAssistantMessage(
+        assistantIndex,
+        turnEvent.combinedText,
+        true,
+        sessionId,
+        _streamMsgs,
+        skipRender,
+      );
 
-      }
+    }
 
-      if (turnEvent.receivedToolCallDelta) {
-        markModelResponseStarted(run, sessionId);
-        markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
-      }
-
-      if (turnEvent.reasoning || turnEvent.text) {
-        markModelResponseStarted(run, sessionId);
-
-        updateAssistantMessage(
-          assistantIndex,
-          turnEvent.combinedText,
-          true,
-          sessionId,
-          _streamMsgs,
-          skipRender,
-        );
-
-      }
-
-      if (turnEvent.usage) {
-        setSessionLastUsage(sessionId, turnEvent.usage);
-        updateUsage(turnEvent.usage, sessionId, ctx);
-
-      }
+    if (turnEvent.usage) {
+      setSessionLastUsage(sessionId, turnEvent.usage);
+      updateUsage(turnEvent.usage, sessionId, ctx);
 
     }
 
   }
 
-  const turnSnapshot = turnAccumulator.snapshot();
-  let rawThought = turnSnapshot.rawThought;
-  let rawContent = turnSnapshot.rawContent;
-  const toolCallsByIndex = turnAccumulator.getToolCallMap();
-  let streamCompleted = turnSnapshot.completed;
-
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    const data = parseSseLine(buffer.trim());
-    if (data === "[DONE]") {
-      streamCompleted = true;
-    } else if (data) {
-      const { reasoning, text } = extractStreamDelta(data);
-      if (reasoning || text) markModelResponseStarted(run, sessionId);
-      if (reasoning) rawThought += reasoning;
-      if (text) rawContent += text;
-      if (data.usage) {
-        setSessionLastUsage(sessionId, data.usage);
-        updateUsage(data.usage, sessionId, ctx);
-      }
-    }
-  }
-
-  if (!streamCompleted) {
-    throw createModelRequestError("Stream interrupted before completion", {
-      code: "stream_interrupted",
-      transient: true,
-    });
-  }
-
-  ctx.runtimeRunId = "";
-  run.runtimeRunId = "";
-
-
-
-  const finalCombined = rawThought ? `<think>${rawThought}</think>\n${rawContent}` : rawContent;
-
-  const toolCalls = normalizeToolCallList(toolCallsByIndex);
-
-  finalizeStreamingAssistantMessage(
-    assistantIndex,
-    finalCombined || toolProgressSummary(toolCalls) || "",
-    toolCalls,
-    sessionId,
-    _streamMsgs,
-    skipRender,
-  );
-
-  if (!ctx.isSubAgent) {
-    await persistRunCheckpoint(ctx, "running", "model", { runtimeRunId: "" }).catch(() => {});
-  }
-  return { content: rawContent, toolCalls };
+  throw createModelRequestError("Stream interrupted before completion", {
+    code: "stream_interrupted",
+    transient: true,
+  });
 
 }
 

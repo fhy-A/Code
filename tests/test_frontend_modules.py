@@ -751,6 +751,131 @@ process.stdout.write(JSON.stringify(result));
             },
         )
 
+    def test_model_sse_data_reader_handles_arbitrary_bytes_and_tail_frames(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-stream.js");
+
+const protocol = window.Code.agent.modelStream;
+const encoder = new TextEncoder();
+
+function byteStream(text) {
+  const bytes = encoder.encode(text);
+  return new ReadableStream({
+    start(controller) {
+      for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+      controller.close();
+    },
+  });
+}
+
+function batchStream(text) {
+  const bytes = encoder.encode(text);
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+async function collect(body) {
+  const reader = protocol.createSseDataReader(body);
+  const frames = [];
+  while (true) {
+    const packet = await reader.read();
+    if (packet.done) return frames;
+    frames.push(packet.value);
+  }
+}
+
+(async () => {
+  const arbitraryBytes = await collect(byteStream([
+    ": keepalive\r\n\r\n",
+    'data: {"choices":[{"delta":{"content":"你"}}]}\r\n\r\n',
+    'data: {"usage":{"completion_tokens":1}}\n\n',
+    "data: [DONE]",
+  ].join("")));
+  const batched = await collect(batchStream([
+    'data: {"choices":[{"delta":{"content":"a"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"b"}}]}\n\n',
+    "data: [DONE]\n\n",
+  ].join("")));
+  const errorTail = await collect(batchStream(
+    'data: [ERROR]{"message":"tail failed","status":502}',
+  ));
+  const toolTail = await collect(batchStream(
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{}"}}]}}]}',
+  ));
+  const incomplete = await collect(batchStream(
+    'data: {"choices":[{"delta":{"content":"partial"}}]}',
+  ));
+
+  let readerError = null;
+  const brokenReader = protocol.createSseDataReader(new ReadableStream({
+    start(controller) {
+      controller.error(new Error("reader broken"));
+    },
+  }));
+  try {
+    await brokenReader.read();
+  } catch (error) {
+    readerError = error.message;
+  }
+
+  process.stdout.write(JSON.stringify({
+    arbitraryBytes,
+    batched,
+    errorTail,
+    toolTail,
+    incomplete,
+    readerError,
+  }));
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["arbitraryBytes"],
+            [
+                {"choices": [{"delta": {"content": "你"}}]},
+                {"usage": {"completion_tokens": 1}},
+                "[DONE]",
+            ],
+        )
+        self.assertEqual(
+            [
+                frame.get("choices", [{}])[0].get("delta", {}).get("content")
+                for frame in data["batched"][:-1]
+            ],
+            ["a", "b"],
+        )
+        self.assertEqual(data["batched"][-1], "[DONE]")
+        self.assertEqual(
+            data["errorTail"],
+            ['[ERROR]{"message":"tail failed","status":502}'],
+        )
+        self.assertEqual(
+            data["toolTail"][0]["choices"][0]["delta"]["tool_calls"][0]["function"],
+            {"name": "read_file", "arguments": "{}"},
+        )
+        self.assertEqual(
+            data["incomplete"],
+            [{"choices": [{"delta": {"content": "partial"}}]}],
+        )
+        self.assertEqual(data["readerError"], "reader broken")
+
     def test_state_module_isolates_session_domains_and_checkpoints(self):
         state_path = ROOT / "src" / "core" / "state.js"
         self.assertTrue(state_path.is_file())
@@ -4986,16 +5111,17 @@ process.stdout.write(JSON.stringify({
         )
         self.assertLess(helper.index("current.meta.toolCalls = toolCalls"), helper.index("renderSessionMessages"))
 
-        stream_start = APP_SOURCE.index("const turnAccumulator = createModelTurnAccumulator()")
+        stream_start = APP_SOURCE.index("const reader = createSseDataReader(res.body)")
         stream_end = APP_SOURCE.index("function _safeMd", stream_start)
         stream = APP_SOURCE[stream_start:stream_end]
         self.assertIn("const turnEvent = turnAccumulator.consume(data)", stream)
-        self.assertIn("const toolCallsByIndex = turnAccumulator.getToolCallMap()", stream)
+        self.assertNotIn("new TextDecoder()", stream)
+        self.assertNotIn("buffer +=", stream)
         self.assertIn(
             'markStreamingAssistantProjection(assistantIndex, "thinking"',
             stream,
         )
-        self.assertGreaterEqual(stream.count("finalizeStreamingAssistantMessage("), 2)
+        self.assertEqual(stream.count("finalizeStreamingAssistantMessage("), 1)
 
     def test_active_run_banner_uses_one_stable_task_status(self):
         helper_start = APP_SOURCE.index("function ensureActiveRunBannerStructure")

@@ -43,7 +43,8 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
         self.assertIn("await sleep(delay, signal)", RUNTIME_SOURCE)
 
     def test_incomplete_sse_is_not_treated_as_success(self):
-        self.assertIn("let streamCompleted = turnSnapshot.completed", APP_SOURCE)
+        self.assertIn("const reader = createSseDataReader(res.body)", APP_SOURCE)
+        self.assertIn("if (done) break", APP_SOURCE)
         self.assertIn('code: "stream_interrupted"', APP_SOURCE)
         self.assertIn("Stream interrupted before completion", APP_SOURCE)
 

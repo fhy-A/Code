@@ -19,6 +19,44 @@
     }
   }
 
+  function createSseDataReader(body) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    const dataQueue = [];
+    let buffer = "";
+    let ended = false;
+
+    function queueLine(line) {
+      const data = parseSseLine(line);
+      if (data) dataQueue.push(data);
+    }
+
+    async function read() {
+      while (dataQueue.length === 0 && !ended) {
+        const packet = await reader.read();
+        if (packet.done) {
+          buffer += decoder.decode();
+          ended = true;
+          if (buffer.trim()) queueLine(buffer.trim());
+          buffer = "";
+          break;
+        }
+
+        buffer += decoder.decode(packet.value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        lines.forEach(queueLine);
+      }
+
+      if (dataQueue.length > 0) {
+        return { value: dataQueue.shift(), done: false };
+      }
+      return { value: undefined, done: true };
+    }
+
+    return Object.freeze({ read });
+  }
+
   function streamDeltaText(value) {
     if (typeof value === "string") return value;
     if (!Array.isArray(value)) return "";
@@ -184,6 +222,7 @@
 
   agent.modelStream = Object.freeze({
     parseSseLine,
+    createSseDataReader,
     streamDeltaText,
     extractStreamDelta,
     mergeToolCallDelta,
