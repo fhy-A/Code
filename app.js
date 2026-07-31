@@ -72,9 +72,11 @@ const {
   BACKGROUND_JOB_TIMEOUT_MS,
   backgroundJobElapsedMs,
   buildBackgroundJobCheckpoint,
+  buildBackgroundResultMessage,
   buildBackgroundTaskPrompt,
   buildRestoredBackgroundJobData,
   createSubAgentContext,
+  hasBackgroundResult,
   mergeBackgroundUsageStats,
   parseParallelCommand,
 } = window.Code.agent.subagents;
@@ -6858,30 +6860,18 @@ function pumpBackgroundDispatcher() {
     runBackgroundSubAgentJob(job)
       .then(async (sub) => {
         const content = String(sub.result || (sub.ok === false ? "后台任务失败" : "后台任务已完成"));
-        const existingResult = getSessionMessages(job.sessionId).find((message) => (
-          message?.role === "assistant"
-          && message.meta?.kind === "background-subagent"
-          && message.meta?.jobId === job.id
-        ));
+        const existingResult = hasBackgroundResult(getSessionMessages(job.sessionId), job.id);
         if (!existingResult) {
           mergeBackgroundUsage(job.sessionId, sub.usage);
-          appendSessionMessages(job.sessionId, {
-            role: "assistant",
+          appendSessionMessages(job.sessionId, buildBackgroundResultMessage(job, {
             content,
-            meta: {
-              kind: "background-subagent",
-              jobId: job.id,
-              agentRunId: job.agentRunId,
-              error: sub.ok === false,
-              detachedFromMain: true,
-              parentTaskStartedAt: Number(job.parentTaskStartedAt || 0),
-              _usage: sub.usage,
-              _usageScope: "task",
-            },
-            _model: job.model || getSelectedModel(),
-            _time: new Date().toISOString(),
-            _responseTime: backgroundJobElapsed(job),
-          });
+            error: sub.ok === false,
+            model: job.model || getSelectedModel(),
+            timestamp: new Date().toISOString(),
+            responseTime: backgroundJobElapsed(job),
+            usage: sub.usage,
+            includeUsage: true,
+          }));
         }
         updateBackgroundJob(job, sub.ok === false ? "failed" : "completed", sub.ok === false ? sub.result : "");
         await persistBackgroundJob(job)
@@ -6890,27 +6880,15 @@ function pumpBackgroundDispatcher() {
       })
       .catch(async (err) => {
         const message = err?.name === "AbortError" ? "后台任务已取消或超时" : (err.message || String(err));
-        const existingResult = getSessionMessages(job.sessionId).some((entry) => (
-          entry?.role === "assistant"
-          && entry.meta?.kind === "background-subagent"
-          && entry.meta?.jobId === job.id
-        ));
+        const existingResult = hasBackgroundResult(getSessionMessages(job.sessionId), job.id);
         if (!existingResult) {
-          appendSessionMessages(job.sessionId, {
-            role: "assistant",
+          appendSessionMessages(job.sessionId, buildBackgroundResultMessage(job, {
             content: message,
-            meta: {
-              kind: "background-subagent",
-              jobId: job.id,
-              agentRunId: job.agentRunId,
-              error: true,
-              detachedFromMain: true,
-              parentTaskStartedAt: Number(job.parentTaskStartedAt || 0),
-            },
-            _model: job.model || getSelectedModel(),
-            _time: new Date().toISOString(),
-            _responseTime: backgroundJobElapsed(job),
-          });
+            error: true,
+            model: job.model || getSelectedModel(),
+            timestamp: new Date().toISOString(),
+            responseTime: backgroundJobElapsed(job),
+          }));
         }
         updateBackgroundJob(job, "failed", message);
         await persistBackgroundJob(job).catch(() => {});
@@ -7019,11 +6997,7 @@ async function restoreBackgroundJobsForSession(summary) {
   let checkpointChanged = false;
   for (const checkpoint of checkpoints) {
     if (getBackgroundJob(checkpoint.id)) continue;
-    const existingResult = messages.some((message) => (
-      message?.role === "assistant"
-      && message.meta?.kind === "background-subagent"
-      && message.meta?.jobId === checkpoint.id
-    ));
+    const existingResult = hasBackgroundResult(messages, checkpoint.id);
     if (existingResult) {
       removeBackgroundRunCheckpoint(summary.id, checkpoint.id);
       checkpointChanged = true;

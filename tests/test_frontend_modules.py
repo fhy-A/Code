@@ -686,10 +686,12 @@ process.stdout.write(JSON.stringify({{
                 "BACKGROUND_JOB_TIMEOUT_MS",
                 "backgroundJobElapsedMs",
                 "buildBackgroundJobCheckpoint",
+                "buildBackgroundResultMessage",
                 "buildBackgroundTaskPrompt",
                 "buildRestoredBackgroundJobData",
                 "buildSubAgentSystemPrompt",
                 "createSubAgentContext",
+                "hasBackgroundResult",
                 "mergeBackgroundUsageStats",
                 "parseParallelCommand",
             ],
@@ -746,6 +748,13 @@ process.stdout.write(JSON.stringify({{
             "document.",
             "renderSessionMessages",
             "setBackgroundRunCheckpoint",
+            "new Promise",
+            "AbortController",
+            "appendSessionMessages",
+            "requestServerAgentAuthorization",
+            "pumpBackgroundDispatcher",
+            "dispatchBackgroundSubAgent",
+            "restoreBackgroundJobsForSession",
         ):
             self.assertNotIn(forbidden, SUBAGENTS_SOURCE)
 
@@ -997,6 +1006,105 @@ process.stdout.write(JSON.stringify({{
         self.assertNotIn("function buildRestoredBackgroundJobData(", APP_SOURCE)
         self.assertIn("buildRestoredBackgroundJobData(checkpoint, {", APP_SOURCE)
         self.assertIn("...restoredJobData,", APP_SOURCE)
+
+    def test_background_result_projection_and_deduplication_are_pure(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(SUBAGENTS_SOURCE)});
+const subagents = window.Code.agent.subagents;
+const job = {{id: "job-1", agentRunId: "run-1", parentTaskStartedAt: "500"}};
+const usage = {{input: 3, output: 4, cache: 5}};
+const success = subagents.buildBackgroundResultMessage(job, {{
+  content: "completed",
+  error: false,
+  model: "test-model",
+  timestamp: "2026-08-01T00:00:00.000Z",
+  responseTime: "2.5s",
+  usage,
+  includeUsage: true,
+}});
+const failure = subagents.buildBackgroundResultMessage(job, {{
+  content: "failed",
+  error: true,
+  model: "test-model",
+  timestamp: "2026-08-01T00:00:01.000Z",
+  responseTime: "3s",
+}});
+const messages = [
+  {{role: "user", meta: {{kind: "background-subagent", jobId: 7}}}},
+  {{role: "assistant", meta: {{kind: "other", jobId: 7}}}},
+  {{role: "assistant", meta: {{kind: "background-subagent", jobId: 7}}}},
+];
+process.stdout.write(JSON.stringify({{
+  success,
+  failure,
+  sameUsage: success.meta._usage === usage,
+  foundNumber: subagents.hasBackgroundResult(messages, 7),
+  foundString: subagents.hasBackgroundResult(messages, "7"),
+  foundMissing: subagents.hasBackgroundResult(null, 7),
+  job,
+  usage,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        self.assertEqual(data["success"], {
+            "role": "assistant",
+            "content": "completed",
+            "meta": {
+                "kind": "background-subagent",
+                "jobId": "job-1",
+                "agentRunId": "run-1",
+                "error": False,
+                "detachedFromMain": True,
+                "parentTaskStartedAt": 500,
+                "_usage": {"input": 3, "output": 4, "cache": 5},
+                "_usageScope": "task",
+            },
+            "_model": "test-model",
+            "_time": "2026-08-01T00:00:00.000Z",
+            "_responseTime": "2.5s",
+        })
+        self.assertEqual(data["failure"], {
+            "role": "assistant",
+            "content": "failed",
+            "meta": {
+                "kind": "background-subagent",
+                "jobId": "job-1",
+                "agentRunId": "run-1",
+                "error": True,
+                "detachedFromMain": True,
+                "parentTaskStartedAt": 500,
+            },
+            "_model": "test-model",
+            "_time": "2026-08-01T00:00:01.000Z",
+            "_responseTime": "3s",
+        })
+        self.assertTrue(data["sameUsage"])
+        self.assertTrue(data["foundNumber"])
+        self.assertFalse(data["foundString"])
+        self.assertFalse(data["foundMissing"])
+        self.assertEqual(data["job"], {
+            "id": "job-1",
+            "agentRunId": "run-1",
+            "parentTaskStartedAt": "500",
+        })
+        self.assertEqual(data["usage"], {"input": 3, "output": 4, "cache": 5})
+
+        for function_name in ("buildBackgroundResultMessage", "hasBackgroundResult"):
+            self.assertIn(f"function {function_name}(", SUBAGENTS_SOURCE)
+            self.assertNotIn(f"function {function_name}(", APP_SOURCE)
+        self.assertGreaterEqual(APP_SOURCE.count("hasBackgroundResult("), 3)
+        self.assertEqual(APP_SOURCE.count("buildBackgroundResultMessage(job, {"), 2)
 
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (

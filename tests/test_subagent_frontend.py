@@ -97,8 +97,37 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertNotIn('mergeBackgroundUsage(sessionId, subCtx.stats);', self.source)
 
     def test_background_result_keeps_its_own_usage(self):
-        self.assertIn('_usage: sub.usage', self.source)
-        self.assertIn('_usageScope: "task"', self.source)
+        self.assertIn('meta._usage = usage', self.subagents_source)
+        self.assertIn('meta._usageScope = "task"', self.subagents_source)
+        self.assertIn('usage: sub.usage', self.source)
+        self.assertIn('includeUsage: true', self.source)
+
+    def test_subagent_module_stops_at_pure_result_projection_boundary(self):
+        for function_name in (
+            "buildBackgroundResultMessage",
+            "hasBackgroundResult",
+        ):
+            self.assertIn(f"function {function_name}(", self.subagents_source)
+            self.assertNotIn(f"function {function_name}(", self.source)
+        for runtime_function in (
+            "createBackgroundServerContext",
+            "runBackgroundSubAgentJob",
+            "pumpBackgroundDispatcher",
+            "dispatchBackgroundSubAgent",
+            "restoreBackgroundJobsForSession",
+            "resumePersistedBackgroundRuns",
+        ):
+            self.assertIn(f"function {runtime_function}(", self.source)
+            self.assertNotIn(f"function {runtime_function}(", self.subagents_source)
+        for forbidden in (
+            "window.AgentRuntime",
+            "AbortController",
+            "new Promise",
+            "appendSessionMessages",
+            "saveSessionState",
+            "requestServerAgentAuthorization",
+        ):
+            self.assertNotIn(forbidden, self.subagents_source)
 
     def test_background_elapsed_time_survives_refresh(self):
         self.assertIn("startedAt: Number(source.startedAt || 0)", self.subagents_source)
@@ -106,10 +135,8 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertIn("buildRestoredBackgroundJobData(checkpoint, {", self.source)
         self.assertIn('if (status === "running" && !Number(job.startedAt || 0))', self.source)
         self.assertIn("const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt)", self.subagents_source)
-        self.assertGreaterEqual(
-            self.source.count("_responseTime: backgroundJobElapsed(job)"),
-            2,
-        )
+        self.assertIn("_responseTime: responseTime", self.subagents_source)
+        self.assertGreaterEqual(self.source.count("responseTime: backgroundJobElapsed(job)"), 2)
 
     def test_visible_timing_starts_when_each_message_is_submitted(self):
         self.assertIn("ctx.taskStartedAt = submittedAt", self.source)

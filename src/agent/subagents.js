@@ -117,6 +117,46 @@
     };
   }
 
+  function hasBackgroundResult(messages, jobId) {
+    return (Array.isArray(messages) ? messages : []).some((message) => (
+      message?.role === "assistant"
+      && message.meta?.kind === "background-subagent"
+      && message.meta?.jobId === jobId
+    ));
+  }
+
+  function buildBackgroundResultMessage(job, {
+    content = "",
+    error = false,
+    model = "",
+    timestamp = "",
+    responseTime = "",
+    usage,
+    includeUsage = false,
+  } = {}) {
+    const source = job || {};
+    const meta = {
+      kind: "background-subagent",
+      jobId: source.id,
+      agentRunId: source.agentRunId,
+      error: Boolean(error),
+      detachedFromMain: true,
+      parentTaskStartedAt: Number(source.parentTaskStartedAt || 0),
+    };
+    if (includeUsage) {
+      meta._usage = usage;
+      meta._usageScope = "task";
+    }
+    return {
+      role: "assistant",
+      content,
+      meta,
+      _model: model,
+      _time: timestamp,
+      _responseTime: responseTime,
+    };
+  }
+
   function mergeBackgroundUsageStats(currentStats, childStats) {
     const merged = { ...(currentStats || {}) };
     const child = childStats || {};
@@ -138,10 +178,12 @@
     BACKGROUND_JOB_TIMEOUT_MS,
     backgroundJobElapsedMs,
     buildBackgroundJobCheckpoint,
+    buildBackgroundResultMessage,
     buildBackgroundTaskPrompt,
     buildRestoredBackgroundJobData,
     buildSubAgentSystemPrompt,
     createSubAgentContext,
+    hasBackgroundResult,
     mergeBackgroundUsageStats,
     parseParallelCommand,
   });
