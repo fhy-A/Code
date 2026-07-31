@@ -57,7 +57,11 @@ const {
 } = window.Code.agent.tools;
 const {
   executionOwnerForPermissionProfile,
+  filterPendingAuthorizations,
   getAllowedToolNamesForProfile,
+  getPermissionInstruction,
+  groupAuthorizations,
+  serializeAuthorizationRequest,
 } = window.Code.agent.permissions;
 const {
   classifyModelRequestFailure,
@@ -1067,20 +1071,6 @@ save_memory 保存偏好或决策到长期记忆。先在回复末尾询问”�
 
 
 
-const permissionInstructions = {
-
-  read: "权限策略：只读分析。只能列出、读取和搜索项目文件；遇到无法从上下文或文件中确认的关键决策时可以向用户提问。不能写入、删除、运行命令、访问网络或启动子 Agent。",
-
-  plan: "权限策略：计划模式。可读取、搜索、生成修改方案，但不能运行命令或直接写入文件。",
-
-  accept: "权限策略：接受编辑模式。可执行命令和写入文件，但操作前需用户确认。",
-
-  bypass: "权限策略：自动模式。所有操作自动执行，无需确认。",
-
-};
-
-
-
 function trashIcon() {
   return `<svg width="14" height="14" viewBox="0 0 1024 1024"><path d="M799.2 874.4c0 34.4-28 62.4-62.4 62.4H287.2c-34.4 0-62.4-28-62.4-62.4V212h574.4v662.4zM349.6 100c0-7.2 5.6-12.8 12.8-12.8h300c7.2 0 12.8 5.6 12.8 12.8v37.6H349.6V100z m636.8 37.6H749.6V100c0-48-39.2-87.2-87.2-87.2h-300c-48 0-87.2 39.2-87.2 87.2v37.6H37.6C16.8 137.6 0 154.4 0 175.2s16.8 37.6 37.6 37.6h112v661.6c0 76 61.6 137.6 137.6 137.6h449.6c76 0 137.6-61.6 137.6-137.6V212h112c20.8 0 37.6-16.8 37.6-37.6s-16.8-36.8-37.6-36.8zM512 824c20.8 0 37.6-16.8 37.6-37.6v-400c0-20.8-16.8-37.6-37.6-37.6s-37.6 16.8-37.6 37.6v400c0 20.8 16.8 37.6 37.6 37.6m-175.2 0c20.8 0 37.6-16.8 37.6-37.6v-400c0-20.8-16.8-37.6-37.6-37.6s-37.6 16.8-37.6 37.6v400c.8 20.8 17.6 37.6 37.6 37.6m350.4 0c20.8 0 37.6-16.8 37.6-37.6v-400c0-20.8-16.8-37.6-37.6-37.6s-37.6 16.8-37.6 37.6v400c0 20.8 16.8 37.6 37.6 37.6" fill="currentColor"/></svg>`;
 }
@@ -1341,7 +1331,7 @@ async function getSystemPrompt(options = {}) {
 
   parts.push(
 
-    permissionInstructions[permissionProfile] || permissionInstructions.confirm,
+    getPermissionInstruction(permissionProfile),
 
   );
 
@@ -1438,7 +1428,7 @@ function updateModePromptPreview() {
 
   const lines = [
 
-    permissionInstructions[permissionProfile] || permissionInstructions.confirm,
+    getPermissionInstruction(permissionProfile),
 
   ];
 
@@ -4785,14 +4775,6 @@ function authorizationTarget(tool) {
   return tool.path || tool.query || describeToolForConfirm(tool);
 }
 
-function serializeAuthorizationRequest(request) {
-  if (!request) return null;
-  const {
-    resolve, abortSignal, abortHandler, submitDecision, _finishing, error, ...serializable
-  } = request;
-  return JSON.parse(JSON.stringify(serializable));
-}
-
 function restoreAuthorizationRequest(sessionId, savedRequest) {
   if (!sessionId) return null;
   const isPendingServerRequest = savedRequest?.serverAgent && savedRequest.status === "pending";
@@ -4815,22 +4797,7 @@ function restoreAuthorizationRequest(sessionId, savedRequest) {
 }
 
 function pendingAuthorizations(sessionId = state.sessionId) {
-  return state.authorizationRequests.filter((item) => item.status === "pending" && item.sessionId === sessionId);
-}
-
-function groupAuthorizations(items) {
-  const groups = [];
-  const byKey = new Map();
-  for (const item of items) {
-    let group = byKey.get(item.sourceKey);
-    if (!group) {
-      group = { key: item.sourceKey, label: item.sourceLabel, items: [] };
-      byKey.set(item.sourceKey, group);
-      groups.push(group);
-    }
-    group.items.push(item);
-  }
-  return groups;
+  return filterPendingAuthorizations(state.authorizationRequests, sessionId);
 }
 
 function renderAuthorizationPanel() {

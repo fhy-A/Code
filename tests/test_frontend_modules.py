@@ -1072,6 +1072,110 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("function executionOwnerForPermissionProfile", APP_SOURCE)
         self.assertNotIn("function getAllowedToolNamesForProfile", APP_SOURCE)
 
+    def test_agent_permissions_transform_authorization_data_without_side_effects(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/permissions.js");
+
+const permissions = window.Code.agent.permissions;
+const request = {
+  id: "authorization-1",
+  sessionId: "alpha",
+  sourceKey: "main",
+  sourceLabel: "Main",
+  status: "pending",
+  selected: true,
+  tool: {action: "write_file", path: "README.md", metadata: {attempt: 1}},
+  resolve: () => {},
+  abortSignal: {aborted: false},
+  abortHandler: () => {},
+  submitDecision: () => {},
+  _finishing: true,
+  error: "temporary",
+};
+const serialized = permissions.serializeAuthorizationRequest(request);
+request.tool.path = "changed.md";
+request.tool.metadata.attempt = 2;
+
+const items = [
+  {id: "sub-1", sessionId: "alpha", status: "pending", sourceKey: "sub", sourceLabel: "Sub"},
+  {id: "main-1", sessionId: "alpha", status: "pending", sourceKey: "main", sourceLabel: "Main"},
+  {id: "sub-2", sessionId: "alpha", status: "pending", sourceKey: "sub", sourceLabel: "Sub"},
+  {id: "done", sessionId: "alpha", status: "approved", sourceKey: "main", sourceLabel: "Main"},
+  {id: "other", sessionId: "beta", status: "pending", sourceKey: "main", sourceLabel: "Main"},
+];
+const pending = permissions.filterPendingAuthorizations(items, "alpha");
+const groups = permissions.groupAuthorizations(pending);
+
+process.stdout.write(JSON.stringify({
+  instructions: Object.fromEntries(
+    ["read", "plan", "accept", "bypass"].map((profile) => [
+      profile,
+      permissions.getPermissionInstruction(profile),
+    ]),
+  ),
+  unknownInstruction: permissions.getPermissionInstruction("unknown") ?? null,
+  nullSerialization: permissions.serializeAuthorizationRequest(null),
+  serialized,
+  requestPath: request.tool.path,
+  pendingIds: pending.map((item) => item.id),
+  pendingKeepsReferences: pending[0] === items[0] && pending[1] === items[1],
+  groupKeys: groups.map((group) => group.key),
+  groupLabels: groups.map((group) => group.label),
+  groupedIds: groups.map((group) => group.items.map((item) => item.id)),
+  groupsKeepReferences: groups[0].items[0] === items[0] && groups[0].items[1] === items[2],
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["instructions"],
+            {
+                "read": "权限策略：只读分析。只能列出、读取和搜索项目文件；遇到无法从上下文或文件中确认的关键决策时可以向用户提问。不能写入、删除、运行命令、访问网络或启动子 Agent。",
+                "plan": "权限策略：计划模式。可读取、搜索、生成修改方案，但不能运行命令或直接写入文件。",
+                "accept": "权限策略：接受编辑模式。可执行命令和写入文件，但操作前需用户确认。",
+                "bypass": "权限策略：自动模式。所有操作自动执行，无需确认。",
+            },
+        )
+        self.assertIsNone(data["unknownInstruction"])
+        self.assertIsNone(data["nullSerialization"])
+        self.assertEqual(
+            data["serialized"],
+            {
+                "id": "authorization-1",
+                "sessionId": "alpha",
+                "sourceKey": "main",
+                "sourceLabel": "Main",
+                "status": "pending",
+                "selected": True,
+                "tool": {"action": "write_file", "path": "README.md", "metadata": {"attempt": 1}},
+            },
+        )
+        self.assertEqual(data["requestPath"], "changed.md")
+        self.assertEqual(data["pendingIds"], ["sub-1", "main-1", "sub-2"])
+        self.assertTrue(data["pendingKeepsReferences"])
+        self.assertEqual(data["groupKeys"], ["sub", "main"])
+        self.assertEqual(data["groupLabels"], ["Sub", "Main"])
+        self.assertEqual(data["groupedIds"], [["sub-1", "sub-2"], ["main-1"]])
+        self.assertTrue(data["groupsKeepReferences"])
+        for function_name in (
+            "getPermissionInstruction",
+            "serializeAuthorizationRequest",
+            "filterPendingAuthorizations",
+            "groupAuthorizations",
+        ):
+            self.assertIn(f"function {function_name}(", PERMISSIONS_SOURCE)
+            self.assertNotIn(f"function {function_name}(", APP_SOURCE)
+        self.assertNotIn("const permissionInstructions =", APP_SOURCE)
+
     def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
         script = r"""
 global.window = {};

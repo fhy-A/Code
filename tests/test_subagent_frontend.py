@@ -83,7 +83,8 @@ class TestSubAgentFrontend(unittest.TestCase):
 
     def test_authorization_panel_groups_main_and_subagents(self):
         self.assertIn('return { key: "main", label: t("mainAgentLabel") };', self.source)
-        self.assertIn('function groupAuthorizations(items)', self.source)
+        self.assertIn('function groupAuthorizations(items)', self.permissions_source)
+        self.assertNotIn('function groupAuthorizations(items)', self.source)
         self.assertIn('data-auth-group=', self.source)
         self.assertIn('data-auth-action="approve"', self.source)
         self.assertIn('data-auth-action="reject-all"', self.source)
