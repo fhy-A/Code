@@ -4745,32 +4745,6 @@ function getAllowedToolNames(toolPreset = els.toolPreset.value) {
 
 
 
-function isToolAllowed(action) {
-
-  if (action === "request_user_input") return true;
-
-  return getAllowedToolNames().has(action);
-
-}
-
-
-
-function shouldAskBeforeTool(action) {
-
-  const profile = getPermissionProfile();
-
-  if (profile === "bypass") return false;
-
-  if (profile === "plan") return false; // 计划模式允许的工具都不会弹窗
-
-  // accept mode: ask for destructive operations
-
-  return action === "run_command" || action === "write_file" || action === "delete_file";
-
-}
-
-
-
 function describeToolForConfirm(tool) {
 
   if (tool.action === "run_command") return `${t("fmtCommand")}：${tool.command || ""}`;
@@ -4918,13 +4892,6 @@ function renderAuthorizationPanel() {
     </div>`;
 }
 
-function finishLocalAuthorizationRequest(item, approved) {
-  item.status = approved ? "approved" : "rejected";
-  if (item.abortSignal && item.abortHandler) item.abortSignal.removeEventListener("abort", item.abortHandler);
-  item.resolve?.(Boolean(approved));
-  state.authorizationRequests = state.authorizationRequests.filter((entry) => entry !== item);
-}
-
 function markServerAuthorizationProjection(item, result, approved) {
   const decisionResult = result?.childResult || result || {};
   const applied = decisionResult.applied === true || decisionResult.executed === true;
@@ -5010,10 +4977,6 @@ async function finishServerAgentAuthorizationRequest(item, approved) {
 
 function resolveAuthorization(item, approved) {
   if (!item || item.status !== "pending" || item._finishing) return Promise.resolve(null);
-  if (!item.serverAgent) {
-    finishLocalAuthorizationRequest(item, approved);
-    return Promise.resolve(Boolean(approved));
-  }
   item._finishing = true;
   renderAuthorizationPanel();
   return finishServerAgentAuthorizationRequest(item, approved).catch((error) => {
@@ -5022,42 +4985,6 @@ function resolveAuthorization(item, approved) {
     renderAuthorizationPanel();
     showToast(item.error, "error");
     throw error;
-  });
-}
-
-function requestAuthorization(tool, ctx = null, options = {}) {
-  return new Promise((resolve) => {
-    const source = authorizationSource(ctx);
-    const request = {
-      id: `authorization-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      sessionId: ctx?.sessionId || state.sessionId,
-      sourceKey: source.key,
-      sourceLabel: source.label,
-      tool: { ...tool },
-      editId: options.editId || "",
-      stats: options.stats || null,
-      selected: true,
-      status: "pending",
-      resolve,
-    };
-    const abortSignal = ctx?.run?.abortController?.signal;
-    if (abortSignal) {
-      request.abortSignal = abortSignal;
-      request.abortHandler = () => {
-        resolveAuthorization(request, false);
-        renderAuthorizationPanel();
-      };
-      if (abortSignal.aborted) {
-        request.status = "rejected";
-        resolve(false);
-        return;
-      }
-      abortSignal.addEventListener("abort", request.abortHandler, { once: true });
-    }
-    state.authorizationRequests.push(request);
-    state.authorizationPanelCollapsed = false;
-    renderAuthorizationPanel();
-    if (isUserAway()) notifyPermissionNeeded(tool.action, tool.path || tool.command || "");
   });
 }
 

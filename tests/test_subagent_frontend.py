@@ -54,9 +54,16 @@ class TestSubAgentFrontend(unittest.TestCase):
             'async function executeToolCall(',
             'async function mapWithConcurrency(',
             'function mergeDelegatedUsage(',
+            'function isToolAllowed(',
+            'function shouldAskBeforeTool(',
+            'function finishLocalAuthorizationRequest(',
+            'function requestAuthorization(',
             'messageQueue:',
         ):
             self.assertNotIn(obsolete, self.source)
+        resolve_start = self.source.index("function resolveAuthorization(")
+        resolve_end = self.source.index("function bindAuthorizationPanel()", resolve_start)
+        self.assertNotIn("if (!item.serverAgent)", self.source[resolve_start:resolve_end])
 
     def test_foreground_and_background_agents_use_durable_server_runs(self):
         self.assertIn('return runServerAgentLoop(ctx);', self.source)
