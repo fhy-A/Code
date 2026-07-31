@@ -575,6 +575,48 @@ process.stdout.write(JSON.stringify({
         self.assertIn('return buildUserInputResultData(request, t("questionCanceled"));', APP_SOURCE)
         self.assertNotIn("const answers = request.questions.map", APP_SOURCE)
 
+    def test_questionnaire_side_effects_and_legacy_reload_stay_in_app(self):
+        start = APP_SOURCE.index("function normalizeUserInputRequest(")
+        end = APP_SOURCE.index("async function resumePersistedRuns()", start)
+        source = APP_SOURCE[start:end]
+
+        for expected in (
+            "function getUserInputRequest(",
+            "function restoreUserInputRequest(",
+            "if (current?.id === savedRequest.id) return current;",
+            "const restored = JSON.parse(JSON.stringify(savedRequest));",
+            "async function requestUserInput(",
+            "if (ctx?.isSubAgent)",
+            "async function finishServerAgentUserInputRequest(",
+            "window.AgentRuntime.submitAgentInput(request.agentRunId",
+            "if (request.agentRunId) return finishServerAgentUserInputRequest(request);",
+            'role: "tool-result"',
+            "resumedFromUserInput: true",
+            "resumePersistedSessionRun(summary).catch",
+            "function renderUserInputPanel(",
+            "async function persistUserInputProgress(",
+            "async function resolveUserInputQuestion(",
+            "function bindUserInputPanel(",
+        ):
+            self.assertIn(expected, source)
+
+        self.assertEqual(APP_SOURCE.count("requestUserInput("), 2)
+        self.assertIn("await requestServerAgentInput(ctx, snapshot.pendingInput)", APP_SOURCE)
+        self.assertIn("_agentRunId: ctx.agentRunId", APP_SOURCE)
+        self.assertIn("restoreUserInputRequest(session.id, session.runState?.userInputRequest)", APP_SOURCE)
+
+        for forbidden in (
+            "state.",
+            "window.AgentRuntime",
+            "saveSessionState",
+            "renderUserInputPanel",
+            ".innerHTML",
+            "addEventListener",
+            "_notify(",
+            "resumePersistedSessionRun",
+        ):
+            self.assertNotIn(forbidden, QUESTIONNAIRE_SOURCE)
+
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (
             "requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",
