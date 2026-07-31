@@ -351,7 +351,7 @@ eval(source);
         self.assertEqual(data["body"]["toolBudgets"][0]["limit"], 4)
 
     def test_server_agent_questionnaire_uses_durable_submit_and_reload_path(self):
-        self.assertIn('name: "request_user_input"', APP_SOURCE)
+        self.assertIn('name: "request_user_input"', TOOLS_SOURCE)
         self.assertIn("const skillAllowedToolNames = applySkillTaskPolicy(", APP_SOURCE)
         self.assertIn("const serverTools = getNativeTools(ctx.toolPreset, skillAllowedToolNames)", APP_SOURCE)
         self.assertIn('if (snapshot.status === "waiting_user_input")', APP_SOURCE)
@@ -884,6 +884,77 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("function parseJsonLoose", APP_SOURCE)
         self.assertNotIn("function normalizeNativeToolCall", APP_SOURCE)
         self.assertNotIn("function normalizeToolCallList", APP_SOURCE)
+
+    def test_agent_tools_exports_stable_native_tool_schema(self):
+        script = r"""
+const crypto = require("crypto");
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+require("./src/agent/tools.js");
+
+const definitions = window.Code.agent.tools.nativeTools;
+const before = JSON.stringify(definitions);
+const selected = definitions.filter((tool) => ["request_user_input", "read_file"].includes(tool.function.name));
+const byName = Object.fromEntries(definitions.map((tool) => [tool.function.name, tool]));
+
+process.stdout.write(JSON.stringify({
+  names: definitions.map((tool) => tool.function.name),
+  hash: crypto.createHash("sha256").update(before).digest("hex"),
+  unchanged: JSON.stringify(definitions) === before,
+  selectedNames: selected.map((tool) => tool.function.name),
+  selectionIsNewArray: selected !== definitions,
+  questionnaireOptionLimit:
+    byName.request_user_input.function.parameters.properties.questions.items.properties.options.maxItems,
+  runCommandProperties: Object.keys(byName.run_command.function.parameters.properties),
+  saveMemoryRequired: byName.save_memory.function.parameters.required,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["names"],
+            [
+                "request_user_input",
+                "list_files",
+                "read_file",
+                "search_files",
+                "glob_files",
+                "propose_edit",
+                "run_command",
+                "task",
+                "use_skill",
+                "check_skill_dependencies",
+                "read_skill_resource",
+                "write_file",
+                "delete_file",
+                "web_fetch",
+                "save_memory",
+            ],
+        )
+        self.assertEqual(
+            data["hash"],
+            "65c3320c6550f0b2391c9d77e84760e8e901881a88a717e6fc0bea74b97373df",
+        )
+        self.assertTrue(data["unchanged"])
+        self.assertTrue(data["selectionIsNewArray"])
+        self.assertEqual(data["selectedNames"], ["request_user_input", "read_file"])
+        self.assertIsNone(data.get("questionnaireOptionLimit"))
+        self.assertEqual(data["runCommandProperties"], ["command"])
+        self.assertEqual(
+            data["saveMemoryRequired"],
+            ["name", "description", "body"],
+        )
+        self.assertIn("const nativeTools = [", TOOLS_SOURCE)
+        self.assertIn("nativeTools,", APP_SOURCE[:3000])
+        self.assertNotIn("const nativeTools = [", APP_SOURCE)
 
     def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
         script = r"""
@@ -3688,10 +3759,10 @@ process.stdout.write(JSON.stringify({staleBrowserValueCleared, keyUpdated, edito
             self.assertIn(selector, STYLE_SOURCE)
 
     def test_skill_dependencies_gate_first_use_and_are_available_as_a_read_tool(self):
-        self.assertIn('name: "check_skill_dependencies"', APP_SOURCE)
+        self.assertIn('name: "check_skill_dependencies"', TOOLS_SOURCE)
         self.assertIn('"check_skill_dependencies"', APP_SOURCE[APP_SOURCE.index("const toolPolicy"):])
         self.assertIn("before first use of this Skill", SKILLS_MEMORY_SOURCE)
-        self.assertIn('capability: { type: "string"', APP_SOURCE)
+        self.assertIn('capability: { type: "string"', TOOLS_SOURCE)
         self.assertIn("Choose only the capability needed by the current task", SKILLS_MEMORY_SOURCE)
         self.assertIn("Re-run check_skill_dependencies for the same selected capability", SKILLS_MEMORY_SOURCE)
         self.assertIn("System-command dependencies must be installed by the user outside Code", SKILLS_MEMORY_SOURCE)
