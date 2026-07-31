@@ -30,6 +30,7 @@ MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(e
 TOOLS_SOURCE = (ROOT / "src" / "agent" / "tools.js").read_text(encoding="utf-8")
 PERMISSIONS_SOURCE = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
 QUESTIONNAIRE_SOURCE = (ROOT / "src" / "agent" / "questionnaire.js").read_text(encoding="utf-8")
+SUBAGENTS_SOURCE = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
@@ -616,6 +617,131 @@ process.stdout.write(JSON.stringify({
             "resumePersistedSessionRun",
         ):
             self.assertNotIn(forbidden, QUESTIONNAIRE_SOURCE)
+
+    def test_subagent_context_and_background_prompt_are_pure_module_behaviors(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(SUBAGENTS_SOURCE)});
+const subagents = window.Code.agent.subagents;
+const sourceTools = [
+  {{type: "function", function: {{name: "read_file"}}}},
+  {{type: "function", function: {{name: "task"}}}},
+  {{type: "function", function: {{name: "request_user_input"}}}},
+];
+const parent = {{
+  model: "test-model",
+  cwd: "C:/project",
+  primaryRoot: "C:/workspace",
+  messages: [{{role: "user", content: "parent history"}}],
+  stats: {{input: 9, output: 8, cache: 7}},
+}};
+const rawPrompt = "  inspect   project  ";
+const context = subagents.createSubAgentContext({{
+  parentContext: parent,
+  taskPrompt: rawPrompt,
+  securityLayer: "SECURITY",
+  authorizationId: "sub-fixed",
+  tools: sourceTools,
+}});
+const longTask = "x".repeat(151);
+process.stdout.write(JSON.stringify({{
+  exports: Object.keys(subagents).sort(),
+  context: {{
+    model: context.model,
+    isSubAgent: context.isSubAgent,
+    authorizationId: context.authorizationId,
+    authorizationLabel: context.authorizationLabel,
+    tools: context.tools.map((tool) => tool.function.name),
+    messages: context.messages,
+    stats: context.stats,
+    taskUsage: context.taskUsage,
+  }},
+  parentMessages: parent.messages,
+  parentStats: parent.stats,
+  sourceTools: sourceTools.map((tool) => tool.function.name),
+  background: subagents.buildBackgroundTaskPrompt(longTask, "new request"),
+  standalone: subagents.buildBackgroundTaskPrompt("", "new request"),
+  parsed: [
+    subagents.parseParallelCommand("/parallel do work"),
+    subagents.parseParallelCommand("/PARALLEL  multi\\nline  "),
+    subagents.parseParallelCommand("/parallel"),
+    subagents.parseParallelCommand("ordinary text"),
+  ],
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        self.assertEqual(
+            data["exports"],
+            [
+                "buildBackgroundTaskPrompt",
+                "buildSubAgentSystemPrompt",
+                "createSubAgentContext",
+                "parseParallelCommand",
+            ],
+        )
+        self.assertEqual(data["context"]["model"], "test-model")
+        self.assertTrue(data["context"]["isSubAgent"])
+        self.assertEqual(data["context"]["authorizationId"], "sub-fixed")
+        self.assertEqual(data["context"]["authorizationLabel"], "inspect project")
+        self.assertEqual(data["context"]["tools"], ["read_file"])
+        self.assertEqual(data["context"]["messages"][1]["content"], "  inspect   project  ")
+        self.assertIn("SECURITY", data["context"]["messages"][0]["content"])
+        self.assertIn("当前工作目录：C:/project", data["context"]["messages"][0]["content"])
+        self.assertIn("主文件夹：C:/workspace", data["context"]["messages"][0]["content"])
+        self.assertIn("禁止再次委派子 Agent", data["context"]["messages"][0]["content"])
+        self.assertIn("[DECISION_POINT]", data["context"]["messages"][0]["content"])
+        self.assertEqual(data["context"]["stats"], {"input": 0, "output": 0, "cache": 0})
+        self.assertEqual(data["context"]["taskUsage"], {"input": 0, "output": 0, "cache": 0})
+        self.assertEqual(data["parentMessages"], [{"role": "user", "content": "parent history"}])
+        self.assertEqual(data["parentStats"], {"input": 9, "output": 8, "cache": 7})
+        self.assertEqual(data["sourceTools"], ["read_file", "task", "request_user_input"])
+        self.assertIn(f"主 Agent 正在处理：{'x' * 150}", data["background"])
+        self.assertNotIn("x" * 151, data["background"])
+        self.assertIn("[新请求] new request", data["background"])
+        self.assertEqual(data["standalone"], "new request")
+        self.assertEqual(data["parsed"], ["do work", "multi\nline", "", None])
+
+        for function_name in (
+            "buildBackgroundTaskPrompt",
+            "buildSubAgentSystemPrompt",
+            "createSubAgentContext",
+            "parseParallelCommand",
+        ):
+            self.assertIn(f"function {function_name}(", SUBAGENTS_SOURCE)
+        self.assertNotIn("function createSubAgentContext(", APP_SOURCE)
+        self.assertNotIn("function buildBackgroundTaskPrompt(", APP_SOURCE)
+        self.assertNotIn("function parseParallelCommand(", APP_SOURCE)
+        self.assertIn("} = window.Code.agent.subagents;", APP_SOURCE)
+        self.assertIn("return createSubAgentContext({", APP_SOURCE)
+        self.assertIn("buildBackgroundTaskPrompt(currentTask, userText)", APP_SOURCE)
+        self.assertLess(
+            INDEX_SOURCE.index("./src/agent/questionnaire.js"),
+            INDEX_SOURCE.index("./src/agent/subagents.js"),
+        )
+        self.assertLess(
+            INDEX_SOURCE.index("./src/agent/subagents.js"),
+            INDEX_SOURCE.index("./src/agent/model-stream.js"),
+        )
+        for forbidden in (
+            "state.",
+            "window.AgentRuntime",
+            "saveSessionState",
+            "fetch(",
+            "document.",
+            "renderSessionMessages",
+            "setBackgroundRunCheckpoint",
+        ):
+            self.assertNotIn(forbidden, SUBAGENTS_SOURCE)
 
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (

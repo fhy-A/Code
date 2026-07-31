@@ -15,6 +15,7 @@ class TestSubAgentFrontend(unittest.TestCase):
         cls.messages_source = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
         cls.model_request_source = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
         cls.permissions_source = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
+        cls.subagents_source = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
 
     def test_subagent_system_message_stays_system(self):
         self.assertIn('if (message.role === "system")', self.model_request_source)
@@ -25,8 +26,9 @@ class TestSubAgentFrontend(unittest.TestCase):
 
     def test_background_agent_builds_private_prompt_before_server_dispatch(self):
         self.assertIn('const subCtx = createSubContext(parentCtx, job.taskPrompt);', self.source)
-        self.assertIn('{ role: "system", content: subSystem }', self.source)
-        self.assertIn('{ role: "user", content: taskPrompt }', self.source)
+        self.assertIn('function createSubAgentContext(', self.subagents_source)
+        self.assertIn('{ role: "system", content: subSystem }', self.subagents_source)
+        self.assertIn('{ role: "user", content: taskPrompt }', self.subagents_source)
         self.assertIn(
             'const prepared = await buildModelRequestPayload(subCtx, true, serverTools);',
             self.source,
@@ -34,10 +36,10 @@ class TestSubAgentFrontend(unittest.TestCase):
 
     def test_subagent_cannot_delegate_again(self):
         self.assertIn(
-            '.filter((tool) => !["task", "request_user_input"].includes(tool.function?.name))',
-            self.source,
+            'Object.freeze(["task", "request_user_input"])',
+            self.subagents_source,
         )
-        self.assertIn('禁止再次委派子 Agent', self.source)
+        self.assertIn('禁止再次委派子 Agent', self.subagents_source)
 
     def test_main_agent_receives_explicit_delegation_rules(self):
         self.assertIn('const SUBAGENT_DELEGATION_RULES = `## 子 Agent 委派规则', self.source)
@@ -79,7 +81,7 @@ class TestSubAgentFrontend(unittest.TestCase):
             self.assertIn(allowed, plan_policy)
         for mutation in ('"run_command"', '"write_file"', '"delete_file"'):
             self.assertNotIn(mutation, plan_policy)
-        self.assertIn('.filter((tool) => !["task", "request_user_input"].includes(tool.function?.name))', self.source)
+        self.assertIn('SUBAGENT_DISABLED_TOOL_NAMES.includes', self.subagents_source)
 
     def test_authorization_panel_groups_main_and_subagents(self):
         self.assertIn('return { key: "main", label: t("mainAgentLabel") };', self.source)

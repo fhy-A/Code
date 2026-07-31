@@ -7,6 +7,7 @@ APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
+SUBAGENTS_SOURCE = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
 
 
 class TestRunningMessageQueue(unittest.TestCase):
@@ -19,8 +20,10 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn("dispatchBackgroundSubAgent(sessionId, taskText, imgs)", submit)
 
     def test_parallel_intent_requires_explicit_command(self):
-        self.assertIn("function parseParallelCommand(text)", APP_SOURCE)
-        self.assertIn(r"/^\/parallel(?:\s+([\s\S]*))?$/i", APP_SOURCE)
+        self.assertIn("function parseParallelCommand(text)", SUBAGENTS_SOURCE)
+        self.assertIn(r"/^\/parallel(?:\s+([\s\S]*))?$/i", SUBAGENTS_SOURCE)
+        self.assertNotIn("function parseParallelCommand(text)", APP_SOURCE)
+        self.assertIn("} = window.Code.agent.subagents;", APP_SOURCE)
         self.assertIn('{ name: "parallel", desc: t("cmdParallelDesc") }', (
             ROOT / "src" / "features" / "skills-memory.js"
         ).read_text(encoding="utf-8"))
