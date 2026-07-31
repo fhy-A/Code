@@ -687,6 +687,7 @@ process.stdout.write(JSON.stringify({{
                 "backgroundJobElapsedMs",
                 "buildBackgroundJobCheckpoint",
                 "buildBackgroundTaskPrompt",
+                "buildRestoredBackgroundJobData",
                 "buildSubAgentSystemPrompt",
                 "createSubAgentContext",
                 "mergeBackgroundUsageStats",
@@ -875,6 +876,127 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("buildBackgroundJobCheckpoint(job, Date.now())", APP_SOURCE)
         self.assertIn("Object.assign(stats, mergeBackgroundUsageStats(stats, childStats));", APP_SOURCE)
         self.assertIn("formatElapsedMs(backgroundJobElapsedMs(job, finishedAt))", APP_SOURCE)
+
+    def test_background_restore_job_data_is_pure_and_backward_compatible(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(SUBAGENTS_SOURCE)});
+const subagents = window.Code.agent.subagents;
+const sourceRoots = ["C:/workspace", "D:/shared"];
+const checkpoint = {{
+  id: 77,
+  clientRequestId: 88,
+  status: "waiting-authorization",
+  agentRunId: 99,
+  cursor: "3",
+  userText: "saved request",
+  taskPrompt: "saved task",
+  model: "saved-model",
+  permissionProfile: "plan",
+  toolPreset: "full",
+  thinkingLevel: "high",
+  temperature: "0",
+  maxTokens: "2048",
+  cwd: "C:/project",
+  primaryRoot: "C:/workspace",
+  rootPaths: sourceRoots,
+  parentTaskStartedAt: "500",
+  queuedAt: "1000",
+  startedAt: "1200",
+  deadlineAt: "9000",
+  futureField: {{version: 2}},
+}};
+const restored = subagents.buildRestoredBackgroundJobData(checkpoint, {{
+  sessionId: "session-1",
+  fallbackUserText: "message fallback",
+  fallbackModel: "selected-model",
+  fallbackQueuedAt: 7000,
+  fallbackDeadlineAt: 607000,
+}});
+const restoredRoots = [...restored.rootPaths];
+restored.rootPaths.push("E:/mutated");
+const legacyCheckpoint = {{
+  id: "legacy-job",
+  status: "running",
+  agentRunId: "run-1",
+  cursor: "4",
+  futureField: "keep",
+}};
+const legacy = subagents.buildRestoredBackgroundJobData(legacyCheckpoint, {{
+  sessionId: "legacy-session",
+  fallbackUserText: "message text",
+  fallbackModel: "fallback-model",
+  fallbackQueuedAt: 3000,
+  fallbackDeadlineAt: 603000,
+}});
+process.stdout.write(JSON.stringify({{
+  restored,
+  restoredRoots,
+  checkpoint,
+  sourceRoots,
+  legacy,
+  legacyCheckpoint,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        restored = data["restored"]
+        self.assertEqual(restored["id"], "77")
+        self.assertEqual(restored["clientRequestId"], "88")
+        self.assertEqual(restored["sessionId"], "session-1")
+        self.assertEqual(restored["status"], "pending")
+        self.assertTrue(restored["restored"])
+        self.assertEqual(restored["agentRunId"], "99")
+        self.assertEqual(restored["cursor"], 3)
+        self.assertEqual(restored["userText"], "saved request")
+        self.assertEqual(restored["taskPrompt"], "saved task")
+        self.assertEqual(restored["model"], "saved-model")
+        self.assertEqual(restored["temperature"], 0)
+        self.assertEqual(restored["maxTokens"], 2048)
+        self.assertEqual(restored["queuedAt"], 1000)
+        self.assertEqual(restored["startedAt"], 1200)
+        self.assertEqual(restored["deadlineAt"], 9000)
+        self.assertEqual(restored["futureField"], {"version": 2})
+        self.assertEqual(data["restoredRoots"], ["C:/workspace", "D:/shared"])
+        self.assertEqual(data["sourceRoots"], ["C:/workspace", "D:/shared"])
+        self.assertEqual(data["checkpoint"]["status"], "waiting-authorization")
+        self.assertEqual(data["checkpoint"]["id"], 77)
+
+        legacy = data["legacy"]
+        self.assertEqual(legacy["id"], "legacy-job")
+        self.assertEqual(legacy["clientRequestId"], "legacy-job")
+        self.assertEqual(legacy["sessionId"], "legacy-session")
+        self.assertEqual(legacy["status"], "pending")
+        self.assertTrue(legacy["restored"])
+        self.assertEqual(legacy["agentRunId"], "run-1")
+        self.assertEqual(legacy["cursor"], 4)
+        self.assertEqual(legacy["userText"], "message text")
+        self.assertEqual(legacy["taskPrompt"], "message text")
+        self.assertEqual(legacy["model"], "fallback-model")
+        self.assertEqual(legacy["permissionProfile"], "read")
+        self.assertEqual(legacy["toolPreset"], "default")
+        self.assertEqual(legacy["thinkingLevel"], "auto")
+        self.assertEqual(legacy["temperature"], 0.2)
+        self.assertEqual(legacy["queuedAt"], 3000)
+        self.assertEqual(legacy["deadlineAt"], 603000)
+        self.assertEqual(legacy["futureField"], "keep")
+        self.assertEqual(data["legacyCheckpoint"]["status"], "running")
+        for runtime_field in ("parentCtx", "userMessage", "completion", "resolve"):
+            self.assertNotIn(runtime_field, legacy)
+
+        self.assertIn("function buildRestoredBackgroundJobData(", SUBAGENTS_SOURCE)
+        self.assertNotIn("function buildRestoredBackgroundJobData(", APP_SOURCE)
+        self.assertIn("buildRestoredBackgroundJobData(checkpoint, {", APP_SOURCE)
+        self.assertIn("...restoredJobData,", APP_SOURCE)
 
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (

@@ -73,6 +73,7 @@ const {
   backgroundJobElapsedMs,
   buildBackgroundJobCheckpoint,
   buildBackgroundTaskPrompt,
+  buildRestoredBackgroundJobData,
   createSubAgentContext,
   mergeBackgroundUsageStats,
   parseParallelCommand,
@@ -7053,31 +7054,19 @@ async function restoreBackgroundJobsForSession(summary) {
     }
     let resolve;
     const completion = new Promise((done) => { resolve = done; });
-    state._backgroundDispatcher.jobs.push({
-      ...checkpoint,
-      id: String(checkpoint.id),
-      clientRequestId: String(checkpoint.clientRequestId || checkpoint.id),
+    const restoredJobData = buildRestoredBackgroundJobData(checkpoint, {
       sessionId: summary.id,
-      userText: String(checkpoint.userText || getMsgText(userMessage) || ""),
-      taskPrompt: String(checkpoint.taskPrompt || checkpoint.userText || getMsgText(userMessage) || ""),
-      model: String(checkpoint.model || userMessage._model || getSelectedModel()),
-      permissionProfile: String(checkpoint.permissionProfile || "read"),
-      toolPreset: String(checkpoint.toolPreset || "default"),
-      thinkingLevel: String(checkpoint.thinkingLevel || "auto"),
-      temperature: Number(checkpoint.temperature ?? 0.2),
-      maxTokens: Number(checkpoint.maxTokens || 0),
-      parentTaskStartedAt: Number(checkpoint.parentTaskStartedAt || 0),
-      agentRunId: String(checkpoint.agentRunId || ""),
-      cursor: Number(checkpoint.cursor || 0),
-      queuedAt: Number(checkpoint.queuedAt || Date.now()),
-      startedAt: Number(checkpoint.startedAt || 0),
-      deadlineAt: Number(checkpoint.deadlineAt || (Date.now() + BACKGROUND_JOB_TIMEOUT_MS)),
+      fallbackUserText: checkpoint.userText ? "" : getMsgText(userMessage),
+      fallbackModel: checkpoint.model ? "" : (userMessage._model || getSelectedModel()),
+      fallbackQueuedAt: checkpoint.queuedAt ? 0 : Date.now(),
+      fallbackDeadlineAt: checkpoint.deadlineAt ? 0 : (Date.now() + BACKGROUND_JOB_TIMEOUT_MS),
+    });
+    state._backgroundDispatcher.jobs.push({
+      ...restoredJobData,
       parentCtx: null,
       userMessage,
-      status: "pending",
       completion,
       resolve,
-      restored: true,
     });
   }
   if (checkpointChanged) {

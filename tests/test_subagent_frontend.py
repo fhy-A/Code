@@ -102,7 +102,8 @@ class TestSubAgentFrontend(unittest.TestCase):
 
     def test_background_elapsed_time_survives_refresh(self):
         self.assertIn("startedAt: Number(source.startedAt || 0)", self.subagents_source)
-        self.assertIn("startedAt: Number(checkpoint.startedAt || 0)", self.source)
+        self.assertIn("queuedAt: source.queuedAt || fallbackQueuedAt", self.subagents_source)
+        self.assertIn("buildRestoredBackgroundJobData(checkpoint, {", self.source)
         self.assertIn('if (status === "running" && !Number(job.startedAt || 0))', self.source)
         self.assertIn("const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt)", self.subagents_source)
         self.assertGreaterEqual(
@@ -171,6 +172,18 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertIn("async function resumePersistedBackgroundRuns()", self.source)
         self.assertIn("restoreBackgroundJobsForSession(summary)", self.source)
         self.assertIn("{ persistMessages: true }", self.source)
+        restore_start = self.source.index("async function restoreBackgroundJobsForSession(summary)")
+        restore_end = self.source.index("async function resumePersistedBackgroundRuns()", restore_start)
+        restore = self.source[restore_start:restore_end]
+        self.assertIn("buildRestoredBackgroundJobData(checkpoint, {", restore)
+        self.assertIn("const completion = new Promise", restore)
+        self.assertIn("state._backgroundDispatcher.jobs.push({", restore)
+        self.assertIn("removeBackgroundRunCheckpoint(summary.id, checkpoint.id)", restore)
+        self.assertIn("await saveSessionState(", restore)
+        self.assertIn("parentCtx: null", restore)
+        self.assertIn("userMessage,", restore)
+        self.assertIn("completion,", restore)
+        self.assertIn("resolve,", restore)
 
     def test_background_server_agent_cannot_delegate_or_open_questionnaire(self):
         self.assertIn('allowedToolNames.delete("task")', self.source)

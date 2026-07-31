@@ -89,6 +89,34 @@
     };
   }
 
+  function buildRestoredBackgroundJobData(checkpoint, {
+    sessionId = "",
+    fallbackUserText = "",
+    fallbackModel = "",
+    fallbackQueuedAt = 0,
+    fallbackDeadlineAt = 0,
+  } = {}) {
+    const source = checkpoint || {};
+    const userText = String(source.userText || fallbackUserText || "");
+    const normalized = buildBackgroundJobCheckpoint({
+      ...source,
+      userText,
+      taskPrompt: source.taskPrompt || source.userText || fallbackUserText || "",
+      model: source.model || fallbackModel || "",
+      queuedAt: source.queuedAt || fallbackQueuedAt,
+      deadlineAt: source.deadlineAt || fallbackDeadlineAt,
+    });
+    return {
+      ...source,
+      ...normalized,
+      id: String(source.id || ""),
+      clientRequestId: String(source.clientRequestId || source.id || ""),
+      sessionId: String(sessionId || ""),
+      status: "pending",
+      restored: true,
+    };
+  }
+
   function mergeBackgroundUsageStats(currentStats, childStats) {
     const merged = { ...(currentStats || {}) };
     const child = childStats || {};
@@ -111,6 +139,7 @@
     backgroundJobElapsedMs,
     buildBackgroundJobCheckpoint,
     buildBackgroundTaskPrompt,
+    buildRestoredBackgroundJobData,
     buildSubAgentSystemPrompt,
     createSubAgentContext,
     mergeBackgroundUsageStats,
