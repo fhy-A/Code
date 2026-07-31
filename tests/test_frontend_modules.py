@@ -784,10 +784,13 @@ process.stdout.write(JSON.stringify({
         end = APP_SOURCE.index("async function _callModelOnceAttempt(", start)
         adapter_source = APP_SOURCE[start:end]
         runtime_source = APP_SOURCE[end:]
+        app_imports = APP_SOURCE[:start]
 
         self.assertIn("await loadProjectContextForRoot(", adapter_source)
         self.assertIn("await getSystemPrompt({", adapter_source)
         self.assertIn("assembleModelRequestPayload({", adapter_source)
+        self.assertNotIn("buildModelRequestMessages,", app_imports)
+        self.assertNotIn("function isTransientModelError", APP_SOURCE)
         self.assertNotIn("loadProjectContextForRoot", MODEL_REQUEST_SOURCE)
         self.assertNotIn("getSystemPrompt(", MODEL_REQUEST_SOURCE)
         self.assertNotIn("fetch(", MODEL_REQUEST_SOURCE)
@@ -850,6 +853,18 @@ const failedTurn = protocol.createModelTurnAccumulator();
 const failedTurnEvent = failedTurn.consume(
   '[ERROR]{"message":"runtime failed","status":502,"code":"upstream","transient":false}',
 );
+const completeToolTurn = protocol.createModelTurnAccumulator();
+const completeToolEvent = completeToolTurn.consume({
+  choices: [{
+    message: {
+      tool_calls: [{
+        id: "call-complete",
+        type: "function",
+        function: {name: "read_file", arguments: "{\"path\":\"VERSION\"}"},
+      }],
+    },
+  }],
+});
 const result = {
   frozen: Object.isFrozen(protocol),
   ignored: protocol.parseSseLine("event: message"),
@@ -873,6 +888,10 @@ const result = {
   responsesText: protocol.extractStreamDelta({
     type: "response.output_text.delta",
     delta: "response",
+  }),
+  responsesReasoning: protocol.extractStreamDelta({
+    type: "response.reasoning_text.delta",
+    delta: "response reason",
   }),
   toolCall: toolCalls.get(0),
   accessDenied: protocol.classifyModelRequestFailure(
@@ -913,6 +932,10 @@ const result = {
       modelRequest: failedTurnEvent.error.modelRequest,
     },
   },
+  completeToolTurn: {
+    event: completeToolEvent,
+    toolCall: completeToolTurn.getToolCallMap().get(0),
+  },
 };
 process.stdout.write(JSON.stringify(result));
 """
@@ -941,6 +964,7 @@ process.stdout.write(JSON.stringify(result));
         self.assertEqual(data["anthropicThinking"]["reasoning"], "reason")
         self.assertEqual(data["anthropicText"]["text"], "answer")
         self.assertEqual(data["responsesText"]["text"], "response")
+        self.assertEqual(data["responsesReasoning"]["reasoning"], "response reason")
         self.assertEqual(
             data["toolCall"],
             {
@@ -1012,6 +1036,18 @@ process.stdout.write(JSON.stringify(result));
                 "modelRequest": True,
             },
         )
+        self.assertTrue(data["completeToolTurn"]["event"]["receivedToolCallDelta"])
+        self.assertEqual(
+            data["completeToolTurn"]["toolCall"],
+            {
+                "id": "call-complete",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"VERSION"}',
+                },
+            },
+        )
 
     def test_model_sse_data_reader_handles_arbitrary_bytes_and_tail_frames(self):
         script = r"""
@@ -1053,6 +1089,7 @@ async function collect(body) {
 }
 
 (async () => {
+  const frozenReader = protocol.createSseDataReader(batchStream("data: [DONE]\n\n"));
   const arbitraryBytes = await collect(byteStream([
     ": keepalive\r\n\r\n",
     'data: {"choices":[{"delta":{"content":"你"}}]}\r\n\r\n',
@@ -1087,6 +1124,7 @@ async function collect(body) {
   }
 
   process.stdout.write(JSON.stringify({
+    readerFrozen: Object.isFrozen(frozenReader),
     arbitraryBytes,
     batched,
     errorTail,
@@ -1108,6 +1146,7 @@ async function collect(body) {
             check=True,
         )
         data = json.loads(completed.stdout)
+        self.assertTrue(data["readerFrozen"])
         self.assertEqual(
             data["arbitraryBytes"],
             [

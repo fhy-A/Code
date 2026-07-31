@@ -48,7 +48,6 @@ const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const {
   assembleModelRequestPayload,
-  buildModelRequestMessages,
   buildNativeToolCallMessage,
   mapMessageForApi,
 } = window.Code.agent.modelRequest;
@@ -6703,17 +6702,6 @@ async function resumePersistedRuns() {
     ["running", "waiting-network", "resuming"].includes(session?.runState?.status));
   if (candidates.length === 0) return;
   await Promise.allSettled(candidates.map((session) => resumePersistedSessionRun(session)));
-}
-
-function isTransientModelError(error) {
-  if (!error || error.name === "AbortError") return false;
-  if (typeof error.transient === "boolean") return error.transient;
-  const status = Number(error.status || 0);
-  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
-  if ([400, 401, 403, 404, 422].includes(status)) return false;
-  const text = `${error.code || ""} ${error.message || error}`.toLowerCase();
-  if (/invalid token|insufficient.*quota|quota.*not enough|model_not_found|model_access_denied|no access to model|无权访问模型|no available channel|permission denied/.test(text)) return false;
-  return /timeout|timed out|network|fetch failed|failed to fetch|upstream error|do request failed|temporar|connection (reset|refused|closed)|econn(reset|refused)|winerror 10061|stream interrupted|unexpected end/.test(text);
 }
 
 function createRequestSignal(userSignal, timeoutMs) {

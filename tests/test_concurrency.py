@@ -502,7 +502,7 @@ class TestDispatcherLimits(unittest.TestCase):
         self.assertNotIn('localStorage.getItem("code-foreground-view")', init_block)
 
         resume_start = self.source.index('async function resumePersistedRuns()')
-        resume_end = self.source.index('function isTransientModelError', resume_start)
+        resume_end = self.source.index('function createRequestSignal', resume_start)
         resume_block = self.source[resume_start:resume_end]
         self.assertIn('resumePersistedSessionRun(session)', resume_block)
         self.assertNotIn('loadSession(', resume_block)
