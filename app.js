@@ -7760,13 +7760,21 @@ async function compactConversation() {
 
   // Confirmation handler (one-shot)
 
+  const confirmBtn = document.getElementById("confirmCompact");
+
+  const cancelBtn = document.getElementById("cancelCompact");
+
+  const cancelX = document.getElementById("cancelCompactX");
+
+  const modal = document.getElementById("compactConfirmModal");
+
   const doCompact = async () => {
 
     hideCompactConfirm();
 
-    els.compactBtn.disabled = true;
+    confirmBtn.disabled = true;
 
-    els.compactBtn.textContent = t("compacting");
+    confirmBtn.textContent = t("compacting");
 
     try {
 
@@ -7825,9 +7833,9 @@ async function compactConversation() {
 
     } finally {
 
-      els.compactBtn.disabled = false;
+      confirmBtn.disabled = false;
 
-      els.compactBtn.textContent = t("compactButton");
+      confirmBtn.textContent = t("confirmCompact");
 
     }
 
@@ -7841,39 +7849,33 @@ async function compactConversation() {
 
   // Bind one-shot handlers
 
-  const confirmBtn = document.getElementById("confirmCompact");
+  function cleanup() {
 
-  const cancelBtn = document.getElementById("cancelCompact");
+    confirmBtn.removeEventListener("click", onConfirm);
 
-  const cancelX = document.getElementById("cancelCompactX");
+    cancelBtn.removeEventListener("click", onCancel);
 
-  const modal = document.getElementById("compactConfirmModal");
-
-
-
-  const cleanup = () => {
-
-    confirmBtn.removeEventListener("click", doCompact);
-
-    cancelBtn.removeEventListener("click", cancelCompact);
-
-    cancelX.removeEventListener("click", cancelCompact);
+    cancelX.removeEventListener("click", onCancel);
 
     modal.removeEventListener("click", onModalClick);
 
-  };
+  }
 
 
 
-  const onModalClick = (e) => { if (e.target === modal) cancelCompact(); };
+  function onConfirm() { cleanup(); void doCompact(); }
+
+  function onCancel() { cleanup(); cancelCompact(); }
+
+  function onModalClick(e) { if (e.target === modal) onCancel(); }
 
 
 
-  confirmBtn.addEventListener("click", () => { cleanup(); doCompact(); });
+  confirmBtn.addEventListener("click", onConfirm);
 
-  cancelBtn.addEventListener("click", () => { cleanup(); cancelCompact(); });
+  cancelBtn.addEventListener("click", onCancel);
 
-  cancelX.addEventListener("click", () => { cleanup(); cancelCompact(); });
+  cancelX.addEventListener("click", onCancel);
 
   modal.addEventListener("click", onModalClick);
 
@@ -8318,6 +8320,7 @@ function saveLocalSettings() {
 function handleUiSlashCommand(text) {
   const parts = text.trim().split(/\s+/);
   const cmd = parts[0] || "";
+  if (cmd === "/compact") { void compactConversation(); return true; }
   if (cmd === "/export") { exportMarkdown(); return true; }
   if (cmd === "/clear")  { clearCurrentSession(); return true; }
   if (cmd === "/branch") { createBranch(); return true; }

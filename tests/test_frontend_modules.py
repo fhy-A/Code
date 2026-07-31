@@ -73,6 +73,47 @@ class TestFrontendCoreModules(unittest.TestCase):
             export_source,
         )
 
+    def test_compact_slash_command_reuses_stable_confirmation_flow(self):
+        handler_start = APP_SOURCE.index("function handleUiSlashCommand(text)")
+        handler_end = APP_SOURCE.index("function clearCurrentSession()", handler_start)
+        handler_source = APP_SOURCE[handler_start:handler_end]
+        script = f"""
+let compactCalls = 0;
+function compactConversation() {{ compactCalls += 1; return Promise.resolve(); }}
+function exportMarkdown() {{}}
+function clearCurrentSession() {{}}
+function createBranch() {{}}
+eval({json.dumps(handler_source)});
+process.stdout.write(JSON.stringify({{
+  handled: handleUiSlashCommand("/compact"),
+  unknown: handleUiSlashCommand("/unknown"),
+  compactCalls,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "handled": True,
+            "unknown": False,
+            "compactCalls": 1,
+        })
+
+        compact_start = APP_SOURCE.index("async function compactConversation()")
+        compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
+        compact_source = APP_SOURCE[compact_start:compact_end]
+        self.assertNotIn("els.compactBtn", compact_source)
+        self.assertIn('confirmBtn.textContent = t("compacting")', compact_source)
+        self.assertIn('confirmBtn.textContent = t("confirmCompact")', compact_source)
+        for handler in ("onConfirm", "onCancel", "onModalClick"):
+            self.assertIn(f'addEventListener("click", {handler})', compact_source)
+            self.assertIn(f'removeEventListener("click", {handler})', compact_source)
+
     def test_settings_shell_is_responsive_and_navigation_is_grouped(self):
         for key in (
             "settingsGroupAgent",
