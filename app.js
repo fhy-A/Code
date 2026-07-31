@@ -56,6 +56,10 @@ const {
   normalizeToolCallList,
 } = window.Code.agent.tools;
 const {
+  executionOwnerForPermissionProfile,
+  getAllowedToolNamesForProfile,
+} = window.Code.agent.permissions;
+const {
   classifyModelRequestFailure,
   createSseDataReader,
   createModelTurnAccumulator,
@@ -1001,24 +1005,6 @@ filesFeature.bind();
 
 
 const MAX_TOOL_ROUNDS = 200;
-
-
-
-const toolPolicy = {
-
-  read: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "check_skill_dependencies"]),
-
-  plan: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "web_fetch", "propose_edit", "task", "use_skill", "check_skill_dependencies", "read_skill_resource"]),
-
-  accept: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "web_fetch", "propose_edit", "run_command", "task", "use_skill", "check_skill_dependencies", "write_file", "delete_file", "save_memory", "read_skill_resource"]),
-
-  bypass: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "web_fetch", "propose_edit", "run_command", "task", "use_skill", "check_skill_dependencies", "write_file", "delete_file", "save_memory", "read_skill_resource"]),
-
-};
-
-
-
-
 
 
 
@@ -4746,30 +4732,6 @@ function getNativeTools(toolPreset = els.toolPreset.value, allowedToolNames = nu
 function getPermissionProfile() {
 
   return getPermLevel() || state.permissionProfile || "accept";
-
-}
-
-
-
-function executionOwnerForPermissionProfile(permissionProfile) {
-
-  return ["read", "plan", "accept", "bypass"].includes(permissionProfile) ? "server-agent" : "browser";
-
-}
-
-
-
-function getAllowedToolNamesForProfile(permissionProfile, toolPreset = els.toolPreset.value) {
-
-  const base = new Set(toolPolicy[permissionProfile] || toolPolicy.accept);
-
-  if (toolPreset === "full" && ["accept", "bypass"].includes(permissionProfile)) {
-
-    base.add("run_command");
-
-  }
-
-  return base;
 
 }
 

@@ -14,6 +14,7 @@ class TestSubAgentFrontend(unittest.TestCase):
         cls.i18n_source = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
         cls.messages_source = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
         cls.model_request_source = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
+        cls.permissions_source = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
 
     def test_subagent_system_message_stays_system(self):
         self.assertIn('if (message.role === "system")', self.model_request_source)
@@ -64,7 +65,13 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertGreaterEqual(self.source.count('window.AgentRuntime.watchAgentRun'), 2)
 
     def test_plan_mode_can_delegate_without_mutation_tools(self):
-        self.assertIn('plan: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "web_fetch", "propose_edit", "task", "use_skill", "check_skill_dependencies", "read_skill_resource"])', self.source)
+        plan_start = self.permissions_source.index("plan: Object.freeze([")
+        plan_end = self.permissions_source.index("accept: Object.freeze([", plan_start)
+        plan_policy = self.permissions_source[plan_start:plan_end]
+        for allowed in ('"propose_edit"', '"task"', '"use_skill"'):
+            self.assertIn(allowed, plan_policy)
+        for mutation in ('"run_command"', '"write_file"', '"delete_file"'):
+            self.assertNotIn(mutation, plan_policy)
         self.assertIn('.filter((tool) => !["task", "request_user_input"].includes(tool.function?.name))', self.source)
 
     def test_authorization_panel_groups_main_and_subagents(self):

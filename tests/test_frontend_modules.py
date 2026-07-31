@@ -28,6 +28,7 @@ SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_t
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
 MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
 TOOLS_SOURCE = (ROOT / "src" / "agent" / "tools.js").read_text(encoding="utf-8")
+PERMISSIONS_SOURCE = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
@@ -378,7 +379,10 @@ eval(source);
             DIFF_SOURCE,
         )
         self.assertIn("executionOwner: executionOwnerForPermissionProfile(permissionProfile)", APP_SOURCE)
-        self.assertIn('return ["read", "plan", "accept", "bypass"].includes(permissionProfile) ? "server-agent" : "browser"', APP_SOURCE)
+        self.assertIn(
+            'return SERVER_EXECUTION_PROFILES.includes(permissionProfile) ? "server-agent" : "browser"',
+            PERMISSIONS_SOURCE,
+        )
         self.assertIn("action: authorizationAction", APP_SOURCE)
         self.assertIn("pendingAuthorization.path || pendingAuthorization.command", APP_SOURCE)
 
@@ -387,7 +391,6 @@ eval(source);
             "const profileAllowedToolNames = getAllowedToolNamesForProfile(",
             "allowedTools: serverToolNames",
             "toolBudgets: skillToolBudgets",
-            'toolPreset === "full" && ["accept", "bypass"].includes(permissionProfile)',
             '["propose_edit", "apply_edit", "write_file", "delete_file"]',
             'const authorizationAction = String(pendingAuthorization.action || "propose_edit")',
             'command: String(pendingAuthorization.command || "")',
@@ -396,6 +399,10 @@ eval(source);
             'const delegatedEditCompletion = toolAction === "task" && Boolean(projection)',
         ):
             self.assertIn(expected, APP_SOURCE)
+        self.assertIn(
+            'toolPreset === "full" && ["accept", "bypass"].includes(permissionProfile)',
+            PERMISSIONS_SOURCE,
+        )
         self.assertNotIn("SERVER_AGENT_SAFE_TOOLS", APP_SOURCE)
 
     def test_agent_runtime_submits_authorization_id_and_decision(self):
@@ -502,6 +509,7 @@ eval(source);
             "src/features/session-import.js",
             "src/agent/model-request.js",
             "src/agent/tools.js",
+            "src/agent/permissions.js",
             "src/agent/model-stream.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
@@ -531,6 +539,7 @@ eval(source);
             "./src/features/session-import.js",
             "./src/agent/model-request.js",
             "./src/agent/tools.js",
+            "./src/agent/permissions.js",
             "./src/agent/model-stream.js",
             "./agent-runtime.js",
             "./app.js",
@@ -955,6 +964,113 @@ process.stdout.write(JSON.stringify({
         self.assertIn("const nativeTools = [", TOOLS_SOURCE)
         self.assertIn("nativeTools,", APP_SOURCE[:3000])
         self.assertNotIn("const nativeTools = [", APP_SOURCE)
+
+    def test_agent_permissions_select_stable_profile_tools_without_shared_mutation(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/permissions.js");
+
+const permissions = window.Code.agent.permissions;
+const profiles = Object.fromEntries(
+  ["read", "plan", "accept", "bypass"].map((profile) => [
+    profile,
+    [...permissions.getAllowedToolNamesForProfile(profile)],
+  ]),
+);
+const firstRead = permissions.getAllowedToolNamesForProfile("read");
+firstRead.add("run_command");
+const secondRead = permissions.getAllowedToolNamesForProfile("read");
+
+process.stdout.write(JSON.stringify({
+  frozen: Object.isFrozen(permissions),
+  profiles,
+  unknown: [...permissions.getAllowedToolNamesForProfile("unknown")],
+  planFull: [...permissions.getAllowedToolNamesForProfile("plan", "full")],
+  readIsolated: !secondRead.has("run_command"),
+  owners: Object.fromEntries(
+    ["read", "plan", "accept", "bypass", "unknown"].map((profile) => [
+      profile,
+      permissions.executionOwnerForPermissionProfile(profile),
+    ]),
+  ),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["frozen"])
+        self.assertTrue(data["readIsolated"])
+        self.assertEqual(
+            data["profiles"]["read"],
+            [
+                "request_user_input",
+                "list_files",
+                "read_file",
+                "search_files",
+                "glob_files",
+                "check_skill_dependencies",
+            ],
+        )
+        self.assertEqual(
+            data["profiles"]["plan"],
+            [
+                "request_user_input",
+                "list_files",
+                "read_file",
+                "search_files",
+                "glob_files",
+                "web_fetch",
+                "propose_edit",
+                "task",
+                "use_skill",
+                "check_skill_dependencies",
+                "read_skill_resource",
+            ],
+        )
+        self.assertEqual(
+            data["profiles"]["accept"],
+            [
+                "request_user_input",
+                "list_files",
+                "read_file",
+                "search_files",
+                "glob_files",
+                "web_fetch",
+                "propose_edit",
+                "run_command",
+                "task",
+                "use_skill",
+                "check_skill_dependencies",
+                "write_file",
+                "delete_file",
+                "save_memory",
+                "read_skill_resource",
+            ],
+        )
+        self.assertEqual(data["profiles"]["accept"], data["profiles"]["bypass"])
+        self.assertEqual(data["unknown"], data["profiles"]["accept"])
+        self.assertNotIn("run_command", data["planFull"])
+        self.assertEqual(
+            data["owners"],
+            {
+                "read": "server-agent",
+                "plan": "server-agent",
+                "accept": "server-agent",
+                "bypass": "server-agent",
+                "unknown": "browser",
+            },
+        )
+        self.assertIn("} = window.Code.agent.permissions;", APP_SOURCE[:3000])
+        self.assertNotIn("const toolPolicy =", APP_SOURCE)
+        self.assertNotIn("function executionOwnerForPermissionProfile", APP_SOURCE)
+        self.assertNotIn("function getAllowedToolNamesForProfile", APP_SOURCE)
 
     def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
         script = r"""
@@ -3760,7 +3876,7 @@ process.stdout.write(JSON.stringify({staleBrowserValueCleared, keyUpdated, edito
 
     def test_skill_dependencies_gate_first_use_and_are_available_as_a_read_tool(self):
         self.assertIn('name: "check_skill_dependencies"', TOOLS_SOURCE)
-        self.assertIn('"check_skill_dependencies"', APP_SOURCE[APP_SOURCE.index("const toolPolicy"):])
+        self.assertIn('"check_skill_dependencies"', PERMISSIONS_SOURCE)
         self.assertIn("before first use of this Skill", SKILLS_MEMORY_SOURCE)
         self.assertIn('capability: { type: "string"', TOOLS_SOURCE)
         self.assertIn("Choose only the capability needed by the current task", SKILLS_MEMORY_SOURCE)

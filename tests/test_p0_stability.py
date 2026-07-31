@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
+PERMISSIONS_SOURCE = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
 PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
 SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
@@ -256,8 +257,12 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn("if (options.persistMessages === true)", PERSISTENCE_SOURCE)
 
     def test_all_permission_profiles_have_single_server_execution_owner(self):
-        self.assertIn('read: new Set(["request_user_input", "list_files", "read_file", "search_files", "glob_files", "check_skill_dependencies"])', APP_SOURCE)
-        self.assertIn('return ["read", "plan", "accept", "bypass"].includes(permissionProfile) ? "server-agent" : "browser"', APP_SOURCE)
+        self.assertIn('read: Object.freeze([', PERMISSIONS_SOURCE)
+        self.assertIn('"check_skill_dependencies"', PERMISSIONS_SOURCE)
+        self.assertIn(
+            'return SERVER_EXECUTION_PROFILES.includes(permissionProfile) ? "server-agent" : "browser"',
+            PERMISSIONS_SOURCE,
+        )
         self.assertIn("executionOwner: executionOwnerForPermissionProfile(permissionProfile)", APP_SOURCE)
         self.assertIn("ctx.executionOwner = runState.executionOwner || executionOwnerForPermissionProfile(ctx.permissionProfile)", APP_SOURCE)
         self.assertIn('if (!isServerOwnedRun(ctx)) throw new Error(LEGACY_BROWSER_RUN_ERROR)', APP_SOURCE)
