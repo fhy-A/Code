@@ -47,6 +47,11 @@ const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const {
+  buildModelRequestMessages,
+  buildNativeToolCallMessage,
+  mapMessageForApi,
+} = window.Code.agent.modelRequest;
+const {
   classifyModelRequestFailure,
   createSseDataReader,
   createModelTurnAccumulator,
@@ -5984,28 +5989,6 @@ function parseJsonLoose(text = "{}") {
 
 
 
-function buildNativeToolCallMessage(toolCall) {
-
-  return {
-
-    id: toolCall.id || `call_${Date.now()}`,
-
-    type: toolCall.type || "function",
-
-    function: {
-
-      name: toolCall.function?.name || toolCall.name || "",
-
-      arguments: toolCall.function?.arguments || toolCall.arguments || "{}",
-
-    },
-
-  };
-
-}
-
-
-
 function normalizeNativeToolCall(call) {
 
   const name = call?.function?.name || call?.name || "";
@@ -6796,85 +6779,6 @@ async function waitForModelRetry(ctx, attempt, maxAttempts, delayMs, error) {
   }
 }
 
-function mapMessageForApi(msg, includeNativeTools = true) {
-
-  if (!msg || typeof msg !== "object") return null;
-  if (msg.meta?.skipApi) return null;
-
-  if (msg.role === "system") {
-    return { role: "system", content: getMsgText(msg) };
-  }
-
-  if (msg.role === "assistant") {
-
-    const toolCalls = includeNativeTools ? (msg.meta?.toolCalls || []) : [];
-
-    if (toolCalls.length > 0) {
-
-      return {
-
-        role: "assistant",
-
-        content: getMsgText(msg),
-
-        tool_calls: toolCalls.map(buildNativeToolCallMessage),
-
-      };
-
-    }
-
-    return { role: "assistant", content: getMsgText(msg) };
-
-  }
-
-  if (msg.role === "tool-call") {
-
-    return null;
-
-  }
-
-  if (msg.role === "tool-result") {
-
-    if (includeNativeTools && msg.meta?.toolCallId) {
-
-      return {
-
-        role: "tool",
-
-        tool_call_id: msg.meta.toolCallId,
-
-        content: getMsgText(msg),
-
-      };
-
-    }
-
-    return { role: "user", content: `【工具结果】\n${getMsgText(msg)}` };
-
-  }
-
-  // User messages may have array content (text + images)
-
-  if (msg.role === "user") {
-
-    const content = msg.content || "";
-
-    if (Array.isArray(content)) {
-
-      return { role: "user", content };
-
-    }
-
-    return { role: "user", content };
-
-  }
-
-  return { role: "user", content: getMsgText(msg) };
-
-}
-
-
-
 async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolOverride = null) {
   const model = ctx?.model || getSelectedModel();
   const tools = Array.isArray(toolOverride)
@@ -6922,121 +6826,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
         }),
       }]),
 
-      ...(function buildMessages() {
-
-        const result = [];
-
-        let pendingToolCallIds = new Set();
-        let lastAssistantWithCallsIdx = -1;
-
-        for (const msg of modelMessages) {
-
-          if (!msg || msg.streaming) continue;
-
-          const mapped = mapMessageForApi(msg, tools.length > 0);
-
-          if (!mapped) {
-
-            // tool-call messages are filtered out, but we still track them
-
-            if (msg.role === "tool-call" && msg.meta?.toolCallId && !msg.meta?.skipApi) {
-
-              pendingToolCallIds.add(msg.meta.toolCallId);
-
-            }
-
-            continue;
-
-          }
-
-          // Validate: if this is a tool message, it must follow an assistant with matching tool_calls
-
-          if (mapped.role === "tool") {
-
-            if (pendingToolCallIds.has(mapped.tool_call_id)) {
-
-              pendingToolCallIds.delete(mapped.tool_call_id);
-
-            } else {
-
-              // Downgrade to user text — orphaned tool result
-
-              result.push({ role: "user", content: `[Tool result]\n${mapped.content || ""}` });
-
-              continue;
-
-            }
-
-          }
-
-          // When any non-tool message follows an assistant with tool_calls,
-          // strip unmatched tool_calls to avoid API 400 errors
-
-          if (lastAssistantWithCallsIdx >= 0 && pendingToolCallIds.size > 0 && mapped.role !== "tool") {
-
-            const prev = result[lastAssistantWithCallsIdx];
-
-            if (prev && prev.tool_calls) {
-
-              prev.tool_calls = prev.tool_calls.filter((tc) => !pendingToolCallIds.has(tc.id));
-
-              if (prev.tool_calls.length === 0) {
-
-                delete prev.tool_calls;
-
-              }
-
-            }
-
-            lastAssistantWithCallsIdx = -1;
-
-            pendingToolCallIds.clear();
-
-          }
-
-          result.push(mapped);
-
-          // Track tool_calls from assistant messages
-
-          if (mapped.role === "assistant" && mapped.tool_calls && mapped.tool_calls.length > 0) {
-
-            lastAssistantWithCallsIdx = result.length - 1;
-
-            pendingToolCallIds = new Set(mapped.tool_calls.map((tc) => tc.id));
-
-          } else if (mapped.role === "assistant") {
-
-            lastAssistantWithCallsIdx = -1;
-
-            pendingToolCallIds.clear();
-
-          }
-
-        }
-
-        // Final pass: strip unmatched tool_calls from the last assistant
-
-        if (lastAssistantWithCallsIdx >= 0 && pendingToolCallIds.size > 0) {
-
-          const prev = result[lastAssistantWithCallsIdx];
-
-          if (prev && prev.tool_calls) {
-
-            prev.tool_calls = prev.tool_calls.filter((tc) => !pendingToolCallIds.has(tc.id));
-
-            if (prev.tool_calls.length === 0) {
-
-              delete prev.tool_calls;
-
-            }
-
-          }
-
-        }
-
-        return result;
-
-      })(),
+      ...buildModelRequestMessages(modelMessages, tools.length > 0),
 
     ],
 

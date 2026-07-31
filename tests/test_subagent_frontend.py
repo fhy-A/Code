@@ -13,10 +13,14 @@ class TestSubAgentFrontend(unittest.TestCase):
         cls.persistence_source = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
         cls.i18n_source = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
         cls.messages_source = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
+        cls.model_request_source = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
 
     def test_subagent_system_message_stays_system(self):
-        self.assertIn('if (msg.role === "system")', self.source)
-        self.assertIn('return { role: "system", content: getMsgText(msg) };', self.source)
+        self.assertIn('if (message.role === "system")', self.model_request_source)
+        self.assertIn(
+            'return { role: "system", content: getMessageText(message) };',
+            self.model_request_source,
+        )
 
     def test_background_agent_builds_private_prompt_before_server_dispatch(self):
         self.assertIn('const subCtx = createSubContext(parentCtx, job.taskPrompt);', self.source)

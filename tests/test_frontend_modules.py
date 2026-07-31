@@ -26,6 +26,7 @@ FILES_SOURCE = (ROOT / "src" / "features" / "files.js").read_text(encoding="utf-
 SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_text(encoding="utf-8")
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
+MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
@@ -36,10 +37,14 @@ LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.
 
 class TestFrontendCoreModules(unittest.TestCase):
     def test_import_boundary_survives_compaction_and_stays_out_of_exports(self):
-        self.assertIn("if (msg.meta?.skipApi) return null;", APP_SOURCE)
+        self.assertIn("if (message.meta?.skipApi) return null;", MODEL_REQUEST_SOURCE)
         self.assertIn(
-            'msg.role === "tool-call" && msg.meta?.toolCallId && !msg.meta?.skipApi',
-            APP_SOURCE,
+            'message.role === "tool-call"',
+            MODEL_REQUEST_SOURCE,
+        )
+        self.assertIn(
+            "&& !message.meta?.skipApi",
+            MODEL_REQUEST_SOURCE,
         )
         compact_start = APP_SOURCE.index("async function compactConversation()")
         compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
@@ -494,6 +499,7 @@ eval(source);
             "src/features/files.js",
             "src/features/skills-memory.js",
             "src/features/session-import.js",
+            "src/agent/model-request.js",
             "src/agent/model-stream.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
@@ -521,6 +527,7 @@ eval(source);
             "./src/features/preview.js",
             "./src/features/files.js",
             "./src/features/session-import.js",
+            "./src/agent/model-request.js",
             "./src/agent/model-stream.js",
             "./agent-runtime.js",
             "./app.js",
@@ -532,6 +539,129 @@ eval(source);
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")
         for bucket in ("core", "services", "features", "agent", "ui"):
             self.assertIn(f'Code.{bucket} = Code.{bucket} || {{}}', source)
+
+    def test_model_request_builds_stable_message_sequences(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+
+const request = window.Code.agent.modelRequest;
+const messages = [
+  {
+    role: "assistant",
+    content: "checking",
+    meta: {
+      toolCalls: [
+        {
+          id: "call-1",
+          type: "function",
+          function: {name: "read_file", arguments: "{\"path\":\"A.md\"}"},
+        },
+        {
+          id: "call-2",
+          type: "function",
+          function: {name: "read_file", arguments: "{\"path\":\"B.md\"}"},
+        },
+      ],
+    },
+  },
+  {role: "tool-call", meta: {toolCallId: "call-1"}},
+  {
+    role: "tool-result",
+    content: "A result",
+    meta: {toolCallId: "call-1"},
+  },
+  {
+    role: "user",
+    content: [
+      {type: "text", text: "next"},
+      {type: "image_url", image_url: {url: "data:image/png;base64,x"}},
+    ],
+  },
+  {
+    role: "tool-result",
+    content: "orphan",
+    meta: {toolCallId: "missing"},
+  },
+  {role: "assistant", content: "pending", streaming: true},
+  {role: "system", content: "hidden", meta: {skipApi: true}},
+];
+const before = JSON.stringify(messages);
+const nativeMessages = request.buildModelRequestMessages(messages, true);
+const fallbackMessages = request.buildModelRequestMessages(messages, false);
+const generatedToolCall = request.buildNativeToolCallMessage({
+  name: "search_files",
+  arguments: "{\"query\":\"todo\"}",
+});
+
+process.stdout.write(JSON.stringify({
+  frozen: Object.isFrozen(request),
+  inputUnchanged: JSON.stringify(messages) === before,
+  nativeMessages,
+  fallbackMessages,
+  generatedToolCall,
+  invalid: request.mapMessageForApi(null),
+  system: request.mapMessageForApi({role: "system", content: "rules"}),
+  skipped: request.mapMessageForApi({
+    role: "user",
+    content: "private",
+    meta: {skipApi: true},
+  }),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["frozen"])
+        self.assertTrue(data["inputUnchanged"])
+        self.assertIsNone(data["invalid"])
+        self.assertIsNone(data["skipped"])
+        self.assertEqual(data["system"], {"role": "system", "content": "rules"})
+        self.assertTrue(data["generatedToolCall"]["id"].startswith("call_"))
+        self.assertEqual(data["generatedToolCall"]["type"], "function")
+        self.assertEqual(
+            data["generatedToolCall"]["function"],
+            {"name": "search_files", "arguments": '{"query":"todo"}'},
+        )
+
+        native_messages = data["nativeMessages"]
+        self.assertEqual(len(native_messages), 4)
+        self.assertEqual(
+            [call["id"] for call in native_messages[0]["tool_calls"]],
+            ["call-1"],
+        )
+        self.assertEqual(
+            native_messages[1],
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "A result",
+            },
+        )
+        self.assertEqual(native_messages[2]["content"][1]["type"], "image_url")
+        self.assertEqual(
+            native_messages[3],
+            {"role": "user", "content": "[Tool result]\norphan"},
+        )
+
+        fallback_messages = data["fallbackMessages"]
+        self.assertEqual(len(fallback_messages), 4)
+        self.assertNotIn("tool_calls", fallback_messages[0])
+        self.assertEqual(
+            fallback_messages[1],
+            {"role": "user", "content": "【工具结果】\nA result"},
+        )
+        self.assertEqual(
+            fallback_messages[3],
+            {"role": "user", "content": "【工具结果】\norphan"},
+        )
 
     def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
         script = r"""
