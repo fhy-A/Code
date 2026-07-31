@@ -330,6 +330,7 @@ class TestBranchFlowMarker(unittest.TestCase):
         cls.messages_source = (root / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
         cls.timeline_source = (root / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
         cls.sessions_source = (root / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
+        cls.branches_source = (root / "src" / "features" / "branches.js").read_text(encoding="utf-8")
 
     def test_branch_marker_uses_raw_message_boundary(self):
         self.assertIn("const branchMarker = getBranchFlowMarker();", self.source)
@@ -341,12 +342,17 @@ class TestBranchFlowMarker(unittest.TestCase):
         self.assertIn("function syncSessionBranchMetadata(", self.timeline_source)
 
     def test_new_branch_inherits_usage_baseline_before_loading(self):
-        create_start = self.source.index("async function createBranch(title)")
-        create_end = self.source.index("async function switchToBranch", create_start)
-        create_branch = self.source[create_start:create_end]
+        create_start = self.branches_source.index("async function createBranch(title)")
+        create_end = self.branches_source.index("function bind()", create_start)
+        create_branch = self.branches_source[create_start:create_end]
         self.assertIn("const parentStats = { ...(getSessionStats(parentSessionId) || {}) };", create_branch)
-        self.assertIn("setSessionStats(resp.id, inheritedStats);", create_branch)
-        self.assertIn("setSessionLastUsage(resp.id, resp.lastUsage || parentLastUsage);", create_branch)
+        self.assertIn("setSessionStats(response.id, inheritedStats);", create_branch)
+        self.assertIn("setSessionLastUsage(response.id, response.lastUsage || parentLastUsage);", create_branch)
+        self.assertIn("createBranchesFeature({", self.source)
+
+    def test_branch_tree_derives_children_from_list_parent_metadata(self):
+        self.assertIn("item._parentId === record.id", self.branches_source)
+        self.assertIn("new Set([...explicitBranchIds, ...derivedBranchIds])", self.branches_source)
 
     def test_branch_marker_does_not_splice_projected_rows(self):
         self.assertNotIn("rows.splice(insertAt", self.messages_source)

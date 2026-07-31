@@ -36,6 +36,7 @@ const {
   createSessionStartup,
   createSessionsFeature,
 } = window.Code.features.sessions;
+const { createBranchesFeature } = window.Code.features.branches;
 const { createSettingsFeature } = window.Code.features.settings;
 const {
   applySkillTaskPolicy,
@@ -666,6 +667,7 @@ const els = {
 };
 
 let messagesFeature = null;
+let branchesFeature = null;
 const diffFeature = createDiffFeature({
   escapeHtml,
   highlightSyntax: (...args) => markdownFeature.highlightSyntax(...args),
@@ -774,7 +776,7 @@ const panelsFeature = createPanelsFeature({
   getMessageText: getMsgText,
   getSystemPrompt,
   copyText,
-  onRenderBranchTree: () => renderBranchTree(),
+  onRenderBranchTree: () => branchesFeature?.renderBranchTree(),
   onRenderToolLog: () => renderToolLog(),
   onBranchPanelOpenChanged: (open) => {
     state.branchPanelOpen = open;
@@ -850,6 +852,34 @@ const sessionStartup = createSessionStartup({
   },
   logger: console,
 });
+
+branchesFeature = createBranchesFeature({
+  state,
+  elements: els,
+  requestJson: apiJson,
+  stateAccessors: {
+    getSessionLastUsage,
+    getSessionStats,
+    setSessionLastUsage,
+    setSessionStats,
+  },
+  session: {
+    loadSession,
+    refreshSessions,
+    deleteSession,
+  },
+  view: {
+    showToast,
+  },
+  t,
+  escapeHtml,
+});
+const {
+  createBranch,
+  renderBranchTree,
+  switchToBranch,
+} = branchesFeature;
+branchesFeature.bind();
 
 const skillsMemoryFeature = createSkillsMemoryFeature({
   state,
@@ -2097,115 +2127,6 @@ function updateModePromptPreview() {
 
 }
 
-
-
-function buildBranchTree(focusSessionId) {
-  if (!focusSessionId || !state.sessions.length) return null;
-  var sessions = state.sessions;
-  var current = null;
-  for (var i = 0; i < sessions.length; i++) {
-    if (sessions[i].id === focusSessionId) { current = sessions[i]; break; }
-  }
-  if (!current) return null;
-  while (current._parentId) {
-    var parent = null;
-    for (var j = 0; j < sessions.length; j++) {
-      if (sessions[j].id === current._parentId) { parent = sessions[j]; break; }
-    }
-    if (!parent) break;
-    current = parent;
-  }
-  var rootId = current.id;
-
-  function makeNode(session) {
-    var children = [];
-    var branchIds = session._branches || [];
-    for (var k = 0; k < branchIds.length; k++) {
-      var child = null;
-      for (var m = 0; m < sessions.length; m++) {
-        if (sessions[m].id === branchIds[k]) { child = sessions[m]; break; }
-      }
-      if (child) children.push(makeNode(child));
-    }
-    return {
-      id: session.id, title: session.title || t("untitledSession"),
-      depth: session._branchDepth || 0,
-      isActive: session.id === state.sessionId, children: children,
-    };
-  }
-  for (var n = 0; n < sessions.length; n++) {
-    if (sessions[n].id === rootId) return makeNode(sessions[n]);
-  }
-  return null;
-}
-
-function renderBranchTree() {
-  if (!els.branchTree) return;
-  var root = buildBranchTree(state.sessionId);
-  if (!root) {
-    els.branchTree.innerHTML = '<div class="branch-empty">' + t("noBranches") + '</div>';
-    return;
-  }
-  function renderNode(node, depth) {
-    var indent = depth * 20;
-    var activeClass = node.isActive ? " active" : "";
-    var html = '<div class="branch-node' + activeClass + '" data-session-id="' + escapeHtml(node.id) + '" style="padding-left:' + (indent + 12) + 'px">';
-    html += '<span class="branch-title">' + escapeHtml(node.title) + '</span>';
-    html += '<button class="branch-delete-btn" data-session-id="' + escapeHtml(node.id) + '" title="' + t("delete") + '"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>';
-    html += '</div>';
-    for (var i = 0; i < node.children.length; i++) { html += renderNode(node.children[i], depth + 1); }
-    return html;
-  }
-  els.branchTree.innerHTML = renderNode(root, 0);
-  var nodes = els.branchTree.querySelectorAll(".branch-node");
-  for (var i = 0; i < nodes.length; i++) {
-    nodes[i].addEventListener("click", function (e) {
-      if (e.target.closest(".branch-delete-btn")) return;
-      var sid = this.getAttribute("data-session-id");
-      if (sid && sid !== state.sessionId) switchToBranch(sid);
-    });
-  }
-  var deleteBtns = els.branchTree.querySelectorAll(".branch-delete-btn");
-  for (var j = 0; j < deleteBtns.length; j++) {
-    deleteBtns[j].addEventListener("click", function (e) {
-      e.stopPropagation();
-      var sid = this.getAttribute("data-session-id");
-      if (sid) deleteSession(sid);
-    });
-  }
-}
-
-async function createBranch(title) {
-  if (!state.sessionId) { showToast(t("createSessionFirst"), "warning"); return; }
-  if (state.isStreaming) { showToast(t("stopBeforeBranch"), "warning"); return; }
-  const parentSessionId = state.sessionId;
-  const parentStats = { ...(getSessionStats(parentSessionId) || {}) };
-  const parentLastUsage = getSessionLastUsage(parentSessionId);
-  if (!title) {
-    var cur = state.sessions.find(function(s) { return s.id === state.sessionId; });
-    title = t("branchTitleTemplate", { title: (cur && cur.title) || "" });
-  }
-  try {
-    var resp = await apiJson("/api/sessions/" + encodeURIComponent(state.sessionId) + "/branch", {
-      method: "POST", body: JSON.stringify({ title: title }),
-    });
-    const inheritedStats = resp.stats && Object.keys(resp.stats).length
-      ? { ...resp.stats }
-      : parentStats;
-    setSessionStats(resp.id, inheritedStats);
-    setSessionLastUsage(resp.id, resp.lastUsage || parentLastUsage);
-    await refreshSessions();
-    state._keepBranchOpen = true;
-    await loadSession(resp.id);
-    if (state.branchPanelOpen) renderBranchTree();
-  } catch (err) { showToast(t("branchFailed") + ": " + (err.message || err), "error"); }
-}
-
-async function switchToBranch(sessionId) {
-  state._keepBranchOpen = true;
-  await loadSession(sessionId);
-  if (state.branchPanelOpen) renderBranchTree();
-}
 
 
 function splitThoughtContent(text = "") {
@@ -10673,12 +10594,6 @@ window.addEventListener("resize", () => {
   applySidebarSessionHeight(state.sidebarSessionHeight);
 
   applySidebarWidth(state.sidebarWidth);
-
-});
-
-els.createBranchBtn.addEventListener("click", () => {
-
-  createBranch();
 
 });
 

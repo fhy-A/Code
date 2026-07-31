@@ -25,6 +25,7 @@ PREVIEW_SOURCE = (ROOT / "src" / "features" / "preview.js").read_text(encoding="
 FILES_SOURCE = (ROOT / "src" / "features" / "files.js").read_text(encoding="utf-8")
 SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_text(encoding="utf-8")
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
+BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
@@ -481,6 +482,7 @@ eval(source);
             "src/services/api-client.js",
             "src/services/persistence.js",
             "src/features/sessions.js",
+            "src/features/branches.js",
             "src/ui/diff.js",
             "src/ui/markdown.js",
             "src/ui/timeline.js",
@@ -511,6 +513,7 @@ eval(source);
             "./src/ui/messages.js",
             "./src/ui/panels.js",
             "./src/features/sessions.js",
+            "./src/features/branches.js",
             "./src/features/settings.js",
             "./src/features/skills-memory.js",
             "./src/features/preview.js",
@@ -1305,6 +1308,163 @@ const startup = window.Code.features.sessions.createSessionStartup({
             "const background = recovery.resumePersistedBackgroundRuns()",
             SESSIONS_SOURCE[recovery_start:startup_end],
         )
+
+    def test_branches_feature_preserves_tree_creation_and_switching(self):
+        self.assertIn("const { createBranchesFeature } = window.Code.features.branches;", APP_SOURCE)
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/branches.js");
+
+const events = [];
+const stats = new Map([["parent", {input: 12, output: 3, cache: 4, cost: 0.5}]]);
+const usage = new Map([["parent", {total_tokens: 19}]]);
+const state = {
+  sessionId: "child",
+  sessions: [
+    {id: "parent", title: "Parent <root>", _branches: [], _branchDepth: 0},
+    {id: "child", title: "Child", _parentId: "parent", _branches: [], _branchDepth: 1},
+  ],
+  isStreaming: false,
+  branchPanelOpen: true,
+  _keepBranchOpen: false,
+};
+let branchHtml = "";
+let createHandler = null;
+const elements = {
+  branchTree: {
+    get innerHTML() { return branchHtml; },
+    set innerHTML(value) { branchHtml = value; },
+    querySelectorAll: () => [],
+  },
+  createBranchBtn: {
+    addEventListener: (name, handler) => {
+      events.push(["bind", name]);
+      createHandler = handler;
+    },
+  },
+};
+const requestJson = async (url, options) => {
+  events.push(["request", url, options.method, JSON.parse(options.body)]);
+  return {id: "branch-new", title: "Branch: Child", stats: {}, lastUsage: null};
+};
+const feature = window.Code.features.branches.createBranchesFeature({
+  state,
+  elements,
+  requestJson,
+  stateAccessors: {
+    getSessionStats: (sessionId) => stats.get(sessionId) || {},
+    getSessionLastUsage: (sessionId) => usage.get(sessionId) || null,
+    setSessionStats: (sessionId, value) => {
+      stats.set(sessionId, value);
+      events.push(["stats", sessionId, value]);
+    },
+    setSessionLastUsage: (sessionId, value) => {
+      usage.set(sessionId, value);
+      events.push(["usage", sessionId, value]);
+    },
+  },
+  session: {
+    refreshSessions: async () => events.push(["refresh"]),
+    loadSession: async (sessionId) => {
+      events.push(["load", sessionId]);
+      state.sessionId = sessionId;
+    },
+    deleteSession: async (sessionId) => events.push(["delete", sessionId]),
+  },
+  view: {
+    showToast: (message, kind) => events.push(["toast", message, kind]),
+  },
+  t: (key, params = {}) => ({
+    untitledSession: "Untitled",
+    noBranches: "No branches",
+    delete: "Delete",
+    branchTitleTemplate: `Branch: ${params.title || ""}`,
+    createSessionFirst: "Create session first",
+    stopBeforeBranch: "Stop first",
+    branchFailed: "Branch failed",
+  }[key] || key),
+  escapeHtml: (value) => String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;"),
+});
+
+(async () => {
+  const tree = feature.buildBranchTree("child");
+  feature.renderBranchTree();
+  const rendered = branchHtml;
+
+  state.sessionId = "parent";
+  await feature.createBranch();
+  const afterCreate = {
+    stats: stats.get("branch-new"),
+    usage: usage.get("branch-new"),
+    keepOpen: state._keepBranchOpen,
+    sessionId: state.sessionId,
+  };
+
+  await feature.switchToBranch("child");
+  feature.bind();
+
+  state.sessionId = null;
+  await feature.createBranch();
+  state.sessionId = "parent";
+  state.isStreaming = true;
+  await feature.createBranch();
+
+  process.stdout.write(JSON.stringify({
+    tree,
+    rendered,
+    afterCreate,
+    events,
+    hasCreateHandler: typeof createHandler === "function",
+  }));
+})();
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["tree"]["id"], "parent")
+        self.assertEqual(result["tree"]["children"][0]["id"], "child")
+        self.assertTrue(result["tree"]["children"][0]["isActive"])
+        self.assertIn("Parent &lt;root&gt;", result["rendered"])
+        self.assertIn("branch-node active", result["rendered"])
+        self.assertEqual(result["afterCreate"]["stats"], {"input": 12, "output": 3, "cache": 4, "cost": 0.5})
+        self.assertEqual(result["afterCreate"]["usage"], {"total_tokens": 19})
+        self.assertTrue(result["afterCreate"]["keepOpen"])
+        self.assertEqual(result["afterCreate"]["sessionId"], "branch-new")
+        self.assertIn(
+            [
+                "request",
+                "/api/sessions/parent/branch",
+                "POST",
+                {"title": "Branch: Parent <root>"},
+            ],
+            result["events"],
+        )
+        self.assertIn(["refresh"], result["events"])
+        self.assertIn(["load", "branch-new"], result["events"])
+        self.assertIn(["load", "child"], result["events"])
+        self.assertIn(["toast", "Create session first", "warning"], result["events"])
+        self.assertIn(["toast", "Stop first", "warning"], result["events"])
+        self.assertIn(["bind", "click"], result["events"])
+        self.assertTrue(result["hasCreateHandler"])
+
+        self.assertIn("const response = await requestJson(", BRANCHES_SOURCE)
+        self.assertIn("item._parentId === record.id", BRANCHES_SOURCE)
+        self.assertIn("void session.deleteSession(sessionId);", BRANCHES_SOURCE)
+        self.assertIn("await session.refreshSessions();", BRANCHES_SOURCE)
+        self.assertIn("await session.loadSession(response.id);", BRANCHES_SOURCE)
+        self.assertNotIn("function buildBranchTree(", APP_SOURCE)
+        self.assertNotIn("async function createBranch(", APP_SOURCE)
+        self.assertNotIn("async function switchToBranch(", APP_SOURCE)
 
     def test_platform_core_normalizes_and_parses_key_config(self):
         self.assertIn('const WORKBAR_URL = "https://workbar.ai"', PLATFORM_SOURCE)
