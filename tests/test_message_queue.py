@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
+SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
 
@@ -88,8 +89,12 @@ class TestRunningMessageQueue(unittest.TestCase):
     def test_queue_restores_after_foreground_recovery(self):
         init_start = APP_SOURCE.index("async function init()")
         init = APP_SOURCE[init_start:]
-        self.assertIn("resumePersistedRuns()", init)
-        self.assertIn(".then(() => resumePersistedQueuedMessages())", init)
+        self.assertIn("sessionStartup.startRecovery();", init)
+        startup_start = SESSIONS_SOURCE.index("function createSessionStartup(")
+        coordination_start = SESSIONS_SOURCE.index("function startRecovery()", startup_start)
+        coordination = SESSIONS_SOURCE[coordination_start:]
+        self.assertIn("recovery.resumePersistedRuns()", coordination)
+        self.assertIn(".then(() => recovery.resumePersistedQueuedMessages())", coordination)
         resume_start = APP_SOURCE.index("async function resumePersistedQueuedMessages()")
         resume_end = APP_SOURCE.index("const BACKGROUND_JOB_TIMEOUT_MS", resume_start)
         resume = APP_SOURCE[resume_start:resume_end]

@@ -152,10 +152,16 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
 
     def test_init_starts_recovery_after_models_are_loaded(self):
         models_pos = APP_SOURCE.index("await refreshModels();")
-        resume_pos = APP_SOURCE.index("resumePersistedRuns()", models_pos)
-        self.assertGreater(resume_pos, models_pos)
-        queue_resume_pos = APP_SOURCE.index("resumePersistedQueuedMessages()", resume_pos)
-        self.assertGreater(queue_resume_pos, resume_pos)
+        recovery_pos = APP_SOURCE.index("sessionStartup.startRecovery();", models_pos)
+        self.assertGreater(recovery_pos, models_pos)
+        startup_start = SESSIONS_SOURCE.index("function createSessionStartup(")
+        coordination_start = SESSIONS_SOURCE.index("function startRecovery()", startup_start)
+        coordination = SESSIONS_SOURCE[coordination_start:]
+        runs_pos = coordination.index("recovery.resumePersistedRuns()")
+        queue_resume_pos = coordination.index("recovery.resumePersistedQueuedMessages()")
+        background_pos = coordination.index("recovery.resumePersistedBackgroundRuns()")
+        self.assertGreater(queue_resume_pos, runs_pos)
+        self.assertGreater(background_pos, runs_pos)
 
     def test_init_restores_saved_model_before_platform_sync_and_validates_availability(self):
         restore = 'setSelectedModel(localStorage.getItem("code-model") || "");'

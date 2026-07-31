@@ -486,10 +486,20 @@ class TestDispatcherLimits(unittest.TestCase):
         self.assertNotIn('setStreaming(false', load_block)
         self.assertNotIn('run.messageQueue = []', load_block)
 
+        startup_start = self.sessions_source.index("function createSessionStartup(")
+        foreground_start = self.sessions_source.index("async function restoreForegroundSession()", startup_start)
+        recovery_coordination_start = self.sessions_source.index("function startRecovery()", foreground_start)
+        foreground_block = self.sessions_source[foreground_start:recovery_coordination_start]
+        recovery_coordination = self.sessions_source[recovery_coordination_start:]
+        self.assertIn('storage.getItem("code-foreground-view")', foreground_block)
+        self.assertIn('foregroundView !== "welcome"', foreground_block)
+        self.assertIn("await navigation.loadSession(lastId);", foreground_block)
+        self.assertNotIn("navigation.loadSession(", recovery_coordination)
+
         init_start = self.source.index('async function init()')
         init_block = self.source[init_start:]
-        self.assertIn('const foregroundView = localStorage.getItem("code-foreground-view");', init_block)
-        self.assertIn('foregroundView !== "welcome"', init_block)
+        self.assertIn("await sessionStartup.restoreForegroundSession();", init_block)
+        self.assertNotIn('localStorage.getItem("code-foreground-view")', init_block)
 
         resume_start = self.source.index('async function resumePersistedRuns()')
         resume_end = self.source.index('function createModelRequestError', resume_start)

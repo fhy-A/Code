@@ -33,6 +33,7 @@ const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.time
 const { createPanelsFeature } = window.Code.ui.panels;
 const {
   createSessionNavigation,
+  createSessionStartup,
   createSessionsFeature,
 } = window.Code.features.sessions;
 const { createSettingsFeature } = window.Code.features.settings;
@@ -837,6 +838,18 @@ const {
   createSession,
   loadSession,
 } = sessionNavigation;
+
+const sessionStartup = createSessionStartup({
+  state,
+  storage: localStorage,
+  navigation: sessionNavigation,
+  recovery: {
+    resumePersistedRuns,
+    resumePersistedQueuedMessages,
+    resumePersistedBackgroundRuns,
+  },
+  logger: console,
+});
 
 const skillsMemoryFeature = createSkillsMemoryFeature({
   state,
@@ -11840,24 +11853,8 @@ async function init() {
   await loadProjectContext();
   setTimeout(preloadImportSessions, 3000);  // background: preload Codex + Claude Code session lists
 
-  // Restore the last foreground session only when the user last left a
-  // session selected. Background runs are resumed independently below and
-  // must never decide which foreground view is shown.
-
-  const foregroundView = localStorage.getItem("code-foreground-view");
-  const lastId = localStorage.getItem("code-last-session");
-
-  if (foregroundView !== "welcome"
-      && lastId
-      && state.sessions.some((s) => s.id === lastId)) {
-
-    await loadSession(lastId);
-
-  } else if (foregroundView === "welcome" || !lastId) {
-
-    rememberWelcomeForeground();
-
-  }
+  // Foreground restoration is independent from persisted task recovery.
+  await sessionStartup.restoreForegroundSession();
 
   const platformSync = await platformSyncPromise;
   if (platformSync?.authExpired) {
@@ -11866,17 +11863,10 @@ async function init() {
   }
   if (getApiKeys().length > 0 && els.baseUrl.value.trim()) await refreshModels();
 
-  // Resume tasks whose browser-side stream was interrupted by a page reload.
-  // Each session owns an independent lock and run context, so multiple saved
-  // tasks can recover without forcing the user to remain on one conversation.
-  resumePersistedRuns()
-    .then(() => resumePersistedQueuedMessages())
-    .catch((error) => {
-      console.error("Failed to resume persisted runs or queued messages:", error);
-    });
-  resumePersistedBackgroundRuns().catch((error) => {
-    console.error("Failed to resume persisted background runs:", error);
-  });
+  // Recovery starts only after the available model list has loaded. Foreground
+  // runs finish recovery before queued messages pump; background work remains
+  // independent and cannot select the foreground conversation.
+  sessionStartup.startRecovery();
 
   // Restore preview pane state after config/session load.
   await previewFeature.restore();

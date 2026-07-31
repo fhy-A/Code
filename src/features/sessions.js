@@ -292,10 +292,69 @@
     });
   }
 
+  function createSessionStartup({
+    state,
+    storage = global.localStorage,
+    navigation,
+    recovery,
+    logger = global.console,
+  }) {
+    if (!state || typeof state !== "object") {
+      throw new TypeError("Session startup requires application state");
+    }
+    if (!navigation?.loadSession || !navigation?.rememberWelcomeForeground) {
+      throw new TypeError("Session startup requires session navigation");
+    }
+    if (
+      !recovery?.resumePersistedRuns
+      || !recovery?.resumePersistedQueuedMessages
+      || !recovery?.resumePersistedBackgroundRuns
+    ) {
+      throw new TypeError("Session startup requires recovery coordination");
+    }
+
+    async function restoreForegroundSession() {
+      const foregroundView = storage.getItem("code-foreground-view");
+      const lastId = storage.getItem("code-last-session");
+
+      if (
+        foregroundView !== "welcome"
+        && lastId
+        && state.sessions.some((session) => session.id === lastId)
+      ) {
+        await navigation.loadSession(lastId);
+        return lastId;
+      }
+      if (foregroundView === "welcome" || !lastId) {
+        navigation.rememberWelcomeForeground();
+      }
+      return null;
+    }
+
+    function startRecovery() {
+      const foreground = recovery.resumePersistedRuns()
+        .then(() => recovery.resumePersistedQueuedMessages())
+        .catch((error) => {
+          logger?.error?.("Failed to resume persisted runs or queued messages:", error);
+        });
+      const background = recovery.resumePersistedBackgroundRuns()
+        .catch((error) => {
+          logger?.error?.("Failed to resume persisted background runs:", error);
+        });
+      return Object.freeze({ foreground, background });
+    }
+
+    return Object.freeze({
+      restoreForegroundSession,
+      startRecovery,
+    });
+  }
+
   features.sessions = Object.freeze({
     normalizeSessionMessages,
     collectPendingEdits,
     createSessionsFeature,
     createSessionNavigation,
+    createSessionStartup,
   });
 })(window);

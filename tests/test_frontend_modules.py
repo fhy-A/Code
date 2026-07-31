@@ -1185,6 +1185,127 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         self.assertIn(["authorization", "beta", "authorization-beta"], result["events"])
         self.assertIn(["scroll", "beta"], result["events"])
 
+    def test_session_startup_restores_foreground_and_orders_recovery(self):
+        self.assertIn("createSessionStartup,", APP_SOURCE)
+        self.assertIn("const sessionStartup = createSessionStartup({", APP_SOURCE)
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+
+const values = new Map([
+  ["code-foreground-view", "session"],
+  ["code-last-session", "alpha"],
+]);
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+const state = {
+  sessions: [{id: "alpha"}, {id: "running", runState: {status: "running"}}],
+};
+const events = [];
+const errors = [];
+const navigation = {
+  loadSession: async (sessionId) => events.push(["load", sessionId]),
+  rememberWelcomeForeground: () => {
+    events.push(["welcome"]);
+    values.set("code-foreground-view", "welcome");
+    values.delete("code-last-session");
+  },
+};
+const recovery = {
+  resumePersistedRuns: async () => {
+    events.push(["runs-start"]);
+    await Promise.resolve();
+    events.push(["runs-finish"]);
+  },
+  resumePersistedQueuedMessages: async () => events.push(["queued"]),
+  resumePersistedBackgroundRuns: async () => events.push(["background"]),
+};
+const startup = window.Code.features.sessions.createSessionStartup({
+  state,
+  storage,
+  navigation,
+  recovery,
+  logger: {error: (...args) => errors.push(args.map(String))},
+});
+
+(async () => {
+  const restored = await startup.restoreForegroundSession();
+  const tasks = startup.startRecovery();
+  const afterStart = events.slice();
+  await Promise.all([tasks.foreground, tasks.background]);
+  const afterRecovery = events.slice();
+
+  values.set("code-foreground-view", "welcome");
+  values.set("code-last-session", "alpha");
+  const welcomeResult = await startup.restoreForegroundSession();
+
+  const failingStartup = window.Code.features.sessions.createSessionStartup({
+    state,
+    storage,
+    navigation,
+    recovery: {
+      resumePersistedRuns: async () => { throw new Error("runs failed"); },
+      resumePersistedQueuedMessages: async () => events.push(["unexpected-queued"]),
+      resumePersistedBackgroundRuns: async () => { throw new Error("background failed"); },
+    },
+    logger: {error: (...args) => errors.push(args.map((value) => value?.message || String(value)))},
+  });
+  const failedTasks = failingStartup.startRecovery();
+  await Promise.all([failedTasks.foreground, failedTasks.background]);
+
+  process.stdout.write(JSON.stringify({
+    restored,
+    afterStart,
+    afterRecovery,
+    welcomeResult,
+    foregroundView: values.get("code-foreground-view"),
+    lastSession: values.get("code-last-session") || null,
+    errors,
+  }));
+})();
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["restored"], "alpha")
+        self.assertEqual(
+            result["afterStart"],
+            [["load", "alpha"], ["runs-start"], ["background"]],
+        )
+        self.assertEqual(
+            result["afterRecovery"],
+            [["load", "alpha"], ["runs-start"], ["background"], ["runs-finish"], ["queued"]],
+        )
+        self.assertIsNone(result["welcomeResult"])
+        self.assertEqual(result["foregroundView"], "welcome")
+        self.assertIsNone(result["lastSession"])
+        self.assertEqual(len(result["errors"]), 2)
+        self.assertFalse(any(event[0] == "unexpected-queued" for event in result["afterRecovery"]))
+
+        startup_start = SESSIONS_SOURCE.index("function createSessionStartup(")
+        restore_start = SESSIONS_SOURCE.index("async function restoreForegroundSession()", startup_start)
+        recovery_start = SESSIONS_SOURCE.index("function startRecovery()", restore_start)
+        startup_end = SESSIONS_SOURCE.index("features.sessions = Object.freeze", recovery_start)
+        self.assertIn('storage.getItem("code-foreground-view")', SESSIONS_SOURCE[restore_start:recovery_start])
+        self.assertIn("await navigation.loadSession(lastId);", SESSIONS_SOURCE[restore_start:recovery_start])
+        self.assertIn(
+            ".then(() => recovery.resumePersistedQueuedMessages())",
+            SESSIONS_SOURCE[recovery_start:startup_end],
+        )
+        self.assertIn(
+            "const background = recovery.resumePersistedBackgroundRuns()",
+            SESSIONS_SOURCE[recovery_start:startup_end],
+        )
+
     def test_platform_core_normalizes_and_parses_key_config(self):
         self.assertIn('const WORKBAR_URL = "https://workbar.ai"', PLATFORM_SOURCE)
         script = r"""
@@ -5566,7 +5687,7 @@ process.stdout.write(JSON.stringify(orderProjects(projects, ["c"]).map((item) =>
 
     def test_session_restore_waits_for_sidebar_refresh(self):
         init_start = APP_SOURCE.index("async function init()")
-        init_end = APP_SOURCE.index("const foregroundView", init_start)
+        init_end = APP_SOURCE.index("await sessionStartup.restoreForegroundSession();", init_start)
         self.assertIn("await refreshSessions();", APP_SOURCE[init_start:init_end])
 
 
