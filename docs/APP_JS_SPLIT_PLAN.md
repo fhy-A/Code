@@ -1,6 +1,6 @@
 # app.js 后续拆分计划
 
-> 状态：进行中（阶段 3 已完成，下一步进入阶段 4 的会话状态与持久化拆分）
+> 状态：进行中（阶段 1 至 4、阶段 5A 至 5F 已完成，下一步只读审计 5G）
 > 适用范围：Code 前端  
 > 核心原则：先拆职责、保持行为，再引入构建工具；每一批都可验证、可回滚。
 
@@ -257,6 +257,16 @@ code/
 
 ### 阶段 4：拆分会话状态与持久化
 
+#### 当前进度
+
+- [x] 4A-1：新增 `src/core/state.js`，抽离应用状态源以及会话消息、stats、usage、运行状态、后台任务和排队消息检查点的纯状态访问器；`app.js` 删除重复定义并保持兼容装配。
+- [x] 4A-2：新增 `src/services/persistence.js`，抽离可配置字段组合的消息序列化、保存负载构建和按会话串行保存队列；保持同会话串行、跨会话并行和失败后续跑语义。
+- [x] 4B：迁移会话 CRUD、切换和刷新恢复。
+  - [x] 4B-1：新增 `src/features/sessions.js`，抽离会话 CRUD 数据访问、历史消息规范化和待处理编辑卡片重建；保留切换与恢复副作用编排。
+  - [x] 4B-2：扩展 `src/features/sessions.js`，迁移前台新建、切换、导航竞态保护和当前会话状态装配；保持后台运行隔离与首次发送延后刷新语义。
+  - [x] 4B-3：迁移刷新后的前台会话恢复与 Agent 恢复启动协调；保持前台运行、排队消息和后台任务的原有启动顺序与隔离语义。
+- [x] 4C：新增 `src/features/branches.js`，迁移分支创建、stats/usage 继承、父子切换、分支树构建与渲染，并兼容只含 `_parentId` 的列表摘要。
+
 #### 拆分内容
 
 - `state.js`
@@ -283,7 +293,7 @@ code/
 
 #### 拆分顺序
 
-1. `model-stream.js`
+1. `model-stream.js` / `model-request.js`
 2. `tools.js`
 3. `permissions.js`
 4. `questionnaire.js`
@@ -299,6 +309,49 @@ code/
 - 计划模式、接受编辑模式和完全访问模式的行为不能因模块化改变。
 - 问卷与权限继续是两个独立的等待通道。
 
+#### 当前进度
+
+- [x] 5A-1：新增 `src/agent/model-stream.js`，抽离 SSE 行解析、OpenAI / Anthropic / Responses 文本与思考增量提取、工具调用分片合并、模型请求错误标准化、模型访问失败分类和原生工具兼容降级判断。
+- [x] 5A-2a：抽离模型轮次纯累加器，统一思考、正文、工具分片、usage 引用和完成/错误事件，消息投影、账本、检查点与 Runtime ID 仍由 `app.js` 编排。
+- [x] 5A-2b：抽离可测试的 SSE 数据读取器，覆盖任意 UTF-8 字节分块、同块多帧、CRLF/keepalive 和无末尾换行尾帧；`app.js` 删除重复尾缓冲并只保留一个 `[DONE]` 原子提交出口。
+- [x] 5A-3：新增 `src/agent/model-request.js`，抽离请求消息映射、原生工具调用序列化、工具调用/结果配对、孤立结果降级、未完成调用清理和非原生工具回退格式；普通请求、服务端 Agent、后台子任务与会话压缩共享同一纯边界。
+- [x] 5A-4：扩展 `src/agent/model-request.js`，抽离固定请求字段、系统消息插入、工具配置以及 Claude thinking、OpenAI reasoning effort、Gemini reasoning effort 的纯装配；`app.js` 仅传入已经解析的输入。
+- [x] 5A 保持请求上下文选择、项目上下文与系统提示词异步加载、UI 配置读取、`_callModelOnceAttempt()`、请求发起、`AgentRuntime.openSseResponse()`、Abort/读取错误分类、usage 账本、消息/DOM 投影、运行检查点和网络恢复状态在原所有者中，没有改变 JSONL、API、SSE、工具协议或 AgentRun 事件。
+- [x] 5A 收口审计确认剩余模型调用代码均为异步准备或副作用编排；删除无调用的 `isTransientModelError()` 和无效消息构造导入，补齐 Responses reasoning、完整工具调用和读取器冻结测试，不再为减少行数继续搬迁模型调用主体。
+- [x] 5B-1：新增 `src/agent/tools.js`，抽离 `parseJsonLoose()`、`normalizeNativeToolCall()` 和 `normalizeToolCallList()`；复用 `model-request.js` 的 `buildNativeToolCallMessage()`，保持工具 ID、参数覆盖、索引顺序、空名称过滤和输入不可变语义。
+- [x] 5B-1 保持静态 `nativeTools` schema、`toolPolicy` / `getNativeTools()`、`formatToolCall()` / `formatToolResult()`、权限、问卷、网络、持久化、UI 投影和真实工具执行在原所有者中；没有修改服务端、JSONL、API 或工具协议。
+- [x] 5B-2：将前端 15 项静态 `nativeTools` schema 原样迁入 `src/agent/tools.js`，以序列化哈希固定完整内容，并覆盖名称顺序、过滤不修改源数组以及问卷、命令、Memory 三处关键兼容差异；`toolPolicy` 与 `getNativeTools()` 仍由 `app.js` 负责。
+- [x] 5B-2 不统一前后端定义：服务端 Agent 只采用前端传入的工具名称并从 `SERVER_TOOL_REGISTRY` 重新取得执行 schema；直接代理兼容路径继续使用前端定义。没有修改 `server.py`、JSONL、API、工具协议、权限或工具执行。
+- [x] 5B-3：只读收口确认剩余工具选择属于权限策略，结果摘要属于 UI/i18n，授权、持久化、服务端事件桥接与真实执行属于副作用编排；不再为减少行数迁入 `tools.js`。
+- [x] 5B-3 删除 `app.js` 中已经由 `src/ui/messages.js` 承接且无引用的旧工具渲染表、状态/目标/结果摘要辅助函数和单条/分区渲染函数，共减少 159 行；保留仍由消息模块注入使用的 `_toolActionLabel()`，并增加源码所有权回归护栏。
+- [x] 5B 正式结束：`tools.js` 保持纯 schema 与调用标准化边界，权限、问卷、网络、持久化、UI 投影和真实工具执行均未改变；下一阶段进入 `permissions.js` 只读盘点。
+- [x] 5C-1：新增 `src/agent/permissions.js`，抽离四种权限模式的静态工具策略、`getAllowedToolNamesForProfile()` 与 `executionOwnerForPermissionProfile()`；模块不读取 DOM、state、网络或持久化状态，每次返回独立 `Set`。
+- [x] 5C-1 保持 read/plan/accept/bypass 工具名称与顺序、未知模式回退到 accept 工具集合、未知执行所有者回退到 browser，以及服务端注册表二次筛选行为不变；授权队列、确认面板、权限提示文本、问卷、恢复和真实执行均未迁移。
+- [x] 5C-2：Git 历史与全仓引用审计确认，`isToolAllowed()`、`shouldAskBeforeTool()` 和 `requestAuthorization()` 在 `b26a0fb` 删除旧浏览器 Agent 执行循环后已失去全部调用方；同步删除只由旧请求入口使用的 `finishLocalAuthorizationRequest()` 和 `resolveAuthorization()` 中不可达的非 serverAgent 分支。
+- [x] 5C-2 保持 `requestServerAgentAuthorization()`、服务端授权提交、确认面板 DOM、后台任务、旧会话恢复、持久化和通知链不变；旧本地授权 Promise 从未形成可恢复数据，因此无需迁移，并增加旧代码不得回流的源码护栏。
+- [x] 5C-3：扩展 `src/agent/permissions.js`，迁移四种权限提示、授权请求序列化、按会话筛选待授权项和稳定分组四项纯逻辑；`pendingAuthorizations()` 保留为 `state.authorizationRequests` 适配器，`restoreAuthorizationRequest()` 与所有授权副作用继续由 `app.js` 编排。
+- [x] 5C-3 固定提示文本、未知模式无提示、瞬态字段剔除、JSON 深拷贝、会话隔离、输入顺序和引用保持语义；未修改 JSONL、API、AgentRun、问卷、授权面板 DOM 或真实工具执行。浏览器真实授权流程通过，测试中发现的模式预览即时同步问题记入 TODO，未扩大本批范围。
+- [x] 5D-1：新增 `src/agent/questionnaire.js`，抽离 `normalizeUserInputQuestions()` 与 `serializeUserInputRequest()` 两项纯逻辑；`app.js` 继续生成请求 ID、会话 ID、默认标题和时间，并持有问卷状态、恢复、DOM、持久化、通知与服务端提交副作用。
+- [x] 5D-1 固定最多 3 个问题、最多 8 个选项、类型与字段默认值、无效问题过滤、pending 初态、瞬态字段剔除、JSON 深拷贝和输入不可变语义；未修改前后端 schema 差异、JSONL、API、AgentRun、授权通道或旧会话兼容完成分支。
+- [x] 5D-2：扩展 `src/agent/questionnaire.js`，迁移答案文本和提交结果构造；`app.js` 仅保留传入 `t("questionCanceled")` 的本地化适配器，四个结果调用点和完成时序不变。
+- [x] 5D-2 固定文本 trim、选项标签映射、未知值回退、用户选择顺序、`、`/`：` 分隔符、取消与空答案回退、`values`/`text` 的 undefined 序列化、`other` trim 和选择数组隔离语义；未统一前后端取消文案，未修改 `/input`、旧会话兼容结果或问卷 UI。
+- [x] 5D-3：收口审计确认剩余问卷代码均为运行时元数据、本地化适配、状态、DOM、持久化、通知、AgentRun 提交或旧会话兼容副作用，不再为减少行数继续迁移。
+- [x] 5D-3 新增测试护栏，固定恢复去重、服务端提交、旧浏览器问卷 reload 后工具结果重建、`resumedFromUserInput` 恢复、DOM/持久化所有权和纯模块禁止读取全局副作用；5D 正式收口。
+- [x] 5E-1：新增 `src/agent/subagents.js`，抽离子 Agent 私有 system prompt、上下文数据构造、显式 `/parallel` 命令解析和后台任务提示词构造；`app.js` 仅保留运行时授权 ID 生成及既有副作用接线，由 10,268 行降至 10,247 行。
+- [x] 5E-1 固定父上下文配置继承、独立消息/usage 账本、授权标签空白折叠与 24 字符上限、禁用递归 `task`/`request_user_input`、主任务摘要最多 150 字符、输入工具数组不变及显式并行语义；未修改服务端 Child AgentRun、后台调度、AgentRuntime、授权、持久化、JSONL、API 或恢复协议。
+- [x] 5E-2a：扩展 `src/agent/subagents.js`，抽离后台任务 timeout 常量、checkpoint 序列化、提交起点耗时和 usage 合并纯计算；`app.js` 继续提供当前时间、保留 stats 原对象并负责耗时格式化与状态写入，由 10,247 行降至 10,213 行。
+- [x] 5E-2a 固定旧字段默认值、父上下文目录回退、`rootPaths` 数组隔离、瞬态字段剔除、`cacheWrite` 仅在子 usage 明确报告时累加、输入对象不变、排队时间优先和负耗时归零语义；未迁移 reload job 装配、Promise/resolver、调度、去重、AgentRuntime、授权或持久化。
+- [x] 5E-2b：扩展 `src/agent/subagents.js`，抽离 reload checkpoint 到 runtime job 的纯字段规范化；复用 checkpoint 默认值边界并保留未知字段，`app.js` 仅提供消息文本、当前模型和两个显式时间回退，由 10,213 行降至 10,202 行。
+- [x] 5E-2b 固定 `id`/`clientRequestId` 字符串化、session 归属、旧文本与模型回退、cursor/AgentRun/时间恢复、强制 `pending`、`restored`、未知字段保留、`rootPaths` 隔离和输入不变语义；Promise/resolver、消息补建、既有结果去重、checkpoint 移除、dispatcher 注册、保存和调度继续由 `app.js` 负责。
+- [x] 5E-3：抽离后台结果严格判重和成功/异常结果消息构造，统一 `jobId`、AgentRun、错误状态、父任务排序、模型、时间、耗时与可选 usage 元数据；成功、异常和 reload 三处复用同一判重规则，`app.js` 由 10,202 行降至 10,176 行。
+- [x] 5E-3 收口审计确认剩余代码均为运行时上下文适配、AgentRuntime、Abort、授权等待、Promise、消息写入、dispatcher、上传、持久化或 UI 副作用；以源码所有权护栏固定边界，不迁移 `createBackgroundServerContext()`、`runBackgroundSubAgentJob()`、`pumpBackgroundDispatcher()`、dispatch 或 restore 编排，5E 正式结束。
+- [x] 5F-1：新增 `src/agent/compaction.js`，抽离压缩摘要识别、最新摘要后的主上下文选择和模型上下文上限三项纯策略；`app.js` 只注入后台/排队消息隔离谓词，并继续负责请求准备、状态和 UI 副作用，由 10,176 行降至 10,152 行。
+- [x] 5F-1 固定无摘要、多个摘要取最新、detached 消息排除、输入数组不变及 Claude/OpenAI/DeepSeek/Gemini/未知模型上限语义；未修改 JSONL、API、压缩按钮、压缩结果、消息时序或持久化。用户补充 5F-2 必须保留最新几轮完整上下文，工具调用与结果不可拆分。
+- [x] 5F-2：扩展 `src/agent/compaction.js`，抽离导入边界分组、API 消息映射、三轮完整上下文选择、服务端保留数兼容、摘要请求裁剪、Token 节省估算和摘要消息构造；`app.js` 只注入映射/文本/隔离函数并执行原有网络、归档、状态、DOM 和保存副作用，由 10,152 行降至 10,117 行。
+- [x] 5F-2 默认至少保留最近 3 个非 detached 用户轮次，并在最近 6 条 API 可见消息落入更早轮次时向前对齐到该轮用户消息，确保工具调用、工具结果和最终回复不在保留边界处拆开；摘要请求只携带导入边界、真正移除的 API 前缀和服务端公式所需的 2 至 6 条尾部，未新增 `/api/compact` 字段或修改服务端。
+- [x] 5F 收口确认剩余手动压缩代码均为配置、确认框、网络、归档、状态替换、DOM、保存和错误提示副作用，不再为减少行数强行迁移；随后作为独立产品增强完成 90% 自动压缩、同一 AgentRun 中途续行、上下文超限单次恢复和执行轨迹投影，未改变 5F 的纯策略所有权。
+- [ ] 5G：只读审计 `agent-loop.js` 的安全职责边界；仅迁移可独立测试且不改变运行时副作用时序的状态转换，若不存在稳定边界则保留主循环编排并直接完成阶段 5 收口。
+
 #### 验收
 
 - 纯对话、工具调用、编辑审批、命令执行、问卷和子 Agent 均正常。
@@ -306,7 +359,7 @@ code/
 - 网络断开能显示重连状态并恢复原服务端流。
 - 子 Agent 并行 usage 只合并一次，不打断主任务。
 - 自动压缩阈值和压缩后上下文行为不变。
-- `app.js` 最终只保留约 500 至 1,000 行装配代码。
+- `app.js` 保留跨领域装配、初始化、运行时副作用协调和必要的薄适配器；行数仅作为观察指标，不为达到数值目标迁移高耦合代码。
 
 ### 阶段 6：引入 esbuild 并清理兼容层
 
@@ -338,7 +391,7 @@ code/
 6. 删除 `app.js` 中旧实现，确认不存在重复定义。
 7. 再跑一次全量测试。
 8. 单独提交 Git，提交信息只描述本次抽离范围。
-9. 在 `CHANGELOG.md` 记录实际完成内容和验证结果。
+9. 在当天开发日志中记录实际完成内容和验证结果，并更新 `docs/development-log/README.md` 索引。
 10. 更新本计划中的进度与下一批入口。
 
 禁止一次提交同时完成“大量搬迁 + 行为改造 + UI 调整”。
@@ -389,21 +442,20 @@ code/
 
 满足以下条件后，`app.js 模块化` 才可在 `TODO.md` 标记完成：
 
-- `app.js` 不超过约 1,000 行，只包含装配、初始化和顶层事件协调。
+- `app.js` 中剩余职责均能解释为跨领域装配、初始化、顶层事件协调、运行时副作用编排或必要薄适配器；行数不是硬性完成门槛。
 - 业务实现已进入职责清晰的模块，模块间无循环依赖。
 - 除 `window.Code` 和必要的第三方库外，不新增散落全局变量。
 - 开发版、正式 EXE、更新后重启均能加载完整前端资源。
 - 旧会话、旧配置和现有 New API 接口保持兼容。
 - 自动化全量测试通过。
 - 测试矩阵中的关键浏览器场景通过。
-- `CHANGELOG.md` 记录各阶段实际结果，`TODO.md` 状态与代码一致。
+- 按日期开发日志记录各阶段实际结果并同步索引，`TODO.md` 状态与代码一致。
 
 ## 10. 推荐的下一步
 
-下一批进入阶段 4，但先做会话状态和持久化的边界盘点，不直接搬迁 Agent 执行链：
+阶段 5A 至 5F 已按职责收口。下一批只读审计 5G `agent-loop.js`：
 
-1. 列出 `state` 中当前查看会话、后台运行会话、消息缓存、累计 usage、最后上下文用量、运行检查点和保存队列的读写方。
-2. 明确 `state.js`、`persistence.js`、`sessions.js` 与 `branches.js` 的依赖方向和最小公开接口，优先提取纯选择器与序列化函数。
-3. 为新建、切换、刷新恢复、后台继续输出、分支继承、并发保存和旧会话默认值补齐模块级护栏。
-4. 每次只迁移一个会话领域，保持 JSON 格式、API 路径、SSE、AgentRun 和工具副作用协议不变。
-5. 完成语法、定向、全量和浏览器冒烟验证后单独提交，再进入下一批会话拆分。
+1. 盘点主循环中的纯状态转换、终态判定、恢复判断与跨模块副作用编排，先确认所有权再决定是否创建模块。
+2. 只为能够独立测试、接口稳定且不引入循环依赖的逻辑建立纯边界；AgentRuntime、网络、授权、消息写入、持久化和 UI 时序继续由现有编排层负责。
+3. 若审计确认没有足够安全的独立边界，则以护栏测试固定现有所有权并结束阶段 5，不以行数目标强行搬迁高耦合代码。
+4. 导入边界在最新摘要后的模型可见语义、模型真实上下文上限等产品兼容议题继续按 `TODO.md` 独立处理；阶段 6 esbuild 后置并单独确认。

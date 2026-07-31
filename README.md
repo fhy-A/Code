@@ -173,10 +173,10 @@ Code/
 ├── data/skills/             # 随程序分发的 Skills
 ├── assets/                  # Code 品牌与界面资产
 ├── tests/                   # 自动化测试与测试夹具
-├── docs/                    # 使用、迁移、架构计划与版本说明
+├── docs/                    # 使用、迁移、架构计划、开发日志与版本说明
+│   └── development-log/     # 开发日志索引、按日期记录与冻结历史归档
 ├── build_exe.py             # PyInstaller 单文件构建入口
 ├── VERSION                  # 当前版本号
-├── CHANGELOG.md             # 已完成开发记录
 └── TODO.md                  # 尚未完成的路线清单
 ```
 
@@ -215,14 +215,13 @@ python build_exe.py
 
 ## 文档与路线
 
-- [使用指南](docs/GUIDE.md)
 - [v0.5.7 发布说明](docs/releases/v0.5.7.md)
 - [v0.5.6 发布说明](docs/releases/v0.5.6.md)
 - [v0.5.4 发布说明](docs/releases/v0.5.4.md)
 - [会话 JSONL 迁移说明](docs/session-jsonl-migration.md)
 - [服务端 Agent 循环迁移计划](docs/SERVER_AGENT_LOOP_PLAN.md)
 - [前端模块拆分计划](docs/APP_JS_SPLIT_PLAN.md)
-- [开发日志](CHANGELOG.md)
+- [开发日志索引](docs/development-log/README.md)
 - [待办与路线](TODO.md)
 
 ## 当前边界

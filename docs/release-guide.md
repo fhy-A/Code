@@ -46,7 +46,7 @@ python release.py 0.5.8 --skip-tests
 |------|----------|
 | 工作区干净 | `git status` — 不应有未提交的本阶段改动 |
 | 上一阶段已提交 | `git log --oneline -3` — 确认最近的提交是上一个功能阶段 |
-| CHANGELOG.md 已更新 | 本版本的所有改动已记录到 `CHANGELOG.md` |
+| 开发日志已更新 | 本版本的所有改动已记录到当天日期文件，且 `docs/development-log/README.md` 索引已同步 |
 | TODO.md 已更新 | 已完成条目已移除，新发现的待办已加入 |
 | GitHub CLI 已安装 | `gh --version` |
 | GitHub CLI 已登录 | `gh auth status` |
@@ -83,7 +83,7 @@ python release.py 0.5.8
 - 打开 `docs/releases/v0.5.8.md`
 - 把 `[发布说明待补充 -- 请在此描述本版本的主要改动]` 替换为实际改动描述
 - 默认使用中文撰写，仅保留模型名、参数名、错误码、命令和哈希等必要英文技术字段
-- 以“上一标签至当前标签”的 Git 提交和 `CHANGELOG.md` 为依据，只记录本次实际包含的改动，不写入尚未交付的计划
+- 以“上一标签至当前标签”的 Git 提交和开发日志索引及相关日期文件为依据，只记录本次实际包含的改动，不写入尚未交付的计划
 - 确认全文不存在“待补充”、示例版本号或其他占位文案
 - 保存文件
 
@@ -232,5 +232,5 @@ gh release create v0.5.8 dist/Code-v0.5.8.exe `
 | `Code-vX.Y.Z.spec` | PyInstaller 打包配置 |
 | `build_exe.py` | PyInstaller 构建入口 |
 | `docs/releases/vX.Y.Z.md` | 单版本发布说明 |
-| `CHANGELOG.md` | 所有版本的开发记录 |
+| `docs/development-log/README.md` | 开发日志索引；详细记录位于同目录的日期文件，早期记录位于 `archive/` |
 | `TODO.md` | 待办路线 |

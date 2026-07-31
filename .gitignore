@@ -1,5 +1,6 @@
 # Data (user sessions, backups, attachments — runtime state)
 data/sessions/
+data/session-archive/
 data/agent-runs/
 data/attachments/
 data/file-backups/

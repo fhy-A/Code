@@ -1,191 +1,120 @@
-# 开发交接快照
+# 活动任务交接
 
-> **上次更新**：<!-- FILL: YYYY-MM-DD -->
->
-> **事实源**：`CHANGELOG.md`（已完成）和 `TODO.md`（未完成）是唯一事实源。本文件只做导航和模板——开始任何工作前必须先核对 Git 现场状态，与本文件冲突时以现场为准。
->
-> **使用方式**：每次任务交接时，填写下方的 `<!-- FILL: ... -->` 占位字段，其他内容保持不动。稳定章节只有在架构或规则真正变化时才修改。
+## 元数据
 
----
+- 状态：`active`
+- 任务 ID：`upstream-channel-formal-admission`
+- 任务名称：现有上游渠道正式准入与持续评估
+- 任务范围：workbar 已启用的 12 条上游渠道，不新增模型分组，不重新录入基础价
+- 最近执行 Agent：Codex（可由 Claude Code 或其他遵守项目规则的 Agent 接续）
+- 上次更新：2026-07-30 22:30（Asia/Shanghai）
+- 当前分支：`master`
+- 记录时 HEAD：`d001d08 文档：记录初始令牌自动分组验收`
 
-## 一、当前仓库状态
+## 目标与验收条件
 
-> 每次交接必填。运行以下命令获取最新值后填入：
-> ```powershell
-> git log -1 --oneline
-> git branch --show-current
-> git status --short
-> ```
+### 目标
 
-| 项目 | 值 |
-|------|-----|
-| 项目目录 | `C:\Users\Admin\Desktop\api中转站\code` |
-| 当前分支 | `<!-- FILL: master / main / feature-branch -->` |
-| HEAD 提交 | `<!-- FILL: git log -1 --oneline -->` |
-| 发布基线 | `<!-- FILL: vX.Y.Z -->` |
-| 未跟踪/未提交文件 | `<!-- FILL: 列出需要注意的未跟踪文件，无则写"无" -->` |
+按模型身份、跨时段稳定性、并发、SSE、Code 工具闭环、错误率、账单一致性和故障切换累计证据，最终给出主渠道、备份、试用、观察或淘汰结论，以及优先级、权重和充值建议。
 
-### 快速校验命令
+### 验收条件
 
-任何 Agent 接手后先执行：
+- 试用候选：至少 90 次请求、3 个自然日、3 个本地时段、有效成功率不低于 95%；
+- 备份候选：至少 200 次请求、5 天、并发至少 2、有效成功率不低于 97.5%，并完成故障切换演练；
+- 主渠道候选：至少 500 次请求、7 天、并发至少 5、有效成功率不低于 99%，并完成账单和商务复核；
+- 一次短测或后台连通测试不得作为正式准入。
 
-```powershell
-Set-Location "C:\Users\Admin\Desktop\api中转站\code"
-Get-Content CHANGELOG.md -Encoding utf8 -TotalCount 120
-Get-Content TODO.md -Encoding utf8
-git status --short
-git log -8 --oneline
-```
+## 事实源
 
----
+- 已完成事实：`docs/development-log/README.md` 及索引中的最新日期日志；
+- 未完成事项：`TODO.md` 的“完成当前渠道的正式准入与持续评估”；
+- 人工测试规范：`../../模型定价/渠道采购体系/规范/06_Workbar人工渠道模型测试与协作SOP.md`；
+- 首轮汇总：`../../模型定价/渠道采购体系/outputs/20260730/workbar-code-hard-gate-round1/round1-summary.md`；
+- DeepSeek 官方对照：`../../模型定价/渠道采购体系/outputs/20260730/workbar-code-hard-gate-round1/deepseek-official-comparison.md`；
+- Git 现场：进入 `code` 后运行 `git status --short`、`git log -8 --oneline`。
 
-## 二、项目不变量
+> 本交接只记录尚未完成任务的进行中差量。与 Git、开发日志、TODO、采购体系记录或可复现结果冲突时，以现场为准并修正本文件。
 
-> 以下描述项目的稳定架构、技术栈和核心约定。这些内容不常变化——只有在新功能改变了系统设计时才更新对应条目。
+## 已完成
 
-### 技术栈与入口
+- 模型人民币基础价、分组倍率和模型广场反算已经完成；本阶段不得重复录入基础价或重新划分模型组。
+- 2026-07-30 20:31—21:35 完成单一晚间窗口的首轮 H1 精确指令、H2 流式、H3 Code 文件工具闭环及后台费用核对。
+- 12 条渠道首轮分类：
+  - 硬门槛通过 4 条：`BoxYing-Codex-Plus`、`BoxYing-Codex-Premium`、`UUAPI-Domestic-OpenAI`、`deepseek官方`；
+  - 条件通过 / 观察 6 条：`ByteCatCode-Codex-Value`、`ApiNebula-Codex`、`BoxYing-Claude-Official`、`ApiNebula-Grok`、`ApiNebula-Gemini-Antigravity`、`ApiNebula-Gemini-GCP`；
+  - 未通过 2 条：`Unity2-Claude-Max`、`ApiNebula-Claude-Kiro`。
+- DeepSeek 官方的 `deepseek-v4-flash` 和 `deepseek-v4-pro` 均通过本轮精确指令、真实流式和文件读取工具闭环；workbar 用户侧账单可以按模型基础价、缓存价和 `1.18x` 倍率反算。
+- `BoxYing-Codex-Plus` 和 `BoxYing-Codex-Premium` 定向测试时临时改为优先级 20，用户已确认恢复为 0。
+- 已建立可复用的人工测试 SOP、单轮记录模板、首轮汇总和 DeepSeek 对照报告。
 
-| 项 | 说明 |
-|----|------|
-| 服务入口 | 正式版/普通源码入口为 `server.py`；隔离开发入口为 `dev_server.py` |
-| 前端 | 原生 JavaScript / HTML / CSS，主状态在 `app.js`，部分功能已迁入 `src/` |
-| 打包 | PyInstaller 单文件 EXE（`build_exe.py`），入口 `launcher.py` |
-| 运行实例 | 打包正式版固定为 `127.0.0.1:3010` / `Code`；`启动Code开发版.bat` 默认为 `127.0.0.1:3011` / `Code Dev` |
-| 数据目录 | 正式 EXE 用 `%USERPROFILE%\.code\`，3011 开发实例用仓库 `data/` |
-| 模型网关 | 固定为 `https://workbar.ai`，前端不展示或编辑 Base URL |
+## 当前进行中
 
-### 正式版与开发版隔离
+- 等待用户选择下一个不同本地时段后继续人工扩样；
+- 保持首轮结论为“硬门槛筛查”，不提前升级为试用、备份或主渠道；
+- 当前不执行浏览器操作，由用户负责 workbar 选择、发送消息、Key 和截图。
 
-- `Code-v*.exe`、正式快捷方式和自动更新始终使用 3010；即使父进程继承了开发环境变量，冻结构建也会强制恢复正式端口和 `Code` 标识。
-- `dev_server.py` 设置独立的端口、数据目录、重启入口和 `dev` 实例模式；默认由 `启动Code开发版.bat` 启动，可用 `CODE_DEV_PORT`、`CODE_DEV_DATA_DIR` 覆盖。
-- 3010 与 3011 是不同浏览器来源，workbar 登录态和浏览器本地配置不共享。诊断“平台中没有可用的 API Key”时，必须区分平台登录/令牌读取状态与本机已缓存 Key 状态。
-- 开发实例的网页名称、任务通知标题与托盘悬停提示显示 `Code Dev`；正式版既有名称、菜单和图标保持不变。
+## 尚未完成
 
-### 发版
+- 上午、午间/高峰、晚间及必要的低谷跨时段复测；
+- 3 天试用、5 天备份和 7 天主渠道所需样本；
+- 并发、限流、退避、首请求成功率与最终成功率统计；
+- 故障切换和独立故障域验证；
+- workbar 与供应商上游账户逐单账单核对；
+- DeepSeek 官方高峰期双倍扣费规则；
+- 最终渠道等级、优先级、权重和充值建议。
 
-- **必须使用 `release.py`**，不得手动改版本号。用法详见 `docs/release-guide.md`。
-- Agent 发版加 `--yes`；推送或 Release 失败时立刻报告用户。
-- 发布说明、更新摘要和开发日志默认使用中文；发布前检查无占位文案，并确认内容只覆盖上一标签至当前标签之间的实际改动。
+## 修改现场
 
-### 协作规则（详见 `AGENTS.md` 和 `CLAUDE.md`）
+### 本任务相关
 
-1. 新需求、优化建议或 Bug 先进行只读调查并给出初步方案；用户明确同意前不得修改业务代码，实施范围发生明显变化时必须重新确认。
-2. 诊断请求默认只读；本地提交可按阶段规则自动完成，推送、标签、发布、删除数据和线上配置修改必须获得明确授权。
-3. 临时测试参数必须在结束前恢复、核对并报告，不得进入提交或发布。
-4. 同一级 `AGENTS.md` 与 `CLAUDE.md` 的共同规则保持同步；根目录与子项目的相同全局规则也要检查同步。
-5. 会话格式、持久化数据、工具协议或配置结构变更，方案必须包含兼容、迁移和回退方式。
-6. 一次只做一个阶段，不混入下一阶段功能。
-7. 先验证后提交：测试、语法检查、`git diff --check` 全过才提交。
-8. 视觉、时序、交互改动必须人工验收后才提交。
-9. 每阶段结束更新 `CHANGELOG.md` 和 `TODO.md`，独立 `git commit`。
+- `TODO.md`：保留渠道正式准入主线，并新增消息流垂直间距待办；
+- `AGENTS.md`、`CLAUDE.md`：新增新会话自助启动和跨 Agent 活动交接规则；
+- `docs/development-handoff.md`：本活动交接；
+- `docs/development-handoff-template.md`：跨 Agent 中立模板；
+- `docs/development-log/README.md` 与当天日志：协作机制和阶段事实索引；
+- 项目根目录 `AGENTS.md`、`CLAUDE.md`：子项目路由和活动交接规则；
+- `../../模型定价/渠道采购体系/`：人工测试 SOP、模板、首轮报告、截图和索引。
 
-### i18n 约定
+### 共享工作区既存修改
 
-- 所有浏览器端翻译统一在 `src/core/i18n.js`，不得在业务文件中新建局部语言字典。
-- 新增文案必须在 `zh` 和 `en` 区域用同一 key 成对添加。
-- 修改后运行 `node --check src/core/i18n.js` 和 `pytest tests/test_frontend_modules.py tests/test_p2_coverage.py -q`。
+记录时 `code` 工作区已有大量未提交文档迁移和发布资料修改，包括 `CHANGELOG.md`、`docs/GUIDE.md` 删除、多个发布说明和 `release.py`。接手 Agent 必须重新运行 `git status --short`，不得恢复、清理或顺带提交不属于当前阶段的改动。
 
-### AgentRun 与会话
+### 临时配置
 
-- 四种权限模式的任务均由服务端持久 AgentRun 执行；浏览器负责 SSE 观察、问卷和授权交互。
-- 主任务运行时的新消息 FIFO 排队，不自动转为后台任务；明确并行操作（`/parallel`）才创建后台 AgentRun。
-- 模型 `task` 工具创建子 AgentRun，同一轮次最多并发 3 个，不可递归委托。
-- 会话使用 JSONL 持久化；分支会话复制父会话消息后独立保存。
-- 刷新/切换/新建会话不取消其他正在运行的 AgentRun。
+- BoxYing 两条 Codex 渠道临时优先级：已恢复为 0；
+- 其他线上优先级、权重和余额：未修改；
+- 浏览器与 Key：始终由用户操作，Agent 不读取真实 Key。
 
-### Skills 依赖管理
+## 验证结果
 
-- `dependencies.json` 以能力为单位声明 Python/Node/系统依赖。
-- Python 与 Node 依赖只能在 Code 管理的隔离运行时（`data/runtime`）中、经用户授权后安装。
-- 系统级依赖只提供 `installHint`，不由模型直接执行系统包管理器。
-- 已阻止：`winget`/`choco`/`apt`、PATH 修改、全局包装器、相同命令重复执行超过两次。
+| 检查 | 结果 |
+|---|---|
+| 首轮人工硬门槛 | 4 条通过、6 条观察、2 条未通过 |
+| DeepSeek 官方对照 | 两个模型 H1/H2/H3 通过 |
+| workbar 用户侧费用 | 首轮合计 ¥1.096064；只代表 workbar 费用，不代表采购账户实际扣费 |
+| 临时优先级恢复 | 用户确认两条 BoxYing Codex 渠道均恢复为 0 |
+| 正式准入 | 尚未达到任何渠道的正式试用、备份或主渠道门槛 |
 
-### 安全边界
+## 阻塞与待授权
 
-- workbar Access Token、API Key、Authorization 头不得写入 AgentRun 状态、交接文档、测试输出或 Git。
-- 不得使用 `git reset --hard`、`git checkout --` 或其他破坏性命令处理共享工作区。
-- `data/` 包含本地会话、授权状态和备份；除非任务明确要求，不要批量清理。
-- Docker 构建优先使用 `--pull=false`。
+- 当前无技术阻塞；下一轮人工测试等待用户选择合适时段。
+- 线上渠道、模型、分组、倍率、优先级、权重和余额修改必须获得明确授权。
+- Git 推送、标签和发布必须获得明确授权。
+- 不得读取、显示或写入真实 API Key、Access Token、Authorization、Cookie。
 
----
+## 准确下一步
 
-## 三、本次交接备注
+1. 新 Agent 先读取开发日志索引、最新日期日志、`TODO.md`，并核对 Git 现场；
+2. 阅读人工测试 SOP 和首轮汇总，不重新执行已完成的晚间首轮；
+3. 向用户确认当前本地时段和本轮可测试范围；
+4. 每次只发送一个包含“workbar 令牌、分组、模型、测试消息”的测试卡；
+5. 用户回传前台结果、流式体感和后台记录后，分析方核算并追加跨时段证据；
+6. 当渠道准入阶段全部完成时，把最终事实写入开发日志和 TODO，随后移除本活动交接文件。
 
-> 每次交接填写。描述当前阶段目标、特殊注意事项、已知问题或临时约束。
+## 禁止重复或不得触碰
 
-### 当前建议推进
-
-<!-- FILL: 从 TODO.md 中摘取本次最优先的 1-3 项任务，简要说明目标和边界 -->
-
-1. **<!-- FILL: 任务名 -->**：<!-- FILL: 目标和范围 -->
-2. **<!-- FILL: 任务名 -->**：<!-- FILL: 目标和范围 -->
-
-### 特殊注意事项
-
-<!-- FILL: 本次交接特有的警告、约束或背景信息。没有则写"无"。 -->
-
-### 已知阻塞
-
-<!-- FILL: 当前有哪些阻塞项？依赖什么条件？没有则写"无"。 -->
-
----
-
-## 四、验证流程
-
-每个阶段结束前必须完成以下验证，再提交。
-
-### 自动检查清单
-
-```powershell
-# Python 编译检查（按实际改动选取文件）
-python -m py_compile server.py launcher.py build_exe.py
-
-# JavaScript 语法检查
-node --check app.js
-node --check agent-runtime.js
-node --check src/core/i18n.js
-
-# 定向测试（按改动范围选取，以下为常用组合）
-python -m pytest tests/test_server.py tests/test_routes.py -q
-python -m pytest tests/test_frontend_modules.py tests/test_p2_coverage.py -q
-
-# 提交前最后一道检查
-git diff --check
-```
-
-### 人工验收条件
-
-以下情况必须交给用户人工确认，不能自行判定通过：
-
-- 视觉变更：布局、颜色、间距、动画
-- 交互变更：焦点行为、键盘导航、拖拽
-- 时序变更：流式显示、加载状态、通知时机
-- 浏览器差异：不同浏览器或窗口尺寸下的表现
-
-### 全量回归
-
-重大变更或发版前运行：
-
-```powershell
-python -m pytest tests -q
-```
-
----
-
-## 五、新任务启动消息模板
-
-> 以下模板可直接粘贴给新 Agent。将 `{...}` 占位符替换为当前值后使用。
-
-```text
-请接手 {项目目录} 的后续开发。
-
-开始前完整阅读 AGENTS.md、CHANGELOG.md、TODO.md 和 docs/development-handoff.md，
-并用 git status --short、git log -8 --oneline 核对现场状态。
-CHANGELOG.md 是已完成改动的事实源，TODO.md 是未完成事项的事实源；
-交接快照与现场冲突时以现场为准。
-
-当前建议推进：{简要描述本次最优先任务}。
-
-一次只推进一个阶段；自动测试充分时自行验证、更新 CHANGELOG/TODO 并提交；
-涉及界面和时序时先给出人工测试步骤，等确认后再提交。
-```
+- 不重复录入模型基础价，不重新划分现有模型组；
+- 不把一次短测、重试后的最终成功或后台连通测试写成正式准入；
+- 不操作用户浏览器，不读取或输出真实 Key；
+- 不覆盖共享工作区的既存修改；
+- 未经授权不改线上配置、不推送、不打标签、不发布。

@@ -497,7 +497,7 @@ python build_exe.py
 
 ## 相关记录
 
-- 具体实现时间线与文件级改动见 `CHANGELOG.md`。
+- 具体实现时间线与文件级改动见 `docs/development-log/README.md` 索引及其日期文件。
 """
 
 
