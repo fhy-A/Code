@@ -6742,6 +6742,7 @@ async function runBackgroundSubAgentJob(job) {
       maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: job.permissionProfile,
       cwd: subCtx.cwd || "",
+      contextLimit: getModelContextLimit(job.model || getSelectedModel()),
       signal: subCtx.run.abortController.signal,
     });
     job.agentRunId = String(created.agentRunId || "");
@@ -7188,6 +7189,50 @@ function projectAgentModelCompleted(ctx, event) {
   ctx.run.runtimeRunId = "";
 }
 
+function findAgentCompactionProjection(ctx, compactionId) {
+  return ctx.messages.find((msg) => (
+    msg?.meta?.agentRunId === ctx.agentRunId
+    && msg?.meta?.kind === "auto-context-compaction"
+    && msg?.meta?.compactionId === compactionId
+  ));
+}
+
+function projectAgentContextCompaction(ctx, event, status) {
+  const data = event?.data || {};
+  const compactionId = String(data.compactionId || "");
+  if (!compactionId) return;
+  let projection = findAgentCompactionProjection(ctx, compactionId);
+  if (!projection) {
+    projection = {
+      role: "assistant",
+      content: "",
+      streaming: status === "running",
+      _time: String(event?.createdAt || new Date().toISOString()),
+      meta: {},
+    };
+    ctx.messages.push(projection);
+  }
+  projection.streaming = status === "running";
+  projection.meta = {
+    ...(projection.meta || {}),
+    ...agentEventMeta(ctx, event),
+    kind: "auto-context-compaction",
+    compactionId,
+    status,
+    reason: String(data.reason || projection.meta?.reason || "threshold"),
+    estimatedTokensBefore: Number(
+      data.estimatedTokensBefore ?? projection.meta?.estimatedTokensBefore ?? 0,
+    ),
+    estimatedTokensAfter: Number(
+      data.estimatedTokensAfter ?? projection.meta?.estimatedTokensAfter ?? 0,
+    ),
+    compactedMessageCount: Number(
+      data.compactedMessageCount ?? projection.meta?.compactedMessageCount ?? 0,
+    ),
+    errorCode: String(data.errorCode || ""),
+  };
+}
+
 function projectAgentModelRecovery(ctx, event) {
   const data = event?.data || {};
   const runtimeRunId = String(data.runtimeRunId || "");
@@ -7355,6 +7400,13 @@ async function projectAgentEvent(ctx, event) {
   else if (eventType === "model_recovery") projectAgentModelRecovery(ctx, event);
   else if (eventType === "tool_started") projectAgentToolStarted(ctx, event);
   else if (eventType === "tool_completed") projectAgentToolCompleted(ctx, event);
+  else if (eventType === "context_compaction_started") {
+    projectAgentContextCompaction(ctx, event, "running");
+  } else if (eventType === "context_compaction_completed") {
+    projectAgentContextCompaction(ctx, event, "completed");
+  } else if (eventType === "context_compaction_failed") {
+    projectAgentContextCompaction(ctx, event, "failed");
+  }
 
   ctx.agentEventCursor = Math.max(Number(ctx.agentEventCursor || 0), Number(event?.seq || 0));
   ctx.run.agentEventCursor = ctx.agentEventCursor;
@@ -7614,6 +7666,7 @@ async function runServerAgentLoop(ctx) {
       maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: ctx.permissionProfile || "read",
       cwd: ctx.cwd || "",
+      contextLimit: getModelContextLimit(ctx.model || getSelectedModel()),
       signal: ctx.run.abortController.signal,
     });
     ctx.agentRunId = String(created.agentRunId || "");
@@ -7825,7 +7878,13 @@ async function compactConversation() {
       renderMessages();
 
       setStreaming(false, state.sessionId);
-      await saveSessionState(state.sessionId, state.messages, state.stats);
+      await saveSessionState(
+        state.sessionId,
+        state.messages,
+        state.stats,
+        undefined,
+        { persistMessages: true },
+      );
 
     } catch (err) {
 

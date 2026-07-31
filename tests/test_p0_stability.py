@@ -160,7 +160,11 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
             "run.modelResponseStarted = false",
             "markModelResponseStarted(run, sessionId)",
             "function projectAgentModelRecovery(ctx, event)",
+            "function projectAgentContextCompaction(ctx, event, status)",
             'eventType === "model_recovery"',
+            'eventType === "context_compaction_started"',
+            'eventType === "context_compaction_completed"',
+            'eventType === "context_compaction_failed"',
             'return t("modelRecovery"',
         ):
             self.assertIn(expected, APP_SOURCE)

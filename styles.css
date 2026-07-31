@@ -4132,6 +4132,49 @@ body.theme-dark .syn-fn { color: #61afef; }
   width: 100%;
 }
 
+.context-compaction-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.context-compaction-icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  opacity: .78;
+}
+
+.context-compaction-icon::before,
+.context-compaction-icon::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1px;
+  background: currentColor;
+}
+
+.context-compaction-icon::before { top: 4px; }
+.context-compaction-icon::after { bottom: 4px; }
+
+.context-compaction-row.running .context-compaction-icon {
+  color: var(--accent);
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+.context-compaction-row.failed {
+  color: var(--danger);
+}
+
 .completed-run-line {
   display: flex;
   align-items: center;

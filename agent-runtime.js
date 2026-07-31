@@ -129,6 +129,7 @@
     maxRounds,
     permissionProfile = "read",
     cwd = "",
+    contextLimit,
     signal,
   }) {
     return apiJson("/api/agent/runs", {
@@ -145,6 +146,7 @@
         maxRounds,
         permissionProfile,
         cwd,
+        contextLimit,
       }),
       signal,
     });

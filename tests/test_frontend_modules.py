@@ -64,6 +64,7 @@ class TestFrontendCoreModules(unittest.TestCase):
             "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages]",
             compact_source,
         )
+        self.assertIn("{ persistMessages: true }", compact_source)
 
         export_start = APP_SOURCE.index("function exportMarkdown()")
         export_end = APP_SOURCE.index("let sidebarDragState", export_start)
@@ -433,6 +434,7 @@ eval(source);
     payload: {{model: "test-model", messages: [{{role: "user", content: "hi"}}]}},
     keys: [],
     toolBudgets: [{{name: "reading", tools: ["read_file"], limit: 4}}],
+    contextLimit: 128000,
   }});
   process.stdout.write(JSON.stringify(captured));
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
@@ -448,6 +450,7 @@ eval(source);
         self.assertEqual(data["url"], "/api/agent/runs")
         self.assertEqual(data["body"]["clientRequestId"], "background-123")
         self.assertEqual(data["body"]["toolBudgets"][0]["limit"], 4)
+        self.assertEqual(data["body"]["contextLimit"], 128000)
 
     def test_server_agent_questionnaire_uses_durable_submit_and_reload_path(self):
         self.assertIn('name: "request_user_input"', TOOLS_SOURCE)
@@ -5395,6 +5398,16 @@ const groupedStageHtml = feature.projectMessages([
   {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "group-2", outcome: "succeeded"}},
   {role: "assistant", content: "done", _responseTime: "2s"},
 ], {hasActiveRun: false});
+const autoCompactionHtml = feature.projectMessages([
+  {role: "user", content: "continue a long task"},
+  {role: "assistant", content: "checkpoint", meta: {toolCalls: [
+    {id: "compact-tool-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "compact-tool-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "contents", meta: {action: "read_file", toolCallId: "compact-tool-1", outcome: "succeeded"}},
+  {role: "assistant", content: "", meta: {kind: "auto-context-compaction", status: "completed"}},
+  {role: "assistant", content: "final after compaction", _responseTime: "3s"},
+], {hasActiveRun: false});
 const runningStage = feature.renderToolProcessProjection([
   {msg: {role: "assistant", meta: {toolCalls: [
     {id: "running-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
@@ -5476,6 +5489,7 @@ process.stdout.write(JSON.stringify({
   emptyRecoveryHtml,
   operationalHtml,
   groupedStageHtml,
+  autoCompactionHtml,
   runningStage,
   completedCommands,
   completedEdits,
@@ -5557,6 +5571,15 @@ process.stdout.write(JSON.stringify({
         self.assertLess(first_trace_commentary, first_trace_tools)
         self.assertLess(first_trace_tools, trace_end)
         self.assertLess(trace_end, final_answer)
+        auto_compaction_html = data["autoCompactionHtml"]
+        auto_trace_body = auto_compaction_html.index('class="execution-trace-body"')
+        auto_marker = auto_compaction_html.index("data-context-compaction")
+        auto_final = auto_compaction_html.index("final after compaction")
+        auto_trace_end = auto_compaction_html.rfind("</details>", auto_trace_body, auto_final)
+        self.assertLess(auto_trace_body, auto_marker)
+        self.assertLess(auto_marker, auto_trace_end)
+        self.assertLess(auto_trace_end, auto_final)
+        self.assertIn("autoCompactedContext", auto_compaction_html)
         self.assertNotIn("execution-trace", data["simpleCompletedHtml"])
         self.assertIn("data-completed-run-status", data["simpleCompletedHtml"])
         active_answer_html = data["activeAnswerHtml"]
@@ -6835,6 +6858,21 @@ process.stdout.write(JSON.stringify({
         self.assertIn("els.messageList.innerHTML = html", render)
         self.assertNotIn("els.messages.innerHTML = html", render)
         self.assertIn("pruneStaleStreamingNodes(state.sessionId)", render)
+
+    def test_auto_context_compaction_is_rendered_inside_execution_trace(self):
+        self.assertIn('kind: "auto-context-compaction"', APP_SOURCE)
+        self.assertIn("function renderAutoContextCompaction(msg, index)", MESSAGES_SOURCE)
+        self.assertIn('msg.meta?.kind === "auto-context-compaction"', MESSAGES_SOURCE)
+        self.assertIn('data-context-compaction', MESSAGES_SOURCE)
+        self.assertIn('t(labelKey)', MESSAGES_SOURCE)
+        self.assertIn(".context-compaction-row {", STYLE_SOURCE)
+        self.assertIn(".context-compaction-row.running", STYLE_SOURCE)
+        for key in (
+            "autoCompactingContext",
+            "autoCompactedContext",
+            "autoCompactContextFailed",
+        ):
+            self.assertIn(key, I18N_SOURCE)
 
     def test_tool_round_finalization_is_atomic(self):
         helper_start = APP_SOURCE.index("function finalizeStreamingAssistantMessage")

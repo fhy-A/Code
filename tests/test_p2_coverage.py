@@ -308,7 +308,11 @@ class TestCompactSummaryMarker(unittest.TestCase):
             "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages]",
             self.source,
         )
-        self.assertIn("await saveSessionState(state.sessionId, state.messages, state.stats)", self.source)
+        compact_start = self.source.index("async function compactConversation()")
+        compact_end = self.source.index("function hideCompactConfirm()", compact_start)
+        compact_source = self.source[compact_start:compact_end]
+        self.assertIn("await saveSessionState(", compact_source)
+        self.assertIn("{ persistMessages: true }", compact_source)
         self.assertNotIn("_compactPrefix", self.source)
 
     def test_usage_is_isolated_and_persisted_per_session(self):

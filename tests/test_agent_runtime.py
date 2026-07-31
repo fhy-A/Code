@@ -49,6 +49,20 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                 if type(self).scripted_rounds
                 else None
             )
+        if isinstance(scripted_frames, dict) and scripted_frames.get("http_error"):
+            status = int(scripted_frames.get("http_error") or 400)
+            body = json.dumps({
+                "error": {
+                    "message": str(scripted_frames.get("message") or "upstream error"),
+                },
+            }).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
         messages = payload.get("messages") or []
         parallel_child_prompt = next((
             str(message.get("content") or "")
@@ -579,6 +593,317 @@ class TestDurableAgentRuntime(unittest.TestCase):
         while run.get("worker") is not None and time.time() < deadline:
             time.sleep(0.01)
         self.assertIsNone(run.get("worker"))
+
+    def test_agent_context_limit_and_multilingual_request_estimate(self):
+        self.assertEqual(server_mod._agent_model_context_limit("gpt-5.6"), 1_000_000)
+        self.assertEqual(server_mod._agent_model_context_limit("claude-4.5"), 200_000)
+        self.assertEqual(server_mod._agent_model_context_limit("unknown-model"), 128_000)
+        self.assertEqual(
+            server_mod._normalize_agent_context_limit(None, "gemini-2.5-pro"),
+            1_000_000,
+        )
+        with self.assertRaisesRegex(ValueError, "contextLimit"):
+            server_mod._normalize_agent_context_limit("large", "test-model", strict=True)
+        with self.assertRaisesRegex(ValueError, "contextLimit"):
+            server_mod._normalize_agent_context_limit({}, "test-model", strict=True)
+
+        ascii_tokens = server_mod._agent_estimate_text_tokens("a" * 40)
+        chinese_tokens = server_mod._agent_estimate_text_tokens("上下文压缩测试" * 5)
+        self.assertEqual(ascii_tokens, 10)
+        self.assertEqual(chinese_tokens, 35)
+
+        base = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "x" * 3200}],
+        }
+        with_tools = dict(base, tools=[{
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "y" * 1200,
+                "parameters": {"type": "object"},
+            },
+        }])
+        self.assertFalse(server_mod._agent_should_auto_compact(base, 1024))
+        self.assertTrue(server_mod._agent_should_auto_compact(with_tools, 1024))
+
+    def test_agent_compaction_plan_keeps_active_task_and_latest_complete_tool_group(self):
+        messages = [
+            {"role": "system", "content": "system rules"},
+            {"role": "user", "content": "old task"},
+            {"role": "assistant", "content": "old result"},
+            {
+                "role": "user",
+                "content": server_mod._AGENT_CONTEXT_SUMMARY_PREFIX + "\nolder summary",
+            },
+            {"role": "user", "content": "current task must remain exact"},
+            {"role": "assistant", "content": "intermediate explanation"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-latest",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-latest",
+                "name": "read_file",
+                "content": "latest tool result",
+            },
+        ]
+
+        plan = server_mod._agent_compaction_plan(messages)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["latestUserIndex"], 4)
+        self.assertEqual(plan["toolBlockIndices"], [6, 7])
+        self.assertEqual(
+            [message.get("content") for message in plan["retainedMessages"]],
+            ["system rules", "current task must remain exact", "", "latest tool result"],
+        )
+        self.assertIn("intermediate explanation", [
+            message.get("content") for message in plan["compactedMessages"]
+        ])
+        self.assertIn("older summary", json.dumps(plan["compactedMessages"]))
+
+    def test_agent_compaction_plan_refuses_unshrinkable_current_task(self):
+        self.assertIsNone(server_mod._agent_compaction_plan([
+            {"role": "system", "content": "system rules"},
+            {"role": "user", "content": "one very large current task"},
+        ]))
+
+    def test_legacy_agent_record_restores_context_defaults(self):
+        run = server_mod._create_agent_run(
+            "legacy-context-session",
+            {
+                "model": "gpt-5.6",
+                "messages": [{"role": "user", "content": "legacy task"}],
+            },
+            self.base_url,
+            [],
+            start_worker=False,
+        )
+        record = server_mod._agent_run_record(run)
+        record["version"] = 2
+        record.pop("contextLimit")
+        record.pop("contextRecoveryRound")
+        record.pop("compactions")
+
+        restored = server_mod._agent_run_from_record(record)
+
+        self.assertEqual(restored["context_limit"], 1_000_000)
+        self.assertEqual(restored["context_recovery_round"], 0)
+        self.assertEqual(restored["compactions"], [])
+
+    def test_agent_auto_compacts_after_tool_result_and_continues_same_run(self):
+        (self.project_dir / "large.txt").write_text("x" * 12000, encoding="utf-8")
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [
+                    {"choices": [{
+                        "delta": {"tool_calls": [{
+                            "index": 0,
+                            "id": "compact-read-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "large.txt"}),
+                            },
+                        }]},
+                        "finish_reason": "tool_calls",
+                    }]},
+                    {"choices": [], "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 4,
+                        "total_tokens": 9,
+                    }},
+                ],
+                [
+                    {"choices": [{
+                        "delta": {"content": "Older investigation was summarized."},
+                        "finish_reason": "stop",
+                    }]},
+                    {"choices": [], "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                    }},
+                ],
+                [
+                    {"choices": [{
+                        "delta": {"content": "task continued after compaction"},
+                        "finish_reason": "stop",
+                    }]},
+                    {"choices": [], "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 2,
+                        "total_tokens": 7,
+                    }},
+                ],
+            ]
+        run = server_mod._create_agent_run(
+            "session-auto-compact",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "system rules"},
+                    {"role": "user", "content": "older investigation"},
+                    {"role": "assistant", "content": "older checkpoint"},
+                    {"role": "user", "content": "inspect the large file and continue"},
+                ],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["read_file"]],
+            },
+            self.base_url,
+            ["agent-secret-key"],
+            allowed_tools=["read_file"],
+            context_limit=2048,
+            start_worker=False,
+        )
+        initial_payload, _ = server_mod._agent_model_payload(run)
+        self.assertFalse(server_mod._agent_should_auto_compact(initial_payload, 2048))
+
+        server_mod._start_agent_worker(run)
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "task continued after compaction")
+        self.assertEqual(snapshot["round"], 2)
+        self.assertEqual(snapshot["usage"]["total_tokens"], 22)
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(len(snapshot["compactions"]), 1)
+        self.assertEqual(snapshot["compactions"][0]["reason"], "threshold")
+        self.assertTrue(any(
+            str(message.get("content") or "").startswith(
+                server_mod._AGENT_CONTEXT_SUMMARY_PREFIX,
+            )
+            for message in run["messages"]
+        ))
+        self.assertTrue(any(
+            message.get("role") == "tool"
+            and message.get("tool_call_id") == "compact-read-1"
+            for message in run["messages"]
+        ))
+        event_types = [event["type"] for event in snapshot["events"]]
+        self.assertLess(
+            event_types.index("tool_completed"),
+            event_types.index("context_compaction_started"),
+        )
+        self.assertLess(
+            event_types.index("context_compaction_started"),
+            event_types.index("context_compaction_completed"),
+        )
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertEqual(len(restored["compactions"]), 1)
+        self.assertTrue(any(
+            event["type"] == "context_compaction_completed"
+            for event in restored["events"]
+        ))
+
+    def test_agent_recovers_once_from_upstream_context_error(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                {
+                    "http_error": 400,
+                    "message": "maximum context length exceeded for this model",
+                },
+                [
+                    {"choices": [{
+                        "delta": {"content": "Recovered history summary."},
+                        "finish_reason": "stop",
+                    }]},
+                    {"choices": [], "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                    }},
+                ],
+                [
+                    {"choices": [{
+                        "delta": {"content": "recovered after context overflow"},
+                        "finish_reason": "stop",
+                    }]},
+                    {"choices": [], "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 2,
+                        "total_tokens": 7,
+                    }},
+                ],
+            ]
+        run = server_mod._create_agent_run(
+            "session-context-recovery",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "system rules"},
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["agent-secret-key"],
+            context_limit=128000,
+        )
+
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "recovered after context overflow")
+        self.assertEqual(snapshot["round"], 1)
+        self.assertEqual(snapshot["usage"]["total_tokens"], 13)
+        self.assertEqual(run["context_recovery_round"], 1)
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(len(snapshot["compactions"]), 1)
+        self.assertEqual(
+            snapshot["compactions"][0]["reason"],
+            "context_window_exceeded",
+        )
+
+    def test_agent_context_recovery_is_bounded_to_one_attempt_per_round(self):
+        context_error = {
+            "http_error": 400,
+            "message": "maximum context length exceeded for this model",
+        }
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                context_error,
+                [{
+                    "choices": [{
+                        "delta": {"content": "One recovery summary."},
+                        "finish_reason": "stop",
+                    }],
+                }],
+                context_error,
+            ]
+        run = server_mod._create_agent_run(
+            "session-context-recovery-bounded",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["agent-secret-key"],
+            context_limit=128000,
+        )
+
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "context_window_exceeded")
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(len(snapshot["compactions"]), 1)
 
     def test_client_request_id_reuses_same_agent_run_after_memory_reset(self):
         payload = {

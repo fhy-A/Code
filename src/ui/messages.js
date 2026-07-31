@@ -259,6 +259,7 @@
         if (userIndex < 0
             || msg.role !== "assistant"
             || msg.streaming
+            || msg.meta?.kind === "auto-context-compaction"
             || isDetachedProjectionMessage(msg)) return;
         const elapsed = getResponseElapsed(msg);
         if (elapsed) statuses.set(userIndex, elapsed);
@@ -278,6 +279,10 @@
           return;
         }
         if (userIndex < 0 || isDetachedProjectionMessage(msg)) return;
+        if (msg.meta?.kind === "auto-context-compaction") {
+          turns.add(userIndex);
+          return;
+        }
         if (msg.role === "tool-call" || msg.role === "tool-result") {
           turns.add(userIndex);
           return;
@@ -309,6 +314,7 @@
         if (userIndex < 0
             || msg.role !== "assistant"
             || msg.meta?.toolCalls?.length
+            || msg.meta?.kind === "auto-context-compaction"
             || isDetachedProjectionMessage(msg)) return;
         const content = (getMessageText(msg) || "").trim();
         if (!content
@@ -661,6 +667,19 @@
       return `<div class="response-info">${renderCompletedRunStatus(meta._model || msg._model || "", elapsed, usage)}</div>`;
     }
 
+    function renderAutoContextCompaction(msg, index) {
+      const status = ["running", "completed", "failed"].includes(msg.meta?.status)
+        ? msg.meta.status
+        : "completed";
+      const labelKey = status === "running"
+        ? "autoCompactingContext"
+        : (status === "failed" ? "autoCompactContextFailed" : "autoCompactedContext");
+      return `<div class="context-compaction-row msg ${escapeHtml(status)}" data-msg-index="${index}" data-context-compaction>
+        <span class="context-compaction-icon" aria-hidden="true"></span>
+        <span>${escapeHtml(t(labelKey))}</span>
+      </div>`;
+    }
+
     function renderBackgroundReplyReference(msg) {
       if (msg.meta?.kind !== "background-subagent" || !msg.meta?.jobId) return "";
       const jobId = String(msg.meta.jobId);
@@ -813,6 +832,11 @@
         if (msg.meta?.kind === "compact-summary") {
           flushProcess();
           rows.push(renderCompactSummary(msg, index));
+          continue;
+        }
+        if (msg.meta?.kind === "auto-context-compaction") {
+          flushProcess();
+          rows.push(renderAutoContextCompaction(msg, index));
           continue;
         }
         if (msg.meta?.kind === "user-input-summary") {
