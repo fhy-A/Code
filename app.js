@@ -48,9 +48,12 @@ const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const {
   assembleModelRequestPayload,
-  buildNativeToolCallMessage,
   mapMessageForApi,
 } = window.Code.agent.modelRequest;
+const {
+  normalizeNativeToolCall,
+  normalizeToolCallList,
+} = window.Code.agent.tools;
 const {
   classifyModelRequestFailure,
   createSseDataReader,
@@ -5967,60 +5970,6 @@ function bindAuthorizationPanel() {
       if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   });
-}
-
-
-
-function parseJsonLoose(text = "{}") {
-
-  if (typeof text === "object" && text !== null) return text;
-
-  try {
-
-    return JSON.parse(text || "{}");
-
-  } catch {
-
-    return {};
-
-  }
-
-}
-
-
-
-function normalizeNativeToolCall(call) {
-
-  const name = call?.function?.name || call?.name || "";
-
-  const args = parseJsonLoose(call?.function?.arguments || call?.arguments || "{}");
-
-  return {
-
-    ...args,
-
-    action: name,
-
-    _native: true,
-
-    _toolCallId: call?.id || `call_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-
-  };
-
-}
-
-
-
-function normalizeToolCallList(map) {
-
-  return [...map.entries()]
-
-    .sort((a, b) => a[0] - b[0])
-
-    .map(([, call]) => buildNativeToolCallMessage(call))
-
-    .filter((call) => call.function.name);
-
 }
 
 

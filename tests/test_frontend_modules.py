@@ -27,6 +27,7 @@ SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_tex
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
 MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
+TOOLS_SOURCE = (ROOT / "src" / "agent" / "tools.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
@@ -500,6 +501,7 @@ eval(source);
             "src/features/skills-memory.js",
             "src/features/session-import.js",
             "src/agent/model-request.js",
+            "src/agent/tools.js",
             "src/agent/model-stream.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
@@ -528,6 +530,7 @@ eval(source);
             "./src/features/files.js",
             "./src/features/session-import.js",
             "./src/agent/model-request.js",
+            "./src/agent/tools.js",
             "./src/agent/model-stream.js",
             "./agent-runtime.js",
             "./app.js",
@@ -797,6 +800,90 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("AbortController", MODEL_REQUEST_SOURCE)
         self.assertIn("window.AgentRuntime.openSseResponse({", runtime_source)
         self.assertIn('fetch("/proxy/chat", {', runtime_source)
+
+    def test_agent_tools_normalize_native_calls_without_mutating_inputs(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+require("./src/agent/tools.js");
+
+const tools = window.Code.agent.tools;
+const objectArgs = {path: "A.md", action: "wrong"};
+const nativeCall = {
+  id: "call-1",
+  type: "function",
+  function: {name: "read_file", arguments: objectArgs},
+};
+const before = JSON.stringify(nativeCall);
+const normalized = tools.normalizeNativeToolCall(nativeCall);
+const generated = tools.normalizeNativeToolCall({
+  name: "search_files",
+  arguments: "{\"query\":\"todo\"}",
+});
+const callsByIndex = new Map([
+  [3, {id: "call-empty", function: {name: "", arguments: "{}"}}],
+  [2, {id: "call-2", function: {name: "read_file", arguments: "{}"}}],
+  [1, {id: "call-1", function: {name: "list_files", arguments: "{}"}}],
+]);
+const callsBefore = JSON.stringify([...callsByIndex.entries()]);
+const normalizedList = tools.normalizeToolCallList(callsByIndex);
+
+process.stdout.write(JSON.stringify({
+  frozen: Object.isFrozen(tools),
+  inputUnchanged: JSON.stringify(nativeCall) === before,
+  mapUnchanged: JSON.stringify([...callsByIndex.entries()]) === callsBefore,
+  sameObject: tools.parseJsonLoose(objectArgs) === objectArgs,
+  invalid: tools.parseJsonLoose("{broken"),
+  empty: tools.parseJsonLoose(""),
+  normalized,
+  generated,
+  normalizedList,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["frozen"])
+        self.assertTrue(data["inputUnchanged"])
+        self.assertTrue(data["mapUnchanged"])
+        self.assertTrue(data["sameObject"])
+        self.assertEqual(data["invalid"], {})
+        self.assertEqual(data["empty"], {})
+        self.assertEqual(
+            data["normalized"],
+            {
+                "path": "A.md",
+                "action": "read_file",
+                "_native": True,
+                "_toolCallId": "call-1",
+            },
+        )
+        self.assertEqual(data["generated"]["action"], "search_files")
+        self.assertEqual(data["generated"]["query"], "todo")
+        self.assertTrue(data["generated"]["_toolCallId"].startswith("call_"))
+        self.assertEqual(
+            [call["function"]["name"] for call in data["normalizedList"]],
+            ["list_files", "read_file"],
+        )
+        self.assertEqual(
+            [call["id"] for call in data["normalizedList"]],
+            ["call-1", "call-2"],
+        )
+        self.assertIn(
+            "const { buildNativeToolCallMessage } = agent.modelRequest;",
+            TOOLS_SOURCE,
+        )
+        self.assertIn("} = window.Code.agent.tools;", APP_SOURCE[:3000])
+        self.assertNotIn("function parseJsonLoose", APP_SOURCE)
+        self.assertNotIn("function normalizeNativeToolCall", APP_SOURCE)
+        self.assertNotIn("function normalizeToolCallList", APP_SOURCE)
 
     def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
         script = r"""
