@@ -404,6 +404,7 @@ class TestDispatcherLimits(unittest.TestCase):
         cls.state_source = (root / "src" / "core" / "state.js").read_text(encoding="utf-8")
         cls.persistence_source = (root / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
         cls.sessions_source = (root / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
+        cls.subagents_source = (root / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
 
     def test_global_limit_enforced(self):
         self.assertIn('globalLimit: 3', self.state_source,
@@ -453,7 +454,7 @@ class TestDispatcherLimits(unittest.TestCase):
     def test_background_job_lifecycle(self):
         self.assertIn('backgroundDispatch: { id, status: "pending", agentRunId: "", parentTaskStartedAt }', self.source)
         self.assertIn('updateBackgroundJob(job, "running")', self.source)
-        self.assertIn('const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;', self.source)
+        self.assertIn('const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;', self.subagents_source)
 
     def test_abort_controller_per_job(self):
         self.assertIn('abortController: new AbortController()', self.source)

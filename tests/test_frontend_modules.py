@@ -683,9 +683,13 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(
             data["exports"],
             [
+                "BACKGROUND_JOB_TIMEOUT_MS",
+                "backgroundJobElapsedMs",
+                "buildBackgroundJobCheckpoint",
                 "buildBackgroundTaskPrompt",
                 "buildSubAgentSystemPrompt",
                 "createSubAgentContext",
+                "mergeBackgroundUsageStats",
                 "parseParallelCommand",
             ],
         )
@@ -736,12 +740,141 @@ process.stdout.write(JSON.stringify({{
             "state.",
             "window.AgentRuntime",
             "saveSessionState",
+            "Date.now",
             "fetch(",
             "document.",
             "renderSessionMessages",
             "setBackgroundRunCheckpoint",
         ):
             self.assertNotIn(forbidden, SUBAGENTS_SOURCE)
+
+    def test_background_checkpoint_timing_and_usage_are_pure_module_behaviors(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(SUBAGENTS_SOURCE)});
+const subagents = window.Code.agent.subagents;
+const parentRoots = ["C:/workspace", "D:/shared"];
+const job = {{
+  id: "job-1",
+  clientRequestId: "request-1",
+  status: "running",
+  agentRunId: 42,
+  cursor: "3",
+  userText: "inspect",
+  taskPrompt: "",
+  model: "test-model",
+  permissionProfile: "plan",
+  toolPreset: "full",
+  thinkingLevel: "high",
+  temperature: "0",
+  maxTokens: "4096",
+  parentCtx: {{cwd: "C:/project", primaryRoot: "C:/workspace", rootPaths: parentRoots}},
+  parentTaskStartedAt: "500",
+  queuedAt: "1000",
+  startedAt: "1200",
+  deadlineAt: "9000",
+  abortController: {{hidden: true}},
+  completion: "hidden",
+}};
+const checkpoint = subagents.buildBackgroundJobCheckpoint(job, 7000);
+const checkpointRoots = [...checkpoint.rootPaths];
+checkpoint.rootPaths.push("E:/mutated");
+const legacy = subagents.buildBackgroundJobCheckpoint({{
+  id: "legacy-job",
+  status: "pending",
+  userText: "legacy task",
+  parentCtx: {{cwd: "C:/legacy", primaryRoot: "", rootPaths: ["C:/legacy"]}},
+}}, 10000);
+const currentStats = {{input: 1, output: "2", cache: 3, cost: 0.5, cacheWrite: 4, extra: "keep"}};
+const childStats = {{input: "5", output: 6, cache: "7", cost: "1.5", cacheWrite: "2"}};
+const merged = subagents.mergeBackgroundUsageStats(currentStats, childStats);
+const withoutCacheWrite = subagents.mergeBackgroundUsageStats(currentStats, {{input: 2}});
+process.stdout.write(JSON.stringify({{
+  timeout: subagents.BACKGROUND_JOB_TIMEOUT_MS,
+  checkpoint,
+  checkpointRoots,
+  parentRoots,
+  legacy,
+  merged,
+  withoutCacheWrite,
+  currentStats,
+  childStats,
+  elapsed: [
+    subagents.backgroundJobElapsedMs({{queuedAt: 1000, startedAt: 2000}}, 5500),
+    subagents.backgroundJobElapsedMs({{startedAt: 2000}}, 5500),
+    subagents.backgroundJobElapsedMs({{queuedAt: 6000}}, 5500),
+    subagents.backgroundJobElapsedMs(null, 5500),
+  ],
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        self.assertEqual(data["timeout"], 600000)
+        self.assertEqual(data["checkpointRoots"], ["C:/workspace", "D:/shared"])
+        self.assertEqual(data["parentRoots"], ["C:/workspace", "D:/shared"])
+        self.assertEqual(data["checkpoint"]["agentRunId"], "42")
+        self.assertEqual(data["checkpoint"]["cursor"], 3)
+        self.assertEqual(data["checkpoint"]["taskPrompt"], "inspect")
+        self.assertEqual(data["checkpoint"]["temperature"], 0)
+        self.assertEqual(data["checkpoint"]["maxTokens"], 4096)
+        self.assertEqual(data["checkpoint"]["cwd"], "C:/project")
+        self.assertEqual(data["checkpoint"]["primaryRoot"], "C:/workspace")
+        self.assertEqual(data["checkpoint"]["queuedAt"], 1000)
+        self.assertEqual(data["checkpoint"]["deadlineAt"], 9000)
+        self.assertNotIn("abortController", data["checkpoint"])
+        self.assertNotIn("completion", data["checkpoint"])
+
+        self.assertEqual(data["legacy"]["clientRequestId"], "legacy-job")
+        self.assertEqual(data["legacy"]["taskPrompt"], "legacy task")
+        self.assertEqual(data["legacy"]["permissionProfile"], "read")
+        self.assertEqual(data["legacy"]["toolPreset"], "default")
+        self.assertEqual(data["legacy"]["thinkingLevel"], "auto")
+        self.assertEqual(data["legacy"]["temperature"], 0.2)
+        self.assertEqual(data["legacy"]["cwd"], "C:/legacy")
+        self.assertEqual(data["legacy"]["rootPaths"], ["C:/legacy"])
+        self.assertEqual(data["legacy"]["queuedAt"], 10000)
+        self.assertEqual(data["legacy"]["deadlineAt"], 610000)
+
+        self.assertEqual(data["merged"], {
+            "input": 6,
+            "output": 8,
+            "cache": 10,
+            "cost": 2,
+            "cacheWrite": 6,
+            "extra": "keep",
+        })
+        self.assertEqual(data["withoutCacheWrite"]["cacheWrite"], 4)
+        self.assertEqual(data["currentStats"], {
+            "input": 1,
+            "output": "2",
+            "cache": 3,
+            "cost": 0.5,
+            "cacheWrite": 4,
+            "extra": "keep",
+        })
+        self.assertEqual(data["childStats"]["cacheWrite"], "2")
+        self.assertEqual(data["elapsed"], [4500, 3500, 0, 0])
+
+        for function_name in (
+            "buildBackgroundJobCheckpoint",
+            "mergeBackgroundUsageStats",
+            "backgroundJobElapsedMs",
+        ):
+            self.assertIn(f"function {function_name}(", SUBAGENTS_SOURCE)
+            self.assertNotIn(f"function {function_name}(", APP_SOURCE)
+        self.assertNotIn("const BACKGROUND_JOB_TIMEOUT_MS", APP_SOURCE)
+        self.assertIn("buildBackgroundJobCheckpoint(job, Date.now())", APP_SOURCE)
+        self.assertIn("Object.assign(stats, mergeBackgroundUsageStats(stats, childStats));", APP_SOURCE)
+        self.assertIn("formatElapsedMs(backgroundJobElapsedMs(job, finishedAt))", APP_SOURCE)
 
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (

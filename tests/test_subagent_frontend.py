@@ -101,10 +101,10 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertIn('_usageScope: "task"', self.source)
 
     def test_background_elapsed_time_survives_refresh(self):
-        self.assertIn("startedAt: Number(job.startedAt || 0)", self.source)
+        self.assertIn("startedAt: Number(source.startedAt || 0)", self.subagents_source)
         self.assertIn("startedAt: Number(checkpoint.startedAt || 0)", self.source)
         self.assertIn('if (status === "running" && !Number(job.startedAt || 0))', self.source)
-        self.assertIn("const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt)", self.source)
+        self.assertIn("const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt)", self.subagents_source)
         self.assertGreaterEqual(
             self.source.count("_responseTime: backgroundJobElapsed(job)"),
             2,
@@ -151,7 +151,7 @@ class TestSubAgentFrontend(unittest.TestCase):
     def test_background_dispatch_has_visible_lifecycle_and_timeout(self):
         self.assertIn('backgroundDispatch: { id, status: "pending", agentRunId: "", parentTaskStartedAt }', self.source)
         self.assertIn('updateBackgroundJob(job, "running")', self.source)
-        self.assertIn('const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;', self.source)
+        self.assertIn('const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;', self.subagents_source)
         self.assertIn('后台处理中', self.i18n_source)
 
     def test_background_dispatch_uses_durable_server_agent(self):

@@ -99,7 +99,7 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn("recovery.resumePersistedRuns()", coordination)
         self.assertIn(".then(() => recovery.resumePersistedQueuedMessages())", coordination)
         resume_start = APP_SOURCE.index("async function resumePersistedQueuedMessages()")
-        resume_end = APP_SOURCE.index("const BACKGROUND_JOB_TIMEOUT_MS", resume_start)
+        resume_end = APP_SOURCE.index("function getBackgroundJob", resume_start)
         resume = APP_SOURCE[resume_start:resume_end]
         self.assertIn('item.status !== "running"', resume)
         self.assertIn('status: "pending"', resume)

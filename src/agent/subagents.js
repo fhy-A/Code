@@ -4,6 +4,7 @@
   const agent = global.Code && global.Code.agent;
   if (!agent) throw new Error("Code agent namespace must load before subagents");
 
+  const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;
   const SUBAGENT_DISABLED_TOOL_NAMES = Object.freeze(["task", "request_user_input"]);
 
   function buildSubAgentSystemPrompt({ securityLayer = "", cwd = "", primaryRoot = "" } = {}) {
@@ -60,10 +61,59 @@
     return String(match[1] || "").trim();
   }
 
+  function buildBackgroundJobCheckpoint(job, fallbackNow = 0) {
+    const source = job || {};
+    const now = Number(fallbackNow || 0);
+    const rootPaths = source.rootPaths || source.parentCtx?.rootPaths;
+    return {
+      id: source.id,
+      clientRequestId: source.clientRequestId || source.id,
+      status: source.status,
+      agentRunId: String(source.agentRunId || ""),
+      cursor: Number(source.cursor || 0),
+      userText: String(source.userText || ""),
+      taskPrompt: String(source.taskPrompt || source.userText || ""),
+      model: String(source.model || ""),
+      permissionProfile: String(source.permissionProfile || "read"),
+      toolPreset: String(source.toolPreset || "default"),
+      thinkingLevel: String(source.thinkingLevel || "auto"),
+      temperature: Number(source.temperature ?? 0.2),
+      maxTokens: Number(source.maxTokens || 0),
+      cwd: String(source.cwd || source.parentCtx?.cwd || ""),
+      primaryRoot: String(source.primaryRoot || source.parentCtx?.primaryRoot || ""),
+      rootPaths: Array.isArray(rootPaths) ? [...rootPaths] : [],
+      parentTaskStartedAt: Number(source.parentTaskStartedAt || 0),
+      queuedAt: Number(source.queuedAt || now),
+      startedAt: Number(source.startedAt || 0),
+      deadlineAt: Number(source.deadlineAt || (now + BACKGROUND_JOB_TIMEOUT_MS)),
+    };
+  }
+
+  function mergeBackgroundUsageStats(currentStats, childStats) {
+    const merged = { ...(currentStats || {}) };
+    const child = childStats || {};
+    for (const key of ["input", "output", "cache", "cost"]) {
+      merged[key] = Number(merged[key] || 0) + Number(child[key] || 0);
+    }
+    if (Object.prototype.hasOwnProperty.call(child, "cacheWrite")) {
+      merged.cacheWrite = Number(merged.cacheWrite || 0) + Number(child.cacheWrite || 0);
+    }
+    return merged;
+  }
+
+  function backgroundJobElapsedMs(job, finishedAt) {
+    const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt);
+    return Math.max(0, Number(finishedAt) - submittedAt);
+  }
+
   agent.subagents = Object.freeze({
+    BACKGROUND_JOB_TIMEOUT_MS,
+    backgroundJobElapsedMs,
+    buildBackgroundJobCheckpoint,
     buildBackgroundTaskPrompt,
     buildSubAgentSystemPrompt,
     createSubAgentContext,
+    mergeBackgroundUsageStats,
     parseParallelCommand,
   });
 })(window);

@@ -69,8 +69,12 @@ const {
   serializeUserInputRequest,
 } = window.Code.agent.questionnaire;
 const {
+  BACKGROUND_JOB_TIMEOUT_MS,
+  backgroundJobElapsedMs,
+  buildBackgroundJobCheckpoint,
   buildBackgroundTaskPrompt,
   createSubAgentContext,
+  mergeBackgroundUsageStats,
   parseParallelCommand,
 } = window.Code.agent.subagents;
 const {
@@ -6610,8 +6614,6 @@ async function resumePersistedQueuedMessages() {
   }));
 }
 
-const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;
-
 function getBackgroundJob(jobId) {
   return state._backgroundDispatcher.jobs.find((job) => job.id === jobId) || null;
 }
@@ -6620,33 +6622,6 @@ function findBackgroundUserMessage(job) {
   return getSessionMessages(job.sessionId).find((message) => (
     message?.role === "user" && message.meta?.backgroundDispatch?.id === job.id
   )) || job.userMessage || null;
-}
-
-function backgroundJobCheckpoint(job) {
-  return {
-    id: job.id,
-    clientRequestId: job.clientRequestId || job.id,
-    status: job.status,
-    agentRunId: String(job.agentRunId || ""),
-    cursor: Number(job.cursor || 0),
-    userText: String(job.userText || ""),
-    taskPrompt: String(job.taskPrompt || job.userText || ""),
-    model: String(job.model || ""),
-    permissionProfile: String(job.permissionProfile || "read"),
-    toolPreset: String(job.toolPreset || "default"),
-    thinkingLevel: String(job.thinkingLevel || "auto"),
-    temperature: Number(job.temperature ?? 0.2),
-    maxTokens: Number(job.maxTokens || 0),
-    cwd: String(job.cwd || job.parentCtx?.cwd || ""),
-    primaryRoot: String(job.primaryRoot || job.parentCtx?.primaryRoot || ""),
-    rootPaths: Array.isArray(job.rootPaths || job.parentCtx?.rootPaths)
-      ? [...(job.rootPaths || job.parentCtx.rootPaths)]
-      : [],
-    parentTaskStartedAt: Number(job.parentTaskStartedAt || 0),
-    queuedAt: Number(job.queuedAt || Date.now()),
-    startedAt: Number(job.startedAt || 0),
-    deadlineAt: Number(job.deadlineAt || (Date.now() + BACKGROUND_JOB_TIMEOUT_MS)),
-  };
 }
 
 function syncBackgroundJobCheckpoint(job) {
@@ -6663,7 +6638,7 @@ function syncBackgroundJobCheckpoint(job) {
   if (["completed", "failed"].includes(job.status)) {
     removeBackgroundRunCheckpoint(job.sessionId, job.id);
   } else {
-    setBackgroundRunCheckpoint(job.sessionId, backgroundJobCheckpoint(job));
+    setBackgroundRunCheckpoint(job.sessionId, buildBackgroundJobCheckpoint(job, Date.now()));
   }
 }
 
@@ -6714,21 +6689,12 @@ function backgroundActiveForSession(sessionId) {
 function mergeBackgroundUsage(sessionId, childStats) {
   if (!childStats) return;
   const stats = getSessionStats(sessionId);
-  for (const key of ["input", "output", "cache", "cost"]) {
-    stats[key] = Number(stats[key] || 0) + Number(childStats[key] || 0);
-  }
-  if (Object.prototype.hasOwnProperty.call(childStats, "cacheWrite")) {
-    stats.cacheWrite = (
-      Number(stats.cacheWrite || 0)
-      + Number(childStats.cacheWrite || 0)
-    );
-  }
+  Object.assign(stats, mergeBackgroundUsageStats(stats, childStats));
   setSessionStats(sessionId, stats);
 }
 
 function backgroundJobElapsed(job, finishedAt = Date.now()) {
-  const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt);
-  return formatElapsedMs(Math.max(0, Number(finishedAt) - submittedAt));
+  return formatElapsedMs(backgroundJobElapsedMs(job, finishedAt));
 }
 
 function createBackgroundServerContext(job) {
