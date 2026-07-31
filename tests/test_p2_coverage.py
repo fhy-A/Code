@@ -284,6 +284,7 @@ class TestCompactSummaryMarker(unittest.TestCase):
         cls.messages_source = (root / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
         cls.timeline_source = (root / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
         cls.i18n_source = (root / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
+        cls.compaction_source = (root / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 
     def test_compact_summary_has_message_flow_projection(self):
         self.assertIn('msg.meta?.kind === "compact-summary"', self.messages_source)
@@ -316,9 +317,9 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertIn("lastUsage: getSessionLastUsage(sessionId)", self.source)
 
     def test_context_limit_handles_hyphenated_claude_versions(self):
-        self.assertIn("function getModelContextLimit(model)", self.source)
-        self.assertIn("const claudeVersion = normalized.match", self.source)
-        self.assertIn("major === 4 && minor >= 6", self.source)
+        self.assertIn("function getModelContextLimit(model)", self.compaction_source)
+        self.assertIn("const claudeVersion = normalized.match", self.compaction_source)
+        self.assertIn("major === 4 && minor >= 6", self.compaction_source)
 
 
 class TestBranchFlowMarker(unittest.TestCase):

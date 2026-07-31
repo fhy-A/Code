@@ -81,6 +81,11 @@ const {
   parseParallelCommand,
 } = window.Code.agent.subagents;
 const {
+  getModelContextLimit,
+  getModelContextMessages,
+  isCompactSummaryMessage,
+} = window.Code.agent.compaction;
+const {
   classifyModelRequestFailure,
   createSseDataReader,
   createModelTurnAccumulator,
@@ -273,38 +278,6 @@ async function clearRunCheckpoint(ctx) {
     }).catch(() => null);
     syncSessionSourceBadgeState(ctx.sessionId, savedSession, { notify: true });
   }
-}
-
-function isCompactSummaryMessage(msg) {
-  return msg?.meta?.kind === "compact-summary";
-}
-
-function getModelContextMessages(messages) {
-  const visible = (Array.isArray(messages) ? messages : [])
-    .filter((msg) => !isDetachedFromMainContext(msg));
-  let latestSummaryIndex = -1;
-  visible.forEach((msg, index) => {
-    if (isCompactSummaryMessage(msg)) latestSummaryIndex = index;
-  });
-  return latestSummaryIndex >= 0 ? visible.slice(latestSummaryIndex) : visible;
-}
-
-function getModelContextLimit(model) {
-  const normalized = String(model || "").toLowerCase().replace(/_/g, "-");
-  const claudeVersion = normalized.match(/claude.*?(\d+)[.-](\d+)/);
-  if (claudeVersion) {
-    const major = Number(claudeVersion[1]);
-    const minor = Number(claudeVersion[2]);
-    if (major >= 5 || (major === 4 && minor >= 6)) return 1000000;
-    return 200000;
-  }
-  if (/claude|opus|sonnet|haiku/i.test(normalized)) return 200000;
-  if (/gpt-4\.1|gpt-5[.-][2-9]/i.test(normalized)) return 1000000;
-  if (/gpt|o1|o3|o4|openai/i.test(normalized)) return 128000;
-  if (/deepseek.*v4/i.test(normalized)) return 1000000;
-  if (/deepseek/i.test(normalized)) return 128000;
-  if (/gemini/i.test(normalized)) return 1000000;
-  return 128000;
 }
 
 function resetRenderCache() {
@@ -811,7 +784,10 @@ const panelsFeature = createPanelsFeature({
     };
   },
   getSessionLastUsage,
-  getContextMessages: getModelContextMessages,
+  getContextMessages: (messages) => getModelContextMessages(
+    messages,
+    isDetachedFromMainContext,
+  ),
   getContextLimit: getModelContextLimit,
   getSelectedModel,
   getMessageText: getMsgText,
@@ -5713,7 +5689,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
   const streamMessages = ctx?.messages || getSessionMessages(sessionId);
   const modelMessages = ctx?.isSubAgent
     ? streamMessages
-    : getModelContextMessages(streamMessages);
+    : getModelContextMessages(streamMessages, isDetachedFromMainContext);
   if (ctx && !ctx.projectContextResolved) {
     ctx.projectContext = await loadProjectContextForRoot(
       ctx.primaryRoot || ctx.cwd || "",

@@ -405,6 +405,7 @@ class TestDispatcherLimits(unittest.TestCase):
         cls.persistence_source = (root / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
         cls.sessions_source = (root / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
         cls.subagents_source = (root / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
+        cls.compaction_source = (root / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 
     def test_global_limit_enforced(self):
         self.assertIn('globalLimit: 3', self.state_source,
@@ -436,9 +437,9 @@ class TestDispatcherLimits(unittest.TestCase):
     def test_detached_messages_not_leaked_to_model(self):
         self.assertIn('function isDetachedFromMainContext(msg)', self.source)
         self.assertIn('msg.meta?.detachedFromMain', self.source)
-        self.assertIn('function getModelContextMessages(messages)', self.source)
-        self.assertIn('.filter((msg) => !isDetachedFromMainContext(msg))', self.source)
-        self.assertIn('getModelContextMessages(streamMessages)', self.source)
+        self.assertIn('function getModelContextMessages(messages, isDetachedMessage = null)', self.compaction_source)
+        self.assertIn('.filter((message) => !shouldDetach(message))', self.compaction_source)
+        self.assertIn('getModelContextMessages(streamMessages, isDetachedFromMainContext)', self.source)
 
     def test_parallel_usage_ledger_isolation(self):
         self.assertIn('if (!ctx?.isSubAgent) setSessionStats(sessionId, stats);', self.source)

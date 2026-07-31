@@ -31,6 +31,7 @@ TOOLS_SOURCE = (ROOT / "src" / "agent" / "tools.js").read_text(encoding="utf-8")
 PERMISSIONS_SOURCE = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
 QUESTIONNAIRE_SOURCE = (ROOT / "src" / "agent" / "questionnaire.js").read_text(encoding="utf-8")
 SUBAGENTS_SOURCE = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
+COMPACTION_SOURCE = (ROOT / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
@@ -1106,6 +1107,95 @@ process.stdout.write(JSON.stringify({{
         self.assertGreaterEqual(APP_SOURCE.count("hasBackgroundResult("), 3)
         self.assertEqual(APP_SOURCE.count("buildBackgroundResultMessage(job, {"), 2)
 
+    def test_compaction_context_policy_is_pure_and_backward_compatible(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(COMPACTION_SOURCE)});
+const compaction = window.Code.agent.compaction;
+const messages = [
+  {{role: "user", content: "old"}},
+  {{role: "assistant", content: "summary-1", meta: {{kind: "compact-summary"}}}},
+  {{role: "assistant", content: "detached", meta: {{detachedFromMain: true}}}},
+  {{role: "user", content: "middle"}},
+  {{role: "assistant", content: "summary-2", meta: {{kind: "compact-summary"}}}},
+  {{role: "user", content: "latest"}},
+];
+const before = JSON.stringify(messages);
+const selected = compaction.getModelContextMessages(
+  messages,
+  (message) => Boolean(message?.meta?.detachedFromMain),
+);
+const noSummary = compaction.getModelContextMessages([
+  {{role: "user", content: "visible"}},
+  {{role: "assistant", content: "hidden", meta: {{detachedFromMain: true}}}},
+], (message) => Boolean(message?.meta?.detachedFromMain));
+process.stdout.write(JSON.stringify({{
+  selected: selected.map((message) => message.content),
+  noSummary: noSummary.map((message) => message.content),
+  unchanged: JSON.stringify(messages) === before,
+  summary: compaction.isCompactSummaryMessage(messages[4]),
+  limits: Object.fromEntries([
+    "claude-4.5-sonnet",
+    "claude_4.6_opus",
+    "claude-5.0-sonnet",
+    "gpt-4.1",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex",
+    "deepseek-v4",
+    "deepseek-v3",
+    "gemini-2.5-pro",
+    "unknown",
+  ].map((model) => [model, compaction.getModelContextLimit(model)])),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["selected"], ["summary-2", "latest"])
+        self.assertEqual(data["noSummary"], ["visible"])
+        self.assertTrue(data["unchanged"])
+        self.assertTrue(data["summary"])
+        self.assertEqual(data["limits"], {
+            "claude-4.5-sonnet": 200000,
+            "claude_4.6_opus": 1000000,
+            "claude-5.0-sonnet": 1000000,
+            "gpt-4.1": 1000000,
+            "gpt-5.2-codex": 1000000,
+            "gpt-5.1-codex": 128000,
+            "deepseek-v4": 1000000,
+            "deepseek-v3": 128000,
+            "gemini-2.5-pro": 1000000,
+            "unknown": 128000,
+        })
+
+        for function_name in (
+            "getModelContextLimit",
+            "getModelContextMessages",
+            "isCompactSummaryMessage",
+        ):
+            self.assertIn(f"function {function_name}(", COMPACTION_SOURCE)
+            self.assertNotIn(f"function {function_name}(", APP_SOURCE)
+        self.assertIn("} = window.Code.agent.compaction;", APP_SOURCE)
+        self.assertIn(
+            "getModelContextMessages(streamMessages, isDetachedFromMainContext)",
+            APP_SOURCE,
+        )
+        for forbidden in (
+            "state.",
+            "document.",
+            "localStorage",
+            "apiJson",
+            "saveSessionState",
+            "fetch(",
+        ):
+            self.assertNotIn(forbidden, COMPACTION_SOURCE)
+
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (
             "requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",
@@ -1254,6 +1344,7 @@ eval(source);
             "src/agent/tools.js",
             "src/agent/permissions.js",
             "src/agent/questionnaire.js",
+            "src/agent/compaction.js",
             "src/agent/model-stream.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
@@ -1285,6 +1376,7 @@ eval(source);
             "./src/agent/tools.js",
             "./src/agent/permissions.js",
             "./src/agent/questionnaire.js",
+            "./src/agent/compaction.js",
             "./src/agent/model-stream.js",
             "./agent-runtime.js",
             "./app.js",

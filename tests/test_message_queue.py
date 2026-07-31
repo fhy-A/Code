@@ -8,6 +8,7 @@ SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
 SUBAGENTS_SOURCE = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
+COMPACTION_SOURCE = (ROOT / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 
 
 class TestRunningMessageQueue(unittest.TestCase):
@@ -50,7 +51,11 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn("meta: {", APP_SOURCE)
         self.assertIn("queuedDispatch: { id, status: \"pending\", queuedAt }", APP_SOURCE)
         self.assertIn("detachedFromMain: true", APP_SOURCE)
-        self.assertIn(".filter((msg) => !isDetachedFromMainContext(msg))", APP_SOURCE)
+        self.assertIn(".filter((message) => !shouldDetach(message))", COMPACTION_SOURCE)
+        self.assertIn(
+            "getModelContextMessages(streamMessages, isDetachedFromMainContext)",
+            APP_SOURCE,
+        )
 
     def test_queue_uses_stable_client_request_id_for_server_idempotency(self):
         self.assertIn("clientRequestId: id", APP_SOURCE)
@@ -60,7 +65,7 @@ class TestRunningMessageQueue(unittest.TestCase):
 
     def test_success_atomically_removes_active_queue_item(self):
         clear_start = APP_SOURCE.index("async function clearRunCheckpoint(ctx)")
-        clear_end = APP_SOURCE.index("function isCompactSummaryMessage", clear_start)
+        clear_end = APP_SOURCE.index("function resetRenderCache", clear_start)
         clear = APP_SOURCE[clear_start:clear_end]
         self.assertIn('const queueItemId = String(ctx.queueItemId || "")', clear)
         self.assertIn(".filter((item) => item.id !== queueItemId)", clear)

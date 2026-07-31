@@ -16,6 +16,7 @@ class TestSubAgentFrontend(unittest.TestCase):
         cls.model_request_source = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
         cls.permissions_source = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
         cls.subagents_source = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
+        cls.compaction_source = (ROOT / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 
     def test_subagent_system_message_stays_system(self):
         self.assertIn('if (message.role === "system")', self.model_request_source)
@@ -227,9 +228,9 @@ class TestSubAgentFrontend(unittest.TestCase):
     def test_background_messages_are_detached_from_main_model_context(self):
         self.assertIn('function isDetachedFromMainContext(msg)', self.source)
         self.assertIn('msg.meta?.detachedFromMain', self.source)
-        self.assertIn('function getModelContextMessages(messages)', self.source)
-        self.assertIn('.filter((msg) => !isDetachedFromMainContext(msg))', self.source)
-        self.assertIn('getModelContextMessages(streamMessages)', self.source)
+        self.assertIn('function getModelContextMessages(messages, isDetachedMessage = null)', self.compaction_source)
+        self.assertIn('.filter((message) => !shouldDetach(message))', self.compaction_source)
+        self.assertIn('getModelContextMessages(streamMessages, isDetachedFromMainContext)', self.source)
         self.assertGreaterEqual(self.source.count('detachedFromMain: true'), 3)
 
     def test_legacy_background_notifications_stay_out_of_model_context(self):
