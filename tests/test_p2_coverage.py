@@ -292,8 +292,8 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertIn('class="msg branch-indicator compact-indicator"', self.timeline_source)
 
     def test_manual_compaction_uses_summary_message_factory(self):
-        self.assertEqual(self.source.count("const summaryMsg = createCompactSummaryMessage(result)"), 1)
-        self.assertIn('kind: "compact-summary"', self.source)
+        self.assertEqual(self.source.count("const summaryMsg = createCompactSummaryMessage(result, {"), 1)
+        self.assertIn('kind: "compact-summary"', self.compaction_source)
 
     def test_marker_is_localized(self):
         self.assertIn('compactMarker: "上下文已压缩"', self.i18n_source)
@@ -301,11 +301,11 @@ class TestCompactSummaryMarker(unittest.TestCase):
 
     def test_manual_compaction_keeps_marker_chronology(self):
         self.assertIn(
-            "const kept = compactableMessages.slice(keepStartIndex)",
-            self.source,
+            "const keptMessages = compactableMessages.slice(keepStartIndex)",
+            self.compaction_source,
         )
         self.assertIn(
-            "state.messages = [...durableSystemMessages, summaryMsg, ...kept]",
+            "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages]",
             self.source,
         )
         self.assertIn("await saveSessionState(state.sessionId, state.messages, state.stats)", self.source)

@@ -55,16 +55,13 @@ class TestFrontendCoreModules(unittest.TestCase):
         compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
         compact_source = APP_SOURCE[compact_start:compact_end]
         self.assertIn(
-            'msg?.meta?.kind === "import-boundary"',
-            compact_source,
+            'message?.meta?.kind === "import-boundary"',
+            COMPACTION_SOURCE,
         )
+        self.assertIn("buildManualCompactionPlan(state.messages, {", compact_source)
+        self.assertIn("messages: requestMessages", compact_source)
         self.assertIn(
-            ".map((msg) => mapMessageForApi(msg, false))",
-            compact_source,
-        )
-        self.assertIn(".filter(Boolean)", compact_source)
-        self.assertIn(
-            "state.messages = [...durableSystemMessages, summaryMsg, ...kept]",
+            "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages]",
             compact_source,
         )
 
@@ -1195,6 +1192,120 @@ process.stdout.write(JSON.stringify({{
             "fetch(",
         ):
             self.assertNotIn(forbidden, COMPACTION_SOURCE)
+
+    def test_manual_compaction_plan_keeps_three_complete_context_rounds(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(MODEL_REQUEST_SOURCE)});
+eval({json.dumps(COMPACTION_SOURCE)});
+const request = window.Code.agent.modelRequest;
+const compaction = window.Code.agent.compaction;
+const messages = [
+  {{role: "system", content: "import boundary", meta: {{kind: "import-boundary"}}}},
+  {{role: "assistant", content: "old summary", meta: {{kind: "compact-summary"}}}},
+  {{role: "user", content: "u0"}},
+  {{role: "assistant", content: "a0"}},
+  {{role: "tool-result", content: "archived trace", meta: {{skipApi: true}}}},
+  {{role: "user", content: "u1"}},
+  {{role: "assistant", content: "a1"}},
+  {{role: "user", content: "u2"}},
+  {{role: "assistant", content: "a2"}},
+  {{role: "tool-call", content: "read_file", meta: {{toolCallId: "call-2"}}}},
+  {{role: "tool-result", content: "file contents", meta: {{toolCallId: "call-2"}}}},
+  {{role: "assistant", content: "a2 final"}},
+  {{role: "user", content: "u3"}},
+  {{role: "assistant", content: "a3"}},
+  {{role: "user", content: "queued", meta: {{detachedFromMain: true}}}},
+  {{role: "assistant", content: "background", meta: {{detachedFromMain: true}}}},
+  {{role: "user", content: "u4"}},
+  {{role: "assistant", content: "a4"}},
+];
+const before = JSON.stringify(messages);
+const plan = compaction.buildManualCompactionPlan(messages, {{
+  mapMessageForApi: request.mapMessageForApi,
+  getMessageText: (message) => String(message?.content || ""),
+  isDetachedMessage: (message) => Boolean(message?.meta?.detachedFromMain),
+}});
+const shortPlan = compaction.buildManualCompactionPlan([
+  {{role: "user", content: "s0"}},
+  {{role: "assistant", content: "r0"}},
+  {{role: "user", content: "s1"}},
+  {{role: "assistant", content: "r1"}},
+  {{role: "user", content: "s2"}},
+  {{role: "assistant", content: "r2"}},
+], {{mapMessageForApi: request.mapMessageForApi}});
+const summaryMessage = compaction.createCompactSummaryMessage(
+  {{summary: "  stable summary  ", compressed: 99}},
+  {{compressed: plan.compressCount, estimatedSaved: 123, createdAt: "2026-08-01T00:00:00.000Z"}},
+);
+const serverSummaryCount = plan.requestMessages.length
+  - compaction.serverKeepCount(plan.requestMessages.length);
+process.stdout.write(JSON.stringify({{
+  canCompact: plan.canCompact,
+  compressCount: plan.compressCount,
+  keepCount: plan.keepCount,
+  kept: plan.keptMessages.map((message) => message.content),
+  removed: plan.removedMessages.map((message) => message.content),
+  request: plan.requestMessages.map((message) => message.content),
+  requestKeepCount: plan.requestKeepCount,
+  serverSummaryCount,
+  shortCanCompact: shortPlan.canCompact,
+  shortKept: shortPlan.keptMessages.map((message) => message.content),
+  summaryMessage,
+  unchanged: JSON.stringify(messages) === before,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["canCompact"])
+        self.assertEqual(data["compressCount"], 5)
+        self.assertEqual(data["keepCount"], 10)
+        self.assertEqual(data["kept"], [
+            "u2", "a2", "read_file", "file contents", "a2 final",
+            "u3", "a3", "queued", "background", "u4", "a4",
+        ])
+        self.assertEqual(data["removed"], [
+            "old summary", "u0", "a0", "archived trace", "u1", "a1",
+        ])
+        self.assertEqual(data["request"], [
+            "import boundary", "old summary", "u0", "a0", "u1", "a1", "u4", "a4",
+        ])
+        self.assertEqual(data["requestKeepCount"], 2)
+        self.assertEqual(data["serverSummaryCount"], 6)
+        self.assertFalse(data["shortCanCompact"])
+        self.assertEqual(data["shortKept"], ["s0", "r0", "s1", "r1", "s2", "r2"])
+        self.assertEqual(data["summaryMessage"], {
+            "role": "assistant",
+            "content": "上下文压缩摘要（5 条消息）\n\nstable summary",
+            "meta": {
+                "kind": "compact-summary",
+                "compressed": 5,
+                "estimatedSaved": 123,
+            },
+            "_time": "2026-08-01T00:00:00.000Z",
+        })
+        self.assertTrue(data["unchanged"])
+
+        for function_name in (
+            "buildManualCompactionPlan",
+            "createCompactSummaryMessage",
+            "findCompleteContextStart",
+            "resolveRequestKeepCount",
+            "serverKeepCount",
+        ):
+            self.assertIn(f"function {function_name}(", COMPACTION_SOURCE)
+        self.assertNotIn("function createCompactSummaryMessage(", APP_SOURCE)
+        self.assertIn("recentRoundCount: RECENT_CONTEXT_ROUND_COUNT", APP_SOURCE)
+        self.assertIn("createdAt: new Date().toISOString()", APP_SOURCE)
+        self.assertNotIn("new Date(", COMPACTION_SOURCE)
 
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (

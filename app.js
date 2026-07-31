@@ -81,9 +81,11 @@ const {
   parseParallelCommand,
 } = window.Code.agent.subagents;
 const {
+  RECENT_CONTEXT_ROUND_COUNT,
+  buildManualCompactionPlan,
+  createCompactSummaryMessage,
   getModelContextLimit,
   getModelContextMessages,
-  isCompactSummaryMessage,
 } = window.Code.agent.compaction;
 const {
   classifyModelRequestFailure,
@@ -1834,22 +1836,6 @@ function showImageOverlay(src) {
   overlay.addEventListener("click", () => overlay.remove());
   document.addEventListener("keydown", function esc(e) { if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", esc); } });
   document.body.appendChild(overlay);
-}
-
-function createCompactSummaryMessage(result) {
-  const compressed = Math.max(0, Number(result?.compressed) || 0);
-  const estimatedSaved = Math.max(0, Math.ceil(compressed * 3000 * 0.7));
-  const summary = String(result?.summary || "").trim();
-  return {
-    role: "assistant",
-    content: `上下文压缩摘要（${compressed} 条消息）\n\n${summary}`,
-    meta: {
-      kind: "compact-summary",
-      compressed,
-      estimatedSaved,
-    },
-    _time: new Date().toISOString(),
-  };
 }
 
 const streamingRenderQueue = new Map();
@@ -7718,19 +7704,14 @@ async function compactConversation() {
 
   if (state.isStreaming) { showToast("Please wait for the current task to finish before compacting.", "warning"); return; }
 
-  const durableSystemMessages = state.messages.filter(
-    (msg) => msg?.meta?.kind === "import-boundary",
-  );
+  const compactionPlan = buildManualCompactionPlan(state.messages, {
+    mapMessageForApi,
+    getMessageText: getMsgText,
+    isDetachedMessage: isDetachedFromMainContext,
+    recentRoundCount: RECENT_CONTEXT_ROUND_COUNT,
+  });
 
-  const compactableMessages = state.messages.filter(
-    (msg) => msg?.meta?.kind !== "import-boundary",
-  );
-
-  const compactableApiMessages = compactableMessages
-    .map((msg) => mapMessageForApi(msg, false))
-    .filter(Boolean);
-
-  if (compactableApiMessages.length < 6) { showToast("There are too few messages to compact.", "warning"); return; }
+  if (!compactionPlan.canCompact) { showToast("There are too few messages to compact.", "warning"); return; }
 
 
 
@@ -7744,20 +7725,14 @@ async function compactConversation() {
 
   // Show confirmation dialog
 
-  const totalMsgs = compactableApiMessages.length;
-
-  const keepCount = Math.max(2, Math.min(6, Math.floor(totalMsgs / 4)));
-
-  const compressCount = totalMsgs - keepCount;
-
-  const totalChars = compactableApiMessages.slice(0, compressCount).reduce(
-    (sum, message) => sum + getMsgText(message).length,
-    0,
-  );
-
-  const estimatedTokens = Math.ceil(totalChars / 3.2);
-
-  const estimatedSaved = Math.ceil(estimatedTokens * 0.7); // ~70% reduction after summarization
+  const {
+    compressCount,
+    durableSystemMessages,
+    estimatedSaved,
+    keepCount,
+    keptMessages,
+    requestMessages,
+  } = compactionPlan;
 
 
 
@@ -7805,9 +7780,7 @@ async function compactConversation() {
 
           model,
 
-          messages: [...durableSystemMessages, ...compactableMessages]
-            .map((msg) => mapMessageForApi(msg, false))
-            .filter(Boolean),
+          messages: requestMessages,
 
         }),
 
@@ -7827,21 +7800,13 @@ async function compactConversation() {
         });
       } catch (_) { /* non-critical */ }
 
-      let keepStartIndex = compactableMessages.length;
-      let remainingKept = keepCount;
-      for (let index = compactableMessages.length - 1; index >= 0; index -= 1) {
-        if (!mapMessageForApi(compactableMessages[index], false)) continue;
-        remainingKept -= 1;
-        if (remainingKept <= 0) {
-          keepStartIndex = index;
-          break;
-        }
-      }
-      const kept = compactableMessages.slice(keepStartIndex);
+      const summaryMsg = createCompactSummaryMessage(result, {
+        compressed: compressCount,
+        estimatedSaved,
+        createdAt: new Date().toISOString(),
+      });
 
-      const summaryMsg = createCompactSummaryMessage(result);
-
-      state.messages = [...durableSystemMessages, summaryMsg, ...kept];
+      state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages];
 
       state.stats = { input: 0, output: 0, cache: 0 };
 
