@@ -461,6 +461,120 @@ process.stdout.write(JSON.stringify({
         self.assertIn("} = window.Code.agent.questionnaire;", APP_SOURCE)
         self.assertIn("normalizeUserInputQuestions(tool.questions)", APP_SOURCE)
 
+    def test_agent_questionnaire_builds_stable_localized_results(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/questionnaire.js");
+
+const questionnaire = window.Code.agent.questionnaire;
+const request = {
+  id: "request-2",
+  title: "Choose",
+  questions: [
+    {id: "text", prompt: "Text", type: "text", status: "resolved", text: "  hello  ", other: ""},
+    {
+      id: "choice",
+      prompt: "Choice",
+      type: "multiple",
+      status: "resolved",
+      selected: ["api", "unknown"],
+      options: [{value: "api", label: "API"}],
+      other: "  custom  ",
+    },
+    {
+      id: "skip",
+      prompt: "Skip",
+      type: "single",
+      status: "canceled",
+      selected: [],
+      options: [{value: "later", label: "Later"}],
+      other: "  later  ",
+    },
+    {id: "empty", prompt: "Empty", type: "text", status: "resolved", text: "   ", other: ""},
+    {
+      id: "skip-empty",
+      prompt: "Skip empty",
+      type: "single",
+      status: "canceled",
+      selected: [],
+      options: [{value: "later", label: "Later"}],
+      other: "",
+    },
+  ],
+};
+const requestBefore = JSON.stringify(request);
+const result = questionnaire.buildUserInputResult(request, "Skipped");
+const payload = JSON.parse(JSON.stringify(result));
+const selectedValues = [...result.answers[1].values];
+result.answers[1].values.push("mutated");
+
+process.stdout.write(JSON.stringify({
+  answerTexts: result.answers.map((answer) => answer.answer),
+  otherValues: result.answers.map((answer) => answer.other),
+  selectedValues,
+  requestUnchanged: JSON.stringify(request) === requestBefore,
+  sourceSelected: request.questions[1].selected,
+  summary: result.summary,
+  resultHeader: {
+    ok: result.ok,
+    action: result.action,
+    requestId: result.requestId,
+    title: result.title,
+  },
+  ownProperties: result.answers.map((answer) => ({
+    values: Object.prototype.hasOwnProperty.call(answer, "values"),
+    text: Object.prototype.hasOwnProperty.call(answer, "text"),
+  })),
+  payloadKeys: payload.answers.map((answer) => Object.keys(answer)),
+  nullAnswer: questionnaire.userInputAnswerText(null, "Skipped"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["resultHeader"], {
+            "ok": True,
+            "action": "request_user_input",
+            "requestId": "request-2",
+            "title": "Choose",
+        })
+        self.assertEqual(data["answerTexts"], [
+            "hello",
+            "API、unknown、  custom  ",
+            "Skipped：  later  ",
+            "",
+            "Skipped",
+        ])
+        self.assertEqual(data["otherValues"], ["", "custom", "later", "", ""])
+        self.assertEqual(data["selectedValues"], ["api", "unknown"])
+        self.assertTrue(data["requestUnchanged"])
+        self.assertEqual(data["sourceSelected"], ["api", "unknown"])
+        self.assertEqual(
+            data["summary"],
+            "Text：hello\nChoice：API、unknown、  custom  \n"
+            "Skip：Skipped：  later  \nEmpty：Skipped\nSkip empty：Skipped",
+        )
+        self.assertTrue(all(item == {"values": True, "text": True} for item in data["ownProperties"]))
+        self.assertNotIn("values", data["payloadKeys"][0])
+        self.assertIn("text", data["payloadKeys"][0])
+        self.assertIn("values", data["payloadKeys"][1])
+        self.assertNotIn("text", data["payloadKeys"][1])
+        self.assertEqual(data["nullAnswer"], "")
+
+        self.assertIn("function userInputAnswerText(", QUESTIONNAIRE_SOURCE)
+        self.assertIn("function buildUserInputResult(", QUESTIONNAIRE_SOURCE)
+        self.assertNotIn("function userInputAnswerText(", APP_SOURCE)
+        self.assertIn("buildUserInputResult: buildUserInputResultData", APP_SOURCE)
+        self.assertIn('return buildUserInputResultData(request, t("questionCanceled"));', APP_SOURCE)
+        self.assertNotIn("const answers = request.questions.map", APP_SOURCE)
+
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (
             "requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",

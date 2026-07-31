@@ -64,6 +64,7 @@ const {
   serializeAuthorizationRequest,
 } = window.Code.agent.permissions;
 const {
+  buildUserInputResult: buildUserInputResultData,
   normalizeUserInputQuestions,
   serializeUserInputRequest,
 } = window.Code.agent.questionnaire;
@@ -5304,34 +5305,8 @@ function restoreUserInputRequest(sessionId, savedRequest) {
   return restored;
 }
 
-function userInputAnswerText(question) {
-  if (!question) return "";
-  if (question.status === "canceled") return question.other ? `${t("questionCanceled")}：${question.other}` : t("questionCanceled");
-  if (question.type === "text") return String(question.text || "").trim();
-  const labels = (question.selected || []).map((value) => question.options.find((option) => option.value === value)?.label || value);
-  if (question.other) labels.push(question.other);
-  return labels.join("、");
-}
-
 function buildUserInputResult(request) {
-  const answers = request.questions.map((question) => ({
-    id: question.id,
-    prompt: question.prompt,
-    type: question.type,
-    status: question.status,
-    values: question.type === "text" ? undefined : [...(question.selected || [])],
-    text: question.type === "text" ? String(question.text || "").trim() : undefined,
-    other: String(question.other || "").trim(),
-    answer: userInputAnswerText(question),
-  }));
-  return {
-    ok: true,
-    action: "request_user_input",
-    requestId: request.id,
-    title: request.title,
-    answers,
-    summary: answers.map((answer) => `${answer.prompt}：${answer.answer || t("questionCanceled")}`).join("\n"),
-  };
+  return buildUserInputResultData(request, t("questionCanceled"));
 }
 
 function appendUserInputSummary(request, result) {
