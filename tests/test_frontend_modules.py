@@ -4006,8 +4006,18 @@ process.stdout.write(JSON.stringify({
             "function renderFinalAssistantProjection(",
             "function renderCompletedRunStatus(",
             "function renderBackgroundReplyReference(",
+            "const TOOL_DISPLAY =",
+            "function _isToolError(",
+            "function _toolStatusLabel(",
+            "function _toolStatusClass(",
+            "function _toolTarget(",
+            "function _toolResultSummary(",
+            "function renderToolMessage(",
+            "function renderToolSection(",
         ):
             self.assertNotIn(obsolete, APP_SOURCE)
+        self.assertIn("function _toolActionLabel(action)", APP_SOURCE)
+        self.assertIn("getToolActionLabel: _toolActionLabel", APP_SOURCE)
         self.assertIn("window.copyMessageText = copyMessageText", APP_SOURCE)
         script = r"""
 global.window = {Code: {ui: {}}};

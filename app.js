@@ -1613,26 +1613,6 @@ function bindClickablePaths() {
 
 
 
-const TOOL_DISPLAY = {
-  list_files:   { label: "列出文件" },
-  read_file:    { label: "读取文件" },
-  search_files: { label: "搜索文件" },
-  glob_files:   { label: "匹配文件" },
-  propose_edit: { label: "生成修改方案" },
-  apply_edit:   { label: "应用修改" },
-  run_command:  { label: "执行命令" },
-  write_file:   { label: "写入文件" },
-  delete_file:  { label: "删除文件" },
-  web_fetch:    { label: "抓取网页" },
-  task:         { label: "子任务" },
-  use_skill:    { label: "加载 Skill" },
-  check_skill_dependencies: { label: "检查 Skill 依赖" },
-  read_skill_resource: { label: "读取 Skill 资源" },
-  save_memory:  { label: "保存记忆" },
-}
-
-
-
 function _toolActionLabel(action) {
   const map = { list_files:"toolListFiles", read_file:"toolReadFile", search_files:"toolSearchFiles",
     glob_files:"toolGlobFiles", propose_edit:"toolProposeEdit", apply_edit:"toolApplyEdit",
@@ -1681,87 +1661,6 @@ function _formatAgentError(err) {
   return t("errAgentFailed") + ": " + fallback;
 }
 
-function _isToolError(content) {
-  return /failed|error|失败|不存在|拒绝|denied/i.test(content || "");
-}
-
-function _toolStatusLabel({ isCall = false, resultMsg = null, error = false } = {}) {
-  if (error) return "statusFail";
-  if (resultMsg || !isCall) return "statusDone";
-  return "statusRunning";
-}
-
-function _toolStatusClass(label) {
-  if (label === "statusFail") return "failed";
-  if (label === "statusDone") return "done";
-  return "pending";
-}
-
-function _toolTarget(meta) {
-  if (!meta) return "";
-  const tool = meta.tool || meta;
-  if (tool.path) return tool.path;
-  if (tool.pattern) return tool.pattern;
-  if (tool.query) return "\"" + tool.query + "\"";
-  if (tool.command) return tool.command;
-  if (tool.url) return tool.url;
-  if (tool.prompt) return (tool.prompt || "").slice(0, 60);
-  return "";
-}
-
-function _toolResultSummary(msg) {
-  if (msg.role !== "tool-result") return "";
-  const content = (getMsgText(msg)).trim();
-  const meta = msg.meta || {};
-  const action = meta.action || meta.tool?.action || "";
-  if (action === "read_file") {
-    const p = meta.path || meta.tool?.path || "";
-    return p ? p.split("/").pop().split("\\").pop() || p : "";
-  }
-  if (action === "run_command") {
-    const m = content.match(/exit\s*code\s*[:=]\s*(\d+)/i);
-    return m ? (m[1] === "0" ? "退出码 0" : "退出码 " + m[1]) : "";
-  }
-  if (action === "web_fetch") {
-    return _isToolError(content) ? t("fetchFailed") : t("fetchDone");
-  }
-  const firstLine = content.split("\n").find((l) => l.trim() && !l.startsWith("```"));
-  return firstLine ? firstLine.trim().slice(0, 80) : "";
-}
-
-function renderToolMessage(msg) {
-
-  const meta = msg.meta || {};
-  const action = meta.action || msg.name || "tool";
-  const isCall = msg.role === "tool-call";
-  const label = _toolActionLabel(action);
-  const target = _toolTarget(meta);
-  const summary = isCall ? "" : _toolResultSummary(msg);
-  const pendingId = meta.pendingEditId;
-  const applied = !!(resultMsg?.meta?.applied);
-  const cls = isCall ? "call" : "result";
-  const content = getMsgText(msg);
-  const error = !isCall && _isToolError(content);
-  const statusLabel = _toolStatusLabel({ isCall, error });
-  const statusClass = _toolStatusClass(statusLabel);
-  const hasBody = content.length > 0 && action !== "read_file";
-  const autoOpen = !isCall && (action === "propose_edit" || action === "write_file") ? " open" : "";
-
-  return `
-    <details class="tool-inline ${cls}${error ? " error" : ""}"${autoOpen}>
-      <summary class="tool-inline-head">
-        <span class="tool-status-chip ${statusClass}">${t(statusLabel)}</span>
-        <span class="tool-inline-label">${escapeHtml(label)}</span>
-        ${target ? `<span class="tool-inline-target">${escapeHtml(target)}</span>` : ""}
-        ${summary ? `<span class="tool-inline-summary">${escapeHtml(summary)}</span>` : ""}
-        ${hasBody ? `<span class="tool-inline-expand">${t("toolExpand")}</span>` : ""}
-      </summary>
-      ${hasBody ? `<div class="tool-inline-body">${renderMarkdownLite(content)}</div>` : ""}
-    </details>
-    ${pendingId && applied ? `<div class="apply-edit-bar done"><span class="apply-edit-done">已应用</span></div>` : ""}
-    ${pendingId && resultMsg?.meta?.rejected ? `<div class="apply-edit-bar rejected"><span class="apply-edit-rejected">已拒绝</span></div>` : ""}
-  `;
-}
 function renderProcessAssistant(msg) {
 
   const thought = msg.thought || "";
@@ -1946,64 +1845,6 @@ function findLastAssistantMessage(messages = state.messages) {
 }
 
 
-
-function renderToolSection(tools, isStreaming) {
-  if (!tools || !tools.length) return "";
-  const cards = tools.map((item, idx) => {
-    const callMsg = item.callMsg || item;
-    const resultMsg = item.resultMsg || null;
-    const meta = callMsg.meta || {};
-    const action = meta.action || (meta.tool || {}).action || "tool";
-    const resultContent = resultMsg ? getMsgText(resultMsg) : "";
-    const resultError = resultMsg && _isToolError(resultContent);
-    const label = _toolActionLabel(action);
-    const statusLabel = _toolStatusLabel({ isCall: !resultMsg, resultMsg, error: resultError });
-    const statusClass = _toolStatusClass(statusLabel);
-    const target = _toolTarget(meta);
-    const pendingId = (resultMsg?.meta || {}).pendingEditId;
-    const applied = !!(resultMsg?.meta?.applied);
-    const rejected = !!(resultMsg?.meta?.rejected);
-    const showApplyBar = pendingId && !applied && !rejected;
-    const summary = resultMsg ? _toolResultSummary(resultMsg) : "";
-    const hasBody = resultContent.length > 0 && action !== "read_file";
-    const needsReview = pendingId && !applied;
-    const openAttr = needsReview ? " open" : "";
-    let html = `<details class="tool-inline merged${resultError ? " error" : ""}"${openAttr}>
-      <summary class="tool-inline-head">
-        <span class="tool-status-chip ${statusClass}">${t(statusLabel)}</span>
-        <span class="tool-inline-label">${escapeHtml(label)}</span>
-        ${target ? `<span class="tool-inline-target">${escapeHtml(target)}</span>` : ""}
-        ${summary ? `<span class="tool-inline-summary">${escapeHtml(summary)}</span>` : ""}
-        ${hasBody ? `<span class="tool-inline-expand">${t("toolExpand")}</span>` : ""}
-      </summary>`;
-    if (hasBody) html += `<div class="tool-inline-body">${renderMarkdownLite(resultContent)}</div>`;
-    html += `</details>`;
-    if (showApplyBar) {
-      const canReject = getPermissionProfile() !== "bypass";
-      html += `<div class="apply-edit-bar"><button class="apply-edit-btn" type="button" data-edit-id="${pendingId}">Apply edit</button>${canReject ? `<button class="reject-edit-btn" type="button" data-edit-id="${pendingId}">Reject</button>` : ""}<span class="apply-edit-hint">Write changes to file</span></div>`;
-    }
-    if (pendingId && applied) {
-      html += `<div class="apply-edit-bar done"><span class="apply-edit-done">Applied</span></div>`;
-    }
-    if (pendingId && (resultMsg?.meta || {}).rejected) {
-      html += `<div class="apply-edit-bar rejected"><span class="apply-edit-rejected">Rejected</span></div>`;
-    }
-    return html;
-  }).join("");
-  const totalCalls = tools.filter((t) => t.callMsg || t.role === "tool-call").length;
-  const failCount = tools.filter((t) => t.resultMsg && _isToolError(getMsgText(t.resultMsg))).length;
-  const successCount = Math.max(0, totalCalls - failCount);
-  const needsReview = tools.some((t) => {
-    const a = (t.callMsg?.meta || t.meta || {}).action || "";
-    const pid = (t.resultMsg?.meta || {}).pendingEditId;
-    return (a === "propose_edit" || a === "write_file") && pid && !state.pendingEdits[pid]?.applied;
-  });
-  if (isStreaming) return `<div class="tool-section streaming">${cards}</div>`;
-  const parts = [t("toolCount").replace("{count}", totalCalls)];
-  if (successCount) parts.push(t("tasksDone").replace("{count}", successCount));
-  if (failCount) parts.push(t("tasksFail").replace("{count}", failCount));
-  return `<details class="tool-section done"${needsReview ? " open" : ""}><summary class="tool-section-summary">${t("toolSection")}${escapeHtml(parts.join(" · "))}</summary><div class="tool-section-body">${cards}</div></details>`;
-}
 
 function isDetachedFromMainContext(msg) {
   if (!msg) return false;
