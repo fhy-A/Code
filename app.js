@@ -7702,7 +7702,7 @@ async function executeRunContext(ctx) {
 
 async function compactConversation() {
 
-  if (state.isStreaming) { showToast("Please wait for the current task to finish before compacting.", "warning"); return; }
+  if (state.isStreaming) { showToast(t("compactWaitForActiveTask"), "warning"); return; }
 
   const compactionPlan = buildManualCompactionPlan(state.messages, {
     mapMessageForApi,
@@ -7711,7 +7711,7 @@ async function compactConversation() {
     recentRoundCount: RECENT_CONTEXT_ROUND_COUNT,
   });
 
-  if (!compactionPlan.canCompact) { showToast("There are too few messages to compact.", "warning"); return; }
+  if (!compactionPlan.canCompact) { showToast(t("compactTooFewMessages"), "warning"); return; }
 
 
 
@@ -7719,7 +7719,7 @@ async function compactConversation() {
 
   const key = getBestKey(model);
 
-  if (!key || !model) { showToast("Please configure the API key and model first.", "warning"); return; }
+  if (!key || !model) { showToast(t("compactSetupRequired"), "warning"); return; }
 
 
 

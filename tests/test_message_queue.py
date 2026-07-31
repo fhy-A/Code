@@ -25,7 +25,7 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn(r"/^\/parallel(?:\s+([\s\S]*))?$/i", SUBAGENTS_SOURCE)
         self.assertNotIn("function parseParallelCommand(text)", APP_SOURCE)
         self.assertIn("} = window.Code.agent.subagents;", APP_SOURCE)
-        self.assertIn('{ name: "parallel", desc: t("cmdParallelDesc") }', (
+        self.assertIn('{ name: "parallel", descriptionKey: "cmdParallelDesc" }', (
             ROOT / "src" / "features" / "skills-memory.js"
         ).read_text(encoding="utf-8"))
         self.assertIn("cmdParallelDesc", I18N_SOURCE)

@@ -5894,6 +5894,19 @@ body.theme-dark .syn-fn { color: #61afef; }
   background: var(--panel-3); box-shadow: var(--shadow);
   max-height: 200px; overflow: auto; z-index: 10;
 }
+.slash-section + .slash-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.slash-section-label {
+  padding: 4px 9px 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  pointer-events: none;
+}
 .slash-item {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 14px; cursor: pointer;

@@ -161,6 +161,33 @@
     ].filter(Boolean).join("\n");
   }
 
+  const UI_SLASH_COMMANDS = Object.freeze([
+    { name: "compact", descriptionKey: "cmdCompactDesc" },
+    { name: "export", descriptionKey: "cmdExportDesc" },
+    { name: "clear", descriptionKey: "cmdClearDesc" },
+    { name: "branch", descriptionKey: "cmdBranchDesc" },
+    { name: "parallel", descriptionKey: "cmdParallelDesc" },
+  ]);
+
+  function getSlashSuggestionGroups(skills, disabledSkills, partial, t) {
+    const normalizedPartial = String(partial || "").toLowerCase();
+    const disabled = disabledSkills instanceof Set ? disabledSkills : new Set(disabledSkills || []);
+    const commandItems = UI_SLASH_COMMANDS
+      .filter((command) => command.name.startsWith(normalizedPartial))
+      .map((command) => ({
+        name: command.name,
+        description: t(command.descriptionKey),
+      }));
+    const skillItems = (skills || [])
+      .filter((skill) => !disabled.has(skill.name))
+      .filter((skill) => skill.name.startsWith(normalizedPartial));
+
+    return [
+      { key: "commands", label: t("slashCommandsLabel"), items: commandItems },
+      { key: "skills", label: t("slashSkillsLabel"), items: skillItems },
+    ].filter((group) => group.items.length);
+  }
+
   function createSkillsMemoryFeature(options = {}) {
     const state = options.state || {};
     const els = options.elements || {};
@@ -496,20 +523,8 @@
         return;
       }
       const partial = value.slice(1).toLowerCase();
-      const skillMatches = (state.skills || [])
-        .filter((skill) => !state.disabledSkills.has(skill.name))
-        .filter((skill) => skill.name.startsWith(partial));
-
-      // Built-in UI commands that run locally without involving the model
-      const UI_COMMANDS = [
-        { name: "export", desc: t("cmdExportDesc") },
-        { name: "clear",  desc: t("cmdClearDesc") },
-        { name: "branch", desc: t("cmdBranchDesc") },
-        { name: "parallel", desc: t("cmdParallelDesc") },
-      ];
-      const cmdMatches = UI_COMMANDS.filter((cmd) => cmd.name.startsWith(partial));
-
-      const matches = [...cmdMatches.map((cmd) => ({ name: cmd.name, description: cmd.desc })), ...skillMatches];
+      const groups = getSlashSuggestionGroups(state.skills, state.disabledSkills, partial, t);
+      const matches = groups.flatMap((group) => group.items);
       if (!matches.length) {
         existing?.remove();
         return;
@@ -533,9 +548,16 @@
         dropdown.style.left = "";
         dropdown.style.right = "";
       }
-      dropdown.innerHTML = matches.map((skill, i) => `<div class="slash-item${i === 0 ? " slash-item--sel" : ""}" data-skill="${escapeHtml(skill.name)}" data-index="${i}">
-        <span class="slash-name">/${escapeHtml(skill.name)}</span>
-        <span class="slash-desc" title="${escapeHtml(skill.description || "")}">${escapeHtml(skill.description || "")}</span>
+      let itemIndex = 0;
+      dropdown.innerHTML = groups.map((group) => `<div class="slash-section" data-slash-section="${escapeHtml(group.key)}">
+        <div class="slash-section-label">${escapeHtml(group.label)}</div>
+        ${group.items.map((item) => {
+          const index = itemIndex++;
+          return `<div class="slash-item${index === 0 ? " slash-item--sel" : ""}" data-skill="${escapeHtml(item.name)}" data-index="${index}">
+            <span class="slash-name">/${escapeHtml(item.name)}</span>
+            <span class="slash-desc" title="${escapeHtml(item.description || "")}">${escapeHtml(item.description || "")}</span>
+          </div>`;
+        }).join("")}
       </div>`).join("");
       state._slashIndex = 0;
       state._slashCount = matches.length;
@@ -1489,6 +1511,7 @@
     EXPLICIT_ONLY_SKILLS,
     createSkillsMemoryFeature,
     formatSkillInstructions,
+    getSlashSuggestionGroups,
     getSkillToolBudgets,
     rankMatchedSkills,
   });

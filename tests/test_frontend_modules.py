@@ -108,11 +108,68 @@ process.stdout.write(JSON.stringify({{
         compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
         compact_source = APP_SOURCE[compact_start:compact_end]
         self.assertNotIn("els.compactBtn", compact_source)
+        self.assertNotIn("There are too few messages to compact.", compact_source)
+        for key in (
+            "compactWaitForActiveTask",
+            "compactTooFewMessages",
+            "compactSetupRequired",
+        ):
+            self.assertIn(f't("{key}")', compact_source)
         self.assertIn('confirmBtn.textContent = t("compacting")', compact_source)
         self.assertIn('confirmBtn.textContent = t("confirmCompact")', compact_source)
         for handler in ("onConfirm", "onCancel", "onModalClick"):
             self.assertIn(f'addEventListener("click", {handler})', compact_source)
             self.assertIn(f'removeEventListener("click", {handler})', compact_source)
+
+    def test_slash_suggestions_group_commands_before_skills(self):
+        script = f"""
+global.window = {{Code: {{features: {{}}}}}};
+eval({json.dumps(SKILLS_MEMORY_SOURCE)});
+const translate = (key) => ({{
+  cmdCompactDesc: "compact-desc",
+  cmdExportDesc: "export-desc",
+  cmdClearDesc: "clear-desc",
+  cmdBranchDesc: "branch-desc",
+  cmdParallelDesc: "parallel-desc",
+  slashCommandsLabel: "Commands",
+  slashSkillsLabel: "Skills",
+}}[key] || key);
+const groups = window.Code.features.skillsMemory.getSlashSuggestionGroups(
+  [
+    {{name: "alpha", description: "Alpha skill"}},
+    {{name: "compact-skill", description: "Skill with a similar name"}},
+    {{name: "disabled", description: "Disabled skill"}},
+  ],
+  new Set(["disabled"]),
+  "",
+  translate,
+);
+process.stdout.write(JSON.stringify(groups));
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            input=script,
+            check=True,
+        )
+        groups = json.loads(completed.stdout)
+        self.assertEqual([group["key"] for group in groups], ["commands", "skills"])
+        self.assertEqual(groups[0]["label"], "Commands")
+        self.assertEqual(
+            [item["name"] for item in groups[0]["items"]],
+            ["compact", "export", "clear", "branch", "parallel"],
+        )
+        self.assertEqual(
+            [item["name"] for item in groups[1]["items"]],
+            ["alpha", "compact-skill"],
+        )
+        self.assertIn('class="slash-section-label"', SKILLS_MEMORY_SOURCE)
+        self.assertIn(".slash-section + .slash-section", STYLE_SOURCE)
+        self.assertIn('slashCommandsLabel: "命令", slashSkillsLabel: "Skills"', I18N_SOURCE)
+        self.assertIn('slashCommandsLabel: "Commands", slashSkillsLabel: "Skills"', I18N_SOURCE)
 
     def test_settings_shell_is_responsive_and_navigation_is_grouped(self):
         for key in (
