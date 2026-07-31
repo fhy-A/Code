@@ -32,9 +32,8 @@ const { createMessagesFeature } = window.Code.ui.messages;
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
 const {
-  collectPendingEdits: collectSessionPendingEdits,
+  createSessionNavigation,
   createSessionsFeature,
-  normalizeSessionMessages: normalizeLoadedSessionMessages,
 } = window.Code.features.sessions;
 const { createSettingsFeature } = window.Code.features.settings;
 const {
@@ -106,13 +105,13 @@ const { saveSession: persistSessionPayload } = createSessionPersistence({
   requestJson: apiJson,
   saveChains: state._sessionSaveChains,
 });
+const sessionDataFeature = createSessionsFeature({ requestJson: apiJson });
 const {
   listSessions: listSessionRecords,
   getSession: getSessionRecord,
-  createSession: createSessionRecord,
   updateSession: updateSessionRecord,
   deleteSession: deleteSessionRecord,
-} = createSessionsFeature({ requestJson: apiJson });
+} = sessionDataFeature;
 
 const { t, setLang, applyI18n } = createI18nRuntime({
   getLanguage: () => state.lang,
@@ -787,6 +786,57 @@ const {
   updateStatsPanel,
 } = panelsFeature;
 panelsFeature.bind();
+
+const sessionNavigation = createSessionNavigation({
+  state,
+  elements: els,
+  storage: localStorage,
+  data: sessionDataFeature,
+  stateAccessors: {
+    getSessionRunState,
+    setSessionLastUsage,
+    setSessionMessages,
+    setSessionRunState,
+    setSessionStats,
+  },
+  project: {
+    getCurrentProject: projectForCurrentRoot,
+    getById: (projectId) => state.projectsMap[projectId],
+    getPrimaryPath: projectPrimaryPath,
+    getCurrentRoot: () => els.projectRoot?.value,
+    pathsEqual: (left, right) => normalizePathIdentity(left) === normalizePathIdentity(right),
+    saveRoot: saveProjectRoot,
+  },
+  branch: {
+    syncMetadata: syncSessionBranchMetadata,
+  },
+  recovery: {
+    restoreUserInputRequest,
+    restoreAuthorizationRequest,
+  },
+  view: {
+    cacheActiveSessionState,
+    resetRenderCache,
+    renderMessages,
+    renderSessions,
+    updateGroupBadge,
+    updateStatsPanel,
+    updateSendButtonState,
+    syncActiveStreamingState,
+    scheduleMessagesScrollToBottom,
+    refreshSessions,
+    showToast,
+  },
+  t,
+});
+const {
+  invalidateForegroundSessionNavigation,
+  rememberWelcomeForeground,
+  rememberSessionForeground,
+  beginNewConversation,
+  createSession,
+  loadSession,
+} = sessionNavigation;
 
 const skillsMemoryFeature = createSkillsMemoryFeature({
   state,
@@ -4380,34 +4430,6 @@ function projectIdForNewConversation() {
   return active?.projectId || projectForCurrentRoot()?.id || null;
 }
 
-function beginNewConversation(projectId = null) {
-  cacheActiveSessionState();
-  invalidateForegroundSessionNavigation();
-  state.pendingProjectId = projectId || null;
-  state.sessionId = null;
-  state.messages = [];
-  state._lastRenderedHtml = null;
-  state.stats = { input: 0, output: 0, cache: 0 };
-  state.pendingEdits = {};
-  els.sessionTitle.value = "";
-  rememberWelcomeForeground();
-  syncActiveStreamingState();
-  renderMessages();
-  renderSessions();
-  updateGroupBadge({});
-  updateStatsPanel();
-  updateSendButtonState();
-  const primaryPath = projectPrimaryPath(state.projectsMap[projectId]);
-  if (
-    primaryPath
-    && normalizePathIdentity(primaryPath) !== normalizePathIdentity(els.projectRoot?.value)
-  ) {
-    saveProjectRoot(primaryPath, { syncSession: false }).catch((error) => {
-      showToast(error.message || String(error), "error");
-    });
-  }
-}
-
 // Close any context menu on outside click
 document.addEventListener("click", function (e) {
   if (!e.target.closest(".project-context-menu") && !e.target.closest(".project-header")) {
@@ -4417,23 +4439,6 @@ document.addEventListener("click", function (e) {
     closeAllSessionMenus();
   }
 });
-
-function invalidateForegroundSessionNavigation() {
-  state._foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
-}
-
-function rememberWelcomeForeground() {
-  localStorage.setItem("code-foreground-view", "welcome");
-  localStorage.removeItem("code-last-session");
-}
-
-function rememberSessionForeground(sessionId) {
-  if (!sessionId) return;
-  localStorage.setItem("code-foreground-view", "session");
-  localStorage.setItem("code-last-session", sessionId);
-}
-
-
 
 async function refreshSessions() {
 
@@ -4467,169 +4472,6 @@ function scheduleDeferredSessionRefresh(sessionId) {
     console.error("Failed to refresh deferred session sidebar:", error);
   });
 }
-
-async function createSession(title = t("sessionTitleDefault"), options = {}) {
-
-  cacheActiveSessionState();
-  const initialMessages = Array.isArray(options.initialMessages)
-    ? options.initialMessages
-    : null;
-  var body = { title: title };
-  const projectId = state.pendingProjectId || projectForCurrentRoot()?.id || null;
-  if (projectId) {
-    body.projectId = projectId;
-    body.cwd = projectPrimaryPath(state.projectsMap[projectId]);
-  }
-  const loadSeq = (state._sessionLoadSeq || 0) + 1;
-  state._sessionLoadSeq = loadSeq;
-
-  const session = await createSessionRecord(body);
-  if (loadSeq !== state._sessionLoadSeq) return session;
-
-  state.sessionId = session.id;
-  state.pendingProjectId = session.projectId || null;
-
-  state.sessionCreated = session.createdAt || "";
-  state.sessionUpdated = session.lastMessageTime || session.updatedAt || "";
-  state._sessionFilePath = session._filePath || "";
-  state._sessionMessageFilePath = session._messageFilePath || "";
-  updateGroupBadge(session);
-
-  state.messages = initialMessages || session.messages || [];
-  setSessionMessages(session.id, state.messages);
-  setSessionRunState(session.id, session.runState || {});
-  setSessionLastUsage(session.id, session.lastUsage || null);
-
-  state.pendingEdits = {};
-
-  state.stats = session.stats || { input: 0, output: 0, cache: 0 };
-  setSessionStats(session.id, state.stats);
-  resetRenderCache();
-
-  els.sessionTitle.value = session.title || t("sessionTitleDefault");
-
-  rememberSessionForeground(session.id);
-
-  if (options.deferSidebarRefresh === true) {
-    state._deferredSessionRefreshId = session.id;
-  }
-  renderMessages();
-
-  if (session.cwd) await saveProjectRoot(session.cwd, { syncSession: false });
-  if (options.deferSidebarRefresh !== true) {
-    await refreshSessions();
-  }
-
-  syncActiveStreamingState();
-
-  renderMessages();
-
-  return session;
-
-}
-
-
-
-async function loadSession(sessionId) {
-
-  if (!sessionId) return;
-
-  // Debounce rapid clicks (300ms)
-  const now = Date.now();
-  if (state._lastSwitchTime && now - state._lastSwitchTime < 300) return;
-  state._lastSwitchTime = now;
-
-  const foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
-  state._foregroundNavigationSeq = foregroundNavigationSeq;
-
-  // Close branch panel on session switch (unless from branch tree itself)
-  if (state.branchPanelOpen && !state._keepBranchOpen) {
-    els.branchPanel.classList.remove("open");
-    els.toggleBranches.classList.remove("active");
-    state.branchPanelOpen = false;
-  }
-  state._keepBranchOpen = false;
-
-  if (sessionId === state.sessionId) {
-    const current = state.sessions.find((item) => item.id === sessionId);
-    state.pendingProjectId = current?.projectId || null;
-    if (
-      current?.cwd
-      && normalizePathIdentity(current.cwd) !== normalizePathIdentity(els.projectRoot?.value)
-    ) {
-      await saveProjectRoot(current.cwd, { syncSession: false });
-    }
-    rememberSessionForeground(sessionId);
-    syncActiveStreamingState();
-    resetRenderCache();
-    renderMessages();
-    scheduleMessagesScrollToBottom(sessionId);
-    return;
-  }
-
-  const loadSeq = (state._sessionLoadSeq || 0) + 1;
-  state._sessionLoadSeq = loadSeq;
-
-  // Save current messages to cache before switching
-  const prevId = state.sessionId;
-  cacheActiveSessionState();
-
-  const session = await getSessionRecord(sessionId);
-  if (loadSeq !== state._sessionLoadSeq
-      || foregroundNavigationSeq !== state._foregroundNavigationSeq) return;
-
-  // Track unread: only mark if messages arrived while user was away
-  if (prevId && prevId !== session.id) {
-    const prev = state.sessions.find((s) => s.id === prevId);
-    const prevMsgs = state._sessionMsgs[prevId] || [];
-    // User was viewing this session, so they've seen all current messages
-    if (prev) prev._seenCount = Math.max(prev._seenCount || 0, prevMsgs.length);
-    if (prev && prevMsgs.length > (prev._seenCount || 0)) prev._unread = true;
-  }
-  const loaded = syncSessionBranchMetadata(state.sessions, session);
-  if (loaded) { loaded._unread = false; }
-
-  // Switch session — prefer cache (has in-flight streaming content) over server
-  state.sessionId = session.id;
-  state.pendingProjectId = session.projectId || null;
-
-  state.sessionCreated = session.createdAt || "";
-  state.sessionUpdated = session.lastMessageTime || session.updatedAt || "";
-  state._sessionFilePath = session._filePath || "";
-  state._sessionMessageFilePath = session._messageFilePath || "";
-  updateGroupBadge(session);
-
-  // Load from active run (streaming) > cache > server
-  const cached = state._sessionMsgs && state._sessionMsgs[session.id];
-  state.messages = cached || normalizeLoadedSessionMessages(session.messages || []);
-  setSessionMessages(session.id, state.messages);
-  setSessionRunState(session.id, session.runState || getSessionRunState(session.id));
-  restoreUserInputRequest(session.id, session.runState?.userInputRequest);
-  restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
-  if (loaded) loaded._seenCount = state.messages.length;
-
-  state.pendingEdits = collectSessionPendingEdits(state.messages);
-
-  state.stats = state._sessionStats[session.id] || session.stats || { input: 0, output: 0, cache: 0, cost: 0 };
-  setSessionStats(session.id, state.stats);
-  setSessionLastUsage(session.id, state._sessionLastUsage[session.id] || session.lastUsage || null);
-  resetRenderCache();
-
-  els.sessionTitle.value = session.title || t("untitledSession");
-
-  rememberSessionForeground(session.id);
-
-  if (session.cwd) await saveProjectRoot(session.cwd, { syncSession: false });
-  renderSessions();
-
-  syncActiveStreamingState();
-
-  renderMessages();
-  scheduleMessagesScrollToBottom(session.id);
-
-}
-
-
 
 const SOURCE_BADGE_NOTICE_KEY = "code-source-badge-lifecycle-notice-v1";
 

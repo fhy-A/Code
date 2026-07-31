@@ -329,13 +329,15 @@ class TestBranchFlowMarker(unittest.TestCase):
         cls.source = (root / "app.js").read_text(encoding="utf-8")
         cls.messages_source = (root / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
         cls.timeline_source = (root / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
+        cls.sessions_source = (root / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 
     def test_branch_marker_uses_raw_message_boundary(self):
         self.assertIn("const branchMarker = getBranchFlowMarker();", self.source)
         self.assertIn("if (index === branchBoundary) insertBranchMarker();", self.messages_source)
 
     def test_loaded_branch_metadata_hydrates_session_summary(self):
-        self.assertIn("syncSessionBranchMetadata(state.sessions, session)", self.source)
+        self.assertIn("syncMetadata: syncSessionBranchMetadata", self.source)
+        self.assertIn("branch.syncMetadata(state.sessions, session)", self.sessions_source)
         self.assertIn("function syncSessionBranchMetadata(", self.timeline_source)
 
     def test_new_branch_inherits_usage_baseline_before_loading(self):

@@ -403,6 +403,7 @@ class TestDispatcherLimits(unittest.TestCase):
         cls.source = (root / "app.js").read_text(encoding="utf-8")
         cls.state_source = (root / "src" / "core" / "state.js").read_text(encoding="utf-8")
         cls.persistence_source = (root / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
+        cls.sessions_source = (root / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 
     def test_global_limit_enforced(self):
         self.assertIn('globalLimit: 3', self.state_source,
@@ -461,22 +462,24 @@ class TestDispatcherLimits(unittest.TestCase):
         start = self.source.index('els.newChat.addEventListener("click"')
         end = self.source.index('els.exportChat.addEventListener', start)
         handler = self.source[start:end]
-        helper_start = self.source.index("function beginNewConversation(")
-        helper_end = self.source.index("// Close any context menu", helper_start)
-        new_session_flow = handler + self.source[helper_start:helper_end]
-        self.assertIn('cacheActiveSessionState();', new_session_flow)
+        navigation_start = self.sessions_source.index("function createSessionNavigation(")
+        helper_start = self.sessions_source.index("function beginNewConversation(", navigation_start)
+        helper_end = self.sessions_source.index("async function createSession(", helper_start)
+        new_session_flow = handler + self.sessions_source[helper_start:helper_end]
+        self.assertIn('view.cacheActiveSessionState();', new_session_flow)
         self.assertIn('invalidateForegroundSessionNavigation();', new_session_flow)
         self.assertIn('rememberWelcomeForeground();', new_session_flow)
-        self.assertIn('syncActiveStreamingState();', new_session_flow)
+        self.assertIn('view.syncActiveStreamingState();', new_session_flow)
         self.assertIn("beginNewConversation(projectIdForNewConversation());", handler)
         self.assertNotIn('state.isStreaming) { showToast', new_session_flow)
         self.assertNotIn('run.abortController.abort()', new_session_flow)
         self.assertNotIn('run.messageQueue = []', new_session_flow)
 
     def test_welcome_refresh_only_changes_foreground_navigation(self):
-        load_start = self.source.index('async function loadSession(sessionId)')
-        load_end = self.source.index('async function saveSessionState', load_start)
-        load_block = self.source[load_start:load_end]
+        navigation_start = self.sessions_source.index("function createSessionNavigation(")
+        load_start = self.sessions_source.index('async function loadSession(sessionId)', navigation_start)
+        load_end = self.sessions_source.index('return Object.freeze({', load_start)
+        load_block = self.sessions_source[load_start:load_end]
         self.assertIn('foregroundNavigationSeq !== state._foregroundNavigationSeq', load_block)
         self.assertIn('rememberSessionForeground(session.id);', load_block)
         self.assertNotIn('abortController.abort()', load_block)

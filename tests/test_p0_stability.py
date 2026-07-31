@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
 PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
+SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 TIMELINE_SOURCE = (ROOT / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
@@ -113,10 +114,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn("if (state.sessionId !== sessionId) return", APP_SOURCE)
         self.assertIn("els.messages.scrollTop = els.messages.scrollHeight", APP_SOURCE)
 
-        load_session = APP_SOURCE[
-            APP_SOURCE.index("async function loadSession(sessionId)"):
-            APP_SOURCE.index("async function saveSessionState", APP_SOURCE.index("async function loadSession(sessionId)"))
-        ]
+        navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
+        load_start = SESSIONS_SOURCE.index("async function loadSession(sessionId)", navigation_start)
+        load_end = SESSIONS_SOURCE.index("return Object.freeze({", load_start)
+        load_session = SESSIONS_SOURCE[load_start:load_end]
         self.assertEqual(load_session.count("scheduleMessagesScrollToBottom("), 2)
 
         timeline = TIMELINE_SOURCE[

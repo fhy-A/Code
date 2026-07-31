@@ -878,31 +878,13 @@ const sessions = createSessionsFeature({requestJson});
 
         self.assertIn("createSessionsFeature({ requestJson: apiJson })", APP_SOURCE)
         refresh_start = APP_SOURCE.index("async function refreshSessions()")
-        create_start = APP_SOURCE.index("async function createSession(", refresh_start)
-        load_start = APP_SOURCE.index("async function loadSession(", create_start)
-        save_start = APP_SOURCE.index("async function saveSessionState", load_start)
+        refresh_end = APP_SOURCE.index("function scheduleDeferredSessionRefresh(", refresh_start)
         rename_start = APP_SOURCE.index("async function renameSession(")
         delete_start = APP_SOURCE.index("async function deleteSession(", rename_start)
         pinned_start = APP_SOURCE.index("function getPinnedSessions()", delete_start)
         self.assertIn(
             "state.sessions = await listSessionRecords();",
-            APP_SOURCE[refresh_start:create_start],
-        )
-        self.assertIn(
-            "const session = await createSessionRecord(body);",
-            APP_SOURCE[create_start:load_start],
-        )
-        self.assertIn(
-            "const session = await getSessionRecord(sessionId);",
-            APP_SOURCE[load_start:save_start],
-        )
-        self.assertIn(
-            "normalizeLoadedSessionMessages(session.messages || [])",
-            APP_SOURCE[load_start:save_start],
-        )
-        self.assertIn(
-            "collectSessionPendingEdits(state.messages)",
-            APP_SOURCE[load_start:save_start],
+            APP_SOURCE[refresh_start:refresh_end],
         )
         self.assertIn(
             "await updateSessionRecord(sessionId",
@@ -912,6 +894,296 @@ const sessions = createSessionsFeature({requestJson});
             "await deleteSessionRecord(sessionId);",
             APP_SOURCE[delete_start:pinned_start],
         )
+        navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
+        self.assertIn(
+            "const session = await data.createSession(body);",
+            SESSIONS_SOURCE[navigation_start:],
+        )
+        self.assertIn(
+            "const session = await data.getSession(sessionId);",
+            SESSIONS_SOURCE[navigation_start:],
+        )
+        self.assertIn(
+            "state.messages = cached || normalizeSessionMessages(session.messages || []);",
+            SESSIONS_SOURCE[navigation_start:],
+        )
+        self.assertIn(
+            "state.pendingEdits = collectPendingEdits(state.messages);",
+            SESSIONS_SOURCE[navigation_start:],
+        )
+        self.assertNotIn("async function createSession(", APP_SOURCE)
+        self.assertNotIn("async function loadSession(", APP_SOURCE)
+
+    def test_session_navigation_preserves_new_create_and_switch_state(self):
+        self.assertLess(
+            APP_SOURCE.index("const panelsFeature = createPanelsFeature({"),
+            APP_SOURCE.index("const sessionNavigation = createSessionNavigation({"),
+        )
+        self.assertLess(
+            APP_SOURCE.index("updateStatsPanel,", APP_SOURCE.index("const {", APP_SOURCE.index("const panelsFeature"))),
+            APP_SOURCE.index("const sessionNavigation = createSessionNavigation({"),
+        )
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+
+const values = new Map([
+  ["code-foreground-view", "session"],
+  ["code-last-session", "alpha"],
+]);
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+const alphaMessages = [{role: "user", content: "alpha"}];
+const state = {
+  sessionId: "alpha",
+  sessions: [
+    {id: "alpha", projectId: "p1", cwd: "C:/One", title: "Alpha"},
+    {id: "beta", projectId: "p2", cwd: "C:/Beta", title: "Beta"},
+  ],
+  projectsMap: {
+    p1: {id: "p1", path: "C:/One"},
+    p2: {id: "p2", path: "C:/Two"},
+  },
+  pendingProjectId: null,
+  messages: alphaMessages,
+  stats: {input: 1, output: 2, cache: 3},
+  pendingEdits: {},
+  _sessionMsgs: {alpha: alphaMessages},
+  _sessionStats: {alpha: {input: 1, output: 2, cache: 3}},
+  _sessionLastUsage: {},
+  _sessionRunStates: {},
+  _foregroundNavigationSeq: 0,
+  _sessionLoadSeq: 0,
+  branchPanelOpen: true,
+  _keepBranchOpen: false,
+};
+const events = [];
+const elements = {
+  sessionTitle: {value: "Alpha"},
+  branchPanel: {classList: {remove: (name) => events.push(["branch-remove", name])}},
+  toggleBranches: {classList: {remove: (name) => events.push(["toggle-remove", name])}},
+};
+const stateAccessors = {
+  getSessionRunState: (sessionId) => state._sessionRunStates[sessionId] || {},
+  setSessionRunState: (sessionId, runState) => {
+    state._sessionRunStates[sessionId] = {...(runState || {})};
+  },
+  setSessionMessages: (sessionId, messages) => {
+    state._sessionMsgs[sessionId] = messages;
+    if (sessionId === state.sessionId) state.messages = messages;
+  },
+  setSessionStats: (sessionId, stats) => {
+    state._sessionStats[sessionId] = stats;
+    if (sessionId === state.sessionId) state.stats = stats;
+  },
+  setSessionLastUsage: (sessionId, usage) => {
+    if (usage) state._sessionLastUsage[sessionId] = usage;
+    else delete state._sessionLastUsage[sessionId];
+    if (sessionId === state.sessionId) state.lastUsage = usage || null;
+  },
+};
+const data = {
+  createSession: async (body) => {
+    events.push(["create", body]);
+    return {
+      id: "created",
+      title: body.title,
+      projectId: body.projectId,
+      cwd: body.cwd,
+      createdAt: "2026-07-31T07:00:00Z",
+      updatedAt: "2026-07-31T07:00:01Z",
+      messages: [],
+      stats: {input: 0, output: 0, cache: 0},
+      runState: {},
+      lastUsage: null,
+    };
+  },
+  getSession: async (sessionId) => {
+    events.push(["get", sessionId]);
+    return {
+      id: "beta",
+      title: "Beta loaded",
+      projectId: "p2",
+      cwd: "C:/Beta",
+      createdAt: "2026-07-30T01:00:00Z",
+      updatedAt: "2026-07-31T07:00:02Z",
+      messages: [{
+        role: "tool-result",
+        content: "edit",
+        meta: {
+          pendingEditId: "edit-beta",
+          path: "beta.js",
+          newContent: "next",
+          rejected: true,
+        },
+      }],
+      stats: {input: 7, output: 8, cache: 9, cost: 1},
+      lastUsage: {total_tokens: 24},
+      runState: {
+        status: "waiting-user-input",
+        userInputRequest: {id: "question-beta", status: "pending"},
+        authorizationRequest: {id: "authorization-beta", status: "pending"},
+      },
+    };
+  },
+};
+let currentRoot = "C:/One";
+const project = {
+  getCurrentProject: () => state.projectsMap.p1,
+  getById: (projectId) => state.projectsMap[projectId],
+  getPrimaryPath: (projectRecord) => projectRecord?.path || "",
+  getCurrentRoot: () => currentRoot,
+  pathsEqual: (left, right) => String(left).toLowerCase() === String(right).toLowerCase(),
+  saveRoot: async (path) => {
+    currentRoot = path;
+    events.push(["save-root", path]);
+  },
+};
+const view = {
+  cacheActiveSessionState: () => {
+    events.push(["cache", state.sessionId]);
+    if (!state.sessionId) return;
+    state._sessionMsgs[state.sessionId] = state.messages;
+    state._sessionStats[state.sessionId] = state.stats;
+  },
+  resetRenderCache: () => events.push(["reset-render"]),
+  renderMessages: () => events.push(["render-messages", state.sessionId]),
+  renderSessions: () => events.push(["render-sessions", state.sessionId]),
+  updateGroupBadge: (session) => events.push(["group", session.id || ""]),
+  updateStatsPanel: () => events.push(["stats"]),
+  updateSendButtonState: () => events.push(["send"]),
+  syncActiveStreamingState: () => events.push(["stream", state.sessionId]),
+  scheduleMessagesScrollToBottom: (sessionId) => events.push(["scroll", sessionId]),
+  refreshSessions: async () => events.push(["refresh"]),
+  showToast: (message, kind) => events.push(["toast", message, kind]),
+};
+const recovery = {
+  restoreUserInputRequest: (sessionId, request) => events.push(["user-input", sessionId, request?.id || ""]),
+  restoreAuthorizationRequest: (sessionId, request) => events.push(["authorization", sessionId, request?.id || ""]),
+};
+const branch = {
+  syncMetadata: (summaries, session) => {
+    const summary = summaries.find((item) => item.id === session.id);
+    if (summary) Object.assign(summary, session);
+    return summary || null;
+  },
+};
+const navigation = window.Code.features.sessions.createSessionNavigation({
+  state,
+  elements,
+  storage,
+  data,
+  stateAccessors,
+  project,
+  branch,
+  recovery,
+  view,
+  t: (key) => key === "untitledSession" ? "Untitled" : "New session",
+});
+
+(async () => {
+  navigation.beginNewConversation("p2");
+  const afterBegin = {
+    sessionId: state.sessionId,
+    pendingProjectId: state.pendingProjectId,
+    title: elements.sessionTitle.value,
+    foregroundView: values.get("code-foreground-view"),
+    lastSession: values.get("code-last-session") || null,
+  };
+
+  const optimisticMessages = [{role: "user", content: "optimistic"}];
+  await navigation.createSession("Created", {
+    initialMessages: optimisticMessages,
+    deferSidebarRefresh: true,
+  });
+  const afterCreate = {
+    sessionId: state.sessionId,
+    pendingProjectId: state.pendingProjectId,
+    title: elements.sessionTitle.value,
+    messages: state.messages,
+    deferredRefreshId: state._deferredSessionRefreshId,
+    foregroundView: values.get("code-foreground-view"),
+    lastSession: values.get("code-last-session"),
+  };
+
+  state._lastSwitchTime = 0;
+  await navigation.loadSession("beta");
+  const afterLoad = {
+    sessionId: state.sessionId,
+    pendingProjectId: state.pendingProjectId,
+    title: elements.sessionTitle.value,
+    messages: state.messages,
+    pendingEdits: state.pendingEdits,
+    stats: state.stats,
+    lastUsage: state.lastUsage,
+    branchPanelOpen: state.branchPanelOpen,
+    foregroundView: values.get("code-foreground-view"),
+    lastSession: values.get("code-last-session"),
+  };
+
+  process.stdout.write(JSON.stringify({afterBegin, afterCreate, afterLoad, events}));
+})();
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["afterBegin"],
+            {
+                "sessionId": None,
+                "pendingProjectId": "p2",
+                "title": "",
+                "foregroundView": "welcome",
+                "lastSession": None,
+            },
+        )
+        self.assertEqual(result["afterCreate"]["sessionId"], "created")
+        self.assertEqual(result["afterCreate"]["pendingProjectId"], "p2")
+        self.assertEqual(result["afterCreate"]["title"], "Created")
+        self.assertEqual(
+            result["afterCreate"]["messages"],
+            [{"role": "user", "content": "optimistic"}],
+        )
+        self.assertEqual(result["afterCreate"]["deferredRefreshId"], "created")
+        self.assertEqual(result["afterCreate"]["foregroundView"], "session")
+        self.assertEqual(result["afterCreate"]["lastSession"], "created")
+
+        self.assertEqual(result["afterLoad"]["sessionId"], "beta")
+        self.assertEqual(result["afterLoad"]["pendingProjectId"], "p2")
+        self.assertEqual(result["afterLoad"]["title"], "Beta loaded")
+        self.assertEqual(result["afterLoad"]["stats"], {"input": 7, "output": 8, "cache": 9, "cost": 1})
+        self.assertEqual(result["afterLoad"]["lastUsage"], {"total_tokens": 24})
+        self.assertFalse(result["afterLoad"]["branchPanelOpen"])
+        self.assertEqual(result["afterLoad"]["foregroundView"], "session")
+        self.assertEqual(result["afterLoad"]["lastSession"], "beta")
+        self.assertEqual(
+            result["afterLoad"]["pendingEdits"],
+            {
+                "edit-beta": {
+                    "path": "beta.js",
+                    "newContent": "next",
+                    "applied": False,
+                    "rejected": True,
+                    "resolved": True,
+                    "serverManaged": False,
+                    "mtime": 0,
+                },
+            },
+        )
+        self.assertIn(["create", {"title": "Created", "projectId": "p2", "cwd": "C:/Two"}], result["events"])
+        self.assertIn(["get", "beta"], result["events"])
+        self.assertIn(["user-input", "beta", "question-beta"], result["events"])
+        self.assertIn(["authorization", "beta", "authorization-beta"], result["events"])
+        self.assertIn(["scroll", "beta"], result["events"])
 
     def test_platform_core_normalizes_and_parses_key_config(self):
         self.assertIn('const WORKBAR_URL = "https://workbar.ai"', PLATFORM_SOURCE)
@@ -4355,20 +4627,21 @@ process.stdout.write(JSON.stringify({{
         self.assertFalse(data["pending"])
 
     def test_deferred_first_send_sidebar_refresh_preserves_active_run(self):
-        create_start = APP_SOURCE.index("async function createSession(")
-        create_end = APP_SOURCE.index("async function loadSession(", create_start)
-        create = APP_SOURCE[create_start:create_end]
+        navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
+        create_start = SESSIONS_SOURCE.index("async function createSession(", navigation_start)
+        create_end = SESSIONS_SOURCE.index("async function loadSession(", create_start)
+        create = SESSIONS_SOURCE[create_start:create_end]
         self.assertIn("const initialMessages = Array.isArray(options.initialMessages)", create)
         self.assertIn("state.messages = initialMessages || session.messages || [];", create)
         self.assertIn("if (options.deferSidebarRefresh !== true)", create)
         self.assertIn("state._deferredSessionRefreshId = session.id;", create)
         self.assertLess(
-            create.index("renderMessages();"),
-            create.index("if (session.cwd) await saveProjectRoot"),
+            create.index("view.renderMessages();"),
+            create.index("if (session.cwd) await project.saveRoot"),
         )
 
         refresh_start = APP_SOURCE.index("async function refreshSessions()")
-        refresh_end = APP_SOURCE.index("async function createSession(", refresh_start)
+        refresh_end = APP_SOURCE.index("function scheduleDeferredSessionRefresh(", refresh_start)
         refresh = APP_SOURCE[refresh_start:refresh_end]
         self.assertIn("if (!isSessionStreaming(session.id))", refresh)
         self.assertIn("setSessionRunState(session.id, session.runState || {});", refresh)
@@ -5283,9 +5556,10 @@ process.stdout.write(JSON.stringify(orderProjects(projects, ["c"]).map((item) =>
         self.assertIn("PROJECT_SESSION_PREVIEW_LIMIT = 3", APP_SOURCE)
 
     def test_new_session_inherits_project_without_filter_dropdown(self):
-        create_start = APP_SOURCE.index("async function createSession(")
-        create_end = APP_SOURCE.index("async function loadSession(", create_start)
-        create_source = APP_SOURCE[create_start:create_end]
+        navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
+        create_start = SESSIONS_SOURCE.index("async function createSession(", navigation_start)
+        create_end = SESSIONS_SOURCE.index("async function loadSession(", create_start)
+        create_source = SESSIONS_SOURCE[create_start:create_end]
         self.assertIn("state.pendingProjectId", create_source)
         self.assertIn("body.projectId = projectId", create_source)
         self.assertNotIn("projectSelect", create_source)
