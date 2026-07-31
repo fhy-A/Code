@@ -3,6 +3,7 @@
 Run: python -m pytest tests/test_p0_stability.py -v
 """
 
+import io
 import json
 import tempfile
 import unittest
@@ -21,6 +22,64 @@ SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
 TIMELINE_SOURCE = (ROOT / "src" / "ui" / "timeline.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
+
+
+class _ProxyStreamingResponse:
+    status = 200
+    headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+
+    def __init__(self, lines=(), error=None):
+        self._lines = iter(lines)
+        self._error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def readline(self):
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+        return next(self._lines, b"")
+
+
+class TestStreamingProxyFrames(unittest.TestCase):
+    def _run_proxy(self, response):
+        body = json.dumps({"stream": True}).encode("utf-8")
+        handler = object.__new__(server_mod.CodeHandler)
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "X-Base-URL": "http://upstream.test",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+
+        with mock.patch.object(server_mod.request, "urlopen", return_value=response):
+            handler.proxy("POST", "/v1/chat/completions")
+
+        handler.send_response.assert_called_once_with(200)
+        return handler.wfile.getvalue()
+
+    def test_streaming_proxy_passes_upstream_frames_verbatim(self):
+        output = self._run_proxy(_ProxyStreamingResponse(lines=[
+            b'data: {"choices":[]}\n\n',
+            b"data: [DONE]\n\n",
+        ]))
+        self.assertEqual(
+            output,
+            b'data: {"choices":[]}\n\ndata: [DONE]\n\n',
+        )
+
+    def test_streaming_proxy_terminates_error_frame_after_headers(self):
+        output = self._run_proxy(_ProxyStreamingResponse(
+            error=RuntimeError("upstream broke"),
+        ))
+        self.assertEqual(output, b"data: [ERROR] upstream broke\n\n")
 
 
 class TestFrontendNetworkRecovery(unittest.TestCase):

@@ -11751,7 +11751,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 # Headers already sent — can't send a proper HTTP error.
                 # Write a best-effort SSE error line and close.
                 try:
-                    err_line = f"data: [ERROR] {exc}\\n\\n".encode("utf-8")
+                    err_line = f"data: [ERROR] {exc}\n\n".encode("utf-8")
                     self.wfile.write(err_line)
                     self.wfile.flush()
                 except Exception:
