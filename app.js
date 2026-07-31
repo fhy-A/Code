@@ -48,9 +48,9 @@ const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const {
   classifyModelRequestFailure,
+  createModelTurnAccumulator,
   createModelRequestError,
   extractStreamDelta,
-  mergeToolCallDelta,
   parseSseLine,
   shouldRetryWithoutNativeTools,
 } = window.Code.agent.modelStream;
@@ -7250,12 +7250,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
   let buffer = "";
 
-  let rawThought = "";
-
-  let rawContent = "";
-
-  const toolCallsByIndex = new Map();
-  let streamCompleted = false;
+  const turnAccumulator = createModelTurnAccumulator();
 
 
 
@@ -7289,31 +7284,23 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
       if (!data) continue;
 
-      if (typeof data === "string" && data.startsWith("[ERROR]")) {
-        const rawError = data.slice(7).trim();
-        let detail = {};
-        try { detail = JSON.parse(rawError); } catch (_) { detail = {}; }
+      const turnEvent = turnAccumulator.consume(data);
+
+      if (turnEvent.kind === "error") {
         ctx.runtimeRunId = "";
         run.runtimeRunId = "";
-        throw createModelRequestError(detail.message || rawError || "Stream interrupted", {
-          status: Number(detail.status || 0),
-          code: detail.code || "stream_error",
-          transient: detail.transient !== false,
-        });
+        throw turnEvent.error;
       }
 
-      if (data === "[DONE]") {
-        streamCompleted = true;
+      if (turnEvent.kind === "done") {
         ctx.runtimeRunId = "";
         run.runtimeRunId = "";
 
-        const finalText = rawThought ? `<think>${rawThought}</think>\n${rawContent}` : rawContent;
-
-        const toolCalls = normalizeToolCallList(toolCallsByIndex);
+        const toolCalls = normalizeToolCallList(turnAccumulator.getToolCallMap());
 
         finalizeStreamingAssistantMessage(
           assistantIndex,
-          finalText || toolProgressSummary(toolCalls) || "",
+          turnEvent.combinedText || toolProgressSummary(toolCalls) || "",
           toolCalls,
           sessionId,
           _streamMsgs,
@@ -7323,54 +7310,44 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
         if (!ctx.isSubAgent) {
           await persistRunCheckpoint(ctx, "running", "model", { runtimeRunId: "" }).catch(() => {});
         }
-        return { content: rawContent, toolCalls };
+        return { content: turnEvent.rawContent, toolCalls };
 
       }
 
-      const { reasoning, text, delta, choice } = extractStreamDelta(data);
-
-      let receivedToolCallDelta = false;
-      if (Array.isArray(delta.tool_calls)) {
-
-        delta.tool_calls.forEach((part) => mergeToolCallDelta(toolCallsByIndex, part));
-        receivedToolCallDelta = delta.tool_calls.length > 0;
-
-      }
-
-      if (Array.isArray(choice.message?.tool_calls)) {
-
-        choice.message.tool_calls.forEach((part, index) => mergeToolCallDelta(toolCallsByIndex, { ...part, index }));
-        receivedToolCallDelta = receivedToolCallDelta || choice.message.tool_calls.length > 0;
-
-      }
-
-      if (receivedToolCallDelta) {
+      if (turnEvent.receivedToolCallDelta) {
         markModelResponseStarted(run, sessionId);
         markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
       }
 
-      if (reasoning) rawThought += reasoning;
-
-      if (text) rawContent += text;
-
-      if (reasoning || text) {
+      if (turnEvent.reasoning || turnEvent.text) {
         markModelResponseStarted(run, sessionId);
 
-        const combined = rawThought ? `<think>${rawThought}</think>\n${rawContent}` : rawContent;
-
-        updateAssistantMessage(assistantIndex, combined, true, sessionId, _streamMsgs, skipRender);
+        updateAssistantMessage(
+          assistantIndex,
+          turnEvent.combinedText,
+          true,
+          sessionId,
+          _streamMsgs,
+          skipRender,
+        );
 
       }
 
-      if (data.usage) {
-        setSessionLastUsage(sessionId, data.usage);
-        updateUsage(data.usage, sessionId, ctx);
+      if (turnEvent.usage) {
+        setSessionLastUsage(sessionId, turnEvent.usage);
+        updateUsage(turnEvent.usage, sessionId, ctx);
 
       }
 
     }
 
   }
+
+  const turnSnapshot = turnAccumulator.snapshot();
+  let rawThought = turnSnapshot.rawThought;
+  let rawContent = turnSnapshot.rawContent;
+  const toolCallsByIndex = turnAccumulator.getToolCallMap();
+  let streamCompleted = turnSnapshot.completed;
 
   buffer += decoder.decode();
   if (buffer.trim()) {

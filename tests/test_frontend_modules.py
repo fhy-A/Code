@@ -557,11 +557,45 @@ const requestError = protocol.createModelRequestError("broken", {
   code: "upstream_error",
   transient: true,
 });
+const turn = protocol.createModelTurnAccumulator();
+const firstTurnEvent = turn.consume({
+  choices: [{
+    delta: {
+      reasoning_content: "plan",
+      content: "answer",
+      tool_calls: [{
+        index: 0,
+        id: "call-2",
+        type: "function",
+        function: {name: "read_file", arguments: "{\"path\":"},
+      }],
+    },
+  }],
+});
+const secondTurnEvent = turn.consume({
+  choices: [{
+    delta: {
+      tool_calls: [{
+        index: 0,
+        function: {arguments: "\"TODO.md\"}"},
+      }],
+    },
+  }],
+  usage: {completion_tokens: 3},
+});
+const doneTurnEvent = turn.consume("[DONE]");
+const failedTurn = protocol.createModelTurnAccumulator();
+const failedTurnEvent = failedTurn.consume(
+  '[ERROR]{"message":"runtime failed","status":502,"code":"upstream","transient":false}',
+);
 const result = {
   frozen: Object.isFrozen(protocol),
   ignored: protocol.parseSseLine("event: message"),
   invalid: protocol.parseSseLine("data: {broken"),
   done: protocol.parseSseLine("data: [DONE]"),
+  errorFrame: protocol.parseSseLine(
+    'data: [ERROR]{"message":"runtime failed","status":502}',
+  ),
   parsed: protocol.parseSseLine('data: {"choices":[{"delta":{"content":"ok"}}]}'),
   openai: protocol.extractStreamDelta({
     choices: [{delta: {reasoning_content: "think", content: ["a", {text: "b"}]}}],
@@ -595,6 +629,28 @@ const result = {
     "function calling is not supported",
   ),
   keepTools: protocol.shouldRetryWithoutNativeTools("upstream timeout"),
+  turn: {
+    frozen: Object.isFrozen(turn),
+    first: firstTurnEvent,
+    second: secondTurnEvent,
+    done: doneTurnEvent,
+    toolCall: turn.getToolCallMap().get(0),
+  },
+  failedTurn: {
+    event: {
+      kind: failedTurnEvent.kind,
+      rawThought: failedTurnEvent.rawThought,
+      rawContent: failedTurnEvent.rawContent,
+      completed: failedTurnEvent.completed,
+    },
+    error: {
+      message: failedTurnEvent.error.message,
+      status: failedTurnEvent.error.status,
+      code: failedTurnEvent.error.code,
+      transient: failedTurnEvent.error.transient,
+      modelRequest: failedTurnEvent.error.modelRequest,
+    },
+  },
 };
 process.stdout.write(JSON.stringify(result));
 """
@@ -610,6 +666,10 @@ process.stdout.write(JSON.stringify(result));
         self.assertIsNone(data["ignored"])
         self.assertIsNone(data["invalid"])
         self.assertEqual(data["done"], "[DONE]")
+        self.assertEqual(
+            data["errorFrame"],
+            '[ERROR]{"message":"runtime failed","status":502}',
+        )
         self.assertEqual(
             data["parsed"]["choices"][0]["delta"]["content"],
             "ok",
@@ -651,6 +711,45 @@ process.stdout.write(JSON.stringify(result));
         )
         self.assertTrue(data["retryWithoutTools"])
         self.assertFalse(data["keepTools"])
+        self.assertTrue(data["turn"]["frozen"])
+        self.assertEqual(data["turn"]["first"]["kind"], "delta")
+        self.assertEqual(data["turn"]["first"]["reasoning"], "plan")
+        self.assertEqual(data["turn"]["first"]["text"], "answer")
+        self.assertTrue(data["turn"]["first"]["receivedToolCallDelta"])
+        self.assertEqual(data["turn"]["first"]["combinedText"], "<think>plan</think>\nanswer")
+        self.assertEqual(data["turn"]["second"]["usage"], {"completion_tokens": 3})
+        self.assertEqual(data["turn"]["done"]["kind"], "done")
+        self.assertTrue(data["turn"]["done"]["completed"])
+        self.assertEqual(
+            data["turn"]["toolCall"],
+            {
+                "id": "call-2",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"TODO.md"}',
+                },
+            },
+        )
+        self.assertEqual(
+            data["failedTurn"]["event"],
+            {
+                "kind": "error",
+                "rawThought": "",
+                "rawContent": "",
+                "completed": False,
+            },
+        )
+        self.assertEqual(
+            data["failedTurn"]["error"],
+            {
+                "message": "runtime failed",
+                "status": 502,
+                "code": "upstream",
+                "transient": False,
+                "modelRequest": True,
+            },
+        )
 
     def test_state_module_isolates_session_domains_and_checkpoints(self):
         state_path = ROOT / "src" / "core" / "state.js"
@@ -4887,9 +4986,11 @@ process.stdout.write(JSON.stringify({
         )
         self.assertLess(helper.index("current.meta.toolCalls = toolCalls"), helper.index("renderSessionMessages"))
 
-        stream_start = APP_SOURCE.index("const toolCallsByIndex = new Map()")
+        stream_start = APP_SOURCE.index("const turnAccumulator = createModelTurnAccumulator()")
         stream_end = APP_SOURCE.index("function _safeMd", stream_start)
         stream = APP_SOURCE[stream_start:stream_end]
+        self.assertIn("const turnEvent = turnAccumulator.consume(data)", stream)
+        self.assertIn("const toolCallsByIndex = turnAccumulator.getToolCallMap()", stream)
         self.assertIn(
             'markStreamingAssistantProjection(assistantIndex, "thinking"',
             stream,

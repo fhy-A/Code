@@ -312,7 +312,7 @@ class TestCompactSummaryMarker(unittest.TestCase):
 
     def test_usage_is_isolated_and_persisted_per_session(self):
         self.assertIn("_sessionLastUsage: {}", self.state_source)
-        self.assertIn("setSessionLastUsage(sessionId, data.usage)", self.source)
+        self.assertIn("setSessionLastUsage(sessionId, turnEvent.usage)", self.source)
         self.assertIn("lastUsage: getSessionLastUsage(sessionId)", self.source)
 
     def test_context_limit_handles_hyphenated_claude_versions(self):

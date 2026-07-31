@@ -8,7 +8,9 @@
     if (!line.startsWith("data:")) return null;
 
     const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") return payload || null;
+    if (!payload || payload === "[DONE]" || payload.startsWith("[ERROR]")) {
+      return payload || null;
+    }
 
     try {
       return JSON.parse(payload);
@@ -68,6 +70,89 @@
     map.set(index, existing);
   }
 
+  function combinedTurnText(rawThought, rawContent) {
+    return rawThought ? `<think>${rawThought}</think>\n${rawContent}` : rawContent;
+  }
+
+  function createModelTurnAccumulator() {
+    let rawThought = "";
+    let rawContent = "";
+    let completed = false;
+    const toolCallsByIndex = new Map();
+
+    function snapshot() {
+      return {
+        rawThought,
+        rawContent,
+        combinedText: combinedTurnText(rawThought, rawContent),
+        completed,
+      };
+    }
+
+    function consume(data) {
+      if (typeof data === "string" && data.startsWith("[ERROR]")) {
+        const rawError = data.slice(7).trim();
+        let detail = {};
+        try {
+          detail = JSON.parse(rawError);
+        } catch (_) {
+          detail = {};
+        }
+        return {
+          kind: "error",
+          error: createModelRequestError(
+            detail.message || rawError || "Stream interrupted",
+            {
+              status: Number(detail.status || 0),
+              code: detail.code || "stream_error",
+              transient: detail.transient !== false,
+            },
+          ),
+          ...snapshot(),
+        };
+      }
+
+      if (data === "[DONE]") {
+        completed = true;
+        return { kind: "done", ...snapshot() };
+      }
+
+      const { reasoning, text, delta, choice } = extractStreamDelta(data);
+      let receivedToolCallDelta = false;
+
+      if (Array.isArray(delta.tool_calls)) {
+        delta.tool_calls.forEach((part) => mergeToolCallDelta(toolCallsByIndex, part));
+        receivedToolCallDelta = delta.tool_calls.length > 0;
+      }
+
+      if (Array.isArray(choice.message?.tool_calls)) {
+        choice.message.tool_calls.forEach((part, index) => (
+          mergeToolCallDelta(toolCallsByIndex, { ...part, index })
+        ));
+        receivedToolCallDelta = receivedToolCallDelta
+          || choice.message.tool_calls.length > 0;
+      }
+
+      if (reasoning) rawThought += reasoning;
+      if (text) rawContent += text;
+
+      return {
+        kind: "delta",
+        reasoning,
+        text,
+        usage: data?.usage,
+        receivedToolCallDelta,
+        ...snapshot(),
+      };
+    }
+
+    return Object.freeze({
+      consume,
+      snapshot,
+      getToolCallMap: () => toolCallsByIndex,
+    });
+  }
+
   function createModelRequestError(message, details = {}) {
     const error = new Error(String(message || "Model request failed"));
     error.status = Number(details.status || 0);
@@ -102,6 +187,7 @@
     streamDeltaText,
     extractStreamDelta,
     mergeToolCallDelta,
+    createModelTurnAccumulator,
     createModelRequestError,
     isModelAccessDenied,
     classifyModelRequestFailure,
