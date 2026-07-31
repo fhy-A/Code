@@ -47,6 +47,7 @@ const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const {
+  assembleModelRequestPayload,
   buildModelRequestMessages,
   buildNativeToolCallMessage,
   mapMessageForApi,
@@ -6796,93 +6797,28 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     ctx.projectContextResolved = true;
   }
 
-  const payload = {
-
+  // Sub-agent already has its own system prompt in ctx.messages[0]; don't double-inject.
+  const systemPrompt = ctx?.isSubAgent ? "" : await getSystemPrompt({
+    messages: modelMessages,
+    explicitSkill: ctx?.explicitSkill,
+    toolPreset: ctx?.toolPreset,
+    permissionProfile: ctx?.permissionProfile,
+    allowedToolNames: ctx?.allowedToolNames,
+    cwd: ctx?.cwd,
+    primaryRoot: ctx?.primaryRoot,
+    rootPaths: ctx?.rootPaths,
+    projectContext: ctx?.projectContext,
+  });
+  const payload = assembleModelRequestPayload({
     model,
-
-    stream: true,
-
-    stream_options: { include_usage: true },
-
+    tools,
+    modelMessages,
+    systemPrompt,
+    includeSystemPrompt: !ctx?.isSubAgent,
     temperature: ctx?.temperature ?? Number(els.temperature.value || 0.2),
-
-    max_tokens: ctx?.maxTokens || getEffectiveMaxTokens(model),
-
-    messages: [
-
-      // Sub-agent already has its own system prompt in ctx.messages[0]; don't double-inject
-      ...(ctx?.isSubAgent ? [] : [{
-        role: "system",
-        content: await getSystemPrompt({
-          messages: modelMessages,
-          explicitSkill: ctx?.explicitSkill,
-          toolPreset: ctx?.toolPreset,
-          permissionProfile: ctx?.permissionProfile,
-          allowedToolNames: ctx?.allowedToolNames,
-          cwd: ctx?.cwd,
-          primaryRoot: ctx?.primaryRoot,
-          rootPaths: ctx?.rootPaths,
-          projectContext: ctx?.projectContext,
-        }),
-      }]),
-
-      ...buildModelRequestMessages(modelMessages, tools.length > 0),
-
-    ],
-
-  };
-
-  if (tools.length > 0) {
-
-    payload.tools = tools;
-
-    payload.tool_choice = "auto";
-
-  }
-
-
-
-  // Thinking / reasoning control
-
-  const thinkingMode = ctx?.thinkingLevel || getThinkingLevel();
-
-  if (/claude|opus|sonnet|haiku/i.test(model)) {
-
-    if (thinkingMode === "off") {
-
-      payload.thinking = { type: "disabled" };
-
-    } else {
-
-      const budgets = { auto: 4000, high: 8000, max: 16000 };
-
-      payload.thinking = { type: "enabled", budget_tokens: budgets[thinkingMode] || 4000 };
-
-    }
-
-  } else if (/o1|o3|o4/i.test(model)) {
-
-    if (thinkingMode !== "off") {
-
-      payload.reasoning_effort = thinkingMode === "max" ? "high" : thinkingMode === "high" ? "medium" : "low";
-
-    }
-
-  } else if (/gemini|nano-banana/i.test(model)) {
-
-    // Gemini 3+: reasoning_effort maps to thinkingLevel (low/medium/high)
-
-    const efforts = { high: "high", max: "high" };
-
-    if (efforts[thinkingMode]) {
-
-      payload.reasoning_effort = efforts[thinkingMode];
-
-    }
-
-    // off/auto: don't send reasoning_effort (off disables, auto uses model default)
-
-  }
+    maxTokens: ctx?.maxTokens || getEffectiveMaxTokens(model),
+    thinkingLevel: ctx?.thinkingLevel || getThinkingLevel(),
+  });
 
   return { payload, tools, model, sessionId, streamMessages };
 }

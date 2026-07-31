@@ -663,6 +663,138 @@ process.stdout.write(JSON.stringify({
             {"role": "user", "content": "【工具结果】\norphan"},
         )
 
+    def test_model_request_assembles_payload_fields_and_reasoning_controls(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+
+const {assembleModelRequestPayload} = window.Code.agent.modelRequest;
+const tool = {
+  type: "function",
+  function: {name: "read_file", parameters: {type: "object"}},
+};
+const input = {
+  model: "claude-sonnet",
+  tools: [tool],
+  modelMessages: [{role: "user", content: "hello"}],
+  systemPrompt: "rules",
+  includeSystemPrompt: true,
+  temperature: 0.3,
+  maxTokens: 1234,
+  thinkingLevel: "high",
+};
+const before = JSON.stringify(input);
+const assemble = (model, thinkingLevel, extra = {}) => assembleModelRequestPayload({
+  model,
+  thinkingLevel,
+  modelMessages: [{role: "user", content: "hello"}],
+  temperature: 0.2,
+  maxTokens: 2048,
+  ...extra,
+});
+
+process.stdout.write(JSON.stringify({
+  inputUnchanged: JSON.stringify(input) === before,
+  base: assembleModelRequestPayload(input),
+  subAgent: assemble("plain-model", "off", {
+    systemPrompt: "must-not-appear",
+    includeSystemPrompt: false,
+  }),
+  claude: {
+    off: assemble("claude-3-7-sonnet", "off"),
+    auto: assemble("claude-3-7-sonnet", "auto"),
+    high: assemble("claude-3-7-sonnet", "high"),
+    max: assemble("claude-3-7-sonnet", "max"),
+  },
+  openai: {
+    off: assemble("o3", "off"),
+    auto: assemble("o3", "auto"),
+    high: assemble("o3", "high"),
+    max: assemble("o3", "max"),
+  },
+  gemini: {
+    off: assemble("gemini-3-pro", "off"),
+    auto: assemble("nano-banana-pro", "auto"),
+    high: assemble("gemini-3-pro", "high"),
+    max: assemble("nano-banana-pro", "max"),
+  },
+  other: assemble("gpt-4.1", "max"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["inputUnchanged"])
+
+        base = data["base"]
+        self.assertEqual(
+            {key: base[key] for key in (
+                "model", "stream", "stream_options", "temperature", "max_tokens",
+            )},
+            {
+                "model": "claude-sonnet",
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "temperature": 0.3,
+                "max_tokens": 1234,
+            },
+        )
+        self.assertEqual(base["messages"], [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "hello"},
+        ])
+        self.assertEqual(base["tools"], [{
+            "type": "function",
+            "function": {"name": "read_file", "parameters": {"type": "object"}},
+        }])
+        self.assertEqual(base["tool_choice"], "auto")
+        self.assertEqual(base["thinking"], {"type": "enabled", "budget_tokens": 8000})
+
+        sub_agent = data["subAgent"]
+        self.assertEqual(sub_agent["messages"], [{"role": "user", "content": "hello"}])
+        self.assertNotIn("tools", sub_agent)
+        self.assertNotIn("tool_choice", sub_agent)
+
+        self.assertEqual(data["claude"]["off"]["thinking"], {"type": "disabled"})
+        self.assertEqual(data["claude"]["auto"]["thinking"]["budget_tokens"], 4000)
+        self.assertEqual(data["claude"]["high"]["thinking"]["budget_tokens"], 8000)
+        self.assertEqual(data["claude"]["max"]["thinking"]["budget_tokens"], 16000)
+
+        self.assertNotIn("reasoning_effort", data["openai"]["off"])
+        self.assertEqual(data["openai"]["auto"]["reasoning_effort"], "low")
+        self.assertEqual(data["openai"]["high"]["reasoning_effort"], "medium")
+        self.assertEqual(data["openai"]["max"]["reasoning_effort"], "high")
+
+        self.assertNotIn("reasoning_effort", data["gemini"]["off"])
+        self.assertNotIn("reasoning_effort", data["gemini"]["auto"])
+        self.assertEqual(data["gemini"]["high"]["reasoning_effort"], "high")
+        self.assertEqual(data["gemini"]["max"]["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", data["other"])
+        self.assertNotIn("thinking", data["other"])
+
+    def test_model_request_payload_keeps_async_preparation_and_runtime_in_app(self):
+        start = APP_SOURCE.index("async function buildModelRequestPayload(")
+        end = APP_SOURCE.index("async function _callModelOnceAttempt(", start)
+        adapter_source = APP_SOURCE[start:end]
+        runtime_source = APP_SOURCE[end:]
+
+        self.assertIn("await loadProjectContextForRoot(", adapter_source)
+        self.assertIn("await getSystemPrompt({", adapter_source)
+        self.assertIn("assembleModelRequestPayload({", adapter_source)
+        self.assertNotIn("loadProjectContextForRoot", MODEL_REQUEST_SOURCE)
+        self.assertNotIn("getSystemPrompt(", MODEL_REQUEST_SOURCE)
+        self.assertNotIn("fetch(", MODEL_REQUEST_SOURCE)
+        self.assertNotIn("AbortController", MODEL_REQUEST_SOURCE)
+        self.assertIn("window.AgentRuntime.openSseResponse({", runtime_source)
+        self.assertIn('fetch("/proxy/chat", {', runtime_source)
+
     def test_model_stream_protocol_parses_deltas_tools_and_failures(self):
         script = r"""
 global.window = {};

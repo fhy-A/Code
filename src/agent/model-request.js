@@ -136,7 +136,63 @@
     return result;
   }
 
+  function assembleModelRequestPayload({
+    model = "",
+    tools = [],
+    modelMessages = [],
+    systemPrompt = "",
+    includeSystemPrompt = true,
+    temperature = 0.2,
+    maxTokens = 0,
+    thinkingLevel = "auto",
+  } = {}) {
+    const requestTools = Array.isArray(tools) ? tools : [];
+    const payload = {
+      model,
+      stream: true,
+      stream_options: { include_usage: true },
+      temperature,
+      max_tokens: maxTokens,
+      messages: [
+        ...(includeSystemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+        ...buildModelRequestMessages(modelMessages, requestTools.length > 0),
+      ],
+    };
+
+    if (requestTools.length > 0) {
+      payload.tools = requestTools;
+      payload.tool_choice = "auto";
+    }
+
+    const thinkingMode = thinkingLevel || "auto";
+    if (/claude|opus|sonnet|haiku/i.test(model)) {
+      if (thinkingMode === "off") {
+        payload.thinking = { type: "disabled" };
+      } else {
+        const budgets = { auto: 4000, high: 8000, max: 16000 };
+        payload.thinking = {
+          type: "enabled",
+          budget_tokens: budgets[thinkingMode] || 4000,
+        };
+      }
+    } else if (/o1|o3|o4/i.test(model)) {
+      if (thinkingMode !== "off") {
+        payload.reasoning_effort = thinkingMode === "max"
+          ? "high"
+          : thinkingMode === "high" ? "medium" : "low";
+      }
+    } else if (/gemini|nano-banana/i.test(model)) {
+      const efforts = { high: "high", max: "high" };
+      if (efforts[thinkingMode]) {
+        payload.reasoning_effort = efforts[thinkingMode];
+      }
+    }
+
+    return payload;
+  }
+
   agent.modelRequest = Object.freeze({
+    assembleModelRequestPayload,
     buildModelRequestMessages,
     buildNativeToolCallMessage,
     mapMessageForApi,
