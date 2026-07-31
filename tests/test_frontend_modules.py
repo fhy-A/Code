@@ -29,6 +29,7 @@ BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding
 MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
 TOOLS_SOURCE = (ROOT / "src" / "agent" / "tools.js").read_text(encoding="utf-8")
 PERMISSIONS_SOURCE = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
+QUESTIONNAIRE_SOURCE = (ROOT / "src" / "agent" / "questionnaire.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
@@ -363,6 +364,103 @@ eval(source);
         self.assertIn('agentRunId: String(tool._agentRunId || "")', APP_SOURCE)
         self.assertIn("userInputRequest: serializeUserInputRequest(request)", APP_SOURCE)
 
+    def test_agent_questionnaire_normalizes_and_serializes_without_side_effects(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/questionnaire.js");
+
+const questionnaire = window.Code.agent.questionnaire;
+const source = [
+  {
+    prompt: "  Pick a target  ",
+    type: "unknown",
+    required: false,
+    allowOther: 1,
+    options: [
+      {},
+      {value: "api"},
+      {label: "Second"},
+      {value: "four"},
+      {value: "five"},
+      {value: "six"},
+      {value: "seven"},
+      {value: "eight"},
+      {value: "ignored"},
+    ],
+  },
+  {id: "details", prompt: " Explain ", type: "text", options: [{value: "ignored"}]},
+  {prompt: "   ", type: "text"},
+  {prompt: "sliced out", type: "text"},
+];
+const sourceBefore = JSON.stringify(source);
+const questions = questionnaire.normalizeUserInputQuestions(source);
+const request = {
+  id: "request-1",
+  questions,
+  nested: {value: 1},
+  abortSignal: {aborted: false},
+  abortHandler: "handler",
+  _finishing: true,
+};
+const serialized = questionnaire.serializeUserInputRequest(request);
+serialized.nested.value = 2;
+
+process.stdout.write(JSON.stringify({
+  frozen: Object.isFrozen(questionnaire),
+  sourceUnchanged: JSON.stringify(source) === sourceBefore,
+  questions,
+  serialized,
+  requestNestedValue: request.nested.value,
+  nullRequest: questionnaire.serializeUserInputRequest(null),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["frozen"])
+        self.assertTrue(data["sourceUnchanged"])
+        self.assertEqual(len(data["questions"]), 2)
+        first, second = data["questions"]
+        self.assertEqual(first["id"], "question_1")
+        self.assertEqual(first["prompt"], "Pick a target")
+        self.assertEqual(first["type"], "single")
+        self.assertFalse(first["required"])
+        self.assertTrue(first["allowOther"])
+        self.assertEqual(len(first["options"]), 8)
+        self.assertEqual(first["options"][:3], [
+            {"value": "option_1", "label": "1", "description": ""},
+            {"value": "api", "label": "api", "description": ""},
+            {"value": "option_3", "label": "Second", "description": ""},
+        ])
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(first["selected"], [])
+        self.assertEqual(first["text"], "")
+        self.assertEqual(first["other"], "")
+        self.assertIsNone(first["answer"])
+        self.assertEqual(second["id"], "details")
+        self.assertEqual(second["prompt"], "Explain")
+        self.assertEqual(second["type"], "text")
+        self.assertEqual(second["options"], [])
+        self.assertNotIn("abortSignal", data["serialized"])
+        self.assertNotIn("abortHandler", data["serialized"])
+        self.assertNotIn("_finishing", data["serialized"])
+        self.assertEqual(data["serialized"]["nested"]["value"], 2)
+        self.assertEqual(data["requestNestedValue"], 1)
+        self.assertIsNone(data["nullRequest"])
+
+        for function_name in ("normalizeUserInputQuestions", "serializeUserInputRequest"):
+            self.assertIn(f"function {function_name}(", QUESTIONNAIRE_SOURCE)
+            self.assertNotIn(f"function {function_name}(", APP_SOURCE)
+        self.assertIn("} = window.Code.agent.questionnaire;", APP_SOURCE)
+        self.assertIn("normalizeUserInputQuestions(tool.questions)", APP_SOURCE)
+
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (
             "requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",
@@ -510,6 +608,7 @@ eval(source);
             "src/agent/model-request.js",
             "src/agent/tools.js",
             "src/agent/permissions.js",
+            "src/agent/questionnaire.js",
             "src/agent/model-stream.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
@@ -540,6 +639,7 @@ eval(source);
             "./src/agent/model-request.js",
             "./src/agent/tools.js",
             "./src/agent/permissions.js",
+            "./src/agent/questionnaire.js",
             "./src/agent/model-stream.js",
             "./agent-runtime.js",
             "./app.js",
