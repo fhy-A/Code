@@ -296,10 +296,44 @@ process.stdout.write(JSON.stringify(groups));
             self.assertIn(expected, RUNTIME_SOURCE)
         self.assertIn('clientRequestId = ""', RUNTIME_SOURCE)
         self.assertIn("clientRequestId,", RUNTIME_SOURCE)
+        self.assertIn("agent.runtime = runtime", RUNTIME_SOURCE)
+        self.assertNotIn("global." + "AgentRuntime", RUNTIME_SOURCE)
+        self.assertNotIn("window." + "AgentRuntime", APP_SOURCE)
+        self.assertIn("const agentRuntime = window.Code.agent.runtime;", APP_SOURCE)
+
+    def test_agent_runtime_registers_only_inside_code_namespace(self):
+        script = f"""
+const source = {json.dumps(RUNTIME_SOURCE)};
+global.window = {{}};
+let missingNamespaceError = "";
+try {{ eval(source); }} catch (error) {{ missingNamespaceError = error.message; }}
+global.window = {{Code: {{agent: {{}}}}}};
+eval(source);
+process.stdout.write(JSON.stringify({{
+  missingNamespaceError,
+  registered: typeof window.Code.agent.runtime?.watchAgentRun === "function",
+  hasTopLevelRuntime: Object.prototype.hasOwnProperty.call(window, "AgentRuntime"),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["missingNamespaceError"],
+            "Code agent namespace must load before agent runtime",
+        )
+        self.assertTrue(data["registered"])
+        self.assertFalse(data["hasTopLevelRuntime"])
 
     def test_agent_runtime_watcher_projects_events_sequentially_and_resumes_cursor(self):
         script = f"""
-global.window = {{}};
+global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
 const urls = [];
 const snapshots = [
@@ -316,7 +350,7 @@ global.fetch = async (url) => {{
 eval(source);
 const order = [];
 (async () => {{
-  const result = await window.AgentRuntime.watchAgentRun({{
+  const result = await window.Code.agent.runtime.watchAgentRun({{
     agentRunId: "agent-1",
     onEvent: async (event) => {{
       order.push(`start-${{event.seq}}`);
@@ -346,7 +380,7 @@ const order = [];
 
     def test_agent_runtime_smooths_large_text_delta_without_changing_content(self):
         script = f"""
-global.window = {{}};
+global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
 const original = "x".repeat(145);
 let fetchCount = 0;
@@ -375,7 +409,7 @@ global.fetch = async (url) => {{
 }};
 eval(source);
 (async () => {{
-  const response = await window.AgentRuntime.openSseResponse({{
+  const response = await window.Code.agent.runtime.openSseResponse({{
     sessionId: "session-1",
     payload: {{model: "claude-test", messages: [{{role: "user", content: "hi"}}]}},
     keys: ["key"],
@@ -423,7 +457,7 @@ eval(source);
 
     def test_agent_runtime_sends_background_idempotency_key(self):
         script = f"""
-global.window = {{}};
+global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
 let captured = null;
 global.fetch = async (url, options) => {{
@@ -435,7 +469,7 @@ global.fetch = async (url, options) => {{
 }};
 eval(source);
 (async () => {{
-  await window.AgentRuntime.createAgentRun({{
+  await window.Code.agent.runtime.createAgentRun({{
     sessionId: "session-1",
     clientRequestId: "background-123",
     payload: {{model: "test-model", messages: [{{role: "user", content: "hi"}}]}},
@@ -465,7 +499,7 @@ eval(source);
         self.assertIn("const serverTools = getNativeTools(ctx.toolPreset, skillAllowedToolNames)", APP_SOURCE)
         self.assertIn('if (snapshot.status === "waiting_user_input")', APP_SOURCE)
         self.assertIn("await requestServerAgentInput(ctx, snapshot.pendingInput)", APP_SOURCE)
-        self.assertIn("window.AgentRuntime.submitAgentInput(request.agentRunId", APP_SOURCE)
+        self.assertIn("agentRuntime.submitAgentInput(request.agentRunId", APP_SOURCE)
         self.assertIn('status: nextStatus', APP_SOURCE)
         self.assertIn('const nextStatus = resolver ? "running" : "resuming"', APP_SOURCE)
         self.assertIn('agentRunId: String(tool._agentRunId || "")', APP_SOURCE)
@@ -477,10 +511,10 @@ eval(source);
         loop_source = APP_SOURCE[loop_start:loop_end]
 
         ordered_steps = (
-            "let snapshot = await window.AgentRuntime.getAgentRun",
+            "let snapshot = await agentRuntime.getAgentRun",
             'if (snapshot.status === "waiting_credentials") {',
-            "await window.AgentRuntime.resumeAgentRun",
-            "snapshot = await window.AgentRuntime.watchAgentRun",
+            "await agentRuntime.resumeAgentRun",
+            "snapshot = await agentRuntime.watchAgentRun",
             "ctx.agentEventCursor = Number(",
             'if (snapshot.status === "waiting_credentials") continue;',
             'if (snapshot.status === "waiting_user_input") {',
@@ -496,7 +530,7 @@ eval(source);
 
         for expected in (
             "await buildModelRequestPayload(ctx, true, serverTools)",
-            "await window.AgentRuntime.createAgentRun",
+            "await agentRuntime.createAgentRun",
             "await persistRunCheckpoint(ctx, \"running\", \"model\"",
             "onEvent: (event) => projectAgentEvent(ctx, event)",
             "ctx.run.recovery = {",
@@ -737,7 +771,7 @@ process.stdout.write(JSON.stringify({
             "async function requestUserInput(",
             "if (ctx?.isSubAgent)",
             "async function finishServerAgentUserInputRequest(",
-            "window.AgentRuntime.submitAgentInput(request.agentRunId",
+            "agentRuntime.submitAgentInput(request.agentRunId",
             "if (request.agentRunId) return finishServerAgentUserInputRequest(request);",
             'role: "tool-result"',
             "resumedFromUserInput: true",
@@ -756,7 +790,7 @@ process.stdout.write(JSON.stringify({
 
         for forbidden in (
             "state.",
-            "window.AgentRuntime",
+            "agentRuntime",
             "saveSessionState",
             "renderUserInputPanel",
             ".innerHTML",
@@ -889,7 +923,7 @@ process.stdout.write(JSON.stringify({{
         )
         for forbidden in (
             "state.",
-            "window.AgentRuntime",
+            "agentRuntime",
             "saveSessionState",
             "Date.now",
             "fetch(",
@@ -1460,7 +1494,7 @@ process.stdout.write(JSON.stringify({{
     def test_server_agent_authorization_uses_durable_card_and_reload_path(self):
         for expected in (
             "requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",
-            "window.AgentRuntime.submitAgentAuthorization(item.agentRunId",
+            "agentRuntime.submitAgentAuthorization(item.agentRunId",
             'status: "waiting-authorization"',
             "authorizationRequest: serializeAuthorizationRequest(request)",
             "restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest)",
@@ -1501,7 +1535,7 @@ process.stdout.write(JSON.stringify({{
 
     def test_agent_runtime_submits_authorization_id_and_decision(self):
         script = f"""
-global.window = {{}};
+global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
 let captured = null;
 global.fetch = async (url, options) => {{
@@ -1513,7 +1547,7 @@ global.fetch = async (url, options) => {{
 }};
 eval(source);
 (async () => {{
-  const result = await window.AgentRuntime.submitAgentAuthorization("agent/a", {{
+  const result = await window.Code.agent.runtime.submitAgentAuthorization("agent/a", {{
     authorizationId: "authorization-1",
     decision: "approved",
   }});
@@ -2198,7 +2232,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("getSystemPrompt(", MODEL_REQUEST_SOURCE)
         self.assertNotIn("fetch(", MODEL_REQUEST_SOURCE)
         self.assertNotIn("AbortController", MODEL_REQUEST_SOURCE)
-        self.assertIn("window.AgentRuntime.openSseResponse({", runtime_source)
+        self.assertIn("agentRuntime.openSseResponse({", runtime_source)
         self.assertIn('fetch("/proxy/chat", {', runtime_source)
 
     def test_agent_tools_normalize_native_calls_without_mutating_inputs(self):

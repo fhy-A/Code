@@ -71,8 +71,8 @@ class TestSubAgentFrontend(unittest.TestCase):
     def test_foreground_and_background_agents_use_durable_server_runs(self):
         self.assertIn('return runServerAgentLoop(ctx);', self.source)
         self.assertIn('async function runBackgroundSubAgentJob(job)', self.source)
-        self.assertGreaterEqual(self.source.count('window.AgentRuntime.createAgentRun'), 2)
-        self.assertGreaterEqual(self.source.count('window.AgentRuntime.watchAgentRun'), 2)
+        self.assertGreaterEqual(self.source.count('agentRuntime.createAgentRun'), 2)
+        self.assertGreaterEqual(self.source.count('agentRuntime.watchAgentRun'), 2)
 
     def test_plan_mode_can_delegate_without_mutation_tools(self):
         plan_start = self.permissions_source.index("plan: Object.freeze([")
@@ -121,7 +121,7 @@ class TestSubAgentFrontend(unittest.TestCase):
             self.assertIn(f"function {runtime_function}(", self.source)
             self.assertNotIn(f"function {runtime_function}(", self.subagents_source)
         for forbidden in (
-            "window.AgentRuntime",
+            "agentRuntime",
             "AbortController",
             "new Promise",
             "appendSessionMessages",
@@ -187,10 +187,10 @@ class TestSubAgentFrontend(unittest.TestCase):
         background_start = self.source.index("async function runBackgroundSubAgentJob(job)")
         background_end = self.source.index("function pumpBackgroundDispatcher()", background_start)
         background = self.source[background_start:background_end]
-        self.assertIn("window.AgentRuntime.createAgentRun", background)
+        self.assertIn("agentRuntime.createAgentRun", background)
         self.assertIn("clientRequestId: job.clientRequestId || job.id", background)
-        self.assertIn("window.AgentRuntime.watchAgentRun", background)
-        self.assertIn("window.AgentRuntime.resumeAgentRun", background)
+        self.assertIn("agentRuntime.watchAgentRun", background)
+        self.assertIn("agentRuntime.resumeAgentRun", background)
         self.assertNotIn("runAgentLoop(", background)
 
     def test_background_run_checkpoint_survives_main_completion_and_reload(self):

@@ -1,6 +1,9 @@
 (function attachAgentRuntime(global) {
   "use strict";
 
+  const agent = global.Code && global.Code.agent;
+  if (!agent) throw new Error("Code agent namespace must load before agent runtime");
+
   const POLL_DELAYS = [500, 1000, 2000, 4000, 8000];
   const SSE_VISUAL_CHUNK_CHARS = 48;
   const SSE_VISUAL_MAX_CHUNKS = 12;
@@ -372,7 +375,7 @@
     return apiJson(`/api/agent/runs/${encodeURIComponent(agentRunId)}`, { method: "DELETE" });
   }
 
-  global.AgentRuntime = Object.freeze({
+  const runtime = Object.freeze({
     openSseResponse,
     cancelRun,
     createAgentRun,
@@ -383,4 +386,5 @@
     watchAgentRun,
     cancelAgentRun,
   });
+  agent.runtime = runtime;
 })(window);

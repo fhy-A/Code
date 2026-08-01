@@ -46,6 +46,7 @@ const {
 const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
+const agentRuntime = window.Code.agent.runtime;
 const {
   assembleModelRequestPayload,
   mapMessageForApi,
@@ -4869,10 +4870,10 @@ function markServerAuthorizationProjection(item, result, approved) {
 }
 
 async function finishServerAgentAuthorizationRequest(item, approved) {
-  if (!window.AgentRuntime?.submitAgentAuthorization) {
+  if (!agentRuntime?.submitAgentAuthorization) {
     throw new Error("Server Agent authorization runtime is unavailable");
   }
-  const response = await window.AgentRuntime.submitAgentAuthorization(item.agentRunId, {
+  const response = await agentRuntime.submitAgentAuthorization(item.agentRunId, {
     authorizationId: item.authorizationId,
     decision: approved ? "approved" : "rejected",
     signal: item.abortSignal,
@@ -5366,8 +5367,8 @@ async function finishServerAgentUserInputRequest(request) {
   request._finishing = true;
   const result = buildUserInputResult(request);
   try {
-    if (!window.AgentRuntime?.submitAgentInput) throw new Error("Server Agent input runtime is unavailable");
-    await window.AgentRuntime.submitAgentInput(request.agentRunId, {
+    if (!agentRuntime?.submitAgentInput) throw new Error("Server Agent input runtime is unavailable");
+    await agentRuntime.submitAgentInput(request.agentRunId, {
       answers: result.answers,
       signal: request.abortSignal,
     });
@@ -5750,10 +5751,10 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
   const totalKeys = fallbackKeys.length;
   let res;
   let lastError = "";
-  const useRuntimeBridge = !ctx?.isSubAgent && Boolean(window.AgentRuntime?.openSseResponse);
+  const useRuntimeBridge = !ctx?.isSubAgent && Boolean(agentRuntime?.openSseResponse);
 
   if (useRuntimeBridge) {
-    res = await window.AgentRuntime.openSseResponse({
+    res = await agentRuntime.openSseResponse({
       runId: ctx.runtimeRunId || run.runtimeRunId || "",
       sessionId,
       payload,
@@ -6641,13 +6642,13 @@ function cancelSessionRun(run) {
   if (!run) return;
   const agentRunId = String(run.agentRunId || run._activeCtx?.agentRunId || "");
   if (agentRunId) {
-    window.AgentRuntime?.cancelAgentRun(agentRunId).catch(() => {});
+    agentRuntime?.cancelAgentRun(agentRunId).catch(() => {});
     run.agentRunId = "";
     if (run._activeCtx) run._activeCtx.agentRunId = "";
   }
   const runtimeRunId = String(run.runtimeRunId || "");
   if (runtimeRunId) {
-    window.AgentRuntime?.cancelRun(runtimeRunId).catch(() => {});
+    agentRuntime?.cancelRun(runtimeRunId).catch(() => {});
     run.runtimeRunId = "";
   }
   if (run.abortController) run.abortController.abort();
@@ -6715,7 +6716,7 @@ function createBackgroundServerContext(job) {
 }
 
 async function runBackgroundSubAgentJob(job) {
-  if (!window.AgentRuntime?.createAgentRun || !window.AgentRuntime?.watchAgentRun) {
+  if (!agentRuntime?.createAgentRun || !agentRuntime?.watchAgentRun) {
     throw new Error("Server Agent runtime is unavailable");
   }
   const subCtx = createBackgroundServerContext(job);
@@ -6737,11 +6738,11 @@ async function runBackgroundSubAgentJob(job) {
   const timeoutId = setTimeout(() => {
     timedOut = true;
     subCtx.run.abortController.abort();
-    if (job.agentRunId) window.AgentRuntime.cancelAgentRun(job.agentRunId).catch(() => {});
+    if (job.agentRunId) agentRuntime.cancelAgentRun(job.agentRunId).catch(() => {});
   }, remainingMs);
   try {
     if (remainingMs <= 0) throw new DOMException("Aborted", "AbortError");
-    const created = await window.AgentRuntime.createAgentRun({
+    const created = await agentRuntime.createAgentRun({
       sessionId: job.sessionId,
       clientRequestId: job.clientRequestId || job.id,
       payload: prepared.payload,
@@ -6760,20 +6761,20 @@ async function runBackgroundSubAgentJob(job) {
     await persistBackgroundJob(job);
 
     while (true) {
-      let snapshot = await window.AgentRuntime.getAgentRun(job.agentRunId, {
+      let snapshot = await agentRuntime.getAgentRun(job.agentRunId, {
         cursor: job.cursor || 0,
         signal: subCtx.run.abortController.signal,
       });
       if (snapshot.status === "waiting_credentials") {
         updateBackgroundJob(job, "waiting-credentials");
         await persistBackgroundJob(job);
-        await window.AgentRuntime.resumeAgentRun(job.agentRunId, {
+        await agentRuntime.resumeAgentRun(job.agentRunId, {
           keys,
           baseUrl,
           signal: subCtx.run.abortController.signal,
         });
       }
-      snapshot = await window.AgentRuntime.watchAgentRun({
+      snapshot = await agentRuntime.watchAgentRun({
         agentRunId: job.agentRunId,
         cursor: job.cursor || 0,
         signal: subCtx.run.abortController.signal,
@@ -7448,7 +7449,7 @@ async function requestServerAgentInput(ctx, pendingInput) {
 }
 
 async function requestEmptyResponseContinue(ctx, pendingInput) {
-  if (!window.AgentRuntime || !window.AgentRuntime.submitAgentInput) {
+  if (!agentRuntime || !agentRuntime.submitAgentInput) {
     throw new Error("Agent input runtime unavailable");
   }
   ctx.run.modelRecovery = {
@@ -7459,7 +7460,7 @@ async function requestEmptyResponseContinue(ctx, pendingInput) {
   ctx.run.modelWaitStartedAt = Date.now();
   ctx.run.modelResponseStarted = false;
   if (ctx.sessionId === state.sessionId) syncActiveRunBanner(ctx.sessionId);
-  await window.AgentRuntime.submitAgentInput(ctx.agentRunId, { answers: {} });
+  await agentRuntime.submitAgentInput(ctx.agentRunId, { answers: {} });
   return { ok: true };
 }
 
@@ -7626,7 +7627,7 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
 }
 
 async function runServerAgentLoop(ctx) {
-  if (!window.AgentRuntime?.createAgentRun || !window.AgentRuntime?.watchAgentRun) {
+  if (!agentRuntime?.createAgentRun || !agentRuntime?.watchAgentRun) {
     throw new Error("Server Agent runtime is unavailable");
   }
   ctx.messages = Array.isArray(ctx.messages) ? ctx.messages.filter(Boolean) : [];
@@ -7664,7 +7665,7 @@ async function runServerAgentLoop(ctx) {
   const keys = getFallbackKeys(ctx.model || getSelectedModel());
   if (!ctx.agentRunId) {
     const prepared = await buildModelRequestPayload(ctx, true, serverTools);
-    const created = await window.AgentRuntime.createAgentRun({
+    const created = await agentRuntime.createAgentRun({
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
       payload: prepared.payload,
@@ -7691,19 +7692,19 @@ async function runServerAgentLoop(ctx) {
   }
 
   while (true) {
-    let snapshot = await window.AgentRuntime.getAgentRun(ctx.agentRunId, {
+    let snapshot = await agentRuntime.getAgentRun(ctx.agentRunId, {
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
     });
     if (snapshot.status === "waiting_credentials") {
-      await window.AgentRuntime.resumeAgentRun(ctx.agentRunId, {
+      await agentRuntime.resumeAgentRun(ctx.agentRunId, {
         keys,
         baseUrl,
         signal: ctx.run.abortController.signal,
       });
     }
 
-    snapshot = await window.AgentRuntime.watchAgentRun({
+    snapshot = await agentRuntime.watchAgentRun({
       agentRunId: ctx.agentRunId,
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
