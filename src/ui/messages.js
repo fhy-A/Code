@@ -109,7 +109,8 @@
       line.length <= 220
       && (
         /^正在.+(?:…|\.{3})$/.test(line)
-        || /^(?:Listing|Reading|Searching|Running|Executing|Checking|Inspecting|Viewing|Editing|Writing|Creating|Deleting|Opening|Calling)\b.+(?:…|\.{3})$/i.test(line)
+        || /^(?:Listing|Reading|Searching|Running|Executing|Checking|Inspecting|Viewing|Editing|Writing|Creating|Deleting|Opening|Calling|Waiting)\b.+(?:…|\.{3})$/i.test(line)
+        || /^→\s*request_user_input$/.test(line)
       )
     ));
   }
@@ -578,6 +579,7 @@
       if (["propose_edit", "apply_edit", "write_file"].includes(action)) return "edit";
       if (action === "delete_file") return "delete";
       if (["read_file", "list_files", "search_files", "glob_files"].includes(action)) return "inspect";
+      if (action === "request_user_input") return "questionnaire";
       return "tool";
     }
 
@@ -599,6 +601,7 @@
         edit: ["toolProcessEditedFile", "toolProcessEditedFiles"],
         inspect: ["toolProcessInspectedFile", "toolProcessInspectedFiles"],
         delete: ["toolProcessDeletedFile", "toolProcessDeletedFiles"],
+        questionnaire: ["toolProcessAskedUser", "toolProcessAskedUserMultiple"],
         tool: ["toolProcessUsedTool", "toolProcessUsedTools"],
       };
       return [...families.entries()]

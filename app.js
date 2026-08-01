@@ -1588,7 +1588,7 @@ function _toolActionLabel(action) {
   const map = { list_files:"toolListFiles", read_file:"toolReadFile", search_files:"toolSearchFiles",
     glob_files:"toolGlobFiles", propose_edit:"toolProposeEdit", apply_edit:"toolApplyEdit",
     run_command:"toolRunCommand", write_file:"toolWriteFile", delete_file:"toolDeleteFile",
-    web_fetch:"toolWebFetch", task:"toolTask", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory" };
+    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory" };
   return map[action] ? t(map[action]) : action;
 }
 
@@ -4997,6 +4997,7 @@ function toolProgressSummary(toolCalls) {
       case "delete_file":  return t("progressDelete", { target: args.path || t("fileLabel") });
       case "web_fetch":    return t("progressFetch", { target: args.url || "Web" });
       case "task":         return t("progressTask", { target: (args.description || args.prompt || "").slice(0, 30) });
+      case "request_user_input": return t("progressUserInput");
       default:             return fn ? `→ ${fn}` : "";
     }
   }).filter(Boolean);

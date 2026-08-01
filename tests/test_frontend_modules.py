@@ -5801,6 +5801,88 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-usage-kind="cache-write"', data["cacheStatus"])
         self.assertIn('title="statCacheWriteTitle"', data["cacheStatus"])
 
+    def test_messages_ui_localizes_request_user_input_process(self):
+        self.assertIn('request_user_input:"toolRequestUserInput"', APP_SOURCE)
+        self.assertIn('case "request_user_input": return t("progressUserInput");', APP_SOURCE)
+        self.assertIn('/^→\\s*request_user_input$/.test(line)', MESSAGES_SOURCE)
+        self.assertIn('if (action === "request_user_input") return "questionnaire";', MESSAGES_SOURCE)
+
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const feature = createMessagesFeature({
+  escapeHtml: (value) => String(value ?? ""),
+  renderMarkdown: (value) => String(value ?? ""),
+  renderAssistantContent: (value) => `<answer>${String(value ?? "")}</answer>`,
+  getMessageText: (msg) => String(msg?.content || ""),
+  getToolActionLabel: (action) => `label:${action}`,
+  t: (key) => key,
+});
+const messages = [
+  {role: "user", content: "ask"},
+  {role: "assistant", content: "→ request_user_input", meta: {toolCalls: [
+    {id: "question-1", function: {name: "request_user_input", arguments: '{"questions":[{"id":"preview","question":"预览正常吗？"}]}' }},
+  ]}},
+  {role: "tool-call", meta: {action: "request_user_input", toolCallId: "question-1", tool: {
+    action: "request_user_input",
+    questions: [{id: "preview", question: "预览正常吗？"}],
+  }}},
+  {role: "tool-result", content: '{"answers":{"preview":"正常"}}', meta: {
+    action: "request_user_input",
+    toolCallId: "question-1",
+    outcome: "succeeded",
+  }},
+  {role: "assistant", content: "done", _responseTime: "1s"},
+];
+const html = feature.projectMessages(messages, {hasActiveRun: false});
+const multiple = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [
+    {id: "question-2", function: {name: "request_user_input", arguments: '{"questions":[{"id":"a","question":"A?"}]}' }},
+    {id: "question-3", function: {name: "request_user_input", arguments: '{"questions":[{"id":"b","question":"B?"}]}' }},
+  ]}}, index: 1},
+  {msg: {role: "tool-call", meta: {action: "request_user_input", toolCallId: "question-2", tool: {action: "request_user_input"}}}, index: 2},
+  {msg: {role: "tool-result", content: "a", meta: {action: "request_user_input", toolCallId: "question-2", outcome: "succeeded"}}, index: 3},
+  {msg: {role: "tool-call", meta: {action: "request_user_input", toolCallId: "question-3", tool: {action: "request_user_input"}}}, index: 4},
+  {msg: {role: "tool-result", content: "b", meta: {action: "request_user_input", toolCallId: "question-3", outcome: "succeeded"}}, index: 5},
+], 2);
+process.stdout.write(JSON.stringify({
+  html,
+  multiple,
+  legacyNotice: feature.isOperationalToolNotice("→ request_user_input"),
+  chineseNotice: feature.isOperationalToolNotice("正在等待用户输入…"),
+  englishNotice: feature.isOperationalToolNotice("Waiting for user input…"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["legacyNotice"])
+        self.assertTrue(data["chineseNotice"])
+        self.assertTrue(data["englishNotice"])
+        self.assertNotIn("→ request_user_input", data["html"])
+        self.assertEqual(data["html"].count("data-tool-process-block"), 1)
+        self.assertIn("<strong>toolProcessAskedUser</strong>", data["html"])
+        self.assertIn("<strong>label:request_user_input</strong>", data["html"])
+        self.assertIn("<strong>toolProcessAskedUserMultiple</strong>", data["multiple"])
+        for expected in (
+            'toolRequestUserInput: "询问用户"',
+            'toolProcessAskedUser: "询问了用户"',
+            'toolProcessAskedUserMultiple: "多次询问了用户"',
+            'progressUserInput: "正在等待用户输入…"',
+            'toolRequestUserInput: "Ask user"',
+            'toolProcessAskedUser: "Asked the user"',
+            'toolProcessAskedUserMultiple: "Asked the user multiple times"',
+            'progressUserInput: "Waiting for user input…"',
+        ):
+            self.assertIn(expected, I18N_SOURCE)
+
     def test_messages_ui_defers_pending_fifo_rows_below_active_output(self):
         script = r"""
 global.window = {Code: {ui: {}}};
