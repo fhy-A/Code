@@ -1633,9 +1633,14 @@ eval(source);
     def test_frontend_bundle_build_is_deterministic_and_not_default_loaded(self):
         self.assertEqual(PACKAGE_JSON["devDependencies"]["esbuild"], "0.28.1")
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
+        self.assertIn('"verify:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('entryPoints: ["src/frontend-entry.js"]', FRONTEND_BUILD_SOURCE)
         self.assertIn('format: "iife"', FRONTEND_BUILD_SOURCE)
         self.assertIn('treeShaking: false', FRONTEND_BUILD_SOURCE)
+        self.assertIn('const statePath = path.join(outputDir, "code.bundle.state.json")', FRONTEND_BUILD_SOURCE)
+        self.assertIn('if (checkOnly)', FRONTEND_BUILD_SOURCE)
+        self.assertIn('sourceFingerprint', FRONTEND_BUILD_SOURCE)
+        self.assertIn('Frontend build output hash mismatch', FRONTEND_BUILD_SOURCE)
         self.assertNotIn("code.bundle.js", INDEX_SOURCE)
         self.assertNotIn("code.bundle.js", BUILD_SOURCE)
 
@@ -1644,6 +1649,8 @@ eval(source);
             second = Path(temp_dir) / "second"
             bundles = []
             previews = []
+            fallbacks = []
+            source_fingerprints = []
             for output_dir in (first, second):
                 result = subprocess.run(
                     [
@@ -1662,14 +1669,22 @@ eval(source);
                 bundle = output_dir / "code.bundle.js"
                 source_map = output_dir / "code.bundle.js.map"
                 metadata = output_dir / "code.bundle.meta.json"
+                state = output_dir / "code.bundle.state.json"
                 preview = output_dir / "index.html"
+                fallback = output_dir / "index.classic.html"
                 self.assertTrue(bundle.is_file())
                 self.assertTrue(source_map.is_file())
                 self.assertTrue(metadata.is_file())
+                self.assertTrue(state.is_file())
                 self.assertTrue(preview.is_file())
+                self.assertTrue(fallback.is_file())
                 bundles.append(bundle.read_bytes())
                 preview_source = preview.read_text(encoding="utf-8")
                 previews.append(preview_source)
+                fallback_source = fallback.read_text(encoding="utf-8")
+                fallbacks.append(fallback_source)
+                state_data = json.loads(state.read_text(encoding="utf-8"))
+                source_fingerprints.append(state_data["sourceFingerprint"])
 
                 self.assertIn('data-frontend-runtime="bundle"', preview_source)
                 self.assertIn('href="/styles.css"', preview_source)
@@ -1685,6 +1700,57 @@ eval(source);
                 )
                 self.assertIn("https://cdn.jsdelivr.net/npm/katex", preview_source)
                 self.assertIn("https://cdn.jsdelivr.net/npm/marked", preview_source)
+                self.assertIn('data-frontend-runtime="classic-fallback"', fallback_source)
+                self.assertIn('href="/styles.css"', fallback_source)
+                self.assertIn('href="/code-icon.ico', fallback_source)
+                self.assertNotIn("code.bundle.js", fallback_source)
+                fallback_scripts = re.findall(
+                    r'<script src="(/(?:src/[^"]+|agent-runtime\.js|app\.js))"></script>',
+                    fallback_source,
+                )
+                self.assertEqual(len(fallback_scripts), 31)
+                self.assertEqual(fallback_scripts[-2:], ["/agent-runtime.js", "/app.js"])
+
+                self.assertEqual(state_data["schemaVersion"], 1)
+                self.assertEqual(state_data["esbuildVersion"], "0.28.1")
+                self.assertRegex(state_data["sourceFingerprint"], r"^[0-9a-f]{64}$")
+                for expected in (
+                    "src/frontend-entry.js",
+                    "index.html",
+                    "package-lock.json",
+                    "scripts/build-frontend.mjs",
+                ):
+                    self.assertIn(expected, state_data["inputs"])
+                self.assertEqual(
+                    set(state_data["outputs"]),
+                    {
+                        "code.bundle.js",
+                        "code.bundle.js.map",
+                        "code.bundle.meta.json",
+                        "index.html",
+                        "index.classic.html",
+                    },
+                )
+
+                freshness = subprocess.run(
+                    [
+                        "node",
+                        "scripts/build-frontend.mjs",
+                        "--check",
+                        "--outdir",
+                        str(output_dir),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(
+                    freshness.returncode,
+                    0,
+                    freshness.stdout + freshness.stderr,
+                )
 
                 syntax = subprocess.run(
                     ["node", "--check", str(bundle)],
@@ -1707,6 +1773,53 @@ eval(source);
 
             self.assertEqual(bundles[0], bundles[1])
             self.assertEqual(previews[0], previews[1])
+            self.assertEqual(fallbacks[0], fallbacks[1])
+            self.assertEqual(source_fingerprints[0], source_fingerprints[1])
+
+            first_bundle = first / "code.bundle.js"
+            original_bundle = first_bundle.read_bytes()
+            first_bundle.write_bytes(original_bundle + b"\n// tampered\n")
+            tampered = subprocess.run(
+                ["node", "scripts/build-frontend.mjs", "--check", "--outdir", str(first)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(tampered.returncode, 0)
+            self.assertIn("Frontend build output hash mismatch", tampered.stdout + tampered.stderr)
+            first_bundle.write_bytes(original_bundle)
+
+            first_state = first / "code.bundle.state.json"
+            original_state = first_state.read_text(encoding="utf-8")
+            stale_state = json.loads(original_state)
+            stale_state["sourceFingerprint"] = "0" * 64
+            first_state.write_text(json.dumps(stale_state), encoding="utf-8")
+            stale = subprocess.run(
+                ["node", "scripts/build-frontend.mjs", "--check", "--outdir", str(first)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("source fingerprint changed", stale.stdout + stale.stderr)
+            first_state.write_text(original_state, encoding="utf-8")
+
+            first_fallback = first / "index.classic.html"
+            first_fallback.unlink()
+            missing = subprocess.run(
+                ["node", "scripts/build-frontend.mjs", "--check", "--outdir", str(first)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("Frontend build output is missing", missing.stdout + missing.stderr)
 
     def test_namespace_defines_supported_buckets(self):
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")

@@ -1,7 +1,8 @@
 {
   "scripts": {
     "build:frontend": "node scripts/build-frontend.mjs",
-    "check:frontend": "npm run build:frontend && node --check dist/frontend/code.bundle.js"
+    "verify:frontend": "node scripts/build-frontend.mjs --check && node --check dist/frontend/code.bundle.js",
+    "check:frontend": "npm run build:frontend && npm run verify:frontend"
   },
   "dependencies": {
     "docx": "^9.7.1"
