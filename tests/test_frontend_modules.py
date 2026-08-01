@@ -1629,13 +1629,100 @@ eval(source);
         self.assertIn('data-frontend-runtime="bundle"', INDEX_SOURCE)
         self.assertEqual(INDEX_SOURCE.count('/dist/frontend/code.bundle.js'), 1)
         self.assertEqual(INDEX_SOURCE.count('/dist/frontend/index.classic.html'), 1)
-        self.assertIn("window.__codeUseClassicFrontend('bundle-load')", INDEX_SOURCE)
-        self.assertIn('window.__codeUseClassicFrontend("bundle-init")', INDEX_SOURCE)
-        self.assertIn("window.Code.frontendBundleLoaded = true", FRONTEND_ENTRY_SOURCE)
+        self.assertNotIn("window.__codeUseClassicFrontend", INDEX_SOURCE)
+        self.assertNotIn("frontendBundleLoaded", FRONTEND_ENTRY_SOURCE)
+        self.assertNotRegex(INDEX_SOURCE, r"\sonerror=")
+        self.assertIn('bundleScript.addEventListener("error"', INDEX_SOURCE)
+        self.assertIn('bundleScript.addEventListener("load"', INDEX_SOURCE)
+        self.assertIn(
+            'document.documentElement.setAttribute("data-code-frontend-ready", "true")',
+            FRONTEND_ENTRY_SOURCE,
+        )
         self.assertNotRegex(
             INDEX_SOURCE,
             r'<script src="\./(?:src/[^\"]+|agent-runtime\.js|app\.js)"></script>',
         )
+
+    def test_default_bundle_bootstrap_falls_back_without_global_bridge(self):
+        runtime_match = re.search(
+            r'<!-- code-frontend-runtime:start -->\s*<script>([\s\S]*?)</script>\s*<!-- code-frontend-runtime:end -->',
+            INDEX_SOURCE,
+        )
+        self.assertIsNotNone(runtime_match)
+        bootstrap_source = runtime_match.group(1)
+        script = f"""
+const vm = require("vm");
+const bootstrapSource = {json.dumps(bootstrap_source)};
+
+function runScenario(eventType, ready) {{
+  const attributes = new Map();
+  if (ready) attributes.set("data-code-frontend-ready", "true");
+  const listeners = {{}};
+  const replacements = [];
+  let appended = null;
+  const bundleScript = {{
+    src: "",
+    async: true,
+    addEventListener(type, handler, options) {{
+      listeners[type] = {{handler, options}};
+    }},
+  }};
+  const document = {{
+    documentElement: {{
+      getAttribute(name) {{ return attributes.get(name) || null; }},
+    }},
+    createElement(tagName) {{
+      if (tagName !== "script") throw new Error(`unexpected element: ${{tagName}}`);
+      return bundleScript;
+    }},
+    body: {{
+      appendChild(node) {{ appended = node; return node; }},
+    }},
+  }};
+  const window = {{
+    location: {{
+      href: "http://127.0.0.1:3011/?phase2-first-send=1",
+      replace(value) {{ replacements.push(String(value)); }},
+    }},
+  }};
+  vm.runInNewContext(bootstrapSource, {{window, document, URL}});
+  if (eventType) listeners[eventType].handler();
+  return {{
+    appended: appended === bundleScript,
+    src: bundleScript.src,
+    async: bundleScript.async,
+    errorOnce: listeners.error.options.once === true,
+    loadOnce: listeners.load.options.once === true,
+    replacements,
+  }};
+}}
+
+process.stdout.write(JSON.stringify({{
+  error: runScenario("error", false),
+  initFailure: runScenario("load", false),
+  ready: runScenario("load", true),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        for scenario in data.values():
+            self.assertTrue(scenario["appended"])
+            self.assertEqual(scenario["src"], "/dist/frontend/code.bundle.js")
+            self.assertFalse(scenario["async"])
+            self.assertTrue(scenario["errorOnce"])
+            self.assertTrue(scenario["loadOnce"])
+        self.assertEqual(len(data["error"]["replacements"]), 1)
+        self.assertIn("fallback=bundle-load", data["error"]["replacements"][0])
+        self.assertEqual(len(data["initFailure"]["replacements"]), 1)
+        self.assertIn("fallback=bundle-init", data["initFailure"]["replacements"][0])
+        self.assertEqual(data["ready"]["replacements"], [])
 
     def test_frontend_bundle_build_is_deterministic_and_guarded(self):
         self.assertEqual(PACKAGE_JSON["devDependencies"]["esbuild"], "0.28.1")
@@ -1718,7 +1805,7 @@ eval(source);
                 self.assertIn('data-frontend-runtime="bundle"', preview_source)
                 self.assertIn('href="/styles.css"', preview_source)
                 self.assertIn('href="/code-icon.ico', preview_source)
-                self.assertIn('<script src="./code.bundle.js"', preview_source)
+                self.assertIn('bundleScript.src = "./code.bundle.js";', preview_source)
                 self.assertIn('new URL("./index.classic.html"', preview_source)
                 self.assertNotRegex(
                     preview_source,
@@ -1726,7 +1813,7 @@ eval(source);
                 )
                 self.assertLess(
                     preview_source.index('id="importModal"'),
-                    preview_source.index('<script src="./code.bundle.js"'),
+                    preview_source.index('bundleScript.src = "./code.bundle.js";'),
                 )
                 self.assertIn("https://cdn.jsdelivr.net/npm/katex", preview_source)
                 self.assertIn("https://cdn.jsdelivr.net/npm/marked", preview_source)

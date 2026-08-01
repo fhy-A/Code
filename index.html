@@ -639,18 +639,23 @@
   </div>
   <!-- code-frontend-runtime:start -->
   <script>
-    window.__codeUseClassicFrontend = function (reason) {
-      const fallback = new URL("/dist/frontend/index.classic.html", window.location.href);
-      fallback.searchParams.set("fallback", reason || "unknown");
-      window.location.replace(fallback);
-    };
-  </script>
-  <script src="/dist/frontend/code.bundle.js"
-    onerror="window.__codeUseClassicFrontend('bundle-load')"></script>
-  <script>
-    if (window.Code?.frontendBundleLoaded !== true) {
-      window.__codeUseClassicFrontend("bundle-init");
-    }
+    (() => {
+      const useClassicFrontend = (reason) => {
+        const fallback = new URL("/dist/frontend/index.classic.html", window.location.href);
+        fallback.searchParams.set("fallback", reason || "unknown");
+        window.location.replace(fallback);
+      };
+      const bundleScript = document.createElement("script");
+      bundleScript.src = "/dist/frontend/code.bundle.js";
+      bundleScript.async = false;
+      bundleScript.addEventListener("error", () => useClassicFrontend("bundle-load"), { once: true });
+      bundleScript.addEventListener("load", () => {
+        if (document.documentElement.getAttribute("data-code-frontend-ready") !== "true") {
+          useClassicFrontend("bundle-init");
+        }
+      }, { once: true });
+      document.body.appendChild(bundleScript);
+    })();
   </script>
   <!-- code-frontend-runtime:end -->
 </body>
