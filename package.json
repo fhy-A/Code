@@ -1,5 +1,12 @@
 {
+  "scripts": {
+    "build:frontend": "node scripts/build-frontend.mjs",
+    "check:frontend": "npm run build:frontend && node --check dist/frontend/code.bundle.js"
+  },
   "dependencies": {
     "docx": "^9.7.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
   }
 }

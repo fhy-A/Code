@@ -1,8 +1,10 @@
 """Regression guards for the transitional frontend module split."""
 
 import json
+import posixpath
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,6 +37,9 @@ COMPACTION_SOURCE = (ROOT / "src" / "agent" / "compaction.js").read_text(encodin
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
+FRONTEND_ENTRY_SOURCE = (ROOT / "src" / "frontend-entry.js").read_text(encoding="utf-8")
+FRONTEND_BUILD_SOURCE = (ROOT / "scripts" / "build-frontend.mjs").read_text(encoding="utf-8")
+PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
 LOGO_SOURCE = (ROOT / "assets" / "code-logo.svg").read_text(encoding="utf-8")
 LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.py").read_text(encoding="utf-8")
@@ -1579,6 +1584,7 @@ eval(source);
             "src/core/utils.js",
             "src/core/i18n.js",
             "src/core/platform.js",
+            "src/core/theme-engine.js",
             "src/services/notifications.js",
             "src/services/api-client.js",
             "src/services/persistence.js",
@@ -1598,45 +1604,88 @@ eval(source);
             "src/agent/tools.js",
             "src/agent/permissions.js",
             "src/agent/questionnaire.js",
+            "src/agent/subagents.js",
             "src/agent/compaction.js",
             "src/agent/model-stream.js",
+            "src/frontend-entry.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
     def test_scripts_load_before_runtime_and_app(self):
-        scripts = (
-            "./src/core/namespace.js",
-            "./src/core/state.js",
-            "./src/core/platform.js",
-            "./src/core/icons.js",
-            "./src/core/utils.js",
-            "./src/core/i18n.js",
-            "./src/services/notifications.js",
-            "./src/services/api-client.js",
-            "./src/services/persistence.js",
-            "./src/ui/diff.js",
-            "./src/ui/markdown.js",
-            "./src/ui/timeline.js",
-            "./src/ui/messages.js",
-            "./src/ui/panels.js",
-            "./src/features/sessions.js",
-            "./src/features/branches.js",
-            "./src/features/settings.js",
-            "./src/features/skills-memory.js",
-            "./src/features/preview.js",
-            "./src/features/files.js",
-            "./src/features/session-import.js",
-            "./src/agent/model-request.js",
-            "./src/agent/tools.js",
-            "./src/agent/permissions.js",
-            "./src/agent/questionnaire.js",
-            "./src/agent/compaction.js",
-            "./src/agent/model-stream.js",
-            "./agent-runtime.js",
-            "./app.js",
+        classic_scripts = re.findall(
+            r'<script src="(\./(?:src/[^\"]+|agent-runtime\.js|app\.js))"></script>',
+            INDEX_SOURCE,
         )
-        positions = [INDEX_SOURCE.index(f'src="{script}"') for script in scripts]
-        self.assertEqual(positions, sorted(positions))
+        entry_imports = re.findall(
+            r'^import "([^\"]+)";$',
+            FRONTEND_ENTRY_SOURCE,
+            flags=re.MULTILINE,
+        )
+        bundled_scripts = [
+            "./" + posixpath.normpath(posixpath.join("src", item))
+            for item in entry_imports
+        ]
+
+        self.assertEqual(classic_scripts, bundled_scripts)
+        self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
+        self.assertEqual(classic_scripts[-2:], ["./agent-runtime.js", "./app.js"])
+
+    def test_frontend_bundle_build_is_deterministic_but_not_loaded_yet(self):
+        self.assertEqual(PACKAGE_JSON["devDependencies"]["esbuild"], "0.28.1")
+        self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
+        self.assertIn('entryPoints: ["src/frontend-entry.js"]', FRONTEND_BUILD_SOURCE)
+        self.assertIn('format: "iife"', FRONTEND_BUILD_SOURCE)
+        self.assertIn('treeShaking: false', FRONTEND_BUILD_SOURCE)
+        self.assertNotIn("code.bundle.js", INDEX_SOURCE)
+        self.assertNotIn("code.bundle.js", BUILD_SOURCE)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = Path(temp_dir) / "first"
+            second = Path(temp_dir) / "second"
+            bundles = []
+            for output_dir in (first, second):
+                result = subprocess.run(
+                    [
+                        "node",
+                        "scripts/build-frontend.mjs",
+                        "--outdir",
+                        str(output_dir),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                bundle = output_dir / "code.bundle.js"
+                source_map = output_dir / "code.bundle.js.map"
+                metadata = output_dir / "code.bundle.meta.json"
+                self.assertTrue(bundle.is_file())
+                self.assertTrue(source_map.is_file())
+                self.assertTrue(metadata.is_file())
+                bundles.append(bundle.read_bytes())
+
+                syntax = subprocess.run(
+                    ["node", "--check", str(bundle)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(syntax.returncode, 0, syntax.stdout + syntax.stderr)
+
+                inputs = json.loads(metadata.read_text(encoding="utf-8"))["inputs"]
+                for expected in (
+                    "src/frontend-entry.js",
+                    "src/core/namespace.js",
+                    "agent-runtime.js",
+                    "app.js",
+                ):
+                    self.assertIn(expected, inputs)
+
+            self.assertEqual(bundles[0], bundles[1])
 
     def test_namespace_defines_supported_buckets(self):
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")
