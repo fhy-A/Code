@@ -7,6 +7,25 @@ import sys
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
+FRONTEND_BUILD_SCRIPT = APP_DIR / "scripts" / "build-frontend.mjs"
+FRONTEND_OUTPUT_DIR = APP_DIR / "dist" / "frontend"
+FRONTEND_BUNDLE = FRONTEND_OUTPUT_DIR / "code.bundle.js"
+FRONTEND_CLASSIC_FALLBACK = FRONTEND_OUTPUT_DIR / "index.classic.html"
+
+
+def build_frontend_assets():
+    """Build and verify the exact frontend assets embedded in the EXE."""
+    commands = (
+        ["node", str(FRONTEND_BUILD_SCRIPT)],
+        ["node", str(FRONTEND_BUILD_SCRIPT), "--check"],
+        ["node", "--check", str(FRONTEND_BUNDLE)],
+    )
+    print("Building and verifying frontend assets...")
+    for command in commands:
+        subprocess.run(command, cwd=str(APP_DIR), check=True)
+
+
+build_frontend_assets()
 
 # Ensure data subdirs exist
 for d in ["data", "data/sessions", "data/memory", "data/skills", "data/attachments", "data/file-backups"]:
@@ -26,6 +45,8 @@ cmd = [
     "--add-data", f"{APP_DIR / 'agent-runtime.js'}{';'}.",
     "--add-data", f"{APP_DIR / 'src'}{';'}src",
     "--add-data", f"{APP_DIR / 'index.html'}{';'}.",
+    "--add-data", f"{FRONTEND_BUNDLE}{';'}dist/frontend",
+    "--add-data", f"{FRONTEND_CLASSIC_FALLBACK}{';'}dist/frontend",
     "--add-data", f"{APP_DIR / 'styles.css'}{';'}.",
     "--add-data", f"{APP_DIR / 'code-icon.ico'}{';'}.",
     "--add-data", f"{APP_DIR / 'code-icon.png'}{';'}.",

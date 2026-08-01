@@ -40,6 +40,8 @@ BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 FRONTEND_ENTRY_SOURCE = (ROOT / "src" / "frontend-entry.js").read_text(encoding="utf-8")
 FRONTEND_BUILD_SOURCE = (ROOT / "scripts" / "build-frontend.mjs").read_text(encoding="utf-8")
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+CURRENT_SPEC_SOURCE = (ROOT / f"Code-v{CURRENT_VERSION}.spec").read_text(encoding="utf-8")
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
 LOGO_SOURCE = (ROOT / "assets" / "code-logo.svg").read_text(encoding="utf-8")
 LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.py").read_text(encoding="utf-8")
@@ -1648,7 +1650,18 @@ eval(source);
         self.assertIn('Frontend build output hash mismatch', FRONTEND_BUILD_SOURCE)
         self.assertIn('/dist/frontend/code.bundle.js', INDEX_SOURCE)
         self.assertIn('/dist/frontend/index.classic.html', INDEX_SOURCE)
-        self.assertNotIn("code.bundle.js", BUILD_SOURCE)
+        self.assertIn("FRONTEND_BUNDLE", BUILD_SOURCE)
+        self.assertIn("FRONTEND_CLASSIC_FALLBACK", BUILD_SOURCE)
+        self.assertIn("build_frontend_assets()", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.js.map", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.meta.json", BUILD_SOURCE)
+
+        self.assertIn("dist\\\\frontend\\\\code.bundle.js", CURRENT_SPEC_SOURCE)
+        self.assertIn("dist\\\\frontend\\\\index.classic.html", CURRENT_SPEC_SOURCE)
+        self.assertIn("src', 'src'", CURRENT_SPEC_SOURCE)
+        self.assertNotIn("code.bundle.js.map", CURRENT_SPEC_SOURCE)
+        self.assertNotIn("code.bundle.meta.json", CURRENT_SPEC_SOURCE)
+        self.assertNotIn("code.bundle.state.json", CURRENT_SPEC_SOURCE)
 
         entry_imports = re.findall(
             r'^import "([^\"]+)";$',
@@ -6933,8 +6946,12 @@ process.stdout.write(JSON.stringify({
         self.assertIn("APP_DIR / 'agent-runtime.js'", BUILD_SOURCE)
         self.assertIn("APP_DIR / 'src'", BUILD_SOURCE)
         self.assertIn("f\"{APP_DIR / 'src'}{';'}src\"", BUILD_SOURCE)
+        self.assertIn("f\"{FRONTEND_BUNDLE}{';'}dist/frontend\"", BUILD_SOURCE)
+        self.assertIn("f\"{FRONTEND_CLASSIC_FALLBACK}{';'}dist/frontend\"", BUILD_SOURCE)
         self.assertIn("APP_DIR / 'code-icon.png'", BUILD_SOURCE)
         self.assertIn("APP_DIR / 'assets'", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.js.map", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.meta.json", BUILD_SOURCE)
 
     def test_code_brand_mark_and_minimal_welcome_stay_in_sync(self):
         upper_path = "M80 13A40 40 0 0 1 80 93"

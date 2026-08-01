@@ -35,6 +35,8 @@ VERSION_INFO_FILE = ROOT / "file_version_info.txt"
 README_FILE = ROOT / "README.md"
 RELEASES_DIR = ROOT / "docs" / "releases"
 BUILD_SCRIPT = ROOT / "build_exe.py"
+FRONTEND_BUILD_SCRIPT = ROOT / "scripts" / "build-frontend.mjs"
+FRONTEND_BUNDLE = ROOT / "dist" / "frontend" / "code.bundle.js"
 DEFAULT_BRANCH = "master"
 RELEASE_NOTES_PLACEHOLDER = "[发布说明待补充 -- 请在此描述本版本的主要改动]"
 RELEASE_NOTES_BODY_START = "<!-- code-release-notes:body:start -->"
@@ -347,6 +349,30 @@ def run_git_diff_check():
     ok("git diff --check 通过")
 
 
+def prepare_frontend_assets(build=True):
+    """Build when allowed, then require fresh and syntactically valid assets."""
+    print("\n-- 前端构建门禁 --")
+    commands = []
+    if build:
+        commands.append((
+            ["node", str(FRONTEND_BUILD_SCRIPT)],
+            "build frontend bundle",
+        ))
+    commands.extend((
+        (
+            ["node", str(FRONTEND_BUILD_SCRIPT), "--check"],
+            "verify frontend freshness",
+        ),
+        (["node", "--check", str(FRONTEND_BUNDLE)], "check frontend bundle syntax"),
+    ))
+
+    for command, description in commands:
+        rc, stdout, stderr = run(command, description=description, timeout=120)
+        if rc != 0:
+            die(f"前端构建门禁失败: {description}\n{stdout}{stderr}")
+        ok(description)
+
+
 # ═══════════════════════════════════════════════════════════════
 # Step 5: 构建 EXE
 # ═══════════════════════════════════════════════════════════════
@@ -366,7 +392,7 @@ def build_exe(new_version):
     exe_path = ROOT / "dist" / f"Code-v{new_version}.exe"
 
     if rc != 0:
-        die(f"PyInstaller 构建失败（耗时 {elapsed:.0f}s）")
+        die(f"EXE 构建流程失败（耗时 {elapsed:.0f}s）")
 
     if not exe_path.exists():
         die(f"构建完成但找不到产物: {exe_path}")
@@ -824,10 +850,11 @@ def main():
     verify_version_consistency(new_version, old_version, dry_run=args.dry_run)
 
     # ── Phase 2: 代码质量检查 ──
+    print("\n" + "=" * 60)
+    print("  Phase 2: 代码质量检查")
+    print("=" * 60)
+    prepare_frontend_assets(build=not args.dry_run)
     if not args.skip_tests:
-        print("\n" + "=" * 60)
-        print("  Phase 2: 代码质量检查")
-        print("=" * 60)
 
         if not args.dry_run:
             run_tests()

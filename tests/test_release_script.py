@@ -152,6 +152,54 @@ Date: 2026-07-27
         )
         self.assertIn("if initial_errors and args.yes", source)
 
+    def test_frontend_release_gate_builds_then_verifies(self):
+        successful = (0, "ok", "")
+        with mock.patch.object(
+            release,
+            "run",
+            side_effect=[successful, successful, successful],
+        ) as run_command:
+            release.prepare_frontend_assets(build=True)
+
+        self.assertEqual(
+            [call.args[0] for call in run_command.call_args_list],
+            [
+                ["node", str(release.FRONTEND_BUILD_SCRIPT)],
+                ["node", str(release.FRONTEND_BUILD_SCRIPT), "--check"],
+                ["node", "--check", str(release.FRONTEND_BUNDLE)],
+            ],
+        )
+
+    def test_frontend_release_gate_is_read_only_in_dry_run(self):
+        successful = (0, "ok", "")
+        with mock.patch.object(
+            release,
+            "run",
+            side_effect=[successful, successful],
+        ) as run_command:
+            release.prepare_frontend_assets(build=False)
+
+        self.assertEqual(
+            [call.args[0] for call in run_command.call_args_list],
+            [
+                ["node", str(release.FRONTEND_BUILD_SCRIPT), "--check"],
+                ["node", "--check", str(release.FRONTEND_BUNDLE)],
+            ],
+        )
+
+    def test_frontend_release_gate_failure_stops_release(self):
+        failed = (1, "stale", "hash mismatch")
+        with mock.patch.object(release, "run", return_value=failed):
+            with self.assertRaises(SystemExit):
+                release.prepare_frontend_assets(build=False)
+
+    def test_frontend_release_gate_runs_before_exe_packaging(self):
+        source = inspect.getsource(release.main)
+        self.assertLess(
+            source.index("prepare_frontend_assets"),
+            source.index("build_exe"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
