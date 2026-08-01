@@ -464,6 +464,48 @@ eval(source);
         self.assertIn('agentRunId: String(tool._agentRunId || "")', APP_SOURCE)
         self.assertIn("userInputRequest: serializeUserInputRequest(request)", APP_SOURCE)
 
+    def test_server_agent_loop_state_matrix_and_side_effects_stay_in_app(self):
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+
+        ordered_steps = (
+            "let snapshot = await window.AgentRuntime.getAgentRun",
+            'if (snapshot.status === "waiting_credentials") {',
+            "await window.AgentRuntime.resumeAgentRun",
+            "snapshot = await window.AgentRuntime.watchAgentRun",
+            "ctx.agentEventCursor = Number(",
+            'if (snapshot.status === "waiting_credentials") continue;',
+            'if (snapshot.status === "waiting_user_input") {',
+            "await requestServerAgentInput(ctx, snapshot.pendingInput)",
+            'if (snapshot.status === "waiting_authorization") {',
+            "await requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",
+            'if (snapshot.status === "completed") {',
+            'if (snapshot.status === "cancelled") throw new DOMException("Aborted", "AbortError");',
+            "const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`)",
+        )
+        positions = [loop_source.index(step) for step in ordered_steps]
+        self.assertEqual(positions, sorted(positions))
+
+        for expected in (
+            "await buildModelRequestPayload(ctx, true, serverTools)",
+            "await window.AgentRuntime.createAgentRun",
+            "await persistRunCheckpoint(ctx, \"running\", \"model\"",
+            "onEvent: (event) => projectAgentEvent(ctx, event)",
+            "ctx.run.recovery = {",
+            "ctx.run.agentEventCursor = ctx.agentEventCursor",
+            "ctx.agentRunId = \"\"",
+            "ctx.run.agentRunId = \"\"",
+            "err.status = snapshot.status",
+            "err.errorCode = snapshot.errorCode || \"\"",
+            'if (err.errorCode === "model_access_denied")',
+            "await refreshModels()",
+        ):
+            self.assertIn(expected, loop_source)
+
+        self.assertFalse((ROOT / "src" / "agent" / "agent-loop.js").exists())
+        self.assertNotIn("./src/agent/agent-loop.js", INDEX_SOURCE)
+
     def test_agent_questionnaire_normalizes_and_serializes_without_side_effects(self):
         script = r"""
 global.window = {};
