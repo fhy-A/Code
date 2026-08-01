@@ -5542,7 +5542,8 @@ process.stdout.write(JSON.stringify({
             self.assertNotIn(obsolete, APP_SOURCE)
         self.assertIn("function _toolActionLabel(action)", APP_SOURCE)
         self.assertIn("getToolActionLabel: _toolActionLabel", APP_SOURCE)
-        self.assertIn("window.copyMessageText = copyMessageText", APP_SOURCE)
+        self.assertNotIn("window.copyMessageText", APP_SOURCE)
+        self.assertIn("bindMessageInteractions(els.messageList)", APP_SOURCE)
         script = r"""
 global.window = {Code: {ui: {}}};
 require("./src/ui/messages.js");
@@ -5943,6 +5944,126 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-usage-kind="cache-read"', data["cacheStatus"])
         self.assertIn('data-usage-kind="cache-write"', data["cacheStatus"])
         self.assertIn('title="statCacheWriteTitle"', data["cacheStatus"])
+
+    def test_messages_ui_binds_copy_and_image_events_without_inline_globals(self):
+        self.assertNotIn('onclick="copyMessageText', MESSAGES_SOURCE)
+        self.assertNotIn('onclick="showImageOverlay', MESSAGES_SOURCE)
+        self.assertNotIn('onload="', MESSAGES_SOURCE)
+        self.assertNotIn('onclick="showImageOverlay', MARKDOWN_SOURCE)
+        self.assertNotIn('onclick="showImageOverlay', APP_SOURCE)
+        self.assertIn("data-composer-image-preview", APP_SOURCE)
+        image_thumbs_source = APP_SOURCE.split("function renderImageThumbs()", 1)[1].split(
+            "async function handleImageFile", 1
+        )[0]
+        self.assertIn(
+            'container.querySelectorAll("[data-composer-image-preview]")',
+            image_thumbs_source,
+        )
+        model_attempt_source = APP_SOURCE.split("async function _callModelOnceAttempt", 1)[1].split(
+            "function _safeMd", 1
+        )[0]
+        self.assertNotIn("data-composer-image-preview", model_attempt_source)
+
+        script = r"""
+const writes = [];
+const previewed = [];
+const loaded = [];
+const timers = [];
+global.setTimeout = (handler) => { timers.push(handler); return timers.length; };
+global.window = {
+  Code: {ui: {}},
+  navigator: {clipboard: {writeText: async (value) => { writes.push(value); }}},
+};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const handlers = {};
+const root = {
+  addEventListener(type, handler, options) {
+    handlers[type] = handlers[type] || [];
+    handlers[type].push({handler, options});
+  },
+  contains: () => true,
+};
+const classes = new Set();
+const copyButton = {
+  dataset: {copyText: "copy me"},
+  innerHTML: "copy",
+  title: "",
+  classList: {
+    add: (...names) => names.forEach((name) => classes.add(name)),
+    remove: (...names) => names.forEach((name) => classes.delete(name)),
+  },
+  setAttribute(name, value) { this[name] = value; },
+  closest(selector) { return selector === ".msg-copy-btn" ? this : null; },
+};
+const previewImage = {
+  currentSrc: "current-preview.png",
+  src: "fallback-preview.png",
+  closest(selector) { return selector === "[data-message-image-preview]" ? this : null; },
+};
+const loadingImage = {
+  closest(selector) { return selector === "[data-message-scroll-on-load]" ? this : null; },
+};
+const feature = createMessagesFeature({
+  escapeHtml: (value) => String(value ?? ""),
+  t: (key) => key,
+  onImagePreview: (src) => previewed.push(src),
+  onImageLoad: (image) => loaded.push(image),
+});
+const firstBound = feature.bindInteractions(root);
+const secondBound = feature.bindInteractions(root);
+
+(async () => {
+  handlers.click[0].handler({target: copyButton});
+  await Promise.resolve();
+  await Promise.resolve();
+  handlers.click[0].handler({target: previewImage});
+  handlers.load[0].handler({target: loadingImage});
+  const copyHtml = feature.renderCopyButton("copy me");
+  const userHtml = feature.renderUserProjection({
+    role: "user",
+    content: "",
+    _images: [{path: "C:/tmp/demo.png", name: "demo"}],
+  }, 1);
+  process.stdout.write(JSON.stringify({
+    firstBound,
+    secondBound,
+    clickHandlers: handlers.click.length,
+    loadHandlers: handlers.load.length,
+    loadUsesCapture: handlers.load[0].options === true,
+    writes,
+    previewed,
+    loadedCount: loaded.length,
+    copied: classes.has("copied"),
+    copyHtml,
+    userHtml,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["firstBound"])
+        self.assertFalse(data["secondBound"])
+        self.assertEqual(data["clickHandlers"], 1)
+        self.assertEqual(data["loadHandlers"], 1)
+        self.assertTrue(data["loadUsesCapture"])
+        self.assertEqual(data["writes"], ["copy me"])
+        self.assertEqual(data["previewed"], ["current-preview.png"])
+        self.assertEqual(data["loadedCount"], 1)
+        self.assertTrue(data["copied"])
+        self.assertIn('class="msg-copy-btn"', data["copyHtml"])
+        self.assertNotIn("onclick=", data["copyHtml"])
+        self.assertIn("data-message-image-preview", data["userHtml"])
+        self.assertIn("data-message-scroll-on-load", data["userHtml"])
+        self.assertNotIn("onclick=", data["userHtml"])
+        self.assertNotIn("onload=", data["userHtml"])
 
     def test_messages_ui_localizes_request_user_input_process(self):
         self.assertIn('request_user_input:"toolRequestUserInput"', APP_SOURCE)

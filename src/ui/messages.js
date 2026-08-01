@@ -132,6 +132,9 @@
     const isEditSuggestionMessage = options.isEditSuggestionMessage || (() => false);
     const renderEditSuggestion = options.renderEditSuggestion || (() => "");
     const getToolActionLabel = options.getToolActionLabel || ((action) => String(action || "tool"));
+    const onImagePreview = options.onImagePreview || (() => {});
+    const onImageLoad = options.onImageLoad || (() => {});
+    const boundInteractionRoots = new WeakSet();
 
     function renderCopyIconSvg() {
       return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
@@ -181,9 +184,32 @@
       }, 1500);
     }
 
+    function bindInteractions(root) {
+      if (!root || typeof root.addEventListener !== "function" || boundInteractionRoots.has(root)) return false;
+      boundInteractionRoots.add(root);
+
+      root.addEventListener("click", (event) => {
+        const copyButton = event.target?.closest?.(".msg-copy-btn");
+        if (copyButton && (!root.contains || root.contains(copyButton))) {
+          void copyMessageText(copyButton);
+          return;
+        }
+        const image = event.target?.closest?.("[data-message-image-preview]");
+        if (image && (!root.contains || root.contains(image))) {
+          onImagePreview(image.currentSrc || image.src || "");
+        }
+      });
+
+      root.addEventListener("load", (event) => {
+        const image = event.target?.closest?.("[data-message-scroll-on-load]");
+        if (image && (!root.contains || root.contains(image))) onImageLoad(image);
+      }, true);
+      return true;
+    }
+
     function renderCopyButton(text) {
       if (!text || !text.trim()) return "";
-      return `<button class="msg-copy-btn" type="button" title="${t("copy")}" aria-label="${t("copy")}" data-copy-text="${escapeHtml(text)}" onclick="copyMessageText(this)">${COPY_SVG}</button>`;
+      return `<button class="msg-copy-btn" type="button" title="${t("copy")}" aria-label="${t("copy")}" data-copy-text="${escapeHtml(text)}">${COPY_SVG}</button>`;
     }
 
     function formatMessageTime(isoString) {
@@ -358,10 +384,10 @@
         const src = image.path
           ? `/api/file?path=${encodeURIComponent(image.path)}&raw=1`
           : `data:${image.mime || "image/png"};base64,${image.base64}`;
-        const onLoad = image.path ? ` onload="const el=document.querySelector('.messages');if(el)el.scrollTop=el.scrollHeight"` : "";
+        const onLoad = image.path ? " data-message-scroll-on-load" : "";
         return `<article class="msg user msg-image" data-msg-index="${index}" data-img="${imageIndex}"${dispatchAttr}>
           <div class="bubble bubble-img">
-            <img class="msg-img msg-img-clickable" src="${src}" alt="${escapeHtml(image.name || "image")}"${onLoad} onclick="showImageOverlay(this.src)" title="Click to enlarge">
+            <img class="msg-img msg-img-clickable" src="${src}" alt="${escapeHtml(image.name || "image")}"${onLoad} data-message-image-preview title="Click to enlarge">
           </div>
         </article>`;
       }).join("");
@@ -926,7 +952,7 @@
     }
 
     return Object.freeze({
-      copyMessageText,
+      bindInteractions,
       formatMessageTime,
       hasUsageStats,
       isInternalMessage,

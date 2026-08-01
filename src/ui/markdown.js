@@ -169,7 +169,7 @@
         return `<img src="${escapeHtml(source)}" alt="${alt}"${title}>`;
       }
       const apiUrl = `/api/file?path=${encodeURIComponent(imagePath)}&raw=1`;
-      return `<img src="${apiUrl}" alt="${alt}"${title} loading="lazy" onclick="showImageOverlay(this.src)" class="msg-inline-img">`;
+      return `<img src="${apiUrl}" alt="${alt}"${title} loading="lazy" class="msg-inline-img" data-message-image-preview>`;
     };
 
     renderer.code = function renderCodeBlock({ text, lang }) {

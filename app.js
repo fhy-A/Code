@@ -753,9 +753,13 @@ messagesFeature = createMessagesFeature({
   isEditSuggestionMessage,
   renderEditSuggestion: renderEditSuggestionProjection,
   getToolActionLabel: _toolActionLabel,
+  onImagePreview: showImageOverlay,
+  onImageLoad: () => {
+    if (els.messages) els.messages.scrollTop = els.messages.scrollHeight;
+  },
 });
 const {
-  copyMessageText,
+  bindInteractions: bindMessageInteractions,
   hasUsageStats,
   isToolPlanningPlaceholder,
   normalizeResponseUsage,
@@ -763,7 +767,7 @@ const {
   renderCopyButton: renderCopyBtn,
   showIconCopyFeedback,
 } = messagesFeature;
-window.copyMessageText = copyMessageText;
+bindMessageInteractions(els.messageList);
 
 const panelsFeature = createPanelsFeature({
   elements: els,
@@ -4460,7 +4464,7 @@ function renderImageThumbs() {
 
     <div class="img-thumb">
 
-      <img src="data:${img.mime};base64,${img.base64}" alt="${escapeHtml(img.name)}" onclick="showImageOverlay(this.src)" title="点击查看大图" style="cursor:pointer" />
+      <img src="data:${img.mime};base64,${img.base64}" alt="${escapeHtml(img.name)}" data-composer-image-preview title="点击查看大图" style="cursor:pointer" />
 
       <button class="img-thumb-remove" type="button" title="${t("delete")}" data-index="${i}">&times;</button>
 
@@ -4472,6 +4476,10 @@ function renderImageThumbs() {
 
     btn.addEventListener("click", () => removeImage(parseInt(btn.dataset.index)));
 
+  });
+
+  container.querySelectorAll("[data-composer-image-preview]").forEach((image) => {
+    image.addEventListener("click", () => showImageOverlay(image.currentSrc || image.src || ""));
   });
 
 }
