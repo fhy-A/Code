@@ -9,12 +9,104 @@ cleanup.
 
 import importlib
 import os
+import subprocess
+import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib import parse
 
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_DEV_PORT = 3011
+FRONTEND_BUILD_SCRIPT = APP_DIR / "scripts" / "build-frontend.mjs"
+_FRONTEND_BUILD_LOCK = threading.Lock()
+
+
+def _frontend_command_output(result, limit=2000):
+    output = "\n".join(
+        part.strip()
+        for part in (result.stdout or "", result.stderr or "")
+        if part and part.strip()
+    )
+    return output[-limit:] if output else "No command output."
+
+
+def _hidden_subprocess_kwargs():
+    """Prevent short-lived frontend build consoles from flashing on Windows."""
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
+
+
+def _run_frontend_command(*arguments):
+    command = ["node", str(FRONTEND_BUILD_SCRIPT), *arguments]
+    try:
+        return subprocess.run(
+            command,
+            cwd=APP_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Node.js is required to build the Code development frontend."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Frontend build timed out after 60 seconds.") from exc
+
+
+def ensure_frontend_build():
+    """Verify the generated frontend and rebuild it when source inputs changed."""
+    with _FRONTEND_BUILD_LOCK:
+        freshness = _run_frontend_command("--check")
+        if freshness.returncode == 0:
+            return False
+
+        build = _run_frontend_command()
+        if build.returncode != 0:
+            raise RuntimeError(
+                "Frontend build failed:\n" + _frontend_command_output(build)
+            )
+
+        verified = _run_frontend_command("--check")
+        if verified.returncode != 0:
+            raise RuntimeError(
+                "Frontend build verification failed:\n"
+                + _frontend_command_output(verified)
+            )
+        return True
+
+
+def create_dev_handler(base_handler, ensure_frontend=ensure_frontend_build):
+    """Wrap the application handler with source-mode frontend freshness checks."""
+
+    class DevelopmentCodeHandler(base_handler):
+        def do_GET(self):
+            route = parse.urlsplit(self.path).path
+            if route in {"/", "/index.html"}:
+                try:
+                    rebuilt = ensure_frontend()
+                except RuntimeError as exc:
+                    print(f"Code Dev frontend unavailable: {exc}")
+                    self.send_error(503, "Frontend build failed")
+                    return
+                if rebuilt:
+                    print("Code Dev frontend rebuilt from current sources.")
+            return super().do_GET()
+
+    DevelopmentCodeHandler.__name__ = f"Development{base_handler.__name__}"
+    return DevelopmentCodeHandler
 
 
 def configure_dev_environment(environ=None):
@@ -43,10 +135,18 @@ def configure_dev_environment(environ=None):
     return port, data_dir
 
 
-def run_dev_server(server_module=None, server_factory=ThreadingHTTPServer):
+def run_dev_server(
+    server_module=None,
+    server_factory=ThreadingHTTPServer,
+    ensure_frontend=ensure_frontend_build,
+):
     """Run the source instance without invoking ``server.py`` cleanup."""
     port, data_dir = configure_dev_environment()
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    rebuilt = ensure_frontend()
+    if rebuilt:
+        print("Code Dev frontend rebuilt from current sources.")
 
     if server_module is None:
         server_module = importlib.import_module("server")
@@ -56,7 +156,8 @@ def run_dev_server(server_module=None, server_factory=ThreadingHTTPServer):
     server_module._migrate_codex_project_sessions_support()
     server_module._migrate_project_root_paths()
 
-    httpd = server_factory(("127.0.0.1", port), server_module.CodeHandler)
+    handler = create_dev_handler(server_module.CodeHandler, ensure_frontend)
+    httpd = server_factory(("127.0.0.1", port), handler)
     httpd.socket.settimeout(2.0)
     server_module.start_tray(port, httpd)
 

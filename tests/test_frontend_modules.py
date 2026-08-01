@@ -878,12 +878,12 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("return createSubAgentContext({", APP_SOURCE)
         self.assertIn("buildBackgroundTaskPrompt(currentTask, userText)", APP_SOURCE)
         self.assertLess(
-            INDEX_SOURCE.index("./src/agent/questionnaire.js"),
-            INDEX_SOURCE.index("./src/agent/subagents.js"),
+            FRONTEND_ENTRY_SOURCE.index('import "./agent/questionnaire.js"'),
+            FRONTEND_ENTRY_SOURCE.index('import "./agent/subagents.js"'),
         )
         self.assertLess(
-            INDEX_SOURCE.index("./src/agent/subagents.js"),
-            INDEX_SOURCE.index("./src/agent/model-stream.js"),
+            FRONTEND_ENTRY_SOURCE.index('import "./agent/subagents.js"'),
+            FRONTEND_ENTRY_SOURCE.index('import "./agent/model-stream.js"'),
         )
         for forbidden in (
             "state.",
@@ -1611,26 +1611,31 @@ eval(source);
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
-    def test_scripts_load_before_runtime_and_app(self):
-        classic_scripts = re.findall(
-            r'<script src="(\./(?:src/[^\"]+|agent-runtime\.js|app\.js))"></script>',
-            INDEX_SOURCE,
-        )
+    def test_default_entry_uses_bundle_with_generated_classic_fallback(self):
         entry_imports = re.findall(
             r'^import "([^\"]+)";$',
             FRONTEND_ENTRY_SOURCE,
             flags=re.MULTILINE,
         )
-        bundled_scripts = [
+        classic_scripts = [
             "./" + posixpath.normpath(posixpath.join("src", item))
             for item in entry_imports
         ]
 
-        self.assertEqual(classic_scripts, bundled_scripts)
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
         self.assertEqual(classic_scripts[-2:], ["./agent-runtime.js", "./app.js"])
+        self.assertIn('data-frontend-runtime="bundle"', INDEX_SOURCE)
+        self.assertEqual(INDEX_SOURCE.count('/dist/frontend/code.bundle.js'), 1)
+        self.assertEqual(INDEX_SOURCE.count('/dist/frontend/index.classic.html'), 1)
+        self.assertIn("window.__codeUseClassicFrontend('bundle-load')", INDEX_SOURCE)
+        self.assertIn('window.__codeUseClassicFrontend("bundle-init")', INDEX_SOURCE)
+        self.assertIn("window.Code.frontendBundleLoaded = true", FRONTEND_ENTRY_SOURCE)
+        self.assertNotRegex(
+            INDEX_SOURCE,
+            r'<script src="\./(?:src/[^\"]+|agent-runtime\.js|app\.js)"></script>',
+        )
 
-    def test_frontend_bundle_build_is_deterministic_and_not_default_loaded(self):
+    def test_frontend_bundle_build_is_deterministic_and_guarded(self):
         self.assertEqual(PACKAGE_JSON["devDependencies"]["esbuild"], "0.28.1")
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('"verify:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
@@ -1641,8 +1646,19 @@ eval(source);
         self.assertIn('if (checkOnly)', FRONTEND_BUILD_SOURCE)
         self.assertIn('sourceFingerprint', FRONTEND_BUILD_SOURCE)
         self.assertIn('Frontend build output hash mismatch', FRONTEND_BUILD_SOURCE)
-        self.assertNotIn("code.bundle.js", INDEX_SOURCE)
+        self.assertIn('/dist/frontend/code.bundle.js', INDEX_SOURCE)
+        self.assertIn('/dist/frontend/index.classic.html', INDEX_SOURCE)
         self.assertNotIn("code.bundle.js", BUILD_SOURCE)
+
+        entry_imports = re.findall(
+            r'^import "([^\"]+)";$',
+            FRONTEND_ENTRY_SOURCE,
+            flags=re.MULTILINE,
+        )
+        expected_fallback_scripts = [
+            "/" + posixpath.normpath(posixpath.join("src", item))
+            for item in entry_imports
+        ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             first = Path(temp_dir) / "first"
@@ -1689,14 +1705,15 @@ eval(source);
                 self.assertIn('data-frontend-runtime="bundle"', preview_source)
                 self.assertIn('href="/styles.css"', preview_source)
                 self.assertIn('href="/code-icon.ico', preview_source)
-                self.assertIn('<script src="./code.bundle.js"></script>', preview_source)
+                self.assertIn('<script src="./code.bundle.js"', preview_source)
+                self.assertIn('new URL("./index.classic.html"', preview_source)
                 self.assertNotRegex(
                     preview_source,
                     r'<script src="\./(?:src/[^\"]+|agent-runtime\.js|app\.js)"></script>',
                 )
                 self.assertLess(
                     preview_source.index('id="importModal"'),
-                    preview_source.index('<script src="./code.bundle.js"></script>'),
+                    preview_source.index('<script src="./code.bundle.js"'),
                 )
                 self.assertIn("https://cdn.jsdelivr.net/npm/katex", preview_source)
                 self.assertIn("https://cdn.jsdelivr.net/npm/marked", preview_source)
@@ -1708,7 +1725,7 @@ eval(source);
                     r'<script src="(/(?:src/[^"]+|agent-runtime\.js|app\.js))"></script>',
                     fallback_source,
                 )
-                self.assertEqual(len(fallback_scripts), 31)
+                self.assertEqual(fallback_scripts, expected_fallback_scripts)
                 self.assertEqual(fallback_scripts[-2:], ["/agent-runtime.js", "/app.js"])
 
                 self.assertEqual(state_data["schemaVersion"], 1)

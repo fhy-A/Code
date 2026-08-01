@@ -1,5 +1,6 @@
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,8 +63,9 @@ class TestDevServer(unittest.TestCase):
 
     def test_runner_uses_dev_port_migrations_and_tray(self):
         fake_module = mock.Mock()
-        fake_module.CodeHandler = object()
+        fake_module.CodeHandler = object
         fake_module.load_config.return_value = {"projectRoot": str(ROOT)}
+        ensure_frontend = mock.Mock(return_value=False)
 
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
             os.environ,
@@ -73,7 +75,11 @@ class TestDevServer(unittest.TestCase):
             },
             clear=False,
         ):
-            dev_server.run_dev_server(fake_module, _FakeHttpServer)
+            dev_server.run_dev_server(
+                fake_module,
+                _FakeHttpServer,
+                ensure_frontend=ensure_frontend,
+            )
 
         instance = _FakeHttpServer.last_instance
         self.assertEqual(instance.address, ("127.0.0.1", 3011))
@@ -84,6 +90,111 @@ class TestDevServer(unittest.TestCase):
         fake_module._migrate_codex_project_sessions_support.assert_called_once_with()
         fake_module._migrate_project_root_paths.assert_called_once_with()
         fake_module.start_tray.assert_called_once_with(3011, instance)
+        ensure_frontend.assert_called_once_with()
+        self.assertTrue(issubclass(instance.handler, fake_module.CodeHandler))
+
+    def test_frontend_build_check_returns_without_rebuilding_when_fresh(self):
+        fresh = subprocess.CompletedProcess([], 0, "fresh", "")
+        with mock.patch.object(
+            dev_server,
+            "_run_frontend_command",
+            return_value=fresh,
+        ) as run_command:
+            rebuilt = dev_server.ensure_frontend_build()
+
+        self.assertFalse(rebuilt)
+        run_command.assert_called_once_with("--check")
+
+    def test_frontend_command_hides_short_lived_console_on_windows(self):
+        completed = subprocess.CompletedProcess([], 0, "fresh", "")
+        with mock.patch.object(
+            dev_server.subprocess,
+            "run",
+            return_value=completed,
+        ) as run_command:
+            result = dev_server._run_frontend_command("--check")
+
+        self.assertIs(result, completed)
+        kwargs = run_command.call_args.kwargs
+        if os.name == "nt":
+            self.assertEqual(kwargs["creationflags"], 0x08000000)
+            self.assertTrue(
+                kwargs["startupinfo"].dwFlags
+                & subprocess.STARTF_USESHOWWINDOW
+            )
+            self.assertEqual(kwargs["startupinfo"].wShowWindow, subprocess.SW_HIDE)
+        else:
+            self.assertNotIn("creationflags", kwargs)
+            self.assertNotIn("startupinfo", kwargs)
+
+    def test_frontend_build_check_rebuilds_and_rechecks_when_stale(self):
+        stale = subprocess.CompletedProcess([], 1, "", "stale")
+        built = subprocess.CompletedProcess([], 0, "built", "")
+        fresh = subprocess.CompletedProcess([], 0, "fresh", "")
+        with mock.patch.object(
+            dev_server,
+            "_run_frontend_command",
+            side_effect=[stale, built, fresh],
+        ) as run_command:
+            rebuilt = dev_server.ensure_frontend_build()
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(
+            run_command.call_args_list,
+            [mock.call("--check"), mock.call(), mock.call("--check")],
+        )
+
+    def test_frontend_build_failure_stops_source_startup(self):
+        stale = subprocess.CompletedProcess([], 1, "", "stale")
+        failed = subprocess.CompletedProcess([], 1, "", "build exploded")
+        with mock.patch.object(
+            dev_server,
+            "_run_frontend_command",
+            side_effect=[stale, failed],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "build exploded"):
+                dev_server.ensure_frontend_build()
+
+    def test_dev_handler_checks_root_refresh_but_not_other_routes(self):
+        base_calls = []
+
+        class BaseHandler:
+            def do_GET(self):
+                base_calls.append(self.path)
+
+        ensure_frontend = mock.Mock(return_value=False)
+        handler_class = dev_server.create_dev_handler(BaseHandler, ensure_frontend)
+        handler = handler_class()
+
+        for path in ("/?refresh=1", "/index.html?refresh=1", "/api/version"):
+            handler.path = path
+            handler.do_GET()
+
+        self.assertEqual(ensure_frontend.call_count, 2)
+        self.assertEqual(
+            base_calls,
+            ["/?refresh=1", "/index.html?refresh=1", "/api/version"],
+        )
+
+    def test_dev_handler_returns_503_when_root_rebuild_fails(self):
+        base_do_get = mock.Mock()
+
+        class BaseHandler:
+            do_GET = base_do_get
+
+            def send_error(self, status, message):
+                self.error = (status, message)
+
+        handler_class = dev_server.create_dev_handler(
+            BaseHandler,
+            mock.Mock(side_effect=RuntimeError("broken frontend")),
+        )
+        handler = handler_class()
+        handler.path = "/"
+        handler.do_GET()
+
+        self.assertEqual(handler.error, (503, "Frontend build failed"))
+        base_do_get.assert_not_called()
 
     def test_development_batch_targets_only_port_3011_and_dev_entry(self):
         source = (ROOT / "启动Code开发版.bat").read_text(encoding="utf-8")

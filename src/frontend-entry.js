@@ -31,3 +31,5 @@ import "./agent/compaction.js";
 import "./agent/model-stream.js";
 import "../agent-runtime.js";
 import "../app.js";
+
+window.Code.frontendBundleLoaded = true;

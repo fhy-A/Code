@@ -36,6 +36,9 @@ const metadataPath = path.join(outputDir, "code.bundle.meta.json");
 const statePath = path.join(outputDir, "code.bundle.state.json");
 const previewPath = path.join(outputDir, "index.html");
 const classicFallbackPath = path.join(outputDir, "index.classic.html");
+const runtimeBlockPattern = /  <!-- code-frontend-runtime:start -->[\s\S]*?  <!-- code-frontend-runtime:end -->/;
+const defaultBundlePath = "/dist/frontend/code.bundle.js";
+const defaultFallbackPath = "/dist/frontend/index.classic.html";
 
 function toPosix(value) {
   return value.split(path.sep).join("/");
@@ -81,6 +84,7 @@ async function collectSourceState() {
   return {
     bundleInputs,
     fingerprintInputs,
+    importSpecifiers,
     sourceFingerprint: hash.digest("hex"),
   };
 }
@@ -108,35 +112,39 @@ function toPublicBundlePath(directory) {
 }
 
 function createPreviewHtml(source, publicBundlePath) {
-  const classicModulePattern = /^  <script src="\.\/(?:src\/[^\"]+|agent-runtime\.js)"><\/script>\r?\n/gm;
-  const classicModuleTags = source.match(classicModulePattern) || [];
-  if (classicModuleTags.length !== 30) {
-    throw new Error(
-      `Expected 30 classic module/runtime scripts in index.html, found ${classicModuleTags.length}`,
-    );
+  if (!runtimeBlockPattern.test(source)) {
+    throw new Error("Default index.html is missing the frontend runtime block");
   }
-
-  const appTag = '  <script src="./app.js"></script>';
-  if (source.split(appTag).length !== 2) {
-    throw new Error("Expected exactly one classic app.js script in index.html");
+  if (source.split(defaultBundlePath).length !== 2) {
+    throw new Error("Default index.html must reference exactly one frontend bundle");
+  }
+  if (source.split(defaultFallbackPath).length !== 2) {
+    throw new Error("Default index.html must reference exactly one classic fallback");
   }
 
   return source
-    .replace('<html lang="zh-CN">', '<html lang="zh-CN" data-frontend-runtime="bundle">')
     .replace('href="./styles.css"', 'href="/styles.css"')
     .replace('href="./code-icon.ico', 'href="/code-icon.ico')
-    .replace(classicModulePattern, "")
-    .replace(appTag, `  <script src="${publicBundlePath}"></script>`);
+    .replace(defaultBundlePath, publicBundlePath)
+    .replace(defaultFallbackPath, "./index.classic.html");
 }
 
-function createClassicFallbackHtml(source) {
+function classicScriptTags(importSpecifiers) {
+  return importSpecifiers.map((specifier) => {
+    const absolutePath = path.resolve(path.dirname(entryPath), specifier);
+    return `  <script src="/${relativeToRoot(absolutePath)}"></script>`;
+  }).join("\n");
+}
+
+function createClassicFallbackHtml(source, importSpecifiers) {
+  if (!runtimeBlockPattern.test(source)) {
+    throw new Error("Default index.html is missing the frontend runtime block");
+  }
   return source
-    .replace('<html lang="zh-CN">', '<html lang="zh-CN" data-frontend-runtime="classic-fallback">')
+    .replace('data-frontend-runtime="bundle"', 'data-frontend-runtime="classic-fallback"')
     .replace('href="./styles.css"', 'href="/styles.css"')
     .replace('href="./code-icon.ico', 'href="/code-icon.ico')
-    .replaceAll('src="./src/', 'src="/src/')
-    .replace('src="./agent-runtime.js"', 'src="/agent-runtime.js"')
-    .replace('src="./app.js"', 'src="/app.js"');
+    .replace(runtimeBlockPattern, classicScriptTags(importSpecifiers));
 }
 
 const outputPaths = Object.freeze({
@@ -223,7 +231,11 @@ await writeFile(metadataPath, `${JSON.stringify(result.metafile, null, 2)}\n`, "
 const indexSource = await readFile(path.join(rootDir, "index.html"), "utf8");
 const previewHtml = createPreviewHtml(indexSource, toPublicBundlePath(outputDir));
 await writeFile(previewPath, previewHtml, "utf8");
-await writeFile(classicFallbackPath, createClassicFallbackHtml(indexSource), "utf8");
+await writeFile(
+  classicFallbackPath,
+  createClassicFallbackHtml(indexSource, sourceBeforeBuild.importSpecifiers),
+  "utf8",
+);
 
 const sourceAfterBuild = await collectSourceState();
 if (
