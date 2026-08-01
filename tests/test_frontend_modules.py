@@ -1630,7 +1630,7 @@ eval(source);
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
         self.assertEqual(classic_scripts[-2:], ["./agent-runtime.js", "./app.js"])
 
-    def test_frontend_bundle_build_is_deterministic_but_not_loaded_yet(self):
+    def test_frontend_bundle_build_is_deterministic_and_not_default_loaded(self):
         self.assertEqual(PACKAGE_JSON["devDependencies"]["esbuild"], "0.28.1")
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('entryPoints: ["src/frontend-entry.js"]', FRONTEND_BUILD_SOURCE)
@@ -1643,6 +1643,7 @@ eval(source);
             first = Path(temp_dir) / "first"
             second = Path(temp_dir) / "second"
             bundles = []
+            previews = []
             for output_dir in (first, second):
                 result = subprocess.run(
                     [
@@ -1661,10 +1662,29 @@ eval(source);
                 bundle = output_dir / "code.bundle.js"
                 source_map = output_dir / "code.bundle.js.map"
                 metadata = output_dir / "code.bundle.meta.json"
+                preview = output_dir / "index.html"
                 self.assertTrue(bundle.is_file())
                 self.assertTrue(source_map.is_file())
                 self.assertTrue(metadata.is_file())
+                self.assertTrue(preview.is_file())
                 bundles.append(bundle.read_bytes())
+                preview_source = preview.read_text(encoding="utf-8")
+                previews.append(preview_source)
+
+                self.assertIn('data-frontend-runtime="bundle"', preview_source)
+                self.assertIn('href="/styles.css"', preview_source)
+                self.assertIn('href="/code-icon.ico', preview_source)
+                self.assertIn('<script src="./code.bundle.js"></script>', preview_source)
+                self.assertNotRegex(
+                    preview_source,
+                    r'<script src="\./(?:src/[^\"]+|agent-runtime\.js|app\.js)"></script>',
+                )
+                self.assertLess(
+                    preview_source.index('id="importModal"'),
+                    preview_source.index('<script src="./code.bundle.js"></script>'),
+                )
+                self.assertIn("https://cdn.jsdelivr.net/npm/katex", preview_source)
+                self.assertIn("https://cdn.jsdelivr.net/npm/marked", preview_source)
 
                 syntax = subprocess.run(
                     ["node", "--check", str(bundle)],
@@ -1686,6 +1706,7 @@ eval(source);
                     self.assertIn(expected, inputs)
 
             self.assertEqual(bundles[0], bundles[1])
+            self.assertEqual(previews[0], previews[1])
 
     def test_namespace_defines_supported_buckets(self):
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")

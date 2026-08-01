@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as esbuild from "esbuild";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +19,38 @@ function parseOutputDir(argv) {
 const outputDir = parseOutputDir(process.argv.slice(2));
 const bundlePath = path.join(outputDir, "code.bundle.js");
 const metadataPath = path.join(outputDir, "code.bundle.meta.json");
+const previewPath = path.join(outputDir, "index.html");
+
+function toPublicBundlePath(directory) {
+  const relative = path.relative(rootDir, directory);
+  if (!relative || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    const publicDir = relative.split(path.sep).join("/");
+    return `/${publicDir ? `${publicDir}/` : ""}code.bundle.js`;
+  }
+  return "./code.bundle.js";
+}
+
+function createPreviewHtml(source, publicBundlePath) {
+  const classicModulePattern = /^  <script src="\.\/(?:src\/[^\"]+|agent-runtime\.js)"><\/script>\r?\n/gm;
+  const classicModuleTags = source.match(classicModulePattern) || [];
+  if (classicModuleTags.length !== 30) {
+    throw new Error(
+      `Expected 30 classic module/runtime scripts in index.html, found ${classicModuleTags.length}`,
+    );
+  }
+
+  const appTag = '  <script src="./app.js"></script>';
+  if (source.split(appTag).length !== 2) {
+    throw new Error("Expected exactly one classic app.js script in index.html");
+  }
+
+  return source
+    .replace('<html lang="zh-CN">', '<html lang="zh-CN" data-frontend-runtime="bundle">')
+    .replace('href="./styles.css"', 'href="/styles.css"')
+    .replace('href="./code-icon.ico', 'href="/code-icon.ico')
+    .replace(classicModulePattern, "")
+    .replace(appTag, `  <script src="${publicBundlePath}"></script>`);
+}
 
 await mkdir(outputDir, { recursive: true });
 
@@ -45,6 +77,11 @@ const result = await esbuild.build({
 });
 
 await writeFile(metadataPath, `${JSON.stringify(result.metafile, null, 2)}\n`, "utf8");
+const indexSource = await readFile(path.join(rootDir, "index.html"), "utf8");
+const previewHtml = createPreviewHtml(indexSource, toPublicBundlePath(outputDir));
+await writeFile(previewPath, previewHtml, "utf8");
 
 const relativeBundle = path.relative(rootDir, bundlePath) || bundlePath;
 process.stdout.write(`Frontend bundle written: ${relativeBundle}\n`);
+const relativePreview = path.relative(rootDir, previewPath) || previewPath;
+process.stdout.write(`Bundle preview written: ${relativePreview}\n`);
