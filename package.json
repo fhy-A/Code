@@ -2,7 +2,8 @@
   "scripts": {
     "build:frontend": "node scripts/build-frontend.mjs",
     "verify:frontend": "node scripts/build-frontend.mjs --check && node --check dist/frontend/code.bundle.js",
-    "check:frontend": "npm run build:frontend && npm run verify:frontend"
+    "check:frontend": "npm run build:frontend && npm run verify:frontend",
+    "verify:harness-replay": "node scripts/replay-agent-traces.cjs"
   },
   "dependencies": {
     "docx": "^9.7.1"
