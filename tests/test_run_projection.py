@@ -198,6 +198,92 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("arguments", serialized_summary)
         self.assertNotIn("result", serialized_summary)
 
+    def test_shadow_report_is_bounded_copied_and_whitelist_sanitized(self):
+        data = run_node(r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/run-reducer.js");
+require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
+const api = window.Code.agent.runProjectionShadow;
+const secret = "sk-secret-must-never-be-exported";
+const summaries = [
+  {
+    schemaVersion: 1,
+    cursor: 3,
+    status: "completed",
+    eventsObserved: 3,
+    snapshotsObserved: 1,
+    comparisons: 4,
+    mismatches: 0,
+    observerErrors: 0,
+    diagnosticCounts: {},
+    diagnostics: [],
+    diagnosticsDropped: 0,
+    runKind: "foreground",
+  },
+  {
+    schemaVersion: 1,
+    cursor: 7,
+    status: secret,
+    eventsObserved: 7,
+    snapshotsObserved: 2,
+    comparisons: 9,
+    mismatches: 2,
+    observerErrors: 1,
+    diagnosticCounts: {[secret]: 5, projection_mismatch: 2},
+    diagnostics: [{
+      code: secret,
+      field: secret,
+      cursor: 6,
+      status: secret,
+      arguments: secret,
+    }],
+    diagnosticsDropped: 4,
+    runKind: secret,
+    runId: secret,
+    sessionId: secret,
+  },
+];
+const enabled = api.createProjectionShadowReport(summaries, {enabled: true, maxSummaries: 1});
+enabled.summaries[0].cursor = 999;
+const copied = api.createProjectionShadowReport(summaries, {enabled: true, maxSummaries: 1});
+const disabled = api.createProjectionShadowReport(summaries, {enabled: false});
+process.stdout.write(JSON.stringify({
+  maxSummaries: api.DEFAULT_MAX_SUMMARIES,
+  enabled,
+  copied,
+  disabled,
+  secret,
+}));
+""")
+        self.assertEqual(data["maxSummaries"], 32)
+        self.assertTrue(data["enabled"]["enabled"])
+        self.assertEqual(data["enabled"]["summaryLimit"], 1)
+        self.assertEqual(data["enabled"]["summaryCount"], 1)
+        self.assertEqual(
+            data["enabled"]["runKindCounts"],
+            {"foreground": 1, "background": 0},
+        )
+        self.assertEqual(data["enabled"]["totals"]["eventsObserved"], 7)
+        self.assertEqual(data["enabled"]["totals"]["mismatches"], 2)
+        self.assertEqual(data["enabled"]["diagnosticCounts"]["projection_mismatch"], 2)
+        self.assertEqual(
+            data["enabled"]["diagnosticCounts"]["projection_shadow_error"],
+            5,
+        )
+        self.assertEqual(data["copied"]["summaries"][0]["cursor"], 7)
+        self.assertEqual(data["copied"]["summaries"][0]["status"], "")
+        self.assertEqual(data["copied"]["summaries"][0]["runKind"], "foreground")
+        self.assertFalse(data["disabled"]["enabled"])
+        self.assertEqual(data["disabled"]["summaryCount"], 0)
+        self.assertEqual(data["disabled"]["summaries"], [])
+        serialized = json.dumps(data["enabled"])
+        self.assertNotIn(data["secret"], serialized)
+        self.assertNotIn("arguments", serialized)
+        self.assertNotIn("runId", serialized)
+        self.assertNotIn("sessionId", serialized)
+
     def test_all_h0_traces_replay_to_their_frozen_checkpoints(self):
         data = run_node(r"""
 global.window = {};

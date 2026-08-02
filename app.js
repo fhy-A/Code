@@ -1232,6 +1232,21 @@ function setAgentProjectionShadowEnabled(enabled) {
   _agentProjectionShadowEnabled = enabled === true;
 }
 
+function snapshotAgentProjectionShadowDiagnostics() {
+  return agentRunProjectionShadow.createProjectionShadowReport(
+    _agentProjectionShadowEnabled ? state._agentProjectionShadowSummaries : [],
+    {
+      enabled: _agentProjectionShadowEnabled,
+      maxSummaries: agentRunProjectionShadow.DEFAULT_MAX_SUMMARIES,
+    },
+  );
+}
+
+window.Code.agent.projectionShadowDiagnostics = Object.freeze({
+  schemaVersion: 1,
+  snapshot: snapshotAgentProjectionShadowDiagnostics,
+});
+
 function isUserAway() {
   return document.visibilityState !== "visible";
 }
@@ -7393,7 +7408,7 @@ function isServerOwnedRun(ctx) {
   return !ctx?.isSubAgent && ctx?.executionOwner === "server-agent";
 }
 
-const AGENT_PROJECTION_SHADOW_SUMMARY_LIMIT = 32;
+const AGENT_PROJECTION_SHADOW_SUMMARY_LIMIT = agentRunProjectionShadow.DEFAULT_MAX_SUMMARIES;
 const AGENT_PROJECTION_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 function agentProjectionStatus(snapshot, ctx) {
   const snapshotStatus = String(snapshot?.status || "");

@@ -11,6 +11,22 @@
 
   const RUN_PROJECTION_SHADOW_SCHEMA_VERSION = 1;
   const DEFAULT_MAX_DIAGNOSTICS = 64;
+  const DEFAULT_MAX_SUMMARIES = 32;
+  const SAFE_DIAGNOSTIC_CODES = new Set([
+    "projection_shadow_error",
+    "projection_mismatch",
+    "event_observer_error",
+    "snapshot_observer_error",
+    "comparison_observer_error",
+    "reducer_event_sequence_gap",
+    "reducer_unknown_event_type",
+    "reducer_illegal_terminal_transition",
+  ]);
+  const SAFE_DIAGNOSTIC_FIELDS = new Set([
+    "",
+    ...view.RUN_PROJECTION_COMPARISON_FIELDS,
+  ]);
+  const SAFE_RUN_KINDS = new Set(["foreground", "background"]);
   const LEGACY_EVENT_CATEGORIES = Object.freeze({
     created: "run",
     resumed: "run",
@@ -71,6 +87,103 @@
     const number = Number(value);
     const normalized = Number.isInteger(number) && number > 0 ? number : fallback;
     return Math.min(normalized, fallback);
+  }
+
+  function nonNegativeInteger(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+  }
+
+  function diagnosticCode(value) {
+    const code = String(value || "");
+    return SAFE_DIAGNOSTIC_CODES.has(code) ? code : "projection_shadow_error";
+  }
+
+  function diagnosticField(value) {
+    const field = String(value || "");
+    return SAFE_DIAGNOSTIC_FIELDS.has(field) ? field : "";
+  }
+
+  function projectionStatus(value) {
+    const status = String(value || "");
+    return reducer.RUN_STATUSES.includes(status) ? status : "";
+  }
+
+  function sanitizeDiagnosticCounts(value) {
+    const counts = {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return counts;
+    for (const [rawCode, rawCount] of Object.entries(value)) {
+      const code = diagnosticCode(rawCode);
+      counts[code] = nonNegativeInteger(counts[code]) + nonNegativeInteger(rawCount);
+    }
+    return counts;
+  }
+
+  function sanitizeArchivedSummary(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const runKind = String(value.runKind || "");
+    return {
+      schemaVersion: RUN_PROJECTION_SHADOW_SCHEMA_VERSION,
+      cursor: nonNegativeInteger(value.cursor),
+      status: projectionStatus(value.status),
+      eventsObserved: nonNegativeInteger(value.eventsObserved),
+      snapshotsObserved: nonNegativeInteger(value.snapshotsObserved),
+      comparisons: nonNegativeInteger(value.comparisons),
+      mismatches: nonNegativeInteger(value.mismatches),
+      observerErrors: nonNegativeInteger(value.observerErrors),
+      diagnosticCounts: sanitizeDiagnosticCounts(value.diagnosticCounts),
+      diagnostics: (Array.isArray(value.diagnostics) ? value.diagnostics : [])
+        .slice(0, DEFAULT_MAX_DIAGNOSTICS)
+        .map((item) => ({
+          code: diagnosticCode(item?.code),
+          field: diagnosticField(item?.field),
+          cursor: nonNegativeInteger(item?.cursor),
+          status: projectionStatus(item?.status),
+        })),
+      diagnosticsDropped: nonNegativeInteger(value.diagnosticsDropped),
+      runKind: SAFE_RUN_KINDS.has(runKind) ? runKind : "foreground",
+    };
+  }
+
+  function createProjectionShadowReport(
+    summaries,
+    { enabled = false, maxSummaries = DEFAULT_MAX_SUMMARIES } = {},
+  ) {
+    const active = enabled === true;
+    const limit = positiveLimit(maxSummaries, DEFAULT_MAX_SUMMARIES);
+    const safeSummaries = active
+      ? (Array.isArray(summaries) ? summaries : [])
+        .slice(-limit)
+        .map(sanitizeArchivedSummary)
+        .filter(Boolean)
+      : [];
+    const totals = {
+      eventsObserved: 0,
+      snapshotsObserved: 0,
+      comparisons: 0,
+      mismatches: 0,
+      observerErrors: 0,
+      diagnosticsDropped: 0,
+    };
+    const runKindCounts = { foreground: 0, background: 0 };
+    const diagnosticCounts = {};
+    for (const summary of safeSummaries) {
+      runKindCounts[summary.runKind] += 1;
+      for (const field of Object.keys(totals)) totals[field] += summary[field];
+      for (const [code, count] of Object.entries(summary.diagnosticCounts)) {
+        diagnosticCounts[code] = nonNegativeInteger(diagnosticCounts[code]) + count;
+      }
+    }
+    return {
+      schemaVersion: RUN_PROJECTION_SHADOW_SCHEMA_VERSION,
+      enabled: active,
+      summaryLimit: limit,
+      summaryCount: safeSummaries.length,
+      runKindCounts,
+      totals,
+      diagnosticCounts,
+      summaries: safeSummaries,
+    };
   }
 
   function incrementCount(target, key) {
@@ -292,6 +405,7 @@
   agent.runProjectionShadow = Object.freeze({
     RUN_PROJECTION_SHADOW_SCHEMA_VERSION,
     DEFAULT_MAX_DIAGNOSTICS,
+    DEFAULT_MAX_SUMMARIES,
     createLegacyProjectionObservation,
     observeLegacyProjectionEvent,
     snapshotLegacyProjectionObservation,
@@ -300,5 +414,6 @@
     observeProjectionSnapshot,
     compareProjectionShadow,
     snapshotRunProjectionShadow,
+    createProjectionShadowReport,
   });
 })(window);

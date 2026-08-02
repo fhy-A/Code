@@ -36,6 +36,7 @@ QUESTIONNAIRE_SOURCE = (ROOT / "src" / "agent" / "questionnaire.js").read_text(e
 SUBAGENTS_SOURCE = (ROOT / "src" / "agent" / "subagents.js").read_text(encoding="utf-8")
 COMPACTION_SOURCE = (ROOT / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 MODEL_STREAM_SOURCE = (ROOT / "src" / "agent" / "model-stream.js").read_text(encoding="utf-8")
+SHADOW_SOURCE = (ROOT / "src" / "agent" / "run-projection-shadow.js").read_text(encoding="utf-8")
 INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 FRONTEND_ENTRY_SOURCE = (ROOT / "src" / "frontend-entry.js").read_text(encoding="utf-8")
@@ -740,6 +741,14 @@ eval(source);
         self.assertIn("completeAgentProjectionEvent(ctx, event, projectionReferenceTime)", APP_SOURCE)
         self.assertIn("archiveAgentProjectionShadow(ctx)", APP_SOURCE)
         self.assertIn("_agentProjectionShadowSummaries: []", STATE_SOURCE)
+        self.assertIn("projectionShadowDiagnostics = Object.freeze", APP_SOURCE)
+        self.assertIn("snapshot: snapshotAgentProjectionShadowDiagnostics", APP_SOURCE)
+        self.assertIn(
+            "_agentProjectionShadowEnabled ? state._agentProjectionShadowSummaries : []",
+            APP_SOURCE,
+        )
+        self.assertIn("createProjectionShadowReport", SHADOW_SOURCE)
+        self.assertIn("DEFAULT_MAX_SUMMARIES", SHADOW_SOURCE)
 
     def test_agent_questionnaire_normalizes_and_serializes_without_side_effects(self):
         script = r"""
