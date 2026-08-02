@@ -1,0 +1,581 @@
+{
+  "schemaVersion": 1,
+  "scope": "H0-1 current AgentRun events, states, frontend facts, and sanitized trace candidates",
+  "baselineCommit": "d444921",
+  "sources": [
+    "server.py",
+    "agent-runtime.js",
+    "app.js",
+    "src/core/state.js",
+    "src/ui/messages.js"
+  ],
+  "agentRun": {
+    "recordVersion": 3,
+    "eventEnvelopeFields": [
+      "seq",
+      "type",
+      "data",
+      "createdAt"
+    ],
+    "statuses": [
+      {
+        "name": "model",
+        "class": "active",
+        "meaning": "The worker is preparing, starting, or waiting for a model round."
+      },
+      {
+        "name": "tools",
+        "class": "active",
+        "meaning": "The worker is executing or resuming pending tool calls."
+      },
+      {
+        "name": "waiting_credentials",
+        "class": "waiting",
+        "meaning": "Credentials were intentionally dropped and the run needs a resume request; restored active runs also normalize to this status."
+      },
+      {
+        "name": "waiting_user_input",
+        "class": "waiting",
+        "meaning": "A normalized questionnaire or empty-response continuation is pending."
+      },
+      {
+        "name": "waiting_authorization",
+        "class": "waiting",
+        "meaning": "A command, edit, file mutation, or child authorization decision is pending."
+      },
+      {
+        "name": "completed",
+        "class": "terminal",
+        "meaning": "The run produced a final result."
+      },
+      {
+        "name": "failed",
+        "class": "terminal",
+        "meaning": "The run ended with an error and optional error code."
+      },
+      {
+        "name": "cancelled",
+        "class": "terminal",
+        "meaning": "Cancellation reached the AgentRun terminal boundary."
+      }
+    ],
+    "events": [
+      {
+        "type": "created",
+        "payloadFields": [
+          "model",
+          "allowedTools",
+          "maxRounds",
+          "contextLimit",
+          "permissionProfile",
+          "toolBudgets",
+          "cwd",
+          "workspaceRoots"
+        ],
+        "producer": "_create_agent_run",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "resumed",
+        "payloadFields": [
+          "status"
+        ],
+        "producer": "_resume_agent_run",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "waiting_credentials",
+        "payloadFields": [
+          "resumeStatus",
+          "reason"
+        ],
+        "producer": "restore and post-interaction credential boundaries",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "runBackgroundSubAgentJob"
+        ]
+      },
+      {
+        "type": "model_pending",
+        "payloadFields": [
+          "round"
+        ],
+        "producer": "_agent_run_worker",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "model_started",
+        "payloadFields": [
+          "round",
+          "runtimeRunId"
+        ],
+        "producer": "_agent_run_worker",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentModelStarted"
+        ]
+      },
+      {
+        "type": "model_completed",
+        "payloadFields": [
+          "round",
+          "runtimeRunId",
+          "content",
+          "reasoning",
+          "toolCalls",
+          "finishReason",
+          "usage",
+          "completedAt",
+          "outcome",
+          "forcedFinal"
+        ],
+        "producer": "_agent_run_worker",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentModelCompleted"
+        ]
+      },
+      {
+        "type": "model_recovery",
+        "payloadFields": [
+          "reason",
+          "attempt",
+          "maxAttempts",
+          "runtimeRunId",
+          "legacyPendingInput"
+        ],
+        "producer": "non-action and legacy empty-response recovery",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentModelRecovery"
+        ]
+      },
+      {
+        "type": "tool_started",
+        "payloadFields": [
+          "toolCallId",
+          "name",
+          "arguments",
+          "argumentAliases"
+        ],
+        "producer": "tool executors",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentToolStarted"
+        ]
+      },
+      {
+        "type": "command_started",
+        "payloadFields": [
+          "toolCallId",
+          "command"
+        ],
+        "producer": "_execute_agent_pending_tools",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "tool_completed",
+        "payloadFields": [
+          "toolCallId",
+          "name",
+          "arguments",
+          "argumentAliases",
+          "result",
+          "outcome",
+          "replayed"
+        ],
+        "producer": "tool, input, and authorization completion paths",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentToolCompleted",
+          "projectServerEditToolCompleted"
+        ]
+      },
+      {
+        "type": "tool_retry_blocked",
+        "payloadFields": [
+          "toolCallId",
+          "name",
+          "failureCount"
+        ],
+        "producer": "_execute_agent_pending_tools",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "authorization_required",
+        "payloadFields": [
+          "authorizationId",
+          "toolCallId",
+          "action",
+          "proposalId",
+          "path",
+          "diff",
+          "decision",
+          "requestedAt",
+          "command",
+          "description",
+          "childAgentRunId"
+        ],
+        "producer": "command, edit, file mutation, and child authorization paths",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "requestServerAgentAuthorization",
+          "runBackgroundSubAgentJob"
+        ]
+      },
+      {
+        "type": "authorization_submitted",
+        "payloadFields": [
+          "authorizationId",
+          "toolCallId",
+          "decision",
+          "childAgentRunId"
+        ],
+        "producer": "authorization submission paths",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "user_input_required",
+        "payloadFields": [
+          "requestId",
+          "toolCallId",
+          "title",
+          "reason",
+          "questions",
+          "type"
+        ],
+        "producer": "_execute_agent_pending_tools",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "requestServerAgentInput"
+        ]
+      },
+      {
+        "type": "user_input_submitted",
+        "payloadFields": [
+          "requestId",
+          "toolCallId"
+        ],
+        "producer": "_submit_agent_input",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "child_agent_created",
+        "payloadFields": [
+          "toolCallId",
+          "childAgentRunId"
+        ],
+        "producer": "_execute_agent_delegation",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "context_compaction_started",
+        "payloadFields": [
+          "compactionId",
+          "reason",
+          "estimatedTokensBefore",
+          "contextLimit",
+          "threshold",
+          "compactedMessageCount",
+          "retainedMessageCount"
+        ],
+        "producer": "_run_agent_auto_compaction",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentContextCompaction"
+        ]
+      },
+      {
+        "type": "context_compaction_completed",
+        "payloadFields": [
+          "compactionId",
+          "runtimeRunId",
+          "reason",
+          "summary",
+          "estimatedTokensBefore",
+          "estimatedTokensAfter",
+          "compactedMessageCount",
+          "retainedMessageCount",
+          "usage",
+          "startedAt",
+          "completedAt"
+        ],
+        "producer": "_run_agent_auto_compaction",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentContextCompaction"
+        ]
+      },
+      {
+        "type": "context_compaction_failed",
+        "payloadFields": [
+          "compactionId",
+          "reason",
+          "error",
+          "errorCode"
+        ],
+        "producer": "_run_agent_auto_compaction",
+        "frontendMode": "event-projection",
+        "frontendConsumers": [
+          "projectAgentEvent",
+          "projectAgentContextCompaction"
+        ]
+      },
+      {
+        "type": "completed",
+        "payloadFields": [],
+        "producer": "_finish_agent_run",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "runBackgroundSubAgentJob"
+        ]
+      },
+      {
+        "type": "failed",
+        "payloadFields": [
+          "error",
+          "errorCode"
+        ],
+        "producer": "_finish_agent_run",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "runBackgroundSubAgentJob"
+        ]
+      },
+      {
+        "type": "cancelled",
+        "payloadFields": [],
+        "producer": "_finish_agent_run",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "runBackgroundSubAgentJob"
+        ]
+      }
+    ],
+    "toolExecutionStatuses": [
+      "running",
+      "waiting_user_input",
+      "waiting_authorization",
+      "applying_edit",
+      "authorized",
+      "applying_file_mutation",
+      "waiting_child",
+      "waiting_child_authorization",
+      "completed",
+      "cancelled"
+    ],
+    "permissionProfiles": [
+      {
+        "name": "read",
+        "selectedEffects": [
+          "read",
+          "interaction"
+        ]
+      },
+      {
+        "name": "plan",
+        "selectedEffects": [
+          "read",
+          "interaction",
+          "proposal",
+          "delegation"
+        ],
+        "note": "Edit proposals remain proposal-only."
+      },
+      {
+        "name": "accept",
+        "selectedEffects": [
+          "read",
+          "interaction",
+          "proposal",
+          "command",
+          "memory_write",
+          "file_mutation",
+          "delegation"
+        ],
+        "note": "Mutating operations and commands cross an authorization boundary."
+      },
+      {
+        "name": "bypass",
+        "selectedEffects": [
+          "read",
+          "interaction",
+          "proposal",
+          "command",
+          "memory_write",
+          "file_mutation",
+          "delegation"
+        ],
+        "note": "Normal mutations run without user confirmation; managed dependency installation remains gated."
+      }
+    ]
+  },
+  "modelRuntime": {
+    "statuses": [
+      "running",
+      "completed",
+      "failed",
+      "cancelled"
+    ],
+    "eventEnvelopeFields": [
+      "seq",
+      "data"
+    ],
+    "durability": "in-memory bounded runtime stream",
+    "frontendConsumer": "agent-runtime.js openSseResponse",
+    "note": "This stream carries raw upstream SSE frames and is separate from durable AgentRun domain events."
+  },
+  "frontend": {
+    "persistedCheckpointFields": [
+      "version",
+      "status",
+      "phase",
+      "startedAt",
+      "updatedAt",
+      "elapsedMs",
+      "model",
+      "temperature",
+      "maxTokens",
+      "toolPreset",
+      "permissionProfile",
+      "thinkingLevel",
+      "taskPrompt",
+      "recoveryCount",
+      "runtimeRunId",
+      "executionOwner",
+      "clientRequestId",
+      "queueItemId",
+      "agentRunId",
+      "agentEventCursor",
+      "hasFirstModelResponseStarted",
+      "modelRound",
+      "backgroundRuns",
+      "queuedMessages"
+    ],
+    "sessionRunFields": [
+      "sessionId",
+      "isStreaming",
+      "abortController",
+      "responseStartTime",
+      "taskStartTime",
+      "taskElapsedBaseMs",
+      "taskElapsedResumedAt",
+      "modelWaitStartedAt",
+      "modelResponseStarted",
+      "hasFirstModelResponseStarted",
+      "modelRound",
+      "modelRecovery",
+      "timerInterval",
+      "timerDisplay",
+      "recovery",
+      "runtimeRunId",
+      "agentRunId",
+      "agentEventCursor"
+    ],
+    "inferredStates": [
+      {
+        "owner": "src/ui/messages.js getProcessCallView",
+        "fact": "Tool outcome is inferred from result meta, pending edit state, result presence, and call presence."
+      },
+      {
+        "owner": "src/ui/messages.js renderToolProcessProjection",
+        "fact": "The active stage and its title are inferred from projected message order and tool outcomes."
+      },
+      {
+        "owner": "src/ui/messages.js collectExecutionTraceTurns",
+        "fact": "Whether a turn has an execution trace is inferred from message roles, compaction markers, and assistant metadata."
+      },
+      {
+        "owner": "app.js getActiveRunLabel",
+        "fact": "The top label is inferred from first-response, recovery, and model-wait timing flags."
+      },
+      {
+        "owner": "app.js activeRunElapsedMs and persistedRunElapsedMs",
+        "fact": "Elapsed time combines an explicit persisted base with a resume timestamp, otherwise task or response start time."
+      }
+    ]
+  },
+  "sanitizedTraceCandidates": [
+    {
+      "id": "plain-text-final",
+      "scenario": "One model round returns a final text answer."
+    },
+    {
+      "id": "single-read-tool",
+      "scenario": "A model round requests one read-only tool, then returns a final answer."
+    },
+    {
+      "id": "multi-tool-stage",
+      "scenario": "One stage contains multiple read-only tool calls and preserves active versus completed group titles."
+    },
+    {
+      "id": "questionnaire-submit",
+      "scenario": "request_user_input pauses the run, accepts answers, resumes credentials, and completes."
+    },
+    {
+      "id": "edit-authorization-accept",
+      "scenario": "An edit proposal waits for authorization, is accepted, and completes once."
+    },
+    {
+      "id": "command-authorization-reject",
+      "scenario": "A command waits for authorization, is rejected, and returns a deterministic tool result."
+    },
+    {
+      "id": "auto-compaction-success",
+      "scenario": "Threshold compaction emits start and completion markers before the model continues."
+    },
+    {
+      "id": "auto-compaction-failure",
+      "scenario": "Compaction failure is projected but the surrounding run state remains diagnosable."
+    },
+    {
+      "id": "cancel-during-model",
+      "scenario": "Cancellation interrupts an active model runtime and produces one terminal cancellation."
+    },
+    {
+      "id": "cancel-during-command",
+      "scenario": "Cancellation interrupts a command and does not replay it."
+    },
+    {
+      "id": "refresh-before-first-response",
+      "scenario": "A refresh restores an active server-owned run without duplicating the upstream model request."
+    },
+    {
+      "id": "refresh-during-tools",
+      "scenario": "A refresh restores the event cursor and does not duplicate an already completed tool."
+    },
+    {
+      "id": "server-restart-command-unknown",
+      "scenario": "A command active during server restart becomes an unknown-state non-replayed result."
+    },
+    {
+      "id": "poll-disconnect-reconnect",
+      "scenario": "Agent polling disconnects, shows recovery state, resumes from the last successful event cursor, and completes."
+    },
+    {
+      "id": "model-non-action-recovery",
+      "scenario": "An empty or reasoning-only model response triggers one recovery round before completion or failure."
+    }
+  ]
+}
