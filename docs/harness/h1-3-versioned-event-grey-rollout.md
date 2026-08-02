@@ -94,12 +94,8 @@ AgentRun 恢复时不重写历史事件。一个从旧记录恢复并继续执�
 
 服务端协议定向结果为 `96 passed, 179 subtests passed`，前端与 H0 定向结果为 `169 passed, 18 subtests passed`。连续刷新计时修正后的前端模块结果为 `157 passed`，刷新与稳定性定向结果为 `39 passed, 7 subtests passed`；完整回归为 `955 passed, 427 subtests passed in 73.79s`。`npm run check:frontend` 通过 bundle 构建、新鲜度、JavaScript 语法和经典回退门禁；Python 语法与 `git diff --check` 通过。
 
-## 7. 下一阶段
+## 7. H1 后续收口
 
-H1-3 代码阶段完成后，先在开发实例执行真实多工具任务、刷新恢复和旧 Run 续接人工验收，并观察 H1-2 影子诊断。验收正常后，再独立确认：
+H1-3 后的真实多工具、刷新恢复和耐久记录审计发现，凭据样式示例会令严格契约扫描中止单个影子事件，并对后续合法事件产生级联序号误报。H1-4 已将严格拒绝与生产影子脱敏诊断分层；最近 5 个真实 v1 Run 的 221 个事件随后全部通过相同规范化与序号验证，只保留 2 条不含原值的 `credential_like_text` 诊断。
 
-1. 是否把正式实例的 v1 写入从默认关闭提升为默认开启；
-2. 是否需要保留一轮正式实例可关闭的灰度期；
-3. H1 是否满足收口条件并进入 H2 reducer 与影子投影。
-
-在上述确认前，不提前修改正式实例默认值，也不把 H2 状态投影重构混入本阶段。
+完整结论、兼容边界和验证结果见 [`h1-4-shadow-credential-diagnostics.md`](h1-4-shadow-credential-diagnostics.md)。H1 至此收口并允许进入 H2 reducer 与影子投影；正式实例继续默认写入旧格式，是否提升 v1 默认值仍是独立发布决策。

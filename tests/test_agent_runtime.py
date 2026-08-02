@@ -947,6 +947,51 @@ class TestDurableAgentRuntime(unittest.TestCase):
             self.assertNotIn("protocolShadow", encoded)
             self.assertNotIn("diagnosticCounts", encoded)
 
+    def test_agent_protocol_shadow_diagnoses_credential_like_tool_text_without_sequence_gap(self):
+        fixture_text = "source example sk-fixture123456 remains ordinary tool output"
+        with (
+            mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True),
+            mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True),
+        ):
+            run = server_mod._create_agent_run(
+                "shadow-credential-diagnostic-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "inspect source"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            server_mod._set_agent_status(run, "tools")
+            server_mod._append_agent_event(run, "tool_started", {
+                "toolCallId": "shadow-source-call",
+                "name": "search_files",
+                "arguments": "{}",
+            })
+            completed = server_mod._append_agent_event(run, "tool_completed", {
+                "toolCallId": "shadow-source-call",
+                "name": "search_files",
+                "result": {"content": fixture_text},
+                "outcome": "success",
+            })
+            server_mod._set_agent_status(run, "model")
+            server_mod._append_agent_event(run, "model_pending", {"round": 2})
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertEqual(completed["data"]["result"]["content"], fixture_text)
+        self.assertEqual(shadow["eventsObserved"], 4)
+        self.assertEqual(shadow["eventsAccepted"], 4)
+        self.assertEqual(shadow["contractErrors"], 0)
+        self.assertEqual(shadow["diagnosticCounts"]["credential_like_text"], 1)
+        self.assertNotIn("event_sequence_gap", shadow["diagnosticCounts"])
+        encoded_shadow = json.dumps(shadow, ensure_ascii=False)
+        self.assertNotIn("sk-fixture123456", encoded_shadow)
+        self.assertIn(
+            fixture_text,
+            json.dumps(server_mod._agent_run_record(run), ensure_ascii=False),
+        )
+
     def test_agent_protocol_shadow_is_fail_open_and_diagnostics_are_bounded(self):
         with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
             run = server_mod._create_agent_run(

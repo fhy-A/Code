@@ -357,38 +357,67 @@ def _normalized_key(value):
     return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
-def _reject_credentials(value, path="$"):
+def _credential_diagnostics(value, path="$", found=None):
+    """Find credential-shaped content without retaining any matched value."""
+    if found is None:
+        found = {}
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = f"{path}.{key}"
             if _normalized_key(key) in _SENSITIVE_KEY_NAMES:
-                raise AgentProtocolError(
-                    f"credential-bearing field is not allowed in Agent events: {child_path}"
+                found.setdefault(
+                    "credential_bearing_field",
+                    _diagnostic(
+                        "credential_bearing_field",
+                        f"Credential-bearing field is not allowed in Agent events: {child_path}",
+                        path=child_path,
+                        severity="error",
+                    ),
                 )
-            _reject_credentials(child, child_path)
+                continue
+            _credential_diagnostics(child, child_path, found)
+            if len(found) >= 2:
+                break
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            _reject_credentials(child, f"{path}[{index}]")
+            _credential_diagnostics(child, f"{path}[{index}]", found)
+            if len(found) >= 2:
+                break
     elif isinstance(value, str):
         for pattern in _SENSITIVE_TEXT_PATTERNS:
             if pattern.search(value):
-                raise AgentProtocolError(
-                    f"credential-like text is not allowed in Agent events: {path}"
+                found.setdefault(
+                    "credential_like_text",
+                    _diagnostic(
+                        "credential_like_text",
+                        f"Credential-like text requires review in Agent events: {path}",
+                        path=path,
+                        severity="warning",
+                    ),
                 )
+                break
+    return list(found.values())
 
 
-def normalize_agent_event(raw_event, *, strict=False):
+def normalize_agent_event(raw_event, *, strict=False, credential_mode="reject"):
     """Adapt an unversioned/current event to the canonical v1 envelope.
 
     Unknown event types and unknown fields are preserved or ignored with
     diagnostics so a newer producer cannot crash an older projection. Missing
-    required fields fail only in strict test mode. Credentials always fail.
+    required fields fail only in strict test mode. Credential-shaped content
+    is rejected by default; the production shadow observer may request a
+    sanitized diagnostic so sequence validation can continue without retaining
+    the matched value.
     """
     if not isinstance(raw_event, dict):
         raise AgentProtocolError("Agent event must be an object")
-    _reject_credentials(raw_event)
+    if credential_mode not in {"reject", "diagnose"}:
+        raise ValueError("credential_mode must be 'reject' or 'diagnose'")
+    credential_diagnostics = _credential_diagnostics(raw_event)
+    if credential_diagnostics and (strict or credential_mode == "reject"):
+        raise AgentProtocolError(credential_diagnostics[0]["message"])
 
-    diagnostics = []
+    diagnostics = list(credential_diagnostics)
     raw_version = raw_event.get("protocolVersion")
     if raw_version is None:
         source_version = 0

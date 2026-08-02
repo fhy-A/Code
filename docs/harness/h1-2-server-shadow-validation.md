@@ -6,7 +6,7 @@
 
 阶段性质：服务端内存影子观察，不改变事件、持久化或前端行为
 
-> 后续状态：H1-3 已在开发实例灰度启用显式事件 `protocolVersion: 1`，并增加前端旧事件、v1、未来版本与畸形事件兼容；正式实例仍默认写入旧格式。当前边界见 [`h1-3-versioned-event-grey-rollout.md`](h1-3-versioned-event-grey-rollout.md)。以下内容保留 H1-2 完成时的阶段事实。
+> 后续状态：H1-3 已在开发实例灰度启用显式事件 `protocolVersion: 1`，并增加前端旧事件、v1、未来版本与畸形事件兼容；H1-4 已修正真实工具结果中凭据样式示例造成的级联影子误报并完成 H1 收口。正式实例仍默认写入旧格式。当前边界见 [`h1-4-shadow-credential-diagnostics.md`](h1-4-shadow-credential-diagnostics.md)。以下内容保留 H1-2 完成时的阶段事实。
 
 ## 1. 阶段目标
 

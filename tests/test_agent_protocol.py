@@ -160,6 +160,58 @@ class TestAgentEventContract(unittest.TestCase):
             "fixture-authorizationId",
         )
 
+    def test_credential_diagnostics_preserve_shadow_sequence_without_leaking_values(self):
+        raw = _strict_event("tool_completed", 1)
+        raw["data"]["result"] = {
+            "content": "source example sk-fixture123456 must not enter diagnostics",
+        }
+        normalized = agent_protocol.normalize_agent_event(
+            raw,
+            credential_mode="diagnose",
+        )
+        self.assertEqual(normalized["event"]["data"], raw["data"])
+        self.assertEqual(
+            {item["code"] for item in normalized["diagnostics"]},
+            {"credential_like_text"},
+        )
+        encoded_diagnostics = json.dumps(
+            normalized["diagnostics"],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("sk-fixture123456", encoded_diagnostics)
+
+        validator = agent_protocol.AgentEventSequenceValidator()
+        self.assertTrue(validator.observe(normalized)["accepted"])
+        second = agent_protocol.normalize_agent_event(
+            _strict_event("completed", 2),
+            strict=True,
+        )
+        observed = validator.observe(second, strict=True)
+        self.assertTrue(observed["accepted"])
+        self.assertEqual(observed["diagnostics"], [])
+
+        sensitive_field = _strict_event("tool_completed", 1)
+        sensitive_field["data"]["result"] = {
+            "headers": {"X-Test": "fixture"},
+        }
+        diagnosed_field = agent_protocol.normalize_agent_event(
+            sensitive_field,
+            credential_mode="diagnose",
+        )
+        field_diagnostic = next(
+            item for item in diagnosed_field["diagnostics"]
+            if item["code"] == "credential_bearing_field"
+        )
+        self.assertEqual(field_diagnostic["severity"], "error")
+        self.assertNotIn("fixture", json.dumps(field_diagnostic))
+
+        with self.assertRaises(agent_protocol.AgentProtocolError):
+            agent_protocol.normalize_agent_event(
+                raw,
+                strict=True,
+                credential_mode="diagnose",
+            )
+
     def test_sequence_is_monotonic_and_exact_redelivery_is_idempotent(self):
         validator = agent_protocol.AgentEventSequenceValidator()
         first = agent_protocol.normalize_agent_event(_strict_event("created", 1), strict=True)

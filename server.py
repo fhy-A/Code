@@ -1552,7 +1552,10 @@ def _agent_protocol_shadow_observe(run, event, *, source="append"):
             event_seq = (event or {}).get("seq") if isinstance(event, dict) else 0
             shadow["events_observed"] = int(shadow.get("events_observed") or 0) + 1
             try:
-                normalized = agent_protocol.normalize_agent_event(event)
+                normalized = agent_protocol.normalize_agent_event(
+                    event,
+                    credential_mode="diagnose",
+                )
                 for diagnostic in normalized.get("diagnostics") or []:
                     _record_agent_protocol_shadow_diagnostic(
                         shadow,
