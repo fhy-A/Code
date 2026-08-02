@@ -316,18 +316,21 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertNotIn("async function runAgentLoop(", APP_SOURCE)
         self.assertNotIn("async function executeToolWithDelegation(", APP_SOURCE)
 
-    def test_refresh_restores_original_task_timer_before_streaming(self):
+    def test_refresh_restores_active_elapsed_timer_without_counting_offline_time(self):
         recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary)")
         recovery_end = APP_SOURCE.index("async function resumePersistedRuns()", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
-        parse_index = recovery.index("const originalStartedAt = Date.parse")
-        task_index = recovery.index("ctx.run.taskStartTime = originalStartedAt")
+        elapsed_index = recovery.index("ctx.run.taskElapsedBaseMs = persistedRunElapsedMs")
+        resume_index = recovery.index("ctx.run.taskElapsedResumedAt = resumedAt")
         streaming_index = recovery.index("setStreaming(true, summary.id)")
 
-        self.assertLess(parse_index, task_index)
-        self.assertLess(task_index, streaming_index)
-        self.assertIn("ctx.taskStartedAt = originalStartedAt", recovery)
-        self.assertIn("ctx.run.responseStartTime = originalStartedAt", recovery)
+        self.assertLess(elapsed_index, streaming_index)
+        self.assertLess(resume_index, streaming_index)
+        self.assertIn("ctx.taskStartedAt = taskStartedAt", recovery)
+        self.assertIn("ctx.run.taskStartTime = taskStartedAt", recovery)
+        self.assertIn("ctx.run.responseStartTime = resumedAt", recovery)
+        self.assertNotIn("ctx.run.responseStartTime = originalStartedAt", recovery)
+        self.assertIn("elapsedMs: activeRunElapsedMs(timingRun, checkpointNow)", APP_SOURCE)
 
     def test_server_agent_cancellation_covers_parent_and_child_runs(self):
         cancel_start = APP_SOURCE.index("function cancelSessionRun(run)")

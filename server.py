@@ -86,6 +86,10 @@ MAX_SEARCH_RESULTS = 100
 MAX_COMMAND_SECONDS = 30
 MAX_DEPENDENCY_COMMAND_SECONDS = 300
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MODEL_INPUT_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/webp"})
+MODEL_INPUT_CONVERTIBLE_FORMATS = frozenset({"BMP", "GIF", "ICO", "TIFF"})
+MODEL_INPUT_IMAGE_MAX_PIXELS = 25_000_000
+MODEL_INPUT_IMAGE_MAX_DIMENSION = 2048
 _json_write_lock = threading.RLock()
 _edit_apply_lock = threading.RLock()
 _model_runtime_runs = {}
@@ -433,7 +437,7 @@ def _runtime_error_text(exc):
 
 
 def _model_runtime_worker(run):
-    payload = dict(run["payload"])
+    payload = _project_model_payload_images(run["payload"])
     payload["stream"] = True
     stream_options = dict(payload.get("stream_options") or {})
     stream_options["include_usage"] = True
@@ -658,6 +662,146 @@ def _agent_run_path(run_id):
 
 def _json_clone(value):
     return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _sniff_model_image_format(data):
+    """Return a conservative image format/MIME pair from the encoded bytes."""
+    raw = bytes(data or b"")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG", "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "JPEG", "image/jpeg"
+    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "WEBP", "image/webp"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "GIF", "image/gif"
+    if raw.startswith(b"BM"):
+        return "BMP", "image/bmp"
+    if raw.startswith(b"\x00\x00\x01\x00"):
+        return "ICO", "image/x-icon"
+    if raw.startswith((b"II*\x00", b"MM\x00*")):
+        return "TIFF", "image/tiff"
+    return "", ""
+
+
+def _normalize_model_image_bytes(data, declared_mime=""):
+    """Project encoded image bytes into a model-safe MIME without persistence."""
+    raw = bytes(data or b"")
+    if not raw:
+        return {"ok": False, "error": "empty image"}
+    if len(raw) > MAX_TOOL_IMAGE_BYTES:
+        return {"ok": False, "error": "image exceeds model input limit"}
+
+    source_format, detected_mime = _sniff_model_image_format(raw)
+    if detected_mime in MODEL_INPUT_IMAGE_MIMES:
+        return {
+            "ok": True,
+            "data": raw,
+            "mime": detected_mime,
+            "sourceMime": str(declared_mime or detected_mime).lower(),
+            "converted": False,
+        }
+    if source_format not in MODEL_INPUT_CONVERTIBLE_FORMATS:
+        return {"ok": False, "error": "unsupported image encoding"}
+
+    try:
+        from PIL import Image as PILImage
+
+        with PILImage.open(io.BytesIO(raw)) as source:
+            source.seek(0)
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > MODEL_INPUT_IMAGE_MAX_PIXELS:
+                return {"ok": False, "error": "image dimensions exceed model input limit"}
+            frame = source.copy()
+
+        if max(frame.size) > MODEL_INPUT_IMAGE_MAX_DIMENSION:
+            frame.thumbnail(
+                (MODEL_INPUT_IMAGE_MAX_DIMENSION, MODEL_INPUT_IMAGE_MAX_DIMENSION),
+                PILImage.Resampling.LANCZOS,
+            )
+        has_alpha = "A" in frame.getbands() or "transparency" in frame.info
+        frame = frame.convert("RGBA" if has_alpha else "RGB")
+        output = io.BytesIO()
+        frame.save(output, format="PNG", optimize=True)
+        normalized = output.getvalue()
+        if not normalized or len(normalized) > MAX_TOOL_IMAGE_BYTES:
+            return {"ok": False, "error": "normalized image exceeds model input limit"}
+        return {
+            "ok": True,
+            "data": normalized,
+            "mime": "image/png",
+            "sourceMime": str(declared_mime or detected_mime).lower(),
+            "converted": True,
+        }
+    except Exception:
+        return {"ok": False, "error": "image conversion failed"}
+
+
+def _project_model_image_url(value):
+    """Normalize a local data URL; remote URLs remain the upstream's concern."""
+    image_url = str(value or "")
+    if not image_url.startswith("data:"):
+        return image_url or None
+    if "," not in image_url:
+        return None
+    header, encoded = image_url.split(",", 1)
+    declared_mime = header[5:].split(";", 1)[0].strip().lower()
+    if not declared_mime.startswith("image/") or ";base64" not in header.lower():
+        return None
+    encoded = re.sub(r"\s+", "", encoded)
+    if len(encoded) > ((MAX_TOOL_IMAGE_BYTES + 2) // 3) * 4:
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return None
+    normalized = _normalize_model_image_bytes(raw, declared_mime)
+    if not normalized.get("ok"):
+        return None
+    if not normalized.get("converted") and declared_mime == normalized["mime"]:
+        return image_url
+    payload = base64.b64encode(normalized["data"]).decode("ascii")
+    return f"data:{normalized['mime']};base64,{payload}"
+
+
+def _project_model_payload_images(payload):
+    """Clone a request and normalize/omit unsafe data images for this call only."""
+    projected = _json_clone(payload or {})
+    messages = projected.get("messages")
+    if not isinstance(messages, list):
+        return projected
+
+    for message in messages:
+        if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+            continue
+        content = []
+        omitted = 0
+        for part in message["content"]:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                content.append(part)
+                continue
+            image_value = part.get("image_url")
+            source_url = image_value.get("url") if isinstance(image_value, dict) else image_value
+            projected_url = _project_model_image_url(source_url)
+            if not projected_url:
+                omitted += 1
+                continue
+            projected_part = _json_clone(part)
+            if isinstance(projected_part.get("image_url"), dict):
+                projected_part["image_url"]["url"] = projected_url
+            else:
+                projected_part["image_url"] = {"url": projected_url}
+            content.append(projected_part)
+        if omitted:
+            content.append({
+                "type": "text",
+                "text": (
+                    f"[System] {omitted} local image(s) could not be converted for this "
+                    "model request and were omitted. The original conversation history is unchanged."
+                ),
+            })
+        message["content"] = content
+    return projected
 
 
 def _agent_value_has_credential_field(value):
@@ -12079,7 +12223,11 @@ class CodeHandler(BaseHTTPRequestHandler):
         is_stream = False
         if body:
             try:
-                is_stream = bool(json.loads(body.decode("utf-8")).get("stream"))
+                parsed_body = json.loads(body.decode("utf-8"))
+                if upstream_path.endswith("/chat/completions"):
+                    parsed_body = _project_model_payload_images(parsed_body)
+                    body = json.dumps(parsed_body, ensure_ascii=False).encode("utf-8")
+                is_stream = bool(parsed_body.get("stream"))
             except Exception:
                 is_stream = False
         api_key = self.headers.get("Authorization", "")

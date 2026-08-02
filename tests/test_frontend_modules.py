@@ -2161,6 +2161,11 @@ const messages = [
 const before = JSON.stringify(messages);
 const nativeMessages = request.buildModelRequestMessages(messages, true);
 const fallbackMessages = request.buildModelRequestMessages(messages, false);
+const textOnlyMessages = request.projectMessagesWithoutImages(messages);
+const pureImageRetry = request.projectMessagesWithoutImages([{
+  role: "user",
+  content: [{type: "image_url", image_url: {url: "data:image/png;base64,AAAA"}}],
+}]);
 const generatedToolCall = request.buildNativeToolCallMessage({
   name: "search_files",
   arguments: "{\"query\":\"todo\"}",
@@ -2171,6 +2176,9 @@ process.stdout.write(JSON.stringify({
   inputUnchanged: JSON.stringify(messages) === before,
   nativeMessages,
   fallbackMessages,
+  hasImages: request.hasImageContent(messages),
+  textOnlyMessages,
+  pureImageRetry,
   generatedToolCall,
   invalid: request.mapMessageForApi(null),
   system: request.mapMessageForApi({role: "system", content: "rules"}),
@@ -2192,6 +2200,7 @@ process.stdout.write(JSON.stringify({
         data = json.loads(completed.stdout)
         self.assertTrue(data["frozen"])
         self.assertTrue(data["inputUnchanged"])
+        self.assertTrue(data["hasImages"])
         self.assertIsNone(data["invalid"])
         self.assertIsNone(data["skipped"])
         self.assertEqual(data["system"], {"role": "system", "content": "rules"})
@@ -2221,6 +2230,16 @@ process.stdout.write(JSON.stringify({
             native_messages[3],
             {"role": "user", "content": "[Tool result]\norphan"},
         )
+        self.assertEqual(
+            data["textOnlyMessages"][3]["content"],
+            [{"type": "text", "text": "next"}],
+        )
+        self.assertIn(
+            "text-only compatibility retry",
+            data["pureImageRetry"][0]["content"][0]["text"],
+        )
+        self.assertNotIn("lastUser.content = textOnly", APP_SOURCE)
+        self.assertIn("ctx._omitImagesForModelRequest = true", APP_SOURCE)
 
         fallback_messages = data["fallbackMessages"]
         self.assertEqual(len(fallback_messages), 4)
@@ -3210,6 +3229,76 @@ process.stdout.write(JSON.stringify({
                 "mirroredRunState": True,
                 "backgroundRuns": [],
                 "queuedMessages": [{"id": "queue-1", "status": "queued"}],
+            },
+        )
+
+    def test_run_timing_helpers_exclude_offline_time_and_support_old_checkpoints(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/core/state.js");
+
+const {
+  activeRunElapsedMs,
+  createAppState,
+  createSessionStateAccessors,
+  persistedRunElapsedMs,
+} = window.Code.core.state;
+const state = createAppState({getItem: () => null});
+const run = createSessionStateAccessors(state).ensureSessionRun("timer");
+
+process.stdout.write(JSON.stringify({
+  defaultTimerFields: [run.taskElapsedBaseMs, run.taskElapsedResumedAt],
+  explicitCheckpoint: persistedRunElapsedMs({
+    elapsedMs: 15000,
+    startedAt: "2026-08-02T00:27:00.000Z",
+    updatedAt: "2026-08-02T00:27:15.000Z",
+  }, Date.parse("2026-08-02T16:15:00.000Z")),
+  legacyCheckpoint: persistedRunElapsedMs({
+    startedAt: "2026-08-02T00:27:00.000Z",
+    updatedAt: "2026-08-02T00:27:15.000Z",
+  }, Date.parse("2026-08-02T16:15:00.000Z")),
+  futureCheckpoint: persistedRunElapsedMs({
+    startedAt: "2026-08-02T16:15:00.000Z",
+    updatedAt: "2026-08-02T16:16:00.000Z",
+  }, Date.parse("2026-08-02T16:15:30.000Z")),
+  malformedCheckpoint: persistedRunElapsedMs({startedAt: "bad", updatedAt: "worse"}, 100000),
+  normalActiveRun: activeRunElapsedMs({
+    taskStartTime: 10000,
+    taskElapsedBaseMs: null,
+    taskElapsedResumedAt: null,
+  }, 16000),
+  resumedActiveRun: activeRunElapsedMs({
+    taskStartTime: 1000,
+    taskElapsedBaseMs: 15000,
+    taskElapsedResumedAt: 100000,
+  }, 103000),
+  futureResumeAnchor: activeRunElapsedMs({
+    taskStartTime: 1000,
+    taskElapsedBaseMs: 15000,
+    taskElapsedResumedAt: 104000,
+  }, 103000),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "defaultTimerFields": [None, None],
+                "explicitCheckpoint": 15000,
+                "legacyCheckpoint": 15000,
+                "futureCheckpoint": 0,
+                "malformedCheckpoint": 0,
+                "normalActiveRun": 6000,
+                "resumedActiveRun": 18000,
+                "futureResumeAnchor": 15000,
             },
         )
 

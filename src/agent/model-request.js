@@ -13,6 +13,30 @@
     return String(content);
   }
 
+  function hasImageContent(messages) {
+    return (Array.isArray(messages) ? messages : []).some((message) => (
+      Array.isArray(message?.content)
+      && message.content.some((part) => part?.type === "image_url")
+    ));
+  }
+
+  function projectMessagesWithoutImages(messages) {
+    return (Array.isArray(messages) ? messages : []).map((message) => {
+      if (!message || typeof message !== "object") return message;
+      if (!Array.isArray(message.content)) return { ...message };
+      const content = message.content
+        .filter((part) => part?.type !== "image_url")
+        .map((part) => (part && typeof part === "object" ? { ...part } : part));
+      if (content.length === 0) {
+        content.push({
+          type: "text",
+          text: "[Image omitted for a text-only compatibility retry]",
+        });
+      }
+      return { ...message, content };
+    });
+  }
+
   function buildNativeToolCallMessage(toolCall) {
     return {
       id: toolCall?.id || `call_${Date.now()}`,
@@ -195,6 +219,8 @@
     assembleModelRequestPayload,
     buildModelRequestMessages,
     buildNativeToolCallMessage,
+    hasImageContent,
     mapMessageForApi,
+    projectMessagesWithoutImages,
   });
 })(window);

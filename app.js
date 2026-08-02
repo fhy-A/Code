@@ -1,4 +1,9 @@
-const { createAppState, createSessionStateAccessors } = window.Code.core.state;
+const {
+  activeRunElapsedMs,
+  createAppState,
+  createSessionStateAccessors,
+  persistedRunElapsedMs,
+} = window.Code.core.state;
 const { uiIcon } = window.Code.core.icons;
 const {
   escapeHtml,
@@ -49,7 +54,9 @@ const { createImportBatchRunner } = window.Code.features.sessionImport;
 const agentRuntime = window.Code.agent.runtime;
 const {
   assembleModelRequestPayload,
+  hasImageContent,
   mapMessageForApi,
+  projectMessagesWithoutImages,
 } = window.Code.agent.modelRequest;
 const {
   nativeTools,
@@ -197,12 +204,18 @@ const { t, setLang, applyI18n } = createI18nRuntime({
 
 function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {}) {
   const previous = getSessionRunState(ctx.sessionId);
+  const checkpointNow = Date.now();
+  const timingRun = {
+    ...(ctx.run || {}),
+    taskStartTime: ctx.run?.taskStartTime || ctx.taskStartedAt || null,
+  };
   return {
     version: 1,
     status,
     phase,
     startedAt: previous.startedAt || new Date(Number(ctx.taskStartedAt || Date.now())).toISOString(),
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date(checkpointNow).toISOString(),
+    elapsedMs: activeRunElapsedMs(timingRun, checkpointNow),
     model: ctx.model || "",
     temperature: Number(ctx.temperature ?? 0.2),
     maxTokens: Number(ctx.maxTokens || 0),
@@ -1673,7 +1686,8 @@ function formatElapsedMs(ms) {
 function getRunTimerDisplay(sessionId = state.sessionId) {
   const run = ensureSessionRun(sessionId);
   // Prefer task-level time so the timer doesn't reset between tool rounds
-  const startedAt = run?.taskStartTime || run?.responseStartTime || (sessionId === state.sessionId ? state.responseStartTime : null);
+  if (run?.taskStartTime) return formatElapsedMs(activeRunElapsedMs(run));
+  const startedAt = run?.responseStartTime || (sessionId === state.sessionId ? state.responseStartTime : null);
   if (!startedAt) return state._timerDisplay || "0s";
   return formatElapsedMs(Date.now() - startedAt);
 }
@@ -4277,6 +4291,8 @@ function setStreaming(active, sessionId = state.sessionId) {
       // set it once per task and only clear on final stop.
       if (!run.taskStartTime) {
         run.taskStartTime = Date.now();
+        run.taskElapsedBaseMs = null;
+        run.taskElapsedResumedAt = null;
         run.modelRound = 0;
       }
     } else {
@@ -4319,8 +4335,14 @@ function startLiveTimer() {
 
   if (run && !run.responseStartTime) run.responseStartTime = Date.now();
   if (run && !run.taskStartTime) {
-    const checkpointStartedAt = Date.parse(getSessionRunState(state.sessionId)?.startedAt || "");
-    run.taskStartTime = Number.isFinite(checkpointStartedAt) ? checkpointStartedAt : Date.now();
+    const checkpoint = getSessionRunState(state.sessionId);
+    const resumedAt = Date.now();
+    const checkpointStartedAt = Date.parse(checkpoint?.startedAt || "");
+    run.taskStartTime = Number.isFinite(checkpointStartedAt) && checkpointStartedAt > 0 && checkpointStartedAt <= resumedAt
+      ? checkpointStartedAt
+      : resumedAt;
+    run.taskElapsedBaseMs = persistedRunElapsedMs(checkpoint, resumedAt);
+    run.taskElapsedResumedAt = resumedAt;
   }
 
   state.responseStartTime = run?.responseStartTime || Date.now();
@@ -4372,7 +4394,7 @@ function finalizeRunTiming(sessionId) {
   let changed = false;
 
   if (startedAt && lastMsg && !lastMsg.streaming) {
-    const display = formatElapsedMs(Date.now() - startedAt);
+    const display = formatElapsedMs(activeRunElapsedMs(run));
     const runModel = run.model || run._model || getSelectedModel() || "Agent";
     lastMsg._responseTime = display;
     lastMsg._model = lastMsg._model || runModel;
@@ -4383,6 +4405,8 @@ function finalizeRunTiming(sessionId) {
   }
 
   run.taskStartTime = null;
+  run.taskElapsedBaseMs = null;
+  run.taskElapsedResumedAt = null;
   run.responseStartTime = null;
   run.modelRound = 0;
   return changed;
@@ -5266,15 +5290,17 @@ async function resumePersistedSessionRun(summary) {
 
     const ctx = buildRecoveredRunContext(session, latestRunState);
     const recoveryCount = Number(latestRunState.recoveryCount || 0) + 1;
+    const resumedAt = Date.now();
     const originalStartedAt = Date.parse(latestRunState.startedAt || 0);
-    if (Number.isFinite(originalStartedAt) && originalStartedAt > 0) {
-      ctx.taskStartedAt = originalStartedAt;
-      ctx.run.taskStartTime = originalStartedAt;
-    }
+    const taskStartedAt = Number.isFinite(originalStartedAt) && originalStartedAt > 0 && originalStartedAt <= resumedAt
+      ? originalStartedAt
+      : resumedAt;
+    ctx.taskStartedAt = taskStartedAt;
+    ctx.run.taskStartTime = taskStartedAt;
+    ctx.run.taskElapsedBaseMs = persistedRunElapsedMs(latestRunState, resumedAt);
+    ctx.run.taskElapsedResumedAt = resumedAt;
     setStreaming(true, summary.id);
-    if (Number.isFinite(originalStartedAt) && originalStartedAt > 0) {
-      ctx.run.responseStartTime = originalStartedAt;
-    }
+    ctx.run.responseStartTime = resumedAt;
     await persistRunCheckpoint(ctx, "resuming", latestRunState.phase || "model", {
       recoveryCount,
       lastError: latestRunState.lastError || "",
@@ -5736,6 +5762,9 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
   const modelMessages = ctx?.isSubAgent
     ? streamMessages
     : getModelContextMessages(streamMessages, isDetachedFromMainContext);
+  const requestMessages = ctx?._omitImagesForModelRequest
+    ? projectMessagesWithoutImages(modelMessages)
+    : modelMessages;
   if (ctx && !ctx.projectContextResolved) {
     ctx.projectContext = await loadProjectContextForRoot(
       ctx.primaryRoot || ctx.cwd || "",
@@ -5758,7 +5787,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
   const payload = assembleModelRequestPayload({
     model,
     tools,
-    modelMessages,
+    modelMessages: requestMessages,
     systemPrompt,
     includeSystemPrompt: !ctx?.isSubAgent,
     temperature: ctx?.temperature ?? Number(els.temperature.value || 0.2),
@@ -8246,6 +8275,8 @@ async function sendMessage(userText, options = {}) {
   }
 
   run.taskStartTime = submittedAt;
+  run.taskElapsedBaseMs = null;
+  run.taskElapsedResumedAt = null;
   run.hasFirstModelResponseStarted = false;
   ctx.taskStartedAt = submittedAt;
   if (!existingMessage && !optimisticMessage) {
@@ -8281,15 +8312,12 @@ async function sendMessage(userText, options = {}) {
 
     // If the request had images and the error suggests the model doesn't
     // support multimodal input, retry automatically with text-only content.
-    const lastUser = [...ctx.messages].reverse().find((m) => m && m.role === "user");
-    if (lastUser && Array.isArray(lastUser.content)) {
+    const lastUser = [...ctx.messages].reverse().find((message) => message?.role === "user");
+    if (hasImageContent(lastUser ? [lastUser] : [])) {
       // If the request had images and failed, retry with text-only — unless
       // the error is clearly unrelated to multimodal (rate limit, quota).
       const skipRetry = /rate.?limit|too.*(many|fast|frequent)|429|quota.*exceeded/i.test(err.message || "");
       if (!skipRetry) {
-        // Rewrite user message to text-only
-        const textOnly = lastUser.content.find((p) => p.type === "text")?.text || "";
-        lastUser.content = textOnly;
         // Remove the failed assistant placeholder so retry adds a fresh one
         const placeholderIdx = ctx.messages.findIndex((m) => m && m.role === "assistant" && m.streaming && !m.content);
         if (placeholderIdx >= 0) ctx.messages.splice(placeholderIdx, 1);
@@ -8299,11 +8327,13 @@ async function sendMessage(userText, options = {}) {
         setSessionMessages(sessionId, ctx.messages);
         // Retry
         loopError = null;
+        const previousOmitImages = ctx._omitImagesForModelRequest;
         try {
           ctx.agentRunId = "";
           ctx.agentEventCursor = 0;
           run.agentRunId = "";
           run.agentEventCursor = 0;
+          ctx._omitImagesForModelRequest = true;
           await executeRunContext(ctx);
           // Annotate the assistant response
           const lastAsst = [...ctx.messages].reverse().find((m) => m && m.role === "assistant");
@@ -8314,6 +8344,12 @@ async function sendMessage(userText, options = {}) {
           renderSessionMessages(sessionId);
         } catch (retryErr) {
           loopError = retryErr;
+        } finally {
+          if (previousOmitImages === undefined) {
+            delete ctx._omitImagesForModelRequest;
+          } else {
+            ctx._omitImagesForModelRequest = previousOmitImages;
+          }
         }
       }
     }

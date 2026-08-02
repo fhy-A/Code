@@ -74,6 +74,47 @@
     };
   }
 
+  function persistedRunElapsedMs(runState, now = Date.now()) {
+    const hasExplicitElapsed = runState?.elapsedMs !== undefined
+      && runState?.elapsedMs !== null
+      && runState?.elapsedMs !== "";
+    const explicitElapsed = Number(runState?.elapsedMs);
+    if (hasExplicitElapsed && Number.isFinite(explicitElapsed) && explicitElapsed >= 0) {
+      return Math.floor(explicitElapsed);
+    }
+
+    const startedAt = Date.parse(runState?.startedAt || "");
+    const updatedAt = Date.parse(runState?.updatedAt || "");
+    if (
+      !Number.isFinite(startedAt)
+      || !Number.isFinite(updatedAt)
+      || startedAt <= 0
+      || updatedAt < startedAt
+      || updatedAt > now
+    ) {
+      return 0;
+    }
+    return Math.floor(updatedAt - startedAt);
+  }
+
+  function activeRunElapsedMs(run, now = Date.now()) {
+    const hasCarriedElapsed = run?.taskElapsedBaseMs !== undefined
+      && run?.taskElapsedBaseMs !== null
+      && run?.taskElapsedBaseMs !== "";
+    const carriedElapsed = Number(run?.taskElapsedBaseMs);
+    if (hasCarriedElapsed && Number.isFinite(carriedElapsed) && carriedElapsed >= 0) {
+      const resumedAt = Number(run?.taskElapsedResumedAt);
+      if (Number.isFinite(resumedAt) && resumedAt > 0 && resumedAt <= now) {
+        return Math.floor(carriedElapsed + (now - resumedAt));
+      }
+      return Math.floor(carriedElapsed);
+    }
+
+    const startedAt = Number(run?.taskStartTime || run?.responseStartTime || 0);
+    if (!Number.isFinite(startedAt) || startedAt <= 0 || startedAt > now) return 0;
+    return Math.floor(now - startedAt);
+  }
+
   function createSessionStateAccessors(state) {
     if (!state || typeof state !== "object") {
       throw new TypeError("Session state accessors require an application state object");
@@ -88,6 +129,8 @@
           abortController: null,
           responseStartTime: null,
           taskStartTime: null,
+          taskElapsedBaseMs: null,
+          taskElapsedResumedAt: null,
           modelWaitStartedAt: null,
           modelResponseStarted: false,
           hasFirstModelResponseStarted: false,
@@ -226,7 +269,9 @@
   }
 
   core.state = Object.freeze({
+    activeRunElapsedMs,
     createAppState,
     createSessionStateAccessors,
+    persistedRunElapsedMs,
   });
 })(window);

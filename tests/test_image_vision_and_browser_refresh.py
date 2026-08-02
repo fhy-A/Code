@@ -1,4 +1,7 @@
 import json
+import base64
+import io
+import inspect
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +28,17 @@ class _Response:
 
 
 class TestImageVisionBridge(unittest.TestCase):
+    @staticmethod
+    def _image_bytes(image_format):
+        from PIL import Image
+
+        image = Image.new("RGBA", (16, 16), (30, 120, 210, 180))
+        if image_format in {"JPEG", "BMP"}:
+            image = image.convert("RGB")
+        output = io.BytesIO()
+        image.save(output, format=image_format)
+        return output.getvalue()
+
     def test_image_limit_is_separate_from_text_limit(self):
         self.assertGreater(server.MAX_TOOL_IMAGE_BYTES, server.MAX_TOOL_READ_BYTES)
 
@@ -66,6 +80,78 @@ class TestImageVisionBridge(unittest.TestCase):
         }
         marker = server._agent_tool_vision_marker(result, "call-image")
         self.assertNotIn("aW1hZ2U=", json.dumps(marker))
+
+    def test_model_image_projection_accepts_or_converts_supported_matrix(self):
+        for image_format, expected_mime, converted in (
+            ("PNG", "image/png", False),
+            ("JPEG", "image/jpeg", False),
+            ("WEBP", "image/webp", False),
+            ("BMP", "image/png", True),
+            ("GIF", "image/png", True),
+            ("ICO", "image/png", True),
+            ("TIFF", "image/png", True),
+        ):
+            with self.subTest(image_format=image_format):
+                result = server._normalize_model_image_bytes(
+                    self._image_bytes(image_format),
+                    "image/x-icon",
+                )
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertEqual(result["mime"], expected_mime)
+                self.assertEqual(result["converted"], converted)
+
+    def test_model_payload_projection_repairs_mime_without_mutating_history(self):
+        encoded = base64.b64encode(self._image_bytes("ICO")).decode("ascii")
+        payload = {
+            "model": "gpt-test",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/x-icon;base64,{encoded}"},
+                    },
+                ],
+            }],
+        }
+        before = json.dumps(payload, ensure_ascii=False)
+
+        projected = server._project_model_payload_images(payload)
+
+        self.assertEqual(json.dumps(payload, ensure_ascii=False), before)
+        image_url = projected["messages"][0]["content"][1]["image_url"]["url"]
+        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+
+    def test_model_payload_projection_omits_invalid_data_image_non_destructively(self):
+        payload = {
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/x-icon;base64,not-valid"},
+                }],
+            }],
+        }
+
+        projected = server._project_model_payload_images(payload)
+
+        self.assertEqual(
+            payload["messages"][0]["content"][0]["image_url"]["url"],
+            "data:image/x-icon;base64,not-valid",
+        )
+        self.assertEqual(projected["messages"][0]["content"][0]["type"], "text")
+        self.assertIn("original conversation history is unchanged", projected["messages"][0]["content"][0]["text"])
+
+    def test_all_upstream_chat_paths_apply_model_image_projection(self):
+        self.assertIn(
+            "_project_model_payload_images(run[\"payload\"])",
+            inspect.getsource(server._model_runtime_worker),
+        )
+        self.assertIn(
+            "_project_model_payload_images(parsed_body)",
+            inspect.getsource(server.CodeHandler.proxy),
+        )
 
 
 class TestExistingBrowserRefresh(unittest.TestCase):
