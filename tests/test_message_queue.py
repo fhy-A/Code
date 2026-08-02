@@ -12,13 +12,23 @@ COMPACTION_SOURCE = (ROOT / "src" / "agent" / "compaction.js").read_text(encodin
 
 
 class TestRunningMessageQueue(unittest.TestCase):
-    def test_ordinary_running_message_uses_fifo_queue(self):
+    def test_running_message_uses_configured_follow_up_behavior(self):
         submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
         submit_end = APP_SOURCE.index('els.newChat.addEventListener', submit_start)
         submit = APP_SOURCE[submit_start:submit_end]
-        self.assertIn("enqueueSessionMessage(sessionId, taskText, imgs)", submit)
+        self.assertIn("followUpBehaviorOverride || loadFollowUpBehavior(localStorage)", submit)
+        self.assertIn('followUpBehavior === "queue" ? enqueueSessionMessage : steerSessionMessage', submit)
         self.assertIn("if (parallelTask !== null)", submit)
         self.assertIn("dispatchBackgroundSubAgent(sessionId, taskText, imgs)", submit)
+
+    def test_ctrl_enter_inverts_follow_up_behavior_once(self):
+        keydown_start = APP_SOURCE.index('els.prompt.addEventListener("keydown"')
+        keydown_end = APP_SOURCE.index('els.stopBtn.addEventListener', keydown_start)
+        keydown = APP_SOURCE[keydown_start:keydown_end]
+        self.assertIn("event.ctrlKey || event.metaKey", keydown)
+        self.assertIn("oppositeFollowUpBehavior", keydown)
+        self.assertIn("loadFollowUpBehavior(localStorage)", keydown)
+        self.assertIn("consumeFollowUpBehaviorOverride()", APP_SOURCE)
 
     def test_parallel_intent_requires_explicit_command(self):
         self.assertIn("function parseParallelCommand(text)", SUBAGENTS_SOURCE)
@@ -35,7 +45,7 @@ class TestRunningMessageQueue(unittest.TestCase):
         enqueue_end = APP_SOURCE.index("async function cancelQueuedSessionMessage", enqueue_start)
         enqueue = APP_SOURCE[enqueue_start:enqueue_end]
         for expected in (
-            "const model = getSelectedModel()",
+            "const model = String(existingMessage?._model || getSelectedModel())",
             "const permissionProfile = getPermissionProfile()",
             'const toolPreset = els.toolPreset.value || "default"',
             "const thinkingLevel = getThinkingLevel()",
@@ -91,8 +101,8 @@ class TestRunningMessageQueue(unittest.TestCase):
         marker = APP_SOURCE[marker_start:marker_end]
         self.assertIn('queuedDispatch.status = "canceled"', marker)
         self.assertIn("message.meta.detachedFromMain = true", marker)
-        self.assertIn("queuedMessageCanceled", I18N_SOURCE)
-        self.assertIn('queued-message-status canceled', MESSAGES_SOURCE)
+        self.assertNotIn("queuedMessageCanceled", I18N_SOURCE)
+        self.assertNotIn('queued-message-status canceled', MESSAGES_SOURCE)
 
     def test_queue_restores_after_foreground_recovery(self):
         init_start = APP_SOURCE.index("async function init()")
@@ -119,12 +129,57 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn("if (!item.model || !getBestKey(item.model)) return false", pump)
         self.assertIn("queueMicrotask", pump)
 
-    def test_queue_projection_has_status_and_cancel_action(self):
-        self.assertIn("queued-message-status pending", MESSAGES_SOURCE)
-        self.assertIn("queued-message-cancel", MESSAGES_SOURCE)
+    def test_first_message_queue_pump_uses_session_created_by_send(self):
+        send_start = APP_SOURCE.index("async function sendMessage(")
+        send_end = APP_SOURCE.index("function getSelectedModel", send_start)
+        send = APP_SOURCE[send_start:send_end]
+        resolved_session = 'const sessionId = String(options.sessionId || state.sessionId || "")'
+        self.assertIn(resolved_session, send)
+        self.assertIn('typeof options.onSessionResolved === "function"', send)
+        self.assertIn("options.onSessionResolved(sessionId)", send)
+        self.assertLess(
+            send.index(resolved_session),
+            send.index("options.onSessionResolved(sessionId)"),
+        )
+
+        submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
+        submit_end = APP_SOURCE.index('els.newChat.addEventListener', submit_start)
+        submit = APP_SOURCE[submit_start:submit_end]
+        self.assertIn("let submittedSessionId = state.sessionId", submit)
+        self.assertIn("onSessionResolved: (sessionId) => {", submit)
+        self.assertIn("submittedSessionId = sessionId", submit)
+        self.assertIn("void pumpQueuedSessionMessages(submittedSessionId)", submit)
+        self.assertLess(
+            submit.index("submittedSessionId = sessionId"),
+            submit.index("void pumpQueuedSessionMessages(submittedSessionId)"),
+        )
+
+    def test_queue_projection_uses_plain_user_message_without_status_hint(self):
+        self.assertNotIn("queued-message-status pending", MESSAGES_SOURCE)
+        self.assertNotIn("queued-message-cancel", MESSAGES_SOURCE)
         self.assertIn("queuedTailMessages.push", MESSAGES_SOURCE)
-        self.assertIn("queuedMessagePending", I18N_SOURCE)
-        self.assertIn("cancelQueuedMessage", I18N_SOURCE)
+        self.assertNotIn("queuedMessagePending", I18N_SOURCE)
+        self.assertNotIn("cancelQueuedMessage", I18N_SOURCE)
+
+    def test_steer_is_persisted_and_uses_same_agent_run(self):
+        steer_start = APP_SOURCE.index("async function steerSessionMessage(")
+        steer_end = APP_SOURCE.index("async function resumePendingSessionSteers", steer_start)
+        steer = APP_SOURCE[steer_start:steer_end]
+        self.assertIn("ctx.messages.push(userMessage)", steer)
+        self.assertIn('status: "submitting"', steer)
+        self.assertIn("await saveSessionState", steer)
+        self.assertIn("await submitSessionSteer(ctx, userMessage)", steer)
+        self.assertIn("existingMessage: userMessage", steer)
+        self.assertIn("agentRuntime.steerAgentRun(ctx.agentRunId", APP_SOURCE)
+
+    def test_unacknowledged_steer_is_idempotently_resumed(self):
+        resume_start = APP_SOURCE.index("async function resumePendingSessionSteers")
+        resume_end = APP_SOURCE.index("async function cancelQueuedSessionMessage", resume_start)
+        resume = APP_SOURCE[resume_start:resume_end]
+        self.assertIn('steerDispatch?.status === "submitting"', resume)
+        self.assertIn("await submitSessionSteer(ctx, message)", resume)
+        self.assertIn("existingMessage: message", resume)
+        self.assertIn("await resumePendingSessionSteers(ctx)", APP_SOURCE)
 
 
 if __name__ == "__main__":

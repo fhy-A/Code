@@ -42,7 +42,11 @@ const {
   createSessionsFeature,
 } = window.Code.features.sessions;
 const { createBranchesFeature } = window.Code.features.branches;
-const { createSettingsFeature } = window.Code.features.settings;
+const {
+  createSettingsFeature,
+  loadFollowUpBehavior,
+  oppositeFollowUpBehavior,
+} = window.Code.features.settings;
 const {
   applySkillTaskPolicy,
   createSkillsMemoryFeature,
@@ -2635,7 +2639,7 @@ function renderMessages() {
   const branchMarker = getBranchFlowMarker();
   const expandedExecutionTraces = new Set(
     Array.from(
-      els.messageList.querySelectorAll("details.execution-trace[open][data-execution-trace]"),
+      els.messageList.querySelectorAll(".execution-trace.is-expanded[data-execution-trace]"),
       (trace) => trace.dataset.executionTrace,
     ).filter(Boolean),
   );
@@ -2847,22 +2851,6 @@ function bindMessageActions() {
       target.classList.remove("background-reply-highlight");
       requestAnimationFrame(() => target.classList.add("background-reply-highlight"));
       setTimeout(() => target.classList.remove("background-reply-highlight"), 1400);
-    });
-  });
-
-  document.querySelectorAll(".queued-message-cancel").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const queueItemId = String(button.dataset.queueItemId || "");
-      const sessionId = state.sessionId;
-      if (!queueItemId || !sessionId) return;
-      button.disabled = true;
-      cancelQueuedSessionMessage(sessionId, queueItemId).catch((error) => {
-        console.error("Failed to cancel queued message:", error);
-        showToast(error.message || String(error), "error");
-        if (button.isConnected) button.disabled = false;
-      });
     });
   });
 
@@ -6746,9 +6734,10 @@ function updateQueuedMessageItem(sessionId, queueItemId, updates = {}) {
   return queuedMessages.find((item) => item.id === queueItemId) || null;
 }
 
-async function enqueueSessionMessage(sessionId, userText, images = []) {
+async function enqueueSessionMessage(sessionId, userText, images = [], options = {}) {
   if (!sessionId) throw new Error(t("createSessionFirst"));
-  const model = getSelectedModel();
+  const existingMessage = options.existingMessage || null;
+  const model = String(existingMessage?._model || getSelectedModel());
   if (!model) throw new Error(t("selectModelFirst"));
   if (!getBestKey(model)) throw new Error(t("configureKeyFirst"));
 
@@ -6759,8 +6748,10 @@ async function enqueueSessionMessage(sessionId, userText, images = []) {
   const thinkingLevel = getThinkingLevel();
   const temperature = Number(els.temperature.value || 0.2);
   const maxTokens = getEffectiveMaxTokens(model);
-  const imageRefs = await uploadImagesForStorage(images || []);
-  const content = images.length
+  const imageRefs = existingMessage
+    ? (Array.isArray(existingMessage._images) ? existingMessage._images : [])
+    : await uploadImagesForStorage(images || []);
+  const content = existingMessage?.content ?? (images.length
     ? [
         { type: "text", text: userText },
         ...images.map((image) => ({
@@ -6768,7 +6759,7 @@ async function enqueueSessionMessage(sessionId, userText, images = []) {
           image_url: { url: `data:${image.mime};base64,${image.base64}` },
         })),
       ]
-    : userText;
+    : userText);
   const item = queuedMessageCheckpoint({
     id,
     clientRequestId: id,
@@ -6782,27 +6773,135 @@ async function enqueueSessionMessage(sessionId, userText, images = []) {
     maxTokens,
     queuedAt,
   });
-  const userMessage = {
+  const userMessage = existingMessage || {
     role: "user",
     content,
     _images: imageRefs.length ? imageRefs : undefined,
     _model: model,
     _time: new Date(queuedAt).toISOString(),
-    meta: {
-      queuedDispatch: { id, status: "pending", queuedAt },
-      detachedFromMain: true,
-    },
   };
+  userMessage.content = content;
+  userMessage._images = imageRefs.length ? imageRefs : undefined;
+  userMessage._model = model;
+  userMessage.meta = {
+    ...(userMessage.meta || {}),
+    queuedDispatch: { id, status: "pending", queuedAt },
+    detachedFromMain: true,
+  };
+  delete userMessage.meta.steerDispatch;
 
   const queuedMessages = [...getQueuedMessageCheckpoints(sessionId), item];
   setQueuedMessageCheckpoints(sessionId, queuedMessages);
-  const messages = appendSessionMessages(sessionId, userMessage);
+  const messages = getSessionMessages(sessionId);
+  if (!messages.includes(userMessage)) messages.push(userMessage);
+  setSessionMessages(sessionId, messages);
   await saveSessionState(sessionId, messages, getSessionStats(sessionId), undefined, {
     persistMessages: true,
   });
   renderSessionMessages(sessionId);
   if (!isSessionStreaming(sessionId)) void pumpQueuedSessionMessages(sessionId);
   return id;
+}
+
+function followUpMessageText(message) {
+  if (!Array.isArray(message?.content)) return String(message?.content || "");
+  return String(message.content.find((item) => item?.type === "text")?.text || "");
+}
+
+async function submitSessionSteer(ctx, userMessage) {
+  const dispatch = userMessage?.meta?.steerDispatch;
+  if (!ctx?.agentRunId || !dispatch?.clientRequestId) return null;
+  const response = await agentRuntime.steerAgentRun(ctx.agentRunId, {
+    message: { role: "user", content: userMessage.content },
+    clientRequestId: dispatch.clientRequestId,
+    signal: ctx.run?.abortController?.signal,
+  });
+  dispatch.status = "accepted";
+  dispatch.agentRunId = ctx.agentRunId;
+  dispatch.steerId = String(response?.result?.steerId || dispatch.steerId || "");
+  dispatch.acceptedAt = Date.now();
+  await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats, undefined, {
+    persistMessages: true,
+  });
+  renderSessionMessages(ctx.sessionId);
+  return response;
+}
+
+async function steerSessionMessage(sessionId, userText, images = []) {
+  if (!sessionId) throw new Error(t("createSessionFirst"));
+  const run = ensureSessionRun(sessionId);
+  const ctx = run?._activeCtx;
+  if (!ctx || !ownsActiveRunContext(ctx) || !ctx.agentRunId || !agentRuntime?.steerAgentRun) {
+    return enqueueSessionMessage(sessionId, userText, images);
+  }
+
+  const model = String(ctx.model || getSelectedModel());
+  const submittedAt = Date.now();
+  const clientRequestId = `steer-${submittedAt}-${Math.random().toString(16).slice(2)}`;
+  const imageRefs = await uploadImagesForStorage(images || []);
+  const content = images.length
+    ? [
+        { type: "text", text: userText },
+        ...images.map((image) => ({
+          type: "image_url",
+          image_url: { url: `data:${image.mime};base64,${image.base64}` },
+        })),
+      ]
+    : userText;
+  const userMessage = {
+    role: "user",
+    content,
+    _images: imageRefs.length ? imageRefs : undefined,
+    _model: model,
+    _time: new Date(submittedAt).toISOString(),
+    meta: {
+      steerDispatch: {
+        agentRunId: ctx.agentRunId,
+        clientRequestId,
+        status: "submitting",
+        submittedAt,
+      },
+    },
+  };
+
+  ctx.messages.push(userMessage);
+  setSessionMessages(sessionId, ctx.messages);
+  await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, {
+    persistMessages: true,
+  });
+  renderSessionMessages(sessionId);
+
+  try {
+    await submitSessionSteer(ctx, userMessage);
+    return clientRequestId;
+  } catch (error) {
+    if (Number(error?.status || 0) === 409) {
+      return enqueueSessionMessage(sessionId, userText, [], { existingMessage: userMessage });
+    }
+    throw error;
+  }
+}
+
+async function resumePendingSessionSteers(ctx) {
+  if (!ctx?.agentRunId || !agentRuntime?.steerAgentRun) return;
+  const pending = ctx.messages.filter((message) => (
+    message?.role === "user"
+    && message.meta?.steerDispatch?.status === "submitting"
+    && String(message.meta.steerDispatch.agentRunId || "") === String(ctx.agentRunId)
+  ));
+  for (const message of pending) {
+    try {
+      await submitSessionSteer(ctx, message);
+    } catch (error) {
+      if (Number(error?.status || 0) !== 409) continue;
+      await enqueueSessionMessage(
+        ctx.sessionId,
+        followUpMessageText(message),
+        [],
+        { existingMessage: message },
+      );
+    }
+  }
 }
 
 async function cancelQueuedSessionMessage(sessionId, queueItemId) {
@@ -7045,6 +7144,14 @@ function mergeBackgroundUsage(sessionId, childStats) {
   const stats = getSessionStats(sessionId);
   Object.assign(stats, mergeBackgroundUsageStats(stats, childStats));
   setSessionStats(sessionId, stats);
+}
+
+let nextFollowUpBehaviorOverride = "";
+
+function consumeFollowUpBehaviorOverride() {
+  const behavior = nextFollowUpBehaviorOverride;
+  nextFollowUpBehaviorOverride = "";
+  return behavior;
 }
 
 function backgroundJobElapsed(job, finishedAt = Date.now()) {
@@ -8313,6 +8420,7 @@ async function runServerAgentLoop(ctx) {
   }
 
   while (true) {
+    await resumePendingSessionSteers(ctx);
     let snapshot = await agentRuntime.getAgentRun(ctx.agentRunId, {
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
@@ -8690,6 +8798,9 @@ async function sendMessage(userText, options = {}) {
 
   const sessionId = String(options.sessionId || state.sessionId || "");
   if (!sessionId) throw new Error(t("createSessionFirst"));
+  if (typeof options.onSessionResolved === "function") {
+    options.onSessionResolved(sessionId);
+  }
   const run = ensureSessionRun(sessionId);
   const ctx = buildRunContext(sessionId, options);
   ctx.taskUsage = { input: 0, output: 0, cache: 0 };
@@ -8909,8 +9020,15 @@ async function sendMessage(userText, options = {}) {
       if (userMsg && userMsg.role === "user") {
         userMsg.content = originalUserContent;
       }
+      const followUpsToPreserve = ctx.messages.slice(snapshotIndex).filter((message) => (
+        message?.role === "user"
+        && (message.meta?.steerDispatch || message.meta?.queuedDispatch || message.meta?.backgroundDispatch)
+      ));
       // Drop all messages from the failed run (assistant, tool-call, tool-result)
       ctx.messages.length = snapshotIndex;
+      for (const message of followUpsToPreserve) {
+        if (!ctx.messages.includes(message)) ctx.messages.push(message);
+      }
       // Clean any streaming/partial markers on messages before the snapshot
       for (const msg of ctx.messages) {
         if (msg && msg.streaming) {
@@ -9279,6 +9397,12 @@ els.prompt.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
 
     event.preventDefault();
+
+    if (isSessionStreaming(state.sessionId) && (event.ctrlKey || event.metaKey)) {
+      nextFollowUpBehaviorOverride = oppositeFollowUpBehavior(
+        loadFollowUpBehavior(localStorage),
+      );
+    }
 
     els.chatForm.requestSubmit();
 
@@ -9776,6 +9900,8 @@ els.chatForm.addEventListener("submit", async (event) => {
 
   event.preventDefault();
 
+  const followUpBehaviorOverride = consumeFollowUpBehaviorOverride();
+
   await waitForPendingImageAttachments();
   await resolveAtImages();
 
@@ -9813,8 +9939,10 @@ els.chatForm.addEventListener("submit", async (event) => {
         appendSystemError(err.message || String(err));
       });
     } else {
-      enqueueSessionMessage(sessionId, taskText, imgs).catch((err) => {
-        console.error("Failed to queue message:", err);
+      const followUpBehavior = followUpBehaviorOverride || loadFollowUpBehavior(localStorage);
+      const dispatch = followUpBehavior === "queue" ? enqueueSessionMessage : steerSessionMessage;
+      dispatch(sessionId, taskText, imgs).catch((err) => {
+        console.error("Failed to dispatch follow-up message:", err);
         appendSystemError(err.message || String(err));
       });
     }
@@ -9834,10 +9962,14 @@ els.chatForm.addEventListener("submit", async (event) => {
     try { Notification.requestPermission(); } catch (_) {}
   }
 
-  const submittedSessionId = state.sessionId;
+  let submittedSessionId = state.sessionId;
   try {
 
-    await sendMessage(text);
+    await sendMessage(text, {
+      onSessionResolved: (sessionId) => {
+        submittedSessionId = sessionId;
+      },
+    });
 
   } catch (err) {
 

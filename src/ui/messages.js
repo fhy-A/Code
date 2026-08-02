@@ -188,6 +188,13 @@
       boundInteractionRoots.add(root);
 
       root.addEventListener("click", (event) => {
+        const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
+        if (traceToggle && (!root.contains || root.contains(traceToggle))) {
+          const trace = traceToggle.closest("[data-execution-trace]");
+          const expanded = Boolean(trace?.classList.toggle("is-expanded"));
+          traceToggle.setAttribute("aria-expanded", String(expanded));
+          return;
+        }
         const copyButton = event.target?.closest?.(".msg-copy-btn");
         if (copyButton && (!root.contains || root.contains(copyButton))) {
           void copyMessageText(copyButton);
@@ -203,6 +210,13 @@
         const image = event.target?.closest?.("[data-message-scroll-on-load]");
         if (image && (!root.contains || root.contains(image))) onImageLoad(image);
       }, true);
+      root.addEventListener("keydown", (event) => {
+        if (!["Enter", " "].includes(event.key)) return;
+        const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
+        if (!traceToggle || (root.contains && !root.contains(traceToggle))) return;
+        event.preventDefault();
+        traceToggle.click();
+      });
       return true;
     }
 
@@ -261,6 +275,13 @@
       );
     }
 
+    function isSteerProjectionMessage(msg) {
+      return Boolean(
+        msg?.role === "user"
+        && String(msg.meta?.steerDispatch?.agentRunId || ""),
+      );
+    }
+
     function renderCompletedRunHeader(elapsed) {
       if (!elapsed) return "";
       return `<div class="completed-run-status msg" data-completed-run-status>
@@ -277,6 +298,7 @@
       messages.forEach((msg, index) => {
         if (!msg || isInternalMessage(msg)) return;
         if (msg.role === "user"
+            && !isSteerProjectionMessage(msg)
             && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
             && !msg.meta?.detachedFromMain) {
           userIndex = index;
@@ -299,6 +321,7 @@
       messages.forEach((msg, index) => {
         if (!msg || isInternalMessage(msg)) return;
         if (msg.role === "user"
+            && !isSteerProjectionMessage(msg)
             && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
             && !msg.meta?.detachedFromMain) {
           userIndex = index;
@@ -332,6 +355,7 @@
       messages.forEach((msg, index) => {
         if (!msg || isInternalMessage(msg)) return;
         if (msg.role === "user"
+            && !isSteerProjectionMessage(msg)
             && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
             && !msg.meta?.detachedFromMain) {
           userIndex = index;
@@ -352,7 +376,7 @@
       return turns;
     }
 
-    function renderUserProjection(msg, index) {
+    function renderUserProjection(msg, index, options = {}) {
       const text = Array.isArray(msg.content)
         ? (msg.content.find((item) => item.type === "text")?.text || "")
         : getMessageText(msg);
@@ -370,15 +394,8 @@
         : dispatchJob?.status === "running"
           ? `<span class="background-dispatch-status running"><span class="background-dispatch-dot"></span>${t("backgroundRunning")}</span>`
           : "";
-      const queuedStatusValue = String(msg.meta?.queuedDispatch?.status || "");
-      const queuedStatus = queuedStatusValue === "pending"
-        ? `<span class="queued-message-status pending"><span class="queued-message-dot"></span>${t("queuedMessagePending")}<button class="queued-message-cancel" type="button" data-queue-item-id="${escapeHtml(queueItemId)}" title="${escapeHtml(t("cancelQueuedMessage"))}" aria-label="${escapeHtml(t("cancelQueuedMessage"))}">×</button></span>`
-        : queuedStatusValue === "running"
-          ? `<span class="queued-message-status running"><span class="queued-message-dot"></span>${t("queuedMessageRunning")}</span>`
-          : queuedStatusValue === "canceled"
-            ? `<span class="queued-message-status canceled"><span class="queued-message-dot"></span>${t("queuedMessageCanceled")}</span>`
-            : "";
-      const dispatchStatus = queuedStatus || backgroundStatus;
+      const dispatchStatus = backgroundStatus;
+      const traceClass = options.tracePersistent ? " execution-trace-persistent" : "";
       const imageItems = images.map((image, imageIndex) => {
         const src = image.path
           ? `/api/file?path=${encodeURIComponent(image.path)}&raw=1`
@@ -395,10 +412,10 @@
           : dispatchStatus
             ? `<div class="msg-meta">${dispatchStatus}${time}</div>`
             : "";
-        return `<article class="msg user msg-image-batch" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
+        return `<article class="msg user msg-image-batch${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
       }
       const textArticle = text
-        ? `<article class="msg user" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area"><div class="bubble">${renderMarkdown(text)}</div><div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
+        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area"><div class="bubble">${renderMarkdown(text)}</div><div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
         : "";
       return textArticle;
     }
@@ -793,6 +810,14 @@
         : new Set(projection.expandedToolProcesses || []);
       const rows = [];
       const queuedTailMessages = [];
+      const claimedToolResultIndexes = new Set();
+      const toolResultsByCallId = new Map();
+      messages.forEach((message, index) => {
+        if (message?.role !== "tool-result" || !message.meta?.toolCallId) return;
+        const id = String(message.meta.toolCallId);
+        if (!toolResultsByCallId.has(id)) toolResultsByCallId.set(id, []);
+        toolResultsByCallId.get(id).push({ msg: message, index });
+      });
       let pendingProcess = [];
       let processSerial = 0;
       let activeUserIndex = -1;
@@ -802,6 +827,7 @@
         for (let index = messages.length - 1; index >= 0; index -= 1) {
           const message = messages[index];
           if (message?.role === "user"
+              && !isSteerProjectionMessage(message)
               && message.meta?.queuedDispatch?.status !== "pending"
               && !message.meta?.detachedFromMain
               && !isInternalMessage(message)) {
@@ -827,6 +853,30 @@
       };
       const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
+        const existingIndexes = new Set(pendingProcess.map((item) => item.index));
+        const runIds = new Set(pendingProcess
+          .map((item) => String(item.msg?.meta?.agentRunId || ""))
+          .filter(Boolean));
+        const callIds = new Set();
+        pendingProcess.forEach(({ msg }) => {
+          if (msg?.role === "assistant") {
+            (Array.isArray(msg.meta?.toolCalls) ? msg.meta.toolCalls : []).forEach((call) => {
+              if (call?.id) callIds.add(String(call.id));
+            });
+          } else if (msg?.role === "tool-call" && msg.meta?.toolCallId) {
+            callIds.add(String(msg.meta.toolCallId));
+          }
+        });
+        callIds.forEach((toolCallId) => {
+          const resultEntry = (toolResultsByCallId.get(toolCallId) || []).find((entry) => {
+            if (existingIndexes.has(entry.index) || claimedToolResultIndexes.has(entry.index)) return false;
+            const resultRunId = String(entry.msg?.meta?.agentRunId || "");
+            return !resultRunId || runIds.size === 0 || runIds.has(resultRunId);
+          });
+          if (!resultEntry) return;
+          pendingProcess.push(resultEntry);
+          claimedToolResultIndexes.add(resultEntry.index);
+        });
         processSerial += 1;
         const processKey = `${currentUserIndex}:${processSerial}`;
         rows.push(renderToolProcessProjection(pendingProcess, processSerial, {
@@ -838,29 +888,29 @@
         return true;
       };
       const openCompletedExecutionTrace = (userIndex, elapsed) => {
-        const open = expandedExecutionTraces.has(String(userIndex)) ? " open" : "";
-        rows.push(`<details class="execution-trace completed" data-execution-trace="${userIndex}"${open}>
-          <summary class="execution-trace-summary">
+        const expanded = expandedExecutionTraces.has(String(userIndex));
+        rows.push(`<section class="execution-trace completed${expanded ? " is-expanded" : ""}" data-execution-trace="${userIndex}">
+          <div class="execution-trace-summary" role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle>
             ${renderCompletedRunHeader(elapsed)}
             <span class="execution-trace-chevron" aria-hidden="true"></span>
-          </summary>
+          </div>
           <div class="execution-trace-body">`);
         openExecutionTraceUserIndex = userIndex;
       };
       const openActiveExecutionTrace = (userIndex) => {
-        const open = expandedExecutionTraces.has(String(userIndex)) ? " open" : "";
-        rows.push(`<details class="execution-trace active" data-execution-trace="${userIndex}"${open}>
-          <summary class="execution-trace-summary">
+        const expanded = expandedExecutionTraces.has(String(userIndex));
+        rows.push(`<section class="execution-trace active${expanded ? " is-expanded" : ""}" data-execution-trace="${userIndex}">
+          <div class="execution-trace-summary" role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle>
             ${takeActiveRunAnchor()}
             <span class="execution-trace-chevron" aria-hidden="true"></span>
-          </summary>
+          </div>
           <div class="execution-trace-body">`);
         openExecutionTraceUserIndex = userIndex;
       };
       const closeExecutionTrace = (options = {}) => {
         flushProcess(options);
         if (openExecutionTraceUserIndex < 0) return;
-        rows.push("</div></details>");
+        rows.push("</div></section>");
         openExecutionTraceUserIndex = -1;
       };
       const insertBranchMarker = () => {
@@ -899,7 +949,9 @@
         }
         if (isInternalMessage(msg)) continue;
         if (isEditSuggestionMessage(msg)) {
-          if (msg.role === "tool-result") pendingProcess.push({ msg, index });
+          if (msg.role === "tool-result" && !claimedToolResultIndexes.has(index)) {
+            pendingProcess.push({ msg, index });
+          }
           flushProcess();
           rows.push(renderEditSuggestion(msg, index));
           continue;
@@ -943,6 +995,13 @@
           rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
           continue;
         }
+        if (msg.role === "user" && isSteerProjectionMessage(msg) && currentUserIndex >= 0) {
+          flushProcess();
+          rows.push(renderUserProjection(msg, index, {
+            tracePersistent: openExecutionTraceUserIndex >= 0,
+          }));
+          continue;
+        }
         if (msg.role === "user") {
           closeExecutionTrace();
           currentUserIndex = index;
@@ -964,6 +1023,7 @@
           continue;
         }
         if (msg.role === "tool-call" || msg.role === "tool-result") {
+          if (msg.role === "tool-result" && claimedToolResultIndexes.has(index)) continue;
           pendingProcess.push({ msg, index });
         }
       }

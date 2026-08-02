@@ -2394,6 +2394,90 @@ process.stdout.write(JSON.stringify({
             {"role": "user", "content": "【工具结果】\norphan"},
         )
 
+    def test_model_request_canonicalizes_tool_result_before_same_run_steer(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+
+const request = window.Code.agent.modelRequest;
+const messages = [
+  {role: "user", content: "original"},
+  {role: "assistant", content: "checking", meta: {
+    agentRunId: "run-1",
+    toolCalls: [{id: "call-1", type: "function", function: {
+      name: "run_command",
+      arguments: '{"command":"git status --short"}',
+    }}],
+  }},
+  {role: "tool-call", meta: {agentRunId: "run-1", toolCallId: "call-1"}},
+  {role: "user", content: "steer", meta: {steerDispatch: {
+    agentRunId: "run-1",
+    status: "accepted",
+  }}},
+  {role: "tool-result", content: "clean", meta: {
+    agentRunId: "run-1",
+    toolCallId: "call-1",
+  }},
+  {role: "assistant", content: "more", meta: {
+    agentRunId: "run-1",
+    toolCalls: [{id: "call-2", type: "function", function: {
+      name: "read_file",
+      arguments: '{"path":"VERSION"}',
+    }}],
+  }},
+  {role: "tool-call", meta: {agentRunId: "run-1", toolCallId: "call-2"}},
+  {role: "user", content: "second steer", meta: {steerDispatch: {
+    agentRunId: "run-1",
+    status: "accepted",
+  }}},
+  {role: "tool-result", content: "0.5.32", meta: {
+    agentRunId: "run-1",
+    toolCallId: "call-2",
+  }},
+  {role: "assistant", content: "done", meta: {agentRunId: "run-1"}},
+];
+const before = JSON.stringify(messages);
+const canonical = request.canonicalizeSteerToolResultOrder(messages);
+const nativeMessages = request.buildModelRequestMessages(messages, true);
+process.stdout.write(JSON.stringify({
+  inputUnchanged: JSON.stringify(messages) === before,
+  canonicalRoles: canonical.map((message) => message.role),
+  canonicalContent: canonical.map((message) => message.content || ""),
+  nativeMessages,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["inputUnchanged"])
+        self.assertEqual(
+            data["canonicalRoles"],
+            [
+                "user", "assistant", "tool-call", "tool-result", "user",
+                "assistant", "tool-call", "tool-result", "user", "assistant",
+            ],
+        )
+        self.assertEqual(data["canonicalContent"][3:5], ["clean", "steer"])
+        self.assertEqual(
+            [message["role"] for message in data["nativeMessages"]],
+            ["user", "assistant", "tool", "user", "assistant", "tool", "user", "assistant"],
+        )
+        self.assertEqual(
+            data["nativeMessages"][1]["tool_calls"][0]["id"],
+            "call-1",
+        )
+        self.assertEqual(data["nativeMessages"][2]["tool_call_id"], "call-1")
+        self.assertEqual(data["nativeMessages"][3]["content"], "steer")
+        self.assertEqual(data["nativeMessages"][5]["tool_call_id"], "call-2")
+        self.assertEqual(data["nativeMessages"][6]["content"], "second steer")
+
     def test_model_request_assembles_payload_fields_and_reasoning_controls(self):
         script = r"""
 global.window = {};
@@ -4651,11 +4735,17 @@ const {apiJson} = window.Code.services.apiClient;
     body: JSON.stringify({hello: "world"}),
   });
   let serverError = "";
+  let serverErrorStatus = 0;
+  let serverErrorData = null;
   let invalidError = "";
-  try { await apiJson("/server-error"); } catch (error) { serverError = error.message; }
+  try { await apiJson("/server-error"); } catch (error) {
+    serverError = error.message;
+    serverErrorStatus = error.status;
+    serverErrorData = error.data;
+  }
   try { await apiJson("/invalid-error"); } catch (error) { invalidError = error.message; }
   const emptySuccess = await apiJson("/empty-success");
-  process.stdout.write(JSON.stringify({success, serverError, invalidError, emptySuccess, calls}));
+  process.stdout.write(JSON.stringify({success, serverError, serverErrorStatus, serverErrorData, invalidError, emptySuccess, calls}));
 })().catch((error) => { console.error(error); process.exit(1); });
 """
         completed = subprocess.run(
@@ -4668,6 +4758,8 @@ const {apiJson} = window.Code.services.apiClient;
         data = json.loads(completed.stdout)
         self.assertEqual(data["success"], {"value": 42})
         self.assertEqual(data["serverError"], "broken")
+        self.assertEqual(data["serverErrorStatus"], 400)
+        self.assertEqual(data["serverErrorData"], {"error": "broken"})
         self.assertEqual(data["invalidError"], "HTTP 502: Bad Gateway")
         self.assertEqual(data["emptySuccess"], {})
         self.assertEqual(data["calls"][0]["url"], "/success")
@@ -6730,13 +6822,13 @@ process.stdout.write(JSON.stringify({
         self.assertLess(completed_html.index("run &lt;task&gt;"), completed_html.index("data-completed-run-status"))
         self.assertIn('class="execution-trace completed"', completed_html)
         self.assertIn('data-execution-trace="0"', completed_html)
-        self.assertNotIn('class="execution-trace completed" open', completed_html)
+        self.assertNotIn('class="execution-trace completed is-expanded"', completed_html)
         trace_start = completed_html.index('class="execution-trace completed"')
         trace_body = completed_html.index('class="execution-trace-body"', trace_start)
         first_trace_commentary = completed_html.index("<answer>inspect **project**</answer>")
         first_trace_tools = completed_html.index("data-tool-process-block", first_trace_commentary)
         final_answer = completed_html.index("<answer>done</answer>")
-        trace_end = completed_html.rfind("</details>", trace_body, final_answer)
+        trace_end = completed_html.rfind("</section>", trace_body, final_answer)
         self.assertLess(completed_html.index("data-completed-run-status"), trace_body)
         self.assertLess(trace_body, first_trace_commentary)
         self.assertLess(first_trace_commentary, first_trace_tools)
@@ -6746,7 +6838,7 @@ process.stdout.write(JSON.stringify({
         auto_trace_body = auto_compaction_html.index('class="execution-trace-body"')
         auto_marker = auto_compaction_html.index("data-context-compaction")
         auto_final = auto_compaction_html.index("final after compaction")
-        auto_trace_end = auto_compaction_html.rfind("</details>", auto_trace_body, auto_final)
+        auto_trace_end = auto_compaction_html.rfind("</section>", auto_trace_body, auto_final)
         self.assertLess(auto_trace_body, auto_marker)
         self.assertLess(auto_marker, auto_trace_end)
         self.assertLess(auto_trace_end, auto_final)
@@ -6769,7 +6861,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('class="execution-trace active"', active_answer_html)
         self.assertIn('data-execution-trace="0"', active_answer_html)
         self.assertNotIn(
-            '<details class="execution-trace active" data-execution-trace="0" open',
+            'class="execution-trace active is-expanded"',
             active_answer_html,
         )
         active_trace_start = active_answer_html.index('class="execution-trace active"')
@@ -6779,7 +6871,7 @@ process.stdout.write(JSON.stringify({
         active_commentary = active_answer_html.index("checkpoint", active_body)
         active_tools = active_answer_html.index("data-tool-process-block", active_commentary)
         active_final = active_answer_html.index("first final chunk")
-        active_trace_end = active_answer_html.rfind("</details>", active_tools, active_final)
+        active_trace_end = active_answer_html.rfind("</section>", active_tools, active_final)
         self.assertLess(active_summary, active_anchor)
         self.assertLess(active_anchor, active_body)
         self.assertLess(active_body, active_commentary)
@@ -6787,7 +6879,7 @@ process.stdout.write(JSON.stringify({
         self.assertLess(active_tools, active_trace_end)
         self.assertLess(active_trace_end, active_final)
         self.assertIn(
-            '<details class="execution-trace active" data-execution-trace="0" open',
+            'class="execution-trace active is-expanded"',
             data["expandedActiveAnswerHtml"],
         )
         self.assertNotIn("execution-trace", data["activeThinkingHtml"])
@@ -7162,9 +7254,9 @@ process.stdout.write(feature.projectMessages(messages, {hasActiveRun: true}));
         self.assertLess(html.index("active output"), html.index("queued first"))
         self.assertLess(html.index("queued first"), html.index("canceled second"))
         self.assertLess(html.index("canceled second"), html.index("queued third"))
-        self.assertEqual(html.count("queued-message-cancel"), 2)
-        self.assertEqual(html.count("queuedMessagePending"), 2)
-        self.assertEqual(html.count("queuedMessageCanceled"), 1)
+        self.assertEqual(html.count("queued-message-cancel"), 0)
+        self.assertEqual(html.count("queuedMessagePending"), 0)
+        self.assertEqual(html.count("queuedMessageCanceled"), 0)
 
     def test_timeline_ui_owns_markers_nodes_and_click_navigation(self):
         self.assertIn("Code.ui.timeline = Object.freeze", TIMELINE_SOURCE)
@@ -7935,7 +8027,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn("const filesFeature = createFilesFeature", APP_SOURCE)
         self.assertIn("getSkillToolBudgets,", APP_SOURCE)
         self.assertIn("const skillsMemoryFeature = createSkillsMemoryFeature", APP_SOURCE)
-        self.assertIn("const { createSettingsFeature } = window.Code.features.settings", APP_SOURCE)
+        self.assertIn("createSettingsFeature,", APP_SOURCE)
+        self.assertIn("loadFollowUpBehavior,", APP_SOURCE)
+        self.assertIn("} = window.Code.features.settings", APP_SOURCE)
         self.assertIn("const settingsFeature = createSettingsFeature", APP_SOURCE)
         self.assertIn("createMarkdownFeature,", APP_SOURCE)
         self.assertIn("const markdownFeature = createMarkdownFeature", APP_SOURCE)
@@ -8211,6 +8305,155 @@ process.stdout.write(JSON.stringify({
         modern_message_end = STYLE_SOURCE.index("}", modern_message_start)
         modern_message_rule = STYLE_SOURCE[modern_message_start:modern_message_end]
         self.assertIn("margin-bottom: var(--message-stack-gap)", modern_message_rule)
+
+    def test_same_run_steer_stays_inside_one_execution_trace_without_merging_tool_stages(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+const feature = createMessagesFeature({
+  escapeHtml,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  t: (key) => key,
+  getMessageText: (msg) => String(msg?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => [],
+  getSessionId: () => "session-steer",
+  getSelectedModel: () => "model-1",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => `<answer>${escapeHtml(value)}</answer>`,
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+  getToolActionLabel: (action) => `label:${action}`,
+});
+const messages = [
+  {role: "user", content: "original"},
+  {role: "assistant", content: "first checkpoint", meta: {
+    agentRunId: "run-1",
+    toolCalls: [{id: "call-1", function: {
+      name: "run_command",
+      arguments: '{"command":"git status --short"}',
+    }}],
+  }},
+  {role: "tool-call", meta: {
+    agentRunId: "run-1",
+    action: "run_command",
+    toolCallId: "call-1",
+    tool: {action: "run_command", command: "git status --short"},
+  }},
+  {role: "user", content: "steer instruction", meta: {steerDispatch: {
+    agentRunId: "run-1",
+    status: "accepted",
+  }}},
+  {role: "tool-result", content: "clean", meta: {
+    agentRunId: "run-1",
+    action: "run_command",
+    toolCallId: "call-1",
+    outcome: "succeeded",
+  }},
+  {role: "assistant", content: "second checkpoint", meta: {
+    agentRunId: "run-1",
+    toolCalls: [{id: "call-2", function: {
+      name: "read_file",
+      arguments: '{"path":"VERSION"}',
+    }}],
+  }},
+  {role: "tool-call", meta: {
+    agentRunId: "run-1",
+    action: "read_file",
+    toolCallId: "call-2",
+    tool: {action: "read_file", path: "VERSION"},
+  }},
+  {role: "user", content: "second steer", meta: {steerDispatch: {
+    agentRunId: "run-1",
+    status: "accepted",
+  }}},
+  {role: "tool-result", content: "0.5.32", meta: {
+    agentRunId: "run-1",
+    action: "read_file",
+    toolCallId: "call-2",
+    outcome: "succeeded",
+  }},
+  {role: "assistant", content: "final answer", _responseTime: "44s", meta: {
+    agentRunId: "run-1",
+  }},
+];
+process.stdout.write(JSON.stringify({
+  completed: feature.projectMessages(messages, {hasActiveRun: false}),
+  expanded: feature.projectMessages(messages, {
+    hasActiveRun: false,
+    expandedExecutionTraces: new Set(["0"]),
+  }),
+  active: feature.projectMessages(messages.slice(0, 5), {hasActiveRun: true}),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        html = data["completed"]
+        self.assertEqual(html.count('class="execution-trace completed"'), 1)
+        self.assertEqual(html.count("data-completed-run-status"), 1)
+        self.assertEqual(html.count("data-tool-process-block"), 2)
+        self.assertEqual(html.count('class="tool-process-stage succeeded"'), 2)
+        trace_body = html.index('class="execution-trace-body"')
+        first_checkpoint = html.index("first checkpoint", trace_body)
+        first_tools = html.index("data-tool-process-block", first_checkpoint)
+        steer = html.index("steer instruction", first_tools)
+        second_checkpoint = html.index("second checkpoint", steer)
+        second_tools = html.index("data-tool-process-block", second_checkpoint)
+        second_steer = html.index("second steer", second_tools)
+        final_answer = html.index("final answer", second_steer)
+        trace_end = html.rfind("</section>", second_tools, final_answer)
+        self.assertLess(trace_body, first_checkpoint)
+        self.assertLess(first_checkpoint, first_tools)
+        self.assertLess(first_tools, steer)
+        self.assertLess(steer, second_checkpoint)
+        self.assertLess(second_checkpoint, second_tools)
+        self.assertLess(second_tools, second_steer)
+        self.assertLess(second_steer, trace_end)
+        self.assertLess(trace_end, final_answer)
+        self.assertEqual(html.count("<answer>final answer</answer>"), 1)
+        self.assertEqual(html.count("execution-trace-persistent"), 2)
+        self.assertIn(
+            ".execution-trace:not(.is-expanded) > .execution-trace-body > :not(.execution-trace-persistent)",
+            STYLE_SOURCE,
+        )
+        first_stage = html[first_tools:steer]
+        self.assertIn('class="tool-process-stage succeeded"', first_stage)
+        self.assertNotIn('class="tool-process-stage running"', first_stage)
+
+        expanded_html = data["expanded"]
+        self.assertEqual(
+            expanded_html.count('class="execution-trace completed is-expanded"'),
+            1,
+        )
+        expanded_first_tools = expanded_html.index("data-tool-process-block")
+        expanded_steer = expanded_html.index("steer instruction", expanded_first_tools)
+        expanded_second_tools = expanded_html.index("data-tool-process-block", expanded_steer)
+        expanded_second_steer = expanded_html.index("second steer", expanded_second_tools)
+        expanded_final = expanded_html.index("final answer", expanded_second_steer)
+        self.assertLess(expanded_first_tools, expanded_steer)
+        self.assertLess(expanded_steer, expanded_second_tools)
+        self.assertLess(expanded_second_tools, expanded_second_steer)
+        self.assertLess(expanded_second_steer, expanded_final)
+
+        active_html = data["active"]
+        self.assertNotIn('class="execution-trace active"', active_html)
+        self.assertLess(active_html.index("data-active-run-anchor"), active_html.index("first checkpoint"))
+        self.assertLess(active_html.index("data-tool-process-block"), active_html.index("steer instruction"))
 
     def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
         render_start = MESSAGES_SOURCE.index("function projectMessages(")
@@ -8719,7 +8962,7 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn('data-active-run-anchor', MESSAGES_SOURCE)
         self.assertIn("const expandedExecutionTraces = new Set(", render)
-        self.assertIn('details.execution-trace[open][data-execution-trace]', render)
+        self.assertIn('.execution-trace.is-expanded[data-execution-trace]', render)
         self.assertIn("const expandedToolProcesses = hasActiveRun", render)
         self.assertIn('details.tool-process-stage[open][data-tool-process-key]', render)
         self.assertIn("const html = projectMessages(msgs, {", render)

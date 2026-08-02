@@ -26,7 +26,10 @@
     }
 
     if (!response.ok) {
-      throw new Error(data.error || data?.error?.message || `HTTP ${response.status}`);
+      const error = new Error(data.error || data?.error?.message || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.data = data;
+      throw error;
     }
 
     return data;

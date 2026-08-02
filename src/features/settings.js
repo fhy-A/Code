@@ -17,6 +17,26 @@
     settings: "code-update-seen-settings",
     page: "code-update-seen-page",
   });
+  const FOLLOW_UP_BEHAVIOR_STORAGE_KEY = "code-follow-up-behavior";
+  const FOLLOW_UP_BEHAVIORS = Object.freeze(["steer", "queue"]);
+
+  function normalizeFollowUpBehavior(value) {
+    return value === "queue" ? "queue" : "steer";
+  }
+
+  function loadFollowUpBehavior(storage = global.localStorage) {
+    return normalizeFollowUpBehavior(storage?.getItem(FOLLOW_UP_BEHAVIOR_STORAGE_KEY));
+  }
+
+  function saveFollowUpBehavior(value, storage = global.localStorage) {
+    const normalized = normalizeFollowUpBehavior(value);
+    storage?.setItem(FOLLOW_UP_BEHAVIOR_STORAGE_KEY, normalized);
+    return normalized;
+  }
+
+  function oppositeFollowUpBehavior(value) {
+    return normalizeFollowUpBehavior(value) === "steer" ? "queue" : "steer";
+  }
 
   function loadKeyConfig(storage = global.localStorage) {
     return platform.loadKeyConfig(storage);
@@ -547,6 +567,29 @@
         els.systemPromptText.value = value;
         byId("settingsSystemText").value = value;
         saveSystemPrompt();
+      });
+    }
+
+    function renderEditorPanel(container) {
+      const current = loadFollowUpBehavior(storage);
+      const options = FOLLOW_UP_BEHAVIORS.map((behavior) => (
+        `<button class="follow-up-behavior-option${behavior === current ? " active" : ""}" type="button" role="radio" aria-checked="${behavior === current}" data-follow-up-behavior="${behavior}">${t(behavior === "steer" ? "followUpSteer" : "followUpQueue")}</button>`
+      )).join("");
+      container.innerHTML = `<h3 class="settings-section-title" data-i18n="editorSettings">${t("editorSettings")}</h3>
+        <div class="settings-lite-page editor-settings-panel">
+          <section class="settings-lite-card follow-up-behavior-card">
+            <div class="follow-up-behavior-copy">
+              <strong data-i18n="followUpBehavior">${t("followUpBehavior")}</strong>
+              <span data-i18n="followUpBehaviorHint">${t("followUpBehaviorHint")}</span>
+            </div>
+            <div class="follow-up-behavior-options" role="radiogroup" aria-label="${t("followUpBehavior")}">${options}</div>
+          </section>
+        </div>`;
+      container.querySelectorAll("[data-follow-up-behavior]").forEach((button) => {
+        button.addEventListener("click", () => {
+          saveFollowUpBehavior(button.dataset.followUpBehavior, storage);
+          renderEditorPanel(container);
+        });
       });
     }
 
@@ -1190,6 +1233,7 @@
         case "memory": renderMemoryPanel(detail); break;
         case "skills": renderSkillsInSettings(detail); break;
         case "system": renderSystemPanel(detail); break;
+        case "editor": renderEditorPanel(detail); break;
         case "theme": renderThemePanel(detail); break;
         case "update": renderUpdatePanel(detail); break;
         default: return;
@@ -1219,6 +1263,9 @@
           break;
         case "theme":
           renderThemePanel(detail);
+          break;
+        case "editor":
+          renderEditorPanel(detail);
           break;
         case "models": {
           const refreshButton = byId("settingsRefreshModels");
@@ -1351,10 +1398,16 @@
   }
 
   Code.features.settings = Object.freeze({
+    FOLLOW_UP_BEHAVIORS,
+    FOLLOW_UP_BEHAVIOR_STORAGE_KEY,
     UPDATE_NOTICE_STORAGE_KEYS,
     WORKBAR_URL,
     buildPlatformLoginUrl,
     createSettingsFeature,
     loadKeyConfig,
+    loadFollowUpBehavior,
+    normalizeFollowUpBehavior,
+    oppositeFollowUpBehavior,
+    saveFollowUpBehavior,
   });
 })(window);

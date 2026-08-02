@@ -2043,8 +2043,7 @@ input:focus, select:focus, textarea:focus {
 .msg-copy-btn svg { display: block; width: 14px; height: 14px; }
 .msg.user .msg-copy-btn { opacity: 1; }
 .user-message-hover-area:hover .msg-meta { pointer-events: auto; }
-.msg.user:has(.background-dispatch-status) .msg-meta,
-.msg.user:has(.queued-message-status) .msg-meta { opacity: 1; }
+.msg.user:has(.background-dispatch-status) .msg-meta { opacity: 1; }
 .background-dispatch-status {
   display: inline-flex;
   align-items: center;
@@ -2064,47 +2063,6 @@ input:focus, select:focus, textarea:focus {
   background: var(--accent);
   animation: queuePulse 1.2s ease-in-out infinite;
 }
-.queued-message-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: 4px;
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-.queued-message-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 58%, var(--muted));
-}
-.queued-message-status.running .queued-message-dot {
-  background: var(--accent);
-  animation: queuePulse 1.2s ease-in-out infinite;
-}
-.queued-message-status.canceled { color: var(--muted); opacity: .78; }
-.queued-message-status.canceled .queued-message-dot { background: var(--muted); }
-.msg.user:has(.queued-message-status.canceled) .bubble { opacity: .64; }
-.queued-message-cancel {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  margin-left: 1px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-}
-.queued-message-cancel:hover { background: var(--panel-2); color: var(--text); }
-.queued-message-cancel:disabled { opacity: .45; cursor: default; }
 .msg-dispatch-meta { min-height: 18px; }
 .msg-copy-btn:hover { border-color: var(--line); background: var(--panel-2); color: var(--text); }
 .msg-copy-btn.copied { border-color: color-mix(in srgb, var(--green) 36%, var(--line)); color: var(--green); }
@@ -4122,10 +4080,6 @@ body.theme-dark .syn-fn { color: #61afef; }
   cursor: pointer;
 }
 
-.execution-trace-summary::-webkit-details-marker {
-  display: none;
-}
-
 .execution-trace-summary > .completed-run-status.msg,
 .execution-trace-summary > .active-run-anchor.msg {
   width: auto;
@@ -4145,12 +4099,30 @@ body.theme-dark .syn-fn { color: #61afef; }
   transition: transform 140ms ease;
 }
 
-.execution-trace[open] > .execution-trace-summary .execution-trace-chevron {
+.execution-trace.is-expanded > .execution-trace-summary .execution-trace-chevron {
   transform: rotate(225deg);
 }
 
 .execution-trace-body {
+  padding-top: 0;
+}
+
+.execution-trace.is-expanded > .execution-trace-body {
   padding-top: 10px;
+}
+
+.execution-trace:not(.is-expanded) > .execution-trace-body > :not(.execution-trace-persistent) {
+  display: none !important;
+}
+
+.execution-trace:not(.is-expanded) > .execution-trace-body > .execution-trace-persistent {
+  margin-top: 10px;
+}
+
+.execution-trace-summary:focus-visible {
+  border-radius: 6px;
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 3px;
 }
 
 .execution-trace-body > :is(.msg, .tool-process) {
@@ -6686,6 +6658,45 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 .settings-empty-card { padding: 30px; text-align: center; color: var(--muted); }
 .settings-empty-card p { margin: 0 0 14px; }
+.follow-up-behavior-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+}
+.follow-up-behavior-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.follow-up-behavior-copy strong { font-size: 14px; }
+.follow-up-behavior-copy span { color: var(--muted); font-size: 12px; line-height: 1.55; }
+.follow-up-behavior-options {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+.follow-up-behavior-option {
+  min-width: 64px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.follow-up-behavior-option:hover { color: var(--text); }
+.follow-up-behavior-option.active {
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+}
+@media (max-width: 760px) {
+  .follow-up-behavior-card { align-items: stretch; flex-direction: column; gap: 14px; }
+  .follow-up-behavior-options { align-self: flex-start; }
+}
 .text-btn {
   padding: 0;
   border: 0;

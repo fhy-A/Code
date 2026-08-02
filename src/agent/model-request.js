@@ -89,12 +89,80 @@
     return { role: "user", content: getMessageText(message) };
   }
 
+  function isSteerMessage(message) {
+    return Boolean(
+      message?.role === "user"
+      && String(message.meta?.steerDispatch?.agentRunId || ""),
+    );
+  }
+
+  function canonicalizeSteerToolResultOrder(messages) {
+    const source = Array.isArray(messages) ? messages : [];
+    const futureResultsById = new Map();
+    source.forEach((message, index) => {
+      if (message?.role !== "tool-result" || !message.meta?.toolCallId) return;
+      const id = String(message.meta.toolCallId);
+      if (!futureResultsById.has(id)) futureResultsById.set(id, []);
+      futureResultsById.get(id).push({ index, message });
+    });
+
+    const output = [];
+    const movedResultIndexes = new Set();
+    const pendingCalls = new Map();
+    const rememberCall = (id, runId = "") => {
+      const normalizedId = String(id || "");
+      if (!normalizedId) return;
+      pendingCalls.set(normalizedId, String(runId || pendingCalls.get(normalizedId) || ""));
+    };
+
+    source.forEach((message, index) => {
+      if (movedResultIndexes.has(index)) return;
+
+      if (isSteerMessage(message)) {
+        const steerRunId = String(message.meta.steerDispatch.agentRunId || "");
+        const matchingResults = [];
+        pendingCalls.forEach((runId, toolCallId) => {
+          if (runId && steerRunId && runId !== steerRunId) return;
+          const match = (futureResultsById.get(toolCallId) || []).find((entry) => (
+            entry.index > index && !movedResultIndexes.has(entry.index)
+          ));
+          if (match) matchingResults.push({ ...match, toolCallId });
+        });
+        matchingResults
+          .sort((left, right) => left.index - right.index)
+          .forEach((entry) => {
+            output.push(entry.message);
+            movedResultIndexes.add(entry.index);
+            pendingCalls.delete(entry.toolCallId);
+          });
+        output.push(message);
+        return;
+      }
+
+      output.push(message);
+      if (message?.role === "assistant") {
+        (Array.isArray(message.meta?.toolCalls) ? message.meta.toolCalls : []).forEach((call) => {
+          rememberCall(call?.id, message.meta?.agentRunId);
+        });
+      } else if (message?.role === "tool-call") {
+        rememberCall(message.meta?.toolCallId, message.meta?.agentRunId);
+      } else if (message?.role === "tool-result") {
+        pendingCalls.delete(String(message.meta?.toolCallId || ""));
+      }
+    });
+
+    return output;
+  }
+
   function buildModelRequestMessages(messages, includeNativeTools = true) {
     const result = [];
     let pendingToolCallIds = new Set();
     let lastAssistantWithCallsIndex = -1;
+    const requestMessages = includeNativeTools
+      ? canonicalizeSteerToolResultOrder(messages)
+      : (Array.isArray(messages) ? messages : []);
 
-    for (const message of Array.isArray(messages) ? messages : []) {
+    for (const message of requestMessages) {
       if (!message || message.streaming) continue;
 
       const mapped = mapMessageForApi(message, includeNativeTools);
@@ -219,6 +287,7 @@
     assembleModelRequestPayload,
     buildModelRequestMessages,
     buildNativeToolCallMessage,
+    canonicalizeSteerToolResultOrder,
     hasImageContent,
     mapMessageForApi,
     projectMessagesWithoutImages,
