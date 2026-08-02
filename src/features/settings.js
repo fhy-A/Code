@@ -921,6 +921,27 @@
       }
     }
 
+    function inspectPlatformKeyPayload(tokens, fullKeys) {
+      const tokenEntries = Array.isArray(tokens) ? tokens : [];
+      const readableItems = [];
+      let unreadableKeyCount = 0;
+      for (const tokenEntry of tokenEntries) {
+        const platformTokenId = platform.normalizePlatformTokenId(tokenEntry?.id);
+        const key = platform.normalizeSyncedKey(platformTokenId ? fullKeys?.[platformTokenId] : "");
+        if (!key) {
+          unreadableKeyCount += 1;
+          continue;
+        }
+        readableItems.push({ tokenEntry, platformTokenId, key });
+      }
+      return {
+        tokenCount: tokenEntries.length,
+        readableKeyCount: readableItems.length,
+        unreadableKeyCount,
+        readableItems,
+      };
+    }
+
     async function syncKeysFromPlatform({ interactive = true } = {}) {
       const auth = getPlatformAuth();
       if (!auth) {
@@ -959,22 +980,55 @@
           throw new Error(workbarSyncFailureMessage(data, response.status));
         }
         if (data.error) throw new Error(data.error);
-        const tokens = data.tokens || [];
-        if (!tokens.length) {
-          if (interactive) showToast(t("noPlatformKeys"));
-          return { ok: true, imported: 0, updated: 0 };
+        const tokens = Array.isArray(data.tokens) ? data.tokens : [];
+        const fullKeys = data.keys && typeof data.keys === "object" && !Array.isArray(data.keys) ? data.keys : {};
+        const localConfig = loadKeyConfig(storage);
+        const snapshot = inspectPlatformKeyPayload(tokens, fullKeys);
+        if (snapshot.tokenCount === 0) {
+          if (interactive) showToast(t("noPlatformTokens"), "warning");
+          return {
+            ok: true,
+            status: "no-platform-tokens",
+            imported: 0,
+            updated: 0,
+            tokenCount: 0,
+            readableKeyCount: 0,
+            unreadableKeyCount: 0,
+            preservedLocalCount: localConfig.length,
+          };
+        }
+        if (snapshot.readableKeyCount === 0) {
+          if (interactive) showToast(t("platformKeysUnreadable", { count: snapshot.tokenCount }), "warning");
+          return {
+            ok: true,
+            status: "keys-unreadable",
+            imported: 0,
+            updated: 0,
+            tokenCount: snapshot.tokenCount,
+            readableKeyCount: 0,
+            unreadableKeyCount: snapshot.unreadableKeyCount,
+            preservedLocalCount: localConfig.length,
+          };
         }
         if (interactive) {
-          const presented = showKeySyncModal(tokens, data.keys || {});
-          if (!presented) showToast(t("noPlatformKeys"));
-          return { ok: true, presented };
+          const presentation = showKeySyncModal(snapshot);
+          return { ok: true, ...presentation };
         }
         const excludedTokenIds = platform.loadPlatformKeyExclusions(auth.userId, storage);
-        const result = platform.mergeSyncedKeys(loadKeyConfig(storage), tokens, data.keys || {}, { excludedTokenIds });
+        const result = platform.mergeSyncedKeys(localConfig, tokens, fullKeys, { excludedTokenIds });
         const saved = saveKeyConfig(result.entries);
         els.apiKey.value = serializeKeys(saved);
         saveLocalSettings();
-        return { ok: true, imported: result.imported, updated: result.updated };
+        return {
+          ok: true,
+          status: snapshot.unreadableKeyCount > 0 ? "partial" : result.imported > 0 ? "synced" : "unchanged",
+          imported: result.imported,
+          updated: result.updated,
+          tokenCount: snapshot.tokenCount,
+          readableKeyCount: snapshot.readableKeyCount,
+          unreadableKeyCount: snapshot.unreadableKeyCount,
+          preservedLocalCount: localConfig.length,
+        };
       } catch (error) {
         const message = error.message || String(error);
         if (interactive) showToast(t("syncFailed", { message }), "error");
@@ -992,7 +1046,7 @@
       return syncKeysFromPlatform({ interactive: false });
     }
 
-    function showKeySyncModal(tokens, fullKeys) {
+    function showKeySyncModal(snapshot) {
       byId("keySyncOverlay")?.remove();
       const existingKeys = new Set(loadKeyConfig(storage)
         .map((entry) => platform.normalizeSyncedKey(entry.key))
@@ -1001,10 +1055,9 @@
       const excludedTokenIds = platform.loadPlatformKeyExclusions(auth?.userId, storage);
       const seen = new Set();
       const items = [];
-      for (const tokenEntry of Array.isArray(tokens) ? tokens : []) {
-        const platformTokenId = platform.normalizePlatformTokenId(tokenEntry?.id);
-        const key = platform.normalizeSyncedKey(fullKeys[platformTokenId]);
-        if (!key || seen.has(key)) continue;
+      for (const readable of snapshot.readableItems) {
+        const { tokenEntry, platformTokenId, key } = readable;
+        if (seen.has(key)) continue;
         seen.add(key);
         const name = String(tokenEntry?.name || "").trim();
         items.push({
@@ -1017,7 +1070,15 @@
           enabled: tokenEntry?.status == null || Number(tokenEntry.status) === 1,
         });
       }
-      if (!items.length) return 0;
+      if (!items.length) {
+        return {
+          status: "keys-unreadable",
+          presented: 0,
+          tokenCount: snapshot.tokenCount,
+          readableKeyCount: 0,
+          unreadableKeyCount: snapshot.unreadableKeyCount,
+        };
+      }
 
       const copyLines = items.map((item) => item.enabled ? item.line : "");
       const enabledItems = items.filter((item) => item.enabled);
@@ -1025,6 +1086,7 @@
       const newCount = enabledItems.filter((item) => !item.exists && !item.excluded).length;
       const excludedCount = enabledItems.filter((item) => !item.exists && item.excluded).length;
       const disabledCount = items.length - enabledItems.length;
+      const unreadableCount = snapshot.unreadableKeyCount;
       const rows = items.map((item, index) => {
         const badges = [
           item.exists ? `<span class="key-sync-badge">${t("alreadyAdded")}</span>` : "",
@@ -1034,16 +1096,33 @@
         const copyButton = item.enabled
           ? `<button class="mini-btn key-copy-one" data-copy-index="${index}" type="button">${t("copy")}</button>`
           : "";
-        return `<div class="key-sync-row${item.exists ? " key-sync-exists" : ""}${item.excluded && !item.exists ? " key-sync-excluded" : ""}${item.enabled ? "" : " key-sync-disabled"}"><span class="key-sync-name">${escapeHtml(item.name || t("unnamed"))}</span><span class="key-sync-key">${escapeHtml(item.preview)}</span><span class="key-sync-actions">${badges}${copyButton}</span></div>`;
+        const displayName = item.name || t("unnamed");
+        return `<div class="key-sync-row${item.exists ? " key-sync-exists" : ""}${item.excluded && !item.exists ? " key-sync-excluded" : ""}${item.enabled ? "" : " key-sync-disabled"}"><span class="key-sync-name" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</span><span class="key-sync-key">${escapeHtml(item.preview)}</span><span class="key-sync-actions">${badges}${copyButton}</span></div>`;
       }).join("");
       const overlay = documentRef.createElement("div");
       overlay.id = "keySyncOverlay";
       overlay.className = "modal-overlay";
-      overlay.innerHTML = `<div class="modal-card" style="width:540px;max-height:70vh;display:flex;flex-direction:column">
+      const summaryParts = [
+        t("keyCount", { count: snapshot.tokenCount }),
+        newCount > 0 && newCount < enabledItems.length ? t("newKeyCount", { count: newCount }) : "",
+        excludedCount > 0 ? t("removedKeyCount", { count: excludedCount }) : "",
+        disabledCount > 0 ? t("disabledKeyCount", { count: disabledCount }) : "",
+        unreadableCount > 0 ? t("unreadableKeyCount", { count: unreadableCount }) : "",
+      ].filter(Boolean);
+      const footerKey = enabledItems.length === 0
+        ? "noEnabledPlatformKeys"
+        : unreadableCount > 0 && newCount === 0 && excludedCount === 0
+          ? "partialKeysUnreadable"
+          : newCount === 0 && excludedCount === 0
+            ? "allKeysAdded"
+            : newCount === 0
+              ? "removedKeysHint"
+              : "pasteKeysHint";
+      overlay.innerHTML = `<div class="modal-card key-sync-card">
         <header><h3>${t("syncKeysTitle")}</h3><button class="icon-btn key-sync-close" type="button">&times;</button></header>
-        <div class="key-sync-summary"><span>${t("keyCount", { count: items.length })}${newCount > 0 && newCount < enabledItems.length ? `，${t("newKeyCount", { count: newCount })}` : ""}${excludedCount > 0 ? `，${t("removedKeyCount", { count: excludedCount })}` : ""}${disabledCount > 0 ? `，${t("disabledKeyCount", { count: disabledCount })}` : ""}</span><button id="keySyncCopyAll" class="mini-btn primary" type="button"${enabledItems.length ? "" : " disabled"}>${t("copyAll")}</button></div>
+        <div class="key-sync-summary"><span>${summaryParts.join(t("keySummarySeparator"))}</span><button id="keySyncCopyAll" class="mini-btn primary" type="button"${enabledItems.length ? "" : " disabled"}>${t("copyAll")}</button></div>
         <div class="key-sync-list">${rows}</div>
-        <div class="key-sync-footer">${enabledItems.length === 0 ? `<span class="key-sync-note">${t("noEnabledPlatformKeys")}</span>` : newCount === 0 && excludedCount === 0 ? `<span class="key-sync-note is-complete">${t("allKeysAdded")}</span>` : newCount === 0 ? `<span class="key-sync-note">${t("removedKeysHint")}</span>` : `<span class="key-sync-note">${t("pasteKeysHint")}</span>`}</div>
+        <div class="key-sync-footer"><span class="key-sync-note${footerKey === "allKeysAdded" ? " is-complete" : ""}">${t(footerKey)}</span></div>
       </div>`;
       documentRef.body.appendChild(overlay);
       overlay.querySelector(".key-sync-close").addEventListener("click", () => overlay.remove());
@@ -1065,7 +1144,21 @@
           }).catch(() => showToast(t("copyFailed")));
         });
       });
-      return items.length;
+      return {
+        status: unreadableCount > 0
+          ? "partial"
+          : enabledItems.length === 0
+            ? "no-enabled-keys"
+            : newCount === 0 && excludedCount === 0
+              ? "all-added"
+              : newCount > 0
+                ? "new-keys"
+                : "excluded",
+        presented: items.length,
+        tokenCount: snapshot.tokenCount,
+        readableKeyCount: snapshot.readableKeyCount,
+        unreadableKeyCount: unreadableCount,
+      };
     }
 
     async function checkCodeCallback() {

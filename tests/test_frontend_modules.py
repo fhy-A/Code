@@ -4944,6 +4944,118 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertIn('syncFailureTimeout: "{stage}{position}超时"', I18N_SOURCE)
         self.assertIn('syncFailureTimeout: "{stage}{position} timed out"', I18N_SOURCE)
 
+    def test_settings_sync_distinguishes_empty_unreadable_and_all_added_results(self):
+        script = r"""
+const values = new Map([
+  ["code-platform-auth", JSON.stringify({token: "access-1", userId: "7"})],
+  ["code-key-config", JSON.stringify([
+    {name: "local", key: "sk-existing", enabled: true, source: "manual"},
+  ])],
+]);
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+const toasts = [];
+let mode = "empty";
+let appendedHtml = "";
+const actionButton = {textContent: "", addEventListener: () => {}};
+const documentStub = {
+  body: {appendChild: (node) => { appendedHtml = node.innerHTML; }},
+  createElement: () => ({
+    id: "",
+    className: "",
+    innerHTML: "",
+    remove: () => {},
+    addEventListener: () => {},
+    querySelector: (selector) => selector === ".key-sync-close" || selector === "#keySyncCopyAll" ? actionButton : null,
+    querySelectorAll: () => [],
+  }),
+  getElementById: () => null,
+  querySelectorAll: () => [],
+};
+global.window = {
+  localStorage: storage,
+  URLSearchParams,
+  location: {search: "", reload: () => {}},
+  history: {replaceState: () => {}},
+  matchMedia: () => ({matches: false, addEventListener: () => {}}),
+  addEventListener: () => {},
+  open: () => {},
+  setTimeout,
+  setInterval,
+  clearInterval,
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const feature = window.Code.features.settings.createSettingsFeature({
+  elements: {apiKey: {value: "local: sk-existing"}},
+  t: (key, args) => args?.count == null ? key : `${key}:${args.count}`,
+  apiJson: async () => ({}),
+  document: documentStub,
+  storage,
+  navigator: {clipboard: {writeText: async () => {}}},
+  fetch: async () => {
+    if (mode === "empty") return {status: 200, ok: true, json: async () => ({tokens: [], keys: {}})};
+    if (mode === "unreadable") return {
+      status: 200,
+      ok: true,
+      json: async () => ({tokens: [{id: 1}, {id: 2}], keys: {}}),
+    };
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({tokens: [{id: 1, name: "existing", status: 1}], keys: {1: "sk-existing"}}),
+    };
+  },
+  showToast: (...args) => toasts.push(args),
+});
+(async () => {
+  const before = values.get("code-key-config");
+  const empty = await feature.syncKeysFromPlatform();
+  mode = "unreadable";
+  const unreadable = await feature.syncKeysFromPlatform();
+  mode = "all-added";
+  const allAdded = await feature.syncKeysFromPlatform();
+  process.stdout.write(JSON.stringify({
+    empty,
+    unreadable,
+    allAdded,
+    toasts,
+    appendedHtml,
+    localConfigPreserved: before === values.get("code-key-config"),
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["empty"]["status"], "no-platform-tokens")
+        self.assertEqual(data["empty"]["preservedLocalCount"], 1)
+        self.assertEqual(data["unreadable"]["status"], "keys-unreadable")
+        self.assertEqual(data["unreadable"]["unreadableKeyCount"], 2)
+        self.assertEqual(data["unreadable"]["preservedLocalCount"], 1)
+        self.assertEqual(data["allAdded"]["status"], "all-added")
+        self.assertEqual(data["allAdded"]["presented"], 1)
+        self.assertTrue(data["localConfigPreserved"])
+        self.assertEqual(data["toasts"], [
+            ["noPlatformTokens", "warning"],
+            ["platformKeysUnreadable:2", "warning"],
+        ])
+        self.assertIn("allKeysAdded", data["appendedHtml"])
+        self.assertIn('noPlatformTokens: "workbar 账号暂无 Key，本地 Key 不受影响"', I18N_SOURCE)
+        self.assertIn('noPlatformTokens: "No Keys in this workbar account. Local Keys are unchanged."', I18N_SOURCE)
+        self.assertIn('allKeysAdded: "当前 Code 已添加全部 Key"', I18N_SOURCE)
+        self.assertIn('allKeysAdded: "All Keys are added to this Code instance"', I18N_SOURCE)
+
     def test_settings_silent_sync_merges_without_touching_manual_keys_or_ui(self):
         script = r"""
 const values = new Map([
@@ -5025,6 +5137,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
         data = json.loads(completed.stdout)
         config = {entry["key"]: entry for entry in data["config"]}
         self.assertTrue(data["result"]["ok"])
+        self.assertEqual(data["result"]["status"], "synced")
         self.assertEqual(data["result"]["imported"], 1)
         self.assertEqual(config["sk-manual"], {
             "name": "manual", "key": "sk-manual", "enabled": False, "source": "manual",
@@ -5120,6 +5233,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
         {id: 1, name: "existing", status: 1},
         {id: 2, name: "new:key\nname", status: 1},
         {id: 3, name: "disabled", status: 2},
+        {id: 4, name: "unreadable", status: 1},
       ],
       keys: {1: "existing-secret", 2: "sk-new-secret", 3: "sk-disabled-secret"},
     }),
@@ -5151,6 +5265,9 @@ const feature = window.Code.features.settings.createSettingsFeature({
         )
         data = json.loads(completed.stdout)
         self.assertEqual(data["result"]["presented"], 3)
+        self.assertEqual(data["result"]["status"], "partial")
+        self.assertEqual(data["result"]["tokenCount"], 4)
+        self.assertEqual(data["result"]["unreadableKeyCount"], 1)
         self.assertEqual(data["copyButtonCount"], 2)
         self.assertIn("alreadyAdded", data["html"])
         self.assertIn("removedFromCode", data["html"])
@@ -5158,6 +5275,9 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertIn("removedKeysHint", data["html"])
         self.assertIn("disabledStatus", data["html"])
         self.assertIn("disabledKeyCount:1", data["html"])
+        self.assertIn("unreadableKeyCount:1", data["html"])
+        self.assertIn('class="modal-card key-sync-card"', data["html"])
+        self.assertIn('class="key-sync-name" title="existing"', data["html"])
         self.assertIn("key-sync-disabled", data["html"])
         self.assertIn("sk-••••••••cret", data["html"])
         self.assertNotIn("sk-existing-secret", data["html"])
@@ -5425,10 +5545,13 @@ process.stdout.write(JSON.stringify({staleBrowserValueCleared, keyUpdated, edito
         self.assertTrue(data["keyUpdated"])
         self.assertTrue(data["editorUpdated"])
         self.assertEqual(data["reloads"], 1)
-        self.assertIn('syncKeysTitle: "选择 workbar API Key"', I18N_SOURCE)
-        self.assertIn('allKeysAdded: "已启用的 API Key 均已在本地列表中"', I18N_SOURCE)
+        self.assertIn('syncKeysTitle: "从 workbar 获取 API Key"', I18N_SOURCE)
+        self.assertIn('syncKeysTitle: "Get API Keys from workbar"', I18N_SOURCE)
+        self.assertIn('allKeysAdded: "当前 Code 已添加全部 Key"', I18N_SOURCE)
         self.assertIn('detectAvailableModels: "重新检测可用模型"', I18N_SOURCE)
         self.assertIn(".key-sync-note.is-complete::before", STYLE_SOURCE)
+        self.assertIn(".key-sync-card { width: min(720px, calc(100vw - 32px));", STYLE_SOURCE)
+        self.assertIn("grid-template-columns: minmax(160px, 1.35fr) minmax(150px, 0.8fr) minmax(132px, auto);", STYLE_SOURCE)
         self.assertNotIn('class="key-connect-btn"', SETTINGS_SOURCE)
         self.assertNotIn('class="key-enable-label"', SETTINGS_SOURCE)
 
