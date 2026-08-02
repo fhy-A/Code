@@ -136,10 +136,12 @@ global.window = {{Code: {{features: {{}}}}}};
 eval({json.dumps(SKILLS_MEMORY_SOURCE)});
 const translate = (key) => ({{
   cmdCompactDesc: "compact-desc",
+  cmdRememberDesc: "remember-desc",
   cmdExportDesc: "export-desc",
   cmdClearDesc: "clear-desc",
   cmdBranchDesc: "branch-desc",
   cmdParallelDesc: "parallel-desc",
+  cmdHelpDesc: "help-desc",
   slashCommandsLabel: "Commands",
   slashSkillsLabel: "Skills",
 }}[key] || key);
@@ -169,7 +171,19 @@ process.stdout.write(JSON.stringify(groups));
         self.assertEqual(groups[0]["label"], "Commands")
         self.assertEqual(
             [item["name"] for item in groups[0]["items"]],
-            ["compact", "export", "clear", "branch", "parallel"],
+            ["compact", "remember", "export", "clear", "branch", "parallel", "help"],
+        )
+        self.assertEqual(
+            [item["description"] for item in groups[0]["items"]],
+            [
+                "compact-desc",
+                "remember-desc",
+                "export-desc",
+                "clear-desc",
+                "branch-desc",
+                "parallel-desc",
+                "help-desc",
+            ],
         )
         self.assertEqual(
             [item["name"] for item in groups[1]["items"]],
@@ -179,6 +193,14 @@ process.stdout.write(JSON.stringify(groups));
         self.assertIn(".slash-section + .slash-section", STYLE_SOURCE)
         self.assertIn('slashCommandsLabel: "命令", slashSkillsLabel: "Skills"', I18N_SOURCE)
         self.assertIn('slashCommandsLabel: "Commands", slashSkillsLabel: "Skills"', I18N_SOURCE)
+        self.assertIn(
+            'cmdParallelDesc: "主任务运行时，启动共享当前项目的后台子 Agent"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'cmdParallelDesc: "Start a background Subagent that shares the current project"',
+            I18N_SOURCE,
+        )
 
     def test_settings_shell_is_responsive_and_navigation_is_grouped(self):
         for key in (
@@ -6740,6 +6762,15 @@ process.stdout.write(JSON.stringify({
         )
         self.assertNotIn("Untitled session", delete_source)
         self.assertNotIn("This action cannot be undone.`", delete_source)
+
+    def test_remaining_visible_status_strings_use_i18n(self):
+        self.assertIn('showToast(t("notEnoughToExtract"))', APP_SOURCE)
+        self.assertIn('content: t("scanningConversation")', APP_SOURCE)
+        self.assertIn('showToast(t("restarting"), "success")', SETTINGS_SOURCE)
+        self.assertNotIn("Not enough conversation content to extract memories", APP_SOURCE)
+        self.assertNotIn("Scanning conversation...", APP_SOURCE)
+        self.assertNotIn("Code is restarting...", SETTINGS_SOURCE)
+        self.assertEqual(I18N_SOURCE.count("scanningConversation:"), 2)
 
     def test_panels_ui_owns_session_stats_fields_and_top_panel_interactions(self):
         self.assertIn("Code.ui.panels = Object.freeze", PANELS_SOURCE)

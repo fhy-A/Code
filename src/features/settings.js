@@ -866,7 +866,7 @@
               status("restarting", "loading");
               actions("");
               try { await apiJson("/api/restart", { method: "POST", body: JSON.stringify({ path: newExePath }) }); } catch {}
-              showToast("Code is restarting...", "success");
+              showToast(t("restarting"), "success");
               global.setTimeout(() => {
                 const check = global.setInterval(() => {
                   fetchFn(`/api/version?_=${Date.now()}`, { cache: "no-store" })

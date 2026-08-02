@@ -6147,9 +6147,9 @@ function formatToolResult(result) {
 
 async function extractAndSuggestMemories() {
   const recent = state.messages.filter((m) => m.role === "user" || m.role === "assistant").slice(-20);
-  if (recent.length < 2) { showToast("Not enough conversation content to extract memories"); return; }
+  if (recent.length < 2) { showToast(t("notEnoughToExtract")); return; }
   const transcript = recent.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${getMsgText(m).slice(0, 500)}`).join("\n\n");
-  const idx = state.messages.push({ role: "assistant", content: "Scanning conversation...", streaming: true, _streamProjection: "answer", _model: getSelectedModel() }) - 1;
+  const idx = state.messages.push({ role: "assistant", content: t("scanningConversation"), streaming: true, _streamProjection: "answer", _model: getSelectedModel() }) - 1;
   renderMessages();
   els.messages.scrollTop = els.messages.scrollHeight;
   try {

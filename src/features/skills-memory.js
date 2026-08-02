@@ -163,10 +163,12 @@
 
   const UI_SLASH_COMMANDS = Object.freeze([
     { name: "compact", descriptionKey: "cmdCompactDesc" },
+    { name: "remember", descriptionKey: "cmdRememberDesc" },
     { name: "export", descriptionKey: "cmdExportDesc" },
     { name: "clear", descriptionKey: "cmdClearDesc" },
     { name: "branch", descriptionKey: "cmdBranchDesc" },
     { name: "parallel", descriptionKey: "cmdParallelDesc" },
+    { name: "help", descriptionKey: "cmdHelpDesc" },
   ]);
 
   function getSlashSuggestionGroups(skills, disabledSkills, partial, t) {
