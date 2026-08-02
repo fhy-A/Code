@@ -50,6 +50,14 @@ const {
 } = window.Code.features.skillsMemory;
 const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
+const {
+  canDeferImageConversion,
+  imageMimeForFile,
+  isImageFileCandidate,
+  modelImageOutputMime,
+  parseImageDataUrl,
+  storageNameForImage,
+} = window.Code.features.imageAttachments;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const agentRuntime = window.Code.agent.runtime;
 const {
@@ -4473,7 +4481,10 @@ async function uploadImagesForStorage(images) {
     try {
       const resp = await fetch("/api/attachments", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: img.name || "image.png", contentBase64: img.base64 })
+        body: JSON.stringify({
+          name: img.storageName || img.name || "image.png",
+          contentBase64: img.base64,
+        })
       });
       const data = await resp.json();
       if (data.path) { refs.push({ path: data.path, name: img.name, mime: img.mime }); continue; }
@@ -4487,9 +4498,15 @@ async function uploadImagesForStorage(images) {
 
 
 
-function addImage(name, base64, mime) {
+function addImage(name, base64, mime, options = {}) {
 
-  state.attachedImages.push({ name, base64, mime: mime || "image/png" });
+  state.attachedImages.push({
+    name,
+    base64,
+    mime: mime || "image/png",
+    ...(options.storageName ? { storageName: options.storageName } : {}),
+    ...(options.ref ? { _ref: options.ref } : {}),
+  });
 
   renderImageThumbs();
 
@@ -4561,60 +4578,161 @@ function renderImageThumbs() {
 
 
 
-async function handleImageFile(file) {
+const MAX_COMPOSER_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_DECODE_TIMEOUT_MS = 10000;
+const _imageAttachmentTasks = new Set();
 
-  if (!file.type.startsWith("image/")) return;
-
-  const base64 = await compressImage(file);
-
-  addImage(file.name, base64, file.type);
-
+function imageAttachmentError(code, cause = null) {
+  const error = new Error(code);
+  error.code = code;
+  if (cause) error.cause = cause;
+  return error;
 }
 
+function bytesToBase64(bytes) {
+  const chunks = [];
+  const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  for (let index = 0; index < source.length; index += 0x8000) {
+    chunks.push(String.fromCharCode(...source.subarray(index, index + 0x8000)));
+  }
+  return btoa(chunks.join(""));
+}
 
+function base64ToBytes(value) {
+  const binary = atob(String(value || "").replace(/\s+/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function imageFileFromBytes(bytes, name, mime) {
+  if (typeof File === "function") return new File([bytes], name, { type: mime });
+  const blob = new Blob([bytes], { type: mime });
+  Object.defineProperty(blob, "name", { configurable: true, value: name });
+  return blob;
+}
 
 async function compressImage(file, maxW = 1024, quality = 0.7) {
+  let bytes;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch (error) {
+    throw imageAttachmentError("read", error);
+  }
+  if (!bytes.length) throw imageAttachmentError("read");
+  if (bytes.length > MAX_COMPOSER_IMAGE_BYTES) throw imageAttachmentError("too-large");
 
-  return new Promise((resolve) => {
+  const sourceMime = imageMimeForFile(file, bytes);
+  if (!sourceMime?.startsWith("image/")) throw imageAttachmentError("unsupported");
+  const original = {
+    base64: bytesToBase64(bytes),
+    mime: sourceMime,
+    storageName: storageNameForImage(file.name, sourceMime),
+  };
 
+  return new Promise((resolve, reject) => {
     const img = new Image();
-
-    const url = URL.createObjectURL(file);
-
-    img.onload = () => {
-
-      URL.revokeObjectURL(url);
-
-      let w = img.width, h = img.height;
-
-      if (w > maxW || h > maxW) {
-
-        const ratio = maxW / Math.max(w, h);
-
-        w = Math.round(w * ratio);
-
-        h = Math.round(h * ratio);
-
-      }
-
-      const canvas = document.createElement("canvas");
-
-      canvas.width = w; canvas.height = h;
-
-      const ctx = canvas.getContext("2d");
-
-      ctx.drawImage(img, 0, 0, w, h);
-
-      const mime = file.type === "image/png" ? "image/jpeg" : file.type;
-
-      resolve(canvas.toDataURL(mime, quality).split(",")[1]);
-
+    let url = "";
+    let decodeTimer = null;
+    let settled = false;
+    const cleanup = () => {
+      if (decodeTimer) clearTimeout(decodeTimer);
+      decodeTimer = null;
+      if (url) URL.revokeObjectURL(url);
+      url = "";
+    };
+    const finishWithOriginal = (cause = null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (canDeferImageConversion(sourceMime)) resolve(original);
+      else reject(imageAttachmentError("unsupported", cause));
     };
 
-    img.src = url;
-
+    img.onload = () => {
+      if (settled) return;
+      try {
+        let width = Number(img.naturalWidth || img.width || 0);
+        let height = Number(img.naturalHeight || img.height || 0);
+        if (width <= 0 || height <= 0) {
+          finishWithOriginal();
+          return;
+        }
+        if (width > maxW || height > maxW) {
+          const ratio = maxW / Math.max(width, height);
+          width = Math.max(1, Math.round(width * ratio));
+          height = Math.max(1, Math.round(height * ratio));
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          finishWithOriginal();
+          return;
+        }
+        context.drawImage(img, 0, 0, width, height);
+        const encoded = parseImageDataUrl(
+          canvas.toDataURL(modelImageOutputMime(sourceMime), quality),
+        );
+        if (!encoded) {
+          finishWithOriginal();
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve({
+          base64: encoded.base64,
+          mime: encoded.mime,
+          storageName: storageNameForImage(file.name, encoded.mime),
+        });
+      } catch (error) {
+        finishWithOriginal(error);
+      }
+    };
+    img.onerror = () => finishWithOriginal();
+    try {
+      url = URL.createObjectURL(file);
+      decodeTimer = setTimeout(() => finishWithOriginal(), IMAGE_DECODE_TIMEOUT_MS);
+      img.src = url;
+    } catch (error) {
+      finishWithOriginal(error);
+    }
   });
+}
 
+async function handleImageFile(file, options = {}) {
+  if (!isImageFileCandidate(file)) return false;
+  const displayName = options.name || file.name || "image";
+  try {
+    const image = await compressImage(file);
+    addImage(displayName, image.base64, image.mime, {
+      storageName: image.storageName,
+      ref: options.ref,
+    });
+    return true;
+  } catch (error) {
+    const key = error?.code === "too-large"
+      ? "imageAttachmentTooLarge"
+      : error?.code === "unsupported"
+        ? "imageAttachmentUnsupported"
+        : "imageAttachmentFailed";
+    showToast(t(key, { name: displayName, limit: MAX_COMPOSER_IMAGE_BYTES / 1024 / 1024 }), "error");
+    return false;
+  }
+}
+
+function queueImageFile(file, options = {}) {
+  const task = handleImageFile(file, options);
+  _imageAttachmentTasks.add(task);
+  task.finally(() => _imageAttachmentTasks.delete(task));
+  return task;
+}
+
+async function waitForPendingImageAttachments() {
+  if (_imageAttachmentTasks.size > 0) {
+    await Promise.allSettled([..._imageAttachmentTasks]);
+  }
 }
 
 
@@ -4627,11 +4745,13 @@ async function handleImagePaste(e) {
 
   for (const item of items) {
 
-    if (item.type.startsWith("image/")) {
+    const file = item.getAsFile();
+
+    if (file && isImageFileCandidate(file)) {
 
       e.preventDefault();
 
-      handleImageFile(item.getAsFile());
+      queueImageFile(file);
 
     }
 
@@ -4649,11 +4769,11 @@ function handleImageDrop(e) {
 
   for (const file of files) {
 
-    if (file.type.startsWith("image/")) {
+    if (isImageFileCandidate(file)) {
 
       e.preventDefault();
 
-      handleImageFile(file);
+      queueImageFile(file);
 
     }
 
@@ -8686,23 +8806,20 @@ async function resolveAtImages() {
         const cl = parseInt(resp.headers.get("Content-Length") || "0");
         if (cl > MAX_AT_IMG_BYTES) return;
         const contentType = resp.headers.get("Content-Type") || "";
-        let base64, mime;
+        let bytes, mime;
         if (contentType.startsWith("application/json")) {
           const json = await resp.json();
           if (!json.content) return;
-          base64 = json.content;
+          bytes = base64ToBytes(json.content);
           mime = json.mime || `image/${ext === "jpg" ? "jpeg" : ext}`;
         } else {
           const buf = await resp.arrayBuffer();
           if (buf.byteLength > MAX_AT_IMG_BYTES) return;
-          const bytes = new Uint8Array(buf);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          base64 = btoa(binary);
+          bytes = new Uint8Array(buf);
           mime = contentType || `image/${ext === "jpg" ? "jpeg" : ext}`;
         }
-        state.attachedImages.push({ name: filePath.split("/").pop() || filePath, base64, mime, _ref: filePath });
-        renderImageThumbs();
+        const name = filePath.split("/").pop() || filePath;
+        await handleImageFile(imageFileFromBytes(bytes, name, mime), { name, ref: filePath });
       } catch (_) { /* ignore */ }
       finally { _atImgFetching.delete(filePath); }
     })();
@@ -9234,6 +9351,9 @@ els.sessionTitle.addEventListener("change", () => saveCurrentSession().catch(() 
 els.chatForm.addEventListener("submit", async (event) => {
 
   event.preventDefault();
+
+  await waitForPendingImageAttachments();
+  await resolveAtImages();
 
   let text = els.prompt.value.trim();
   const hasImages = state.attachedImages.length > 0;

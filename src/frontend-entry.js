@@ -21,6 +21,7 @@ import "./features/settings.js";
 import "./features/skills-memory.js";
 import "./features/preview.js";
 import "./features/files.js";
+import "./features/image-attachments.js";
 import "./features/session-import.js";
 import "./agent/model-request.js";
 import "./agent/tools.js";

@@ -25,6 +25,7 @@ TIMELINE_SOURCE = (ROOT / "src" / "ui" / "timeline.js").read_text(encoding="utf-
 PANELS_SOURCE = (ROOT / "src" / "ui" / "panels.js").read_text(encoding="utf-8")
 PREVIEW_SOURCE = (ROOT / "src" / "features" / "preview.js").read_text(encoding="utf-8")
 FILES_SOURCE = (ROOT / "src" / "features" / "files.js").read_text(encoding="utf-8")
+IMAGE_ATTACHMENTS_SOURCE = (ROOT / "src" / "features" / "image-attachments.js").read_text(encoding="utf-8")
 SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_text(encoding="utf-8")
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
@@ -1768,6 +1769,7 @@ eval(source);
             "src/features/settings.js",
             "src/features/preview.js",
             "src/features/files.js",
+            "src/features/image-attachments.js",
             "src/features/skills-memory.js",
             "src/features/session-import.js",
             "src/agent/model-request.js",
@@ -4643,6 +4645,115 @@ const feature = createFilesFeature({
             json.loads(data["calls"][0]["options"]["body"]),
             {"name": "demo.txt", "contentBase64": "aGk="},
         )
+
+    def test_image_attachment_mime_facts_cover_input_matrix(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/image-attachments.js");
+const images = window.Code.features.imageAttachments;
+const bytes = {
+  png: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  jpeg: [0xff, 0xd8, 0xff],
+  webp: [...Buffer.from("RIFF"), 0, 0, 0, 0, ...Buffer.from("WEBP")],
+  gif: [...Buffer.from("GIF89a")],
+  bmp: [0x42, 0x4d],
+  ico: [0x00, 0x00, 0x01, 0x00],
+  tiffLe: [0x49, 0x49, 0x2a, 0x00],
+  tiffBe: [0x4d, 0x4d, 0x00, 0x2a],
+};
+process.stdout.write(JSON.stringify({
+  sniffed: Object.fromEntries(Object.entries(bytes).map(([key, value]) => [
+    key,
+    images.sniffImageMime(Uint8Array.from(value)),
+  ])),
+  aliases: [
+    images.normalizeImageMime("image/jpg"),
+    images.normalizeImageMime("image/vnd.microsoft.icon"),
+    images.normalizeImageMime("image/x-tiff"),
+  ],
+  fileFacts: [
+    images.imageMimeForFile({name: "wrong.ico", type: "image/x-icon"}, Uint8Array.from(bytes.png)),
+    images.imageMimeForFile({name: "photo.tiff", type: ""}),
+    images.isImageFileCandidate({name: "photo.tiff", type: ""}),
+    images.isImageFileCandidate({name: "notes.txt", type: "text/plain"}),
+  ],
+  outputs: ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/x-icon", "image/tiff"]
+    .map((mime) => images.modelImageOutputMime(mime)),
+  deferred: ["image/png", "image/gif", "image/tiff", "image/svg+xml"]
+    .map((mime) => images.canDeferImageConversion(mime)),
+  parsed: images.parseImageDataUrl("data:image/png;base64,QUJD"),
+  rejectedDataUrl: images.parseImageDataUrl("data:image/png,not-base64"),
+  storageNames: [
+    images.storageNameForImage("code-icon.ico", "image/png"),
+    images.storageNameForImage("photo.jpeg", "image/jpeg"),
+    images.storageNameForImage("capture", "image/webp"),
+  ],
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["sniffed"], {
+            "png": "image/png",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+            "gif": "image/gif",
+            "bmp": "image/bmp",
+            "ico": "image/x-icon",
+            "tiffLe": "image/tiff",
+            "tiffBe": "image/tiff",
+        })
+        self.assertEqual(data["aliases"], ["image/jpeg", "image/x-icon", "image/tiff"])
+        self.assertEqual(data["fileFacts"], ["image/png", "image/tiff", True, False])
+        self.assertEqual(data["outputs"], [
+            "image/png", "image/jpeg", "image/webp",
+            "image/png", "image/png", "image/png", "image/png",
+        ])
+        self.assertEqual(data["deferred"], [True, True, True, False])
+        self.assertEqual(data["parsed"], {"mime": "image/png", "base64": "QUJD"})
+        self.assertIsNone(data["rejectedDataUrl"])
+        self.assertEqual(data["storageNames"], ["code-icon.png", "photo.jpeg", "capture.webp"])
+
+    def test_composer_image_pipeline_uses_actual_encoding_and_waits_before_send(self):
+        compression = APP_SOURCE[
+            APP_SOURCE.index("async function compressImage("):
+            APP_SOURCE.index("async function handleImagePaste(")
+        ]
+        self.assertIn("const sourceMime = imageMimeForFile(file, bytes)", compression)
+        self.assertIn("canvas.toDataURL(modelImageOutputMime(sourceMime), quality)", compression)
+        self.assertIn("const encoded = parseImageDataUrl(", compression)
+        self.assertIn("img.onerror = () => finishWithOriginal()", compression)
+        self.assertIn("setTimeout(() => finishWithOriginal(), IMAGE_DECODE_TIMEOUT_MS)", compression)
+        self.assertNotIn('file.type === "image/png" ? "image/jpeg" : file.type', compression)
+        self.assertIn("addImage(displayName, image.base64, image.mime", compression)
+        self.assertIn("name: img.storageName || img.name || \"image.png\"", APP_SOURCE)
+        self.assertIn("await handleImageFile(imageFileFromBytes(bytes, name, mime)", APP_SOURCE)
+
+        submit = APP_SOURCE[
+            APP_SOURCE.index('els.chatForm.addEventListener("submit"'):
+            APP_SOURCE.index("els.newChat.addEventListener", APP_SOURCE.index('els.chatForm.addEventListener("submit"'))
+        ]
+        self.assertLess(
+            submit.index("await waitForPendingImageAttachments()"),
+            submit.index("const hasImages = state.attachedImages.length > 0"),
+        )
+        self.assertLess(
+            submit.index("await resolveAtImages()"),
+            submit.index("const hasImages = state.attachedImages.length > 0"),
+        )
+        for key in (
+            "imageAttachmentTooLarge",
+            "imageAttachmentUnsupported",
+            "imageAttachmentFailed",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
 
     def test_skills_memory_feature_ranks_and_loads_context_without_app_globals(self):
         self.assertIn("features.skillsMemory = Object.freeze", SKILLS_MEMORY_SOURCE)
