@@ -54,7 +54,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["reducerVersion"], 1)
         self.assertEqual(data["viewVersion"], 1)
         self.assertEqual(data["statusCount"], 8)
-        self.assertEqual(len(data["eventTypes"]), 22)
+        self.assertEqual(len(data["eventTypes"]), 24)
         self.assertEqual(
             data["fields"],
             [

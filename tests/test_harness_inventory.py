@@ -55,7 +55,10 @@ class HarnessFactInventoryTests(unittest.TestCase):
         for node in ast.walk(self.server_tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
-            if node.func.id != "_append_agent_event" or len(node.args) < 2:
+            if node.func.id not in {
+                "_append_agent_event",
+                "_append_agent_event_locked",
+            } or len(node.args) < 2:
                 continue
             event_type = node.args[1]
             if isinstance(event_type, ast.Constant) and isinstance(event_type.value, str):
@@ -64,7 +67,7 @@ class HarnessFactInventoryTests(unittest.TestCase):
             item["type"] for item in self.inventory["agentRun"]["events"]
         }
         self.assertEqual(produced, listed)
-        self.assertEqual(22, len(listed))
+        self.assertEqual(24, len(listed))
 
     def test_agent_run_record_version_matches_inventory(self):
         record_version = None

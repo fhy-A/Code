@@ -24,6 +24,8 @@
     "model_started",
     "model_completed",
     "model_recovery",
+    "steer_submitted",
+    "steer_consumed",
     "tool_started",
     "command_started",
     "tool_completed",
@@ -50,6 +52,8 @@
     model_started: "model",
     model_completed: "model",
     model_recovery: "model",
+    steer_submitted: "steer",
+    steer_consumed: "steer",
     tool_started: "tool",
     command_started: "tool",
     tool_completed: "tool",
@@ -75,6 +79,8 @@
     model_started: "running",
     model_completed: "completed",
     model_recovery: "recovery",
+    steer_submitted: "submitted",
+    steer_consumed: "consumed",
     tool_started: "running",
     command_started: "running",
     tool_completed: "completed",
@@ -234,6 +240,9 @@
     if (eventType.startsWith("authorization_")) return stringValue(data.authorizationId);
     if (eventType.startsWith("user_input_")) return stringValue(data.requestId);
     if (eventType.startsWith("context_compaction_")) return stringValue(data.compactionId);
+    if (eventType.startsWith("steer_")) {
+      return stringValue(data.steerId || data.steerIds?.[0]);
+    }
     return "";
   }
 

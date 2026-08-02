@@ -25,9 +25,11 @@ def _field_value(field):
         "compactedMessageCount",
         "retainedMessageCount",
         "failureCount",
+        "count",
+        "pendingCount",
     }:
         return 1
-    if field in {"allowedTools", "toolBudgets", "workspaceRoots", "toolCalls", "argumentAliases", "questions"}:
+    if field in {"allowedTools", "toolBudgets", "workspaceRoots", "toolCalls", "argumentAliases", "questions", "steerIds"}:
         return []
     if field in {"usage", "result"}:
         return {}
@@ -280,7 +282,7 @@ class TestAgentEventContract(unittest.TestCase):
         summary = agent_protocol.public_contract_summary()
         encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True)
         self.assertIn('"protocolVersion": 1', encoded)
-        self.assertEqual(len(summary["eventTypes"]), 22)
+        self.assertEqual(len(summary["eventTypes"]), 24)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn("import agent_protocol", server_source)
         self.assertNotIn("from agent_protocol", server_source)

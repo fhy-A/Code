@@ -35,6 +35,8 @@
     model_started: "model",
     model_completed: "model",
     model_recovery: "model",
+    steer_submitted: "steer",
+    steer_consumed: "steer",
     tool_started: "tool",
     command_started: "tool",
     tool_completed: "tool",
@@ -59,6 +61,8 @@
     model_started: "running",
     model_completed: "completed",
     model_recovery: "recovery",
+    steer_submitted: "submitted",
+    steer_consumed: "consumed",
     tool_started: "running",
     command_started: "running",
     tool_completed: "completed",
@@ -196,6 +200,9 @@
     if (type.startsWith("authorization_")) return String(data.authorizationId || "");
     if (type.startsWith("user_input_")) return String(data.requestId || "");
     if (type.startsWith("context_compaction_")) return String(data.compactionId || "");
+    if (type.startsWith("steer_")) {
+      return String(data.steerId || data.steerIds?.[0] || "");
+    }
     return "";
   }
 

@@ -1804,6 +1804,43 @@ eval(source);
         })
         self.assertTrue(data["result"]["result"]["applied"])
 
+    def test_agent_runtime_steers_same_run_with_idempotency_key(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+let captured = null;
+global.fetch = async (url, options) => {{
+  captured = {{url: String(url), method: options.method, body: JSON.parse(options.body)}};
+  return new Response(JSON.stringify({{status: "model", result: {{status: "pending"}}}}), {{
+    status: 200,
+    headers: {{"Content-Type": "application/json"}},
+  }});
+}};
+eval(source);
+(async () => {{
+  const result = await window.Code.agent.runtime.steerAgentRun("agent/a", {{
+    clientRequestId: "steer-client-1",
+    message: {{role: "user", content: "new priority"}},
+  }});
+  process.stdout.write(JSON.stringify({{captured, result}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["captured"]["url"], "/api/agent/runs/agent%2Fa/steer")
+        self.assertEqual(data["captured"]["method"], "POST")
+        self.assertEqual(data["captured"]["body"], {
+            "message": {"role": "user", "content": "new priority"},
+            "clientRequestId": "steer-client-1",
+        })
+        self.assertEqual(data["result"]["result"]["status"], "pending")
+
     def test_read_only_permission_is_user_visible(self):
         self.assertIn('data-value="read"', INDEX_SOURCE)
         self.assertIn('data-i18n="permRead"', INDEX_SOURCE)

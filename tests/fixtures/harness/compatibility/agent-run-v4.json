@@ -1,0 +1,63 @@
+{
+  "fixtureVersion": 1,
+  "name": "agent-run-v4",
+  "source": "synthetic-minimum-same-run-steer",
+  "record": {
+    "version": 4,
+    "id": "44444444444444444444444444444444",
+    "sessionId": "session-fixture-v4",
+    "cwd": "/workspace/demo",
+    "workspaceRoots": ["/workspace/demo"],
+    "clientRequestId": "client-fixture-v4",
+    "status": "completed",
+    "resumeStatus": "",
+    "permissionProfile": "read",
+    "error": "",
+    "errorCode": "",
+    "baseUrl": "https://gateway.example.test",
+    "contextLimit": 200000,
+    "contextRecoveryRound": 0,
+    "request": {"model": "fixture-model", "tool_choice": "auto"},
+    "messages": [
+      {"role": "user", "content": "Synthetic v4 task."},
+      {"role": "user", "content": "Synthetic same-run steer."},
+      {"role": "assistant", "content": "Synthetic guided result."}
+    ],
+    "tools": [],
+    "toolBudgets": [],
+    "rounds": [{"round": 1, "toolCalls": [], "usage": {"total_tokens": 16}}],
+    "compactions": [],
+    "pendingToolCalls": [],
+    "pendingInput": null,
+    "pendingAuthorization": null,
+    "pendingSteers": [],
+    "steerReceipts": [{
+      "steerId": "55555555555555555555555555555555",
+      "clientRequestId": "steer-fixture-v4",
+      "messageHash": "synthetic-message-hash",
+      "status": "consumed",
+      "submittedAt": "2030-01-01T00:00:01Z",
+      "consumedAt": "2030-01-01T00:00:02Z"
+    }],
+    "toolExecutions": {},
+    "usage": {"total_tokens": 16},
+    "result": {"content": "Synthetic guided result."},
+    "events": [
+      {"seq": 1, "type": "steer_submitted", "data": {"steerId": "55555555555555555555555555555555", "clientRequestId": "steer-fixture-v4", "runStatus": "model", "pendingCount": 1}, "createdAt": "2030-01-01T00:00:01Z"},
+      {"seq": 2, "type": "steer_consumed", "data": {"steerIds": ["55555555555555555555555555555555"], "count": 1}, "createdAt": "2030-01-01T00:00:02Z"},
+      {"seq": 3, "type": "completed", "data": {}, "createdAt": "2030-01-01T00:00:03Z"}
+    ],
+    "nextSeq": 4,
+    "maxRounds": 4,
+    "createdAt": "2030-01-01T00:00:00Z",
+    "updatedAt": "2030-01-01T00:00:03Z"
+  },
+  "expected": {
+    "status": "completed",
+    "resumeStatus": "",
+    "contextLimit": 200000,
+    "compactionCount": 0,
+    "steerReceiptCount": 1,
+    "workspaceRootsSource": "record"
+  }
+}

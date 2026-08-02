@@ -162,6 +162,7 @@ _AGENT_RUN_WAITING = {"waiting_credentials", "waiting_user_input", "waiting_auth
 _AGENT_PERMISSION_PROFILES = {"read", "plan", "accept", "bypass"}
 _AGENT_RUN_DEFAULT_MAX_ROUNDS = 12
 _AGENT_RUN_MAX_ROUNDS = 50
+_AGENT_RUN_MAX_PENDING_STEERS = 32
 _AGENT_IDENTICAL_TOOL_FAILURE_LIMIT = 3
 _AGENT_CONTENT_FILTER_FINISH_REASONS = {
     "content_filter", "safety", "blocked",
@@ -176,6 +177,10 @@ _AGENT_CREDENTIAL_FIELDS = {
     "apikey", "authorization", "accesstoken", "bearertoken", "token", "keys",
 }
 _agent_workspace_context = threading.local()
+
+
+class AgentRunConflictError(ValueError):
+    """Raised when an AgentRun cannot accept a state-dependent request."""
 
 
 def _runtime_stream_text(value):
@@ -715,6 +720,40 @@ def _agent_run_path(run_id):
 
 def _json_clone(value):
     return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _normalize_agent_steer_message(message):
+    """Return one durable user message accepted by the same-run steer API."""
+    if isinstance(message, str):
+        normalized = {"role": "user", "content": message}
+    elif isinstance(message, dict):
+        role = str(message.get("role") or "user").strip().lower()
+        if role != "user":
+            raise ValueError("steer message role must be user")
+        normalized = {"role": "user", "content": _json_clone(message.get("content"))}
+    else:
+        raise ValueError("steer message must be a string or object")
+
+    content = normalized.get("content")
+    if isinstance(content, str):
+        if not content.strip():
+            raise ValueError("steer message content is required")
+    elif isinstance(content, list):
+        if not content or any(not isinstance(item, dict) for item in content):
+            raise ValueError("steer message content parts must be non-empty objects")
+    else:
+        raise ValueError("steer message content must be text or content parts")
+    return normalized
+
+
+def _agent_steer_message_hash(message):
+    payload = json.dumps(
+        message,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _sniff_model_image_format(data):
@@ -1266,7 +1305,7 @@ def _agent_model_tools(run):
 def _agent_run_record(run):
     """Return the credential-free durable representation of an Agent run."""
     return {
-        "version": 3,
+        "version": 4,
         "id": run["id"],
         "sessionId": run["session_id"],
         "cwd": run.get("cwd", ""),
@@ -1295,6 +1334,8 @@ def _agent_run_record(run):
         "pendingToolCalls": _json_clone(run.get("pending_tool_calls") or []),
         "pendingInput": _json_clone(run.get("pending_input")),
         "pendingAuthorization": _json_clone(run.get("pending_authorization")),
+        "pendingSteers": _json_clone(run.get("pending_steers") or []),
+        "steerReceipts": _json_clone(run.get("steer_receipts") or []),
         "toolExecutions": _json_clone(run.get("tool_executions") or {}),
         "usage": _json_clone(run.get("usage") or {}),
         "result": _json_clone(run.get("result") or {}),
@@ -1419,6 +1460,18 @@ def _agent_snapshot(run, cursor=0):
             "pendingToolCalls": _json_clone(run.get("pending_tool_calls") or []),
             "pendingInput": _json_clone(run.get("pending_input")),
             "pendingAuthorization": _agent_public_pending_authorization(run),
+            "pendingSteerCount": len(run.get("pending_steers") or []),
+            "steerReceipts": [
+                {
+                    "steerId": str(item.get("steerId") or ""),
+                    "clientRequestId": str(item.get("clientRequestId") or ""),
+                    "status": str(item.get("status") or ""),
+                    "submittedAt": str(item.get("submittedAt") or ""),
+                    "consumedAt": str(item.get("consumedAt") or ""),
+                }
+                for item in run.get("steer_receipts") or []
+                if isinstance(item, dict)
+            ],
             "toolExecutions": _agent_public_tool_executions(run),
             "usage": _json_clone(run.get("usage") or {}),
             "compactions": _json_clone(run.get("compactions") or []),
@@ -1676,25 +1729,33 @@ def _agent_protocol_shadow_snapshot(run):
         }
 
 
+def _append_agent_event_locked(run, event_type, data=None):
+    """Append an event while the caller owns run['condition']."""
+    if run["status"] in _AGENT_RUN_TERMINAL:
+        return None
+    created_at = now_iso()
+    event = _build_agent_event(
+        run["next_seq"],
+        event_type,
+        data,
+        created_at,
+    )
+    run["next_seq"] += 1
+    run["events"].append(event)
+    # Event protocol timestamps are normalized independently. AgentRun
+    # metadata keeps its existing local-time representation so H1-3 does
+    # not silently change the enclosing persistence contract.
+    run["updated_at"] = created_at
+    _agent_protocol_shadow_observe(run, event, source="append")
+    run["condition"].notify_all()
+    return event
+
+
 def _append_agent_event(run, event_type, data=None):
     with run["condition"]:
-        if run["status"] in _AGENT_RUN_TERMINAL:
-            return None
-        created_at = now_iso()
-        event = _build_agent_event(
-            run["next_seq"],
-            event_type,
-            data,
-            created_at,
-        )
-        run["next_seq"] += 1
-        run["events"].append(event)
-        # Event protocol timestamps are normalized independently. AgentRun
-        # metadata keeps its existing local-time representation so H1-3 does
-        # not silently change the enclosing persistence contract.
-        run["updated_at"] = created_at
-        _agent_protocol_shadow_observe(run, event, source="append")
-        run["condition"].notify_all()
+        event = _append_agent_event_locked(run, event_type, data)
+    if event is None:
+        return None
     _persist_agent_run(run)
     return event
 
@@ -1818,6 +1879,10 @@ def _finish_agent_run(run, status, error_message="", error_code=""):
         raise ValueError("invalid terminal Agent status")
     with run["condition"]:
         if run["status"] in _AGENT_RUN_TERMINAL:
+            return False
+        # A steer accepted before terminal commit belongs to this same run.
+        # Let the worker consume it instead of publishing a stale completion.
+        if status == "completed" and run.get("pending_steers"):
             return False
         run["status"] = status
         run["resume_status"] = ""
@@ -1960,6 +2025,8 @@ def _agent_run_from_record(record):
         "pending_tool_calls": list(record.get("pendingToolCalls") or []),
         "pending_input": _json_clone(record.get("pendingInput")) if isinstance(record.get("pendingInput"), dict) else None,
         "pending_authorization": pending_authorization,
+        "pending_steers": list(record.get("pendingSteers") or []),
+        "steer_receipts": list(record.get("steerReceipts") or []),
         "tool_executions": tool_executions,
         "usage": dict(record.get("usage") or {}),
         "result": dict(record.get("result") or {}),
@@ -4040,6 +4107,7 @@ def _agent_run_worker(run):
 
             if run["status"] != "model":
                 return
+            _consume_agent_steers(run)
             if len(run["rounds"]) >= run["max_rounds"]:
                 _finish_agent_run(run, "failed", f"Agent exceeded {run['max_rounds']} model rounds")
                 return
@@ -4186,8 +4254,9 @@ def _agent_run_worker(run):
                     "finishReason": str(model_result.get("finishReason") or ""),
                     "usage": _json_clone(run["usage"]),
                 }
-                _finish_agent_run(run, "completed")
-                return
+                if _finish_agent_run(run, "completed"):
+                    return
+                continue
 
             if tool_calls:
                 # A real tool call proves forward progress and clears any prior
@@ -4216,8 +4285,9 @@ def _agent_run_worker(run):
                 "finishReason": str(model_result.get("finishReason") or ""),
                 "usage": _json_clone(run["usage"]),
             }
-            _finish_agent_run(run, "completed")
-            return
+            if _finish_agent_run(run, "completed"):
+                return
+            continue
     except Exception as exc:
         _finish_agent_run(run, "failed", str(exc), error_code="internal_error")
     finally:
@@ -4328,6 +4398,8 @@ def _create_agent_run(
         "pending_tool_calls": [],
         "pending_input": None,
         "pending_authorization": None,
+        "pending_steers": [],
+        "steer_receipts": [],
         "tool_executions": {},
         "usage": {},
         "result": {},
@@ -8034,6 +8106,112 @@ def _deduplicate_import_rows(rows):
     return result
 
 
+def _public_agent_steer_receipt(receipt, duplicate=False, pending_count=0):
+    return {
+        "steerId": str((receipt or {}).get("steerId") or ""),
+        "clientRequestId": str((receipt or {}).get("clientRequestId") or ""),
+        "status": str((receipt or {}).get("status") or ""),
+        "submittedAt": str((receipt or {}).get("submittedAt") or ""),
+        "consumedAt": str((receipt or {}).get("consumedAt") or ""),
+        "duplicate": bool(duplicate),
+        "pendingCount": max(0, int(pending_count or 0)),
+    }
+
+
+def _submit_agent_steer(run, message, client_request_id=""):
+    """Durably append input to the current AgentRun without creating a run."""
+    normalized_message = _normalize_agent_steer_message(message)
+    request_id = _agent_client_request_id(client_request_id)
+    message_hash = _agent_steer_message_hash(normalized_message)
+
+    with run["condition"]:
+        receipts = run.setdefault("steer_receipts", [])
+        if request_id:
+            existing = next((
+                item for item in receipts
+                if isinstance(item, dict)
+                and str(item.get("clientRequestId") or "") == request_id
+            ), None)
+            if existing:
+                if str(existing.get("messageHash") or "") != message_hash:
+                    raise ValueError(
+                        "clientRequestId was already used for a different steer message"
+                    )
+                return _public_agent_steer_receipt(
+                    existing,
+                    duplicate=True,
+                    pending_count=len(run.get("pending_steers") or []),
+                )
+
+        if run["status"] in _AGENT_RUN_TERMINAL:
+            raise AgentRunConflictError(
+                f"Agent run cannot be steered from status {run['status']}"
+            )
+        pending = run.setdefault("pending_steers", [])
+        if len(pending) >= _AGENT_RUN_MAX_PENDING_STEERS:
+            raise AgentRunConflictError("Agent run has too many pending steer messages")
+
+        steer_id = uuid.uuid4().hex
+        submitted_at = now_iso()
+        pending.append({
+            "steerId": steer_id,
+            "clientRequestId": request_id,
+            "message": normalized_message,
+        })
+        receipt = {
+            "steerId": steer_id,
+            "clientRequestId": request_id,
+            "messageHash": message_hash,
+            "status": "pending",
+            "submittedAt": submitted_at,
+            "consumedAt": "",
+        }
+        receipts.append(receipt)
+        pending_count = len(pending)
+        _append_agent_event_locked(run, "steer_submitted", {
+                "steerId": steer_id,
+                "clientRequestId": request_id,
+                "runStatus": run["status"],
+                "pendingCount": pending_count,
+            })
+
+    _persist_agent_run(run)
+    return _public_agent_steer_receipt(
+        receipt,
+        pending_count=pending_count,
+    )
+
+
+def _consume_agent_steers(run):
+    """Move pending steer messages into the next model request exactly once."""
+    with run["condition"]:
+        pending = list(run.get("pending_steers") or [])
+        if not pending:
+            return []
+        run["pending_steers"] = []
+        steer_ids = []
+        consumed_at = now_iso()
+        for item in pending:
+            steer_id = str((item or {}).get("steerId") or "")
+            message = (item or {}).get("message")
+            if steer_id and isinstance(message, dict):
+                steer_ids.append(steer_id)
+                run["messages"].append(_json_clone(message))
+            for receipt in run.get("steer_receipts") or []:
+                if str((receipt or {}).get("steerId") or "") == steer_id:
+                    receipt["status"] = "consumed"
+                    receipt["consumedAt"] = consumed_at
+                    break
+        run["result"] = {}
+        _append_agent_event_locked(run, "steer_consumed", {
+            "steerIds": steer_ids,
+            "count": len(steer_ids),
+        })
+
+    _persist_agent_run(run)
+    return steer_ids
+
+
 def list_codex_sessions(query=None):
     """Scan the Codex sessions directory and return a list of importable sessions.
 
@@ -11233,6 +11411,33 @@ class CodeHandler(BaseHTTPRequestHandler):
                     return
                 _resume_agent_run(run, keys or [], body.get("baseUrl") or "")
                 self.send_json({"agentRunId": run["id"], "status": run["status"]})
+                return
+            if route.startswith("/api/agent/runs/") and route.endswith("/steer"):
+                run_id = route.rsplit("/", 2)[-2]
+                run = _get_agent_run(run_id)
+                if not run:
+                    self.send_json({"error": "Agent run not found"}, 404)
+                    return
+                body = self.read_body_json()
+                try:
+                    result = _submit_agent_steer(
+                        run,
+                        body.get("message"),
+                        body.get("clientRequestId") or "",
+                    )
+                except AgentRunConflictError as exc:
+                    self.send_json({
+                        "error": str(exc),
+                        "errorCode": "agent_run_not_active",
+                        "agentRunId": run["id"],
+                        "status": run["status"],
+                    }, 409)
+                    return
+                self.send_json({
+                    "agentRunId": run["id"],
+                    "status": run["status"],
+                    "result": result,
+                })
                 return
             if route.startswith("/api/agent/runs/") and route.endswith("/input"):
                 run_id = route.rsplit("/", 2)[-2]

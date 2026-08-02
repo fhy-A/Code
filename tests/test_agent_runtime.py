@@ -3038,6 +3038,150 @@ class TestDurableAgentRuntime(unittest.TestCase):
         ):
             self.assertIn(expected, event_types)
 
+    def test_active_agent_steer_is_durable_idempotent_and_consumed_once(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{
+                    "choices": [{
+                        "delta": {"content": "stale candidate"},
+                        "finish_reason": "stop",
+                    }],
+                }],
+                [{
+                    "choices": [{
+                        "delta": {"content": "guided result"},
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+
+        run = server_mod._create_agent_run(
+            "steer-active-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "slow request"}],
+            },
+            self.base_url,
+            ["steer-secret-key"],
+        )
+        self.assertTrue(_AgentUpstream.slow_started.wait(timeout=2))
+        receipt = server_mod._submit_agent_steer(
+            run,
+            {"role": "user", "content": "use the new priority"},
+            "steer-client-1",
+        )
+        duplicate = server_mod._submit_agent_steer(
+            run,
+            {"role": "user", "content": "use the new priority"},
+            "steer-client-1",
+        )
+        self.assertFalse(receipt["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(receipt["steerId"], duplicate["steerId"])
+        with self.assertRaisesRegex(ValueError, "different steer message"):
+            server_mod._submit_agent_steer(
+                run,
+                "different content",
+                "steer-client-1",
+            )
+
+        _AgentUpstream.release_slow.set()
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "guided result")
+        self.assertEqual(snapshot["pendingSteerCount"], 0)
+        self.assertEqual(snapshot["steerReceipts"][0]["status"], "consumed")
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(
+            sum(
+                message.get("role") == "user"
+                and message.get("content") == "use the new priority"
+                for message in run["messages"]
+            ),
+            1,
+        )
+        self.assertTrue(any(
+            message.get("role") == "user"
+            and message.get("content") == "use the new priority"
+            for message in _AgentUpstream.payloads[1]["messages"]
+        ))
+        event_types = [event["type"] for event in snapshot["events"]]
+        self.assertEqual(event_types.count("steer_submitted"), 1)
+        self.assertEqual(event_types.count("steer_consumed"), 1)
+        self.assertLess(
+            event_types.index("steer_submitted"),
+            event_types.index("steer_consumed"),
+        )
+        persisted = json.loads(
+            server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["version"], 4)
+        self.assertEqual(persisted["pendingSteers"], [])
+        self.assertNotIn("steer-secret-key", json.dumps(persisted))
+
+    def test_pending_agent_steer_survives_restart_and_resume(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[{
+                "choices": [{
+                    "delta": {"content": "restored guided result"},
+                    "finish_reason": "stop",
+                }],
+            }]]
+        run = server_mod._create_agent_run(
+            "steer-restart-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "original task"}],
+            },
+            self.base_url,
+            [],
+            start_worker=False,
+        )
+        server_mod._submit_agent_steer(
+            run,
+            "restored steer",
+            "steer-restart-client",
+        )
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertEqual(restored["status"], "waiting_credentials")
+        self.assertEqual(len(restored["pending_steers"]), 1)
+        server_mod._resume_agent_run(restored, ["steer-resume-key"])
+        self._wait_terminal(restored)
+        self.assertEqual(restored["result"]["content"], "restored guided result")
+        self.assertEqual(restored["pending_steers"], [])
+        self.assertEqual(restored["steer_receipts"][0]["status"], "consumed")
+        self.assertEqual(
+            [message.get("content") for message in restored["messages"]].count(
+                "restored steer"
+            ),
+            1,
+        )
+
+    def test_terminal_agent_rejects_new_steer(self):
+        run = server_mod._create_agent_run(
+            "steer-terminal-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "terminal task"}],
+            },
+            self.base_url,
+            ["terminal-steer-key"],
+        )
+        self._wait_terminal(run)
+        with self.assertRaisesRegex(
+            server_mod.AgentRunConflictError,
+            "cannot be steered",
+        ):
+            server_mod._submit_agent_steer(
+                run,
+                "too late",
+                "terminal-steer-client",
+            )
+
     def test_accept_profile_waits_for_durable_edit_authorization(self):
         target = self.project_dir / "README.md"
         run = server_mod._create_agent_run(
@@ -3577,6 +3721,88 @@ class TestDurableAgentRuntime(unittest.TestCase):
             self.assertEqual(snapshot.get("status"), "completed")
             self.assertEqual(snapshot.get("result", {}).get("content"), "questionnaire task complete")
         finally:
+            http_server.shutdown()
+            http_server.server_close()
+            thread.join(timeout=2)
+
+    def test_http_steer_endpoint_uses_same_agent_run_and_returns_conflict_after_terminal(self):
+        server_mod.ThreadingHTTPServer.daemon_threads = True
+        http_server = server_mod.ThreadingHTTPServer(
+            ("127.0.0.1", 0), server_mod.CodeHandler,
+        )
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{http_server.server_address[1]}"
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{
+                    "choices": [{
+                        "delta": {"content": "first candidate"},
+                        "finish_reason": "stop",
+                    }],
+                }],
+                [{
+                    "choices": [{
+                        "delta": {"content": "HTTP guided result"},
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+        try:
+            created = requests.post(
+                base + "/api/agent/runs",
+                json={
+                    "sessionId": "http-steer-agent",
+                    "payload": {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "slow request"}],
+                    },
+                    "baseUrl": self.base_url,
+                    "keys": ["http-steer-key"],
+                },
+                timeout=5,
+            )
+            self.assertEqual(created.status_code, 201)
+            run_id = created.json()["agentRunId"]
+            self.assertTrue(_AgentUpstream.slow_started.wait(timeout=2))
+
+            steered = requests.post(
+                f"{base}/api/agent/runs/{run_id}/steer",
+                json={
+                    "clientRequestId": "http-steer-client",
+                    "message": {"role": "user", "content": "HTTP steer"},
+                },
+                timeout=3,
+            )
+            self.assertEqual(steered.status_code, 200)
+            self.assertEqual(steered.json()["agentRunId"], run_id)
+            self.assertEqual(steered.json()["result"]["status"], "pending")
+            _AgentUpstream.release_slow.set()
+
+            deadline = time.time() + 5
+            snapshot = {}
+            while time.time() < deadline:
+                snapshot = requests.get(
+                    f"{base}/api/agent/runs/{run_id}?cursor=0&wait=1",
+                    timeout=3,
+                ).json()
+                if snapshot.get("status") in server_mod._AGENT_RUN_TERMINAL:
+                    break
+            self.assertEqual(snapshot.get("status"), "completed")
+            self.assertEqual(snapshot.get("result", {}).get("content"), "HTTP guided result")
+
+            rejected = requests.post(
+                f"{base}/api/agent/runs/{run_id}/steer",
+                json={
+                    "clientRequestId": "http-steer-late",
+                    "message": "too late",
+                },
+                timeout=3,
+            )
+            self.assertEqual(rejected.status_code, 409)
+            self.assertEqual(rejected.json()["errorCode"], "agent_run_not_active")
+        finally:
+            _AgentUpstream.release_slow.set()
             http_server.shutdown()
             http_server.server_close()
             thread.join(timeout=2)

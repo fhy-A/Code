@@ -246,6 +246,18 @@
     });
   }
 
+  async function steerAgentRun(
+    agentRunId,
+    { message, clientRequestId = "", signal } = {},
+  ) {
+    return apiJson(`/api/agent/runs/${encodeURIComponent(agentRunId)}/steer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, clientRequestId }),
+      signal,
+    });
+  }
+
   async function submitAgentAuthorization(
     agentRunId,
     { authorizationId = "", decision = "", signal } = {},
@@ -453,6 +465,7 @@
     createAgentRun,
     getAgentRun,
     resumeAgentRun,
+    steerAgentRun,
     submitAgentInput,
     submitAgentAuthorization,
     normalizeAgentEvent,

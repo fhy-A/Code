@@ -10,8 +10,9 @@
     "src/ui/messages.js"
   ],
   "agentRun": {
-    "recordVersion": 3,
+    "recordVersion": 4,
     "eventEnvelopeFields": [
+      "protocolVersion",
       "seq",
       "type",
       "data",
@@ -156,6 +157,28 @@
           "projectAgentEvent",
           "projectAgentModelRecovery"
         ]
+      },
+      {
+        "type": "steer_submitted",
+        "payloadFields": [
+          "steerId",
+          "clientRequestId",
+          "runStatus",
+          "pendingCount"
+        ],
+        "producer": "_submit_agent_steer",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
+      },
+      {
+        "type": "steer_consumed",
+        "payloadFields": [
+          "steerIds",
+          "count"
+        ],
+        "producer": "_consume_agent_steers",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
       },
       {
         "type": "tool_started",

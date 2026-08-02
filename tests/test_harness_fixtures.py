@@ -76,8 +76,8 @@ class HarnessFixtureTests(unittest.TestCase):
                 self.assertEqual(harness_fixtures.trace_walk_hash(suite, size), digest)
                 self.assertEqual(harness_fixtures.trace_walk_hash(suite, size), digest)
 
-    def test_agent_run_v1_v2_v3_minimum_records_restore(self):
-        for version in (1, 2, 3):
+    def test_agent_run_v1_v2_v3_v4_minimum_records_restore(self):
+        for version in (1, 2, 3, 4):
             fixture = json.loads(
                 (COMPATIBILITY_DIR / f"agent-run-v{version}.json")
                 .read_text(encoding="utf-8")
@@ -94,6 +94,11 @@ class HarnessFixtureTests(unittest.TestCase):
                 self.assertEqual(restored["resume_status"], expected["resumeStatus"])
                 self.assertEqual(restored["context_limit"], expected["contextLimit"])
                 self.assertEqual(len(restored["compactions"]), expected["compactionCount"])
+                self.assertEqual(
+                    len(restored["steer_receipts"]),
+                    expected.get("steerReceiptCount", 0),
+                )
+                self.assertEqual(restored["pending_steers"], [])
                 roots_argument = workspace_mock.call_args.args[2]
                 if expected["workspaceRootsSource"] == "legacy-fallback":
                     self.assertIsNone(roots_argument)
@@ -130,7 +135,7 @@ class HarnessFixtureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         summary = json.loads(result.stdout.strip())
         self.assertEqual(summary["fixtureCount"], 15)
-        self.assertEqual(summary["compatibilityFixtureCount"], 5)
+        self.assertEqual(summary["compatibilityFixtureCount"], 6)
 
 
 if __name__ == "__main__":

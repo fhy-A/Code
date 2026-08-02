@@ -253,6 +253,7 @@ def validate_all() -> dict:
         "agent-run-v1.json",
         "agent-run-v2.json",
         "agent-run-v3.json",
+        "agent-run-v4.json",
         "session-legacy-partial.jsonl",
         "classic-frontend.json",
     }

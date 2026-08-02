@@ -89,6 +89,18 @@ AGENT_EVENT_SPECS = {
         "legacyPendingInput",
         required=("reason", "attempt"),
     ),
+    "steer_submitted": _event_spec(
+        "steerId",
+        "clientRequestId",
+        "runStatus",
+        "pendingCount",
+        required=("steerId", "runStatus", "pendingCount"),
+    ),
+    "steer_consumed": _event_spec(
+        "steerIds",
+        "count",
+        required=("steerIds", "count"),
+    ),
     "tool_started": _event_spec(
         "toolCallId",
         "name",
