@@ -1827,6 +1827,7 @@ eval(source);
             "src/ui/markdown.js",
             "src/ui/timeline.js",
             "src/ui/messages.js",
+            "src/ui/run-view-model.js",
             "src/ui/panels.js",
             "src/features/settings.js",
             "src/features/preview.js",
@@ -1841,6 +1842,7 @@ eval(source);
             "src/agent/subagents.js",
             "src/agent/compaction.js",
             "src/agent/model-stream.js",
+            "src/agent/run-reducer.js",
             "src/frontend-entry.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)

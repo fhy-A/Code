@@ -56,9 +56,9 @@ async function collectSourceState() {
   const entrySource = await readFile(entryPath, "utf8");
   const importSpecifiers = [...entrySource.matchAll(/^import "([^"]+)";$/gm)]
     .map((match) => match[1]);
-  if (importSpecifiers.length !== 32) {
+  if (importSpecifiers.length !== 34) {
     throw new Error(
-      `Expected 32 frontend entry imports, found ${importSpecifiers.length}`,
+      `Expected 34 frontend entry imports, found ${importSpecifiers.length}`,
     );
   }
 

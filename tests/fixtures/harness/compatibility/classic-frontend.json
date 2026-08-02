@@ -34,6 +34,8 @@
     "./agent/subagents.js",
     "./agent/compaction.js",
     "./agent/model-stream.js",
+    "./agent/run-reducer.js",
+    "./ui/run-view-model.js",
     "../agent-runtime.js",
     "../app.js"
   ],
