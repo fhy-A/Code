@@ -22,6 +22,7 @@ import threading
 import time
 import webbrowser
 
+import agent_protocol
 from skill_dependencies import (
     build_dependency_operation_plan,
     DependencyManifestError,
@@ -71,6 +72,26 @@ CONFIG_PATH = DATA_DIR / "config.json"
 NEW_API_BASE_URL = os.environ.get("NEW_API_BASE_URL", "").rstrip("/")
 WORKBAR_URL = "https://workbar.ai"
 PORT, INSTANCE_MODE = _resolve_instance_settings()
+
+
+def _resolve_agent_protocol_shadow_enabled(environ=None, *, instance_mode=None):
+    """Enable shadow validation by default only for the development instance."""
+    source = os.environ if environ is None else environ
+    mode = INSTANCE_MODE if instance_mode is None else str(instance_mode or "")
+    raw = source.get("CODE_AGENT_PROTOCOL_SHADOW")
+    if raw is None or str(raw).strip() == "":
+        return mode == "dev"
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return mode == "dev"
+
+
+_AGENT_PROTOCOL_SHADOW_ENABLED = _resolve_agent_protocol_shadow_enabled()
+_AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT = 64
+_AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT = 256
 _active_downloads = {}   # downloadId -> {progress, done, error, path, total}
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -1377,6 +1398,217 @@ def _agent_snapshot(run, cursor=0):
         }
 
 
+def _new_agent_protocol_shadow(status, cursor=0):
+    """Create one in-memory-only compatibility observer for an Agent run."""
+    if not _AGENT_PROTOCOL_SHADOW_ENABLED:
+        return None
+    try:
+        normalized_cursor = max(0, int(cursor or 0))
+    except (TypeError, ValueError):
+        normalized_cursor = 0
+    normalized_status = str(status or "")
+    if normalized_status not in agent_protocol.AGENT_RUN_STATES:
+        normalized_status = "model"
+    return {
+        "validator": agent_protocol.AgentEventSequenceValidator(
+            cursor=normalized_cursor,
+        ),
+        "last_run_status": normalized_status,
+        "events_observed": 0,
+        "events_accepted": 0,
+        "transitions_observed": 0,
+        "diagnostic_counts": {},
+        "diagnostics": [],
+        "diagnostic_sample_keys": set(),
+        "diagnostics_dropped": 0,
+        "contract_errors": 0,
+    }
+
+
+def _record_agent_protocol_shadow_diagnostic(
+    shadow,
+    diagnostic,
+    *,
+    source,
+    event_type,
+    seq,
+):
+    """Record bounded structural metadata without retaining event data or errors."""
+    raw_code = str((diagnostic or {}).get("code") or "unknown_diagnostic")
+    code = re.sub(r"[^a-z0-9_]+", "_", raw_code.lower()).strip("_")[:64]
+    if not code:
+        code = "unknown_diagnostic"
+    severity = str((diagnostic or {}).get("severity") or "warning").lower()
+    if severity not in {"info", "warning", "error"}:
+        severity = "warning"
+    safe_source = source if source in {"append", "terminal"} else "other"
+    safe_event_type = (
+        event_type
+        if event_type in agent_protocol.AGENT_EVENT_SPECS
+        else "unknown"
+    )
+    try:
+        safe_seq = max(0, int(seq or 0))
+    except (TypeError, ValueError):
+        safe_seq = 0
+
+    counts = shadow.setdefault("diagnostic_counts", {})
+    if (
+        code not in counts
+        and len(counts) >= _AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT - 1
+    ):
+        code = "other_diagnostics"
+    counts[code] = int(counts.get(code) or 0) + 1
+    sample_key = (code, safe_source, safe_event_type)
+    sample_keys = shadow.setdefault("diagnostic_sample_keys", set())
+    samples = shadow.setdefault("diagnostics", [])
+    if (
+        sample_key in sample_keys
+        or len(samples) >= _AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT
+    ):
+        shadow["diagnostics_dropped"] = (
+            int(shadow.get("diagnostics_dropped") or 0) + 1
+        )
+        return
+    sample_keys.add(sample_key)
+    samples.append({
+        "code": code,
+        "severity": severity,
+        "source": safe_source,
+        "eventType": safe_event_type,
+        "seq": safe_seq,
+    })
+
+
+def _agent_protocol_shadow_observe(run, event, *, source="append"):
+    """Observe one event without changing or blocking the production event path."""
+    if not _AGENT_PROTOCOL_SHADOW_ENABLED:
+        return
+    try:
+        with run["condition"]:
+            shadow = run.get("protocol_shadow")
+            if not isinstance(shadow, dict):
+                try:
+                    initial_cursor = max(0, int((event or {}).get("seq") or 1) - 1)
+                except (AttributeError, TypeError, ValueError):
+                    initial_cursor = 0
+                shadow = _new_agent_protocol_shadow(
+                    run.get("status"),
+                    initial_cursor,
+                )
+                if not isinstance(shadow, dict):
+                    return
+                run["protocol_shadow"] = shadow
+
+            event_type = str((event or {}).get("type") or "")
+            event_seq = (event or {}).get("seq") if isinstance(event, dict) else 0
+            shadow["events_observed"] = int(shadow.get("events_observed") or 0) + 1
+            try:
+                normalized = agent_protocol.normalize_agent_event(event)
+                for diagnostic in normalized.get("diagnostics") or []:
+                    _record_agent_protocol_shadow_diagnostic(
+                        shadow,
+                        diagnostic,
+                        source=source,
+                        event_type=event_type,
+                        seq=event_seq,
+                    )
+                validator = shadow["validator"]
+                sequence = validator.observe(normalized)
+                if sequence.get("accepted"):
+                    shadow["events_accepted"] = (
+                        int(shadow.get("events_accepted") or 0) + 1
+                    )
+                while (
+                    len(validator.fingerprints)
+                    > _AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT
+                ):
+                    validator.fingerprints.pop(next(iter(validator.fingerprints)))
+                for diagnostic in sequence.get("diagnostics") or []:
+                    _record_agent_protocol_shadow_diagnostic(
+                        shadow,
+                        diagnostic,
+                        source=source,
+                        event_type=event_type,
+                        seq=event_seq,
+                    )
+            except Exception:
+                shadow["contract_errors"] = int(shadow.get("contract_errors") or 0) + 1
+                _record_agent_protocol_shadow_diagnostic(
+                    shadow,
+                    {"code": "shadow_contract_error", "severity": "error"},
+                    source=source,
+                    event_type=event_type,
+                    seq=event_seq,
+                )
+
+            previous_status = str(shadow.get("last_run_status") or "")
+            current_status = str(run.get("status") or "")
+            if current_status != previous_status:
+                shadow["transitions_observed"] = (
+                    int(shadow.get("transitions_observed") or 0) + 1
+                )
+                try:
+                    transition = agent_protocol.validate_transition(
+                        "run",
+                        previous_status,
+                        current_status,
+                    )
+                    for diagnostic in transition.get("diagnostics") or []:
+                        _record_agent_protocol_shadow_diagnostic(
+                            shadow,
+                            diagnostic,
+                            source=source,
+                            event_type=event_type,
+                            seq=event_seq,
+                        )
+                except Exception:
+                    shadow["contract_errors"] = (
+                        int(shadow.get("contract_errors") or 0) + 1
+                    )
+                    _record_agent_protocol_shadow_diagnostic(
+                        shadow,
+                        {"code": "shadow_contract_error", "severity": "error"},
+                        source=source,
+                        event_type=event_type,
+                        seq=event_seq,
+                    )
+                shadow["last_run_status"] = current_status
+    except Exception:
+        # The observer is intentionally fail-open. No validation issue may alter
+        # event delivery, persistence, or task completion.
+        return
+
+
+def _agent_protocol_shadow_snapshot(run):
+    """Return sanitized diagnostics for tests and local inspection only."""
+    with run["condition"]:
+        shadow = run.get("protocol_shadow")
+        if not isinstance(shadow, dict):
+            return {
+                "enabled": False,
+                "eventsObserved": 0,
+                "eventsAccepted": 0,
+                "transitionsObserved": 0,
+                "diagnosticCounts": {},
+                "diagnostics": [],
+                "diagnosticsDropped": 0,
+                "contractErrors": 0,
+                "lastRunStatus": "",
+            }
+        return {
+            "enabled": bool(_AGENT_PROTOCOL_SHADOW_ENABLED),
+            "eventsObserved": int(shadow.get("events_observed") or 0),
+            "eventsAccepted": int(shadow.get("events_accepted") or 0),
+            "transitionsObserved": int(shadow.get("transitions_observed") or 0),
+            "diagnosticCounts": dict(shadow.get("diagnostic_counts") or {}),
+            "diagnostics": [dict(item) for item in shadow.get("diagnostics") or []],
+            "diagnosticsDropped": int(shadow.get("diagnostics_dropped") or 0),
+            "contractErrors": int(shadow.get("contract_errors") or 0),
+            "lastRunStatus": str(shadow.get("last_run_status") or ""),
+        }
+
+
 def _append_agent_event(run, event_type, data=None):
     with run["condition"]:
         if run["status"] in _AGENT_RUN_TERMINAL:
@@ -1390,6 +1622,7 @@ def _append_agent_event(run, event_type, data=None):
         run["next_seq"] += 1
         run["events"].append(event)
         run["updated_at"] = event["createdAt"]
+        _agent_protocol_shadow_observe(run, event, source="append")
         run["condition"].notify_all()
     _persist_agent_run(run)
     return event
@@ -1535,6 +1768,7 @@ def _finish_agent_run(run, status, error_message="", error_code=""):
         }
         run["next_seq"] += 1
         run["events"].append(event)
+        _agent_protocol_shadow_observe(run, event, source="terminal")
     _persist_agent_run(run)
     # Terminal state must be durable before waiters are released. Otherwise a
     # fast reload can observe the in-memory terminal status and read the older
@@ -1660,6 +1894,7 @@ def _agent_run_from_record(record):
         "result": dict(record.get("result") or {}),
         "events": events,
         "next_seq": next_seq,
+        "protocol_shadow": _new_agent_protocol_shadow(status, next_seq - 1),
         "max_rounds": max(1, min(int(record.get("maxRounds") or _AGENT_RUN_DEFAULT_MAX_ROUNDS), _AGENT_RUN_MAX_ROUNDS)),
         "created_at": str(record.get("createdAt") or now_iso()),
         "updated_at": str(record.get("updatedAt") or now_iso()),
@@ -4027,6 +4262,7 @@ def _create_agent_run(
         "result": {},
         "events": [],
         "next_seq": 1,
+        "protocol_shadow": _new_agent_protocol_shadow("model", 0),
         "max_rounds": rounds_limit,
         "created_at": timestamp,
         "updated_at": timestamp,

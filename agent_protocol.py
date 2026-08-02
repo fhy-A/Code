@@ -1,8 +1,8 @@
 """Pure Agent event contract and compatibility helpers.
 
-H1-1 deliberately keeps this module detached from the production runtime. It
-defines the canonical v1 contract and validation behavior without changing
-AgentRun persistence, HTTP snapshots, or frontend projection.
+The server may call these pure helpers from an in-memory shadow observer. The
+module does not own AgentRun persistence, HTTP snapshots, or frontend
+projection.
 """
 
 from __future__ import annotations

@@ -698,6 +698,315 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(restored["context_recovery_round"], 0)
         self.assertEqual(restored["compactions"], [])
 
+    def test_agent_protocol_shadow_flag_defaults_and_override(self):
+        self.assertTrue(server_mod._resolve_agent_protocol_shadow_enabled(
+            {},
+            instance_mode="dev",
+        ))
+        self.assertFalse(server_mod._resolve_agent_protocol_shadow_enabled(
+            {},
+            instance_mode="release",
+        ))
+        for value in ("0", "false", "NO", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(server_mod._resolve_agent_protocol_shadow_enabled(
+                    {"CODE_AGENT_PROTOCOL_SHADOW": value},
+                    instance_mode="dev",
+                ))
+        for value in ("1", "true", "YES", "on"):
+            with self.subTest(value=value):
+                self.assertTrue(server_mod._resolve_agent_protocol_shadow_enabled(
+                    {"CODE_AGENT_PROTOCOL_SHADOW": value},
+                    instance_mode="release",
+                ))
+        self.assertFalse(server_mod._resolve_agent_protocol_shadow_enabled(
+            {"CODE_AGENT_PROTOCOL_SHADOW": "unexpected"},
+            instance_mode="release",
+        ))
+        self.assertTrue(server_mod._resolve_agent_protocol_shadow_enabled(
+            {"CODE_AGENT_PROTOCOL_SHADOW": "unexpected"},
+            instance_mode="dev",
+        ))
+
+    def test_agent_protocol_shadow_observes_without_changing_public_or_durable_data(self):
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+            run = server_mod._create_agent_run(
+                "shadow-shape-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "inspect"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            server_mod._set_agent_status(run, "tools")
+            event = server_mod._append_agent_event(run, "tool_started", {
+                "toolCallId": "shadow-call",
+                "name": "read_file",
+                "arguments": "{}",
+            })
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertEqual(
+            set(event),
+            {"seq", "type", "data", "createdAt"},
+        )
+        self.assertEqual(shadow["eventsObserved"], 2)
+        self.assertEqual(shadow["eventsAccepted"], 2)
+        self.assertEqual(shadow["transitionsObserved"], 1)
+        self.assertEqual(shadow["lastRunStatus"], "tools")
+        self.assertEqual(shadow["contractErrors"], 0)
+        self.assertEqual(shadow["diagnosticCounts"]["legacy_unversioned_event"], 2)
+
+        durable = server_mod._agent_run_record(run)
+        public = server_mod._agent_snapshot(run, 0)
+        persisted = json.loads(
+            server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
+        )
+        for representation in (durable, public, persisted):
+            encoded = json.dumps(representation, ensure_ascii=False)
+            self.assertNotIn("protocol_shadow", encoded)
+            self.assertNotIn("protocolShadow", encoded)
+            self.assertNotIn("diagnosticCounts", encoded)
+
+    def test_agent_protocol_shadow_is_fail_open_and_diagnostics_are_bounded(self):
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+            run = server_mod._create_agent_run(
+                "shadow-fail-open-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "continue"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            with mock.patch.object(
+                server_mod.agent_protocol,
+                "normalize_agent_event",
+                side_effect=RuntimeError("sensitive fixture detail"),
+            ):
+                event = server_mod._append_agent_event(
+                    run,
+                    "model_pending",
+                    {"round": 1},
+                )
+
+            shadow_state = run["protocol_shadow"]
+            for index in range(
+                server_mod._AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT + 6
+            ):
+                server_mod._record_agent_protocol_shadow_diagnostic(
+                    shadow_state,
+                    {
+                        "code": f"fixture_{index}",
+                        "message": "sk-sensitive-value-must-not-be-retained",
+                        "path": "data.secret",
+                    },
+                    source="test-source",
+                    event_type="future-sensitive-event",
+                    seq=index + 10,
+                )
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(run["events"][-1]["type"], "model_pending")
+        self.assertEqual(shadow["contractErrors"], 1)
+        self.assertLessEqual(
+            len(shadow["diagnostics"]),
+            server_mod._AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT,
+        )
+        self.assertGreater(shadow["diagnosticsDropped"], 0)
+        self.assertLessEqual(
+            len(shadow["diagnosticCounts"]),
+            server_mod._AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT,
+        )
+        encoded = json.dumps(shadow, ensure_ascii=False)
+        self.assertNotIn("sensitive fixture detail", encoded)
+        self.assertNotIn("sk-sensitive-value", encoded)
+        self.assertNotIn("data.secret", encoded)
+        self.assertTrue(all(
+            set(item) == {"code", "severity", "source", "eventType", "seq"}
+            for item in shadow["diagnostics"]
+        ))
+
+    def test_agent_protocol_shadow_can_be_disabled_without_changing_events(self):
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", False):
+            run = server_mod._create_agent_run(
+                "shadow-disabled-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "continue"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            event = server_mod._append_agent_event(
+                run,
+                "model_pending",
+                {"round": 1},
+            )
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertIsNone(run["protocol_shadow"])
+        self.assertFalse(shadow["enabled"])
+        self.assertEqual(shadow["eventsObserved"], 0)
+        self.assertEqual(event["seq"], 2)
+
+    def test_agent_protocol_shadow_restores_at_persisted_cursor(self):
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+            run = server_mod._create_agent_run(
+                "shadow-restore-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "continue"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            record = server_mod._agent_run_record(run)
+            restored = server_mod._agent_run_from_record(record)
+            self.assertEqual(restored["status"], "waiting_credentials")
+            server_mod._set_agent_status(restored, "model")
+            server_mod._append_agent_event(
+                restored,
+                "resumed",
+                {"status": "model"},
+            )
+            shadow = server_mod._agent_protocol_shadow_snapshot(restored)
+
+        self.assertEqual(shadow["eventsObserved"], 1)
+        self.assertEqual(shadow["eventsAccepted"], 1)
+        self.assertEqual(shadow["transitionsObserved"], 1)
+        self.assertEqual(shadow["lastRunStatus"], "model")
+        self.assertNotIn("event_sequence_gap", shadow["diagnosticCounts"])
+        self.assertNotIn("out_of_order_event", shadow["diagnosticCounts"])
+
+    def test_agent_protocol_shadow_observes_complete_terminal_chain(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[
+                {
+                    "choices": [{
+                        "delta": {"content": "shadow validation complete"},
+                        "finish_reason": "stop",
+                    }],
+                },
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 4,
+                        "total_tokens": 7,
+                    },
+                },
+            ]]
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+            run = server_mod._create_agent_run(
+                "shadow-terminal-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "complete"}],
+                },
+                self.base_url,
+                ["shadow-runtime-key"],
+                allowed_tools=[],
+            )
+            self._wait_terminal(run)
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(shadow["eventsObserved"], len(run["events"]))
+        self.assertEqual(shadow["eventsAccepted"], len(run["events"]))
+        self.assertEqual(shadow["lastRunStatus"], "completed")
+        self.assertEqual(shadow["contractErrors"], 0)
+        for unexpected in (
+            "event_sequence_gap",
+            "out_of_order_event",
+            "missing_payload_fields",
+            "illegal_state_transition",
+            "unknown_event_type",
+        ):
+            self.assertNotIn(unexpected, shadow["diagnosticCounts"])
+
+    def test_agent_protocol_shadow_accepts_all_h0_trace_events(self):
+        suite_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "harness"
+            / "trace-suite.json"
+        )
+        suite = json.loads(suite_path.read_text(encoding="utf-8"))
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+            for fixture in suite["fixtures"]:
+                with self.subTest(fixture=fixture["name"]):
+                    run = {
+                        "condition": threading.Condition(threading.RLock()),
+                        "status": "model",
+                        "protocol_shadow": server_mod._new_agent_protocol_shadow(
+                            "model",
+                            0,
+                        ),
+                    }
+                    for event in fixture["events"]:
+                        server_mod._agent_protocol_shadow_observe(
+                            run,
+                            event,
+                            source="append",
+                        )
+                    shadow = server_mod._agent_protocol_shadow_snapshot(run)
+                    self.assertEqual(
+                        shadow["eventsObserved"],
+                        len(fixture["events"]),
+                    )
+                    self.assertEqual(
+                        shadow["eventsAccepted"],
+                        len(fixture["events"]),
+                    )
+                    self.assertEqual(shadow["contractErrors"], 0)
+                    self.assertNotIn(
+                        "event_sequence_gap",
+                        shadow["diagnosticCounts"],
+                    )
+                    self.assertNotIn(
+                        "out_of_order_event",
+                        shadow["diagnosticCounts"],
+                    )
+
+    def test_agent_protocol_shadow_bounds_sequence_fingerprints(self):
+        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+            run = {
+                "condition": threading.Condition(threading.RLock()),
+                "status": "model",
+                "protocol_shadow": server_mod._new_agent_protocol_shadow(
+                    "model",
+                    0,
+                ),
+            }
+            event_count = server_mod._AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT + 12
+            for seq in range(1, event_count + 1):
+                server_mod._agent_protocol_shadow_observe(
+                    run,
+                    {
+                        "seq": seq,
+                        "type": "model_pending",
+                        "data": {"round": seq},
+                        "createdAt": "2030-01-01T00:00:00Z",
+                    },
+                    source="append",
+                )
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertEqual(shadow["eventsAccepted"], event_count)
+        self.assertEqual(
+            len(run["protocol_shadow"]["validator"].fingerprints),
+            server_mod._AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT,
+        )
+        self.assertNotIn(1, run["protocol_shadow"]["validator"].fingerprints)
+        self.assertIn(event_count, run["protocol_shadow"]["validator"].fingerprints)
+
     def test_agent_auto_compacts_after_tool_result_and_continues_same_run(self):
         (self.project_dir / "large.txt").write_text("x" * 12000, encoding="utf-8")
         with _AgentUpstream.scripted_lock:

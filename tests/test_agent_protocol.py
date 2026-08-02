@@ -224,13 +224,13 @@ class TestAgentEventContract(unittest.TestCase):
             )["valid"]
         )
 
-    def test_contract_summary_is_json_serializable_and_runtime_is_detached(self):
+    def test_contract_summary_is_json_serializable_and_runtime_imports_contract(self):
         summary = agent_protocol.public_contract_summary()
         encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True)
         self.assertIn('"protocolVersion": 1', encoded)
         self.assertEqual(len(summary["eventTypes"]), 22)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
-        self.assertNotIn("import agent_protocol", server_source)
+        self.assertIn("import agent_protocol", server_source)
         self.assertNotIn("from agent_protocol", server_source)
 
 
