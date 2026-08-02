@@ -6774,6 +6774,21 @@ process.stdout.write(JSON.stringify({
         )[0]
         self.assertNotIn("data-composer-image-preview", model_attempt_source)
 
+        sent_image_rule_start = STYLE_SOURCE.index(".msg-img-clickable {")
+        sent_image_rule_end = STYLE_SOURCE.index("}", sent_image_rule_start)
+        sent_image_rule = STYLE_SOURCE[sent_image_rule_start:sent_image_rule_end]
+        self.assertIn("width: auto", sent_image_rule)
+        self.assertIn("height: 120px", sent_image_rule)
+        self.assertIn("max-width: 100%", sent_image_rule)
+        self.assertIn("object-fit: contain", sent_image_rule)
+        image_group_rule_start = STYLE_SOURCE.index(".msg-image-group {")
+        image_group_rule_end = STYLE_SOURCE.index("}", image_group_rule_start)
+        image_group_rule = STYLE_SOURCE[image_group_rule_start:image_group_rule_end]
+        self.assertIn("display: flex", image_group_rule)
+        self.assertIn("flex-wrap: wrap", image_group_rule)
+        self.assertIn("justify-content: flex-end", image_group_rule)
+        self.assertIn("gap: 8px", image_group_rule)
+
         script = r"""
 const writes = [];
 const previewed = [];
@@ -6835,6 +6850,15 @@ const secondBound = feature.bindInteractions(root);
     content: "",
     _images: [{path: "C:/tmp/demo.png", name: "demo"}],
   }, 1);
+  const batchHtml = feature.renderUserProjection({
+    role: "user",
+    content: "describe these images",
+    _images: [
+      {path: "C:/tmp/one.png", name: "one"},
+      {path: "C:/tmp/two.png", name: "two"},
+      {path: "C:/tmp/three.png", name: "three"},
+    ],
+  }, 2);
   process.stdout.write(JSON.stringify({
     firstBound,
     secondBound,
@@ -6847,6 +6871,7 @@ const secondBound = feature.bindInteractions(root);
     copied: classes.has("copied"),
     copyHtml,
     userHtml,
+    batchHtml,
   }));
 })().catch((error) => { console.error(error); process.exit(1); });
 """
@@ -6874,6 +6899,13 @@ const secondBound = feature.bindInteractions(root);
         self.assertIn("data-message-scroll-on-load", data["userHtml"])
         self.assertNotIn("onclick=", data["userHtml"])
         self.assertNotIn("onload=", data["userHtml"])
+        self.assertEqual(data["batchHtml"].count('class="msg user msg-image-batch"'), 1)
+        self.assertEqual(data["batchHtml"].count("data-message-image-preview"), 3)
+        self.assertEqual(data["batchHtml"].count('class="bubble bubble-img msg-image-group"'), 1)
+        self.assertLess(
+            data["batchHtml"].index("msg-image-group"),
+            data["batchHtml"].index("describe these images"),
+        )
 
     def test_messages_ui_localizes_request_user_input_process(self):
         self.assertIn('request_user_input:"toolRequestUserInput"', APP_SOURCE)

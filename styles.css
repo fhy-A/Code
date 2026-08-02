@@ -1975,10 +1975,35 @@ input:focus, select:focus, textarea:focus {
   border-radius: 6px; margin-top: 4px;
   border: 1px solid var(--line); cursor: pointer;
 }
-.msg-img-clickable { max-width: 260px; max-height: 260px; }
+.msg-img-clickable {
+  width: auto;
+  height: 120px;
+  max-width: 100%;
+  object-fit: contain;
+  flex: 0 1 auto;
+  margin-top: 0;
+}
 .msg-img:hover { opacity: .85; }
 .bubble-img { padding: 4px !important; background: transparent !important; }
-.msg-image .bubble { padding: 2px; }
+.user-message-batch {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.msg-image-group {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 8px;
+  overflow: visible;
+}
+.msg-image-batch .bubble { padding: 2px; }
 
 /* ── Message meta (timestamp + copy) ── */
 .msg-meta { position: absolute; z-index: 1; top: 100%; right: 0; display: flex; align-items: center; justify-content: flex-end; height: var(--user-message-meta-height); gap: 5px; margin-top: var(--user-message-meta-offset); font-size: 11px; color: var(--muted); opacity: 0; pointer-events: none; transition: opacity .15s; }

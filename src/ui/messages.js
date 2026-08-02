@@ -379,25 +379,28 @@
             ? `<span class="queued-message-status canceled"><span class="queued-message-dot"></span>${t("queuedMessageCanceled")}</span>`
             : "";
       const dispatchStatus = queuedStatus || backgroundStatus;
-      const imageArticles = images.map((image, imageIndex) => {
+      const imageItems = images.map((image, imageIndex) => {
         const src = image.path
           ? `/api/file?path=${encodeURIComponent(image.path)}&raw=1`
           : `data:${image.mime || "image/png"};base64,${image.base64}`;
         const onLoad = image.path ? " data-message-scroll-on-load" : "";
-        return `<article class="msg user msg-image" data-msg-index="${index}" data-img="${imageIndex}"${dispatchAttr}>
-          <div class="bubble bubble-img">
-            <img class="msg-img msg-img-clickable" src="${src}" alt="${escapeHtml(image.name || "image")}"${onLoad} data-message-image-preview title="Click to enlarge">
-          </div>
-        </article>`;
+        return `<img class="msg-img msg-img-clickable" src="${src}" alt="${escapeHtml(image.name || "image")}" data-img="${imageIndex}"${onLoad} data-message-image-preview title="Click to enlarge">`;
       }).join("");
       if (!text && images.length === 0) return "";
+      if (images.length) {
+        const imageGroup = `<div class="bubble bubble-img msg-image-group">${imageItems}</div>`;
+        const textBubble = text ? `<div class="bubble">${renderMarkdown(text)}</div>` : "";
+        const batchMeta = text
+          ? `<div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div>`
+          : dispatchStatus
+            ? `<div class="msg-meta">${dispatchStatus}${time}</div>`
+            : "";
+        return `<article class="msg user msg-image-batch" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
+      }
       const textArticle = text
         ? `<article class="msg user" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area"><div class="bubble">${renderMarkdown(text)}</div><div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
         : "";
-      const imageOnlyStatus = !text && dispatchStatus
-        ? `<article class="msg user msg-dispatch-meta" data-msg-index="${index}"${dispatchAttr}><div class="msg-meta">${dispatchStatus}${time}</div></article>`
-        : "";
-      return textArticle + imageArticles + imageOnlyStatus;
+      return textArticle;
     }
 
     function renderUserInputSummaryProjection(msg, index) {
