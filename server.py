@@ -12007,8 +12007,10 @@ class CodeHandler(BaseHTTPRequestHandler):
         # Format conversation as text
         lines = []
         for msg in to_compress:
-            role = msg.get("role", "?")
-            content = (msg.get("content") or "").strip()
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "?")
+            content = _agent_message_content_text(msg).strip()
             if not content:
                 continue
             label = {"user": "用户", "assistant": "Agent", "tool-call": "工具调用", "tool-result": "工具结果"}.get(role, role)
@@ -12041,10 +12043,13 @@ class CodeHandler(BaseHTTPRequestHandler):
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = api_key
+        base_url = _normalize_runtime_base_url(
+            self.headers.get("X-Base-URL", "") or NEW_API_BASE_URL
+        )
 
         try:
             req = request.Request(
-                NEW_API_BASE_URL + "/v1/chat/completions",
+                base_url + "/v1/chat/completions",
                 data=json.dumps(payload).encode("utf-8"),
                 method="POST",
                 headers=headers,

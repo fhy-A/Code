@@ -65,10 +65,11 @@ class TestFrontendCoreModules(unittest.TestCase):
             'message?.meta?.kind === "import-boundary"',
             COMPACTION_SOURCE,
         )
-        self.assertIn("buildManualCompactionPlan(state.messages, {", compact_source)
+        self.assertIn("const modelContextMessages = getModelContextMessages(", compact_source)
+        self.assertIn("buildManualCompactionPlan(modelContextMessages, {", compact_source)
         self.assertIn("messages: requestMessages", compact_source)
         self.assertIn(
-            "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages]",
+            "state.messages = [...messagesBeforeCompaction, summaryMsg, manualCompactionMarker]",
             compact_source,
         )
         self.assertIn("{ persistMessages: true }", compact_source)
@@ -1411,6 +1412,15 @@ const plan = compaction.buildManualCompactionPlan(messages, {{
   getMessageText: (message) => String(message?.content || ""),
   isDetachedMessage: (message) => Boolean(message?.meta?.detachedFromMain),
 }});
+const activeContext = compaction.getModelContextMessages(
+  messages,
+  (message) => Boolean(message?.meta?.detachedFromMain),
+);
+const repeatPlan = compaction.buildManualCompactionPlan(activeContext, {{
+  mapMessageForApi: request.mapMessageForApi,
+  getMessageText: (message) => String(message?.content || ""),
+  isDetachedMessage: (message) => Boolean(message?.meta?.detachedFromMain),
+}});
 const shortPlan = compaction.buildManualCompactionPlan([
   {{role: "user", content: "s0"}},
   {{role: "assistant", content: "r0"}},
@@ -1434,6 +1444,11 @@ process.stdout.write(JSON.stringify({{
   request: plan.requestMessages.map((message) => message.content),
   requestKeepCount: plan.requestKeepCount,
   serverSummaryCount,
+  activeContext: activeContext.map((message) => message.content),
+  repeatCanCompact: repeatPlan.canCompact,
+  repeatRemoved: repeatPlan.removedMessages.map((message) => message.content),
+  repeatKept: repeatPlan.keptMessages.map((message) => message.content),
+  repeatRequest: repeatPlan.requestMessages.map((message) => message.content),
   shortCanCompact: shortPlan.canCompact,
   shortKept: shortPlan.keptMessages.map((message) => message.content),
   summaryMessage,
@@ -1464,6 +1479,22 @@ process.stdout.write(JSON.stringify({{
         ])
         self.assertEqual(data["requestKeepCount"], 2)
         self.assertEqual(data["serverSummaryCount"], 6)
+        self.assertEqual(data["activeContext"], [
+            "old summary", "u0", "a0", "archived trace", "u1", "a1",
+            "u2", "a2", "read_file", "file contents", "a2 final",
+            "u3", "a3", "u4", "a4",
+        ])
+        self.assertTrue(data["repeatCanCompact"])
+        self.assertEqual(data["repeatRemoved"], [
+            "old summary", "u0", "a0", "archived trace", "u1", "a1",
+        ])
+        self.assertEqual(data["repeatKept"], [
+            "u2", "a2", "read_file", "file contents", "a2 final",
+            "u3", "a3", "u4", "a4",
+        ])
+        self.assertEqual(data["repeatRequest"], [
+            "old summary", "u0", "a0", "u1", "a1", "u4", "a4",
+        ])
         self.assertFalse(data["shortCanCompact"])
         self.assertEqual(data["shortKept"], ["s0", "r0", "s1", "r1", "s2", "r2"])
         self.assertEqual(data["summaryMessage"], {
@@ -1482,6 +1513,7 @@ process.stdout.write(JSON.stringify({{
             "buildManualCompactionPlan",
             "createCompactSummaryMessage",
             "findCompleteContextStart",
+            "getModelContextMessages",
             "resolveRequestKeepCount",
             "serverKeepCount",
         ):
@@ -4188,8 +4220,10 @@ const runtime = window.Code.core.i18n.createI18nRuntime({
   onLanguageChanged: (nextLanguage) => changed.push(nextLanguage),
 });
 const zh = runtime.t("editingMemory", {name: "demo"});
+const zhDeleteSession = runtime.t("deleteSessionConfirmMessage", {name: "示例"});
 runtime.setLang("en");
 const en = runtime.t("editingMemory", {name: "demo"});
+const enDeleteSession = runtime.t("deleteSessionConfirmMessage", {name: "Example"});
 const {LANG, I18N} = window.Code.core.i18n;
 const missingKeys = {
   i18nEn: Object.keys(I18N.zh).filter((key) => !(key in I18N.en)),
@@ -4197,7 +4231,7 @@ const missingKeys = {
   langEn: Object.keys(LANG.zh).filter((key) => !(key in LANG.en)),
   langZh: Object.keys(LANG.en).filter((key) => !(key in LANG.zh)),
 };
-process.stdout.write(JSON.stringify({zh, en, persisted, changed, missingKeys}));
+process.stdout.write(JSON.stringify({zh, zhDeleteSession, en, enDeleteSession, persisted, changed, missingKeys}));
 """
         completed = subprocess.run(
             ["node", "-e", script],
@@ -4211,7 +4245,9 @@ process.stdout.write(JSON.stringify({zh, en, persisted, changed, missingKeys}));
             json.loads(completed.stdout),
             {
                 "zh": "编辑中：demo",
+                "zhDeleteSession": "删除会话「示例」？此操作不可恢复。",
                 "en": "Editing: demo",
+                "enDeleteSession": 'Delete session "Example"? This action cannot be undone.',
                 "persisted": ["en"],
                 "changed": ["en"],
                 "missingKeys": {
@@ -5683,7 +5719,6 @@ const feature = createMessagesFeature({
   getSelectedModel: () => "model-1",
   renderNetworkRecoveryStatus: () => "<recovery></recovery>",
   renderAssistantContent: (value) => `<answer>${escapeHtml(value)}</answer>`,
-  renderCompactSummary: (_msg, index) => `<compact data-index="${index}"></compact>`,
   renderBranchFlow: (title) => `<branch>${escapeHtml(title)}</branch>`,
   isEditSuggestionMessage: (msg) => Boolean(msg?.meta?.edit),
   renderEditSuggestion: (_msg, index) => `<edit data-index="${index}"></edit>`,
@@ -5712,6 +5747,13 @@ const completedHtml = feature.projectMessages(messages, {
 const simpleCompletedHtml = feature.projectMessages([
   {role: "user", content: "simple"},
   {role: "assistant", content: "simple answer", _responseTime: "1s"},
+], {hasActiveRun: false});
+const compactSummaryHtml = feature.projectMessages([
+  {role: "user", content: "visible old task"},
+  {role: "assistant", content: "visible old answer", _responseTime: "1s"},
+  {role: "assistant", content: "hidden compact summary", meta: {kind: "compact-summary", compressed: 12}},
+  {role: "user", content: "recent task"},
+  {role: "assistant", content: "recent answer", _responseTime: "1s"},
 ], {hasActiveRun: false});
 const activeTraceMessages = [
   {role: "user", content: "active trace"},
@@ -5784,6 +5826,21 @@ const autoCompactionHtml = feature.projectMessages([
   {role: "tool-result", content: "contents", meta: {action: "read_file", toolCallId: "compact-tool-1", outcome: "succeeded"}},
   {role: "assistant", content: "", meta: {kind: "auto-context-compaction", status: "completed"}},
   {role: "assistant", content: "final after compaction", _responseTime: "3s"},
+], {hasActiveRun: false});
+const manualCompactionRunningHtml = feature.projectMessages([
+  {role: "user", content: "manual compact task"},
+  {role: "assistant", content: "manual compact answer", _responseTime: "2s"},
+  {role: "assistant", content: "", meta: {kind: "manual-context-compaction", status: "running", skipApi: true}},
+], {hasActiveRun: false});
+const manualCompactionCompletedHtml = feature.projectMessages([
+  {role: "user", content: "manual compact task"},
+  {role: "assistant", content: "manual compact answer", _responseTime: "2s"},
+  {role: "assistant", content: "", meta: {kind: "manual-context-compaction", status: "completed", skipApi: true}},
+], {hasActiveRun: false});
+const manualCompactionFailedHtml = feature.projectMessages([
+  {role: "user", content: "manual compact task"},
+  {role: "assistant", content: "manual compact answer", _responseTime: "2s"},
+  {role: "assistant", content: "", meta: {kind: "manual-context-compaction", status: "failed", skipApi: true}},
 ], {hasActiveRun: false});
 const runningStage = feature.renderToolProcessProjection([
   {msg: {role: "assistant", meta: {toolCalls: [
@@ -5860,6 +5917,7 @@ process.stdout.write(JSON.stringify({
   html,
   completedHtml,
   simpleCompletedHtml,
+  compactSummaryHtml,
   activeAnswerHtml,
   expandedActiveAnswerHtml,
   activeThinkingHtml,
@@ -5867,6 +5925,9 @@ process.stdout.write(JSON.stringify({
   operationalHtml,
   groupedStageHtml,
   autoCompactionHtml,
+  manualCompactionRunningHtml,
+  manualCompactionCompletedHtml,
+  manualCompactionFailedHtml,
   runningStage,
   completedCommands,
   completedEdits,
@@ -5918,6 +5979,11 @@ process.stdout.write(JSON.stringify({
         self.assertIn("toolProcessResult", html)
         self.assertNotIn("secret reasoning", html)
         self.assertIn("background done", html)
+        self.assertNotIn("<compact", data["compactSummaryHtml"])
+        self.assertNotIn("hidden compact summary", data["compactSummaryHtml"])
+        self.assertIn("visible old task", data["compactSummaryHtml"])
+        self.assertIn("visible old answer", data["compactSummaryHtml"])
+        self.assertIn("recent answer", data["compactSummaryHtml"])
         self.assertNotIn("hidden tool", html)
         self.assertNotIn("<md>inspect", html)
         self.assertNotIn("hidden internal", html)
@@ -5957,6 +6023,18 @@ process.stdout.write(JSON.stringify({
         self.assertLess(auto_marker, auto_trace_end)
         self.assertLess(auto_trace_end, auto_final)
         self.assertIn("autoCompactedContext", auto_compaction_html)
+        manual_running_html = data["manualCompactionRunningHtml"]
+        manual_completed_html = data["manualCompactionCompletedHtml"]
+        manual_failed_html = data["manualCompactionFailedHtml"]
+        self.assertNotIn("execution-trace", manual_running_html)
+        self.assertIn('class="context-compaction-row msg running"', manual_running_html)
+        self.assertIn('data-context-compaction-mode="manual"', manual_running_html)
+        self.assertIn("manualCompactingContext", manual_running_html)
+        self.assertLess(manual_running_html.index("manual compact answer"), manual_running_html.index("data-context-compaction"))
+        self.assertIn('class="context-compaction-row msg completed"', manual_completed_html)
+        self.assertIn("manualCompactedContext", manual_completed_html)
+        self.assertIn('class="context-compaction-row msg failed"', manual_failed_html)
+        self.assertIn("manualCompactContextFailed", manual_failed_html)
         self.assertNotIn("execution-trace", data["simpleCompletedHtml"])
         self.assertIn("data-completed-run-status", data["simpleCompletedHtml"])
         active_answer_html = data["activeAnswerHtml"]
@@ -6319,7 +6397,7 @@ process.stdout.write(feature.projectMessages(messages, {hasActiveRun: true}));
         script = r"""
 global.window = {Code: {ui: {}}};
 require("./src/ui/timeline.js");
-const {createTimelineFeature, DEFAULT_MIN_TIMELINE_WIDTH, TIMELINE_MARKER_PITCH, TIMELINE_MAX_VIEWPORT_RATIO, getCompactSummaryStats, syncSessionBranchMetadata} = window.Code.ui.timeline;
+const {createTimelineFeature, DEFAULT_MIN_TIMELINE_WIDTH, TIMELINE_MARKER_PITCH, TIMELINE_MAX_VIEWPORT_RATIO, syncSessionBranchMetadata} = window.Code.ui.timeline;
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 let messages = [
   {role: "user", content: "first task"},
@@ -6438,9 +6516,6 @@ const feature = createTimelineFeature({
   ResizeObserver: FakeResizeObserver,
   getViewportHeight: () => viewportHeight,
 });
-const metaStats = feature.getCompactSummaryStats({meta: {compressed: 5, estimatedSaved: 9000}});
-const legacyStats = getCompactSummaryStats({content: "自动压缩 4 条，节省 ~1.5k"});
-const compact = feature.renderCompactSummaryProjection({meta: {compressed: 5, estimatedSaved: 9000}}, 7);
 const syncedBranch = syncSessionBranchMetadata(sessions, loadedBranch);
 const branchMarker = feature.getBranchFlowMarker();
 const branch = feature.renderBranchFlowProjection(branchMarker.parentTitle);
@@ -6511,9 +6586,6 @@ process.stdout.write(JSON.stringify({
   defaultMinTimelineWidth: DEFAULT_MIN_TIMELINE_WIDTH,
   timelineMarkerPitch: TIMELINE_MARKER_PITCH,
   timelineMaxViewportRatio: TIMELINE_MAX_VIEWPORT_RATIO,
-  metaStats,
-  legacyStats,
-  compact,
   syncedBranch,
   branchMarker,
   branch,
@@ -6560,11 +6632,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["defaultMinTimelineWidth"], 560)
         self.assertEqual(data["timelineMarkerPitch"], 9)
         self.assertEqual(data["timelineMaxViewportRatio"], 0.7)
-        self.assertEqual(data["metaStats"], {"compressed": 5, "estimatedSaved": 9000})
-        self.assertEqual(data["legacyStats"], {"compressed": 4, "estimatedSaved": 1500})
-        self.assertIn('class="msg branch-indicator compact-indicator"', data["compact"])
-        self.assertIn("compactMarkerMessages:5", data["compact"])
-        self.assertIn("compactMarkerSaved:9000t", data["compact"])
+        self.assertNotIn("function getCompactSummaryStats(", TIMELINE_SOURCE)
+        self.assertNotIn("function renderCompactSummaryProjection(", TIMELINE_SOURCE)
         self.assertEqual(data["syncedBranch"]["_branchMsgCount"], 3.8)
         self.assertEqual(data["branchMarker"], {"messageCount": 3, "parentTitle": "Parent <one>"})
         self.assertIn("Parent &lt;one&gt;", data["branch"])
@@ -6620,6 +6689,7 @@ process.stdout.write(JSON.stringify({
                 "outside": False,
             },
         )
+
         self.assertTrue(data["hoverCascadeCleared"])
         self.assertEqual(data["afterWheelStart"], "3")
         self.assertEqual(data["afterWheelFirstIndex"], "3")
@@ -6652,6 +6722,24 @@ process.stdout.write(JSON.stringify({
         self.assertIn("-webkit-line-clamp: 3", STYLE_SOURCE)
         self.assertIn("white-space: pre-line", STYLE_SOURCE)
         self.assertNotIn(".tl-dot {", STYLE_SOURCE)
+
+    def test_delete_session_confirmation_uses_i18n_and_localized_fallback(self):
+        delete_start = APP_SOURCE.index("async function deleteSession(")
+        delete_end = APP_SOURCE.index("function getPinnedSessions()", delete_start)
+        delete_source = APP_SOURCE[delete_start:delete_end]
+
+        self.assertIn('session?.title || t("untitledSession")', delete_source)
+        self.assertIn(
+            't("deleteSessionConfirmMessage", { name: title })',
+            delete_source,
+        )
+        self.assertIn('deleteSessionConfirmMessage: "删除会话「{name}」？此操作不可恢复。"', I18N_SOURCE)
+        self.assertIn(
+            'deleteSessionConfirmMessage: "Delete session \\"{name}\\"? This action cannot be undone."',
+            I18N_SOURCE,
+        )
+        self.assertNotIn("Untitled session", delete_source)
+        self.assertNotIn("This action cannot be undone.`", delete_source)
 
     def test_panels_ui_owns_session_stats_fields_and_top_panel_interactions(self):
         self.assertIn("Code.ui.panels = Object.freeze", PANELS_SOURCE)

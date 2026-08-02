@@ -22,26 +22,6 @@
     return String(msg?.content || "");
   }
 
-  function getCompactSummaryStats(msg, getMessageText = defaultMessageText) {
-    const meta = msg?.meta || {};
-    let compressed = Math.max(0, Number(meta.compressed) || 0);
-    let estimatedSaved = Math.max(0, Number(meta.estimatedSaved) || 0);
-    const text = getMessageText(msg) || "";
-    if (!compressed) {
-      const countMatch = text.match(/(?:压缩摘要|自动压缩)[^\d]*(\d+)\s*条/);
-      if (countMatch) compressed = Number(countMatch[1]) || 0;
-    }
-    if (!estimatedSaved) {
-      const savedMatch = text.match(/(?:节省|saved)[^\d~]*~?\s*([\d.]+)\s*([kKmM]?)/i);
-      if (savedMatch) {
-        const base = Number(savedMatch[1]) || 0;
-        const unit = String(savedMatch[2] || "").toLowerCase();
-        estimatedSaved = Math.round(base * (unit === "m" ? 1000000 : unit === "k" ? 1000 : 1));
-      }
-    }
-    return { compressed, estimatedSaved };
-  }
-
   function isTimelineInternalMessage(msg) {
     if (!msg) return true;
     if (msg.meta?._system) return true;
@@ -179,7 +159,6 @@
 
   function createTimelineFeature(options = {}) {
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
-    const formatCompact = options.formatCompact || ((value) => String(value ?? 0));
     const t = options.t || ((key) => key);
     const getMessageText = options.getMessageText || defaultMessageText;
     const getMessages = options.getMessages || (() => []);
@@ -227,17 +206,6 @@
     let observedWidthContainer = null;
     let timelineResizeObserver = null;
     let scrollUpdatePending = false;
-
-    function renderCompactSummaryProjection(msg, index) {
-      const { compressed, estimatedSaved } = getCompactSummaryStats(msg, getMessageText);
-      const details = [];
-      if (compressed) details.push(t("compactMarkerMessages", { count: compressed }));
-      if (estimatedSaved) details.push(t("compactMarkerSaved", { tokens: formatCompact(estimatedSaved) }));
-      const label = details.length
-        ? t("compactMarkerWithDetails", { details: details.join(" · ") })
-        : t("compactMarker");
-      return `<article class="msg branch-indicator compact-indicator" data-msg-index="${index}"><div class="branch-indicator-bar"><span class="branch-indicator-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M7 12h10M9 17h6"/><path d="M3 3h18v18H3z"/></svg></span><span>${escapeHtml(label)}</span></div></article>`;
-    }
 
     function getBranchFlowMarker() {
       const sessions = getSessions();
@@ -586,13 +554,11 @@
     return Object.freeze({
       clearTimeline,
       getBranchFlowMarker,
-      getCompactSummaryStats: (msg) => getCompactSummaryStats(msg, getMessageText),
       projectTimelineNodes: (messages) => projectTimelineNodes(messages, getMessageText, {
         isInternalMessage,
         isPlanningPlaceholder,
       }),
       renderBranchFlowProjection,
-      renderCompactSummaryProjection,
       renderTimeline,
       updateActiveTimelineMarker,
     });
@@ -603,7 +569,6 @@
     DEFAULT_MIN_TIMELINE_WIDTH,
     TIMELINE_MARKER_PITCH,
     TIMELINE_MAX_VIEWPORT_RATIO,
-    getCompactSummaryStats,
     projectTimelineNodes,
     syncSessionBranchMetadata,
   });

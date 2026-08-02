@@ -127,7 +127,6 @@
     const getSelectedModel = options.getSelectedModel || (() => "");
     const renderNetworkRecoveryStatus = options.renderNetworkRecoveryStatus || (() => "");
     const renderAssistantContent = options.renderAssistantContent || ((content) => renderMarkdown(content));
-    const renderCompactSummary = options.renderCompactSummary || (() => "");
     const renderBranchFlow = options.renderBranchFlow || (() => "");
     const isEditSuggestionMessage = options.isEditSuggestionMessage || (() => false);
     const renderEditSuggestion = options.renderEditSuggestion || (() => "");
@@ -700,10 +699,15 @@
       const status = ["running", "completed", "failed"].includes(msg.meta?.status)
         ? msg.meta.status
         : "completed";
-      const labelKey = status === "running"
-        ? "autoCompactingContext"
-        : (status === "failed" ? "autoCompactContextFailed" : "autoCompactedContext");
-      return `<div class="context-compaction-row msg ${escapeHtml(status)}" data-msg-index="${index}" data-context-compaction>
+      const manual = msg.meta?.kind === "manual-context-compaction";
+      const labelKey = manual
+        ? (status === "running"
+            ? "manualCompactingContext"
+            : (status === "failed" ? "manualCompactContextFailed" : "manualCompactedContext"))
+        : (status === "running"
+            ? "autoCompactingContext"
+            : (status === "failed" ? "autoCompactContextFailed" : "autoCompactedContext"));
+      return `<div class="context-compaction-row msg ${escapeHtml(status)}" data-msg-index="${index}" data-context-compaction data-context-compaction-mode="${manual ? "manual" : "auto"}">
         <span class="context-compaction-icon" aria-hidden="true"></span>
         <span>${escapeHtml(t(labelKey))}</span>
       </div>`;
@@ -860,7 +864,11 @@
         }
         if (msg.meta?.kind === "compact-summary") {
           flushProcess();
-          rows.push(renderCompactSummary(msg, index));
+          continue;
+        }
+        if (msg.meta?.kind === "manual-context-compaction") {
+          closeExecutionTrace();
+          rows.push(renderAutoContextCompaction(msg, index));
           continue;
         }
         if (msg.meta?.kind === "auto-context-compaction") {

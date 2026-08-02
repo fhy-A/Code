@@ -720,7 +720,6 @@ setupMathCopyHandler(document.getElementById("messages"));
 
 const timelineFeature = createTimelineFeature({
   escapeHtml,
-  formatCompact,
   t,
   getMessageText: getMsgText,
   getMessages: () => state.messages,
@@ -733,7 +732,6 @@ const {
   clearTimeline,
   getBranchFlowMarker,
   renderBranchFlowProjection,
-  renderCompactSummaryProjection,
   renderTimeline,
 } = timelineFeature;
 
@@ -749,7 +747,6 @@ messagesFeature = createMessagesFeature({
   getSelectedModel,
   renderNetworkRecoveryStatus,
   renderAssistantContent,
-  renderCompactSummary: renderCompactSummaryProjection,
   renderBranchFlow: renderBranchFlowProjection,
   isEditSuggestionMessage,
   renderEditSuggestion: renderEditSuggestionProjection,
@@ -2751,7 +2748,7 @@ async function renameSession(sessionId, title) {
 
 async function deleteSession(sessionId) {
   const session = state.sessions.find((item) => item.id === sessionId);
-  const title = session?.title || "Untitled session";
+  const title = session?.title || t("untitledSession");
   showDeleteConfirm(sessionId, title);
 }
 
@@ -2761,7 +2758,7 @@ function hideDeleteConfirm() {
 
 function showDeleteConfirm(sessionId, title) {
   const modal = document.getElementById("deleteConfirmModal");
-  document.getElementById("deleteConfirmText").textContent = `Delete session "${title}"? This action cannot be undone.`;
+  document.getElementById("deleteConfirmText").textContent = t("deleteSessionConfirmMessage", { name: title });
   modal.classList.remove("hidden");
   const confirmBtn = document.getElementById("confirmDeleteSession");
   const cancelBtn = document.getElementById("cancelDeleteSession");
@@ -7767,7 +7764,11 @@ async function compactConversation() {
 
   if (state.isStreaming) { showToast(t("compactWaitForActiveTask"), "warning"); return; }
 
-  const compactionPlan = buildManualCompactionPlan(state.messages, {
+  const modelContextMessages = getModelContextMessages(
+    state.messages,
+    isDetachedFromMainContext,
+  );
+  const compactionPlan = buildManualCompactionPlan(modelContextMessages, {
     mapMessageForApi,
     getMessageText: getMsgText,
     isDetachedMessage: isDetachedFromMainContext,
@@ -7781,6 +7782,7 @@ async function compactConversation() {
   const model = getSelectedModel();
 
   const key = getBestKey(model);
+  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
 
   if (!key || !model) { showToast(t("compactSetupRequired"), "warning"); return; }
 
@@ -7790,10 +7792,8 @@ async function compactConversation() {
 
   const {
     compressCount,
-    durableSystemMessages,
     estimatedSaved,
     keepCount,
-    keptMessages,
     requestMessages,
   } = compactionPlan;
 
@@ -7839,13 +7839,37 @@ async function compactConversation() {
 
     confirmBtn.textContent = t("compacting");
 
+    const messagesBeforeCompaction = [...state.messages];
+    const manualCompactionMarker = {
+      role: "assistant",
+      content: "",
+      streaming: true,
+      _time: new Date().toISOString(),
+      meta: {
+        kind: "manual-context-compaction",
+        status: "running",
+        skipApi: true,
+      },
+    };
+    const finishManualCompactionMarker = (status, error = "") => {
+      manualCompactionMarker.streaming = false;
+      manualCompactionMarker.meta = {
+        ...manualCompactionMarker.meta,
+        status,
+        error: String(error || ""),
+      };
+    };
+    state.messages.push(manualCompactionMarker);
+    setSessionMessages(state.sessionId, state.messages);
+    renderMessages();
+
     try {
 
       const result = await apiJson("/api/compact", {
 
         method: "POST",
 
-        headers: { Authorization: `Bearer ${key}` },
+        headers: { Authorization: `Bearer ${key}`, "X-Base-URL": baseUrl },
 
         body: JSON.stringify({
 
@@ -7867,7 +7891,7 @@ async function compactConversation() {
       try {
         await apiJson(`/api/sessions/${encodeURIComponent(state.sessionId)}/archive`, {
           method: "PUT",
-          body: JSON.stringify({ messages: state.messages }),
+          body: JSON.stringify({ messages: messagesBeforeCompaction }),
         });
       } catch (_) { /* non-critical */ }
 
@@ -7877,7 +7901,8 @@ async function compactConversation() {
         createdAt: new Date().toISOString(),
       });
 
-      state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages];
+      finishManualCompactionMarker("completed");
+      state.messages = [...messagesBeforeCompaction, summaryMsg, manualCompactionMarker];
 
       state.stats = { input: 0, output: 0, cache: 0 };
 
@@ -7897,6 +7922,17 @@ async function compactConversation() {
       );
 
     } catch (err) {
+
+      finishManualCompactionMarker("failed", err.message);
+      setSessionMessages(state.sessionId, state.messages);
+      renderMessages();
+      await saveSessionState(
+        state.sessionId,
+        state.messages,
+        state.stats,
+        undefined,
+        { persistMessages: true },
+      ).catch(() => {});
 
       showToast(`${t("compactFailed")}：${err.message}`, "error");
 

@@ -98,6 +98,82 @@ class TestCompactValidation(unittest.TestCase):
             self.assertTrue(data.get("ok"))
             self.assertGreaterEqual(data["kept"], 2)
 
+    def test_multimodal_content_extracts_text_without_leaking_image_data(self):
+        image_data = "data:image/png;base64,SHOULD_NOT_REACH_COMPACTION_PROMPT"
+        self.handler.read_body_json.return_value = {
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请分析这张图片中的数据"},
+                        {"type": "image_url", "image_url": {"url": image_data}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_data}},
+                    ],
+                },
+                *[
+                    {"role": "assistant", "content": f"message-{index}"}
+                    for index in range(6)
+                ],
+            ],
+        }
+        self.handler.headers["Authorization"] = "Bearer sk-test"
+
+        with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._make_urlopen_mock()
+            server_mod.CodeHandler.compact(self.handler)
+
+        upstream_request = mock_urlopen.call_args[0][0]
+        upstream_payload = json.loads(upstream_request.data.decode("utf-8"))
+        prompt = upstream_payload["messages"][0]["content"]
+        self.assertIn("请分析这张图片中的数据", prompt)
+        self.assertNotIn(image_data, prompt)
+        self.assertNotIn("SHOULD_NOT_REACH_COMPACTION_PROMPT", prompt)
+        self.assertTrue(self.handler.send_json.call_args[0][0]["ok"])
+
+    def test_uses_request_base_url_and_normalizes_v1_suffix(self):
+        self.handler.read_body_json.return_value = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": str(i)} for i in range(8)],
+        }
+        self.handler.headers.update({
+            "Authorization": "Bearer sk-test",
+            "X-Base-URL": "https://gateway.example/v1/",
+        })
+        with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._make_urlopen_mock()
+            server_mod.CodeHandler.compact(self.handler)
+
+        request_object = mock_urlopen.call_args[0][0]
+        self.assertEqual(
+            request_object.full_url,
+            "https://gateway.example/v1/chat/completions",
+        )
+        self.assertTrue(self.handler.send_json.call_args[0][0]["ok"])
+
+    def test_empty_base_url_falls_back_to_local_gateway(self):
+        self.handler.read_body_json.return_value = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": str(i)} for i in range(8)],
+        }
+        self.handler.headers["Authorization"] = "Bearer sk-test"
+        with mock.patch.object(server_mod, "NEW_API_BASE_URL", ""), \
+             mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._make_urlopen_mock()
+            server_mod.CodeHandler.compact(self.handler)
+
+        request_object = mock_urlopen.call_args[0][0]
+        self.assertEqual(
+            request_object.full_url,
+            "http://localhost:3000/v1/chat/completions",
+        )
+        self.assertTrue(self.handler.send_json.call_args[0][0]["ok"])
+
     def test_role_labels_applied(self):
         """Verify user/assistant/tool-call/tool-result labels are in the prompt."""
         self.handler.read_body_json.return_value = {
@@ -286,31 +362,63 @@ class TestCompactSummaryMarker(unittest.TestCase):
         cls.i18n_source = (root / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
         cls.compaction_source = (root / "src" / "agent" / "compaction.js").read_text(encoding="utf-8")
 
-    def test_compact_summary_has_message_flow_projection(self):
+    def test_compact_summary_is_hidden_from_message_flow(self):
         self.assertIn('msg.meta?.kind === "compact-summary"', self.messages_source)
-        self.assertIn("renderCompactSummary(msg, index)", self.messages_source)
-        self.assertIn('class="msg branch-indicator compact-indicator"', self.timeline_source)
+        self.assertNotIn("renderCompactSummary(msg, index)", self.messages_source)
+        self.assertNotIn("renderCompactSummaryProjection", self.timeline_source)
+        self.assertNotIn('class="msg branch-indicator compact-indicator"', self.timeline_source)
 
     def test_manual_compaction_uses_summary_message_factory(self):
         self.assertEqual(self.source.count("const summaryMsg = createCompactSummaryMessage(result, {"), 1)
         self.assertIn('kind: "compact-summary"', self.compaction_source)
 
-    def test_marker_is_localized(self):
-        self.assertIn('compactMarker: "上下文已压缩"', self.i18n_source)
-        self.assertIn('compactMarker: "Context compacted"', self.i18n_source)
+    def test_manual_compaction_projection_is_localized_and_separate(self):
+        for key in (
+            "manualCompactingContext",
+            "manualCompactedContext",
+            "manualCompactContextFailed",
+        ):
+            self.assertEqual(self.i18n_source.count(f"{key}:"), 2, key)
+        self.assertIn('msg.meta?.kind === "manual-context-compaction"', self.messages_source)
+        self.assertIn("closeExecutionTrace();", self.messages_source)
+        self.assertIn('data-context-compaction-mode="${manual ? "manual" : "auto"}"', self.messages_source)
+        compact_start = self.source.index("async function compactConversation()")
+        compact_end = self.source.index("function hideCompactConfirm()", compact_start)
+        compact_source = self.source[compact_start:compact_end]
+        self.assertIn('kind: "manual-context-compaction"', compact_source)
+        self.assertIn('status: "running"', compact_source)
+        self.assertIn("skipApi: true", compact_source)
+        self.assertIn('finishManualCompactionMarker("completed")', compact_source)
+        self.assertIn('finishManualCompactionMarker("failed", err.message)', compact_source)
+        self.assertIn("...messagesBeforeCompaction, summaryMsg, manualCompactionMarker", compact_source)
+        self.assertIn("messages: messagesBeforeCompaction", compact_source)
+        self.assertNotIn('showToast(t("compactMarker")', compact_source)
 
-    def test_manual_compaction_keeps_marker_chronology(self):
+    def test_manual_compaction_passes_current_gateway_base_url(self):
+        compact_start = self.source.index("async function compactConversation()")
+        compact_end = self.source.index("function hideCompactConfirm()", compact_start)
+        compact_source = self.source[compact_start:compact_end]
+        self.assertIn('const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000"', compact_source)
+        self.assertIn('"X-Base-URL": baseUrl', compact_source)
+
+    def test_manual_compaction_keeps_full_history_and_persists_summary_boundary(self):
         self.assertIn(
             "const keptMessages = compactableMessages.slice(keepStartIndex)",
             self.compaction_source,
         )
         self.assertIn(
-            "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages]",
+            "state.messages = [...messagesBeforeCompaction, summaryMsg, manualCompactionMarker]",
             self.source,
         )
         compact_start = self.source.index("async function compactConversation()")
         compact_end = self.source.index("function hideCompactConfirm()", compact_start)
         compact_source = self.source[compact_start:compact_end]
+        self.assertIn("const modelContextMessages = getModelContextMessages(", compact_source)
+        self.assertIn("buildManualCompactionPlan(modelContextMessages, {", compact_source)
+        self.assertNotIn(
+            "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages",
+            compact_source,
+        )
         self.assertIn("await saveSessionState(", compact_source)
         self.assertIn("{ persistMessages: true }", compact_source)
         self.assertNotIn("_compactPrefix", self.source)
