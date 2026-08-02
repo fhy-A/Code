@@ -728,8 +728,185 @@ class TestDurableAgentRuntime(unittest.TestCase):
             instance_mode="dev",
         ))
 
+    def test_agent_event_protocol_v1_flag_defaults_and_override(self):
+        self.assertTrue(server_mod._resolve_agent_event_protocol_v1_enabled(
+            {},
+            instance_mode="dev",
+        ))
+        self.assertFalse(server_mod._resolve_agent_event_protocol_v1_enabled(
+            {},
+            instance_mode="release",
+        ))
+        for value in ("0", "false", "NO", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(server_mod._resolve_agent_event_protocol_v1_enabled(
+                    {"CODE_AGENT_EVENT_PROTOCOL_V1": value},
+                    instance_mode="dev",
+                ))
+        for value in ("1", "true", "YES", "on"):
+            with self.subTest(value=value):
+                self.assertTrue(server_mod._resolve_agent_event_protocol_v1_enabled(
+                    {"CODE_AGENT_EVENT_PROTOCOL_V1": value},
+                    instance_mode="release",
+                ))
+        self.assertFalse(server_mod._resolve_agent_event_protocol_v1_enabled(
+            {"CODE_AGENT_EVENT_PROTOCOL_V1": "unexpected"},
+            instance_mode="release",
+        ))
+        self.assertTrue(server_mod._resolve_agent_event_protocol_v1_enabled(
+            {"CODE_AGENT_EVENT_PROTOCOL_V1": "unexpected"},
+            instance_mode="dev",
+        ))
+
+    def test_agent_event_protocol_v1_writes_one_explicit_envelope(self):
+        with (
+            mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True),
+            mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True),
+        ):
+            run = server_mod._create_agent_run(
+                "protocol-v1-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "inspect"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            server_mod._set_agent_status(run, "tools")
+            server_mod._append_agent_event(run, "tool_started", {
+                "toolCallId": "protocol-call",
+                "name": "read_file",
+                "arguments": "{}",
+            })
+            server_mod._finish_agent_run(run, "completed")
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+
+        self.assertTrue(run["events"])
+        for event in run["events"]:
+            self.assertEqual(event["protocolVersion"], 1)
+            self.assertEqual(
+                set(event),
+                {"protocolVersion", "seq", "type", "data", "createdAt"},
+            )
+            normalized = server_mod.agent_protocol.normalize_agent_event(
+                event,
+                strict=True,
+            )
+            self.assertEqual(normalized["sourceProtocolVersion"], 1)
+        self.assertNotIn(
+            "legacy_unversioned_event",
+            shadow["diagnosticCounts"],
+        )
+        persisted = json.loads(
+            server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
+        )
+        self.assertTrue(all(
+            event.get("protocolVersion") == 1
+            for event in persisted["events"]
+        ))
+        public = server_mod._agent_snapshot(run, 0)
+        self.assertTrue(all(
+            event.get("protocolVersion") == 1
+            for event in public["events"]
+        ))
+
+    def test_agent_event_protocol_v1_uses_real_utc_and_legacy_preserves_local_time(self):
+        local_value = "2030-01-01T20:00:00+08:00"
+        with mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True):
+            self.assertEqual(
+                server_mod._agent_event_created_at(local_value),
+                "2030-01-01T12:00:00Z",
+            )
+            event = server_mod._build_agent_event(
+                1,
+                "completed",
+                {},
+                local_value,
+            )
+            normalized = server_mod.agent_protocol.normalize_agent_event(
+                event,
+                strict=True,
+            )
+            self.assertEqual(normalized["event"]["createdAt"], "2030-01-01T12:00:00Z")
+
+            run = server_mod._create_agent_run(
+                "protocol-v1-time-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "inspect time"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            with mock.patch.object(server_mod, "now_iso", return_value=local_value):
+                appended = server_mod._append_agent_event(
+                    run,
+                    "model_pending",
+                    {"round": 1},
+                )
+            self.assertEqual(appended["createdAt"], "2030-01-01T12:00:00Z")
+            self.assertEqual(run["updated_at"], local_value)
+
+        legacy_value = "2030-01-01T20:00:00"
+        with mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", False):
+            self.assertEqual(
+                server_mod._agent_event_created_at(legacy_value),
+                legacy_value,
+            )
+
+    def test_agent_event_protocol_v1_supports_mixed_history_and_rollback(self):
+        with mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", False):
+            run = server_mod._create_agent_run(
+                "protocol-mixed-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "continue"}],
+                },
+                self.base_url,
+                [],
+                start_worker=False,
+            )
+            legacy_record = server_mod._agent_run_record(run)
+
+        self.assertNotIn("protocolVersion", legacy_record["events"][0])
+        with mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True):
+            restored = server_mod._agent_run_from_record(legacy_record)
+            server_mod._set_agent_status(restored, "model")
+            server_mod._append_agent_event(
+                restored,
+                "resumed",
+                {"status": "model"},
+            )
+
+        self.assertNotIn("protocolVersion", restored["events"][0])
+        self.assertEqual(restored["events"][1]["protocolVersion"], 1)
+        source_versions = [
+            server_mod.agent_protocol.normalize_agent_event(event)[
+                "sourceProtocolVersion"
+            ]
+            for event in restored["events"]
+        ]
+        self.assertEqual(source_versions, [0, 1])
+
+        with mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", False):
+            rollback_event = server_mod._build_agent_event(
+                3,
+                "model_pending",
+                {"round": 2},
+                "2030-01-01T00:00:00Z",
+            )
+        self.assertEqual(
+            set(rollback_event),
+            {"seq", "type", "data", "createdAt"},
+        )
+
     def test_agent_protocol_shadow_observes_without_changing_public_or_durable_data(self):
-        with mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True):
+        with (
+            mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True),
+            mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", False),
+        ):
             run = server_mod._create_agent_run(
                 "shadow-shape-session",
                 {

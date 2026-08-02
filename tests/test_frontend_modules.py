@@ -392,10 +392,11 @@ process.stdout.write(JSON.stringify(groups));
             "resumeAgentRun",
             "submitAgentInput",
             "submitAgentAuthorization",
+            "normalizeAgentEvent",
             "watchAgentRun",
             "cancelAgentRun",
             '"waiting_authorization",',
-            "await onEvent?.(event, snapshot)",
+            "await onEvent?.(normalized.event, snapshot",
         ):
             self.assertIn(expected, RUNTIME_SOURCE)
         self.assertIn('clientRequestId = ""', RUNTIME_SOURCE)
@@ -441,8 +442,13 @@ global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
 const urls = [];
 const snapshots = [
-  {{status: "running", events: [{{seq: 1, type: "created"}}, {{seq: 2, type: "model_started"}}]}},
-  {{status: "completed", events: [{{seq: 3, type: "completed"}}], result: {{content: "ok"}}}},
+  {{status: "running", events: [
+    {{seq: 1, type: "created"}},
+    {{protocolVersion: 1, seq: 2, type: "model_started", data: {{}}}},
+    {{protocolVersion: 3, seq: 3, type: "future_event", data: {{future: true}}}},
+    {{protocolVersion: 1, seq: 4, type: "", data: {{}}}},
+  ]}},
+  {{status: "completed", events: [{{seq: 5, type: "completed"}}], result: {{content: "ok"}}}},
 ];
 global.fetch = async (url) => {{
   urls.push(String(url));
@@ -453,16 +459,18 @@ global.fetch = async (url) => {{
 }};
 eval(source);
 const order = [];
+const versions = [];
 (async () => {{
   const result = await window.Code.agent.runtime.watchAgentRun({{
     agentRunId: "agent-1",
     onEvent: async (event) => {{
       order.push(`start-${{event.seq}}`);
+      versions.push([event.seq, event.protocolVersion, event.type]);
       await new Promise((resolve) => setTimeout(resolve, 1));
       order.push(`end-${{event.seq}}`);
     }},
   }});
-  process.stdout.write(JSON.stringify({{urls, order, cursor: result.nextCursor, status: result.status}}));
+  process.stdout.write(JSON.stringify({{urls, order, versions, cursor: result.nextCursor, status: result.status}}));
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         completed = subprocess.run(
@@ -474,13 +482,67 @@ const order = [];
         )
         data = json.loads(completed.stdout)
         self.assertIn("cursor=0", data["urls"][0])
-        self.assertIn("cursor=2", data["urls"][1])
+        self.assertIn("cursor=4", data["urls"][1])
         self.assertEqual(
             data["order"],
-            ["start-1", "end-1", "start-2", "end-2", "start-3", "end-3"],
+            [
+                "start-1", "end-1",
+                "start-2", "end-2",
+                "start-3", "end-3",
+                "start-5", "end-5",
+            ],
         )
-        self.assertEqual(data["cursor"], 3)
+        self.assertEqual(
+            data["versions"],
+            [
+                [1, 1, "created"],
+                [2, 1, "model_started"],
+                [3, 1, "future_event"],
+                [5, 1, "completed"],
+            ],
+        )
+        self.assertEqual(data["cursor"], 5)
         self.assertEqual(data["status"], "completed")
+
+    def test_agent_runtime_normalizes_legacy_v1_future_and_malformed_events(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+eval(source);
+const normalize = window.Code.agent.runtime.normalizeAgentEvent;
+const events = [
+  {{seq: 1, type: "created", data: {{model: "fixture"}}, createdAt: "2030-01-01T00:00:00Z"}},
+  {{protocolVersion: 1, seq: 2, type: "completed", data: {{}}, createdAt: "2030-01-01T00:00:01Z", ignored: true}},
+  {{protocolVersion: 4, seq: 3, type: "future_event", data: {{future: true}}, createdAt: "2030-01-01T00:00:02Z"}},
+  {{protocolVersion: 1, seq: 4, type: "tool_started", data: ["invalid"], createdAt: "2030-01-01T00:00:03Z"}},
+  {{protocolVersion: 1, seq: 5, type: "", data: {{}}, createdAt: "2030-01-01T00:00:04Z"}},
+];
+process.stdout.write(JSON.stringify(events.map((event) => normalize(event))));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        legacy, current, future, invalid_data, invalid_type = json.loads(
+            completed.stdout
+        )
+        self.assertEqual(legacy["sourceProtocolVersion"], 0)
+        self.assertEqual(legacy["event"]["protocolVersion"], 1)
+        self.assertIn("legacy_unversioned_event", legacy["diagnostics"])
+        self.assertEqual(current["sourceProtocolVersion"], 1)
+        self.assertNotIn("ignored", current["event"])
+        self.assertEqual(future["sourceProtocolVersion"], 4)
+        self.assertEqual(future["event"]["type"], "future_event")
+        self.assertIn("future_protocol_version", future["diagnostics"])
+        self.assertEqual(invalid_data["event"]["data"], {})
+        self.assertIn("invalid_event_data", invalid_data["diagnostics"])
+        self.assertIsNone(invalid_type["event"])
+        self.assertEqual(invalid_type["seq"], 5)
+        self.assertIn("invalid_event_type", invalid_type["diagnostics"])
 
     def test_agent_runtime_smooths_large_text_delta_without_changing_content(self):
         script = f"""

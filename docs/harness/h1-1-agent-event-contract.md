@@ -6,7 +6,7 @@
 
 阶段性质：新增纯协议模块与契约测试，不接入生产事件链
 
-> 后续状态：H1-2 已将本模块接入服务端内存影子观察，但仍未改变事件、持久化或前端协议；当前边界见 [`h1-2-server-shadow-validation.md`](h1-2-server-shadow-validation.md)。以下内容保留 H1-1 完成时的阶段事实。
+> 后续状态：H1-2 已将本模块接入服务端内存影子观察，H1-3 已在开发实例灰度启用显式事件版本并增加前端兼容读取；正式实例仍默认写入旧格式。当前边界见 [`h1-3-versioned-event-grey-rollout.md`](h1-3-versioned-event-grey-rollout.md)。以下内容保留 H1-1 完成时的阶段事实。
 
 ## 1. 阶段目标
 

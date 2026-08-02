@@ -89,9 +89,25 @@ def _resolve_agent_protocol_shadow_enabled(environ=None, *, instance_mode=None):
     return mode == "dev"
 
 
+def _resolve_agent_event_protocol_v1_enabled(environ=None, *, instance_mode=None):
+    """Write explicit v1 events by default only in the development instance."""
+    source = os.environ if environ is None else environ
+    mode = INSTANCE_MODE if instance_mode is None else str(instance_mode or "")
+    raw = source.get("CODE_AGENT_EVENT_PROTOCOL_V1")
+    if raw is None or str(raw).strip() == "":
+        return mode == "dev"
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return mode == "dev"
+
+
 _AGENT_PROTOCOL_SHADOW_ENABLED = _resolve_agent_protocol_shadow_enabled()
 _AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT = 64
 _AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT = 256
+_AGENT_EVENT_PROTOCOL_V1_ENABLED = _resolve_agent_event_protocol_v1_enabled()
 _active_downloads = {}   # downloadId -> {progress, done, error, path, total}
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -1398,6 +1414,38 @@ def _agent_snapshot(run, cursor=0):
         }
 
 
+def _agent_event_created_at(created_at):
+    """Return a strict UTC timestamp for v1 events and preserve legacy values."""
+    value = str(created_at or now_iso())
+    if not _AGENT_EVENT_PROTOCOL_V1_ENABLED:
+        return value
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = dt.datetime.now().astimezone()
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return (
+        parsed.astimezone(dt.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _build_agent_event(seq, event_type, data, created_at):
+    """Build the only durable Agent event envelope written by the server."""
+    event = {
+        "seq": int(seq),
+        "type": str(event_type or "event"),
+        "data": _json_clone(data if data is not None else {}),
+        "createdAt": _agent_event_created_at(created_at),
+    }
+    if _AGENT_EVENT_PROTOCOL_V1_ENABLED:
+        event["protocolVersion"] = agent_protocol.AGENT_EVENT_PROTOCOL_VERSION
+    return event
+
+
 def _new_agent_protocol_shadow(status, cursor=0):
     """Create one in-memory-only compatibility observer for an Agent run."""
     if not _AGENT_PROTOCOL_SHADOW_ENABLED:
@@ -1613,15 +1661,19 @@ def _append_agent_event(run, event_type, data=None):
     with run["condition"]:
         if run["status"] in _AGENT_RUN_TERMINAL:
             return None
-        event = {
-            "seq": run["next_seq"],
-            "type": str(event_type or "event"),
-            "data": _json_clone(data if data is not None else {}),
-            "createdAt": now_iso(),
-        }
+        created_at = now_iso()
+        event = _build_agent_event(
+            run["next_seq"],
+            event_type,
+            data,
+            created_at,
+        )
         run["next_seq"] += 1
         run["events"].append(event)
-        run["updated_at"] = event["createdAt"]
+        # Event protocol timestamps are normalized independently. AgentRun
+        # metadata keeps its existing local-time representation so H1-3 does
+        # not silently change the enclosing persistence contract.
+        run["updated_at"] = created_at
         _agent_protocol_shadow_observe(run, event, source="append")
         run["condition"].notify_all()
     _persist_agent_run(run)
@@ -1760,12 +1812,12 @@ def _finish_agent_run(run, status, error_message="", error_code=""):
             event_data["error"] = run["error"]
         if run["error_code"]:
             event_data["errorCode"] = run["error_code"]
-        event = {
-            "seq": run["next_seq"],
-            "type": status,
-            "data": event_data,
-            "createdAt": run["updated_at"],
-        }
+        event = _build_agent_event(
+            run["next_seq"],
+            status,
+            event_data,
+            run["updated_at"],
+        )
         run["next_seq"] += 1
         run["events"].append(event)
         _agent_protocol_shadow_observe(run, event, source="terminal")

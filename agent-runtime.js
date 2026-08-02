@@ -9,6 +9,7 @@
   const SSE_VISUAL_MAX_CHUNKS = 12;
   const SSE_BATCH_MAX_PAUSES = 8;
   const SSE_BATCH_PACE_MS = 16;
+  const AGENT_EVENT_PROTOCOL_VERSION = 1;
 
   function sleep(ms, signal) {
     return new Promise((resolve, reject) => {
@@ -42,6 +43,71 @@
 
   function encodeSse(data) {
     return new TextEncoder().encode(`data: ${data}\n\n`);
+  }
+
+  function normalizeAgentEvent(rawEvent) {
+    const diagnostics = [];
+    if (!rawEvent || typeof rawEvent !== "object" || Array.isArray(rawEvent)) {
+      return {
+        event: null,
+        seq: 0,
+        sourceProtocolVersion: 0,
+        diagnostics: ["invalid_event_envelope"],
+      };
+    }
+
+    const seq = Number(rawEvent.seq);
+    if (!Number.isInteger(seq) || seq <= 0) {
+      return {
+        event: null,
+        seq: 0,
+        sourceProtocolVersion: 0,
+        diagnostics: ["invalid_event_seq"],
+      };
+    }
+
+    let sourceProtocolVersion = 0;
+    if (rawEvent.protocolVersion == null) {
+      diagnostics.push("legacy_unversioned_event");
+    } else if (
+      Number.isInteger(rawEvent.protocolVersion)
+      && rawEvent.protocolVersion >= 1
+    ) {
+      sourceProtocolVersion = rawEvent.protocolVersion;
+      if (sourceProtocolVersion > AGENT_EVENT_PROTOCOL_VERSION) {
+        diagnostics.push("future_protocol_version");
+      }
+    } else {
+      diagnostics.push("invalid_protocol_version");
+    }
+
+    const eventType = String(rawEvent.type || "").trim();
+    if (!eventType) {
+      return {
+        event: null,
+        seq,
+        sourceProtocolVersion,
+        diagnostics: [...diagnostics, "invalid_event_type"],
+      };
+    }
+
+    const data = rawEvent.data && typeof rawEvent.data === "object" && !Array.isArray(rawEvent.data)
+      ? { ...rawEvent.data }
+      : {};
+    if (data !== rawEvent.data) diagnostics.push("invalid_event_data");
+
+    return {
+      event: {
+        protocolVersion: AGENT_EVENT_PROTOCOL_VERSION,
+        seq,
+        type: eventType,
+        data,
+        createdAt: String(rawEvent.createdAt || ""),
+      },
+      seq,
+      sourceProtocolVersion,
+      diagnostics,
+    };
   }
 
   function splitTextForProjection(text) {
@@ -227,12 +293,18 @@
       }
 
       const events = Array.isArray(snapshot.events) ? snapshot.events : [];
-      for (const event of events) {
-        const seq = Number(event?.seq || 0);
+      for (const rawEvent of events) {
+        const normalized = normalizeAgentEvent(rawEvent);
+        const seq = normalized.seq;
         if (seq <= activeCursor) continue;
         // Advance the cursor only after the event projection succeeds. A page
         // reload can then safely replay the same durable event.
-        await onEvent?.(event, snapshot);
+        if (normalized.event) {
+          await onEvent?.(normalized.event, snapshot, {
+            sourceProtocolVersion: normalized.sourceProtocolVersion,
+            diagnostics: [...normalized.diagnostics],
+          });
+        }
         activeCursor = seq;
       }
       await onSnapshot?.(snapshot, activeCursor);
@@ -383,6 +455,7 @@
     resumeAgentRun,
     submitAgentInput,
     submitAgentAuthorization,
+    normalizeAgentEvent,
     watchAgentRun,
     cancelAgentRun,
   });
