@@ -3585,7 +3585,7 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
   const local = state.sessions.find((s) => s.id === sessionId);
   const sessionTitle = title
     || (sessionId === state.sessionId ? els.sessionTitle.value.trim() : local?.title)
-    || "Untitled";
+    || t("untitledSession");
 
   // Metadata-only: title, stats, runState → meta JSON.
   // Messages are persisted all at once at stream end / session switch / page close.
@@ -3610,7 +3610,7 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
 
 async function saveCurrentSession() {
 
-  if (!state.sessionId) await createSession("New session");
+  if (!state.sessionId) await createSession(t("sessionTitleDefault"));
 
   const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
 
@@ -6420,8 +6420,8 @@ function updateQueuedMessageItem(sessionId, queueItemId, updates = {}) {
 async function enqueueSessionMessage(sessionId, userText, images = []) {
   if (!sessionId) throw new Error(t("createSessionFirst"));
   const model = getSelectedModel();
-  if (!model) throw new Error("Please refresh and select a model first.");
-  if (!getBestKey(model)) throw new Error("Please enter a New API sub key in Models first.");
+  if (!model) throw new Error(t("selectModelFirst"));
+  if (!getBestKey(model)) throw new Error(t("configureKeyFirst"));
 
   const queuedAt = Date.now();
   const id = `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
@@ -8088,11 +8088,11 @@ async function sendMessage(userText, options = {}) {
 
   const model = String(options.model || getSelectedModel());
 
+  if (!model) throw new Error(t("selectModelFirst"));
+
   const key = getBestKey(model);
 
-  if (!key) throw new Error("Please enter a New API sub key in Models first.");
-
-  if (!model) throw new Error("Please refresh and select a model first.");
+  if (!key) throw new Error(t("configureKeyFirst"));
 
   const submittedAt = Date.now();
 
@@ -8106,7 +8106,7 @@ async function sendMessage(userText, options = {}) {
     : null;
   if (!options.sessionId && !state.sessionId) {
     await createSession(
-      userText.slice(0, 24) || "New session",
+      userText.slice(0, 24) || t("sessionTitleDefault"),
       optimisticMessage
         ? {
             initialMessages: state.messages,

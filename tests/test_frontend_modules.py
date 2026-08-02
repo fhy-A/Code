@@ -48,6 +48,86 @@ LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_send_preconditions_are_localized_and_check_model_before_key(self):
+        queue_start = APP_SOURCE.index("async function enqueueSessionMessage(")
+        queue_end = APP_SOURCE.index("async function cancelQueuedSessionMessage(", queue_start)
+        queue_source = APP_SOURCE[queue_start:queue_end]
+        send_start = APP_SOURCE.index("async function sendMessage(")
+        send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
+        send_source = APP_SOURCE[send_start:send_end]
+        script = f"""
+let selectedModel = "";
+let selectedKey = "";
+const keyLookups = [];
+const translations = {{
+  createSessionFirst: "create-session-first",
+  selectModelFirst: "select-model-first",
+  configureKeyFirst: "configure-key-first",
+}};
+function t(key) {{ return translations[key] || key; }}
+function getSelectedModel() {{ return selectedModel; }}
+function getBestKey(model) {{ keyLookups.push(model); return selectedKey; }}
+eval({json.dumps(queue_source)});
+eval({json.dumps(send_source)});
+async function errorMessage(callback) {{
+  try {{ await callback(); return ""; }}
+  catch (error) {{ return error.message; }}
+}}
+(async () => {{
+  const queueNoModel = await errorMessage(() => enqueueSessionMessage("session-1", "queued"));
+  const sendNoModel = await errorMessage(() => sendMessage("sent"));
+  const lookupsBeforeModel = keyLookups.length;
+  selectedModel = "gpt-test";
+  const queueNoKey = await errorMessage(() => enqueueSessionMessage("session-1", "queued"));
+  const sendNoKey = await errorMessage(() => sendMessage("sent"));
+  process.stdout.write(JSON.stringify({{
+    queueNoModel,
+    sendNoModel,
+    queueNoKey,
+    sendNoKey,
+    lookupsBeforeModel,
+    keyLookups,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "queueNoModel": "select-model-first",
+            "sendNoModel": "select-model-first",
+            "queueNoKey": "configure-key-first",
+            "sendNoKey": "configure-key-first",
+            "lookupsBeforeModel": 0,
+            "keyLookups": ["gpt-test", "gpt-test"],
+        })
+        self.assertIn('selectModelFirst: "请先刷新并选择模型"', I18N_SOURCE)
+        self.assertIn('selectModelFirst: "Refresh and select a model first"', I18N_SOURCE)
+        self.assertIn('configureKeyFirst: "请先在“模型”设置中添加 API Key"', I18N_SOURCE)
+        self.assertIn('configureKeyFirst: "Add an API Key in Models first"', I18N_SOURCE)
+        self.assertNotIn("Please enter a New API sub key in Models first.", APP_SOURCE)
+        self.assertNotIn("Please refresh and select a model first.", APP_SOURCE)
+
+    def test_session_title_fallbacks_use_current_language(self):
+        save_state_start = APP_SOURCE.index("async function saveSessionState(")
+        save_state_end = APP_SOURCE.index("async function saveCurrentSession()", save_state_start)
+        save_state_source = APP_SOURCE[save_state_start:save_state_end]
+        save_current_start = save_state_end
+        save_current_end = APP_SOURCE.index("async function loadConfig()", save_current_start)
+        save_current_source = APP_SOURCE[save_current_start:save_current_end]
+        send_start = APP_SOURCE.index("async function sendMessage(")
+        send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
+        send_source = APP_SOURCE[send_start:send_end]
+        self.assertIn('|| t("untitledSession")', save_state_source)
+        self.assertIn('createSession(t("sessionTitleDefault"))', save_current_source)
+        self.assertIn('userText.slice(0, 24) || t("sessionTitleDefault")', send_source)
+        self.assertNotIn('createSession("New session")', APP_SOURCE)
+
     def test_import_boundary_survives_compaction_and_stays_out_of_exports(self):
         self.assertIn("if (message.meta?.skipApi) return null;", MODEL_REQUEST_SOURCE)
         self.assertIn(

@@ -37,7 +37,6 @@ _上次更新：2026-08-02_
 - 加强 Skill 执行证据校验，避免只输出结论而未实际完成 Skill 要求。
 - 完成 `app.js` 阶段 6 esbuild 构建体系的稳定观察与兼容层收口：6A 至 6C-3 已完成，`v0.5.32` 已发布，并经用户确认 3010 启动、刷新和对话正常，3010/3011 可同时运行，默认 bundle 页面与经典回退均正常。经典页面和原始脚本至少保留一个稳定正式版本；后续继续观察无回退需求后再评估 6D，TypeScript 继续后置。
 - 观察第三方 Agent / 开发工具安装器对 Windows 用户 PATH 与解释器解析顺序的影响：本机安装 Hermes Agent 后，其内部 `venv\Scripts` 被置于用户 PATH 前部，导致裸 `python` / `pythonw` 命中裁剪过的 Hermes 虚拟环境，已出现 pytest 不可用、Office 工具依赖缺失，以及 Code Dev 3011 服务正常但托盘因缺少 `pystray` 而不显示。当前已通过 Hermes 专用启动器并将内部 Scripts 路径后移恢复；后续继续观察其他安装器、Hermes 更新或系统重启是否重新置顶路径或引发同类工具消失。巡检信号包括 `where python` / `where pythonw` / `where hermes` 的顺序、`python -m pytest --version`、`python -c "import pystray, PIL"`、3011 Code Dev 托盘和 Office `run_command` 冒烟；若再次发生，优先恢复解释器所有权，不向第三方内部虚拟环境安装项目依赖。
-- 低优先级修复权限模式提示预览：当前权限按钮切换后，设置中的 `modePromptPreview` 仍显示上一个模式，刷新页面后才与已保存模式一致；系统提示在真正发起请求时按当前模式重新读取，不影响实际权限执行。本问题早于 5C-3，需在后续 UI 状态同步批次补直接交互测试后修复。
 - 补全 workbar 用量体验：在不暴露敏感信息的前提下展示账号、会话和任务维度的 Token / 成本信息。
 
 ---
