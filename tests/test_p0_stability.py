@@ -233,17 +233,28 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertGreater(background_pos, runs_pos)
 
     def test_init_restores_saved_model_before_platform_sync_and_validates_availability(self):
+        cache_restore = "const cachedModelCatalog = hasEnabledKey ? restoreCachedModelCatalog() : [];"
         restore = 'setSelectedModel(localStorage.getItem("code-model") || "");'
+        cache_pos = APP_SOURCE.index(cache_restore)
         restore_pos = APP_SOURCE.index(restore)
         sync_pos = APP_SOURCE.index("const platformSyncPromise = syncPlatformKeysSilently();")
+        self.assertLess(cache_pos, restore_pos)
         self.assertLess(restore_pos, sync_pos)
 
         refresh_start = APP_SOURCE.index("async function refreshModels()")
         refresh_end = APP_SOURCE.index("function appendSystemError", refresh_start)
         refresh_source = APP_SOURCE[refresh_start:refresh_end]
+        self.assertIn("if (successCount === 0)", refresh_source)
+        self.assertIn('"modelCatalogRefreshFailedCached"', refresh_source)
+        self.assertIn('writeModelCatalogCache(models, baseUrl)', refresh_source)
         self.assertIn('if (savedModel && models.includes(savedModel))', refresh_source)
         self.assertIn('setSelectedModel("");', refresh_source)
         self.assertIn('localStorage.removeItem("code-model");', refresh_source)
+
+        best_key_start = APP_SOURCE.index("function getBestKey(model)")
+        best_key_end = APP_SOURCE.index("function getFallbackKeys(model)", best_key_start)
+        best_key_source = APP_SOURCE[best_key_start:best_key_end]
+        self.assertIn("mappedKey && keys.includes(mappedKey)", best_key_source)
 
     def test_server_agent_checkpoint_survives_reload(self):
         for expected in (

@@ -946,6 +946,7 @@ const settingsFeature = createSettingsFeature({
   refreshSkillsMemorySettingsLanguage,
   getDefaultSystemPrompt: () => defaultSystemPrompt,
   onPlatformLogout: clearPlatformLocalData,
+  onKeyConfigChanged: markModelCatalogStale,
   trashIcon,
 });
 const {
@@ -964,9 +965,8 @@ function clearPlatformLocalData() {
   els.baseUrl.value = WORKBAR_URL;
   state.modelKeyMap = {};
   state.modelKeysMap = {};
-  els.modelListBox.innerHTML = "";
-  els.modelPillDropdown.innerHTML = "";
-  document.getElementById("settingsModelList")?.replaceChildren();
+  clearModelCatalogCache();
+  renderModelCatalog([], "enterApiKey", "empty");
   setSelectedModel("");
   updateSendButtonState();
 }
@@ -1160,7 +1160,8 @@ function getBestKey(model) {
 
   const keys = getApiKeys();
 
-  if (model && state.modelKeyMap[model]) return state.modelKeyMap[model];
+  const mappedKey = model ? state.modelKeyMap[model] : "";
+  if (mappedKey && keys.includes(mappedKey)) return mappedKey;
 
   return keys[0] || "";
 
@@ -3997,31 +3998,154 @@ function insertPromptText(text) {
 
 
 
+const MODEL_CATALOG_CACHE_KEY = "code-model-catalog-cache-v1";
+const MODEL_CATALOG_CACHE_VERSION = 1;
+
+function normalizeModelCatalogModels(models) {
+  return [...new Set((Array.isArray(models) ? models : [])
+    .map((model) => String(model || "").trim().replace(/^models\//, ""))
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function readModelCatalogCache(baseUrl) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(MODEL_CATALOG_CACHE_KEY) || "null");
+    if (cached?.version !== MODEL_CATALOG_CACHE_VERSION) return null;
+    if (String(cached.baseUrl || "") !== String(baseUrl || "")) return null;
+    const models = normalizeModelCatalogModels(cached.models);
+    if (!models.length) return null;
+    return { models, savedAt: Number(cached.savedAt || 0) };
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeModelCatalogCache(models, baseUrl) {
+  const normalized = normalizeModelCatalogModels(models);
+  try {
+    if (!normalized.length) {
+      localStorage.removeItem(MODEL_CATALOG_CACHE_KEY);
+      return;
+    }
+    localStorage.setItem(MODEL_CATALOG_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_VERSION,
+      baseUrl: String(baseUrl || ""),
+      models: normalized,
+      savedAt: Date.now(),
+    }));
+  } catch (_) {
+    // The catalog cache is optional; storage failures must not block model use.
+  }
+}
+
+function clearModelCatalogCache() {
+  try { localStorage.removeItem(MODEL_CATALOG_CACHE_KEY); } catch (_) {}
+}
+
+function groupModelCatalog(models) {
+  const patterns = [
+    ["DeepSeek", /^deepseek|^deep\b/i],
+    ["OpenAI", /^gpt|^o1|^o3|^openai|^davinci|^text-davinci/i],
+    ["Anthropic", /^claude|^anthropic/i],
+    ["Google", /^gemini|^gemma|^palm|^nano-banana|^imagen|^veo|^lyria|^chirp/i],
+    ["通义千问", /^qwen|^tongyi/i],
+    ["智谱", /^glm|^chatglm/i],
+    ["Moonshot", /^moonshot|^kimi/i],
+    ["零一万物", /^yi-/i],
+    ["百度", /^ernie|^baidu/i],
+    ["腾讯", /^hunyuan/i],
+    ["Mistral", /^mistral|^mixtral/i],
+    ["Meta", /^llama|^meta/i],
+    ["XAI", /^grok/i],
+  ];
+  const groups = {};
+  for (const id of normalizeModelCatalogModels(models)) {
+    let provider = "其他";
+    for (const [name, pattern] of patterns) {
+      if (pattern.test(id)) { provider = name; break; }
+    }
+    if (!groups[provider]) groups[provider] = [];
+    groups[provider].push(id);
+  }
+  return groups;
+}
+
+function modelCatalogStatusTone(statusKey) {
+  if (statusKey === "detectingModels") return "loading";
+  if (statusKey === "modelCatalogRefreshFailed") return "error";
+  return "warning";
+}
+
+function renderModelCatalog(models, statusKey = "", source = "live") {
+  const normalized = normalizeModelCatalogModels(models);
+  const groups = groupModelCatalog(normalized);
+  state.modelCatalogModels = normalized;
+  state.modelCatalogStatusKey = statusKey;
+  state.modelCatalogSource = source;
+
+  els.modelPillDropdown.innerHTML = Object.entries(groups).map(([provider, ids]) => (
+    `<div class="model-pill-optgroup"><div class="model-pill-optgroup-label">${escapeHtml(provider)}</div>${ids.map((id) => `<button class="model-pill-option" type="button" data-model="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("")}</div>`
+  )).join("");
+
+  const statusHtml = statusKey
+    ? `<div class="model-list-state is-${modelCatalogStatusTone(statusKey)}" role="status" aria-live="polite" data-i18n="${escapeHtml(statusKey)}">${escapeHtml(t(statusKey))}</div>`
+    : "";
+  const groupsHtml = Object.entries(groups).map(([provider, ids]) => (
+    `<div class="model-provider-group"><span class="model-provider-label">${escapeHtml(provider)}</span>${ids.map((id) => `<span class="model-name-tag">${escapeHtml(id)}</span>`).join("")}</div>`
+  )).join("");
+  els.modelListBox.innerHTML = statusHtml + groupsHtml;
+
+  const settingsList = document.getElementById("settingsModelList");
+  if (settingsList) settingsList.innerHTML = els.modelListBox.innerHTML;
+  const settingsCount = document.getElementById("settingsModelCount");
+  if (settingsCount) settingsCount.textContent = String(normalized.length);
+  setSelectedModel(getSelectedModel());
+  return normalized;
+}
+
+function restoreCachedModelCatalog() {
+  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
+  const cached = readModelCatalogCache(baseUrl);
+  if (!cached) return [];
+  return renderModelCatalog(cached.models, "detectingModels", "cache");
+}
+
+function markModelCatalogStale(config) {
+  state.modelKeyMap = {};
+  state.modelKeysMap = {};
+  const entries = Array.isArray(config) ? config : loadKeyConfig();
+  const hasEnabledKey = entries.some((entry) => entry?.enabled !== false && String(entry?.key || "").trim());
+  if (!hasEnabledKey) {
+    clearModelCatalogCache();
+    renderModelCatalog([], "enterApiKey", "empty");
+    return;
+  }
+  renderModelCatalog(state.modelCatalogModels, "modelCatalogNeedsRefresh", state.modelCatalogModels.length ? "cache" : "empty");
+}
+
 async function refreshModels() {
 
   const keys = getApiKeys();
+  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
 
   if (keys.length === 0) {
     state.modelKeyMap = {};
     state.modelKeysMap = {};
-    els.modelListBox.innerHTML = "";
-    const settingsList = document.getElementById("settingsModelList");
-    if (settingsList) settingsList.innerHTML = "";
+    clearModelCatalogCache();
+    renderModelCatalog([], "enterApiKey", "empty");
     showToast(t("enterApiKey"), "warning");
-    return;
+    return { ok: false, reason: "no-keys", models: [] };
   }
 
-
-
+  const previousModels = [...state.modelCatalogModels];
+  state.modelKeyMap = {};
+  state.modelKeysMap = {};
+  renderModelCatalog(previousModels, "detectingModels", previousModels.length ? "cache" : "empty");
   els.refreshModelsBtn.disabled = true;
-
-  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-
   const allModels = new Set();
-
   const modelKeyMap = {};
   const modelKeysMap = {};
-
   let successCount = 0;
 
 
@@ -4034,7 +4158,7 @@ async function refreshModels() {
 
       const data = await res.json();
 
-      if (res.ok && data.data) {
+      if (res.ok && Array.isArray(data.data)) {
 
         successCount++;
 
@@ -4066,18 +4190,24 @@ async function refreshModels() {
 
   }
 
-  state.modelKeyMap = modelKeyMap;
-  state.modelKeysMap = modelKeysMap;
-
-
+  if (successCount === 0) {
+    const statusKey = previousModels.length
+      ? "modelCatalogRefreshFailedCached"
+      : "modelCatalogRefreshFailed";
+    renderModelCatalog(previousModels, statusKey, previousModels.length ? "cache" : "empty");
+    showToast(t(statusKey), previousModels.length ? "warning" : "error");
+    els.refreshModelsBtn.disabled = false;
+    return { ok: false, reason: "request-failed", models: previousModels };
+  }
 
   if (allModels.size === 0) {
-    els.modelListBox.innerHTML = "";
-    const settingsList = document.getElementById("settingsModelList");
-    if (settingsList) settingsList.innerHTML = "";
+    clearModelCatalogCache();
+    renderModelCatalog([], "noModelsFound", "live");
+    setSelectedModel("");
+    localStorage.removeItem("code-model");
     showToast(t("noModelsFound"), "error");
     els.refreshModelsBtn.disabled = false;
-    return;
+    return { ok: true, models: [] };
   }
 
 
@@ -4086,93 +4216,10 @@ async function refreshModels() {
 
     const models = [...allModels].sort((a, b) => a.localeCompare(b));
 
-    // Group models by provider
-
-    const PROVIDER_PATTERNS = [
-
-      ["DeepSeek", /^deepseek|^deep/i],
-
-      ["OpenAI", /^gpt|^o1|^o3|^openai|^davinci|^text-davinci/i],
-
-      ["Anthropic", /^claude|^anthropic/i],
-
-      ["Google", /^gemini|^gemma|^palm|^nano-banana|^imagen|^veo|^lyria|^chirp/i],
-
-      ["通义千问", /^qwen|^tongyi/i],
-
-      ["智谱", /^glm|^chatglm/i],
-
-      ["Moonshot", /^moonshot|^kimi/i],
-
-      ["零一万物", /^yi-/i],
-
-      ["百度", /^ernie|^baidu/i],
-
-      ["腾讯", /^hunyuan/i],
-
-      ["Mistral", /^mistral|^mixtral/i],
-
-      ["Meta", /^llama|^meta/i],
-
-      ["XAI", /^grok/i],
-
-    ];
-
-    const groups = {};
-
-    for (const id of models) {
-
-      let provider = "其他";
-
-      for (const [name, re] of PROVIDER_PATTERNS) {
-
-        if (re.test(id)) { provider = name; break; }
-
-      }
-
-      if (!groups[provider]) groups[provider] = [];
-
-      groups[provider].push(id);
-
-    }
-
-
-
-    // Pill dropdown with optgroups
-
-    let dropdownHtml = "";
-
-    for (const [provider, ids] of Object.entries(groups)) {
-
-      dropdownHtml += `<div class="model-pill-optgroup">`;
-
-      dropdownHtml += `<div class="model-pill-optgroup-label">${escapeHtml(provider)}</div>`;
-
-      dropdownHtml += ids.map((id) => `<button class="model-pill-option" type="button" data-model="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("");
-
-      dropdownHtml += `</div>`;
-
-    }
-
-    els.modelPillDropdown.innerHTML = dropdownHtml;
-
-
-
-    // Modal display list
-
-    let listHtml = "";
-
-    for (const [provider, ids] of Object.entries(groups)) {
-
-      listHtml += `<div class="model-provider-group"><span class="model-provider-label">${escapeHtml(provider)}</span>`;
-
-      listHtml += ids.map((id) => `<span class="model-name-tag">${escapeHtml(id)}</span>`).join("");
-
-      listHtml += `</div>`;
-
-    }
-
-    els.modelListBox.innerHTML = listHtml;
+    renderModelCatalog(models, "", "live");
+    writeModelCatalogCache(models, baseUrl);
+    state.modelKeyMap = modelKeyMap;
+    state.modelKeysMap = modelKeysMap;
 
 
 
@@ -4190,9 +4237,15 @@ async function refreshModels() {
 
     }
 
-  } catch (err) {
+    return { ok: true, models };
 
-    showToast(err.message, "error");
+  } catch (err) {
+    const statusKey = previousModels.length
+      ? "modelCatalogRefreshFailedCached"
+      : "modelCatalogRefreshFailed";
+    renderModelCatalog(previousModels, statusKey, previousModels.length ? "cache" : "empty");
+    showToast(err.message || t(statusKey), "error");
+    return { ok: false, reason: "render-failed", models: previousModels };
 
   } finally {
 
@@ -10131,6 +10184,9 @@ async function init() {
   els.systemPromptText.value = localStorage.getItem("code-system-prompt") || defaultSystemPrompt;
 
   applyI18n(); // run early, before async ops, to prevent flicker
+  const hasEnabledKey = storedKeyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim());
+  const cachedModelCatalog = hasEnabledKey ? restoreCachedModelCatalog() : [];
+  if (!cachedModelCatalog.length) renderModelCatalog([], hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
   // Restore the persisted model before platform sync can save other settings.
   // Availability is validated only after refreshModels receives a real list.
   setSelectedModel(localStorage.getItem("code-model") || "");

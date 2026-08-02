@@ -63,6 +63,9 @@
       lang: getStoredValue("code-lang") || "zh",
       modelKeyMap: {},
       modelKeysMap: {},
+      modelCatalogModels: [],
+      modelCatalogStatusKey: "",
+      modelCatalogSource: "empty",
       stats: {
         input: 0,
         output: 0,

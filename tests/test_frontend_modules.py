@@ -5183,6 +5183,8 @@ const feature = window.Code.features.settings.createSettingsFeature({
             'class="model-refresh-btn"',
             'refreshSettingsModelList',
             'await refreshModels()',
+            "onKeyConfigChanged(saved)",
+            "hasCatalogState",
         ):
             self.assertIn(expected, SETTINGS_SOURCE)
         for expected in (
@@ -5191,9 +5193,148 @@ const feature = window.Code.features.settings.createSettingsFeature({
             ".model-refresh-btn.is-loading svg",
             ".model-provider-group + .model-provider-group",
             ".model-list-empty",
+            ".model-list-state.is-loading::before",
+            ".model-list-state.is-warning",
+            ".model-list-state.is-error",
         ):
             self.assertIn(expected, STYLE_SOURCE)
         self.assertIn('getFromWorkbar: "从 workbar 获取"', I18N_SOURCE)
+
+    def test_model_catalog_cache_restores_and_refreshes_atomically(self):
+        catalog_start = APP_SOURCE.index('const MODEL_CATALOG_CACHE_KEY =')
+        catalog_end = APP_SOURCE.index("function appendSystemError", catalog_start)
+        catalog_source = APP_SOURCE[catalog_start:catalog_end]
+        script = f"""
+const values = new Map([
+  ["code-model", "old-model"],
+  ["code-model-catalog-cache-v1", JSON.stringify({{
+    version: 1,
+    baseUrl: "https://workbar.ai",
+    models: ["old-model"],
+    savedAt: 1,
+  }})],
+]);
+const localStorage = {{
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+}};
+const state = {{
+  modelKeyMap: {{}},
+  modelKeysMap: {{}},
+  modelCatalogModels: ["old-model"],
+  modelCatalogStatusKey: "",
+  modelCatalogSource: "cache",
+}};
+const settingsList = {{innerHTML: ""}};
+const settingsCount = {{textContent: ""}};
+const document = {{
+  getElementById: (id) => id === "settingsModelList" ? settingsList : id === "settingsModelCount" ? settingsCount : null,
+}};
+const els = {{
+  baseUrl: {{value: "https://workbar.ai"}},
+  modelPillDropdown: {{innerHTML: ""}},
+  modelListBox: {{innerHTML: ""}},
+  refreshModelsBtn: {{disabled: false}},
+}};
+const toasts = [];
+let selectedModel = "old-model";
+let fetchMode = "success";
+const t = (key) => key;
+const escapeHtml = (value) => String(value);
+const showToast = (...args) => toasts.push(args);
+const getSelectedModel = () => selectedModel;
+const setSelectedModel = (value) => {{ selectedModel = value; }};
+const getApiKeys = () => ["sk-one"];
+async function fetch() {{
+  if (fetchMode === "failure") throw new Error("offline");
+  const data = fetchMode === "empty"
+    ? []
+    : [{{id: "models/gpt-b"}}, {{id: "gpt-a"}}, {{id: "imagen-3"}}];
+  return {{ok: true, json: async () => ({{data}})}};
+}}
+eval({json.dumps(catalog_source)});
+(async () => {{
+  const firstPromise = refreshModels();
+  const duringStatus = state.modelCatalogStatusKey;
+  const first = await firstPromise;
+  const firstMapKey = state.modelKeyMap["gpt-a"];
+  const cacheTextAfterSuccess = values.get("code-model-catalog-cache-v1");
+  const cacheAfterSuccess = JSON.parse(cacheTextAfterSuccess);
+
+  selectedModel = "gpt-b";
+  values.set("code-model", "gpt-b");
+  state.modelCatalogModels = [];
+  const restored = restoreCachedModelCatalog();
+  const restoreStatus = state.modelCatalogStatusKey;
+
+  fetchMode = "failure";
+  const failed = await refreshModels();
+  const failureStatus = state.modelCatalogStatusKey;
+  const failureSelection = selectedModel;
+  const cacheAfterFailure = values.has("code-model-catalog-cache-v1");
+
+  fetchMode = "empty";
+  const empty = await refreshModels();
+  const emptyStatus = state.modelCatalogStatusKey;
+  const emptySelection = selectedModel;
+  const emptyCacheExists = values.has("code-model-catalog-cache-v1");
+  markModelCatalogStale([{{key: "sk-two", enabled: true}}]);
+  const enabledKeyStatus = state.modelCatalogStatusKey;
+  markModelCatalogStale([{{key: "sk-two", enabled: false}}]);
+  const disabledKeyStatus = state.modelCatalogStatusKey;
+  process.stdout.write(JSON.stringify({{
+    duringStatus,
+    first,
+    firstMapKey,
+    cacheAfterSuccess,
+    cacheContainsSecret: cacheTextAfterSuccess.includes("sk-one"),
+    restored,
+    restoreStatus,
+    failed,
+    failureStatus,
+    failureSelection,
+    cacheAfterFailure,
+    empty,
+    emptyStatus,
+    emptySelection,
+    emptyCacheExists,
+    settingsCount: settingsCount.textContent,
+    enabledKeyStatus,
+    disabledKeyStatus,
+    toasts,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["duringStatus"], "detectingModels")
+        self.assertEqual(data["first"], {"ok": True, "models": ["gpt-a", "gpt-b"]})
+        self.assertEqual(data["firstMapKey"], "sk-one")
+        self.assertEqual(data["cacheAfterSuccess"]["models"], ["gpt-a", "gpt-b"])
+        self.assertNotIn("key", data["cacheAfterSuccess"])
+        self.assertFalse(data["cacheContainsSecret"])
+        self.assertEqual(data["restored"], ["gpt-a", "gpt-b"])
+        self.assertEqual(data["restoreStatus"], "detectingModels")
+        self.assertEqual(data["failed"]["reason"], "request-failed")
+        self.assertEqual(data["failed"]["models"], ["gpt-a", "gpt-b"])
+        self.assertEqual(data["failureStatus"], "modelCatalogRefreshFailedCached")
+        self.assertEqual(data["failureSelection"], "gpt-b")
+        self.assertTrue(data["cacheAfterFailure"])
+        self.assertEqual(data["empty"], {"ok": True, "models": []})
+        self.assertEqual(data["emptyStatus"], "noModelsFound")
+        self.assertEqual(data["emptySelection"], "")
+        self.assertFalse(data["emptyCacheExists"])
+        self.assertEqual(data["settingsCount"], "0")
+        self.assertEqual(data["enabledKeyStatus"], "modelCatalogNeedsRefresh")
+        self.assertEqual(data["disabledKeyStatus"], "enterApiKey")
 
     def test_key_persistence_is_isolated_from_general_settings_and_syncs_across_tabs(self):
         save_start = APP_SOURCE.index("function saveLocalSettings()")

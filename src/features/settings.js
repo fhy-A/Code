@@ -39,6 +39,7 @@
     const refreshSkillsMemorySettingsLanguage = options.refreshSkillsMemorySettingsLanguage || (() => {});
     const getDefaultSystemPrompt = options.getDefaultSystemPrompt || (() => "");
     const onPlatformLogout = options.onPlatformLogout || (() => {});
+    const onKeyConfigChanged = options.onKeyConfigChanged || (() => {});
     const trashIcon = options.trashIcon || (() => "");
     const documentRef = options.document || global.document;
     const storage = options.storage || global.localStorage;
@@ -51,7 +52,9 @@
     let bound = false;
 
     function saveKeyConfig(config) {
-      return platform.saveKeyConfig(config, storage);
+      const saved = platform.saveKeyConfig(config, storage);
+      onKeyConfigChanged(saved);
+      return saved;
     }
 
     function parseKeyLines(raw, notifyDuplicates = true) {
@@ -441,11 +444,13 @@
     function updateSettingsModelSnapshot() {
       const list = byId("settingsModelList");
       const count = renderedModelCount();
+      const canonicalHtml = String(els.modelListBox?.innerHTML || "");
+      const hasCatalogState = canonicalHtml.includes('class="model-list-state');
       const countBadge = byId("settingsModelCount");
       if (countBadge) countBadge.textContent = String(count);
       if (!list) return count;
-      if (count > 0) {
-        list.innerHTML = els.modelListBox.innerHTML;
+      if (count > 0 || hasCatalogState) {
+        list.innerHTML = canonicalHtml;
       } else {
         const hasEnabledKey = loadKeyConfig(storage).some((entry) => entry.enabled !== false && String(entry.key || "").trim());
         const emptyKey = hasEnabledKey ? "noModelsFound" : "enterApiKey";
@@ -477,8 +482,9 @@
       const keyConfig = loadKeyConfig(storage);
       els.apiKey.value = serializeKeys(keyConfig);
       const modelCount = renderedModelCount();
-      const initialModels = modelCount > 0
-        ? els.modelListBox.innerHTML
+      const canonicalModels = String(els.modelListBox?.innerHTML || "");
+      const initialModels = modelCount > 0 || canonicalModels.includes('class="model-list-state')
+        ? canonicalModels
         : (() => {
           const emptyKey = keyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim()) ? "noModelsFound" : "enterApiKey";
           return `<div class="model-list-empty" data-i18n="${emptyKey}">${t(emptyKey)}</div>`;
@@ -1204,7 +1210,8 @@
           return;
         }
         if (event.key !== platform.KEY_CONFIG_STORAGE_KEY) return;
-        syncKeyEditorFromStorage();
+        const config = syncKeyEditorFromStorage();
+        onKeyConfigChanged(config);
       });
       global.addEventListener?.("pageshow", syncKeyEditorFromStorage);
       els.closeSettings?.addEventListener("click", () => showSettings(false));
