@@ -363,8 +363,53 @@ function renderSessionMessages(sessionId) {
   }
 }
 
+const PERSISTED_ACTIVE_RUN_STATUSES = new Set([
+  "running",
+  "waiting-network",
+  "resuming",
+]);
+
+function hydratePersistedRunPresentation(run, runState, messages = [], now = Date.now()) {
+  if (
+    !run
+    || run.isStreaming
+    || !PERSISTED_ACTIVE_RUN_STATUSES.has(String(runState?.status || ""))
+    || runState?.executionOwner !== "server-agent"
+    || !String(runState?.agentRunId || "")
+  ) {
+    return false;
+  }
+
+  const persistedStartedAt = Date.parse(runState.startedAt || "");
+  run.isStreaming = true;
+  // This is presentation hydration only. Keep elapsed time frozen at the last
+  // durable checkpoint until resumePersistedSessionRun actually takes over.
+  run.taskStartTime = Number.isFinite(persistedStartedAt)
+    && persistedStartedAt > 0
+    && persistedStartedAt <= now
+    ? persistedStartedAt
+    : now;
+  run.taskElapsedBaseMs = persistedRunElapsedMs(runState, now);
+  run.taskElapsedResumedAt = null;
+  run.responseStartTime = now;
+  run.hasFirstModelResponseStarted = Boolean(
+    runState.hasFirstModelResponseStarted
+    || hasRecoveredModelResponse(messages, runState)
+  );
+  run.modelRound = Number(runState.modelRound || 0);
+  run.model = String(runState.model || run.model || "");
+  run.agentRunId = String(runState.agentRunId || "");
+  run.agentEventCursor = Number(runState.agentEventCursor || 0);
+  return true;
+}
+
 function syncActiveStreamingState() {
   const run = ensureSessionRun(state.sessionId);
+  hydratePersistedRunPresentation(
+    run,
+    getSessionRunState(state.sessionId),
+    getSessionMessages(state.sessionId),
+  );
   state.isStreaming = Boolean(run?.isStreaming);
   state.abortController = run?.abortController || null;
   els.stopBtn.disabled = !state.isStreaming;

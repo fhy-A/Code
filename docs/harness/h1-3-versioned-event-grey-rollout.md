@@ -6,6 +6,8 @@
 
 阶段性质：开发实例灰度写入事件 v1，前端兼容读取旧事件、v1 与未来版本；不迁移旧数据，不进入 reducer 或 UI 重写
 
+> 后续修正（2026-08-02 21:35）：开发实例人工刷新测试发现，持久化运行状态已恢复但内存显示态要等恢复接管或下一事件才建立，导致“已处理 + 计时”短暂消失。现已在会话首帧从持久化检查点恢复纯显示态，恢复接管前冻结累计耗时，接管后继续计时；不启动模型、不生成事件、不写回数据，终态和旧浏览器任务不会误显示。
+
 ## 1. 阶段目标
 
 H1-3 在 H1-2 影子观察通过后，完成事件版本从“仅有契约”到“可灰度写入和兼容消费”的最小闭环：
@@ -90,7 +92,7 @@ AgentRun 恢复时不重写历史事件。一个从旧记录恢复并继续执�
 - 前端无版本、v1、未来版本、未知事件和畸形事件的归一与游标行为；
 - AgentRun v1/v2/v3、旧 JSONL、H0 轨迹和经典回退继续通过。
 
-服务端协议定向结果为 `96 passed, 179 subtests passed`，前端与 H0 定向结果为 `169 passed, 18 subtests passed`；完整回归为 `954 passed, 427 subtests passed in 68.58s`。`npm run check:frontend` 通过 bundle 构建、新鲜度、JavaScript 语法和经典回退门禁；Python 语法与 `git diff --check` 通过。
+服务端协议定向结果为 `96 passed, 179 subtests passed`，前端与 H0 定向结果为 `169 passed, 18 subtests passed`。首帧恢复修正后的前端模块结果为 `157 passed`，刷新与稳定性定向结果为 `39 passed, 7 subtests passed`；完整回归为 `955 passed, 427 subtests passed in 70.61s`。`npm run check:frontend` 通过 bundle 构建、新鲜度、JavaScript 语法和经典回退门禁；Python 语法与 `git diff --check` 通过。
 
 ## 7. 下一阶段
 

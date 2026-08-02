@@ -8341,6 +8341,102 @@ process.stdout.write(JSON.stringify({
         self.assertIn("modelRound: Number(extra.modelRound", APP_SOURCE)
         self.assertIn("ctx.run.modelRound = Number(runState.modelRound || 0)", APP_SOURCE)
 
+    def test_persisted_run_presentation_hydrates_before_network_recovery(self):
+        helper_start = APP_SOURCE.index("const PERSISTED_ACTIVE_RUN_STATUSES")
+        helper_end = APP_SOURCE.index("function syncActiveStreamingState", helper_start)
+        helper = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+global.window = {{Code: {{core: {{}}}}}};
+require("./src/core/state.js");
+const {{activeRunElapsedMs, persistedRunElapsedMs}} = window.Code.core.state;
+function hasRecoveredModelResponse(messages, runState) {{
+  return messages.some((message) => message?.meta?.agentRunId === runState?.agentRunId);
+}}
+{helper}
+const resumedAt = Date.parse("2026-08-02T16:16:00Z");
+const active = {{isStreaming: false}};
+const hydrated = hydratePersistedRunPresentation(active, {{
+  status: "running",
+  executionOwner: "server-agent",
+  agentRunId: "agent-1",
+  agentEventCursor: 7,
+  elapsedMs: 15000,
+  startedAt: "2026-08-02T16:15:00Z",
+  hasFirstModelResponseStarted: true,
+  modelRound: 2,
+  model: "test-model",
+}}, [], resumedAt);
+const frozenElapsed = activeRunElapsedMs(active, resumedAt + 60000);
+active.taskElapsedResumedAt = resumedAt + 60000;
+const continuedElapsed = activeRunElapsedMs(active, resumedAt + 65000);
+
+const inferred = {{isStreaming: false}};
+hydratePersistedRunPresentation(inferred, {{
+  status: "waiting-network",
+  executionOwner: "server-agent",
+  agentRunId: "agent-2",
+  elapsedMs: 4000,
+}}, [{{meta: {{agentRunId: "agent-2"}}}}], resumedAt);
+
+const completed = {{isStreaming: false}};
+const completedHydrated = hydratePersistedRunPresentation(completed, {{
+  status: "completed",
+  executionOwner: "server-agent",
+  agentRunId: "agent-3",
+  elapsedMs: 9000,
+}}, [], resumedAt);
+const legacy = {{isStreaming: false}};
+const legacyHydrated = hydratePersistedRunPresentation(legacy, {{
+  status: "running",
+  executionOwner: "browser",
+  agentRunId: "agent-4",
+}}, [], resumedAt);
+process.stdout.write(JSON.stringify({{
+  hydrated,
+  active,
+  frozenElapsed,
+  continuedElapsed,
+  inferred,
+  completedHydrated,
+  completed,
+  legacyHydrated,
+  legacy,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["hydrated"])
+        self.assertTrue(data["active"]["isStreaming"])
+        self.assertEqual(data["active"]["agentRunId"], "agent-1")
+        self.assertEqual(data["active"]["agentEventCursor"], 7)
+        self.assertEqual(data["active"]["modelRound"], 2)
+        self.assertEqual(data["active"]["model"], "test-model")
+        self.assertTrue(data["active"]["hasFirstModelResponseStarted"])
+        self.assertEqual(data["frozenElapsed"], 15000)
+        self.assertEqual(data["continuedElapsed"], 20000)
+        self.assertTrue(data["inferred"]["isStreaming"])
+        self.assertTrue(data["inferred"]["hasFirstModelResponseStarted"])
+        self.assertFalse(data["completedHydrated"])
+        self.assertFalse(data["completed"]["isStreaming"])
+        self.assertFalse(data["legacyHydrated"])
+        self.assertFalse(data["legacy"]["isStreaming"])
+
+        sync_start = APP_SOURCE.index("function syncActiveStreamingState")
+        sync_end = APP_SOURCE.index("let composerResizeObserver", sync_start)
+        sync_helper = APP_SOURCE[sync_start:sync_end]
+        self.assertIn("hydratePersistedRunPresentation(", sync_helper)
+        self.assertLess(
+            sync_helper.index("hydratePersistedRunPresentation("),
+            sync_helper.index("state.isStreaming = Boolean(run?.isStreaming)"),
+        )
+
     def test_first_send_projects_user_before_session_creation(self):
         helper_start = APP_SOURCE.index("function projectOptimisticFirstMessage")
         helper_end = APP_SOURCE.index("async function sendMessage", helper_start)
