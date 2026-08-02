@@ -8057,6 +8057,38 @@ process.stdout.write(JSON.stringify({{
         primary_css = "\n".join(primary_css_blocks)
         self.assertIn("background: var(--accent)", primary_css)
         self.assertIn("color: var(--bg)", primary_css)
+        feedback_css = re.search(
+            r"\.import-feedback\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(feedback_css)
+        self.assertIn("flex: 0 0 auto", feedback_css.group("body"))
+        self.assertIn("max-height: 170px", feedback_css.group("body"))
+        self.assertIn("overflow-y: auto", feedback_css.group("body"))
+        result_css = re.search(
+            r"\.import-result\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(result_css)
+        for expected in (
+            "min-height: 0",
+            "padding: 8px 10px",
+            "border: 1px solid var(--line)",
+            "background: var(--panel)",
+            "line-height: 1.45",
+        ):
+            self.assertIn(expected, result_css.group("body"))
+        self.assertIn(".import-result:empty", STYLE_SOURCE)
+        self.assertIn(".import-failures:empty", STYLE_SOURCE)
+        footer_css = re.search(
+            r"\.import-dialog-footer\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(footer_css)
+        self.assertIn("flex: 0 0 auto", footer_css.group("body"))
 
     def test_session_transfer_toolbar_uses_distinct_accessible_icons(self):
         toolbar_start = INDEX_SOURCE.index('class="session-transfer-actions"')

@@ -6359,20 +6359,42 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .import-feedback {
+  flex: 0 0 auto;
   max-height: 170px;
   margin: 0 20px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .import-result {
-  min-height: 20px;
+  min-height: 0;
   margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
-.import-result.is-success { color: var(--green); }
-.import-result.is-warning { color: var(--yellow); }
-.import-result.is-error { color: var(--red); }
+.import-result:empty,
+.import-failures:empty { display: none; }
+.import-result.is-success {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  background: color-mix(in srgb, var(--green) 7%, var(--panel));
+  color: var(--green);
+}
+.import-result.is-warning {
+  border-color: color-mix(in srgb, var(--yellow) 32%, var(--line));
+  background: color-mix(in srgb, var(--yellow) 7%, var(--panel));
+  color: var(--yellow);
+}
+.import-result.is-error {
+  border-color: color-mix(in srgb, var(--red) 32%, var(--line));
+  background: color-mix(in srgb, var(--red) 7%, var(--panel));
+  color: var(--red);
+}
 .import-badge-hint {
   margin: 1px 0 6px;
   color: var(--muted);
@@ -6469,6 +6491,7 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .import-dialog-footer {
+  flex: 0 0 auto;
   justify-content: space-between;
   gap: 16px;
   min-height: 58px;
