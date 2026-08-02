@@ -642,21 +642,26 @@
       return "completed";
     }
 
-    function renderToolProcessProjection(items, serial) {
+    function renderToolProcessProjection(items, serial, options = {}) {
       const { calls } = collectToolProcess(items);
       const visibleCalls = calls.map(getProcessCallView);
       if (!visibleCalls.length) return "";
       const currentCall = currentProcessCall(visibleCalls);
-      const processOutcome = stageProcessOutcome(visibleCalls);
-      const stageIsActive = processOutcome === "running" || processOutcome === "pending";
+      const detectedOutcome = stageProcessOutcome(visibleCalls);
+      const stageIsActive = Boolean(options.activeStage)
+        || detectedOutcome === "running"
+        || detectedOutcome === "pending";
+      const processOutcome = stageIsActive ? "running" : detectedOutcome;
       const headingText = stageIsActive
         ? getToolActionLabel(currentCall.action)
         : completedProcessSummary(visibleCalls);
       const headingTarget = stageIsActive ? currentCall.target : "";
+      const processKey = String(options.processKey || serial);
+      const open = options.open ? " open" : "";
 
       return `
         <article class="msg assistant tool-process" data-tool-process-block="${serial}">
-          <details class="tool-process-stage ${escapeHtml(processOutcome)}" data-current-action="${escapeHtml(currentCall.action)}">
+          <details class="tool-process-stage ${escapeHtml(processOutcome)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}"${open}>
             <summary class="tool-process-stage-summary">
               <span class="tool-process-stage-heading"><strong>${escapeHtml(headingText)}</strong>${headingTarget ? `<code>${escapeHtml(headingTarget)}</code>` : ""}</span>
               <span class="tool-process-stage-chevron" aria-hidden="true"></span>
@@ -780,6 +785,9 @@
       const expandedExecutionTraces = projection.expandedExecutionTraces instanceof Set
         ? projection.expandedExecutionTraces
         : new Set(projection.expandedExecutionTraces || []);
+      const expandedToolProcesses = projection.expandedToolProcesses instanceof Set
+        ? projection.expandedToolProcesses
+        : new Set(projection.expandedToolProcesses || []);
       const rows = [];
       const queuedTailMessages = [];
       let pendingProcess = [];
@@ -814,10 +822,15 @@
         const anchor = takeActiveRunAnchor();
         if (anchor) rows.push(anchor);
       };
-      const flushProcess = () => {
+      const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
         processSerial += 1;
-        rows.push(renderToolProcessProjection(pendingProcess, processSerial));
+        const processKey = `${currentUserIndex}:${processSerial}`;
+        rows.push(renderToolProcessProjection(pendingProcess, processSerial, {
+          ...options,
+          processKey,
+          open: hasActiveRun && expandedToolProcesses.has(processKey),
+        }));
         pendingProcess = [];
         return true;
       };
@@ -841,8 +854,8 @@
           <div class="execution-trace-body">`);
         openExecutionTraceUserIndex = userIndex;
       };
-      const closeExecutionTrace = () => {
-        flushProcess();
+      const closeExecutionTrace = (options = {}) => {
+        flushProcess(options);
         if (openExecutionTraceUserIndex < 0) return;
         rows.push("</div></details>");
         openExecutionTraceUserIndex = -1;
@@ -889,7 +902,8 @@
           continue;
         }
         if (msg.role === "assistant") {
-          const streamingToolRound = msg.streaming && msg._streamProjection === "thinking";
+          const streamingProcessRound = msg.streaming
+            && ["pending", "thinking"].includes(msg._streamProjection);
           const toolCommentary = (getMessageText(msg) || "").trim();
           const hasMeaningfulToolCommentary = Boolean(
             toolCommentary
@@ -915,7 +929,7 @@
             });
             continue;
           }
-          if (streamingToolRound) {
+          if (streamingProcessRound) {
             if (hasMeaningfulToolCommentary) {
               flushProcess();
               rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
@@ -950,7 +964,9 @@
           pendingProcess.push({ msg, index });
         }
       }
-      closeExecutionTrace();
+      closeExecutionTrace({
+        activeStage: hasActiveRun && currentUserIndex === activeUserIndex,
+      });
       if (hasActiveRun && !activeRunAnchorInserted) insertActiveRunAnchor();
       insertBranchMarker();
       queuedTailMessages.forEach(({ msg, index }) => {

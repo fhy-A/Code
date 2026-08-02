@@ -2481,10 +2481,19 @@ function renderMessages() {
       (trace) => trace.dataset.executionTrace,
     ).filter(Boolean),
   );
+  const expandedToolProcesses = hasActiveRun
+    ? new Set(
+      Array.from(
+        els.messageList.querySelectorAll("details.tool-process-stage[open][data-tool-process-key]"),
+        (stage) => stage.dataset.toolProcessKey,
+      ).filter(Boolean),
+    )
+    : new Set();
   const html = projectMessages(msgs, {
     hasActiveRun,
     branchMarker,
     expandedExecutionTraces,
+    expandedToolProcesses,
   });
   const stableHtml = html
     .replace(/<span class="streaming-timer">[^<]*<\/span>/g, '<span class="streaming-timer"></span>')

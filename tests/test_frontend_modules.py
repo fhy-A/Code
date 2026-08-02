@@ -6383,6 +6383,26 @@ const groupedStageHtml = feature.projectMessages([
   {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "group-2", outcome: "succeeded"}},
   {role: "assistant", content: "done", _responseTime: "2s"},
 ], {hasActiveRun: false});
+const activeCompletedTailMessages = [
+  {role: "user", content: "active tool stage"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "active-tail-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+    {id: "active-tail-2", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "active-tail-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "contents", meta: {action: "read_file", toolCallId: "active-tail-1", outcome: "succeeded"}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "active-tail-2", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "active-tail-2", outcome: "succeeded"}},
+];
+const activeCompletedTailHtml = feature.projectMessages(activeCompletedTailMessages, {hasActiveRun: true});
+const expandedActiveTailHtml = feature.projectMessages(activeCompletedTailMessages, {
+  hasActiveRun: true,
+  expandedToolProcesses: new Set(["0:1"]),
+});
+const completedCollapsedTailHtml = feature.projectMessages(activeCompletedTailMessages, {
+  hasActiveRun: false,
+  expandedToolProcesses: new Set(["0:1"]),
+});
 const autoCompactionHtml = feature.projectMessages([
   {role: "user", content: "continue a long task"},
   {role: "assistant", content: "checkpoint", meta: {toolCalls: [
@@ -6490,6 +6510,9 @@ process.stdout.write(JSON.stringify({
   emptyRecoveryHtml,
   operationalHtml,
   groupedStageHtml,
+  activeCompletedTailHtml,
+  expandedActiveTailHtml,
+  completedCollapsedTailHtml,
   autoCompactionHtml,
   manualCompactionRunningHtml,
   manualCompactionCompletedHtml,
@@ -6639,6 +6662,16 @@ process.stdout.write(JSON.stringify({
             data["emptyRecoveryHtml"].index("data-active-run-anchor"),
             data["emptyRecoveryHtml"].index("data-tool-process-block"),
         )
+        pending_tail_summary = data["emptyRecoveryHtml"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn('class="tool-process-stage running"', pending_tail_summary)
+        self.assertIn(
+            "<strong>label:run_command</strong><code>git status --short</code>",
+            pending_tail_summary,
+        )
+        self.assertNotIn("toolProcessRanCommand", pending_tail_summary)
+        answer_stage_summary = data["activeAnswerHtml"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn("<strong>toolProcessRanCommand</strong>", answer_stage_summary)
+        self.assertNotIn("<code>", answer_stage_summary)
         self.assertNotIn("正在读取 README.md", data["operationalHtml"])
         self.assertNotIn("正在执行 git status --short", data["operationalHtml"])
         self.assertIn("meaningful checkpoint", data["operationalHtml"])
@@ -6661,6 +6694,18 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("tool-process-indicator", grouped_stage_summary)
         self.assertNotIn("<code>", grouped_stage_summary)
         self.assertNotIn("<details open", data["groupedStageHtml"])
+        active_tail_summary = data["activeCompletedTailHtml"].split('<div class="tool-process-stage-body">', 1)[0]
+        self.assertIn('class="tool-process-stage running"', active_tail_summary)
+        self.assertIn(
+            "<strong>label:run_command</strong><code>git status --short</code>",
+            active_tail_summary,
+        )
+        self.assertNotIn("toolProcessInspectedFile", active_tail_summary)
+        self.assertNotIn("toolProcessRanCommand", active_tail_summary)
+        self.assertIn('data-tool-process-key="0:1"', data["activeCompletedTailHtml"])
+        self.assertNotIn('<details class="tool-process-stage running" data-current-action="run_command" data-tool-process-key="0:1" open>', data["activeCompletedTailHtml"])
+        self.assertIn('<details class="tool-process-stage running" data-current-action="run_command" data-tool-process-key="0:1" open>', data["expandedActiveTailHtml"])
+        self.assertNotIn('data-tool-process-key="0:1" open', data["completedCollapsedTailHtml"])
         self.assertIn('data-current-action="run_command"', data["runningStage"])
         self.assertIn('class="tool-process-stage running"', data["runningStage"])
         running_stage_summary = data["runningStage"].split('<div class="tool-process-stage-body">', 1)[0]
@@ -8003,9 +8048,10 @@ process.stdout.write(JSON.stringify({
         assistant_block = MESSAGES_SOURCE[assistant_start:assistant_end]
 
         self.assertIn(
-            'const streamingToolRound = msg.streaming && msg._streamProjection === "thinking"',
+            'const streamingProcessRound = msg.streaming',
             assistant_block,
         )
+        self.assertIn('["pending", "thinking"].includes(msg._streamProjection)', assistant_block)
         self.assertIn(
             "if (msg.meta?.toolCalls?.length) {",
             assistant_block,
@@ -8019,9 +8065,9 @@ process.stdout.write(JSON.stringify({
             assistant_block.index("rows.push(renderFinalAssistantProjection(msg, index, assistantOptions))"),
             assistant_block.index("pendingProcess.push"),
         )
-        self.assertIn("if (streamingToolRound) {", assistant_block)
+        self.assertIn("if (streamingProcessRound) {", assistant_block)
         self.assertLess(
-            assistant_block.index("if (streamingToolRound) {"),
+            assistant_block.index("if (streamingProcessRound) {"),
             assistant_block.rindex("rows.push(renderFinalAssistantProjection(msg, index, assistantOptions))"),
         )
         projection_start = MESSAGES_SOURCE.index("function renderToolProcessProjection")
@@ -8324,8 +8370,11 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('data-active-run-anchor', MESSAGES_SOURCE)
         self.assertIn("const expandedExecutionTraces = new Set(", render)
         self.assertIn('details.execution-trace[open][data-execution-trace]', render)
+        self.assertIn("const expandedToolProcesses = hasActiveRun", render)
+        self.assertIn('details.tool-process-stage[open][data-tool-process-key]', render)
         self.assertIn("const html = projectMessages(msgs, {", render)
         self.assertIn("expandedExecutionTraces,", render)
+        self.assertIn("expandedToolProcesses,", render)
         self.assertLess(render.index("parkActiveRunBanner();\n  els.messageList.innerHTML = html"), render.index("mountActiveRunBanner();", render.index("els.messageList.innerHTML = html")))
         mounted_index = render.index("mountActiveRunBanner();", render.index("els.messageList.innerHTML = html"))
         self.assertLess(mounted_index, render.index("syncActiveRunBanner(state.sessionId);", mounted_index))
