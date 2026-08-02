@@ -72,7 +72,7 @@ H0 已确认当前实现并非所有状态都由耐久事件直接投影：
 | --- | --- |
 | `status` | 当前 8 类 AgentRun 状态之一 |
 | `terminalStatus` | 非终态为空；终态为 `completed / failed / cancelled` |
-| `modelRoundCount` | 已观察快照轮数与事件轮次中的最大值 |
+| `modelRoundCount` | 已由快照确认或已实际开始/完成的模型轮次最大值；`model_pending` 只表示下一轮排队，不提前计数 |
 | `toolCount` | 按非空 `toolCallId` 去重后的工具执行数，不按开始/完成事件重复计数 |
 | `pendingKind` | 空、`authorization`、`user-input` 或 `credentials` |
 | `elapsedMs` | 使用显式观察值或调用方提供的参考时间计算，绝不读取 `Date.now()` |

@@ -242,7 +242,7 @@
         observation.toolCallIds.push(toolCallId);
       }
     }
-    if (item.type.startsWith("model_")) {
+    if (["model_started", "model_completed"].includes(item.type)) {
       observation.modelRoundCount = Math.max(
         Number(observation.modelRoundCount || 0),
         Number(data.round || 0),

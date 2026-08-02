@@ -368,8 +368,6 @@
       next.status = "model";
       if (eventType !== "model_pending") {
         upsertModel(next, data, eventType === "model_started" ? "running" : "recovery", createdAt);
-      } else {
-        next.modelRoundCount = Math.max(next.modelRoundCount, positiveInteger(data.round));
       }
     } else if (eventType === "model_completed") {
       upsertModel(next, data, "completed", createdAt);

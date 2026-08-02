@@ -142,6 +142,100 @@ process.stdout.write(JSON.stringify({equal, legacyFacts, summary: shadowApi.snap
             ],
         )
 
+    def test_authorization_resume_model_pending_does_not_start_the_next_round(self):
+        data = run_node(r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/run-reducer.js");
+require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
+const reducer = window.Code.agent.runReducer;
+const view = window.Code.ui.runViewModel;
+const shadowApi = window.Code.agent.runProjectionShadow;
+const initialSnapshot = {
+  status: "model",
+  eventCursor: 0,
+  round: 0,
+  createdAt: "2030-01-01T00:00:00Z",
+  updatedAt: "2030-01-01T00:00:00Z",
+  elapsedObservedAt: "2030-01-01T00:00:00Z",
+  elapsedMs: 0,
+};
+const events = [
+  {protocolVersion: 1, seq: 1, type: "model_started", data: {round: 1, runtimeRunId: "runtime-auth-1"}, createdAt: "2030-01-01T00:00:01Z"},
+  {protocolVersion: 1, seq: 2, type: "model_completed", data: {round: 1, runtimeRunId: "runtime-auth-1", toolCalls: [{id: "tool-command-1", name: "run_command"}], outcome: "tool_calls"}, createdAt: "2030-01-01T00:00:02Z"},
+  {protocolVersion: 1, seq: 3, type: "tool_started", data: {toolCallId: "tool-command-1", name: "run_command"}, createdAt: "2030-01-01T00:00:03Z"},
+  {protocolVersion: 1, seq: 4, type: "authorization_required", data: {authorizationId: "auth-command-1", toolCallId: "tool-command-1", action: "run_command"}, createdAt: "2030-01-01T00:00:04Z"},
+  {protocolVersion: 1, seq: 5, type: "authorization_submitted", data: {authorizationId: "auth-command-1", toolCallId: "tool-command-1", decision: "approved"}, createdAt: "2030-01-01T00:00:05Z"},
+  {protocolVersion: 1, seq: 6, type: "waiting_credentials", data: {resumeStatus: "tools", reason: "authorization_submitted"}, createdAt: "2030-01-01T00:00:06Z"},
+  {protocolVersion: 1, seq: 7, type: "resumed", data: {status: "tools"}, createdAt: "2030-01-01T00:00:07Z"},
+  {protocolVersion: 1, seq: 8, type: "command_started", data: {toolCallId: "tool-command-1"}, createdAt: "2030-01-01T00:00:08Z"},
+  {protocolVersion: 1, seq: 9, type: "tool_completed", data: {toolCallId: "tool-command-1", name: "run_command", outcome: "succeeded"}, createdAt: "2030-01-01T00:00:09Z"},
+  {protocolVersion: 1, seq: 10, type: "model_pending", data: {round: 2}, createdAt: "2030-01-01T00:00:10Z"},
+];
+let state = reducer.createRunProjectionState(initialSnapshot);
+const observer = shadowApi.createRunProjectionShadow({initialSnapshot});
+const legacy = shadowApi.createLegacyProjectionObservation();
+for (const event of events) {
+  state = reducer.reduceRunProjectionEvent(state, event);
+  shadowApi.observeProjectionEvent(observer, event);
+  shadowApi.observeLegacyProjectionEvent(legacy, event);
+}
+const pendingModel = view.projectRunViewModel(state);
+const pendingSnapshot = {
+  status: "model",
+  eventCursor: 10,
+  round: 1,
+  toolExecutions: [{toolCallId: "tool-command-1", name: "run_command", status: "completed", outcome: "succeeded"}],
+  createdAt: "2030-01-01T00:00:00Z",
+  updatedAt: "2030-01-01T00:00:10Z",
+  elapsedObservedAt: "2030-01-01T00:00:10Z",
+  elapsedMs: 10000,
+};
+shadowApi.observeProjectionSnapshot(observer, pendingSnapshot);
+const pendingLegacy = shadowApi.snapshotLegacyProjectionObservation(legacy);
+const pendingEqual = shadowApi.compareProjectionShadow(observer, {
+  status: "model",
+  terminalStatus: "",
+  modelRoundCount: 1,
+  toolCount: pendingLegacy.toolCount,
+  pendingKind: "",
+  elapsedMs: 10000,
+  timeline: pendingLegacy.timeline,
+}, {referenceTime: "2030-01-01T00:00:10Z"});
+const startedEvent = {protocolVersion: 1, seq: 11, type: "model_started", data: {round: 2, runtimeRunId: "runtime-auth-2"}, createdAt: "2030-01-01T00:00:11Z"};
+state = reducer.reduceRunProjectionEvent(state, startedEvent);
+shadowApi.observeProjectionEvent(observer, startedEvent);
+shadowApi.observeLegacyProjectionEvent(legacy, startedEvent);
+const startedModel = view.projectRunViewModel(state);
+const startedLegacy = shadowApi.snapshotLegacyProjectionObservation(legacy);
+const startedEqual = shadowApi.compareProjectionShadow(observer, {
+  status: "model",
+  terminalStatus: "",
+  modelRoundCount: 2,
+  toolCount: startedLegacy.toolCount,
+  pendingKind: "",
+  elapsedMs: 11000,
+  timeline: startedLegacy.timeline,
+}, {referenceTime: "2030-01-01T00:00:11Z"});
+process.stdout.write(JSON.stringify({
+  pendingEqual,
+  startedEqual,
+  pendingModel,
+  pendingLegacy,
+  startedModel,
+  summary: shadowApi.snapshotRunProjectionShadow(observer),
+}));
+""")
+        self.assertTrue(data["pendingEqual"])
+        self.assertTrue(data["startedEqual"])
+        self.assertEqual(data["pendingModel"]["status"], "model")
+        self.assertEqual(data["pendingModel"]["modelRoundCount"], 1)
+        self.assertEqual(data["pendingLegacy"]["modelRoundCount"], 1)
+        self.assertEqual(data["startedModel"]["modelRoundCount"], 2)
+        self.assertEqual(data["summary"]["mismatches"], 0)
+        self.assertEqual(data["summary"]["observerErrors"], 0)
+
     def test_shadow_diagnostics_are_bounded_sanitized_and_fail_open(self):
         data = run_node(r"""
 global.window = {};
