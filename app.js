@@ -1784,6 +1784,24 @@ function _errorCodeInfo(code) {
   };
 }
 
+function claimActiveRunContext(ctx) {
+  const run = ctx?.run;
+  if (!run) return false;
+  if (run._activeCtx && run._activeCtx !== ctx) return false;
+  run._activeCtx = ctx;
+  return true;
+}
+
+function ownsActiveRunContext(ctx) {
+  return Boolean(ctx?.run && ctx.run._activeCtx === ctx);
+}
+
+function releaseActiveRunContext(ctx) {
+  if (!ownsActiveRunContext(ctx)) return false;
+  ctx.run._activeCtx = null;
+  return true;
+}
+
 function _formatAgentError(err) {
   var code = String(err.errorCode || "");
   var info = _errorCodeInfo(code);
@@ -2860,6 +2878,7 @@ async function continueAgentRun() {
   setSessionMessages(sessionId, ctx.messages);
   renderSessionMessages(sessionId);
   await saveSessionState(sessionId, ctx.messages, ctx.stats);
+  if (!claimActiveRunContext(ctx)) return;
   setStreaming(true, sessionId);
   let completedNormally = false;
   try {
@@ -2884,7 +2903,9 @@ async function continueAgentRun() {
       await saveSessionState(sessionId, ctx.messages, ctx.stats);
     }
   } finally {
-    setStreaming(false, sessionId);
+    if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);
+    archiveAgentProjectionShadow(ctx);
+    releaseActiveRunContext(ctx);
     if (completedNormally) void pumpQueuedSessionMessages(sessionId);
   }
 }
@@ -5517,7 +5538,6 @@ function buildRecoveredRunContext(session, runState) {
   );
   ctx.run.modelRound = Number(runState.modelRound || 0);
   ctx.run.model = ctx.model;
-  ctx.run._activeCtx = ctx;
   return ctx;
 }
 
@@ -5563,6 +5583,7 @@ async function resumePersistedSessionRun(summary) {
     }
 
     const ctx = buildRecoveredRunContext(session, latestRunState);
+    if (!claimActiveRunContext(ctx)) return;
     const recoveryCount = Number(latestRunState.recoveryCount || 0) + 1;
     const resumedAt = Date.now();
     const originalStartedAt = Date.parse(latestRunState.startedAt || 0);
@@ -5596,9 +5617,9 @@ async function resumePersistedSessionRun(summary) {
         lastError: error?.message || String(error),
       }).catch(() => {});
     } finally {
-      setStreaming(false, summary.id);
+      if (ownsActiveRunContext(ctx)) setStreaming(false, summary.id);
       archiveAgentProjectionShadow(ctx);
-      ctx.run._activeCtx = null;
+      releaseActiveRunContext(ctx);
       if (ctx.queueItemId) finishQueuedSessionMessage(summary.id, ctx.queueItemId, !recoveryError);
       await saveSessionState(summary.id, ctx.messages, ctx.stats, session.title).catch(() => {});
       if (summary.id === state.sessionId) renderSessionMessages(summary.id);
@@ -8253,7 +8274,9 @@ async function runServerAgentLoop(ctx) {
   ctx.allowedToolNames = new Set(serverToolNames);
   ctx.tools = serverTools;
   ctx.run = ctx.run || ensureSessionRun(ctx.sessionId);
-  ctx.run._activeCtx = ctx;
+  if (!claimActiveRunContext(ctx)) {
+    throw new Error("Foreground AgentRun already has an active observer");
+  }
   if (!ctx.run.abortController || ctx.run.abortController.signal.aborted) {
     ctx.run.abortController = new AbortController();
   }
@@ -8672,7 +8695,6 @@ async function sendMessage(userText, options = {}) {
   ctx.taskUsage = { input: 0, output: 0, cache: 0 };
   // Make the active context accessible for background sub-agent dispatch
   ctx._taskPrompt = userText;
-  run._activeCtx = ctx;
 
 
 
@@ -8756,14 +8778,14 @@ async function sendMessage(userText, options = {}) {
 
       setStreaming(false, sessionId);
       await saveSessionState(sessionId, ctx.messages, ctx.stats);
-      if (run) run._activeCtx = null;
+      releaseActiveRunContext(ctx);
       return;
 
     }
 
     if (cmd === "remember") {
       await extractAndSuggestMemories();
-      if (run) run._activeCtx = null;
+      releaseActiveRunContext(ctx);
       return;
     }
 
@@ -8778,8 +8800,6 @@ async function sendMessage(userText, options = {}) {
     }
 
   }
-
-
 
   const shouldAutoTitle = !existingMessage
     && sessionId === state.sessionId
@@ -8816,6 +8836,9 @@ async function sendMessage(userText, options = {}) {
 
   // Anchor the model name and expose the active state before persistence so
   // first-send feedback is not blocked on metadata writes.
+  if (!claimActiveRunContext(ctx)) {
+    throw new Error("Foreground AgentRun already has an active observer");
+  }
   run._model = ctx.model || getSelectedModel();
   setStreaming(true, sessionId);
   if (optimisticMessage) scheduleDeferredSessionRefresh(sessionId);
@@ -8918,13 +8941,13 @@ async function sendMessage(userText, options = {}) {
     await clearRunCheckpoint(ctx).catch(() => {});
   }
 
-  setStreaming(false, sessionId);
+  if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);
   await saveSessionState(sessionId, ctx.messages, ctx.stats);
   renderSessions();
 
   notifyTaskComplete(sessionId);
   archiveAgentProjectionShadow(ctx);
-  if (run) run._activeCtx = null;
+  releaseActiveRunContext(ctx);
 
   if (loopError) throw loopError;  // propagate to chatForm handler
 }
