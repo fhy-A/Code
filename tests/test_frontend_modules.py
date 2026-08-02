@@ -699,6 +699,7 @@ eval(source);
             "await agentRuntime.createAgentRun",
             "await persistRunCheckpoint(ctx, \"running\", \"model\"",
             "onEvent: (event) => projectAgentEvent(ctx, event)",
+            "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
             "ctx.run.recovery = {",
             "ctx.run.agentEventCursor = ctx.agentEventCursor",
             "ctx.agentRunId = \"\"",
@@ -712,6 +713,33 @@ eval(source);
 
         self.assertFalse((ROOT / "src" / "agent" / "agent-loop.js").exists())
         self.assertNotIn("./src/agent/agent-loop.js", INDEX_SOURCE)
+
+    def test_projection_shadow_is_feature_gated_and_observes_all_run_boundaries(self):
+        background_start = APP_SOURCE.index("async function runBackgroundSubAgentJob(job)")
+        background_end = APP_SOURCE.index("function pumpBackgroundDispatcher()", background_start)
+        background = APP_SOURCE[background_start:background_end]
+        foreground_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        foreground_end = APP_SOURCE.index("async function executeRunContext(ctx)", foreground_start)
+        foreground = APP_SOURCE[foreground_start:foreground_end]
+
+        self.assertIn("let _agentProjectionShadowEnabled = false", APP_SOURCE)
+        self.assertIn("setAgentProjectionShadowEnabled(data.agentProjectionShadow === true)", APP_SOURCE)
+        self.assertIn("if (!_agentProjectionShadowEnabled", APP_SOURCE)
+        self.assertIn("onEvent: (event) => observeAgentProjectionEvent(subCtx, event)", background)
+        self.assertIn(
+            "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(subCtx, observedSnapshot)",
+            background,
+        )
+        self.assertIn("archiveAgentProjectionShadow(subCtx)", background)
+        self.assertIn("onEvent: (event) => projectAgentEvent(ctx, event)", foreground)
+        self.assertIn(
+            "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
+            foreground,
+        )
+        self.assertIn("beginAgentProjectionEvent(ctx, event, projectionReferenceTime)", APP_SOURCE)
+        self.assertIn("completeAgentProjectionEvent(ctx, event, projectionReferenceTime)", APP_SOURCE)
+        self.assertIn("archiveAgentProjectionShadow(ctx)", APP_SOURCE)
+        self.assertIn("_agentProjectionShadowSummaries: []", STATE_SOURCE)
 
     def test_agent_questionnaire_normalizes_and_serializes_without_side_effects(self):
         script = r"""
@@ -1843,6 +1871,7 @@ eval(source);
             "src/agent/compaction.js",
             "src/agent/model-stream.js",
             "src/agent/run-reducer.js",
+            "src/agent/run-projection-shadow.js",
             "src/frontend-entry.js",
         ):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)

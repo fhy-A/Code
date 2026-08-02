@@ -46,6 +46,7 @@
         perSessionLimit: 2,
       },
       _queuedMessagePumps: new Set(),
+      _agentProjectionShadowSummaries: [],
       pendingEdits: {},
       authorizationRequests: [],
       userInputRequests: {},

@@ -32,6 +32,7 @@ import "./agent/compaction.js";
 import "./agent/model-stream.js";
 import "./agent/run-reducer.js";
 import "./ui/run-view-model.js";
+import "./agent/run-projection-shadow.js";
 import "../agent-runtime.js";
 import "../app.js";
 

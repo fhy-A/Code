@@ -758,6 +758,36 @@ class TestDurableAgentRuntime(unittest.TestCase):
             instance_mode="dev",
         ))
 
+    def test_agent_projection_shadow_flag_defaults_and_override(self):
+        self.assertTrue(server_mod._resolve_agent_projection_shadow_enabled(
+            {},
+            instance_mode="dev",
+        ))
+        self.assertFalse(server_mod._resolve_agent_projection_shadow_enabled(
+            {},
+            instance_mode="release",
+        ))
+        for value in ("0", "false", "NO", "off"):
+            with self.subTest(value=value):
+                self.assertFalse(server_mod._resolve_agent_projection_shadow_enabled(
+                    {"CODE_AGENT_PROJECTION_SHADOW": value},
+                    instance_mode="dev",
+                ))
+        for value in ("1", "true", "YES", "on"):
+            with self.subTest(value=value):
+                self.assertTrue(server_mod._resolve_agent_projection_shadow_enabled(
+                    {"CODE_AGENT_PROJECTION_SHADOW": value},
+                    instance_mode="release",
+                ))
+        self.assertFalse(server_mod._resolve_agent_projection_shadow_enabled(
+            {"CODE_AGENT_PROJECTION_SHADOW": "unexpected"},
+            instance_mode="release",
+        ))
+        self.assertTrue(server_mod._resolve_agent_projection_shadow_enabled(
+            {"CODE_AGENT_PROJECTION_SHADOW": "unexpected"},
+            instance_mode="dev",
+        ))
+
     def test_agent_event_protocol_v1_writes_one_explicit_envelope(self):
         with (
             mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True),

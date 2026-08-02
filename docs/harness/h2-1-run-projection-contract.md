@@ -1,5 +1,7 @@
 # Harness H2-1 Run 投影契约与纯函数边界
 
+> 后续状态：H2-2 已在开发默认、正式关闭的独立开关下接入前台、恢复、队列和后台 AgentRun 只读影子计算，旧投影继续作为唯一可见实现。当前边界见 [`h2-2-frontend-shadow-projection.md`](h2-2-frontend-shadow-projection.md)。以下内容保留 H2-1 完成时的阶段事实。
+
 完成时间：2026-08-03 01:00（Asia/Shanghai）
 
 阶段性质：新增纯 reducer、规范 View Model 与离线比较契约，不接入现有事件轮询或 UI 投影

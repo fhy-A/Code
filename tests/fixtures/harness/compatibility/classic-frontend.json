@@ -36,6 +36,7 @@
     "./agent/model-stream.js",
     "./agent/run-reducer.js",
     "./ui/run-view-model.js",
+    "./agent/run-projection-shadow.js",
     "../agent-runtime.js",
     "../app.js"
   ],

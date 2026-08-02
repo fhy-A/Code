@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REDUCER_SOURCE = (ROOT / "src" / "agent" / "run-reducer.js").read_text(encoding="utf-8")
 VIEW_MODEL_SOURCE = (ROOT / "src" / "ui" / "run-view-model.js").read_text(encoding="utf-8")
+SHADOW_SOURCE = (ROOT / "src" / "agent" / "run-projection-shadow.js").read_text(encoding="utf-8")
 
 
 def run_node(script):
@@ -26,14 +27,17 @@ class RunProjectionContractTests(unittest.TestCase):
         for forbidden in ("fetch(", "document.", "localStorage", "sessionStorage", "Date.now"):
             self.assertNotIn(forbidden, REDUCER_SOURCE)
             self.assertNotIn(forbidden, VIEW_MODEL_SOURCE)
+            self.assertNotIn(forbidden, SHADOW_SOURCE)
 
         data = run_node(r"""
 global.window = {};
 require("./src/core/namespace.js");
 require("./src/agent/run-reducer.js");
 require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
 const reducer = window.Code.agent.runReducer;
 const view = window.Code.ui.runViewModel;
+const shadow = window.Code.agent.runProjectionShadow;
 process.stdout.write(JSON.stringify({
   reducerVersion: reducer.RUN_PROJECTION_SCHEMA_VERSION,
   viewVersion: view.RUN_VIEW_MODEL_SCHEMA_VERSION,
@@ -42,6 +46,9 @@ process.stdout.write(JSON.stringify({
   fields: view.RUN_PROJECTION_COMPARISON_FIELDS,
   reducerFrozen: Object.isFrozen(reducer),
   viewFrozen: Object.isFrozen(view),
+  shadowVersion: shadow.RUN_PROJECTION_SHADOW_SCHEMA_VERSION,
+  shadowLimit: shadow.DEFAULT_MAX_DIAGNOSTICS,
+  shadowFrozen: Object.isFrozen(shadow),
 }));
 """)
         self.assertEqual(data["reducerVersion"], 1)
@@ -62,6 +69,134 @@ process.stdout.write(JSON.stringify({
         )
         self.assertTrue(data["reducerFrozen"])
         self.assertTrue(data["viewFrozen"])
+        self.assertEqual(data["shadowVersion"], 1)
+        self.assertEqual(data["shadowLimit"], 64)
+        self.assertTrue(data["shadowFrozen"])
+
+    def test_shadow_observer_matches_a_complete_event_and_snapshot_trace(self):
+        data = run_node(r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/run-reducer.js");
+require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
+const shadowApi = window.Code.agent.runProjectionShadow;
+const initialSnapshot = {
+  status: "model",
+  eventCursor: 0,
+  createdAt: "2030-01-01T00:00:00Z",
+  updatedAt: "2030-01-01T00:00:00Z",
+  elapsedObservedAt: "2030-01-01T00:00:00Z",
+  elapsedMs: 0,
+};
+const events = [
+  {protocolVersion: 1, seq: 1, type: "model_started", data: {round: 1, runtimeRunId: "round-1"}, createdAt: "2030-01-01T00:00:01Z"},
+  {protocolVersion: 1, seq: 2, type: "tool_started", data: {toolCallId: "tool-1", name: "read_file"}, createdAt: "2030-01-01T00:00:02Z"},
+  {protocolVersion: 1, seq: 3, type: "tool_completed", data: {toolCallId: "tool-1", name: "read_file", outcome: "succeeded"}, createdAt: "2030-01-01T00:00:03Z"},
+  {protocolVersion: 1, seq: 4, type: "completed", data: {}, createdAt: "2030-01-01T00:00:04Z"},
+];
+const observer = shadowApi.createRunProjectionShadow({initialSnapshot});
+const legacy = shadowApi.createLegacyProjectionObservation();
+for (const event of events) {
+  shadowApi.observeProjectionEvent(observer, event);
+  shadowApi.observeLegacyProjectionEvent(legacy, event);
+}
+const snapshot = {
+  status: "completed",
+  round: 1,
+  toolExecutions: [{toolCallId: "tool-1", name: "read_file", status: "completed", outcome: "succeeded"}],
+  createdAt: "2030-01-01T00:00:00Z",
+  updatedAt: "2030-01-01T00:00:04Z",
+  completedAt: "2030-01-01T00:00:04Z",
+  elapsedObservedAt: "2030-01-01T00:00:04Z",
+  elapsedMs: 4000,
+};
+shadowApi.observeProjectionSnapshot(observer, snapshot);
+const legacyFacts = shadowApi.snapshotLegacyProjectionObservation(legacy);
+const equal = shadowApi.compareProjectionShadow(observer, {
+  status: "completed",
+  terminalStatus: "completed",
+  modelRoundCount: legacyFacts.modelRoundCount,
+  toolCount: legacyFacts.toolCount,
+  pendingKind: "",
+  elapsedMs: 4000,
+  timeline: legacyFacts.timeline,
+}, {referenceTime: "2030-01-01T00:00:04Z"});
+process.stdout.write(JSON.stringify({equal, legacyFacts, summary: shadowApi.snapshotRunProjectionShadow(observer)}));
+""")
+        self.assertTrue(data["equal"])
+        self.assertEqual(data["summary"]["eventsObserved"], 4)
+        self.assertEqual(data["summary"]["snapshotsObserved"], 1)
+        self.assertEqual(data["summary"]["comparisons"], 1)
+        self.assertEqual(data["summary"]["mismatches"], 0)
+        self.assertEqual(data["summary"]["diagnostics"], [])
+        self.assertEqual(data["legacyFacts"]["modelRoundCount"], 1)
+        self.assertEqual(data["legacyFacts"]["toolCount"], 1)
+        self.assertEqual(
+            data["legacyFacts"]["timeline"],
+            [
+                {"seq": 1, "type": "model_started", "category": "model", "status": "running", "refId": "round-1"},
+                {"seq": 2, "type": "tool_started", "category": "tool", "status": "running", "refId": "tool-1"},
+                {"seq": 3, "type": "tool_completed", "category": "tool", "status": "completed", "refId": "tool-1"},
+                {"seq": 4, "type": "completed", "category": "terminal", "status": "completed", "refId": ""},
+            ],
+        )
+
+    def test_shadow_diagnostics_are_bounded_sanitized_and_fail_open(self):
+        data = run_node(r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/run-reducer.js");
+require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
+const shadowApi = window.Code.agent.runProjectionShadow;
+const secret = "sk-secret-must-never-be-recorded";
+const observer = shadowApi.createRunProjectionShadow({maxDiagnostics: 3});
+const cappedObserver = shadowApi.createRunProjectionShadow({maxDiagnostics: 1000});
+const observed = shadowApi.observeProjectionEvent(observer, {
+  protocolVersion: 1,
+  seq: 1,
+  type: "tool_started",
+  data: {toolCallId: "tool-1", name: "run_command", arguments: {apiKey: secret}},
+  createdAt: "2030-01-01T00:00:01Z",
+});
+const invalidObserved = shadowApi.observeProjectionEvent(observer, {data: {result: secret}});
+for (let index = 0; index < 5; index += 1) {
+  shadowApi.compareProjectionShadow(observer, {
+    status: "completed",
+    terminalStatus: "completed",
+    modelRoundCount: 99,
+    toolCount: 99,
+    pendingKind: "authorization",
+    elapsedMs: 999999,
+    timeline: [],
+  }, {referenceTime: "2030-01-01T00:00:02Z"});
+}
+const summary = shadowApi.snapshotRunProjectionShadow(observer);
+process.stdout.write(JSON.stringify({
+  observed,
+  invalidObserved,
+  summary,
+  secret,
+  cappedLimit: cappedObserver.maxDiagnostics,
+}));
+""")
+        self.assertTrue(data["observed"])
+        self.assertFalse(data["invalidObserved"])
+        self.assertEqual(data["cappedLimit"], 64)
+        summary = data["summary"]
+        self.assertEqual(summary["observerErrors"], 1)
+        self.assertEqual(len(summary["diagnostics"]), 3)
+        self.assertGreater(summary["diagnosticsDropped"], 0)
+        self.assertGreater(summary["diagnosticCounts"]["projection_mismatch"], 3)
+        self.assertEqual(
+            set(summary["diagnostics"][0]),
+            {"code", "field", "cursor", "status"},
+        )
+        serialized_summary = json.dumps(summary)
+        self.assertNotIn(data["secret"], serialized_summary)
+        self.assertNotIn("arguments", serialized_summary)
+        self.assertNotIn("result", serialized_summary)
 
     def test_all_h0_traces_replay_to_their_frozen_checkpoints(self):
         data = run_node(r"""

@@ -60,6 +60,8 @@ const {
 } = window.Code.features.imageAttachments;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
 const agentRuntime = window.Code.agent.runtime;
+const agentRunReducer = window.Code.agent.runReducer;
+const agentRunProjectionShadow = window.Code.agent.runProjectionShadow;
 const {
   assembleModelRequestPayload,
   hasImageContent,
@@ -1216,6 +1218,7 @@ function trashIcon() {
 let _baseDocumentTitle = document.title;
 let _instanceProductName = "Code";
 let _pendingPermNotify = false;
+let _agentProjectionShadowEnabled = false;
 
 function applyInstanceIdentity(instanceMode) {
   const isDev = instanceMode === "dev";
@@ -1223,6 +1226,10 @@ function applyInstanceIdentity(instanceMode) {
   _baseDocumentTitle = _instanceProductName;
   if (els.productName) els.productName.textContent = _instanceProductName;
   if (!_pendingPermNotify) document.title = _baseDocumentTitle;
+}
+
+function setAgentProjectionShadowEnabled(enabled) {
+  _agentProjectionShadowEnabled = enabled === true;
 }
 
 function isUserAway() {
@@ -5575,6 +5582,7 @@ async function resumePersistedSessionRun(summary) {
       }).catch(() => {});
     } finally {
       setStreaming(false, summary.id);
+      archiveAgentProjectionShadow(ctx);
       ctx.run._activeCtx = null;
       if (ctx.queueItemId) finishQueuedSessionMessage(summary.id, ctx.queueItemId, !recoveryError);
       await saveSessionState(summary.id, ctx.messages, ctx.stats, session.title).catch(() => {});
@@ -7042,6 +7050,8 @@ function createBackgroundServerContext(job) {
   subCtx.isDetachedBackground = true;
   subCtx.backgroundJobId = job.id;
   subCtx.parentTaskStartedAt = Number(job.parentTaskStartedAt || 0);
+  subCtx.agentEventCursor = Number(job.cursor || 0);
+  subCtx._agentProjectionElapsedMs = (referenceTime) => backgroundJobElapsedMs(job, referenceTime);
   subCtx.run = {
     sessionId: job.sessionId,
     isStreaming: false,
@@ -7113,8 +7123,11 @@ async function runBackgroundSubAgentJob(job) {
         agentRunId: job.agentRunId,
         cursor: job.cursor || 0,
         signal: subCtx.run.abortController.signal,
+        onEvent: (event) => observeAgentProjectionEvent(subCtx, event),
+        onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(subCtx, observedSnapshot),
       });
       job.cursor = Number(snapshot.nextCursor ?? job.cursor ?? 0);
+      subCtx.agentEventCursor = job.cursor;
       lastUsage = cloneUsageStats(snapshot.usage || snapshot.result?.usage);
       if (snapshot.status === "waiting_credentials") continue;
       if (snapshot.status === "waiting_user_input") {
@@ -7149,6 +7162,7 @@ async function runBackgroundSubAgentJob(job) {
       usage: lastUsage,
     };
   } finally {
+    archiveAgentProjectionShadow(subCtx);
     clearTimeout(timeoutId);
   }
 }
@@ -7377,6 +7391,237 @@ async function resumePersistedBackgroundRuns() {
 
 function isServerOwnedRun(ctx) {
   return !ctx?.isSubAgent && ctx?.executionOwner === "server-agent";
+}
+
+const AGENT_PROJECTION_SHADOW_SUMMARY_LIMIT = 32;
+const AGENT_PROJECTION_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+function agentProjectionStatus(snapshot, ctx) {
+  const snapshotStatus = String(snapshot?.status || "");
+  if (agentRunReducer.RUN_STATUSES.includes(snapshotStatus)) return snapshotStatus;
+  const runState = ctx?.isDetachedBackground ? {} : getSessionRunState(ctx?.sessionId);
+  const phase = String(runState?.phase || "");
+  return phase === "tools" ? "tools" : "model";
+}
+
+function agentProjectionSnapshotToolSummaries(snapshot) {
+  const tools = new Map();
+  const snapshotTools = Array.isArray(snapshot?.toolExecutions)
+    ? snapshot.toolExecutions
+    : Object.values(snapshot?.toolExecutions || {});
+  for (const source of snapshotTools) {
+    const toolCallId = String(source?.toolCallId || source?.id || "");
+    if (!toolCallId) continue;
+    tools.set(toolCallId, {
+      toolCallId,
+      name: String(source?.name || source?.action || ""),
+      status: String(source?.status || "running"),
+      outcome: String(source?.outcome || ""),
+      startedAt: String(source?.startedAt || ""),
+      completedAt: String(source?.completedAt || ""),
+    });
+  }
+  return [...tools.values()];
+}
+
+function agentProjectionMessageToolSummaries(ctx) {
+  const tools = new Map();
+  for (const message of Array.isArray(ctx?.messages) ? ctx.messages : []) {
+    if (!["tool-call", "tool-result"].includes(String(message?.role || ""))) continue;
+    const messageRunId = String(message?.meta?.agentRunId || "");
+    if (!messageRunId || messageRunId !== String(ctx?.agentRunId || "")) continue;
+    const toolCallId = String(message?.meta?.toolCallId || message?.meta?.tool?._toolCallId || "");
+    if (!toolCallId) continue;
+    const previous = tools.get(toolCallId) || {};
+    tools.set(toolCallId, {
+      toolCallId,
+      name: String(message?.meta?.action || message?.meta?.tool?.action || previous.name || ""),
+      status: message.role === "tool-result" ? "completed" : String(previous.status || "running"),
+      outcome: String(message?.meta?.outcome || previous.outcome || ""),
+      startedAt: String(previous.startedAt || message?._time || ""),
+      completedAt: message.role === "tool-result"
+        ? String(message?._time || previous.completedAt || "")
+        : String(previous.completedAt || ""),
+    });
+  }
+  return [...tools.values()];
+}
+
+function agentProjectionPending(snapshot, status) {
+  if (status === "waiting_authorization") {
+    return {
+      kind: "authorization",
+      id: String(snapshot?.pendingAuthorization?.authorizationId || ""),
+      toolCallId: String(snapshot?.pendingAuthorization?.toolCallId || ""),
+      action: String(snapshot?.pendingAuthorization?.action || ""),
+    };
+  }
+  if (status === "waiting_user_input") {
+    return {
+      kind: "user-input",
+      id: String(snapshot?.pendingInput?.requestId || ""),
+      toolCallId: String(snapshot?.pendingInput?.toolCallId || ""),
+      action: String(snapshot?.pendingInput?.type || ""),
+    };
+  }
+  if (status === "waiting_credentials") {
+    return { kind: "credentials", id: "", toolCallId: "", action: "" };
+  }
+  return null;
+}
+
+function agentProjectionElapsedMs(ctx, referenceTime) {
+  if (typeof ctx?._agentProjectionElapsedMs === "function") {
+    return Math.max(0, Number(ctx._agentProjectionElapsedMs(referenceTime) || 0));
+  }
+  return Math.max(0, activeRunElapsedMs(ctx?.run, referenceTime));
+}
+
+function agentProjectionSnapshotFacts(ctx, snapshot, referenceTime) {
+  const status = agentProjectionStatus(snapshot, ctx);
+  const elapsedMs = agentProjectionElapsedMs(ctx, referenceTime);
+  const observedAt = new Date(referenceTime).toISOString();
+  const tools = snapshot
+    ? agentProjectionSnapshotToolSummaries(snapshot)
+    : agentProjectionMessageToolSummaries(ctx);
+  const pending = agentProjectionPending(snapshot, status);
+  const taskStartedAt = Number(ctx?.run?.taskStartTime || ctx?.taskStartedAt || 0);
+  return {
+    status,
+    eventCursor: Number(ctx?.agentEventCursor || 0),
+    round: Math.max(Number(snapshot?.round || 0), Number(ctx?.run?.modelRound || 0)),
+    toolExecutions: tools,
+    ...(pending?.kind === "authorization" ? {
+      pendingAuthorization: {
+        authorizationId: pending.id,
+        toolCallId: pending.toolCallId,
+        action: pending.action,
+      },
+    } : {}),
+    ...(pending?.kind === "user-input" ? {
+      pendingInput: {
+        requestId: pending.id,
+        toolCallId: pending.toolCallId,
+        type: pending.action,
+      },
+    } : {}),
+    ...(pending?.kind === "credentials" ? { resumeStatus: String(snapshot?.resumeStatus || "") } : {}),
+    createdAt: String(snapshot?.createdAt || (taskStartedAt > 0 ? new Date(taskStartedAt).toISOString() : "")),
+    updatedAt: String(snapshot?.updatedAt || observedAt),
+    completedAt: AGENT_PROJECTION_TERMINAL_STATUSES.has(status)
+      ? String(snapshot?.updatedAt || observedAt)
+      : "",
+    elapsedMs,
+    elapsedObservedAt: observedAt,
+  };
+}
+
+function agentProjectionLegacyFacts(ctx, snapshot, referenceTime) {
+  const status = agentProjectionStatus(snapshot, ctx);
+  const pending = agentProjectionPending(snapshot, status);
+  const messageTools = agentProjectionMessageToolSummaries(ctx);
+  const snapshotTools = agentProjectionSnapshotToolSummaries(snapshot);
+  const legacy = agentRunProjectionShadow.snapshotLegacyProjectionObservation(
+    ctx?._agentProjectionLegacyObservation,
+  );
+  const backgroundToolCount = snapshot
+    ? snapshotTools.length
+    : legacy.toolCount;
+  const backgroundRound = snapshot
+    ? Number(snapshot?.round || 0)
+    : legacy.modelRoundCount;
+  return {
+    status,
+    terminalStatus: AGENT_PROJECTION_TERMINAL_STATUSES.has(status) ? status : "",
+    modelRoundCount: Math.max(0, ctx?.isDetachedBackground
+      ? backgroundRound
+      : Number(ctx?.run?.modelRound || 0)),
+    toolCount: ctx?.isDetachedBackground ? backgroundToolCount : messageTools.length,
+    pendingKind: pending?.kind || "",
+    elapsedMs: agentProjectionElapsedMs(ctx, referenceTime),
+    timeline: legacy.timeline,
+  };
+}
+
+function ensureAgentProjectionShadow(ctx, referenceTime = Date.now()) {
+  if (!_agentProjectionShadowEnabled || !ctx || !agentRunProjectionShadow) return null;
+  if (ctx._agentProjectionShadow) return ctx._agentProjectionShadow;
+  ctx._agentProjectionLegacyObservation = agentRunProjectionShadow.createLegacyProjectionObservation({
+    cursor: Number(ctx?.agentEventCursor || 0),
+    toolCallIds: agentProjectionMessageToolSummaries(ctx).map((tool) => tool.toolCallId),
+    modelRoundCount: Number(ctx?.run?.modelRound || 0),
+  });
+  ctx._agentProjectionShadow = agentRunProjectionShadow.createRunProjectionShadow({
+    initialSnapshot: agentProjectionSnapshotFacts(ctx, null, referenceTime),
+  });
+  return ctx._agentProjectionShadow;
+}
+
+function beginAgentProjectionEvent(ctx, event, referenceTime = Date.now()) {
+  const shadow = ensureAgentProjectionShadow(ctx, referenceTime);
+  if (!shadow) return false;
+  agentRunProjectionShadow.observeProjectionEvent(shadow, event);
+  return true;
+}
+
+function completeAgentProjectionEvent(ctx, event, referenceTime = Date.now()) {
+  const shadow = ctx?._agentProjectionShadow;
+  if (!shadow) return;
+  const eventType = String(event?.type || "");
+  agentRunProjectionShadow.observeLegacyProjectionEvent(
+    ctx._agentProjectionLegacyObservation,
+    event,
+  );
+  const fields = ["timeline"];
+  if (!ctx.isDetachedBackground && ["tool_started", "tool_completed"].includes(eventType)) {
+    fields.push("toolCount");
+  }
+  if (!ctx.isDetachedBackground && eventType === "model_started") {
+    fields.push("modelRoundCount");
+  }
+  agentRunProjectionShadow.compareProjectionShadow(
+    shadow,
+    agentProjectionLegacyFacts(ctx, null, referenceTime),
+    { referenceTime, fields },
+  );
+}
+
+function observeAgentProjectionEvent(ctx, event, referenceTime = Date.now()) {
+  if (!beginAgentProjectionEvent(ctx, event, referenceTime)) return;
+  completeAgentProjectionEvent(ctx, event, referenceTime);
+}
+
+function archiveAgentProjectionShadow(ctx) {
+  if (!ctx?._agentProjectionShadow || ctx._agentProjectionShadowArchived) return;
+  const summary = agentRunProjectionShadow.snapshotRunProjectionShadow(ctx._agentProjectionShadow);
+  if (!summary) return;
+  ctx._agentProjectionShadowArchived = true;
+  state._agentProjectionShadowSummaries.push({
+    ...summary,
+    runKind: ctx.isDetachedBackground ? "background" : "foreground",
+  });
+  if (state._agentProjectionShadowSummaries.length > AGENT_PROJECTION_SHADOW_SUMMARY_LIMIT) {
+    state._agentProjectionShadowSummaries.splice(
+      0,
+      state._agentProjectionShadowSummaries.length - AGENT_PROJECTION_SHADOW_SUMMARY_LIMIT,
+    );
+  }
+}
+
+function observeAgentProjectionSnapshot(ctx, snapshot, referenceTime = Date.now()) {
+  const shadow = ensureAgentProjectionShadow(ctx, referenceTime);
+  if (!shadow) return;
+  agentRunProjectionShadow.observeProjectionSnapshot(
+    shadow,
+    agentProjectionSnapshotFacts(ctx, snapshot, referenceTime),
+  );
+  agentRunProjectionShadow.compareProjectionShadow(
+    shadow,
+    agentProjectionLegacyFacts(ctx, snapshot, referenceTime),
+    { referenceTime },
+  );
+  if (AGENT_PROJECTION_TERMINAL_STATUSES.has(String(snapshot?.status || ""))) {
+    archiveAgentProjectionShadow(ctx);
+  }
 }
 
 function findAgentProjectionMessage(ctx, eventType, eventSeq) {
@@ -7740,6 +7985,8 @@ function projectAgentToolCompleted(ctx, event) {
 
 async function projectAgentEvent(ctx, event) {
   const eventType = String(event?.type || "");
+  const projectionReferenceTime = Date.now();
+  const projectionObserved = beginAgentProjectionEvent(ctx, event, projectionReferenceTime);
   if (eventType === "model_started") await projectAgentModelStarted(ctx, event);
   else if (eventType === "model_completed") projectAgentModelCompleted(ctx, event);
   else if (eventType === "model_recovery") projectAgentModelRecovery(ctx, event);
@@ -7753,6 +8000,7 @@ async function projectAgentEvent(ctx, event) {
     projectAgentContextCompaction(ctx, event, "failed");
   }
 
+  if (projectionObserved) completeAgentProjectionEvent(ctx, event, projectionReferenceTime);
   ctx.agentEventCursor = Math.max(Number(ctx.agentEventCursor || 0), Number(event?.seq || 0));
   ctx.run.agentEventCursor = ctx.agentEventCursor;
   setSessionMessages(ctx.sessionId, ctx.messages);
@@ -8044,6 +8292,7 @@ async function runServerAgentLoop(ctx) {
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
       onEvent: (event) => projectAgentEvent(ctx, event),
+      onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot),
       onReconnect({ attempt, nextRetryAt, error }) {
         ctx.run.recovery = {
           source: "agent-poll",
@@ -8659,6 +8908,7 @@ async function sendMessage(userText, options = {}) {
   renderSessions();
 
   notifyTaskComplete(sessionId);
+  archiveAgentProjectionShadow(ctx);
   if (run) run._activeCtx = null;
 
   if (loopError) throw loopError;  // propagate to chatForm handler
@@ -10418,6 +10668,7 @@ async function init() {
           browserInstanceMode = data.instanceMode;
           applyInstanceIdentity(browserInstanceMode);
         }
+        setAgentProjectionShadowEnabled(data.agentProjectionShadow === true);
       } catch (_) { /* backend may be restarting */ }
     };
     setInterval(sendBrowserHeartbeat, 3000);

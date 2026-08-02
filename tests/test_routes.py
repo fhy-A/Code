@@ -134,6 +134,12 @@ class TestHealthAndConfig(TestServerFixture):
         self.assertEqual(data["instanceMode"], "release")
         self.assertEqual(data["port"], 3010)
 
+    def test_browser_heartbeat_keeps_projection_shadow_disabled_in_release(self):
+        status, data = _req("GET", "/api/browser-heartbeat")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["instanceMode"], "release")
+        self.assertFalse(data["agentProjectionShadow"])
+
     def test_skill_dependency_preflight_route(self):
         expected = {
             "summary": {"declared": 1, "ready": 0, "partial": 1, "unavailable": 0},

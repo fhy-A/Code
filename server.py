@@ -104,10 +104,26 @@ def _resolve_agent_event_protocol_v1_enabled(environ=None, *, instance_mode=None
     return mode == "dev"
 
 
+def _resolve_agent_projection_shadow_enabled(environ=None, *, instance_mode=None):
+    """Enable frontend projection shadowing by default only in development."""
+    source = os.environ if environ is None else environ
+    mode = INSTANCE_MODE if instance_mode is None else str(instance_mode or "")
+    raw = source.get("CODE_AGENT_PROJECTION_SHADOW")
+    if raw is None or str(raw).strip() == "":
+        return mode == "dev"
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return mode == "dev"
+
+
 _AGENT_PROTOCOL_SHADOW_ENABLED = _resolve_agent_protocol_shadow_enabled()
 _AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT = 64
 _AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT = 256
 _AGENT_EVENT_PROTOCOL_V1_ENABLED = _resolve_agent_event_protocol_v1_enabled()
+_AGENT_PROJECTION_SHADOW_ENABLED = _resolve_agent_projection_shadow_enabled()
 _active_downloads = {}   # downloadId -> {progress, done, error, path, total}
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -11027,6 +11043,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "serverInstanceId": _server_instance_id,
                     "instanceMode": INSTANCE_MODE,
+                    "agentProjectionShadow": bool(_AGENT_PROJECTION_SHADOW_ENABLED),
                 })
                 return
             if route == "/api/check-path":
