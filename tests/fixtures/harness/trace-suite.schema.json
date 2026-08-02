@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://code.example.test/schemas/harness-trace-suite-v1.json",
+  "title": "Code Harness synthetic trace suite v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fixtureVersion", "suite", "source", "clock", "fixtures"],
+  "properties": {
+    "fixtureVersion": {"const": 1},
+    "suite": {"type": "string", "minLength": 1},
+    "source": {"const": "synthetic"},
+    "clock": {
+      "type": "object",
+      "required": ["origin", "note"],
+      "properties": {
+        "origin": {"type": "string"},
+        "note": {"type": "string"}
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 10,
+      "items": {"$ref": "#/$defs/fixture"}
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "type", "data", "createdAt"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 1},
+        "type": {"type": "string", "minLength": 1},
+        "data": {"type": "object"},
+        "createdAt": {"type": "string"}
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterSeq", "expectedState", "expectedTimeline"],
+      "properties": {
+        "afterSeq": {"type": "integer", "minimum": 1},
+        "expectedState": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {"status": {"type": "string"}}
+        },
+        "expectedTimeline": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "recoveryPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterSeq", "cursor", "kind"],
+      "properties": {
+        "afterSeq": {"type": "integer", "minimum": 1},
+        "cursor": {"type": "integer", "minimum": 0},
+        "kind": {"enum": ["page-refresh", "poll-disconnect", "service-restart"]}
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source", "tags", "initialSnapshot", "events", "checkpoints", "expectedTerminal"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "source": {"const": "synthetic"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "initialSnapshot": {
+          "type": "object",
+          "required": ["status", "eventCursor"],
+          "properties": {
+            "status": {"type": "string"},
+            "eventCursor": {"const": 0}
+          }
+        },
+        "events": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/event"}},
+        "recoveryPoints": {"type": "array", "items": {"$ref": "#/$defs/recoveryPoint"}},
+        "checkpoints": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/checkpoint"}},
+        "expectedTerminal": {
+          "type": "object",
+          "required": ["status", "eventType"],
+          "properties": {
+            "status": {"enum": ["completed", "failed", "cancelled"]},
+            "eventType": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}

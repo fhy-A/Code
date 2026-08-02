@@ -1,0 +1,4 @@
+{"role":"user","content":"Synthetic legacy question.","timestamp":"2030-01-01T00:00:00Z"}
+{"role":"assistant","content":"Synthetic legacy answer.","model":"fixture-model","_responseTime":1.25}
+{"role":"tool-call","content":"","toolCall":{"id":"tool-fixture-legacy-1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}}
+{"role":"assistant","content":"synthetic partial line"

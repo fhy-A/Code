@@ -1,0 +1,41 @@
+{
+  "fixtureVersion": 1,
+  "name": "agent-run-v2",
+  "source": "synthetic-minimum-from-abf3419",
+  "record": {
+    "version": 2,
+    "id": "22222222222222222222222222222222",
+    "sessionId": "session-fixture-v2",
+    "cwd": "/workspace/demo",
+    "workspaceRoots": ["/workspace/demo", "/workspace/shared"],
+    "status": "waiting_user_input",
+    "resumeStatus": "",
+    "permissionProfile": "read",
+    "error": "",
+    "errorCode": "",
+    "baseUrl": "https://gateway.example.test",
+    "request": {"model": "gpt-5.6-fixture", "tool_choice": "auto"},
+    "messages": [{"role": "user", "content": "Synthetic v2 task."}],
+    "tools": [],
+    "toolBudgets": [],
+    "rounds": [],
+    "pendingToolCalls": [],
+    "pendingInput": {"requestId": "request-fixture-v2", "questions": [{"id": "target", "question": "Choose a target"}]},
+    "pendingAuthorization": null,
+    "toolExecutions": {},
+    "usage": {},
+    "result": {},
+    "events": [],
+    "nextSeq": 1,
+    "maxRounds": 4,
+    "createdAt": "2030-01-01T00:00:00Z",
+    "updatedAt": "2030-01-01T00:00:00Z"
+  },
+  "expected": {
+    "status": "waiting_user_input",
+    "resumeStatus": "",
+    "contextLimit": 1000000,
+    "compactionCount": 0,
+    "workspaceRootsSource": "record"
+  }
+}
