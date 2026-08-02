@@ -368,8 +368,78 @@ const PERSISTED_ACTIVE_RUN_STATUSES = new Set([
   "waiting-network",
   "resuming",
 ]);
+const ACTIVE_RUN_TIMER_STORAGE_PREFIX = "code-active-run-timer:";
+const ACTIVE_RUN_TIMER_MAX_AGE_MS = 30000;
 
-function hydratePersistedRunPresentation(run, runState, messages = [], now = Date.now()) {
+function activeRunTimerStorageKey(sessionId) {
+  return `${ACTIVE_RUN_TIMER_STORAGE_PREFIX}${String(sessionId || "")}`;
+}
+
+function readActiveRunTimerCheckpoint(sessionId, agentRunId, now = Date.now()) {
+  if (!sessionId || !agentRunId) return null;
+  try {
+    const checkpoint = JSON.parse(
+      sessionStorage.getItem(activeRunTimerStorageKey(sessionId)) || "null"
+    );
+    const savedAt = Number(checkpoint?.savedAt);
+    const elapsedMs = Number(checkpoint?.elapsedMs);
+    const ageMs = now - savedAt;
+    if (
+      checkpoint?.version !== 1
+      || String(checkpoint?.agentRunId || "") !== String(agentRunId)
+      || !Number.isFinite(savedAt)
+      || !Number.isFinite(elapsedMs)
+      || elapsedMs < 0
+      || ageMs < 0
+      || ageMs > ACTIVE_RUN_TIMER_MAX_AGE_MS
+    ) {
+      return null;
+    }
+    return { elapsedMs: Math.floor(elapsedMs), savedAt: Math.floor(savedAt) };
+  } catch (_) {
+    return null;
+  }
+}
+
+function persistActiveRunTimerCheckpoint(sessionId, now = Date.now()) {
+  const run = ensureSessionRun(sessionId);
+  const agentRunId = String(run?.agentRunId || "");
+  if (!sessionId || !run?.isStreaming || !run.taskStartTime || !agentRunId) return false;
+  try {
+    sessionStorage.setItem(activeRunTimerStorageKey(sessionId), JSON.stringify({
+      version: 1,
+      agentRunId,
+      elapsedMs: activeRunElapsedMs(run, now),
+      savedAt: now,
+    }));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function clearActiveRunTimerCheckpoint(sessionId) {
+  if (!sessionId) return;
+  try {
+    sessionStorage.removeItem(activeRunTimerStorageKey(sessionId));
+  } catch (_) { /* session storage may be unavailable */ }
+}
+
+function recoverActiveRunElapsedMs(sessionId, runState, now = Date.now()) {
+  const durableElapsedMs = persistedRunElapsedMs(runState, now);
+  const checkpoint = readActiveRunTimerCheckpoint(
+    sessionId,
+    String(runState?.agentRunId || ""),
+    now,
+  );
+  if (!checkpoint) return durableElapsedMs;
+  return Math.max(
+    durableElapsedMs,
+    checkpoint.elapsedMs + Math.max(0, now - checkpoint.savedAt),
+  );
+}
+
+function hydratePersistedRunPresentation(sessionId, run, runState, messages = [], now = Date.now()) {
   if (
     !run
     || run.isStreaming
@@ -382,15 +452,15 @@ function hydratePersistedRunPresentation(run, runState, messages = [], now = Dat
 
   const persistedStartedAt = Date.parse(runState.startedAt || "");
   run.isStreaming = true;
-  // This is presentation hydration only. Keep elapsed time frozen at the last
-  // durable checkpoint until resumePersistedSessionRun actually takes over.
+  // This is presentation hydration only. A recent same-run timer checkpoint
+  // bridges the reload gap without changing the durable run contract.
   run.taskStartTime = Number.isFinite(persistedStartedAt)
     && persistedStartedAt > 0
     && persistedStartedAt <= now
     ? persistedStartedAt
     : now;
-  run.taskElapsedBaseMs = persistedRunElapsedMs(runState, now);
-  run.taskElapsedResumedAt = null;
+  run.taskElapsedBaseMs = recoverActiveRunElapsedMs(sessionId, runState, now);
+  run.taskElapsedResumedAt = now;
   run.responseStartTime = now;
   run.hasFirstModelResponseStarted = Boolean(
     runState.hasFirstModelResponseStarted
@@ -400,12 +470,14 @@ function hydratePersistedRunPresentation(run, runState, messages = [], now = Dat
   run.model = String(runState.model || run.model || "");
   run.agentRunId = String(runState.agentRunId || "");
   run.agentEventCursor = Number(runState.agentEventCursor || 0);
+  persistActiveRunTimerCheckpoint(sessionId, now);
   return true;
 }
 
 function syncActiveStreamingState() {
   const run = ensureSessionRun(state.sessionId);
   hydratePersistedRunPresentation(
+    state.sessionId,
     run,
     getSessionRunState(state.sessionId),
     getSessionMessages(state.sessionId),
@@ -423,6 +495,7 @@ function syncActiveStreamingState() {
       state._timerInterval = null;
     }
     state._timerDisplay = null;
+    clearActiveRunTimerCheckpoint(state.sessionId);
     if (els.activeRunBanner) els.activeRunBanner.classList.remove("visible");
   }
 }
@@ -4358,6 +4431,7 @@ function setStreaming(active, sessionId = state.sessionId) {
         run.modelRound = 0;
       }
     } else {
+      clearActiveRunTimerCheckpoint(sessionId);
       run.abortController = null;
       run.responseStartTime = null;
       run.modelWaitStartedAt = null;
@@ -4413,6 +4487,8 @@ function startLiveTimer() {
 
   els.liveTimer.classList.remove("visible");
 
+  persistActiveRunTimerCheckpoint(state.sessionId);
+
   state._timerInterval = setInterval(() => {
 
     const run = ensureSessionRun(state.sessionId);
@@ -4438,6 +4514,8 @@ function startLiveTimer() {
     document.querySelectorAll(".network-reconnect-countdown").forEach((countdown) => {
       if (countdown.textContent !== recoveryDisplay) countdown.textContent = recoveryDisplay;
     });
+
+    persistActiveRunTimerCheckpoint(state.sessionId);
 
   }, 1000);
 
@@ -5469,9 +5547,13 @@ async function resumePersistedSessionRun(summary) {
     const taskStartedAt = Number.isFinite(originalStartedAt) && originalStartedAt > 0 && originalStartedAt <= resumedAt
       ? originalStartedAt
       : resumedAt;
+    const presentationElapsedMs = activeRunElapsedMs(ctx.run, resumedAt);
     ctx.taskStartedAt = taskStartedAt;
     ctx.run.taskStartTime = taskStartedAt;
-    ctx.run.taskElapsedBaseMs = persistedRunElapsedMs(latestRunState, resumedAt);
+    ctx.run.taskElapsedBaseMs = Math.max(
+      presentationElapsedMs,
+      persistedRunElapsedMs(latestRunState, resumedAt),
+    );
     ctx.run.taskElapsedResumedAt = resumedAt;
     setStreaming(true, summary.id);
     ctx.run.responseStartTime = resumedAt;
@@ -10464,6 +10546,7 @@ async function init() {
   window.addEventListener("beforeunload", () => {
     const sid = state.sessionId;
     if (!sid) return;
+    persistActiveRunTimerCheckpoint(sid);
     const msgs = state.messages || [];
     if (msgs.length > 0) {
       const serialized = msgs.map((msg) => ({

@@ -316,21 +316,30 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertNotIn("async function runAgentLoop(", APP_SOURCE)
         self.assertNotIn("async function executeToolWithDelegation(", APP_SOURCE)
 
-    def test_refresh_restores_active_elapsed_timer_without_counting_offline_time(self):
+    def test_refresh_restores_monotonic_elapsed_timer_with_short_lived_bridge(self):
         recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary)")
         recovery_end = APP_SOURCE.index("async function resumePersistedRuns()", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
-        elapsed_index = recovery.index("ctx.run.taskElapsedBaseMs = persistedRunElapsedMs")
+        presentation_index = recovery.index(
+            "const presentationElapsedMs = activeRunElapsedMs"
+        )
+        elapsed_index = recovery.index("ctx.run.taskElapsedBaseMs = Math.max(")
         resume_index = recovery.index("ctx.run.taskElapsedResumedAt = resumedAt")
         streaming_index = recovery.index("setStreaming(true, summary.id)")
 
+        self.assertLess(presentation_index, elapsed_index)
         self.assertLess(elapsed_index, streaming_index)
         self.assertLess(resume_index, streaming_index)
+        self.assertIn("persistedRunElapsedMs(latestRunState, resumedAt)", recovery)
         self.assertIn("ctx.taskStartedAt = taskStartedAt", recovery)
         self.assertIn("ctx.run.taskStartTime = taskStartedAt", recovery)
         self.assertIn("ctx.run.responseStartTime = resumedAt", recovery)
         self.assertNotIn("ctx.run.responseStartTime = originalStartedAt", recovery)
         self.assertIn("elapsedMs: activeRunElapsedMs(timingRun, checkpointNow)", APP_SOURCE)
+        self.assertIn("const ACTIVE_RUN_TIMER_MAX_AGE_MS = 30000", APP_SOURCE)
+        self.assertIn("checkpoint.elapsedMs + Math.max(0, now - checkpoint.savedAt)", APP_SOURCE)
+        self.assertIn("persistActiveRunTimerCheckpoint(sid);", APP_SOURCE)
+        self.assertIn("clearActiveRunTimerCheckpoint(sessionId);", APP_SOURCE)
 
     def test_server_agent_cancellation_covers_parent_and_child_runs(self):
         cancel_start = APP_SOURCE.index("function cancelSessionRun(run)")

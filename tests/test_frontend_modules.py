@@ -8349,13 +8349,28 @@ process.stdout.write(JSON.stringify({
 global.window = {{Code: {{core: {{}}}}}};
 require("./src/core/state.js");
 const {{activeRunElapsedMs, persistedRunElapsedMs}} = window.Code.core.state;
+const stored = new Map();
+global.sessionStorage = {{
+  getItem: (key) => stored.has(key) ? stored.get(key) : null,
+  setItem: (key, value) => stored.set(key, String(value)),
+  removeItem: (key) => stored.delete(key),
+}};
+const runs = new Map();
+function ensureSessionRun(sessionId) {{ return runs.get(sessionId) || null; }}
 function hasRecoveredModelResponse(messages, runState) {{
   return messages.some((message) => message?.meta?.agentRunId === runState?.agentRunId);
 }}
 {helper}
 const resumedAt = Date.parse("2026-08-02T16:16:00Z");
+sessionStorage.setItem(activeRunTimerStorageKey("session-1"), JSON.stringify({{
+  version: 1,
+  agentRunId: "agent-1",
+  elapsedMs: 17000,
+  savedAt: resumedAt - 1000,
+}}));
 const active = {{isStreaming: false}};
-const hydrated = hydratePersistedRunPresentation(active, {{
+runs.set("session-1", active);
+const hydrated = hydratePersistedRunPresentation("session-1", active, {{
   status: "running",
   executionOwner: "server-agent",
   agentRunId: "agent-1",
@@ -8366,41 +8381,91 @@ const hydrated = hydratePersistedRunPresentation(active, {{
   modelRound: 2,
   model: "test-model",
 }}, [], resumedAt);
-const frozenElapsed = activeRunElapsedMs(active, resumedAt + 60000);
-active.taskElapsedResumedAt = resumedAt + 60000;
-const continuedElapsed = activeRunElapsedMs(active, resumedAt + 65000);
+const initialElapsed = activeRunElapsedMs(active, resumedAt);
+const continuedElapsed = activeRunElapsedMs(active, resumedAt + 5000);
+persistActiveRunTimerCheckpoint("session-1", resumedAt + 5000);
+const repeated = {{isStreaming: false}};
+runs.set("session-1", repeated);
+const repeatedHydrated = hydratePersistedRunPresentation("session-1", repeated, {{
+  status: "running",
+  executionOwner: "server-agent",
+  agentRunId: "agent-1",
+  elapsedMs: 15000,
+  startedAt: "2026-08-02T16:15:00Z",
+}}, [], resumedAt + 6000);
+const repeatedElapsed = activeRunElapsedMs(repeated, resumedAt + 6000);
 
 const inferred = {{isStreaming: false}};
-hydratePersistedRunPresentation(inferred, {{
+runs.set("session-2", inferred);
+hydratePersistedRunPresentation("session-2", inferred, {{
   status: "waiting-network",
   executionOwner: "server-agent",
   agentRunId: "agent-2",
   elapsedMs: 4000,
 }}, [{{meta: {{agentRunId: "agent-2"}}}}], resumedAt);
 
+sessionStorage.setItem(activeRunTimerStorageKey("session-stale"), JSON.stringify({{
+  version: 1,
+  agentRunId: "agent-stale",
+  elapsedMs: 50000,
+  savedAt: resumedAt - 31000,
+}}));
+const stale = {{isStreaming: false}};
+runs.set("session-stale", stale);
+hydratePersistedRunPresentation("session-stale", stale, {{
+  status: "running",
+  executionOwner: "server-agent",
+  agentRunId: "agent-stale",
+  elapsedMs: 9000,
+}}, [], resumedAt);
+
+sessionStorage.setItem(activeRunTimerStorageKey("session-mismatch"), JSON.stringify({{
+  version: 1,
+  agentRunId: "other-agent",
+  elapsedMs: 80000,
+  savedAt: resumedAt - 500,
+}}));
+const mismatch = {{isStreaming: false}};
+runs.set("session-mismatch", mismatch);
+hydratePersistedRunPresentation("session-mismatch", mismatch, {{
+  status: "running",
+  executionOwner: "server-agent",
+  agentRunId: "expected-agent",
+  elapsedMs: 7000,
+}}, [], resumedAt);
+
 const completed = {{isStreaming: false}};
-const completedHydrated = hydratePersistedRunPresentation(completed, {{
+runs.set("session-3", completed);
+const completedHydrated = hydratePersistedRunPresentation("session-3", completed, {{
   status: "completed",
   executionOwner: "server-agent",
   agentRunId: "agent-3",
   elapsedMs: 9000,
 }}, [], resumedAt);
 const legacy = {{isStreaming: false}};
-const legacyHydrated = hydratePersistedRunPresentation(legacy, {{
+runs.set("session-4", legacy);
+const legacyHydrated = hydratePersistedRunPresentation("session-4", legacy, {{
   status: "running",
   executionOwner: "browser",
   agentRunId: "agent-4",
 }}, [], resumedAt);
+clearActiveRunTimerCheckpoint("session-1");
+const checkpointCleared = sessionStorage.getItem(activeRunTimerStorageKey("session-1")) === null;
 process.stdout.write(JSON.stringify({{
   hydrated,
   active,
-  frozenElapsed,
+  initialElapsed,
   continuedElapsed,
+  repeatedHydrated,
+  repeatedElapsed,
   inferred,
+  staleElapsed: activeRunElapsedMs(stale, resumedAt),
+  mismatchElapsed: activeRunElapsedMs(mismatch, resumedAt),
   completedHydrated,
   completed,
   legacyHydrated,
   legacy,
+  checkpointCleared,
 }}));
 """
         completed = subprocess.run(
@@ -8419,14 +8484,19 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(data["active"]["modelRound"], 2)
         self.assertEqual(data["active"]["model"], "test-model")
         self.assertTrue(data["active"]["hasFirstModelResponseStarted"])
-        self.assertEqual(data["frozenElapsed"], 15000)
-        self.assertEqual(data["continuedElapsed"], 20000)
+        self.assertEqual(data["initialElapsed"], 18000)
+        self.assertEqual(data["continuedElapsed"], 23000)
+        self.assertTrue(data["repeatedHydrated"])
+        self.assertEqual(data["repeatedElapsed"], 24000)
         self.assertTrue(data["inferred"]["isStreaming"])
         self.assertTrue(data["inferred"]["hasFirstModelResponseStarted"])
+        self.assertEqual(data["staleElapsed"], 9000)
+        self.assertEqual(data["mismatchElapsed"], 7000)
         self.assertFalse(data["completedHydrated"])
         self.assertFalse(data["completed"]["isStreaming"])
         self.assertFalse(data["legacyHydrated"])
         self.assertFalse(data["legacy"]["isStreaming"])
+        self.assertTrue(data["checkpointCleared"])
 
         sync_start = APP_SOURCE.index("function syncActiveStreamingState")
         sync_end = APP_SOURCE.index("let composerResizeObserver", sync_start)
@@ -8436,6 +8506,19 @@ process.stdout.write(JSON.stringify({{
             sync_helper.index("hydratePersistedRunPresentation("),
             sync_helper.index("state.isStreaming = Boolean(run?.isStreaming)"),
         )
+        timer_start = APP_SOURCE.index("function startLiveTimer()")
+        timer_end = APP_SOURCE.index("function finalizeRunTiming", timer_start)
+        self.assertIn(
+            "persistActiveRunTimerCheckpoint(state.sessionId)",
+            APP_SOURCE[timer_start:timer_end],
+        )
+        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun")
+        recovery_end = APP_SOURCE.index("function normalizeUserInputRequest", recovery_start)
+        recovery = APP_SOURCE[recovery_start:recovery_end]
+        self.assertIn("const presentationElapsedMs = activeRunElapsedMs", recovery)
+        self.assertIn("ctx.run.taskElapsedBaseMs = Math.max(", recovery)
+        self.assertIn("persistActiveRunTimerCheckpoint(sid);", APP_SOURCE)
+        self.assertIn("clearActiveRunTimerCheckpoint(sessionId);", APP_SOURCE)
 
     def test_first_send_projects_user_before_session_creation(self):
         helper_start = APP_SOURCE.index("function projectOptimisticFirstMessage")
