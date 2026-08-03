@@ -561,6 +561,7 @@
       if (!outcome && call.resultMessage?.meta?.pendingEditId) outcome = "running";
       if (!outcome && call.resultMessage) outcome = "completed";
       if (!outcome) outcome = call.started ? "running" : "pending";
+      if (result.cancelled) outcome = "cancelled";
       const target = toolTarget(call.args, result);
       const error = outcome === "failed"
         ? toolResultError(result) || compactProcessText(call.resultMessage?.content, 220)
@@ -578,6 +579,7 @@
       if (outcome === "failed") return t("toolProcessFailed");
       if (outcome === "succeeded") return t("toolProcessSucceeded");
       if (outcome === "completed") return t("toolProcessCompleted");
+      if (outcome === "cancelled") return t("toolProcessCancelled");
       if (outcome === "running") return t("toolProcessRunning");
       return t("toolProcessPending");
     }
@@ -658,6 +660,7 @@
       if (calls.some((call) => call.outcome === "running")) return "running";
       if (calls.some((call) => call.outcome === "pending")) return "pending";
       if (calls.some((call) => call.outcome === "failed")) return "failed";
+      if (calls.some((call) => call.outcome === "cancelled")) return "cancelled";
       if (calls.every((call) => call.outcome === "succeeded")) return "succeeded";
       return "completed";
     }

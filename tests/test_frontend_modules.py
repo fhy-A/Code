@@ -622,6 +622,82 @@ eval(source);
         self.assertEqual(data["usageFrames"], 1)
         self.assertEqual(data["doneCount"], 1)
 
+    def test_agent_runtime_yields_while_draining_a_text_backlog(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+const progress = [];
+global.fetch = async () => {{
+  const events = Array.from({{length: 120}}, (_, index) => ({{
+    seq: index + 1,
+    data: JSON.stringify({{choices: [{{delta: {{content: "x"}}}}]}}),
+  }}));
+  events.push({{seq: 121, data: "[DONE]"}});
+  return new Response(JSON.stringify({{
+    status: "completed",
+    events,
+    nextCursor: 121,
+  }}), {{status: 200, headers: {{"Content-Type": "application/json"}}}});
+}};
+eval(source);
+(async () => {{
+  const startedAt = Date.now();
+  const response = await window.Code.agent.runtime.openSseResponse({{
+    runId: "runtime-existing",
+    onStreamProgress: (sample) => progress.push(sample),
+  }});
+  const reader = response.body.getReader();
+  let text = "";
+  while (true) {{
+    const packet = await reader.read();
+    if (packet.done) break;
+    text += new TextDecoder().decode(packet.value);
+  }}
+  process.stdout.write(JSON.stringify({{
+    elapsedMs: Date.now() - startedAt,
+    phases: progress.map((item) => item.phase),
+    firstBatchEventCount: progress.find((item) => item.phase === "first-delta")?.pendingEventCount || 0,
+    frameCount: (text.match(/data: /g) || []).length,
+    diagnostic: window.Code.agent.runtime.streamDiagnostics.snapshot(),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertGreaterEqual(data["elapsedMs"], 60)
+        self.assertEqual(data["phases"], ["poll-started", "first-delta", "completed"])
+        self.assertEqual(data["firstBatchEventCount"], 121)
+        self.assertEqual(data["frameCount"], 121)
+        self.assertEqual(data["diagnostic"]["status"], "completed")
+        self.assertEqual(data["diagnostic"]["runtimeRunId"], "runtime-existing")
+        self.assertEqual(data["diagnostic"]["firstBatchEventCount"], 121)
+        self.assertEqual(data["diagnostic"]["batchCount"], 1)
+        self.assertEqual(data["diagnostic"]["eventCount"], 121)
+        self.assertEqual(data["diagnostic"]["maxBatchEventCount"], 121)
+        self.assertEqual(data["diagnostic"]["contentFrameCount"], 120)
+        self.assertEqual(data["diagnostic"]["contentChars"], 120)
+        self.assertEqual(data["diagnostic"]["reasoningFrameCount"], 0)
+        self.assertEqual(data["diagnostic"]["reasoningChars"], 0)
+        self.assertGreaterEqual(
+            data["diagnostic"]["firstContentAt"],
+            data["diagnostic"]["firstDeltaAt"],
+        )
+        self.assertGreaterEqual(
+            data["diagnostic"]["lastContentAt"],
+            data["diagnostic"]["firstContentAt"],
+        )
+        self.assertGreaterEqual(
+            data["diagnostic"]["firstDeltaAt"],
+            data["diagnostic"]["pollStartedAt"],
+        )
+
     def test_agent_runtime_sends_background_idempotency_key(self):
         script = f"""
 global.window = {{Code: {{agent: {{}}}}}};
@@ -689,11 +765,20 @@ eval(source);
             'if (snapshot.status === "waiting_authorization") {',
             "await requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization)",
             'if (snapshot.status === "completed") {',
-            'if (snapshot.status === "cancelled") throw new DOMException("Aborted", "AbortError");',
+            'if (snapshot.status === "cancelled") {',
+            'throw new DOMException("Aborted", "AbortError");',
             "const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`)",
         )
         positions = [loop_source.index(step) for step in ordered_steps]
         self.assertEqual(positions, sorted(positions))
+        cancelled_start = loop_source.index('if (snapshot.status === "cancelled") {')
+        cancelled_end = loop_source.index("const err = new Error", cancelled_start)
+        cancelled = loop_source[cancelled_start:cancelled_end]
+        self.assertIn("clearObservedAgentRun(ctx);", cancelled)
+        self.assertLess(
+            cancelled.index("clearObservedAgentRun(ctx);"),
+            cancelled.index('throw new DOMException("Aborted", "AbortError");'),
+        )
 
         for expected in (
             "await buildModelRequestPayload(ctx, true, serverTools)",
@@ -703,8 +788,7 @@ eval(source);
             "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
             "ctx.run.recovery = {",
             "ctx.run.agentEventCursor = ctx.agentEventCursor",
-            "ctx.agentRunId = \"\"",
-            "ctx.run.agentRunId = \"\"",
+            "clearObservedAgentRun(ctx)",
             "err.status = snapshot.status",
             "err.errorCode = snapshot.errorCode || \"\"",
             'if (err.errorCode === "model_access_denied")',
@@ -6703,6 +6787,13 @@ const completedEdits = feature.renderToolProcessProjection([
   {msg: {role: "tool-call", meta: {action: "propose_edit", toolCallId: "edit-2", tool: {action: "propose_edit", path: "src/b.js"}}}, index: 4},
   {msg: {role: "tool-result", content: "applied", meta: {action: "propose_edit", toolCallId: "edit-2", outcome: "succeeded"}}, index: 5},
 ], 11);
+const cancelledCommand = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [
+    {id: "cancelled-1", function: {name: "run_command", arguments: '{"command":"node slow.js"}'}},
+  ]}}, index: 1},
+  {msg: {role: "tool-call", meta: {action: "run_command", toolCallId: "cancelled-1", tool: {action: "run_command", command: "node slow.js"}}}, index: 2},
+  {msg: {role: "tool-result", content: "Command cancelled.", meta: {action: "run_command", toolCallId: "cancelled-1", outcome: "failed", result: {ok: false, cancelled: true, error: "Command cancelled."}}}, index: 3},
+], 12);
 const streaming = feature.renderFinalAssistantProjection({
   role: "assistant",
   content: "streaming answer",
@@ -6766,6 +6857,7 @@ process.stdout.write(JSON.stringify({
   runningStage,
   completedCommands,
   completedEdits,
+  cancelledCommand,
   streaming,
   pending,
   commentary,
@@ -6968,6 +7060,10 @@ process.stdout.write(JSON.stringify({
         completed_edits_summary = data["completedEdits"].split('<div class="tool-process-stage-body">', 1)[0]
         self.assertIn("<strong>toolProcessEditedFiles</strong>", completed_edits_summary)
         self.assertNotIn("<code>", completed_edits_summary)
+        self.assertIn('class="tool-process-stage cancelled"', data["cancelledCommand"])
+        self.assertIn('class="tool-process-item cancelled"', data["cancelledCommand"])
+        self.assertIn("toolProcessCancelled", data["cancelledCommand"])
+        self.assertNotIn("toolProcessRunning", data["cancelledCommand"])
         for expected in (
             'toolProcessRanCommand: "运行了命令"',
             'toolProcessRanCommands: "运行了多个命令"',
@@ -8564,6 +8660,11 @@ process.stdout.write(JSON.stringify({
         patch = APP_SOURCE[patch_start:patch_end]
         self.assertIn('if (streamKind === "pending")', patch)
         self.assertIn("scheduleStreamingAnswerProjection(sessionId, index)", patch)
+        self.assertIn('msg._streamProjection === "pending" && visibleContent', patch)
+        self.assertLess(
+            patch.index("scheduleStreamingAnswerProjection(sessionId, index)"),
+            patch.index("const article = els.messages.querySelector"),
+        )
         self.assertIn('data-stream-part="answer"', patch)
         self.assertIn("renderMarkdownLite(visibleContent)", patch)
         self.assertIn('streamKind === "pending" || !visibleContent', patch)

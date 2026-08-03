@@ -2657,6 +2657,15 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(execution["status"], "cancelled")
         self.assertTrue(execution["result"]["cancelled"])
         self.assertIn("command-started", execution["stdout"])
+        event_types = [event["type"] for event in snapshot["events"]]
+        self.assertEqual(event_types[-2:], ["tool_completed", "cancelled"])
+        self.assertEqual(event_types.count("tool_completed"), 1)
+        completed_event = snapshot["events"][-2]
+        self.assertEqual(completed_event["data"]["toolCallId"], "agent-command-1")
+        self.assertEqual(completed_event["data"]["name"], "run_command")
+        self.assertEqual(completed_event["data"]["outcome"], "failed")
+        self.assertTrue(completed_event["data"]["result"]["cancelled"])
+        self.assertIn("command-started", completed_event["data"]["result"]["stdout"])
 
     def test_bypass_dependency_install_still_waits_for_user_authorization(self):
         run = server_mod._create_agent_run(

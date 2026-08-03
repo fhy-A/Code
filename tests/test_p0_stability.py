@@ -140,12 +140,32 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
             "SSE_VISUAL_CHUNK_CHARS = 48",
             "SSE_VISUAL_MAX_CHUNKS = 12",
             "SSE_BATCH_MAX_PAUSES = 8",
+            "SSE_BACKLOG_FRAMES_PER_PAINT = 48",
             "expandSseDataForProjection",
             "Array.from(String(text || \"\"))",
         ):
             self.assertIn(expected, RUNTIME_SOURCE)
         self.assertIn("if (delta.tool_calls || delta.function_call) return [value]", RUNTIME_SOURCE)
         self.assertIn("if (!isLast) delete projectedFrame.usage", RUNTIME_SOURCE)
+
+    def test_server_owned_model_attaches_before_checkpoint_persistence(self):
+        start = APP_SOURCE.index("async function projectAgentModelStarted")
+        end = APP_SOURCE.index("function projectAgentModelCompleted", start)
+        projection = APP_SOURCE[start:end]
+        attach = projection.index("const streamPromise = _callModelOnceAttempt")
+        checkpoint = projection.index("persistRunCheckpoint(ctx, \"running\", \"model\"")
+        self.assertLess(attach, checkpoint)
+        self.assertNotIn("await persistRunCheckpoint", projection[:attach])
+
+        attempt_start = APP_SOURCE.index("async function _callModelOnceAttempt")
+        attempt_end = APP_SOURCE.index("function _safeMd", attempt_start)
+        attempt = APP_SOURCE[attempt_start:attempt_end]
+        self.assertIn("useRuntimeBridge && attachedRuntimeRunId", attempt)
+        self.assertIn("payload: {}", attempt)
+        self.assertIn('"poll-started": "pollStartedAt"', attempt)
+        self.assertIn('"first-delta": "firstDeltaAt"', attempt)
+        self.assertIn("streamDiagnostics", RUNTIME_SOURCE)
+        self.assertIn("latestStreamDiagnostic", RUNTIME_SOURCE)
 
     def test_model_wait_escalates_only_before_first_response(self):
         for expected in (
@@ -282,7 +302,8 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn("ctx.executionOwner = runState.executionOwner || executionOwnerForPermissionProfile(ctx.permissionProfile)", APP_SOURCE)
         self.assertIn('if (!isServerOwnedRun(ctx)) throw new Error(LEGACY_BROWSER_RUN_ERROR)', APP_SOURCE)
         self.assertIn('return runServerAgentLoop(ctx)', APP_SOURCE)
-        self.assertIn('await _callModelOnceAttempt(assistantIndex, true, ctx)', APP_SOURCE)
+        self.assertIn('const streamPromise = _callModelOnceAttempt(assistantIndex, true, ctx)', APP_SOURCE)
+        self.assertIn('await streamPromise', APP_SOURCE)
         server_projection = APP_SOURCE[
             APP_SOURCE.index("async function projectAgentModelStarted"):
             APP_SOURCE.index("function projectAgentModelCompleted")
@@ -345,8 +366,16 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         cancel_start = APP_SOURCE.index("function cancelSessionRun(run)")
         cancel_end = APP_SOURCE.index("function backgroundActiveForSession", cancel_start)
         cancel = APP_SOURCE[cancel_start:cancel_end]
-        self.assertIn("cancelAgentRun(agentRunId)", cancel)
+        self.assertIn("cancelAgentRun?.(agentRunId)", cancel)
         self.assertIn("cancelRun(runtimeRunId)", cancel)
+        self.assertIn("if (!run || run.cancelRequested) return;", cancel)
+        self.assertNotIn('run.agentRunId = ""', cancel)
+        server_cancel_start = cancel.index("if (agentRunId) {")
+        legacy_cancel_start = cancel.index("const runtimeRunId", server_cancel_start)
+        server_cancel = cancel[server_cancel_start:legacy_cancel_start]
+        self.assertIn("run.cancelRequested = true;", server_cancel)
+        self.assertTrue(server_cancel.rstrip().endswith("return;\n  }"))
+        self.assertNotIn("run.abortController.abort()", server_cancel)
 
     def test_durable_model_projection_always_has_completion_time(self):
         projection_start = APP_SOURCE.index("function projectAgentModelCompleted")
@@ -367,7 +396,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertLess(finalize_index, serialize_index)
         self.assertIn("meta: message.meta || {}", PERSISTENCE_SOURCE)
 
-        timing_start = APP_SOURCE.index("function finalizeRunTiming(sessionId)")
+        timing_start = APP_SOURCE.index("function finalizeRunTiming(sessionId")
         timing_end = APP_SOURCE.index("function placeMainResultByCompletionOrder", timing_start)
         timing = APP_SOURCE[timing_start:timing_end]
         self.assertIn("lastMsg._responseTime = display", timing)

@@ -143,6 +143,7 @@
           runtimeRunId: "",
           agentRunId: "",
           agentEventCursor: 0,
+          cancelRequested: false,
         };
       }
       return state._sessionRuns[sessionId];

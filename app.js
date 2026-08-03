@@ -2074,12 +2074,18 @@ function patchStreamingAssistantMessage(sessionId, index) {
   const content = (getMsgText(msg) || "").trim();
   const visibleContent = content && !isToolPlanningPlaceholder(content) ? content : "";
 
+  // The pending model round has no DOM node while it is empty. Schedule the
+  // answer projection before looking up that node so the first visible delta
+  // can create it instead of remaining hidden until the final full render.
+  if (msg._streamProjection === "pending" && visibleContent) {
+    scheduleStreamingAnswerProjection(sessionId, index);
+  }
+
   const article = els.messages.querySelector(`.msg.assistant[data-msg-index="${index}"][data-streaming-message="true"]`);
   if (!article) return;
 
   const streamKind = article.dataset.streamKind || "pending";
   if (streamKind === "pending") {
-    if (visibleContent) scheduleStreamingAnswerProjection(sessionId, index);
     return;
   }
   const outputNode = article.querySelector('[data-stream-part="answer"]');
@@ -2875,12 +2881,7 @@ async function continueAgentRun() {
     completedNormally = true;
   } catch (err) {
     if (err.name === "AbortError") {
-      ctx.messages.forEach((msg) => { msg.streaming = false; });
-      const last = ctx.messages.at(-1);
-      if (last?.role === "assistant") last.content = `${last.content || ""}
-
-[Output paused]`;
-      setSessionMessages(sessionId, ctx.messages);
+      finalizePausedRun(ctx);
       renderSessionMessages(sessionId);
       await saveSessionState(sessionId, ctx.messages, ctx.stats);
     } else {
@@ -4452,6 +4453,7 @@ function setStreaming(active, sessionId = state.sessionId) {
   if (run) {
     run.isStreaming = active;
     if (active) {
+      run.cancelRequested = false;
       run.responseStartTime = Date.now();
       // taskStartTime anchors the persistent status bar across tool rounds;
       // set it once per task and only clear on final stop.
@@ -4468,6 +4470,7 @@ function setStreaming(active, sessionId = state.sessionId) {
       run.modelWaitStartedAt = null;
       run.modelResponseStarted = false;
       run.modelRecovery = null;
+      run.cancelRequested = false;
     }
   }
 
@@ -4554,14 +4557,16 @@ function startLiveTimer() {
 
 
 
-function finalizeRunTiming(sessionId) {
+function finalizeRunTiming(sessionId, targetMessage = null) {
   const run = ensureSessionRun(sessionId);
   if (!run) return false;
   const startedAt = run.taskStartTime || run.responseStartTime;
   const messages = getSessionMessages(sessionId);
-  const lastMsg = [...messages].reverse().find((message) => (
+  const lastMsg = targetMessage && messages.includes(targetMessage)
+    ? targetMessage
+    : [...messages].reverse().find((message) => (
     message?.role === "assistant" && !isDetachedFromMainContext(message)
-  )) || null;
+    )) || null;
   let changed = false;
 
   if (startedAt && lastMsg && !lastMsg.streaming) {
@@ -4581,6 +4586,58 @@ function finalizeRunTiming(sessionId) {
   run.responseStartTime = null;
   run.modelRound = 0;
   return changed;
+}
+
+function finalizePausedRun(ctx) {
+  const sessionId = String(ctx?.sessionId || state.sessionId || "");
+  if (!sessionId) return null;
+  const messages = Array.isArray(ctx?.messages) ? ctx.messages : getSessionMessages(sessionId);
+  const streamingAssistants = messages.filter((message) => (
+    message?.role === "assistant"
+    && message.streaming
+    && !isDetachedFromMainContext(message)
+    && message.meta?.kind !== "auto-context-compaction"
+  ));
+
+  for (const message of messages) {
+    if (!message?.streaming) continue;
+    message.streaming = false;
+    delete message._streamProjection;
+  }
+
+  let target = streamingAssistants.at(-1) || null;
+  if (!target) {
+    const lastAssistant = [...messages].reverse().find((message) => (
+      message?.role === "assistant" && !isDetachedFromMainContext(message)
+    ));
+    if (lastAssistant?.meta?.runPaused) target = lastAssistant;
+  }
+
+  const pausedText = t("outputPaused");
+  if (!target) {
+    target = {
+      role: "assistant",
+      content: pausedText,
+      _model: ctx?.model || ctx?.run?.model || ctx?.run?._model || getSelectedModel(),
+      _time: new Date().toISOString(),
+      meta: { kind: "run-paused", runPaused: true },
+    };
+    messages.push(target);
+  } else {
+    const content = String(target.content || "").trimEnd();
+    if (!content.includes(pausedText)) {
+      target.content = [content, pausedText].filter(Boolean).join("\n\n");
+    }
+    target._model = target._model || ctx?.model || ctx?.run?.model || ctx?.run?._model || getSelectedModel();
+    target._time = target._time || new Date().toISOString();
+    target.meta = { ...(target.meta || {}), runPaused: true };
+    delete target.meta._usage;
+    delete target.meta._usageScope;
+  }
+
+  setSessionMessages(sessionId, messages);
+  finalizeRunTiming(sessionId, target);
+  return target;
 }
 
 function placeMainResultByCompletionOrder(messages, mainMessage, taskStartedAt) {
@@ -5600,6 +5657,7 @@ async function resumePersistedSessionRun(summary) {
     } catch (error) {
       recoveryError = error;
       const status = error?.name === "AbortError" ? "paused" : "failed";
+      if (status === "paused") finalizePausedRun(ctx);
       await persistRunCheckpoint(ctx, status, "model", {
         recoveryCount,
         lastError: error?.message || String(error),
@@ -6016,6 +6074,14 @@ function resetAssistantForModelRetry(ctx, assistantIndex) {
   }
 }
 
+function removeKeyFallbackMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.meta?.kind === "key-fallback") messages.splice(index, 1);
+  }
+  return messages;
+}
+
 async function waitForModelRetry(ctx, attempt, maxAttempts, delayMs, error) {
   const run = ctx?.run || ensureSessionRun(ctx?.sessionId || state.sessionId);
   const nextRetryAt = Date.now() + delayMs;
@@ -6090,10 +6156,23 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
 
 async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx = null) {
 
-  const prepared = await buildModelRequestPayload(ctx, useNativeTools);
-  const { payload, tools, model, sessionId } = prepared;
+  const initialSessionId = ctx?.sessionId || state.sessionId;
+  const run = ctx?.run || ensureSessionRun(initialSessionId);
+  const useRuntimeBridge = !ctx?.isSubAgent && Boolean(agentRuntime?.openSseResponse);
+  const attachedRuntimeRunId = String(ctx?.runtimeRunId || run?.runtimeRunId || "");
+  // A server-owned Agent round is already running when model_started arrives.
+  // Rebuilding the full prompt here can delay attachment long enough for the
+  // child Runtime to finish and turn thousands of real deltas into one backlog.
+  const prepared = useRuntimeBridge && attachedRuntimeRunId
+    ? {
+        payload: {},
+        model: ctx?.model || getSelectedModel(),
+        sessionId: initialSessionId,
+        streamMessages: ctx?.messages || getSessionMessages(initialSessionId),
+      }
+    : await buildModelRequestPayload(ctx, useNativeTools);
+  const { payload, model, sessionId } = prepared;
   const skipRender = ctx?.isSubAgent;
-  const run = ctx?.run || ensureSessionRun(sessionId);
   if (!isServerOwnedRun(ctx)) {
     run.modelRound = Math.max(0, Number(run.modelRound || 0)) + 1;
   }
@@ -6118,8 +6197,6 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
   const totalKeys = fallbackKeys.length;
   let res;
   let lastError = "";
-  const useRuntimeBridge = !ctx?.isSubAgent && Boolean(agentRuntime?.openSseResponse);
-
   if (useRuntimeBridge) {
     res = await agentRuntime.openSseResponse({
       runId: ctx.runtimeRunId || run.runtimeRunId || "",
@@ -6147,6 +6224,24 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
         if (run.recovery?.source !== "runtime-poll") return;
         run.recovery = null;
         if (sessionId === state.sessionId) renderSessionMessages(sessionId);
+      },
+      onStreamProgress(sample) {
+        const phase = String(sample?.phase || "");
+        if (!phase) return;
+        const timingKey = {
+          "poll-started": "pollStartedAt",
+          "first-delta": "firstDeltaAt",
+          completed: "completedAt",
+        }[phase];
+        if (!timingKey) return;
+        run.streamTiming = {
+          ...(run.streamTiming || {}),
+          runtimeRunId: attachedRuntimeRunId || String(ctx?.runtimeRunId || run.runtimeRunId || ""),
+          [timingKey]: Number(sample?.at || Date.now()),
+          ...(phase === "first-delta"
+            ? { firstBatchEventCount: Number(sample?.pendingEventCount || 0) }
+            : {}),
+        };
       },
     });
   } else {
@@ -6209,7 +6304,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
     }
 
-    _streamMsgs = _streamMsgs.filter((m) => m.meta?.kind !== "key-fallback");
+    removeKeyFallbackMessages(_streamMsgs);
 
     if (tools.length > 0 && shouldRetryWithoutNativeTools(errText)) {
 
@@ -6228,7 +6323,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
   // Clean up fallback messages on success
 
-  _streamMsgs = _streamMsgs.filter((m) => m.meta?.kind !== "key-fallback");
+  removeKeyFallbackMessages(_streamMsgs);
 
 
 
@@ -7116,13 +7211,39 @@ function updateBackgroundJob(job, status, detail = "") {
   renderSessions();
 }
 
+function clearObservedAgentRun(ctx) {
+  if (!ctx) return;
+  ctx.agentRunId = "";
+  ctx.agentEventCursor = 0;
+  if (!ctx.run) return;
+  ctx.run.agentRunId = "";
+  ctx.run.agentEventCursor = 0;
+  ctx.run.cancelRequested = false;
+}
+
 function cancelSessionRun(run) {
-  if (!run) return;
+  if (!run || run.cancelRequested) return;
   const agentRunId = String(run.agentRunId || run._activeCtx?.agentRunId || "");
   if (agentRunId) {
-    agentRuntime?.cancelAgentRun(agentRunId).catch(() => {});
-    run.agentRunId = "";
-    if (run._activeCtx) run._activeCtx.agentRunId = "";
+    run.cancelRequested = true;
+    const cancellation = agentRuntime?.cancelAgentRun?.(agentRunId);
+    if (!cancellation || typeof cancellation.catch !== "function") {
+      run.cancelRequested = false;
+      console.error("AgentRun cancellation is unavailable");
+      showToast(t("cancelRunFailed"), "error");
+      return;
+    }
+    cancellation.catch((error) => {
+      const activeAgentRunId = String(run.agentRunId || run._activeCtx?.agentRunId || "");
+      if (activeAgentRunId !== agentRunId) return;
+      run.cancelRequested = false;
+      console.error("Failed to cancel AgentRun:", error);
+      showToast(t("cancelRunFailed"), "error");
+    });
+    // The server persists the terminal event before the DELETE response and
+    // wakes the long-poll observer. Keep the observer alive so it can project
+    // the durable cancelled event and terminal snapshot before local cleanup.
+    return;
   }
   const runtimeRunId = String(run.runtimeRunId || "");
   if (runtimeRunId) {
@@ -7831,17 +7952,26 @@ async function projectAgentModelStarted(ctx, event) {
     : Math.max(0, Number(ctx.run.modelRound || 0)) + 1;
   ctx.run.modelWaitStartedAt = Date.now();
   ctx.run.modelResponseStarted = false;
+  ctx.run.streamTiming = {
+    runtimeRunId,
+    modelStartedReceivedAt: Date.now(),
+  };
   setSessionMessages(ctx.sessionId, ctx.messages);
   renderSessionMessages(ctx.sessionId);
   if (ctx.sessionId === state.sessionId) syncActiveRunBanner(ctx.sessionId);
-  await persistRunCheckpoint(ctx, "running", "model", { runtimeRunId });
 
   ctx.responseUsage = { input: 0, output: 0, cache: 0 };
   try {
     // The server Agent owns this model round. Attach only to its child runtime;
     // never use callModelOnce here because its retry path could create a second
     // independent upstream request.
-    await _callModelOnceAttempt(assistantIndex, true, ctx);
+    // Attach before persisting the checkpoint. Persistence is still serialized
+    // normally, but it must not sit on the live-delta critical path.
+    const streamPromise = _callModelOnceAttempt(assistantIndex, true, ctx);
+    persistRunCheckpoint(ctx, "running", "model", { runtimeRunId }).catch((error) => {
+      console.error("Failed to persist model-start checkpoint:", error);
+    });
+    await streamPromise;
     const turnUsage = { ...(ctx.responseUsage || {}) };
     const projected = ctx.messages[assistantIndex];
     if (projected) {
@@ -7855,6 +7985,11 @@ async function projectAgentModelStarted(ctx, event) {
     }
   } catch (error) {
     if (error?.name === "AbortError") throw error;
+    // Cancelling the parent AgentRun cancels its child model Runtime first.
+    // Keep the partial streaming projection in place until the durable parent
+    // run reaches `cancelled`; finalizePausedRun() will then append the pause
+    // marker and timing without discarding text that was already visible.
+    if (ctx.run?.cancelRequested || error?.code === "runtime_cancelled") return;
     // Durable model_completed contains the complete response. If the short-lived
     // child runtime has expired, discard only its empty/partial projection and
     // let that event rebuild the round without issuing another model request.
@@ -8472,13 +8607,13 @@ async function runServerAgentLoop(ctx) {
     }
     if (snapshot.status === "completed") {
       const result = snapshot.result || {};
-      ctx.agentRunId = "";
-      ctx.agentEventCursor = 0;
-      ctx.run.agentRunId = "";
-      ctx.run.agentEventCursor = 0;
+      clearObservedAgentRun(ctx);
       return result;
     }
-    if (snapshot.status === "cancelled") throw new DOMException("Aborted", "AbortError");
+    if (snapshot.status === "cancelled") {
+      clearObservedAgentRun(ctx);
+      throw new DOMException("Aborted", "AbortError");
+    }
     const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`);
     err.status = snapshot.status;
     err.errorCode = snapshot.errorCode || "";
@@ -9015,6 +9150,7 @@ async function sendMessage(userText, options = {}) {
   if (loopError) {
     const isAbort = loopError?.name === "AbortError";
     const status = isAbort ? "paused" : "failed";
+    if (isAbort) finalizePausedRun(ctx);
     // For non-abort errors, rollback to healthy state so the conversation
     // isn't stuck replaying the same broken context on every retry.
     if (!isAbort) {
@@ -9981,14 +10117,7 @@ els.chatForm.addEventListener("submit", async (event) => {
     const stats = getSessionStats(sessionId);
 
     if (err.name === "AbortError") {
-
-      messages.forEach((msg) => { msg.streaming = false; });
-
-      const last = messages.at(-1);
-
-      if (last?.role === "assistant") last.content = `${last.content || ""}\n\n[已暂停输出]`;
-
-      setSessionMessages(sessionId, messages);
+      finalizePausedRun({ sessionId, messages, run: ensureSessionRun(sessionId) });
       renderSessionMessages(sessionId);
 
       setStreaming(false, sessionId);

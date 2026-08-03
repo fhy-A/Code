@@ -7868,6 +7868,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
 }
 .tool-process-indicator.pending { background: var(--muted-2); }
 .tool-process-indicator.failed { background: var(--red); }
+.tool-process-indicator.cancelled { background: var(--yellow); }
 
 .tool-process-row-heading {
   min-width: 0;
@@ -7897,6 +7898,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
   font-size: 11px;
 }
 .tool-process-item.failed .tool-process-outcome { color: var(--red); }
+.tool-process-item.cancelled .tool-process-outcome { color: var(--yellow); }
 .tool-process-item.succeeded .tool-process-outcome,
 .tool-process-item.completed .tool-process-outcome { color: var(--green); }
 

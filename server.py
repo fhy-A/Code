@@ -4516,6 +4516,17 @@ def _cancel_agent_run(run_id):
                 execution["result"] = result
                 execution["error"] = result["error"]
                 execution["completedAt"] = now_iso()
+                _append_agent_event_locked(run, "tool_completed", {
+                    "toolCallId": command_call_id,
+                    "name": str(execution.get("name") or "run_command"),
+                    "arguments": execution.get("arguments", "{}"),
+                    "argumentAliases": _json_clone(
+                        execution.get("argumentAliases") or []
+                    ),
+                    "result": result,
+                    "outcome": _agent_execution_outcome(result),
+                    "replayed": False,
+                })
             run["active_process"] = None
             run["active_command_call_id"] = ""
     _finish_agent_run(run, "cancelled")
