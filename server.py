@@ -1874,37 +1874,50 @@ def _recover_agent_non_action(run, reason, runtime_run_id):
     return True
 
 
-def _finish_agent_run(run, status, error_message="", error_code=""):
+def _finish_agent_run_locked(run, status, error_message="", error_code=""):
     if status not in _AGENT_RUN_TERMINAL:
         raise ValueError("invalid terminal Agent status")
+    if run["status"] in _AGENT_RUN_TERMINAL:
+        return False
+    # Cancellation owns a short finalization window so the worker cannot
+    # publish the terminal event before all pending tool calls are closed.
+    if run.get("cancel_finalizing"):
+        return False
+    # A steer accepted before terminal commit belongs to this same run.
+    # Let the worker consume it instead of publishing a stale completion.
+    if status == "completed" and run.get("pending_steers"):
+        return False
+    run["status"] = status
+    run["resume_status"] = ""
+    run["error"] = _redact_agent_secrets(run, error_message)[:2000]
+    run["error_code"] = str(error_code)[:64] if error_code else ""
+    run["active_runtime_id"] = ""
+    run["keys"] = []
+    run["updated_at"] = now_iso()
+    event_data = {}
+    if run["error"]:
+        event_data["error"] = run["error"]
+    if run["error_code"]:
+        event_data["errorCode"] = run["error_code"]
+    event = _build_agent_event(
+        run["next_seq"],
+        status,
+        event_data,
+        run["updated_at"],
+    )
+    run["next_seq"] += 1
+    run["events"].append(event)
+    _agent_protocol_shadow_observe(run, event, source="terminal")
+    return True
+
+
+def _finish_agent_run(run, status, error_message="", error_code=""):
     with run["condition"]:
-        if run["status"] in _AGENT_RUN_TERMINAL:
-            return False
-        # A steer accepted before terminal commit belongs to this same run.
-        # Let the worker consume it instead of publishing a stale completion.
-        if status == "completed" and run.get("pending_steers"):
-            return False
-        run["status"] = status
-        run["resume_status"] = ""
-        run["error"] = _redact_agent_secrets(run, error_message)[:2000]
-        run["error_code"] = str(error_code)[:64] if error_code else ""
-        run["active_runtime_id"] = ""
-        run["keys"] = []
-        run["updated_at"] = now_iso()
-        event_data = {}
-        if run["error"]:
-            event_data["error"] = run["error"]
-        if run["error_code"]:
-            event_data["errorCode"] = run["error_code"]
-        event = _build_agent_event(
-            run["next_seq"],
-            status,
-            event_data,
-            run["updated_at"],
+        finished = _finish_agent_run_locked(
+            run, status, error_message, error_code,
         )
-        run["next_seq"] += 1
-        run["events"].append(event)
-        _agent_protocol_shadow_observe(run, event, source="terminal")
+    if not finished:
+        return False
     _persist_agent_run(run)
     # Terminal state must be durable before waiters are released. Otherwise a
     # fast reload can observe the in-memory terminal status and read the older
@@ -2044,6 +2057,7 @@ def _agent_run_from_record(record):
         "active_process": None,
         "active_command_call_id": "",
         "worker": None,
+        "cancel_finalizing": False,
     }
 
 
@@ -3544,11 +3558,16 @@ def _execute_agent_pending_tools(run):
         for definition in run.get("tools") or []
         if isinstance(definition, dict)
     }
-    while run.get("pending_tool_calls"):
-        if run["cancel_event"].is_set():
-            _finish_agent_run(run, "cancelled")
-            return False
-        call = run["pending_tool_calls"][0]
+    while True:
+        with run["condition"]:
+            if not run.get("pending_tool_calls"):
+                return True
+            if (
+                run["cancel_event"].is_set()
+                or run["status"] in _AGENT_RUN_TERMINAL
+            ):
+                return False
+            call = run["pending_tool_calls"][0]
         call_id = call["id"]
         name = str((call.get("function") or {}).get("name") or "")
         if (SERVER_TOOL_REGISTRY.get(name) or {}).get("effect") == "delegation":
@@ -3603,29 +3622,36 @@ def _execute_agent_pending_tools(run):
                 or resuming_file_mutation
                 or resuming_delegation
             ):
-                execution = {
-                    "name": name,
-                    "arguments": (call.get("function") or {}).get("arguments", "{}"),
-                    "argumentAliases": _json_clone(
-                        call.get("argumentAliases") or []
-                    ),
-                    "fingerprint": call.get("fingerprint", ""),
-                    "status": "running",
-                    "outcome": "",
-                    "result": None,
-                    "error": "",
-                    "startedAt": now_iso(),
-                    "completedAt": "",
-                }
-                run["tool_executions"][call_id] = execution
-                _append_agent_event(run, "tool_started", {
-                    "toolCallId": call_id,
-                    "name": name,
-                    "arguments": execution["arguments"],
-                    "argumentAliases": _json_clone(
-                        execution.get("argumentAliases") or []
-                    ),
-                })
+                with run["condition"]:
+                    if (
+                        run["cancel_event"].is_set()
+                        or run["status"] in _AGENT_RUN_TERMINAL
+                    ):
+                        return False
+                    execution = {
+                        "name": name,
+                        "arguments": (call.get("function") or {}).get("arguments", "{}"),
+                        "argumentAliases": _json_clone(
+                            call.get("argumentAliases") or []
+                        ),
+                        "fingerprint": call.get("fingerprint", ""),
+                        "status": "running",
+                        "outcome": "",
+                        "result": None,
+                        "error": "",
+                        "startedAt": now_iso(),
+                        "completedAt": "",
+                    }
+                    run["tool_executions"][call_id] = execution
+                    _append_agent_event_locked(run, "tool_started", {
+                        "toolCallId": call_id,
+                        "name": name,
+                        "arguments": execution["arguments"],
+                        "argumentAliases": _json_clone(
+                            execution.get("argumentAliases") or []
+                        ),
+                    })
+                _persist_agent_run(run)
             try:
                 previous_project_root = getattr(
                     _agent_workspace_context, "project_root", None,
@@ -3873,61 +3899,67 @@ def _execute_agent_pending_tools(run):
                         pass
                 else:
                     _agent_workspace_context.workspace_roots = previous_workspace_roots
-            if run["cancel_event"].is_set() or run["status"] in _AGENT_RUN_TERMINAL:
-                return False
+        with run["condition"]:
             if (
-                isinstance(result, dict)
-                and result.get("ok") is False
-                and not result.get("retryBlocked")
+                run["cancel_event"].is_set()
+                or run["status"] in _AGENT_RUN_TERMINAL
             ):
-                failure_signature = _agent_tool_failure_signature(result)
-                failure_count = _agent_identical_tool_failure_count(
-                    run,
-                    call.get("fingerprint", ""),
-                    failure_signature,
-                ) + 1
-                execution["failureSignature"] = failure_signature
-                result = dict(result)
-                result["failureCount"] = failure_count
-                if failure_count >= _AGENT_IDENTICAL_TOOL_FAILURE_LIMIT:
-                    result["retryLimitReached"] = True
-                    result["error"] = (
-                        str(result.get("error") or "Tool execution failed")
-                        + " The identical-call retry limit is now reached; "
-                        "change the arguments, use another tool, or explain the limitation."
-                    )[:2000]
-            _set_agent_execution_result(execution, result)
-            _persist_agent_run(run)
+                return False
+            if not reused_execution:
+                if (
+                    isinstance(result, dict)
+                    and result.get("ok") is False
+                    and not result.get("retryBlocked")
+                ):
+                    failure_signature = _agent_tool_failure_signature(result)
+                    failure_count = _agent_identical_tool_failure_count(
+                        run,
+                        call.get("fingerprint", ""),
+                        failure_signature,
+                    ) + 1
+                    execution["failureSignature"] = failure_signature
+                    result = dict(result)
+                    result["failureCount"] = failure_count
+                    if failure_count >= _AGENT_IDENTICAL_TOOL_FAILURE_LIMIT:
+                        result["retryLimitReached"] = True
+                        result["error"] = (
+                            str(result.get("error") or "Tool execution failed")
+                            + " The identical-call retry limit is now reached; "
+                            "change the arguments, use another tool, or explain the limitation."
+                        )[:2000]
+                _set_agent_execution_result(execution, result)
 
-        if not _agent_has_current_tool_message(run, call_id):
-            run["messages"].append({
-                "role": "tool",
-                "tool_call_id": call_id,
+            if not _agent_has_current_tool_message(run, call_id):
+                run["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": _agent_tool_message_content(result),
+                })
+            vision_marker = _agent_tool_vision_marker(result, call_id)
+            if vision_marker and not any(
+                isinstance(message, dict)
+                and message.get("_agentToolVisionCallId") == call_id
+                for message in run.get("messages") or []
+            ):
+                run["messages"].append(vision_marker)
+            run["pending_tool_calls"] = [
+                pending
+                for pending in run["pending_tool_calls"]
+                if pending.get("id") != call_id
+            ]
+            _append_agent_event_locked(run, "tool_completed", {
+                "toolCallId": call_id,
                 "name": name,
-                "content": _agent_tool_message_content(result),
+                "arguments": execution.get("arguments", "{}"),
+                "argumentAliases": _json_clone(
+                    execution.get("argumentAliases") or []
+                ),
+                "result": result,
+                "outcome": _agent_execution_outcome(result),
+                "replayed": reused_execution or bool(result.get("replayed")),
             })
-        vision_marker = _agent_tool_vision_marker(result, call_id)
-        if vision_marker and not any(
-            isinstance(message, dict)
-            and message.get("_agentToolVisionCallId") == call_id
-            for message in run.get("messages") or []
-        ):
-            run["messages"].append(vision_marker)
-        run["pending_tool_calls"] = [
-            pending for pending in run["pending_tool_calls"] if pending.get("id") != call_id
-        ]
-        _append_agent_event(run, "tool_completed", {
-            "toolCallId": call_id,
-            "name": name,
-            "arguments": execution.get("arguments", "{}"),
-            "argumentAliases": _json_clone(
-                execution.get("argumentAliases") or []
-            ),
-            "result": result,
-            "outcome": _agent_execution_outcome(result),
-            "replayed": reused_execution or bool(result.get("replayed")),
-        })
-    return True
+        _persist_agent_run(run)
 
 
 def _agent_wait_for_model(run, model_run):
@@ -4261,9 +4293,24 @@ def _agent_run_worker(run):
             if tool_calls:
                 # A real tool call proves forward progress and clears any prior
                 # no-action recovery debt.
-                run["non_action_count"] = 0
-                run["pending_tool_calls"] = tool_calls
-                _set_agent_status(run, "tools")
+                with run["condition"]:
+                    if (
+                        run["cancel_event"].is_set()
+                        or run["status"] in _AGENT_RUN_TERMINAL
+                    ):
+                        should_cancel = True
+                    else:
+                        should_cancel = False
+                        run["non_action_count"] = 0
+                        run["pending_tool_calls"] = tool_calls
+                        run["status"] = "tools"
+                        run["resume_status"] = ""
+                        run["updated_at"] = now_iso()
+                        run["condition"].notify_all()
+                if should_cancel:
+                    _finish_agent_run(run, "cancelled")
+                    return
+                _persist_agent_run(run)
                 continue
 
             if non_action_reason:
@@ -4417,6 +4464,7 @@ def _create_agent_run(
         "active_process": None,
         "active_command_call_id": "",
         "worker": None,
+        "cancel_finalizing": False,
     }
     with _agent_run_lock:
         existing = _agent_runs.get(run_id)
@@ -4475,61 +4523,174 @@ def _resume_agent_run(run, keys, base_url=""):
     return run
 
 
+def _agent_has_tool_completed_event_locked(run, tool_call_id):
+    return any(
+        event.get("type") == "tool_completed"
+        and str((event.get("data") or {}).get("toolCallId") or "") == tool_call_id
+        for event in run.get("events") or []
+        if isinstance(event, dict)
+    )
+
+
+def _agent_cancel_tool_result(execution, name, *, cancelled_before_start=False):
+    if name == "run_command":
+        result = {
+            "ok": False,
+            "action": "run_command",
+            "command": str((execution or {}).get("command") or ""),
+            "cwd": str((execution or {}).get("cwd") or ""),
+            "exitCode": None,
+            "stdout": str((execution or {}).get("stdout") or ""),
+            "stderr": str((execution or {}).get("stderr") or ""),
+            "cancelled": True,
+            "error": (
+                "Tool call cancelled before execution."
+                if cancelled_before_start
+                else "Command cancelled."
+            ),
+        }
+    else:
+        result = {
+            "ok": False,
+            "action": name,
+            "cancelled": True,
+            "error": (
+                "Tool call cancelled before execution."
+                if cancelled_before_start
+                else "Tool call cancelled."
+            ),
+        }
+    if cancelled_before_start:
+        result["cancelledBeforeStart"] = True
+    return result
+
+
+def _close_agent_tools_for_cancel_locked(run):
+    pending_calls = list(run.get("pending_tool_calls") or [])
+    pending_by_id = {
+        str(call.get("id") or ""): call
+        for call in pending_calls
+        if isinstance(call, dict) and str(call.get("id") or "")
+    }
+    ordered_call_ids = list(pending_by_id)
+    for call_id, execution in (run.get("tool_executions") or {}).items():
+        if (
+            str(call_id or "")
+            and str(call_id) not in pending_by_id
+            and isinstance(execution, dict)
+            and execution.get("status") not in {"completed", "cancelled"}
+        ):
+            ordered_call_ids.append(str(call_id))
+
+    completed_at = now_iso()
+    for call_id in ordered_call_ids:
+        call = pending_by_id.get(call_id) or {}
+        execution = (run.get("tool_executions") or {}).get(call_id)
+        function = call.get("function") or {}
+        name = str(
+            (execution or {}).get("name")
+            or function.get("name")
+            or ""
+        )
+        arguments = (
+            (execution or {}).get("arguments")
+            or function.get("arguments")
+            or "{}"
+        )
+        argument_aliases = _json_clone(
+            (execution or {}).get("argumentAliases")
+            or call.get("argumentAliases")
+            or []
+        )
+        cancelled_before_start = not isinstance(execution, dict)
+
+        if cancelled_before_start:
+            result = _agent_cancel_tool_result(
+                None, name, cancelled_before_start=True,
+            )
+            execution = {
+                "name": name,
+                "arguments": arguments,
+                "argumentAliases": argument_aliases,
+                "fingerprint": call.get("fingerprint", ""),
+                "status": "cancelled",
+                "outcome": _agent_execution_outcome(result),
+                "result": result,
+                "error": result["error"],
+                "startedAt": "",
+                "completedAt": completed_at,
+            }
+            run["tool_executions"][call_id] = execution
+        elif execution.get("status") not in {"completed", "cancelled"}:
+            result = _agent_cancel_tool_result(execution, name)
+            execution["status"] = "cancelled"
+            execution["outcome"] = _agent_execution_outcome(result)
+            execution["result"] = result
+            execution["error"] = result["error"]
+            execution["completedAt"] = completed_at
+        else:
+            result = execution.get("result") or {}
+            if not execution.get("outcome"):
+                execution["outcome"] = _agent_execution_outcome(result)
+
+        if not _agent_has_tool_completed_event_locked(run, call_id):
+            _append_agent_event_locked(run, "tool_completed", {
+                "toolCallId": call_id,
+                "name": name,
+                "arguments": arguments,
+                "argumentAliases": argument_aliases,
+                "result": result,
+                "outcome": _agent_execution_outcome(result),
+                "replayed": False,
+            })
+
+    run["pending_tool_calls"] = []
+    run["pending_input"] = None
+    run["pending_authorization"] = None
+    run["active_process"] = None
+    run["active_command_call_id"] = ""
+
+
 def _cancel_agent_run(run_id):
     run = _get_agent_run(run_id)
     if not run:
         return False
-    if run["status"] in _AGENT_RUN_TERMINAL:
-        return run
-    run["cancel_event"].set()
-    runtime_id = run.get("active_runtime_id")
+    with run["condition"]:
+        while (
+            run.get("cancel_finalizing")
+            and run["status"] not in _AGENT_RUN_TERMINAL
+        ):
+            run["condition"].wait(timeout=0.05)
+        if run["status"] in _AGENT_RUN_TERMINAL:
+            return run
+        run["cancel_finalizing"] = True
+        run["cancel_event"].set()
+        runtime_id = run.get("active_runtime_id")
+        child_run_ids = {
+            str(execution.get("childAgentRunId") or "")
+            for execution in (run.get("tool_executions") or {}).values()
+            if isinstance(execution, dict) and execution.get("childAgentRunId")
+        }
+        process = run.get("active_process")
     if runtime_id:
         _cancel_model_runtime_run(runtime_id)
-    child_run_ids = {
-        str(execution.get("childAgentRunId") or "")
-        for execution in (run.get("tool_executions") or {}).values()
-        if isinstance(execution, dict) and execution.get("childAgentRunId")
-    }
     for child_run_id in child_run_ids:
         if child_run_id and child_run_id != run["id"]:
             _cancel_agent_run(child_run_id)
-    process = run.get("active_process")
-    command_call_id = str(run.get("active_command_call_id") or "")
     if process is not None:
         _terminate_command_process(process)
-    if command_call_id:
+    with run["condition"]:
+        if run["status"] in _AGENT_RUN_TERMINAL:
+            run["cancel_finalizing"] = False
+            run["condition"].notify_all()
+            return run
+        _close_agent_tools_for_cancel_locked(run)
+        run["cancel_finalizing"] = False
+        finished = _finish_agent_run_locked(run, "cancelled")
+    if finished:
+        _persist_agent_run(run)
         with run["condition"]:
-            execution = run.get("tool_executions", {}).get(command_call_id)
-            if isinstance(execution, dict) and execution.get("status") == "running":
-                result = {
-                    "ok": False,
-                    "action": "run_command",
-                    "command": str(execution.get("command") or ""),
-                    "cwd": str(execution.get("cwd") or ""),
-                    "exitCode": None,
-                    "stdout": str(execution.get("stdout") or ""),
-                    "stderr": str(execution.get("stderr") or ""),
-                    "cancelled": True,
-                    "error": "Command cancelled.",
-                }
-                execution["status"] = "cancelled"
-                execution["result"] = result
-                execution["error"] = result["error"]
-                execution["completedAt"] = now_iso()
-                _append_agent_event_locked(run, "tool_completed", {
-                    "toolCallId": command_call_id,
-                    "name": str(execution.get("name") or "run_command"),
-                    "arguments": execution.get("arguments", "{}"),
-                    "argumentAliases": _json_clone(
-                        execution.get("argumentAliases") or []
-                    ),
-                    "result": result,
-                    "outcome": _agent_execution_outcome(result),
-                    "replayed": False,
-                })
-            run["active_process"] = None
-            run["active_command_call_id"] = ""
-    _finish_agent_run(run, "cancelled")
+            run["condition"].notify_all()
     return run
 
 

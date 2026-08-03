@@ -45,7 +45,7 @@ copy(JSON.stringify(window.Code.agent.projectionShadowDiagnostics.snapshot(), nu
 7. 排队消息（已通过）；
 8. `/parallel` 后台任务（已通过）；
 9. 模型阶段取消（已通过，包含部分流式正文保留）；
-10. 命令阶段取消或失败（取消交互已通过，仍待影子摘要与失败路径）。
+10. 命令阶段取消或失败（取消已通过，包含同轮多工具终态闭合与影子零差异；仍待失败路径）。
 
 每个场景记录：页面行为是否正常、报告中的新增 `summaryCount`、`runKind`、`status`、`mismatches`、`observerErrors`、`diagnosticCounts` 和 `diagnostics`。任何差异先保存脱敏字段与复现步骤，再决定修复哪一侧，不根据 UI 文字猜测领域状态。
 
@@ -66,7 +66,7 @@ copy(JSON.stringify(window.Code.agent.projectionShadowDiagnostics.snapshot(), nu
 - 排队消息已通过：新会话首轮前台任务结束后无需刷新即自动启动持久化排队项；两个前台 Run 均为 `completed`，分别观察 29/4 个事件、12/2 个快照和 41/6 次比较，合计 33 个事件、14 个快照、47 次比较，差异、观察器错误与丢弃诊断均为 0；
 - `/parallel` 后台任务已通过：首轮发现子上下文按引用继承父任务影子，导致前后台两条独立耐久 Run 写入同一观察器并产生 91 条镜像差异；隔离投影私有状态后只余后台 `model_started` 时事件已开始轮次领先于快照已完成轮数的两条差异，统一取两类已观察轮次最大值后，最终前台/后台分别观察 10/11 个事件，合计 21 个事件、17 个快照和 38 次比较均零差异且无观察器错误或丢弃诊断；
 - 模型阶段取消已通过：暂停立即生效、计时与暂停说明稳定，部分流式正文保留；对应脱敏影子摘要为 3 个事件、2 个快照和 5 次比较，`cancelled` 终态零差异且无观察器错误或诊断丢弃；
-- 命令阶段取消的进程终止和界面交互已通过：耐久事件补齐为 `tool_completed → cancelled`，已有输出保留且工具状态显示“已取消”；仍需提取修复后的脱敏影子摘要，命令失败路径也尚未执行；
+- 命令阶段取消已通过：服务端会在 Run `cancelled` 前闭合同一模型轮的全部待处理工具，正在执行的命令沿用现有取消结果且只产生一次 `tool_completed`，从未开始的调用写入带 `cancelledBeforeStart: true` 的耐久取消结果且不产生 `tool_started / command_started`；取消后 `pendingToolCalls`、`pendingInput` 与 `pendingAuthorization` 均为空，重复取消、并发取消和持久化重载回归通过。真实双工具人工验收中命令与未开始的 `VERSION` 读取均显示“已取消”，脱敏影子摘要观察 8 个事件、3 个快照和 11 次比较，`mismatches`、`observerErrors` 与 `diagnosticsDropped` 均为 0；命令失败路径仍尚未执行；
 - 尚未形成真实零差异重复样本；
 - 尚未把真实差异或近期跨层时序问题转换为 replay 夹具；
 - 因此 H2 仍处于未收口状态，新投影仍不能接管现有 UI。

@@ -6790,9 +6790,11 @@ const completedEdits = feature.renderToolProcessProjection([
 const cancelledCommand = feature.renderToolProcessProjection([
   {msg: {role: "assistant", meta: {toolCalls: [
     {id: "cancelled-1", function: {name: "run_command", arguments: '{"command":"node slow.js"}'}},
+    {id: "cancelled-2", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
   ]}}, index: 1},
   {msg: {role: "tool-call", meta: {action: "run_command", toolCallId: "cancelled-1", tool: {action: "run_command", command: "node slow.js"}}}, index: 2},
   {msg: {role: "tool-result", content: "Command cancelled.", meta: {action: "run_command", toolCallId: "cancelled-1", outcome: "failed", result: {ok: false, cancelled: true, error: "Command cancelled."}}}, index: 3},
+  {msg: {role: "tool-result", content: "Tool call cancelled before execution.", meta: {action: "read_file", toolCallId: "cancelled-2", outcome: "failed", result: {ok: false, cancelled: true, cancelledBeforeStart: true, error: "Tool call cancelled before execution."}}}, index: 4},
 ], 12);
 const streaming = feature.renderFinalAssistantProjection({
   role: "assistant",
@@ -7062,6 +7064,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("<code>", completed_edits_summary)
         self.assertIn('class="tool-process-stage cancelled"', data["cancelledCommand"])
         self.assertIn('class="tool-process-item cancelled"', data["cancelledCommand"])
+        self.assertEqual(data["cancelledCommand"].count('class="tool-process-item cancelled"'), 2)
         self.assertIn("toolProcessCancelled", data["cancelledCommand"])
         self.assertNotIn("toolProcessRunning", data["cancelledCommand"])
         for expected in (

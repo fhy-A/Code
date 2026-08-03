@@ -2667,6 +2667,190 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertTrue(completed_event["data"]["result"]["cancelled"])
         self.assertIn("command-started", completed_event["data"]["result"]["stdout"])
 
+    def test_cancel_closes_every_tool_in_one_model_round_without_starting_the_second(self):
+        command_started = threading.Event()
+        command_calls = []
+
+        def fake_command_executor(
+            body,
+            *,
+            cancel_event=None,
+            output_callback=None,
+            process_callback=None,
+        ):
+            command_calls.append(dict(body or {}))
+            if callable(output_callback):
+                output_callback("stdout", "multi-cancel-started\n")
+            command_started.set()
+            self.assertIsNotNone(cancel_event)
+            self.assertTrue(cancel_event.wait(timeout=2))
+            return {
+                "ok": False,
+                "action": "run_command",
+                "command": str((body or {}).get("command") or ""),
+                "cwd": str(self.project_dir),
+                "exitCode": None,
+                "stdout": "multi-cancel-started\n",
+                "stderr": "",
+                "cancelled": True,
+                "error": "Command cancelled.",
+            }
+
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[{
+                "choices": [{
+                    "delta": {"tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "multi-cancel-command",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "command": "node -e \"setTimeout(() => {}, 20000)\"",
+                                    "description": "cancel the active command",
+                                }),
+                            },
+                        },
+                        {
+                            "index": 1,
+                            "id": "multi-cancel-read",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "README.md"}),
+                            },
+                        },
+                    ]},
+                    "finish_reason": "tool_calls",
+                }],
+            }]]
+
+        with (
+            mock.patch.object(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True),
+            mock.patch.object(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True),
+            mock.patch.object(
+                server_mod,
+                "execute_run_command_tool",
+                side_effect=fake_command_executor,
+            ),
+            mock.patch.object(
+                server_mod,
+                "execute_registered_tool",
+                wraps=server_mod.execute_registered_tool,
+            ) as registered_tool,
+        ):
+            run = server_mod._create_agent_run(
+                "multi-tool-cancel-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "cancel two tools"}],
+                    "tools": [
+                        server_mod._SERVER_TOOL_DEFINITIONS["run_command"],
+                        server_mod._SERVER_TOOL_DEFINITIONS["read_file"],
+                    ],
+                },
+                self.base_url,
+                ["multi-cancel-key"],
+                allowed_tools=["run_command", "read_file"],
+                permission_profile="bypass",
+            )
+            self.assertTrue(command_started.wait(timeout=5))
+
+            barrier = threading.Barrier(3)
+            cancel_results = []
+
+            def cancel_run():
+                barrier.wait()
+                cancel_results.append(server_mod._cancel_agent_run(run["id"]))
+
+            cancel_threads = [
+                threading.Thread(target=cancel_run),
+                threading.Thread(target=cancel_run),
+            ]
+            for thread in cancel_threads:
+                thread.start()
+            barrier.wait()
+            for thread in cancel_threads:
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+
+            self._wait_terminal(run)
+            self._wait_worker_idle(run)
+            event_count = len(run["events"])
+            self.assertIs(server_mod._cancel_agent_run(run["id"]), run)
+            self.assertEqual(len(run["events"]), event_count)
+            self.assertEqual(cancel_results, [run, run])
+            self.assertEqual(len(command_calls), 1)
+            registered_tool.assert_not_called()
+
+            snapshot = server_mod._agent_snapshot(run, 0)
+            self.assertEqual(snapshot["status"], "cancelled")
+            self.assertEqual(snapshot["pendingToolCalls"], [])
+            self.assertIsNone(snapshot["pendingInput"])
+            self.assertIsNone(snapshot["pendingAuthorization"])
+            executions = {
+                item["toolCallId"]: item for item in snapshot["toolExecutions"]
+            }
+            self.assertEqual(set(executions), {
+                "multi-cancel-command", "multi-cancel-read",
+            })
+            active = executions["multi-cancel-command"]
+            waiting = executions["multi-cancel-read"]
+            self.assertEqual((active["status"], active["outcome"]), ("cancelled", "failed"))
+            self.assertTrue(active["result"]["cancelled"])
+            self.assertNotIn("cancelledBeforeStart", active["result"])
+            self.assertEqual((waiting["status"], waiting["outcome"]), ("cancelled", "failed"))
+            self.assertTrue(waiting["result"]["cancelled"])
+            self.assertTrue(waiting["result"]["cancelledBeforeStart"])
+            self.assertEqual(waiting["startedAt"], "")
+
+            events = snapshot["events"]
+            completed = [event for event in events if event["type"] == "tool_completed"]
+            self.assertEqual(
+                [event["data"]["toolCallId"] for event in completed],
+                ["multi-cancel-command", "multi-cancel-read"],
+            )
+            self.assertEqual(len(completed), 2)
+            self.assertEqual(events[-1]["type"], "cancelled")
+            self.assertLess(events.index(completed[-1]), len(events) - 1)
+            self.assertEqual([
+                event["data"]["toolCallId"]
+                for event in events if event["type"] == "tool_started"
+            ], ["multi-cancel-command"])
+            self.assertEqual([
+                event["data"]["toolCallId"]
+                for event in events if event["type"] == "command_started"
+            ], ["multi-cancel-command"])
+            shadow = server_mod._agent_protocol_shadow_snapshot(run)
+            self.assertEqual(shadow["diagnosticCounts"], {})
+            self.assertEqual(shadow["contractErrors"], 0)
+
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        restored_snapshot = server_mod._agent_snapshot(restored, 0)
+        self.assertEqual(restored_snapshot["status"], "cancelled")
+        self.assertEqual(restored_snapshot["pendingToolCalls"], [])
+        self.assertIsNone(restored_snapshot["pendingInput"])
+        self.assertIsNone(restored_snapshot["pendingAuthorization"])
+        non_terminal_tool_statuses = {
+            "running",
+            "waiting_authorization",
+            "waiting_user_input",
+            "authorized",
+            "applying_edit",
+            "applying_file_mutation",
+            "queued_child",
+            "waiting_child",
+            "waiting_child_authorization",
+        }
+        self.assertFalse(
+            non_terminal_tool_statuses & {
+                item["status"] for item in restored_snapshot["toolExecutions"]
+            },
+        )
+
     def test_bypass_dependency_install_still_waits_for_user_authorization(self):
         run = server_mod._create_agent_run(
             "dependency-install-bypass-session",

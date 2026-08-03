@@ -162,6 +162,85 @@ process.stdout.write(JSON.stringify({equal, legacyFacts, summary: shadowApi.snap
             ],
         )
 
+    def test_shadow_observer_matches_cancelled_multi_tool_terminal_closure(self):
+        data = run_node(r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/run-reducer.js");
+require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
+const shadowApi = window.Code.agent.runProjectionShadow;
+const initialSnapshot = {
+  status: "model",
+  eventCursor: 0,
+  round: 0,
+  createdAt: "2030-01-01T00:00:00Z",
+  updatedAt: "2030-01-01T00:00:00Z",
+  elapsedObservedAt: "2030-01-01T00:00:00Z",
+  elapsedMs: 0,
+};
+const events = [
+  {protocolVersion: 1, seq: 1, type: "model_started", data: {round: 1, runtimeRunId: "cancel-round-1"}, createdAt: "2030-01-01T00:00:01Z"},
+  {protocolVersion: 1, seq: 2, type: "model_completed", data: {round: 1, runtimeRunId: "cancel-round-1", toolCalls: [{id: "cancel-command", name: "run_command"}, {id: "cancel-read", name: "read_file"}], outcome: "tool_calls"}, createdAt: "2030-01-01T00:00:02Z"},
+  {protocolVersion: 1, seq: 3, type: "tool_started", data: {toolCallId: "cancel-command", name: "run_command"}, createdAt: "2030-01-01T00:00:03Z"},
+  {protocolVersion: 1, seq: 4, type: "command_started", data: {toolCallId: "cancel-command"}, createdAt: "2030-01-01T00:00:04Z"},
+  {protocolVersion: 1, seq: 5, type: "tool_completed", data: {toolCallId: "cancel-command", name: "run_command", outcome: "failed", result: {ok: false, cancelled: true}}, createdAt: "2030-01-01T00:00:05Z"},
+  {protocolVersion: 1, seq: 6, type: "tool_completed", data: {toolCallId: "cancel-read", name: "read_file", outcome: "failed", result: {ok: false, cancelled: true, cancelledBeforeStart: true}}, createdAt: "2030-01-01T00:00:06Z"},
+  {protocolVersion: 1, seq: 7, type: "cancelled", data: {}, createdAt: "2030-01-01T00:00:07Z"},
+];
+const observer = shadowApi.createRunProjectionShadow({initialSnapshot});
+const legacy = shadowApi.createLegacyProjectionObservation();
+for (const event of events) {
+  shadowApi.observeProjectionEvent(observer, event);
+  shadowApi.observeLegacyProjectionEvent(legacy, event);
+}
+const snapshot = {
+  status: "cancelled",
+  eventCursor: 7,
+  round: 1,
+  pendingToolCalls: [],
+  pendingInput: null,
+  pendingAuthorization: null,
+  toolExecutions: [
+    {toolCallId: "cancel-command", name: "run_command", status: "cancelled", outcome: "failed", result: {ok: false, cancelled: true}},
+    {toolCallId: "cancel-read", name: "read_file", status: "cancelled", outcome: "failed", result: {ok: false, cancelled: true, cancelledBeforeStart: true}},
+  ],
+  createdAt: "2030-01-01T00:00:00Z",
+  updatedAt: "2030-01-01T00:00:07Z",
+  completedAt: "2030-01-01T00:00:07Z",
+  elapsedObservedAt: "2030-01-01T00:00:07Z",
+  elapsedMs: 7000,
+};
+shadowApi.observeProjectionSnapshot(observer, snapshot);
+const legacyFacts = shadowApi.snapshotLegacyProjectionObservation(legacy);
+const equal = shadowApi.compareProjectionShadow(observer, {
+  status: "cancelled",
+  terminalStatus: "cancelled",
+  modelRoundCount: legacyFacts.modelRoundCount,
+  toolCount: legacyFacts.toolCount,
+  pendingKind: "",
+  elapsedMs: 7000,
+  timeline: legacyFacts.timeline,
+}, {referenceTime: "2030-01-01T00:00:07Z"});
+process.stdout.write(JSON.stringify({
+  equal,
+  legacyFacts,
+  summary: shadowApi.snapshotRunProjectionShadow(observer),
+}));
+""")
+        self.assertTrue(data["equal"])
+        self.assertEqual(data["legacyFacts"]["modelRoundCount"], 1)
+        self.assertEqual(data["legacyFacts"]["toolCount"], 2)
+        self.assertEqual(
+            [item["type"] for item in data["legacyFacts"]["timeline"]].count(
+                "tool_completed"
+            ),
+            2,
+        )
+        self.assertEqual(data["summary"]["mismatches"], 0)
+        self.assertEqual(data["summary"]["observerErrors"], 0)
+        self.assertEqual(data["summary"]["diagnostics"], [])
+
     def test_authorization_resume_model_pending_does_not_start_the_next_round(self):
         data = run_node(r"""
 global.window = {};
