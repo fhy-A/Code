@@ -2592,6 +2592,89 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertNotIn("command-before-approval-key", persisted)
         self.assertNotIn("command-after-approval-key", persisted)
 
+    def test_failed_command_reports_nonzero_result_once_and_run_can_complete(self):
+        command = (
+            'node -e "console.error(\'h2-3-intentional-failure\'); '
+            'process.exit(7)"'
+        )
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{
+                    "choices": [{
+                        "delta": {"tool_calls": [{
+                            "index": 0,
+                            "id": "agent-command-failure-1",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "command": command,
+                                    "description": "Intentional AgentRun failure",
+                                }),
+                            },
+                        }]},
+                        "finish_reason": "tool_calls",
+                    }],
+                }],
+                [{
+                    "choices": [{
+                        "delta": {"content": "command failed once with exit code 7"},
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+
+        run = server_mod._create_agent_run(
+            "command-failure-session",
+            {
+                "model": "test-model",
+                "messages": [{
+                    "role": "user",
+                    "content": "run one intentionally failing command",
+                }],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["run_command"]],
+            },
+            self.base_url,
+            ["command-failure-key"],
+            allowed_tools=["run_command"],
+            permission_profile="bypass",
+        )
+        self._wait_terminal(run)
+
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(
+            snapshot["result"]["content"],
+            "command failed once with exit code 7",
+        )
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(snapshot["pendingToolCalls"], [])
+        execution = snapshot["toolExecutions"][0]
+        self.assertEqual(execution["toolCallId"], "agent-command-failure-1")
+        self.assertEqual(execution["status"], "completed")
+        self.assertEqual(execution["outcome"], "failed")
+        self.assertFalse(execution["result"]["ok"])
+        self.assertEqual(execution["result"]["exitCode"], 7)
+        self.assertIn("h2-3-intentional-failure", execution["result"]["stderr"])
+        event_types = [event["type"] for event in snapshot["events"]]
+        self.assertEqual(event_types.count("command_started"), 1)
+        completed = [
+            event for event in snapshot["events"]
+            if event["type"] == "tool_completed"
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["data"]["outcome"], "failed")
+        self.assertEqual(completed[0]["data"]["result"]["exitCode"], 7)
+        tool_messages = [
+            message for message in _AgentUpstream.payloads[-1]["messages"]
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_messages), 1)
+        tool_result = json.loads(tool_messages[0]["content"])
+        self.assertFalse(tool_result["ok"])
+        self.assertEqual(tool_result["exitCode"], 7)
+        self.assertIn("h2-3-intentional-failure", tool_result["stderr"])
+
     def test_rejected_command_becomes_tool_result_without_execution(self):
         run = server_mod._create_agent_run(
             "command-reject-session",
