@@ -98,6 +98,13 @@
     return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
   }
 
+  function resolveObservedModelRoundCount(snapshotRound, eventRound) {
+    return Math.max(
+      nonNegativeInteger(snapshotRound),
+      nonNegativeInteger(eventRound),
+    );
+  }
+
   function diagnosticCode(value) {
     const code = String(value || "");
     return SAFE_DIAGNOSTIC_CODES.has(code) ? code : "projection_shadow_error";
@@ -416,6 +423,7 @@
     createLegacyProjectionObservation,
     observeLegacyProjectionEvent,
     snapshotLegacyProjectionObservation,
+    resolveObservedModelRoundCount,
     createRunProjectionShadow,
     observeProjectionEvent,
     observeProjectionSnapshot,

@@ -6,6 +6,11 @@
 
   const BACKGROUND_JOB_TIMEOUT_MS = 10 * 60 * 1000;
   const SUBAGENT_DISABLED_TOOL_NAMES = Object.freeze(["task", "request_user_input"]);
+  const SUBAGENT_PROJECTION_PRIVATE_FIELDS = Object.freeze([
+    "_agentProjectionShadow",
+    "_agentProjectionLegacyObservation",
+    "_agentProjectionShadowArchived",
+  ]);
 
   function buildSubAgentSystemPrompt({ securityLayer = "", cwd = "", primaryRoot = "" } = {}) {
     return [
@@ -32,8 +37,12 @@
       cwd: parentContext.cwd,
       primaryRoot: parentContext.primaryRoot,
     });
+    const inheritedContext = { ...parentContext };
+    for (const field of SUBAGENT_PROJECTION_PRIVATE_FIELDS) {
+      delete inheritedContext[field];
+    }
     return {
-      ...parentContext,
+      ...inheritedContext,
       messages: [
         { role: "system", content: subSystem },
         { role: "user", content: taskPrompt },

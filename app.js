@@ -7670,7 +7670,10 @@ function agentProjectionLegacyFacts(ctx, snapshot, referenceTime) {
     ? snapshotTools.length
     : legacy.toolCount;
   const backgroundRound = snapshot
-    ? Number(snapshot?.round || 0)
+    ? agentRunProjectionShadow.resolveObservedModelRoundCount(
+      snapshot?.round,
+      legacy.modelRoundCount,
+    )
     : legacy.modelRoundCount;
   return {
     status,

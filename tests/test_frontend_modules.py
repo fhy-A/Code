@@ -1020,6 +1020,9 @@ const parent = {{
   primaryRoot: "C:/workspace",
   messages: [{{role: "user", content: "parent history"}}],
   stats: {{input: 9, output: 8, cache: 7}},
+  _agentProjectionShadow: {{id: "parent-shadow"}},
+  _agentProjectionLegacyObservation: {{id: "parent-legacy"}},
+  _agentProjectionShadowArchived: true,
 }};
 const rawPrompt = "  inspect   project  ";
 const context = subagents.createSubAgentContext({{
@@ -1041,9 +1044,15 @@ process.stdout.write(JSON.stringify({{
     messages: context.messages,
     stats: context.stats,
     taskUsage: context.taskUsage,
+    ownsProjectionShadow: Object.prototype.hasOwnProperty.call(context, "_agentProjectionShadow"),
+    ownsLegacyProjection: Object.prototype.hasOwnProperty.call(context, "_agentProjectionLegacyObservation"),
+    ownsProjectionArchiveFlag: Object.prototype.hasOwnProperty.call(context, "_agentProjectionShadowArchived"),
   }},
   parentMessages: parent.messages,
   parentStats: parent.stats,
+  parentProjectionShadow: parent._agentProjectionShadow,
+  parentLegacyProjection: parent._agentProjectionLegacyObservation,
+  parentProjectionArchiveFlag: parent._agentProjectionShadowArchived,
   sourceTools: sourceTools.map((tool) => tool.function.name),
   background: subagents.buildBackgroundTaskPrompt(longTask, "new request"),
   standalone: subagents.buildBackgroundTaskPrompt("", "new request"),
@@ -1094,8 +1103,14 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("[DECISION_POINT]", data["context"]["messages"][0]["content"])
         self.assertEqual(data["context"]["stats"], {"input": 0, "output": 0, "cache": 0})
         self.assertEqual(data["context"]["taskUsage"], {"input": 0, "output": 0, "cache": 0})
+        self.assertFalse(data["context"]["ownsProjectionShadow"])
+        self.assertFalse(data["context"]["ownsLegacyProjection"])
+        self.assertFalse(data["context"]["ownsProjectionArchiveFlag"])
         self.assertEqual(data["parentMessages"], [{"role": "user", "content": "parent history"}])
         self.assertEqual(data["parentStats"], {"input": 9, "output": 8, "cache": 7})
+        self.assertEqual(data["parentProjectionShadow"], {"id": "parent-shadow"})
+        self.assertEqual(data["parentLegacyProjection"], {"id": "parent-legacy"})
+        self.assertTrue(data["parentProjectionArchiveFlag"])
         self.assertEqual(data["sourceTools"], ["read_file", "task", "request_user_input"])
         self.assertIn(f"主 Agent 正在处理：{'x' * 150}", data["background"])
         self.assertNotIn("x" * 151, data["background"])

@@ -23,6 +23,26 @@ def run_node(script):
 
 
 class RunProjectionContractTests(unittest.TestCase):
+    def test_observed_model_round_keeps_started_background_round_ahead_of_snapshot(self):
+        data = run_node(r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/run-reducer.js");
+require("./src/ui/run-view-model.js");
+require("./src/agent/run-projection-shadow.js");
+const shadow = window.Code.agent.runProjectionShadow;
+process.stdout.write(JSON.stringify({
+  firstStarted: shadow.resolveObservedModelRoundCount(0, 1),
+  secondStarted: shadow.resolveObservedModelRoundCount(1, 2),
+  completedSnapshot: shadow.resolveObservedModelRoundCount(2, 2),
+  replayedSnapshotAhead: shadow.resolveObservedModelRoundCount(3, 2),
+}));
+""")
+        self.assertEqual(data["firstStarted"], 1)
+        self.assertEqual(data["secondStarted"], 2)
+        self.assertEqual(data["completedSnapshot"], 2)
+        self.assertEqual(data["replayedSnapshotAhead"], 3)
+
     def test_modules_are_pure_and_export_the_frozen_h2_contract(self):
         for forbidden in ("fetch(", "document.", "localStorage", "sessionStorage", "Date.now"):
             self.assertNotIn(forbidden, REDUCER_SOURCE)
