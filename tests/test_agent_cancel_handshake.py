@@ -261,18 +261,17 @@ process.stdout.write(JSON.stringify({ messages, assistant }));
         )
 
     def test_cancelled_child_runtime_keeps_partial_projection_for_pause_finalizer(self):
-        start = APP_SOURCE.index("async function projectAgentModelStarted(ctx, event)")
+        start = APP_SOURCE.index("async function attachAgentRuntimeProjection(ctx, event")
         end = APP_SOURCE.index("function projectAgentModelCompleted(ctx, event)", start)
         projection = APP_SOURCE[start:end]
         cancelled = 'ctx.run?.cancelRequested || error?.code === "runtime_cancelled"'
         discard = "if (projectedIndex >= 0) ctx.messages.splice(projectedIndex, 1);"
 
         self.assertIn(cancelled, projection)
-        self.assertIn(discard, projection)
-        self.assertLess(projection.index(cancelled), projection.index(discard))
+        self.assertNotIn(discard, projection)
         cancellation_start = projection.index(cancelled)
         cancellation_end = projection.index(
-            "// Durable model_completed contains the complete response.",
+            "// The parent AgentRun owns this child Runtime ID.",
             cancellation_start,
         )
         self.assertIn("return;", projection[cancellation_start:cancellation_end])

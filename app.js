@@ -1884,13 +1884,42 @@ function getActiveRunLabel(sessionId = state.sessionId) {
 }
 
 function markModelResponseStarted(run, sessionId = state.sessionId) {
-  if (!run) return;
+  if (!run) return false;
+  const firstResponseStarted = !run.hasFirstModelResponseStarted;
   run.hasFirstModelResponseStarted = true;
-  if (run.modelResponseStarted) return;
+  if (run.modelResponseStarted) return firstResponseStarted;
   run.modelResponseStarted = true;
   run.modelWaitStartedAt = null;
   run.modelRecovery = null;
   if (sessionId === state.sessionId) syncActiveRunBanner(sessionId);
+  return firstResponseStarted;
+}
+
+function persistFirstModelResponseStarted(ctx) {
+  if (!ctx?.sessionId || ctx.isSubAgent) return Promise.resolve();
+  const checkpoint = makeRunCheckpoint(ctx, "running", "model", {
+    runtimeRunId: String(ctx.runtimeRunId || ctx.run?.runtimeRunId || ""),
+    hasFirstModelResponseStarted: true,
+  });
+  setSessionRunState(ctx.sessionId, checkpoint);
+  // This transition is a bounded presentation checkpoint. Persist only the
+  // existing runState metadata; partial reasoning/content remains transient
+  // and the message JSONL is still written only at established boundaries.
+  return saveSessionState(
+    ctx.sessionId,
+    ctx.messages,
+    ctx.stats,
+    undefined,
+    { persistMessages: false },
+  );
+}
+
+function recordModelResponseStarted(ctx, run, sessionId) {
+  const firstResponseStarted = markModelResponseStarted(run, sessionId);
+  if (!firstResponseStarted || !ctx || ctx.isSubAgent) return;
+  persistFirstModelResponseStarted(ctx).catch((error) => {
+    console.error("Failed to persist first model response checkpoint:", error);
+  });
 }
 
 function getRecoveryCountdownSeconds(sessionId = state.sessionId) {
@@ -6379,12 +6408,12 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
     }
 
     if (turnEvent.receivedToolCallDelta) {
-      markModelResponseStarted(run, sessionId);
+      recordModelResponseStarted(ctx, run, sessionId);
       markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
     }
 
     if (turnEvent.reasoning || turnEvent.text) {
-      markModelResponseStarted(run, sessionId);
+      recordModelResponseStarted(ctx, run, sessionId);
 
       updateAssistantMessage(
         assistantIndex,
@@ -7915,11 +7944,75 @@ function findAgentAssistantByRuntime(ctx, runtimeRunId) {
   ));
 }
 
-async function projectAgentModelStarted(ctx, event) {
+const activeAgentRuntimeProjectionOwners = new Map();
+
+function consumeAgentRuntimeProjection(ctx, runtimeRunId, consumer) {
+  const key = String(runtimeRunId || "");
+  if (!key) return Promise.resolve();
+  const localConsumers = ctx._agentRuntimeProjectionConsumers instanceof Map
+    ? ctx._agentRuntimeProjectionConsumers
+    : new Map();
+  ctx._agentRuntimeProjectionConsumers = localConsumers;
+  const localPromise = localConsumers.get(key);
+  if (localPromise) return localPromise;
+
+  const existing = activeAgentRuntimeProjectionOwners.get(key);
+  if (existing) {
+    localConsumers.set(key, existing.promise);
+    return existing.promise;
+  }
+
+  const owner = {
+    agentRunId: String(ctx?.agentRunId || ""),
+    sessionId: String(ctx?.sessionId || ""),
+    promise: null,
+  };
+  owner.promise = Promise.resolve()
+    .then(consumer)
+    .finally(() => {
+      if (activeAgentRuntimeProjectionOwners.get(key) === owner) {
+        activeAgentRuntimeProjectionOwners.delete(key);
+      }
+    });
+  activeAgentRuntimeProjectionOwners.set(key, owner);
+  localConsumers.set(key, owner.promise);
+  return owner.promise;
+}
+
+function snapshotHasPendingModelStarted(snapshot, cursor = 0) {
+  return (Array.isArray(snapshot?.events) ? snapshot.events : []).some((event) => (
+    String(event?.type || "") === "model_started"
+    && Number(event?.seq || 0) > Number(cursor || 0)
+  ));
+}
+
+function rebindRecoveredRuntimeAssistant(ctx, runtimeRunId) {
+  const authoritativeId = String(runtimeRunId || "");
+  if (!authoritativeId) return null;
+  const exact = findAgentAssistantByRuntime(ctx, authoritativeId);
+  if (exact) return exact;
+  const candidate = [...ctx.messages].reverse().find((message) => (
+    message?.role === "assistant"
+    && message?.streaming
+    && String(message?.meta?.agentRunId || "") === String(ctx.agentRunId || "")
+  ));
+  if (!candidate) return null;
+  candidate.meta = {
+    ...(candidate.meta || {}),
+    agentRunId: ctx.agentRunId,
+    agentRuntimeRunId: authoritativeId,
+  };
+  return candidate;
+}
+
+async function attachAgentRuntimeProjection(ctx, event, options = {}) {
   const runtimeRunId = String(event?.data?.runtimeRunId || "");
   if (!runtimeRunId) return;
+  const recoveredAttachment = options.recovered === true;
 
-  let assistant = findAgentAssistantByRuntime(ctx, runtimeRunId);
+  let assistant = recoveredAttachment
+    ? rebindRecoveredRuntimeAssistant(ctx, runtimeRunId)
+    : findAgentAssistantByRuntime(ctx, runtimeRunId);
   if (assistant && !assistant.streaming) return;
 
   if (!assistant) {
@@ -7930,7 +8023,7 @@ async function projectAgentModelStarted(ctx, event) {
       _streamProjection: "pending",
       _model: ctx.model || getSelectedModel(),
       meta: {
-        ...agentEventMeta(ctx, event, "model_started"),
+        ...(recoveredAttachment ? { agentRunId: ctx.agentRunId } : agentEventMeta(ctx, event, "model_started")),
         agentRuntimeRunId: runtimeRunId,
       },
     };
@@ -7938,7 +8031,7 @@ async function projectAgentModelStarted(ctx, event) {
   } else {
     assistant.meta = {
       ...(assistant.meta || {}),
-      ...agentEventMeta(ctx, event, "model_started"),
+      ...(recoveredAttachment ? {} : agentEventMeta(ctx, event, "model_started")),
       agentRuntimeRunId: runtimeRunId,
     };
   }
@@ -7947,14 +8040,17 @@ async function projectAgentModelStarted(ctx, event) {
   ctx.runtimeRunId = runtimeRunId;
   ctx.run.runtimeRunId = runtimeRunId;
   const eventRound = Number(event?.data?.round || 0);
-  ctx.run.modelRound = eventRound > 0
-    ? eventRound
-    : Math.max(0, Number(ctx.run.modelRound || 0)) + 1;
-  ctx.run.modelWaitStartedAt = Date.now();
-  ctx.run.modelResponseStarted = false;
+  if (!recoveredAttachment) {
+    ctx.run.modelRound = eventRound > 0
+      ? eventRound
+      : Math.max(0, Number(ctx.run.modelRound || 0)) + 1;
+    ctx.run.modelWaitStartedAt = Date.now();
+    ctx.run.modelResponseStarted = false;
+  }
   ctx.run.streamTiming = {
     runtimeRunId,
     modelStartedReceivedAt: Date.now(),
+    recoveredAttachment,
   };
   setSessionMessages(ctx.sessionId, ctx.messages);
   renderSessionMessages(ctx.sessionId);
@@ -7968,9 +8064,11 @@ async function projectAgentModelStarted(ctx, event) {
     // Attach before persisting the checkpoint. Persistence is still serialized
     // normally, but it must not sit on the live-delta critical path.
     const streamPromise = _callModelOnceAttempt(assistantIndex, true, ctx);
-    persistRunCheckpoint(ctx, "running", "model", { runtimeRunId }).catch((error) => {
-      console.error("Failed to persist model-start checkpoint:", error);
-    });
+    if (!recoveredAttachment) {
+      persistRunCheckpoint(ctx, "running", "model", { runtimeRunId }).catch((error) => {
+        console.error("Failed to persist model-start checkpoint:", error);
+      });
+    }
     await streamPromise;
     const turnUsage = { ...(ctx.responseUsage || {}) };
     const projected = ctx.messages[assistantIndex];
@@ -7978,7 +8076,7 @@ async function projectAgentModelStarted(ctx, event) {
       const hasUsage = ["input", "output", "cache"].some((key) => Number(turnUsage[key] || 0) > 0);
       projected.meta = {
         ...(projected.meta || {}),
-        ...agentEventMeta(ctx, event, "model_started"),
+        ...(recoveredAttachment ? {} : agentEventMeta(ctx, event, "model_started")),
         agentRuntimeRunId: runtimeRunId,
         ...(hasUsage ? { _usage: turnUsage } : {}),
       };
@@ -7990,23 +8088,66 @@ async function projectAgentModelStarted(ctx, event) {
     // run reaches `cancelled`; finalizePausedRun() will then append the pause
     // marker and timing without discarding text that was already visible.
     if (ctx.run?.cancelRequested || error?.code === "runtime_cancelled") return;
-    // Durable model_completed contains the complete response. If the short-lived
-    // child runtime has expired, discard only its empty/partial projection and
-    // let that event rebuild the round without issuing another model request.
-    const projectedIndex = ctx.messages.findIndex((msg) => (
-      msg?.role === "assistant"
-      && msg?.meta?.agentRunId === ctx.agentRunId
-      && msg?.meta?.agentRuntimeRunId === runtimeRunId
-      && msg?.streaming
-    ));
-    if (projectedIndex >= 0) ctx.messages.splice(projectedIndex, 1);
-    ctx.runtimeRunId = "";
-    ctx.run.runtimeRunId = "";
+    // The parent AgentRun owns this child Runtime ID. A stale or expired child
+    // is not permission to clear the authoritative ID or create a replacement;
+    // keep the projection and let the durable parent terminal event close it.
+    console.warn("Agent model Runtime attachment ended before parent terminal state:", error);
   } finally {
     ctx.responseUsage = null;
     setSessionMessages(ctx.sessionId, ctx.messages);
     renderSessionMessages(ctx.sessionId);
   }
+}
+
+async function projectAgentModelStarted(ctx, event) {
+  const runtimeRunId = String(event?.data?.runtimeRunId || "");
+  if (!runtimeRunId) return;
+  // A refresh recovery can win the tiny race between active_runtime_id being
+  // published and model_started being appended. The Runtime consumer remains
+  // idempotent, but the later durable event must still contribute its metadata
+  // and round bookkeeping before its already-owned promise is reused.
+  if (ctx._agentRuntimeProjectionConsumers?.has(runtimeRunId)) {
+    const assistant = findAgentAssistantByRuntime(ctx, runtimeRunId);
+    if (assistant) {
+      assistant.meta = {
+        ...(assistant.meta || {}),
+        ...agentEventMeta(ctx, event, "model_started"),
+        agentRuntimeRunId: runtimeRunId,
+      };
+    }
+    const eventRound = Number(event?.data?.round || 0);
+    ctx.run.modelRound = eventRound > 0
+      ? eventRound
+      : Math.max(0, Number(ctx.run.modelRound || 0)) + 1;
+    ctx.runtimeRunId = runtimeRunId;
+    ctx.run.runtimeRunId = runtimeRunId;
+  }
+  return consumeAgentRuntimeProjection(
+    ctx,
+    runtimeRunId,
+    () => attachAgentRuntimeProjection(ctx, event),
+  );
+}
+
+async function recoverActiveAgentRuntimeProjection(ctx, snapshot) {
+  const activeRuntimeRunId = String(snapshot?.activeRuntimeRunId || "");
+  if (!activeRuntimeRunId) {
+    return { status: "no-active-runtime", runtimeRunId: "" };
+  }
+  ctx.runtimeRunId = activeRuntimeRunId;
+  ctx.run.runtimeRunId = activeRuntimeRunId;
+  if (snapshotHasPendingModelStarted(snapshot, ctx.agentEventCursor || 0)) {
+    return { status: "pending-model-start", runtimeRunId: activeRuntimeRunId };
+  }
+
+  await consumeAgentRuntimeProjection(
+    ctx,
+    activeRuntimeRunId,
+    () => attachAgentRuntimeProjection(ctx, {
+      data: { runtimeRunId: activeRuntimeRunId },
+    }, { recovered: true }),
+  );
+  return { status: "reattached", runtimeRunId: activeRuntimeRunId };
 }
 
 function projectAgentModelCompleted(ctx, event) {
@@ -8571,6 +8712,12 @@ async function runServerAgentLoop(ctx) {
       });
     }
 
+    // A page reload can resume after model_started was already consumed by the
+    // durable Agent cursor. In that case the parent snapshot's active Runtime
+    // is authoritative and must be reattached before parent polling continues.
+    // If model_started is still pending, the normal event replay path owns it.
+    await recoverActiveAgentRuntimeProjection(ctx, snapshot);
+
     snapshot = await agentRuntime.watchAgentRun({
       agentRunId: ctx.agentRunId,
       cursor: ctx.agentEventCursor || 0,
@@ -8899,8 +9046,6 @@ function reconcileOptimisticFirstMessage(message, content, imageRefs, model) {
     if (Object.keys(message.meta).length === 0) delete message.meta;
   }
 }
-
-
 
 async function sendMessage(userText, options = {}) {
 

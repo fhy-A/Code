@@ -115,6 +115,459 @@ async function errorMessage(callback) {{
         self.assertNotIn("Please enter a New API sub key in Models first.", APP_SOURCE)
         self.assertNotIn("Please refresh and select a model first.", APP_SOURCE)
 
+    def test_active_model_runtime_recovery_uses_snapshot_authority_and_one_owner(self):
+        ownership_start = APP_SOURCE.index("const activeAgentRuntimeProjectionOwners")
+        ownership_end = APP_SOURCE.index("function rebindRecoveredRuntimeAssistant", ownership_start)
+        ownership_source = APP_SOURCE[ownership_start:ownership_end]
+        project_start = APP_SOURCE.index("async function projectAgentModelStarted")
+        recovery_start = APP_SOURCE.index("async function recoverActiveAgentRuntimeProjection")
+        project_source = APP_SOURCE[project_start:recovery_start]
+        recovery_end = APP_SOURCE.index("function projectAgentModelCompleted", recovery_start)
+        recovery_source = APP_SOURCE[recovery_start:recovery_end]
+        script = f"""
+{ownership_source}
+const attachmentCalls = [];
+async function attachAgentRuntimeProjection(ctx, event, options) {{
+  attachmentCalls.push({{
+    agentRunId: ctx.agentRunId,
+    runtimeRunId: event?.data?.runtimeRunId || "",
+    recovered: options?.recovered === true,
+  }});
+}}
+function findAgentAssistantByRuntime(ctx, runtimeRunId) {{
+  return (ctx.messages || []).find((message) => message?.meta?.agentRuntimeRunId === runtimeRunId);
+}}
+function agentEventMeta(ctx, event, type) {{
+  return {{agentRunId: ctx.agentRunId, agentEventType: type, agentEventSeq: event.seq}};
+}}
+{project_source}
+{recovery_source}
+(async () => {{
+  let releaseShared;
+  let sharedConsumerCalls = 0;
+  const sharedGate = new Promise((resolve) => {{ releaseShared = resolve; }});
+  const ownerCtx = {{agentRunId: "agent-owner", sessionId: "session-owner"}};
+  const first = consumeAgentRuntimeProjection(ownerCtx, "runtime-shared", async () => {{
+    sharedConsumerCalls += 1;
+    await sharedGate;
+    return "shared-result";
+  }});
+  const second = consumeAgentRuntimeProjection(ownerCtx, "runtime-shared", async () => {{
+    sharedConsumerCalls += 1;
+    return "duplicate-result";
+  }});
+  await Promise.resolve();
+  releaseShared();
+  const sharedResults = await Promise.all([first, second]);
+  const settledResult = await consumeAgentRuntimeProjection(ownerCtx, "runtime-shared", async () => {{
+    sharedConsumerCalls += 1;
+    return "late-duplicate-result";
+  }});
+
+  const missingCtx = {{
+    agentRunId: "agent-missing",
+    sessionId: "session-missing",
+    agentEventCursor: 4,
+    runtimeRunId: "persisted-clue",
+    run: {{runtimeRunId: "persisted-clue"}},
+  }};
+  const missing = await recoverActiveAgentRuntimeProjection(missingCtx, {{
+    activeRuntimeRunId: "",
+    events: [],
+  }});
+
+  const pendingCtx = {{
+    agentRunId: "agent-pending",
+    sessionId: "session-pending",
+    agentEventCursor: 4,
+    runtimeRunId: "stale-runtime",
+    run: {{runtimeRunId: "stale-runtime"}},
+    messages: [],
+  }};
+  const pending = await recoverActiveAgentRuntimeProjection(pendingCtx, {{
+    activeRuntimeRunId: "runtime-authoritative-pending",
+    events: [{{seq: 5, type: "model_started", data: {{runtimeRunId: "runtime-authoritative-pending"}}}}],
+  }});
+
+  const recoveredCtx = {{
+    agentRunId: "agent-recovered",
+    sessionId: "session-recovered",
+    agentEventCursor: 9,
+    runtimeRunId: "stale-runtime",
+    run: {{runtimeRunId: "stale-runtime"}},
+    messages: [],
+  }};
+  const recovered = await recoverActiveAgentRuntimeProjection(recoveredCtx, {{
+    activeRuntimeRunId: "runtime-authoritative",
+    events: [],
+  }});
+  const recoveredAssistant = {{
+    role: "assistant",
+    streaming: true,
+    meta: {{agentRunId: "agent-recovered", agentRuntimeRunId: "runtime-authoritative"}},
+  }};
+  recoveredCtx.messages.push(recoveredAssistant);
+  await projectAgentModelStarted(recoveredCtx, {{
+    seq: 10,
+    type: "model_started",
+    data: {{runtimeRunId: "runtime-authoritative", round: 3}},
+  }});
+
+  process.stdout.write(JSON.stringify({{
+    samePromise: first === second,
+    sharedConsumerCalls,
+    sharedResults,
+    settledResult,
+    missing,
+    missingRuntimeRunId: missingCtx.runtimeRunId,
+    missingRunRuntimeRunId: missingCtx.run.runtimeRunId,
+    pending,
+    pendingRuntimeRunId: pendingCtx.runtimeRunId,
+    pendingRunRuntimeRunId: pendingCtx.run.runtimeRunId,
+    recovered,
+    recoveredRuntimeRunId: recoveredCtx.runtimeRunId,
+    recoveredRunRuntimeRunId: recoveredCtx.run.runtimeRunId,
+    recoveredModelRound: recoveredCtx.run.modelRound,
+    recoveredAssistantMeta: recoveredAssistant.meta,
+    attachmentCalls,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["samePromise"])
+        self.assertEqual(data["sharedConsumerCalls"], 1)
+        self.assertEqual(data["sharedResults"], ["shared-result", "shared-result"])
+        self.assertEqual(data["settledResult"], "shared-result")
+        self.assertEqual(data["missing"]["status"], "no-active-runtime")
+        self.assertEqual(data["missingRuntimeRunId"], "persisted-clue")
+        self.assertEqual(data["missingRunRuntimeRunId"], "persisted-clue")
+        self.assertEqual(data["pending"]["status"], "pending-model-start")
+        self.assertEqual(data["pendingRuntimeRunId"], "runtime-authoritative-pending")
+        self.assertEqual(data["pendingRunRuntimeRunId"], "runtime-authoritative-pending")
+        self.assertEqual(data["recovered"]["status"], "reattached")
+        self.assertEqual(data["recoveredRuntimeRunId"], "runtime-authoritative")
+        self.assertEqual(data["recoveredRunRuntimeRunId"], "runtime-authoritative")
+        self.assertEqual(data["recoveredModelRound"], 3)
+        self.assertEqual(data["recoveredAssistantMeta"]["agentEventType"], "model_started")
+        self.assertEqual(data["recoveredAssistantMeta"]["agentEventSeq"], 10)
+        self.assertEqual(data["attachmentCalls"], [{
+            "agentRunId": "agent-recovered",
+            "runtimeRunId": "runtime-authoritative",
+            "recovered": True,
+        }])
+
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop")
+        loop_end = APP_SOURCE.index("async function executeRunContext", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+        get_index = loop_source.index("let snapshot = await agentRuntime.getAgentRun")
+        recover_index = loop_source.index("await recoverActiveAgentRuntimeProjection(ctx, snapshot)")
+        watch_index = loop_source.index("snapshot = await agentRuntime.watchAgentRun")
+        self.assertLess(get_index, recover_index)
+        self.assertLess(recover_index, watch_index)
+        attachment_start = APP_SOURCE.index("async function attachAgentRuntimeProjection")
+        attachment_end = APP_SOURCE.index("async function projectAgentModelStarted", attachment_start)
+        attachment_source = APP_SOURCE[attachment_start:attachment_end]
+        self.assertNotIn('ctx.runtimeRunId = ""', attachment_source)
+        self.assertNotIn('ctx.run.runtimeRunId = ""', attachment_source)
+        self.assertNotIn("createRun(", attachment_source)
+        self.assertIn("const streamPromise = _callModelOnceAttempt", attachment_source)
+
+    def test_first_model_delta_persists_one_metadata_only_checkpoint(self):
+        helper_start = APP_SOURCE.index("function markModelResponseStarted")
+        helper_end = APP_SOURCE.index("function getRecoveryCountdownSeconds", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const state = {{sessionId: "other-session"}};
+const checkpoints = [];
+const saves = [];
+function syncActiveRunBanner() {{}}
+function makeRunCheckpoint(ctx, status, phase, extra) {{
+  return {{status, phase, ...extra, fromRun: ctx.run.hasFirstModelResponseStarted}};
+}}
+function setSessionRunState(sessionId, checkpoint) {{
+  checkpoints.push({{sessionId, checkpoint}});
+}}
+async function saveSessionState(sessionId, messages, stats, title, options) {{
+  saves.push({{sessionId, messages, stats, title, options}});
+}}
+{helper_source}
+(async () => {{
+  const messages = [{{role: "assistant", content: "partial", streaming: true}}];
+  const run = {{
+    hasFirstModelResponseStarted: false,
+    modelResponseStarted: false,
+    modelWaitStartedAt: 123,
+    modelRecovery: {{attempt: 1}},
+    runtimeRunId: "runtime-authoritative",
+  }};
+  const ctx = {{
+    sessionId: "session-1",
+    runtimeRunId: "runtime-authoritative",
+    messages,
+    stats: {{input: 1}},
+    run,
+  }};
+  recordModelResponseStarted(ctx, run, "session-1");
+  recordModelResponseStarted(ctx, run, "session-1");
+  await Promise.resolve();
+  process.stdout.write(JSON.stringify({{
+    run,
+    checkpointCount: checkpoints.length,
+    checkpoints,
+    saveCount: saves.length,
+    persistMessages: saves[0]?.options?.persistMessages,
+    sameMessages: saves[0]?.messages === messages,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["run"]["hasFirstModelResponseStarted"])
+        self.assertTrue(data["run"]["modelResponseStarted"])
+        self.assertIsNone(data["run"]["modelWaitStartedAt"])
+        self.assertIsNone(data["run"]["modelRecovery"])
+        self.assertEqual(data["checkpointCount"], 1)
+        self.assertEqual(data["saveCount"], 1)
+        self.assertFalse(data["persistMessages"])
+        self.assertTrue(data["sameMessages"])
+        checkpoint = data["checkpoints"][0]["checkpoint"]
+        self.assertTrue(checkpoint["hasFirstModelResponseStarted"])
+        self.assertTrue(checkpoint["fromRun"])
+        self.assertEqual(checkpoint["runtimeRunId"], "runtime-authoritative")
+
+    def test_existing_runtime_404_never_creates_a_replacement_run(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+const calls = [];
+global.fetch = async (url, options = {{}}) => {{
+  calls.push({{url: String(url), method: String(options.method || "GET")}});
+  return new Response(JSON.stringify({{error: "runtime missing"}}), {{
+    status: 404,
+    headers: {{"Content-Type": "application/json"}},
+  }});
+}};
+eval(source);
+(async () => {{
+  let errorStatus = 0;
+  let errorMessage = "";
+  try {{
+    const response = await window.Code.agent.runtime.openSseResponse({{
+      runId: "runtime-expired",
+      sessionId: "session-1",
+      payload: {{model: "should-not-be-used"}},
+      keys: ["should-not-be-used"],
+    }});
+    await response.body.getReader().read();
+  }} catch (error) {{
+    errorStatus = Number(error?.status || 0);
+    errorMessage = error?.message || String(error);
+  }}
+  process.stdout.write(JSON.stringify({{calls, errorStatus, errorMessage}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["errorStatus"], 404)
+        self.assertEqual(data["calls"], [{
+            "url": "/api/runtime/runs/runtime-expired?cursor=0&wait=25",
+            "method": "GET",
+        }])
+        self.assertNotEqual(data["calls"][0]["url"], "/api/runtime/runs")
+
+    def test_existing_runtime_replay_restores_body_across_repeated_attachments(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+const calls = [];
+let requestCount = 0;
+const frames = [
+  {{seq: 1, data: JSON.stringify({{choices: [{{delta: {{reasoning_content: "思考一。"}}}}]}})}},
+  {{seq: 2, data: JSON.stringify({{choices: [{{delta: {{content: "第一段。\\n\\n"}}}}]}})}},
+  {{seq: 3, data: JSON.stringify({{choices: [{{delta: {{content: "第二段。\\n\\n"}}}}]}})}},
+  {{seq: 4, data: JSON.stringify({{choices: [{{delta: {{tool_calls: [{{
+    index: 0,
+    id: "call-1",
+    function: {{name: "read_file", arguments: "{{\\\"path\\\":\\\"VERSION\\\"}}"}},
+  }}]}}}}]}})}},
+  {{seq: 5, data: JSON.stringify({{choices: [{{delta: {{content: "第三段。"}}, finish_reason: "stop"}}]}})}},
+  {{seq: 6, data: "[DONE]"}},
+];
+global.fetch = async (url, options = {{}}) => {{
+  calls.push({{url: String(url), method: String(options.method || "GET")}});
+  requestCount += 1;
+  if (requestCount % 2 === 1) {{
+    return new Response(JSON.stringify({{
+      status: "model",
+      events: [],
+      nextCursor: 0,
+    }}), {{status: 200, headers: {{"Content-Type": "application/json"}}}});
+  }}
+  return new Response(JSON.stringify({{
+    status: "completed",
+    events: frames,
+    nextCursor: 6,
+  }}), {{status: 200, headers: {{"Content-Type": "application/json"}}}});
+}};
+eval(source);
+async function attach() {{
+  const response = await window.Code.agent.runtime.openSseResponse({{
+    runId: "runtime-replay",
+    sessionId: "session-1",
+  }});
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  while (true) {{
+    const packet = await reader.read();
+    if (packet.done) break;
+    raw += decoder.decode(packet.value);
+  }}
+  const payloads = raw.split(/\\r?\\n/)
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6));
+  const jsonFrames = payloads.filter((item) => item !== "[DONE]").map(JSON.parse);
+  return {{
+    content: jsonFrames.map((frame) => frame.choices?.[0]?.delta?.content || "").join(""),
+    reasoning: jsonFrames.map((frame) => frame.choices?.[0]?.delta?.reasoning_content || "").join(""),
+    toolNames: jsonFrames.flatMap((frame) => frame.choices?.[0]?.delta?.tool_calls || [])
+      .map((call) => call.function?.name || ""),
+    doneCount: payloads.filter((item) => item === "[DONE]").length,
+  }};
+}}
+(async () => {{
+  const first = await attach();
+  const second = await attach();
+  process.stdout.write(JSON.stringify({{first, second, calls}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        expected = {
+            "content": "第一段。\n\n第二段。\n\n第三段。",
+            "reasoning": "思考一。",
+            "toolNames": ["read_file"],
+            "doneCount": 1,
+        }
+        self.assertEqual(data["first"], expected)
+        self.assertEqual(data["second"], expected)
+        self.assertEqual(len(data["calls"]), 4)
+        self.assertTrue(all(
+            call == {
+                "url": "/api/runtime/runs/runtime-replay?cursor=0&wait=25",
+                "method": "GET",
+            }
+            for call in data["calls"]
+        ))
+
+    def test_replayed_model_completion_reuses_one_assistant(self):
+        projection_start = APP_SOURCE.index("function projectAgentModelCompleted")
+        projection_end = APP_SOURCE.index("function findAgentCompactionProjection", projection_start)
+        projection_source = APP_SOURCE[projection_start:projection_end]
+        script = f"""
+function findAgentAssistantByRuntime(ctx, runtimeRunId) {{
+  return ctx.messages.find((message) => message?.meta?.agentRuntimeRunId === runtimeRunId);
+}}
+function splitThoughtContent(text) {{
+  return {{thought: "restored thought", content: String(text).replace(/^.*?\\n/, "")}};
+}}
+function toolProgressSummary() {{ return ""; }}
+function agentEventMeta(ctx, event, type) {{
+  return {{agentRunId: ctx.agentRunId, agentEventType: type, agentEventSeq: event.seq}};
+}}
+function markModelResponseStarted(run) {{ run.hasFirstModelResponseStarted = true; }}
+function cloneUsageStats(usage) {{ return {{...usage}}; }}
+function setSessionLastUsage() {{}}
+function updateUsage() {{}}
+{projection_source}
+const assistant = {{
+  role: "assistant",
+  content: "partial body",
+  thought: "partial thought",
+  streaming: true,
+  meta: {{agentRunId: "agent-1", agentRuntimeRunId: "runtime-1"}},
+}};
+const ctx = {{
+  agentRunId: "agent-1",
+  sessionId: "session-1",
+  model: "model-1",
+  messages: [assistant],
+  run: {{}},
+  runtimeRunId: "runtime-1",
+}};
+const event = {{
+  seq: 12,
+  createdAt: "2026-08-04T00:00:00Z",
+  data: {{
+    runtimeRunId: "runtime-1",
+    reasoning: "final thought",
+    content: "final body",
+    usage: {{input: 10, output: 20}},
+    toolCalls: [],
+  }},
+}};
+projectAgentModelCompleted(ctx, event);
+projectAgentModelCompleted(ctx, event);
+process.stdout.write(JSON.stringify({{
+  messageCount: ctx.messages.length,
+  sameAssistant: ctx.messages[0] === assistant,
+  streaming: assistant.streaming,
+  content: assistant.content,
+  eventType: assistant.meta.agentEventType,
+  eventSeq: assistant.meta.agentEventSeq,
+  runtimeRunId: assistant.meta.agentRuntimeRunId,
+  ctxRuntimeRunId: ctx.runtimeRunId,
+  runRuntimeRunId: ctx.run.runtimeRunId,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["messageCount"], 1)
+        self.assertTrue(data["sameAssistant"])
+        self.assertFalse(data["streaming"])
+        self.assertEqual(data["content"], "final body")
+        self.assertEqual(data["eventType"], "model_completed")
+        self.assertEqual(data["eventSeq"], 12)
+        self.assertEqual(data["runtimeRunId"], "runtime-1")
+        self.assertEqual(data["ctxRuntimeRunId"], "")
+        self.assertEqual(data["runRuntimeRunId"], "")
+
     def test_session_title_fallbacks_use_current_language(self):
         save_state_start = APP_SOURCE.index("async function saveSessionState(")
         save_state_end = APP_SOURCE.index("async function saveCurrentSession()", save_state_start)
@@ -8754,7 +9207,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("run.hasFirstModelResponseStarted = true;", response_helper)
         self.assertLess(
             response_helper.index("run.hasFirstModelResponseStarted = true;"),
-            response_helper.index("if (run.modelResponseStarted) return;"),
+            response_helper.index("if (run.modelResponseStarted) return firstResponseStarted;"),
         )
 
         self.assertIn("hasFirstModelResponseStarted: false", STATE_SOURCE)

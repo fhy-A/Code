@@ -149,7 +149,7 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
         self.assertIn("if (!isLast) delete projectedFrame.usage", RUNTIME_SOURCE)
 
     def test_server_owned_model_attaches_before_checkpoint_persistence(self):
-        start = APP_SOURCE.index("async function projectAgentModelStarted")
+        start = APP_SOURCE.index("async function attachAgentRuntimeProjection")
         end = APP_SOURCE.index("function projectAgentModelCompleted", start)
         projection = APP_SOURCE[start:end]
         attach = projection.index("const streamPromise = _callModelOnceAttempt")
