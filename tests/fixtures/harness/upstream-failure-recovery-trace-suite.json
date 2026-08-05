@@ -1,0 +1,299 @@
+{
+  "fixtureVersion": 1,
+  "evidenceProfile": {
+    "id": "h3-2c1-upstream-failure-non-action",
+    "version": 1,
+    "replayPayload": "single-run-fixture-v1",
+    "productionEvidence": "model-runtime-agent-run-integration-v1"
+  },
+  "suite": "h3-2c1-upstream-failure-recovery",
+  "source": "synthetic",
+  "clock": {
+    "origin": "2030-06-01T00:00:00Z",
+    "note": "Synthetic monotonic timestamps for H3-2C1 evidence replay."
+  },
+  "fixtures": [
+    {
+      "name": "upstream-401-config-terminal",
+      "source": "synthetic",
+      "tags": ["upstream", "http", "terminal"],
+      "sourceFacts": {
+        "caseKind": "http-failure",
+        "upstreamStatus": 401,
+        "upstreamMessage": "Synthetic upstream authorization failure.",
+        "runtimeErrorCode": "config_error",
+        "runtimeTransient": false,
+        "agentRunErrorCode": "config_error",
+        "agentEventTypes": ["created", "model_started", "failed"],
+        "runtimeInput": {
+          "userContent": "Synthetic request for generic 401 evidence.",
+          "responseMode": "http-error",
+          "httpStatus": 401,
+          "httpMessage": "Synthetic upstream authorization failure."
+        },
+        "fallback": {"tested": false}
+      },
+      "initialSnapshot": {"status": "model", "eventCursor": 0},
+      "events": [
+        {"seq": 1, "type": "created", "data": {"model": "test-model"}, "createdAt": "2030-06-01T00:00:01Z"},
+        {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-evidence-401"}, "createdAt": "2030-06-01T00:00:02Z"},
+        {"seq": 3, "type": "failed", "data": {"error": "Synthetic upstream authorization failure.", "errorCode": "config_error"}, "createdAt": "2030-06-01T00:00:03Z"}
+      ],
+      "recoveryPoints": [],
+      "checkpoints": [
+        {
+          "afterSeq": 2,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started"]
+        },
+        {
+          "afterSeq": 3,
+          "expectedState": {"status": "failed", "terminalStatus": "failed", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "failed"]
+        }
+      ],
+      "expectedTerminal": {"status": "failed", "eventType": "failed"}
+    },
+    {
+      "name": "upstream-429-transient-terminal",
+      "source": "synthetic",
+      "tags": ["upstream", "http", "terminal", "transient"],
+      "sourceFacts": {
+        "caseKind": "http-failure",
+        "upstreamStatus": 429,
+        "upstreamMessage": "Synthetic upstream rate limit.",
+        "runtimeErrorCode": "upstream_error",
+        "runtimeTransient": true,
+        "agentRunErrorCode": "upstream_error",
+        "agentEventTypes": ["created", "model_started", "failed"],
+        "runtimeInput": {
+          "userContent": "Synthetic request for 429 evidence.",
+          "responseMode": "http-error",
+          "httpStatus": 429,
+          "httpMessage": "Synthetic upstream rate limit."
+        },
+        "fallback": {"tested": false}
+      },
+      "initialSnapshot": {"status": "model", "eventCursor": 0},
+      "events": [
+        {"seq": 1, "type": "created", "data": {"model": "test-model"}, "createdAt": "2030-06-01T00:01:01Z"},
+        {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-evidence-429"}, "createdAt": "2030-06-01T00:01:02Z"},
+        {"seq": 3, "type": "failed", "data": {"error": "Synthetic upstream rate limit.", "errorCode": "upstream_error"}, "createdAt": "2030-06-01T00:01:03Z"}
+      ],
+      "recoveryPoints": [],
+      "checkpoints": [
+        {
+          "afterSeq": 2,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started"]
+        },
+        {
+          "afterSeq": 3,
+          "expectedState": {"status": "failed", "terminalStatus": "failed", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "failed"]
+        }
+      ],
+      "expectedTerminal": {"status": "failed", "eventType": "failed"}
+    },
+    {
+      "name": "upstream-502-transient-terminal",
+      "source": "synthetic",
+      "tags": ["upstream", "http", "terminal", "transient", "fallback"],
+      "sourceFacts": {
+        "caseKind": "http-failure",
+        "upstreamStatus": 502,
+        "upstreamMessage": "Synthetic upstream unavailable.",
+        "runtimeErrorCode": "upstream_error",
+        "runtimeTransient": true,
+        "agentRunErrorCode": "upstream_error",
+        "agentEventTypes": ["created", "model_started", "failed"],
+        "runtimeInput": {
+          "userContent": "Synthetic request for 502 evidence.",
+          "responseMode": "http-error",
+          "httpStatus": 502,
+          "httpMessage": "Synthetic upstream unavailable."
+        },
+        "fallback": {
+          "tested": true,
+          "firstAttemptStatus": 502,
+          "keyCount": 2,
+          "expectedCalls": 2,
+          "expectedRuntimeStatus": "completed",
+          "scope": "representative-status-only"
+        }
+      },
+      "initialSnapshot": {"status": "model", "eventCursor": 0},
+      "events": [
+        {"seq": 1, "type": "created", "data": {"model": "test-model"}, "createdAt": "2030-06-01T00:02:01Z"},
+        {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-evidence-502"}, "createdAt": "2030-06-01T00:02:02Z"},
+        {"seq": 3, "type": "failed", "data": {"error": "Synthetic upstream unavailable.", "errorCode": "upstream_error"}, "createdAt": "2030-06-01T00:02:03Z"}
+      ],
+      "recoveryPoints": [],
+      "checkpoints": [
+        {
+          "afterSeq": 2,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started"]
+        },
+        {
+          "afterSeq": 3,
+          "expectedState": {"status": "failed", "terminalStatus": "failed", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "failed"]
+        }
+      ],
+      "expectedTerminal": {"status": "failed", "eventType": "failed"}
+    },
+    {
+      "name": "model-first-response-timeout-terminal",
+      "source": "synthetic",
+      "tags": ["upstream", "timeout", "terminal", "transient"],
+      "sourceFacts": {
+        "caseKind": "first-response-timeout",
+        "upstreamStatus": 200,
+        "upstreamMessage": "No model content, reasoning, or tool call was received within 0.12 seconds",
+        "runtimeErrorCode": "model_response_timeout",
+        "runtimeTransient": true,
+        "agentRunErrorCode": "model_response_timeout",
+        "agentEventTypes": ["created", "model_started", "failed"],
+        "runtimeInput": {
+          "userContent": "Synthetic request for first response timeout evidence.",
+          "responseMode": "first-response-timeout",
+          "httpStatus": 200,
+          "timeoutSeconds": 0.12
+        },
+        "fallback": {"tested": false}
+      },
+      "initialSnapshot": {"status": "model", "eventCursor": 0},
+      "events": [
+        {"seq": 1, "type": "created", "data": {"model": "test-model"}, "createdAt": "2030-06-01T00:03:01Z"},
+        {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-evidence-timeout"}, "createdAt": "2030-06-01T00:03:02Z"},
+        {"seq": 3, "type": "failed", "data": {"error": "No model content, reasoning, or tool call was received within 0.12 seconds", "errorCode": "model_response_timeout"}, "createdAt": "2030-06-01T00:03:03Z"}
+      ],
+      "recoveryPoints": [],
+      "checkpoints": [
+        {
+          "afterSeq": 2,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started"]
+        },
+        {
+          "afterSeq": 3,
+          "expectedState": {"status": "failed", "terminalStatus": "failed", "modelRoundCount": 1, "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "failed"]
+        }
+      ],
+      "expectedTerminal": {"status": "failed", "eventType": "failed"}
+    },
+    {
+      "name": "model-empty-output-recovery-current",
+      "source": "synthetic",
+      "tags": ["model", "non-action", "empty", "recovery"],
+      "sourceFacts": {
+        "caseKind": "non-action",
+        "upstreamStatus": 0,
+        "upstreamMessage": "",
+        "runtimeErrorCode": "",
+        "runtimeTransient": false,
+        "agentRunErrorCode": "",
+        "agentEventTypes": ["created", "model_started", "model_completed", "model_recovery", "model_started", "model_completed", "completed"],
+        "runtimeInput": {
+          "userContent": "Synthetic request for empty output recovery evidence.",
+          "responseMode": "empty-then-content",
+          "httpStatus": 200,
+          "finalContent": "Synthetic recovered answer after empty output."
+        },
+        "fallback": {"tested": false}
+      },
+      "initialSnapshot": {"status": "model", "eventCursor": 0},
+      "events": [
+        {"seq": 1, "type": "created", "data": {"model": "test-model"}, "createdAt": "2030-06-01T00:04:01Z"},
+        {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-evidence-empty-1"}, "createdAt": "2030-06-01T00:04:02Z"},
+        {"seq": 3, "type": "model_completed", "data": {"round": 1, "runtimeRunId": "runtime-evidence-empty-1", "content": "", "reasoning": "", "toolCalls": [], "finishReason": "stop", "outcome": "empty"}, "createdAt": "2030-06-01T00:04:03Z"},
+        {"seq": 4, "type": "model_recovery", "data": {"reason": "empty", "attempt": 1, "maxAttempts": 1, "runtimeRunId": "runtime-evidence-empty-1"}, "createdAt": "2030-06-01T00:04:04Z"},
+        {"seq": 5, "type": "model_started", "data": {"round": 2, "runtimeRunId": "runtime-evidence-empty-2"}, "createdAt": "2030-06-01T00:04:05Z"},
+        {"seq": 6, "type": "model_completed", "data": {"round": 2, "runtimeRunId": "runtime-evidence-empty-2", "content": "Synthetic recovered answer after empty output.", "reasoning": "", "toolCalls": [], "finishReason": "stop", "outcome": "completed"}, "createdAt": "2030-06-01T00:04:06Z"},
+        {"seq": 7, "type": "completed", "data": {}, "createdAt": "2030-06-01T00:04:07Z"}
+      ],
+      "recoveryPoints": [],
+      "checkpoints": [
+        {
+          "afterSeq": 3,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-empty-1", "status": "completed", "outcome": "empty"}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed"]
+        },
+        {
+          "afterSeq": 4,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-empty-1", "status": "recovery", "outcome": "empty"}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed", "model_recovery"]
+        },
+        {
+          "afterSeq": 5,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 2, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-empty-1", "status": "recovery", "outcome": "empty"}, {"round": 2, "runtimeRunId": "runtime-evidence-empty-2", "status": "running", "outcome": ""}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed", "model_recovery", "model_started"]
+        },
+        {
+          "afterSeq": 7,
+          "expectedState": {"status": "completed", "terminalStatus": "completed", "modelRoundCount": 2, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-empty-1", "status": "recovery", "outcome": "empty"}, {"round": 2, "runtimeRunId": "runtime-evidence-empty-2", "status": "completed", "outcome": "completed"}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed", "model_recovery", "model_started", "model_completed", "completed"]
+        }
+      ],
+      "expectedTerminal": {"status": "completed", "eventType": "completed"}
+    },
+    {
+      "name": "model-reasoning-only-recovery-current",
+      "source": "synthetic",
+      "tags": ["model", "non-action", "reasoning-only", "recovery"],
+      "sourceFacts": {
+        "caseKind": "non-action",
+        "upstreamStatus": 0,
+        "upstreamMessage": "",
+        "runtimeErrorCode": "",
+        "runtimeTransient": false,
+        "agentRunErrorCode": "",
+        "agentEventTypes": ["created", "model_started", "model_completed", "model_recovery", "model_started", "model_completed", "completed"],
+        "runtimeInput": {
+          "userContent": "Synthetic request for reasoning only recovery evidence.",
+          "responseMode": "reasoning-then-content",
+          "httpStatus": 200,
+          "reasoning": "Synthetic internal reasoning without an answer.",
+          "finalContent": "Synthetic recovered answer after reasoning only."
+        },
+        "fallback": {"tested": false}
+      },
+      "initialSnapshot": {"status": "model", "eventCursor": 0},
+      "events": [
+        {"seq": 1, "type": "created", "data": {"model": "test-model"}, "createdAt": "2030-06-01T00:05:01Z"},
+        {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-evidence-reasoning-1"}, "createdAt": "2030-06-01T00:05:02Z"},
+        {"seq": 3, "type": "model_completed", "data": {"round": 1, "runtimeRunId": "runtime-evidence-reasoning-1", "content": "", "reasoning": "Synthetic internal reasoning without an answer.", "toolCalls": [], "finishReason": "stop", "outcome": "reasoning_only"}, "createdAt": "2030-06-01T00:05:03Z"},
+        {"seq": 4, "type": "model_recovery", "data": {"reason": "reasoning_only", "attempt": 1, "maxAttempts": 1, "runtimeRunId": "runtime-evidence-reasoning-1"}, "createdAt": "2030-06-01T00:05:04Z"},
+        {"seq": 5, "type": "model_started", "data": {"round": 2, "runtimeRunId": "runtime-evidence-reasoning-2"}, "createdAt": "2030-06-01T00:05:05Z"},
+        {"seq": 6, "type": "model_completed", "data": {"round": 2, "runtimeRunId": "runtime-evidence-reasoning-2", "content": "Synthetic recovered answer after reasoning only.", "reasoning": "", "toolCalls": [], "finishReason": "stop", "outcome": "completed"}, "createdAt": "2030-06-01T00:05:06Z"},
+        {"seq": 7, "type": "completed", "data": {}, "createdAt": "2030-06-01T00:05:07Z"}
+      ],
+      "recoveryPoints": [],
+      "checkpoints": [
+        {
+          "afterSeq": 3,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-reasoning-1", "status": "completed", "outcome": "reasoning_only"}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed"]
+        },
+        {
+          "afterSeq": 4,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 1, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-reasoning-1", "status": "recovery", "outcome": "reasoning_only"}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed", "model_recovery"]
+        },
+        {
+          "afterSeq": 5,
+          "expectedState": {"status": "model", "terminalStatus": "", "modelRoundCount": 2, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-reasoning-1", "status": "recovery", "outcome": "reasoning_only"}, {"round": 2, "runtimeRunId": "runtime-evidence-reasoning-2", "status": "running", "outcome": ""}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed", "model_recovery", "model_started"]
+        },
+        {
+          "afterSeq": 7,
+          "expectedState": {"status": "completed", "terminalStatus": "completed", "modelRoundCount": 2, "modelRounds": [{"round": 1, "runtimeRunId": "runtime-evidence-reasoning-1", "status": "recovery", "outcome": "reasoning_only"}, {"round": 2, "runtimeRunId": "runtime-evidence-reasoning-2", "status": "completed", "outcome": "completed"}], "pendingKind": ""},
+          "expectedTimeline": ["created", "model_started", "model_completed", "model_recovery", "model_started", "model_completed", "completed"]
+        }
+      ],
+      "expectedTerminal": {"status": "completed", "eventType": "completed"}
+    }
+  ]
+}

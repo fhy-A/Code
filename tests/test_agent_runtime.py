@@ -17,6 +17,27 @@ from unittest import mock
 import requests
 
 import server as server_mod
+from agent_protocol import normalize_agent_event
+
+
+_H3_2C1_SUITE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "harness"
+    / "upstream-failure-recovery-trace-suite.json"
+)
+
+
+def _load_h3_2c1_evidence_fixtures():
+    suite = json.loads(_H3_2C1_SUITE_PATH.read_text(encoding="utf-8"))
+    if suite.get("evidenceProfile") != {
+        "id": "h3-2c1-upstream-failure-non-action",
+        "version": 1,
+        "replayPayload": "single-run-fixture-v1",
+        "productionEvidence": "model-runtime-agent-run-integration-v1",
+    }:
+        raise AssertionError("unexpected H3-2C1 evidence profile")
+    return suite["fixtures"]
 
 
 class _AgentUpstream(BaseHTTPRequestHandler):
@@ -49,6 +70,22 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                 if type(self).scripted_rounds
                 else None
             )
+        if isinstance(scripted_frames, dict) and scripted_frames.get("first_response_timeout"):
+            self.send_response(int(scripted_frames.get("http_status") or 200))
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.end_headers()
+            deadline = time.monotonic() + max(
+                float(scripted_frames["first_response_timeout"]) * 4,
+                0.3,
+            )
+            while time.monotonic() < deadline:
+                try:
+                    self.wfile.write(b": synthetic keepalive\n\n")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.01)
+            return
         if isinstance(scripted_frames, dict) and scripted_frames.get("http_error"):
             status = int(scripted_frames.get("http_error") or 400)
             body = json.dumps({
@@ -593,6 +630,296 @@ class TestDurableAgentRuntime(unittest.TestCase):
         while run.get("worker") is not None and time.time() < deadline:
             time.sleep(0.01)
         self.assertIsNone(run.get("worker"))
+
+    def _assert_expected_subset(self, actual, expected, path):
+        if isinstance(expected, dict):
+            self.assertIsInstance(actual, dict, path)
+            for key, value in expected.items():
+                self.assertIn(key, actual, f"{path}.{key}")
+                self._assert_expected_subset(actual[key], value, f"{path}.{key}")
+            return
+        if isinstance(expected, list):
+            self.assertIsInstance(actual, list, path)
+            self.assertEqual(len(actual), len(expected), path)
+            for index, value in enumerate(expected):
+                self._assert_expected_subset(actual[index], value, f"{path}[{index}]")
+            return
+        self.assertEqual(actual, expected, path)
+
+    def _assert_agent_events_match_evidence_fixture(self, run, fixture):
+        actual_events = run["events"]
+        expected_events = fixture["events"]
+        facts = fixture["sourceFacts"]
+        self.assertEqual(
+            [event["type"] for event in actual_events],
+            facts["agentEventTypes"],
+            "$.sourceFacts.agentEventTypes",
+        )
+        self.assertEqual(len(actual_events), len(expected_events), "$.events")
+
+        expected_runtime_ids = [
+            event["data"]["runtimeRunId"]
+            for event in expected_events
+            if event["type"] == "model_started"
+        ]
+        actual_runtime_ids = [
+            event["data"]["runtimeRunId"]
+            for event in actual_events
+            if event["type"] == "model_started"
+        ]
+        self.assertEqual(len(actual_runtime_ids), len(expected_runtime_ids), "$.events.runtimeRunId")
+        runtime_ids = dict(zip(expected_runtime_ids, actual_runtime_ids))
+
+        def replace_runtime_ids(value):
+            if isinstance(value, dict):
+                return {key: replace_runtime_ids(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [replace_runtime_ids(item) for item in value]
+            return runtime_ids.get(value, value)
+
+        for index, (actual, expected) in enumerate(zip(actual_events, expected_events)):
+            normalized = normalize_agent_event(actual, strict=True)
+            self.assertEqual(normalized["diagnostics"], [], f"$.events[{index}]")
+            self.assertEqual(actual["seq"], expected["seq"], f"$.events[{index}].seq")
+            self.assertEqual(actual["type"], expected["type"], f"$.events[{index}].type")
+            self._assert_expected_subset(
+                actual["data"],
+                replace_runtime_ids(expected["data"]),
+                f"$.events[{index}].data",
+            )
+        return actual_runtime_ids
+
+    def test_h3_2c1_agent_failures_and_runtime_snapshots_consume_same_case_data(self):
+        fixtures = [
+            fixture for fixture in _load_h3_2c1_evidence_fixtures()
+            if fixture["sourceFacts"]["caseKind"] in {
+                "http-failure",
+                "first-response-timeout",
+            }
+        ]
+        agent_projection_by_status = {}
+        for index, fixture in enumerate(fixtures):
+            with self.subTest(fixture=fixture["name"]):
+                facts = fixture["sourceFacts"]
+                runtime_input = facts["runtimeInput"]
+                scripted = (
+                    {
+                        "http_error": runtime_input["httpStatus"],
+                        "message": runtime_input["httpMessage"],
+                    }
+                    if facts["caseKind"] == "http-failure"
+                    else {
+                        "first_response_timeout": runtime_input["timeoutSeconds"],
+                        "http_status": runtime_input["httpStatus"],
+                    }
+                )
+                with _AgentUpstream.scripted_lock:
+                    _AgentUpstream.scripted_rounds = [scripted]
+                timeout_patch = (
+                    mock.patch.object(
+                        server_mod,
+                        "_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT",
+                        runtime_input["timeoutSeconds"],
+                    )
+                    if facts["caseKind"] == "first-response-timeout"
+                    else mock.patch.object(
+                        server_mod,
+                        "_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT",
+                        server_mod._MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT,
+                    )
+                )
+                with timeout_patch, mock.patch.object(
+                    server_mod,
+                    "_AGENT_EVENT_PROTOCOL_V1_ENABLED",
+                    True,
+                ):
+                    run = server_mod._create_agent_run(
+                        f"h3-2c1-agent-failure-{index}",
+                        {
+                            "model": "test-model",
+                            "messages": [{
+                                "role": "user",
+                                "content": runtime_input["userContent"],
+                            }],
+                        },
+                        self.base_url,
+                        ["synthetic-agent-key"],
+                        allowed_tools=[],
+                        max_rounds=3,
+                    )
+                    self._wait_terminal(run)
+
+                snapshot = server_mod._agent_snapshot(run, 0)
+                self.assertEqual(snapshot["status"], "failed")
+                self.assertEqual(
+                    snapshot["errorCode"],
+                    facts["agentRunErrorCode"],
+                    f"$.fixtures[{index}].sourceFacts.agentRunErrorCode",
+                )
+                runtime_ids = self._assert_agent_events_match_evidence_fixture(run, fixture)
+                self.assertEqual(len(runtime_ids), 1)
+                runtime_run = server_mod._get_model_runtime_run(runtime_ids[0])
+                self.assertIsNotNone(runtime_run)
+                runtime_snapshot = server_mod._runtime_snapshot(runtime_run, 0)
+                self.assertEqual(
+                    runtime_snapshot["upstreamStatus"],
+                    facts["upstreamStatus"],
+                    f"$.fixtures[{index}].sourceFacts.upstreamStatus",
+                )
+                self.assertEqual(
+                    runtime_snapshot["errorCode"],
+                    facts["runtimeErrorCode"],
+                    f"$.fixtures[{index}].sourceFacts.runtimeErrorCode",
+                )
+                self.assertEqual(
+                    runtime_snapshot["transient"],
+                    facts["runtimeTransient"],
+                    f"$.fixtures[{index}].sourceFacts.runtimeTransient",
+                )
+                if facts["upstreamStatus"] in {429, 502}:
+                    agent_projection_by_status[facts["upstreamStatus"]] = (
+                        snapshot["status"],
+                        snapshot["errorCode"],
+                        [event["type"] for event in run["events"]],
+                    )
+
+        self.assertEqual(agent_projection_by_status[429], agent_projection_by_status[502])
+
+    def test_h3_2c1_non_action_agent_events_match_current_production_order(self):
+        fixtures = [
+            fixture for fixture in _load_h3_2c1_evidence_fixtures()
+            if fixture["sourceFacts"]["caseKind"] == "non-action"
+        ]
+        for index, fixture in enumerate(fixtures):
+            with self.subTest(fixture=fixture["name"]):
+                runtime_input = fixture["sourceFacts"]["runtimeInput"]
+                if runtime_input["responseMode"] == "empty-then-content":
+                    first_delta = {}
+                else:
+                    first_delta = {"reasoning_content": runtime_input["reasoning"]}
+                with _AgentUpstream.scripted_lock:
+                    _AgentUpstream.scripted_rounds = [
+                        [{"choices": [{"delta": first_delta, "finish_reason": "stop"}]}],
+                        [{"choices": [{
+                            "delta": {"content": runtime_input["finalContent"]},
+                            "finish_reason": "stop",
+                        }]}],
+                    ]
+                with mock.patch.object(
+                    server_mod,
+                    "_AGENT_EVENT_PROTOCOL_V1_ENABLED",
+                    True,
+                ):
+                    run = server_mod._create_agent_run(
+                        f"h3-2c1-agent-non-action-{index}",
+                        {
+                            "model": "test-model",
+                            "messages": [{
+                                "role": "user",
+                                "content": runtime_input["userContent"],
+                            }],
+                        },
+                        self.base_url,
+                        ["synthetic-agent-key"],
+                        allowed_tools=[],
+                        max_rounds=3,
+                    )
+                    self._wait_terminal(run)
+                snapshot = server_mod._agent_snapshot(run, 0)
+                runtime_ids = self._assert_agent_events_match_evidence_fixture(run, fixture)
+
+                self.assertEqual(snapshot["status"], "completed")
+                self.assertEqual(snapshot["result"]["content"], runtime_input["finalContent"])
+                self.assertEqual([item["outcome"] for item in run["rounds"]], [
+                    fixture["events"][2]["data"]["outcome"],
+                    "completed",
+                ])
+                self.assertNotIn("model_pending", [event["type"] for event in run["events"]])
+                self.assertEqual(len(runtime_ids), 2)
+                for runtime_id in runtime_ids:
+                    runtime_snapshot = server_mod._runtime_snapshot(
+                        server_mod._get_model_runtime_run(runtime_id),
+                        0,
+                    )
+                    self.assertEqual(runtime_snapshot["status"], "completed")
+                    self.assertEqual(
+                        runtime_snapshot["upstreamStatus"],
+                        fixture["sourceFacts"]["upstreamStatus"],
+                        "$.sourceFacts.upstreamStatus",
+                    )
+                    self.assertEqual(
+                        runtime_snapshot["errorCode"],
+                        fixture["sourceFacts"]["runtimeErrorCode"],
+                        "$.sourceFacts.runtimeErrorCode",
+                    )
+                    self.assertEqual(
+                        runtime_snapshot["transient"],
+                        fixture["sourceFacts"]["runtimeTransient"],
+                        "$.sourceFacts.runtimeTransient",
+                    )
+
+    def test_h3_2c1_pre_event_fallback_reaches_agent_only_for_representative_502(self):
+        fixture = next(
+            fixture for fixture in _load_h3_2c1_evidence_fixtures()
+            if fixture["sourceFacts"]["fallback"]["tested"]
+        )
+        facts = fixture["sourceFacts"]
+        fallback = facts["fallback"]
+        self.assertEqual(facts["upstreamStatus"], 502)
+        self.assertEqual(fallback["scope"], "representative-status-only")
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                {
+                    "http_error": fallback["firstAttemptStatus"],
+                    "message": facts["runtimeInput"]["httpMessage"],
+                },
+                [{"choices": [{
+                    "delta": {"content": "Synthetic fallback completed."},
+                    "finish_reason": "stop",
+                }]}],
+            ]
+        with mock.patch.object(
+            server_mod,
+            "_AGENT_EVENT_PROTOCOL_V1_ENABLED",
+            True,
+        ):
+            run = server_mod._create_agent_run(
+                "h3-2c1-agent-fallback",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": facts["runtimeInput"]["userContent"],
+                    }],
+                },
+                self.base_url,
+                ["synthetic-primary-key", "synthetic-secondary-key"],
+                allowed_tools=[],
+                max_rounds=3,
+            )
+            self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(_AgentUpstream.calls, fallback["expectedCalls"])
+        self.assertEqual(len(_AgentUpstream.authorizations), fallback["keyCount"])
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "Synthetic fallback completed.")
+        self.assertEqual(
+            [event["type"] for event in run["events"]],
+            ["created", "model_started", "model_completed", "completed"],
+        )
+        self.assertNotIn("failed", [event["type"] for event in run["events"]])
+        runtime_id = next(
+            event["data"]["runtimeRunId"]
+            for event in run["events"] if event["type"] == "model_started"
+        )
+        runtime_snapshot = server_mod._runtime_snapshot(
+            server_mod._get_model_runtime_run(runtime_id),
+            0,
+        )
+        self.assertEqual(runtime_snapshot["status"], fallback["expectedRuntimeStatus"])
+        self.assertEqual(runtime_snapshot["errorCode"], "")
+        self.assertNotIn(facts["upstreamMessage"], json.dumps(runtime_snapshot, ensure_ascii=False))
 
     def test_agent_context_limit_and_multilingual_request_estimate(self):
         self.assertEqual(server_mod._agent_model_context_limit("gpt-5.6"), 1_000_000)

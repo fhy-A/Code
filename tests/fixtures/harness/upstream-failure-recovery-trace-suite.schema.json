@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://code.example.test/schemas/h3-2c1-upstream-failure-recovery-v1.json",
+  "title": "Code Harness H3-2C1 upstream failure and non-action evidence suite v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fixtureVersion", "evidenceProfile", "suite", "source", "clock", "fixtures"],
+  "properties": {
+    "fixtureVersion": {"const": 1},
+    "evidenceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "replayPayload", "productionEvidence"],
+      "properties": {
+        "id": {"const": "h3-2c1-upstream-failure-non-action"},
+        "version": {"const": 1},
+        "replayPayload": {"const": "single-run-fixture-v1"},
+        "productionEvidence": {"const": "model-runtime-agent-run-integration-v1"}
+      }
+    },
+    "suite": {"const": "h3-2c1-upstream-failure-recovery"},
+    "source": {"const": "synthetic"},
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "note"],
+      "properties": {
+        "origin": {"type": "string", "format": "date-time"},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {"$ref": "#/$defs/fixture"}
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "type", "data", "createdAt"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 1},
+        "type": {"type": "string", "minLength": 1},
+        "data": {"type": "object"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterSeq", "expectedState", "expectedTimeline"],
+      "properties": {
+        "afterSeq": {"type": "integer", "minimum": 1},
+        "expectedState": {"type": "object", "required": ["status"]},
+        "expectedTimeline": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "fallbackUntested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tested"],
+      "properties": {"tested": {"const": false}}
+    },
+    "fallbackTested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tested",
+        "firstAttemptStatus",
+        "keyCount",
+        "expectedCalls",
+        "expectedRuntimeStatus",
+        "scope"
+      ],
+      "properties": {
+        "tested": {"const": true},
+        "firstAttemptStatus": {"type": "integer", "minimum": 100, "maximum": 599},
+        "keyCount": {"const": 2},
+        "expectedCalls": {"const": 2},
+        "expectedRuntimeStatus": {"const": "completed"},
+        "scope": {"const": "representative-status-only"}
+      }
+    },
+    "runtimeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["userContent", "responseMode", "httpStatus"],
+      "properties": {
+        "userContent": {"type": "string", "pattern": "^Synthetic "},
+        "responseMode": {
+          "enum": ["http-error", "first-response-timeout", "empty-then-content", "reasoning-then-content"]
+        },
+        "httpStatus": {"type": "integer", "minimum": 100, "maximum": 599},
+        "httpMessage": {"type": "string"},
+        "reasoning": {"type": "string"},
+        "finalContent": {"type": "string"},
+        "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"responseMode": {"const": "http-error"}}},
+          "then": {"required": ["httpMessage"]}
+        },
+        {
+          "if": {"properties": {"responseMode": {"const": "first-response-timeout"}}},
+          "then": {"required": ["timeoutSeconds"]}
+        },
+        {
+          "if": {"properties": {"responseMode": {"const": "empty-then-content"}}},
+          "then": {"required": ["finalContent"]}
+        },
+        {
+          "if": {"properties": {"responseMode": {"const": "reasoning-then-content"}}},
+          "then": {"required": ["reasoning", "finalContent"]}
+        }
+      ]
+    },
+    "sourceFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseKind",
+        "upstreamStatus",
+        "upstreamMessage",
+        "runtimeErrorCode",
+        "runtimeTransient",
+        "agentRunErrorCode",
+        "agentEventTypes",
+        "runtimeInput",
+        "fallback"
+      ],
+      "properties": {
+        "caseKind": {"enum": ["http-failure", "first-response-timeout", "non-action"]},
+        "upstreamStatus": {
+          "oneOf": [
+            {"const": 0},
+            {"type": "integer", "minimum": 100, "maximum": 599}
+          ]
+        },
+        "upstreamMessage": {"type": "string"},
+        "runtimeErrorCode": {"type": "string"},
+        "runtimeTransient": {"type": "boolean"},
+        "agentRunErrorCode": {"type": "string"},
+        "agentEventTypes": {
+          "type": "array",
+          "minItems": 3,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "runtimeInput": {"$ref": "#/$defs/runtimeInput"},
+        "fallback": {"oneOf": [{"$ref": "#/$defs/fallbackUntested"}, {"$ref": "#/$defs/fallbackTested"}]}
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source",
+        "tags",
+        "sourceFacts",
+        "initialSnapshot",
+        "events",
+        "checkpoints",
+        "expectedTerminal"
+      ],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "source": {"const": "synthetic"},
+        "tags": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "sourceFacts": {"$ref": "#/$defs/sourceFacts"},
+        "initialSnapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "eventCursor"],
+          "properties": {
+            "status": {"const": "model"},
+            "eventCursor": {"const": 0}
+          }
+        },
+        "events": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/event"}},
+        "recoveryPoints": {"type": "array", "maxItems": 0},
+        "checkpoints": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/checkpoint"}},
+        "expectedTerminal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "eventType"],
+          "properties": {
+            "status": {"enum": ["completed", "failed"]},
+            "eventType": {"enum": ["completed", "failed"]}
+          }
+        }
+      }
+    }
+  }
+}

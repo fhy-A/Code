@@ -8,14 +8,37 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 import server as server_mod
 
 
+_H3_2C1_SUITE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "harness"
+    / "upstream-failure-recovery-trace-suite.json"
+)
+
+
+def _load_h3_2c1_evidence_fixtures():
+    suite = json.loads(_H3_2C1_SUITE_PATH.read_text(encoding="utf-8"))
+    if suite.get("evidenceProfile") != {
+        "id": "h3-2c1-upstream-failure-non-action",
+        "version": 1,
+        "replayPayload": "single-run-fixture-v1",
+        "productionEvidence": "model-runtime-agent-run-integration-v1",
+    }:
+        raise AssertionError("unexpected H3-2C1 evidence profile")
+    return suite["fixtures"]
+
+
 class _StreamingUpstream(BaseHTTPRequestHandler):
     calls = 0
     authorizations = []
+    evidence_case = None
+    evidence_fallback_active = False
 
     def log_message(self, *_args):
         return
@@ -26,6 +49,43 @@ class _StreamingUpstream(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         user_content = (payload.get("messages") or [{}])[-1].get("content")
+        evidence_case = type(self).evidence_case
+        if evidence_case:
+            facts = evidence_case["sourceFacts"]
+            runtime_input = facts["runtimeInput"]
+            if user_content == runtime_input["userContent"]:
+                mode = runtime_input["responseMode"]
+                fallback_succeeded = (
+                    type(self).evidence_fallback_active
+                    and facts["fallback"]["tested"]
+                    and type(self).calls > 1
+                )
+                if mode == "http-error" and not fallback_succeeded:
+                    body = json.dumps({
+                        "error": {"message": runtime_input["httpMessage"]},
+                    }).encode("utf-8")
+                    self.send_response(runtime_input["httpStatus"])
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if mode == "first-response-timeout":
+                    self.send_response(runtime_input["httpStatus"])
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.end_headers()
+                    deadline = time.monotonic() + max(
+                        float(runtime_input["timeoutSeconds"]) * 4,
+                        0.3,
+                    )
+                    while time.monotonic() < deadline:
+                        try:
+                            self.wfile.write(b": synthetic keepalive\n\n")
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                        time.sleep(0.01)
+                    return
         if user_content == "always 502":
             body = json.dumps({
                 "error": {
@@ -168,6 +228,8 @@ class TestModelRuntime(unittest.TestCase):
     def setUp(self):
         _StreamingUpstream.calls = 0
         _StreamingUpstream.authorizations = []
+        _StreamingUpstream.evidence_case = None
+        _StreamingUpstream.evidence_fallback_active = False
         with server_mod._model_runtime_lock:
             server_mod._model_runtime_runs.clear()
 
@@ -289,6 +351,131 @@ class TestModelRuntime(unittest.TestCase):
         self.assertEqual(snapshot["errorCode"], "upstream_error")
         self.assertTrue(snapshot["transient"])
         self.assertEqual(snapshot["error"], "Upstream service temporarily unavailable")
+
+    def test_h3_2c1_http_cases_consume_the_versioned_evidence_profile(self):
+        fixtures = [
+            fixture for fixture in _load_h3_2c1_evidence_fixtures()
+            if fixture["sourceFacts"]["caseKind"] == "http-failure"
+        ]
+        for index, fixture in enumerate(fixtures):
+            with self.subTest(fixture=fixture["name"]):
+                facts = fixture["sourceFacts"]
+                _StreamingUpstream.calls = 0
+                _StreamingUpstream.evidence_case = fixture
+                run = server_mod._create_model_runtime_run(
+                    f"h3-2c1-runtime-http-{index}",
+                    {
+                        "model": "test-model",
+                        "messages": [{
+                            "role": "user",
+                            "content": facts["runtimeInput"]["userContent"],
+                        }],
+                    },
+                    self.base_url,
+                    ["synthetic-test-key"],
+                )
+                self._wait_for_terminal(run)
+                snapshot = server_mod._runtime_snapshot(run, 0)
+
+                self.assertEqual(
+                    snapshot["upstreamStatus"],
+                    facts["upstreamStatus"],
+                    f"$.fixtures[{index}].sourceFacts.upstreamStatus",
+                )
+                self.assertEqual(
+                    snapshot["errorCode"],
+                    facts["runtimeErrorCode"],
+                    f"$.fixtures[{index}].sourceFacts.runtimeErrorCode",
+                )
+                self.assertEqual(
+                    snapshot["transient"],
+                    facts["runtimeTransient"],
+                    f"$.fixtures[{index}].sourceFacts.runtimeTransient",
+                )
+                self.assertEqual(snapshot["error"], facts["upstreamMessage"])
+                self.assertEqual(snapshot["status"], "failed")
+                self.assertEqual(_StreamingUpstream.calls, 1)
+                self.assertEqual(
+                    server_mod._classify_runtime_failure(
+                        facts["upstreamStatus"],
+                        facts["upstreamMessage"],
+                    ),
+                    (facts["runtimeErrorCode"], facts["runtimeTransient"]),
+                )
+
+        self.assertEqual(
+            server_mod._classify_runtime_failure(
+                401,
+                "Synthetic credential has no access to model synthetic-model.",
+            ),
+            ("model_access_denied", False),
+        )
+
+    def test_h3_2c1_first_response_timeout_consumes_the_same_case_data(self):
+        fixture = next(
+            item for item in _load_h3_2c1_evidence_fixtures()
+            if item["sourceFacts"]["caseKind"] == "first-response-timeout"
+        )
+        facts = fixture["sourceFacts"]
+        runtime_input = facts["runtimeInput"]
+        _StreamingUpstream.evidence_case = fixture
+        with mock.patch.object(
+            server_mod,
+            "_MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT",
+            runtime_input["timeoutSeconds"],
+        ):
+            run = server_mod._create_model_runtime_run(
+                "h3-2c1-runtime-timeout",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": runtime_input["userContent"]}],
+                },
+                self.base_url,
+                ["synthetic-test-key"],
+            )
+            self._wait_for_terminal(run)
+        snapshot = server_mod._runtime_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["upstreamStatus"], facts["upstreamStatus"], "$.sourceFacts.upstreamStatus")
+        self.assertEqual(snapshot["errorCode"], facts["runtimeErrorCode"], "$.sourceFacts.runtimeErrorCode")
+        self.assertEqual(snapshot["transient"], facts["runtimeTransient"], "$.sourceFacts.runtimeTransient")
+        self.assertEqual(snapshot["error"], facts["upstreamMessage"])
+        self.assertEqual(_StreamingUpstream.calls, 1)
+
+    def test_h3_2c1_pre_event_multi_key_fallback_is_scoped_to_the_502_case(self):
+        fixture = next(
+            item for item in _load_h3_2c1_evidence_fixtures()
+            if item["sourceFacts"]["fallback"]["tested"]
+        )
+        facts = fixture["sourceFacts"]
+        fallback = facts["fallback"]
+        self.assertEqual(facts["upstreamStatus"], 502)
+        self.assertEqual(fallback["scope"], "representative-status-only")
+        _StreamingUpstream.evidence_case = fixture
+        _StreamingUpstream.evidence_fallback_active = True
+        run = server_mod._create_model_runtime_run(
+            "h3-2c1-runtime-fallback",
+            {
+                "model": "test-model",
+                "messages": [{
+                    "role": "user",
+                    "content": facts["runtimeInput"]["userContent"],
+                }],
+            },
+            self.base_url,
+            ["synthetic-primary-key", "synthetic-secondary-key"],
+        )
+        self._wait_for_terminal(run)
+        snapshot = server_mod._runtime_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], fallback["expectedRuntimeStatus"])
+        self.assertEqual(_StreamingUpstream.calls, fallback["expectedCalls"])
+        self.assertEqual(len(_StreamingUpstream.authorizations), fallback["keyCount"])
+        self.assertEqual(snapshot["result"]["content"], "hello")
+        self.assertEqual(snapshot["errorCode"], "")
+        self.assertEqual(snapshot["events"][0]["seq"], 1)
+        self.assertNotIn(facts["upstreamMessage"], json.dumps(snapshot, ensure_ascii=False))
 
     def test_first_response_timeout_ignores_keepalive_and_usage_only_events(self):
         for user_content in ("keepalive only", "usage only"):
