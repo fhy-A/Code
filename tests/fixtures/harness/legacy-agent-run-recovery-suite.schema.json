@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workbar.test/schemas/legacy-agent-run-recovery-suite-v1.schema.json",
+  "title": "H3-2C2 legacy AgentRun recovery evidence manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifestVersion", "evidenceProfile", "persistedV4Fields", "cases"],
+  "properties": {
+    "manifestVersion": {"const": 1},
+    "evidenceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sourceKind", "productionEvidence"],
+      "properties": {
+        "id": {"const": "h3-2c2-legacy-agent-run-recovery"},
+        "version": {"const": 1},
+        "sourceKind": {"const": "referenced-compatibility-fixtures"},
+        "productionEvidence": {"const": "agent-run-loader-snapshot-persistence-v1"}
+      }
+    },
+    "persistedV4Fields": {
+      "type": "array",
+      "minItems": 39,
+      "maxItems": 39,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/case"}
+    }
+  },
+  "$defs": {
+    "sourceFixture": {
+      "enum": [
+        "compatibility/agent-run-v1.json",
+        "compatibility/agent-run-v2.json",
+        "compatibility/agent-run-v3.json",
+        "compatibility/agent-run-v4.json"
+      ]
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "missingFields": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 19,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "loaderFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "resume_status", "client_request_id", "parent_agent_run_id",
+        "parent_tool_call_id", "agent_depth", "permission_profile", "error_code",
+        "non_action_count", "force_final_round", "force_final_reason", "context_limit",
+        "context_recovery_round", "pending_steers", "pending_input_present",
+        "steer_receipt_count", "compaction_count", "next_seq", "max_rounds"
+      ],
+      "properties": {
+        "status": {"type": "string"},
+        "resume_status": {"type": "string"},
+        "client_request_id": {"type": "string"},
+        "parent_agent_run_id": {"type": "string"},
+        "parent_tool_call_id": {"type": "string"},
+        "agent_depth": {"type": "integer", "minimum": 0},
+        "permission_profile": {"type": "string"},
+        "error_code": {"type": "string"},
+        "non_action_count": {"type": "integer", "minimum": 0},
+        "force_final_round": {"type": "boolean"},
+        "force_final_reason": {"type": "string"},
+        "context_limit": {"type": "integer", "minimum": 1},
+        "context_recovery_round": {"type": "integer", "minimum": 0},
+        "pending_steers": {"type": "array", "maxItems": 0},
+        "pending_input_present": {"type": "boolean"},
+        "steer_receipt_count": {"type": "integer", "minimum": 0},
+        "compaction_count": {"type": "integer", "minimum": 0},
+        "next_seq": {"type": "integer", "minimum": 1},
+        "max_rounds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "snapshotFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "clientRequestId", "parentAgentRunId", "parentToolCallId", "agentDepth",
+        "permissionProfile", "errorCode", "nonActionCount", "forceFinalRound", "contextLimit",
+        "round", "pendingSteerCount", "pendingInputPresent", "steerReceiptCount",
+        "compactionCount", "nextCursor"
+      ],
+      "properties": {
+        "status": {"type": "string"},
+        "clientRequestId": {"type": "string"},
+        "parentAgentRunId": {"type": "string"},
+        "parentToolCallId": {"type": "string"},
+        "agentDepth": {"type": "integer", "minimum": 0},
+        "permissionProfile": {"type": "string"},
+        "errorCode": {"type": "string"},
+        "nonActionCount": {"type": "integer", "minimum": 0},
+        "forceFinalRound": {"type": "boolean"},
+        "contextLimit": {"type": "integer", "minimum": 1},
+        "round": {"type": "integer", "minimum": 0},
+        "pendingSteerCount": {"type": "integer", "minimum": 0},
+        "pendingInputPresent": {"type": "boolean"},
+        "steerReceiptCount": {"type": "integer", "minimum": 0},
+        "compactionCount": {"type": "integer", "minimum": 0},
+        "nextCursor": {"type": "integer", "minimum": 0}
+      }
+    },
+    "persistedFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "status", "resumeStatus", "clientRequestId", "parentAgentRunId",
+        "parentToolCallId", "agentDepth", "permissionProfile", "errorCode", "nonActionCount",
+        "forceFinalRound", "forceFinalReason", "contextLimit", "contextRecoveryRound",
+        "pendingSteers", "pendingInputPresent", "steerReceiptCount", "compactionCount", "nextSeq"
+      ],
+      "properties": {
+        "version": {"const": 4},
+        "status": {"type": "string"},
+        "resumeStatus": {"type": "string"},
+        "clientRequestId": {"type": "string"},
+        "parentAgentRunId": {"type": "string"},
+        "parentToolCallId": {"type": "string"},
+        "agentDepth": {"type": "integer", "minimum": 0},
+        "permissionProfile": {"type": "string"},
+        "errorCode": {"type": "string"},
+        "nonActionCount": {"type": "integer", "minimum": 0},
+        "forceFinalRound": {"type": "boolean"},
+        "forceFinalReason": {"type": "string"},
+        "contextLimit": {"type": "integer", "minimum": 1},
+        "contextRecoveryRound": {"type": "integer", "minimum": 0},
+        "pendingSteers": {"type": "array", "maxItems": 0},
+        "pendingInputPresent": {"type": "boolean"},
+        "steerReceiptCount": {"type": "integer", "minimum": 0},
+        "compactionCount": {"type": "integer", "minimum": 0},
+        "nextSeq": {"type": "integer", "minimum": 1}
+      }
+    },
+    "restartEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "reason", "resumeStatus"],
+      "properties": {
+        "type": {"const": "waiting_credentials"},
+        "reason": {"const": "server_restarted"},
+        "resumeStatus": {"type": "string"}
+      }
+    },
+    "diskFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "firstLoadStatus", "firstLoadEventTypes", "firstLoadNextSeq", "firstLoadNextCursor",
+        "restartEvents", "cacheHitSameObject", "persistedVersion", "secondLoadStatus",
+        "secondLoadEventTypes", "secondLoadNextSeq", "secondLoadNextCursor",
+        "publicSnapshotStable", "persistedRecordStable"
+      ],
+      "properties": {
+        "firstLoadStatus": {"type": "string"},
+        "firstLoadEventTypes": {"type": "array", "items": {"type": "string"}},
+        "firstLoadNextSeq": {"type": "integer", "minimum": 1},
+        "firstLoadNextCursor": {"type": "integer", "minimum": 0},
+        "restartEvents": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/restartEvent"}},
+        "cacheHitSameObject": {"const": true},
+        "persistedVersion": {"const": 4},
+        "secondLoadStatus": {"type": "string"},
+        "secondLoadEventTypes": {"type": "array", "items": {"type": "string"}},
+        "secondLoadNextSeq": {"type": "integer", "minimum": 1},
+        "secondLoadNextCursor": {"type": "integer", "minimum": 0},
+        "publicSnapshotStable": {"const": true},
+        "persistedRecordStable": {"const": true}
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["loader", "snapshot", "persisted", "disk"],
+      "properties": {
+        "loader": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fields"],
+          "properties": {"fields": {"$ref": "#/$defs/loaderFields"}}
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fields"],
+          "properties": {"fields": {"$ref": "#/$defs/snapshotFields"}}
+        },
+        "persisted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fields"],
+          "properties": {"fields": {"$ref": "#/$defs/persistedFields"}}
+        },
+        "disk": {"$ref": "#/$defs/diskFields"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "sourceFixture", "sourceCanonicalSha256", "sourceRecordVersion",
+        "missingFields", "expected"
+      ],
+      "properties": {
+        "name": {"enum": ["agent-run-v1", "agent-run-v2", "agent-run-v3", "agent-run-v4"]},
+        "sourceFixture": {"$ref": "#/$defs/sourceFixture"},
+        "sourceCanonicalSha256": {"$ref": "#/$defs/sha256"},
+        "sourceRecordVersion": {"type": "integer", "minimum": 1, "maximum": 4},
+        "missingFields": {"$ref": "#/$defs/missingFields"},
+        "expected": {"$ref": "#/$defs/expected"}
+      }
+    }
+  }
+}
