@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workbar.local/schemas/harness/manual-compaction-visible-history-evidence-v1.schema.json",
+  "title": "H3-2D2 manual compaction visible history evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "evidenceProfile",
+    "sourceSlice",
+    "fixedInputs",
+    "sourceMessages",
+    "expected"
+  ],
+  "properties": {
+    "$schema": {"type": "string", "const": "./manual-compaction-visible-history-evidence.schema.json"},
+    "schemaVersion": {"type": "integer", "const": 1},
+    "evidenceProfile": {"$ref": "#/$defs/evidenceProfile"},
+    "sourceSlice": {"$ref": "#/$defs/sourceSlice"},
+    "fixedInputs": {"$ref": "#/$defs/fixedInputs"},
+    "sourceMessages": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "items": {"$ref": "#/$defs/sourceMessage"}
+    },
+    "expected": {"$ref": "#/$defs/expected"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "stringArray": {"type": "array", "items": {"type": "string"}},
+    "hashArray": {"type": "array", "items": {"$ref": "#/$defs/sha256"}},
+    "zeroSideEffects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["browserCalls", "modelCalls", "networkCalls", "threadStarts", "toolCalls", "workerStarts"],
+      "properties": {
+        "browserCalls": {"type": "integer", "const": 0},
+        "modelCalls": {"type": "integer", "const": 0},
+        "networkCalls": {"type": "integer", "const": 0},
+        "threadStarts": {"type": "integer", "const": 0},
+        "toolCalls": {"type": "integer", "const": 0},
+        "workerStarts": {"type": "integer", "const": 0}
+      }
+    },
+    "evidenceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "scope"],
+      "properties": {
+        "id": {"const": "h3-2d2-manual-compaction-visible-history"},
+        "version": {"type": "integer", "const": 1},
+        "scope": {"const": "exact-app-source-slice-success-chain"}
+      }
+    },
+    "sourceSlice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startMarker", "endMarker", "requiredFunction", "sha256"],
+      "properties": {
+        "startMarker": {"const": "async function compactConversation()"},
+        "endMarker": {"const": "function projectOptimisticFirstMessage("},
+        "requiredFunction": {"const": "function hideCompactConfirm()"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "fixedInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "now", "model", "baseUrl", "summary", "markerSentinel"],
+      "properties": {
+        "sessionId": {"const": "session-h3-2d2-synthetic"},
+        "now": {"type": "string", "format": "date-time"},
+        "model": {"const": "synthetic-compaction-model"},
+        "baseUrl": {"const": "https://synthetic.invalid"},
+        "summary": {"const": "SYNTHETIC_COMPACT_SUMMARY_INTERNAL"},
+        "markerSentinel": {"const": "VISIBLE_MANUAL_COMPACTION_COMPLETED"}
+      }
+    },
+    "simpleMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceMessageId"],
+      "properties": {
+        "evidenceMessageId": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "toolCallMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceMessageId", "toolCallId", "action", "tool"],
+      "properties": {
+        "evidenceMessageId": {"const": "msg-tool-call-1"},
+        "toolCallId": {"const": "tool-call-synthetic-1"},
+        "action": {"const": "read_file"},
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "path"],
+          "properties": {
+            "action": {"const": "read_file"},
+            "path": {"const": "synthetic/visible-history.txt"}
+          }
+        }
+      }
+    },
+    "toolResultMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceMessageId", "toolCallId", "action", "outcome", "result"],
+      "properties": {
+        "evidenceMessageId": {"const": "msg-tool-result-1"},
+        "toolCallId": {"const": "tool-call-synthetic-1"},
+        "action": {"const": "read_file"},
+        "outcome": {"const": "succeeded"},
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ok", "path"],
+          "properties": {
+            "ok": {"const": true},
+            "path": {"const": "synthetic/visible-history.txt"}
+          }
+        }
+      }
+    },
+    "sourceMessage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "content", "meta", "_time"],
+          "properties": {
+            "role": {"enum": ["user", "assistant"]},
+            "content": {"$ref": "#/$defs/nonEmptyString"},
+            "meta": {"$ref": "#/$defs/simpleMeta"},
+            "_time": {"type": "string", "format": "date-time"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "content", "meta", "_time"],
+          "properties": {
+            "role": {"const": "tool-call"},
+            "content": {"const": ""},
+            "meta": {"$ref": "#/$defs/toolCallMeta"},
+            "_time": {"type": "string", "format": "date-time"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "content", "meta", "_time"],
+          "properties": {
+            "role": {"const": "tool-result"},
+            "content": {"const": "VISIBLE_TOOL_RESULT_1"},
+            "meta": {"$ref": "#/$defs/toolResultMeta"},
+            "_time": {"type": "string", "format": "date-time"}
+          }
+        }
+      ]
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "counts",
+        "source",
+        "slice",
+        "plan",
+        "execution",
+        "archive",
+        "completed",
+        "save",
+        "model",
+        "ui",
+        "sideEffects",
+        "replayHash"
+      ],
+      "properties": {
+        "counts": {"$ref": "#/$defs/counts"},
+        "source": {"$ref": "#/$defs/sourceExpected"},
+        "slice": {"$ref": "#/$defs/sliceExpected"},
+        "plan": {"$ref": "#/$defs/planExpected"},
+        "execution": {"$ref": "#/$defs/executionExpected"},
+        "archive": {"$ref": "#/$defs/archiveExpected"},
+        "completed": {"$ref": "#/$defs/completedExpected"},
+        "save": {"$ref": "#/$defs/saveExpected"},
+        "model": {"$ref": "#/$defs/modelExpected"},
+        "ui": {"$ref": "#/$defs/uiExpected"},
+        "sideEffects": {"$ref": "#/$defs/zeroSideEffects"},
+        "replayHash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceMessages", "visibleSourceSentinels", "finalMessages", "summaryMessages", "markerMessages"],
+      "properties": {
+        "sourceMessages": {"type": "integer", "const": 13},
+        "visibleSourceSentinels": {"type": "integer", "const": 12},
+        "finalMessages": {"type": "integer", "const": 15},
+        "summaryMessages": {"type": "integer", "const": 1},
+        "markerMessages": {"type": "integer", "const": 1}
+      }
+    },
+    "sourceExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageIds", "messageCanonicalHashes", "historyCanonicalHash", "visibleSentinels"],
+      "properties": {
+        "messageIds": {"$ref": "#/$defs/stringArray"},
+        "messageCanonicalHashes": {"$ref": "#/$defs/hashArray"},
+        "historyCanonicalHash": {"$ref": "#/$defs/sha256"},
+        "visibleSentinels": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "sliceExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startMarkerCount", "endMarkerCount", "containsHideCompactConfirm", "characterLength", "sha256", "compiledInVm"],
+      "properties": {
+        "startMarkerCount": {"type": "integer", "const": 1},
+        "endMarkerCount": {"type": "integer", "const": 1},
+        "containsHideCompactConfirm": {"const": true},
+        "characterLength": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "compiledInVm": {"const": true}
+      }
+    },
+    "planExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activeContextMessageIds", "canCompact", "compressCount", "keepCount", "removedMessageIds", "keptMessageIds", "requestMessageCount", "requestApiMessageHashes", "requestApiPayloadHash"],
+      "properties": {
+        "activeContextMessageIds": {"$ref": "#/$defs/stringArray"},
+        "canCompact": {"const": true},
+        "compressCount": {"type": "integer", "minimum": 1},
+        "keepCount": {"type": "integer", "minimum": 1},
+        "removedMessageIds": {"$ref": "#/$defs/stringArray"},
+        "keptMessageIds": {"$ref": "#/$defs/stringArray"},
+        "requestMessageCount": {"type": "integer", "minimum": 1},
+        "requestApiMessageHashes": {"$ref": "#/$defs/hashArray"},
+        "requestApiPayloadHash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "executionExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compactCalls", "archiveCalls", "saveCalls", "renderCalls", "setStreamingCalls", "toastCalls", "confirmHandlersBeforeClick", "cancelHandlersBeforeClick", "modalHandlersBeforeClick", "confirmHandlersAfterCleanup", "cancelHandlersAfterCleanup", "modalHandlersAfterCleanup", "repeatClickAddedCompactCalls", "repeatClickAddedArchiveCalls", "repeatClickAddedSaveCalls", "fixedMarkerTime", "savePersistMessages"],
+      "properties": {
+        "compactCalls": {"type": "integer", "const": 1},
+        "archiveCalls": {"type": "integer", "const": 1},
+        "saveCalls": {"type": "integer", "const": 1},
+        "renderCalls": {"type": "integer", "const": 2},
+        "setStreamingCalls": {"type": "integer", "const": 1},
+        "toastCalls": {"type": "integer", "const": 0},
+        "confirmHandlersBeforeClick": {"type": "integer", "const": 1},
+        "cancelHandlersBeforeClick": {"type": "integer", "const": 2},
+        "modalHandlersBeforeClick": {"type": "integer", "const": 1},
+        "confirmHandlersAfterCleanup": {"type": "integer", "const": 0},
+        "cancelHandlersAfterCleanup": {"type": "integer", "const": 0},
+        "modalHandlersAfterCleanup": {"type": "integer", "const": 0},
+        "repeatClickAddedCompactCalls": {"type": "integer", "const": 0},
+        "repeatClickAddedArchiveCalls": {"type": "integer", "const": 0},
+        "repeatClickAddedSaveCalls": {"type": "integer", "const": 0},
+        "fixedMarkerTime": {"type": "string", "format": "date-time"},
+        "savePersistMessages": {"const": true}
+      }
+    },
+    "archiveExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestPath", "requestMethod", "payloadHash", "payloadMessageHash", "recordHash", "copiedJsonlHash", "responseOk", "pathsInsideTemp", "relativeFiles"],
+      "properties": {
+        "requestPath": {"const": "/api/sessions/session-h3-2d2-synthetic/archive"},
+        "requestMethod": {"const": "PUT"},
+        "payloadHash": {"$ref": "#/$defs/sha256"},
+        "payloadMessageHash": {"$ref": "#/$defs/sha256"},
+        "recordHash": {"$ref": "#/$defs/sha256"},
+        "copiedJsonlHash": {"$ref": "#/$defs/sha256"},
+        "responseOk": {"const": true},
+        "pathsInsideTemp": {"const": true},
+        "relativeFiles": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "completedExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finalMessagesHash", "sourcePrefixHash", "summaryHash", "markerHash", "summaryCount", "markerCount", "markerStatus", "markerSkipApi", "stats"],
+      "properties": {
+        "finalMessagesHash": {"$ref": "#/$defs/sha256"},
+        "sourcePrefixHash": {"$ref": "#/$defs/sha256"},
+        "summaryHash": {"$ref": "#/$defs/sha256"},
+        "markerHash": {"$ref": "#/$defs/sha256"},
+        "summaryCount": {"type": "integer", "const": 1},
+        "markerCount": {"type": "integer", "const": 1},
+        "markerStatus": {"const": "completed"},
+        "markerSkipApi": {"const": true},
+        "stats": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["input", "output", "cache"],
+          "properties": {
+            "input": {"type": "integer", "const": 0},
+            "output": {"type": "integer", "const": 0},
+            "cache": {"type": "integer", "const": 0}
+          }
+        }
+      }
+    },
+    "saveExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serializedHash", "payloadHash", "roundTripHash", "roundTripMessageIds", "originalPrefixHash", "relativeFile"],
+      "properties": {
+        "serializedHash": {"$ref": "#/$defs/sha256"},
+        "payloadHash": {"$ref": "#/$defs/sha256"},
+        "roundTripHash": {"$ref": "#/$defs/sha256"},
+        "roundTripMessageIds": {
+          "type": "array",
+          "items": {"type": ["string", "null"]}
+        },
+        "originalPrefixHash": {"$ref": "#/$defs/sha256"},
+        "relativeFile": {"const": "save/final.jsonl"}
+      }
+    },
+    "modelExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contextLength", "contextSourceMessageIds", "contextKinds", "contextHash", "apiMessageHashes", "apiPayloadHash", "evidenceIdsAbsentFromApiPayload"],
+      "properties": {
+        "contextLength": {"type": "integer", "const": 2},
+        "contextSourceMessageIds": {"$ref": "#/$defs/stringArray"},
+        "contextKinds": {"$ref": "#/$defs/stringArray"},
+        "contextHash": {"$ref": "#/$defs/sha256"},
+        "apiMessageHashes": {"$ref": "#/$defs/hashArray"},
+        "apiPayloadHash": {"$ref": "#/$defs/sha256"},
+        "evidenceIdsAbsentFromApiPayload": {"const": true}
+      }
+    },
+    "uiExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["htmlHash", "visibleTextHash", "visibleSentinels", "markerSentinel", "summarySentinel", "markerCount", "summaryCount"],
+      "properties": {
+        "htmlHash": {"$ref": "#/$defs/sha256"},
+        "visibleTextHash": {"$ref": "#/$defs/sha256"},
+        "visibleSentinels": {"$ref": "#/$defs/stringArray"},
+        "markerSentinel": {"$ref": "#/$defs/nonEmptyString"},
+        "summarySentinel": {"$ref": "#/$defs/nonEmptyString"},
+        "markerCount": {"type": "integer", "const": 1},
+        "summaryCount": {"type": "integer", "const": 0}
+      }
+    }
+  }
+}
