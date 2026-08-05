@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:code:harness:multi-run-trace-suite:v2",
+  "title": "Code Harness synthetic Child AgentRun multi-run trace suite v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["multiRunFixtureVersion", "suite", "source", "clock", "scenarios"],
+  "properties": {
+    "multiRunFixtureVersion": {"const": 2},
+    "suite": {"type": "string", "minLength": 1},
+    "source": {"const": "synthetic"},
+    "clock": {"$ref": "#/$defs/clock"},
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "agentRunId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "note"],
+      "properties": {
+        "origin": {"type": "string", "format": "date-time"},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "sessionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId"],
+      "properties": {
+        "sessionId": {"type": "string", "minLength": 1}
+      }
+    },
+    "agentRunIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentRunId",
+        "sessionRef",
+        "sessionId",
+        "clientRequestId",
+        "role",
+        "parentAgentRunId",
+        "parentToolCallId",
+        "agentDepth"
+      ],
+      "properties": {
+        "agentRunId": {"$ref": "#/$defs/agentRunId"},
+        "sessionRef": {"$ref": "#/$defs/identifier"},
+        "sessionId": {"type": "string", "minLength": 1},
+        "clientRequestId": {"type": "string"},
+        "role": {"enum": ["foreground", "child"]},
+        "parentAgentRunId": {"type": "string"},
+        "parentToolCallId": {"type": "string"},
+        "agentDepth": {"type": "integer", "minimum": 0, "maximum": 1}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "role": {"const": "foreground"},
+            "clientRequestId": {"type": "string", "minLength": 1},
+            "parentAgentRunId": {"const": ""},
+            "parentToolCallId": {"const": ""},
+            "agentDepth": {"const": 0}
+          }
+        },
+        {
+          "properties": {
+            "role": {"const": "child"},
+            "clientRequestId": {"const": ""},
+            "parentAgentRunId": {"$ref": "#/$defs/agentRunId"},
+            "parentToolCallId": {"type": "string", "minLength": 1},
+            "agentDepth": {"const": 1}
+          }
+        }
+      ]
+    },
+    "runtimeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtimeRunId", "agentRunKey", "round"],
+      "properties": {
+        "runtimeRunId": {"type": "string", "minLength": 1},
+        "agentRunKey": {"$ref": "#/$defs/identifier"},
+        "round": {"type": "integer", "minimum": 1}
+      }
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions", "agentRuns", "runtimes", "queueItems", "backgroundJobs"],
+      "properties": {
+        "sessions": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/sessionIdentity"}
+        },
+        "agentRuns": {
+          "type": "object",
+          "minProperties": 3,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/agentRunIdentity"}
+        },
+        "runtimes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/runtimeIdentity"}
+        },
+        "queueItems": {
+          "type": "object",
+          "maxProperties": 0,
+          "additionalProperties": false
+        },
+        "backgroundJobs": {
+          "type": "object",
+          "maxProperties": 0,
+          "additionalProperties": false
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "type", "data", "createdAt"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 1},
+        "type": {"type": "string", "minLength": 1},
+        "data": {"type": "object"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityRef", "initialSnapshot", "events"],
+      "properties": {
+        "identityRef": {"$ref": "#/$defs/identifier"},
+        "initialSnapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "eventCursor"],
+          "properties": {
+            "status": {"type": "string", "minLength": 1},
+            "eventCursor": {"const": 0}
+          }
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/event"}
+        }
+      }
+    },
+    "runMap": {
+      "type": "object",
+      "minProperties": 3,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/run"}
+    },
+    "scheduleStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "kind", "runKey", "agentRunId", "eventSeq"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1},
+        "kind": {"const": "run-event"},
+        "runKey": {"$ref": "#/$defs/identifier"},
+        "agentRunId": {"$ref": "#/$defs/agentRunId"},
+        "eventSeq": {"type": "integer", "minimum": 1}
+      }
+    },
+    "expectedTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolCallId", "name", "status", "outcome"],
+      "properties": {
+        "toolCallId": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "minLength": 1},
+        "outcome": {"type": "string"}
+      }
+    },
+    "expectedRunView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cursor",
+        "status",
+        "terminalStatus",
+        "modelRoundCount",
+        "timeline",
+        "toolCount",
+        "tools"
+      ],
+      "properties": {
+        "cursor": {"type": "integer", "minimum": 0},
+        "status": {"type": "string", "minLength": 1},
+        "terminalStatus": {"type": "string"},
+        "modelRoundCount": {"type": "integer", "minimum": 0},
+        "timeline": {"type": "array", "items": {"type": "string"}},
+        "toolCount": {"type": "integer", "minimum": 0},
+        "tools": {"type": "array", "items": {"$ref": "#/$defs/expectedTool"}}
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterStep", "expectedRunCursors", "expectedRunViews"],
+      "properties": {
+        "afterStep": {"type": "integer", "minimum": 1},
+        "expectedRunCursors": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "expectedRunViews": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": {"$ref": "#/$defs/expectedRunView"}
+        }
+      }
+    },
+    "expectedOrders": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "creation",
+        "terminal",
+        "childCreated",
+        "childTerminal",
+        "parentToolResults",
+        "factMarkers"
+      ],
+      "properties": {
+        "creation": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/identifier"}},
+        "terminal": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/identifier"}},
+        "childCreated": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
+        "childTerminal": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/identifier"}},
+        "parentToolResults": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
+        "factMarkers": {"type": "array", "maxItems": 0}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source",
+        "tags",
+        "identities",
+        "runs",
+        "schedule",
+        "checkpoints",
+        "expectedOrders",
+        "expectedCompositeHash"
+      ],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "source": {"const": "synthetic"},
+        "tags": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "identities": {"$ref": "#/$defs/identities"},
+        "runs": {"$ref": "#/$defs/runMap"},
+        "schedule": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/scheduleStep"}
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"$ref": "#/$defs/checkpoint"}
+        },
+        "expectedOrders": {"$ref": "#/$defs/expectedOrders"},
+        "expectedCompositeHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  }
+}

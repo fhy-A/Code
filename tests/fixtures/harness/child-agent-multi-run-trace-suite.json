@@ -1,0 +1,310 @@
+{
+  "multiRunFixtureVersion": 2,
+  "suite": "h3-2b2-child-agent-relations",
+  "source": "synthetic",
+  "clock": {
+    "origin": "2032-01-01T00:00:00Z",
+    "note": "Fixed synthetic clock; no Child worker, scheduler, usage ledger, UI, Runtime recovery, or network is executed."
+  },
+  "scenarios": [
+    {
+      "name": "child-agent-out-of-order-terminal-parent-results",
+      "source": "synthetic",
+      "tags": ["h3-2b2", "multi-run", "child-agent", "parent-child-relations"],
+      "identities": {
+        "sessions": {
+          "S1": {"sessionId": "session-fixture-child-1"}
+        },
+        "agentRuns": {
+          "P1": {
+            "agentRunId": "11111111111111111111111111111111",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-child-1",
+            "clientRequestId": "synthetic-parent-request",
+            "role": "foreground",
+            "parentAgentRunId": "",
+            "parentToolCallId": "",
+            "agentDepth": 0
+          },
+          "C1": {
+            "agentRunId": "22222222222222222222222222222222",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-child-1",
+            "clientRequestId": "",
+            "role": "child",
+            "parentAgentRunId": "11111111111111111111111111111111",
+            "parentToolCallId": "T1",
+            "agentDepth": 1
+          },
+          "C2": {
+            "agentRunId": "33333333333333333333333333333333",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-child-1",
+            "clientRequestId": "",
+            "role": "child",
+            "parentAgentRunId": "11111111111111111111111111111111",
+            "parentToolCallId": "T2",
+            "agentDepth": 1
+          }
+        },
+        "runtimes": {
+          "R_P1_1": {"runtimeRunId": "runtime-child-parent-round-1", "agentRunKey": "P1", "round": 1},
+          "R_P1_2": {"runtimeRunId": "runtime-child-parent-round-2", "agentRunKey": "P1", "round": 2},
+          "R_C1_1": {"runtimeRunId": "runtime-child-one-round-1", "agentRunKey": "C1", "round": 1},
+          "R_C2_1": {"runtimeRunId": "runtime-child-two-round-1", "agentRunKey": "C2", "round": 1}
+        },
+        "queueItems": {},
+        "backgroundJobs": {}
+      },
+      "runs": {
+        "P1": {
+          "identityRef": "P1",
+          "initialSnapshot": {"status": "model", "eventCursor": 0},
+          "events": [
+            {
+              "seq": 1,
+              "type": "created",
+              "data": {"model": "synthetic-model"},
+              "createdAt": "2032-01-01T00:00:01Z"
+            },
+            {
+              "seq": 2,
+              "type": "model_started",
+              "data": {"round": 1, "runtimeRunId": "runtime-child-parent-round-1"},
+              "createdAt": "2032-01-01T00:00:02Z"
+            },
+            {
+              "seq": 3,
+              "type": "model_completed",
+              "data": {
+                "round": 1,
+                "runtimeRunId": "runtime-child-parent-round-1",
+                "content": "",
+                "reasoning": "",
+                "toolCalls": [
+                  {"id": "T1", "type": "function", "function": {"name": "task", "arguments": "{\"prompt\":\"Synthetic child one.\"}"}},
+                  {"id": "T2", "type": "function", "function": {"name": "task", "arguments": "{\"prompt\":\"Synthetic child two.\"}"}}
+                ],
+                "outcome": "tool_calls"
+              },
+              "createdAt": "2032-01-01T00:00:03Z"
+            },
+            {
+              "seq": 4,
+              "type": "tool_started",
+              "data": {"toolCallId": "T1", "name": "task", "arguments": "{\"prompt\":\"Synthetic child one.\"}"},
+              "createdAt": "2032-01-01T00:00:04Z"
+            },
+            {
+              "seq": 5,
+              "type": "child_agent_created",
+              "data": {"toolCallId": "T1", "childAgentRunId": "22222222222222222222222222222222"},
+              "createdAt": "2032-01-01T00:00:06Z"
+            },
+            {
+              "seq": 6,
+              "type": "tool_started",
+              "data": {"toolCallId": "T2", "name": "task", "arguments": "{\"prompt\":\"Synthetic child two.\"}"},
+              "createdAt": "2032-01-01T00:00:08Z"
+            },
+            {
+              "seq": 7,
+              "type": "child_agent_created",
+              "data": {"toolCallId": "T2", "childAgentRunId": "33333333333333333333333333333333"},
+              "createdAt": "2032-01-01T00:00:10Z"
+            },
+            {
+              "seq": 8,
+              "type": "tool_completed",
+              "data": {
+                "toolCallId": "T1",
+                "name": "task",
+                "arguments": "{\"prompt\":\"Synthetic child one.\"}",
+                "result": {
+                  "ok": true,
+                  "action": "task",
+                  "status": "completed",
+                  "result": "Synthetic child one result.",
+                  "childAgentRunId": "22222222222222222222222222222222",
+                  "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+                },
+                "outcome": "succeeded",
+                "replayed": false
+              },
+              "createdAt": "2032-01-01T00:00:16Z"
+            },
+            {
+              "seq": 9,
+              "type": "tool_completed",
+              "data": {
+                "toolCallId": "T2",
+                "name": "task",
+                "arguments": "{\"prompt\":\"Synthetic child two.\"}",
+                "result": {
+                  "ok": true,
+                  "action": "task",
+                  "status": "completed",
+                  "result": "Synthetic child two result.",
+                  "childAgentRunId": "33333333333333333333333333333333",
+                  "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+                },
+                "outcome": "succeeded",
+                "replayed": false
+              },
+              "createdAt": "2032-01-01T00:00:17Z"
+            },
+            {
+              "seq": 10,
+              "type": "model_pending",
+              "data": {"round": 2},
+              "createdAt": "2032-01-01T00:00:18Z"
+            },
+            {
+              "seq": 11,
+              "type": "model_started",
+              "data": {"round": 2, "runtimeRunId": "runtime-child-parent-round-2"},
+              "createdAt": "2032-01-01T00:00:19Z"
+            },
+            {
+              "seq": 12,
+              "type": "model_completed",
+              "data": {
+                "round": 2,
+                "runtimeRunId": "runtime-child-parent-round-2",
+                "content": "Synthetic parent final result.",
+                "reasoning": "",
+                "toolCalls": [],
+                "outcome": "content"
+              },
+              "createdAt": "2032-01-01T00:00:20Z"
+            },
+            {
+              "seq": 13,
+              "type": "completed",
+              "data": {},
+              "createdAt": "2032-01-01T00:00:21Z"
+            }
+          ]
+        },
+        "C1": {
+          "identityRef": "C1",
+          "initialSnapshot": {"status": "model", "eventCursor": 0},
+          "events": [
+            {"seq": 1, "type": "created", "data": {"model": "synthetic-model"}, "createdAt": "2032-01-01T00:00:05Z"},
+            {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-child-one-round-1"}, "createdAt": "2032-01-01T00:00:07Z"},
+            {
+              "seq": 3,
+              "type": "model_completed",
+              "data": {"round": 1, "runtimeRunId": "runtime-child-one-round-1", "content": "Synthetic child one result.", "reasoning": "", "toolCalls": [], "outcome": "content"},
+              "createdAt": "2032-01-01T00:00:14Z"
+            },
+            {"seq": 4, "type": "completed", "data": {}, "createdAt": "2032-01-01T00:00:15Z"}
+          ]
+        },
+        "C2": {
+          "identityRef": "C2",
+          "initialSnapshot": {"status": "model", "eventCursor": 0},
+          "events": [
+            {"seq": 1, "type": "created", "data": {"model": "synthetic-model"}, "createdAt": "2032-01-01T00:00:09Z"},
+            {"seq": 2, "type": "model_started", "data": {"round": 1, "runtimeRunId": "runtime-child-two-round-1"}, "createdAt": "2032-01-01T00:00:11Z"},
+            {
+              "seq": 3,
+              "type": "model_completed",
+              "data": {"round": 1, "runtimeRunId": "runtime-child-two-round-1", "content": "Synthetic child two result.", "reasoning": "", "toolCalls": [], "outcome": "content"},
+              "createdAt": "2032-01-01T00:00:12Z"
+            },
+            {"seq": 4, "type": "completed", "data": {}, "createdAt": "2032-01-01T00:00:13Z"}
+          ]
+        }
+      },
+      "schedule": [
+        {"step": 1, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 1},
+        {"step": 2, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 2},
+        {"step": 3, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 3},
+        {"step": 4, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 4},
+        {"step": 5, "kind": "run-event", "runKey": "C1", "agentRunId": "22222222222222222222222222222222", "eventSeq": 1},
+        {"step": 6, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 5},
+        {"step": 7, "kind": "run-event", "runKey": "C1", "agentRunId": "22222222222222222222222222222222", "eventSeq": 2},
+        {"step": 8, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 6},
+        {"step": 9, "kind": "run-event", "runKey": "C2", "agentRunId": "33333333333333333333333333333333", "eventSeq": 1},
+        {"step": 10, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 7},
+        {"step": 11, "kind": "run-event", "runKey": "C2", "agentRunId": "33333333333333333333333333333333", "eventSeq": 2},
+        {"step": 12, "kind": "run-event", "runKey": "C2", "agentRunId": "33333333333333333333333333333333", "eventSeq": 3},
+        {"step": 13, "kind": "run-event", "runKey": "C2", "agentRunId": "33333333333333333333333333333333", "eventSeq": 4},
+        {"step": 14, "kind": "run-event", "runKey": "C1", "agentRunId": "22222222222222222222222222222222", "eventSeq": 3},
+        {"step": 15, "kind": "run-event", "runKey": "C1", "agentRunId": "22222222222222222222222222222222", "eventSeq": 4},
+        {"step": 16, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 8},
+        {"step": 17, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 9},
+        {"step": 18, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 10},
+        {"step": 19, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 11},
+        {"step": 20, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 12},
+        {"step": 21, "kind": "run-event", "runKey": "P1", "agentRunId": "11111111111111111111111111111111", "eventSeq": 13}
+      ],
+      "checkpoints": [
+        {
+          "afterStep": 3,
+          "expectedRunCursors": {"P1": 3, "C1": 0, "C2": 0},
+          "expectedRunViews": {
+            "P1": {"cursor": 3, "status": "tools", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed"], "toolCount": 0, "tools": []},
+            "C1": {"cursor": 0, "status": "model", "terminalStatus": "", "modelRoundCount": 0, "timeline": [], "toolCount": 0, "tools": []},
+            "C2": {"cursor": 0, "status": "model", "terminalStatus": "", "modelRoundCount": 0, "timeline": [], "toolCount": 0, "tools": []}
+          }
+        },
+        {
+          "afterStep": 10,
+          "expectedRunCursors": {"P1": 7, "C1": 2, "C2": 1},
+          "expectedRunViews": {
+            "P1": {"cursor": 7, "status": "tools", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "tool_started", "child_agent_created", "tool_started", "child_agent_created"], "toolCount": 2, "tools": [{"toolCallId": "T1", "name": "task", "status": "running", "outcome": ""}, {"toolCallId": "T2", "name": "task", "status": "running", "outcome": ""}]},
+            "C1": {"cursor": 2, "status": "model", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started"], "toolCount": 0, "tools": []},
+            "C2": {"cursor": 1, "status": "model", "terminalStatus": "", "modelRoundCount": 0, "timeline": ["created"], "toolCount": 0, "tools": []}
+          }
+        },
+        {
+          "afterStep": 13,
+          "expectedRunCursors": {"P1": 7, "C1": 2, "C2": 4},
+          "expectedRunViews": {
+            "P1": {"cursor": 7, "status": "tools", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "tool_started", "child_agent_created", "tool_started", "child_agent_created"], "toolCount": 2, "tools": [{"toolCallId": "T1", "name": "task", "status": "running", "outcome": ""}, {"toolCallId": "T2", "name": "task", "status": "running", "outcome": ""}]},
+            "C1": {"cursor": 2, "status": "model", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started"], "toolCount": 0, "tools": []},
+            "C2": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []}
+          }
+        },
+        {
+          "afterStep": 15,
+          "expectedRunCursors": {"P1": 7, "C1": 4, "C2": 4},
+          "expectedRunViews": {
+            "P1": {"cursor": 7, "status": "tools", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "tool_started", "child_agent_created", "tool_started", "child_agent_created"], "toolCount": 2, "tools": [{"toolCallId": "T1", "name": "task", "status": "running", "outcome": ""}, {"toolCallId": "T2", "name": "task", "status": "running", "outcome": ""}]},
+            "C1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []},
+            "C2": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []}
+          }
+        },
+        {
+          "afterStep": 17,
+          "expectedRunCursors": {"P1": 9, "C1": 4, "C2": 4},
+          "expectedRunViews": {
+            "P1": {"cursor": 9, "status": "tools", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "tool_started", "child_agent_created", "tool_started", "child_agent_created", "tool_completed", "tool_completed"], "toolCount": 2, "tools": [{"toolCallId": "T1", "name": "task", "status": "completed", "outcome": "succeeded"}, {"toolCallId": "T2", "name": "task", "status": "completed", "outcome": "succeeded"}]},
+            "C1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []},
+            "C2": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []}
+          }
+        },
+        {
+          "afterStep": 21,
+          "expectedRunCursors": {"P1": 13, "C1": 4, "C2": 4},
+          "expectedRunViews": {
+            "P1": {"cursor": 13, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 2, "timeline": ["created", "model_started", "model_completed", "tool_started", "child_agent_created", "tool_started", "child_agent_created", "tool_completed", "tool_completed", "model_pending", "model_started", "model_completed", "completed"], "toolCount": 2, "tools": [{"toolCallId": "T1", "name": "task", "status": "completed", "outcome": "succeeded"}, {"toolCallId": "T2", "name": "task", "status": "completed", "outcome": "succeeded"}]},
+            "C1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []},
+            "C2": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"], "toolCount": 0, "tools": []}
+          }
+        }
+      ],
+      "expectedOrders": {
+        "creation": ["P1", "C1", "C2"],
+        "terminal": ["C2", "C1", "P1"],
+        "childCreated": ["T1:C1", "T2:C2"],
+        "childTerminal": ["C2", "C1"],
+        "parentToolResults": ["T1", "T2"],
+        "factMarkers": []
+      },
+      "expectedCompositeHash": "176f9e3324d213fe6ac5c9a3bc12e78d7b3f6dd004b3124b7a188c36801158a0"
+    }
+  ]
+}

@@ -21,6 +21,7 @@ const DEFAULT_SUITE_PATH = path.join(
   "multi-run-trace-suite.json",
 );
 const TERMINAL_EVENT_TYPES = new Set(["completed", "failed", "cancelled"]);
+const SUPPORTED_MULTI_RUN_FIXTURE_VERSIONS = new Set([1, 2]);
 
 function loadProjectionContract() {
   if (!global.window) global.window = {};
@@ -275,6 +276,229 @@ function validateIdentityGraph(scenario) {
   }
 }
 
+function validateIdentityGraphV2(scenario) {
+  const identities = scenario.identities || {};
+  const sessions = identities.sessions || {};
+  const agentRuns = identities.agentRuns || {};
+  const runtimes = identities.runtimes || {};
+  const runs = scenario.runs || {};
+  const runKeys = Object.keys(runs);
+  const identityKeys = Object.keys(agentRuns).sort();
+  const runKeyDifference = firstDifference(identityKeys, [...runKeys].sort(), "$.identities.agentRuns");
+  if (runKeyDifference) {
+    failDifference(scenario, "v2 run and identity key sets differ", runKeyDifference);
+  }
+  if (runKeys.length < 3) {
+    failScenario(scenario, "v2 child scenario requires a root and at least two child runs", {
+      path: "$.runs",
+      expected: "at least three runs",
+      actual: runKeys,
+    });
+  }
+
+  const seenAgentRunIds = new Map();
+  const runKeyByAgentRunId = new Map();
+  const rootKeys = [];
+  const childKeys = [];
+  for (const [runKey, run] of Object.entries(runs)) {
+    if (run.identityRef !== runKey || !agentRuns[runKey]) {
+      failScenario(scenario, "run identity reference differs from its map key", {
+        path: `$.runs.${runKey}.identityRef`,
+        expected: runKey,
+        actual: run.identityRef,
+      });
+    }
+    const identity = agentRuns[runKey];
+    const session = sessions[identity.sessionRef];
+    if (!session) {
+      failScenario(scenario, "agent run references an unknown session", {
+        path: `$.identities.agentRuns.${runKey}.sessionRef`,
+        expected: Object.keys(sessions),
+        actual: identity.sessionRef,
+      });
+    }
+    if (identity.sessionId !== session.sessionId) {
+      failScenario(scenario, "agent run session identity is inconsistent", {
+        path: `$.identities.agentRuns.${runKey}.sessionId`,
+        expected: session.sessionId,
+        actual: identity.sessionId,
+      });
+    }
+    if (seenAgentRunIds.has(identity.agentRunId)) {
+      failScenario(scenario, "agentRunId must be unique within a scenario", {
+        path: `$.identities.agentRuns.${runKey}.agentRunId`,
+        expected: `different from ${seenAgentRunIds.get(identity.agentRunId)}`,
+        actual: identity.agentRunId,
+      });
+    }
+    seenAgentRunIds.set(identity.agentRunId, runKey);
+    runKeyByAgentRunId.set(identity.agentRunId, runKey);
+
+    if (identity.role === "child") {
+      childKeys.push(runKey);
+      if (identity.clientRequestId !== "") {
+        failScenario(scenario, "child clientRequestId must be empty", {
+          path: `$.identities.agentRuns.${runKey}.clientRequestId`,
+          expected: "",
+          actual: identity.clientRequestId,
+        });
+      }
+      if (!identity.parentAgentRunId) {
+        failScenario(scenario, "child parent AgentRun identity is required", {
+          path: `$.identities.agentRuns.${runKey}.parentAgentRunId`,
+          expected: "a root AgentRun ID",
+          actual: identity.parentAgentRunId,
+        });
+      }
+      if (!identity.parentToolCallId) {
+        failScenario(scenario, "child parent tool call identity is required", {
+          path: `$.identities.agentRuns.${runKey}.parentToolCallId`,
+          expected: "a parent tool call ID",
+          actual: identity.parentToolCallId,
+        });
+      }
+      if (identity.agentDepth !== 1) {
+        failScenario(scenario, "child AgentRun depth must be one", {
+          path: `$.identities.agentRuns.${runKey}.agentDepth`,
+          expected: 1,
+          actual: identity.agentDepth,
+        });
+      }
+    } else {
+      rootKeys.push(runKey);
+      if (identity.role !== "foreground") {
+        failScenario(scenario, "v2 root role must be foreground", {
+          path: `$.identities.agentRuns.${runKey}.role`,
+          expected: "foreground",
+          actual: identity.role,
+        });
+      }
+      if (!identity.clientRequestId) {
+        failScenario(scenario, "root clientRequestId is required", {
+          path: `$.identities.agentRuns.${runKey}.clientRequestId`,
+          expected: "non-empty string",
+          actual: identity.clientRequestId,
+        });
+      }
+      if (identity.parentAgentRunId || identity.parentToolCallId) {
+        failScenario(scenario, "root AgentRun parent identities must be empty", {
+          path: `$.identities.agentRuns.${runKey}.parentAgentRunId`,
+          expected: "",
+          actual: identity.parentAgentRunId,
+        });
+      }
+      if (identity.agentDepth !== 0) {
+        failScenario(scenario, "root AgentRun depth must be zero", {
+          path: `$.identities.agentRuns.${runKey}.agentDepth`,
+          expected: 0,
+          actual: identity.agentDepth,
+        });
+      }
+    }
+
+    const sequences = (run.events || []).map((event) => event.seq);
+    const expectedSequences = Array.from({ length: sequences.length }, (_, index) => index + 1);
+    const difference = firstDifference(sequences, expectedSequences, `$.runs.${runKey}.events`);
+    if (difference) failDifference(scenario, "run event sequence is not contiguous", difference);
+  }
+
+  if (rootKeys.length !== 1) {
+    failScenario(scenario, "v2 child scenario requires exactly one root AgentRun", {
+      path: "$.identities.agentRuns",
+      expected: "one foreground root",
+      actual: rootKeys,
+    });
+  }
+  if (childKeys.length !== 2) {
+    failScenario(scenario, "v2 child scenario requires exactly two child AgentRuns", {
+      path: "$.identities.agentRuns",
+      expected: "two child runs",
+      actual: childKeys,
+    });
+  }
+
+  const rootKey = rootKeys[0];
+  const rootIdentity = agentRuns[rootKey];
+  const childKeyByToolCallId = new Map();
+  for (const childKey of childKeys) {
+    const childIdentity = agentRuns[childKey];
+    if (childIdentity.parentAgentRunId !== rootIdentity.agentRunId) {
+      failScenario(scenario, "child references the wrong parent AgentRun", {
+        path: `$.identities.agentRuns.${childKey}.parentAgentRunId`,
+        expected: rootIdentity.agentRunId,
+        actual: childIdentity.parentAgentRunId,
+      });
+    }
+    if (childIdentity.sessionId !== rootIdentity.sessionId) {
+      failScenario(scenario, "child and parent AgentRuns cross session boundaries", {
+        path: `$.identities.agentRuns.${childKey}.sessionId`,
+        expected: rootIdentity.sessionId,
+        actual: childIdentity.sessionId,
+      });
+    }
+    if (childKeyByToolCallId.has(childIdentity.parentToolCallId)) {
+      failScenario(scenario, "parent tool call must map to exactly one child AgentRun", {
+        path: `$.identities.agentRuns.${childKey}.parentToolCallId`,
+        expected: `different from ${childKeyByToolCallId.get(childIdentity.parentToolCallId)}`,
+        actual: childIdentity.parentToolCallId,
+      });
+    }
+    childKeyByToolCallId.set(childIdentity.parentToolCallId, childKey);
+  }
+
+  const seenRuntimeIds = new Map();
+  for (const [runtimeKey, runtime] of Object.entries(runtimes)) {
+    if (!runs[runtime.agentRunKey]) {
+      failScenario(scenario, "runtime references an unknown AgentRun", {
+        path: `$.identities.runtimes.${runtimeKey}.agentRunKey`,
+        expected: runKeys,
+        actual: runtime.agentRunKey,
+      });
+    }
+    if (seenRuntimeIds.has(runtime.runtimeRunId)) {
+      failScenario(scenario, "runtimeRunId must be unique within a scenario", {
+        path: `$.identities.runtimes.${runtimeKey}.runtimeRunId`,
+        expected: `different from ${seenRuntimeIds.get(runtime.runtimeRunId)}`,
+        actual: runtime.runtimeRunId,
+      });
+    }
+    seenRuntimeIds.set(runtime.runtimeRunId, runtimeKey);
+    const matchingEvent = runs[runtime.agentRunKey].events.find((event) => (
+      event.data?.runtimeRunId === runtime.runtimeRunId
+      && Number(event.data?.round || 0) === Number(runtime.round)
+    ));
+    if (!matchingEvent) {
+      failScenario(scenario, "runtime identity has no matching run event", {
+        path: `$.identities.runtimes.${runtimeKey}.runtimeRunId`,
+        expected: "a model event with the same runtimeRunId and round",
+        actual: runtime.runtimeRunId,
+      });
+    }
+  }
+  for (const [runKey, run] of Object.entries(runs)) {
+    for (let eventIndex = 0; eventIndex < run.events.length; eventIndex += 1) {
+      const runtimeRunId = String(run.events[eventIndex].data?.runtimeRunId || "");
+      if (!runtimeRunId) continue;
+      const runtimeKey = seenRuntimeIds.get(runtimeRunId);
+      const runtime = runtimeKey ? runtimes[runtimeKey] : null;
+      if (!runtime || runtime.agentRunKey !== runKey) {
+        failScenario(scenario, "run event runtime identity is not closed", {
+          path: `$.runs.${runKey}.events[${eventIndex}].data.runtimeRunId`,
+          expected: `runtime owned by ${runKey}`,
+          actual: runtimeRunId,
+        });
+      }
+    }
+  }
+
+  return {
+    rootKey,
+    childKeys,
+    runKeyByAgentRunId,
+    childKeyByToolCallId,
+  };
+}
+
 function deriveOrders(scenario, throughStep = scenario.schedule.length) {
   const creation = [];
   const terminal = [];
@@ -290,6 +514,44 @@ function deriveOrders(scenario, throughStep = scenario.schedule.length) {
     if (TERMINAL_EVENT_TYPES.has(event?.type)) terminal.push(entry.runKey);
   }
   return { creation, terminal, factMarkers };
+}
+
+function deriveOrdersV2(scenario, relations, throughStep = scenario.schedule.length) {
+  const creation = [];
+  const terminal = [];
+  const childCreated = [];
+  const childTerminal = [];
+  const parentToolResults = [];
+  const factMarkers = [];
+  const childKeySet = new Set(relations.childKeys);
+  for (const entry of scenario.schedule) {
+    if (entry.step > throughStep) break;
+    if (entry.kind === "fact-marker") {
+      factMarkers.push(`${entry.fact}:${entry.ref}`);
+      continue;
+    }
+    const event = findRunEvent(scenario, entry.runKey, entry.eventSeq);
+    if (event?.type === "created") creation.push(entry.runKey);
+    if (TERMINAL_EVENT_TYPES.has(event?.type)) {
+      terminal.push(entry.runKey);
+      if (childKeySet.has(entry.runKey)) childTerminal.push(entry.runKey);
+    }
+    if (entry.runKey === relations.rootKey && event?.type === "child_agent_created") {
+      const childKey = relations.runKeyByAgentRunId.get(event.data?.childAgentRunId) || "<unknown>";
+      childCreated.push(`${event.data?.toolCallId || "<missing>"}:${childKey}`);
+    }
+    if (entry.runKey === relations.rootKey && event?.type === "tool_completed") {
+      parentToolResults.push(String(event.data?.toolCallId || ""));
+    }
+  }
+  return {
+    creation,
+    terminal,
+    childCreated,
+    childTerminal,
+    parentToolResults,
+    factMarkers,
+  };
 }
 
 function validateSchedule(scenario) {
@@ -370,6 +632,249 @@ function validateSchedule(scenario) {
   if (difference) failDifference(scenario, "fixed schedule order differs", difference);
 }
 
+function scheduleIndexForEvent(scenario, runKey, eventSeq) {
+  return scenario.schedule.findIndex((entry) => (
+    entry.kind === "run-event"
+    && entry.runKey === runKey
+    && entry.eventSeq === eventSeq
+  ));
+}
+
+function validateChildContractsV2(scenario, relations) {
+  const rootEvents = scenario.runs[relations.rootKey].events;
+  const rootIdentity = scenario.identities.agentRuns[relations.rootKey];
+  const childIdentities = scenario.identities.agentRuns;
+  const declaredEventIndex = rootEvents.findIndex((event) => (
+    event.type === "model_completed" && Number(event.data?.round) === 1
+  ));
+  if (declaredEventIndex < 0) {
+    failScenario(scenario, "parent first model round declaration is missing", {
+      path: `$.runs.${relations.rootKey}.events`,
+      expected: "one round-1 model_completed event",
+      actual: "<missing>",
+    });
+  }
+  const declaredCalls = rootEvents[declaredEventIndex].data?.toolCalls;
+  const declaredToolIds = Array.isArray(declaredCalls)
+    ? declaredCalls.map((call) => String(call?.id || ""))
+    : [];
+  const expectedToolIds = relations.childKeys.map(
+    (childKey) => childIdentities[childKey].parentToolCallId,
+  );
+  const declaredDifference = firstDifference(
+    [...declaredToolIds].sort(),
+    [...expectedToolIds].sort(),
+    `$.runs.${relations.rootKey}.events[${declaredEventIndex}].data.toolCalls`,
+  );
+  if (declaredDifference) {
+    failDifference(scenario, "parent declarations and child parent-tool identities differ", declaredDifference);
+  }
+  if (new Set(declaredToolIds).size !== declaredToolIds.length) {
+    failScenario(scenario, "parent first model round declares duplicate tool call IDs", {
+      path: `$.runs.${relations.rootKey}.events[${declaredEventIndex}].data.toolCalls`,
+      expected: "unique tool call IDs",
+      actual: declaredToolIds,
+    });
+  }
+
+  const childCreatedEvents = rootEvents
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === "child_agent_created");
+  for (const childKey of relations.childKeys) {
+    const identity = childIdentities[childKey];
+    const match = childCreatedEvents.find(({ event }) => (
+      event.data?.toolCallId === identity.parentToolCallId
+    ));
+    if (!match) {
+      failScenario(scenario, "parent child_agent_created mapping is missing", {
+        path: `$.runs.${relations.rootKey}.events`,
+        expected: `${identity.parentToolCallId}:${childKey}`,
+        actual: childCreatedEvents.map(({ event }) => event.data?.toolCallId),
+      });
+    }
+    if (match.event.data?.childAgentRunId !== identity.agentRunId) {
+      failScenario(scenario, "child_agent_created references the wrong Child AgentRun", {
+        path: `$.runs.${relations.rootKey}.events[${match.index}].data.childAgentRunId`,
+        expected: identity.agentRunId,
+        actual: match.event.data?.childAgentRunId,
+      });
+    }
+  }
+  if (childCreatedEvents.length !== relations.childKeys.length) {
+    failScenario(scenario, "parent child_agent_created events are not one-to-one", {
+      path: `$.runs.${relations.rootKey}.events`,
+      expected: relations.childKeys.length,
+      actual: childCreatedEvents.length,
+    });
+  }
+
+  const parentResults = rootEvents
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === "tool_completed");
+  for (const childKey of relations.childKeys) {
+    const identity = childIdentities[childKey];
+    const match = parentResults.find(({ event }) => (
+      event.data?.toolCallId === identity.parentToolCallId
+    ));
+    if (!match) {
+      failScenario(scenario, "parent tool result mapping is missing", {
+        path: `$.runs.${relations.rootKey}.events`,
+        expected: identity.parentToolCallId,
+        actual: parentResults.map(({ event }) => event.data?.toolCallId),
+      });
+    }
+    if (match.event.data?.result?.childAgentRunId !== identity.agentRunId) {
+      failScenario(scenario, "parent tool result references the wrong Child AgentRun", {
+        path: `$.runs.${relations.rootKey}.events[${match.index}].data.result.childAgentRunId`,
+        expected: identity.agentRunId,
+        actual: match.event.data?.result?.childAgentRunId,
+      });
+    }
+  }
+  if (parentResults.length !== relations.childKeys.length) {
+    failScenario(scenario, "parent tool results are not one-to-one with Child AgentRuns", {
+      path: `$.runs.${relations.rootKey}.events`,
+      expected: relations.childKeys.length,
+      actual: parentResults.length,
+    });
+  }
+
+  for (const childKey of relations.childKeys) {
+    const childTerminals = scenario.runs[childKey].events.filter(
+      (event) => TERMINAL_EVENT_TYPES.has(event.type),
+    );
+    if (childTerminals.length !== 1 || childTerminals[0].type !== "completed") {
+      failScenario(scenario, "each Child AgentRun must have one completed terminal", {
+        path: `$.runs.${childKey}.events`,
+        expected: ["completed"],
+        actual: childTerminals.map((event) => event.type),
+      });
+    }
+  }
+  const childTerminalScheduleIndexes = relations.childKeys.map((childKey) => {
+    const terminal = scenario.runs[childKey].events.find(
+      (event) => TERMINAL_EVENT_TYPES.has(event.type),
+    );
+    return scheduleIndexForEvent(scenario, childKey, terminal.seq);
+  });
+  const firstParentResult = parentResults
+    .map(({ event }) => ({ event, scheduleIndex: scheduleIndexForEvent(scenario, relations.rootKey, event.seq) }))
+    .sort((left, right) => left.scheduleIndex - right.scheduleIndex)[0];
+  if (firstParentResult && childTerminalScheduleIndexes.some(
+    (scheduleIndex) => scheduleIndex < 0 || scheduleIndex > firstParentResult.scheduleIndex,
+  )) {
+    failScenario(scenario, "parent tool result appears before every Child AgentRun is terminal", {
+      path: `$.schedule[${firstParentResult.scheduleIndex}].eventSeq`,
+      expected: "after all Child AgentRun terminals",
+      actual: firstParentResult.event.seq,
+    });
+  }
+
+  const parentModelCompletions = rootEvents.filter((event) => event.type === "model_completed");
+  const finalModelCompletions = parentModelCompletions.filter((event) => (
+    Number(event.data?.round) === 2
+    && Array.isArray(event.data?.toolCalls)
+    && event.data.toolCalls.length === 0
+    && String(event.data?.content || "")
+  ));
+  if (parentModelCompletions.length !== 2 || finalModelCompletions.length !== 1) {
+    failScenario(scenario, "parent must enter round two and produce one final model completion", {
+      path: `$.runs.${relations.rootKey}.events`,
+      expected: "two model_completed events with one final round-two answer",
+      actual: parentModelCompletions.map((event) => ({
+        round: event.data?.round,
+        toolCallCount: Array.isArray(event.data?.toolCalls) ? event.data.toolCalls.length : null,
+      })),
+    });
+  }
+  const rootTerminals = rootEvents.filter((event) => TERMINAL_EVENT_TYPES.has(event.type));
+  if (rootTerminals.length !== 1 || rootTerminals[0].type !== "completed") {
+    failScenario(scenario, "parent must have one completed terminal", {
+      path: `$.runs.${relations.rootKey}.events`,
+      expected: ["completed"],
+      actual: rootTerminals.map((event) => event.type),
+    });
+  }
+  if (rootIdentity.agentDepth !== 0) {
+    failScenario(scenario, "parent root depth changed during contract validation", {
+      path: `$.identities.agentRuns.${relations.rootKey}.agentDepth`,
+      expected: 0,
+      actual: rootIdentity.agentDepth,
+    });
+  }
+}
+
+function validateScheduleV2(scenario, relations) {
+  const runKeys = Object.keys(scenario.runs);
+  const expectedLocalSeq = Object.fromEntries(runKeys.map((runKey) => [runKey, 1]));
+  for (let index = 0; index < scenario.schedule.length; index += 1) {
+    const entry = scenario.schedule[index];
+    const expectedStep = index + 1;
+    if (entry.step !== expectedStep) {
+      failScenario(scenario, "schedule steps must be contiguous", {
+        path: `$.schedule[${index}].step`,
+        expected: expectedStep,
+        actual: entry.step,
+      });
+    }
+    if (entry.kind === "fact-marker") {
+      failScenario(scenario, "v2 child scenario does not use fact markers", {
+        path: `$.schedule[${index}].kind`,
+        expected: "run-event",
+        actual: entry.kind,
+      });
+    }
+    const run = scenario.runs[entry.runKey];
+    if (!run) {
+      failScenario(scenario, "schedule references an unknown run", {
+        path: `$.schedule[${index}].runKey`,
+        expected: runKeys,
+        actual: entry.runKey,
+      });
+    }
+    const identity = scenario.identities.agentRuns[entry.runKey];
+    if (entry.agentRunId !== identity.agentRunId) {
+      failScenario(scenario, "schedule event was delivered to the wrong run", {
+        path: `$.schedule[${index}].agentRunId`,
+        expected: identity.agentRunId,
+        actual: entry.agentRunId,
+      });
+    }
+    const event = findRunEvent(scenario, entry.runKey, entry.eventSeq);
+    if (!event) {
+      failScenario(scenario, "schedule references an unavailable run event", {
+        path: `$.schedule[${index}].eventSeq`,
+        expected: run.events.map((candidate) => candidate.seq),
+        actual: entry.eventSeq,
+      });
+    }
+    if (entry.eventSeq !== expectedLocalSeq[entry.runKey]) {
+      failScenario(scenario, "schedule duplicates or reorders a run event", {
+        path: `$.schedule[${index}].eventSeq`,
+        expected: expectedLocalSeq[entry.runKey],
+        actual: entry.eventSeq,
+      });
+    }
+    expectedLocalSeq[entry.runKey] += 1;
+  }
+  for (const runKey of runKeys) {
+    const expectedAfterFinal = scenario.runs[runKey].events.length + 1;
+    if (expectedLocalSeq[runKey] !== expectedAfterFinal) {
+      const missingSeq = expectedLocalSeq[runKey];
+      failScenario(scenario, "schedule omits a canonical run event", {
+        path: `$.runs.${runKey}.events[${missingSeq - 1}].seq`,
+        expected: `scheduled event ${runKey}:${missingSeq}`,
+        actual: "<missing>",
+      });
+    }
+  }
+
+  validateChildContractsV2(scenario, relations);
+  const actualOrders = deriveOrdersV2(scenario, relations);
+  const difference = firstDifference(actualOrders, scenario.expectedOrders, "$.orders");
+  if (difference) failDifference(scenario, "fixed child schedule order differs", difference);
+}
+
 function validateCheckpoints(scenario) {
   const runKeys = Object.keys(scenario.runs).sort();
   const seenSteps = new Set();
@@ -399,16 +904,30 @@ function validateCheckpoints(scenario) {
   }
 }
 
-function validateScenario(scenario) {
+function validateScenario(scenario, { fixtureVersion = 1 } = {}) {
   if (!scenario || typeof scenario !== "object" || !scenario.name) {
     throw new ReplayAssertionError("multi-run scenario requires a name", {
       scenario: "<unknown>",
       path: "$.name",
     });
   }
-  validateIdentityGraph(scenario);
-  validateSchedule(scenario);
+  if (fixtureVersion === 1) {
+    validateIdentityGraph(scenario);
+    validateSchedule(scenario);
+    validateCheckpoints(scenario);
+    return null;
+  }
+  if (fixtureVersion !== 2) {
+    failScenario(scenario, "unsupported multi-run fixture version", {
+      path: "$.multiRunFixtureVersion",
+      expected: [1, 2],
+      actual: fixtureVersion,
+    });
+  }
+  const relations = validateIdentityGraphV2(scenario);
+  validateScheduleV2(scenario, relations);
   validateCheckpoints(scenario);
+  return relations;
 }
 
 function createCompositeState(scenario, contract) {
@@ -506,7 +1025,7 @@ function referenceTimeForCursor(scenario, scheduleCursor) {
   return findRunEvent(scenario, entry.runKey, entry.eventSeq)?.createdAt || null;
 }
 
-function projectCompositeState(scenario, state, contract) {
+function projectCompositeState(scenario, state, contract, fixtureVersion = 1, relations = null) {
   const referenceTime = referenceTimeForCursor(scenario, state.scheduleCursor);
   const runs = {};
   for (const runKey of Object.keys(scenario.runs).sort()) {
@@ -519,18 +1038,30 @@ function projectCompositeState(scenario, state, contract) {
     identities: state.identities,
     runCursors: { ...state.runCursors },
     runs,
-    orders: deriveOrders(scenario, state.scheduleCursor),
+    orders: fixtureVersion === 1
+      ? deriveOrders(scenario, state.scheduleCursor)
+      : deriveOrdersV2(scenario, relations, state.scheduleCursor),
   };
 }
 
-function checkpointRunView(model) {
-  return {
+function checkpointRunView(model, fixtureVersion = 1) {
+  const view = {
     cursor: model.cursor,
     status: model.status,
     terminalStatus: model.terminalStatus,
     modelRoundCount: model.modelRoundCount,
     timeline: model.timeline.map((item) => item.type),
   };
+  if (fixtureVersion === 2) {
+    view.toolCount = model.toolCount;
+    view.tools = model.tools.map((tool) => ({
+      toolCallId: tool.toolCallId,
+      name: tool.name,
+      status: tool.status,
+      outcome: tool.outcome,
+    }));
+  }
+  return view;
 }
 
 function hashRunViews(projection) {
@@ -539,7 +1070,7 @@ function hashRunViews(projection) {
   );
 }
 
-function assertCheckpoint(scenario, checkpoint, checkpointIndex, projection) {
+function assertCheckpoint(scenario, checkpoint, checkpointIndex, projection, fixtureVersion = 1) {
   const cursorDifference = firstDifference(
     projection.runCursors,
     checkpoint.expectedRunCursors,
@@ -551,7 +1082,7 @@ function assertCheckpoint(scenario, checkpoint, checkpointIndex, projection) {
     });
   }
   for (const [runKey, expectedView] of Object.entries(checkpoint.expectedRunViews)) {
-    const actualView = checkpointRunView(projection.runs[runKey]);
+    const actualView = checkpointRunView(projection.runs[runKey], fixtureVersion);
     const difference = firstDifference(
       actualView,
       expectedView,
@@ -642,11 +1173,18 @@ function restoreCompositeState(scenario, serializedState, pathPrefix = "$") {
 }
 
 function replayScenario(scenario, options = {}) {
-  validateScenario(scenario);
+  const fixtureVersion = Number(options.fixtureVersion || 1);
+  const relations = validateScenario(scenario, { fixtureVersion });
   const contract = options.contract || loadProjectionContract();
   const fullStep = scenario.schedule.length;
   const uninterrupted = replayThroughStep(scenario, fullStep, contract);
-  const finalProjection = projectCompositeState(scenario, uninterrupted.state, contract);
+  const finalProjection = projectCompositeState(
+    scenario,
+    uninterrupted.state,
+    contract,
+    fixtureVersion,
+    relations,
+  );
   const stateHash = canonicalHash(finalProjection);
   if (options.verifyExpectedHash !== false && stateHash !== scenario.expectedCompositeHash) {
     failScenario(scenario, "composite state hash differs", {
@@ -659,7 +1197,13 @@ function replayScenario(scenario, options = {}) {
   const duplicated = replayThroughStep(scenario, fullStep, contract, {
     duplicateDelivery: true,
   });
-  const duplicateProjection = projectCompositeState(scenario, duplicated.state, contract);
+  const duplicateProjection = projectCompositeState(
+    scenario,
+    duplicated.state,
+    contract,
+    fixtureVersion,
+    relations,
+  );
   const duplicateDifference = firstDifference(duplicateProjection, finalProjection, "$.duplicate");
   if (duplicateDifference) {
     failDifference(scenario, "duplicate event delivery changed the composite projection", duplicateDifference);
@@ -669,8 +1213,20 @@ function replayScenario(scenario, options = {}) {
   for (let checkpointIndex = 0; checkpointIndex < scenario.checkpoints.length; checkpointIndex += 1) {
     const checkpoint = scenario.checkpoints[checkpointIndex];
     const prefix = replayThroughStep(scenario, checkpoint.afterStep, contract);
-    const checkpointProjection = projectCompositeState(scenario, prefix.state, contract);
-    assertCheckpoint(scenario, checkpoint, checkpointIndex, checkpointProjection);
+    const checkpointProjection = projectCompositeState(
+      scenario,
+      prefix.state,
+      contract,
+      fixtureVersion,
+      relations,
+    );
+    assertCheckpoint(
+      scenario,
+      checkpoint,
+      checkpointIndex,
+      checkpointProjection,
+      fixtureVersion,
+    );
 
     const serializedState = clone(prefix.state);
     options.resumeStateMutator?.({
@@ -681,7 +1237,13 @@ function replayScenario(scenario, options = {}) {
     const resumePath = `$.checkpoints[${checkpointIndex}].resume`;
     const restored = restoreCompositeState(scenario, serializedState, resumePath);
     continueFromStep(scenario, restored, restored.scheduleCursor, contract);
-    const resumedProjection = projectCompositeState(scenario, restored, contract);
+    const resumedProjection = projectCompositeState(
+      scenario,
+      restored,
+      contract,
+      fixtureVersion,
+      relations,
+    );
     const resumedDifference = firstDifference(
       resumedProjection,
       finalProjection,
@@ -732,14 +1294,14 @@ function selectScenarios(scenarios, names = []) {
 function runReplaySuite(suite, options = {}) {
   if (
     !suite
-    || suite.multiRunFixtureVersion !== 1
+    || !SUPPORTED_MULTI_RUN_FIXTURE_VERSIONS.has(suite.multiRunFixtureVersion)
     || suite.source !== "synthetic"
     || !Array.isArray(suite.scenarios)
   ) {
-    throw new ReplayAssertionError("multi-run suite must use fixture version 1", {
+    throw new ReplayAssertionError("multi-run suite must use a supported fixture version", {
       scenario: "<suite>",
       path: "$.multiRunFixtureVersion",
-      expected: 1,
+      expected: [1, 2],
       actual: suite?.multiRunFixtureVersion,
     });
   }
@@ -755,6 +1317,7 @@ function runReplaySuite(suite, options = {}) {
   const contract = loadProjectionContract();
   const results = selected.map((scenario) => replayScenario(scenario, {
     contract,
+    fixtureVersion: suite.multiRunFixtureVersion,
     verifyExpectedHash: options.verifyExpectedHash,
   }));
   return {

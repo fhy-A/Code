@@ -82,6 +82,8 @@ git diff --check
 
 ## 完成声明边界
 
-H3-2B1 证明的是：多个 Run 分别复用生产 reducer/View Model 后的独立投影、静态 Session/父子/queue item/background job 身份关系、固定 schedule 和不同终态顺序、由保存 `scheduleCursor` 驱动的复合检查点恢复，以及重复投递幂等。
+H3-2B1 证明的是：多个独立 Root Run 分别复用生产 reducer/View Model 后的独立投影、静态 Session/queue item/background job 身份关系、固定 schedule 和不同终态顺序、由保存 `scheduleCursor` 驱动的复合检查点恢复，以及重复投递幂等。B1 不包含 Child 父子关系。
 
-Session accessors、后台 helper 和确定性 AgentRun ID 只按其现有直接函数契约测试。本阶段不证明真实 queue 提升、background 调度或完成、消息或 usage exactly-once、真实线程竞争、DOM、页面刷新、Runtime 原始事件恢复或发布门禁；`fact-marker` 也不是这些生产生命周期的测试替身。H3-2B2 的 Child AgentRun replay 尚未开始，仍需单独分析和确认。
+Session accessors、后台 helper 和确定性 AgentRun ID 只按其现有直接函数契约测试。本阶段不证明真实 queue 提升、background 调度或完成、消息或 usage exactly-once、真实线程竞争、DOM、页面刷新、Runtime 原始事件恢复或发布门禁；`fact-marker` 也不是这些生产生命周期的测试替身。
+
+H3-2B2 后续已在同一 multi-run runner 上通过显式版本分派增加独立 fixture v2；B1 的 v1 schema/suite、默认 CLI、`deriveOrders` 输出、投影结构、计数和全部哈希保持不变。Child AgentRun 的父子关系与顺序证据单独记录于 [`H3-2B2 Child AgentRun replay 关系契约`](h3-2b2-child-agentrun-replay.md)，不得倒推为 B1 已证明 Child 生命周期。
