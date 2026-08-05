@@ -1,0 +1,512 @@
+{
+  "schemaVersion": 1,
+  "evidenceProfile": {
+    "id": "h3-2d1-image-mime-preservation",
+    "version": 1,
+    "scope": "seven-format-production-chain",
+    "caseOrder": ["png", "jpeg", "webp", "bmp", "gif", "ico", "tiff"],
+    "passthroughCaseIds": ["png", "jpeg", "webp"],
+    "convertedCaseIds": ["bmp", "gif", "ico", "tiff"]
+  },
+  "persistenceOptions": {
+    "includeModel": true,
+    "includeTime": true
+  },
+  "cases": [
+    {
+      "id": "png",
+      "projectionKind": "passthrough",
+      "framePolicy": "single-image",
+      "source": {
+        "format": "PNG",
+        "mime": "image/png",
+        "fileName": "synthetic-png.png",
+        "byteLength": 121,
+        "sha256": "9262204cf402f25d538b5bad046fab58672e011150fc4991ccc7020b15d7d358",
+        "frameCount": 1,
+        "selectedWidth": 4,
+        "selectedHeight": 4,
+        "selectedFrameRgbaSha256": "a1b62c3d91c89576111f6620bf298a49c7ec05f08682adc58076e4107f8212d3"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the synthetic PNG image."},
+          {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAQElEQVR4nGNUKLjw/8eBirsMDAwMNxpeKDNIGHjcAQl+2GDwH8RmAslccEhgMDiwAMRkYATJaDRIgLVwOHQoAwCwgxg5CUphTQAAAABJRU5ErkJggg=="}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "png"},
+        "_images": [
+          {"name": "synthetic-png.png", "mime": "image/png", "base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAQElEQVR4nGNUKLjw/8eBirsMDAwMNxpeKDNIGHjcAQl+2GDwH8RmAslccEhgMDiwAMRkYATJaDRIgLVwOHQoAwCwgxg5CUphTQAAAABJRU5ErkJggg=="}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:01Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "2499b5634e2cc1207487ca7f3c37b293775c001cab4813261a32b0fbb35c00e9",
+          "serializedMessageSha256": "2499b5634e2cc1207487ca7f3c37b293775c001cab4813261a32b0fbb35c00e9",
+          "roundTripMessageSha256": "2499b5634e2cc1207487ca7f3c37b293775c001cab4813261a32b0fbb35c00e9",
+          "originalDataUrlSha256": "e49f10d972fa8fa471621eebbc1804d9d89279032cd031a3c5a796819e50e3e0",
+          "roundTripCaseId": "png",
+          "roundTripMime": "image/png",
+          "roundTripSourceSha256": "9262204cf402f25d538b5bad046fab58672e011150fc4991ccc7020b15d7d358",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/png",
+          "bytePreserved": true,
+          "outputByteSha256": "9262204cf402f25d538b5bad046fab58672e011150fc4991ccc7020b15d7d358",
+          "outputDataUrlSha256": "e49f10d972fa8fa471621eebbc1804d9d89279032cd031a3c5a796819e50e3e0",
+          "pngSignatureHex": null,
+          "selectedWidth": 4,
+          "selectedHeight": 4,
+          "sourceAndOutputRgbaEqual": null,
+          "semanticPixelSha256": null
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "e49f10d972fa8fa471621eebbc1804d9d89279032cd031a3c5a796819e50e3e0",
+          "projectMessagesImageSrcSha256": "e49f10d972fa8fa471621eebbc1804d9d89279032cd031a3c5a796819e50e3e0",
+          "renderUserHtmlSha256": "7055fad17ba6400d4368a6022437d970f5b1e037cbec821dbaab816fc22e1962",
+          "projectMessagesHtmlSha256": "7055fad17ba6400d4368a6022437d970f5b1e037cbec821dbaab816fc22e1962",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": null
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    },
+    {
+      "id": "jpeg",
+      "projectionKind": "passthrough",
+      "framePolicy": "single-image",
+      "source": {
+        "format": "JPEG",
+        "mime": "image/jpeg",
+        "fileName": "synthetic-jpeg.jpeg",
+        "byteLength": 402,
+        "sha256": "e67855ca30452e19e69a1d45c510d444e088529ef158ed821a0f072faa73d3ad",
+        "frameCount": 1,
+        "selectedWidth": 4,
+        "selectedHeight": 4,
+        "selectedFrameRgbaSha256": "6456193579b58f7d80837f87710c60262d5be9ae623ee673b964b1b5b9317982"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the synthetic JPEG image."},
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAgMDAwMDBAcFBAQEBAkGBwUHCgkLCwoJCgoMDREODAwQDAoKDhQPEBESExMTCw4UFhQSFhESExL/2wBDAQMDAwQEBAgFBQgSDAoMEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhL/wAARCAAEAAQDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAAB//EAB8QAAICAQQDAAAAAAAAAAAAAAIFAQQGAxIUMRETM//EABQBAQAAAAAAAAAAAAAAAAAAAAb/xAAeEQACAQUBAQEAAAAAAAAAAAABAhEDBAUGEjEhMv/aAAwDAQACEQMRAD8AJJllTdv1OPP8gx+jj7iys09NOwKrzPSW3k2Nv0sH2epPfiIiBERGGWo6jidqxNLLZakKleoFJJVT6qtA6VoA6gARMdN1UZ3YdsGwX+Cv3sbFytJSQACR4SJMESTE/fPysIFUf//Z"}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "jpeg"},
+        "_images": [
+          {"name": "synthetic-jpeg.jpeg", "mime": "image/jpeg", "base64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAgMDAwMDBAcFBAQEBAkGBwUHCgkLCwoJCgoMDREODAwQDAoKDhQPEBESExMTCw4UFhQSFhESExL/2wBDAQMDAwQEBAgFBQgSDAoMEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhL/wAARCAAEAAQDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAAB//EAB8QAAICAQQDAAAAAAAAAAAAAAIFAQQGAxIUMRETM//EABQBAQAAAAAAAAAAAAAAAAAAAAb/xAAeEQACAQUBAQEAAAAAAAAAAAABAhEDBAUGEjEhMv/aAAwDAQACEQMRAD8AJJllTdv1OPP8gx+jj7iys09NOwKrzPSW3k2Nv0sH2epPfiIiBERGGWo6jidqxNLLZakKleoFJJVT6qtA6VoA6gARMdN1UZ3YdsGwX+Cv3sbFytJSQACR4SJMESTE/fPysIFUf//Z"}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:02Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "d5451f2605560725d8acf67a5bc9c52396c53350c854991b4fdd1f2ec96b3e18",
+          "serializedMessageSha256": "d5451f2605560725d8acf67a5bc9c52396c53350c854991b4fdd1f2ec96b3e18",
+          "roundTripMessageSha256": "d5451f2605560725d8acf67a5bc9c52396c53350c854991b4fdd1f2ec96b3e18",
+          "originalDataUrlSha256": "0cfc0af37ff5b2c66cc5bfad9b9b541458e7ee517c46796302f02a2869fdf86f",
+          "roundTripCaseId": "jpeg",
+          "roundTripMime": "image/jpeg",
+          "roundTripSourceSha256": "e67855ca30452e19e69a1d45c510d444e088529ef158ed821a0f072faa73d3ad",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/jpeg",
+          "bytePreserved": true,
+          "outputByteSha256": "e67855ca30452e19e69a1d45c510d444e088529ef158ed821a0f072faa73d3ad",
+          "outputDataUrlSha256": "0cfc0af37ff5b2c66cc5bfad9b9b541458e7ee517c46796302f02a2869fdf86f",
+          "pngSignatureHex": null,
+          "selectedWidth": 4,
+          "selectedHeight": 4,
+          "sourceAndOutputRgbaEqual": null,
+          "semanticPixelSha256": null
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "0cfc0af37ff5b2c66cc5bfad9b9b541458e7ee517c46796302f02a2869fdf86f",
+          "projectMessagesImageSrcSha256": "0cfc0af37ff5b2c66cc5bfad9b9b541458e7ee517c46796302f02a2869fdf86f",
+          "renderUserHtmlSha256": "fe900881f462f37dd47755c35942bfeab51416c1a056e747d53f84eb8a3aa59f",
+          "projectMessagesHtmlSha256": "523a61c5678f0139dd71d9806022dc309fe97ad73f670f04626c8a004e939787",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": null
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    },
+    {
+      "id": "webp",
+      "projectionKind": "passthrough",
+      "framePolicy": "single-image",
+      "source": {
+        "format": "WEBP",
+        "mime": "image/webp",
+        "fileName": "synthetic-webp.webp",
+        "byteLength": 74,
+        "sha256": "48ff9e02de480877b29ce6123c08eeb41ff9c21f91d59f9b537540fabe8b9d96",
+        "frameCount": 1,
+        "selectedWidth": 4,
+        "selectedHeight": 4,
+        "selectedFrameRgbaSha256": "a1b62c3d91c89576111f6620bf298a49c7ec05f08682adc58076e4107f8212d3"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the synthetic WebP image."},
+          {"type": "image_url", "image_url": {"url": "data:image/webp;base64,UklGRkIAAABXRUJQVlA4TDUAAAAvA8AAEBcgEEjUQhtpXLFg8g4lf7IQBAKJRhhjji0QSGDyR5rl+C4xCASIC08yPImP6H9gAwA="}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "webp"},
+        "_images": [
+          {"name": "synthetic-webp.webp", "mime": "image/webp", "base64": "UklGRkIAAABXRUJQVlA4TDUAAAAvA8AAEBcgEEjUQhtpXLFg8g4lf7IQBAKJRhhjji0QSGDyR5rl+C4xCASIC08yPImP6H9gAwA="}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:03Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "31cff8264b1a226ee9d5dced5ca8cbf0c6a377ade26c65bc413898d00362bb2d",
+          "serializedMessageSha256": "31cff8264b1a226ee9d5dced5ca8cbf0c6a377ade26c65bc413898d00362bb2d",
+          "roundTripMessageSha256": "31cff8264b1a226ee9d5dced5ca8cbf0c6a377ade26c65bc413898d00362bb2d",
+          "originalDataUrlSha256": "a96ba00bb8592fb6379220e448b39211b5fd95f508029427b631a4fb66e1ccf6",
+          "roundTripCaseId": "webp",
+          "roundTripMime": "image/webp",
+          "roundTripSourceSha256": "48ff9e02de480877b29ce6123c08eeb41ff9c21f91d59f9b537540fabe8b9d96",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/webp",
+          "bytePreserved": true,
+          "outputByteSha256": "48ff9e02de480877b29ce6123c08eeb41ff9c21f91d59f9b537540fabe8b9d96",
+          "outputDataUrlSha256": "a96ba00bb8592fb6379220e448b39211b5fd95f508029427b631a4fb66e1ccf6",
+          "pngSignatureHex": null,
+          "selectedWidth": 4,
+          "selectedHeight": 4,
+          "sourceAndOutputRgbaEqual": null,
+          "semanticPixelSha256": null
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "a96ba00bb8592fb6379220e448b39211b5fd95f508029427b631a4fb66e1ccf6",
+          "projectMessagesImageSrcSha256": "a96ba00bb8592fb6379220e448b39211b5fd95f508029427b631a4fb66e1ccf6",
+          "renderUserHtmlSha256": "6fca0cadcff02ce3257b22fd8df088365bf4ef545b7edccf00ee1ac81141903d",
+          "projectMessagesHtmlSha256": "e796345e4e65784239d20108d486ffc65f328ad05c737293f6c6c0d023482058",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": null
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    },
+    {
+      "id": "bmp",
+      "projectionKind": "convert-to-png",
+      "framePolicy": "single-image",
+      "source": {
+        "format": "BMP",
+        "mime": "image/bmp",
+        "fileName": "synthetic-bmp.bmp",
+        "byteLength": 102,
+        "sha256": "03e9e4fe8c3a59fcbbf5845db6180545eb9e7ad4d8ad58785f3272787ae3a485",
+        "frameCount": 1,
+        "selectedWidth": 4,
+        "selectedHeight": 4,
+        "selectedFrameRgbaSha256": "4f596d1149d7ab4f0a0c0e0efbb7ea1aa46a7b258667ca764edf82b840fdd9ed"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the synthetic BMP image."},
+          {"type": "image_url", "image_url": {"url": "data:image/bmp;base64,Qk1mAAAAAAAAADYAAAAoAAAABAAAAAQAAAABABgAAAAAADAAAADEDgAAxA4AAAAAAAAAAAAAMLDwSDAYSDAY0HAgSDAYMLDw0HAgSDAYSDAY0HAgMLDwSDAY0HAgSDAYSDAYMLDw"}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "bmp"},
+        "_images": [
+          {"name": "synthetic-bmp.bmp", "mime": "image/bmp", "base64": "Qk1mAAAAAAAAADYAAAAoAAAABAAAAAQAAAABABgAAAAAADAAAADEDgAAxA4AAAAAAAAAAAAAMLDwSDAYSDAY0HAgSDAYMLDw0HAgSDAYSDAY0HAgMLDwSDAY0HAgSDAYSDAYMLDw"}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:04Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "e09acdba80f8f43068741118524319f68eba5ccfad7a35134c288a2a068ac907",
+          "serializedMessageSha256": "e09acdba80f8f43068741118524319f68eba5ccfad7a35134c288a2a068ac907",
+          "roundTripMessageSha256": "e09acdba80f8f43068741118524319f68eba5ccfad7a35134c288a2a068ac907",
+          "originalDataUrlSha256": "9752dc3ba24bdfaec44255077c67b6b0d1a03d025204ae7b25f0d53b643239ac",
+          "roundTripCaseId": "bmp",
+          "roundTripMime": "image/bmp",
+          "roundTripSourceSha256": "03e9e4fe8c3a59fcbbf5845db6180545eb9e7ad4d8ad58785f3272787ae3a485",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/png",
+          "bytePreserved": false,
+          "outputByteSha256": null,
+          "outputDataUrlSha256": null,
+          "pngSignatureHex": "89504e470d0a1a0a",
+          "selectedWidth": 4,
+          "selectedHeight": 4,
+          "sourceAndOutputRgbaEqual": true,
+          "semanticPixelSha256": "4f596d1149d7ab4f0a0c0e0efbb7ea1aa46a7b258667ca764edf82b840fdd9ed"
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "9752dc3ba24bdfaec44255077c67b6b0d1a03d025204ae7b25f0d53b643239ac",
+          "projectMessagesImageSrcSha256": "9752dc3ba24bdfaec44255077c67b6b0d1a03d025204ae7b25f0d53b643239ac",
+          "renderUserHtmlSha256": "3c01ae6de6a4413d63f8cabfd5ecae482421308f100eca7f62c6a2bc71768445",
+          "projectMessagesHtmlSha256": "0f765d7820e66181b84586a7e66800eacec746adcccb964f0b571f7705b5728b",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": true
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    },
+    {
+      "id": "gif",
+      "projectionKind": "convert-to-png",
+      "framePolicy": "first-frame-only",
+      "source": {
+        "format": "GIF",
+        "mime": "image/gif",
+        "fileName": "synthetic-gif.gif",
+        "byteLength": 129,
+        "sha256": "af3d02c8e9faebe5e07c6435ef6fa2920b0f612ad699e03ebb71e3f8fb31d98e",
+        "frameCount": 2,
+        "selectedWidth": 4,
+        "selectedHeight": 4,
+        "selectedFrameRgbaSha256": "4f596d1149d7ab4f0a0c0e0efbb7ea1aa46a7b258667ca764edf82b840fdd9ed"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the first frame of the synthetic GIF image."},
+          {"type": "image_url", "image_url": {"url": "data:image/gif;base64,R0lGODlhBAAEAIEAAPCwMCBw0BgwSAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQICAAAACwAAAAABAAEAAAIDwADCBAAQECAggQFIgwQEAAh+QQIDAAAACwAAAAABAAEAIHwsDDQSHhYGEAAAAAIDwADCBAAQECAggQFIgwQEAA7"}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "gif"},
+        "_images": [
+          {"name": "synthetic-gif.gif", "mime": "image/gif", "base64": "R0lGODlhBAAEAIEAAPCwMCBw0BgwSAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQICAAAACwAAAAABAAEAAAIDwADCBAAQECAggQFIgwQEAAh+QQIDAAAACwAAAAABAAEAIHwsDDQSHhYGEAAAAAIDwADCBAAQECAggQFIgwQEAA7"}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:05Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "d076f1c387727931624a23dc2480824291ef6bb2aa6700981f149640b5bdd14a",
+          "serializedMessageSha256": "d076f1c387727931624a23dc2480824291ef6bb2aa6700981f149640b5bdd14a",
+          "roundTripMessageSha256": "d076f1c387727931624a23dc2480824291ef6bb2aa6700981f149640b5bdd14a",
+          "originalDataUrlSha256": "a3382dcb95e5515f306adb68a8f6f6c660ee3ba32a974c15accae5838c282450",
+          "roundTripCaseId": "gif",
+          "roundTripMime": "image/gif",
+          "roundTripSourceSha256": "af3d02c8e9faebe5e07c6435ef6fa2920b0f612ad699e03ebb71e3f8fb31d98e",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/png",
+          "bytePreserved": false,
+          "outputByteSha256": null,
+          "outputDataUrlSha256": null,
+          "pngSignatureHex": "89504e470d0a1a0a",
+          "selectedWidth": 4,
+          "selectedHeight": 4,
+          "sourceAndOutputRgbaEqual": true,
+          "semanticPixelSha256": "4f596d1149d7ab4f0a0c0e0efbb7ea1aa46a7b258667ca764edf82b840fdd9ed"
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "a3382dcb95e5515f306adb68a8f6f6c660ee3ba32a974c15accae5838c282450",
+          "projectMessagesImageSrcSha256": "a3382dcb95e5515f306adb68a8f6f6c660ee3ba32a974c15accae5838c282450",
+          "renderUserHtmlSha256": "a4d2bf7ccaa687cc16999d0a0ac5ac2174a9f65c48ab4b3ac45eee7b133cb687",
+          "projectMessagesHtmlSha256": "1e1b9d5bdd8507233ed66d31aebacc15955c0ef04db896e6c57c3df2f1eef895",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": true
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    },
+    {
+      "id": "ico",
+      "projectionKind": "convert-to-png",
+      "framePolicy": "single-size-only",
+      "source": {
+        "format": "ICO",
+        "mime": "image/x-icon",
+        "fileName": "synthetic-ico.ico",
+        "byteLength": 152,
+        "sha256": "7382b2ab160035853eb3981a14b932941ebe41e175811a6b1c4c270a09283370",
+        "frameCount": 1,
+        "selectedWidth": 16,
+        "selectedHeight": 16,
+        "selectedFrameRgbaSha256": "c58a10581113a39bf8f21f016b1d7d1f8c1395182b4045e44be76da50db1b7f5"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the synthetic ICO image."},
+          {"type": "image_url", "image_url": {"url": "data:image/x-icon;base64,AAABAAEAEBAAAAAAIACCAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAQAAAAEAgGAAAAH/P/YQAAAElJREFUeJxjYEACCgkH/jMQAOhqmBgoBEyUGsBIjLOJBgpkhAELNkUfNhhgNUgg4AIjuhgTA4WAadQABhZiQ3vwJiQmSi2l2AAAnpQXRgjeXmUAAAAASUVORK5CYII="}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "ico"},
+        "_images": [
+          {"name": "synthetic-ico.ico", "mime": "image/x-icon", "base64": "AAABAAEAEBAAAAAAIACCAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAQAAAAEAgGAAAAH/P/YQAAAElJREFUeJxjYEACCgkH/jMQAOhqmBgoBEyUGsBIjLOJBgpkhAELNkUfNhhgNUgg4AIjuhgTA4WAadQABhZiQ3vwJiQmSi2l2AAAnpQXRgjeXmUAAAAASUVORK5CYII="}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:06Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "6259e4167d8c7b6c7d05a222434d0970452593127858dfa2b7d152590fdf843d",
+          "serializedMessageSha256": "6259e4167d8c7b6c7d05a222434d0970452593127858dfa2b7d152590fdf843d",
+          "roundTripMessageSha256": "6259e4167d8c7b6c7d05a222434d0970452593127858dfa2b7d152590fdf843d",
+          "originalDataUrlSha256": "c298d26490127f31fae25daf176b26bea7026ed5b2dee61419de3d9e84b5bf4d",
+          "roundTripCaseId": "ico",
+          "roundTripMime": "image/x-icon",
+          "roundTripSourceSha256": "7382b2ab160035853eb3981a14b932941ebe41e175811a6b1c4c270a09283370",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/png",
+          "bytePreserved": false,
+          "outputByteSha256": null,
+          "outputDataUrlSha256": null,
+          "pngSignatureHex": "89504e470d0a1a0a",
+          "selectedWidth": 16,
+          "selectedHeight": 16,
+          "sourceAndOutputRgbaEqual": true,
+          "semanticPixelSha256": "c58a10581113a39bf8f21f016b1d7d1f8c1395182b4045e44be76da50db1b7f5"
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "c298d26490127f31fae25daf176b26bea7026ed5b2dee61419de3d9e84b5bf4d",
+          "projectMessagesImageSrcSha256": "c298d26490127f31fae25daf176b26bea7026ed5b2dee61419de3d9e84b5bf4d",
+          "renderUserHtmlSha256": "183c39f8717c0681da01c1175b706b1661913bcefd4cab0154cde83c30861dd6",
+          "projectMessagesHtmlSha256": "37be66409d5047b4ab794afd1746bc854d8f336d2b6e514915a4c8aa558e3b7b",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": true
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    },
+    {
+      "id": "tiff",
+      "projectionKind": "convert-to-png",
+      "framePolicy": "first-frame-only",
+      "source": {
+        "format": "TIFF",
+        "mime": "image/tiff",
+        "fileName": "synthetic-tiff.tiff",
+        "byteLength": 384,
+        "sha256": "6165cf2ae17b6a07ea8a20496b7d7b12681ad1aefd59776ff8bbacef7146167c",
+        "frameCount": 2,
+        "selectedWidth": 4,
+        "selectedHeight": 4,
+        "selectedFrameRgbaSha256": "4f596d1149d7ab4f0a0c0e0efbb7ea1aa46a7b258667ca764edf82b840fdd9ed"
+      },
+      "sourceMessage": {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect the first page of the synthetic TIFF image."},
+          {"type": "image_url", "image_url": {"url": "data:image/tiff;base64,SUkqAAgAAAAKAAABBAABAAAABAAAAAEBBAABAAAABAAAAAIBAwADAAAAhgAAAAMBAwABAAAAAQAAAAYBAwABAAAAAgAAABEBBAABAAAAjAAAABUBAwABAAAAAwAAABYBBAABAAAABAAAABcBBAABAAAAMAAAABwBAwABAAAAAQAAAMgAAAAIAAgACAAgcNAYMEgYMEjwsDAYMEggcNDwsDAYMEgYMEjwsDAgcNAYMEjwsDAYMEgYMEggcNAAAAAASUkqAAgAAAAKAAABBAABAAAABAAAAAEBBAABAAAABAAAAAIBAwADAAAARgEAAAMBAwABAAAAAQAAAAYBAwABAAAAAgAAABEBBAABAAAATAEAABUBAwABAAAAAwAAABYBBAABAAAABAAAABcBBAABAAAAMAAAABwBAwABAAAAAQAAAAAAAAAIAAgACADQSHhYGEBYGEDwsDBYGEDQSHjwsDBYGEBYGEDwsDDQSHhYGEDwsDBYGEBYGEDQSHgAAAAA"}}
+        ],
+        "thought": "",
+        "meta": {"evidenceCaseId": "tiff"},
+        "_images": [
+          {"name": "synthetic-tiff.tiff", "mime": "image/tiff", "base64": "SUkqAAgAAAAKAAABBAABAAAABAAAAAEBBAABAAAABAAAAAIBAwADAAAAhgAAAAMBAwABAAAAAQAAAAYBAwABAAAAAgAAABEBBAABAAAAjAAAABUBAwABAAAAAwAAABYBBAABAAAABAAAABcBBAABAAAAMAAAABwBAwABAAAAAQAAAMgAAAAIAAgACAAgcNAYMEgYMEjwsDAYMEggcNDwsDAYMEgYMEjwsDAgcNAYMEjwsDAYMEgYMEggcNAAAAAASUkqAAgAAAAKAAABBAABAAAABAAAAAEBBAABAAAABAAAAAIBAwADAAAARgEAAAMBAwABAAAAAQAAAAYBAwABAAAAAgAAABEBBAABAAAATAEAABUBAwABAAAAAwAAABYBBAABAAAABAAAABcBBAABAAAAMAAAABwBAwABAAAAAQAAAAAAAAAIAAgACADQSHhYGEBYGEDwsDBYGEDQSHjwsDBYGEBYGEDwsDDQSHhYGEDwsDBYGEBYGEDQSHgAAAAA"}
+        ],
+        "_model": "synthetic-model",
+        "_time": "2030-01-02T03:04:07Z"
+      },
+      "expected": {
+        "persistence": {
+          "sourceMessageSha256": "ac9bfe76df957431e61d99553cd585b2db378b982d2c31d246aba7c6dd986296",
+          "serializedMessageSha256": "ac9bfe76df957431e61d99553cd585b2db378b982d2c31d246aba7c6dd986296",
+          "roundTripMessageSha256": "ac9bfe76df957431e61d99553cd585b2db378b982d2c31d246aba7c6dd986296",
+          "originalDataUrlSha256": "c616706b47defe7552447e3727f94d1020eea9feb6f4d08fb5072d0acba88e10",
+          "roundTripCaseId": "tiff",
+          "roundTripMime": "image/tiff",
+          "roundTripSourceSha256": "6165cf2ae17b6a07ea8a20496b7d7b12681ad1aefd59776ff8bbacef7146167c",
+          "imageCount": 1
+        },
+        "model": {
+          "outputMime": "image/png",
+          "bytePreserved": false,
+          "outputByteSha256": null,
+          "outputDataUrlSha256": null,
+          "pngSignatureHex": "89504e470d0a1a0a",
+          "selectedWidth": 4,
+          "selectedHeight": 4,
+          "sourceAndOutputRgbaEqual": true,
+          "semanticPixelSha256": "4f596d1149d7ab4f0a0c0e0efbb7ea1aa46a7b258667ca764edf82b840fdd9ed"
+        },
+        "ui": {
+          "renderUserImageSrcSha256": "c616706b47defe7552447e3727f94d1020eea9feb6f4d08fb5072d0acba88e10",
+          "projectMessagesImageSrcSha256": "c616706b47defe7552447e3727f94d1020eea9feb6f4d08fb5072d0acba88e10",
+          "renderUserHtmlSha256": "4dfd209f2af8ebb3aabe572318dfb435c35601d70c6d0e0eb70af586ba78b5c5",
+          "projectMessagesHtmlSha256": "b06ff50e8e3149ed40136f3262f52b85045275659270b6ff25a5647cf9785388",
+          "usesOriginalDataUrl": true,
+          "modelOutputUrlAbsentWhenConverted": true
+        },
+        "stability": {
+          "modelProjectionStable": true,
+          "uiProjectionStable": true,
+          "sourceMessageUnchanged": true,
+          "sourceImageCount": 1
+        }
+      }
+    }
+  ],
+  "expectedAggregate": {
+    "counts": {
+      "cases": 7,
+      "passthroughCases": 3,
+      "convertedCases": 4,
+      "messages": 7,
+      "contentImages": 7,
+      "sourceImages": 7,
+      "jsonlMessages": 7
+    },
+    "executedCaseIds": ["png", "jpeg", "webp", "bmp", "gif", "ico", "tiff"],
+    "batchStability": {
+      "serializationStable": true,
+      "buildPayloadMatchesSerialization": true,
+      "sourceMessagesUnchanged": true
+    },
+    "sideEffects": {
+      "tempDiskEntries": ["evidence.jsonl"],
+      "sessionApiCalls": 0,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "networkCalls": 0,
+      "browserCalls": 0,
+      "workerStarts": 0
+    }
+  }
+}

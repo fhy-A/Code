@@ -1,0 +1,656 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workbar.local/schemas/harness/image-mime-preservation-evidence-v1.schema.json",
+  "title": "H3-2D1 seven-format image MIME preservation evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidenceProfile",
+    "persistenceOptions",
+    "cases",
+    "expectedAggregate"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "evidenceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "scope",
+        "caseOrder",
+        "passthroughCaseIds",
+        "convertedCaseIds"
+      ],
+      "properties": {
+        "id": {"const": "h3-2d1-image-mime-preservation"},
+        "version": {"const": 1},
+        "scope": {"const": "seven-format-production-chain"},
+        "caseOrder": {"$ref": "#/$defs/caseOrder"},
+        "passthroughCaseIds": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {"const": "png"},
+            {"const": "jpeg"},
+            {"const": "webp"}
+          ],
+          "items": false
+        },
+        "convertedCaseIds": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {"const": "bmp"},
+            {"const": "gif"},
+            {"const": "ico"},
+            {"const": "tiff"}
+          ],
+          "items": false
+        }
+      }
+    },
+    "persistenceOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["includeModel", "includeTime"],
+      "properties": {
+        "includeModel": {"const": true},
+        "includeTime": {"const": true}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "prefixItems": [
+        {"$ref": "#/$defs/pngCase"},
+        {"$ref": "#/$defs/jpegCase"},
+        {"$ref": "#/$defs/webpCase"},
+        {"$ref": "#/$defs/bmpCase"},
+        {"$ref": "#/$defs/gifCase"},
+        {"$ref": "#/$defs/icoCase"},
+        {"$ref": "#/$defs/tiffCase"}
+      ],
+      "items": false
+    },
+    "expectedAggregate": {"$ref": "#/$defs/aggregateEvidence"}
+  },
+  "$defs": {
+    "hexSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableSha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/hexSha256"},
+        {"type": "null"}
+      ]
+    },
+    "caseOrder": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "prefixItems": [
+        {"const": "png"},
+        {"const": "jpeg"},
+        {"const": "webp"},
+        {"const": "bmp"},
+        {"const": "gif"},
+        {"const": "ico"},
+        {"const": "tiff"}
+      ],
+      "items": false
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "mime",
+        "fileName",
+        "byteLength",
+        "sha256",
+        "frameCount",
+        "selectedWidth",
+        "selectedHeight",
+        "selectedFrameRgbaSha256"
+      ],
+      "properties": {
+        "format": {
+          "enum": ["PNG", "JPEG", "WEBP", "BMP", "GIF", "ICO", "TIFF"]
+        },
+        "mime": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/bmp",
+            "image/gif",
+            "image/x-icon",
+            "image/tiff"
+          ]
+        },
+        "fileName": {
+          "type": "string",
+          "pattern": "^synthetic-[a-z]+\\.(?:png|jpeg|webp|bmp|gif|ico|tiff)$"
+        },
+        "byteLength": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/hexSha256"},
+        "frameCount": {"type": "integer", "enum": [1, 2]},
+        "selectedWidth": {"type": "integer", "minimum": 1, "maximum": 32},
+        "selectedHeight": {"type": "integer", "minimum": 1, "maximum": 32},
+        "selectedFrameRgbaSha256": {"$ref": "#/$defs/hexSha256"}
+      }
+    },
+    "sourceMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "content",
+        "thought",
+        "meta",
+        "_images",
+        "_model",
+        "_time"
+      ],
+      "properties": {
+        "role": {"const": "user"},
+        "content": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "text"],
+              "properties": {
+                "type": {"const": "text"},
+                "text": {"type": "string", "minLength": 1}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "image_url"],
+              "properties": {
+                "type": {"const": "image_url"},
+                "image_url": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["url"],
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "pattern": "^data:image/(?:png|jpeg|webp|bmp|gif|x-icon|tiff);base64,[A-Za-z0-9+/]+={0,2}$"
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "items": false
+        },
+        "thought": {"const": ""},
+        "meta": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidenceCaseId"],
+          "properties": {
+            "evidenceCaseId": {
+              "enum": ["png", "jpeg", "webp", "bmp", "gif", "ico", "tiff"]
+            }
+          }
+        },
+        "_images": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "mime", "base64"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "mime": {
+                "enum": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/webp",
+                  "image/bmp",
+                  "image/gif",
+                  "image/x-icon",
+                  "image/tiff"
+                ]
+              },
+              "base64": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+              }
+            }
+          }
+        },
+        "_model": {"const": "synthetic-model"},
+        "_time": {"type": "string", "format": "date-time"}
+      }
+    },
+    "persistenceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceMessageSha256",
+        "serializedMessageSha256",
+        "roundTripMessageSha256",
+        "originalDataUrlSha256",
+        "roundTripCaseId",
+        "roundTripMime",
+        "roundTripSourceSha256",
+        "imageCount"
+      ],
+      "properties": {
+        "sourceMessageSha256": {"$ref": "#/$defs/hexSha256"},
+        "serializedMessageSha256": {"$ref": "#/$defs/hexSha256"},
+        "roundTripMessageSha256": {"$ref": "#/$defs/hexSha256"},
+        "originalDataUrlSha256": {"$ref": "#/$defs/hexSha256"},
+        "roundTripCaseId": {
+          "enum": ["png", "jpeg", "webp", "bmp", "gif", "ico", "tiff"]
+        },
+        "roundTripMime": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/bmp",
+            "image/gif",
+            "image/x-icon",
+            "image/tiff"
+          ]
+        },
+        "roundTripSourceSha256": {"$ref": "#/$defs/hexSha256"},
+        "imageCount": {"const": 1}
+      }
+    },
+    "modelEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outputMime",
+        "bytePreserved",
+        "outputByteSha256",
+        "outputDataUrlSha256",
+        "pngSignatureHex",
+        "selectedWidth",
+        "selectedHeight",
+        "sourceAndOutputRgbaEqual",
+        "semanticPixelSha256"
+      ],
+      "properties": {
+        "outputMime": {
+          "enum": ["image/png", "image/jpeg", "image/webp"]
+        },
+        "bytePreserved": {"type": "boolean"},
+        "outputByteSha256": {"$ref": "#/$defs/nullableSha256"},
+        "outputDataUrlSha256": {"$ref": "#/$defs/nullableSha256"},
+        "pngSignatureHex": {
+          "oneOf": [
+            {"const": "89504e470d0a1a0a"},
+            {"type": "null"}
+          ]
+        },
+        "selectedWidth": {"type": "integer", "minimum": 1, "maximum": 32},
+        "selectedHeight": {"type": "integer", "minimum": 1, "maximum": 32},
+        "sourceAndOutputRgbaEqual": {
+          "oneOf": [{"const": true}, {"type": "null"}]
+        },
+        "semanticPixelSha256": {"$ref": "#/$defs/nullableSha256"}
+      }
+    },
+    "uiEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "renderUserImageSrcSha256",
+        "projectMessagesImageSrcSha256",
+        "renderUserHtmlSha256",
+        "projectMessagesHtmlSha256",
+        "usesOriginalDataUrl",
+        "modelOutputUrlAbsentWhenConverted"
+      ],
+      "properties": {
+        "renderUserImageSrcSha256": {"$ref": "#/$defs/hexSha256"},
+        "projectMessagesImageSrcSha256": {"$ref": "#/$defs/hexSha256"},
+        "renderUserHtmlSha256": {"$ref": "#/$defs/hexSha256"},
+        "projectMessagesHtmlSha256": {"$ref": "#/$defs/hexSha256"},
+        "usesOriginalDataUrl": {"const": true},
+        "modelOutputUrlAbsentWhenConverted": {
+          "oneOf": [{"const": true}, {"type": "null"}]
+        }
+      }
+    },
+    "stabilityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelProjectionStable",
+        "uiProjectionStable",
+        "sourceMessageUnchanged",
+        "sourceImageCount"
+      ],
+      "properties": {
+        "modelProjectionStable": {"const": true},
+        "uiProjectionStable": {"const": true},
+        "sourceMessageUnchanged": {"const": true},
+        "sourceImageCount": {"const": 1}
+      }
+    },
+    "caseExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["persistence", "model", "ui", "stability"],
+      "properties": {
+        "persistence": {"$ref": "#/$defs/persistenceEvidence"},
+        "model": {"$ref": "#/$defs/modelEvidence"},
+        "ui": {"$ref": "#/$defs/uiEvidence"},
+        "stability": {"$ref": "#/$defs/stabilityEvidence"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "projectionKind",
+        "framePolicy",
+        "source",
+        "sourceMessage",
+        "expected"
+      ],
+      "properties": {
+        "id": {
+          "enum": ["png", "jpeg", "webp", "bmp", "gif", "ico", "tiff"]
+        },
+        "projectionKind": {
+          "enum": ["passthrough", "convert-to-png"]
+        },
+        "framePolicy": {
+          "enum": ["single-image", "first-frame-only", "single-size-only"]
+        },
+        "source": {"$ref": "#/$defs/source"},
+        "sourceMessage": {"$ref": "#/$defs/sourceMessage"},
+        "expected": {"$ref": "#/$defs/caseExpected"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"projectionKind": {"const": "passthrough"}},
+            "required": ["projectionKind"]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "properties": {
+                  "model": {
+                    "properties": {
+                      "bytePreserved": {"const": true},
+                      "outputByteSha256": {"$ref": "#/$defs/hexSha256"},
+                      "outputDataUrlSha256": {"$ref": "#/$defs/hexSha256"},
+                      "pngSignatureHex": {"type": "null"},
+                      "sourceAndOutputRgbaEqual": {"type": "null"},
+                      "semanticPixelSha256": {"type": "null"}
+                    }
+                  },
+                  "ui": {
+                    "properties": {
+                      "modelOutputUrlAbsentWhenConverted": {"type": "null"}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"projectionKind": {"const": "convert-to-png"}},
+            "required": ["projectionKind"]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "properties": {
+                  "model": {
+                    "properties": {
+                      "outputMime": {"const": "image/png"},
+                      "bytePreserved": {"const": false},
+                      "outputByteSha256": {"type": "null"},
+                      "outputDataUrlSha256": {"type": "null"},
+                      "pngSignatureHex": {"const": "89504e470d0a1a0a"},
+                      "sourceAndOutputRgbaEqual": {"const": true},
+                      "semanticPixelSha256": {"$ref": "#/$defs/hexSha256"}
+                    }
+                  },
+                  "ui": {
+                    "properties": {
+                      "modelOutputUrlAbsentWhenConverted": {"const": true}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pngCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "png"},
+            "projectionKind": {"const": "passthrough"},
+            "framePolicy": {"const": "single-image"},
+            "source": {
+              "properties": {
+                "format": {"const": "PNG"},
+                "mime": {"const": "image/png"},
+                "frameCount": {"const": 1}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "jpegCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "jpeg"},
+            "projectionKind": {"const": "passthrough"},
+            "framePolicy": {"const": "single-image"},
+            "source": {
+              "properties": {
+                "format": {"const": "JPEG"},
+                "mime": {"const": "image/jpeg"},
+                "frameCount": {"const": 1}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "webpCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "webp"},
+            "projectionKind": {"const": "passthrough"},
+            "framePolicy": {"const": "single-image"},
+            "source": {
+              "properties": {
+                "format": {"const": "WEBP"},
+                "mime": {"const": "image/webp"},
+                "frameCount": {"const": 1}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "bmpCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "bmp"},
+            "projectionKind": {"const": "convert-to-png"},
+            "framePolicy": {"const": "single-image"},
+            "source": {
+              "properties": {
+                "format": {"const": "BMP"},
+                "mime": {"const": "image/bmp"},
+                "frameCount": {"const": 1}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "gifCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "gif"},
+            "projectionKind": {"const": "convert-to-png"},
+            "framePolicy": {"const": "first-frame-only"},
+            "source": {
+              "properties": {
+                "format": {"const": "GIF"},
+                "mime": {"const": "image/gif"},
+                "frameCount": {"const": 2}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "icoCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "ico"},
+            "projectionKind": {"const": "convert-to-png"},
+            "framePolicy": {"const": "single-size-only"},
+            "source": {
+              "properties": {
+                "format": {"const": "ICO"},
+                "mime": {"const": "image/x-icon"},
+                "frameCount": {"const": 1}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tiffCase": {
+      "allOf": [
+        {"$ref": "#/$defs/case"},
+        {
+          "properties": {
+            "id": {"const": "tiff"},
+            "projectionKind": {"const": "convert-to-png"},
+            "framePolicy": {"const": "first-frame-only"},
+            "source": {
+              "properties": {
+                "format": {"const": "TIFF"},
+                "mime": {"const": "image/tiff"},
+                "frameCount": {"const": 2}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "aggregateEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "executedCaseIds", "batchStability", "sideEffects"],
+      "properties": {
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cases",
+            "passthroughCases",
+            "convertedCases",
+            "messages",
+            "contentImages",
+            "sourceImages",
+            "jsonlMessages"
+          ],
+          "properties": {
+            "cases": {"const": 7},
+            "passthroughCases": {"const": 3},
+            "convertedCases": {"const": 4},
+            "messages": {"const": 7},
+            "contentImages": {"const": 7},
+            "sourceImages": {"const": 7},
+            "jsonlMessages": {"const": 7}
+          }
+        },
+        "executedCaseIds": {"$ref": "#/$defs/caseOrder"},
+        "batchStability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "serializationStable",
+            "buildPayloadMatchesSerialization",
+            "sourceMessagesUnchanged"
+          ],
+          "properties": {
+            "serializationStable": {"const": true},
+            "buildPayloadMatchesSerialization": {"const": true},
+            "sourceMessagesUnchanged": {"const": true}
+          }
+        },
+        "sideEffects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tempDiskEntries",
+            "sessionApiCalls",
+            "modelCalls",
+            "toolCalls",
+            "networkCalls",
+            "browserCalls",
+            "workerStarts"
+          ],
+          "properties": {
+            "tempDiskEntries": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "prefixItems": [{"const": "evidence.jsonl"}],
+              "items": false
+            },
+            "sessionApiCalls": {"const": 0},
+            "modelCalls": {"const": 0},
+            "toolCalls": {"const": 0},
+            "networkCalls": {"const": 0},
+            "browserCalls": {"const": 0},
+            "workerStarts": {"const": 0}
+          }
+        }
+      }
+    }
+  }
+}
