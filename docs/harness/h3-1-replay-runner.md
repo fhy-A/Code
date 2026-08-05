@@ -38,11 +38,12 @@ node scripts/replay-agent-traces.cjs --json
 7. 规范 View Model 计算 SHA-256 状态哈希；相同轨迹重复运行必须得到相同哈希。
 8. 失败输出首个相关事件序号、状态路径、期望值和实际值，不只返回笼统失败。
 
-H3-1 交付时的 H0 基线为 15 条夹具、106 个事件、17 个检查点恢复和 4 个显式恢复点。H3-2A 已在不修改 runner/schema 的前提下增加两条单 Run 轨迹，当前统一基线为 17 条夹具、124 个事件、25 个检查点、25 次检查点恢复和 4 个显式恢复点；详见 [`H3-2A 单 Run replay 夹具扩展`](h3-2a-single-run-replay-fixtures.md)。这些轨迹仍未等同于优化计划第六节所列 15 类最终完整场景。
+H3-1 交付时的 H0 基线为 15 条夹具、106 个事件、17 个检查点恢复和 4 个显式恢复点。H3-2A 已在不修改 runner/schema 的前提下增加两条单 Run 轨迹，当前统一单 Run 基线为 17 条夹具、124 个事件、25 个检查点、25 次检查点恢复和 4 个显式恢复点；详见 [`H3-2A 单 Run replay 夹具扩展`](h3-2a-single-run-replay-fixtures.md)。H3-2B1 另建独立 multi-run schema/suite/runner，基线为 1 个场景、3 个 Run、12 个事件、15 个 schedule 步骤、3 个 fact-marker、4 个检查点及 4 次恢复；详见 [`H3-2B1 多 Run replay 关系基础设施`](h3-2b1-multi-run-replay-relations.md)。两套计数互不合并，且仍未等同于优化计划第六节所列 15 类最终完整场景。
 
 ## 测试与回归
 
 - `tests/test_harness_replay.py` 覆盖全量回放、按名称/标签筛选、重复哈希、检查点恢复、重复投递、删除事件、乱序事件、检查点差异与空选择错误。
+- `tests/test_harness_multi_run_fixtures.py` 与 `tests/test_harness_multi_run_replay.py` 独立覆盖多 Run fixture/schema、身份关系、固定 schedule、每 Run 生产投影、复合 cursor 恢复、重复投递和定向首差异路径，不改变单 Run 测试语义。
 - 原有 `tests/test_run_projection.py` 继续保留纯 reducer/View Model 的细粒度契约测试。
 - 新测试由默认 `pytest` 完整回归自动执行；发布脚本门禁尚未在本阶段修改。
 
@@ -50,11 +51,13 @@ H3-1 交付时的 H0 基线为 15 条夹具、106 个事件、17 个检查点恢
 
 - 不增加或迁移持久化字段，不修改旧 AgentRun、会话 JSONL、工具协议、默认前端或经典回退页。
 - `scripts/replay-agent-traces.cjs` 与对应测试、`package.json` 命令可独立删除，生产行为不受影响。
+- H3-2B1 的 multi-run schema/suite/runner/test 也可作为独立测试层删除，不影响单 Run runner 或生产行为。
 - 当前未提交的实验性 completion Guard 不属于 H3-1，也不作为本阶段正确性的前提。
 
 ## 后续边界
 
 1. H2-3 真实影子采样已经收口，H3-2A 已先固化同轮多工具取消和命令失败后模型恢复两条单 Run 轨迹。
-2. H3-2B 需另行设计和确认多 Run replay，覆盖排队、显式 `/parallel`、Child AgentRun 与不同完成顺序；H3-2A 收口不代表该阶段已经开始。
-3. 后续仍需补齐图片降级、手动压缩、更多上游错误和旧记录恢复等轨迹。
-4. 关键轨迹稳定并覆盖完整场景后，再单独确认 replay 发布门禁和 H4 隔离浏览器 E2E。
+2. H3-2B1 已完成 `queue-parallel-multi-run-relations` 的独立多 Run 回放基础设施、静态身份关系、固定顺序、复合恢复与幂等契约；它不证明真实 queue/background/UI/usage 生命周期、DOM、刷新、Runtime 原始事件或发布门禁。
+3. H3-2B2 的 Child AgentRun replay 尚未开始，仍需单独设计和确认。
+4. 后续仍需补齐图片降级、手动压缩、更多上游错误和旧记录恢复等轨迹。
+5. 关键轨迹稳定并覆盖完整场景后，再单独确认 replay 发布门禁和 H4 隔离浏览器 E2E。

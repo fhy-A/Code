@@ -1,0 +1,285 @@
+{
+  "multiRunFixtureVersion": 1,
+  "suite": "h3-2b1-multi-run-relations",
+  "source": "synthetic",
+  "clock": {
+    "origin": "2031-01-01T00:00:00Z",
+    "note": "Fixed synthetic clock; no runtime, queue, background, UI, or usage lifecycle is executed."
+  },
+  "scenarios": [
+    {
+      "name": "queue-parallel-multi-run-relations",
+      "source": "synthetic",
+      "tags": ["h3-2b1", "multi-run", "queue-relation", "parallel-relation"],
+      "identities": {
+        "sessions": {
+          "S1": {
+            "sessionId": "session-fixture-multi-1"
+          }
+        },
+        "agentRuns": {
+          "F1": {
+            "agentRunId": "eed03b0fa725ee68f222fa248db8eb65",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-multi-1",
+            "clientRequestId": "foreground-main-request",
+            "role": "foreground",
+            "parentAgentRunId": "",
+            "parentToolCallId": ""
+          },
+          "B1": {
+            "agentRunId": "0b9eaae0b3d70394a2142f4053faa5b6",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-multi-1",
+            "clientRequestId": "background-job-1",
+            "role": "background",
+            "parentAgentRunId": "",
+            "parentToolCallId": ""
+          },
+          "F2": {
+            "agentRunId": "4946b2f5edd1f9a96c6183374be8a5f5",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-multi-1",
+            "clientRequestId": "queue-item-1",
+            "role": "queued-foreground",
+            "parentAgentRunId": "",
+            "parentToolCallId": ""
+          }
+        },
+        "runtimes": {
+          "R_F1_1": {
+            "runtimeRunId": "runtime-multi-f1-round-1",
+            "agentRunKey": "F1",
+            "round": 1
+          },
+          "R_B1_1": {
+            "runtimeRunId": "runtime-multi-b1-round-1",
+            "agentRunKey": "B1",
+            "round": 1
+          },
+          "R_F2_1": {
+            "runtimeRunId": "runtime-multi-f2-round-1",
+            "agentRunKey": "F2",
+            "round": 1
+          }
+        },
+        "queueItems": {
+          "Q1": {
+            "id": "queue-item-1",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-multi-1",
+            "clientRequestId": "queue-item-1",
+            "agentRunKey": "F2"
+          }
+        },
+        "backgroundJobs": {
+          "J1": {
+            "id": "background-job-1",
+            "sessionRef": "S1",
+            "sessionId": "session-fixture-multi-1",
+            "clientRequestId": "background-job-1",
+            "agentRunKey": "B1",
+            "parentForegroundRunKey": "F1"
+          }
+        }
+      },
+      "runs": {
+        "F1": {
+          "identityRef": "F1",
+          "initialSnapshot": {"status": "model", "eventCursor": 0},
+          "events": [
+            {
+              "seq": 1,
+              "type": "created",
+              "data": {"model": "synthetic-model"},
+              "createdAt": "2031-01-01T00:00:01Z"
+            },
+            {
+              "seq": 2,
+              "type": "model_started",
+              "data": {"round": 1, "runtimeRunId": "runtime-multi-f1-round-1"},
+              "createdAt": "2031-01-01T00:00:02Z"
+            },
+            {
+              "seq": 3,
+              "type": "model_completed",
+              "data": {
+                "round": 1,
+                "runtimeRunId": "runtime-multi-f1-round-1",
+                "content": "Synthetic foreground result one.",
+                "reasoning": "",
+                "toolCalls": [],
+                "outcome": "content"
+              },
+              "createdAt": "2031-01-01T00:00:07Z"
+            },
+            {
+              "seq": 4,
+              "type": "completed",
+              "data": {},
+              "createdAt": "2031-01-01T00:00:08Z"
+            }
+          ]
+        },
+        "B1": {
+          "identityRef": "B1",
+          "initialSnapshot": {"status": "model", "eventCursor": 0},
+          "events": [
+            {
+              "seq": 1,
+              "type": "created",
+              "data": {"model": "synthetic-model"},
+              "createdAt": "2031-01-01T00:00:05Z"
+            },
+            {
+              "seq": 2,
+              "type": "model_started",
+              "data": {"round": 1, "runtimeRunId": "runtime-multi-b1-round-1"},
+              "createdAt": "2031-01-01T00:00:06Z"
+            },
+            {
+              "seq": 3,
+              "type": "model_completed",
+              "data": {
+                "round": 1,
+                "runtimeRunId": "runtime-multi-b1-round-1",
+                "content": "Synthetic background result.",
+                "reasoning": "",
+                "toolCalls": [],
+                "outcome": "content"
+              },
+              "createdAt": "2031-01-01T00:00:14Z"
+            },
+            {
+              "seq": 4,
+              "type": "completed",
+              "data": {},
+              "createdAt": "2031-01-01T00:00:15Z"
+            }
+          ]
+        },
+        "F2": {
+          "identityRef": "F2",
+          "initialSnapshot": {"status": "model", "eventCursor": 0},
+          "events": [
+            {
+              "seq": 1,
+              "type": "created",
+              "data": {"model": "synthetic-model"},
+              "createdAt": "2031-01-01T00:00:10Z"
+            },
+            {
+              "seq": 2,
+              "type": "model_started",
+              "data": {"round": 1, "runtimeRunId": "runtime-multi-f2-round-1"},
+              "createdAt": "2031-01-01T00:00:11Z"
+            },
+            {
+              "seq": 3,
+              "type": "model_completed",
+              "data": {
+                "round": 1,
+                "runtimeRunId": "runtime-multi-f2-round-1",
+                "content": "Synthetic queued foreground result.",
+                "reasoning": "",
+                "toolCalls": [],
+                "outcome": "content"
+              },
+              "createdAt": "2031-01-01T00:00:12Z"
+            },
+            {
+              "seq": 4,
+              "type": "completed",
+              "data": {},
+              "createdAt": "2031-01-01T00:00:13Z"
+            }
+          ]
+        }
+      },
+      "schedule": [
+        {"step": 1, "kind": "run-event", "runKey": "F1", "agentRunId": "eed03b0fa725ee68f222fa248db8eb65", "eventSeq": 1},
+        {"step": 2, "kind": "run-event", "runKey": "F1", "agentRunId": "eed03b0fa725ee68f222fa248db8eb65", "eventSeq": 2},
+        {"step": 3, "kind": "fact-marker", "fact": "queue-submitted", "ref": "Q1", "observedAt": "2031-01-01T00:00:03Z"},
+        {"step": 4, "kind": "fact-marker", "fact": "background-dispatched", "ref": "J1", "observedAt": "2031-01-01T00:00:04Z"},
+        {"step": 5, "kind": "run-event", "runKey": "B1", "agentRunId": "0b9eaae0b3d70394a2142f4053faa5b6", "eventSeq": 1},
+        {"step": 6, "kind": "run-event", "runKey": "B1", "agentRunId": "0b9eaae0b3d70394a2142f4053faa5b6", "eventSeq": 2},
+        {"step": 7, "kind": "run-event", "runKey": "F1", "agentRunId": "eed03b0fa725ee68f222fa248db8eb65", "eventSeq": 3},
+        {"step": 8, "kind": "run-event", "runKey": "F1", "agentRunId": "eed03b0fa725ee68f222fa248db8eb65", "eventSeq": 4},
+        {"step": 9, "kind": "fact-marker", "fact": "queue-run-linked", "ref": "Q1", "observedAt": "2031-01-01T00:00:09Z"},
+        {"step": 10, "kind": "run-event", "runKey": "F2", "agentRunId": "4946b2f5edd1f9a96c6183374be8a5f5", "eventSeq": 1},
+        {"step": 11, "kind": "run-event", "runKey": "F2", "agentRunId": "4946b2f5edd1f9a96c6183374be8a5f5", "eventSeq": 2},
+        {"step": 12, "kind": "run-event", "runKey": "F2", "agentRunId": "4946b2f5edd1f9a96c6183374be8a5f5", "eventSeq": 3},
+        {"step": 13, "kind": "run-event", "runKey": "F2", "agentRunId": "4946b2f5edd1f9a96c6183374be8a5f5", "eventSeq": 4},
+        {"step": 14, "kind": "run-event", "runKey": "B1", "agentRunId": "0b9eaae0b3d70394a2142f4053faa5b6", "eventSeq": 3},
+        {"step": 15, "kind": "run-event", "runKey": "B1", "agentRunId": "0b9eaae0b3d70394a2142f4053faa5b6", "eventSeq": 4}
+      ],
+      "checkpoints": [
+        {
+          "afterStep": 6,
+          "expectedRunCursors": {"F1": 2, "B1": 2, "F2": 0},
+          "expectedRunViews": {
+            "F1": {"cursor": 2, "status": "model", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started"]},
+            "B1": {"cursor": 2, "status": "model", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started"]},
+            "F2": {"cursor": 0, "status": "model", "terminalStatus": "", "modelRoundCount": 0, "timeline": []}
+          }
+        },
+        {
+          "afterStep": 10,
+          "expectedRunCursors": {"F1": 4, "B1": 2, "F2": 1},
+          "expectedRunViews": {
+            "F1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"]},
+            "B1": {"cursor": 2, "status": "model", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started"]},
+            "F2": {"cursor": 1, "status": "model", "terminalStatus": "", "modelRoundCount": 0, "timeline": ["created"]}
+          }
+        },
+        {
+          "afterStep": 13,
+          "expectedRunCursors": {"F1": 4, "B1": 2, "F2": 4},
+          "expectedRunViews": {
+            "F1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"]},
+            "B1": {"cursor": 2, "status": "model", "terminalStatus": "", "modelRoundCount": 1, "timeline": ["created", "model_started"]},
+            "F2": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"]}
+          }
+        },
+        {
+          "afterStep": 15,
+          "expectedRunCursors": {"F1": 4, "B1": 4, "F2": 4},
+          "expectedRunViews": {
+            "F1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"]},
+            "B1": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"]},
+            "F2": {"cursor": 4, "status": "completed", "terminalStatus": "completed", "modelRoundCount": 1, "timeline": ["created", "model_started", "model_completed", "completed"]}
+          }
+        }
+      ],
+      "expectedOrders": {
+        "creation": ["F1", "B1", "F2"],
+        "terminal": ["F1", "F2", "B1"],
+        "factMarkers": ["queue-submitted:Q1", "background-dispatched:J1", "queue-run-linked:Q1"]
+      },
+      "directContracts": {
+        "parallelCommand": {
+          "input": "/parallel synthetic background task",
+          "expectedTask": "synthetic background task"
+        },
+        "sessionAccessors": {
+          "queueStatus": "pending",
+          "backgroundStatus": "running",
+          "backgroundCursor": 2
+        },
+        "backgroundResult": {
+          "content": "Synthetic background result.",
+          "model": "synthetic-model",
+          "timestamp": "2031-01-01T00:00:15Z",
+          "responseTime": "11s",
+          "usage": {"input": 3, "output": 5, "cache": 1, "cost": 0.02}
+        },
+        "usageMerge": {
+          "current": {"input": 10, "output": 20, "cache": 2, "cost": 0.1, "extra": "preserved"},
+          "child": {"input": 3, "output": 5, "cache": 1, "cost": 0.02},
+          "expected": {"input": 13, "output": 25, "cache": 3, "cost": 0.12000000000000001, "extra": "preserved"}
+        }
+      },
+      "expectedCompositeHash": "5bfc185b1f31979e3802b1908d1b908c6f64d4ccc5ca882da158e7b840504e85"
+    }
+  ]
+}

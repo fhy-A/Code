@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:code:harness:multi-run-trace-suite:v1",
+  "title": "Code Harness synthetic multi-run trace suite v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["multiRunFixtureVersion", "suite", "source", "clock", "scenarios"],
+  "properties": {
+    "multiRunFixtureVersion": {"const": 1},
+    "suite": {"type": "string", "minLength": 1},
+    "source": {"const": "synthetic"},
+    "clock": {"$ref": "#/$defs/clock"},
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "note"],
+      "properties": {
+        "origin": {"type": "string", "format": "date-time"},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "sessionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId"],
+      "properties": {
+        "sessionId": {"type": "string", "minLength": 1}
+      }
+    },
+    "agentRunIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentRunId",
+        "sessionRef",
+        "sessionId",
+        "clientRequestId",
+        "role",
+        "parentAgentRunId",
+        "parentToolCallId"
+      ],
+      "properties": {
+        "agentRunId": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "sessionRef": {"$ref": "#/$defs/identifier"},
+        "sessionId": {"type": "string", "minLength": 1},
+        "clientRequestId": {"type": "string", "minLength": 1},
+        "role": {"enum": ["foreground", "background", "queued-foreground"]},
+        "parentAgentRunId": {"const": ""},
+        "parentToolCallId": {"const": ""}
+      }
+    },
+    "runtimeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtimeRunId", "agentRunKey", "round"],
+      "properties": {
+        "runtimeRunId": {"type": "string", "minLength": 1},
+        "agentRunKey": {"$ref": "#/$defs/identifier"},
+        "round": {"type": "integer", "minimum": 1}
+      }
+    },
+    "queueItemIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sessionRef", "sessionId", "clientRequestId", "agentRunKey"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "sessionRef": {"$ref": "#/$defs/identifier"},
+        "sessionId": {"type": "string", "minLength": 1},
+        "clientRequestId": {"type": "string", "minLength": 1},
+        "agentRunKey": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "backgroundJobIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sessionRef",
+        "sessionId",
+        "clientRequestId",
+        "agentRunKey",
+        "parentForegroundRunKey"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "sessionRef": {"$ref": "#/$defs/identifier"},
+        "sessionId": {"type": "string", "minLength": 1},
+        "clientRequestId": {"type": "string", "minLength": 1},
+        "agentRunKey": {"$ref": "#/$defs/identifier"},
+        "parentForegroundRunKey": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "identityMap": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"}
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions", "agentRuns", "runtimes", "queueItems", "backgroundJobs"],
+      "properties": {
+        "sessions": {
+          "allOf": [
+            {"$ref": "#/$defs/identityMap"},
+            {"additionalProperties": {"$ref": "#/$defs/sessionIdentity"}}
+          ]
+        },
+        "agentRuns": {
+          "allOf": [
+            {"$ref": "#/$defs/identityMap"},
+            {"additionalProperties": {"$ref": "#/$defs/agentRunIdentity"}}
+          ]
+        },
+        "runtimes": {
+          "allOf": [
+            {"$ref": "#/$defs/identityMap"},
+            {"additionalProperties": {"$ref": "#/$defs/runtimeIdentity"}}
+          ]
+        },
+        "queueItems": {
+          "allOf": [
+            {"$ref": "#/$defs/identityMap"},
+            {"additionalProperties": {"$ref": "#/$defs/queueItemIdentity"}}
+          ]
+        },
+        "backgroundJobs": {
+          "allOf": [
+            {"$ref": "#/$defs/identityMap"},
+            {"additionalProperties": {"$ref": "#/$defs/backgroundJobIdentity"}}
+          ]
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "type", "data", "createdAt"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 1},
+        "type": {"type": "string", "minLength": 1},
+        "data": {"type": "object"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityRef", "initialSnapshot", "events"],
+      "properties": {
+        "identityRef": {"$ref": "#/$defs/identifier"},
+        "initialSnapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "eventCursor"],
+          "properties": {
+            "status": {"type": "string", "minLength": 1},
+            "eventCursor": {"const": 0}
+          }
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/event"}
+        }
+      }
+    },
+    "runMap": {
+      "type": "object",
+      "minProperties": 2,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/run"}
+    },
+    "runEventStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "kind", "runKey", "agentRunId", "eventSeq"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1},
+        "kind": {"const": "run-event"},
+        "runKey": {"$ref": "#/$defs/identifier"},
+        "agentRunId": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "eventSeq": {"type": "integer", "minimum": 1}
+      }
+    },
+    "factMarkerStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "kind", "fact", "ref", "observedAt"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1},
+        "kind": {"const": "fact-marker"},
+        "fact": {"enum": ["queue-submitted", "background-dispatched", "queue-run-linked"]},
+        "ref": {"$ref": "#/$defs/identifier"},
+        "observedAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "scheduleStep": {
+      "oneOf": [
+        {"$ref": "#/$defs/runEventStep"},
+        {"$ref": "#/$defs/factMarkerStep"}
+      ]
+    },
+    "expectedRunView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cursor", "status", "terminalStatus", "modelRoundCount", "timeline"],
+      "properties": {
+        "cursor": {"type": "integer", "minimum": 0},
+        "status": {"type": "string", "minLength": 1},
+        "terminalStatus": {"type": "string"},
+        "modelRoundCount": {"type": "integer", "minimum": 0},
+        "timeline": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterStep", "expectedRunCursors", "expectedRunViews"],
+      "properties": {
+        "afterStep": {"type": "integer", "minimum": 1},
+        "expectedRunCursors": {
+          "type": "object",
+          "minProperties": 2,
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "expectedRunViews": {
+          "type": "object",
+          "minProperties": 2,
+          "additionalProperties": {"$ref": "#/$defs/expectedRunView"}
+        }
+      }
+    },
+    "expectedOrders": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["creation", "terminal", "factMarkers"],
+      "properties": {
+        "creation": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/identifier"}},
+        "terminal": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/identifier"}},
+        "factMarkers": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "directContracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parallelCommand", "sessionAccessors", "backgroundResult", "usageMerge"],
+      "properties": {
+        "parallelCommand": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["input", "expectedTask"],
+          "properties": {
+            "input": {"type": "string", "minLength": 1},
+            "expectedTask": {"type": "string", "minLength": 1}
+          }
+        },
+        "sessionAccessors": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["queueStatus", "backgroundStatus", "backgroundCursor"],
+          "properties": {
+            "queueStatus": {"type": "string", "minLength": 1},
+            "backgroundStatus": {"type": "string", "minLength": 1},
+            "backgroundCursor": {"type": "integer", "minimum": 0}
+          }
+        },
+        "backgroundResult": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["content", "model", "timestamp", "responseTime", "usage"],
+          "properties": {
+            "content": {"type": "string"},
+            "model": {"type": "string", "minLength": 1},
+            "timestamp": {"type": "string", "format": "date-time"},
+            "responseTime": {"type": "string", "minLength": 1},
+            "usage": {"type": "object"}
+          }
+        },
+        "usageMerge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["current", "child", "expected"],
+          "properties": {
+            "current": {"type": "object"},
+            "child": {"type": "object"},
+            "expected": {"type": "object"}
+          }
+        }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source",
+        "tags",
+        "identities",
+        "runs",
+        "schedule",
+        "checkpoints",
+        "expectedOrders",
+        "directContracts",
+        "expectedCompositeHash"
+      ],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "source": {"const": "synthetic"},
+        "tags": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "identities": {"$ref": "#/$defs/identities"},
+        "runs": {"$ref": "#/$defs/runMap"},
+        "schedule": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/scheduleStep"}
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"$ref": "#/$defs/checkpoint"}
+        },
+        "expectedOrders": {"$ref": "#/$defs/expectedOrders"},
+        "directContracts": {"$ref": "#/$defs/directContracts"},
+        "expectedCompositeHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  }
+}
