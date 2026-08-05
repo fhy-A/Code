@@ -17,10 +17,10 @@ COMPATIBILITY_DIR = ROOT / "tests" / "fixtures" / "harness" / "compatibility"
 
 
 class HarnessFixtureTests(unittest.TestCase):
-    def test_trace_suite_has_all_frozen_h0_2_scenarios(self):
+    def test_trace_suite_has_all_frozen_scenarios(self):
         summary = harness_fixtures.validate_trace_suite()
-        self.assertEqual(summary["fixtureCount"], 15)
-        self.assertEqual(summary["eventCount"], 106)
+        self.assertEqual(summary["fixtureCount"], 17)
+        self.assertEqual(summary["eventCount"], 124)
         self.assertEqual(summary["recoveryPointCount"], 4)
         self.assertEqual(
             set(summary["names"]),
@@ -35,6 +35,8 @@ class HarnessFixtureTests(unittest.TestCase):
                 "auto-compaction-failure",
                 "cancel-during-model",
                 "cancel-during-command",
+                "cancel-multi-tool-terminal-closure",
+                "command-failure-model-recovery",
                 "refresh-before-first-response",
                 "refresh-during-tools",
                 "server-restart-command-unknown",
@@ -53,6 +55,119 @@ class HarnessFixtureTests(unittest.TestCase):
         self.assertEqual(suite["fixtureVersion"], 1)
         self.assertEqual(schema["properties"]["source"]["const"], "synthetic")
 
+    def test_h3_2a_raw_fixture_contracts_close_declared_tools(self):
+        suite = harness_fixtures.load_trace_suite()
+        fixtures = {fixture["name"]: fixture for fixture in suite["fixtures"]}
+
+        cancelled = fixtures["cancel-multi-tool-terminal-closure"]
+        cancelled_model_events = [
+            event for event in cancelled["events"]
+            if event["type"] == "model_completed"
+        ]
+        self.assertEqual(len(cancelled_model_events), 1)
+        declared_ids = [
+            tool_call["id"]
+            for tool_call in cancelled_model_events[0]["data"]["toolCalls"]
+        ]
+        completed_events = [
+            event for event in cancelled["events"]
+            if event["type"] == "tool_completed"
+        ]
+        completed_ids = [event["data"]["toolCallId"] for event in completed_events]
+        self.assertEqual(
+            declared_ids,
+            ["tool-fixture-cancel-command", "tool-fixture-cancel-read"],
+        )
+        self.assertEqual(completed_ids, declared_ids)
+        self.assertEqual(len(completed_ids), len(set(completed_ids)))
+
+        started_ids = {
+            event["data"]["toolCallId"]
+            for event in cancelled["events"]
+            if event["type"] == "tool_started"
+        }
+        command_started_ids = {
+            event["data"]["toolCallId"]
+            for event in cancelled["events"]
+            if event["type"] == "command_started"
+        }
+        self.assertEqual(started_ids, {"tool-fixture-cancel-command"})
+        self.assertEqual(command_started_ids, {"tool-fixture-cancel-command"})
+        self.assertNotIn("tool-fixture-cancel-read", started_ids)
+        self.assertNotIn("tool-fixture-cancel-read", command_started_ids)
+
+        cancelled_results = {
+            event["data"]["toolCallId"]: event["data"]["result"]
+            for event in completed_events
+        }
+        self.assertIs(cancelled_results["tool-fixture-cancel-command"]["cancelled"], True)
+        self.assertIs(cancelled_results["tool-fixture-cancel-read"]["cancelled"], True)
+        self.assertIs(
+            cancelled_results["tool-fixture-cancel-read"]["cancelledBeforeStart"],
+            True,
+        )
+        self.assertEqual(
+            [
+                event["type"]
+                for event in cancelled["events"]
+                if event["type"] in {"completed", "failed", "cancelled"}
+            ],
+            ["cancelled"],
+        )
+
+        recovered = fixtures["command-failure-model-recovery"]
+        recovered_model_events = [
+            event for event in recovered["events"]
+            if event["type"] == "model_completed"
+        ]
+        self.assertEqual(len(recovered_model_events), 2)
+        failure_declared_ids = [
+            tool_call["id"]
+            for tool_call in recovered_model_events[0]["data"]["toolCalls"]
+        ]
+        failure_completed_events = [
+            event for event in recovered["events"]
+            if event["type"] == "tool_completed"
+        ]
+        self.assertEqual(failure_declared_ids, ["tool-fixture-command-failure"])
+        self.assertEqual(
+            [event["data"]["toolCallId"] for event in failure_completed_events],
+            failure_declared_ids,
+        )
+        self.assertEqual(
+            [
+                event["data"]["toolCallId"]
+                for event in recovered["events"]
+                if event["type"] == "tool_started"
+            ],
+            failure_declared_ids,
+        )
+        self.assertEqual(
+            [
+                event["data"]["toolCallId"]
+                for event in recovered["events"]
+                if event["type"] == "command_started"
+            ],
+            failure_declared_ids,
+        )
+        failure_result = failure_completed_events[0]["data"]["result"]
+        self.assertIs(failure_result["ok"], False)
+        self.assertEqual(failure_result["exitCode"], 23)
+        self.assertEqual(failure_result["stderr"], "synthetic-command-failure-marker")
+        self.assertEqual(recovered_model_events[1]["data"]["toolCalls"], [])
+        self.assertEqual(
+            recovered_model_events[1]["data"]["content"],
+            "Synthetic command failure handled.",
+        )
+        self.assertEqual(
+            [
+                event["type"]
+                for event in recovered["events"]
+                if event["type"] in {"completed", "failed", "cancelled"}
+            ],
+            ["completed"],
+        )
+
     def test_sanitizer_rejects_credentials_private_paths_and_real_urls(self):
         self.assertEqual(harness_fixtures.scan_sensitive_fixtures(), [])
         probe = {
@@ -67,9 +182,9 @@ class HarnessFixtureTests(unittest.TestCase):
     def test_trace_walk_hashes_are_deterministic(self):
         suite = harness_fixtures.load_trace_suite()
         expected = {
-            100: "fb7a6439a77f41fa0e3b2001a611bc8b383e7e2b28f7dd573b22156304631a3c",
-            1_000: "989cdffa4b0734d5502280a038dc225f6aabf4e4145bcbd6f9979952c068d6b0",
-            10_000: "84205dda88862e7bbfff74077f326547648d8cfba4044c53f358dde51c9887d1",
+            100: "e2598557076f9f7c2c4c9a0f7f87af2133290aa7ff5e149490c5165be37927c2",
+            1_000: "a7039b29a6a124c7617c8a9484bc7e529f2d37c62bcb5085241cb9467d5d9576",
+            10_000: "15e8cc141302275bfae3d344fd616f1c9b2d7e4da40414bd97181ce5dcef6d6c",
         }
         for size, digest in expected.items():
             with self.subTest(size=size):
@@ -134,7 +249,8 @@ class HarnessFixtureTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         summary = json.loads(result.stdout.strip())
-        self.assertEqual(summary["fixtureCount"], 15)
+        self.assertEqual(summary["fixtureCount"], 17)
+        self.assertEqual(summary["eventCount"], 124)
         self.assertEqual(summary["compatibilityFixtureCount"], 6)
 
 

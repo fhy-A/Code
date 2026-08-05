@@ -37,10 +37,10 @@ class HarnessReplayRunnerTests(unittest.TestCase):
 
         self.assertEqual(summary["replayVersion"], 1)
         self.assertEqual(summary["fixtureVersion"], 1)
-        self.assertEqual(summary["fixtureCount"], 15)
-        self.assertEqual(summary["eventCount"], 106)
-        self.assertEqual(summary["checkpointCount"], 17)
-        self.assertEqual(summary["checkpointRecoveryCount"], 17)
+        self.assertEqual(summary["fixtureCount"], 17)
+        self.assertEqual(summary["eventCount"], 124)
+        self.assertEqual(summary["checkpointCount"], 25)
+        self.assertEqual(summary["checkpointRecoveryCount"], 25)
         self.assertEqual(summary["recoveryCount"], 4)
         self.assertEqual(len(summary["suiteReplayHash"]), 64)
         self.assertEqual(
@@ -56,6 +56,8 @@ class HarnessReplayRunnerTests(unittest.TestCase):
                 "auto-compaction-failure",
                 "cancel-during-model",
                 "cancel-during-command",
+                "cancel-multi-tool-terminal-closure",
+                "command-failure-model-recovery",
                 "refresh-before-first-response",
                 "refresh-during-tools",
                 "server-restart-command-unknown",
@@ -70,6 +72,47 @@ class HarnessReplayRunnerTests(unittest.TestCase):
                     self.assertEqual(checkpoint["resumedStateHash"], result["stateHash"])
                 for recovery in result["recoveries"]:
                     self.assertEqual(recovery["stateHash"], result["stateHash"])
+
+    def test_h3_2a_traces_replay_all_stage_checkpoints_deterministically(self):
+        arguments = (
+            "--fixture",
+            "cancel-multi-tool-terminal-closure",
+            "--fixture",
+            "command-failure-model-recovery",
+            "--json",
+        )
+        first = json.loads(run_runner(*arguments).stdout)
+        second = json.loads(run_runner(*arguments).stdout)
+
+        self.assertEqual(first["fixtureCount"], 2)
+        self.assertEqual(first["eventCount"], 18)
+        self.assertEqual(first["checkpointCount"], 8)
+        self.assertEqual(first["checkpointRecoveryCount"], 8)
+        self.assertEqual(first["suiteReplayHash"], second["suiteReplayHash"])
+        self.assertEqual(first["results"], second["results"])
+
+        by_name = {result["name"]: result for result in first["results"]}
+        cancelled = by_name["cancel-multi-tool-terminal-closure"]
+        self.assertEqual(cancelled["eventCount"], 8)
+        self.assertEqual(cancelled["checkpointCount"], 4)
+        self.assertEqual(cancelled["terminalStatus"], "cancelled")
+        self.assertEqual(
+            [checkpoint["afterSeq"] for checkpoint in cancelled["checkpoints"]],
+            [3, 5, 7, 8],
+        )
+
+        recovered = by_name["command-failure-model-recovery"]
+        self.assertEqual(recovered["eventCount"], 10)
+        self.assertEqual(recovered["checkpointCount"], 4)
+        self.assertEqual(recovered["terminalStatus"], "completed")
+        self.assertEqual(
+            [checkpoint["afterSeq"] for checkpoint in recovered["checkpoints"]],
+            [3, 6, 8, 10],
+        )
+        for result in (cancelled, recovered):
+            self.assertEqual(result["stateHash"], result["duplicateStateHash"])
+            for checkpoint in result["checkpoints"]:
+                self.assertEqual(checkpoint["resumedStateHash"], result["stateHash"])
 
     def test_repeated_replay_and_named_or_tagged_subsets_are_deterministic(self):
         first = json.loads(run_runner("--json").stdout)
@@ -136,6 +179,106 @@ try {
         self.assertEqual(error["path"], "$.events[1].seq")
         self.assertEqual(error["expected"], 2)
         self.assertEqual(error["actual"], 3)
+
+    def test_h3_2a_cancel_trace_missing_closure_event_reports_sequence_path(self):
+        completed = run_node(
+            r"""
+const runner = require("./scripts/replay-agent-traces.cjs");
+const suite = runner.loadSuite();
+const fixture = suite.fixtures.find(
+  (item) => item.name === "cancel-multi-tool-terminal-closure",
+);
+fixture.events = fixture.events.filter((event) => event.seq !== 7);
+try {
+  runner.runReplaySuite({fixtureVersion: 1, fixtures: [fixture]});
+  process.exitCode = 2;
+} catch (error) {
+  process.stdout.write(JSON.stringify(error.toJSON()));
+}
+""",
+        )
+        error = json.loads(completed.stdout)
+        self.assertEqual(error["name"], "ReplayAssertionError")
+        self.assertEqual(error["fixture"], "cancel-multi-tool-terminal-closure")
+        self.assertEqual(error["eventSeq"], 8)
+        self.assertEqual(error["path"], "$.events[6].seq")
+        self.assertEqual(error["expected"], 7)
+        self.assertEqual(error["actual"], 8)
+
+    def test_h3_2a_cancel_trace_wrong_tool_id_reports_projection_path(self):
+        completed = run_node(
+            r"""
+const runner = require("./scripts/replay-agent-traces.cjs");
+const suite = runner.loadSuite();
+const fixture = suite.fixtures.find(
+  (item) => item.name === "cancel-multi-tool-terminal-closure",
+);
+fixture.events.find((event) => event.seq === 7).data.toolCallId = "tool-fixture-mutated";
+try {
+  runner.runReplaySuite({fixtureVersion: 1, fixtures: [fixture]});
+  process.exitCode = 2;
+} catch (error) {
+  process.stdout.write(JSON.stringify(error.toJSON()));
+}
+""",
+        )
+        error = json.loads(completed.stdout)
+        self.assertEqual(error["name"], "ReplayAssertionError")
+        self.assertEqual(error["fixture"], "cancel-multi-tool-terminal-closure")
+        self.assertEqual(error["eventSeq"], 7)
+        self.assertEqual(error["path"], "$.tools[1].toolCallId")
+        self.assertEqual(error["expected"], "tool-fixture-cancel-read")
+        self.assertEqual(error["actual"], "tool-fixture-mutated")
+
+    def test_h3_2a_command_recovery_out_of_order_reports_sequence_path(self):
+        completed = run_node(
+            r"""
+const runner = require("./scripts/replay-agent-traces.cjs");
+const suite = runner.loadSuite();
+const fixture = suite.fixtures.find(
+  (item) => item.name === "command-failure-model-recovery",
+);
+[fixture.events[6], fixture.events[7]] = [fixture.events[7], fixture.events[6]];
+try {
+  runner.runReplaySuite({fixtureVersion: 1, fixtures: [fixture]});
+  process.exitCode = 2;
+} catch (error) {
+  process.stdout.write(JSON.stringify(error.toJSON()));
+}
+""",
+        )
+        error = json.loads(completed.stdout)
+        self.assertEqual(error["name"], "ReplayAssertionError")
+        self.assertEqual(error["fixture"], "command-failure-model-recovery")
+        self.assertEqual(error["eventSeq"], 8)
+        self.assertEqual(error["path"], "$.events[6].seq")
+        self.assertEqual(error["expected"], 7)
+        self.assertEqual(error["actual"], 8)
+
+    def test_h3_2a_command_failure_wrong_outcome_reports_projection_path(self):
+        completed = run_node(
+            r"""
+const runner = require("./scripts/replay-agent-traces.cjs");
+const suite = runner.loadSuite();
+const fixture = suite.fixtures.find(
+  (item) => item.name === "command-failure-model-recovery",
+);
+fixture.events.find((event) => event.seq === 6).data.outcome = "succeeded";
+try {
+  runner.runReplaySuite({fixtureVersion: 1, fixtures: [fixture]});
+  process.exitCode = 2;
+} catch (error) {
+  process.stdout.write(JSON.stringify(error.toJSON()));
+}
+""",
+        )
+        error = json.loads(completed.stdout)
+        self.assertEqual(error["name"], "ReplayAssertionError")
+        self.assertEqual(error["fixture"], "command-failure-model-recovery")
+        self.assertEqual(error["eventSeq"], 6)
+        self.assertEqual(error["path"], "$.tools[0].outcome")
+        self.assertEqual(error["expected"], "failed")
+        self.assertEqual(error["actual"], "succeeded")
 
     def test_checkpoint_mismatch_reports_the_first_projection_path(self):
         completed = run_node(
