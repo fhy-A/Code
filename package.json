@@ -3,12 +3,16 @@
     "build:frontend": "node scripts/build-frontend.mjs",
     "verify:frontend": "node scripts/build-frontend.mjs --check && node --check dist/frontend/code.bundle.js",
     "check:frontend": "npm run build:frontend && npm run verify:frontend",
-    "verify:harness-replay": "node scripts/replay-agent-traces.cjs"
+    "verify:harness-replay": "node scripts/replay-agent-traces.cjs",
+    "test:h4:infra": "node tests/e2e/h4/infrastructure-selfcheck.cjs",
+    "test:h4:smoke": "playwright test --config playwright.h4.config.cjs",
+    "test:h4:e2e": "npm run test:h4:infra && npm run test:h4:smoke"
   },
   "dependencies": {
     "docx": "^9.7.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "esbuild": "0.28.1"
   }
 }
