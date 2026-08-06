@@ -1,4 +1,5 @@
 import inspect
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -199,6 +200,153 @@ Date: 2026-07-27
             source.index("prepare_frontend_assets"),
             source.index("build_exe"),
         )
+
+
+class TestHarnessReplayReleaseGate(unittest.TestCase):
+    @staticmethod
+    def _expected_npm_executable():
+        return "npm.cmd" if release.os.name == "nt" else "npm"
+
+    def test_replay_gate_uses_exact_command_and_timeout_then_continues(self):
+        with mock.patch.object(
+            release,
+            "run",
+            return_value=(0, "Replay hash: fixture-hash", ""),
+        ) as run_command, mock.patch.object(release, "ok") as mark_ok:
+            release.run_harness_replay_gate()
+
+        run_command.assert_called_once_with(
+            [self._expected_npm_executable(), "run", "verify:harness-replay"],
+            description="npm run verify:harness-replay",
+            timeout=30,
+        )
+        mark_ok.assert_called_once_with("Harness replay 门禁通过")
+
+    def test_replay_gate_nonzero_result_exits_with_bounded_diagnostic(self):
+        oversized_output = "\n".join(f"diagnostic-{index}" for index in range(500))
+        with mock.patch.object(
+            release,
+            "run",
+            return_value=(7, oversized_output, "synthetic stderr marker"),
+        ), mock.patch.object(release, "die", side_effect=SystemExit) as stop_release:
+            with self.assertRaises(SystemExit):
+                release.run_harness_replay_gate()
+
+        message = stop_release.call_args.args[0]
+        self.assertIn("退出码 7", message)
+        self.assertIn("synthetic stderr marker", message)
+        self.assertLessEqual(len(message), 2100)
+
+    def test_replay_gate_timeout_and_start_failure_exit(self):
+        failures = (
+            subprocess.TimeoutExpired(
+                ["npm", "run", "verify:harness-replay"],
+                30,
+                output="synthetic timeout output",
+            ),
+            FileNotFoundError("synthetic npm missing"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(
+                release,
+                "run",
+                side_effect=failure,
+            ), mock.patch.object(release, "die", side_effect=SystemExit) as stop_release:
+                with self.assertRaises(SystemExit):
+                    release.run_harness_replay_gate()
+                self.assertLessEqual(len(stop_release.call_args.args[0]), 2100)
+
+    def test_replay_gate_runs_after_pytest_before_diff_syntax_and_exe(self):
+        source = inspect.getsource(release.main)
+        self.assertLess(source.index("run_tests()"), source.index("run_harness_replay_gate()"))
+        self.assertLess(source.index("run_harness_replay_gate()"), source.index("run_git_diff_check()"))
+        self.assertLess(source.index("run_harness_replay_gate()"), source.index("run_syntax_checks()"))
+        self.assertLess(source.index("run_harness_replay_gate()"), source.index("build_exe(new_version)"))
+
+    def test_skip_tests_does_not_execute_replay_gate(self):
+        class StopAfterBuild(Exception):
+            pass
+
+        with mock.patch.object(
+            release.sys,
+            "argv",
+            ["release.py", "0.5.99", "--skip-tests", "--no-proxy"],
+        ), mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
+                mock.patch.object(release, "ask", return_value=True), \
+                mock.patch.object(release, "run", return_value=(0, "", "")), \
+                mock.patch.object(release, "update_version_file"), \
+                mock.patch.object(release, "update_version_info"), \
+                mock.patch.object(release, "update_readme"), \
+                mock.patch.object(release, "create_spec_file"), \
+                mock.patch.object(release, "verify_version_consistency"), \
+                mock.patch.object(release, "prepare_frontend_assets"), \
+                mock.patch.object(release, "run_tests") as run_tests, \
+                mock.patch.object(release, "run_harness_replay_gate") as replay_gate, \
+                mock.patch.object(release, "run_git_diff_check") as diff_check, \
+                mock.patch.object(release, "run_syntax_checks"), \
+                mock.patch.object(release, "build_exe", side_effect=StopAfterBuild) as build_exe:
+            with self.assertRaises(StopAfterBuild):
+                release.main()
+
+        run_tests.assert_not_called()
+        replay_gate.assert_not_called()
+        diff_check.assert_not_called()
+        build_exe.assert_called_once_with("0.5.99")
+
+    def test_dry_run_does_not_execute_replay_gate(self):
+        class StopAfterChecks(Exception):
+            pass
+
+        with mock.patch.object(
+            release.sys,
+            "argv",
+            ["release.py", "0.5.99", "--dry-run", "--no-proxy"],
+        ), mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
+                mock.patch.object(release, "verify_version_consistency"), \
+                mock.patch.object(release, "prepare_frontend_assets") as frontend_gate, \
+                mock.patch.object(release, "run_tests") as run_tests, \
+                mock.patch.object(release, "run_harness_replay_gate") as replay_gate, \
+                mock.patch.object(release, "run_git_diff_check") as diff_check, \
+                mock.patch.object(release, "run_syntax_checks"), \
+                mock.patch.object(release, "git_commit_and_tag", side_effect=StopAfterChecks):
+            with self.assertRaises(StopAfterChecks):
+                release.main()
+
+        frontend_gate.assert_called_once_with(build=False)
+        run_tests.assert_not_called()
+        replay_gate.assert_not_called()
+        diff_check.assert_not_called()
+
+    def test_replay_failure_prevents_exe_build(self):
+        with mock.patch.object(
+            release.sys,
+            "argv",
+            ["release.py", "0.5.99", "--no-proxy"],
+        ), mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
+                mock.patch.object(release, "ask", return_value=True), \
+                mock.patch.object(release, "run", return_value=(0, "", "")), \
+                mock.patch.object(release, "update_version_file"), \
+                mock.patch.object(release, "update_version_info"), \
+                mock.patch.object(release, "update_readme"), \
+                mock.patch.object(release, "create_spec_file"), \
+                mock.patch.object(release, "verify_version_consistency"), \
+                mock.patch.object(release, "prepare_frontend_assets"), \
+                mock.patch.object(release, "run_tests") as run_tests, \
+                mock.patch.object(
+                    release,
+                    "run_harness_replay_gate",
+                    side_effect=SystemExit,
+                ) as replay_gate, mock.patch.object(release, "run_git_diff_check") as diff_check, \
+                mock.patch.object(release, "run_syntax_checks") as syntax_checks, \
+                mock.patch.object(release, "build_exe") as build_exe:
+            with self.assertRaises(SystemExit):
+                release.main()
+
+        run_tests.assert_called_once_with()
+        replay_gate.assert_called_once_with()
+        diff_check.assert_not_called()
+        syntax_checks.assert_not_called()
+        build_exe.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Code 发版指南
 
-> 适用于人工操作者和 AI Agent。最后更新：2026-07-23。
+> 适用于人工操作者和 AI Agent。最后更新：2026-08-06。
 
 ---
 
@@ -16,7 +16,7 @@ python release.py 0.5.8 --yes
 # 预演：只检查，不改任何文件
 python release.py 0.5.8 --dry-run
 
-# 刚跑完全量测试，跳过测试步骤
+# 刚跑完全量测试，跳过 pytest 与 replay 测试步骤
 python release.py 0.5.8 --skip-tests
 ```
 
@@ -27,7 +27,7 @@ python release.py 0.5.8 --skip-tests
 | 阶段 | 操作 | 校验 |
 |------|------|------|
 | 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md`，复制 `.spec` | 4 个文件版本号一致 |
-| 2 | `pytest -q` + `git diff --check` + `node --check` + `py_compile` | 全量测试通过，语法无误 |
+| 2 | 前端门禁 → `pytest -q`（180 秒）→ `npm run verify:harness-replay`（30 秒）→ `git diff --check` → `node --check` / `py_compile` | 前端构建、完整回归、默认 replay CLI、差异与语法全部通过 |
 | 3 | `python build_exe.py` 打包 | EXE 文件生成 |
 | 4 | 读取 EXE 版本元数据 + 计算 SHA-256 | `ProductVersion` / `FileVersion` / `OriginalFilename` 正确 |
 | 5 | 生成 `docs/releases/vX.Y.Z.md` 模板 | **暂停等你编辑发布说明** |
@@ -35,6 +35,8 @@ python release.py 0.5.8 --skip-tests
 | 7 | `git push` + `gh release create` | 分支、标签、Release 均已推送 |
 
 任何阶段失败，脚本立刻停止并打印错误原因和补救命令。
+
+正式路径只在非 `--skip-tests`、非 `--dry-run` 时执行独立 replay 门禁。`--skip-tests` 同时跳过 pytest 与 replay；`--dry-run` 保持只做预演检查，不新增 replay 执行。replay 失败、超时或无法启动都会在 EXE 构建前阻断。
 
 ---
 
@@ -127,6 +129,7 @@ python release.py 0.5.8 --yes
 | 情况 | 脚本提示 | 人工处理 |
 |------|----------|----------|
 | 测试失败 | `全量测试未通过` | 修复代码，重新跑测试 |
+| Harness replay 失败或超时 | `Harness replay 门禁失败` | 运行 `npm run verify:harness-replay`，核对首差异与固定哈希 |
 | 构建失败 | `PyInstaller 构建失败` | 检查 PyInstaller 日志，修复依赖 |
 | 推送失败 | `推送分支失败` | 检查网络和权限，手动 `git push` |
 | `gh` 未安装 | `未找到 GitHub CLI` | 安装并登录 GitHub CLI |
@@ -158,11 +161,13 @@ findstr "0.5.8" VERSION file_version_info.txt README.md Code-v0.5.8.spec
 ### 3. 质量检查
 
 ```powershell
+npm run check:frontend
 python -m pytest tests -q
+npm run verify:harness-replay
+git diff --check
 node --check app.js
 node --check agent-runtime.js
 python -m py_compile server.py launcher.py build_exe.py
-git diff --check
 ```
 
 ### 4. 构建

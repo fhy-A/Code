@@ -2,7 +2,7 @@
 
 ## 阶段定位
 
-H3-1 先建立独立、确定性的离线回放入口，为后续状态机、任务契约和完成证据提供可重复验证地基。本阶段最初是在 H2-3 真实影子投影验收前提前完成的工具层准备；当前 H2-3 已收口，H3-2A、H3-2B1、H3-2B2、H3-2C1、H3-2C2、H3-2D1、H3-2D2 与 H3-2D3 已继续扩展测试证据，但仍不代表完整 H3 发布门禁已经交付。
+H3-1 先建立独立、确定性的离线回放入口，为后续状态机、任务契约和完成证据提供可重复验证地基。本阶段最初是在 H2-3 真实影子投影验收前提前完成的工具层准备；当前 H2-3、H3-2A、H3-2B1、H3-2B2、H3-2C1、H3-2C2、H3-2D1、H3-2D2 与 H3-2D3 均已收口，十五类证据映射和正式 replay 发布门禁详见 [`H3 最终覆盖与 replay 发布门禁`](h3-final-coverage-release-gate.md)。
 
 回放器只读取仓库内已经脱敏的合成轨迹，复用 H2-1 的纯 Run reducer 与 View Model；它不读取 `data/sessions/`，不调用模型、工具、网络或浏览器，也不修改 AgentRun、会话 JSONL 和前端状态。
 
@@ -40,7 +40,7 @@ node scripts/replay-agent-traces.cjs --json
 
 H3-1 交付时的 H0 基线为 15 条夹具、106 个事件、17 个检查点恢复和 4 个显式恢复点。H3-2A 已在不修改 runner/schema 的前提下增加两条单 Run 轨迹，当前统一单 Run 基线为 17 条夹具、124 个事件、25 个检查点、25 次检查点恢复和 4 个显式恢复点；详见 [`H3-2A 单 Run replay 夹具扩展`](h3-2a-single-run-replay-fixtures.md)。
 
-multi-run 数量独立统计：H3-2B1 的 fixture v1 为 1 个场景、3 个 Run、12 个事件、15 个 schedule 步骤、3 个 fact-marker、4 个检查点及 4 次恢复；H3-2B2 的 fixture v2 为 1 个场景、3 个 Run、21 个事件、21 个 schedule 步骤、0 个 fact-marker、6 个检查点及 6 次恢复。现有 multi-run runner 显式兼容 v1/v2，默认 CLI 仍运行 v1；详见 [`H3-2B1 多 Run replay 关系基础设施`](h3-2b1-multi-run-replay-relations.md)与 [`H3-2B2 Child AgentRun replay 关系契约`](h3-2b2-child-agentrun-replay.md)。三套计数互不合并，且仍未等同于优化计划第 6.3 节所列 15 类最终完整场景。
+multi-run 数量独立统计：H3-2B1 的 fixture v1 为 1 个场景、3 个 Run、12 个事件、15 个 schedule 步骤、3 个 fact-marker、4 个检查点及 4 次恢复；H3-2B2 的 fixture v2 为 1 个场景、3 个 Run、21 个事件、21 个 schedule 步骤、0 个 fact-marker、6 个检查点及 6 次恢复。现有 multi-run runner 显式兼容 v1/v2，默认 CLI 仍运行 v1；详见 [`H3-2B1 多 Run replay 关系基础设施`](h3-2b1-multi-run-replay-relations.md)与 [`H3-2B2 Child AgentRun replay 关系契约`](h3-2b2-child-agentrun-replay.md)。三套计数互不合并；第 6.3 节十五类场景的跨证明层最终映射见 H3 最终专题。
 
 H3-2C1 另增一套带版本化 evidence profile 的上游失败与 non-action suite：6 条轨迹、26 个事件、16 个检查点及 16 次恢复、0 个显式 `recoveryPoints`。它继续复用现有单 Run replay payload 与 runner，但扩展的 `sourceFacts` 只属于 `h3-2c1-upstream-failure-non-action` v1 evidence profile；Runtime/AgentRun 集成测试直接消费同一 case 数据。详见 [`H3-2C1 上游失败与 non-action 恢复证据`](h3-2c1-upstream-failure-non-action-replay.md)。该数量也不并入默认单 Run或 multi-run 基线。
 
@@ -63,7 +63,7 @@ H3-2D3 新增独立、严格版本化的手动压缩失败与持久化边界 evi
 - `tests/test_harness_manual_compaction_visible_history.py` 覆盖 H3-2D2 精确源码切片执行、一次性 confirm、完整 archive payload、真实临时归档、最终 JSONL、模型上下文旧消息排除、UI 可见哨兵、确定性哈希、零外部副作用和专属首差异路径。
 - `tests/test_harness_manual_compaction_failure_boundaries.py` 覆盖 H3-2D3 的 19 个失败、Session 切换、保存恢复、响应丢失、pending 阻止、显式重试与操作锁异常场景；每条场景冻结调用顺序、marker、最新状态保存、UI、脱敏、监听器清理和专属首差异路径。
 - 原有 `tests/test_run_projection.py` 继续保留纯 reducer/View Model 的细粒度契约测试。
-- 新测试由默认 `pytest` 完整回归自动执行；发布脚本门禁尚未在本阶段修改。
+- 新测试由默认 `pytest` 完整回归自动执行；正式发布流程在完整 pytest 成功后另行执行 `npm run verify:harness-replay`，使用独立 30 秒超时，并在 diff、语法检查和 EXE 构建前失败即停。
 
 ## 兼容与回退
 
@@ -75,15 +75,16 @@ H3-2D3 新增独立、严格版本化的手动压缩失败与持久化边界 evi
 - H3-2D1 的独立 evidence fixture/schema/test 可单独删除；它不修改生产图片投影、会话 JSONL、既有图片测试、默认单 Run runner/schema 或 multi-run 基线。
 - H3-2D2 的独立 evidence fixture/schema/test 可单独删除；它不修改生产压缩状态机、archive handler、会话 JSONL、模型/UI 投影、默认单 Run runner/schema 或 multi-run 基线。源码切片哈希变化必须触发人工语义复审，不能机械更新。
 - H3-2D3 可按阶段整体回退生产压缩/消息/i18n 改动、三个 D3 evidence 文件、必要的旧源码断言适配和 D2 受控重基线；它不新增 Session JSONL 顶层结构、HTTP endpoint、AgentRun/Runtime 或 replay 协议。回退 D2 基线时必须同时恢复切片、fixture 和测试文件哈希。
+- H3 replay 发布门禁可单独回退 `release.py`、对应发布测试和最终收口文档，不影响任何 fixture/runner 或生产 Agent 行为。
 - H2-3 曾评估的实验性 completion Guard 已撤回，不属于 H3-1，也不作为当前 H3 正确性的前提。
 
 ## 后续边界
 
 1. H2-3 真实影子采样已经收口，H3-2A 已先固化同轮多工具取消和命令失败后模型恢复两条单 Run 轨迹。
-2. H3-2B1 已完成 `queue-parallel-multi-run-relations` 的独立多 Run 回放基础设施、静态身份关系、固定顺序、复合恢复与幂等契约；它不证明真实 queue/background/UI/usage 生命周期、DOM、刷新、Runtime 原始事件或发布门禁。
+2. H3-2B1 已完成 `queue-parallel-multi-run-relations` 的独立多 Run 回放基础设施、静态身份关系、固定顺序、复合恢复与幂等契约；它不证明真实 queue/background/UI/usage 生命周期、DOM、刷新或 Runtime 原始事件。
 3. H3-2B2 已完成 `child-agent-out-of-order-terminal-parent-results`：严格 v2 身份图、四方父子映射、Child 终态与父工具结果独立顺序、复合恢复和幂等契约已经冻结；它不证明真实并发、worker、usage exactly-once、DOM、刷新或 Runtime 原始事件恢复。
 4. H3-2C1 已完成 401、429、502、首响应超时、empty 与 reasoning-only 的独立证据 suite：离线 replay 证明合成事件投影，本地假上游集成证明当前 Runtime 分类和 AgentRun 事件顺序；它不证明真实网络、所有状态 fallback、浏览器、刷新或 Runtime 原始事件恢复。默认 suite 的 `model-non-action-recovery` 仅保留为历史投影样本，当前生产精确顺序以 H3-2C1 为准。
-5. H3-2C2 已完成既有 v1～v4 最小 AgentRun 的缺字段恢复契约：四份源 fixture 哈希和显式缺失字段固定，生产 loader、公共 snapshot、v4 serializer 与两次临时磁盘加载闭合；它不证明损坏记录、Session JSONL、worker/工具外部状态、模型、网络、浏览器或发布门禁。
-6. H3-2D1 已完成七格式图片证据：PNG/JPEG/WebP 原样字节保持，BMP/GIF/ICO/TIFF 以尺寸和直接 RGBA 相等证明语义转 PNG，JSONL 与 UI HTML 保留原格式；GIF/TIFF 只覆盖首帧/首页，ICO 只覆盖单尺寸，转换 PNG 编码哈希仅作诊断。它不证明 SVG/AVIF/HEIC、恶意输入、真实浏览器、刷新、模型、网络或发布门禁。
-7. H3-2D2 已完成手动压缩成功路径证据；H3-2D3 进一步完成 19 个失败与持久化边界场景、Session 绑定、最新状态重试、响应丢失收敛、failed+persistence failed 正确显示和异常锁清理。D3 仅受控更新 D2 切片 SHA、长度、replayHash 与文件哈希，源历史、最终 messages、archive、save、model context 和 UI 等领域哈希全部不变。两阶段仍不证明真实网络、真实摘要质量、页面刷新、完整 DOM 生命周期、Runtime、H4 或发布门禁。
-8. 关键轨迹稳定并覆盖完整场景后，再单独确认 replay 发布门禁和 H4 隔离浏览器 E2E；刷新恢复已知限制继续留在 H4，不因 D3 自动或隔离显示证据而标记为通过。
+5. H3-2C2 已完成既有 v1～v4 最小 AgentRun 的缺字段恢复契约：四份源 fixture 哈希和显式缺失字段固定，生产 loader、公共 snapshot、v4 serializer 与两次临时磁盘加载闭合；它不证明损坏记录、Session JSONL、worker/工具外部状态、模型、网络或浏览器。
+6. H3-2D1 已完成七格式图片证据：PNG/JPEG/WebP 原样字节保持，BMP/GIF/ICO/TIFF 以尺寸和直接 RGBA 相等证明语义转 PNG，JSONL 与 UI HTML 保留原格式；GIF/TIFF 只覆盖首帧/首页，ICO 只覆盖单尺寸，转换 PNG 编码哈希仅作诊断。它不证明 SVG/AVIF/HEIC、恶意输入、真实浏览器、刷新、模型或网络。
+7. H3-2D2 已完成手动压缩成功路径证据；H3-2D3 进一步完成 19 个失败与持久化边界场景、Session 绑定、最新状态重试、响应丢失收敛、failed+persistence failed 正确显示和异常锁清理。D3 仅受控更新 D2 切片 SHA、长度、replayHash 与文件哈希，源历史、最终 messages、archive、save、model context 和 UI 等领域哈希全部不变。两阶段仍不证明真实网络、真实摘要质量、页面刷新、完整 DOM 生命周期、Runtime 或 H4。
+8. H3 最终十五类证据映射和 replay 发布门禁已经完成。正式路径顺序为前端门禁、完整 pytest、30 秒 npm replay、diff、语法检查和 EXE 构建；刷新恢复及真实工具展开、问卷、压缩、图片和队列的 DOM 生命周期继续留在 H4，不因自动或隔离投影证据而标记为通过。

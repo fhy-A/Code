@@ -322,6 +322,50 @@ def run_tests():
     ok("全量测试通过")
 
 
+def run_harness_replay_gate():
+    """Run the published single-run replay command as a release gate."""
+    print("\n-- Harness replay 门禁 --")
+    npm_executable = "npm.cmd" if os.name == "nt" else "npm"
+    command = [npm_executable, "run", "verify:harness-replay"]
+
+    def bounded_diagnostic(*values):
+        parts = []
+        for value in values:
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            text = str(value or "").strip()
+            if text:
+                parts.extend(text.splitlines())
+        detail = "\n".join(parts[-20:])
+        if len(detail) > 2000:
+            detail = detail[-2000:]
+        return f"\n{detail}" if detail else ""
+
+    try:
+        rc, stdout, stderr = run(
+            command,
+            description="npm run verify:harness-replay",
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        die(
+            "Harness replay 门禁超时（30 秒）"
+            + bounded_diagnostic(exc.stdout, exc.stderr),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(
+            "Harness replay 门禁无法启动"
+            + bounded_diagnostic(type(exc).__name__, exc),
+        )
+
+    if rc != 0:
+        die(
+            f"Harness replay 门禁失败（退出码 {rc}）"
+            + bounded_diagnostic(stdout, stderr),
+        )
+    ok("Harness replay 门禁通过")
+
+
 def run_syntax_checks():
     print("\n-- 语法检查 --")
     checks = [
@@ -858,6 +902,7 @@ def main():
 
         if not args.dry_run:
             run_tests()
+            run_harness_replay_gate()
             run_git_diff_check()
         run_syntax_checks()
     else:
