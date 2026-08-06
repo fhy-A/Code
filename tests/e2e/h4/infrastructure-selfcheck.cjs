@@ -19,7 +19,86 @@ async function pathExists(target) {
   }
 }
 
+async function assertControlStdoutIsolationSourceContract() {
+  const pythonHostPath = path.join(__dirname, "isolated_host.py");
+  const productionServerPath = path.resolve(__dirname, "../../../server.py");
+  const [pythonHostSource, productionServerSource] = await Promise.all([
+    fs.readFile(pythonHostPath, "utf8"),
+    fs.readFile(productionServerPath, "utf8"),
+  ]);
+  assert.match(
+    pythonHostSource,
+    /class H4CodeHandler\(code_server\.CodeHandler\):\s+def log_message\(self, _format: str, \*_args\) -> None:\s+return/,
+  );
+  assert.match(
+    pythonHostSource,
+    /code_server\.ThreadingHTTPServer\(\("127\.0\.0\.1", 0\), H4CodeHandler\)/,
+  );
+  assert.doesNotMatch(
+    pythonHostSource,
+    /code_server\.CodeHandler\.log_message\s*=/,
+  );
+  assert.match(
+    productionServerSource,
+    /class CodeHandler\(BaseHTTPRequestHandler\):[\s\S]*?def log_message\(self, fmt, \*args\):\s+print\(/,
+  );
+  return {
+    h4UsesSilentSubclass: true,
+    productionHandlerNotMonkeyPatched: true,
+  };
+}
+
+async function runControlStdoutIsolationPressure(host) {
+  const requestCount = 8;
+  const controlCount = 8;
+  const requestSummary = [];
+  let controlPendingCount = 0;
+  const requestPromises = Array.from({ length: requestCount }, async (_, index) => {
+    const method = "GET";
+    const pathname = "/api/ping";
+    const url = new URL(pathname, host.ready.codeUrl);
+    url.searchParams.set("h4_stdout_probe", String(index));
+    const response = await fetch(url, {
+      method,
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { pong: true });
+    requestSummary.push({ method, path: pathname });
+    return true;
+  });
+  const controlPromises = Array.from({ length: controlCount }, async () => {
+    controlPendingCount += 1;
+    try {
+      const metrics = await host.metrics();
+      assert.ok(metrics);
+      assert.ok(Array.isArray(metrics.production?.agentRuns));
+      assert.ok(Array.isArray(metrics.production?.runtimeRuns));
+      return true;
+    } finally {
+      controlPendingCount -= 1;
+    }
+  });
+  const settled = await Promise.all([...requestPromises, ...controlPromises]);
+  assert.equal(settled.length, requestCount + controlCount);
+  assert.equal(settled.every(Boolean), true);
+  assert.equal(controlPendingCount, 0);
+  assert.equal(requestSummary.length, requestCount);
+  assert.deepEqual(
+    [...new Set(requestSummary.map(({ method, path: requestPath }) => `${method} ${requestPath}`))],
+    ["GET /api/ping"],
+  );
+  return {
+    requestCount,
+    controlCount,
+    requestSummary,
+    allPromisesSettled: true,
+    controlPendingCount,
+  };
+}
+
 async function main() {
+  const stdoutIsolationSource = await assertControlStdoutIsolationSourceContract();
   const expectedStopExit = classifyPendingCommandOnChildExit({
     command: "shutdown",
     initiatedByStop: true,
@@ -60,6 +139,7 @@ async function main() {
   let injectedFailureObserved = false;
   let environment = null;
   let toolBoundary = null;
+  let controlStdoutIsolation = null;
 
   try {
     host = await startIsolatedHost();
@@ -79,6 +159,8 @@ async function main() {
       delegationDelta: 1,
       toolExecutionDelta: 1,
     });
+
+    controlStdoutIsolation = await runControlStdoutIsolationPressure(host);
 
     throw new Error(INJECTED_FAILURE);
   } catch (error) {
@@ -171,6 +253,14 @@ async function main() {
     sensitiveEnvironmentNameCount: environment.sensitiveNames.length,
     homeIsIsolated: environment.homeIsIsolated,
     toolBoundary,
+    controlStdoutIsolation: {
+      ...stdoutIsolationSource,
+      requestCount: controlStdoutIsolation.requestCount,
+      controlCount: controlStdoutIsolation.controlCount,
+      requestSummary: controlStdoutIsolation.requestSummary,
+      allPromisesSettled: controlStdoutIsolation.allPromisesSettled,
+      cleanupPendingCount: controlStdoutIsolation.controlPendingCount,
+    },
     childExitClassification: {
       expectedStopExit: expectedStopExit.outcome,
       abnormalShutdownExit: "reject",

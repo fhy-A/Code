@@ -1,8 +1,9 @@
 """Isolated loopback host for H4 browser tests.
 
-The Code side uses the production CodeHandler unchanged. This process only
-provides a deterministic loopback upstream, test-side instrumentation, and a
-stdin control channel for readiness, metrics, release, and graceful shutdown.
+The Code side uses the production CodeHandler behavior through an H4-only
+subclass that silences access logging so stdout remains the JSONL control
+channel. This process otherwise only provides a deterministic loopback
+upstream, test-side instrumentation, and lifecycle controls.
 """
 
 from __future__ import annotations
@@ -586,6 +587,10 @@ def main() -> int:
     sys.path.insert(0, str(repo_root))
     import server as code_server
 
+    class H4CodeHandler(code_server.CodeHandler):
+        def log_message(self, _format: str, *_args) -> None:
+            return
+
     code_server.WORKBAR_URL = fake_url
     code_server.CODEX_SESSIONS_DIR = root / "home" / ".codex" / "sessions"
     code_server.CLAUDE_PROJECTS_DIR = root / "home" / ".claude" / "projects"
@@ -650,7 +655,7 @@ def main() -> int:
     code_server._migrate_sessions_to_hierarchy()
     code_server._migrate_codex_project_sessions_support()
     code_server._migrate_project_root_paths()
-    code_httpd = code_server.ThreadingHTTPServer(("127.0.0.1", 0), code_server.CodeHandler)
+    code_httpd = code_server.ThreadingHTTPServer(("127.0.0.1", 0), H4CodeHandler)
     code_httpd.daemon_threads = True
     code_port = code_httpd.server_address[1]
     code_thread = threading.Thread(target=code_httpd.serve_forever, daemon=True)
