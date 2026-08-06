@@ -648,7 +648,7 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **目标**：覆盖 DOM 生命周期并逐步切换唯一投影入口。
 
-**阶段状态（2026-08-07）**：H4-1 已完成隔离浏览器基础设施、自检门禁，以及默认 bundle 纯文本、默认 bundle 单只读工具和 classic fallback 纯文本三条首批冒烟；详见 [`H4-1 浏览器 E2E 基础设施与首批冒烟`](harness/h4-1-browser-e2e-smoke.md)。H4-2 已完成默认 bundle 的同进程模型流式刷新恢复，覆盖首增量前刷新、两段正文后刷新继续追加及刷新后取消，并证明复用同一 AgentRun/Runtime、无第二上游请求、DOM 前缀不回退与取消终态闭合。2026-08-07 的真实 Code Dev 补充验收还修正了模型目录刷新阻塞 AgentRun/Runtime 重附着的启动顺序，并以慢模型目录闸门证明目录未返回时 Runtime GET、前缀追赶和取消已能进行；人工复验为短暂等待后恢复流式，不声称瞬时恢复。详见 [`H4-2 模型流式刷新恢复`](harness/h4-2-model-stream-refresh-recovery.md)。classic 刷新、服务重启/跨进程恢复及其他浏览器生命周期仍未完成，不得由 H4-2 推定通过。
+**阶段状态（2026-08-07）**：H4-1 已完成隔离浏览器基础设施、自检门禁，以及默认 bundle 纯文本、默认 bundle 单只读工具和 classic fallback 纯文本三条首批冒烟；详见 [`H4-1 浏览器 E2E 基础设施与首批冒烟`](harness/h4-1-browser-e2e-smoke.md)。H4-2 已完成默认 bundle 的同进程模型流式刷新恢复，覆盖首增量前刷新、两段正文后刷新继续追加及刷新后取消，并证明复用同一 AgentRun/Runtime、无第二上游请求、DOM 前缀不回退与取消终态闭合。2026-08-07 的真实 Code Dev 补充验收还修正了模型目录刷新阻塞 AgentRun/Runtime 重附着的启动顺序，并以慢模型目录闸门证明目录未返回时 Runtime GET、前缀追赶和取消已能进行；人工复验为短暂等待后恢复流式，不声称瞬时恢复。详见 [`H4-2 模型流式刷新恢复`](harness/h4-2-model-stream-refresh-recovery.md)。H4-3 已用同一组浏览器流程证明 classic fallback 直接入口的三条刷新路径共用相同生产恢复链，保持同一 AgentRun/Runtime、DOM 前缀和取消终态；详见 [`H4-3 classic fallback 刷新兼容`](harness/h4-3-classic-fallback-refresh.md)。自动 bundle-load 失败降级、服务重启/跨进程恢复及其他浏览器生命周期仍未完成，不得由 H4-2/H4-3 推定通过。
 
 **工作项**：
 

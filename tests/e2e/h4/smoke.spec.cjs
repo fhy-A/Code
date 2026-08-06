@@ -86,6 +86,14 @@ function elapsedSeconds(value) {
   return match ? Number(match[1]) : -1;
 }
 
+async function assertFrontendRuntime(page, runtime) {
+  const expected = runtime === "classic" ? "classic-fallback" : "bundle";
+  await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", expected);
+  if (runtime === "bundle") {
+    await expect(page.locator("html")).toHaveAttribute("data-code-frontend-ready", "true");
+  }
+}
+
 async function assertRefreshIdentityContract(h4, { cancelled = false } = {}) {
   const requests = h4.requestEvidence();
   const metrics = await h4.metrics();
@@ -330,13 +338,12 @@ const test = base.test.extend({
           diagnosticSteps.push({ step: "model-catalog-gate-released", state: gate });
           return gate;
         },
-        async reloadBundle() {
-          diagnosticSteps.push({ step: "reload-started", at: Date.now() });
+        async reloadRuntime(runtime) {
+          diagnosticSteps.push({ step: "reload-started", runtime, at: Date.now() });
           await page.reload({ waitUntil: "domcontentloaded" });
-          await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", "bundle");
-          await expect(page.locator("html")).toHaveAttribute("data-code-frontend-ready", "true");
+          await assertFrontendRuntime(page, runtime);
           const readyAt = Date.now();
-          diagnosticSteps.push({ step: "reload-ready", at: readyAt });
+          diagnosticSteps.push({ step: "reload-ready", runtime, at: readyAt });
           return readyAt;
         },
         async metrics() {
@@ -519,9 +526,10 @@ test("classic fallback completes one plain-text task", async ({ h4 }) => {
   });
 });
 
-test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
+async function exerciseRefreshBeforeFirst(h4, { runtime, evidenceLabel }) {
   const { page } = h4;
-  await h4.open("bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
   await h4.submitGated();
   try {
     await h4.waitGate("before-first-delta");
@@ -542,7 +550,7 @@ test("bundle refresh before first model delta reattaches one live run", async ({
     const beforeSeconds = elapsedSeconds(await elapsedBefore.textContent());
     const runtimeGetsBeforeReload = h4.requestEvidence().runtimeGet;
     await h4.armModelCatalogGate();
-    const reloadReadyAt = await h4.reloadBundle();
+    const reloadReadyAt = await h4.reloadRuntime(runtime);
     const catalogGate = await h4.waitModelCatalogGate();
     expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
     await expect.poll(() => h4.requestEvidence().runtimeGet).toBeGreaterThan(runtimeGetsBeforeReload);
@@ -583,7 +591,8 @@ test("bundle refresh before first model delta reattaches one live run", async ({
       hasStreamProjectionField: false,
     });
     expect(h4.pageErrors).toEqual([]);
-    h4.evidence("bundle-refresh-before-first", {
+    h4.evidence(evidenceLabel, {
+      entryRuntime: runtime,
       ids: {
         agent: evidence.requests.agentIds[0],
         runtime: evidence.requests.runtimeIds[0],
@@ -600,11 +609,12 @@ test("bundle refresh before first model delta reattaches one live run", async ({
   } finally {
     await h4.releaseAllRefreshGates();
   }
-});
+}
 
-test("bundle refresh after two deltas catches up without DOM replay", async ({ h4 }) => {
+async function exerciseRefreshAfterTwo(h4, { runtime, evidenceLabel }) {
   const { page } = h4;
-  await h4.open("bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
   await h4.submitGated();
   try {
     await h4.waitGate("before-first-delta");
@@ -630,7 +640,7 @@ test("bundle refresh after two deltas catches up without DOM replay", async ({ h
 
     const runtimeGetsBeforeReload = h4.requestEvidence().runtimeGet;
     await h4.armModelCatalogGate();
-    const reloadReadyAt = await h4.reloadBundle();
+    const reloadReadyAt = await h4.reloadRuntime(runtime);
     const catalogGate = await h4.waitModelCatalogGate();
     expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
     await expect.poll(() => h4.requestEvidence().runtimeGet).toBeGreaterThan(runtimeGetsBeforeReload);
@@ -675,7 +685,8 @@ test("bundle refresh after two deltas catches up without DOM replay", async ({ h
       hasStreamProjectionField: false,
     });
     expect(h4.pageErrors).toEqual([]);
-    h4.evidence("bundle-refresh-after-two", {
+    h4.evidence(evidenceLabel, {
+      entryRuntime: runtime,
       ids: {
         agent: evidence.requests.agentIds[0],
         runtime: evidence.requests.runtimeIds[0],
@@ -690,11 +701,12 @@ test("bundle refresh after two deltas catches up without DOM replay", async ({ h
   } finally {
     await h4.releaseAllRefreshGates();
   }
-});
+}
 
-test("bundle refresh then cancel preserves partial body and pauses once", async ({ h4 }) => {
+async function exerciseRefreshThenCancel(h4, { runtime, evidenceLabel }) {
   const { page } = h4;
-  await h4.open("bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
   await h4.submitGated();
   try {
     await h4.waitGate("before-first-delta");
@@ -704,7 +716,7 @@ test("bundle refresh then cancel preserves partial body and pauses once", async 
     await expect(firstTwo).toHaveCount(1);
     const runtimeGetsBeforeReload = h4.requestEvidence().runtimeGet;
     await h4.armModelCatalogGate();
-    await h4.reloadBundle();
+    await h4.reloadRuntime(runtime);
     const catalogGate = await h4.waitModelCatalogGate();
     expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
     await expect.poll(() => h4.requestEvidence().runtimeGet).toBeGreaterThan(runtimeGetsBeforeReload);
@@ -747,7 +759,8 @@ test("bundle refresh then cancel preserves partial body and pauses once", async 
       hasStreamProjectionField: false,
     });
     expect(h4.pageErrors).toEqual([]);
-    h4.evidence("bundle-refresh-cancel", {
+    h4.evidence(evidenceLabel, {
+      entryRuntime: runtime,
       ids: {
         agent: evidence.requests.agentIds[0],
         runtime: evidence.requests.runtimeIds[0],
@@ -761,4 +774,46 @@ test("bundle refresh then cancel preserves partial body and pauses once", async 
   } finally {
     await h4.releaseAllRefreshGates();
   }
+}
+
+test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
+  await exerciseRefreshBeforeFirst(h4, {
+    runtime: "bundle",
+    evidenceLabel: "bundle-refresh-before-first",
+  });
+});
+
+test("bundle refresh after two deltas catches up without DOM replay", async ({ h4 }) => {
+  await exerciseRefreshAfterTwo(h4, {
+    runtime: "bundle",
+    evidenceLabel: "bundle-refresh-after-two",
+  });
+});
+
+test("bundle refresh then cancel preserves partial body and pauses once", async ({ h4 }) => {
+  await exerciseRefreshThenCancel(h4, {
+    runtime: "bundle",
+    evidenceLabel: "bundle-refresh-cancel",
+  });
+});
+
+test("classic-refresh-before-first-delta", async ({ h4 }) => {
+  await exerciseRefreshBeforeFirst(h4, {
+    runtime: "classic",
+    evidenceLabel: "classic-refresh-before-first-delta",
+  });
+});
+
+test("classic-refresh-after-two-deltas", async ({ h4 }) => {
+  await exerciseRefreshAfterTwo(h4, {
+    runtime: "classic",
+    evidenceLabel: "classic-refresh-after-two-deltas",
+  });
+});
+
+test("classic-refresh-then-cancel", async ({ h4 }) => {
+  await exerciseRefreshThenCancel(h4, {
+    runtime: "classic",
+    evidenceLabel: "classic-refresh-then-cancel",
+  });
 });
