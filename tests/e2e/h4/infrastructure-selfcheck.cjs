@@ -1,10 +1,47 @@
 const assert = require("node:assert/strict");
-const { getActiveChildCount, startIsolatedHost } = require("./isolated-host.cjs");
+const {
+  classifyPendingCommandOnChildExit,
+  getActiveChildCount,
+  startIsolatedHost,
+} = require("./isolated-host.cjs");
 
 const SENTINEL_NAME = "H4_PARENT_SECRET_SENTINEL";
 const INJECTED_FAILURE = "H4_INJECTED_BEFORE_BROWSER";
 
 async function main() {
+  const expectedStopExit = classifyPendingCommandOnChildExit({
+    command: "shutdown",
+    initiatedByStop: true,
+    exitCode: 0,
+    signalCode: null,
+  });
+  assert.deepEqual(expectedStopExit, {
+    completedByExpectedStopExit: true,
+    outcome: "complete",
+  });
+  for (const abnormalExit of [
+    { exitCode: 1, signalCode: null },
+    { exitCode: null, signalCode: "SIGTERM" },
+  ]) {
+    assert.equal(classifyPendingCommandOnChildExit({
+      command: "shutdown",
+      initiatedByStop: true,
+      ...abnormalExit,
+    }).outcome, "reject");
+  }
+  assert.equal(classifyPendingCommandOnChildExit({
+    command: "metrics",
+    initiatedByStop: true,
+    exitCode: 0,
+    signalCode: null,
+  }).outcome, "reject");
+  assert.equal(classifyPendingCommandOnChildExit({
+    command: "shutdown",
+    initiatedByStop: false,
+    exitCode: 0,
+    signalCode: null,
+  }).outcome, "reject");
+
   const previousSentinel = process.env[SENTINEL_NAME];
   process.env[SENTINEL_NAME] = ["synthetic", "parent", "only"].join("-");
   let host = null;
@@ -62,6 +99,12 @@ async function main() {
     sensitiveEnvironmentNameCount: environment.sensitiveNames.length,
     homeIsIsolated: environment.homeIsIsolated,
     toolBoundary,
+    childExitClassification: {
+      expectedStopExit: expectedStopExit.outcome,
+      abnormalShutdownExit: "reject",
+      pendingNonShutdown: "reject",
+      shutdownOutsideStop: "reject",
+    },
     childExited: cleanup.childExited,
     activeChildCount: cleanup.activeChildCount,
     portsClosed: cleanup.portsClosed,

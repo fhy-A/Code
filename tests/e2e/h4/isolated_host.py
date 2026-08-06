@@ -451,11 +451,47 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
 
 OUTPUT_LOCK = threading.RLock()
+METRICS_BREADCRUMB_SEQUENCE = 0
 
 
 def _json_line(payload: dict) -> None:
     with OUTPUT_LOCK:
         print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def _metrics_breadcrumb(
+    phase: str,
+    request_started: float,
+    phase_started: float,
+    outcome: str,
+) -> None:
+    global METRICS_BREADCRUMB_SEQUENCE
+    METRICS_BREADCRUMB_SEQUENCE += 1
+    now = time.monotonic()
+    payload = {
+        "seq": METRICS_BREADCRUMB_SEQUENCE,
+        "phase": str(phase),
+        "elapsedMs": max(0, round((now - request_started) * 1000)),
+        "durationMs": max(0, round((now - phase_started) * 1000)),
+        "outcome": str(outcome),
+    }
+    print(
+        "H4_METRICS " + json.dumps(payload, separators=(",", ":")),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _run_metrics_phase(phase: str, request_started: float, operation):
+    phase_started = time.monotonic()
+    _metrics_breadcrumb(f"{phase}_start", request_started, phase_started, "started")
+    try:
+        result = operation()
+    except Exception:
+        _metrics_breadcrumb(f"{phase}_done", request_started, phase_started, "failed")
+        raise
+    _metrics_breadcrumb(f"{phase}_done", request_started, phase_started, "succeeded")
+    return result
 
 
 def _safe_id(value) -> str:
@@ -682,17 +718,52 @@ def main() -> int:
                 })
                 continue
             if operation == "metrics":
-                metrics = METRICS.snapshot()
-                metrics["modelCatalogGate"] = MODEL_CATALOG_GATE.snapshot()
-                metrics["refreshGates"] = REFRESH_GATES.snapshot()
-                metrics["production"] = _production_snapshot(code_server)
-                metrics["sessionJsonl"] = _session_jsonl_evidence(code_server)
-                _json_line({
+                request_started = time.monotonic()
+                _metrics_breadcrumb(
+                    "request_received",
+                    request_started,
+                    request_started,
+                    "started",
+                )
+                metrics = _run_metrics_phase(
+                    "metrics_snapshot",
+                    request_started,
+                    METRICS.snapshot,
+                )
+
+                def gate_snapshots():
+                    return {
+                        "modelCatalogGate": MODEL_CATALOG_GATE.snapshot(),
+                        "refreshGates": REFRESH_GATES.snapshot(),
+                    }
+
+                gates = _run_metrics_phase(
+                    "gate_snapshots",
+                    request_started,
+                    gate_snapshots,
+                )
+                metrics.update(gates)
+                metrics["production"] = _run_metrics_phase(
+                    "production_snapshot",
+                    request_started,
+                    lambda: _production_snapshot(code_server),
+                )
+                metrics["sessionJsonl"] = _run_metrics_phase(
+                    "session_jsonl",
+                    request_started,
+                    lambda: _session_jsonl_evidence(code_server),
+                )
+                response = {
                     "type": "response",
                     "id": request_id,
                     "ok": True,
                     "metrics": metrics,
-                })
+                }
+                _run_metrics_phase(
+                    "response_emit",
+                    request_started,
+                    lambda: _json_line(response),
+                )
                 continue
             if operation == "probe-tool-boundary":
                 _json_line({

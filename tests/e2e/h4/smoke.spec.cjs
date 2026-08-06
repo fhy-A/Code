@@ -11,6 +11,8 @@ const STREAM_ONE = "H4_STREAM_ONE";
 const STREAM_TWO = "H4_STREAM_TWO";
 const STREAM_THREE = "H4_STREAM_THREE";
 const STREAM_FINAL = `${STREAM_ONE} ${STREAM_TWO} ${STREAM_THREE}`;
+const FRONTEND_BUNDLE_PATH = "/dist/frontend/code.bundle.js";
+const CLASSIC_FALLBACK_PATH = "/dist/frontend/index.classic.html";
 
 function idHash(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
@@ -86,11 +88,166 @@ function elapsedSeconds(value) {
   return match ? Number(match[1]) : -1;
 }
 
+function productionTerminalEvidence(metrics) {
+  const agentRun = metrics?.production?.agentRuns?.[0] || {};
+  const runtimeRun = metrics?.production?.runtimeRuns?.[0] || {};
+  const eventTypes = Array.isArray(agentRun.eventTypes) ? agentRun.eventTypes : [];
+  return {
+    agentRun: {
+      status: String(agentRun.status || ""),
+      nextCursor: Number(agentRun.nextCursor || 0),
+      terminalEventPresent: eventTypes.some((eventType) => (
+        eventType === "completed" || eventType === "failed" || eventType === "cancelled"
+      )),
+    },
+    runtimeRun: {
+      status: String(runtimeRun.status || ""),
+      nextCursor: Number(runtimeRun.nextCursor || 0),
+    },
+  };
+}
+
+function metricsBreadcrumbs(sanitizedStderr) {
+  const allowedPhases = new Set([
+    "request_received",
+    "metrics_snapshot_start",
+    "metrics_snapshot_done",
+    "gate_snapshots_start",
+    "gate_snapshots_done",
+    "production_snapshot_start",
+    "production_snapshot_done",
+    "session_jsonl_start",
+    "session_jsonl_done",
+    "response_emit_start",
+    "response_emit_done",
+  ]);
+  const allowedOutcomes = new Set(["started", "succeeded", "failed"]);
+  return String(sanitizedStderr || "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("H4_METRICS "))
+    .slice(-200)
+    .flatMap((line) => {
+      try {
+        const payload = JSON.parse(line.slice("H4_METRICS ".length));
+        if (!allowedPhases.has(payload.phase) || !allowedOutcomes.has(payload.outcome)) return [];
+        return [{
+          seq: Number(payload.seq || 0),
+          phase: payload.phase,
+          elapsedMs: Number(payload.elapsedMs || 0),
+          durationMs: Number(payload.durationMs || 0),
+          outcome: payload.outcome,
+        }];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function summarizeMetricsBreadcrumbs(breadcrumbs) {
+  const maxDurationMs = {};
+  for (const item of breadcrumbs) {
+    if (!item.phase.endsWith("_done")) continue;
+    const phase = item.phase.slice(0, -"_done".length);
+    maxDurationMs[phase] = Math.max(maxDurationMs[phase] || 0, item.durationMs);
+  }
+  return {
+    requestCount: breadcrumbs.filter((item) => item.phase === "request_received").length,
+    maxElapsedMs: Math.max(0, ...breadcrumbs.map((item) => item.elapsedMs)),
+    maxDurationMs,
+  };
+}
+
 async function assertFrontendRuntime(page, runtime) {
   const expected = runtime === "classic" ? "classic-fallback" : "bundle";
   await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", expected);
   if (runtime === "bundle") {
     await expect(page.locator("html")).toHaveAttribute("data-code-frontend-ready", "true");
+  }
+}
+
+async function openAutomaticClassicFallback(h4, failureMode) {
+  const { page, host } = h4;
+  const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
+  const bundleUrl = `${host.ready.codeUrl}${FRONTEND_BUNDLE_PATH}`;
+  let injectionCount = 0;
+  const expectedBundleFailures = [];
+  const mainFrameNavigations = [];
+
+  const onRequestFailed = (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== host.ready.codeUrl || url.pathname !== FRONTEND_BUNDLE_PATH) return;
+    expectedBundleFailures.push({
+      event: "requestfailed",
+      method: request.method(),
+      path: url.pathname,
+    });
+  };
+  const onFrameNavigated = (frame) => {
+    if (frame !== page.mainFrame()) return;
+    const url = new URL(frame.url());
+    if (url.origin === host.ready.codeUrl) {
+      mainFrameNavigations.push(`${url.pathname}${url.search}`);
+    }
+  };
+  const faultHandler = async (route) => {
+    injectionCount += 1;
+    if (failureMode === "load") {
+      await route.abort();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/javascript",
+      body: "/* H4 inert bundle-init fault */\n",
+    });
+  };
+
+  page.on("requestfailed", onRequestFailed);
+  page.on("framenavigated", onFrameNavigated);
+  await page.route(bundleUrl, faultHandler, { times: 1 });
+  try {
+    await page.goto(`${host.ready.codeUrl}/`, { waitUntil: "commit" });
+    await page.waitForURL((url) => (
+      url.pathname === CLASSIC_FALLBACK_PATH
+      && url.searchParams.get("fallback") === expectedReason
+    ), { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", MODEL_ID);
+    await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+      element.value = fakeUrl;
+    }, host.ready.fakeUrl);
+
+    const finalUrl = new URL(page.url());
+    expect(injectionCount).toBe(1);
+    expect(finalUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(finalUrl.searchParams.get("fallback")).toBe(expectedReason);
+    expect([...finalUrl.searchParams]).toEqual([["fallback", expectedReason]]);
+    await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", "classic-fallback");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+    expect(mainFrameNavigations).toEqual([
+      "/",
+      `${CLASSIC_FALLBACK_PATH}?fallback=${expectedReason}`,
+    ]);
+    if (failureMode === "load") {
+      expect(expectedBundleFailures).toEqual([{
+        event: "requestfailed",
+        method: "GET",
+        path: FRONTEND_BUNDLE_PATH,
+      }]);
+    } else {
+      expect(expectedBundleFailures).toEqual([]);
+    }
+
+    return {
+      failureMode,
+      expectedReason,
+      injectionCount,
+      expectedBundleFailures,
+      mainFrameNavigations,
+    };
+  } finally {
+    page.off("requestfailed", onRequestFailed);
+    page.off("framenavigated", onFrameNavigated);
+    await page.unroute(bundleUrl, faultHandler);
   }
 }
 
@@ -388,6 +545,21 @@ const test = base.test.extend({
       }
       const cleanup = await host.stop();
       const repeatedCleanup = await host.stop();
+      const breadcrumbs = metricsBreadcrumbs(cleanup.sanitizedStderr);
+      const isAutomaticFallback = testInfo.title.includes("automatically falls back to classic");
+      if (cleanup.cleanupErrors.length > 0) {
+        const diagnostic = {
+          cleanupErrors: cleanup.cleanupErrors,
+          metricsBreadcrumbs: breadcrumbs,
+        };
+        console.log(`H4_CLEANUP_DIAGNOSTIC ${JSON.stringify(diagnostic)}`);
+        try {
+          await testInfo.attach("sanitized-cleanup-diagnostics", {
+            body: Buffer.from(`${JSON.stringify(diagnostic, null, 2)}\n`, "utf8"),
+            contentType: "application/json",
+          });
+        } catch {}
+      }
       console.log(`H4_CLEANUP ${JSON.stringify({
         title: testInfo.title,
         portsClosed: cleanup.portsClosed,
@@ -396,6 +568,9 @@ const test = base.test.extend({
         childPidRecorded: Number.isInteger(cleanup.childPid),
         childExited: cleanup.childExited,
         activeChildCount: cleanup.activeChildCount,
+        ...(isAutomaticFallback
+          ? { metricsPhaseSummary: summarizeMetricsBreadcrumbs(breadcrumbs) }
+          : {}),
       })}`);
       expect(repeatedCleanup).toBe(cleanup);
       expect(cleanup.childExited).toBe(true);
@@ -525,6 +700,90 @@ test("classic fallback completes one plain-text task", async ({ h4 }) => {
     blockedNonLoopback: h4.blockedRequests.length,
   });
 });
+
+for (const fallbackScenario of [
+  {
+    title: "bundle-load failure automatically falls back to classic",
+    failureMode: "load",
+    evidenceLabel: "automatic-classic-fallback-bundle-load",
+  },
+  {
+    title: "bundle-init failure automatically falls back to classic",
+    failureMode: "init",
+    evidenceLabel: "automatic-classic-fallback-bundle-init",
+  },
+]) {
+  test(fallbackScenario.title, async ({ h4 }) => {
+    const { page } = h4;
+    const fallback = await openAutomaticClassicFallback(h4, fallbackScenario.failureMode);
+    await expect.poll(() => (
+      summarizeLoopbackRequests(h4.loopbackRequests)["GET /api/sessions"] || 0
+    )).toBe(1);
+    await expect.poll(() => (
+      summarizeLoopbackRequests(h4.loopbackRequests)["GET /proxy/models"] || 0
+    )).toBe(1);
+    const startupRequests = summarizeLoopbackRequests(h4.loopbackRequests);
+    expect(startupRequests["GET /"]).toBe(1);
+    expect(startupRequests[`GET ${CLASSIC_FALLBACK_PATH}`]).toBe(1);
+    expect(startupRequests[`GET ${FRONTEND_BUNDLE_PATH}`] || 0).toBe(0);
+    expect(startupRequests["GET /agent-runtime.js"]).toBe(1);
+    expect(startupRequests["GET /app.js"]).toBe(1);
+    expect(startupRequests["GET /api/sessions"]).toBe(1);
+    expect(startupRequests["GET /proxy/models"]).toBe(1);
+    await h4.proveNonLoopbackBlocked();
+
+    await h4.submit("H4_PLAIN_USER");
+    const user = page.locator("#messages article.msg.user").filter({ hasText: "H4_PLAIN_USER" });
+    const assistant = page.locator("#messages article.msg.assistant");
+    const finalAnswer = assistant.filter({ hasText: "H4_PLAIN_FINAL" });
+    await expect(user).toHaveCount(1);
+    await expect(assistant).toHaveCount(1);
+    await expect(finalAnswer).toHaveCount(1);
+    const text = await page.locator("#messages").textContent();
+    expect(countOccurrences(text, "H4_PLAIN_USER")).toBe(1);
+    expect(countOccurrences(text, "H4_PLAIN_FINAL")).toBe(1);
+
+    const requests = h4.requestEvidence();
+    const metrics = await h4.metrics();
+    const finalRequests = summarizeLoopbackRequests(h4.loopbackRequests);
+    expect(requests.agentPost).toBe(1);
+    expect(requests.runtimePost).toBe(0);
+    expect(requests.agentIds).toHaveLength(1);
+    expect(requests.runtimeIds).toHaveLength(1);
+    expect(metrics.chatRequests).toEqual([
+      { scenario: "plain-text", stream: true, hasToolResult: false },
+    ]);
+    expect(metrics.toolExecutions).toEqual([]);
+    expect(metrics.unsafeToolRequests).toBe(0);
+    expect(metrics.production.agentRuns).toHaveLength(1);
+    expect(metrics.production.runtimeRuns).toHaveLength(1);
+    expect(metrics.production.agentRuns[0].agentRunId).toBe(requests.agentIds[0]);
+    expect(metrics.production.runtimeRuns[0].runtimeRunId).toBe(requests.runtimeIds[0]);
+    expect(finalRequests["POST /api/sessions"]).toBe(1);
+    expect(finalRequests[`GET ${CLASSIC_FALLBACK_PATH}`]).toBe(1);
+    expect(finalRequests["GET /agent-runtime.js"]).toBe(1);
+    expect(finalRequests["GET /app.js"]).toBe(1);
+    expect(finalRequests["GET /proxy/models"]).toBe(1);
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence(fallbackScenario.evidenceLabel, {
+      fallback,
+      requests,
+      terminal: productionTerminalEvidence(metrics),
+      startup: {
+        rootDocuments: startupRequests["GET /"],
+        classicDocuments: startupRequests[`GET ${CLASSIC_FALLBACK_PATH}`],
+        modelCatalogRequests: startupRequests["GET /proxy/models"],
+        sessionListRequests: startupRequests["GET /api/sessions"],
+        appScripts: startupRequests["GET /app.js"],
+        runtimeScripts: startupRequests["GET /agent-runtime.js"],
+      },
+      dom: { user: 1, assistant: 1, final: 1 },
+      chatRequests: metrics.chatRequests.length,
+      toolExecutions: metrics.toolExecutions.length,
+      blockedNonLoopback: h4.blockedRequests.length,
+    });
+  });
+}
 
 async function exerciseRefreshBeforeFirst(h4, { runtime, evidenceLabel }) {
   const { page } = h4;

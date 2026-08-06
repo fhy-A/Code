@@ -104,6 +104,24 @@ function childHasExited(child) {
   return !child || child.exitCode !== null || child.signalCode !== null;
 }
 
+function classifyPendingCommandOnChildExit({
+  command,
+  initiatedByStop = false,
+  exitCode,
+  signalCode = null,
+} = {}) {
+  const completedByExpectedStopExit = (
+    command === "shutdown"
+    && initiatedByStop === true
+    && exitCode === 0
+    && signalCode === null
+  );
+  return Object.freeze({
+    completedByExpectedStopExit,
+    outcome: completedByExpectedStopExit ? "complete" : "reject",
+  });
+}
+
 async function waitForChildExit(child, timeoutMs = EXIT_TIMEOUT_MS) {
   if (childHasExited(child)) return true;
   return new Promise((resolve) => {
@@ -236,15 +254,68 @@ async function startIsolatedHost() {
       readyReject(error);
       rejectPending(error);
     });
-    const onChildExit = (code) => {
+    const onChildExit = (code, signalCode) => {
       activeChildren.delete(child);
-      const error = new Error(`H4 isolated host exited (${code})`);
+      const exitDescription = signalCode === null ? String(code) : `signal ${signalCode}`;
+      const error = new Error(`H4 isolated host exited (${exitDescription})`);
       if (!host?.ready) readyReject(error);
-      rejectPending(error);
+      for (const handler of [...pending.values()]) {
+        const classification = classifyPendingCommandOnChildExit({
+          command: handler.command,
+          initiatedByStop: handler.initiatedByStop,
+          exitCode: code,
+          signalCode,
+        });
+        if (classification.completedByExpectedStopExit) {
+          handler.finish(null, {
+            type: "response",
+            id: handler.id,
+            ok: true,
+            completedBy: "expected-stop-exit",
+          });
+        } else {
+          handler.finish(error);
+        }
+      }
     };
     child.once("exit", onChildExit);
 
     let stopPromise = null;
+    const sendCommand = (
+      command,
+      details = {},
+      timeoutMs = COMMAND_TIMEOUT_MS,
+      { initiatedByStop = false } = {},
+    ) => {
+      if (childHasExited(child) || !child.stdin.writable) {
+        throw new Error(`H4 host command unavailable: ${command}`);
+      }
+      const id = nextId;
+      nextId += 1;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error, response) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          pending.delete(id);
+          if (error) reject(error);
+          else resolve(response);
+        };
+        const timer = setTimeout(() => {
+          finish(new Error(`H4 host command timed out: ${command}`));
+        }, timeoutMs);
+        pending.set(id, {
+          id,
+          command,
+          initiatedByStop,
+          finish,
+        });
+        child.stdin.write(`${JSON.stringify({ id, command, ...details })}\n`, (error) => {
+          if (error) finish(error);
+        });
+      });
+    };
     host = {
       root,
       dataDir,
@@ -255,29 +326,7 @@ async function startIsolatedHost() {
       ready: null,
       stderr,
       async command(command, details = {}, timeoutMs = COMMAND_TIMEOUT_MS) {
-        if (childHasExited(child) || !child.stdin.writable) {
-          throw new Error(`H4 host command unavailable: ${command}`);
-        }
-        const id = nextId;
-        nextId += 1;
-        return new Promise((resolve, reject) => {
-          let settled = false;
-          const finish = (error, response) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            pending.delete(id);
-            if (error) reject(error);
-            else resolve(response);
-          };
-          const timer = setTimeout(() => {
-            finish(new Error(`H4 host command timed out: ${command}`));
-          }, timeoutMs);
-          pending.set(id, { finish });
-          child.stdin.write(`${JSON.stringify({ id, command, ...details })}\n`, (error) => {
-            if (error) finish(error);
-          });
-        });
+        return sendCommand(command, details, timeoutMs);
       },
       async metrics() {
         const response = await this.command("metrics");
@@ -361,7 +410,12 @@ async function startIsolatedHost() {
           }
           if (!childHasExited(child)) {
             try {
-              await this.command("shutdown");
+              await sendCommand(
+                "shutdown",
+                {},
+                COMMAND_TIMEOUT_MS,
+                { initiatedByStop: true },
+              );
             } catch (error) {
               cleanupErrors.push(error);
             }
@@ -457,6 +511,7 @@ process.once("exit", () => {
 
 module.exports = {
   FIXTURE_CONTENT,
+  classifyPendingCommandOnChildExit,
   getActiveChildCount,
   startIsolatedHost,
 };
