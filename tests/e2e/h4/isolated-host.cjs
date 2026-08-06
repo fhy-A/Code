@@ -185,16 +185,15 @@ function sanitizeText(value, secrets, root) {
   return text.slice(0, 2_000);
 }
 
-async function startIsolatedHost() {
+async function createOwnedWorkspace() {
   const root = assertOwnedRoot(await fs.mkdtemp(path.join(os.tmpdir(), TEMP_PREFIX)));
   const dataDir = path.join(root, "data");
   const projectDir = path.join(root, "project");
   const artifactsDir = path.join(root, "artifacts");
   const homeDir = path.join(root, "home");
   const temporaryDir = path.join(root, "tmp");
-  let child = null;
-  let lines = null;
-  let host = null;
+  const syntheticKey = ["h4", "synthetic", "credential"].join("-");
+  const platformToken = ["h4", "platform", "session"].join("-");
 
   try {
     await Promise.all([
@@ -205,10 +204,45 @@ async function startIsolatedHost() {
       fs.mkdir(temporaryDir, { recursive: true }),
     ]);
     await fs.writeFile(path.join(projectDir, "fixture.txt"), FIXTURE_CONTENT, "utf8");
+  } catch (error) {
+    assertOwnedRoot(root);
+    await fs.rm(root, { recursive: true, force: true });
+    throw error;
+  }
 
+  return Object.freeze({
+    root,
+    dataDir,
+    projectDir,
+    artifactsDir,
+    homeDir,
+    temporaryDir,
+    syntheticKey,
+    platformToken,
+  });
+}
+
+async function startIsolatedGeneration(
+  workspace,
+  { injectFailureAfterSpawn = false } = {},
+) {
+  const {
+    root,
+    dataDir,
+    projectDir,
+    artifactsDir,
+    homeDir,
+    temporaryDir,
+    syntheticKey,
+    platformToken,
+  } = workspace;
+  assertOwnedRoot(root);
+  let child = null;
+  let lines = null;
+  let host = null;
+
+  try {
     const scriptPath = path.join(__dirname, "isolated_host.py");
-    const syntheticKey = ["h4", "synthetic", "credential"].join("-");
-    const platformToken = ["h4", "platform", "session"].join("-");
     child = childProcess.spawn("python", ["-u", scriptPath, root], {
       cwd: path.resolve(__dirname, "..", "..", ".."),
       env: buildChildEnvironment(homeDir, temporaryDir),
@@ -216,6 +250,9 @@ async function startIsolatedHost() {
       windowsHide: true,
     });
     activeChildren.add(child);
+    if (injectFailureAfterSpawn) {
+      throw new Error("H4 injected generation startup failure");
+    }
 
     const stderr = [];
     const pending = new Map();
@@ -321,6 +358,7 @@ async function startIsolatedHost() {
       dataDir,
       projectDir,
       artifactsDir,
+      childPid: child.pid,
       syntheticKey,
       platformToken,
       ready: null,
@@ -448,20 +486,13 @@ async function startIsolatedHost() {
             cleanupErrors.push(error);
           }
           const sanitizedStderr = this.sanitize(stderr.join(""));
-          if (childExited) {
-            try {
-              assertOwnedRoot(root);
-              await fs.rm(root, { recursive: true, force: true });
-            } catch (error) {
-              cleanupErrors.push(error);
-            }
-          }
           const rootRemoved = await rootIsRemoved(root);
           return {
             metrics,
             portsClosed,
             temporaryFiles,
             rootRemoved,
+            rootRetained: !rootRemoved,
             sanitizedStderr,
             cleanupErrors: cleanupErrors.map((error) => this.sanitize(error?.message || error)),
             childPid: child.pid,
@@ -483,18 +514,172 @@ async function startIsolatedHost() {
     if (lines) lines.close();
     const childExited = child ? await terminateRecordedChild(child) : true;
     if (childExited && child) activeChildren.delete(child);
-    if (childExited) {
-      assertOwnedRoot(root);
-      await fs.rm(root, { recursive: true, force: true });
-    }
-    const rootRemoved = await rootIsRemoved(root);
-    if (!childExited || !rootRemoved) {
-      throw new Error(`H4 readiness cleanup failed (childExited=${childExited}, rootRemoved=${rootRemoved})`, {
+    if (!childExited) {
+      throw new Error(`H4 generation readiness cleanup failed (childExited=${childExited})`, {
         cause: error,
       });
     }
     throw error;
   }
+}
+
+async function startIsolatedHost() {
+  const workspace = await createOwnedWorkspace();
+  let currentGeneration = null;
+  let finalStopPromise = null;
+  let generationNumber = 0;
+
+  const startGeneration = async (options = {}) => {
+    generationNumber += 1;
+    return startIsolatedGeneration(workspace, options);
+  };
+
+  try {
+    currentGeneration = await startGeneration();
+  } catch (error) {
+    assertOwnedRoot(workspace.root);
+    await fs.rm(workspace.root, { recursive: true, force: true });
+    throw error;
+  }
+
+  const managed = {
+    ...workspace,
+    get ready() {
+      return currentGeneration?.ready || null;
+    },
+    get stderr() {
+      return currentGeneration?.stderr || [];
+    },
+    get generationNumber() {
+      return generationNumber;
+    },
+    get childPid() {
+      return currentGeneration?.childPid || null;
+    },
+    async command(command, details = {}, timeoutMs = COMMAND_TIMEOUT_MS) {
+      if (!currentGeneration) throw new Error("H4 generation is not running");
+      return currentGeneration.command(command, details, timeoutMs);
+    },
+    async metrics() {
+      if (!currentGeneration) throw new Error("H4 generation is not running");
+      return currentGeneration.metrics();
+    },
+    async refreshGateStatus() {
+      return currentGeneration.refreshGateStatus();
+    },
+    async releaseModel() {
+      return currentGeneration.releaseModel();
+    },
+    async armModelCatalogGate() {
+      return currentGeneration.armModelCatalogGate();
+    },
+    async waitModelCatalogGate() {
+      return currentGeneration.waitModelCatalogGate();
+    },
+    async releaseModelCatalogGate() {
+      return currentGeneration.releaseModelCatalogGate();
+    },
+    async waitRefreshGate(gate, timeoutMs = 5_000) {
+      return currentGeneration.waitRefreshGate(gate, timeoutMs);
+    },
+    async releaseRefreshGate(gate) {
+      return currentGeneration.releaseRefreshGate(gate);
+    },
+    async releaseAllRefreshGates() {
+      return currentGeneration.releaseAllRefreshGates();
+    },
+    async probeToolBoundary() {
+      return currentGeneration.probeToolBoundary();
+    },
+    sanitize(value) {
+      return sanitizeText(
+        value,
+        [workspace.syntheticKey, workspace.platformToken],
+        workspace.root,
+      );
+    },
+    async restartGeneration(options = {}) {
+      if (finalStopPromise) throw new Error("H4 host is already stopping");
+      if (!currentGeneration) throw new Error("H4 generation is not running");
+      const previous = currentGeneration;
+      const previousReady = previous.ready;
+      const previousCleanup = await previous.stop();
+      if (
+        previousCleanup.childExited !== true
+        || previousCleanup.portsClosed.some((closed) => closed !== true)
+        || previousCleanup.rootRetained !== true
+        || previousCleanup.cleanupErrors.length > 0
+      ) {
+        throw new Error("H4 previous generation did not close cleanly before restart");
+      }
+      currentGeneration = null;
+      const next = await startGeneration(options);
+      currentGeneration = next;
+      return Object.freeze({
+        previousPid: previousCleanup.childPid,
+        currentPid: next.childPid,
+        previousReady,
+        currentReady: next.ready,
+        previousCleanup,
+        generationNumber,
+      });
+    },
+    async stop() {
+      if (finalStopPromise) return finalStopPromise;
+      finalStopPromise = (async () => {
+        let generationCleanup = null;
+        const cleanupErrors = [];
+        if (currentGeneration) {
+          try {
+            generationCleanup = await currentGeneration.stop();
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+          currentGeneration = null;
+        }
+        if (!generationCleanup) {
+          generationCleanup = {
+            metrics: null,
+            portsClosed: [true, true],
+            temporaryFiles: [],
+            rootRemoved: false,
+            rootRetained: true,
+            sanitizedStderr: "",
+            cleanupErrors: [],
+            childPid: null,
+            childExited: true,
+            activeChildCount: activeChildren.size,
+          };
+        }
+        cleanupErrors.push(...generationCleanup.cleanupErrors);
+        let temporaryFiles = generationCleanup.temporaryFiles;
+        try {
+          temporaryFiles = await listRelativeFiles(workspace.root);
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        if (generationCleanup.childExited) {
+          try {
+            assertOwnedRoot(workspace.root);
+            await fs.rm(workspace.root, { recursive: true, force: true });
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+        }
+        const rootRemoved = await rootIsRemoved(workspace.root);
+        return {
+          ...generationCleanup,
+          temporaryFiles,
+          rootRemoved,
+          rootRetained: !rootRemoved,
+          cleanupErrors: cleanupErrors.map((error) => managed.sanitize(error?.message || error)),
+          activeChildCount: activeChildren.size,
+        };
+      })();
+      return finalStopPromise;
+    },
+  };
+  return managed;
 }
 
 function getActiveChildCount() {

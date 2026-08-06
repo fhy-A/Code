@@ -15,7 +15,50 @@ const FRONTEND_BUNDLE_PATH = "/dist/frontend/code.bundle.js";
 const CLASSIC_FALLBACK_PATH = "/dist/frontend/index.classic.html";
 
 function idHash(value) {
-  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
+  const raw = String(value || "");
+  return raw ? crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16) : "";
+}
+
+function canonicalHash(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function roleContentProjection(messages) {
+  return (Array.isArray(messages) ? messages : []).map((message) => ({
+    role: String(message?.role || ""),
+    content: message?.content ?? "",
+  }));
+}
+
+function durableAgentEvidence(snapshot) {
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const runtimeIds = events
+    .filter((event) => ["model_started", "model_completed"].includes(event?.type))
+    .map((event) => idHash(event?.data?.runtimeRunId || ""));
+  return {
+    agentRunId: idHash(snapshot?.agentRunId || ""),
+    sessionId: idHash(snapshot?.sessionId || ""),
+    clientRequestId: idHash(snapshot?.clientRequestId || ""),
+    status: String(snapshot?.status || ""),
+    nextCursor: Number(snapshot?.nextCursor || 0),
+    eventTypes: events.map((event) => String(event?.type || "")),
+    terminalEventCount: events.filter((event) => (
+      event?.type === "completed" || event?.type === "failed" || event?.type === "cancelled"
+    )).length,
+    runtimeIds,
+    resultHash: canonicalHash(snapshot?.result || {}),
+  };
+}
+
+async function fetchProductionJson(page, pathName) {
+  return page.evaluate(async (target) => {
+    const response = await fetch(target);
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {}
+    return { status: response.status, body };
+  }, pathName);
 }
 
 function describeLoopbackRequest(request) {
@@ -299,6 +342,16 @@ const test = base.test.extend({
     const blockedRequests = [];
     const diagnosticSteps = [];
     const domTimeline = [];
+    const observedAgentRunIds = new Set();
+    const observedRuntimeRunIds = new Set();
+    const attachPageObservers = (targetPage) => {
+      targetPage.on("console", (message) => {
+        consoleEntries.push({ type: message.type(), text: host.sanitize(message.text()) });
+      });
+      targetPage.on("pageerror", (error) => {
+        pageErrors.push(host.sanitize(error.stack || error.message));
+      });
+    };
 
     try {
       expect(host.ready.environment).toEqual({
@@ -395,6 +448,10 @@ const test = base.test.extend({
           return;
         }
         loopbackRequests.push(describeLoopbackRequest(request));
+        const agentMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
+        const runtimeMatch = url.pathname.match(/^\/api\/runtime\/runs\/([^/]+)$/);
+        if (agentMatch) observedAgentRunIds.add(decodeURIComponent(agentMatch[1]));
+        if (runtimeMatch) observedRuntimeRunIds.add(decodeURIComponent(runtimeMatch[1]));
         if (url.pathname === "/proxy/models") {
           await route.continue({
             headers: {
@@ -408,10 +465,7 @@ const test = base.test.extend({
       });
 
       page = await context.newPage();
-      page.on("console", (message) => {
-        consoleEntries.push({ type: message.type(), text: host.sanitize(message.text()) });
-      });
-      page.on("pageerror", (error) => pageErrors.push(host.sanitize(error.stack || error.message)));
+      attachPageObservers(page);
 
       const h4 = {
         page,
@@ -508,6 +562,39 @@ const test = base.test.extend({
         },
         requestEvidence() {
           return refreshRequestEvidence(loopbackRequests);
+        },
+        requestBoundary() {
+          return loopbackRequests.length;
+        },
+        requestEvidenceSince(boundary) {
+          return refreshRequestEvidence(loopbackRequests.slice(Number(boundary) || 0));
+        },
+        requestSummarySince(boundary) {
+          return summarizeLoopbackRequests(loopbackRequests.slice(Number(boundary) || 0));
+        },
+        controlIds() {
+          return {
+            agentRunIds: [...observedAgentRunIds],
+            runtimeRunIds: [...observedRuntimeRunIds],
+          };
+        },
+        async replacePage() {
+          if (page && !page.isClosed()) await page.close();
+          page = await context.newPage();
+          attachPageObservers(page);
+          this.page = page;
+          return page;
+        },
+        async restartGeneration(options = {}) {
+          const transition = await host.restartGeneration(options);
+          diagnosticSteps.push({
+            step: "generation-restarted",
+            generationNumber: transition.generationNumber,
+            distinctPids: transition.previousPid !== transition.currentPid,
+            previousPortsClosed: transition.previousCleanup.portsClosed,
+            rootRetained: transition.previousCleanup.rootRetained,
+          });
+          return transition;
         },
         evidence(label, payload) {
           console.log(`H4_EVIDENCE ${JSON.stringify({ label, ...payload })}`);
@@ -610,6 +697,232 @@ test("default bundle completes first plain-text send", async ({ h4 }) => {
     toolExecutions: 0,
     dom: { user: 1, final: 1, runningObserved: true },
     blockedNonLoopback: h4.blockedRequests.length,
+  });
+});
+
+test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {
+  let page = h4.page;
+  const generationABoundary = h4.requestBoundary();
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.submit("H4_PLAIN_USER");
+
+  const userA = page.locator("#messages article.msg.user").filter({ hasText: "H4_PLAIN_USER" });
+  const assistantA = page.locator("#messages article.msg.assistant");
+  const finalA = assistantA.filter({ hasText: "H4_PLAIN_FINAL" });
+  await expect(userA).toHaveCount(1);
+  await expect(assistantA).toHaveCount(1);
+  await expect(finalA).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(activeSession).toHaveCount(1);
+  const sessionId = await activeSession.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+
+  await expect.poll(async () => {
+    const metrics = await h4.metrics();
+    return productionTerminalEvidence(metrics);
+  }).toEqual({
+    agentRun: { status: "completed", nextCursor: 4, terminalEventPresent: true },
+    runtimeRun: { status: "completed", nextCursor: 3 },
+  });
+
+  const controlIds = h4.controlIds();
+  expect(controlIds.agentRunIds).toHaveLength(1);
+  expect(controlIds.runtimeRunIds).toHaveLength(1);
+  const agentRunId = controlIds.agentRunIds[0];
+  const runtimeRunId = controlIds.runtimeRunIds[0];
+
+  const agentResponseA = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  const runtimeResponseA = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentResponseA.status).toBe(200);
+  expect(runtimeResponseA.status).toBe(200);
+  expect(agentResponseA.body.status).toBe("completed");
+  expect(agentResponseA.body.result?.content).toBe("H4_PLAIN_FINAL");
+  expect(agentResponseA.body.clientRequestId).toBe("");
+  expect(runtimeResponseA.body.status).toBe("completed");
+  expect(runtimeResponseA.body.result?.content).toBe("H4_PLAIN_FINAL");
+
+  const agentEvidenceA = durableAgentEvidence(agentResponseA.body);
+  expect(agentEvidenceA).toMatchObject({
+    agentRunId: idHash(agentRunId),
+    sessionId: idHash(sessionId),
+    status: "completed",
+    nextCursor: 4,
+    eventTypes: ["created", "model_started", "model_completed", "completed"],
+    terminalEventCount: 1,
+  });
+  expect(new Set(agentEvidenceA.runtimeIds)).toEqual(new Set([idHash(runtimeRunId)]));
+  expect(agentEvidenceA.runtimeIds).toHaveLength(2);
+
+  let sessionResponseA = null;
+  await expect.poll(async () => {
+    sessionResponseA = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    const projection = roleContentProjection(sessionResponseA.body?.messages);
+    return {
+      status: sessionResponseA.status,
+      roles: projection.map((message) => message.role),
+      userCount: projection.filter((message) => message.content === "H4_PLAIN_USER").length,
+      finalCount: projection.filter((message) => message.content === "H4_PLAIN_FINAL").length,
+      runStateKeys: Object.keys(sessionResponseA.body?.runState || {}).sort(),
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant"],
+    userCount: 1,
+    finalCount: 1,
+    runStateKeys: [],
+  });
+  const sessionRoleContentHashA = canonicalHash(
+    roleContentProjection(sessionResponseA.body.messages),
+  );
+  const metricsA = await h4.metrics();
+  const requestsA = h4.requestEvidenceSince(generationABoundary);
+  expect(requestsA.agentPost).toBe(1);
+  expect(requestsA.runtimePost).toBe(0);
+  expect(requestsA.agentIds).toEqual([idHash(agentRunId)]);
+  expect(requestsA.runtimeIds).toEqual([idHash(runtimeRunId)]);
+  expect(metricsA.chatRequests).toEqual([
+    { scenario: "plain-text", stream: true, hasToolResult: false },
+  ]);
+  expect(metricsA.toolExecutions).toEqual([]);
+  expect(metricsA.unsafeToolRequests).toBe(0);
+
+  const processAPid = h4.host.childPid;
+  await page.close();
+  const generationBBoundary = h4.requestBoundary();
+  const transition = await h4.restartGeneration();
+  expect(transition.previousPid).toBe(processAPid);
+  expect(transition.currentPid).not.toBe(transition.previousPid);
+  expect(transition.previousCleanup.childExited).toBe(true);
+  expect(transition.previousCleanup.portsClosed).toEqual([true, true]);
+  expect(transition.previousCleanup.rootRetained).toBe(true);
+  expect(transition.previousCleanup.rootRemoved).toBe(false);
+  expect(transition.previousCleanup.cleanupErrors).toEqual([]);
+  expect(h4.host.generationNumber).toBe(2);
+
+  page = await h4.replacePage();
+  await page.goto(`${h4.host.ready.codeUrl}/`, { waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(page, "bundle");
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", MODEL_ID);
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
+
+  const persistedSessionButton = page.locator("#sessionList button.session-main")
+    .filter({ hasText: "H4_PLAIN_USER" });
+  await expect(persistedSessionButton).toHaveCount(1);
+  await expect(persistedSessionButton).toHaveAttribute("data-session-id", sessionId);
+  await persistedSessionButton.click();
+
+  const userB = page.locator("#messages article.msg.user").filter({ hasText: "H4_PLAIN_USER" });
+  const assistantB = page.locator("#messages article.msg.assistant");
+  const finalB = assistantB.filter({ hasText: "H4_PLAIN_FINAL" });
+  await expect(userB).toHaveCount(1);
+  await expect(assistantB).toHaveCount(1);
+  await expect(finalB).toHaveCount(1);
+  const visibleTextB = await page.locator("#messages").textContent();
+  expect(countOccurrences(visibleTextB, "H4_PLAIN_USER")).toBe(1);
+  expect(countOccurrences(visibleTextB, "H4_PLAIN_FINAL")).toBe(1);
+  expect(countOccurrences(visibleTextB, "[Output paused]")).toBe(0);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+
+  const agentResponseB = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  const runtimeResponseB = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+  );
+  const sessionResponseB = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(agentResponseB.status).toBe(200);
+  expect(runtimeResponseB.status).toBe(404);
+  expect(sessionResponseB.status).toBe(200);
+  expect(agentResponseB.body.status).toBe("completed");
+  expect(agentResponseB.body.result?.content).toBe("H4_PLAIN_FINAL");
+  expect(agentResponseB.body.activeRuntimeRunId).toBe("");
+
+  const agentEvidenceB = durableAgentEvidence(agentResponseB.body);
+  expect(agentEvidenceB).toEqual(agentEvidenceA);
+  const sessionRoleContentHashB = canonicalHash(
+    roleContentProjection(sessionResponseB.body.messages),
+  );
+  expect(sessionRoleContentHashB).toBe(sessionRoleContentHashA);
+  expect(roleContentProjection(sessionResponseB.body.messages)).toEqual(
+    roleContentProjection(sessionResponseA.body.messages),
+  );
+
+  const metricsB = await h4.metrics();
+  const requestsB = h4.requestEvidenceSince(generationBBoundary);
+  expect(requestsB.agentPost).toBe(0);
+  expect(requestsB.runtimePost).toBe(0);
+  expect(requestsB.agentDelete).toBe(0);
+  expect(requestsB.agentIds).toEqual([idHash(agentRunId)]);
+  expect(requestsB.runtimeIds).toEqual([idHash(runtimeRunId)]);
+  expect(metricsB.chatRequests).toEqual([]);
+  expect(metricsB.toolExecutions).toEqual([]);
+  expect(metricsB.unsafeToolRequests).toBe(0);
+  expect(metricsB.production.agentRuns).toHaveLength(1);
+  expect(metricsB.production.agentRuns[0]).toMatchObject({
+    agentRunId: idHash(agentRunId),
+    status: "completed",
+    nextCursor: 4,
+    eventTypes: ["created", "model_started", "model_completed", "completed"],
+    activeRuntimeRunId: "",
+  });
+  expect(metricsB.production.runtimeRuns).toEqual([]);
+  expect(h4.pageErrors).toEqual([]);
+
+  h4.evidence("completed-agent-run-cross-process", {
+    processBoundary: {
+      distinctPids: transition.previousPid !== transition.currentPid,
+      previousPortsClosed: transition.previousCleanup.portsClosed,
+      rootRetained: transition.previousCleanup.rootRetained,
+      generationNumber: transition.generationNumber,
+    },
+    generationA: {
+      requests: requestsA,
+      agent: agentEvidenceA,
+      runtime: {
+        id: idHash(runtimeRunId),
+        status: runtimeResponseA.body.status,
+        nextCursor: runtimeResponseA.body.nextCursor,
+      },
+      chatRequests: metricsA.chatRequests.length,
+      toolExecutions: metricsA.toolExecutions.length,
+      sessionRoleContentHash: sessionRoleContentHashA,
+    },
+    generationB: {
+      requests: requestsB,
+      agent: agentEvidenceB,
+      oldRuntimeStatus: runtimeResponseB.status,
+      chatRequests: metricsB.chatRequests.length,
+      toolExecutions: metricsB.toolExecutions.length,
+      sessionRoleContentHash: sessionRoleContentHashB,
+    },
+    dom: {
+      user: 1,
+      assistant: 1,
+      final: 1,
+      paused: 0,
+      activeBanner: 0,
+      stopDisabled: true,
+    },
   });
 });
 
