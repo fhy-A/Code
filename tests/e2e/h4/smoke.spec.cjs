@@ -92,6 +92,7 @@ async function assertRefreshIdentityContract(h4, { cancelled = false } = {}) {
   expect(requests.agentPost).toBe(1);
   expect(requests.runtimePost).toBe(0);
   expect(requests.agentDelete).toBe(cancelled ? 1 : 0);
+  expect(requests.runtimeGet).toBeGreaterThan(0);
   expect(requests.agentIds).toHaveLength(1);
   expect(requests.runtimeIds).toHaveLength(1);
   expect(metrics.chatRequests).toEqual([
@@ -314,6 +315,21 @@ const test = base.test.extend({
         async releaseAllRefreshGates() {
           return host.releaseAllRefreshGates();
         },
+        async armModelCatalogGate() {
+          const gate = await host.armModelCatalogGate();
+          diagnosticSteps.push({ step: "model-catalog-gate-armed", state: gate });
+          return gate;
+        },
+        async waitModelCatalogGate() {
+          const gate = await host.waitModelCatalogGate();
+          diagnosticSteps.push({ step: "model-catalog-gate-reached", state: gate });
+          return gate;
+        },
+        async releaseModelCatalogGate() {
+          const gate = await host.releaseModelCatalogGate();
+          diagnosticSteps.push({ step: "model-catalog-gate-released", state: gate });
+          return gate;
+        },
         async reloadBundle() {
           diagnosticSteps.push({ step: "reload-started", at: Date.now() });
           await page.reload({ waitUntil: "domcontentloaded" });
@@ -524,7 +540,12 @@ test("bundle refresh before first model delta reattaches one live run", async ({
     const elapsedBefore = page.locator("#activeRunBanner [data-task-elapsed]");
     await expect(elapsedBefore).toHaveText(/^[1-9]\d*s$/);
     const beforeSeconds = elapsedSeconds(await elapsedBefore.textContent());
+    const runtimeGetsBeforeReload = h4.requestEvidence().runtimeGet;
+    await h4.armModelCatalogGate();
     const reloadReadyAt = await h4.reloadBundle();
+    const catalogGate = await h4.waitModelCatalogGate();
+    expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
+    await expect.poll(() => h4.requestEvidence().runtimeGet).toBeGreaterThan(runtimeGetsBeforeReload);
     await expect(page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })).toHaveCount(1);
     await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
     await expect(page.locator("#stopBtn")).toBeEnabled();
@@ -537,6 +558,8 @@ test("bundle refresh before first model delta reattaches one live run", async ({
     await h4.waitGate("after-second-delta");
     const firstTwo = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
     await expect(firstTwo).toHaveCount(1);
+    expect((await h4.metrics()).modelCatalogGate).toMatchObject({ reached: true, released: false });
+    await h4.releaseModelCatalogGate();
     await h4.releaseGate("after-second-delta");
     await expect(page.locator("#messages article.msg.assistant").filter({ hasText: STREAM_FINAL })).toHaveCount(1);
     const terminalGate = (await h4.metrics()).refreshGates["before-terminal"];
@@ -570,6 +593,7 @@ test("bundle refresh before first model delta reattaches one live run", async ({
       reloadReadyAt,
       elapsed: { beforeSeconds, afterSeconds: elapsedSeconds(await elapsedAfter.textContent()) },
       jsonlBeforeDelta: before.sessionJsonl,
+      modelCatalogGate: evidence.metrics.modelCatalogGate,
       gates: evidence.metrics.refreshGates,
       dom: { user: 1, final: 1, stopRestored: true },
     });
@@ -604,13 +628,20 @@ test("bundle refresh after two deltas catches up without DOM replay", async ({ h
       hasStreamProjectionField: false,
     });
 
+    const runtimeGetsBeforeReload = h4.requestEvidence().runtimeGet;
+    await h4.armModelCatalogGate();
     const reloadReadyAt = await h4.reloadBundle();
+    const catalogGate = await h4.waitModelCatalogGate();
+    expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
+    await expect.poll(() => h4.requestEvidence().runtimeGet).toBeGreaterThan(runtimeGetsBeforeReload);
     const caughtUp = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
     await expect(caughtUp).toHaveCount(1);
     expect((await caughtUp.textContent()).trim().startsWith(prefixBefore)).toBe(true);
     await h4.releaseGate("after-second-delta");
     const completeBody = page.locator("#messages article.msg.assistant").filter({ hasText: STREAM_FINAL });
     await expect(completeBody).toHaveCount(1);
+    expect((await h4.metrics()).modelCatalogGate).toMatchObject({ reached: true, released: false });
+    await h4.releaseModelCatalogGate();
     const terminalGate = (await h4.metrics()).refreshGates["before-terminal"];
     expect(terminalGate).toMatchObject({ reached: true, released: false });
     const thirdDomSample = h4.domTimeline.find((sample) => (
@@ -652,6 +683,7 @@ test("bundle refresh after two deltas catches up without DOM replay", async ({ h
       requests: evidence.requests,
       runtimeBeforeRefresh: before.production.runtimeRuns[0],
       jsonlAfterCompletion: evidence.metrics.sessionJsonl,
+      modelCatalogGate: evidence.metrics.modelCatalogGate,
       domTimeline: nonEmptyAfterRefresh,
       thirdBeforeTerminalRelease: true,
     });
@@ -670,7 +702,12 @@ test("bundle refresh then cancel preserves partial body and pauses once", async 
     await h4.waitGate("after-second-delta");
     const firstTwo = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
     await expect(firstTwo).toHaveCount(1);
+    const runtimeGetsBeforeReload = h4.requestEvidence().runtimeGet;
+    await h4.armModelCatalogGate();
     await h4.reloadBundle();
+    const catalogGate = await h4.waitModelCatalogGate();
+    expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
+    await expect.poll(() => h4.requestEvidence().runtimeGet).toBeGreaterThan(runtimeGetsBeforeReload);
     await expect(page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` })).toHaveCount(1);
     await expect(page.locator("#sendBtn.running")).toBeEnabled();
 
@@ -717,6 +754,7 @@ test("bundle refresh then cancel preserves partial body and pauses once", async 
       },
       requests: evidence.requests,
       cancelLatencyMs,
+      modelCatalogGate: evidence.metrics.modelCatalogGate,
       inFlightThirdPersisted: evidence.metrics.sessionJsonl.hasThirdChunk,
       dom: { user: 1, partialPreserved: true, paused: 1, successfulFinal: 0 },
     });

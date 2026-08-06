@@ -54,3 +54,15 @@ H4-2 已闭合默认 bundle 在同一服务进程内的三条模型流式刷新�
 H4-2 不覆盖 classic 刷新、工具流式刷新、问卷/授权、队列/显式并行/Child AgentRun、图片、压缩、真实 CDN/完整 Markdown、浏览器崩溃、服务或 Runtime 进程重启、跨进程恢复、EXE 或发布门禁。
 
 独立回退只需撤销本阶段的 `app.js`、`agent-runtime.js`、四个 H4/前端测试文件及本次收口文档；不需要修改协议、迁移旧数据或撤销 H4-1 浏览器基础设施。
+
+## 9. 真实 Code Dev 补充验收与启动时序修正
+
+2026-08-07 的真实 Code Dev 人工验收暴露了隔离 H4 假上游未覆盖的启动阻塞：不刷新时流式正常，但首增量前刷新和已有正文后刷新都会只恢复运行状态/计时，直到任务终态才一次性出现完整回答；当时暂停也因恢复过晚而未能及时生效。真实页面网络时间线显示，Session 恢复后仍串行等待多次模型目录请求，首个 AgentRun GET 被推迟到约 20.6 秒，刷新页在此前没有 Runtime GET。
+
+`app.js` 因此将既有 `sessionStartup.startRecovery()` 移到模型目录 `refreshModels()` 之前，仍保留在 `platformSyncPromise` 完成和 `authExpired` 检查之后。这只是调整现有恢复链的启动顺序：不新建恢复状态机，不绕过认证失效检查，也不改变队列和后台恢复的内部先后关系。
+
+H4 假上游增加了有界、确定性的模型目录闸门。三条刷新场景都在闸门未释放时确认新的 Runtime GET 已经发生，首增量前场景已恢复流式正文，两段后场景已恢复前缀并追加第三段，取消场景已发出唯一 DELETE。每例仍为 AgentRun POST 1、Runtime POST 0、上游 chat 1，证明修正没有创建第二 Run、Runtime 或模型请求。
+
+修正后真实 Code Dev 人工复验结果为：发送后立即刷新，页面短暂等待后恢复正常流式；已有正文后刷新，页面短暂等待后恢复已有正文并继续流式追加。用户确认当前行为基本满足需求。这不等于“刷新后瞬时恢复正文”：页面仍需完成 Session 恢复及至少一次 AgentRun/Runtime 本地请求；部分正文仍只存在服务进程内 Runtime 累计结果，不写入活动 Session JSONL。本轮人工验收重点复验了两条成功恢复路径；刷新后取消的及时性仍以隔离 H4 场景的 121 ms、唯一 DELETE 和 cancelled 终态为本次回归证据。
+
+完整 Python 回归首次运行还发现一个与 H4 产品逻辑无关的 D3 跨日时钟缺口：手动压缩 VM 已使用 `FixedDate`，但被直接 `require()` 的消息 HTML 投影仍使用宿主日期，8 月 7 日会把 fixture 中 8 月 6 日的“今天”投影为“昨天”。定向测试现在仅在生产 `projectMessages()` 调用边界临时使用既有 `FixedDate`，并在 `finally` 恢复宿主 `Date`。19 个场景哈希及 suite hash `50ff1567e7477d6438bfc7e8175a3936f04177a089a4b4ae5acc0a93a0a2a657` 原样恢复，未修改 fixture 或重基线。

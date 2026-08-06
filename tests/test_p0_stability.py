@@ -239,10 +239,19 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         ):
             self.assertIn(expected, APP_SOURCE)
 
-    def test_init_starts_recovery_after_models_are_loaded(self):
-        models_pos = APP_SOURCE.index("await refreshModels();")
-        recovery_pos = APP_SOURCE.index("sessionStartup.startRecovery();", models_pos)
-        self.assertGreater(recovery_pos, models_pos)
+    def test_init_starts_recovery_before_model_catalog_refresh(self):
+        init_pos = APP_SOURCE.index("async function init()")
+        platform_sync_pos = APP_SOURCE.index(
+            "const platformSync = await platformSyncPromise;",
+            init_pos,
+        )
+        auth_check_pos = APP_SOURCE.index("if (platformSync?.authExpired)", platform_sync_pos)
+        recovery_pos = APP_SOURCE.index("sessionStartup.startRecovery();", auth_check_pos)
+        models_pos = APP_SOURCE.index("await refreshModels();", recovery_pos)
+        self.assertLess(platform_sync_pos, auth_check_pos)
+        self.assertLess(auth_check_pos, recovery_pos)
+        self.assertLess(recovery_pos, models_pos)
+        self.assertEqual(APP_SOURCE.count("sessionStartup.startRecovery();"), 1)
         startup_start = SESSIONS_SOURCE.index("function createSessionStartup(")
         coordination_start = SESSIONS_SOURCE.index("function startRecovery()", startup_start)
         coordination = SESSIONS_SOURCE[coordination_start:]

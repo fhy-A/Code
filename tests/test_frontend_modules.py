@@ -4929,6 +4929,18 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
     def test_session_startup_restores_foreground_and_orders_recovery(self):
         self.assertIn("createSessionStartup,", APP_SOURCE)
         self.assertIn("const sessionStartup = createSessionStartup({", APP_SOURCE)
+        init_start = APP_SOURCE.index("async function init()")
+        platform_sync = APP_SOURCE.index(
+            "const platformSync = await platformSyncPromise;",
+            init_start,
+        )
+        auth_check = APP_SOURCE.index("if (platformSync?.authExpired)", platform_sync)
+        recovery_call = APP_SOURCE.index("sessionStartup.startRecovery();", auth_check)
+        model_refresh = APP_SOURCE.index("await refreshModels();", recovery_call)
+        self.assertLess(platform_sync, auth_check)
+        self.assertLess(auth_check, recovery_call)
+        self.assertLess(recovery_call, model_refresh)
+        self.assertEqual(APP_SOURCE.count("sessionStartup.startRecovery();"), 1)
         script = r"""
 global.window = {};
 require("./src/core/namespace.js");

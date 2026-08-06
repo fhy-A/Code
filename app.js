@@ -11658,12 +11658,17 @@ async function init() {
     updateSendButtonState();
     return;
   }
-  if (getApiKeys().length > 0 && els.baseUrl.value.trim()) await refreshModels();
 
-  // Recovery starts only after the available model list has loaded. Foreground
-  // runs finish recovery before queued messages pump; background work remains
-  // independent and cannot select the foreground conversation.
+  // Existing AgentRun/Runtime recovery must not wait for a potentially slow
+  // model-catalog refresh. The persisted run already owns its model and child
+  // Runtime; delaying attachment can turn a live stream into one terminal
+  // snapshot and make a restored stop control arrive after the run completed.
+  // Foreground runs still finish recovery before queued messages pump;
+  // background work remains independent and cannot select the foreground
+  // conversation.
   sessionStartup.startRecovery();
+
+  if (getApiKeys().length > 0 && els.baseUrl.value.trim()) await refreshModels();
 
   // Restore preview pane state after config/session load.
   await previewFeature.restore();

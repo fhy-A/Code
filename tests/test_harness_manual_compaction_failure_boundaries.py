@@ -437,10 +437,18 @@ async function settle() {
     t: (key) => key,
     getMessageText: (message) => String(message?.content || ""),
   });
-  const projectTargetHtml = () => feature.projectMessages(
-    accessors.getSessionMessages(targetSessionId),
-    {hasActiveRun: false},
-  );
+  const projectTargetHtml = () => {
+    const nativeProjectionDate = global.Date;
+    global.Date = FixedDate;
+    try {
+      return feature.projectMessages(
+        accessors.getSessionMessages(targetSessionId),
+        {hasActiveRun: false},
+      );
+    } finally {
+      global.Date = nativeProjectionDate;
+    }
+  };
   if ([
     "explicit-retry-succeeds",
     "failed-marker-persistence-retry-succeeds",

@@ -51,6 +51,7 @@ class MetricState:
             "productionToolDelegations": 0,
             "unsafeToolRequests": 0,
             "modelGateWaits": 0,
+            "modelCatalogGateTimeline": [],
             "refreshGateTimeline": [],
         }
 
@@ -69,6 +70,79 @@ class MetricState:
 
 METRICS = MetricState()
 MODEL_GATE = threading.Event()
+
+
+class ModelCatalogGateState:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._armed = False
+        self._reached = threading.Event()
+        self._released = threading.Event()
+        self._reached_at = 0
+        self._released_at = 0
+
+    @staticmethod
+    def _now_ms() -> int:
+        return time.time_ns() // 1_000_000
+
+    def arm(self) -> None:
+        with self._lock:
+            self._armed = True
+            self._reached = threading.Event()
+            self._released = threading.Event()
+            self._reached_at = 0
+            self._released_at = 0
+        METRICS.append("modelCatalogGateTimeline", {
+            "event": "armed",
+            "at": self._now_ms(),
+        })
+
+    def reach_and_wait(self, timeout: float = 15.0) -> bool:
+        with self._lock:
+            if not self._armed:
+                return True
+            if not self._reached_at:
+                self._reached_at = self._now_ms()
+            self._reached.set()
+            reached_at = self._reached_at
+            released = self._released
+        METRICS.append("modelCatalogGateTimeline", {
+            "event": "reached",
+            "at": int(reached_at or 0),
+        })
+        continued = released.wait(timeout=timeout)
+        METRICS.append("modelCatalogGateTimeline", {
+            "event": "continued" if continued else "timed-out",
+            "at": self._now_ms(),
+        })
+        return continued
+
+    def wait_until_reached(self, timeout: float = 5.0) -> bool:
+        return self._reached.wait(timeout=timeout)
+
+    def release(self) -> None:
+        with self._lock:
+            if not self._released_at:
+                self._released_at = self._now_ms()
+            self._released.set()
+            released_at = self._released_at
+        METRICS.append("modelCatalogGateTimeline", {
+            "event": "released",
+            "at": int(released_at or 0),
+        })
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "armed": bool(self._armed),
+                "reached": bool(self._reached.is_set()),
+                "released": bool(self._released.is_set()),
+                "reachedAt": int(self._reached_at or 0),
+                "releasedAt": int(self._released_at or 0),
+            }
+
+
+MODEL_CATALOG_GATE = ModelCatalogGateState()
 
 
 class RefreshGateState:
@@ -227,6 +301,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             return
         if route == "/v1/models":
             self._record("models")
+            if not MODEL_CATALOG_GATE.reach_and_wait():
+                self._send_json({"error": "model catalog gate timeout"}, 504)
+                return
             self._send_json({"object": "list", "data": [{"id": MODEL_ID, "object": "model"}]})
             return
         if route == "/api/token/":
@@ -246,6 +323,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             gate_name = route.rsplit("/", 1)[-1]
             if gate_name == "release-all":
                 REFRESH_GATES.release_all()
+                MODEL_CATALOG_GATE.release()
                 self._send_json({"ok": True, "gates": REFRESH_GATES.snapshot()})
                 return
             if gate_name in REFRESH_GATE_NAMES:
@@ -573,10 +651,39 @@ def main() -> int:
             if operation == "release-model":
                 MODEL_GATE.set()
                 REFRESH_GATES.release_all()
+                MODEL_CATALOG_GATE.release()
                 _json_line({"type": "response", "id": request_id, "ok": True})
+                continue
+            if operation == "arm-model-catalog":
+                MODEL_CATALOG_GATE.arm()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "gate": MODEL_CATALOG_GATE.snapshot(),
+                })
+                continue
+            if operation == "wait-model-catalog":
+                reached = MODEL_CATALOG_GATE.wait_until_reached(timeout=5.0)
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": reached,
+                    "gate": MODEL_CATALOG_GATE.snapshot(),
+                })
+                continue
+            if operation == "release-model-catalog":
+                MODEL_CATALOG_GATE.release()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "gate": MODEL_CATALOG_GATE.snapshot(),
+                })
                 continue
             if operation == "metrics":
                 metrics = METRICS.snapshot()
+                metrics["modelCatalogGate"] = MODEL_CATALOG_GATE.snapshot()
                 metrics["refreshGates"] = REFRESH_GATES.snapshot()
                 metrics["production"] = _production_snapshot(code_server)
                 metrics["sessionJsonl"] = _session_jsonl_evidence(code_server)
@@ -601,6 +708,7 @@ def main() -> int:
             _json_line({"type": "response", "id": request_id, "ok": False})
     finally:
         MODEL_GATE.set()
+        MODEL_CATALOG_GATE.release()
         REFRESH_GATES.release_all()
         code_httpd.shutdown()
         fake_server.shutdown()

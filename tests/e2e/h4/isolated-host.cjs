@@ -291,6 +291,27 @@ async function startIsolatedHost() {
         const response = await this.command("release-model");
         if (response.ok !== true) throw new Error("H4 model gate release failed");
       },
+      async armModelCatalogGate() {
+        const response = await this.command("arm-model-catalog");
+        if (response.ok !== true || response.gate?.armed !== true) {
+          throw new Error("H4 model catalog gate arm failed");
+        }
+        return response.gate;
+      },
+      async waitModelCatalogGate() {
+        const response = await this.command("wait-model-catalog", {}, 6_000);
+        if (response.ok !== true || response.gate?.reached !== true) {
+          throw new Error("H4 model catalog gate was not reached");
+        }
+        return response.gate;
+      },
+      async releaseModelCatalogGate() {
+        const response = await this.command("release-model-catalog");
+        if (response.ok !== true || response.gate?.released !== true) {
+          throw new Error("H4 model catalog gate release failed");
+        }
+        return response.gate;
+      },
       async waitRefreshGate(gate, timeoutMs = 5_000) {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
