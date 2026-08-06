@@ -27,6 +27,9 @@ PLAIN_FINAL = "H4_PLAIN_FINAL"
 TOOL_USER = "H4_TOOL_USER"
 TOOL_STAGE = "H4_TOOL_STAGE"
 TOOL_FINAL = "H4_TOOL_FINAL"
+TOOL_DETAILS_USER = "H4_TOOL_DETAILS_USER"
+TOOL_DETAILS_STAGE = "H4_TOOL_DETAILS_STAGE"
+TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -39,6 +42,8 @@ REFRESH_GATE_NAMES = (
     "before-first-delta",
     "after-second-delta",
     "before-terminal",
+    "before-tool-final-delta",
+    "before-tool-terminal",
 )
 
 
@@ -238,6 +243,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             user_text = _message_text(message)
         if message.get("role") == "tool" or message.get("tool_call_id") == TOOL_CALL_ID:
             has_tool_result = True
+    if TOOL_DETAILS_USER in user_text:
+        return ("tool-detail-final" if has_tool_result else "tool-detail-call", has_tool_result)
     if TOOL_USER in user_text:
         return ("tool-final" if has_tool_result else "tool-call", has_tool_result)
     if STREAM_USER in user_text:
@@ -360,7 +367,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "hasToolResult": has_tool_result,
         })
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
-        if scenario != "stream-refresh" and current_chat_count == 1:
+        if scenario not in ("stream-refresh", "tool-detail-call") and current_chat_count == 1:
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
                 self._send_json({"error": "model gate timeout"}, 504)
@@ -413,9 +420,44 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_frame("[DONE]")
             return
 
-        if scenario == "tool-call":
+        if scenario == "tool-detail-final":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def write_tool_detail_frame(frame) -> bool:
+                value = frame if isinstance(frame, str) else json.dumps(frame, separators=(",", ":"))
+                try:
+                    self.wfile.write(f"data: {value}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    return True
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return False
+
+            if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
+                return
+            if not write_tool_detail_frame(_chunk({
+                "role": "assistant",
+                "content": TOOL_DETAILS_FINAL,
+            })):
+                return
+            if not REFRESH_GATES.reach_and_wait("before-tool-terminal"):
+                return
+            if not write_tool_detail_frame(_chunk(
+                {},
+                "stop",
+                {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
+            )):
+                return
+            write_tool_detail_frame("[DONE]")
+            return
+
+        if scenario in ("tool-call", "tool-detail-call"):
+            stage_text = TOOL_DETAILS_STAGE if scenario == "tool-detail-call" else TOOL_STAGE
             frames = [
-                _chunk({"role": "assistant", "content": TOOL_STAGE}),
+                _chunk({"role": "assistant", "content": stage_text}),
                 _chunk({
                     "tool_calls": [{
                         "index": 0,

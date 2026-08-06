@@ -11,6 +11,11 @@ const STREAM_ONE = "H4_STREAM_ONE";
 const STREAM_TWO = "H4_STREAM_TWO";
 const STREAM_THREE = "H4_STREAM_THREE";
 const STREAM_FINAL = `${STREAM_ONE} ${STREAM_TWO} ${STREAM_THREE}`;
+const TOOL_DETAILS_USER = "H4_TOOL_DETAILS_USER";
+const TOOL_DETAILS_STAGE = "H4_TOOL_DETAILS_STAGE";
+const TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL";
+const TOOL_FINAL_DELTA_GATE = "before-tool-final-delta";
+const TOOL_TERMINAL_GATE = "before-tool-terminal";
 const FRONTEND_BUNDLE_PATH = "/dist/frontend/code.bundle.js";
 const CLASSIC_FALLBACK_PATH = "/dist/frontend/index.classic.html";
 const H4_5B1_SEMANTIC_HASHES = Object.freeze({
@@ -22,6 +27,19 @@ const H4_5B1_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "587b9b6365a9811779ab0bac530de558af1dfca14d31c70ac2cce71ae0973fe9",
   domSemantic: "37d1870e896058e5f001c491a241353faa230e5b0a6fca9d487f8cf8bd058e91",
   finalResult: "e40fb4ba752c3fe25f985c5aa78152ee6ce0166330aa57ca7d67e8a68e24bdef",
+});
+const H4_6A_ACTIVE_TO_TERMINAL_HASHES = Object.freeze({
+  lifecycle: "de27ce93297dad0a99c9215080d8ffd891d893ad30a2ed88884ecbeaeff31487",
+  eventProjection: "36658361b00ce7bff3f3464099e27fe81273845e2ab85a62c0229814128b9d48",
+  sessionRoleContent: "c6b7c90baeafb1c29e38d431bdbaf28a1ca282d54d47ac2d024601ad3d3e442a",
+  terminalDom: "71a1ebdf6f609fc44a8408f20d15659626e8b6d11bf033b3665be510bf470712",
+});
+const H4_6A_TERMINAL_REFRESH_HASHES = Object.freeze({
+  refreshLifecycle: "0712a70b1ad23f9d33ab31b780df8c48deebbeaae784e80a4976daf0e7452ec8",
+  eventProjection: "36658361b00ce7bff3f3464099e27fe81273845e2ab85a62c0229814128b9d48",
+  sessionRoleContent: "c6b7c90baeafb1c29e38d431bdbaf28a1ca282d54d47ac2d024601ad3d3e442a",
+  sessionToolMeta: "587b9b6365a9811779ab0bac530de558af1dfca14d31c70ac2cce71ae0973fe9",
+  terminalDom: "71a1ebdf6f609fc44a8408f20d15659626e8b6d11bf033b3665be510bf470712",
 });
 
 function idHash(value) {
@@ -276,6 +294,87 @@ async function toolDomEvidence(page) {
     ordered,
   };
   return { ...projection, semanticHash: canonicalHash(projection) };
+}
+
+async function toolDetailLifecycleDomEvidence(page) {
+  const messages = page.locator("#messages");
+  const user = messages.locator("article.msg.user").filter({ hasText: TOOL_DETAILS_USER });
+  const commentary = messages.locator("article.msg.assistant.agent-commentary")
+    .filter({ hasText: TOOL_DETAILS_STAGE });
+  const process = messages.locator("article.tool-process");
+  const outer = process.locator("details.tool-process-stage");
+  const item = process.locator("details.tool-process-item");
+  const finalAnswer = messages.locator("article.msg.assistant")
+    .filter({ hasText: TOOL_DETAILS_FINAL });
+  const details = process.locator(".tool-process-detail pre");
+  const result = details.filter({ hasText: FIXTURE_CONTENT.trim() });
+  await expect(user).toHaveCount(1);
+  await expect(commentary).toHaveCount(1);
+  await expect(process).toHaveCount(1);
+  await expect(outer).toHaveCount(1);
+  await expect(item).toHaveCount(1);
+  await expect(result).toHaveCount(1);
+  const detailTexts = await details.allTextContents();
+  const argumentText = String(detailTexts[0] || "").trim();
+  const resultText = String(detailTexts[1] || "").trim();
+  const processKey = await outer.getAttribute("data-tool-process-key");
+  const finalCount = await finalAnswer.count();
+  const ordered = await page.evaluate(({ userMarker, stageMarker, finalMarker }) => {
+    const root = document.querySelector("#messages");
+    const find = (selector, marker) => [...root.querySelectorAll(selector)]
+      .find((element) => element.textContent.includes(marker));
+    const nodes = [
+      find("article.msg.user", userMarker),
+      find("article.msg.assistant.agent-commentary", stageMarker),
+      root.querySelector("article.tool-process"),
+    ];
+    const final = find("article.msg.assistant", finalMarker);
+    if (final) nodes.push(final);
+    return nodes.every(Boolean) && nodes.slice(0, -1).every((node, index) => (
+      Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ));
+  }, {
+    userMarker: TOOL_DETAILS_USER,
+    stageMarker: TOOL_DETAILS_STAGE,
+    finalMarker: TOOL_DETAILS_FINAL,
+  });
+  const projection = {
+    sequence: finalCount
+      ? [TOOL_DETAILS_USER, TOOL_DETAILS_STAGE, "read_file", FIXTURE_CONTENT.trim(), TOOL_DETAILS_FINAL]
+      : [TOOL_DETAILS_USER, TOOL_DETAILS_STAGE, "read_file", FIXTURE_CONTENT.trim()],
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 1,
+      result: 1,
+      final: finalCount,
+      ordinaryAssistant: await messages.locator("article.msg.assistant:not(.tool-process)").count(),
+      assistantTotal: await messages.locator("article.msg.assistant").count(),
+    },
+    processKey: String(processKey || ""),
+    outerOpen: await outer.evaluate((element) => element.open),
+    itemOpen: await item.evaluate((element) => element.open),
+    stageClass: String(await outer.getAttribute("class") || ""),
+    currentAction: String(await outer.getAttribute("data-current-action") || ""),
+    heading: String(await outer.locator(".tool-process-stage-heading").textContent() || "").trim(),
+    argumentText,
+    resultText,
+    formattedResult: {
+      pathPresent: resultText.includes("fixture.txt"),
+      sizePresent: resultText.includes("26 B"),
+      fixtureContentCount: countOccurrences(resultText, FIXTURE_CONTENT.trim()),
+    },
+    ordered,
+  };
+  return {
+    process,
+    outer,
+    item,
+    finalAnswer,
+    projection,
+    semanticHash: canonicalHash(projection),
+  };
 }
 
 async function fetchProductionJson(page, pathName) {
@@ -1639,6 +1738,537 @@ test("default bundle executes one read-only tool without duplicate DOM", async (
     toolExecutions: metrics.toolExecutions.length,
     dom: { user: 1, stage: 1, tool: 1, result: 1, final: 1, ordered },
     blockedNonLoopback: h4.blockedRequests.length,
+  });
+});
+
+test("bundle tool group keeps manual expansion through active rerender and collapses at terminal", async ({ h4 }) => {
+  const { page } = h4;
+  const requestBoundary = h4.requestBoundary();
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.proveNonLoopbackBlocked();
+  await h4.submitGated(TOOL_DETAILS_USER);
+  const firstGateSnapshot = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+
+  const initialDom = await toolDetailLifecycleDomEvidence(page);
+  expect(initialDom.projection).toMatchObject({
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 1,
+      result: 1,
+      final: 0,
+      ordinaryAssistant: 1,
+      assistantTotal: 2,
+    },
+    outerOpen: false,
+    itemOpen: false,
+    currentAction: "read_file",
+    ordered: true,
+  });
+  expect(initialDom.projection.processKey).toBe("0:1");
+  expect(initialDom.projection.stageClass.split(/\s+/)).toContain("running");
+  expect(initialDom.projection.heading).toContain("Read File");
+  expect(initialDom.projection.heading).toContain("fixture.txt");
+  expect(initialDom.projection.argumentText).toContain('"path": "fixture.txt"');
+  expect(initialDom.projection.formattedResult).toEqual({
+    pathPresent: true,
+    sizePresent: true,
+    fixtureContentCount: 1,
+  });
+  expect(initialDom.projection.resultText).toContain(FIXTURE_CONTENT.trim());
+  expect(firstGateSnapshot[TOOL_FINAL_DELTA_GATE]).toMatchObject({
+    reached: true,
+    released: false,
+  });
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const activeAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(activeAgent.status).toBe(200);
+  expect(activeAgent.body.status).toBe("model");
+  expect(typeof activeAgent.body.activeRuntimeRunId).toBe("string");
+  expect(activeAgent.body.activeRuntimeRunId).not.toBe("");
+  const activeModelStartedEvents = activeAgent.body.events.filter((event) => (
+    event?.type === "model_started"
+  ));
+  expect(activeModelStartedEvents).toHaveLength(2);
+  const firstRuntimeRunId = String(activeModelStartedEvents[0]?.data?.runtimeRunId || "");
+  const secondRuntimeRunId = String(activeModelStartedEvents[1]?.data?.runtimeRunId || "");
+  expect(firstRuntimeRunId).not.toBe("");
+  expect(secondRuntimeRunId).not.toBe("");
+  expect(secondRuntimeRunId).toBe(activeAgent.body.activeRuntimeRunId);
+  expect(activeModelStartedEvents[1]?.data?.round).toBe(2);
+  await expect.poll(() => ({
+    agentRunIds: h4.controlIds().agentRunIds,
+    runtimeRunIds: h4.controlIds().runtimeRunIds,
+  })).toEqual({
+    agentRunIds: [agentRunId],
+    runtimeRunIds: [firstRuntimeRunId, secondRuntimeRunId],
+  });
+  const firstRuntime = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(firstRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(firstRuntime.status).toBe(200);
+  expect(firstRuntime.body).toMatchObject({
+    runId: firstRuntimeRunId,
+    sessionId: activeAgent.body.sessionId,
+    status: "completed",
+    nextCursor: 4,
+  });
+  expect(firstRuntime.body.result?.content).toBe(TOOL_DETAILS_STAGE);
+  const secondRuntime = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(secondRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(secondRuntime.status).toBe(200);
+  expect(secondRuntime.body).toMatchObject({
+    runId: secondRuntimeRunId,
+    sessionId: activeAgent.body.sessionId,
+    status: "running",
+    nextCursor: 0,
+  });
+  expect(secondRuntime.body.events).toEqual([]);
+  expect(secondRuntime.body.result?.content).toBe("");
+  const activeTrace = durableToolTraceEvidence(activeAgent.body);
+  expect(activeTrace.eventProjection.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "tool_completed",
+    "model_pending",
+    "model_started",
+  ]);
+  expect(activeTrace.toolCallIds).toHaveLength(1);
+  const toolCallId = activeTrace.toolCallIds[0];
+  expect(activeTrace.executionProjection).toEqual([{
+    toolCallId: "tool-1",
+    name: "read_file",
+    arguments: { path: "fixture.txt" },
+    status: "completed",
+    outcome: "succeeded",
+    result: {
+      ok: true,
+      action: "read_file",
+      path: "fixture.txt",
+      content: FIXTURE_CONTENT,
+      size: 26,
+      truncated: false,
+      lineRange: null,
+    },
+  }]);
+
+  const replacedStage = await initialDom.outer.elementHandle();
+  await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(initialDom.outer).toHaveAttribute("open", "");
+  const openedKey = await initialDom.outer.getAttribute("data-tool-process-key");
+  expect(openedKey).toBe(initialDom.projection.processKey);
+
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await expect(initialDom.finalAnswer).toHaveCount(1);
+  const terminalGateSnapshot = await h4.waitGate(TOOL_TERMINAL_GATE);
+  expect(await replacedStage.evaluate((element) => element.isConnected)).toBe(false);
+  const rerenderedDom = await toolDetailLifecycleDomEvidence(page);
+  expect(rerenderedDom.projection.processKey).toBe(openedKey);
+  expect(rerenderedDom.projection.outerOpen).toBe(true);
+  expect(rerenderedDom.projection.counts).toMatchObject({
+    toolProcess: 1,
+    toolItem: 1,
+    result: 1,
+    final: 1,
+    ordinaryAssistant: 2,
+    assistantTotal: 3,
+  });
+  expect(rerenderedDom.projection.resultText).toBe(initialDom.projection.resultText);
+  expect(rerenderedDom.projection.formattedResult).toEqual({
+    pathPresent: true,
+    sizePresent: true,
+    fixtureContentCount: 1,
+  });
+  expect(terminalGateSnapshot[TOOL_TERMINAL_GATE]).toMatchObject({
+    reached: true,
+    released: false,
+  });
+
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+  let completedAgent = null;
+  await expect.poll(async () => {
+    completedAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedAgent.body?.status,
+      nextCursor: completedAgent.body?.nextCursor,
+      eventTypes: (completedAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 9,
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "tool_completed",
+      "model_pending",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+  });
+  expect(completedAgent.status).toBe(200);
+  expect(completedAgent.body.activeRuntimeRunId).toBe("");
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+  const terminalDom = await toolDetailLifecycleDomEvidence(page);
+  expect(terminalDom.projection.processKey).toBe(openedKey);
+  expect(terminalDom.projection.outerOpen).toBe(false);
+  expect(terminalDom.projection.itemOpen).toBe(false);
+  expect(terminalDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
+  expect(terminalDom.projection.heading).toBe("Inspected a file");
+  expect(terminalDom.projection.resultText).toBe(initialDom.projection.resultText);
+  expect(terminalDom.projection.formattedResult).toEqual({
+    pathPresent: true,
+    sizePresent: true,
+    fixtureContentCount: 1,
+  });
+
+  const terminalTrace = page.locator("#messages .execution-trace.completed");
+  await expect(terminalTrace).toHaveCount(1);
+  await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
+  const terminalTraceToggle = terminalTrace.locator(":scope > [data-execution-trace-toggle]");
+  await expect(terminalTraceToggle).toHaveCount(1);
+  await expect(terminalTraceToggle).toHaveAttribute("aria-expanded", "false");
+  await terminalTraceToggle.click();
+  await expect(terminalTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(terminalTraceToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    terminalDom.outer.locator(":scope > summary.tool-process-stage-summary"),
+  ).toBeVisible();
+  await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(terminalDom.outer).toHaveAttribute("open", "");
+  await terminalDom.item.locator(":scope > summary").click();
+  await expect(terminalDom.item).toHaveAttribute("open", "");
+  await expect(terminalDom.process.locator(".tool-process-detail pre").first()).toBeVisible();
+  await expect(terminalDom.process.locator(".tool-process-detail pre").first()).toContainText("fixture.txt");
+  await expect(terminalDom.process.locator(".tool-process-detail pre").last()).toBeVisible();
+  await expect(terminalDom.process.locator(".tool-process-detail pre").last()).toContainText("fixture.txt");
+  await expect(terminalDom.process.locator(".tool-process-detail pre").last()).toContainText("26 B");
+  await expect(terminalDom.process.locator(".tool-process-detail pre").last()).toContainText(FIXTURE_CONTENT.trim());
+  expect(countOccurrences(
+    await terminalDom.process.locator(".tool-process-detail pre").last().textContent(),
+    FIXTURE_CONTENT.trim(),
+  )).toBe(1);
+  await terminalDom.item.locator(":scope > summary").click();
+  await expect(terminalDom.item).not.toHaveAttribute("open", "");
+  await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(terminalDom.outer).not.toHaveAttribute("open", "");
+  await terminalTraceToggle.click();
+  await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
+  await expect(terminalTraceToggle).toHaveAttribute("aria-expanded", "false");
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionResponse = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionResponse.status).toBe(200);
+  const sessionProjection = roleContentProjection(sessionResponse.body.messages);
+  expect(sessionProjection.map((message) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "tool-call",
+    "tool-result",
+    "assistant",
+  ]);
+  const completedTrace = durableToolTraceEvidence(completedAgent.body);
+  expect(completedTrace.toolCallIds).toEqual([toolCallId]);
+  expect(completedTrace.executionProjection).toEqual(activeTrace.executionProjection);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([
+    { scenario: "tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "tool-detail-final", stream: true, hasToolResult: true },
+  ]);
+  expect(metrics.toolExecutions).toEqual([{ action: "read_file", path: "fixture.txt" }]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  const requests = h4.requestEvidenceSince(requestBoundary);
+  expect(requests.agentPost).toBe(1);
+  expect(requests.runtimePost).toBe(0);
+  expect(requests.agentDelete).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+
+  const lifecycleProjection = {
+    processKey: terminalDom.projection.processKey,
+    openTransitions: ["closed", "open", "open-after-rerender", "closed-terminal", "open-inspect", "closed-inspect"],
+    productionRerenderReplacedStage: true,
+    eventTypes: completedTrace.eventProjection.map((event) => event.type),
+    counts: terminalDom.projection.counts,
+    ordered: terminalDom.projection.ordered,
+    requests: {
+      agentPost: requests.agentPost,
+      runtimePost: requests.runtimePost,
+      chat: metrics.chatRequests.length,
+      tools: metrics.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    lifecycle: canonicalHash(lifecycleProjection),
+    eventProjection: completedTrace.eventProjectionHash,
+    sessionRoleContent: canonicalHash(sessionProjection),
+    terminalDom: terminalDom.semanticHash,
+  };
+  expect(hashes).toEqual(H4_6A_ACTIVE_TO_TERMINAL_HASHES);
+  h4.evidence("tool-detail-active-to-terminal", {
+    identity: {
+      agentRunId: idHash(agentRunId),
+      toolCallId: idHash(toolCallId),
+      processKey: terminalDom.projection.processKey,
+    },
+    gateTimeline: metrics.refreshGateTimeline.filter((entry) => (
+      entry.gate === TOOL_FINAL_DELTA_GATE || entry.gate === TOOL_TERMINAL_GATE
+    )),
+    lifecycle: lifecycleProjection,
+    hashes,
+  });
+});
+
+test("completed bundle tool details reload uniquely with default collapsed state", async ({ h4 }) => {
+  const { page } = h4;
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.proveNonLoopbackBlocked();
+  await h4.submitGated(TOOL_DETAILS_USER);
+  await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await h4.waitGate(TOOL_TERMINAL_GATE);
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TOOL_DETAILS_FINAL })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  let agentBefore = null;
+  await expect.poll(async () => {
+    agentBefore = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return agentBefore.body?.status;
+  }).toBe("completed");
+  const traceBefore = durableToolTraceEvidence(agentBefore.body);
+  expect(traceBefore.toolCallIds).toHaveLength(1);
+  const toolCallId = traceBefore.toolCallIds[0];
+  expect(traceBefore.eventProjection.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "tool_completed",
+    "model_pending",
+    "model_started",
+    "model_completed",
+    "completed",
+  ]);
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionBefore = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionBefore.status).toBe(200);
+  const sessionProjectionBefore = roleContentProjection(sessionBefore.body.messages);
+  expect(sessionProjectionBefore.map((message) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "tool-call",
+    "tool-result",
+    "assistant",
+  ]);
+  const toolMetaBefore = sessionToolMetaProjection(
+    sessionBefore.body.messages,
+    agentRunId,
+    toolCallId,
+  );
+  expect(toolMetaBefore).toHaveLength(2);
+  expect(toolMetaBefore.map((message) => message.role)).toEqual(["tool-call", "tool-result"]);
+  expect(toolMetaBefore.every((message) => message.toolCallId === "tool-1")).toBe(true);
+  expect(toolMetaBefore.at(-1)?.result).toEqual({
+    ok: true,
+    action: "read_file",
+    path: "fixture.txt",
+    content: FIXTURE_CONTENT,
+    size: 26,
+    truncated: false,
+    lineRange: null,
+  });
+
+  const domBefore = await toolDetailLifecycleDomEvidence(page);
+  expect(domBefore.projection.outerOpen).toBe(false);
+  expect(domBefore.projection.itemOpen).toBe(false);
+  expect(domBefore.projection.heading).toBe("Inspected a file");
+  expect(domBefore.projection.formattedResult).toEqual({
+    pathPresent: true,
+    sizePresent: true,
+    fixtureContentCount: 1,
+  });
+  const processKey = domBefore.projection.processKey;
+  const traceBeforeReload = page.locator("#messages .execution-trace.completed");
+  await expect(traceBeforeReload).toHaveCount(1);
+  await expect(traceBeforeReload).not.toHaveClass(/\bis-expanded\b/);
+  const traceToggleBeforeReload = traceBeforeReload.locator(
+    ":scope > [data-execution-trace-toggle]",
+  );
+  await expect(traceToggleBeforeReload).toHaveCount(1);
+  await expect(traceToggleBeforeReload).toHaveAttribute("aria-expanded", "false");
+  await traceToggleBeforeReload.click();
+  await expect(traceBeforeReload).toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleBeforeReload).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    domBefore.outer.locator(":scope > summary.tool-process-stage-summary"),
+  ).toBeVisible();
+  await domBefore.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await domBefore.item.locator(":scope > summary").click();
+  await expect(domBefore.outer).toHaveAttribute("open", "");
+  await expect(domBefore.item).toHaveAttribute("open", "");
+
+  const metricsBefore = await h4.metrics();
+  const refreshBoundary = h4.requestBoundary();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(page, "bundle");
+  const persistedSession = page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(persistedSession).toHaveCount(1);
+  await persistedSession.click();
+
+  const domAfter = await toolDetailLifecycleDomEvidence(page);
+  expect(domAfter.projection.processKey).toBe(processKey);
+  expect(domAfter.projection.outerOpen).toBe(false);
+  expect(domAfter.projection.itemOpen).toBe(false);
+  expect(domAfter.projection).toEqual(domBefore.projection);
+  expect(domAfter.projection.formattedResult).toEqual({
+    pathPresent: true,
+    sizePresent: true,
+    fixtureContentCount: 1,
+  });
+  const traceAfterReload = page.locator("#messages .execution-trace.completed");
+  await expect(traceAfterReload).toHaveCount(1);
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  const traceToggleAfterReload = traceAfterReload.locator(
+    ":scope > [data-execution-trace-toggle]",
+  );
+  await expect(traceToggleAfterReload).toHaveCount(1);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "false");
+  await traceToggleAfterReload.click();
+  await expect(traceAfterReload).toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    domAfter.outer.locator(":scope > summary.tool-process-stage-summary"),
+  ).toBeVisible();
+  await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await domAfter.item.locator(":scope > summary").click();
+  await expect(domAfter.outer).toHaveAttribute("open", "");
+  await expect(domAfter.item).toHaveAttribute("open", "");
+  await expect(domAfter.process.locator(".tool-process-detail pre").last()).toContainText("fixture.txt");
+  await expect(domAfter.process.locator(".tool-process-detail pre").last()).toContainText("26 B");
+  await expect(domAfter.process.locator(".tool-process-detail pre").last()).toContainText(FIXTURE_CONTENT.trim());
+  expect(countOccurrences(
+    await domAfter.process.locator(".tool-process-detail pre").last().textContent(),
+    FIXTURE_CONTENT.trim(),
+  )).toBe(1);
+  await domAfter.item.locator(":scope > summary").click();
+  await expect(domAfter.item).not.toHaveAttribute("open", "");
+  await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(domAfter.outer).not.toHaveAttribute("open", "");
+  await traceToggleAfterReload.click();
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "false");
+
+  const agentAfter = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfter.status).toBe(200);
+  const traceAfter = durableToolTraceEvidence(agentAfter.body);
+  expect(traceAfter).toEqual(traceBefore);
+  expect(traceAfter.toolCallIds).toEqual([toolCallId]);
+  const sessionAfter = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionAfter.status).toBe(200);
+  const sessionProjectionAfter = roleContentProjection(sessionAfter.body.messages);
+  expect(sessionProjectionAfter).toEqual(sessionProjectionBefore);
+  const toolMetaAfter = sessionToolMetaProjection(
+    sessionAfter.body.messages,
+    agentRunId,
+    toolCallId,
+  );
+  expect(toolMetaAfter).toEqual(toolMetaBefore);
+
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
+  expect(metricsAfter.chatRequests).toEqual([
+    { scenario: "tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "tool-detail-final", stream: true, hasToolResult: true },
+  ]);
+  expect(metricsAfter.toolExecutions).toEqual([{ action: "read_file", path: "fixture.txt" }]);
+  const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshRequests.agentDelete).toBe(0);
+  expect(h4.controlIds().agentRunIds).toEqual([agentRunId]);
+  expect(h4.pageErrors).toEqual([]);
+
+  const refreshProjection = {
+    processKeyStable: domAfter.projection.processKey === domBefore.projection.processKey,
+    agentRunStable: traceAfter.agentRunId === traceBefore.agentRunId,
+    toolCallStable: traceAfter.toolCallIdHashes[0] === traceBefore.toolCallIdHashes[0],
+    eventProjectionStable: traceAfter.eventProjectionHash === traceBefore.eventProjectionHash,
+    sessionProjectionStable: JSON.stringify(sessionProjectionAfter) === JSON.stringify(sessionProjectionBefore),
+    toolMetaStable: JSON.stringify(toolMetaAfter) === JSON.stringify(toolMetaBefore),
+    refreshDefaultCollapsed: !domAfter.projection.outerOpen && !domAfter.projection.itemOpen,
+    counts: domAfter.projection.counts,
+    requests: {
+      agentPost: refreshRequests.agentPost,
+      runtimePost: refreshRequests.runtimePost,
+      chatDelta: metricsAfter.chatRequests.length - metricsBefore.chatRequests.length,
+      toolDelta: metricsAfter.toolExecutions.length - metricsBefore.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    refreshLifecycle: canonicalHash(refreshProjection),
+    eventProjection: traceBefore.eventProjectionHash,
+    sessionRoleContent: canonicalHash(sessionProjectionBefore),
+    sessionToolMeta: canonicalHash(toolMetaBefore),
+    terminalDom: domBefore.semanticHash,
+  };
+  expect(hashes).toEqual(H4_6A_TERMINAL_REFRESH_HASHES);
+  h4.evidence("tool-detail-terminal-refresh", {
+    identity: {
+      agentRunId: idHash(agentRunId),
+      toolCallId: idHash(toolCallId),
+      processKey,
+    },
+    refresh: refreshProjection,
+    hashes,
+    expansionBoundary: "page-local outer and item details reset to collapsed on full reload",
   });
 });
 
