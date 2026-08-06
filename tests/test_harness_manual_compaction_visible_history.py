@@ -22,8 +22,8 @@ SCHEMA_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.schema.j
 FIXTURE_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.json"
 APP_PATH = ROOT / "app.js"
 
-EXPECTED_FIXTURE_SHA256 = "56584599d968fd7cfcdfad17cc56ed59a7ec8d18c7ab27b5fbe33d5ec3eda586"
-EXPECTED_SLICE_SHA256 = "1264f4f9d7d46c15012b4d0d092d52819f2e8c41daf5c4561ec0286b733052b8"
+EXPECTED_FIXTURE_SHA256 = "1fac9a92faae6084d578d94daa8e7cd3e7a68beb57df94734f065c4927170384"
+EXPECTED_SLICE_SHA256 = "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5"
 EXPECTED_PROFILE = {
     "id": "h3-2d2-manual-compaction-visible-history",
     "version": 1,
@@ -91,7 +91,11 @@ state.sessionId = input.fixedInputs.sessionId;
 state.messages = structuredClone(sourceMessages);
 state.stats = {input: 41, output: 17, cache: 3};
 state.lastUsage = {input: 41, output: 17};
+state.sessions = [{id: input.fixedInputs.sessionId, title: "Synthetic manual compaction evidence"}];
 const stateAccessors = stateModule.createSessionStateAccessors(state);
+stateAccessors.setSessionMessages(state.sessionId, state.messages);
+stateAccessors.setSessionStats(state.sessionId, state.stats);
+stateAccessors.setSessionLastUsage(state.sessionId, state.lastUsage);
 
 const appSource = fs.readFileSync("app.js", "utf8");
 const startMarker = input.sourceSlice.startMarker;
@@ -159,7 +163,10 @@ const confirmBtn = elements.get("confirmCompact");
 const cancelBtn = elements.get("cancelCompact");
 const cancelX = elements.get("cancelCompactX");
 const modal = elements.get("compactConfirmModal");
-const els = {baseUrl: {value: input.fixedInputs.baseUrl}};
+const els = {
+  baseUrl: {value: input.fixedInputs.baseUrl},
+  sessionTitle: {value: "Synthetic manual compaction evidence"},
+};
 
 const NativeDate = Date;
 const fixedEpoch = NativeDate.parse(input.fixedInputs.now);
@@ -229,6 +236,7 @@ const saveSessionState = async (sessionId, messages, stats, title, options) => {
 const context = vm.createContext({
   apiJson,
   buildManualCompactionPlan: compaction.buildManualCompactionPlan,
+  buildSessionSavePayload: persistence.buildSessionSavePayload,
   createCompactSummaryMessage: compaction.createCompactSummaryMessage,
   Date: FixedDate,
   document,
@@ -236,14 +244,24 @@ const context = vm.createContext({
   encodeURIComponent,
   formatCompact: (value) => String(value),
   getBestKey: () => "synthetic-test-credential",
+  getSessionLastUsage: stateAccessors.getSessionLastUsage,
+  getSessionMessages: stateAccessors.getSessionMessages,
+  getSessionRunState: stateAccessors.getSessionRunState,
+  getSessionStats: stateAccessors.getSessionStats,
   getModelContextMessages: compaction.getModelContextMessages,
   getMsgText: getMessageText,
   getSelectedModel: () => input.fixedInputs.model,
   isDetachedFromMainContext,
+  isSessionStreaming: () => false,
   mapMessageForApi: modelRequest.mapMessageForApi,
   RECENT_CONTEXT_ROUND_COUNT: compaction.RECENT_CONTEXT_ROUND_COUNT,
-  renderMessages: () => renderCalls.push({messageCount: state.messages.length}),
+  renderSessionMessages: (sessionId) => renderCalls.push({
+    sessionId,
+    messageCount: stateAccessors.getSessionMessages(sessionId).length,
+  }),
+  resetRenderCache: () => {},
   saveSessionState,
+  serializeSessionMessages: persistence.serializeSessionMessages,
   setSessionLastUsage: stateAccessors.setSessionLastUsage,
   setSessionMessages: stateAccessors.setSessionMessages,
   setSessionStats: stateAccessors.setSessionStats,
@@ -252,6 +270,7 @@ const context = vm.createContext({
   state,
   String,
   t: (key) => key,
+  updateStatsPanel: () => {},
 });
 const compiled = new vm.Script(
   `${sliceSource}\nthis.__compactConversation = compactConversation;`,

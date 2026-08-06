@@ -583,6 +583,78 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('userText.slice(0, 24) || t("sessionTitleDefault")', send_source)
         self.assertNotIn('createSession("New session")', APP_SOURCE)
 
+    def test_concurrent_full_session_writes_share_the_per_session_save_chain(self):
+        clear_start = APP_SOURCE.index("async function clearRunCheckpoint(")
+        clear_end = APP_SOURCE.index("function resetRenderCache()", clear_start)
+        clear_source = APP_SOURCE[clear_start:clear_end]
+        cache_start = APP_SOURCE.index("function cacheActiveSessionState()")
+        cache_end = APP_SOURCE.index("function isSessionStreaming(", cache_start)
+        cache_source = APP_SOURCE[cache_start:cache_end]
+        current_start = APP_SOURCE.index("async function saveCurrentSession()")
+        current_end = APP_SOURCE.index("async function loadConfig()", current_start)
+        current_source = APP_SOURCE[current_start:current_end]
+
+        for source in (clear_source, cache_source, current_source):
+            self.assertIn("saveSessionState(", source)
+            self.assertNotIn("apiJson(`/api/sessions/", source)
+        for source in (clear_source, cache_source, current_source):
+            self.assertIn("{ persistMessages: true }", source)
+
+        persistence_source = (ROOT / "src" / "services" / "persistence.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("const previous = saveChains[sessionId] || Promise.resolve();", persistence_source)
+        self.assertIn("saveChains[sessionId] = savePromise;", persistence_source)
+
+    def test_manual_compaction_operation_locks_cover_preparation_and_release_in_finally(self):
+        compact_start = APP_SOURCE.index("async function compactConversation()")
+        compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
+        compact_source = APP_SOURCE[compact_start:compact_end]
+        do_compact_start = compact_source.index("const doCompact = async () => {")
+        try_index = compact_source.index("try {", do_compact_start)
+        register_index = compact_source.index("operations.set(targetSessionId", try_index)
+        render_index = compact_source.index(
+            "renderManualCompactionTarget(targetSessionId)", register_index
+        )
+        persist_index = compact_source.index(
+            "await persistManualCompactionTerminal(targetSessionId", render_index
+        )
+        finally_index = compact_source.index("} finally {", persist_index)
+        delete_index = compact_source.index(
+            "operations.delete(targetSessionId)", finally_index
+        )
+        self.assertLess(try_index, register_index)
+        self.assertLess(register_index, render_index)
+        self.assertLess(render_index, persist_index)
+        self.assertLess(persist_index, finally_index)
+        self.assertLess(finally_index, delete_index)
+        self.assertIn("if (operationRegistered)", compact_source[finally_index:delete_index])
+
+        retry_start = APP_SOURCE.index("async function retryManualCompactionPersistence(")
+        retry_end = APP_SOURCE.index("function projectOptimisticFirstMessage(", retry_start)
+        retry_source = APP_SOURCE[retry_start:retry_end]
+        retry_try = retry_source.index("try {")
+        retry_register = retry_source.index("operations.set(sessionId", retry_try)
+        fingerprint_index = retry_source.index(
+            "manualCompactionSaveFingerprint(sessionId)", retry_register
+        )
+        title_index = retry_source.index(
+            "manualCompactionTargetTitle(sessionId)", fingerprint_index
+        )
+        save_index = retry_source.index("await saveSessionState(", title_index)
+        retry_finally = retry_source.index("} finally {", save_index)
+        retry_delete = retry_source.index("operations.delete(sessionId)", retry_finally)
+        self.assertLess(retry_try, retry_register)
+        self.assertLess(retry_register, fingerprint_index)
+        self.assertLess(fingerprint_index, title_index)
+        self.assertLess(title_index, save_index)
+        self.assertLess(save_index, retry_finally)
+        self.assertLess(retry_finally, retry_delete)
+        self.assertIn(
+            "if (operations && operationRegistered)",
+            retry_source[retry_finally:retry_delete],
+        )
+
     def test_import_boundary_survives_compaction_and_stays_out_of_exports(self):
         self.assertIn("if (message.meta?.skipApi) return null;", MODEL_REQUEST_SOURCE)
         self.assertIn(
@@ -604,10 +676,18 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("buildManualCompactionPlan(modelContextMessages, {", compact_source)
         self.assertIn("messages: requestMessages", compact_source)
         self.assertIn(
-            "state.messages = [...messagesBeforeCompaction, summaryMsg, manualCompactionMarker]",
+            "const completedMessages = [",
             compact_source,
         )
-        self.assertIn("{ persistMessages: true }", compact_source)
+        self.assertIn("...messagesBeforeCompaction,", compact_source)
+        self.assertIn("commitManualCompactionTarget(targetSessionId", compact_source)
+        self.assertIn(
+            "await persistManualCompactionTerminal(targetSessionId, completedMarker)",
+            compact_source,
+        )
+        retry_end = APP_SOURCE.index("function projectOptimisticFirstMessage(", compact_start)
+        retry_source = APP_SOURCE[compact_start:retry_end]
+        self.assertIn("{ persistMessages: true }", retry_source)
 
         export_start = APP_SOURCE.index("function exportMarkdown()")
         export_end = APP_SOURCE.index("let sidebarDragState", export_start)
@@ -7211,6 +7291,19 @@ const manualCompactionFailedHtml = feature.projectMessages([
   {role: "assistant", content: "manual compact answer", _responseTime: "2s"},
   {role: "assistant", content: "", meta: {kind: "manual-context-compaction", status: "failed", skipApi: true}},
 ], {hasActiveRun: false});
+const manualCompactionFailedPersistenceHtml = feature.projectMessages([
+  {role: "user", content: "manual compact task"},
+  {role: "assistant", content: "", meta: {
+    kind: "manual-context-compaction",
+    status: "failed",
+    errorStage: "compact_request",
+    errorCode: "compact_request_failed",
+    persistenceStatus: "failed",
+    persistenceErrorCode: "session_save_failed",
+    compactionId: "d3d3d3d3-2222-4333-8444-555555555555",
+    skipApi: true,
+  }},
+], {hasActiveRun: false});
 const runningStage = feature.renderToolProcessProjection([
   {msg: {role: "assistant", meta: {toolCalls: [
     {id: "running-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
@@ -7309,6 +7402,7 @@ process.stdout.write(JSON.stringify({
   manualCompactionRunningHtml,
   manualCompactionCompletedHtml,
   manualCompactionFailedHtml,
+  manualCompactionFailedPersistenceHtml,
   runningStage,
   completedCommands,
   completedEdits,
@@ -7408,6 +7502,7 @@ process.stdout.write(JSON.stringify({
         manual_running_html = data["manualCompactionRunningHtml"]
         manual_completed_html = data["manualCompactionCompletedHtml"]
         manual_failed_html = data["manualCompactionFailedHtml"]
+        manual_failed_persistence_html = data["manualCompactionFailedPersistenceHtml"]
         self.assertNotIn("execution-trace", manual_running_html)
         self.assertIn('class="context-compaction-row msg running"', manual_running_html)
         self.assertIn('data-context-compaction-mode="manual"', manual_running_html)
@@ -7417,6 +7512,20 @@ process.stdout.write(JSON.stringify({
         self.assertIn("manualCompactedContext", manual_completed_html)
         self.assertIn('class="context-compaction-row msg failed"', manual_failed_html)
         self.assertIn("manualCompactContextFailed", manual_failed_html)
+        self.assertIn(
+            'class="context-compaction-row msg failed warning"',
+            manual_failed_persistence_html,
+        )
+        self.assertIn(
+            "manualCompactFailurePersistenceFailed",
+            manual_failed_persistence_html,
+        )
+        self.assertIn("data-manual-compaction-retry", manual_failed_persistence_html)
+        self.assertNotIn("manualCompactedContext", manual_failed_persistence_html)
+        self.assertNotIn(
+            ">manualCompactPersistenceFailed<",
+            manual_failed_persistence_html,
+        )
         self.assertNotIn("execution-trace", data["simpleCompletedHtml"])
         self.assertIn("data-completed-run-status", data["simpleCompletedHtml"])
         active_answer_html = data["activeAnswerHtml"]

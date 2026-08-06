@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "manual-compaction-failure-boundaries-evidence.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "evidenceProfile", "sourceFixture", "cases", "expected"],
+  "properties": {
+    "$schema": {"const": "./manual-compaction-failure-boundaries-evidence.schema.json"},
+    "schemaVersion": {"const": 1},
+    "evidenceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "scope", "execution"],
+      "properties": {
+        "id": {"const": "h3-2d3-manual-compaction-failure-boundaries"},
+        "version": {"const": 1},
+        "scope": {"const": "session-bound-failure-and-persistence-retry"},
+        "execution": {"const": "current-app-js-exact-source-slice"}
+      }
+    },
+    "sourceFixture": {"const": "./manual-compaction-visible-history-evidence.json"},
+    "cases": {
+      "type": "array",
+      "minItems": 19,
+      "maxItems": 19,
+      "prefixItems": [
+        {"$ref": "#/$defs/caseCompactThrows"},
+        {"$ref": "#/$defs/caseCompactRejected"},
+        {"$ref": "#/$defs/caseSummaryThrows"},
+        {"$ref": "#/$defs/caseArchiveFails"},
+        {"$ref": "#/$defs/caseSaveRecovers"},
+        {"$ref": "#/$defs/caseSaveFails"},
+        {"$ref": "#/$defs/caseApplyFails"},
+        {"$ref": "#/$defs/caseRepeatConfirm"},
+        {"$ref": "#/$defs/caseSwitchBefore"},
+        {"$ref": "#/$defs/caseSwitchCompact"},
+        {"$ref": "#/$defs/caseTargetChanges"},
+        {"$ref": "#/$defs/caseSwitchSave"},
+        {"$ref": "#/$defs/caseAppendRetry"},
+        {"$ref": "#/$defs/caseResponseLost"},
+        {"$ref": "#/$defs/caseChangeRetry"},
+        {"$ref": "#/$defs/caseSecondBlocked"},
+        {"$ref": "#/$defs/caseExplicitRetry"},
+        {"$ref": "#/$defs/caseFailedMarkerRetry"},
+        {"$ref": "#/$defs/caseOperationLockRender"}
+      ],
+      "items": false
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceFixtureSha256", "slice", "scenarioHashes", "suiteHash", "mutationFirstDifferencePaths"],
+      "properties": {
+        "sourceFixtureSha256": {"$ref": "#/$defs/sha256"},
+        "slice": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "characterLength"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "characterLength": {"type": "integer", "minimum": 1}
+          }
+        },
+        "scenarioHashes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compact-throws", "compact-ok-false", "summary-build-throws", "archive-fails",
+            "first-save-fails-retry-succeeds", "both-saves-fail", "apply-fails", "repeat-confirm",
+            "switch-before-confirm", "switch-during-compact", "target-changes-during-compact",
+            "switch-during-save-retry", "state-appended-before-retry", "save-response-lost-after-server-write",
+            "target-changes-during-retry", "second-compaction-blocked-pending", "explicit-retry-succeeds",
+            "failed-marker-persistence-retry-succeeds", "operation-lock-render-throws"
+          ],
+          "properties": {
+            "compact-throws": {"$ref": "#/$defs/sha256"},
+            "compact-ok-false": {"$ref": "#/$defs/sha256"},
+            "summary-build-throws": {"$ref": "#/$defs/sha256"},
+            "archive-fails": {"$ref": "#/$defs/sha256"},
+            "first-save-fails-retry-succeeds": {"$ref": "#/$defs/sha256"},
+            "both-saves-fail": {"$ref": "#/$defs/sha256"},
+            "apply-fails": {"$ref": "#/$defs/sha256"},
+            "repeat-confirm": {"$ref": "#/$defs/sha256"},
+            "switch-before-confirm": {"$ref": "#/$defs/sha256"},
+            "switch-during-compact": {"$ref": "#/$defs/sha256"},
+            "target-changes-during-compact": {"$ref": "#/$defs/sha256"},
+            "switch-during-save-retry": {"$ref": "#/$defs/sha256"},
+            "state-appended-before-retry": {"$ref": "#/$defs/sha256"},
+            "save-response-lost-after-server-write": {"$ref": "#/$defs/sha256"},
+            "target-changes-during-retry": {"$ref": "#/$defs/sha256"},
+            "second-compaction-blocked-pending": {"$ref": "#/$defs/sha256"},
+            "explicit-retry-succeeds": {"$ref": "#/$defs/sha256"},
+            "failed-marker-persistence-retry-succeeds": {"$ref": "#/$defs/sha256"},
+            "operation-lock-render-throws": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "suiteHash": {"$ref": "#/$defs/sha256"},
+        "mutationFirstDifferencePaths": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["caseOrder", "errorCode", "persistenceStatus", "callOrder", "rawErrorLeak", "profile", "failedPersistenceUi", "operationLock"],
+          "properties": {
+            "caseOrder": {"const": "$.cases[0].id"},
+            "errorCode": {"const": "$.results.compact-throws.marker.errorCode"},
+            "persistenceStatus": {"const": "$.results.both-saves-fail.marker.persistenceStatus"},
+            "callOrder": {"const": "$.results.archive-fails.callTrace[1]"},
+            "rawErrorLeak": {"const": "$.results.compact-throws.rawErrorLeak"},
+            "profile": {"const": "$.evidenceProfile.scope"},
+            "failedPersistenceUi": {"const": "$.results.failed-marker-persistence-retry-succeeds.pendingUiHash"},
+            "operationLock": {"const": "$.results.operation-lock-render-throws.lockRecovery.operationCount"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "caseBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {"id": {"type": "string"}}
+    },
+    "caseCompactThrows": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "compact-throws"}}}]},
+    "caseCompactRejected": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "compact-ok-false"}}}]},
+    "caseSummaryThrows": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "summary-build-throws"}}}]},
+    "caseArchiveFails": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "archive-fails"}}}]},
+    "caseSaveRecovers": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "first-save-fails-retry-succeeds"}}}]},
+    "caseSaveFails": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "both-saves-fail"}}}]},
+    "caseApplyFails": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "apply-fails"}}}]},
+    "caseRepeatConfirm": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "repeat-confirm"}}}]},
+    "caseSwitchBefore": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "switch-before-confirm"}}}]},
+    "caseSwitchCompact": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "switch-during-compact"}}}]},
+    "caseTargetChanges": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "target-changes-during-compact"}}}]},
+    "caseSwitchSave": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "switch-during-save-retry"}}}]},
+    "caseAppendRetry": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "state-appended-before-retry"}}}]},
+    "caseResponseLost": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "save-response-lost-after-server-write"}}}]},
+    "caseChangeRetry": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "target-changes-during-retry"}}}]},
+    "caseSecondBlocked": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "second-compaction-blocked-pending"}}}]},
+    "caseExplicitRetry": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "explicit-retry-succeeds"}}}]},
+    "caseFailedMarkerRetry": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "failed-marker-persistence-retry-succeeds"}}}]},
+    "caseOperationLockRender": {"allOf": [{"$ref": "#/$defs/caseBase"}, {"properties": {"id": {"const": "operation-lock-render-throws"}}}]}
+  }
+}

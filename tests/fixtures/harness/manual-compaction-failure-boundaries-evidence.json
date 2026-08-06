@@ -1,0 +1,71 @@
+{
+  "$schema": "./manual-compaction-failure-boundaries-evidence.schema.json",
+  "schemaVersion": 1,
+  "evidenceProfile": {
+    "id": "h3-2d3-manual-compaction-failure-boundaries",
+    "version": 1,
+    "scope": "session-bound-failure-and-persistence-retry",
+    "execution": "current-app-js-exact-source-slice"
+  },
+  "sourceFixture": "./manual-compaction-visible-history-evidence.json",
+  "cases": [
+    {"id": "compact-throws"},
+    {"id": "compact-ok-false"},
+    {"id": "summary-build-throws"},
+    {"id": "archive-fails"},
+    {"id": "first-save-fails-retry-succeeds"},
+    {"id": "both-saves-fail"},
+    {"id": "apply-fails"},
+    {"id": "repeat-confirm"},
+    {"id": "switch-before-confirm"},
+    {"id": "switch-during-compact"},
+    {"id": "target-changes-during-compact"},
+    {"id": "switch-during-save-retry"},
+    {"id": "state-appended-before-retry"},
+    {"id": "save-response-lost-after-server-write"},
+    {"id": "target-changes-during-retry"},
+    {"id": "second-compaction-blocked-pending"},
+    {"id": "explicit-retry-succeeds"},
+    {"id": "failed-marker-persistence-retry-succeeds"},
+    {"id": "operation-lock-render-throws"}
+  ],
+  "expected": {
+    "sourceFixtureSha256": "1fac9a92faae6084d578d94daa8e7cd3e7a68beb57df94734f065c4927170384",
+    "slice": {
+      "sha256": "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5",
+      "characterLength": 20676
+    },
+    "scenarioHashes": {
+      "compact-throws": "2c9bf9941cb392b1e1f813c80343f28329848df1f31cd37f072f35976a512b92",
+      "compact-ok-false": "41432dcfa2b25763457a8c4e26dbcf6361a4475a6536d709e2993501b31735b7",
+      "summary-build-throws": "34b9a51fc7cca90ccca4e53abaf340ee5fbac756dec9bca1dd5e70d1fca842cc",
+      "archive-fails": "c64f8b60a71308738b24c00733d881c08fba288db981f838ff7ef02bc22250e0",
+      "first-save-fails-retry-succeeds": "4a21887386f4c30e14723fb417dee8342d4db3caf64a95c77e812efbd8403a96",
+      "both-saves-fail": "423faa1011ddd549a4d0e6a5a5151b20d346832fc62f9c9e7f8324b118ce5643",
+      "apply-fails": "602d505afad05cdb1b396259c55c09975982ccfe37cdcf51777444548683009c",
+      "repeat-confirm": "37435df1b8d47afefe44f081a0acabcc43fb14280a2c0eda050de949cd7fa516",
+      "switch-before-confirm": "3e334c8d33b22e544e121ac52b2e6e11e775f258141c07a810180c9d8ef0f24a",
+      "switch-during-compact": "b8fb70509d8e65a7dbc2657274bf8c837cbf0787f5318f15c16af8d1ba09f672",
+      "target-changes-during-compact": "b503109236a35469b45a15bc6751171c6486db8557f32dfc01201adb40f1e785",
+      "switch-during-save-retry": "52f60107fd22fb306c4930327a3f580fbd85926a45b3c3108f185dd9e49218db",
+      "state-appended-before-retry": "ae00f737c8528c5eebbfebe158c6725759f77f1c657cdfcc3f52880af8cf1f77",
+      "save-response-lost-after-server-write": "9148630a4924e320f08ed19ae50e75c928c56ff64bfaf897907d95f757665fd8",
+      "target-changes-during-retry": "1c1807236c7be0e39248f44d6ddb1bc112f8cbadcee6dfb8670ee52a3cb9bc9f",
+      "second-compaction-blocked-pending": "0540004a9774c197abae75f76f33a88d040167069f615c8ece8ba6b5e4477b16",
+      "explicit-retry-succeeds": "be66d0ff93bb84e834ef2b00124856663b19592f867f232b126768d128cc8f3f",
+      "failed-marker-persistence-retry-succeeds": "8d0ddd327e35c249d7574857a63808c14bf9fa356ed0076bc39426a8c5a58415",
+      "operation-lock-render-throws": "25a4410ed195e6390c1be1dd21a104a067179ec7029d0ab5283b8254c00e1033"
+    },
+    "suiteHash": "50ff1567e7477d6438bfc7e8175a3936f04177a089a4b4ae5acc0a93a0a2a657",
+    "mutationFirstDifferencePaths": {
+      "caseOrder": "$.cases[0].id",
+      "errorCode": "$.results.compact-throws.marker.errorCode",
+      "persistenceStatus": "$.results.both-saves-fail.marker.persistenceStatus",
+      "callOrder": "$.results.archive-fails.callTrace[1]",
+      "rawErrorLeak": "$.results.compact-throws.rawErrorLeak",
+      "profile": "$.evidenceProfile.scope",
+      "failedPersistenceUi": "$.results.failed-marker-persistence-retry-succeeds.pendingUiHash",
+      "operationLock": "$.results.operation-lock-render-throws.lockRecovery.operationCount"
+    }
+  }
+}

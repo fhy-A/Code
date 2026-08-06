@@ -133,6 +133,7 @@
     const getToolActionLabel = options.getToolActionLabel || ((action) => String(action || "tool"));
     const onImagePreview = options.onImagePreview || (() => {});
     const onImageLoad = options.onImageLoad || (() => {});
+    const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
     const boundInteractionRoots = new WeakSet();
 
     function renderCopyIconSvg() {
@@ -198,6 +199,14 @@
         const copyButton = event.target?.closest?.(".msg-copy-btn");
         if (copyButton && (!root.contains || root.contains(copyButton))) {
           void copyMessageText(copyButton);
+          return;
+        }
+        const compactionRetry = event.target?.closest?.("[data-manual-compaction-retry]");
+        if (compactionRetry && (!root.contains || root.contains(compactionRetry))) {
+          compactionRetry.disabled = true;
+          Promise.resolve(onManualCompactionRetry(
+            compactionRetry.dataset.manualCompactionRetry || "",
+          )).finally(() => { compactionRetry.disabled = false; });
           return;
         }
         const image = event.target?.closest?.("[data-message-image-preview]");
@@ -728,6 +737,25 @@
         ? msg.meta.status
         : "completed";
       const manual = msg.meta?.kind === "manual-context-compaction";
+      if (manual && msg.meta?.persistenceStatus === "failed") {
+        const compactionId = String(msg.meta?.compactionId || "");
+        const retry = /^[a-f0-9-]{8,64}$/i.test(compactionId)
+          ? `<button class="mini-btn" type="button" data-manual-compaction-retry="${escapeHtml(compactionId)}">${escapeHtml(t("manualCompactRetrySave"))}</button>`
+          : "";
+        const persistenceLabel = status === "failed"
+          ? "manualCompactFailurePersistenceFailed"
+          : "manualCompactPersistenceFailed";
+        return `<div class="context-compaction-row msg ${escapeHtml(status)} warning" data-msg-index="${index}" data-context-compaction data-context-compaction-mode="manual">
+          <span class="context-compaction-icon" aria-hidden="true"></span>
+          <span>${escapeHtml(t(persistenceLabel))}</span>${retry}
+        </div>`;
+      }
+      if (manual && msg.meta?.archiveStatus === "failed") {
+        return `<div class="context-compaction-row msg completed warning" data-msg-index="${index}" data-context-compaction data-context-compaction-mode="manual">
+          <span class="context-compaction-icon" aria-hidden="true"></span>
+          <span>${escapeHtml(t("manualCompactArchiveWarning"))}</span>
+        </div>`;
+      }
       const labelKey = manual
         ? (status === "running"
             ? "manualCompactingContext"

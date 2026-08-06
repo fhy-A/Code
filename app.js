@@ -292,21 +292,13 @@ async function clearRunCheckpoint(ctx) {
   // Write all messages to JSONL in one shot (stream is complete)
   const msgs = ctx.messages || [];
   if (msgs.length > 0) {
-    const serialized = serializeSessionMessages(
+    await saveSessionState(
+      ctx.sessionId,
       msgs,
-      { includeModel: true, includeTime: true },
-    );
-    const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(ctx.sessionId)}`, {
-      method: "PUT",
-      body: JSON.stringify({
-        title: sessionTitle || "Untitled",
-        messages: serialized,
-        stats: { ...(ctx.stats || getSessionStats(ctx.sessionId) || {}) },
-        lastUsage: getSessionLastUsage(ctx.sessionId),
-        runState: clearedRunState,
-      }),
-    }).catch(() => null);
-    syncSessionSourceBadgeState(ctx.sessionId, savedSession, { notify: true });
+      ctx.stats || getSessionStats(ctx.sessionId),
+      sessionTitle || "Untitled",
+      { persistMessages: true },
+    ).catch(() => null);
   }
 }
 
@@ -323,22 +315,13 @@ function cacheActiveSessionState() {
   if (state.lastUsage) state._sessionLastUsage[prevId] = state.lastUsage;
   // Full write of all messages before switching away (fire-and-forget)
   if (msgs.length > 0) {
-    const serialized = serializeSessionMessages(
+    saveSessionState(
+      prevId,
       msgs,
-      { includeModel: true, includeTime: true },
-    );
-    apiJson(`/api/sessions/${encodeURIComponent(prevId)}`, {
-      method: "PUT",
-      body: JSON.stringify({
-        title: els.sessionTitle.value.trim() || "Untitled",
-        messages: serialized,
-        stats: { ...(state.stats || {}) },
-        lastUsage: state.lastUsage,
-        runState: { ...getSessionRunState(prevId) },
-      }),
-    })
-      .then((savedSession) => syncSessionSourceBadgeState(prevId, savedSession))
-      .catch(() => {});
+      state.stats,
+      els.sessionTitle.value.trim() || "Untitled",
+      { persistMessages: true },
+    ).catch(() => {});
   }
 }
 
@@ -900,6 +883,9 @@ messagesFeature = createMessagesFeature({
   onImageLoad: () => {
     if (els.messages) els.messages.scrollTop = els.messages.scrollHeight;
   },
+  onManualCompactionRetry: (compactionId) => (
+    retryManualCompactionPersistence(state.sessionId, compactionId)
+  ),
 });
 const {
   bindInteractions: bindMessageInteractions,
@@ -3822,26 +3808,13 @@ async function saveCurrentSession() {
 
   if (!state.sessionId) await createSession(t("sessionTitleDefault"));
 
-  const savedSession = await apiJson(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
-
-    method: "PUT",
-
-    body: JSON.stringify({
-
-      title: els.sessionTitle.value.trim() || t("untitledSession"),
-
-      messages: serializeSessionMessages(
-        state.messages,
-        { includeModel: true },
-      ),
-
-      stats: state.stats,
-      runState: { ...getSessionRunState(state.sessionId) },
-
-    }),
-
-  });
-  syncSessionSourceBadgeState(state.sessionId, savedSession, { notify: true });
+  await saveSessionState(
+    state.sessionId,
+    getSessionMessages(state.sessionId),
+    getSessionStats(state.sessionId),
+    els.sessionTitle.value.trim() || t("untitledSession"),
+    { persistMessages: true },
+  );
 
   await refreshSessions();
 
@@ -8780,10 +8753,26 @@ async function executeRunContext(ctx) {
 
 async function compactConversation() {
 
-  if (state.isStreaming) { showToast(t("compactWaitForActiveTask"), "warning"); return; }
+  const targetSessionId = state.sessionId;
+  if (!targetSessionId) return;
+  if (isSessionStreaming(targetSessionId)) {
+    showToast(t("compactWaitForActiveTask"), "warning");
+    return;
+  }
+  if (manualCompactionHasPendingPersistence(targetSessionId)) {
+    showToast(t("manualCompactPersistencePending"), "warning");
+    return;
+  }
+  const operations = manualCompactionOperations();
+  if (state._manualCompactionConfirmSessionId || operations.has(targetSessionId)) {
+    showToast(t("manualCompactAlreadyRunning"), "warning");
+    return;
+  }
+  const sourceMessages = [...getSessionMessages(targetSessionId)];
+  const sourceFingerprint = manualCompactionContentFingerprint(targetSessionId);
 
   const modelContextMessages = getModelContextMessages(
-    state.messages,
+    sourceMessages,
     isDetachedFromMainContext,
   );
   const compactionPlan = buildManualCompactionPlan(modelContextMessages, {
@@ -8803,6 +8792,8 @@ async function compactConversation() {
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
 
   if (!key || !model) { showToast(t("compactSetupRequired"), "warning"); return; }
+
+  state._manualCompactionConfirmSessionId = targetSessionId;
 
 
 
@@ -8850,40 +8841,48 @@ async function compactConversation() {
   const modal = document.getElementById("compactConfirmModal");
 
   const doCompact = async () => {
-
-    hideCompactConfirm();
-
-    confirmBtn.disabled = true;
-
-    confirmBtn.textContent = t("compacting");
-
-    const messagesBeforeCompaction = [...state.messages];
-    const manualCompactionMarker = {
-      role: "assistant",
-      content: "",
-      streaming: true,
-      _time: new Date().toISOString(),
-      meta: {
-        kind: "manual-context-compaction",
-        status: "running",
-        skipApi: true,
-      },
-    };
-    const finishManualCompactionMarker = (status, error = "") => {
-      manualCompactionMarker.streaming = false;
-      manualCompactionMarker.meta = {
-        ...manualCompactionMarker.meta,
-        status,
-        error: String(error || ""),
-      };
-    };
-    state.messages.push(manualCompactionMarker);
-    setSessionMessages(state.sessionId, state.messages);
-    renderMessages();
-
+    let manualCompactionMarker = null;
+    let operationRegistered = false;
     try {
+      hideCompactConfirm();
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = t("compacting");
+      state._manualCompactionConfirmSessionId = null;
+      if (
+        isSessionStreaming(targetSessionId)
+        || manualCompactionContentFingerprint(targetSessionId) !== sourceFingerprint
+      ) {
+        showToast(t("manualCompactTargetChanged"), "warning");
+        return;
+      }
 
-      const result = await apiJson("/api/compact", {
+      const messagesBeforeCompaction = [...getSessionMessages(targetSessionId)];
+      const statsBeforeCompaction = { ...(getSessionStats(targetSessionId) || {}) };
+      const lastUsageBeforeCompaction = manualCompactionClone(getSessionLastUsage(targetSessionId));
+      manualCompactionMarker = {
+        role: "assistant",
+        content: "",
+        streaming: true,
+        _time: new Date().toISOString(),
+        meta: {
+          kind: "manual-context-compaction",
+          status: "running",
+          skipApi: true,
+        },
+      };
+      const runningMessages = [...messagesBeforeCompaction, manualCompactionMarker];
+      setSessionMessages(targetSessionId, runningMessages);
+      const runningFingerprint = manualCompactionContentFingerprint(targetSessionId);
+      operations.set(targetSessionId, {
+        marker: manualCompactionMarker,
+        phase: "compact",
+      });
+      operationRegistered = true;
+      renderManualCompactionTarget(targetSessionId);
+
+      let result;
+      try {
+        result = await apiJson("/api/compact", {
 
         method: "POST",
 
@@ -8897,76 +8896,124 @@ async function compactConversation() {
 
         }),
 
-      });
+        });
+      } catch (_) {
+        throw manualCompactionError("compact_request", "compact_request_failed");
+      }
 
 
 
-      if (!result.ok) throw new Error(result.error || t("compactFailed"));
+      if (!result?.ok) {
+        throw manualCompactionError("compact_result", "compact_rejected");
+      }
 
 
 
-      // Archive full messages before compaction
+      let summaryMsg;
       try {
-        await apiJson(`/api/sessions/${encodeURIComponent(state.sessionId)}/archive`, {
+        summaryMsg = createCompactSummaryMessage(result, {
+          compressed: compressCount,
+          estimatedSaved,
+          createdAt: new Date().toISOString(),
+        });
+      } catch (_) {
+        throw manualCompactionError("summary_build", "summary_build_failed");
+      }
+
+      manualCompactionAssertUnchanged(targetSessionId, runningFingerprint);
+      // Archive full messages before compaction. Archive remains non-blocking,
+      // but its bounded warning is persisted with the completed marker.
+      let archiveFailed = false;
+      try {
+        await apiJson(`/api/sessions/${encodeURIComponent(targetSessionId)}/archive`, {
           method: "PUT",
           body: JSON.stringify({ messages: messagesBeforeCompaction }),
         });
-      } catch (_) { /* non-critical */ }
+      } catch (_) {
+        archiveFailed = true;
+        console.warn("Manual compaction archive failed", { code: "archive_failed" });
+      }
+      manualCompactionAssertUnchanged(targetSessionId, runningFingerprint);
 
-      const summaryMsg = createCompactSummaryMessage(result, {
-        compressed: compressCount,
-        estimatedSaved,
-        createdAt: new Date().toISOString(),
-      });
-
-      finishManualCompactionMarker("completed");
-      state.messages = [...messagesBeforeCompaction, summaryMsg, manualCompactionMarker];
-
-      state.stats = { input: 0, output: 0, cache: 0 };
-
-      setSessionMessages(state.sessionId, state.messages);
-      setSessionStats(state.sessionId, state.stats);
-      setSessionLastUsage(state.sessionId, null);
-
-      renderMessages();
-
-      setStreaming(false, state.sessionId);
-      await saveSessionState(
-        state.sessionId,
-        state.messages,
-        state.stats,
-        undefined,
-        { persistMessages: true },
+      const completedMarker = manualCompactionCompletedMarker(
+        manualCompactionMarker,
+        archiveFailed,
       );
+      const completedMessages = [
+        ...messagesBeforeCompaction,
+        summaryMsg,
+        completedMarker,
+      ];
+      try {
+        commitManualCompactionTarget(targetSessionId, {
+          messages: completedMessages,
+          stats: { input: 0, output: 0, cache: 0 },
+          lastUsage: null,
+        });
+      } catch (_) {
+        commitManualCompactionTarget(targetSessionId, {
+          messages: runningMessages,
+          stats: statsBeforeCompaction,
+          lastUsage: lastUsageBeforeCompaction,
+        });
+        throw manualCompactionError("state_apply", "state_apply_failed");
+      }
+
+      const operation = operations.get(targetSessionId);
+      if (operation) operation.marker = completedMarker;
+      renderManualCompactionTarget(targetSessionId);
+      setStreaming(false, targetSessionId);
+      await persistManualCompactionTerminal(targetSessionId, completedMarker);
 
     } catch (err) {
-
-      finishManualCompactionMarker("failed", err.message);
-      setSessionMessages(state.sessionId, state.messages);
-      renderMessages();
-      await saveSessionState(
-        state.sessionId,
-        state.messages,
-        state.stats,
-        undefined,
-        { persistMessages: true },
-      ).catch(() => {});
-
-      showToast(`${t("compactFailed")}：${err.message}`, "error");
-
+      const failure = manualCompactionNormalizeError(err);
+      if (manualCompactionMarker) {
+        let failedMarker = null;
+        try {
+          failedMarker = failManualCompactionMarker(
+            targetSessionId,
+            manualCompactionMarker,
+            failure.errorStage,
+            failure.errorCode,
+          );
+          const operation = operations.get(targetSessionId);
+          if (operation) operation.marker = failedMarker;
+        } catch (_) {}
+        if (failedMarker) {
+          try { renderManualCompactionTarget(targetSessionId); } catch (_) {}
+          try {
+            await persistManualCompactionTerminal(targetSessionId, failedMarker);
+          } catch (_) {
+            console.warn("Manual compaction failure marker save preparation failed", {
+              code: "session_save_failed",
+            });
+          }
+        }
+      }
+      if (targetSessionId === state.sessionId) {
+        try { showToast(t(manualCompactionErrorLabel(failure.errorCode)), "error"); } catch (_) {}
+      }
     } finally {
-
-      confirmBtn.disabled = false;
-
-      confirmBtn.textContent = t("confirmCompact");
-
+      if (operationRegistered) operations.delete(targetSessionId);
+      if (state._manualCompactionConfirmSessionId === targetSessionId) {
+        state._manualCompactionConfirmSessionId = null;
+      }
+      try {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = t("confirmCompact");
+      } catch (_) {}
     }
 
   };
 
 
 
-  const cancelCompact = () => hideCompactConfirm();
+  const cancelCompact = () => {
+    if (state._manualCompactionConfirmSessionId === targetSessionId) {
+      state._manualCompactionConfirmSessionId = null;
+    }
+    hideCompactConfirm();
+  };
 
 
 
@@ -9010,6 +9057,365 @@ function hideCompactConfirm() {
 
   document.getElementById("compactConfirmModal").classList.add("hidden");
 
+}
+
+function manualCompactionOperations() {
+  if (!(state._manualCompactionOperations instanceof Map)) {
+    state._manualCompactionOperations = new Map();
+  }
+  return state._manualCompactionOperations;
+}
+
+function manualCompactionClone(value) {
+  if (value == null) return null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function manualCompactionTargetTitle(sessionId) {
+  const local = state.sessions.find((session) => session.id === sessionId);
+  return (
+    (sessionId === state.sessionId ? els.sessionTitle.value.trim() : "")
+    || String(local?.title || "").trim()
+    || t("untitledSession")
+  );
+}
+
+function manualCompactionContentFingerprint(sessionId) {
+  return JSON.stringify({
+    messages: serializeSessionMessages(
+      getSessionMessages(sessionId),
+      { includeModel: true, includeTime: true },
+    ),
+    stats: { ...(getSessionStats(sessionId) || {}) },
+    lastUsage: manualCompactionClone(getSessionLastUsage(sessionId)),
+  });
+}
+
+function manualCompactionSaveFingerprint(sessionId) {
+  return JSON.stringify(buildSessionSavePayload({
+    title: manualCompactionTargetTitle(sessionId),
+    stats: getSessionStats(sessionId) || {},
+    lastUsage: getSessionLastUsage(sessionId),
+    runState: getSessionRunState(sessionId),
+    messages: getSessionMessages(sessionId),
+    persistMessages: true,
+  }));
+}
+
+function manualCompactionSaveSnapshot(sessionId) {
+  return {
+    messages: getSessionMessages(sessionId),
+    stats: { ...(getSessionStats(sessionId) || {}) },
+    title: manualCompactionTargetTitle(sessionId),
+    fingerprint: manualCompactionSaveFingerprint(sessionId),
+  };
+}
+
+function manualCompactionHasPendingPersistence(sessionId) {
+  return getSessionMessages(sessionId).some((message) => (
+    message?.meta?.kind === "manual-context-compaction"
+    && message.meta.persistenceStatus === "failed"
+  ));
+}
+
+function manualCompactionError(errorStage, errorCode) {
+  const error = new Error(errorCode);
+  error.manualCompactionStage = errorStage;
+  error.manualCompactionCode = errorCode;
+  return error;
+}
+
+function manualCompactionNormalizeError(error) {
+  const errorStage = [
+    "compact_request",
+    "compact_result",
+    "summary_build",
+    "state_apply",
+    "target_session",
+  ].includes(error?.manualCompactionStage)
+    ? error.manualCompactionStage
+    : "state_apply";
+  const allowedCodes = new Set([
+    "compact_request_failed",
+    "compact_rejected",
+    "summary_build_failed",
+    "state_apply_failed",
+    "target_session_changed",
+    "target_session_unavailable",
+  ]);
+  return {
+    errorStage,
+    errorCode: allowedCodes.has(error?.manualCompactionCode)
+      ? error.manualCompactionCode
+      : "state_apply_failed",
+  };
+}
+
+function manualCompactionErrorLabel(errorCode) {
+  return ({
+    compact_request_failed: "manualCompactRequestFailed",
+    compact_rejected: "manualCompactRejected",
+    summary_build_failed: "manualCompactSummaryFailed",
+    state_apply_failed: "manualCompactApplyFailed",
+    target_session_changed: "manualCompactTargetChanged",
+    target_session_unavailable: "manualCompactTargetUnavailable",
+  })[errorCode] || "manualCompactApplyFailed";
+}
+
+function manualCompactionAssertUnchanged(sessionId, expectedFingerprint) {
+  if (!state.sessions.some((session) => session.id === sessionId)) {
+    throw manualCompactionError("target_session", "target_session_unavailable");
+  }
+  if (manualCompactionContentFingerprint(sessionId) !== expectedFingerprint) {
+    throw manualCompactionError("target_session", "target_session_changed");
+  }
+}
+
+function manualCompactionCompletedMarker(marker, archiveFailed) {
+  return {
+    ...marker,
+    streaming: false,
+    meta: {
+      ...marker.meta,
+      status: "completed",
+      error: "",
+      ...(archiveFailed
+        ? { archiveStatus: "failed", archiveErrorCode: "archive_failed" }
+        : {}),
+    },
+  };
+}
+
+function manualCompactionMarkerIndex(messages, marker, compactionId = "") {
+  if (compactionId) {
+    const indexes = [];
+    messages.forEach((message, index) => {
+      if (
+        message?.meta?.kind === "manual-context-compaction"
+        && message.meta.compactionId === compactionId
+      ) indexes.push(index);
+    });
+    return indexes.length === 1 ? indexes[0] : -1;
+  }
+  const directIndex = messages.indexOf(marker);
+  if (directIndex >= 0) return directIndex;
+  const markerTime = String(marker?._time || "");
+  const indexes = [];
+  messages.forEach((message, index) => {
+    if (
+      markerTime
+      && message?.meta?.kind === "manual-context-compaction"
+      && String(message._time || "") === markerTime
+    ) indexes.push(index);
+  });
+  return indexes.length === 1 ? indexes[0] : -1;
+}
+
+function replaceManualCompactionMarker(sessionId, marker, nextMarker, compactionId = "") {
+  const current = getSessionMessages(sessionId);
+  const markerIndex = manualCompactionMarkerIndex(current, marker, compactionId);
+  if (markerIndex < 0) return null;
+  const nextMessages = [...current];
+  nextMessages[markerIndex] = nextMarker;
+  setSessionMessages(sessionId, nextMessages);
+  return nextMarker;
+}
+
+function failManualCompactionMarker(sessionId, marker, errorStage, errorCode) {
+  const failedMarker = {
+    ...marker,
+    streaming: false,
+    meta: {
+      ...marker.meta,
+      status: "failed",
+      errorStage,
+      errorCode,
+    },
+  };
+  delete failedMarker.meta.error;
+  const replaced = replaceManualCompactionMarker(sessionId, marker, failedMarker);
+  if (replaced) return replaced;
+  setSessionMessages(sessionId, [...getSessionMessages(sessionId), failedMarker]);
+  return failedMarker;
+}
+
+function commitManualCompactionTarget(sessionId, next) {
+  const previous = {
+    messages: getSessionMessages(sessionId),
+    stats: getSessionStats(sessionId),
+    lastUsage: getSessionLastUsage(sessionId),
+  };
+  try {
+    setSessionMessages(sessionId, next.messages);
+    setSessionStats(sessionId, next.stats);
+    setSessionLastUsage(sessionId, next.lastUsage);
+  } catch (error) {
+    try { setSessionMessages(sessionId, previous.messages); } catch (_) {}
+    try { setSessionStats(sessionId, previous.stats); } catch (_) {}
+    try { setSessionLastUsage(sessionId, previous.lastUsage); } catch (_) {}
+    throw error;
+  }
+}
+
+function renderManualCompactionTarget(sessionId) {
+  if (sessionId === state.sessionId) resetRenderCache();
+  renderSessionMessages(sessionId);
+  if (sessionId === state.sessionId) updateStatsPanel();
+}
+
+function createManualCompactionId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (!globalThis.crypto?.getRandomValues) {
+    throw manualCompactionError("state_apply", "state_apply_failed");
+  }
+  globalThis.crypto.getRandomValues(bytes);
+  return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function attachManualCompactionId(sessionId, marker) {
+  const compactionId = createManualCompactionId();
+  const identifiedMarker = {
+    ...marker,
+    meta: { ...marker.meta, compactionId },
+  };
+  const replaced = replaceManualCompactionMarker(sessionId, marker, identifiedMarker);
+  return replaced ? { compactionId, marker: replaced } : null;
+}
+
+function markManualCompactionPersistenceFailed(sessionId, marker, errorCode) {
+  const failedMarker = {
+    ...marker,
+    meta: {
+      ...marker.meta,
+      persistenceStatus: "failed",
+      persistenceErrorCode: errorCode,
+    },
+  };
+  const replaced = replaceManualCompactionMarker(
+    sessionId,
+    marker,
+    failedMarker,
+    marker.meta?.compactionId || "",
+  );
+  if (replaced) renderManualCompactionTarget(sessionId);
+  if (sessionId === state.sessionId) {
+    const persistenceLabel = failedMarker.meta?.status === "failed"
+      ? "manualCompactFailurePersistenceFailed"
+      : "manualCompactPersistenceFailed";
+    showToast(t(persistenceLabel), "error");
+  }
+  return replaced || marker;
+}
+
+async function persistManualCompactionTerminal(sessionId, marker) {
+  const firstSnapshot = manualCompactionSaveSnapshot(sessionId);
+  let retryCode = "session_save_failed";
+  try {
+    await saveSessionState(
+      sessionId,
+      firstSnapshot.messages,
+      firstSnapshot.stats,
+      undefined,
+      { persistMessages: true },
+    );
+    if (manualCompactionSaveFingerprint(sessionId) === firstSnapshot.fingerprint) {
+      return true;
+    }
+    retryCode = "session_changed_during_save";
+  } catch (_) {
+    console.warn("Manual compaction session save failed", { code: retryCode });
+  }
+
+  const identified = attachManualCompactionId(sessionId, marker);
+  if (!identified) return false;
+  marker = identified.marker;
+  const retrySnapshot = manualCompactionSaveSnapshot(sessionId);
+  try {
+    await saveSessionState(
+      sessionId,
+      retrySnapshot.messages,
+      retrySnapshot.stats,
+      retrySnapshot.title,
+      { persistMessages: true },
+    );
+    if (manualCompactionSaveFingerprint(sessionId) === retrySnapshot.fingerprint) {
+      if (sessionId === state.sessionId) {
+        showToast(t("manualCompactSaveRecovered"), "info");
+      }
+      return true;
+    }
+    retryCode = "session_changed_during_save";
+  } catch (_) {
+    retryCode = "session_save_failed";
+    console.warn("Manual compaction session retry failed", { code: retryCode });
+  }
+  markManualCompactionPersistenceFailed(sessionId, marker, retryCode);
+  return false;
+}
+
+async function retryManualCompactionPersistence(sessionId, compactionId) {
+  let operations = null;
+  let marker = null;
+  let operationRegistered = false;
+  try {
+    if (!sessionId || !/^[a-f0-9-]{8,64}$/i.test(String(compactionId || ""))) return false;
+    operations = manualCompactionOperations();
+    if (operations.has(sessionId)) return false;
+    const currentMessages = getSessionMessages(sessionId);
+    const markerIndex = manualCompactionMarkerIndex(currentMessages, null, compactionId);
+    marker = markerIndex >= 0 ? currentMessages[markerIndex] : null;
+    if (!marker || marker.meta?.persistenceStatus !== "failed") return false;
+
+    operations.set(sessionId, { marker, phase: "persistence_retry" });
+    operationRegistered = true;
+    const nextMeta = { ...marker.meta };
+    delete nextMeta.persistenceStatus;
+    delete nextMeta.persistenceErrorCode;
+    const persistedMarker = { ...marker, meta: nextMeta };
+    const outgoingMessages = [...currentMessages];
+    outgoingMessages[markerIndex] = persistedMarker;
+    const beforeFingerprint = manualCompactionSaveFingerprint(sessionId);
+    const title = manualCompactionTargetTitle(sessionId);
+    await saveSessionState(
+      sessionId,
+      outgoingMessages,
+      getSessionStats(sessionId),
+      title,
+      { persistMessages: true },
+    );
+    if (manualCompactionSaveFingerprint(sessionId) !== beforeFingerprint) {
+      markManualCompactionPersistenceFailed(
+        sessionId,
+        marker,
+        "session_changed_during_save",
+      );
+      return false;
+    }
+    replaceManualCompactionMarker(
+      sessionId,
+      marker,
+      persistedMarker,
+      compactionId,
+    );
+    renderManualCompactionTarget(sessionId);
+    if (sessionId === state.sessionId) {
+      showToast(t("manualCompactSaveRecovered"), "info");
+    }
+    return true;
+  } catch (_) {
+    console.warn("Manual compaction explicit save retry failed", {
+      code: "session_save_failed",
+    });
+    if (marker) {
+      try {
+        markManualCompactionPersistenceFailed(sessionId, marker, "session_save_failed");
+      } catch (_) {}
+    }
+    return false;
+  } finally {
+    if (operations && operationRegistered) operations.delete(sessionId);
+  }
 }
 
 function projectOptimisticFirstMessage(userText, model, submittedAt, images = []) {

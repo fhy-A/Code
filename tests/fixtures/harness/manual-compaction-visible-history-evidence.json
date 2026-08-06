@@ -10,7 +10,7 @@
     "startMarker": "async function compactConversation()",
     "endMarker": "function projectOptimisticFirstMessage(",
     "requiredFunction": "function hideCompactConfirm()",
-    "sha256": "1264f4f9d7d46c15012b4d0d092d52819f2e8c41daf5c4561ec0286b733052b8"
+    "sha256": "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5"
   },
   "fixedInputs": {
     "sessionId": "session-h3-2d2-synthetic",
@@ -176,8 +176,8 @@
       "startMarkerCount": 1,
       "endMarkerCount": 1,
       "containsHideCompactConfirm": true,
-      "characterLength": 5732,
-      "sha256": "1264f4f9d7d46c15012b4d0d092d52819f2e8c41daf5c4561ec0286b733052b8",
+      "characterLength": 20676,
+      "sha256": "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5",
       "compiledInVm": true
     },
     "plan": {
@@ -340,6 +340,6 @@
       "toolCalls": 0,
       "workerStarts": 0
     },
-    "replayHash": "36e0206d1be87e80bade8a0d6a568fa1f6e2e19747e858964727e0f21b1d4c26"
+    "replayHash": "db2a14b1d572606e9d5a1ed0c494bd0f6e801e31ff20feb0e9e40b9164ce967a"
   }
 }

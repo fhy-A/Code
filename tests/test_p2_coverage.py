@@ -369,7 +369,29 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertNotIn('class="msg branch-indicator compact-indicator"', self.timeline_source)
 
     def test_manual_compaction_uses_summary_message_factory(self):
-        self.assertEqual(self.source.count("const summaryMsg = createCompactSummaryMessage(result, {"), 1)
+        compact_start = self.source.index("async function compactConversation()")
+        compact_end = self.source.index("function manualCompactionOperations()", compact_start)
+        compact_source = self.source[compact_start:compact_end]
+        self.assertEqual(
+            compact_source.count("summaryMsg = createCompactSummaryMessage(result, {"),
+            1,
+        )
+        self.assertRegex(
+            compact_source,
+            re.compile(
+                r"let summaryMsg;\s*"
+                r"try \{\s*"
+                r"summaryMsg = createCompactSummaryMessage\(result, \{.*?\}\);\s*"
+                r"\} catch \(_\) \{\s*"
+                r'throw manualCompactionError\("summary_build", "summary_build_failed"\);\s*'
+                r"\}",
+                re.DOTALL,
+            ),
+        )
+        self.assertLess(
+            compact_source.index("summaryMsg = createCompactSummaryMessage(result, {"),
+            compact_source.index("// Archive full messages before compaction."),
+        )
         self.assertIn('kind: "compact-summary"', self.compaction_source)
 
     def test_manual_compaction_projection_is_localized_and_separate(self):
@@ -388,9 +410,46 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertIn('kind: "manual-context-compaction"', compact_source)
         self.assertIn('status: "running"', compact_source)
         self.assertIn("skipApi: true", compact_source)
-        self.assertIn('finishManualCompactionMarker("completed")', compact_source)
-        self.assertIn('finishManualCompactionMarker("failed", err.message)', compact_source)
-        self.assertIn("...messagesBeforeCompaction, summaryMsg, manualCompactionMarker", compact_source)
+        self.assertIn(
+            """const completedMarker = manualCompactionCompletedMarker(
+        manualCompactionMarker,
+        archiveFailed,
+      );""",
+            compact_source,
+        )
+        self.assertRegex(
+            compact_source,
+            re.compile(
+                r"let failedMarker = null;\s*"
+                r"try \{\s*"
+                r"failedMarker = failManualCompactionMarker\(\s*"
+                r"targetSessionId,\s*"
+                r"manualCompactionMarker,\s*"
+                r"failure\.errorStage,\s*"
+                r"failure\.errorCode,\s*"
+                r"\);",
+                re.DOTALL,
+            ),
+        )
+        completed_helper_start = self.source.index(
+            "function manualCompactionCompletedMarker(marker, archiveFailed)"
+        )
+        completed_helper_end = self.source.index(
+            "function manualCompactionMarkerIndex(", completed_helper_start
+        )
+        completed_helper = self.source[completed_helper_start:completed_helper_end]
+        self.assertIn('status: "completed"', completed_helper)
+        failed_helper_start = self.source.index(
+            "function failManualCompactionMarker(sessionId, marker, errorStage, errorCode)"
+        )
+        failed_helper_end = self.source.index(
+            "function commitManualCompactionTarget(", failed_helper_start
+        )
+        failed_helper = self.source[failed_helper_start:failed_helper_end]
+        self.assertIn('status: "failed"', failed_helper)
+        self.assertIn("errorStage,", failed_helper)
+        self.assertIn("errorCode,", failed_helper)
+        self.assertNotIn("err.message", failed_helper)
         self.assertIn("messages: messagesBeforeCompaction", compact_source)
         self.assertNotIn('showToast(t("compactMarker")', compact_source)
 
@@ -406,21 +465,58 @@ class TestCompactSummaryMarker(unittest.TestCase):
             "const keptMessages = compactableMessages.slice(keepStartIndex)",
             self.compaction_source,
         )
-        self.assertIn(
-            "state.messages = [...messagesBeforeCompaction, summaryMsg, manualCompactionMarker]",
-            self.source,
-        )
         compact_start = self.source.index("async function compactConversation()")
         compact_end = self.source.index("function hideCompactConfirm()", compact_start)
         compact_source = self.source[compact_start:compact_end]
+        conversation_source = compact_source
         self.assertIn("const modelContextMessages = getModelContextMessages(", compact_source)
         self.assertIn("buildManualCompactionPlan(modelContextMessages, {", compact_source)
+        self.assertIn(
+            """const completedMessages = [
+        ...messagesBeforeCompaction,
+        summaryMsg,
+        completedMarker,
+      ];""",
+            conversation_source,
+        )
+        self.assertIn(
+            """commitManualCompactionTarget(targetSessionId, {
+          messages: completedMessages,
+          stats: { input: 0, output: 0, cache: 0 },
+          lastUsage: null,
+        });""",
+            conversation_source,
+        )
+        self.assertNotIn("state.messages =", conversation_source)
         self.assertNotIn(
             "state.messages = [...durableSystemMessages, summaryMsg, ...keptMessages",
-            compact_source,
+            conversation_source,
         )
-        self.assertIn("await saveSessionState(", compact_source)
-        self.assertIn("{ persistMessages: true }", compact_source)
+        self.assertIn(
+            "await persistManualCompactionTerminal(targetSessionId, completedMarker);",
+            conversation_source,
+        )
+        self.assertIn(
+            "body: JSON.stringify({ messages: messagesBeforeCompaction })",
+            conversation_source,
+        )
+        persist_start = self.source.index(
+            "async function persistManualCompactionTerminal(sessionId, marker)"
+        )
+        persist_end = self.source.index(
+            "async function retryManualCompactionPersistence(", persist_start
+        )
+        persist_source = self.source[persist_start:persist_end]
+        self.assertEqual(persist_source.count("await saveSessionState("), 2)
+        self.assertEqual(persist_source.count("{ persistMessages: true }"), 2)
+        self.assertIn(
+            """await saveSessionState(
+      sessionId,
+      firstSnapshot.messages,
+      firstSnapshot.stats,""",
+            persist_source,
+        )
+        self.assertNotIn("await saveSessionState(", conversation_source)
         self.assertNotIn("_compactPrefix", self.source)
 
     def test_usage_is_isolated_and_persisted_per_session(self):

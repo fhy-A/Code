@@ -282,13 +282,40 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
             'agentRunId: String(',
             'agentEventCursor: Number(',
             'runState: getSessionRunState(sid)',
-            'runState: { ...getSessionRunState(prevId) }',
             'persistMessages: ctx.executionOwner === "server-agent"',
             'ctx.executionOwner = runState.executionOwner',
             'ctx.agentRunId = String(runState.agentRunId',
             'await executeRunContext(ctx)',
         ):
             self.assertIn(expected, APP_SOURCE)
+        cache_start = APP_SOURCE.index("function cacheActiveSessionState()")
+        cache_end = APP_SOURCE.index("function isSessionStreaming(", cache_start)
+        cache_source = APP_SOURCE[cache_start:cache_end]
+        self.assertIn(
+            """saveSessionState(
+      prevId,
+      msgs,
+      state.stats,
+      els.sessionTitle.value.trim() || "Untitled",
+      { persistMessages: true },
+    )""",
+            cache_source,
+        )
+        self.assertNotIn("apiJson(`/api/sessions/", cache_source)
+
+        save_start = APP_SOURCE.index("async function saveSessionState(")
+        save_end = APP_SOURCE.index("async function saveCurrentSession()", save_start)
+        save_source = APP_SOURCE[save_start:save_end]
+        self.assertIn("const payload = buildSessionSavePayload({", save_source)
+        self.assertIn("runState: getSessionRunState(sessionId)", save_source)
+        self.assertIn("messages,", save_source)
+
+        payload_start = PERSISTENCE_SOURCE.index("function buildSessionSavePayload(")
+        payload_end = PERSISTENCE_SOURCE.index("function createSessionPersistence(", payload_start)
+        payload_source = PERSISTENCE_SOURCE[payload_start:payload_end]
+        self.assertIn("runState: { ...(options.runState || {}) }", payload_source)
+        self.assertIn("payload.messages = serializeSessionMessages(", payload_source)
+        self.assertIn("options.messages,", payload_source)
         self.assertIn("if (options.persistMessages === true)", PERSISTENCE_SOURCE)
 
     def test_all_permission_profiles_have_single_server_execution_owner(self):
@@ -391,10 +418,43 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         clear_end = APP_SOURCE.index("function resetRenderCache", clear_start)
         clear_checkpoint = APP_SOURCE[clear_start:clear_end]
         finalize_index = clear_checkpoint.index("finalizeRunTiming(ctx.sessionId)")
-        serialize_index = clear_checkpoint.index("const serialized = serializeSessionMessages")
+        save_index = clear_checkpoint.index("await saveSessionState(")
 
-        self.assertLess(finalize_index, serialize_index)
-        self.assertIn("meta: message.meta || {}", PERSISTENCE_SOURCE)
+        self.assertLess(finalize_index, save_index)
+        self.assertIn(
+            """await saveSessionState(
+      ctx.sessionId,
+      msgs,
+      ctx.stats || getSessionStats(ctx.sessionId),
+      sessionTitle || "Untitled",
+      { persistMessages: true },
+    )""",
+            clear_checkpoint,
+        )
+
+        save_start = APP_SOURCE.index("async function saveSessionState(")
+        save_end = APP_SOURCE.index("async function saveCurrentSession()", save_start)
+        save_source = APP_SOURCE[save_start:save_end]
+        self.assertIn("const payload = buildSessionSavePayload({", save_source)
+        self.assertIn("messages,", save_source)
+        self.assertIn("persistMessages: options.persistMessages === true", save_source)
+
+        serialize_start = PERSISTENCE_SOURCE.index("function serializeSessionMessages(")
+        serialize_end = PERSISTENCE_SOURCE.index("function buildSessionSavePayload(", serialize_start)
+        serialize_source = PERSISTENCE_SOURCE[serialize_start:serialize_end]
+        for expected in (
+            "role: message.role",
+            'content: message.content || ""',
+            'thought: message.thought || ""',
+            "meta: message.meta || {}",
+            "_images: message._images || undefined",
+        ):
+            self.assertIn(expected, serialize_source)
+        payload_start = serialize_end
+        payload_end = PERSISTENCE_SOURCE.index("function createSessionPersistence(", payload_start)
+        payload_source = PERSISTENCE_SOURCE[payload_start:payload_end]
+        self.assertIn("payload.messages = serializeSessionMessages(", payload_source)
+        self.assertIn("options.messages,", payload_source)
 
         timing_start = APP_SOURCE.index("function finalizeRunTiming(sessionId")
         timing_end = APP_SOURCE.index("function placeMainResultByCompletionOrder", timing_start)

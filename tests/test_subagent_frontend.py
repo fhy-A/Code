@@ -196,10 +196,30 @@ class TestSubAgentFrontend(unittest.TestCase):
     def test_background_run_checkpoint_survives_main_completion_and_reload(self):
         self.assertIn("function getBackgroundRunCheckpoints(sessionId)", self.state_source)
         self.assertIn("backgroundRuns.push({ ...checkpoint })", self.state_source)
-        self.assertIn("runState: clearedRunState", self.source)
+        clear_start = self.source.index("async function clearRunCheckpoint(ctx)")
+        clear_end = self.source.index("function resetRenderCache", clear_start)
+        clear = self.source[clear_start:clear_end]
+        self.assertIn(
+            """...(backgroundRuns.length ? { backgroundRuns: backgroundRuns.map((item) => ({ ...item })) } : {}),""",
+            clear,
+        )
+        set_run_state_index = clear.index(
+            "setSessionRunState(ctx.sessionId, clearedRunState)"
+        )
+        save_index = clear.index("await saveSessionState(")
+        self.assertLess(set_run_state_index, save_index)
+        self.assertIn(
+            """await saveSessionState(
+      ctx.sessionId,
+      msgs,
+      ctx.stats || getSessionStats(ctx.sessionId),
+      sessionTitle || "Untitled",
+      { persistMessages: true },
+    )""",
+            clear,
+        )
         self.assertIn("async function resumePersistedBackgroundRuns()", self.source)
         self.assertIn("restoreBackgroundJobsForSession(summary)", self.source)
-        self.assertIn("{ persistMessages: true }", self.source)
         restore_start = self.source.index("async function restoreBackgroundJobsForSession(summary)")
         restore_end = self.source.index("async function resumePersistedBackgroundRuns()", restore_start)
         restore = self.source[restore_start:restore_end]

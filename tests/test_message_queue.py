@@ -80,8 +80,40 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn('const queueItemId = String(ctx.queueItemId || "")', clear)
         self.assertIn(".filter((item) => item.id !== queueItemId)", clear)
         self.assertIn('queuedUserMessage.meta.queuedDispatch.status = "completed"', clear)
-        self.assertIn("messages: serialized", clear)
-        self.assertIn("runState: clearedRunState", clear)
+        set_run_state_index = clear.index(
+            "setSessionRunState(ctx.sessionId, clearedRunState)"
+        )
+        save_index = clear.index("await saveSessionState(")
+        self.assertLess(set_run_state_index, save_index)
+        self.assertIn(
+            """await saveSessionState(
+      ctx.sessionId,
+      msgs,
+      ctx.stats || getSessionStats(ctx.sessionId),
+      sessionTitle || "Untitled",
+      { persistMessages: true },
+    )""",
+            clear,
+        )
+
+        save_start = APP_SOURCE.index("async function saveSessionState(")
+        save_end = APP_SOURCE.index("async function saveCurrentSession()", save_start)
+        save_source = APP_SOURCE[save_start:save_end]
+        self.assertIn("const payload = buildSessionSavePayload({", save_source)
+        self.assertIn("runState: getSessionRunState(sessionId)", save_source)
+        self.assertIn("messages,", save_source)
+
+        persistence_source = (
+            ROOT / "src" / "services" / "persistence.js"
+        ).read_text(encoding="utf-8")
+        payload_start = persistence_source.index("function buildSessionSavePayload(")
+        payload_end = persistence_source.index(
+            "function createSessionPersistence(", payload_start
+        )
+        payload_source = persistence_source[payload_start:payload_end]
+        self.assertIn("runState: { ...(options.runState || {}) }", payload_source)
+        self.assertIn("payload.messages = serializeSessionMessages(", payload_source)
+        self.assertIn("options.messages,", payload_source)
 
     def test_pending_message_can_be_canceled_without_touching_active_run(self):
         cancel_start = APP_SOURCE.index("async function cancelQueuedSessionMessage")
