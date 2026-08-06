@@ -280,6 +280,98 @@ function agentEventMeta(ctx, event, type) {{
         self.assertNotIn("createRun(", attachment_source)
         self.assertIn("const streamPromise = _callModelOnceAttempt", attachment_source)
 
+    def test_runtime_assistant_is_revived_only_for_authoritative_active_owner(self):
+        attachment_start = APP_SOURCE.index("function rebindRecoveredRuntimeAssistant")
+        attachment_end = APP_SOURCE.index("async function projectAgentModelStarted", attachment_start)
+        attachment_source = APP_SOURCE[attachment_start:attachment_end]
+        script = f"""
+const state = {{sessionId: "session-active"}};
+const streamCalls = [];
+function findAgentAssistantByRuntime(ctx, runtimeRunId) {{
+  return ctx.messages.find((message) => (
+    message?.role === "assistant"
+    && message?.meta?.agentRunId === ctx.agentRunId
+    && message?.meta?.agentRuntimeRunId === runtimeRunId
+  ));
+}}
+function agentEventMeta(ctx, event, type) {{
+  return {{agentRunId: ctx.agentRunId, agentEventType: type, agentEventSeq: Number(event?.seq || 0)}};
+}}
+function getSelectedModel() {{ return "model-fallback"; }}
+function setSessionMessages() {{}}
+function renderSessionMessages() {{}}
+function syncActiveRunBanner() {{}}
+function persistRunCheckpoint() {{ return Promise.resolve(); }}
+async function _callModelOnceAttempt(index, nativeTools, ctx) {{
+  streamCalls.push({{index, nativeTools, agentRunId: ctx.agentRunId, runtimeRunId: ctx.runtimeRunId}});
+}}
+{attachment_source}
+function makeContext(activeRuntimeRunId) {{
+  const assistant = {{
+    role: "assistant",
+    content: "persisted partial",
+    streaming: false,
+    meta: {{agentRunId: "agent-1", agentRuntimeRunId: "runtime-1"}},
+  }};
+  return {{
+    assistant,
+    ctx: {{
+      agentRunId: "agent-1",
+      sessionId: "session-active",
+      runtimeRunId: "runtime-1",
+      _activeRuntimeRunId: activeRuntimeRunId,
+      model: "model-1",
+      messages: [assistant],
+      run: {{runtimeRunId: "runtime-1"}},
+    }},
+  }};
+}}
+(async () => {{
+  const active = makeContext("runtime-1");
+  await attachAgentRuntimeProjection(active.ctx, {{data: {{runtimeRunId: "runtime-1"}}}}, {{recovered: true}});
+  const nonActive = makeContext("runtime-other");
+  await attachAgentRuntimeProjection(nonActive.ctx, {{data: {{runtimeRunId: "runtime-1"}}}}, {{recovered: true}});
+  const terminal = makeContext("");
+  await attachAgentRuntimeProjection(terminal.ctx, {{data: {{runtimeRunId: "runtime-1"}}}}, {{recovered: true}});
+  const ordinaryReplay = makeContext("runtime-1");
+  await attachAgentRuntimeProjection(ordinaryReplay.ctx, {{data: {{runtimeRunId: "runtime-1"}}}});
+  process.stdout.write(JSON.stringify({{
+    active: {{
+      streaming: active.assistant.streaming,
+      projection: active.assistant._streamProjection,
+      count: active.ctx.messages.length,
+    }},
+    nonActive: {{streaming: nonActive.assistant.streaming, count: nonActive.ctx.messages.length}},
+    terminal: {{streaming: terminal.assistant.streaming, count: terminal.ctx.messages.length}},
+    ordinaryReplay: {{streaming: ordinaryReplay.assistant.streaming, count: ordinaryReplay.ctx.messages.length}},
+    streamCalls,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["active"], {
+            "streaming": True,
+            "projection": "answer",
+            "count": 1,
+        })
+        self.assertEqual(data["nonActive"], {"streaming": False, "count": 1})
+        self.assertEqual(data["terminal"], {"streaming": False, "count": 1})
+        self.assertEqual(data["ordinaryReplay"], {"streaming": False, "count": 1})
+        self.assertEqual(data["streamCalls"], [{
+            "index": 0,
+            "nativeTools": True,
+            "agentRunId": "agent-1",
+            "runtimeRunId": "runtime-1",
+        }])
+
     def test_first_model_delta_persists_one_metadata_only_checkpoint(self):
         helper_start = APP_SOURCE.index("function markModelResponseStarted")
         helper_end = APP_SOURCE.index("function getRecoveryCountdownSeconds", helper_start)
@@ -392,7 +484,7 @@ eval(source);
         data = json.loads(completed.stdout)
         self.assertEqual(data["errorStatus"], 404)
         self.assertEqual(data["calls"], [{
-            "url": "/api/runtime/runs/runtime-expired?cursor=0&wait=25",
+            "url": "/api/runtime/runs/runtime-expired?cursor=0&wait=0",
             "method": "GET",
         }])
         self.assertNotEqual(data["calls"][0]["url"], "/api/runtime/runs")
@@ -403,15 +495,18 @@ global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
 const calls = [];
 let requestCount = 0;
-const frames = [
-  {{seq: 1, data: JSON.stringify({{choices: [{{delta: {{reasoning_content: "思考一。"}}}}]}})}},
-  {{seq: 2, data: JSON.stringify({{choices: [{{delta: {{content: "第一段。\\n\\n"}}}}]}})}},
-  {{seq: 3, data: JSON.stringify({{choices: [{{delta: {{content: "第二段。\\n\\n"}}}}]}})}},
-  {{seq: 4, data: JSON.stringify({{choices: [{{delta: {{tool_calls: [{{
+const catchUpResult = {{
+  reasoning: "思考一。",
+  content: "第一段。\\n\\n第二段。\\n\\n",
+  toolCalls: [{{
     index: 0,
     id: "call-1",
+    type: "function",
     function: {{name: "read_file", arguments: "{{\\\"path\\\":\\\"VERSION\\\"}}"}},
-  }}]}}}}]}})}},
+  }}],
+  usage: {{}},
+}};
+const frames = [
   {{seq: 5, data: JSON.stringify({{choices: [{{delta: {{content: "第三段。"}}, finish_reason: "stop"}}]}})}},
   {{seq: 6, data: "[DONE]"}},
 ];
@@ -420,15 +515,22 @@ global.fetch = async (url, options = {{}}) => {{
   requestCount += 1;
   if (requestCount % 2 === 1) {{
     return new Response(JSON.stringify({{
-      status: "model",
-      events: [],
-      nextCursor: 0,
+      status: "running",
+      events: [
+        {{seq: 1, data: "ignored-history-1"}},
+        {{seq: 2, data: "ignored-history-2"}},
+        {{seq: 3, data: "ignored-history-3"}},
+        {{seq: 4, data: "ignored-history-4"}},
+      ],
+      nextCursor: 4,
+      result: catchUpResult,
     }}), {{status: 200, headers: {{"Content-Type": "application/json"}}}});
   }}
   return new Response(JSON.stringify({{
     status: "completed",
     events: frames,
     nextCursor: 6,
+    result: {{...catchUpResult, content: `${{catchUpResult.content}}第三段。`}},
   }}), {{status: 200, headers: {{"Content-Type": "application/json"}}}});
 }};
 eval(source);
@@ -481,13 +583,106 @@ async function attach() {{
         self.assertEqual(data["first"], expected)
         self.assertEqual(data["second"], expected)
         self.assertEqual(len(data["calls"]), 4)
-        self.assertTrue(all(
-            call == {
-                "url": "/api/runtime/runs/runtime-replay?cursor=0&wait=25",
+        self.assertEqual(data["calls"], [
+            {
+                "url": "/api/runtime/runs/runtime-replay?cursor=0&wait=0",
                 "method": "GET",
-            }
-            for call in data["calls"]
-        ))
+            },
+            {
+                "url": "/api/runtime/runs/runtime-replay?cursor=4&wait=25",
+                "method": "GET",
+            },
+        ] * 2)
+
+    def test_existing_runtime_terminal_snapshots_converge_without_create(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const source = {json.dumps(RUNTIME_SOURCE)};
+const calls = [];
+const snapshots = {{
+  completed: {{
+    status: "completed",
+    events: [{{seq: 1, data: "ignored-history"}}],
+    nextCursor: 1,
+    result: {{content: "complete-body", reasoning: "", toolCalls: [], usage: {{}}}},
+  }},
+  failed: {{
+    status: "failed",
+    events: [{{seq: 1, data: "ignored-history"}}],
+    nextCursor: 1,
+    result: {{content: "failed-partial", reasoning: "", toolCalls: [], usage: {{}}}},
+    errorCode: "upstream_error",
+    error: "bounded failure",
+    transient: true,
+  }},
+  cancelled: {{
+    status: "cancelled",
+    events: [{{seq: 1, data: "ignored-history"}}],
+    nextCursor: 1,
+    result: {{content: "cancelled-partial", reasoning: "", toolCalls: [], usage: {{}}}},
+    errorCode: "runtime_cancelled",
+    transient: false,
+  }},
+}};
+global.fetch = async (url, options = {{}}) => {{
+  calls.push({{url: String(url), method: String(options.method || "GET")}});
+  const runId = String(url).split("/").pop().split("?")[0];
+  return new Response(JSON.stringify(snapshots[runId]), {{
+    status: 200,
+    headers: {{"Content-Type": "application/json"}},
+  }});
+}};
+eval(source);
+async function attach(runId) {{
+  const response = await window.Code.agent.runtime.openSseResponse({{runId}});
+  const reader = response.body.getReader();
+  let text = "";
+  while (true) {{
+    const packet = await reader.read();
+    if (packet.done) break;
+    text += new TextDecoder().decode(packet.value);
+  }}
+  const frames = text.split(/\\r?\\n/)
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6));
+  return {{
+    body: frames.filter((item) => item.startsWith("{{"))
+      .map((item) => JSON.parse(item).choices?.[0]?.delta?.content || "")
+      .join(""),
+    done: frames.filter((item) => item === "[DONE]").length,
+    errors: frames.filter((item) => item.startsWith("[ERROR]")).map((item) => JSON.parse(item.slice(7))),
+  }};
+}}
+(async () => {{
+  const completed = await attach("completed");
+  const failed = await attach("failed");
+  const cancelled = await attach("cancelled");
+  process.stdout.write(JSON.stringify({{completed, failed, cancelled, calls}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["completed"], {
+            "body": "complete-body",
+            "done": 1,
+            "errors": [],
+        })
+        self.assertEqual(data["failed"]["body"], "failed-partial")
+        self.assertEqual(data["failed"]["done"], 0)
+        self.assertEqual(data["failed"]["errors"][0]["code"], "upstream_error")
+        self.assertEqual(data["cancelled"]["body"], "cancelled-partial")
+        self.assertEqual(data["cancelled"]["done"], 0)
+        self.assertEqual(data["cancelled"]["errors"][0]["code"], "runtime_cancelled")
+        self.assertTrue(all(call["method"] == "GET" for call in data["calls"]))
+        self.assertTrue(all("cursor=0&wait=0" in call["url"] for call in data["calls"]))
+        self.assertNotIn({"url": "/api/runtime/runs", "method": "POST"}, data["calls"])
 
     def test_replayed_model_completion_reuses_one_assistant(self):
         projection_start = APP_SOURCE.index("function projectAgentModelCompleted")
@@ -1155,7 +1350,7 @@ eval(source);
         self.assertEqual(data["usageFrames"], 1)
         self.assertEqual(data["doneCount"], 1)
 
-    def test_agent_runtime_yields_while_draining_a_text_backlog(self):
+    def test_agent_runtime_catchup_seed_does_not_reanimate_historical_backlog(self):
         script = f"""
 global.window = {{Code: {{agent: {{}}}}}};
 const source = {json.dumps(RUNTIME_SOURCE)};
@@ -1170,6 +1365,13 @@ global.fetch = async () => {{
     status: "completed",
     events,
     nextCursor: 121,
+    result: {{
+      content: "x".repeat(120),
+      reasoning: "",
+      toolCalls: [],
+      finishReason: "stop",
+      usage: {{prompt_tokens: 8, completion_tokens: 4, total_tokens: 12}},
+    }},
   }}), {{status: 200, headers: {{"Content-Type": "application/json"}}}});
 }};
 eval(source);
@@ -1191,6 +1393,10 @@ eval(source);
     phases: progress.map((item) => item.phase),
     firstBatchEventCount: progress.find((item) => item.phase === "first-delta")?.pendingEventCount || 0,
     frameCount: (text.match(/data: /g) || []).length,
+    content: text.split(/\\r?\\n/)
+      .filter((line) => line.startsWith("data: {{"))
+      .map((line) => JSON.parse(line.slice(6)).choices?.[0]?.delta?.content || "")
+      .join(""),
     diagnostic: window.Code.agent.runtime.streamDiagnostics.snapshot(),
   }}));
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
@@ -1204,17 +1410,19 @@ eval(source);
             check=True,
         )
         data = json.loads(completed.stdout)
-        self.assertGreaterEqual(data["elapsedMs"], 60)
         self.assertEqual(data["phases"], ["poll-started", "first-delta", "completed"])
-        self.assertEqual(data["firstBatchEventCount"], 121)
-        self.assertEqual(data["frameCount"], 121)
+        self.assertEqual(data["firstBatchEventCount"], 0)
+        self.assertEqual(data["frameCount"], 2)
+        self.assertEqual(data["content"], "x" * 120)
         self.assertEqual(data["diagnostic"]["status"], "completed")
         self.assertEqual(data["diagnostic"]["runtimeRunId"], "runtime-existing")
-        self.assertEqual(data["diagnostic"]["firstBatchEventCount"], 121)
-        self.assertEqual(data["diagnostic"]["batchCount"], 1)
-        self.assertEqual(data["diagnostic"]["eventCount"], 121)
-        self.assertEqual(data["diagnostic"]["maxBatchEventCount"], 121)
-        self.assertEqual(data["diagnostic"]["contentFrameCount"], 120)
+        self.assertEqual(data["diagnostic"]["firstBatchEventCount"], 0)
+        self.assertTrue(data["diagnostic"]["catchUpSeeded"])
+        self.assertEqual(data["diagnostic"]["catchUpCursor"], 121)
+        self.assertEqual(data["diagnostic"]["batchCount"], 0)
+        self.assertEqual(data["diagnostic"]["eventCount"], 0)
+        self.assertEqual(data["diagnostic"]["maxBatchEventCount"], 0)
+        self.assertEqual(data["diagnostic"]["contentFrameCount"], 1)
         self.assertEqual(data["diagnostic"]["contentChars"], 120)
         self.assertEqual(data["diagnostic"]["reasoningFrameCount"], 0)
         self.assertEqual(data["diagnostic"]["reasoningChars"], 0)

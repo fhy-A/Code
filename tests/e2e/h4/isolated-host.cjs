@@ -7,7 +7,7 @@ const readline = require("node:readline");
 
 const TEMP_PREFIX = "code-h4-e2e-";
 const FIXTURE_CONTENT = "H4_SYNTHETIC_FILE_CONTENT\n";
-const COMMAND_TIMEOUT_MS = 2_000;
+const COMMAND_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 5_000;
 const activeChildren = new Set();
 
@@ -29,6 +29,21 @@ function withTimeout(promise, timeoutMs, message) {
       },
     );
   });
+}
+
+async function fetchJsonBounded(url, options = {}, timeoutMs = COMMAND_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const payload = await response.json();
+    if (!response.ok || payload?.ok !== true) {
+      throw new Error(`H4 gate control failed (${response.status})`);
+    }
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function assertOwnedRoot(root) {
@@ -239,7 +254,7 @@ async function startIsolatedHost() {
       platformToken,
       ready: null,
       stderr,
-      async command(command, timeoutMs = COMMAND_TIMEOUT_MS) {
+      async command(command, details = {}, timeoutMs = COMMAND_TIMEOUT_MS) {
         if (childHasExited(child) || !child.stdin.writable) {
           throw new Error(`H4 host command unavailable: ${command}`);
         }
@@ -259,7 +274,7 @@ async function startIsolatedHost() {
             finish(new Error(`H4 host command timed out: ${command}`));
           }, timeoutMs);
           pending.set(id, { finish });
-          child.stdin.write(`${JSON.stringify({ id, command })}\n`, (error) => {
+          child.stdin.write(`${JSON.stringify({ id, command, ...details })}\n`, (error) => {
             if (error) finish(error);
           });
         });
@@ -268,9 +283,42 @@ async function startIsolatedHost() {
         const response = await this.command("metrics");
         return response.metrics;
       },
+      async refreshGateStatus() {
+        const response = await fetchJsonBounded(`${this.ready.fakeUrl}/__h4/refresh-gates`);
+        return response.gates || {};
+      },
       async releaseModel() {
         const response = await this.command("release-model");
         if (response.ok !== true) throw new Error("H4 model gate release failed");
+      },
+      async waitRefreshGate(gate, timeoutMs = 5_000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const gates = await this.refreshGateStatus();
+          if (gates?.[gate]?.reached) return gates;
+        }
+        throw new Error(`H4 refresh gate was not reached: ${gate}`);
+      },
+      async releaseRefreshGate(gate) {
+        const response = await fetchJsonBounded(
+          `${this.ready.fakeUrl}/__h4/refresh-gates/${encodeURIComponent(gate)}`,
+          { method: "POST" },
+        );
+        if (!response.gates?.[gate]?.released) {
+          throw new Error(`H4 refresh gate release failed: ${gate}`);
+        }
+        return response.gates;
+      },
+      async releaseAllRefreshGates() {
+        const response = await fetchJsonBounded(
+          `${this.ready.fakeUrl}/__h4/refresh-gates/release-all`,
+          { method: "POST" },
+        );
+        const gates = Object.values(response.gates || {});
+        if (gates.length === 0 || gates.some((state) => !state.released)) {
+          throw new Error("H4 refresh gate release-all failed");
+        }
+        return response.gates;
       },
       async probeToolBoundary() {
         const response = await this.command("probe-tool-boundary");

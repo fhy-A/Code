@@ -7217,6 +7217,7 @@ function clearObservedAgentRun(ctx) {
   if (!ctx) return;
   ctx.agentRunId = "";
   ctx.agentEventCursor = 0;
+  ctx._activeRuntimeRunId = "";
   if (!ctx.run) return;
   ctx.run.agentRunId = "";
   ctx.run.agentEventCursor = 0;
@@ -7952,10 +7953,15 @@ function consumeAgentRuntimeProjection(ctx, runtimeRunId, consumer) {
   return owner.promise;
 }
 
-function snapshotHasPendingModelStarted(snapshot, cursor = 0) {
+function snapshotHasPendingModelStarted(snapshot, cursor = 0, runtimeRunId = "") {
+  const expectedRuntimeRunId = String(runtimeRunId || "");
   return (Array.isArray(snapshot?.events) ? snapshot.events : []).some((event) => (
     String(event?.type || "") === "model_started"
     && Number(event?.seq || 0) > Number(cursor || 0)
+    && (
+      !expectedRuntimeRunId
+      || String(event?.data?.runtimeRunId || "") === expectedRuntimeRunId
+    )
   ));
 }
 
@@ -7986,7 +7992,17 @@ async function attachAgentRuntimeProjection(ctx, event, options = {}) {
   let assistant = recoveredAttachment
     ? rebindRecoveredRuntimeAssistant(ctx, runtimeRunId)
     : findAgentAssistantByRuntime(ctx, runtimeRunId);
-  if (assistant && !assistant.streaming) return;
+  if (assistant && !assistant.streaming) {
+    if (
+      !recoveredAttachment
+      || String(ctx?._activeRuntimeRunId || "") !== runtimeRunId
+      || String(assistant?.meta?.agentRunId || "") !== String(ctx.agentRunId || "")
+    ) return;
+    assistant.streaming = true;
+    assistant._streamProjection = String(assistant.content || "")
+      ? "answer"
+      : (String(assistant.thought || "") ? "thinking" : "pending");
+  }
 
   if (!assistant) {
     assistant = {
@@ -8075,6 +8091,10 @@ async function attachAgentRuntimeProjection(ctx, event, options = {}) {
 async function projectAgentModelStarted(ctx, event) {
   const runtimeRunId = String(event?.data?.runtimeRunId || "");
   if (!runtimeRunId) return;
+  const recoveredAttachment = Boolean(
+    ctx._reuseRuntimeAssistant
+    && String(ctx._activeRuntimeRunId || "") === runtimeRunId
+  );
   // A refresh recovery can win the tiny race between active_runtime_id being
   // published and model_started being appended. The Runtime consumer remains
   // idempotent, but the later durable event must still contribute its metadata
@@ -8098,18 +8118,23 @@ async function projectAgentModelStarted(ctx, event) {
   return consumeAgentRuntimeProjection(
     ctx,
     runtimeRunId,
-    () => attachAgentRuntimeProjection(ctx, event),
+    () => attachAgentRuntimeProjection(ctx, event, { recovered: recoveredAttachment }),
   );
 }
 
 async function recoverActiveAgentRuntimeProjection(ctx, snapshot) {
   const activeRuntimeRunId = String(snapshot?.activeRuntimeRunId || "");
+  ctx._activeRuntimeRunId = activeRuntimeRunId;
   if (!activeRuntimeRunId) {
     return { status: "no-active-runtime", runtimeRunId: "" };
   }
   ctx.runtimeRunId = activeRuntimeRunId;
   ctx.run.runtimeRunId = activeRuntimeRunId;
-  if (snapshotHasPendingModelStarted(snapshot, ctx.agentEventCursor || 0)) {
+  if (snapshotHasPendingModelStarted(
+    snapshot,
+    ctx.agentEventCursor || 0,
+    activeRuntimeRunId,
+  )) {
     return { status: "pending-model-start", runtimeRunId: activeRuntimeRunId };
   }
 
@@ -8172,6 +8197,7 @@ function projectAgentModelCompleted(ctx, event) {
   }
   ctx.runtimeRunId = "";
   ctx.run.runtimeRunId = "";
+  ctx._activeRuntimeRunId = "";
 }
 
 function findAgentCompactionProjection(ctx, compactionId) {

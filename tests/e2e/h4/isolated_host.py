@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 from urllib import parse
 
 
@@ -27,8 +28,17 @@ TOOL_STAGE = "H4_TOOL_STAGE"
 TOOL_FINAL = "H4_TOOL_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
+STREAM_USER = "H4_STREAM_REFRESH_USER"
+STREAM_ONE = "H4_STREAM_ONE "
+STREAM_TWO = "H4_STREAM_TWO "
+STREAM_THREE = "H4_STREAM_THREE"
 TOOL_CALL_ID = "h4-read-call-1"
 READ_PATH = "fixture.txt"
+REFRESH_GATE_NAMES = (
+    "before-first-delta",
+    "after-second-delta",
+    "before-terminal",
+)
 
 
 class MetricState:
@@ -41,6 +51,7 @@ class MetricState:
             "productionToolDelegations": 0,
             "unsafeToolRequests": 0,
             "modelGateWaits": 0,
+            "refreshGateTimeline": [],
         }
 
     def append(self, key: str, value: dict) -> None:
@@ -58,6 +69,74 @@ class MetricState:
 
 METRICS = MetricState()
 MODEL_GATE = threading.Event()
+
+
+class RefreshGateState:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._states = {
+            name: {
+                "reached": threading.Event(),
+                "released": threading.Event(),
+                "reachedAt": 0,
+                "releasedAt": 0,
+            }
+            for name in REFRESH_GATE_NAMES
+        }
+
+    @staticmethod
+    def _now_ms() -> int:
+        return time.time_ns() // 1_000_000
+
+    def reach_and_wait(self, name: str, timeout: float = 15.0) -> bool:
+        state = self._states[name]
+        with self._lock:
+            if not state["reachedAt"]:
+                state["reachedAt"] = self._now_ms()
+            state["reached"].set()
+        METRICS.append("refreshGateTimeline", {
+            "event": "reached",
+            "gate": name,
+            "at": int(state["reachedAt"] or 0),
+        })
+        released = state["released"].wait(timeout=timeout)
+        METRICS.append("refreshGateTimeline", {
+            "event": "continued" if released else "timed-out",
+            "gate": name,
+            "at": self._now_ms(),
+        })
+        return released
+
+    def release(self, name: str) -> None:
+        state = self._states[name]
+        with self._lock:
+            if not state["releasedAt"]:
+                state["releasedAt"] = self._now_ms()
+            state["released"].set()
+        METRICS.append("refreshGateTimeline", {
+            "event": "released",
+            "gate": name,
+            "at": int(state["releasedAt"] or 0),
+        })
+
+    def release_all(self) -> None:
+        for name in REFRESH_GATE_NAMES:
+            self.release(name)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                name: {
+                    "reached": bool(state["reached"].is_set()),
+                    "released": bool(state["released"].is_set()),
+                    "reachedAt": int(state["reachedAt"] or 0),
+                    "releasedAt": int(state["releasedAt"] or 0),
+                }
+                for name, state in self._states.items()
+            }
+
+
+REFRESH_GATES = RefreshGateState()
 
 
 def _message_text(message: dict) -> str:
@@ -86,6 +165,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             has_tool_result = True
     if TOOL_USER in user_text:
         return ("tool-final" if has_tool_result else "tool-call", has_tool_result)
+    if STREAM_USER in user_text:
+        return "stream-refresh", has_tool_result
     if CLASSIC_USER in user_text:
         return "classic-text", has_tool_result
     return "plain-text", has_tool_result
@@ -141,6 +222,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         route = parse.urlparse(self.path).path
+        if route == "/__h4/refresh-gates":
+            self._send_json({"ok": True, "gates": REFRESH_GATES.snapshot()})
+            return
         if route == "/v1/models":
             self._record("models")
             self._send_json({"object": "list", "data": [{"id": MODEL_ID, "object": "model"}]})
@@ -158,6 +242,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = parse.urlparse(self.path).path
+        if route.startswith("/__h4/refresh-gates/"):
+            gate_name = route.rsplit("/", 1)[-1]
+            if gate_name == "release-all":
+                REFRESH_GATES.release_all()
+                self._send_json({"ok": True, "gates": REFRESH_GATES.snapshot()})
+                return
+            if gate_name in REFRESH_GATE_NAMES:
+                REFRESH_GATES.release(gate_name)
+                self._send_json({"ok": True, "gates": REFRESH_GATES.snapshot()})
+                return
+            self._send_json({"ok": False, "error": "unknown refresh gate"}, 400)
+            return
         if route == "/api/token/batch/keys":
             self._read_json()
             self._record("platform-sync")
@@ -185,11 +281,58 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "hasToolResult": has_tool_result,
         })
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
-        if current_chat_count == 1:
+        if scenario != "stream-refresh" and current_chat_count == 1:
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
                 self._send_json({"error": "model gate timeout"}, 504)
                 return
+
+        if scenario == "stream-refresh":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def write_frame(frame) -> bool:
+                value = frame if isinstance(frame, str) else json.dumps(frame, separators=(",", ":"))
+                try:
+                    self.wfile.write(f"data: {value}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    METRICS.append("refreshGateTimeline", {
+                        "event": "frame-written",
+                        "gate": "",
+                        "at": RefreshGateState._now_ms(),
+                    })
+                    return True
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    METRICS.append("refreshGateTimeline", {
+                        "event": "frame-write-failed",
+                        "gate": "",
+                        "at": RefreshGateState._now_ms(),
+                    })
+                    return False
+
+            if not REFRESH_GATES.reach_and_wait("before-first-delta"):
+                return
+            if not write_frame(_chunk({"role": "assistant", "content": STREAM_ONE})):
+                return
+            if not write_frame(_chunk({"content": STREAM_TWO})):
+                return
+            if not REFRESH_GATES.reach_and_wait("after-second-delta"):
+                return
+            if not write_frame(_chunk({"content": STREAM_THREE})):
+                return
+            if not REFRESH_GATES.reach_and_wait("before-terminal"):
+                return
+            if not write_frame(_chunk(
+                {},
+                "stop",
+                {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24},
+            )):
+                return
+            write_frame("[DONE]")
+            return
 
         if scenario == "tool-call":
             frames = [
@@ -229,8 +372,72 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+OUTPUT_LOCK = threading.RLock()
+
+
 def _json_line(payload: dict) -> None:
-    print(json.dumps(payload, separators=(",", ":")), flush=True)
+    with OUTPUT_LOCK:
+        print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def _safe_id(value) -> str:
+    raw = str(value or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16] if raw else ""
+
+
+def _production_snapshot(code_server) -> dict:
+    agent_runs = []
+    for run in list(code_server._agent_runs.values()):
+        with run["condition"]:
+            events = list(run.get("events") or [])
+            agent_runs.append({
+                "agentRunId": _safe_id(run.get("id")),
+                "status": str(run.get("status") or ""),
+                "nextCursor": int(events[-1].get("seq") or 0) if events else 0,
+                "eventTypes": [str(event.get("type") or "") for event in events],
+                "activeRuntimeRunId": _safe_id(run.get("active_runtime_id")),
+            })
+    runtime_runs = []
+    with code_server._model_runtime_lock:
+        candidates = list(code_server._model_runtime_runs.values())
+    for run in candidates:
+        with run["condition"]:
+            events = list(run.get("events") or [])
+            result = code_server._runtime_result_snapshot(run)
+            runtime_runs.append({
+                "runtimeRunId": _safe_id(run.get("id")),
+                "status": str(run.get("status") or ""),
+                "nextCursor": int(events[-1].get("seq") or 0) if events else 0,
+                "eventCount": len(events),
+                "contentLength": len(str(result.get("content") or "")),
+                "hasFirstChunk": STREAM_ONE.strip() in str(result.get("content") or ""),
+                "hasSecondChunk": STREAM_TWO.strip() in str(result.get("content") or ""),
+                "hasThirdChunk": STREAM_THREE in str(result.get("content") or ""),
+            })
+    return {
+        "agentRuns": sorted(agent_runs, key=lambda item: item["agentRunId"]),
+        "runtimeRuns": sorted(runtime_runs, key=lambda item: item["runtimeRunId"]),
+    }
+
+
+def _session_jsonl_evidence(code_server) -> dict:
+    paths = sorted(code_server.SESSIONS_DIR.rglob("*.jsonl"))
+    bodies = []
+    for path in paths:
+        try:
+            bodies.append(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    combined = "\n".join(bodies)
+    return {
+        "fileCount": len(bodies),
+        "hasFirstChunk": STREAM_ONE.strip() in combined,
+        "hasSecondChunk": STREAM_TWO.strip() in combined,
+        "hasThirdChunk": STREAM_THREE in combined,
+        "pausedOutputCount": combined.count("[Output paused]"),
+        "hasStreamingField": '"streaming"' in combined,
+        "hasStreamProjectionField": '"_streamProjection"' in combined,
+    }
 
 
 def main() -> int:
@@ -365,14 +572,19 @@ def main() -> int:
             operation = command.get("command")
             if operation == "release-model":
                 MODEL_GATE.set()
+                REFRESH_GATES.release_all()
                 _json_line({"type": "response", "id": request_id, "ok": True})
                 continue
             if operation == "metrics":
+                metrics = METRICS.snapshot()
+                metrics["refreshGates"] = REFRESH_GATES.snapshot()
+                metrics["production"] = _production_snapshot(code_server)
+                metrics["sessionJsonl"] = _session_jsonl_evidence(code_server)
                 _json_line({
                     "type": "response",
                     "id": request_id,
                     "ok": True,
-                    "metrics": METRICS.snapshot(),
+                    "metrics": metrics,
                 })
                 continue
             if operation == "probe-tool-boundary":
@@ -389,6 +601,7 @@ def main() -> int:
             _json_line({"type": "response", "id": request_id, "ok": False})
     finally:
         MODEL_GATE.set()
+        REFRESH_GATES.release_all()
         code_httpd.shutdown()
         fake_server.shutdown()
         code_httpd.server_close()

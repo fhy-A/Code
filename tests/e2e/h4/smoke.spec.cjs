@@ -1,10 +1,72 @@
 const base = require("@playwright/test");
+const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { FIXTURE_CONTENT, startIsolatedHost } = require("./isolated-host.cjs");
 
 const { expect } = base;
 const MODEL_ID = "h4-e2e-model";
+const STREAM_USER = "H4_STREAM_REFRESH_USER";
+const STREAM_ONE = "H4_STREAM_ONE";
+const STREAM_TWO = "H4_STREAM_TWO";
+const STREAM_THREE = "H4_STREAM_THREE";
+const STREAM_FINAL = `${STREAM_ONE} ${STREAM_TWO} ${STREAM_THREE}`;
+
+function idHash(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
+}
+
+function describeLoopbackRequest(request) {
+  const url = new URL(request.url());
+  const method = request.method();
+  const agentMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
+  const runtimeMatch = url.pathname.match(/^\/api\/runtime\/runs\/([^/]+)$/);
+  if (url.pathname === "/api/agent/runs") {
+    return { at: Date.now(), method, path: "/api/agent/runs", kind: "agent", idHash: "", cursor: 0 };
+  }
+  if (url.pathname === "/api/runtime/runs") {
+    return { at: Date.now(), method, path: "/api/runtime/runs", kind: "runtime", idHash: "", cursor: 0 };
+  }
+  if (agentMatch) {
+    return {
+      at: Date.now(),
+      method,
+      path: "/api/agent/runs/[id]",
+      kind: "agent",
+      idHash: idHash(decodeURIComponent(agentMatch[1])),
+      cursor: Number(url.searchParams.get("cursor") || 0),
+    };
+  }
+  if (runtimeMatch) {
+    return {
+      at: Date.now(),
+      method,
+      path: "/api/runtime/runs/[id]",
+      kind: "runtime",
+      idHash: idHash(decodeURIComponent(runtimeMatch[1])),
+      cursor: Number(url.searchParams.get("cursor") || 0),
+    };
+  }
+  return { at: Date.now(), method, path: url.pathname, kind: "other", idHash: "", cursor: 0 };
+}
+
+function refreshRequestEvidence(entries) {
+  const selected = entries.filter((entry) => entry.kind === "agent" || entry.kind === "runtime");
+  const count = (kind, method) => selected.filter((entry) => (
+    entry.kind === kind && entry.method === method
+  )).length;
+  return {
+    agentPost: selected.filter((entry) => entry.path === "/api/agent/runs" && entry.method === "POST").length,
+    agentGet: count("agent", "GET"),
+    agentDelete: count("agent", "DELETE"),
+    runtimePost: selected.filter((entry) => entry.path === "/api/runtime/runs" && entry.method === "POST").length,
+    runtimeGet: count("runtime", "GET"),
+    agentIds: [...new Set(selected.filter((entry) => entry.kind === "agent" && entry.idHash).map((entry) => entry.idHash))],
+    runtimeIds: [...new Set(selected.filter((entry) => entry.kind === "runtime" && entry.idHash).map((entry) => entry.idHash))],
+    runtimeCursors: selected.filter((entry) => entry.kind === "runtime" && entry.method === "GET")
+      .map((entry) => entry.cursor),
+  };
+}
 
 function countOccurrences(text, marker) {
   return String(text).split(marker).length - 1;
@@ -17,6 +79,31 @@ function summarizeLoopbackRequests(entries) {
     counts[key] = (counts[key] || 0) + 1;
   }
   return counts;
+}
+
+function elapsedSeconds(value) {
+  const match = String(value || "").match(/^(\d+)s$/);
+  return match ? Number(match[1]) : -1;
+}
+
+async function assertRefreshIdentityContract(h4, { cancelled = false } = {}) {
+  const requests = h4.requestEvidence();
+  const metrics = await h4.metrics();
+  expect(requests.agentPost).toBe(1);
+  expect(requests.runtimePost).toBe(0);
+  expect(requests.agentDelete).toBe(cancelled ? 1 : 0);
+  expect(requests.agentIds).toHaveLength(1);
+  expect(requests.runtimeIds).toHaveLength(1);
+  expect(metrics.chatRequests).toEqual([
+    { scenario: "stream-refresh", stream: true, hasToolResult: false },
+  ]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(metrics.production.agentRuns).toHaveLength(1);
+  expect(metrics.production.runtimeRuns).toHaveLength(1);
+  expect(metrics.production.agentRuns[0].agentRunId).toBe(requests.agentIds[0]);
+  expect(metrics.production.runtimeRuns[0].runtimeRunId).toBe(requests.runtimeIds[0]);
+  return { requests, metrics };
 }
 
 async function attachTextBestEffort(testInfo, name, filePath, payload) {
@@ -45,6 +132,7 @@ const test = base.test.extend({
     const loopbackRequests = [];
     const blockedRequests = [];
     const diagnosticSteps = [];
+    const domTimeline = [];
 
     try {
       expect(host.ready.environment).toEqual({
@@ -53,6 +141,20 @@ const test = base.test.extend({
         homeIsIsolated: true,
       });
       context = await browser.newContext();
+      await context.exposeBinding("__h4RecordDomMutation", (_source, sample) => {
+        if (domTimeline.length >= 400) return;
+        const sanitized = {
+          at: Number(sample?.at || 0),
+          text: String(sample?.text || "").slice(0, 256),
+          bannerVisible: Boolean(sample?.bannerVisible),
+          stopEnabled: Boolean(sample?.stopEnabled),
+          elapsed: String(sample?.elapsed || "").slice(0, 32),
+        };
+        const previous = domTimeline.at(-1);
+        if (previous && JSON.stringify(previous).replace(/"at":\d+,?/, "")
+          === JSON.stringify(sanitized).replace(/"at":\d+,?/, "")) return;
+        domTimeline.push(sanitized);
+      });
       await context.addInitScript(({ syntheticKey, platformToken, modelId }) => {
         class OfflineMarkedRenderer {}
         let markedOptions = {};
@@ -82,6 +184,35 @@ const test = base.test.extend({
         localStorage.setItem("code-model", modelId);
         localStorage.setItem("code-permission-profile", "read");
         localStorage.setItem("code-lang", "en");
+        document.addEventListener("DOMContentLoaded", () => {
+          let lastSignature = "";
+          const capture = () => {
+            const text = [...document.querySelectorAll("#messages article.msg.assistant")]
+              .map((element) => element.textContent || "")
+              .filter((value) => value.includes("H4_STREAM_"))
+              .join("\n");
+            const banner = document.querySelector("#activeRunBanner");
+            const stop = document.querySelector("#stopBtn");
+            const elapsed = document.querySelector("#activeRunBanner [data-task-elapsed]")?.textContent || "";
+            const signature = JSON.stringify({
+              text,
+              bannerVisible: Boolean(banner?.classList.contains("visible")),
+              stopEnabled: Boolean(stop && !stop.disabled),
+              elapsed,
+            });
+            if (signature === lastSignature) return;
+            lastSignature = signature;
+            window.__h4RecordDomMutation({ at: Date.now(), ...JSON.parse(signature) });
+          };
+          new MutationObserver(capture).observe(document.documentElement, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ["class", "disabled"],
+          });
+          capture();
+        }, { once: true });
       }, {
         syntheticKey: host.syntheticKey,
         platformToken: host.platformToken,
@@ -97,7 +228,7 @@ const test = base.test.extend({
           await route.abort("blockedbyclient");
           return;
         }
-        loopbackRequests.push({ method: request.method(), path: url.pathname });
+        loopbackRequests.push(describeLoopbackRequest(request));
         if (url.pathname === "/proxy/models") {
           await route.continue({
             headers: {
@@ -124,6 +255,7 @@ const test = base.test.extend({
         loopbackRequests,
         blockedRequests,
         diagnosticSteps,
+        domTimeline,
         async open(runtime) {
           const target = runtime === "classic"
             ? `${host.ready.codeUrl}/dist/frontend/index.classic.html`
@@ -162,8 +294,40 @@ const test = base.test.extend({
           diagnosticSteps.push({ step: "running-state-observed", userMarker });
           await host.releaseModel();
         },
+        async submitGated(userMarker = STREAM_USER) {
+          await page.locator("#prompt").fill(userMarker);
+          await page.locator("#sendBtn").click();
+          await expect(page.locator("#messages article.msg.user").filter({ hasText: userMarker })).toHaveCount(1);
+          await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+          diagnosticSteps.push({ step: "gated-running-state-observed", userMarker });
+        },
+        async waitGate(gate) {
+          const gates = await host.waitRefreshGate(gate);
+          diagnosticSteps.push({ step: "gate-reached", gate, state: gates[gate] });
+          return gates;
+        },
+        async releaseGate(gate) {
+          const gates = await host.releaseRefreshGate(gate);
+          diagnosticSteps.push({ step: "gate-released", gate, state: gates[gate] });
+          return gates;
+        },
+        async releaseAllRefreshGates() {
+          return host.releaseAllRefreshGates();
+        },
+        async reloadBundle() {
+          diagnosticSteps.push({ step: "reload-started", at: Date.now() });
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", "bundle");
+          await expect(page.locator("html")).toHaveAttribute("data-code-frontend-ready", "true");
+          const readyAt = Date.now();
+          diagnosticSteps.push({ step: "reload-ready", at: readyAt });
+          return readyAt;
+        },
         async metrics() {
           return host.metrics();
+        },
+        requestEvidence() {
+          return refreshRequestEvidence(loopbackRequests);
         },
         evidence(label, payload) {
           console.log(`H4_EVIDENCE ${JSON.stringify({ label, ...payload })}`);
@@ -175,6 +339,10 @@ const test = base.test.extend({
     } finally {
       const failed = !useCompleted || Boolean(testInfo.error) || testInfo.status !== testInfo.expectedStatus;
       if (failed) {
+        let failureMetrics = null;
+        try {
+          failureMetrics = await host.metrics();
+        } catch {}
         const screenshotPath = path.join(host.artifactsDir, "failure.png");
         const consolePath = path.join(host.artifactsDir, "console.json");
         const diagnosticsPath = path.join(host.artifactsDir, "sanitized-diagnostics.json");
@@ -185,6 +353,8 @@ const test = base.test.extend({
           loopbackRequests: summarizeLoopbackRequests(loopbackRequests),
           blockedRequests,
           pageErrors,
+          domTimeline,
+          failureMetrics,
         });
       }
       let contextCloseError = null;
@@ -331,4 +501,226 @@ test("classic fallback completes one plain-text task", async ({ h4 }) => {
     dom: { user: 1, final: 1, runningObserved: true },
     blockedNonLoopback: h4.blockedRequests.length,
   });
+});
+
+test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
+  const { page } = h4;
+  await h4.open("bundle");
+  await h4.submitGated();
+  try {
+    await h4.waitGate("before-first-delta");
+    const before = await h4.metrics();
+    expect(before.production.agentRuns).toHaveLength(1);
+    expect(before.production.runtimeRuns).toHaveLength(1);
+    expect(before.production.runtimeRuns[0].nextCursor).toBe(0);
+    expect(before.sessionJsonl).toMatchObject({
+      hasFirstChunk: false,
+      hasSecondChunk: false,
+      hasThirdChunk: false,
+      hasStreamingField: false,
+      hasStreamProjectionField: false,
+    });
+
+    const elapsedBefore = page.locator("#activeRunBanner [data-task-elapsed]");
+    await expect(elapsedBefore).toHaveText(/^[1-9]\d*s$/);
+    const beforeSeconds = elapsedSeconds(await elapsedBefore.textContent());
+    const reloadReadyAt = await h4.reloadBundle();
+    await expect(page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })).toHaveCount(1);
+    await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+    await expect(page.locator("#stopBtn")).toBeEnabled();
+    await expect(page.locator("#sendBtn.running")).toBeEnabled();
+    const elapsedAfter = page.locator("#activeRunBanner [data-task-elapsed]");
+    await expect(elapsedAfter).toHaveText(/^\d+s$/);
+    expect(elapsedSeconds(await elapsedAfter.textContent())).toBeGreaterThanOrEqual(beforeSeconds);
+
+    await h4.releaseGate("before-first-delta");
+    await h4.waitGate("after-second-delta");
+    const firstTwo = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
+    await expect(firstTwo).toHaveCount(1);
+    await h4.releaseGate("after-second-delta");
+    await expect(page.locator("#messages article.msg.assistant").filter({ hasText: STREAM_FINAL })).toHaveCount(1);
+    const terminalGate = (await h4.metrics()).refreshGates["before-terminal"];
+    expect(terminalGate).toMatchObject({ reached: true, released: false });
+    await h4.releaseGate("before-terminal");
+    await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+    const text = await page.locator("#messages").textContent();
+    expect(countOccurrences(text, STREAM_USER)).toBe(1);
+    expect(countOccurrences(text, STREAM_ONE)).toBe(1);
+    expect(countOccurrences(text, STREAM_TWO)).toBe(1);
+    expect(countOccurrences(text, STREAM_THREE)).toBe(1);
+    const evidence = await assertRefreshIdentityContract(h4);
+    expect(evidence.metrics.production.agentRuns[0].status).toBe("completed");
+    expect(evidence.metrics.production.runtimeRuns[0].status).toBe("completed");
+    expect(evidence.metrics.sessionJsonl).toMatchObject({
+      hasFirstChunk: true,
+      hasSecondChunk: true,
+      hasThirdChunk: true,
+      hasStreamingField: false,
+      hasStreamProjectionField: false,
+    });
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence("bundle-refresh-before-first", {
+      ids: {
+        agent: evidence.requests.agentIds[0],
+        runtime: evidence.requests.runtimeIds[0],
+      },
+      requests: evidence.requests,
+      cursors: evidence.requests.runtimeCursors,
+      reloadReadyAt,
+      elapsed: { beforeSeconds, afterSeconds: elapsedSeconds(await elapsedAfter.textContent()) },
+      jsonlBeforeDelta: before.sessionJsonl,
+      gates: evidence.metrics.refreshGates,
+      dom: { user: 1, final: 1, stopRestored: true },
+    });
+  } finally {
+    await h4.releaseAllRefreshGates();
+  }
+});
+
+test("bundle refresh after two deltas catches up without DOM replay", async ({ h4 }) => {
+  const { page } = h4;
+  await h4.open("bundle");
+  await h4.submitGated();
+  try {
+    await h4.waitGate("before-first-delta");
+    await h4.releaseGate("before-first-delta");
+    await h4.waitGate("after-second-delta");
+    const firstTwo = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
+    await expect(firstTwo).toHaveCount(1);
+    const prefixBefore = (await firstTwo.textContent()).trim();
+    const before = await h4.metrics();
+    expect(before.production.runtimeRuns[0]).toMatchObject({
+      nextCursor: 2,
+      hasFirstChunk: true,
+      hasSecondChunk: true,
+      hasThirdChunk: false,
+    });
+    expect(before.sessionJsonl).toMatchObject({
+      hasFirstChunk: false,
+      hasSecondChunk: false,
+      hasThirdChunk: false,
+      hasStreamingField: false,
+      hasStreamProjectionField: false,
+    });
+
+    const reloadReadyAt = await h4.reloadBundle();
+    const caughtUp = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
+    await expect(caughtUp).toHaveCount(1);
+    expect((await caughtUp.textContent()).trim().startsWith(prefixBefore)).toBe(true);
+    await h4.releaseGate("after-second-delta");
+    const completeBody = page.locator("#messages article.msg.assistant").filter({ hasText: STREAM_FINAL });
+    await expect(completeBody).toHaveCount(1);
+    const terminalGate = (await h4.metrics()).refreshGates["before-terminal"];
+    expect(terminalGate).toMatchObject({ reached: true, released: false });
+    const thirdDomSample = h4.domTimeline.find((sample) => (
+      sample.at >= reloadReadyAt && sample.text.includes(STREAM_THREE)
+    ));
+    expect(thirdDomSample).toBeTruthy();
+    const nonEmptyAfterRefresh = h4.domTimeline.filter((sample) => (
+      sample.at >= reloadReadyAt && sample.text.includes(STREAM_ONE)
+    ));
+    expect(nonEmptyAfterRefresh.length).toBeGreaterThan(0);
+    const streamTextsAfterRefresh = nonEmptyAfterRefresh.map((sample) => sample.text.trim());
+    expect(streamTextsAfterRefresh[0].startsWith(prefixBefore)).toBe(true);
+    for (let index = 1; index < streamTextsAfterRefresh.length; index += 1) {
+      expect(streamTextsAfterRefresh[index].startsWith(streamTextsAfterRefresh[index - 1])).toBe(true);
+    }
+    await h4.releaseGate("before-terminal");
+    await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+    const text = await page.locator("#messages").textContent();
+    expect(countOccurrences(text, STREAM_USER)).toBe(1);
+    expect(countOccurrences(text, STREAM_ONE)).toBe(1);
+    expect(countOccurrences(text, STREAM_TWO)).toBe(1);
+    expect(countOccurrences(text, STREAM_THREE)).toBe(1);
+    const evidence = await assertRefreshIdentityContract(h4);
+    expect(evidence.requests.runtimeCursors).toContain(2);
+    expect(evidence.metrics.sessionJsonl).toMatchObject({
+      hasFirstChunk: true,
+      hasSecondChunk: true,
+      hasThirdChunk: true,
+      hasStreamingField: false,
+      hasStreamProjectionField: false,
+    });
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence("bundle-refresh-after-two", {
+      ids: {
+        agent: evidence.requests.agentIds[0],
+        runtime: evidence.requests.runtimeIds[0],
+      },
+      requests: evidence.requests,
+      runtimeBeforeRefresh: before.production.runtimeRuns[0],
+      jsonlAfterCompletion: evidence.metrics.sessionJsonl,
+      domTimeline: nonEmptyAfterRefresh,
+      thirdBeforeTerminalRelease: true,
+    });
+  } finally {
+    await h4.releaseAllRefreshGates();
+  }
+});
+
+test("bundle refresh then cancel preserves partial body and pauses once", async ({ h4 }) => {
+  const { page } = h4;
+  await h4.open("bundle");
+  await h4.submitGated();
+  try {
+    await h4.waitGate("before-first-delta");
+    await h4.releaseGate("before-first-delta");
+    await h4.waitGate("after-second-delta");
+    const firstTwo = page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` });
+    await expect(firstTwo).toHaveCount(1);
+    await h4.reloadBundle();
+    await expect(page.locator("#messages article.msg.assistant").filter({ hasText: `${STREAM_ONE} ${STREAM_TWO}` })).toHaveCount(1);
+    await expect(page.locator("#sendBtn.running")).toBeEnabled();
+
+    const cancelStartedAt = Date.now();
+    const cancelResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === "DELETE"
+      && /^\/api\/agent\/runs\/[^/]+$/.test(new URL(response.url()).pathname)
+    ));
+    await page.locator("#sendBtn").click();
+    await expect.poll(() => h4.requestEvidence().agentDelete).toBe(1);
+    // The synthetic upstream is intentionally stopped inside a server-side
+    // readline. Releasing its gates lets the already-issued Agent DELETE
+    // finish without using a sleep or creating another request.
+    await h4.releaseAllRefreshGates();
+    const cancelResponse = await cancelResponsePromise;
+    expect(cancelResponse.status()).toBe(200);
+    const paused = page.locator("#messages article.msg.assistant").filter({ hasText: "[Output paused]" });
+    await expect(paused).toHaveCount(1);
+    const cancelLatencyMs = Date.now() - cancelStartedAt;
+    expect(cancelLatencyMs).toBeLessThan(5_000);
+    await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+    const text = await page.locator("#messages").textContent();
+    expect(countOccurrences(text, STREAM_USER)).toBe(1);
+    expect(countOccurrences(text, STREAM_ONE)).toBe(1);
+    expect(countOccurrences(text, STREAM_TWO)).toBe(1);
+    expect(countOccurrences(text, "[Output paused]")).toBe(1);
+    const evidence = await assertRefreshIdentityContract(h4, { cancelled: true });
+    expect(evidence.metrics.production.agentRuns[0].status).toBe("cancelled");
+    expect(evidence.metrics.production.runtimeRuns[0].status).toBe("cancelled");
+    expect(evidence.metrics.production.agentRuns[0].eventTypes).not.toContain("model_completed");
+    expect(evidence.metrics.sessionJsonl).toMatchObject({
+      hasFirstChunk: true,
+      hasSecondChunk: true,
+      pausedOutputCount: 1,
+      hasStreamingField: false,
+      hasStreamProjectionField: false,
+    });
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence("bundle-refresh-cancel", {
+      ids: {
+        agent: evidence.requests.agentIds[0],
+        runtime: evidence.requests.runtimeIds[0],
+      },
+      requests: evidence.requests,
+      cancelLatencyMs,
+      inFlightThirdPersisted: evidence.metrics.sessionJsonl.hasThirdChunk,
+      dom: { user: 1, partialPreserved: true, paused: 1, successfulFinal: 0 },
+    });
+  } finally {
+    await h4.releaseAllRefreshGates();
+  }
 });

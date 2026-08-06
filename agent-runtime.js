@@ -383,6 +383,44 @@
     }
   }
 
+  function runtimeSnapshotProjectionSeed(snapshot) {
+    const result = snapshot?.result && typeof snapshot.result === "object"
+      ? snapshot.result
+      : {};
+    const content = String(result.content || "");
+    const reasoning = String(result.reasoning || "");
+    const toolCalls = Array.isArray(result.toolCalls) ? result.toolCalls : [];
+    const usageSource = result.usage && typeof result.usage === "object"
+      ? result.usage
+      : null;
+    const usage = usageSource && Object.keys(usageSource).length > 0
+      ? { ...usageSource }
+      : null;
+    if (!content && !reasoning && toolCalls.length === 0 && !usage) return "";
+    const delta = {
+      ...(reasoning ? { reasoning_content: reasoning } : {}),
+      ...(content ? { content } : {}),
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    };
+    return JSON.stringify({
+      id: "runtime-attachment-snapshot",
+      object: "chat.completion.chunk",
+      choices: [{ index: 0, delta, finish_reason: null }],
+      ...(usage ? { usage } : {}),
+    });
+  }
+
+  function runtimeTerminalErrorData(snapshot) {
+    return `[ERROR]${JSON.stringify({
+      message: snapshot.error || `Runtime ${snapshot.status}`,
+      code: snapshot.errorCode || `runtime_${snapshot.status}`,
+      status: snapshot.upstreamStatus || 0,
+      transient: typeof snapshot.transient === "boolean"
+        ? snapshot.transient
+        : [408, 425, 429, 500, 502, 503, 504].includes(Number(snapshot.upstreamStatus || 0)),
+    })}`;
+  }
+
   function openSseResponse({
     runId = "",
     sessionId = "",
@@ -396,6 +434,7 @@
     onStreamProgress,
   } = {}) {
     let activeRunId = String(runId || "");
+    let catchUpPending = Boolean(activeRunId);
     let cursor = 0;
     let pollStarted = false;
     let firstDeltaObserved = false;
@@ -418,6 +457,8 @@
       reasoningChars: 0,
       contentChars: 0,
       status: "attaching",
+      catchUpSeeded: false,
+      catchUpCursor: 0,
     };
     latestStreamDiagnostic = streamDiagnostic;
 
@@ -464,7 +505,7 @@
                 });
               }
               snapshot = await apiJson(
-                `/api/runtime/runs/${encodeURIComponent(activeRunId)}?cursor=${cursor}&wait=25`,
+                `/api/runtime/runs/${encodeURIComponent(activeRunId)}?cursor=${cursor}&wait=${catchUpPending ? 0 : 25}`,
                 { signal },
               );
               if (failures > 0) onReconnected?.({ attempts: failures });
@@ -483,6 +524,58 @@
                 error,
               });
               await sleep(delay, signal);
+              continue;
+            }
+
+            if (catchUpPending) {
+              catchUpPending = false;
+              const seed = runtimeSnapshotProjectionSeed(snapshot);
+              cursor = Math.max(cursor, Number(snapshot.nextCursor || 0));
+              streamDiagnostic.catchUpCursor = cursor;
+              if (seed) {
+                controller.enqueue(encodeSse(seed));
+                streamDiagnostic.catchUpSeeded = true;
+                const textStats = projectionTextStats(seed);
+                const observedAt = Date.now();
+                if (textStats.reasoningChars > 0) {
+                  streamDiagnostic.firstReasoningAt ||= observedAt;
+                  streamDiagnostic.reasoningFrameCount += 1;
+                  streamDiagnostic.reasoningChars += textStats.reasoningChars;
+                }
+                if (textStats.contentChars > 0) {
+                  streamDiagnostic.firstContentAt ||= observedAt;
+                  streamDiagnostic.lastContentAt = observedAt;
+                  streamDiagnostic.contentFrameCount += 1;
+                  streamDiagnostic.contentChars += textStats.contentChars;
+                }
+                if (!firstDeltaObserved) {
+                  firstDeltaObserved = true;
+                  reportStreamProgress({
+                    phase: "first-delta",
+                    at: observedAt,
+                    cursor,
+                    pendingEventCount: 0,
+                    catchUp: true,
+                  });
+                }
+              }
+              if (snapshot.status === "completed") {
+                controller.enqueue(encodeSse("[DONE]"));
+                reportStreamProgress({
+                  phase: "completed",
+                  at: Date.now(),
+                  cursor,
+                });
+                controller.close();
+                return;
+              }
+              if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+                streamDiagnostic.completedAt = Date.now();
+                streamDiagnostic.status = snapshot.status;
+                controller.enqueue(encodeSse(runtimeTerminalErrorData(snapshot)));
+                controller.close();
+                return;
+              }
               continue;
             }
 
@@ -564,15 +657,7 @@
             if (snapshot.status === "failed" || snapshot.status === "cancelled") {
               streamDiagnostic.completedAt = Date.now();
               streamDiagnostic.status = snapshot.status;
-              const detail = JSON.stringify({
-                message: snapshot.error || `Runtime ${snapshot.status}`,
-                code: snapshot.errorCode || `runtime_${snapshot.status}`,
-                status: snapshot.upstreamStatus || 0,
-                transient: typeof snapshot.transient === "boolean"
-                  ? snapshot.transient
-                  : [408, 425, 429, 500, 502, 503, 504].includes(Number(snapshot.upstreamStatus || 0)),
-              });
-              controller.enqueue(encodeSse(`[ERROR]${detail}`));
+              controller.enqueue(encodeSse(runtimeTerminalErrorData(snapshot)));
               controller.close();
               return;
             }
