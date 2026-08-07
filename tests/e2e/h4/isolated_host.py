@@ -39,6 +39,9 @@ INVALID_TOOL_FINAL = "H4_INVALID_TOOL_ARGUMENTS_FINAL"
 EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER"
 EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE"
 EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL"
+MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER"
+MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
+MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -49,7 +52,9 @@ TOOL_CALL_ID = "h4-read-call-1"
 MULTI_TOOL_CALL_IDS = ("h4-multi-read-call-1", "h4-multi-read-call-2")
 INVALID_TOOL_CALL_ID = "h4-invalid-read-call-1"
 EXECUTOR_RANGE_TOOL_CALL_ID = "h4-executor-range-read-call-1"
+MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
+MISSING_READ_PATH = "h4-missing-fixture.txt"
 REFRESH_GATE_NAMES = (
     "before-first-delta",
     "after-second-delta",
@@ -256,6 +261,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             user_text = _message_text(message)
         if message.get("role") == "tool" or message.get("tool_call_id") in {
             TOOL_CALL_ID, INVALID_TOOL_CALL_ID, EXECUTOR_RANGE_TOOL_CALL_ID,
+            MISSING_FILE_TOOL_CALL_ID,
             *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
@@ -264,6 +270,11 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     if EXECUTOR_RANGE_USER in user_text:
         return (
             "executor-range-final" if has_tool_result else "executor-range-call",
+            has_tool_result,
+        )
+    if MISSING_FILE_USER in user_text:
+        return (
+            "missing-file-final" if has_tool_result else "missing-file-call",
             has_tool_result,
         )
     if MULTI_TOOL_USER in user_text:
@@ -335,6 +346,36 @@ def _executor_range_receipt_projection(payload: dict) -> dict | None:
             "errorPresent": bool(error.strip()),
             "startLineMentioned": "startLine" in error,
             "endLineMentioned": "endLine" in error,
+            "failureCount": int(result.get("failureCount") or 0),
+            "fieldErrorsPresent": "fieldErrors" in result,
+            "retryBlocked": bool(result.get("retryBlocked")),
+            "retryLimitReached": bool(result.get("retryLimitReached")),
+        }
+    return None
+
+
+def _missing_file_receipt_projection(payload: dict) -> dict | None:
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        if str(message.get("tool_call_id") or "") != MISSING_FILE_TOOL_CALL_ID:
+            continue
+        try:
+            result = json.loads(str(message.get("content") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        error = str(result.get("error") or "")
+        return {
+            "role": "tool",
+            "toolCallId": "tool-1",
+            "name": str(message.get("name") or ""),
+            "ok": result.get("ok"),
+            "action": str(result.get("action") or ""),
+            "errorCodePresent": "errorCode" in result,
+            "codePresent": "code" in result,
+            "missingFileError": error == "文件不存在",
             "failureCount": int(result.get("failureCount") or 0),
             "fieldErrorsPresent": "fieldErrors" in result,
             "retryBlocked": bool(result.get("retryBlocked")),
@@ -459,11 +500,13 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["invalidReceipt"] = _invalid_tool_receipt_projection(payload)
         if scenario == "executor-range-final":
             chat_metric["executorRangeReceipt"] = _executor_range_receipt_projection(payload)
+        if scenario == "missing-file-final":
+            chat_metric["missingFileReceipt"] = _missing_file_receipt_projection(payload)
         METRICS.append("chatRequests", chat_metric)
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if scenario not in (
             "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
-            "invalid-tool-call", "executor-range-call",
+            "invalid-tool-call", "executor-range-call", "missing-file-call",
         ) and current_chat_count == 1:
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
@@ -519,7 +562,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         if scenario in (
             "tool-detail-final", "multi-tool-detail-final", "invalid-tool-final",
-            "executor-range-final",
+            "executor-range-final", "missing-file-final",
         ):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -547,7 +590,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     else (
                         EXECUTOR_RANGE_FINAL
                         if scenario == "executor-range-final"
-                        else TOOL_DETAILS_FINAL
+                        else (
+                            MISSING_FILE_FINAL
+                            if scenario == "missing-file-final"
+                            else TOOL_DETAILS_FINAL
+                        )
                     )
                 )
             )
@@ -569,7 +616,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         if scenario in (
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
-            "executor-range-call",
+            "executor-range-call", "missing-file-call",
         ):
             stage_text = {
                 "tool-call": TOOL_STAGE,
@@ -577,6 +624,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "multi-tool-detail-call": MULTI_TOOL_STAGE,
                 "invalid-tool-call": INVALID_TOOL_STAGE,
                 "executor-range-call": EXECUTOR_RANGE_STAGE,
+                "missing-file-call": MISSING_FILE_STAGE,
             }[scenario]
             tool_calls = [{
                 "index": 0,
@@ -636,6 +684,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         "arguments": json.dumps(
                             {"path": READ_PATH, "startLine": 2, "endLine": 1},
                             separators=(",", ":"),
+                        ),
+                    },
+                }]
+            elif scenario == "missing-file-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": MISSING_FILE_TOOL_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": MISSING_READ_PATH}, separators=(",", ":"),
                         ),
                     },
                 }]
@@ -782,6 +842,21 @@ def main() -> int:
             raise RuntimeError("temporary path escaped the owned root")
         candidate.mkdir(parents=True, exist_ok=True)
 
+    missing_relative = Path(MISSING_READ_PATH)
+    if missing_relative.is_absolute() or ".." in missing_relative.parts:
+        raise RuntimeError("H4 missing-file fixture path is not a safe relative path")
+    missing_project_target = (project_dir / missing_relative).resolve()
+    isolated_home = (root / "home").resolve()
+    missing_home_target = (isolated_home / missing_relative).resolve()
+    if project_dir not in missing_project_target.parents:
+        raise RuntimeError("H4 missing-file fixture escaped the project root")
+    if isolated_home not in missing_home_target.parents:
+        raise RuntimeError("H4 missing-file home audit escaped the isolated home")
+    if missing_project_target.exists():
+        raise RuntimeError("H4 missing-file fixture unexpectedly exists in the project root")
+    if missing_home_target.exists():
+        raise RuntimeError("H4 missing-file fixture unexpectedly exists in the isolated home")
+
     fake_server = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstreamHandler)
     fake_server.daemon_threads = True
     fake_port = fake_server.server_address[1]
@@ -822,9 +897,19 @@ def main() -> int:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 tool action is outside the read-only fixture contract")
         requested = str((payload or {}).get("path") or "")
-        if requested != READ_PATH:
+        payload_keys = set((payload or {}).keys())
+        is_missing_read = requested == MISSING_READ_PATH
+        if requested not in {READ_PATH, MISSING_READ_PATH}:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 read_file request escaped the fixed synthetic fixture")
+        if is_missing_read and payload_keys != {"path"}:
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 missing-file request changed the exact fixed payload")
+        if is_missing_read and (
+            missing_project_target.exists() or missing_home_target.exists()
+        ):
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 missing-file fixture precondition changed")
         start_line = (payload or {}).get("startLine")
         end_line = (payload or {}).get("endLine")
         is_second_multi_read = start_line == 1 and end_line == 1
@@ -834,7 +919,7 @@ def main() -> int:
             raise TimeoutError("H4 second read_file execution gate timed out")
         execution_metric = {
             "action": "read_file",
-            "path": READ_PATH,
+            "path": requested,
         }
         if start_line is not None:
             execution_metric["startLine"] = start_line
@@ -842,11 +927,17 @@ def main() -> int:
             execution_metric["endLine"] = end_line
         METRICS.append("toolExecutions", execution_metric)
         METRICS.increment("productionToolDelegations")
-        return original_execute_registered_tool(
-            action,
-            payload,
-            _arguments_validated=_arguments_validated,
-        )
+        try:
+            return original_execute_registered_tool(
+                action,
+                payload,
+                _arguments_validated=_arguments_validated,
+            )
+        finally:
+            if is_missing_read and (
+                missing_project_target.exists() or missing_home_target.exists()
+            ):
+                raise RuntimeError("H4 missing-file fixture was created during execution")
 
     def probe_tool_boundary():
         before = METRICS.snapshot()

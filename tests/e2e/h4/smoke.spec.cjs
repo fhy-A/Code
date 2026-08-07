@@ -23,6 +23,10 @@ const INVALID_TOOL_FINAL = "H4_INVALID_TOOL_ARGUMENTS_FINAL";
 const EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER";
 const EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE";
 const EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL";
+const MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER";
+const MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE";
+const MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL";
+const MISSING_READ_PATH = "h4-missing-fixture.txt";
 const TOOL_FINAL_DELTA_GATE = "before-tool-final-delta";
 const TOOL_TERMINAL_GATE = "before-tool-terminal";
 const SECOND_TOOL_EXECUTE_GATE = "before-second-tool-execute";
@@ -86,6 +90,16 @@ const H4_6G_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "d7ec6a76b4b67e204a24b508b6e548a46e2d92fe9ef8575d6a30bc8b5c5fc500",
   activeDom: "53db0899dd213b606bd89904aa7f4df93cf6270a535648b812b6cb7c2e7da425",
   terminalDom: "92162bb8446b0556cb897912ea0aa0db129b9682a8a071b96ad07795c335299c",
+  refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
+});
+const H4_6H_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "4dd3fb7c43cbe9bcc0fb95b5df7e4cf794f35f4e3a9eb2c8d388c2e7389314f2",
+  missingFileReceiptProjection: "bef7e2038ec8d5a56437dbdeef1b43a73b7553d67fe637ae3fb26d9ae1a8b498",
+  modelToolReceiptProjection: "4204a133ea7a8e74a5981668a013feb29d86b7bc492941b4e25c6a64652a2b8d",
+  sessionRoleContent: "450f53474e8c9fe65b71409b7efb6c3a222e5f4629bd8dbbc89d6d3b6a05c923",
+  sessionToolMeta: "d8e40c3d2d303c0e4c4c6394dde046869f7ffaee8414f960d54dbc3261cb2c7e",
+  activeDom: "b6ae61b6e790e68c2c2d0586fb0d5a62d2074b88d4f6203a35760a78ced8c983",
+  terminalDom: "2aed54d3a2fdb4e76d6c0fe53e4a223992c116adda0826b08334e1a44d54848f",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
 
@@ -176,6 +190,21 @@ function stableExecutorRangeToolResult(result) {
   };
 }
 
+function stableMissingFileToolResult(result) {
+  const error = String(result?.error || "");
+  return {
+    ok: result?.ok === false ? false : result?.ok,
+    action: String(result?.action || ""),
+    errorCodePresent: Object.prototype.hasOwnProperty.call(result || {}, "errorCode"),
+    codePresent: Object.prototype.hasOwnProperty.call(result || {}, "code"),
+    missingFileError: error === "文件不存在",
+    failureCount: Number(result?.failureCount || 0),
+    fieldErrorsPresent: Object.prototype.hasOwnProperty.call(result || {}, "fieldErrors"),
+    retryBlocked: Boolean(result?.retryBlocked),
+    retryLimitReached: Boolean(result?.retryLimitReached),
+  };
+}
+
 const EXPECTED_INVALID_TOOL_RESULT = Object.freeze({
   ok: false,
   action: "read_file",
@@ -192,6 +221,18 @@ const EXPECTED_EXECUTOR_RANGE_RESULT = Object.freeze({
   errorPresent: true,
   startLineMentioned: true,
   endLineMentioned: true,
+  failureCount: 1,
+  fieldErrorsPresent: false,
+  retryBlocked: false,
+  retryLimitReached: false,
+});
+
+const EXPECTED_MISSING_FILE_RESULT = Object.freeze({
+  ok: false,
+  action: "read_file",
+  errorCodePresent: false,
+  codePresent: false,
+  missingFileError: true,
   failureCount: 1,
   fieldErrorsPresent: false,
   retryBlocked: false,
@@ -397,6 +438,110 @@ const EXECUTOR_RANGE_FAILURE_CONTRACT = Object.freeze({
       present: Boolean(text),
       startLineMentioned: text.includes("startLine"),
       endLineMentioned: text.includes("endLine"),
+      nonEmpty: Boolean(text.trim()),
+    };
+  },
+});
+
+const MISSING_FILE_FAILURE_CONTRACT = Object.freeze({
+  key: "H4-6H",
+  userMarker: MISSING_FILE_USER,
+  stageMarker: MISSING_FILE_STAGE,
+  finalMarker: MISSING_FILE_FINAL,
+  arguments: Object.freeze({ path: MISSING_READ_PATH }),
+  projectResult: stableMissingFileToolResult,
+  expectedResult: EXPECTED_MISSING_FILE_RESULT,
+  receiptHashKey: "missingFileReceiptProjection",
+  chatCallScenario: "missing-file-call",
+  chatFinalScenario: "missing-file-final",
+  chatReceiptKey: "missingFileReceipt",
+  expectedDelegations: 1,
+  expectedToolExecutions: Object.freeze([{
+    action: "read_file",
+    path: MISSING_READ_PATH,
+  }]),
+  assertRawResult(result) {
+    expect(result).toEqual({
+      ok: false,
+      action: "read_file",
+      error: "文件不存在",
+      failureCount: 1,
+    });
+  },
+  hashes: H4_6H_SEMANTIC_HASHES,
+  runtimeCursors: Object.freeze({
+    firstActive: 4,
+    secondActive: 0,
+    firstCompleted: 4,
+    secondCompleted: 3,
+  }),
+  evidenceStem: "missing-file-executor-failure",
+  missingReadPath: MISSING_READ_PATH,
+  domArgumentMarkers: Object.freeze([MISSING_READ_PATH]),
+  domResultMarkers: Object.freeze(["文件不存在"]),
+  expectedDomArguments: Object.freeze({
+    pathPresent: true,
+  }),
+  expectedDomResult: Object.freeze({
+    present: true,
+    missingFileErrorCount: 1,
+    nonEmpty: true,
+  }),
+  expectedSessionProjection: Object.freeze([
+    { role: "user", marker: "user" },
+    { role: "assistant", marker: "stage" },
+    { role: "tool-call", contentPresent: true },
+    { role: "tool-result", contentPresent: true, missingFileErrorCount: 1 },
+    { role: "assistant", marker: "final" },
+  ]),
+  get expectedSessionToolMeta() {
+    return [
+      {
+        role: "tool-call",
+        toolCallId: "tool-1",
+        agentRunId: "agent-1",
+        agentEventType: "tool_started",
+        agentEventSeq: 4,
+        action: "read_file",
+        arguments: this.arguments,
+        native: true,
+        replayed: false,
+        outcome: "",
+        result: null,
+      },
+      {
+        role: "tool-result",
+        toolCallId: "tool-1",
+        agentRunId: "agent-1",
+        agentEventType: "tool_completed",
+        agentEventSeq: 5,
+        action: "read_file",
+        arguments: null,
+        native: true,
+        replayed: false,
+        outcome: "failed",
+        result: this.expectedResult,
+      },
+    ];
+  },
+  sessionResultProjection(content) {
+    return {
+      contentPresent: Boolean(content.trim()),
+      missingFileErrorCount: countOccurrences(content, "文件不存在"),
+    };
+  },
+  sessionArgumentsProjection(tool) {
+    return { path: String(tool.path || "") };
+  },
+  domArgumentsProjection(text) {
+    return {
+      pathPresent: text.includes(`"path": "${MISSING_READ_PATH}"`),
+    };
+  },
+  domResultProjection(text) {
+    return {
+      present: Boolean(text),
+      missingFileErrorCount: countOccurrences(text, "文件不存在"),
       nonEmpty: Boolean(text.trim()),
     };
   },
@@ -2936,6 +3081,39 @@ async function assertDirectClassicEntry(page) {
   expect(currentUrl.search).toBe("");
 }
 
+async function pathIsMissing(filePath) {
+  try {
+    await fs.stat(filePath);
+    return false;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+async function assertFailureContractFilesystem(h4, contract) {
+  if (!contract.missingReadPath) return null;
+  expect(path.isAbsolute(contract.missingReadPath)).toBe(false);
+  expect(contract.missingReadPath.split(/[\\/]+/)).not.toContain("..");
+  const projectRoot = path.resolve(h4.host.projectDir);
+  const projectTarget = path.resolve(projectRoot, contract.missingReadPath);
+  const isolatedHome = path.resolve(h4.host.root, "home");
+  const homeTarget = path.resolve(isolatedHome, contract.missingReadPath);
+  expect(path.dirname(projectTarget)).toBe(projectRoot);
+  expect(path.dirname(homeTarget)).toBe(isolatedHome);
+  const audit = {
+    safeRelativePath: true,
+    projectTargetMissing: await pathIsMissing(projectTarget),
+    isolatedHomeTargetMissing: await pathIsMissing(homeTarget),
+  };
+  expect(audit).toEqual({
+    safeRelativePath: true,
+    projectTargetMissing: true,
+    isolatedHomeTargetMissing: true,
+  });
+  return audit;
+}
+
 async function completeToolFailureLifecycle(h4, runtime, contract) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
@@ -2943,6 +3121,7 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   await assertFrontendRuntime(page, runtime);
   if (runtime === "classic") await assertDirectClassicEntry(page);
   await h4.proveNonLoopbackBlocked();
+  const pathAuditBefore = await assertFailureContractFilesystem(h4, contract);
   await h4.submitGated(contract.userMarker);
   const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
   expect(finalDeltaGate[TOOL_FINAL_DELTA_GATE]).toMatchObject({
@@ -3014,7 +3193,6 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     runId: firstRuntimeRunId,
     sessionId: activeAgent.body.sessionId,
     status: "completed",
-    nextCursor: 4,
   });
   expect(firstRuntimeActive.body.result?.content).toBe(contract.stageMarker);
   expect(secondRuntimeActive.status).toBe(200);
@@ -3022,10 +3200,21 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     runId: secondRuntimeRunId,
     sessionId: activeAgent.body.sessionId,
     status: "running",
-    nextCursor: 0,
   });
   expect(secondRuntimeActive.body.events).toEqual([]);
   expect(secondRuntimeActive.body.result?.content).toBe("");
+  const expectedRuntimeCursors = contract.runtimeCursors === null
+    ? null
+    : (contract.runtimeCursors || {
+      firstActive: 4,
+      secondActive: 0,
+      firstCompleted: 4,
+      secondCompleted: 3,
+    });
+  if (expectedRuntimeCursors) {
+    expect(Number(firstRuntimeActive.body.nextCursor || 0)).toBe(expectedRuntimeCursors.firstActive);
+    expect(Number(secondRuntimeActive.body.nextCursor || 0)).toBe(expectedRuntimeCursors.secondActive);
+  }
   expect(h4.controlIds()).toEqual({
     agentRunIds: [agentRunId],
     runtimeRunIds: [firstRuntimeRunId, secondRuntimeRunId],
@@ -3201,8 +3390,10 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   expect(secondRuntimeCompleted.status).toBe(200);
   expect(firstRuntimeCompleted.body.status).toBe("completed");
   expect(secondRuntimeCompleted.body.status).toBe("completed");
-  expect(firstRuntimeCompleted.body.nextCursor).toBe(4);
-  expect(secondRuntimeCompleted.body.nextCursor).toBe(3);
+  if (expectedRuntimeCursors) {
+    expect(Number(firstRuntimeCompleted.body.nextCursor || 0)).toBe(expectedRuntimeCursors.firstCompleted);
+    expect(Number(secondRuntimeCompleted.body.nextCursor || 0)).toBe(expectedRuntimeCursors.secondCompleted);
+  }
   expect(firstRuntimeCompleted.body.result?.content).toBe(contract.stageMarker);
   expect(secondRuntimeCompleted.body.result?.content).toBe(contract.finalMarker);
 
@@ -3265,6 +3456,7 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   expect(metrics.toolExecutions).toEqual(contract.expectedToolExecutions);
   expect(metrics.productionToolDelegations).toBe(contract.expectedDelegations);
   expect(metrics.unsafeToolRequests).toBe(0);
+  const pathAuditAfterExecution = await assertFailureContractFilesystem(h4, contract);
   const requests = h4.requestEvidenceSince(requestBoundary);
   expect(requests.agentPost).toBe(1);
   expect(requests.runtimePost).toBe(0);
@@ -3309,6 +3501,7 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
         productionToolDelegations: metrics.productionToolDelegations,
         toolExecutions: metrics.toolExecutions.length,
       },
+      pathAudit: pathAuditAfterExecution,
       hashes,
     },
   );
@@ -3325,6 +3518,8 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     terminalDom,
     metrics,
     hashes,
+    pathAuditBefore,
+    pathAuditAfterExecution,
   };
 }
 
@@ -3414,6 +3609,7 @@ async function exerciseToolFailureTerminalRefresh(h4, runtime, contract) {
   expect(metricsAfter.toolExecutions).toEqual(contract.expectedToolExecutions);
   expect(metricsAfter.productionToolDelegations).toBe(contract.expectedDelegations);
   expect(metricsAfter.unsafeToolRequests).toBe(0);
+  const pathAuditAfterRefresh = await assertFailureContractFilesystem(h4, contract);
   const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
   expect(refreshRequests.agentPost).toBe(0);
   expect(refreshRequests.runtimePost).toBe(0);
@@ -3460,6 +3656,7 @@ async function exerciseToolFailureTerminalRefresh(h4, runtime, contract) {
         processKey: domAfter.projection.processKey,
       },
       refresh: refreshProjection,
+      pathAudit: pathAuditAfterRefresh,
       hashes,
     },
   );
@@ -3479,6 +3676,14 @@ test("bundle executor-range failure lifecycle and reload", async ({ h4 }) => {
 
 test("direct classic executor-range failure lifecycle and reload", async ({ h4 }) => {
   await exerciseToolFailureTerminalRefresh(h4, "classic", EXECUTOR_RANGE_FAILURE_CONTRACT);
+});
+
+test("bundle missing read_file executor failure lifecycle and reload", async ({ h4 }) => {
+  await exerciseToolFailureTerminalRefresh(h4, "bundle", MISSING_FILE_FAILURE_CONTRACT);
+});
+
+test("direct classic missing read_file executor failure lifecycle and reload", async ({ h4 }) => {
+  await exerciseToolFailureTerminalRefresh(h4, "classic", MISSING_FILE_FAILURE_CONTRACT);
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {
