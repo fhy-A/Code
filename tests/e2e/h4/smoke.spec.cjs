@@ -17,6 +17,9 @@ const TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL";
 const MULTI_TOOL_USER = "H4_MULTI_TOOL_USER";
 const MULTI_TOOL_STAGE = "H4_MULTI_TOOL_STAGE";
 const MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL";
+const INVALID_TOOL_USER = "H4_INVALID_TOOL_ARGUMENTS_USER";
+const INVALID_TOOL_STAGE = "H4_INVALID_TOOL_ARGUMENTS_STAGE";
+const INVALID_TOOL_FINAL = "H4_INVALID_TOOL_ARGUMENTS_FINAL";
 const TOOL_FINAL_DELTA_GATE = "before-tool-final-delta";
 const TOOL_TERMINAL_GATE = "before-tool-terminal";
 const SECOND_TOOL_EXECUTE_GATE = "before-second-tool-execute";
@@ -61,6 +64,16 @@ const H4_6C_TERMINAL_REFRESH_HASHES = Object.freeze({
   sessionRoleContent: "033743ab31d1b95e7e33aefc1c74515a01cc2fb65cebd4830b2099f2c6a4e2f7",
   sessionToolMeta: "23956f1cd5fdb148e94f6c224e7dff3326ec0e4f6aff01342512fa9fc8ab842e",
   terminalDom: "9efb0070a8125ede3c69abf4f4c530ac5076979d480febd63d5df7a7230753cb",
+});
+const H4_6E_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "860e9f45fe924f5a8a94ca031d2839264fd550dfcbef0c4a9a1bb89393bd6ef4",
+  invalidReceiptProjection: "bf4ec29db9ac54505687e3fb3c2040ff5f4fa17aed715700c958317a3aa6c776",
+  modelToolReceiptProjection: "1b94536a4cc63c2bc3b98c54eb14c329ac585b5ec65bf85c1ca7bbd080ab6c80",
+  sessionRoleContent: "cbdcb15dad4b61b34bdf89556131827fc7fd973f88b9b9368e329bf61b1821fb",
+  sessionToolMeta: "c62eca9c84fb4d3c94968c2423f8db13cff6ca254fd90eba9bb225c87d438285",
+  activeDom: "3f718cb47d5fb90dcdc0bbc3a425718a43f1c0fe6ee082ce53e90a22cabc2ad4",
+  terminalDom: "4cdf1271fd50f4060b985a2c9b579bad19b075e0b562881337cd2ddab42b161d",
+  refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
 
 function idHash(value) {
@@ -119,6 +132,29 @@ function stableReadToolResult(result) {
     lineRange: result?.lineRange ?? null,
   };
 }
+
+function stableInvalidToolResult(result) {
+  return {
+    ok: result?.ok === false ? false : result?.ok,
+    action: String(result?.action || ""),
+    errorCode: String(result?.errorCode || ""),
+    errorPresent: Boolean(String(result?.error || "").trim()),
+    failureCount: Number(result?.failureCount || 0),
+    fieldErrors: (Array.isArray(result?.fieldErrors) ? result.fieldErrors : []).map((item) => ({
+      field: String(item?.field || ""),
+      reason: String(item?.reason || ""),
+    })),
+  };
+}
+
+const EXPECTED_INVALID_TOOL_RESULT = Object.freeze({
+  ok: false,
+  action: "read_file",
+  errorCode: "invalid_tool_arguments",
+  errorPresent: true,
+  failureCount: 1,
+  fieldErrors: [{ field: "unexpected", reason: "additional_property" }],
+});
 
 function durableToolTraceEvidence(snapshot) {
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
@@ -196,6 +232,60 @@ function durableToolTraceEvidence(snapshot) {
   };
 }
 
+function durableInvalidToolTraceEvidence(snapshot) {
+  const baseEvidence = durableToolTraceEvidence(snapshot);
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const executions = Array.isArray(snapshot?.toolExecutions) ? snapshot.toolExecutions : [];
+  const runtimeAliases = new Map(
+    baseEvidence.runtimeRunIds.map((runId, index) => [runId, `runtime-${index + 1}`]),
+  );
+  const toolAliases = new Map(
+    baseEvidence.toolCallIds.map((toolCallId, index) => [toolCallId, `tool-${index + 1}`]),
+  );
+  const runtimeAlias = (runId) => runtimeAliases.get(String(runId || "")) || "";
+  const toolAlias = (toolCallId) => toolAliases.get(String(toolCallId || "")) || "";
+  const eventProjection = events.map((event) => {
+    const data = event?.data || {};
+    const projection = {
+      seq: Number(event?.seq || 0),
+      type: String(event?.type || ""),
+    };
+    if (data.round != null) projection.round = Number(data.round);
+    if (data.runtimeRunId) projection.runtimeRunId = runtimeAlias(data.runtimeRunId);
+    if (data.content != null) projection.content = String(data.content);
+    if (data.finishReason != null) projection.finishReason = String(data.finishReason);
+    if (data.outcome != null) projection.outcome = String(data.outcome);
+    if (Array.isArray(data.toolCalls)) {
+      projection.toolCalls = data.toolCalls.map((call) => ({
+        toolCallId: toolAlias(call?.id),
+        name: String(call?.function?.name || call?.name || ""),
+        arguments: parseToolArguments(call?.function?.arguments ?? call?.arguments),
+      }));
+    }
+    if (data.toolCallId) projection.toolCallId = toolAlias(data.toolCallId);
+    if (data.name != null) projection.name = String(data.name);
+    if (data.arguments != null) projection.arguments = parseToolArguments(data.arguments);
+    if (data.replayed != null) projection.replayed = Boolean(data.replayed);
+    if (data.result != null) projection.result = stableInvalidToolResult(data.result);
+    return projection;
+  });
+  const executionProjection = executions.map((execution) => ({
+    toolCallId: toolAlias(execution?.toolCallId),
+    name: String(execution?.name || ""),
+    arguments: parseToolArguments(execution?.arguments),
+    status: String(execution?.status || ""),
+    outcome: String(execution?.outcome || ""),
+    result: stableInvalidToolResult(execution?.result),
+  }));
+  return {
+    ...baseEvidence,
+    eventProjection,
+    eventProjectionHash: canonicalHash(eventProjection),
+    executionProjection,
+    executionProjectionHash: canonicalHash(executionProjection),
+  };
+}
+
 function durableToolRecordProjection(record, traceEvidence) {
   return {
     version: Number(record?.version || 0),
@@ -267,6 +357,62 @@ function multiSessionToolMetaProjection(messages, agentRunId, toolCallIds) {
         replayed: Boolean(meta.replayed),
         outcome: String(meta.outcome || ""),
         result,
+      };
+    });
+}
+
+function invalidSessionRoleContentProjection(messages) {
+  return (Array.isArray(messages) ? messages : []).map((message) => {
+    const role = String(message?.role || "");
+    const content = String(message?.content || "");
+    if (role === "user") return { role, marker: content === INVALID_TOOL_USER ? "user" : "unexpected" };
+    if (role === "assistant") {
+      return {
+        role,
+        marker: content === INVALID_TOOL_STAGE
+          ? "stage"
+          : (content === INVALID_TOOL_FINAL ? "final" : "unexpected"),
+      };
+    }
+    if (role === "tool-call") {
+      return { role, contentPresent: Boolean(content.trim()) };
+    }
+    if (role === "tool-result") {
+      return {
+        role,
+        contentPresent: Boolean(content.trim()),
+        unexpectedCount: countOccurrences(content, "unexpected"),
+      };
+    }
+    return { role, contentPresent: Boolean(content.trim()) };
+  });
+}
+
+function invalidSessionToolMetaProjection(messages, agentRunId, toolCallId) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === "tool-call" || message?.role === "tool-result")
+    .map((message) => {
+      const meta = message?.meta || {};
+      const tool = meta.tool && typeof meta.tool === "object" ? meta.tool : {};
+      return {
+        role: String(message.role),
+        toolCallId: String(meta.toolCallId || "") === toolCallId ? "tool-1" : "mismatch",
+        agentRunId: meta.agentRunId == null
+          ? ""
+          : (String(meta.agentRunId) === agentRunId ? "agent-1" : "mismatch"),
+        agentEventType: String(meta.agentEventType || ""),
+        agentEventSeq: Number(meta.agentEventSeq || 0),
+        action: String(meta.action || ""),
+        arguments: message.role === "tool-call" ? {
+          path: String(tool.path || ""),
+          unexpected: tool.unexpected === true,
+        } : null,
+        native: meta.native === true,
+        replayed: Boolean(meta.replayed),
+        outcome: String(meta.outcome || ""),
+        result: meta.result && typeof meta.result === "object"
+          ? stableInvalidToolResult(meta.result)
+          : null,
       };
     });
 }
@@ -426,6 +572,97 @@ async function toolDetailLifecycleDomEvidence(page) {
     outer,
     item,
     finalAnswer,
+    projection,
+    semanticHash: canonicalHash(projection),
+  };
+}
+
+async function invalidToolLifecycleDomEvidence(page) {
+  const messages = page.locator("#messages");
+  const user = messages.locator("article.msg.user").filter({ hasText: INVALID_TOOL_USER });
+  const commentary = messages.locator("article.msg.assistant.agent-commentary")
+    .filter({ hasText: INVALID_TOOL_STAGE });
+  const process = messages.locator("article.tool-process");
+  const outer = process.locator("details.tool-process-stage");
+  const item = process.locator("details.tool-process-item");
+  const finalAnswer = messages.locator("article.msg.assistant")
+    .filter({ hasText: INVALID_TOOL_FINAL });
+  const details = item.locator(".tool-process-detail pre");
+  await expect(user).toHaveCount(1);
+  await expect(commentary).toHaveCount(1);
+  await expect(process).toHaveCount(1);
+  await expect(outer).toHaveCount(1);
+  await expect(item).toHaveCount(1);
+  await expect(details).toHaveCount(2);
+  const detailTexts = await details.allTextContents();
+  const argumentText = String(detailTexts[0] || "").trim();
+  const resultText = String(detailTexts[1] || "").trim();
+  const finalCount = await finalAnswer.count();
+  const processKey = String(await outer.getAttribute("data-tool-process-key") || "");
+  const outerClass = String(await outer.getAttribute("class") || "");
+  const itemClass = String(await item.getAttribute("class") || "");
+  const ordered = await page.evaluate(({ userMarker, stageMarker, finalMarker }) => {
+    const root = document.querySelector("#messages");
+    const find = (selector, marker) => [...root.querySelectorAll(selector)]
+      .find((element) => element.textContent.includes(marker));
+    const nodes = [
+      find("article.msg.user", userMarker),
+      find("article.msg.assistant.agent-commentary", stageMarker),
+      root.querySelector("article.tool-process"),
+    ];
+    const final = find("article.msg.assistant", finalMarker);
+    if (final) nodes.push(final);
+    return nodes.every(Boolean) && nodes.slice(0, -1).every((node, index) => (
+      Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ));
+  }, {
+    userMarker: INVALID_TOOL_USER,
+    stageMarker: INVALID_TOOL_STAGE,
+    finalMarker: INVALID_TOOL_FINAL,
+  });
+  const projection = {
+    sequence: finalCount
+      ? [INVALID_TOOL_USER, INVALID_TOOL_STAGE, "read_file:failed", INVALID_TOOL_FINAL]
+      : [INVALID_TOOL_USER, INVALID_TOOL_STAGE, "read_file:failed"],
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 1,
+      result: 1,
+      final: finalCount,
+      ordinaryAssistant: await messages.locator("article.msg.assistant:not(.tool-process)").count(),
+      assistantTotal: await messages.locator("article.msg.assistant").count(),
+    },
+    processKey,
+    outerOpen: await outer.evaluate((element) => element.open),
+    itemOpen: await item.evaluate((element) => element.open),
+    outerState: {
+      running: outerClass.split(/\s+/).includes("running"),
+      failed: outerClass.split(/\s+/).includes("failed"),
+    },
+    itemState: {
+      failed: itemClass.split(/\s+/).includes("failed"),
+    },
+    currentAction: String(await outer.getAttribute("data-current-action") || ""),
+    arguments: {
+      pathPresent: argumentText.includes('"path": "fixture.txt"'),
+      unexpectedPresent: argumentText.includes('"unexpected": true'),
+      unexpectedCount: countOccurrences(argumentText, "unexpected"),
+    },
+    result: {
+      present: Boolean(resultText),
+      unexpectedCount: countOccurrences(resultText, "unexpected"),
+      nonEmpty: Boolean(resultText.trim()),
+    },
+    ordered,
+  };
+  return {
+    process,
+    outer,
+    item,
+    finalAnswer,
+    details,
     projection,
     semanticHash: canonicalHash(projection),
   };
@@ -2454,6 +2691,535 @@ test("classic tool group keeps manual expansion through active rerender and coll
 
 test("completed classic tool details reload uniquely with default collapsed state", async ({ h4 }) => {
   await exerciseToolDetailTerminalRefresh(h4, "classic");
+});
+
+async function completeInvalidToolValidationLifecycle(h4) {
+  const { page } = h4;
+  const requestBoundary = h4.requestBoundary();
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.proveNonLoopbackBlocked();
+  await h4.submitGated(INVALID_TOOL_USER);
+  const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+  expect(finalDeltaGate[TOOL_FINAL_DELTA_GATE]).toMatchObject({
+    reached: true,
+    released: false,
+  });
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const activeAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(activeAgent.status).toBe(200);
+  expect(activeAgent.body.status).toBe("model");
+  expect(activeAgent.body.pendingToolCalls).toEqual([]);
+  const activeTrace = durableInvalidToolTraceEvidence(activeAgent.body);
+  expect(activeTrace.eventProjection.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "tool_completed",
+    "model_pending",
+    "model_started",
+  ]);
+  expect(activeTrace.toolCallIds).toHaveLength(1);
+  const toolCallId = activeTrace.toolCallIds[0];
+  expect(activeTrace.executionProjection).toEqual([{
+    toolCallId: "tool-1",
+    name: "read_file",
+    arguments: { path: "fixture.txt", unexpected: true },
+    status: "completed",
+    outcome: "failed",
+    result: EXPECTED_INVALID_TOOL_RESULT,
+  }]);
+  expect(activeTrace.eventProjection[2]?.toolCalls).toEqual([{
+    toolCallId: "tool-1",
+    name: "read_file",
+    arguments: { path: "fixture.txt", unexpected: true },
+  }]);
+  expect(activeTrace.eventProjection[4]).toMatchObject({
+    type: "tool_completed",
+    toolCallId: "tool-1",
+    name: "read_file",
+    outcome: "failed",
+    result: EXPECTED_INVALID_TOOL_RESULT,
+  });
+
+  const modelStartedEvents = activeAgent.body.events.filter((event) => event?.type === "model_started");
+  expect(modelStartedEvents).toHaveLength(2);
+  const firstRuntimeRunId = String(modelStartedEvents[0]?.data?.runtimeRunId || "");
+  const secondRuntimeRunId = String(modelStartedEvents[1]?.data?.runtimeRunId || "");
+  expect(firstRuntimeRunId).not.toBe("");
+  expect(secondRuntimeRunId).not.toBe("");
+  expect(activeAgent.body.activeRuntimeRunId).toBe(secondRuntimeRunId);
+  const firstRuntimeActive = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(firstRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  const secondRuntimeActive = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(secondRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(firstRuntimeActive.status).toBe(200);
+  expect(firstRuntimeActive.body).toMatchObject({
+    runId: firstRuntimeRunId,
+    sessionId: activeAgent.body.sessionId,
+    status: "completed",
+    nextCursor: 4,
+  });
+  expect(firstRuntimeActive.body.result?.content).toBe(INVALID_TOOL_STAGE);
+  expect(secondRuntimeActive.status).toBe(200);
+  expect(secondRuntimeActive.body).toMatchObject({
+    runId: secondRuntimeRunId,
+    sessionId: activeAgent.body.sessionId,
+    status: "running",
+    nextCursor: 0,
+  });
+  expect(secondRuntimeActive.body.events).toEqual([]);
+  expect(secondRuntimeActive.body.result?.content).toBe("");
+  expect(h4.controlIds()).toEqual({
+    agentRunIds: [agentRunId],
+    runtimeRunIds: [firstRuntimeRunId, secondRuntimeRunId],
+  });
+
+  const process = page.locator("#messages article.tool-process");
+  const items = process.locator("details.tool-process-item");
+  await expect(process).toHaveCount(1);
+  await expect(items).toHaveCount(1);
+  await expect(items).toHaveClass(/\bfailed\b/);
+  await expect(items.locator(".tool-process-detail pre")).toHaveCount(2);
+  await expect(items.locator(".tool-process-detail pre").first()).toContainText("fixture.txt");
+  await expect(items.locator(".tool-process-detail pre").first()).toContainText("unexpected");
+  await expect(items.locator(".tool-process-detail pre").last()).toContainText("unexpected");
+  const initialDom = await invalidToolLifecycleDomEvidence(page);
+  expect(String(await initialDom.outer.locator(".tool-process-stage-heading").textContent() || "").trim())
+    .not.toBe("");
+  expect(initialDom.projection).toMatchObject({
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 1,
+      result: 1,
+      final: 0,
+      ordinaryAssistant: 1,
+      assistantTotal: 2,
+    },
+    outerOpen: false,
+    itemOpen: false,
+    outerState: { running: true, failed: false },
+    itemState: { failed: true },
+    currentAction: "read_file",
+    arguments: { pathPresent: true, unexpectedPresent: true, unexpectedCount: 1 },
+    result: { present: true, unexpectedCount: 1, nonEmpty: true },
+    ordered: true,
+  });
+  expect(initialDom.projection.processKey).toBe("0:1");
+  const oldStage = await initialDom.outer.elementHandle();
+  await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(initialDom.outer).toHaveAttribute("open", "");
+  await initialDom.item.locator(":scope > summary").click();
+  await expect(initialDom.item).toHaveAttribute("open", "");
+  await expect(initialDom.details.first()).toContainText("fixture.txt");
+  await expect(initialDom.details.first()).toContainText("unexpected");
+  await expect(initialDom.details.last()).toContainText("unexpected");
+  expect(countOccurrences(await initialDom.details.first().textContent(), "unexpected")).toBe(1);
+  expect(countOccurrences(await initialDom.details.last().textContent(), "unexpected")).toBe(1);
+  await initialDom.item.locator(":scope > summary").click();
+  await expect(initialDom.item).not.toHaveAttribute("open", "");
+
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await expect(initialDom.finalAnswer).toHaveCount(1);
+  const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
+  expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
+  expect(await oldStage.evaluate((element) => element.isConnected)).toBe(false);
+  const afterFinalDeltaDom = await invalidToolLifecycleDomEvidence(page);
+  expect(afterFinalDeltaDom.projection.processKey).toBe(initialDom.projection.processKey);
+  expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
+  expect(afterFinalDeltaDom.projection.itemOpen).toBe(false);
+  expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: false, failed: true });
+  expect(afterFinalDeltaDom.projection.itemState).toEqual({ failed: true });
+  expect(afterFinalDeltaDom.projection.counts).toMatchObject({
+    user: 1,
+    commentary: 1,
+    toolProcess: 1,
+    toolItem: 1,
+    result: 1,
+    final: 1,
+    ordinaryAssistant: 2,
+    assistantTotal: 3,
+  });
+
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+  let completedAgent = null;
+  await expect.poll(async () => {
+    completedAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedAgent.body?.status,
+      nextCursor: completedAgent.body?.nextCursor,
+      activeRuntimeRunId: completedAgent.body?.activeRuntimeRunId,
+      eventTypes: (completedAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 9,
+    activeRuntimeRunId: "",
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "tool_completed",
+      "model_pending",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+  });
+  expect(completedAgent.status).toBe(200);
+  expect(completedAgent.body.pendingToolCalls).toEqual([]);
+  const completedTrace = durableInvalidToolTraceEvidence(completedAgent.body);
+  expect(completedTrace.executionProjection).toEqual(activeTrace.executionProjection);
+  expect(completedTrace.terminalEventCount).toBe(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+
+  const terminalDom = await invalidToolLifecycleDomEvidence(page);
+  expect(String(await terminalDom.outer.locator(".tool-process-stage-heading").textContent() || "").trim())
+    .not.toBe("");
+  expect(terminalDom.projection.processKey).toBe(initialDom.projection.processKey);
+  expect(terminalDom.projection.outerOpen).toBe(false);
+  expect(terminalDom.projection.itemOpen).toBe(false);
+  expect(terminalDom.projection.outerState).toEqual({ running: false, failed: true });
+  expect(terminalDom.projection.itemState).toEqual({ failed: true });
+  expect(terminalDom.projection.counts).toMatchObject({
+    user: 1,
+    commentary: 1,
+    toolProcess: 1,
+    toolItem: 1,
+    result: 1,
+    final: 1,
+    ordinaryAssistant: 2,
+    assistantTotal: 3,
+  });
+
+  const completedTraceElement = page.locator("#messages .execution-trace.completed");
+  const completedTraceToggle = completedTraceElement.locator(":scope > [data-execution-trace-toggle]");
+  await expect(completedTraceElement).not.toHaveClass(/\bis-expanded\b/);
+  await expect(completedTraceToggle).toHaveAttribute("aria-expanded", "false");
+  await completedTraceToggle.click();
+  await expect(completedTraceElement).toHaveClass(/\bis-expanded\b/);
+  await expect(completedTraceToggle).toHaveAttribute("aria-expanded", "true");
+  await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(terminalDom.outer).toHaveAttribute("open", "");
+  await terminalDom.item.locator(":scope > summary").click();
+  await expect(terminalDom.item).toHaveAttribute("open", "");
+  await expect(terminalDom.details.first()).toContainText("fixture.txt");
+  await expect(terminalDom.details.first()).toContainText("unexpected");
+  await expect(terminalDom.details.last()).toContainText("unexpected");
+  expect(countOccurrences(await terminalDom.details.first().textContent(), "unexpected")).toBe(1);
+  expect(countOccurrences(await terminalDom.details.last().textContent(), "unexpected")).toBe(1);
+  await terminalDom.item.locator(":scope > summary").click();
+  await expect(terminalDom.item).not.toHaveAttribute("open", "");
+  await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(terminalDom.outer).not.toHaveAttribute("open", "");
+  await completedTraceToggle.click();
+  await expect(completedTraceElement).not.toHaveClass(/\bis-expanded\b/);
+  await expect(completedTraceToggle).toHaveAttribute("aria-expanded", "false");
+
+  const firstRuntimeCompleted = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(firstRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  const secondRuntimeCompleted = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(secondRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(firstRuntimeCompleted.status).toBe(200);
+  expect(secondRuntimeCompleted.status).toBe(200);
+  expect(firstRuntimeCompleted.body.status).toBe("completed");
+  expect(secondRuntimeCompleted.body.status).toBe("completed");
+  expect(firstRuntimeCompleted.body.nextCursor).toBe(4);
+  expect(secondRuntimeCompleted.body.nextCursor).toBe(3);
+  expect(firstRuntimeCompleted.body.result?.content).toBe(INVALID_TOOL_STAGE);
+  expect(secondRuntimeCompleted.body.result?.content).toBe(INVALID_TOOL_FINAL);
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionResponse = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionResponse.status).toBe(200);
+  expect((sessionResponse.body.messages || []).map((message) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "tool-call",
+    "tool-result",
+    "assistant",
+  ]);
+  const sessionProjection = invalidSessionRoleContentProjection(sessionResponse.body.messages);
+  expect(sessionProjection).toEqual([
+    { role: "user", marker: "user" },
+    { role: "assistant", marker: "stage" },
+    { role: "tool-call", contentPresent: true },
+    { role: "tool-result", contentPresent: true, unexpectedCount: 1 },
+    { role: "assistant", marker: "final" },
+  ]);
+  const sessionToolMeta = invalidSessionToolMetaProjection(
+    sessionResponse.body.messages,
+    agentRunId,
+    toolCallId,
+  );
+  expect(sessionToolMeta).toEqual([
+    {
+      role: "tool-call",
+      toolCallId: "tool-1",
+      agentRunId: "agent-1",
+      agentEventType: "tool_started",
+      agentEventSeq: 4,
+      action: "read_file",
+      arguments: { path: "fixture.txt", unexpected: true },
+      native: true,
+      replayed: false,
+      outcome: "",
+      result: null,
+    },
+    {
+      role: "tool-result",
+      toolCallId: "tool-1",
+      agentRunId: "agent-1",
+      agentEventType: "tool_completed",
+      agentEventSeq: 5,
+      action: "read_file",
+      arguments: null,
+      native: true,
+      replayed: false,
+      outcome: "failed",
+      result: EXPECTED_INVALID_TOOL_RESULT,
+    },
+  ]);
+
+  const durable = await readDurableAgentRecord(h4, agentRunId);
+  expect(durable.record.status).toBe("completed");
+  expect(durable.record.nextSeq).toBe(10);
+  expect(durable.record.pendingToolCalls).toEqual([]);
+  expect(durable.record.events).toHaveLength(9);
+  expect(Object.keys(durable.record.toolExecutions || {})).toEqual([toolCallId]);
+  expect(stableInvalidToolResult(durable.record.toolExecutions[toolCallId]?.result)).toEqual(
+    EXPECTED_INVALID_TOOL_RESULT,
+  );
+
+  const metrics = await h4.metrics();
+  const expectedModelReceipt = {
+    role: "tool",
+    toolCallId: "tool-1",
+    name: "read_file",
+    ...EXPECTED_INVALID_TOOL_RESULT,
+  };
+  expect(metrics.chatRequests).toEqual([
+    { scenario: "invalid-tool-call", stream: true, hasToolResult: false },
+    {
+      scenario: "invalid-tool-final",
+      stream: true,
+      hasToolResult: true,
+      invalidReceipt: expectedModelReceipt,
+    },
+  ]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.productionToolDelegations).toBe(0);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  const requests = h4.requestEvidenceSince(requestBoundary);
+  expect(requests.agentPost).toBe(1);
+  expect(requests.runtimePost).toBe(0);
+  expect(requests.agentDelete).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+
+  const hashes = {
+    eventProjection: completedTrace.eventProjectionHash,
+    invalidReceiptProjection: completedTrace.executionProjectionHash,
+    modelToolReceiptProjection: canonicalHash(expectedModelReceipt),
+    sessionRoleContent: canonicalHash(sessionProjection),
+    sessionToolMeta: canonicalHash(sessionToolMeta),
+    activeDom: afterFinalDeltaDom.semanticHash,
+    terminalDom: terminalDom.semanticHash,
+  };
+  if (Object.keys(H4_6E_SEMANTIC_HASHES).length) {
+    for (const [key, value] of Object.entries(hashes)) {
+      expect(value, `H4-6E ${key}`).toBe(H4_6E_SEMANTIC_HASHES[key]);
+    }
+  }
+  h4.evidence("invalid-tool-arguments-active-to-terminal", {
+    identity: {
+      agentRunId: idHash(agentRunId),
+      toolCallId: idHash(toolCallId),
+      runtimeRunIds: [idHash(firstRuntimeRunId), idHash(secondRuntimeRunId)],
+      processKey: terminalDom.projection.processKey,
+    },
+    runtimeCursors: {
+      firstActive: Number(firstRuntimeActive.body.nextCursor || 0),
+      secondActive: Number(secondRuntimeActive.body.nextCursor || 0),
+      firstCompleted: Number(firstRuntimeCompleted.body.nextCursor || 0),
+      secondCompleted: Number(secondRuntimeCompleted.body.nextCursor || 0),
+    },
+    receipt: EXPECTED_INVALID_TOOL_RESULT,
+    modelToolReceipt: expectedModelReceipt,
+    requests: {
+      agentPost: requests.agentPost,
+      runtimePost: requests.runtimePost,
+      chat: metrics.chatRequests.length,
+      productionToolDelegations: metrics.productionToolDelegations,
+      toolExecutions: metrics.toolExecutions.length,
+    },
+    hashes,
+  });
+  return {
+    page,
+    agentRunId,
+    toolCallId,
+    sessionId,
+    firstRuntimeRunId,
+    secondRuntimeRunId,
+    completedTrace,
+    sessionProjection,
+    sessionToolMeta,
+    terminalDom,
+    metrics,
+    hashes,
+  };
+}
+
+test("invalid read_file arguments fail before execution and complete with final answer", async ({ h4 }) => {
+  await completeInvalidToolValidationLifecycle(h4);
+});
+
+test("completed invalid read_file receipt reloads uniquely without execution", async ({ h4 }) => {
+  const before = await completeInvalidToolValidationLifecycle(h4);
+  const refreshBoundary = h4.requestBoundary();
+  const metricsBefore = await h4.metrics();
+  await before.page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(before.page, "bundle");
+  const persistedSession = before.page.locator(
+    `#sessionList button.session-main[data-session-id="${before.sessionId}"]`,
+  );
+  await expect(persistedSession).toHaveCount(1);
+  await persistedSession.click();
+
+  await expect(before.page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(before.page.locator("#stopBtn")).toBeDisabled();
+  await expect(before.page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(before.page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+  const domAfter = await invalidToolLifecycleDomEvidence(before.page);
+  expect(domAfter.projection).toEqual(before.terminalDom.projection);
+  expect(domAfter.projection.outerOpen).toBe(false);
+  expect(domAfter.projection.itemOpen).toBe(false);
+  expect(domAfter.projection.outerState).toEqual({ running: false, failed: true });
+  expect(domAfter.projection.itemState).toEqual({ failed: true });
+
+  const traceAfterReload = before.page.locator("#messages .execution-trace.completed");
+  const traceToggleAfterReload = traceAfterReload.locator(":scope > [data-execution-trace-toggle]");
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "false");
+  await traceToggleAfterReload.click();
+  await expect(traceAfterReload).toHaveClass(/\bis-expanded\b/);
+  await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(domAfter.outer).toHaveAttribute("open", "");
+  await domAfter.item.locator(":scope > summary").click();
+  await expect(domAfter.item).toHaveAttribute("open", "");
+  await expect(domAfter.details.first()).toContainText("fixture.txt");
+  await expect(domAfter.details.first()).toContainText("unexpected");
+  await expect(domAfter.details.last()).toContainText("unexpected");
+  expect(countOccurrences(await domAfter.details.first().textContent(), "unexpected")).toBe(1);
+  expect(countOccurrences(await domAfter.details.last().textContent(), "unexpected")).toBe(1);
+  await domAfter.item.locator(":scope > summary").click();
+  await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await traceToggleAfterReload.click();
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "false");
+
+  const agentAfter = await fetchProductionJson(
+    before.page,
+    `/api/agent/runs/${encodeURIComponent(before.agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfter.status).toBe(200);
+  const completedTraceAfter = durableInvalidToolTraceEvidence(agentAfter.body);
+  expect(completedTraceAfter).toEqual(before.completedTrace);
+  expect(completedTraceAfter.toolCallIds).toEqual([before.toolCallId]);
+  const sessionAfter = await fetchProductionJson(
+    before.page,
+    `/api/sessions/${encodeURIComponent(before.sessionId)}`,
+  );
+  expect(sessionAfter.status).toBe(200);
+  const sessionProjectionAfter = invalidSessionRoleContentProjection(sessionAfter.body.messages);
+  const sessionToolMetaAfter = invalidSessionToolMetaProjection(
+    sessionAfter.body.messages,
+    before.agentRunId,
+    before.toolCallId,
+  );
+  expect(sessionProjectionAfter).toEqual(before.sessionProjection);
+  expect(sessionToolMetaAfter).toEqual(before.sessionToolMeta);
+
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual([]);
+  expect(metricsAfter.productionToolDelegations).toBe(0);
+  expect(metricsAfter.unsafeToolRequests).toBe(0);
+  const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshRequests.agentDelete).toBe(0);
+  expect(h4.controlIds()).toEqual({
+    agentRunIds: [before.agentRunId],
+    runtimeRunIds: [before.firstRuntimeRunId, before.secondRuntimeRunId],
+  });
+  expect(h4.pageErrors).toEqual([]);
+
+  const refreshProjection = {
+    agentRunStable: completedTraceAfter.agentRunId === before.completedTrace.agentRunId,
+    toolCallStable: completedTraceAfter.toolCallIdHashes[0]
+      === before.completedTrace.toolCallIdHashes[0],
+    eventProjectionStable: completedTraceAfter.eventProjectionHash
+      === before.completedTrace.eventProjectionHash,
+    sessionProjectionStable: JSON.stringify(sessionProjectionAfter)
+      === JSON.stringify(before.sessionProjection),
+    sessionToolMetaStable: JSON.stringify(sessionToolMetaAfter)
+      === JSON.stringify(before.sessionToolMeta),
+    processKeyStable: domAfter.projection.processKey === before.terminalDom.projection.processKey,
+    refreshDefaultCollapsed: !domAfter.projection.outerOpen && !domAfter.projection.itemOpen,
+    counts: domAfter.projection.counts,
+    requests: {
+      agentPost: refreshRequests.agentPost,
+      runtimePost: refreshRequests.runtimePost,
+      chatDelta: metricsAfter.chatRequests.length - metricsBefore.chatRequests.length,
+      toolDelta: metricsAfter.toolExecutions.length - metricsBefore.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    ...before.hashes,
+    refreshLifecycle: canonicalHash(refreshProjection),
+  };
+  if (Object.keys(H4_6E_SEMANTIC_HASHES).length) {
+    expect(hashes).toEqual(H4_6E_SEMANTIC_HASHES);
+  }
+  h4.evidence("invalid-tool-arguments-terminal-refresh", {
+    identity: {
+      agentRunId: idHash(before.agentRunId),
+      toolCallId: idHash(before.toolCallId),
+      processKey: domAfter.projection.processKey,
+    },
+    refresh: refreshProjection,
+    hashes,
+  });
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {

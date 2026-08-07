@@ -33,6 +33,9 @@ TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL"
 MULTI_TOOL_USER = "H4_MULTI_TOOL_USER"
 MULTI_TOOL_STAGE = "H4_MULTI_TOOL_STAGE"
 MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL"
+INVALID_TOOL_USER = "H4_INVALID_TOOL_ARGUMENTS_USER"
+INVALID_TOOL_STAGE = "H4_INVALID_TOOL_ARGUMENTS_STAGE"
+INVALID_TOOL_FINAL = "H4_INVALID_TOOL_ARGUMENTS_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -41,6 +44,7 @@ STREAM_TWO = "H4_STREAM_TWO "
 STREAM_THREE = "H4_STREAM_THREE"
 TOOL_CALL_ID = "h4-read-call-1"
 MULTI_TOOL_CALL_IDS = ("h4-multi-read-call-1", "h4-multi-read-call-2")
+INVALID_TOOL_CALL_ID = "h4-invalid-read-call-1"
 READ_PATH = "fixture.txt"
 REFRESH_GATE_NAMES = (
     "before-first-delta",
@@ -247,9 +251,11 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if message.get("role") == "user":
             user_text = _message_text(message)
         if message.get("role") == "tool" or message.get("tool_call_id") in {
-            TOOL_CALL_ID, *MULTI_TOOL_CALL_IDS,
+            TOOL_CALL_ID, INVALID_TOOL_CALL_ID, *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
+    if INVALID_TOOL_USER in user_text:
+        return ("invalid-tool-final" if has_tool_result else "invalid-tool-call", has_tool_result)
     if MULTI_TOOL_USER in user_text:
         return ("multi-tool-detail-final" if has_tool_result else "multi-tool-detail-call", has_tool_result)
     if TOOL_DETAILS_USER in user_text:
@@ -261,6 +267,39 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     if CLASSIC_USER in user_text:
         return "classic-text", has_tool_result
     return "plain-text", has_tool_result
+
+
+def _invalid_tool_receipt_projection(payload: dict) -> dict | None:
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        if str(message.get("tool_call_id") or "") != INVALID_TOOL_CALL_ID:
+            continue
+        try:
+            result = json.loads(str(message.get("content") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        return {
+            "role": "tool",
+            "toolCallId": "tool-1",
+            "name": str(message.get("name") or ""),
+            "ok": result.get("ok"),
+            "action": str(result.get("action") or ""),
+            "errorCode": str(result.get("errorCode") or ""),
+            "errorPresent": bool(str(result.get("error") or "").strip()),
+            "failureCount": int(result.get("failureCount") or 0),
+            "fieldErrors": [
+                {
+                    "field": str(item.get("field") or ""),
+                    "reason": str(item.get("reason") or ""),
+                }
+                for item in (result.get("fieldErrors") or [])
+                if isinstance(item, dict)
+            ],
+        }
+    return None
 
 
 def _chunk(delta: dict, finish_reason=None, usage=None) -> dict:
@@ -370,14 +409,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         scenario, has_tool_result = _scenario_for(payload)
         self._record("agent-chat")
-        METRICS.append("chatRequests", {
+        chat_metric = {
             "scenario": scenario,
             "stream": True,
             "hasToolResult": has_tool_result,
-        })
+        }
+        if scenario == "invalid-tool-final":
+            chat_metric["invalidReceipt"] = _invalid_tool_receipt_projection(payload)
+        METRICS.append("chatRequests", chat_metric)
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if scenario not in (
             "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
+            "invalid-tool-call",
         ) and current_chat_count == 1:
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
@@ -431,7 +474,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_frame("[DONE]")
             return
 
-        if scenario in ("tool-detail-final", "multi-tool-detail-final"):
+        if scenario in ("tool-detail-final", "multi-tool-detail-final", "invalid-tool-final"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -452,7 +495,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             final_text = (
                 MULTI_TOOL_FINAL
                 if scenario == "multi-tool-detail-final"
-                else TOOL_DETAILS_FINAL
+                else (
+                    INVALID_TOOL_FINAL
+                    if scenario == "invalid-tool-final"
+                    else TOOL_DETAILS_FINAL
+                )
             )
             if not write_tool_detail_frame(_chunk({
                 "role": "assistant",
@@ -470,11 +517,14 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_tool_detail_frame("[DONE]")
             return
 
-        if scenario in ("tool-call", "tool-detail-call", "multi-tool-detail-call"):
+        if scenario in (
+            "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
+        ):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
                 "multi-tool-detail-call": MULTI_TOOL_STAGE,
+                "invalid-tool-call": INVALID_TOOL_STAGE,
             }[scenario]
             tool_calls = [{
                 "index": 0,
@@ -511,6 +561,19 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         },
                     },
                 ]
+            elif scenario == "invalid-tool-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": INVALID_TOOL_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": READ_PATH, "unexpected": True},
+                            separators=(",", ":"),
+                        ),
+                    },
+                }]
             frames = [
                 _chunk({"role": "assistant", "content": stage_text}),
                 _chunk({"tool_calls": tool_calls}),
