@@ -570,6 +570,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **H4-6I 补充状态（2026-08-08）**：H4-6I 以固定原始 malformed JSON `{"path":"fixture.txt"` 同时覆盖默认 bundle 与 direct classic。工具参数真实进入生产 `json.loads()` / `parseError` 分支，并在 `execute_registered_tool` 前以 `invalid_tool_arguments`、空 `fieldErrors` 和首次 `failureCount=1` 失败；原始坏 JSON 只在 AgentRun 耐久事实中闭合，Session/UI 则保留规范化的 `read_file` action、无 path 且不保留原文。两种入口均闭合零生产委托/执行、九事件 completed、Runtime `4/0 → 4/3`、Session 五角色、失败 DOM、完整刷新四项零增量及八类对等哈希。详见 [`H4-6I 工具参数 JSON 解析失败生命周期`](harness/h4-6i-tool-arguments-json-parse-error.md)。该完成声明不覆盖缺 path、其他解析错误、执行器失败、取消、长输出或真实外部副作用 exactly-once。
 
+**H4-6J 补充状态（2026-08-08）**：H4-6J 以固定合法 JSON 原始字符串 `"{}"` 同时覆盖默认 bundle 与 direct classic。参数成功解析后命中生产 `read_file` schema 的唯一 `path/required/is required`，在执行器前以 `invalid_tool_arguments`、首次 `failureCount=1` 失败；生产委托/执行与 unsafe 均为 0，但 AgentRun 持久化唯一失败 execution，失败 receipt 进入第二轮且父 Run completed。Session/UI 保留规范化 `read_file` action、无 path，两种入口闭合九事件、Runtime `4/0 → 4/3`、Session 五角色、失败 DOM、完整刷新四项零增量及八类对等哈希。完整矩阵同时以具体旧节点 `Element is not attached` 证明共享 helper 遇到活动态生产重绘；修正仅在当前具体节点仍 open 时点击并始终严格验证可见节点 closed，没有修改生产、超时、retry 或断言强度。详见 [`H4-6J read_file 缺少必填 path 的 schema 失败`](harness/h4-6j-read-file-missing-path-schema-failure.md)。该完成声明不覆盖其他 required 字段、其他工具、真实模型/网络、跨进程 active、取消或发布。
+
 **工作项**：
 
 1. 列出现有 AgentRun 状态、事件类型、事件载荷和前端处理函数。
@@ -661,6 +663,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 **H4-6H 阶段更新（2026-08-08）**：上段剩余项中的“缺文件执行器失败”现已由 H4-6H 收口；当前真实剩余应读作权限、编码、大文件、其他工具执行器失败及其余已列生命周期。H4-6H 不改变其他产品语义或安全边界，完整证据与限制见 [`H4-6H read_file 缺文件生产执行器失败`](harness/h4-6h-read-file-missing-file-executor-failure.md)。
 
 **H4-6I 阶段更新（2026-08-08）**：上段剩余项中的“JSON parse”现已由 H4-6I 收口；当前执行前参数失败仍保留缺 path 及其他未覆盖解析错误。H4-6I 不改变生产协议、持久化或安全边界，且不把 AgentRun 原始坏 JSON 与 Session/UI 规范化投影混为同一事实；完整证据与限制见 [`H4-6I 工具参数 JSON 解析失败生命周期`](harness/h4-6i-tool-arguments-json-parse-error.md)。
+
+**H4-6J 阶段更新（2026-08-08）**：上段剩余项中的“缺 path”现已由 H4-6J 收口；当前执行前参数失败仍保留其他 required 字段与其他未覆盖解析错误。H4-6J 不改变生产协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6J read_file 缺少必填 path 的 schema 失败`](harness/h4-6j-read-file-missing-path-schema-failure.md)。
 
 **工作项**：
 

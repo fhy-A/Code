@@ -24,6 +24,10 @@ const PARSE_ERROR_TOOL_USER = "H4_PARSE_ERROR_TOOL_ARGUMENTS_USER";
 const PARSE_ERROR_TOOL_STAGE = "H4_PARSE_ERROR_TOOL_ARGUMENTS_STAGE";
 const PARSE_ERROR_TOOL_FINAL = "H4_PARSE_ERROR_TOOL_ARGUMENTS_FINAL";
 const MALFORMED_TOOL_ARGUMENTS = '{"path":"fixture.txt"';
+const MISSING_PATH_TOOL_USER = "H4_MISSING_PATH_TOOL_ARGUMENTS_USER";
+const MISSING_PATH_TOOL_STAGE = "H4_MISSING_PATH_TOOL_ARGUMENTS_STAGE";
+const MISSING_PATH_TOOL_FINAL = "H4_MISSING_PATH_TOOL_ARGUMENTS_FINAL";
+const MISSING_PATH_TOOL_ARGUMENTS = "{}";
 const EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER";
 const EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE";
 const EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL";
@@ -114,6 +118,16 @@ const H4_6I_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "f460fea9ea4f5fe16f53bace264c0ab3904b5fe5610ac8d82dcb824068f6c1da",
   activeDom: "e54e3de59dc8d46a78a819ae0b5b65d791462444e1b592cff96bff71c0226cac",
   terminalDom: "0c10ac9845c8e616e880ef9f693636390fffe942d390201d775d343ac0ab72e3",
+  refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
+});
+const H4_6J_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "8e0d1a69b13eb0c91eaea433f851f8c1ac4e6ce2e1561f2045bbfab19f846ce5",
+  missingPathReceiptProjection: "989616f6ead8ea168f0f785627866befd8960d4221be83a36c2b6558764afda7",
+  modelToolReceiptProjection: "027989be15a449c7cf563e2238404c093361ac7db5ef8dad367b1f6875c6e497",
+  sessionRoleContent: "73166b500f99d97a978f7d5c8e057a50d3aa0ea44c062de8e12e13909f2d524b",
+  sessionToolMeta: "b912f584b5b211e7b79d2ae517529bc89bbd4dcd77dfd5258b9c9434d5d3a6da",
+  activeDom: "30ec16a776f8ecf36035827abb24185ec2d34050288f1db31ebbaf5f625c72da",
+  terminalDom: "ee55a3e8a0629a776a81e4a411261227a9a708314f40a7bbcc5c01ce4b3b9c88",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
 
@@ -235,6 +249,15 @@ const EXPECTED_PARSE_ERROR_TOOL_RESULT = Object.freeze({
   errorPresent: true,
   failureCount: 1,
   fieldErrors: [],
+});
+
+const EXPECTED_MISSING_PATH_TOOL_RESULT = Object.freeze({
+  ok: false,
+  action: "read_file",
+  errorCode: "invalid_tool_arguments",
+  errorPresent: true,
+  failureCount: 1,
+  fieldErrors: [{ field: "path", reason: "required" }],
 });
 
 const EXPECTED_EXECUTOR_RANGE_RESULT = Object.freeze({
@@ -475,6 +498,138 @@ const PARSE_ERROR_TOOL_FAILURE_CONTRACT = Object.freeze({
     return {
       present: Boolean(text),
       malformedRawPresent: text.includes(MALFORMED_TOOL_ARGUMENTS),
+      nonEmpty: Boolean(text.trim()),
+    };
+  },
+});
+
+const MISSING_PATH_TOOL_FAILURE_CONTRACT = Object.freeze({
+  key: "H4-6J",
+  userMarker: MISSING_PATH_TOOL_USER,
+  stageMarker: MISSING_PATH_TOOL_STAGE,
+  finalMarker: MISSING_PATH_TOOL_FINAL,
+  arguments: Object.freeze({}),
+  rawArguments: MISSING_PATH_TOOL_ARGUMENTS,
+  projectResult: stableInvalidToolResult,
+  expectedResult: EXPECTED_MISSING_PATH_TOOL_RESULT,
+  receiptHashKey: "missingPathReceiptProjection",
+  chatCallScenario: "missing-path-tool-call",
+  chatFinalScenario: "missing-path-tool-final",
+  chatReceiptKey: "missingPathReceipt",
+  expectedDelegations: 0,
+  expectedToolExecutions: Object.freeze([]),
+  assertRawResult(result) {
+    expect(result).toMatchObject({
+      ok: false,
+      action: "read_file",
+      errorCode: "invalid_tool_arguments",
+      failureCount: 1,
+    });
+    expect(result?.fieldErrors).toEqual([{
+      field: "path",
+      reason: "required",
+      message: "is required",
+    }]);
+    expect(String(result?.error || "").trim()).not.toBe("");
+  },
+  hashes: H4_6J_SEMANTIC_HASHES,
+  runtimeCursors: Object.freeze({
+    firstActive: 4,
+    secondActive: 0,
+    firstCompleted: 4,
+    secondCompleted: 3,
+  }),
+  evidenceStem: "missing-path-tool-arguments",
+  domPrimaryArgumentMarkers: Object.freeze([]),
+  domArgumentMarkers: Object.freeze([]),
+  domResultMarkers: Object.freeze(["required"]),
+  expectedDomArguments: Object.freeze({
+    actionPresent: true,
+    pathPresent: false,
+  }),
+  expectedDomResult: Object.freeze({
+    present: true,
+    requiredFieldPresent: true,
+    requiredReasonPresent: true,
+    additionalPropertyPresent: false,
+    nonEmpty: true,
+  }),
+  expectedSessionProjection: Object.freeze([
+    { role: "user", marker: "user" },
+    { role: "assistant", marker: "stage" },
+    { role: "tool-call", contentPresent: true, actionPresent: true, pathPresent: false },
+    {
+      role: "tool-result",
+      contentPresent: true,
+      requiredFieldPresent: true,
+      requiredReasonPresent: true,
+      additionalPropertyPresent: false,
+    },
+    { role: "assistant", marker: "final" },
+  ]),
+  get expectedSessionToolMeta() {
+    return [
+      {
+        role: "tool-call",
+        toolCallId: "tool-1",
+        agentRunId: "agent-1",
+        agentEventType: "tool_started",
+        agentEventSeq: 4,
+        action: "read_file",
+        arguments: { action: "read_file", pathPresent: false },
+        native: true,
+        replayed: false,
+        outcome: "",
+        result: null,
+      },
+      {
+        role: "tool-result",
+        toolCallId: "tool-1",
+        agentRunId: "agent-1",
+        agentEventType: "tool_completed",
+        agentEventSeq: 5,
+        action: "read_file",
+        arguments: null,
+        native: true,
+        replayed: false,
+        outcome: "failed",
+        result: this.expectedResult,
+      },
+    ];
+  },
+  sessionCallProjection(content) {
+    return {
+      contentPresent: Boolean(content.trim()),
+      actionPresent: content.includes("read_file"),
+      pathPresent: /[\"']?path[\"']?\s*:/.test(content),
+    };
+  },
+  sessionResultProjection(content) {
+    return {
+      contentPresent: Boolean(content.trim()),
+      requiredFieldPresent: /\bpath\b/.test(content),
+      requiredReasonPresent: /\brequired\b/.test(content),
+      additionalPropertyPresent: content.includes("additional_property"),
+    };
+  },
+  sessionArgumentsProjection(tool) {
+    return {
+      action: String(tool.action || ""),
+      pathPresent: Object.prototype.hasOwnProperty.call(tool, "path"),
+    };
+  },
+  domArgumentsProjection(text) {
+    return {
+      actionPresent: text.includes('"action": "read_file"'),
+      pathPresent: /[\"']?path[\"']?\s*:/.test(text),
+    };
+  },
+  domResultProjection(text) {
+    return {
+      present: Boolean(text),
+      requiredFieldPresent: /\bpath\b/.test(text),
+      requiredReasonPresent: /\brequired\b/.test(text),
+      additionalPropertyPresent: text.includes("additional_property"),
       nonEmpty: Boolean(text.trim()),
     };
   },
@@ -829,6 +984,20 @@ function durableFailedToolTraceEvidence(snapshot, contract) {
     executionProjection,
     executionProjectionHash: canonicalHash(executionProjection),
   };
+}
+
+function assertFailureContractRawArguments(snapshot, contract) {
+  if (contract.rawArguments == null) return;
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const modelCompleted = events.find((event) => event?.type === "model_completed");
+  const toolStarted = events.find((event) => event?.type === "tool_started");
+  const toolCompleted = events.find((event) => event?.type === "tool_completed");
+  const executions = Array.isArray(snapshot?.toolExecutions) ? snapshot.toolExecutions : [];
+  expect(modelCompleted?.data?.toolCalls?.[0]?.function?.arguments).toBe(contract.rawArguments);
+  expect(toolStarted?.data?.arguments).toBe(contract.rawArguments);
+  expect(toolCompleted?.data?.arguments).toBe(contract.rawArguments);
+  expect(executions).toHaveLength(1);
+  expect(executions[0]?.arguments).toBe(contract.rawArguments);
 }
 
 function durableToolRecordProjection(record, traceEvidence) {
@@ -3295,6 +3464,7 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   expect(activeAgent.body.status).toBe("model");
   expect(activeAgent.body.pendingToolCalls).toEqual([]);
   const activeTrace = durableFailedToolTraceEvidence(activeAgent.body, contract);
+  assertFailureContractRawArguments(activeAgent.body, contract);
   expect(activeTrace.eventProjection.map((event) => event.type)).toEqual([
     "created",
     "model_started",
@@ -3424,8 +3594,36 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   const oldStage = await initialDom.outer.elementHandle();
   await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(initialDom.outer).toHaveAttribute("open", "");
+  const firstItemNode = await initialDom.item.elementHandle();
+  const firstSummaryNode = await initialDom.item.locator(":scope > summary").elementHandle();
+  expect(firstItemNode).not.toBeNull();
+  expect(firstSummaryNode).not.toBeNull();
+  expect(await firstItemNode.evaluate((item, summary) => (
+    item.querySelector(":scope > summary") === summary
+  ), firstSummaryNode)).toBe(true);
   await initialDom.item.locator(":scope > summary").click();
   await expect(initialDom.item).toHaveAttribute("open", "");
+  const openedItemNode = await initialDom.item.elementHandle();
+  const openedSummaryNode = await initialDom.item.locator(":scope > summary").elementHandle();
+  expect(openedItemNode).not.toBeNull();
+  expect(openedSummaryNode).not.toBeNull();
+  const capturedItemConnectedAfterFirst = await firstItemNode.evaluate((item) => item.isConnected);
+  const openedItemIsCapturedItem = await firstItemNode.evaluate(
+    (item, opened) => item === opened,
+    openedItemNode,
+  );
+  const firstOpenImmediately = await openedItemNode.evaluate((item) => item.open);
+  h4.diagnosticSteps.push({
+    step: "failed-tool-item-first-click",
+    capturedItemConnectedAfterFirst,
+    capturedSummaryConnectedAfterFirst: await firstSummaryNode.evaluate((summary) => summary.isConnected),
+    openedItemIsCapturedItem,
+    openedSummaryMatchesItem: await openedItemNode.evaluate((item, summary) => (
+      item.querySelector(":scope > summary") === summary
+    ), openedSummaryNode),
+    openImmediately: firstOpenImmediately,
+  });
+  expect(firstOpenImmediately).toBe(true);
   for (const marker of contract.domPrimaryArgumentMarkers || ["fixture.txt"]) {
     await expect(initialDom.details.first()).toContainText(marker);
   }
@@ -3435,7 +3633,39 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   for (const marker of contract.domResultMarkers) {
     await expect(initialDom.details.last()).toContainText(marker);
   }
-  await initialDom.item.locator(":scope > summary").click();
+  const currentItemNode = await initialDom.item.elementHandle();
+  const currentSummaryNode = await initialDom.item.locator(":scope > summary").elementHandle();
+  expect(currentItemNode).not.toBeNull();
+  expect(currentSummaryNode).not.toBeNull();
+  const openedItemConnectedBeforeSecond = await openedItemNode.evaluate((item) => item.isConnected);
+  const currentIsOpenedItem = await openedItemNode.evaluate((item, current) => item === current, currentItemNode);
+  const currentSummaryIsOpenedSummary = await openedSummaryNode.evaluate(
+    (summary, current) => summary === current,
+    currentSummaryNode,
+  );
+  const currentOpenBeforeSecond = await currentItemNode.evaluate((item) => item.open);
+  const currentSummaryMatchesItem = await currentItemNode.evaluate((item, summary) => (
+    item.querySelector(":scope > summary") === summary
+  ), currentSummaryNode);
+  if (currentOpenBeforeSecond) {
+    await currentSummaryNode.click();
+  } else {
+    expect(openedItemConnectedBeforeSecond).toBe(false);
+    expect(currentIsOpenedItem).toBe(false);
+  }
+  const currentOpenAfterSecond = await currentItemNode.evaluate((item) => item.open);
+  h4.diagnosticSteps.push({
+    step: "failed-tool-item-second-click",
+    openedItemConnectedBeforeSecond,
+    currentIsOpenedItem,
+    currentSummaryIsOpenedSummary,
+    currentSummaryMatchesItem,
+    currentOpenBeforeSecond,
+    currentOpenAfterSecond,
+    currentConnectedAfterSecond: await currentItemNode.evaluate((item) => item.isConnected),
+    currentSummaryConnectedAfterSecond: await currentSummaryNode.evaluate((summary) => summary.isConnected),
+  });
+  expect(currentOpenAfterSecond).toBe(false);
   await expect(initialDom.item).not.toHaveAttribute("open", "");
 
   await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
@@ -3492,6 +3722,7 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   expect(completedAgent.status).toBe(200);
   expect(completedAgent.body.pendingToolCalls).toEqual([]);
   const completedTrace = durableFailedToolTraceEvidence(completedAgent.body, contract);
+  assertFailureContractRawArguments(completedAgent.body, contract);
   expect(completedTrace.executionProjection).toEqual(activeTrace.executionProjection);
   expect(completedTrace.terminalEventCount).toBe(1);
   await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
@@ -3600,6 +3831,9 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   expect(durable.record.pendingToolCalls).toEqual([]);
   expect(durable.record.events).toHaveLength(9);
   expect(Object.keys(durable.record.toolExecutions || {})).toEqual([toolCallId]);
+  if (contract.rawArguments != null) {
+    expect(durable.record.toolExecutions[toolCallId]?.arguments).toBe(contract.rawArguments);
+  }
   expect(contract.projectResult(durable.record.toolExecutions[toolCallId]?.result)).toEqual(
     contract.expectedResult,
   );
@@ -3862,6 +4096,14 @@ test("bundle malformed read_file arguments parse failure lifecycle and reload", 
 
 test("direct classic malformed read_file arguments parse failure lifecycle and reload", async ({ h4 }) => {
   await exerciseToolFailureTerminalRefresh(h4, "classic", PARSE_ERROR_TOOL_FAILURE_CONTRACT);
+});
+
+test("bundle missing read_file path schema failure lifecycle and reload", async ({ h4 }) => {
+  await exerciseToolFailureTerminalRefresh(h4, "bundle", MISSING_PATH_TOOL_FAILURE_CONTRACT);
+});
+
+test("direct classic missing read_file path schema failure lifecycle and reload", async ({ h4 }) => {
+  await exerciseToolFailureTerminalRefresh(h4, "classic", MISSING_PATH_TOOL_FAILURE_CONTRACT);
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {
