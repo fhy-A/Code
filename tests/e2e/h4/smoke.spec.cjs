@@ -1741,11 +1741,14 @@ test("default bundle executes one read-only tool without duplicate DOM", async (
   });
 });
 
-test("bundle tool group keeps manual expansion through active rerender and collapses at terminal", async ({ h4 }) => {
+async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
-  await h4.open("bundle");
-  await assertFrontendRuntime(page, "bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
   await h4.proveNonLoopbackBlocked();
   await h4.submitGated(TOOL_DETAILS_USER);
   const firstGateSnapshot = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
@@ -2030,7 +2033,11 @@ test("bundle tool group keeps manual expansion through active rerender and colla
     terminalDom: terminalDom.semanticHash,
   };
   expect(hashes).toEqual(H4_6A_ACTIVE_TO_TERMINAL_HASHES);
-  h4.evidence("tool-detail-active-to-terminal", {
+  h4.evidence(
+    runtime === "classic"
+      ? "classic-tool-detail-active-to-terminal"
+      : "tool-detail-active-to-terminal",
+    {
     identity: {
       agentRunId: idHash(agentRunId),
       toolCallId: idHash(toolCallId),
@@ -2041,13 +2048,21 @@ test("bundle tool group keeps manual expansion through active rerender and colla
     )),
     lifecycle: lifecycleProjection,
     hashes,
-  });
+    },
+  );
+}
+
+test("bundle tool group keeps manual expansion through active rerender and collapses at terminal", async ({ h4 }) => {
+  await exerciseToolDetailActiveToTerminal(h4, "bundle");
 });
 
-test("completed bundle tool details reload uniquely with default collapsed state", async ({ h4 }) => {
+async function exerciseToolDetailTerminalRefresh(h4, runtime) {
   const { page } = h4;
-  await h4.open("bundle");
-  await assertFrontendRuntime(page, "bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
   await h4.proveNonLoopbackBlocked();
   await h4.submitGated(TOOL_DETAILS_USER);
   await h4.waitGate(TOOL_FINAL_DELTA_GATE);
@@ -2149,7 +2164,10 @@ test("completed bundle tool details reload uniquely with default collapsed state
   const metricsBefore = await h4.metrics();
   const refreshBoundary = h4.requestBoundary();
   await page.reload({ waitUntil: "domcontentloaded" });
-  await assertFrontendRuntime(page, "bundle");
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
   const persistedSession = page.locator(
     `#sessionList button.session-main[data-session-id="${sessionId}"]`,
   );
@@ -2260,7 +2278,11 @@ test("completed bundle tool details reload uniquely with default collapsed state
     terminalDom: domBefore.semanticHash,
   };
   expect(hashes).toEqual(H4_6A_TERMINAL_REFRESH_HASHES);
-  h4.evidence("tool-detail-terminal-refresh", {
+  h4.evidence(
+    runtime === "classic"
+      ? "classic-tool-detail-terminal-refresh"
+      : "tool-detail-terminal-refresh",
+    {
     identity: {
       agentRunId: idHash(agentRunId),
       toolCallId: idHash(toolCallId),
@@ -2269,7 +2291,20 @@ test("completed bundle tool details reload uniquely with default collapsed state
     refresh: refreshProjection,
     hashes,
     expansionBoundary: "page-local outer and item details reset to collapsed on full reload",
-  });
+    },
+  );
+}
+
+test("completed bundle tool details reload uniquely with default collapsed state", async ({ h4 }) => {
+  await exerciseToolDetailTerminalRefresh(h4, "bundle");
+});
+
+test("classic tool group keeps manual expansion through active rerender and collapses at terminal", async ({ h4 }) => {
+  await exerciseToolDetailActiveToTerminal(h4, "classic");
+});
+
+test("completed classic tool details reload uniquely with default collapsed state", async ({ h4 }) => {
+  await exerciseToolDetailTerminalRefresh(h4, "classic");
 });
 
 test("classic fallback completes one plain-text task", async ({ h4 }) => {
