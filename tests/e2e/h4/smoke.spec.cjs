@@ -31,6 +31,9 @@ const MISSING_PATH_TOOL_ARGUMENTS = "{}";
 const EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER";
 const EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE";
 const EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL";
+const REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER";
+const REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE";
+const REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL";
 const MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER";
 const MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE";
 const MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL";
@@ -130,6 +133,17 @@ const H4_6J_SEMANTIC_HASHES = Object.freeze({
   terminalDom: "ee55a3e8a0629a776a81e4a411261227a9a708314f40a7bbcc5c01ce4b3b9c88",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
+const H4_6K_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "1d02e735ad701d3394a2dae9eec019d4d22e97fb6fb111de1b90eaf09096aa07",
+  retryExecutionProjection: "c4f4a8432ad9be01f331e72be1c9b6bd709bb7eda508c3b00604a2967d8c31fe",
+  modelToolReceiptProjection: "4d02940043fc3266a6e6bf6e2a94ab7e775dd539401e84f40255daa29ed1b721",
+  forcedFinalProjection: "30387bd58028a9ceef0f9d0cae7b9421c283570773270c995cf972e60e088ced",
+  runtimeProjection: "cfe81b1df3da02903778c0c761e9efed2ce3464788c50d7d0af5231517315c1c",
+  sessionRoleContent: "b9a2d2b56e618c0b939b4bd29690bcf20580cba69954aaf8cf704dd31f1367a2",
+  sessionToolMeta: "76c4d8cfbc85aefd48242eedea1a13b66314430e17860a837b345142e7e6b211",
+  terminalDom: "062793b9555a641084d28f70b8b3028af45ed40847f60ac547222c85dcba36f7",
+  refreshLifecycle: "ae09c60e831dec8ffd7295e9baef598b898a1061ac85250d61e2e1936cc6fc44",
+});
 
 function idHash(value) {
   const raw = String(value || "");
@@ -217,6 +231,83 @@ function stableExecutorRangeToolResult(result) {
     retryLimitReached: Boolean(result?.retryLimitReached),
   };
 }
+
+function stableRepeatedRangeFailureResult(result) {
+  const error = String(result?.error || "");
+  return {
+    ok: result?.ok === false ? false : result?.ok,
+    action: String(result?.action || ""),
+    errorCode: String(result?.errorCode || ""),
+    errorPresent: Boolean(error.trim()),
+    startLineMentioned: error.includes("startLine"),
+    endLineMentioned: error.includes("endLine"),
+    failureCount: Number(result?.failureCount || 0),
+    fieldErrorsPresent: Object.prototype.hasOwnProperty.call(result || {}, "fieldErrors"),
+    retryBlocked: Boolean(result?.retryBlocked),
+    retryLimitReached: Boolean(result?.retryLimitReached),
+  };
+}
+
+const EXPECTED_REPEATED_RANGE_RESULTS = Object.freeze([
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    errorCode: "",
+    errorPresent: true,
+    startLineMentioned: true,
+    endLineMentioned: true,
+    failureCount: 1,
+    fieldErrorsPresent: false,
+    retryBlocked: false,
+    retryLimitReached: false,
+  }),
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    errorCode: "",
+    errorPresent: true,
+    startLineMentioned: true,
+    endLineMentioned: true,
+    failureCount: 2,
+    fieldErrorsPresent: false,
+    retryBlocked: false,
+    retryLimitReached: false,
+  }),
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    errorCode: "",
+    errorPresent: true,
+    startLineMentioned: true,
+    endLineMentioned: true,
+    failureCount: 3,
+    fieldErrorsPresent: false,
+    retryBlocked: false,
+    retryLimitReached: true,
+  }),
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    errorCode: "repeated_tool_failure",
+    errorPresent: true,
+    startLineMentioned: false,
+    endLineMentioned: false,
+    failureCount: 3,
+    fieldErrorsPresent: false,
+    retryBlocked: true,
+    retryLimitReached: false,
+  }),
+]);
+
+const REPEATED_RANGE_FAILURE_CONTRACT = Object.freeze({
+  key: "H4-6K",
+  userMarker: REPEATED_RANGE_FAILURE_USER,
+  stageMarker: REPEATED_RANGE_FAILURE_STAGE,
+  finalMarker: REPEATED_RANGE_FAILURE_FINAL,
+  arguments: Object.freeze({ path: "fixture.txt", startLine: 2, endLine: 1 }),
+  projectResult: stableRepeatedRangeFailureResult,
+  hashes: H4_6K_SEMANTIC_HASHES,
+});
 
 function stableMissingFileToolResult(result) {
   const error = String(result?.error || "");
@@ -966,6 +1057,8 @@ function durableFailedToolTraceEvidence(snapshot, contract) {
     if (data.name != null) projection.name = String(data.name);
     if (data.arguments != null) projection.arguments = parseToolArguments(data.arguments);
     if (data.replayed != null) projection.replayed = Boolean(data.replayed);
+    if (data.failureCount != null) projection.failureCount = Number(data.failureCount);
+    if (data.forcedFinal != null) projection.forcedFinal = Boolean(data.forcedFinal);
     if (data.result != null) projection.result = contract.projectResult(data.result);
     return projection;
   });
@@ -4104,6 +4197,734 @@ test("bundle missing read_file path schema failure lifecycle and reload", async 
 
 test("direct classic missing read_file path schema failure lifecycle and reload", async ({ h4 }) => {
   await exerciseToolFailureTerminalRefresh(h4, "classic", MISSING_PATH_TOOL_FAILURE_CONTRACT);
+});
+
+const REPEATED_RANGE_ACTIVE_EVENT_TYPES = Object.freeze([
+  "created",
+  "model_started", "model_completed", "tool_started", "tool_completed", "model_pending",
+  "model_started", "model_completed", "tool_started", "tool_completed", "model_pending",
+  "model_started", "model_completed", "tool_started", "tool_completed", "model_pending",
+  "model_started", "model_completed", "tool_started", "tool_retry_blocked", "tool_completed", "model_pending",
+  "model_started",
+]);
+const REPEATED_RANGE_TERMINAL_EVENT_TYPES = Object.freeze([
+  ...REPEATED_RANGE_ACTIVE_EVENT_TYPES,
+  "model_completed",
+  "completed",
+]);
+
+function repeatedFailureSessionRoleContentProjection(messages) {
+  return (Array.isArray(messages) ? messages : []).map((message) => {
+    const role = String(message?.role || "");
+    const content = String(message?.content || "");
+    if (role === "user") {
+      return { role, marker: content === REPEATED_RANGE_FAILURE_USER ? "user" : "unexpected" };
+    }
+    if (role === "assistant") {
+      if (content === REPEATED_RANGE_FAILURE_STAGE) return { role, marker: "stage" };
+      if (content === REPEATED_RANGE_FAILURE_FINAL) return { role, marker: "final" };
+      return { role, marker: "tool-round", contentPresent: Boolean(content.trim()) };
+    }
+    if (role === "tool-call") {
+      return {
+        role,
+        contentPresent: Boolean(content.trim()),
+        pathPresent: content.includes("fixture.txt"),
+        startLinePresent: content.includes("startLine"),
+        endLinePresent: content.includes("endLine"),
+      };
+    }
+    if (role === "tool-result") {
+      let result = {};
+      try {
+        result = JSON.parse(content);
+      } catch {}
+      return { role, result: stableRepeatedRangeFailureResult(result) };
+    }
+    return { role, contentPresent: Boolean(content.trim()) };
+  });
+}
+
+function repeatedFailureSessionMetaProjection(messages, agentRunId, toolCallIds) {
+  const aliases = new Map(toolCallIds.map((toolCallId, index) => [toolCallId, `tool-${index + 1}`]));
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === "tool-call" || message?.role === "tool-result")
+    .map((message) => {
+      const meta = message?.meta || {};
+      const tool = meta.tool && typeof meta.tool === "object" ? meta.tool : {};
+      return {
+        role: String(message.role),
+        toolCallId: aliases.get(String(meta.toolCallId || "")) || "mismatch",
+        agentRunId: meta.agentRunId == null
+          ? ""
+          : (String(meta.agentRunId) === agentRunId ? "agent-1" : "mismatch"),
+        agentEventType: String(meta.agentEventType || ""),
+        agentEventSeq: Number(meta.agentEventSeq || 0),
+        action: String(meta.action || ""),
+        arguments: message.role === "tool-call" ? {
+          path: String(tool.path || ""),
+          startLine: tool.startLine ?? null,
+          endLine: tool.endLine ?? null,
+        } : null,
+        native: meta.native === true,
+        replayed: Boolean(meta.replayed),
+        outcome: String(meta.outcome || ""),
+        result: meta.result && typeof meta.result === "object"
+          ? stableRepeatedRangeFailureResult(meta.result)
+          : null,
+      };
+    });
+}
+
+async function repeatedFailureLifecycleDomEvidence(page) {
+  const messages = page.locator("#messages");
+  const user = messages.locator("article.msg.user").filter({ hasText: REPEATED_RANGE_FAILURE_USER });
+  const commentary = messages.locator("article.msg.assistant.agent-commentary")
+    .filter({ hasText: REPEATED_RANGE_FAILURE_STAGE });
+  const process = messages.locator("article.tool-process");
+  const outer = process.locator("details.tool-process-stage");
+  const items = process.locator("details.tool-process-item");
+  const finalAnswer = messages.locator("article.msg.assistant")
+    .filter({ hasText: REPEATED_RANGE_FAILURE_FINAL });
+  await expect(user).toHaveCount(1);
+  await expect(commentary).toHaveCount(1);
+  await expect(process).toHaveCount(1);
+  await expect(outer).toHaveCount(1);
+  await expect(items).toHaveCount(4);
+  const itemLocators = await items.all();
+  const itemProjections = [];
+  for (const [index, item] of itemLocators.entries()) {
+    await expect(item).toHaveClass(/\bfailed\b/);
+    const details = item.locator(".tool-process-detail pre");
+    await expect(details).toHaveCount(2);
+    const texts = await details.allTextContents();
+    const argumentText = String(texts[0] || "").trim();
+    const resultText = String(texts[1] || "").trim();
+    const projection = {
+      tool: index + 1,
+      failed: String(await item.getAttribute("class") || "").split(/\s+/).includes("failed"),
+      open: await item.evaluate((element) => element.open),
+      arguments: {
+        pathPresent: argumentText.includes('"path": "fixture.txt"'),
+        startLinePresent: argumentText.includes('"startLine": 2'),
+        endLinePresent: argumentText.includes('"endLine": 1'),
+      },
+      result: {
+        nonEmpty: Boolean(resultText),
+        rangeFailureVisible: resultText.includes("startLine") && resultText.includes("endLine"),
+        repeatedFailureBlockedVisible: (
+          /exact tool call was blocked after 3 identical failures/i.test(resultText)
+          && /do not repeat it/i.test(resultText)
+        ),
+      },
+    };
+    expect(projection.arguments).toEqual({
+      pathPresent: true,
+      startLinePresent: true,
+      endLinePresent: true,
+    });
+    expect(projection.result).toEqual({
+      nonEmpty: true,
+      rangeFailureVisible: index < 3,
+      repeatedFailureBlockedVisible: index === 3,
+    });
+    itemProjections.push(projection);
+  }
+  const finalCount = await finalAnswer.count();
+  const outerClass = String(await outer.getAttribute("class") || "");
+  const ordered = await page.evaluate(({ userMarker, stageMarker, finalMarker }) => {
+    const root = document.querySelector("#messages");
+    const find = (selector, marker) => [...root.querySelectorAll(selector)]
+      .find((element) => element.textContent.includes(marker));
+    const nodes = [
+      find("article.msg.user", userMarker),
+      find("article.msg.assistant.agent-commentary", stageMarker),
+      root.querySelector("article.tool-process"),
+    ];
+    const final = find("article.msg.assistant", finalMarker);
+    if (final) nodes.push(final);
+    return nodes.every(Boolean) && nodes.slice(0, -1).every((node, index) => (
+      Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ));
+  }, {
+    userMarker: REPEATED_RANGE_FAILURE_USER,
+    stageMarker: REPEATED_RANGE_FAILURE_STAGE,
+    finalMarker: REPEATED_RANGE_FAILURE_FINAL,
+  });
+  const projection = {
+    sequence: finalCount
+      ? [REPEATED_RANGE_FAILURE_USER, REPEATED_RANGE_FAILURE_STAGE, "read_file:failed:4", REPEATED_RANGE_FAILURE_FINAL]
+      : [REPEATED_RANGE_FAILURE_USER, REPEATED_RANGE_FAILURE_STAGE, "read_file:failed:4"],
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 4,
+      result: 4,
+      final: finalCount,
+      ordinaryAssistant: await messages.locator("article.msg.assistant:not(.tool-process)").count(),
+      assistantTotal: await messages.locator("article.msg.assistant").count(),
+    },
+    processKey: String(await outer.getAttribute("data-tool-process-key") || ""),
+    outerOpen: await outer.evaluate((element) => element.open),
+    itemOpen: await Promise.all(itemLocators.map((item) => item.evaluate((element) => element.open))),
+    outerState: {
+      running: outerClass.split(/\s+/).includes("running"),
+      failed: outerClass.split(/\s+/).includes("failed"),
+    },
+    currentAction: String(await outer.getAttribute("data-current-action") || ""),
+    items: itemProjections,
+    ordered,
+  };
+  return {
+    process,
+    outer,
+    items: itemLocators,
+    finalAnswer,
+    projection,
+    semanticHash: canonicalHash(projection),
+  };
+}
+
+function expectedRepeatedModelReceipts(count) {
+  return EXPECTED_REPEATED_RANGE_RESULTS.slice(0, count).map((result, index) => ({
+    role: "tool",
+    toolCallId: `tool-${index + 1}`,
+    name: "read_file",
+    ...result,
+  }));
+}
+
+async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
+  const { page } = h4;
+  const requestBoundary = h4.requestBoundary();
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await h4.proveNonLoopbackBlocked();
+  await h4.submitGated(REPEATED_RANGE_FAILURE_USER);
+  const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+  expect(finalDeltaGate[TOOL_FINAL_DELTA_GATE]).toMatchObject({ reached: true, released: false });
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const activeAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(activeAgent.status).toBe(200);
+  expect(activeAgent.body).toMatchObject({
+    status: "model",
+    nextCursor: REPEATED_RANGE_ACTIVE_EVENT_TYPES.length,
+    forceFinalRound: true,
+    errorCode: "",
+    pendingToolCalls: [],
+  });
+  expect((activeAgent.body.events || []).map((event) => event.type))
+    .toEqual(REPEATED_RANGE_ACTIVE_EVENT_TYPES);
+  const activeTrace = durableFailedToolTraceEvidence(
+    activeAgent.body,
+    REPEATED_RANGE_FAILURE_CONTRACT,
+  );
+  expect(activeTrace.toolCallIds).toHaveLength(4);
+  expect(new Set(activeTrace.toolCallIds).size).toBe(4);
+  expect(activeTrace.executionProjection).toEqual(EXPECTED_REPEATED_RANGE_RESULTS.map((result, index) => ({
+    toolCallId: `tool-${index + 1}`,
+    name: "read_file",
+    arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+    status: "completed",
+    outcome: "failed",
+    result,
+  })));
+  const modelCompletedWithTools = activeTrace.eventProjection.filter((event) => (
+    event.type === "model_completed" && Array.isArray(event.toolCalls) && event.toolCalls.length
+  ));
+  expect(modelCompletedWithTools).toHaveLength(4);
+  expect(modelCompletedWithTools.map((event) => event.toolCalls[0])).toEqual(
+    EXPECTED_REPEATED_RANGE_RESULTS.map((_, index) => ({
+      toolCallId: `tool-${index + 1}`,
+      name: "read_file",
+      arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+    })),
+  );
+  const startedEvents = activeTrace.eventProjection.filter((event) => event.type === "tool_started");
+  const completedEvents = activeTrace.eventProjection.filter((event) => event.type === "tool_completed");
+  expect(startedEvents).toHaveLength(4);
+  expect(completedEvents).toHaveLength(4);
+  for (const [index, event] of startedEvents.entries()) {
+    expect(event).toMatchObject({
+      toolCallId: `tool-${index + 1}`,
+      name: "read_file",
+      arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+    });
+  }
+  for (const [index, event] of completedEvents.entries()) {
+    expect(event).toMatchObject({
+      toolCallId: `tool-${index + 1}`,
+      name: "read_file",
+      outcome: "failed",
+      result: EXPECTED_REPEATED_RANGE_RESULTS[index],
+    });
+  }
+  const retryBlockedEvents = activeTrace.eventProjection.filter((event) => event.type === "tool_retry_blocked");
+  expect(retryBlockedEvents).toEqual([{
+    seq: 20,
+    type: "tool_retry_blocked",
+    failureCount: 3,
+    toolCallId: "tool-4",
+    name: "read_file",
+  }]);
+
+  const modelStartedEvents = activeAgent.body.events.filter((event) => event?.type === "model_started");
+  expect(modelStartedEvents).toHaveLength(5);
+  const runtimeRunIds = modelStartedEvents.map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(runtimeRunIds.every(Boolean)).toBe(true);
+  expect(new Set(runtimeRunIds).size).toBe(5);
+  expect(activeAgent.body.activeRuntimeRunId).toBe(runtimeRunIds[4]);
+  await expect.poll(() => h4.controlIds()).toEqual({
+    agentRunIds: [agentRunId],
+    runtimeRunIds,
+  });
+  const activeRuntimeResponses = [];
+  for (const runtimeRunId of runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    activeRuntimeResponses.push(response.body);
+  }
+  expect(activeRuntimeResponses.slice(0, 4).map((snapshot) => snapshot.status))
+    .toEqual(["completed", "completed", "completed", "completed"]);
+  expect(activeRuntimeResponses[4].status).toBe("running");
+  expect(activeRuntimeResponses[4].events).toEqual([]);
+  expect(activeRuntimeResponses[4].result?.content).toBe("");
+  expect(activeRuntimeResponses[0].result?.content).toBe(REPEATED_RANGE_FAILURE_STAGE);
+  expect(activeRuntimeResponses.slice(1, 4).map((snapshot) => snapshot.result?.content || ""))
+    .toEqual(["", "", ""]);
+
+  const metricsActive = await h4.metrics();
+  const expectedChatRequests = [0, 1, 2, 3].map((receiptCount, index) => ({
+    scenario: `repeated-range-failure-call-${index + 1}`,
+    stream: true,
+    hasToolResult: receiptCount > 0,
+    repeatedRangeFailureReceipts: expectedRepeatedModelReceipts(receiptCount),
+  }));
+  expectedChatRequests.push({
+    scenario: "repeated-range-failure-final",
+    stream: true,
+    hasToolResult: true,
+    repeatedRangeFailureReceipts: expectedRepeatedModelReceipts(4),
+    forcedFinal: {
+      toolsPresent: false,
+      toolChoicePresent: false,
+      recoveryInstructionPresent: true,
+    },
+  });
+  expect(metricsActive.chatRequests).toEqual(expectedChatRequests);
+  expect(metricsActive.productionToolDelegations).toBe(3);
+  expect(metricsActive.toolExecutions).toEqual([1, 2, 3].map(() => ({
+    action: "read_file",
+    path: "fixture.txt",
+    startLine: 2,
+    endLine: 1,
+  })));
+  expect(metricsActive.unsafeToolRequests).toBe(0);
+
+  const process = page.locator("#messages article.tool-process");
+  await expect(process).toHaveCount(1);
+  await expect(process.locator("details.tool-process-item")).toHaveCount(4);
+  await expect(process.locator("details.tool-process-item.failed")).toHaveCount(4);
+  const initialDom = await repeatedFailureLifecycleDomEvidence(page);
+  expect(initialDom.projection).toMatchObject({
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 4,
+      result: 4,
+      final: 0,
+      ordinaryAssistant: 1,
+      assistantTotal: 2,
+    },
+    outerOpen: false,
+    itemOpen: [false, false, false, false],
+    outerState: { running: true, failed: false },
+    currentAction: "read_file",
+    ordered: true,
+  });
+  expect(initialDom.projection.processKey).not.toBe("");
+  const oldStage = await initialDom.outer.elementHandle();
+  await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(initialDom.outer).toHaveAttribute("open", "");
+
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await expect(initialDom.finalAnswer).toHaveCount(1);
+  const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
+  expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
+  expect(await oldStage.evaluate((element) => element.isConnected)).toBe(false);
+  const afterFinalDeltaDom = await repeatedFailureLifecycleDomEvidence(page);
+  expect(afterFinalDeltaDom.projection.processKey).toBe(initialDom.projection.processKey);
+  expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
+  expect(afterFinalDeltaDom.projection.itemOpen).toEqual([false, false, false, false]);
+  expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: false, failed: true });
+  expect(afterFinalDeltaDom.projection.counts).toMatchObject({
+    user: 1,
+    commentary: 1,
+    toolProcess: 1,
+    toolItem: 4,
+    result: 4,
+    final: 1,
+    ordinaryAssistant: 2,
+    assistantTotal: 3,
+  });
+
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+  let completedAgent = null;
+  await expect.poll(async () => {
+    completedAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedAgent.body?.status,
+      nextCursor: completedAgent.body?.nextCursor,
+      activeRuntimeRunId: completedAgent.body?.activeRuntimeRunId,
+      forceFinalRound: completedAgent.body?.forceFinalRound,
+      errorCode: completedAgent.body?.errorCode,
+      eventTypes: (completedAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: REPEATED_RANGE_TERMINAL_EVENT_TYPES.length,
+    activeRuntimeRunId: "",
+    forceFinalRound: false,
+    errorCode: "",
+    eventTypes: REPEATED_RANGE_TERMINAL_EVENT_TYPES,
+  });
+  expect(completedAgent.status).toBe(200);
+  expect(completedAgent.body.pendingToolCalls).toEqual([]);
+  const completedTrace = durableFailedToolTraceEvidence(
+    completedAgent.body,
+    REPEATED_RANGE_FAILURE_CONTRACT,
+  );
+  expect(completedTrace.executionProjection).toEqual(activeTrace.executionProjection);
+  expect(completedTrace.terminalEventCount).toBe(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+
+  const terminalDom = await repeatedFailureLifecycleDomEvidence(page);
+  expect(terminalDom.projection.processKey).toBe(initialDom.projection.processKey);
+  expect(terminalDom.projection.outerOpen).toBe(false);
+  expect(terminalDom.projection.itemOpen).toEqual([false, false, false, false]);
+  expect(terminalDom.projection.outerState).toEqual({ running: false, failed: true });
+  const completedTraceElement = page.locator("#messages .execution-trace.completed");
+  const completedTraceToggle = completedTraceElement.locator(":scope > [data-execution-trace-toggle]");
+  await expect(completedTraceElement).not.toHaveClass(/\bis-expanded\b/);
+  await expect(completedTraceToggle).toHaveAttribute("aria-expanded", "false");
+  await completedTraceToggle.click();
+  await expect(completedTraceElement).toHaveClass(/\bis-expanded\b/);
+  await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(terminalDom.outer).toHaveAttribute("open", "");
+  for (const item of terminalDom.items) {
+    await item.locator(":scope > summary").click();
+    await expect(item).toHaveAttribute("open", "");
+    await expect(item.locator(".tool-process-detail pre")).toHaveCount(2);
+  }
+  for (const item of [...terminalDom.items].reverse()) {
+    await item.locator(":scope > summary").click();
+    await expect(item).not.toHaveAttribute("open", "");
+  }
+  await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(terminalDom.outer).not.toHaveAttribute("open", "");
+  await completedTraceToggle.click();
+  await expect(completedTraceElement).not.toHaveClass(/\bis-expanded\b/);
+  await expect(completedTraceToggle).toHaveAttribute("aria-expanded", "false");
+
+  const terminalRuntimeResponses = [];
+  for (const runtimeRunId of runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("completed");
+    terminalRuntimeResponses.push(response.body);
+  }
+  expect(terminalRuntimeResponses.map((snapshot) => snapshot.result?.content || ""))
+    .toEqual([REPEATED_RANGE_FAILURE_STAGE, "", "", "", REPEATED_RANGE_FAILURE_FINAL]);
+  const runtimeProjection = terminalRuntimeResponses.map((snapshot, index) => ({
+    runtimeRunId: `runtime-${index + 1}`,
+    status: String(snapshot.status || ""),
+    nextCursor: Number(snapshot.nextCursor || 0),
+    content: snapshot.result?.content === REPEATED_RANGE_FAILURE_STAGE
+      ? "stage"
+      : (snapshot.result?.content === REPEATED_RANGE_FAILURE_FINAL ? "final" : "empty"),
+  }));
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionResponse = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionResponse.status).toBe(200);
+  expect((sessionResponse.body.messages || []).map((message) => message.role)).toEqual([
+    "user",
+    "assistant", "tool-call", "tool-result",
+    "assistant", "tool-call", "tool-result",
+    "assistant", "tool-call", "tool-result",
+    "assistant", "tool-call", "tool-result",
+    "assistant",
+  ]);
+  const sessionProjection = repeatedFailureSessionRoleContentProjection(sessionResponse.body.messages);
+  const sessionToolMeta = repeatedFailureSessionMetaProjection(
+    sessionResponse.body.messages,
+    agentRunId,
+    activeTrace.toolCallIds,
+  );
+  expect(sessionToolMeta).toHaveLength(8);
+  for (let index = 0; index < 4; index += 1) {
+    expect(sessionToolMeta[index * 2]).toMatchObject({
+      role: "tool-call",
+      toolCallId: `tool-${index + 1}`,
+      agentRunId: "agent-1",
+      agentEventType: "tool_started",
+      action: "read_file",
+      arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+      native: true,
+      replayed: false,
+      outcome: "",
+      result: null,
+    });
+    expect(sessionToolMeta[index * 2 + 1]).toMatchObject({
+      role: "tool-result",
+      toolCallId: `tool-${index + 1}`,
+      agentRunId: "agent-1",
+      agentEventType: "tool_completed",
+      action: "read_file",
+      arguments: null,
+      native: true,
+      replayed: false,
+      outcome: "failed",
+      result: EXPECTED_REPEATED_RANGE_RESULTS[index],
+    });
+    expect(sessionToolMeta[index * 2].agentEventSeq).toBe(startedEvents[index].seq);
+    expect(sessionToolMeta[index * 2 + 1].agentEventSeq).toBe(completedEvents[index].seq);
+  }
+
+  const durable = await readDurableAgentRecord(h4, agentRunId);
+  expect(durable.record).toMatchObject({
+    status: "completed",
+    nextSeq: REPEATED_RANGE_TERMINAL_EVENT_TYPES.length + 1,
+    forceFinalRound: false,
+    pendingToolCalls: [],
+  });
+  expect(durable.record.events).toHaveLength(REPEATED_RANGE_TERMINAL_EVENT_TYPES.length);
+  expect(Object.keys(durable.record.toolExecutions || {})).toEqual(activeTrace.toolCallIds);
+  for (const [index, toolCallId] of activeTrace.toolCallIds.entries()) {
+    expect(stableRepeatedRangeFailureResult(durable.record.toolExecutions[toolCallId]?.result))
+      .toEqual(EXPECTED_REPEATED_RANGE_RESULTS[index]);
+  }
+
+  const metrics = await h4.metrics();
+  expect(metrics).toMatchObject({
+    productionToolDelegations: 3,
+    unsafeToolRequests: 0,
+  });
+  expect(metrics.chatRequests).toEqual(expectedChatRequests);
+  expect(metrics.toolExecutions).toHaveLength(3);
+  const requests = h4.requestEvidenceSince(requestBoundary);
+  expect(requests.agentPost).toBe(1);
+  expect(requests.runtimePost).toBe(0);
+  expect(requests.agentDelete).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+
+  const retryExecutionProjection = completedTrace.executionProjection;
+  const modelToolReceiptProjection = expectedRepeatedModelReceipts(4);
+  const forcedFinalProjection = {
+    modelRequestCount: metrics.chatRequests.length,
+    scenario: metrics.chatRequests[4]?.scenario,
+    ...metrics.chatRequests[4]?.forcedFinal,
+    parentStatus: completedAgent.body.status,
+    parentErrorCode: String(completedAgent.body.errorCode || ""),
+    forceFinalRound: Boolean(completedAgent.body.forceFinalRound),
+    pendingToolCallCount: completedAgent.body.pendingToolCalls.length,
+  };
+  const hashes = {
+    eventProjection: completedTrace.eventProjectionHash,
+    retryExecutionProjection: canonicalHash(retryExecutionProjection),
+    modelToolReceiptProjection: canonicalHash(modelToolReceiptProjection),
+    forcedFinalProjection: canonicalHash(forcedFinalProjection),
+    runtimeProjection: canonicalHash(runtimeProjection),
+    sessionRoleContent: canonicalHash(sessionProjection),
+    sessionToolMeta: canonicalHash(sessionToolMeta),
+    terminalDom: terminalDom.semanticHash,
+  };
+  if (Object.keys(H4_6K_SEMANTIC_HASHES).length) {
+    for (const [key, value] of Object.entries(hashes)) {
+      expect(value, `H4-6K ${key}`).toBe(H4_6K_SEMANTIC_HASHES[key]);
+    }
+  }
+  h4.evidence(`${runtime === "classic" ? "classic-" : ""}repeated-range-failure-terminal`, {
+    identity: {
+      agentRunId: idHash(agentRunId),
+      toolCallIds: activeTrace.toolCallIds.map(idHash),
+      runtimeRunIds: runtimeRunIds.map(idHash),
+      processKey: terminalDom.projection.processKey,
+    },
+    counts: {
+      modelRequests: metrics.chatRequests.length,
+      productionToolDelegations: metrics.productionToolDelegations,
+      toolExecutions: metrics.toolExecutions.length,
+      durableExecutions: completedTrace.executionProjection.length,
+      retryBlockedEvents: retryBlockedEvents.length,
+    },
+    runtimeProjection,
+    forcedFinalProjection,
+    hashes,
+  });
+  return {
+    page,
+    agentRunId,
+    sessionId,
+    toolCallIds: activeTrace.toolCallIds,
+    runtimeRunIds,
+    completedTrace,
+    sessionProjection,
+    sessionToolMeta,
+    terminalDom,
+    metrics,
+    hashes,
+  };
+}
+
+async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
+  const before = await completeRepeatedRangeFailureLifecycle(h4, runtime);
+  const refreshBoundary = h4.requestBoundary();
+  const metricsBefore = await h4.metrics();
+  await before.page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(before.page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(before.page);
+  const persistedSession = before.page.locator(
+    `#sessionList button.session-main[data-session-id="${before.sessionId}"]`,
+  );
+  await expect(persistedSession).toHaveCount(1);
+  await persistedSession.click();
+  await expect(before.page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(before.page.locator("#stopBtn")).toBeDisabled();
+  await expect(before.page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(before.page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+  const domAfter = await repeatedFailureLifecycleDomEvidence(before.page);
+  expect(domAfter.projection).toEqual(before.terminalDom.projection);
+  expect(domAfter.projection.outerOpen).toBe(false);
+  expect(domAfter.projection.itemOpen).toEqual([false, false, false, false]);
+  const traceAfterReload = before.page.locator("#messages .execution-trace.completed");
+  const traceToggleAfterReload = traceAfterReload.locator(":scope > [data-execution-trace-toggle]");
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "false");
+  await traceToggleAfterReload.click();
+  await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  for (const item of domAfter.items) {
+    await item.locator(":scope > summary").click();
+    await expect(item).toHaveAttribute("open", "");
+    await expect(item.locator(".tool-process-detail pre")).toHaveCount(2);
+  }
+  for (const item of [...domAfter.items].reverse()) {
+    await item.locator(":scope > summary").click();
+  }
+  await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await traceToggleAfterReload.click();
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggleAfterReload).toHaveAttribute("aria-expanded", "false");
+
+  const agentAfter = await fetchProductionJson(
+    before.page,
+    `/api/agent/runs/${encodeURIComponent(before.agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfter.status).toBe(200);
+  const completedTraceAfter = durableFailedToolTraceEvidence(
+    agentAfter.body,
+    REPEATED_RANGE_FAILURE_CONTRACT,
+  );
+  expect(completedTraceAfter).toEqual(before.completedTrace);
+  expect(completedTraceAfter.toolCallIds).toEqual(before.toolCallIds);
+  const sessionAfter = await fetchProductionJson(
+    before.page,
+    `/api/sessions/${encodeURIComponent(before.sessionId)}`,
+  );
+  expect(sessionAfter.status).toBe(200);
+  const sessionProjectionAfter = repeatedFailureSessionRoleContentProjection(sessionAfter.body.messages);
+  const sessionToolMetaAfter = repeatedFailureSessionMetaProjection(
+    sessionAfter.body.messages,
+    before.agentRunId,
+    before.toolCallIds,
+  );
+  expect(sessionProjectionAfter).toEqual(before.sessionProjection);
+  expect(sessionToolMetaAfter).toEqual(before.sessionToolMeta);
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
+  expect(metricsAfter.productionToolDelegations).toBe(3);
+  expect(metricsAfter.unsafeToolRequests).toBe(0);
+  const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshRequests.agentDelete).toBe(0);
+  expect(h4.controlIds()).toEqual({
+    agentRunIds: [before.agentRunId],
+    runtimeRunIds: before.runtimeRunIds,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  const refreshProjection = {
+    agentRunStable: completedTraceAfter.agentRunId === before.completedTrace.agentRunId,
+    toolCallsStable: JSON.stringify(completedTraceAfter.toolCallIdHashes)
+      === JSON.stringify(before.completedTrace.toolCallIdHashes),
+    eventProjectionStable: completedTraceAfter.eventProjectionHash
+      === before.completedTrace.eventProjectionHash,
+    sessionProjectionStable: JSON.stringify(sessionProjectionAfter)
+      === JSON.stringify(before.sessionProjection),
+    sessionToolMetaStable: JSON.stringify(sessionToolMetaAfter)
+      === JSON.stringify(before.sessionToolMeta),
+    processKeyStable: domAfter.projection.processKey === before.terminalDom.projection.processKey,
+    refreshDefaultCollapsed: !domAfter.projection.outerOpen
+      && domAfter.projection.itemOpen.every((value) => !value),
+    counts: domAfter.projection.counts,
+    requests: {
+      agentPost: refreshRequests.agentPost,
+      runtimePost: refreshRequests.runtimePost,
+      chatDelta: metricsAfter.chatRequests.length - metricsBefore.chatRequests.length,
+      toolDelta: metricsAfter.toolExecutions.length - metricsBefore.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    ...before.hashes,
+    refreshLifecycle: canonicalHash(refreshProjection),
+  };
+  if (Object.keys(H4_6K_SEMANTIC_HASHES).length) {
+    expect(hashes).toEqual(H4_6K_SEMANTIC_HASHES);
+  }
+  h4.evidence(`${runtime === "classic" ? "classic-" : ""}repeated-range-failure-refresh`, {
+    identity: {
+      agentRunId: idHash(before.agentRunId),
+      toolCallIds: before.toolCallIds.map(idHash),
+      processKey: domAfter.projection.processKey,
+    },
+    refresh: refreshProjection,
+    hashes,
+  });
+}
+
+test("bundle identical read_file executor failures are bounded and reload uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(h4, "bundle");
+});
+
+test("direct classic identical read_file executor failures are bounded and reload uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(h4, "classic");
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {

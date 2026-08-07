@@ -572,6 +572,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **H4-6J 补充状态（2026-08-08）**：H4-6J 以固定合法 JSON 原始字符串 `"{}"` 同时覆盖默认 bundle 与 direct classic。参数成功解析后命中生产 `read_file` schema 的唯一 `path/required/is required`，在执行器前以 `invalid_tool_arguments`、首次 `failureCount=1` 失败；生产委托/执行与 unsafe 均为 0，但 AgentRun 持久化唯一失败 execution，失败 receipt 进入第二轮且父 Run completed。Session/UI 保留规范化 `read_file` action、无 path，两种入口闭合九事件、Runtime `4/0 → 4/3`、Session 五角色、失败 DOM、完整刷新四项零增量及八类对等哈希。完整矩阵同时以具体旧节点 `Element is not attached` 证明共享 helper 遇到活动态生产重绘；修正仅在当前具体节点仍 open 时点击并始终严格验证可见节点 closed，没有修改生产、超时、retry 或断言强度。详见 [`H4-6J read_file 缺少必填 path 的 schema 失败`](harness/h4-6j-read-file-missing-path-schema-failure.md)。该完成声明不覆盖其他 required 字段、其他工具、真实模型/网络、跨进程 active、取消或发布。
 
+**H4-6K 补充状态（2026-08-08）**：H4-6K 复用 H4-6G 的 schema-valid 只读行范围执行器失败，证明重复身份由工具名与规范 arguments 指纹确定，连续失败还要求 `errorCode` 与规范化错误文本签名一致。前三次相同调用真实执行并得到 `failureCount=1/2/3`，第三次带 `retryLimitReached`；第四个新 toolCallId 的同指纹调用以 `repeated_tool_failure/retryBlocked` 阻断且不进入执行器，第五轮不再携带 tools/tool_choice 并固定终答，父 Run completed。两种入口均闭合 25 事件、五个 Runtime、四对 Session 工具消息、单组四个失败项和刷新四项零增量，九类语义哈希一致。解析/schema 校验早于限流，H4-6E/I/J 的执行前失败不属于本证明。详见 [`H4-6K 相同 read_file 失败限流与强制终答`](harness/h4-6k-identical-read-file-failure-bound-and-forced-final.md)。
+
 **工作项**：
 
 1. 列出现有 AgentRun 状态、事件类型、事件载荷和前端处理函数。
@@ -665,6 +667,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 **H4-6I 阶段更新（2026-08-08）**：上段剩余项中的“JSON parse”现已由 H4-6I 收口；当前执行前参数失败仍保留缺 path 及其他未覆盖解析错误。H4-6I 不改变生产协议、持久化或安全边界，且不把 AgentRun 原始坏 JSON 与 Session/UI 规范化投影混为同一事实；完整证据与限制见 [`H4-6I 工具参数 JSON 解析失败生命周期`](harness/h4-6i-tool-arguments-json-parse-error.md)。
 
 **H4-6J 阶段更新（2026-08-08）**：上段剩余项中的“缺 path”现已由 H4-6J 收口；当前执行前参数失败仍保留其他 required 字段与其他未覆盖解析错误。H4-6J 不改变生产协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6J read_file 缺少必填 path 的 schema 失败`](harness/h4-6j-read-file-missing-path-schema-failure.md)。
+
+**H4-6K 阶段更新（2026-08-08）**：上段剩余项中的“重复失败限流”现已由 H4-6K 在固定 schema-valid 只读行范围执行器失败上收口；执行前 schema/parse 失败、不同参数或工具、错误交替及强制终答失败分支仍未覆盖。H4-6K 不改变生产协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6K 相同 read_file 失败限流与强制终答`](harness/h4-6k-identical-read-file-failure-bound-and-forced-final.md)。
 
 **工作项**：
 

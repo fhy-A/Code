@@ -45,6 +45,9 @@ MISSING_PATH_TOOL_FINAL = "H4_MISSING_PATH_TOOL_ARGUMENTS_FINAL"
 EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER"
 EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE"
 EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL"
+REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER"
+REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE"
+REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL"
 MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER"
 MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
 MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
@@ -60,6 +63,9 @@ INVALID_TOOL_CALL_ID = "h4-invalid-read-call-1"
 PARSE_ERROR_TOOL_CALL_ID = "h4-parse-error-read-call-1"
 MISSING_PATH_TOOL_CALL_ID = "h4-missing-path-read-call-1"
 EXECUTOR_RANGE_TOOL_CALL_ID = "h4-executor-range-read-call-1"
+REPEATED_RANGE_FAILURE_TOOL_CALL_IDS = tuple(
+    f"h4-repeated-range-read-call-{index}" for index in range(1, 5)
+)
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
@@ -273,9 +279,20 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             MISSING_PATH_TOOL_CALL_ID,
             EXECUTOR_RANGE_TOOL_CALL_ID,
             MISSING_FILE_TOOL_CALL_ID,
+            *REPEATED_RANGE_FAILURE_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
+    if REPEATED_RANGE_FAILURE_USER in user_text:
+        completed_calls = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS)
+        receipt_count = len(completed_calls)
+        if receipt_count >= len(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS):
+            return "repeated-range-failure-final", True
+        return f"repeated-range-failure-call-{receipt_count + 1}", receipt_count > 0
     if INVALID_TOOL_USER in user_text:
         return ("invalid-tool-final" if has_tool_result else "invalid-tool-call", has_tool_result)
     if PARSE_ERROR_TOOL_USER in user_text:
@@ -441,6 +458,44 @@ def _executor_range_receipt_projection(payload: dict) -> dict | None:
     return None
 
 
+def _repeated_range_failure_receipt_projection(payload: dict) -> list[dict]:
+    aliases = {
+        tool_call_id: f"tool-{index + 1}"
+        for index, tool_call_id in enumerate(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS)
+    }
+    projections = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        tool_call_id = str(message.get("tool_call_id") or "")
+        alias = aliases.get(tool_call_id)
+        if not alias:
+            continue
+        try:
+            result = json.loads(str(message.get("content") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        error = str(result.get("error") or "")
+        projections.append({
+            "role": "tool",
+            "toolCallId": alias,
+            "name": str(message.get("name") or ""),
+            "ok": result.get("ok"),
+            "action": str(result.get("action") or ""),
+            "errorCode": str(result.get("errorCode") or ""),
+            "errorPresent": bool(error.strip()),
+            "startLineMentioned": "startLine" in error,
+            "endLineMentioned": "endLine" in error,
+            "failureCount": int(result.get("failureCount") or 0),
+            "fieldErrorsPresent": "fieldErrors" in result,
+            "retryBlocked": bool(result.get("retryBlocked")),
+            "retryLimitReached": bool(result.get("retryLimitReached")),
+        })
+    return projections
+
+
 def _missing_file_receipt_projection(payload: dict) -> dict | None:
     for message in payload.get("messages") or []:
         if not isinstance(message, dict) or message.get("role") != "tool":
@@ -591,16 +646,36 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["missingPathReceipt"] = _missing_path_tool_receipt_projection(payload)
         if scenario == "executor-range-final":
             chat_metric["executorRangeReceipt"] = _executor_range_receipt_projection(payload)
+        if scenario.startswith("repeated-range-failure-"):
+            chat_metric["repeatedRangeFailureReceipts"] = (
+                _repeated_range_failure_receipt_projection(payload)
+            )
+        if scenario == "repeated-range-failure-final":
+            chat_metric["forcedFinal"] = {
+                "toolsPresent": bool(payload.get("tools")),
+                "toolChoicePresent": "tool_choice" in payload,
+                "recoveryInstructionPresent": any(
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and "identical tool call was blocked" in str(
+                        message.get("content") or ""
+                    )
+                    for message in (payload.get("messages") or [])
+                ),
+            }
         if scenario == "missing-file-final":
             chat_metric["missingFileReceipt"] = _missing_file_receipt_projection(payload)
         METRICS.append("chatRequests", chat_metric)
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
-        if scenario not in (
-            "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
-            "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
-            "executor-range-call",
-            "missing-file-call",
-        ) and current_chat_count == 1:
+        if (
+            scenario not in (
+                "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
+                "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
+                "executor-range-call", "missing-file-call",
+            )
+            and not scenario.startswith("repeated-range-failure-call-")
+            and current_chat_count == 1
+        ):
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
                 self._send_json({"error": "model gate timeout"}, 504)
@@ -656,7 +731,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario in (
             "tool-detail-final", "multi-tool-detail-final", "invalid-tool-final",
             "parse-error-tool-final", "missing-path-tool-final", "executor-range-final",
-            "missing-file-final",
+            "missing-file-final", "repeated-range-failure-final",
         ):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -675,31 +750,15 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
             if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
                 return
-            final_text = (
-                MULTI_TOOL_FINAL
-                if scenario == "multi-tool-detail-final"
-                else (
-                    INVALID_TOOL_FINAL
-                    if scenario == "invalid-tool-final"
-                    else (
-                        PARSE_ERROR_TOOL_FINAL
-                        if scenario == "parse-error-tool-final"
-                        else (
-                            MISSING_PATH_TOOL_FINAL
-                            if scenario == "missing-path-tool-final"
-                            else (
-                                EXECUTOR_RANGE_FINAL
-                                if scenario == "executor-range-final"
-                                else (
-                                    MISSING_FILE_FINAL
-                                    if scenario == "missing-file-final"
-                                    else TOOL_DETAILS_FINAL
-                                )
-                            )
-                        )
-                    )
-                )
-            )
+            final_text = {
+                "multi-tool-detail-final": MULTI_TOOL_FINAL,
+                "invalid-tool-final": INVALID_TOOL_FINAL,
+                "parse-error-tool-final": PARSE_ERROR_TOOL_FINAL,
+                "missing-path-tool-final": MISSING_PATH_TOOL_FINAL,
+                "executor-range-final": EXECUTOR_RANGE_FINAL,
+                "missing-file-final": MISSING_FILE_FINAL,
+                "repeated-range-failure-final": REPEATED_RANGE_FAILURE_FINAL,
+            }.get(scenario, TOOL_DETAILS_FINAL)
             if not write_tool_detail_frame(_chunk({
                 "role": "assistant",
                 "content": final_text,
@@ -720,7 +779,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call",
-        ):
+        ) or scenario.startswith("repeated-range-failure-call-"):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
@@ -730,7 +789,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "missing-path-tool-call": MISSING_PATH_TOOL_STAGE,
                 "executor-range-call": EXECUTOR_RANGE_STAGE,
                 "missing-file-call": MISSING_FILE_STAGE,
-            }[scenario]
+            }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
                 "id": TOOL_CALL_ID,
@@ -824,11 +883,29 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         ),
                     },
                 }]
-            frames = [
-                _chunk({"role": "assistant", "content": stage_text}),
+            elif scenario.startswith("repeated-range-failure-call-"):
+                call_number = int(scenario.rsplit("-", 1)[-1])
+                tool_calls = [{
+                    "index": 0,
+                    "id": REPEATED_RANGE_FAILURE_TOOL_CALL_IDS[call_number - 1],
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": READ_PATH, "startLine": 2, "endLine": 1},
+                            separators=(",", ":"),
+                        ),
+                    },
+                }]
+                if call_number == 1:
+                    stage_text = REPEATED_RANGE_FAILURE_STAGE
+            frames = []
+            if stage_text:
+                frames.append(_chunk({"role": "assistant", "content": stage_text}))
+            frames.extend([
                 _chunk({"tool_calls": tool_calls}),
                 _chunk({}, "tool_calls", {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}),
-            ]
+            ])
         else:
             final_text = {
                 "plain-text": PLAIN_FINAL,
