@@ -2456,11 +2456,14 @@ test("completed classic tool details reload uniquely with default collapsed stat
   await exerciseToolDetailTerminalRefresh(h4, "classic");
 });
 
-async function startMultiToolDetailAtSecondExecute(h4) {
+async function startMultiToolDetailAtSecondExecute(h4, runtime) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
-  await h4.open("bundle");
-  await assertFrontendRuntime(page, "bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
   await h4.proveNonLoopbackBlocked();
   await h4.submitGated(MULTI_TOOL_USER);
   const gateSnapshot = await h4.waitGate(SECOND_TOOL_EXECUTE_GATE);
@@ -2678,8 +2681,8 @@ async function assertMultiToolCompletedInteraction(page, dom) {
   await expect(traceToggle).toHaveAttribute("aria-expanded", "false");
 }
 
-test("bundle same-round two read_file tools keep order and expansion through terminal", async ({ h4 }) => {
-  const started = await startMultiToolDetailAtSecondExecute(h4);
+async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
+  const started = await startMultiToolDetailAtSecondExecute(h4, runtime);
   const activeProcess = started.page.locator("#messages article.tool-process");
   await expect(activeProcess).toHaveCount(1);
   const activeItems = activeProcess.locator("details.tool-process-item");
@@ -2851,7 +2854,11 @@ test("bundle same-round two read_file tools keep order and expansion through ter
   if (Object.keys(H4_6C_ACTIVE_TO_TERMINAL_HASHES).length) {
     expect(hashes).toEqual(H4_6C_ACTIVE_TO_TERMINAL_HASHES);
   }
-  h4.evidence("multi-tool-detail-active-to-terminal", {
+  h4.evidence(
+    runtime === "classic"
+      ? "classic-multi-tool-detail-active-to-terminal"
+      : "multi-tool-detail-active-to-terminal",
+    {
     identity: {
       agentRunId: idHash(started.agentRunId),
       toolCallIds: completedTrace.toolCallIdHashes,
@@ -2863,11 +2870,20 @@ test("bundle same-round two read_file tools keep order and expansion through ter
     )),
     lifecycle: lifecycleProjection,
     hashes,
-  });
+    },
+  );
+}
+
+test("bundle same-round two read_file tools keep order and expansion through terminal", async ({ h4 }) => {
+  await exerciseMultiToolDetailActiveToTerminal(h4, "bundle");
 });
 
-test("completed bundle same-round two read_file tools reload uniquely without re-execution", async ({ h4 }) => {
-  const started = await startMultiToolDetailAtSecondExecute(h4);
+test("classic same-round two read_file tools keep order and expansion through terminal", async ({ h4 }) => {
+  await exerciseMultiToolDetailActiveToTerminal(h4, "classic");
+});
+
+async function exerciseMultiToolDetailTerminalRefresh(h4, runtime) {
+  const started = await startMultiToolDetailAtSecondExecute(h4, runtime);
   await h4.releaseGate(SECOND_TOOL_EXECUTE_GATE);
   await h4.waitGate(TOOL_FINAL_DELTA_GATE);
   await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
@@ -2916,7 +2932,10 @@ test("completed bundle same-round two read_file tools reload uniquely without re
   const metricsBefore = await h4.metrics();
   const refreshBoundary = h4.requestBoundary();
   await started.page.reload({ waitUntil: "domcontentloaded" });
-  await assertFrontendRuntime(started.page, "bundle");
+  await assertFrontendRuntime(started.page, runtime);
+  if (runtime === "classic") {
+    expect(await started.page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
   const persistedSession = started.page.locator(
     `#sessionList button.session-main[data-session-id="${sessionId}"]`,
   );
@@ -2991,7 +3010,11 @@ test("completed bundle same-round two read_file tools reload uniquely without re
   if (Object.keys(H4_6C_TERMINAL_REFRESH_HASHES).length) {
     expect(hashes).toEqual(H4_6C_TERMINAL_REFRESH_HASHES);
   }
-  h4.evidence("multi-tool-detail-terminal-refresh", {
+  h4.evidence(
+    runtime === "classic"
+      ? "classic-multi-tool-detail-terminal-refresh"
+      : "multi-tool-detail-terminal-refresh",
+    {
     identity: {
       agentRunId: idHash(started.agentRunId),
       toolCallIds: traceBefore.toolCallIdHashes,
@@ -3000,7 +3023,16 @@ test("completed bundle same-round two read_file tools reload uniquely without re
     refresh: refreshProjection,
     hashes,
     expansionBoundary: "page-local completed trace, group, and two item details reset on full reload",
-  });
+    },
+  );
+}
+
+test("completed bundle same-round two read_file tools reload uniquely without re-execution", async ({ h4 }) => {
+  await exerciseMultiToolDetailTerminalRefresh(h4, "bundle");
+});
+
+test("completed classic same-round two read_file tools reload uniquely without re-execution", async ({ h4 }) => {
+  await exerciseMultiToolDetailTerminalRefresh(h4, "classic");
 });
 
 test("classic fallback completes one plain-text task", async ({ h4 }) => {
