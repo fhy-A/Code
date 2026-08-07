@@ -562,6 +562,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **目标**：不改变行为，建立后续比较基线。
 
+**H4-6F 补充状态（2026-08-07）**：H4-6F 只参数化 H4-6E 的既有 Playwright 生命周期与刷新流程，为 `/dist/frontend/index.classic.html` direct classic 入口增加两条对等场景。classic 精确标记为 `classic-fallback`、无 bundle ready 且无 fallback query，不属于自动故障降级；它与 bundle 共用同一生产 AgentRun/Runtime/Session/DOM 链、固定 `additional_property` 失败语义及八类领域哈希，刷新后的 AgentRun POST、Runtime POST、chat 与生产工具执行增量均为 0。详见 [`H4-6F direct classic read_file 参数校验失败对等`](harness/h4-6f-direct-classic-read-file-argument-validation-parity.md)。该完成声明不覆盖其他 classic 失败类型、缺 path/JSON parse、文件系统或执行器失败、取消、长输出及上段列出的其他真实浏览器生命周期。
+
 **工作项**：
 
 1. 列出现有 AgentRun 状态、事件类型、事件载荷和前端处理函数。

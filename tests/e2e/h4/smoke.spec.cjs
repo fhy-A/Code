@@ -2693,11 +2693,20 @@ test("completed classic tool details reload uniquely with default collapsed stat
   await exerciseToolDetailTerminalRefresh(h4, "classic");
 });
 
-async function completeInvalidToolValidationLifecycle(h4) {
+async function assertDirectClassicEntry(page) {
+  await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", "classic-fallback");
+  expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  const currentUrl = new URL(page.url());
+  expect(currentUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+  expect(currentUrl.search).toBe("");
+}
+
+async function completeInvalidToolValidationLifecycle(h4, runtime) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
-  await h4.open("bundle");
-  await assertFrontendRuntime(page, "bundle");
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
   await h4.proveNonLoopbackBlocked();
   await h4.submitGated(INVALID_TOOL_USER);
   const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
@@ -3059,30 +3068,35 @@ async function completeInvalidToolValidationLifecycle(h4) {
       expect(value, `H4-6E ${key}`).toBe(H4_6E_SEMANTIC_HASHES[key]);
     }
   }
-  h4.evidence("invalid-tool-arguments-active-to-terminal", {
-    identity: {
-      agentRunId: idHash(agentRunId),
-      toolCallId: idHash(toolCallId),
-      runtimeRunIds: [idHash(firstRuntimeRunId), idHash(secondRuntimeRunId)],
-      processKey: terminalDom.projection.processKey,
+  h4.evidence(
+    runtime === "classic"
+      ? "classic-invalid-tool-arguments-active-to-terminal"
+      : "invalid-tool-arguments-active-to-terminal",
+    {
+      identity: {
+        agentRunId: idHash(agentRunId),
+        toolCallId: idHash(toolCallId),
+        runtimeRunIds: [idHash(firstRuntimeRunId), idHash(secondRuntimeRunId)],
+        processKey: terminalDom.projection.processKey,
+      },
+      runtimeCursors: {
+        firstActive: Number(firstRuntimeActive.body.nextCursor || 0),
+        secondActive: Number(secondRuntimeActive.body.nextCursor || 0),
+        firstCompleted: Number(firstRuntimeCompleted.body.nextCursor || 0),
+        secondCompleted: Number(secondRuntimeCompleted.body.nextCursor || 0),
+      },
+      receipt: EXPECTED_INVALID_TOOL_RESULT,
+      modelToolReceipt: expectedModelReceipt,
+      requests: {
+        agentPost: requests.agentPost,
+        runtimePost: requests.runtimePost,
+        chat: metrics.chatRequests.length,
+        productionToolDelegations: metrics.productionToolDelegations,
+        toolExecutions: metrics.toolExecutions.length,
+      },
+      hashes,
     },
-    runtimeCursors: {
-      firstActive: Number(firstRuntimeActive.body.nextCursor || 0),
-      secondActive: Number(secondRuntimeActive.body.nextCursor || 0),
-      firstCompleted: Number(firstRuntimeCompleted.body.nextCursor || 0),
-      secondCompleted: Number(secondRuntimeCompleted.body.nextCursor || 0),
-    },
-    receipt: EXPECTED_INVALID_TOOL_RESULT,
-    modelToolReceipt: expectedModelReceipt,
-    requests: {
-      agentPost: requests.agentPost,
-      runtimePost: requests.runtimePost,
-      chat: metrics.chatRequests.length,
-      productionToolDelegations: metrics.productionToolDelegations,
-      toolExecutions: metrics.toolExecutions.length,
-    },
-    hashes,
-  });
+  );
   return {
     page,
     agentRunId,
@@ -3100,15 +3114,20 @@ async function completeInvalidToolValidationLifecycle(h4) {
 }
 
 test("invalid read_file arguments fail before execution and complete with final answer", async ({ h4 }) => {
-  await completeInvalidToolValidationLifecycle(h4);
+  await completeInvalidToolValidationLifecycle(h4, "bundle");
 });
 
-test("completed invalid read_file receipt reloads uniquely without execution", async ({ h4 }) => {
-  const before = await completeInvalidToolValidationLifecycle(h4);
+test("classic invalid read_file arguments fail before execution and complete with final answer", async ({ h4 }) => {
+  await completeInvalidToolValidationLifecycle(h4, "classic");
+});
+
+async function exerciseInvalidToolValidationTerminalRefresh(h4, runtime) {
+  const before = await completeInvalidToolValidationLifecycle(h4, runtime);
   const refreshBoundary = h4.requestBoundary();
   const metricsBefore = await h4.metrics();
   await before.page.reload({ waitUntil: "domcontentloaded" });
-  await assertFrontendRuntime(before.page, "bundle");
+  await assertFrontendRuntime(before.page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(before.page);
   const persistedSession = before.page.locator(
     `#sessionList button.session-main[data-session-id="${before.sessionId}"]`,
   );
@@ -3211,15 +3230,28 @@ test("completed invalid read_file receipt reloads uniquely without execution", a
   if (Object.keys(H4_6E_SEMANTIC_HASHES).length) {
     expect(hashes).toEqual(H4_6E_SEMANTIC_HASHES);
   }
-  h4.evidence("invalid-tool-arguments-terminal-refresh", {
-    identity: {
-      agentRunId: idHash(before.agentRunId),
-      toolCallId: idHash(before.toolCallId),
-      processKey: domAfter.projection.processKey,
+  h4.evidence(
+    runtime === "classic"
+      ? "classic-invalid-tool-arguments-terminal-refresh"
+      : "invalid-tool-arguments-terminal-refresh",
+    {
+      identity: {
+        agentRunId: idHash(before.agentRunId),
+        toolCallId: idHash(before.toolCallId),
+        processKey: domAfter.projection.processKey,
+      },
+      refresh: refreshProjection,
+      hashes,
     },
-    refresh: refreshProjection,
-    hashes,
-  });
+  );
+}
+
+test("completed invalid read_file receipt reloads uniquely without execution", async ({ h4 }) => {
+  await exerciseInvalidToolValidationTerminalRefresh(h4, "bundle");
+});
+
+test("completed classic invalid read_file receipt reloads uniquely without execution", async ({ h4 }) => {
+  await exerciseInvalidToolValidationTerminalRefresh(h4, "classic");
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {
