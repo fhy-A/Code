@@ -36,6 +36,9 @@ MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL"
 INVALID_TOOL_USER = "H4_INVALID_TOOL_ARGUMENTS_USER"
 INVALID_TOOL_STAGE = "H4_INVALID_TOOL_ARGUMENTS_STAGE"
 INVALID_TOOL_FINAL = "H4_INVALID_TOOL_ARGUMENTS_FINAL"
+PARSE_ERROR_TOOL_USER = "H4_PARSE_ERROR_TOOL_ARGUMENTS_USER"
+PARSE_ERROR_TOOL_STAGE = "H4_PARSE_ERROR_TOOL_ARGUMENTS_STAGE"
+PARSE_ERROR_TOOL_FINAL = "H4_PARSE_ERROR_TOOL_ARGUMENTS_FINAL"
 EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER"
 EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE"
 EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL"
@@ -51,10 +54,12 @@ STREAM_THREE = "H4_STREAM_THREE"
 TOOL_CALL_ID = "h4-read-call-1"
 MULTI_TOOL_CALL_IDS = ("h4-multi-read-call-1", "h4-multi-read-call-2")
 INVALID_TOOL_CALL_ID = "h4-invalid-read-call-1"
+PARSE_ERROR_TOOL_CALL_ID = "h4-parse-error-read-call-1"
 EXECUTOR_RANGE_TOOL_CALL_ID = "h4-executor-range-read-call-1"
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
+MALFORMED_TOOL_ARGUMENTS = '{"path":"fixture.txt"'
 REFRESH_GATE_NAMES = (
     "before-first-delta",
     "after-second-delta",
@@ -260,13 +265,19 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if message.get("role") == "user":
             user_text = _message_text(message)
         if message.get("role") == "tool" or message.get("tool_call_id") in {
-            TOOL_CALL_ID, INVALID_TOOL_CALL_ID, EXECUTOR_RANGE_TOOL_CALL_ID,
+            TOOL_CALL_ID, INVALID_TOOL_CALL_ID, PARSE_ERROR_TOOL_CALL_ID,
+            EXECUTOR_RANGE_TOOL_CALL_ID,
             MISSING_FILE_TOOL_CALL_ID,
             *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
     if INVALID_TOOL_USER in user_text:
         return ("invalid-tool-final" if has_tool_result else "invalid-tool-call", has_tool_result)
+    if PARSE_ERROR_TOOL_USER in user_text:
+        return (
+            "parse-error-tool-final" if has_tool_result else "parse-error-tool-call",
+            has_tool_result,
+        )
     if EXECUTOR_RANGE_USER in user_text:
         return (
             "executor-range-final" if has_tool_result else "executor-range-call",
@@ -295,6 +306,39 @@ def _invalid_tool_receipt_projection(payload: dict) -> dict | None:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
         if str(message.get("tool_call_id") or "") != INVALID_TOOL_CALL_ID:
+            continue
+        try:
+            result = json.loads(str(message.get("content") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        return {
+            "role": "tool",
+            "toolCallId": "tool-1",
+            "name": str(message.get("name") or ""),
+            "ok": result.get("ok"),
+            "action": str(result.get("action") or ""),
+            "errorCode": str(result.get("errorCode") or ""),
+            "errorPresent": bool(str(result.get("error") or "").strip()),
+            "failureCount": int(result.get("failureCount") or 0),
+            "fieldErrors": [
+                {
+                    "field": str(item.get("field") or ""),
+                    "reason": str(item.get("reason") or ""),
+                }
+                for item in (result.get("fieldErrors") or [])
+                if isinstance(item, dict)
+            ],
+        }
+    return None
+
+
+def _parse_error_tool_receipt_projection(payload: dict) -> dict | None:
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        if str(message.get("tool_call_id") or "") != PARSE_ERROR_TOOL_CALL_ID:
             continue
         try:
             result = json.loads(str(message.get("content") or "{}"))
@@ -498,6 +542,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         }
         if scenario == "invalid-tool-final":
             chat_metric["invalidReceipt"] = _invalid_tool_receipt_projection(payload)
+        if scenario == "parse-error-tool-final":
+            chat_metric["parseErrorReceipt"] = _parse_error_tool_receipt_projection(payload)
         if scenario == "executor-range-final":
             chat_metric["executorRangeReceipt"] = _executor_range_receipt_projection(payload)
         if scenario == "missing-file-final":
@@ -506,7 +552,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if scenario not in (
             "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
-            "invalid-tool-call", "executor-range-call", "missing-file-call",
+            "invalid-tool-call", "parse-error-tool-call", "executor-range-call",
+            "missing-file-call",
         ) and current_chat_count == 1:
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
@@ -562,7 +609,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         if scenario in (
             "tool-detail-final", "multi-tool-detail-final", "invalid-tool-final",
-            "executor-range-final", "missing-file-final",
+            "parse-error-tool-final", "executor-range-final", "missing-file-final",
         ):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -588,12 +635,16 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     INVALID_TOOL_FINAL
                     if scenario == "invalid-tool-final"
                     else (
-                        EXECUTOR_RANGE_FINAL
-                        if scenario == "executor-range-final"
+                        PARSE_ERROR_TOOL_FINAL
+                        if scenario == "parse-error-tool-final"
                         else (
-                            MISSING_FILE_FINAL
-                            if scenario == "missing-file-final"
-                            else TOOL_DETAILS_FINAL
+                            EXECUTOR_RANGE_FINAL
+                            if scenario == "executor-range-final"
+                            else (
+                                MISSING_FILE_FINAL
+                                if scenario == "missing-file-final"
+                                else TOOL_DETAILS_FINAL
+                            )
                         )
                     )
                 )
@@ -616,13 +667,14 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         if scenario in (
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
-            "executor-range-call", "missing-file-call",
+            "parse-error-tool-call", "executor-range-call", "missing-file-call",
         ):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
                 "multi-tool-detail-call": MULTI_TOOL_STAGE,
                 "invalid-tool-call": INVALID_TOOL_STAGE,
+                "parse-error-tool-call": PARSE_ERROR_TOOL_STAGE,
                 "executor-range-call": EXECUTOR_RANGE_STAGE,
                 "missing-file-call": MISSING_FILE_STAGE,
             }[scenario]
@@ -672,6 +724,16 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                             {"path": READ_PATH, "unexpected": True},
                             separators=(",", ":"),
                         ),
+                    },
+                }]
+            elif scenario == "parse-error-tool-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": PARSE_ERROR_TOOL_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": MALFORMED_TOOL_ARGUMENTS,
                     },
                 }]
             elif scenario == "executor-range-call":

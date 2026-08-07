@@ -20,6 +20,10 @@ const MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL";
 const INVALID_TOOL_USER = "H4_INVALID_TOOL_ARGUMENTS_USER";
 const INVALID_TOOL_STAGE = "H4_INVALID_TOOL_ARGUMENTS_STAGE";
 const INVALID_TOOL_FINAL = "H4_INVALID_TOOL_ARGUMENTS_FINAL";
+const PARSE_ERROR_TOOL_USER = "H4_PARSE_ERROR_TOOL_ARGUMENTS_USER";
+const PARSE_ERROR_TOOL_STAGE = "H4_PARSE_ERROR_TOOL_ARGUMENTS_STAGE";
+const PARSE_ERROR_TOOL_FINAL = "H4_PARSE_ERROR_TOOL_ARGUMENTS_FINAL";
+const MALFORMED_TOOL_ARGUMENTS = '{"path":"fixture.txt"';
 const EXECUTOR_RANGE_USER = "H4_EXECUTOR_RANGE_FAILURE_USER";
 const EXECUTOR_RANGE_STAGE = "H4_EXECUTOR_RANGE_FAILURE_STAGE";
 const EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL";
@@ -100,6 +104,16 @@ const H4_6H_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "d8e40c3d2d303c0e4c4c6394dde046869f7ffaee8414f960d54dbc3261cb2c7e",
   activeDom: "b6ae61b6e790e68c2c2d0586fb0d5a62d2074b88d4f6203a35760a78ced8c983",
   terminalDom: "2aed54d3a2fdb4e76d6c0fe53e4a223992c116adda0826b08334e1a44d54848f",
+  refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
+});
+const H4_6I_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "7bd9960cdce1fe4e6cc79c96ebdb6201ecf36e34a3886415b20490268d5dbff6",
+  parseErrorReceiptProjection: "4408c0eff96e0b57d370df9d6d04ab341c3f8d1d512aab9f5abeefd7f2603558",
+  modelToolReceiptProjection: "d86effa558f902e0c15442c8bfe6de8127f7a33178ad77791b5671b432788e5a",
+  sessionRoleContent: "dc6b9beeac5d404fd7fd7ff147e4cfb4bd8fdb9eef4fceebb399bbb93cb16497",
+  sessionToolMeta: "f460fea9ea4f5fe16f53bace264c0ab3904b5fe5610ac8d82dcb824068f6c1da",
+  activeDom: "e54e3de59dc8d46a78a819ae0b5b65d791462444e1b592cff96bff71c0226cac",
+  terminalDom: "0c10ac9845c8e616e880ef9f693636390fffe942d390201d775d343ac0ab72e3",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
 
@@ -214,6 +228,15 @@ const EXPECTED_INVALID_TOOL_RESULT = Object.freeze({
   fieldErrors: [{ field: "unexpected", reason: "additional_property" }],
 });
 
+const EXPECTED_PARSE_ERROR_TOOL_RESULT = Object.freeze({
+  ok: false,
+  action: "read_file",
+  errorCode: "invalid_tool_arguments",
+  errorPresent: true,
+  failureCount: 1,
+  fieldErrors: [],
+});
+
 const EXPECTED_EXECUTOR_RANGE_RESULT = Object.freeze({
   ok: false,
   action: "read_file",
@@ -321,6 +344,137 @@ const INVALID_TOOL_FAILURE_CONTRACT = Object.freeze({
     return {
       present: Boolean(text),
       unexpectedCount: countOccurrences(text, "unexpected"),
+      nonEmpty: Boolean(text.trim()),
+    };
+  },
+});
+
+const PARSE_ERROR_TOOL_FAILURE_CONTRACT = Object.freeze({
+  key: "H4-6I",
+  userMarker: PARSE_ERROR_TOOL_USER,
+  stageMarker: PARSE_ERROR_TOOL_STAGE,
+  finalMarker: PARSE_ERROR_TOOL_FINAL,
+  arguments: MALFORMED_TOOL_ARGUMENTS,
+  projectResult: stableInvalidToolResult,
+  expectedResult: EXPECTED_PARSE_ERROR_TOOL_RESULT,
+  receiptHashKey: "parseErrorReceiptProjection",
+  chatCallScenario: "parse-error-tool-call",
+  chatFinalScenario: "parse-error-tool-final",
+  chatReceiptKey: "parseErrorReceipt",
+  expectedDelegations: 0,
+  expectedToolExecutions: Object.freeze([]),
+  assertRawResult(result) {
+    expect(result).toMatchObject({
+      ok: false,
+      action: "read_file",
+      errorCode: "invalid_tool_arguments",
+      fieldErrors: [],
+      failureCount: 1,
+    });
+    expect(String(result?.error || "").trim()).not.toBe("");
+  },
+  hashes: H4_6I_SEMANTIC_HASHES,
+  runtimeCursors: Object.freeze({
+    firstActive: 4,
+    secondActive: 0,
+    firstCompleted: 4,
+    secondCompleted: 3,
+  }),
+  evidenceStem: "parse-error-tool-arguments",
+  domPrimaryArgumentMarkers: Object.freeze([]),
+  domArgumentMarkers: Object.freeze([]),
+  domResultMarkers: Object.freeze([]),
+  expectedDomArguments: Object.freeze({
+    actionPresent: true,
+    pathPresent: false,
+    malformedRawPresent: false,
+  }),
+  expectedDomResult: Object.freeze({
+    present: true,
+    malformedRawPresent: false,
+    nonEmpty: true,
+  }),
+  expectedSessionProjection: Object.freeze([
+    { role: "user", marker: "user" },
+    { role: "assistant", marker: "stage" },
+    {
+      role: "tool-call",
+      contentPresent: true,
+      pathPresent: false,
+      malformedRawPresent: false,
+    },
+    {
+      role: "tool-result",
+      contentPresent: true,
+      malformedRawPresent: false,
+    },
+    { role: "assistant", marker: "final" },
+  ]),
+  get expectedSessionToolMeta() {
+    return [
+      {
+        role: "tool-call",
+        toolCallId: "tool-1",
+        agentRunId: "agent-1",
+        agentEventType: "tool_started",
+        agentEventSeq: 4,
+        action: "read_file",
+        arguments: {
+          action: "read_file",
+          pathPresent: false,
+          malformedRawPresent: false,
+        },
+        native: true,
+        replayed: false,
+        outcome: "",
+        result: null,
+      },
+      {
+        role: "tool-result",
+        toolCallId: "tool-1",
+        agentRunId: "agent-1",
+        agentEventType: "tool_completed",
+        agentEventSeq: 5,
+        action: "read_file",
+        arguments: null,
+        native: true,
+        replayed: false,
+        outcome: "failed",
+        result: this.expectedResult,
+      },
+    ];
+  },
+  sessionCallProjection(content) {
+    return {
+      contentPresent: Boolean(content.trim()),
+      pathPresent: content.includes("fixture.txt"),
+      malformedRawPresent: content.includes(MALFORMED_TOOL_ARGUMENTS),
+    };
+  },
+  sessionResultProjection(content) {
+    return {
+      contentPresent: Boolean(content.trim()),
+      malformedRawPresent: content.includes(MALFORMED_TOOL_ARGUMENTS),
+    };
+  },
+  sessionArgumentsProjection(tool) {
+    return {
+      action: String(tool.action || ""),
+      pathPresent: Object.prototype.hasOwnProperty.call(tool, "path"),
+      malformedRawPresent: JSON.stringify(tool).includes(MALFORMED_TOOL_ARGUMENTS),
+    };
+  },
+  domArgumentsProjection(text) {
+    return {
+      actionPresent: text.includes('"action": "read_file"'),
+      pathPresent: text.includes("fixture.txt"),
+      malformedRawPresent: text.includes(MALFORMED_TOOL_ARGUMENTS),
+    };
+  },
+  domResultProjection(text) {
+    return {
+      present: Boolean(text),
+      malformedRawPresent: text.includes(MALFORMED_TOOL_ARGUMENTS),
       nonEmpty: Boolean(text.trim()),
     };
   },
@@ -768,7 +922,9 @@ function failedToolSessionRoleContentProjection(messages, contract) {
       };
     }
     if (role === "tool-call") {
-      return { role, contentPresent: Boolean(content.trim()) };
+      return contract.sessionCallProjection
+        ? { role, ...contract.sessionCallProjection(content) }
+        : { role, contentPresent: Boolean(content.trim()) };
     }
     if (role === "tool-result") {
       return { role, ...contract.sessionResultProjection(content) };
@@ -3163,6 +3319,12 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     name: "read_file",
     arguments: contract.arguments,
   }]);
+  expect(activeTrace.eventProjection[3]).toMatchObject({
+    type: "tool_started",
+    toolCallId: "tool-1",
+    name: "read_file",
+    arguments: contract.arguments,
+  });
   expect(activeTrace.eventProjection[4]).toMatchObject({
     type: "tool_completed",
     toolCallId: "tool-1",
@@ -3226,7 +3388,9 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   await expect(items).toHaveCount(1);
   await expect(items).toHaveClass(/\bfailed\b/);
   await expect(items.locator(".tool-process-detail pre")).toHaveCount(2);
-  await expect(items.locator(".tool-process-detail pre").first()).toContainText("fixture.txt");
+  for (const marker of contract.domPrimaryArgumentMarkers || ["fixture.txt"]) {
+    await expect(items.locator(".tool-process-detail pre").first()).toContainText(marker);
+  }
   for (const marker of contract.domArgumentMarkers) {
     await expect(items.locator(".tool-process-detail pre").first()).toContainText(marker);
   }
@@ -3262,7 +3426,9 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   await expect(initialDom.outer).toHaveAttribute("open", "");
   await initialDom.item.locator(":scope > summary").click();
   await expect(initialDom.item).toHaveAttribute("open", "");
-  await expect(initialDom.details.first()).toContainText("fixture.txt");
+  for (const marker of contract.domPrimaryArgumentMarkers || ["fixture.txt"]) {
+    await expect(initialDom.details.first()).toContainText(marker);
+  }
   for (const marker of contract.domArgumentMarkers) {
     await expect(initialDom.details.first()).toContainText(marker);
   }
@@ -3363,7 +3529,9 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   await expect(terminalDom.outer).toHaveAttribute("open", "");
   await terminalDom.item.locator(":scope > summary").click();
   await expect(terminalDom.item).toHaveAttribute("open", "");
-  await expect(terminalDom.details.first()).toContainText("fixture.txt");
+  for (const marker of contract.domPrimaryArgumentMarkers || ["fixture.txt"]) {
+    await expect(terminalDom.details.first()).toContainText(marker);
+  }
   for (const marker of contract.domArgumentMarkers) {
     await expect(terminalDom.details.first()).toContainText(marker);
   }
@@ -3565,7 +3733,9 @@ async function exerciseToolFailureTerminalRefresh(h4, runtime, contract) {
   await expect(domAfter.outer).toHaveAttribute("open", "");
   await domAfter.item.locator(":scope > summary").click();
   await expect(domAfter.item).toHaveAttribute("open", "");
-  await expect(domAfter.details.first()).toContainText("fixture.txt");
+  for (const marker of contract.domPrimaryArgumentMarkers || ["fixture.txt"]) {
+    await expect(domAfter.details.first()).toContainText(marker);
+  }
   for (const marker of contract.domArgumentMarkers) {
     await expect(domAfter.details.first()).toContainText(marker);
   }
@@ -3684,6 +3854,14 @@ test("bundle missing read_file executor failure lifecycle and reload", async ({ 
 
 test("direct classic missing read_file executor failure lifecycle and reload", async ({ h4 }) => {
   await exerciseToolFailureTerminalRefresh(h4, "classic", MISSING_FILE_FAILURE_CONTRACT);
+});
+
+test("bundle malformed read_file arguments parse failure lifecycle and reload", async ({ h4 }) => {
+  await exerciseToolFailureTerminalRefresh(h4, "bundle", PARSE_ERROR_TOOL_FAILURE_CONTRACT);
+});
+
+test("direct classic malformed read_file arguments parse failure lifecycle and reload", async ({ h4 }) => {
+  await exerciseToolFailureTerminalRefresh(h4, "classic", PARSE_ERROR_TOOL_FAILURE_CONTRACT);
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {
