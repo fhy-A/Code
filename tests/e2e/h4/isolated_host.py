@@ -30,6 +30,9 @@ TOOL_FINAL = "H4_TOOL_FINAL"
 TOOL_DETAILS_USER = "H4_TOOL_DETAILS_USER"
 TOOL_DETAILS_STAGE = "H4_TOOL_DETAILS_STAGE"
 TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL"
+MULTI_TOOL_USER = "H4_MULTI_TOOL_USER"
+MULTI_TOOL_STAGE = "H4_MULTI_TOOL_STAGE"
+MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -37,6 +40,7 @@ STREAM_ONE = "H4_STREAM_ONE "
 STREAM_TWO = "H4_STREAM_TWO "
 STREAM_THREE = "H4_STREAM_THREE"
 TOOL_CALL_ID = "h4-read-call-1"
+MULTI_TOOL_CALL_IDS = ("h4-multi-read-call-1", "h4-multi-read-call-2")
 READ_PATH = "fixture.txt"
 REFRESH_GATE_NAMES = (
     "before-first-delta",
@@ -44,6 +48,7 @@ REFRESH_GATE_NAMES = (
     "before-terminal",
     "before-tool-final-delta",
     "before-tool-terminal",
+    "before-second-tool-execute",
 )
 
 
@@ -241,8 +246,12 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             continue
         if message.get("role") == "user":
             user_text = _message_text(message)
-        if message.get("role") == "tool" or message.get("tool_call_id") == TOOL_CALL_ID:
+        if message.get("role") == "tool" or message.get("tool_call_id") in {
+            TOOL_CALL_ID, *MULTI_TOOL_CALL_IDS,
+        }:
             has_tool_result = True
+    if MULTI_TOOL_USER in user_text:
+        return ("multi-tool-detail-final" if has_tool_result else "multi-tool-detail-call", has_tool_result)
     if TOOL_DETAILS_USER in user_text:
         return ("tool-detail-final" if has_tool_result else "tool-detail-call", has_tool_result)
     if TOOL_USER in user_text:
@@ -367,7 +376,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "hasToolResult": has_tool_result,
         })
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
-        if scenario not in ("stream-refresh", "tool-detail-call") and current_chat_count == 1:
+        if scenario not in (
+            "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
+        ) and current_chat_count == 1:
             METRICS.increment("modelGateWaits")
             if not MODEL_GATE.wait(timeout=10):
                 self._send_json({"error": "model gate timeout"}, 504)
@@ -420,7 +431,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_frame("[DONE]")
             return
 
-        if scenario == "tool-detail-final":
+        if scenario in ("tool-detail-final", "multi-tool-detail-final"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -438,9 +449,14 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
             if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
                 return
+            final_text = (
+                MULTI_TOOL_FINAL
+                if scenario == "multi-tool-detail-final"
+                else TOOL_DETAILS_FINAL
+            )
             if not write_tool_detail_frame(_chunk({
                 "role": "assistant",
-                "content": TOOL_DETAILS_FINAL,
+                "content": final_text,
             })):
                 return
             if not REFRESH_GATES.reach_and_wait("before-tool-terminal"):
@@ -454,21 +470,50 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_tool_detail_frame("[DONE]")
             return
 
-        if scenario in ("tool-call", "tool-detail-call"):
-            stage_text = TOOL_DETAILS_STAGE if scenario == "tool-detail-call" else TOOL_STAGE
-            frames = [
-                _chunk({"role": "assistant", "content": stage_text}),
-                _chunk({
-                    "tool_calls": [{
+        if scenario in ("tool-call", "tool-detail-call", "multi-tool-detail-call"):
+            stage_text = {
+                "tool-call": TOOL_STAGE,
+                "tool-detail-call": TOOL_DETAILS_STAGE,
+                "multi-tool-detail-call": MULTI_TOOL_STAGE,
+            }[scenario]
+            tool_calls = [{
+                "index": 0,
+                "id": TOOL_CALL_ID,
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": READ_PATH}, separators=(",", ":")),
+                },
+            }]
+            if scenario == "multi-tool-detail-call":
+                tool_calls = [
+                    {
                         "index": 0,
-                        "id": TOOL_CALL_ID,
+                        "id": MULTI_TOOL_CALL_IDS[0],
                         "type": "function",
                         "function": {
                             "name": "read_file",
-                            "arguments": json.dumps({"path": READ_PATH}, separators=(",", ":")),
+                            "arguments": json.dumps(
+                                {"path": READ_PATH}, separators=(",", ":"),
+                            ),
                         },
-                    }],
-                }),
+                    },
+                    {
+                        "index": 1,
+                        "id": MULTI_TOOL_CALL_IDS[1],
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps(
+                                {"path": READ_PATH, "startLine": 1, "endLine": 1},
+                                separators=(",", ":"),
+                            ),
+                        },
+                    },
+                ]
+            frames = [
+                _chunk({"role": "assistant", "content": stage_text}),
+                _chunk({"tool_calls": tool_calls}),
                 _chunk({}, "tool_calls", {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}),
             ]
         else:
@@ -652,10 +697,22 @@ def main() -> int:
         if requested != READ_PATH:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 read_file request escaped the fixed synthetic fixture")
-        METRICS.append("toolExecutions", {
+        start_line = (payload or {}).get("startLine")
+        end_line = (payload or {}).get("endLine")
+        is_second_multi_read = start_line == 1 and end_line == 1
+        if is_second_multi_read and not REFRESH_GATES.reach_and_wait(
+            "before-second-tool-execute",
+        ):
+            raise TimeoutError("H4 second read_file execution gate timed out")
+        execution_metric = {
             "action": "read_file",
             "path": READ_PATH,
-        })
+        }
+        if start_line is not None:
+            execution_metric["startLine"] = start_line
+        if end_line is not None:
+            execution_metric["endLine"] = end_line
+        METRICS.append("toolExecutions", execution_metric)
         METRICS.increment("productionToolDelegations")
         return original_execute_registered_tool(
             action,

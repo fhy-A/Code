@@ -14,8 +14,12 @@ const STREAM_FINAL = `${STREAM_ONE} ${STREAM_TWO} ${STREAM_THREE}`;
 const TOOL_DETAILS_USER = "H4_TOOL_DETAILS_USER";
 const TOOL_DETAILS_STAGE = "H4_TOOL_DETAILS_STAGE";
 const TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL";
+const MULTI_TOOL_USER = "H4_MULTI_TOOL_USER";
+const MULTI_TOOL_STAGE = "H4_MULTI_TOOL_STAGE";
+const MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL";
 const TOOL_FINAL_DELTA_GATE = "before-tool-final-delta";
 const TOOL_TERMINAL_GATE = "before-tool-terminal";
+const SECOND_TOOL_EXECUTE_GATE = "before-second-tool-execute";
 const FRONTEND_BUNDLE_PATH = "/dist/frontend/code.bundle.js";
 const CLASSIC_FALLBACK_PATH = "/dist/frontend/index.classic.html";
 const H4_5B1_SEMANTIC_HASHES = Object.freeze({
@@ -40,6 +44,23 @@ const H4_6A_TERMINAL_REFRESH_HASHES = Object.freeze({
   sessionRoleContent: "c6b7c90baeafb1c29e38d431bdbaf28a1ca282d54d47ac2d024601ad3d3e442a",
   sessionToolMeta: "587b9b6365a9811779ab0bac530de558af1dfca14d31c70ac2cce71ae0973fe9",
   terminalDom: "71a1ebdf6f609fc44a8408f20d15659626e8b6d11bf033b3665be510bf470712",
+});
+const H4_6C_ACTIVE_TO_TERMINAL_HASHES = Object.freeze({
+  lifecycle: "f5445145789b337ffba49dcec350a483981be281d52e9144f23fefd8cde3307d",
+  eventProjection: "6e81cc9ad5662a25862ffd3384de2d53481d75e427695391eedd4e8a7aac1342",
+  receiptProjection: "35e8de4147a9991325091f30dedb701ab0676979af6db122ccee9ed3e56042c1",
+  sessionRoleContent: "033743ab31d1b95e7e33aefc1c74515a01cc2fb65cebd4830b2099f2c6a4e2f7",
+  sessionToolMeta: "23956f1cd5fdb148e94f6c224e7dff3326ec0e4f6aff01342512fa9fc8ab842e",
+  activeDom: "3fd7fd4774195b01136297bb63f88e348b18eac5fac40ace73ffe8f88c1ca0d0",
+  terminalDom: "9efb0070a8125ede3c69abf4f4c530ac5076979d480febd63d5df7a7230753cb",
+});
+const H4_6C_TERMINAL_REFRESH_HASHES = Object.freeze({
+  refreshLifecycle: "9421bf68cdb674d5dff228bb173db82772af2806f9881f52437d60b763e673de",
+  eventProjection: "6e81cc9ad5662a25862ffd3384de2d53481d75e427695391eedd4e8a7aac1342",
+  receiptProjection: "35e8de4147a9991325091f30dedb701ab0676979af6db122ccee9ed3e56042c1",
+  sessionRoleContent: "033743ab31d1b95e7e33aefc1c74515a01cc2fb65cebd4830b2099f2c6a4e2f7",
+  sessionToolMeta: "23956f1cd5fdb148e94f6c224e7dff3326ec0e4f6aff01342512fa9fc8ab842e",
+  terminalDom: "9efb0070a8125ede3c69abf4f4c530ac5076979d480febd63d5df7a7230753cb",
 });
 
 function idHash(value) {
@@ -217,6 +238,39 @@ function sessionToolMetaProjection(messages, agentRunId, toolCallId) {
     });
 }
 
+function multiSessionToolMetaProjection(messages, agentRunId, toolCallIds) {
+  const aliases = new Map(toolCallIds.map((toolCallId, index) => [toolCallId, `tool-${index + 1}`]));
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === "tool-call" || message?.role === "tool-result")
+    .map((message) => {
+      const meta = message?.meta || {};
+      const tool = meta.tool && typeof meta.tool === "object" ? meta.tool : {};
+      const result = meta.result && typeof meta.result === "object"
+        ? stableReadToolResult(meta.result)
+        : null;
+      return {
+        role: String(message.role),
+        toolCallId: aliases.get(String(meta.toolCallId || "")) || "mismatch",
+        agentRunId: meta.agentRunId == null
+          ? ""
+          : (String(meta.agentRunId) === agentRunId ? "agent-1" : "mismatch"),
+        agentEventType: String(meta.agentEventType || ""),
+        agentEventSeq: Number(meta.agentEventSeq || 0),
+        action: String(meta.action || ""),
+        arguments: message.role === "tool-call" ? {
+          path: String(tool.path || ""),
+          startLine: tool.startLine ?? null,
+          endLine: tool.endLine ?? null,
+        } : null,
+        path: String(meta.path || tool.path || ""),
+        native: meta.native === true,
+        replayed: Boolean(meta.replayed),
+        outcome: String(meta.outcome || ""),
+        result,
+      };
+    });
+}
+
 async function readDurableAgentRecord(h4, agentRunId) {
   const recordPath = path.join(h4.host.dataDir, "agent-runs", `${agentRunId}.json`);
   const bytes = await fs.readFile(recordPath);
@@ -371,6 +425,101 @@ async function toolDetailLifecycleDomEvidence(page) {
     process,
     outer,
     item,
+    finalAnswer,
+    projection,
+    semanticHash: canonicalHash(projection),
+  };
+}
+
+async function multiToolDetailLifecycleDomEvidence(page) {
+  const messages = page.locator("#messages");
+  const user = messages.locator("article.msg.user").filter({ hasText: MULTI_TOOL_USER });
+  const commentary = messages.locator("article.msg.assistant.agent-commentary")
+    .filter({ hasText: MULTI_TOOL_STAGE });
+  const process = messages.locator("article.tool-process");
+  const outer = process.locator("details.tool-process-stage");
+  const items = process.locator("details.tool-process-item");
+  const finalAnswer = messages.locator("article.msg.assistant")
+    .filter({ hasText: MULTI_TOOL_FINAL });
+  await expect(user).toHaveCount(1);
+  await expect(commentary).toHaveCount(1);
+  await expect(process).toHaveCount(1);
+  await expect(outer).toHaveCount(1);
+  await expect(items).toHaveCount(2);
+  const itemLocators = await items.all();
+  const itemProjections = [];
+  for (const [index, item] of itemLocators.entries()) {
+    const detailTexts = await item.locator(".tool-process-detail pre").allTextContents();
+    const argumentText = String(detailTexts[0] || "").trim();
+    const resultText = String(detailTexts[1] || "").trim();
+    itemProjections.push({
+      order: index + 1,
+      className: String(await item.getAttribute("class") || ""),
+      open: await item.evaluate((element) => element.open),
+      heading: String(await item.locator(":scope > summary .tool-process-row-heading").textContent() || "").trim(),
+      outcome: String(await item.locator(":scope > summary .tool-process-outcome").textContent() || "").trim(),
+      argumentText,
+      resultText,
+      arguments: {
+        pathPresent: argumentText.includes('"path": "fixture.txt"'),
+        startLinePresent: argumentText.includes('"startLine": 1'),
+        endLinePresent: argumentText.includes('"endLine": 1'),
+      },
+      formattedResult: {
+        present: Boolean(resultText),
+        pathPresent: resultText.includes("fixture.txt"),
+        sizePresent: resultText.includes("26 B"),
+        fixtureContentCount: countOccurrences(resultText, FIXTURE_CONTENT.trim()),
+      },
+    });
+  }
+  const processKey = await outer.getAttribute("data-tool-process-key");
+  const finalCount = await finalAnswer.count();
+  const ordered = await page.evaluate(({ userMarker, stageMarker, finalMarker }) => {
+    const root = document.querySelector("#messages");
+    const find = (selector, marker) => [...root.querySelectorAll(selector)]
+      .find((element) => element.textContent.includes(marker));
+    const nodes = [
+      find("article.msg.user", userMarker),
+      find("article.msg.assistant.agent-commentary", stageMarker),
+      root.querySelector("article.tool-process"),
+    ];
+    const final = find("article.msg.assistant", finalMarker);
+    if (final) nodes.push(final);
+    return nodes.every(Boolean) && nodes.slice(0, -1).every((node, index) => (
+      Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ));
+  }, {
+    userMarker: MULTI_TOOL_USER,
+    stageMarker: MULTI_TOOL_STAGE,
+    finalMarker: MULTI_TOOL_FINAL,
+  });
+  const projection = {
+    sequence: finalCount
+      ? [MULTI_TOOL_USER, MULTI_TOOL_STAGE, "read_file:1", "read_file:2", MULTI_TOOL_FINAL]
+      : [MULTI_TOOL_USER, MULTI_TOOL_STAGE, "read_file:1", "read_file:2"],
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItems: itemProjections.length,
+      results: itemProjections.filter((item) => item.formattedResult.present).length,
+      final: finalCount,
+      ordinaryAssistant: await messages.locator("article.msg.assistant:not(.tool-process)").count(),
+      assistantTotal: await messages.locator("article.msg.assistant").count(),
+    },
+    processKey: String(processKey || ""),
+    outerOpen: await outer.evaluate((element) => element.open),
+    stageClass: String(await outer.getAttribute("class") || ""),
+    currentAction: String(await outer.getAttribute("data-current-action") || ""),
+    heading: String(await outer.locator(".tool-process-stage-heading").textContent() || "").trim(),
+    items: itemProjections,
+    ordered,
+  };
+  return {
+    process,
+    outer,
+    items: itemLocators,
     finalAnswer,
     projection,
     semanticHash: canonicalHash(projection),
@@ -2305,6 +2454,553 @@ test("classic tool group keeps manual expansion through active rerender and coll
 
 test("completed classic tool details reload uniquely with default collapsed state", async ({ h4 }) => {
   await exerciseToolDetailTerminalRefresh(h4, "classic");
+});
+
+async function startMultiToolDetailAtSecondExecute(h4) {
+  const { page } = h4;
+  const requestBoundary = h4.requestBoundary();
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.proveNonLoopbackBlocked();
+  await h4.submitGated(MULTI_TOOL_USER);
+  const gateSnapshot = await h4.waitGate(SECOND_TOOL_EXECUTE_GATE);
+  expect(gateSnapshot[SECOND_TOOL_EXECUTE_GATE]).toMatchObject({
+    reached: true,
+    released: false,
+  });
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const activeAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(activeAgent.status).toBe(200);
+  expect(activeAgent.body.status).toBe("tools");
+  const activeTrace = durableToolTraceEvidence(activeAgent.body);
+  expect(activeTrace.eventProjection.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "tool_completed",
+    "tool_started",
+  ]);
+  expect(activeTrace.pendingToolCallCount).toBe(1);
+  expect(activeTrace.toolCallIds).toHaveLength(2);
+  const [firstToolCallId, secondToolCallId] = activeTrace.toolCallIds;
+  expect(activeTrace.eventProjection[2].toolCalls).toEqual([
+    { toolCallId: "tool-1", name: "read_file", arguments: { path: "fixture.txt" } },
+    {
+      toolCallId: "tool-2",
+      name: "read_file",
+      arguments: { path: "fixture.txt", startLine: 1, endLine: 1 },
+    },
+  ]);
+  expect(activeTrace.executionProjection[0]).toEqual({
+    toolCallId: "tool-1",
+    name: "read_file",
+    arguments: { path: "fixture.txt" },
+    status: "completed",
+    outcome: "succeeded",
+    result: {
+      ok: true,
+      action: "read_file",
+      path: "fixture.txt",
+      content: FIXTURE_CONTENT,
+      size: 26,
+      truncated: false,
+      lineRange: null,
+    },
+  });
+  expect(activeTrace.executionProjection[1]).toMatchObject({
+    toolCallId: "tool-2",
+    name: "read_file",
+    arguments: { path: "fixture.txt", startLine: 1, endLine: 1 },
+    status: "running",
+    outcome: "",
+  });
+  const firstRuntimeRunId = String(activeAgent.body.events.find((event) => (
+    event?.type === "model_started"
+  ))?.data?.runtimeRunId || "");
+  expect(firstRuntimeRunId).not.toBe("");
+  expect(h4.controlIds()).toEqual({
+    agentRunIds: [agentRunId],
+    runtimeRunIds: [firstRuntimeRunId],
+  });
+  const firstRuntime = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(firstRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(firstRuntime.status).toBe(200);
+  expect(firstRuntime.body).toMatchObject({
+    runId: firstRuntimeRunId,
+    sessionId: activeAgent.body.sessionId,
+    status: "completed",
+    nextCursor: 4,
+  });
+  expect(firstRuntime.body.result?.content).toBe(MULTI_TOOL_STAGE);
+  const metricsAtGate = await h4.metrics();
+  expect(metricsAtGate.chatRequests).toEqual([
+    { scenario: "multi-tool-detail-call", stream: true, hasToolResult: false },
+  ]);
+  expect(metricsAtGate.toolExecutions).toEqual([
+    { action: "read_file", path: "fixture.txt" },
+  ]);
+  expect(metricsAtGate.unsafeToolRequests).toBe(0);
+  return {
+    page,
+    requestBoundary,
+    agentRunId,
+    activeAgent,
+    activeTrace,
+    firstToolCallId,
+    secondToolCallId,
+    firstRuntimeRunId,
+    metricsAtGate,
+  };
+}
+
+async function waitForMultiToolTerminal(h4, agentRunId) {
+  const { page } = h4;
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+  let completedAgent = null;
+  await expect.poll(async () => {
+    completedAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedAgent.body?.status,
+      nextCursor: completedAgent.body?.nextCursor,
+      eventTypes: (completedAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 11,
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "tool_completed",
+      "tool_started",
+      "tool_completed",
+      "model_pending",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+  });
+  expect(completedAgent.body.activeRuntimeRunId).toBe("");
+  expect(completedAgent.body.pendingToolCalls).toEqual([]);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+  return completedAgent;
+}
+
+function expectedMultiToolExecutionProjection() {
+  return [
+    {
+      toolCallId: "tool-1",
+      name: "read_file",
+      arguments: { path: "fixture.txt" },
+      status: "completed",
+      outcome: "succeeded",
+      result: {
+        ok: true,
+        action: "read_file",
+        path: "fixture.txt",
+        content: FIXTURE_CONTENT,
+        size: 26,
+        truncated: false,
+        lineRange: null,
+      },
+    },
+    {
+      toolCallId: "tool-2",
+      name: "read_file",
+      arguments: { path: "fixture.txt", startLine: 1, endLine: 1 },
+      status: "completed",
+      outcome: "succeeded",
+      result: {
+        ok: true,
+        action: "read_file",
+        path: "fixture.txt",
+        content: FIXTURE_CONTENT.trim(),
+        size: 26,
+        truncated: false,
+        lineRange: { start: 1, end: 1 },
+      },
+    },
+  ];
+}
+
+async function assertMultiToolCompletedInteraction(page, dom) {
+  const terminalTrace = page.locator("#messages .execution-trace.completed");
+  await expect(terminalTrace).toHaveCount(1);
+  await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
+  const traceToggle = terminalTrace.locator(":scope > [data-execution-trace-toggle]");
+  await expect(traceToggle).toHaveCount(1);
+  await expect(traceToggle).toHaveAttribute("aria-expanded", "false");
+  await traceToggle.click();
+  await expect(terminalTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(dom.outer.locator(":scope > summary.tool-process-stage-summary")).toBeVisible();
+  await dom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(dom.outer).toHaveAttribute("open", "");
+  for (const item of dom.items) {
+    await item.locator(":scope > summary").click();
+    await expect(item).toHaveAttribute("open", "");
+  }
+  for (const [index, item] of dom.items.entries()) {
+    const details = item.locator(".tool-process-detail pre");
+    await expect(details).toHaveCount(2);
+    await expect(details.first()).toContainText("fixture.txt");
+    if (index === 1) {
+      await expect(details.first()).toContainText('"startLine": 1');
+      await expect(details.first()).toContainText('"endLine": 1');
+    }
+    await expect(details.last()).toContainText("fixture.txt");
+    await expect(details.last()).toContainText("26 B");
+    await expect(details.last()).toContainText(FIXTURE_CONTENT.trim());
+    expect(countOccurrences(await details.last().textContent(), FIXTURE_CONTENT.trim())).toBe(1);
+  }
+  for (const item of [...dom.items].reverse()) {
+    await item.locator(":scope > summary").click();
+    await expect(item).not.toHaveAttribute("open", "");
+  }
+  await dom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(dom.outer).not.toHaveAttribute("open", "");
+  await traceToggle.click();
+  await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggle).toHaveAttribute("aria-expanded", "false");
+}
+
+test("bundle same-round two read_file tools keep order and expansion through terminal", async ({ h4 }) => {
+  const started = await startMultiToolDetailAtSecondExecute(h4);
+  const activeProcess = started.page.locator("#messages article.tool-process");
+  await expect(activeProcess).toHaveCount(1);
+  const activeItems = activeProcess.locator("details.tool-process-item");
+  await expect(activeItems).toHaveCount(2);
+  const firstActiveItem = activeItems.nth(0);
+  const secondActiveItem = activeItems.nth(1);
+  await expect(firstActiveItem).toHaveClass(/\bsucceeded\b/);
+  await expect(secondActiveItem).toHaveClass(/\brunning\b/);
+  const firstActiveDetails = firstActiveItem.locator(".tool-process-detail pre");
+  const secondActiveDetails = secondActiveItem.locator(".tool-process-detail pre");
+  await expect(firstActiveDetails).toHaveCount(2);
+  await expect(firstActiveDetails.nth(1)).toContainText("fixture.txt");
+  await expect(firstActiveDetails.nth(1)).toContainText("26 B");
+  await expect(firstActiveDetails.nth(1)).toContainText(FIXTURE_CONTENT.trim());
+  expect(countOccurrences(
+    await firstActiveDetails.nth(1).textContent(),
+    FIXTURE_CONTENT.trim(),
+  )).toBe(1);
+  await expect(secondActiveDetails).toHaveCount(1);
+  const initialDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  expect(initialDom.projection).toMatchObject({
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItems: 2,
+      results: 1,
+      final: 0,
+      ordinaryAssistant: 1,
+      assistantTotal: 2,
+    },
+    outerOpen: false,
+    currentAction: "read_file",
+    ordered: true,
+  });
+  expect(initialDom.projection.processKey).toBe("0:1");
+  expect(initialDom.projection.stageClass.split(/\s+/)).toContain("running");
+  expect(initialDom.projection.items[0]).toMatchObject({
+    order: 1,
+    open: false,
+    arguments: { pathPresent: true, startLinePresent: false, endLinePresent: false },
+    formattedResult: { present: true, pathPresent: true, sizePresent: true, fixtureContentCount: 1 },
+  });
+  expect(initialDom.projection.items[0].className.split(/\s+/)).toContain("succeeded");
+  expect(initialDom.projection.items[1]).toMatchObject({
+    order: 2,
+    open: false,
+    arguments: { pathPresent: true, startLinePresent: true, endLinePresent: true },
+    formattedResult: { present: false, pathPresent: false, sizePresent: false, fixtureContentCount: 0 },
+  });
+  expect(initialDom.projection.items[1].className.split(/\s+/)).toContain("running");
+
+  const replacedStage = await initialDom.outer.elementHandle();
+  await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(initialDom.outer).toHaveAttribute("open", "");
+  const openedKey = await initialDom.outer.getAttribute("data-tool-process-key");
+  expect(openedKey).toBe(initialDom.projection.processKey);
+
+  await h4.releaseGate(SECOND_TOOL_EXECUTE_GATE);
+  const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+  expect(finalDeltaGate[TOOL_FINAL_DELTA_GATE]).toMatchObject({ reached: true, released: false });
+  expect(await replacedStage.evaluate((element) => element.isConnected)).toBe(false);
+  const afterSecondToolDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  expect(afterSecondToolDom.projection.processKey).toBe(openedKey);
+  expect(afterSecondToolDom.projection.outerOpen).toBe(true);
+  expect(afterSecondToolDom.projection.counts).toMatchObject({ toolProcess: 1, toolItems: 2, results: 2, final: 0 });
+  expect(afterSecondToolDom.projection.items.map((item) => item.className.split(/\s+/).includes("succeeded")))
+    .toEqual([true, true]);
+  expect(afterSecondToolDom.projection.items.map((item) => item.formattedResult.fixtureContentCount))
+    .toEqual([1, 1]);
+  const metricsAfterSecond = await h4.metrics();
+  expect(metricsAfterSecond.toolExecutions).toEqual([
+    { action: "read_file", path: "fixture.txt" },
+    { action: "read_file", path: "fixture.txt", startLine: 1, endLine: 1 },
+  ]);
+
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await expect(afterSecondToolDom.finalAnswer).toHaveCount(1);
+  const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
+  expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
+  const afterFinalDeltaDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  expect(afterFinalDeltaDom.projection.processKey).toBe(openedKey);
+  expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
+  expect(afterFinalDeltaDom.projection.counts.final).toBe(1);
+
+  const completedAgent = await waitForMultiToolTerminal(h4, started.agentRunId);
+  const completedTrace = durableToolTraceEvidence(completedAgent.body);
+  expect(completedTrace.pendingToolCallCount).toBe(0);
+  expect(completedTrace.terminalEventCount).toBe(1);
+  expect(completedTrace.toolCallIds).toEqual([started.firstToolCallId, started.secondToolCallId]);
+  expect(completedTrace.executionProjection).toEqual(expectedMultiToolExecutionProjection());
+  const terminalDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  expect(terminalDom.projection.processKey).toBe(openedKey);
+  expect(terminalDom.projection.outerOpen).toBe(false);
+  expect(terminalDom.projection.items.map((item) => item.open)).toEqual([false, false]);
+  expect(terminalDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
+  expect(terminalDom.projection.heading).toBe("Inspected a file");
+  await assertMultiToolCompletedInteraction(started.page, terminalDom);
+
+  const sessionButton = started.page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionResponse = await fetchProductionJson(
+    started.page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionResponse.status).toBe(200);
+  const sessionProjection = roleContentProjection(sessionResponse.body.messages);
+  expect(sessionProjection.map((message) => message.role)).toEqual([
+    "user", "assistant", "tool-call", "tool-result", "tool-call", "tool-result", "assistant",
+  ]);
+  const sessionToolMeta = multiSessionToolMetaProjection(
+    sessionResponse.body.messages,
+    started.agentRunId,
+    completedTrace.toolCallIds,
+  );
+  expect(sessionToolMeta.map((message) => [message.role, message.toolCallId])).toEqual([
+    ["tool-call", "tool-1"],
+    ["tool-result", "tool-1"],
+    ["tool-call", "tool-2"],
+    ["tool-result", "tool-2"],
+  ]);
+  expect(sessionToolMeta.map((message) => message.agentRunId)).toEqual([
+    "agent-1", "agent-1", "agent-1", "agent-1",
+  ]);
+  expect(sessionToolMeta[0].arguments).toEqual({ path: "fixture.txt", startLine: null, endLine: null });
+  expect(sessionToolMeta[1].result).toEqual(expectedMultiToolExecutionProjection()[0].result);
+  expect(sessionToolMeta[2].arguments).toEqual({ path: "fixture.txt", startLine: 1, endLine: 1 });
+  expect(sessionToolMeta[3].result).toEqual(expectedMultiToolExecutionProjection()[1].result);
+
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([
+    { scenario: "multi-tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "multi-tool-detail-final", stream: true, hasToolResult: true },
+  ]);
+  expect(metrics.toolExecutions).toEqual([
+    { action: "read_file", path: "fixture.txt" },
+    { action: "read_file", path: "fixture.txt", startLine: 1, endLine: 1 },
+  ]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  const requests = h4.requestEvidenceSince(started.requestBoundary);
+  expect(requests.agentPost).toBe(1);
+  expect(requests.runtimePost).toBe(0);
+  expect(requests.agentDelete).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  const lifecycleProjection = {
+    processKey: terminalDom.projection.processKey,
+    openTransitions: ["closed", "open", "open-after-second-result", "open-after-final-delta", "closed-terminal"],
+    itemOutcomes: terminalDom.projection.items.map((item) => item.className.split(/\s+/).at(-1)),
+    eventTypes: completedTrace.eventProjection.map((event) => event.type),
+    counts: terminalDom.projection.counts,
+    requests: {
+      agentPost: requests.agentPost,
+      runtimePost: requests.runtimePost,
+      chat: metrics.chatRequests.length,
+      tools: metrics.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    lifecycle: canonicalHash(lifecycleProjection),
+    eventProjection: completedTrace.eventProjectionHash,
+    receiptProjection: completedTrace.executionProjectionHash,
+    sessionRoleContent: canonicalHash(sessionProjection),
+    sessionToolMeta: canonicalHash(sessionToolMeta),
+    activeDom: afterSecondToolDom.semanticHash,
+    terminalDom: terminalDom.semanticHash,
+  };
+  if (Object.keys(H4_6C_ACTIVE_TO_TERMINAL_HASHES).length) {
+    expect(hashes).toEqual(H4_6C_ACTIVE_TO_TERMINAL_HASHES);
+  }
+  h4.evidence("multi-tool-detail-active-to-terminal", {
+    identity: {
+      agentRunId: idHash(started.agentRunId),
+      toolCallIds: completedTrace.toolCallIdHashes,
+      runtimeRunIds: completedTrace.runtimeIdHashes,
+      processKey: terminalDom.projection.processKey,
+    },
+    gateTimeline: metrics.refreshGateTimeline.filter((entry) => (
+      [SECOND_TOOL_EXECUTE_GATE, TOOL_FINAL_DELTA_GATE, TOOL_TERMINAL_GATE].includes(entry.gate)
+    )),
+    lifecycle: lifecycleProjection,
+    hashes,
+  });
+});
+
+test("completed bundle same-round two read_file tools reload uniquely without re-execution", async ({ h4 }) => {
+  const started = await startMultiToolDetailAtSecondExecute(h4);
+  await h4.releaseGate(SECOND_TOOL_EXECUTE_GATE);
+  await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await h4.waitGate(TOOL_TERMINAL_GATE);
+  const completedAgent = await waitForMultiToolTerminal(h4, started.agentRunId);
+  const traceBefore = durableToolTraceEvidence(completedAgent.body);
+  expect(traceBefore.executionProjection).toEqual(expectedMultiToolExecutionProjection());
+
+  const sessionButton = started.page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionBefore = await fetchProductionJson(
+    started.page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionBefore.status).toBe(200);
+  const sessionProjectionBefore = roleContentProjection(sessionBefore.body.messages);
+  expect(sessionProjectionBefore.map((message) => message.role)).toEqual([
+    "user", "assistant", "tool-call", "tool-result", "tool-call", "tool-result", "assistant",
+  ]);
+  const toolMetaBefore = multiSessionToolMetaProjection(
+    sessionBefore.body.messages,
+    started.agentRunId,
+    traceBefore.toolCallIds,
+  );
+  expect(toolMetaBefore.map((message) => [message.role, message.toolCallId])).toEqual([
+    ["tool-call", "tool-1"],
+    ["tool-result", "tool-1"],
+    ["tool-call", "tool-2"],
+    ["tool-result", "tool-2"],
+  ]);
+  const domBefore = await multiToolDetailLifecycleDomEvidence(started.page);
+  expect(domBefore.projection.outerOpen).toBe(false);
+  expect(domBefore.projection.items.map((item) => item.open)).toEqual([false, false]);
+  const processKey = domBefore.projection.processKey;
+  const traceBeforeReload = started.page.locator("#messages .execution-trace.completed");
+  const traceToggleBefore = traceBeforeReload.locator(":scope > [data-execution-trace-toggle]");
+  await traceToggleBefore.click();
+  await domBefore.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  for (const item of domBefore.items) await item.locator(":scope > summary").click();
+  await expect(traceBeforeReload).toHaveClass(/\bis-expanded\b/);
+  await expect(domBefore.outer).toHaveAttribute("open", "");
+  for (const item of domBefore.items) await expect(item).toHaveAttribute("open", "");
+
+  const metricsBefore = await h4.metrics();
+  const refreshBoundary = h4.requestBoundary();
+  await started.page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(started.page, "bundle");
+  const persistedSession = started.page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(persistedSession).toHaveCount(1);
+  await persistedSession.click();
+
+  const domAfter = await multiToolDetailLifecycleDomEvidence(started.page);
+  expect(domAfter.projection.processKey).toBe(processKey);
+  expect(domAfter.projection.outerOpen).toBe(false);
+  expect(domAfter.projection.items.map((item) => item.open)).toEqual([false, false]);
+  expect(domAfter.projection).toEqual(domBefore.projection);
+  const traceAfterReload = started.page.locator("#messages .execution-trace.completed");
+  await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
+  const traceToggleAfter = traceAfterReload.locator(":scope > [data-execution-trace-toggle]");
+  await expect(traceToggleAfter).toHaveAttribute("aria-expanded", "false");
+  await assertMultiToolCompletedInteraction(started.page, domAfter);
+
+  const agentAfter = await fetchProductionJson(
+    started.page,
+    `/api/agent/runs/${encodeURIComponent(started.agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfter.status).toBe(200);
+  const traceAfter = durableToolTraceEvidence(agentAfter.body);
+  expect(traceAfter).toEqual(traceBefore);
+  const sessionAfter = await fetchProductionJson(
+    started.page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionAfter.status).toBe(200);
+  const sessionProjectionAfter = roleContentProjection(sessionAfter.body.messages);
+  expect(sessionProjectionAfter).toEqual(sessionProjectionBefore);
+  const toolMetaAfter = multiSessionToolMetaProjection(
+    sessionAfter.body.messages,
+    started.agentRunId,
+    traceAfter.toolCallIds,
+  );
+  expect(toolMetaAfter).toEqual(toolMetaBefore);
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
+  const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshRequests.agentDelete).toBe(0);
+  expect(h4.controlIds().agentRunIds).toEqual([started.agentRunId]);
+  expect(h4.pageErrors).toEqual([]);
+  const refreshProjection = {
+    processKeyStable: domAfter.projection.processKey === domBefore.projection.processKey,
+    agentRunStable: traceAfter.agentRunId === traceBefore.agentRunId,
+    toolCallsStable: JSON.stringify(traceAfter.toolCallIdHashes) === JSON.stringify(traceBefore.toolCallIdHashes),
+    eventProjectionStable: traceAfter.eventProjectionHash === traceBefore.eventProjectionHash,
+    receiptProjectionStable: traceAfter.executionProjectionHash === traceBefore.executionProjectionHash,
+    sessionProjectionStable: JSON.stringify(sessionProjectionAfter) === JSON.stringify(sessionProjectionBefore),
+    toolMetaStable: JSON.stringify(toolMetaAfter) === JSON.stringify(toolMetaBefore),
+    refreshDefaultCollapsed: !domAfter.projection.outerOpen && domAfter.projection.items.every((item) => !item.open),
+    counts: domAfter.projection.counts,
+    requests: {
+      agentPost: refreshRequests.agentPost,
+      runtimePost: refreshRequests.runtimePost,
+      chatDelta: metricsAfter.chatRequests.length - metricsBefore.chatRequests.length,
+      toolDelta: metricsAfter.toolExecutions.length - metricsBefore.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    refreshLifecycle: canonicalHash(refreshProjection),
+    eventProjection: traceBefore.eventProjectionHash,
+    receiptProjection: traceBefore.executionProjectionHash,
+    sessionRoleContent: canonicalHash(sessionProjectionBefore),
+    sessionToolMeta: canonicalHash(toolMetaBefore),
+    terminalDom: domBefore.semanticHash,
+  };
+  if (Object.keys(H4_6C_TERMINAL_REFRESH_HASHES).length) {
+    expect(hashes).toEqual(H4_6C_TERMINAL_REFRESH_HASHES);
+  }
+  h4.evidence("multi-tool-detail-terminal-refresh", {
+    identity: {
+      agentRunId: idHash(started.agentRunId),
+      toolCallIds: traceBefore.toolCallIdHashes,
+      processKey,
+    },
+    refresh: refreshProjection,
+    hashes,
+    expansionBoundary: "page-local completed trace, group, and two item details reset on full reload",
+  });
 });
 
 test("classic fallback completes one plain-text task", async ({ h4 }) => {
