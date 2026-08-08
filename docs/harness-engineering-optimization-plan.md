@@ -574,6 +574,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **H4-6K 补充状态（2026-08-08）**：H4-6K 复用 H4-6G 的 schema-valid 只读行范围执行器失败，证明重复身份由工具名与规范 arguments 指纹确定，连续失败还要求 `errorCode` 与规范化错误文本签名一致。前三次相同调用真实执行并得到 `failureCount=1/2/3`，第三次带 `retryLimitReached`；第四个新 toolCallId 的同指纹调用以 `repeated_tool_failure/retryBlocked` 阻断且不进入执行器，第五轮不再携带 tools/tool_choice 并固定终答，父 Run completed。两种入口均闭合 25 事件、五个 Runtime、四对 Session 工具消息、单组四个失败项和刷新四项零增量，九类语义哈希一致。解析/schema 校验早于限流，H4-6E/I/J 的执行前失败不属于本证明。详见 [`H4-6K 相同 read_file 失败限流与强制终答`](harness/h4-6k-identical-read-file-failure-bound-and-forced-final.md)。
 
+**H4-7A 补充状态（2026-08-08）**：H4-7A 为 TIFF 补齐默认 bundle 与 direct classic 的真实浏览器展示闭环。原 TIFF 继续作为唯一持久化附件和模型输入来源，Session MIME 保持 `image/tiff`；模型仍使用既有 PNG 投影。preview POST/GET 只返回内存派生 PNG，不写预览文件或持久化字段。已保存 path 的页面缓存固定为 `pending`、`ready(blob URL)`、`failed`，同页并发、成功、失败与消息重绘均不重复转换，完整刷新后自然重建并允许一次新 GET。两种入口精确为 POST 2、GET 2、总请求 4，失败只显示附件卡片且不阻止发送或模型识别。详见 [`H4-7A TIFF 派生浏览器预览与页面生命周期缓存`](harness/h4-7a-tiff-derived-browser-preview.md)。
+
 **工作项**：
 
 1. 列出现有 AgentRun 状态、事件类型、事件载荷和前端处理函数。
@@ -669,6 +671,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 **H4-6J 阶段更新（2026-08-08）**：上段剩余项中的“缺 path”现已由 H4-6J 收口；当前执行前参数失败仍保留其他 required 字段与其他未覆盖解析错误。H4-6J 不改变生产协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6J read_file 缺少必填 path 的 schema 失败`](harness/h4-6j-read-file-missing-path-schema-failure.md)。
 
 **H4-6K 阶段更新（2026-08-08）**：上段剩余项中的“重复失败限流”现已由 H4-6K 在固定 schema-valid 只读行范围执行器失败上收口；执行前 schema/parse 失败、不同参数或工具、错误交替及强制终答失败分支仍未覆盖。H4-6K 不改变生产协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6K 相同 read_file 失败限流与强制终答`](harness/h4-6k-identical-read-file-failure-bound-and-forced-final.md)。
+
+**H4-7A 阶段更新（2026-08-08）**：上段剩余项中的“图片”现已由 H4-7A 收窄完成 TIFF 派生浏览器预览、失败卡片和页面生命周期请求去重；其他图片格式完整矩阵、TIFF 多页浏览、真实外部模型与发布门禁仍未覆盖。H4-7A 不改变 AgentRun/Runtime、Session JSONL 或模型请求协议，完整证据与限制见 [`H4-7A TIFF 派生浏览器预览与页面生命周期缓存`](harness/h4-7a-tiff-derived-browser-preview.md)。
 
 **工作项**：
 

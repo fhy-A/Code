@@ -8,9 +8,11 @@ upstream, test-side instrumentation, and lifecycle controls.
 
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -51,6 +53,8 @@ REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL"
 MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER"
 MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
 MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
+TIFF_IMAGE_USER = "H4_TIFF_IMAGE_USER"
+TIFF_IMAGE_FINAL = "H4_TIFF_IMAGE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -323,9 +327,58 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         return ("tool-final" if has_tool_result else "tool-call", has_tool_result)
     if STREAM_USER in user_text:
         return "stream-refresh", has_tool_result
+    if TIFF_IMAGE_USER in user_text:
+        return "tiff-image", has_tool_result
     if CLASSIC_USER in user_text:
         return "classic-text", has_tool_result
     return "plain-text", has_tool_result
+
+
+def _tiff_model_image_projection(payload: dict) -> dict:
+    from PIL import Image
+
+    images = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            value = image_url.get("url") if isinstance(image_url, dict) else image_url
+            value = str(value or "")
+            prefix = "data:image/png;base64,"
+            if not value.startswith(prefix):
+                images.append({"mime": "unexpected", "png": False, "width": 0, "height": 0})
+                continue
+            try:
+                raw = base64.b64decode(value[len(prefix):], validate=True)
+                with Image.open(io.BytesIO(raw)) as image:
+                    width, height = image.size
+                    image_format = image.format
+            except Exception:
+                raw = b""
+                width, height = 0, 0
+                image_format = ""
+            images.append({
+                "mime": "image/png",
+                "png": raw.startswith(bytes.fromhex("89504e470d0a1a0a")) and image_format == "PNG",
+                "width": width,
+                "height": height,
+            })
+    return {
+        "count": len(images),
+        "images": images,
+        "recognized": len(images) == 1 and images[0] == {
+            "mime": "image/png",
+            "png": True,
+            "width": 18,
+            "height": 12,
+        },
+    }
 
 
 def _invalid_tool_receipt_projection(payload: dict) -> dict | None:
@@ -665,6 +718,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             }
         if scenario == "missing-file-final":
             chat_metric["missingFileReceipt"] = _missing_file_receipt_projection(payload)
+        if scenario == "tiff-image":
+            chat_metric["imageProjection"] = _tiff_model_image_projection(payload)
         METRICS.append("chatRequests", chat_metric)
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if (
@@ -910,6 +965,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             final_text = {
                 "plain-text": PLAIN_FINAL,
                 "classic-text": CLASSIC_FINAL,
+                "tiff-image": TIFF_IMAGE_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [
@@ -1029,7 +1085,27 @@ def _session_jsonl_evidence(code_server) -> dict:
         "pausedOutputCount": combined.count("[Output paused]"),
         "hasStreamingField": '"streaming"' in combined,
         "hasStreamProjectionField": '"_streamProjection"' in combined,
+        "tiffMimeCount": combined.count("image/tiff"),
+        "tiffDataUrlCount": combined.count("data:image/tiff;base64,"),
+        "derivedPreviewFieldCount": combined.count("_previewUrl") + combined.count("_previewFailed"),
     }
+
+
+def _attachment_evidence(code_server) -> dict:
+    files = []
+    for path in sorted(code_server.ATTACHMENTS_DIR.iterdir()):
+        if not path.is_file():
+            continue
+        raw = path.read_bytes()
+        source_format, mime = code_server._sniff_model_image_format(raw)
+        files.append({
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "sourceFormat": source_format,
+            "mime": mime,
+            "suffix": path.suffix.lower(),
+        })
+    return {"fileCount": len(files), "files": files}
 
 
 def main() -> int:
@@ -1277,6 +1353,11 @@ def main() -> int:
                     "session_jsonl",
                     request_started,
                     lambda: _session_jsonl_evidence(code_server),
+                )
+                metrics["attachments"] = _run_metrics_phase(
+                    "attachments",
+                    request_started,
+                    lambda: _attachment_evidence(code_server),
                 )
                 response = {
                     "type": "response",

@@ -11,6 +11,7 @@
     "image/x-icon",
     "image/tiff",
   ]);
+  const DERIVED_BROWSER_PREVIEW_MIMES = Object.freeze(["image/tiff"]);
   const EXTENSION_MIMES = Object.freeze({
     bmp: "image/bmp",
     gif: "image/gif",
@@ -91,6 +92,139 @@
       || SERVER_CONVERTIBLE_IMAGE_MIMES.includes(normalized);
   }
 
+  function requiresDerivedBrowserPreview(imageOrMime) {
+    const image = imageOrMime && typeof imageOrMime === "object" ? imageOrMime : null;
+    const mime = normalizeImageMime(image?.mime || imageOrMime)
+      || imageMimeFromName(image?.name || image?.path || "");
+    return DERIVED_BROWSER_PREVIEW_MIMES.includes(mime);
+  }
+
+  function imagePreviewSource(image = {}) {
+    if (requiresDerivedBrowserPreview(image)) {
+      if (image._previewUrl) return String(image._previewUrl);
+      return image.path
+        ? `/api/attachments/preview?path=${encodeURIComponent(image.path)}`
+        : "";
+    }
+    if (image.path) return `/api/file?path=${encodeURIComponent(image.path)}&raw=1`;
+    if (!image.base64) return "";
+    return `data:${normalizeImageMime(image.mime) || "image/png"};base64,${image.base64}`;
+  }
+
+  async function requestDerivedBrowserPreview(image = {}, options = {}) {
+    if (!requiresDerivedBrowserPreview(image) || (!image.base64 && !image.path)) return "";
+    const fetchImpl = options.fetchImpl || global.fetch;
+    const urlApi = options.urlApi || global.URL;
+    if (typeof fetchImpl !== "function" || typeof urlApi?.createObjectURL !== "function") {
+      throw new Error("derived image preview is unavailable");
+    }
+    const response = image.path
+      ? await fetchImpl(imagePreviewSource(image), { method: "GET" })
+      : await fetchImpl("/api/attachments/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mime: normalizeImageMime(image.mime),
+          contentBase64: image.base64,
+        }),
+      });
+    if (!response?.ok) throw new Error("derived image preview failed");
+    const blob = await response.blob();
+    if (!blob?.size || normalizeImageMime(blob.type) !== "image/png") {
+      throw new Error("derived image preview is invalid");
+    }
+    return urlApi.createObjectURL(blob);
+  }
+
+  function derivedBrowserPreviewCacheKey(image = {}) {
+    const mime = normalizeImageMime(image.mime)
+      || imageMimeFromName(image.name || image.path || "");
+    const path = String(image.path || "");
+    if (!DERIVED_BROWSER_PREVIEW_MIMES.includes(mime) || !path) return "";
+    return `${mime}\u0000${path}`;
+  }
+
+  function createDerivedBrowserPreviewCache(options = {}) {
+    const requestPreview = options.requestPreview || requestDerivedBrowserPreview;
+    const urlApi = options.urlApi || global.URL;
+    const onSettled = typeof options.onSettled === "function" ? options.onSettled : () => {};
+    const entries = new Map();
+
+    function notifySettled(key, entry) {
+      try {
+        const result = onSettled({ key, image: entry.image, status: entry.status });
+        if (result && typeof result.catch === "function") result.catch(() => {});
+      } catch (_) {}
+    }
+
+    function revokeEntryUrl(entry, url = entry.url) {
+      if (!url || entry.urlRevoked) return;
+      entry.urlRevoked = true;
+      try {
+        urlApi?.revokeObjectURL?.(url);
+      } catch (_) {}
+    }
+
+    function ensure(image = {}) {
+      const key = derivedBrowserPreviewCacheKey(image);
+      if (!key) return Promise.resolve("");
+      const existing = entries.get(key);
+      if (existing) return existing.promise;
+
+      const entry = {
+        image: {
+          mime: normalizeImageMime(image.mime),
+          path: String(image.path || ""),
+        },
+        promise: null,
+        status: "pending",
+        url: "",
+        urlRevoked: false,
+      };
+      entry.promise = Promise.resolve()
+        .then(() => requestPreview(entry.image, { urlApi }))
+        .then((url) => {
+          if (!url) throw new Error("derived image preview is unavailable");
+          if (entries.get(key) !== entry) {
+            revokeEntryUrl(entry, url);
+            return "";
+          }
+          entry.status = "ready";
+          entry.url = String(url);
+          notifySettled(key, entry);
+          return entry.url;
+        })
+        .catch(() => {
+          if (entries.get(key) === entry) {
+            entry.status = "failed";
+            notifySettled(key, entry);
+          }
+          return "";
+        });
+      entries.set(key, entry);
+      return entry.promise;
+    }
+
+    function source(image = {}) {
+      const entry = entries.get(derivedBrowserPreviewCacheKey(image));
+      return entry?.status === "ready" ? entry.url : "";
+    }
+
+    function status(image = {}) {
+      return entries.get(derivedBrowserPreviewCacheKey(image))?.status || "";
+    }
+
+    function clear() {
+      const currentEntries = Array.from(entries.values());
+      entries.clear();
+      currentEntries.forEach((entry) => {
+        if (entry.status === "ready") revokeEntryUrl(entry);
+      });
+    }
+
+    return Object.freeze({ clear, ensure, source, status });
+  }
+
   function parseImageDataUrl(value) {
     const match = String(value || "").match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
     if (!match) return null;
@@ -112,15 +246,21 @@
   }
 
   features.imageAttachments = Object.freeze({
+    DERIVED_BROWSER_PREVIEW_MIMES,
     MODEL_IMAGE_MIMES,
     SERVER_CONVERTIBLE_IMAGE_MIMES,
     canDeferImageConversion,
+    createDerivedBrowserPreviewCache,
+    derivedBrowserPreviewCacheKey,
     imageMimeForFile,
     imageMimeFromName,
+    imagePreviewSource,
     isImageFileCandidate,
     modelImageOutputMime,
     normalizeImageMime,
     parseImageDataUrl,
+    requestDerivedBrowserPreview,
+    requiresDerivedBrowserPreview,
     sniffImageMime,
     storageNameForImage,
   });

@@ -862,6 +862,16 @@ class TestWebFetch(TestServerFixture):
 
 class TestAttachments(TestServerFixture):
 
+    @staticmethod
+    def _tiff_bytes():
+        import io
+        from PIL import Image
+
+        image = Image.new("RGB", (19, 13), (12, 80, 190))
+        output = io.BytesIO()
+        image.save(output, format="TIFF")
+        return output.getvalue()
+
     def test_attachment_upload(self):
         import base64
         content = base64.b64encode(b"hello attachment").decode()
@@ -878,6 +888,88 @@ class TestAttachments(TestServerFixture):
                             json={"name": "../../../evil.txt", "contentBase64": content})
         # Should succeed — name is sanitized
         self.assertIn(status, [200, 201])
+
+    def test_tiff_attachment_preview_route_is_png_and_preserves_source(self):
+        import base64
+        import hashlib
+        import io
+        from PIL import Image
+
+        source = self._tiff_bytes()
+        status, uploaded = _req("POST", "/api/attachments", json={
+            "name": "sample.tiff",
+            "contentBase64": base64.b64encode(source).decode("ascii"),
+        })
+        self.assertIn(status, [200, 201])
+        _root, target = server_mod.resolve_attachment_path(uploaded["path"])
+        before_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+
+        response = requests.get(
+            f"{_BASE}/api/attachments/preview",
+            params={"path": uploaded["path"]},
+            timeout=10,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Content-Type"), "image/png")
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        with Image.open(io.BytesIO(response.content)) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.size, (19, 13))
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), before_hash)
+
+    def test_inline_tiff_attachment_preview_route_is_png(self):
+        import base64
+
+        response = requests.post(
+            f"{_BASE}/api/attachments/preview",
+            json={
+                "mime": "image/tiff",
+                "contentBase64": base64.b64encode(self._tiff_bytes()).decode("ascii"),
+            },
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Content-Type"), "image/png")
+        self.assertTrue(response.content.startswith(bytes.fromhex("89504e470d0a1a0a")))
+
+    def test_tiff_preview_route_rejects_non_attachment_and_traversal_paths(self):
+        cases = (
+            "README.md",
+            str(self._tmp_root / "README.md"),
+            "attachments/../../../README.md",
+            "attachment:../../../README.md",
+        )
+        for value in cases:
+            with self.subTest(path=value):
+                response = requests.get(
+                    f"{_BASE}/api/attachments/preview",
+                    params={"path": value},
+                    timeout=10,
+                )
+                self.assertEqual(response.status_code, 400)
+                payload = response.json()
+                self.assertNotIn(str(self._tmp_root), str(payload))
+                self.assertNotIn(str(self._tmp_data), str(payload))
+
+    def test_tiff_preview_route_rejects_wrong_signature_and_bad_base64(self):
+        import base64
+
+        cases = (
+            {"mime": "image/tiff", "contentBase64": "%%%"},
+            {"mime": "image/tiff", "contentBase64": base64.b64encode(b"not-tiff").decode("ascii")},
+            {"mime": "image/png", "contentBase64": base64.b64encode(self._tiff_bytes()).decode("ascii")},
+            {"mime": "image/tiff", "contentBase64": base64.b64encode(b"II*\x00broken").decode("ascii")},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload["mime"]):
+                response = requests.post(
+                    f"{_BASE}/api/attachments/preview",
+                    json=payload,
+                    timeout=10,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertLess(len(response.content), 512)
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -16,6 +16,7 @@ STATE_SOURCE = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
 PLATFORM_SOURCE = (ROOT / "src" / "core" / "platform.js").read_text(encoding="utf-8")
 API_CLIENT_SOURCE = (ROOT / "src" / "services" / "api-client.js").read_text(encoding="utf-8")
+PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
 SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 SETTINGS_SOURCE = (ROOT / "src" / "features" / "settings.js").read_text(encoding="utf-8")
 DIFF_SOURCE = (ROOT / "src" / "ui" / "diff.js").read_text(encoding="utf-8")
@@ -5838,6 +5839,247 @@ process.stdout.write(JSON.stringify({
         ):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
 
+    def test_tiff_browser_preview_is_derived_without_entering_persistence(self):
+        script = r"""
+global.window = {
+  fetch: null,
+  URL: {},
+};
+require("./src/core/namespace.js");
+require("./src/features/image-attachments.js");
+const images = window.Code.features.imageAttachments;
+const calls = [];
+const fetchImpl = async (url, options) => {
+  calls.push({url, options});
+  return {
+    ok: true,
+    blob: async () => new Blob([Buffer.from("png-preview")], {type: "image/png"}),
+  };
+};
+const urlApi = {createObjectURL: (blob) => `blob:tiff-${blob.size}`};
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return {promise, reject, resolve};
+};
+(async () => {
+  const previewUrl = await images.requestDerivedBrowserPreview({
+    name: "sample.tiff",
+    mime: "image/tiff",
+    base64: "TU0AKg==",
+  }, {fetchImpl, urlApi});
+  const storedPreviewUrl = await images.requestDerivedBrowserPreview({
+    name: "stored.tiff",
+    mime: "image/x-tiff",
+    path: "attachments/stored.tiff",
+  }, {fetchImpl, urlApi});
+
+  const cacheRequests = [];
+  const pendingRequests = [];
+  const revoked = [];
+  const settled = [];
+  const cache = images.createDerivedBrowserPreviewCache({
+    requestPreview: (image) => {
+      cacheRequests.push({...image});
+      const request = deferred();
+      pendingRequests.push(request);
+      return request.promise;
+    },
+    urlApi: {revokeObjectURL: (url) => revoked.push(url)},
+    onSettled: (entry) => settled.push({key: entry.key, status: entry.status}),
+  });
+  const first = {mime: "image/tiff", path: "attachments/a.tiff", name: "a.tiff"};
+  const firstAlias = {mime: "image/x-tiff", path: "attachments/a.tiff", name: "alias.tiff"};
+  const firstBefore = JSON.stringify(first);
+  const firstPromise = cache.ensure(first);
+  const aliasPromise = cache.ensure(firstAlias);
+  await Promise.resolve();
+  const pendingEvidence = {
+    samePromise: firstPromise === aliasPromise,
+    status: cache.status(first),
+    source: cache.source(first),
+    requestCount: cacheRequests.length,
+    sameKey: images.derivedBrowserPreviewCacheKey(first)
+      === images.derivedBrowserPreviewCacheKey(firstAlias),
+  };
+  pendingRequests[0].resolve("blob:ready-a");
+  const readyValues = await Promise.all([firstPromise, aliasPromise]);
+  const readyRepeat = await cache.ensure(firstAlias);
+  const readyEvidence = {
+    status: cache.status(firstAlias),
+    source: cache.source(firstAlias),
+    values: readyValues,
+    repeat: readyRepeat,
+    requestCount: cacheRequests.length,
+    inputUnchanged: JSON.stringify(first) === firstBefore,
+  };
+
+  const failed = {mime: "image/tiff", path: "attachments/b.tiff"};
+  const failedPromise = cache.ensure(failed);
+  await Promise.resolve();
+  pendingRequests[1].reject(new Error("synthetic preview failure"));
+  const failedValue = await failedPromise;
+  const failedRepeat = await cache.ensure(failed);
+  const failedEvidence = {
+    status: cache.status(failed),
+    source: cache.source(failed),
+    values: [failedValue, failedRepeat],
+    requestCount: cacheRequests.length,
+  };
+
+  const other = {mime: "image/tiff", path: "attachments/c.tiff"};
+  const otherPromise = cache.ensure(other);
+  await Promise.resolve();
+  pendingRequests[2].resolve("blob:ready-c");
+  await otherPromise;
+
+  const late = {mime: "image/tiff", path: "attachments/late.tiff"};
+  const latePromise = cache.ensure(late);
+  await Promise.resolve();
+  const beforeClear = {
+    requestCount: cacheRequests.length,
+    firstStatus: cache.status(first),
+    failedStatus: cache.status(failed),
+    otherStatus: cache.status(other),
+    lateStatus: cache.status(late),
+  };
+  cache.clear();
+  cache.clear();
+  pendingRequests[3].resolve("blob:late-after-clear");
+  await latePromise;
+  process.stdout.write(JSON.stringify({
+    derived: ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/x-icon", "image/tiff"]
+      .map((mime) => images.requiresDerivedBrowserPreview(mime)),
+    previewUrl,
+    storedPreviewUrl,
+    requests: calls.map((call) => ({
+      url: call.url,
+      method: call.options.method,
+      body: call.options.body ? JSON.parse(call.options.body) : null,
+    })),
+    cache: {
+      pendingEvidence,
+      readyEvidence,
+      failedEvidence,
+      beforeClear,
+      requestPaths: cacheRequests.map((image) => image.path),
+      revoked,
+      settled,
+      clearedStatuses: [cache.status(first), cache.status(failed), cache.status(other), cache.status(late)],
+    },
+    sources: {
+      composerTiff: images.imagePreviewSource({mime: "image/tiff", _previewUrl: previewUrl, base64: "ORIGINAL"}),
+      pendingTiffWithoutPreview: images.imagePreviewSource({mime: "image/tiff", base64: "ORIGINAL"}),
+      storedTiff: images.imagePreviewSource({path: "attachments/sample.tiff", mime: "image/tiff"}),
+      storedPng: images.imagePreviewSource({path: "attachments/sample.png", mime: "image/png"}),
+      inlineGif: images.imagePreviewSource({mime: "image/gif", base64: "R0lG"}),
+    },
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["derived"], [False, False, False, False, False, False, True])
+        self.assertTrue(data["previewUrl"].startswith("blob:tiff-"))
+        self.assertTrue(data["storedPreviewUrl"].startswith("blob:tiff-"))
+        self.assertEqual(data["requests"], [
+            {
+                "url": "/api/attachments/preview",
+                "method": "POST",
+                "body": {"mime": "image/tiff", "contentBase64": "TU0AKg=="},
+            },
+            {
+                "url": "/api/attachments/preview?path=attachments%2Fstored.tiff",
+                "method": "GET",
+                "body": None,
+            },
+        ])
+        self.assertEqual(data["cache"]["pendingEvidence"], {
+            "samePromise": True,
+            "status": "pending",
+            "source": "",
+            "requestCount": 1,
+            "sameKey": True,
+        })
+        self.assertEqual(data["cache"]["readyEvidence"], {
+            "status": "ready",
+            "source": "blob:ready-a",
+            "values": ["blob:ready-a", "blob:ready-a"],
+            "repeat": "blob:ready-a",
+            "requestCount": 1,
+            "inputUnchanged": True,
+        })
+        self.assertEqual(data["cache"]["failedEvidence"], {
+            "status": "failed",
+            "source": "",
+            "values": ["", ""],
+            "requestCount": 2,
+        })
+        self.assertEqual(data["cache"]["beforeClear"], {
+            "requestCount": 4,
+            "firstStatus": "ready",
+            "failedStatus": "failed",
+            "otherStatus": "ready",
+            "lateStatus": "pending",
+        })
+        self.assertEqual(data["cache"]["requestPaths"], [
+            "attachments/a.tiff",
+            "attachments/b.tiff",
+            "attachments/c.tiff",
+            "attachments/late.tiff",
+        ])
+        self.assertEqual(data["cache"]["revoked"], [
+            "blob:ready-a",
+            "blob:ready-c",
+            "blob:late-after-clear",
+        ])
+        self.assertEqual(data["cache"]["settled"], [
+            {"key": "image/tiff\u0000attachments/a.tiff", "status": "ready"},
+            {"key": "image/tiff\u0000attachments/b.tiff", "status": "failed"},
+            {"key": "image/tiff\u0000attachments/c.tiff", "status": "ready"},
+        ])
+        self.assertEqual(data["cache"]["clearedStatuses"], ["", "", "", ""])
+        self.assertEqual(data["sources"]["composerTiff"], data["previewUrl"])
+        self.assertEqual(data["sources"]["pendingTiffWithoutPreview"], "")
+        self.assertEqual(
+            data["sources"]["storedTiff"],
+            "/api/attachments/preview?path=attachments%2Fsample.tiff",
+        )
+        self.assertEqual(
+            data["sources"]["storedPng"],
+            "/api/file?path=attachments%2Fsample.png&raw=1",
+        )
+        self.assertEqual(data["sources"]["inlineGif"], "data:image/gif;base64,R0lG")
+
+        compression = APP_SOURCE[
+            APP_SOURCE.index("async function compressImage("):
+            APP_SOURCE.index("async function handleImagePaste(")
+        ]
+        self.assertIn("if (requiresDerivedBrowserPreview(sourceMime)) return original", compression)
+        self.assertIn("previewUrl = await requestDerivedBrowserPreview(image)", compression)
+        self.assertIn("previewFailed = true", compression)
+        self.assertIn("data-composer-image-fallback", APP_SOURCE)
+        upload = APP_SOURCE[
+            APP_SOURCE.index("async function uploadImagesForStorage("):
+            APP_SOURCE.index("function addImage(")
+        ]
+        self.assertNotIn("refs.push(img)", upload)
+        self.assertNotIn("_previewUrl", PERSISTENCE_SOURCE)
+        self.assertNotIn("_previewFailed", PERSISTENCE_SOURCE)
+        self.assertIn("const persistedTiffPreviewCache = createDerivedBrowserPreviewCache", APP_SOURCE)
+        self.assertNotIn("persistedTiffPreviewCache", PERSISTENCE_SOURCE)
+
     def test_skills_memory_feature_ranks_and_loads_context_without_app_globals(self):
         self.assertIn("features.skillsMemory = Object.freeze", SKILLS_MEMORY_SOURCE)
         script = """
@@ -7923,11 +8165,13 @@ const loaded = [];
 const timers = [];
 global.setTimeout = (handler) => { timers.push(handler); return timers.length; };
 global.window = {
-  Code: {ui: {}},
+  Code: {features: {}, ui: {}},
   navigator: {clipboard: {writeText: async (value) => { writes.push(value); }}},
 };
 require("./src/ui/messages.js");
+require("./src/features/image-attachments.js");
 const {createMessagesFeature} = window.Code.ui.messages;
+const {imagePreviewSource} = window.Code.features.imageAttachments;
 const handlers = {};
 const root = {
   addEventListener(type, handler, options) {
@@ -7956,9 +8200,16 @@ const previewImage = {
 const loadingImage = {
   closest(selector) { return selector === "[data-message-scroll-on-load]" ? this : null; },
 };
+const fallbackCard = {hidden: true};
+const failedPreviewImage = {
+  hidden: false,
+  parentElement: {querySelector: () => fallbackCard},
+  closest(selector) { return selector === "[data-message-image-preview]" ? this : null; },
+};
 const feature = createMessagesFeature({
   escapeHtml: (value) => String(value ?? ""),
   t: (key) => key,
+  getImagePreviewSource: imagePreviewSource,
   onImagePreview: (src) => previewed.push(src),
   onImageLoad: (image) => loaded.push(image),
 });
@@ -7971,6 +8222,7 @@ const secondBound = feature.bindInteractions(root);
   await Promise.resolve();
   handlers.click[0].handler({target: previewImage});
   handlers.load[0].handler({target: loadingImage});
+  handlers.error[0].handler({target: failedPreviewImage});
   const copyHtml = feature.renderCopyButton("copy me");
   const userHtml = feature.renderUserProjection({
     role: "user",
@@ -7986,19 +8238,28 @@ const secondBound = feature.bindInteractions(root);
       {path: "C:/tmp/three.png", name: "three"},
     ],
   }, 2);
+  const tiffHtml = feature.renderUserProjection({
+    role: "user",
+    content: "tiff",
+    _images: [{path: "attachments/demo.tiff", name: "demo.tiff", mime: "image/tiff"}],
+  }, 3, {});
   process.stdout.write(JSON.stringify({
     firstBound,
     secondBound,
     clickHandlers: handlers.click.length,
     loadHandlers: handlers.load.length,
+    errorHandlers: handlers.error.length,
     loadUsesCapture: handlers.load[0].options === true,
     writes,
     previewed,
     loadedCount: loaded.length,
+    failedPreviewHidden: failedPreviewImage.hidden,
+    fallbackVisible: fallbackCard.hidden === false,
     copied: classes.has("copied"),
     copyHtml,
     userHtml,
     batchHtml,
+    tiffHtml,
   }));
 })().catch((error) => { console.error(error); process.exit(1); });
 """
@@ -8015,10 +8276,13 @@ const secondBound = feature.bindInteractions(root);
         self.assertFalse(data["secondBound"])
         self.assertEqual(data["clickHandlers"], 1)
         self.assertEqual(data["loadHandlers"], 1)
+        self.assertEqual(data["errorHandlers"], 1)
         self.assertTrue(data["loadUsesCapture"])
         self.assertEqual(data["writes"], ["copy me"])
         self.assertEqual(data["previewed"], ["current-preview.png"])
         self.assertEqual(data["loadedCount"], 1)
+        self.assertTrue(data["failedPreviewHidden"])
+        self.assertTrue(data["fallbackVisible"])
         self.assertTrue(data["copied"])
         self.assertIn('class="msg-copy-btn"', data["copyHtml"])
         self.assertNotIn("onclick=", data["copyHtml"])
@@ -8026,9 +8290,13 @@ const secondBound = feature.bindInteractions(root);
         self.assertIn("data-message-scroll-on-load", data["userHtml"])
         self.assertNotIn("onclick=", data["userHtml"])
         self.assertNotIn("onload=", data["userHtml"])
+        self.assertNotIn("data-message-image-fallback", data["userHtml"])
         self.assertEqual(data["batchHtml"].count('class="msg user msg-image-batch"'), 1)
         self.assertEqual(data["batchHtml"].count("data-message-image-preview"), 3)
         self.assertEqual(data["batchHtml"].count('class="bubble bubble-img msg-image-group"'), 1)
+        self.assertNotIn("data-message-image-fallback", data["batchHtml"])
+        self.assertIn("data-message-image-fallback", data["tiffHtml"])
+        self.assertIn("/api/attachments/preview?path=attachments%2Fdemo.tiff", data["tiffHtml"])
         self.assertLess(
             data["batchHtml"].index("msg-image-group"),
             data["batchHtml"].index("describe these images"),

@@ -1960,6 +1960,31 @@ input:focus, select:focus, textarea:focus {
 .img-thumb img {
   width: 100%; height: 100%; object-fit: cover;
 }
+.image-attachment-card {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.image-attachment-card[hidden] { display: none; }
+.image-attachment-card-type { font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+.image-attachment-card-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9px;
+}
+.composer-image-attachment-card { width: 48px; height: 48px; }
 .img-thumb-remove {
   position: absolute; top: 1px; right: 1px;
   width: 16px; height: 16px; padding: 0;
@@ -1984,6 +2009,8 @@ input:focus, select:focus, textarea:focus {
   margin-top: 0;
 }
 .msg-img:hover { opacity: .85; }
+.message-image-preview-shell { display: inline-flex; max-width: 100%; }
+.message-image-attachment-card { width: 160px; height: 120px; }
 .bubble-img { padding: 4px !important; background: transparent !important; }
 .user-message-batch {
   display: flex;

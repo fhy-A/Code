@@ -829,6 +829,53 @@ def _normalize_model_image_bytes(data, declared_mime=""):
         return {"ok": False, "error": "image conversion failed"}
 
 
+def _derive_tiff_preview_png(data, declared_mime=""):
+    """Derive an in-memory PNG for TIFF display without changing the source."""
+    raw = bytes(data or b"")
+    if not raw:
+        raise ValueError("preview image is empty")
+    if len(raw) > MAX_ATTACHMENT_BYTES:
+        raise ValueError("preview image exceeds size limit")
+
+    normalized_declared_mime = str(declared_mime or "").split(";", 1)[0].strip().lower()
+    if normalized_declared_mime and normalized_declared_mime not in {"image/tiff", "image/x-tiff"}:
+        raise ValueError("preview source must be TIFF")
+    source_format, _detected_mime = _sniff_model_image_format(raw)
+    if source_format != "TIFF":
+        raise ValueError("preview source must be TIFF")
+
+    normalized = _normalize_model_image_bytes(raw, normalized_declared_mime or "image/tiff")
+    if not normalized.get("ok"):
+        error = str(normalized.get("error") or "")
+        if "dimensions exceed" in error:
+            raise ValueError("preview image dimensions exceed limit")
+        if "exceeds" in error:
+            raise ValueError("preview image exceeds size limit")
+        raise ValueError("preview image conversion failed")
+    preview = bytes(normalized.get("data") or b"")
+    if (
+        not normalized.get("converted")
+        or normalized.get("mime") != "image/png"
+        or _sniff_model_image_format(preview) != ("PNG", "image/png")
+    ):
+        raise ValueError("preview image conversion failed")
+    return preview
+
+
+def _decode_tiff_preview_base64(content_base64, declared_mime=""):
+    """Strictly decode an inline TIFF preview request with a pre-decode cap."""
+    if not isinstance(content_base64, str) or not content_base64:
+        raise ValueError("preview image content is required")
+    max_encoded = ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4
+    if len(content_base64) > max_encoded:
+        raise ValueError("preview image exceeds size limit")
+    try:
+        raw = base64.b64decode(content_base64, validate=True)
+    except Exception as exc:
+        raise ValueError("preview image base64 is invalid") from exc
+    return _derive_tiff_preview_png(raw, declared_mime)
+
+
 def _project_model_image_url(value):
     """Normalize a local data URL; remote URLs remain the upstream's concern."""
     image_url = str(value or "")
@@ -11472,6 +11519,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route == "/api/file":
                 self.get_file(query.get("path", [""])[0], raw=query.get("raw", [None])[0] == "1")
                 return
+            if route == "/api/attachments/preview":
+                self.get_attachment_preview(query.get("path", [""])[0])
+                return
             if route.rstrip("/") == "/api/pick-file":
                 self.pick_file()
                 return
@@ -11721,6 +11771,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/attachments":
                 self.create_attachment()
+                return
+            if self.path == "/api/attachments/preview":
+                self.create_attachment_preview()
                 return
             if self.path == "/api/tools/list_files":
                 self.tool_list_files()
@@ -12717,6 +12770,36 @@ class CodeHandler(BaseHTTPRequestHandler):
             "name": name,
             "size": len(data),
         })
+
+    def send_attachment_preview_png(self, data):
+        preview = bytes(data or b"")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(preview)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(preview)
+
+    def get_attachment_preview(self, relative_path):
+        if not relative_path:
+            raise ValueError("preview attachment path is required")
+        _root, target = resolve_attachment_path(relative_path)
+        if target is None:
+            raise ValueError("preview path must reference an attachment")
+        if not target.exists() or not target.is_file():
+            raise ValueError("preview attachment does not exist")
+        if target.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise ValueError("preview image exceeds size limit")
+        self.send_attachment_preview_png(_derive_tiff_preview_png(target.read_bytes(), "image/tiff"))
+
+    def create_attachment_preview(self):
+        body = self.read_body_json()
+        preview = _decode_tiff_preview_base64(
+            body.get("contentBase64"),
+            body.get("mime"),
+        )
+        self.send_attachment_preview_png(preview)
 
     def tool_list_files(self):
         self.send_json(execute_registered_tool("list_files", self.read_body_json()))

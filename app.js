@@ -56,10 +56,15 @@ const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
 const {
   canDeferImageConversion,
+  createDerivedBrowserPreviewCache,
+  imagePreviewSource,
   imageMimeForFile,
   isImageFileCandidate,
   modelImageOutputMime,
+  normalizeImageMime,
   parseImageDataUrl,
+  requestDerivedBrowserPreview,
+  requiresDerivedBrowserPreview,
   storageNameForImage,
 } = window.Code.features.imageAttachments;
 const { createImportBatchRunner } = window.Code.features.sessionImport;
@@ -173,6 +178,29 @@ const {
   getSessionLastUsage,
   setSessionLastUsage,
 } = createSessionStateAccessors(state);
+
+const persistedTiffPreviewCache = createDerivedBrowserPreviewCache({
+  onSettled: ({ image }) => {
+    const sessionId = state.sessionId;
+    if (!sessionId || !image?.path) return;
+    const stillVisible = getSessionMessages(sessionId).some((message) => (
+      Array.isArray(message?._images)
+      && message._images.some((candidate) => (
+        normalizeImageMime(candidate?.mime) === "image/tiff"
+        && String(candidate?.path || "") === image.path
+      ))
+    ));
+    if (stillVisible) renderSessionMessages(sessionId);
+  },
+});
+
+function messageImagePreviewSource(image = {}) {
+  if (!requiresDerivedBrowserPreview(image) || !image.path) return imagePreviewSource(image);
+  const cached = persistedTiffPreviewCache.source(image);
+  if (cached) return cached;
+  void persistedTiffPreviewCache.ensure(image);
+  return "";
+}
 const { saveSession: persistSessionPayload } = createSessionPersistence({
   requestJson: apiJson,
   saveChains: state._sessionSaveChains,
@@ -879,6 +907,7 @@ messagesFeature = createMessagesFeature({
   isEditSuggestionMessage,
   renderEditSuggestion: renderEditSuggestionProjection,
   getToolActionLabel: _toolActionLabel,
+  getImagePreviewSource: messageImagePreviewSource,
   onImagePreview: showImageOverlay,
   onImageLoad: () => {
     if (els.messages) els.messages.scrollTop = els.messages.scrollHeight;
@@ -4699,7 +4728,10 @@ function updateSendButtonState() {
 async function uploadImagesForStorage(images) {
   const refs = [];
   for (const img of images) {
-    if (img.path) { refs.push(img); continue; }  // already uploaded
+    if (img.path) {
+      refs.push({ path: img.path, name: img.name, mime: img.mime });
+      continue;
+    }
     try {
       const resp = await fetch("/api/attachments", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -4711,7 +4743,13 @@ async function uploadImagesForStorage(images) {
       const data = await resp.json();
       if (data.path) { refs.push({ path: data.path, name: img.name, mime: img.mime }); continue; }
     } catch (_) {}
-    refs.push(img);  // fallback to base64
+    refs.push({
+      name: img.name,
+      base64: img.base64,
+      mime: img.mime,
+      ...(img.storageName ? { storageName: img.storageName } : {}),
+      ...(img._ref ? { _ref: img._ref } : {}),
+    });  // fallback to original base64 only
   }
   return refs;
 }
@@ -4728,6 +4766,8 @@ function addImage(name, base64, mime, options = {}) {
     mime: mime || "image/png",
     ...(options.storageName ? { storageName: options.storageName } : {}),
     ...(options.ref ? { _ref: options.ref } : {}),
+    ...(options.previewUrl ? { _previewUrl: options.previewUrl } : {}),
+    ...(options.previewFailed ? { _previewFailed: true } : {}),
   });
 
   renderImageThumbs();
@@ -4740,7 +4780,8 @@ function addImage(name, base64, mime, options = {}) {
 
 function removeImage(index) {
 
-  state.attachedImages.splice(index, 1);
+  const [removed] = state.attachedImages.splice(index, 1);
+  releaseAttachedImagePreview(removed);
 
   renderImageThumbs();
 
@@ -4774,17 +4815,24 @@ function renderImageThumbs() {
 
   }
 
-  container.innerHTML = state.attachedImages.map((img, i) => `
+  container.innerHTML = state.attachedImages.map((img, i) => {
+    const previewSrc = imagePreviewSource(img);
+    const preview = previewSrc
+      ? `<img src="${escapeHtml(previewSrc)}" alt="${escapeHtml(img.name)}" data-composer-image-preview title="Image preview" style="cursor:pointer" />`
+      : "";
+    const fallback = `<div${previewSrc ? " hidden" : ""} data-composer-image-fallback-wrap>${imageAttachmentCard(img.name, "composer")}</div>`;
+    return `
 
     <div class="img-thumb">
 
-      <img src="data:${img.mime};base64,${img.base64}" alt="${escapeHtml(img.name)}" data-composer-image-preview title="点击查看大图" style="cursor:pointer" />
+      ${preview}${fallback}
 
       <button class="img-thumb-remove" type="button" title="${t("delete")}" data-index="${i}">&times;</button>
 
     </div>
 
-  `).join("");
+  `;
+  }).join("");
 
   container.querySelectorAll(".img-thumb-remove").forEach((btn) => {
 
@@ -4794,6 +4842,11 @@ function renderImageThumbs() {
 
   container.querySelectorAll("[data-composer-image-preview]").forEach((image) => {
     image.addEventListener("click", () => showImageOverlay(image.currentSrc || image.src || ""));
+    image.addEventListener("error", () => {
+      image.hidden = true;
+      const fallback = image.closest(".img-thumb")?.querySelector("[data-composer-image-fallback-wrap]");
+      if (fallback) fallback.hidden = false;
+    }, { once: true });
   });
 
 }
@@ -4851,6 +4904,7 @@ async function compressImage(file, maxW = 1024, quality = 0.7) {
     mime: sourceMime,
     storageName: storageNameForImage(file.name, sourceMime),
   };
+  if (requiresDerivedBrowserPreview(sourceMime)) return original;
 
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -4928,9 +4982,20 @@ async function handleImageFile(file, options = {}) {
   const displayName = options.name || file.name || "image";
   try {
     const image = await compressImage(file);
+    let previewUrl = "";
+    let previewFailed = false;
+    if (requiresDerivedBrowserPreview(image.mime)) {
+      try {
+        previewUrl = await requestDerivedBrowserPreview(image);
+      } catch (_) {
+        previewFailed = true;
+      }
+    }
     addImage(displayName, image.base64, image.mime, {
       storageName: image.storageName,
       ref: options.ref,
+      previewUrl,
+      previewFailed,
     });
     return true;
   } catch (error) {
@@ -7965,6 +8030,23 @@ function snapshotHasPendingModelStarted(snapshot, cursor = 0, runtimeRunId = "")
   ));
 }
 
+function releaseAttachedImagePreview(image) {
+  const previewUrl = String(image?._previewUrl || "");
+  if (previewUrl && typeof URL?.revokeObjectURL === "function") {
+    URL.revokeObjectURL(previewUrl);
+  }
+}
+
+function clearAttachedImages() {
+  state.attachedImages.forEach(releaseAttachedImagePreview);
+  state.attachedImages = [];
+}
+
+function imageAttachmentCard(name, scope) {
+  const label = escapeHtml(name || "image attachment");
+  return `<div class="image-attachment-card ${scope}-image-attachment-card" data-${scope}-image-fallback role="img" aria-label="${label}"><span class="image-attachment-card-type">IMAGE</span><span class="image-attachment-card-name">${label}</span></div>`;
+}
+
 function rebindRecoveredRuntimeAssistant(ctx, runtimeRunId) {
   const authoritativeId = String(runtimeRunId || "");
   if (!authoritativeId) return null;
@@ -9654,7 +9736,7 @@ async function sendMessage(userText, options = {}) {
   setSessionMessages(sessionId, ctx.messages);
 
   if (!existingMessage) {
-    state.attachedImages = [];
+    clearAttachedImages();
     renderImageThumbs();
   }
 
@@ -10645,7 +10727,7 @@ els.chatForm.addEventListener("submit", async (event) => {
     const taskText = parallelTask !== null ? parallelTask : text;
     els.prompt.value = "";
     els.prompt.rows = 2;
-    state.attachedImages = [];
+    clearAttachedImages();
     renderImageThumbs();
     updateSendButtonState();
     if (parallelTask !== null) {
@@ -11679,6 +11761,7 @@ async function init() {
 
   // Flush unpersisted messages on page close (best-effort via sendBeacon)
   window.addEventListener("beforeunload", () => {
+    persistedTiffPreviewCache.clear();
     const sid = state.sessionId;
     if (!sid) return;
     persistActiveRunTimerCheckpoint(sid);

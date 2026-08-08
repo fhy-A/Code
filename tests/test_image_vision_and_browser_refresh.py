@@ -2,6 +2,7 @@ import json
 import base64
 import io
 import inspect
+import hashlib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -152,6 +153,85 @@ class TestImageVisionBridge(unittest.TestCase):
             "_project_model_payload_images(parsed_body)",
             inspect.getsource(server.CodeHandler.proxy),
         )
+
+
+class TestTiffAttachmentPreviewPolicy(unittest.TestCase):
+    @staticmethod
+    def _tiff_bytes(size=(17, 11), mode="RGB"):
+        from PIL import Image
+
+        image = Image.new(mode, size, 1 if mode == "1" else (25, 90, 180))
+        output = io.BytesIO()
+        options = {"compression": "group4"} if mode == "1" else {}
+        image.save(output, format="TIFF", **options)
+        return output.getvalue()
+
+    def test_tiff_preview_is_decodable_png_without_mutating_source(self):
+        from PIL import Image
+
+        source = self._tiff_bytes()
+        before_hash = hashlib.sha256(source).hexdigest()
+
+        preview = server._derive_tiff_preview_png(source, "image/tiff")
+
+        self.assertEqual(hashlib.sha256(source).hexdigest(), before_hash)
+        self.assertTrue(preview.startswith(bytes.fromhex("89504e470d0a1a0a")))
+        with Image.open(io.BytesIO(preview)) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.size, (17, 11))
+
+        wide_source = self._tiff_bytes((4096, 2))
+        wide_preview = server._derive_tiff_preview_png(wide_source, "image/tiff")
+        with Image.open(io.BytesIO(wide_preview)) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertLessEqual(max(image.size), server.MODEL_INPUT_IMAGE_MAX_DIMENSION)
+
+    def test_inline_preview_rejects_bad_base64_signature_size_pixels_and_damage(self):
+        png = TestImageVisionBridge._image_bytes("PNG")
+        cases = (
+            (lambda: server._decode_tiff_preview_base64("%%%", "image/tiff"), "base64"),
+            (
+                lambda: server._decode_tiff_preview_base64(
+                    base64.b64encode(png).decode("ascii"),
+                    "image/tiff",
+                ),
+                "must be TIFF",
+            ),
+            (
+                lambda: server._decode_tiff_preview_base64(
+                    base64.b64encode(b"II*\x00broken").decode("ascii"),
+                    "image/tiff",
+                ),
+                "conversion failed",
+            ),
+            (
+                lambda: server._decode_tiff_preview_base64(
+                    "A" * ((((server.MAX_ATTACHMENT_BYTES + 2) // 3) * 4) + 1),
+                    "image/tiff",
+                ),
+                "size limit",
+            ),
+        )
+        for operation, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(ValueError, expected):
+                    operation()
+
+        oversized_pixels = self._tiff_bytes((5001, 5000), mode="1")
+        self.assertLess(len(oversized_pixels), server.MAX_ATTACHMENT_BYTES)
+        with self.assertRaisesRegex(ValueError, "dimensions exceed limit"):
+            server._derive_tiff_preview_png(oversized_pixels, "image/tiff")
+
+    def test_preview_failure_does_not_change_model_tiff_projection(self):
+        source = self._tiff_bytes()
+        data_url = f"data:image/tiff;base64,{base64.b64encode(source).decode('ascii')}"
+        expected = server._project_model_image_url(data_url)
+
+        with self.assertRaises(ValueError):
+            server._derive_tiff_preview_png(b"II*\x00broken", "image/tiff")
+
+        self.assertEqual(server._project_model_image_url(data_url), expected)
+        self.assertTrue(expected.startswith("data:image/png;base64,"))
 
 
 class TestExistingBrowserRefresh(unittest.TestCase):

@@ -38,6 +38,11 @@ const MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER";
 const MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE";
 const MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL";
 const MISSING_READ_PATH = "h4-missing-fixture.txt";
+const TIFF_IMAGE_USER = "H4_TIFF_IMAGE_USER";
+const TIFF_IMAGE_FINAL = "H4_TIFF_IMAGE_FINAL";
+const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
+const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
+const TIFF_ATTACHMENT_SHA256 = "42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73";
 const TOOL_FINAL_DELTA_GATE = "before-tool-final-delta";
 const TOOL_TERMINAL_GATE = "before-tool-terminal";
 const SECOND_TOOL_EXECUTE_GATE = "before-second-tool-execute";
@@ -1719,6 +1724,225 @@ async function assertFrontendRuntime(page, runtime) {
   }
 }
 
+async function dropTiffAttachment(page) {
+  const dataTransfer = await page.evaluateHandle(({ base64, name }) => {
+    const binary = atob(base64);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], name, { type: "image/tiff" }));
+    return transfer;
+  }, { base64: TIFF_ATTACHMENT_BASE64, name: TIFF_ATTACHMENT_NAME });
+  try {
+    await page.locator("#prompt").dispatchEvent("drop", { dataTransfer });
+  } finally {
+    await dataTransfer.dispose();
+  }
+}
+
+async function expectDecodedImage(locator) {
+  await expect(locator).toBeVisible();
+  await expect.poll(async () => locator.evaluate((image) => ({
+    complete: image.complete,
+    naturalWidth: image.naturalWidth,
+    naturalHeight: image.naturalHeight,
+  }))).toEqual({ complete: true, naturalWidth: 18, naturalHeight: 12 });
+}
+
+async function completeTiffPreviewLifecycle(h4, runtime) {
+  const { page } = h4;
+  const previewRequests = [];
+  let previewPhase = "initialization";
+  const recordPreviewRequest = (request) => {
+    const url = new URL(request.url());
+    if (url.pathname !== "/api/attachments/preview") return;
+    previewRequests.push({
+      phase: previewPhase,
+      method: request.method(),
+      path: url.pathname,
+    });
+  };
+  const previewRequestsFor = (phase, method) => previewRequests.filter((request) => (
+    request.phase === phase
+    && request.method === method
+    && request.path === "/api/attachments/preview"
+  ));
+  page.on("request", recordPreviewRequest);
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(new URL(page.url()).pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(new URL(page.url()).search).toBe("");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+
+  previewPhase = "composer-success";
+  await dropTiffAttachment(page);
+  const initialComposerPreview = page.locator("#imageThumbs [data-composer-image-preview]");
+  await expectDecodedImage(initialComposerPreview);
+  expect(previewRequestsFor("composer-success", "POST")).toHaveLength(1);
+  expect(await initialComposerPreview.getAttribute("src")).toMatch(/^blob:/);
+  await expect(page.locator("#imageThumbs [data-composer-image-fallback]")).toBeHidden();
+  await page.locator("#imageThumbs .img-thumb-remove").click();
+  await expect(page.locator("#imageThumbs")).toHaveCount(0);
+
+  let injectedPreviewFailures = 0;
+  const previewPattern = "**/api/attachments/preview*";
+  const failPreview = async (route) => {
+    injectedPreviewFailures += 1;
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "synthetic preview unavailable" }),
+    });
+  };
+  await page.route(previewPattern, failPreview);
+  previewPhase = "composer-failure";
+  await dropTiffAttachment(page);
+  await expect(page.locator("#imageThumbs [data-composer-image-fallback]")).toBeVisible();
+  await expect(page.locator("#imageThumbs [data-composer-image-preview]")).toHaveCount(0);
+  expect(previewRequestsFor("composer-failure", "POST")).toHaveLength(1);
+
+  await page.locator("#prompt").fill(TIFF_IMAGE_USER);
+  previewPhase = "message-initial";
+  await page.locator("#sendBtn").click();
+  const userMessage = page.locator("#messages article.msg.user").filter({ hasText: TIFF_IMAGE_USER });
+  await expect(userMessage).toHaveCount(1);
+  await expect(userMessage.locator("[data-message-image-fallback]")).toBeVisible();
+  await expect.poll(() => previewRequestsFor("message-initial", "GET").length).toBe(1);
+  await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+  previewPhase = "model-rerender";
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TIFF_IMAGE_FINAL })).toHaveCount(1);
+  expect(previewRequestsFor("model-rerender", "GET")).toHaveLength(0);
+  expect(injectedPreviewFailures).toBe(2);
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const sessionBefore = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionBefore.status).toBe(200);
+  const persistedUser = sessionBefore.body.messages.find((message) => message?.role === "user");
+  const persistedImage = persistedUser?.content?.find((item) => item?.type === "image_url");
+  const persistedDataUrl = String(persistedImage?.image_url?.url || "");
+  expect(persistedDataUrl.startsWith("data:image/tiff;base64,")).toBe(true);
+  expect(crypto.createHash("sha256").update(
+    Buffer.from(persistedDataUrl.split(",", 2)[1], "base64"),
+  ).digest("hex")).toBe(TIFF_ATTACHMENT_SHA256);
+  expect(persistedUser?._images).toHaveLength(1);
+  expect(persistedUser._images[0]).toMatchObject({
+    name: TIFF_ATTACHMENT_NAME,
+    mime: "image/tiff",
+  });
+  expect(String(persistedUser._images[0].path || "")).toMatch(/^attachments\//);
+  expect(JSON.stringify(sessionBefore.body)).not.toContain("_previewUrl");
+  expect(JSON.stringify(sessionBefore.body)).not.toContain("_previewFailed");
+
+  const metricsBefore = await h4.metrics();
+  expect(metricsBefore.chatRequests).toEqual([{
+    scenario: "tiff-image",
+    stream: true,
+    hasToolResult: false,
+    imageProjection: {
+      count: 1,
+      images: [{ mime: "image/png", png: true, width: 18, height: 12 }],
+      recognized: true,
+    },
+  }]);
+  expect(metricsBefore.attachments).toEqual({
+    fileCount: 1,
+    files: [{
+      size: Buffer.from(TIFF_ATTACHMENT_BASE64, "base64").length,
+      sha256: TIFF_ATTACHMENT_SHA256,
+      sourceFormat: "TIFF",
+      mime: "image/tiff",
+      suffix: ".tiff",
+    }],
+  });
+  expect(metricsBefore.sessionJsonl.tiffMimeCount).toBeGreaterThanOrEqual(1);
+  expect(metricsBefore.sessionJsonl.tiffDataUrlCount).toBeGreaterThanOrEqual(1);
+  expect(metricsBefore.sessionJsonl.derivedPreviewFieldCount).toBe(0);
+  const requestBoundary = h4.requestBoundary();
+
+  await page.unroute(previewPattern, failPreview);
+  previewPhase = "full-refresh";
+  await h4.reloadRuntime(runtime);
+  const restoredUser = page.locator("#messages article.msg.user").filter({ hasText: TIFF_IMAGE_USER });
+  await expect(restoredUser).toHaveCount(1);
+  const restoredPreview = restoredUser.locator("[data-message-image-preview]");
+  await expectDecodedImage(restoredPreview);
+  expect(previewRequestsFor("full-refresh", "GET")).toHaveLength(1);
+  await expect(restoredUser.locator("[data-message-image-fallback]")).toBeHidden();
+
+  const restoredUserHandle = await restoredUser.elementHandle();
+  expect(restoredUserHandle).toBeTruthy();
+  previewPhase = "post-refresh-rerender";
+  const restoredSessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(restoredSessionButton).toHaveCount(1);
+  await restoredSessionButton.click();
+  await expect.poll(() => restoredUserHandle.evaluate((node) => node.isConnected)).toBe(false);
+  await restoredUserHandle.dispose();
+  const rerenderedUser = page.locator("#messages article.msg.user").filter({ hasText: TIFF_IMAGE_USER });
+  await expect(rerenderedUser).toHaveCount(1);
+  const rerenderedPreview = rerenderedUser.locator("[data-message-image-preview]");
+  await expectDecodedImage(rerenderedPreview);
+  expect(previewRequestsFor("post-refresh-rerender", "GET")).toHaveLength(0);
+
+  previewPhase = "overlay";
+  await rerenderedPreview.click();
+  const overlayImage = page.locator("#imageOverlay img");
+  await expectDecodedImage(overlayImage);
+  expect(previewRequestsFor("overlay", "GET")).toHaveLength(0);
+  await page.locator("#imageOverlay").click();
+  await expect(page.locator("#imageOverlay")).toHaveCount(0);
+
+  const refreshRequests = h4.requestEvidenceSince(requestBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual([]);
+  expect(metricsAfter.attachments).toEqual(metricsBefore.attachments);
+  expect(await page.locator("#messages article.msg.user").filter({ hasText: TIFF_IMAGE_USER }).count()).toBe(1);
+  expect(await page.locator("#messages article.msg.assistant").filter({ hasText: TIFF_IMAGE_FINAL }).count()).toBe(1);
+  const previewRequestCounts = {
+    composerSuccessPost: previewRequestsFor("composer-success", "POST").length,
+    composerFailurePost: previewRequestsFor("composer-failure", "POST").length,
+    messageInitialGet: previewRequestsFor("message-initial", "GET").length,
+    modelRerenderGet: previewRequestsFor("model-rerender", "GET").length,
+    fullRefreshGet: previewRequestsFor("full-refresh", "GET").length,
+    postRefreshRerenderGet: previewRequestsFor("post-refresh-rerender", "GET").length,
+    overlayGet: previewRequestsFor("overlay", "GET").length,
+    total: previewRequests.length,
+  };
+  expect(previewRequestCounts).toEqual({
+    composerSuccessPost: 1,
+    composerFailurePost: 1,
+    messageInitialGet: 1,
+    modelRerenderGet: 0,
+    fullRefreshGet: 1,
+    postRefreshRerenderGet: 0,
+    overlayGet: 0,
+    total: 4,
+  });
+  page.off("request", recordPreviewRequest);
+
+  h4.evidence(`${runtime}-tiff-derived-preview`, {
+    runtime,
+    originalSha256: TIFF_ATTACHMENT_SHA256,
+    composerPreview: { width: 18, height: 12, mime: "image/png" },
+    persisted: { mime: "image/tiff", attachmentFiles: 1, previewFields: 0 },
+    modelProjectionRecognized: true,
+    injectedPreviewFailures,
+    previewRequestCounts,
+    previewConversions: { succeeded: 2, interceptedFailures: 2 },
+    refresh: { agentPost: 0, runtimePost: 0, chat: 0, tool: 0 },
+  });
+}
+
 async function openAutomaticClassicFallback(h4, failureMode) {
   const { page, host } = h4;
   const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
@@ -2209,6 +2433,14 @@ test("default bundle completes first plain-text send", async ({ h4 }) => {
     dom: { user: 1, final: 1, runningObserved: true },
     blockedNonLoopback: h4.blockedRequests.length,
   });
+});
+
+test("bundle TIFF uses derived PNG preview while preserving the original attachment", async ({ h4 }) => {
+  await completeTiffPreviewLifecycle(h4, "bundle");
+});
+
+test("direct classic TIFF uses derived PNG preview while preserving the original attachment", async ({ h4 }) => {
+  await completeTiffPreviewLifecycle(h4, "classic");
 });
 
 test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {

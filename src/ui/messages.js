@@ -131,6 +131,12 @@
     const isEditSuggestionMessage = options.isEditSuggestionMessage || (() => false);
     const renderEditSuggestion = options.renderEditSuggestion || (() => "");
     const getToolActionLabel = options.getToolActionLabel || ((action) => String(action || "tool"));
+    const hasImagePreviewSource = typeof options.getImagePreviewSource === "function";
+    const getImagePreviewSource = options.getImagePreviewSource || ((image = {}) => (
+      image.path
+        ? `/api/file?path=${encodeURIComponent(image.path)}&raw=1`
+        : `data:${image.mime || "image/png"};base64,${image.base64}`
+    ));
     const onImagePreview = options.onImagePreview || (() => {});
     const onImageLoad = options.onImageLoad || (() => {});
     const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
@@ -218,6 +224,14 @@
       root.addEventListener("load", (event) => {
         const image = event.target?.closest?.("[data-message-scroll-on-load]");
         if (image && (!root.contains || root.contains(image))) onImageLoad(image);
+      }, true);
+      root.addEventListener("error", (event) => {
+        const image = event.target?.closest?.("[data-message-image-preview]");
+        if (!image || (root.contains && !root.contains(image))) return;
+        const fallback = image.parentElement?.querySelector?.("[data-message-image-fallback]");
+        if (!fallback) return;
+        image.hidden = true;
+        fallback.hidden = false;
       }, true);
       root.addEventListener("keydown", (event) => {
         if (!["Enter", " "].includes(event.key)) return;
@@ -406,11 +420,20 @@
       const dispatchStatus = backgroundStatus;
       const traceClass = options.tracePersistent ? " execution-trace-persistent" : "";
       const imageItems = images.map((image, imageIndex) => {
-        const src = image.path
-          ? `/api/file?path=${encodeURIComponent(image.path)}&raw=1`
-          : `data:${image.mime || "image/png"};base64,${image.base64}`;
+        const src = getImagePreviewSource(image);
         const onLoad = image.path ? " data-message-scroll-on-load" : "";
-        return `<img class="msg-img msg-img-clickable" src="${src}" alt="${escapeHtml(image.name || "image")}" data-img="${imageIndex}"${onLoad} data-message-image-preview title="Click to enlarge">`;
+        const mime = String(image?.mime || "").trim().toLowerCase();
+        const usesDerivedTiffPreview = hasImagePreviewSource && ["image/tiff", "image/tif"].includes(mime);
+        if (!usesDerivedTiffPreview) {
+          return `<img class="msg-img msg-img-clickable" src="${src}" alt="${escapeHtml(image.name || "image")}" data-img="${imageIndex}"${onLoad} data-message-image-preview title="Click to enlarge">`;
+        }
+        const preview = src
+          ? `<img class="msg-img msg-img-clickable" src="${escapeHtml(src)}" alt="${escapeHtml(image.name || "image")}" data-img="${imageIndex}"${onLoad} data-message-image-preview title="Click to enlarge">`
+          : "";
+        const hidden = src ? " hidden" : "";
+        const name = escapeHtml(image.name || "image.tiff");
+        const fallback = `<div class="image-attachment-card message-image-attachment-card" data-message-image-fallback${hidden} role="img" aria-label="${name}"><span class="image-attachment-card-type">IMAGE</span><span class="image-attachment-card-name">${name}</span></div>`;
+        return `<span class="message-image-preview-shell">${preview}${fallback}</span>`;
       }).join("");
       if (!text && images.length === 0) return "";
       if (images.length) {
