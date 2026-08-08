@@ -580,6 +580,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **H4-6N 补充状态（2026-08-08）**：H4-6N 在每例独立 project 内以固定同参数 `read_file` 构造 `missing → present → missing`，三次均真实委托生产执行器；工具名与规范 arguments 指纹相同，outcome 为 `failed → succeeded → failed`，`failureSignature` 为 `A → absent → A`，`failureCount` 为 `1 → absent → 1`，且成功 execution 顶层及 result 均无该字段。成功打断此前失败链，第三次同失败不继承第一次计数；全程无 retry-limit/block 或 forced-final。bundle/direct classic 均闭合 19 事件、Runtime cursor `[4,3,3,3]`、Session 11 条消息、单组 failed/succeeded/failed 三项、刷新四项零增量及九类一致哈希。详见 [`H4-6N 同指纹成功打断失败链`](harness/h4-6n-identical-fingerprint-success-reset.md)。
 
+**H4-6O 补充状态（2026-08-09）**：H4-6O 沿用 H4-6K 的同指纹只读行范围失败，前三次真实执行、第四次产生耐久 blocked execution 且不再进入执行器，第五轮 forced-final 移除 tools/tool_choice 后由隔离假上游固定返回 HTTP 502。父 AgentRun 以 `failed/upstream_error`、24 事件收敛，Runtime cursor 为 `[4,3,3,3,0]`；Session 回滚为 user 与唯一 error-recovery assistant，公共及 Session 活动 Runtime 清空，原始耐久记录不含 `activeRuntimeRunId`。failed 主任务继续复用既有计时事实源，在同一消息持久化边界前把耗时写入 error assistant 的 `meta._responseTime`，当前页和刷新后顶部耗时唯一、页脚无重复；没有新增字段、迁移、计时算法或历史回填。bundle/direct classic 九项语义哈希一致，完整刷新四项增量为零。详见 [`H4-6O forced-final 模型失败终态与刷新唯一性`](harness/h4-6o-forced-final-model-failure.md)。
+
 **H4-7A 补充状态（2026-08-08）**：H4-7A 为 TIFF 补齐默认 bundle 与 direct classic 的真实浏览器展示闭环。原 TIFF 继续作为唯一持久化附件和模型输入来源，Session MIME 保持 `image/tiff`；模型仍使用既有 PNG 投影。preview POST/GET 只返回内存派生 PNG，不写预览文件或持久化字段。已保存 path 的页面缓存固定为 `pending`、`ready(blob URL)`、`failed`，同页并发、成功、失败与消息重绘均不重复转换，完整刷新后自然重建并允许一次新 GET。两种入口精确为 POST 2、GET 2、总请求 4，失败只显示附件卡片且不阻止发送或模型识别。详见 [`H4-7A TIFF 派生浏览器预览与页面生命周期缓存`](harness/h4-7a-tiff-derived-browser-preview.md)。
 
 **H4-7B 补充状态（2026-08-08）**：H4-7B 修正 detached 用户消息与主任务 turn 所有权不一致：detached 用户仍可见但不再接管主任务完成状态或工具轨迹，主任务及完成后的普通排队任务只在顶部以“用时/Worked for + 时长”各展示一次耗时，对应 assistant 页脚只保留 Token；detached/background/`/parallel` assistant 继续保留自己的单一页脚耗时。后台结果在统一构造入口只规范化一次 `responseTime`，同值镜像到顶层与 `meta._responseTime`，复用既有 Session 序列化恢复，不修改计时算法、Session JSONL 格式、AgentRun、Runtime 或事件协议，也不迁移旧缺失耗时。详见 [`H4-7B 主任务完成计时唯一投影`](harness/h4-7b-primary-completion-elapsed-projection.md)。
@@ -687,6 +689,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 **H4-6M 阶段更新（2026-08-08）**：上段剩余项中的“错误签名交替”现已收窄完成固定同指纹 `A → B → A` 的连续计数隔离；阈值后的交替、不同工具/参数、任意 JSON key 顺序、执行前失败和强制终答失败仍未覆盖。H4-6M 不改变生产限流算法、协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6M 同指纹错误签名交替隔离`](harness/h4-6m-identical-fingerprint-signature-alternation.md)。
 
 **H4-6N 阶段更新（2026-08-08）**：上段剩余项中的“成功是否打断失败链”现已收窄完成固定同指纹 `missing → success → missing` 的生产证据：成功 execution 不携带失败计数或签名，第三次同失败从 `failureCount=1` 重新开始。不同工具/参数、阈值后行为、任意 JSON key 顺序、执行前失败及跨进程 active 恢复仍未覆盖。H4-6N 不改变生产限流算法、协议、持久化、安全边界或交互语义，完整证据与限制见 [`H4-6N 同指纹成功打断失败链`](harness/h4-6n-identical-fingerprint-success-reset.md)。
+
+**H4-6O 阶段更新（2026-08-09）**：上段剩余项中的“强制终答失败分支”现已收窄完成固定 HTTP 502：三次真实执行与第四次阻断保持 H4-6K 语义，第五轮 forced-final 模型失败后父 Run failed，Session 回滚、顶部耗时持久化及同进程刷新零重放闭合。其他执行前失败限流、不同参数/工具、错误交替后的阈值行为、其他模型错误或恢复策略、跨进程 active 与外部副作用 exactly-once 仍未覆盖。完整证据与限制见 [`H4-6O forced-final 模型失败终态与刷新唯一性`](harness/h4-6o-forced-final-model-failure.md)。
 
 **H4-7A 阶段更新（2026-08-08）**：上段剩余项中的“图片”现已由 H4-7A 收窄完成 TIFF 派生浏览器预览、失败卡片和页面生命周期请求去重；其他图片格式完整矩阵、TIFF 多页浏览、真实外部模型与发布门禁仍未覆盖。H4-7A 不改变 AgentRun/Runtime、Session JSONL 或模型请求协议，完整证据与限制见 [`H4-7A TIFF 派生浏览器预览与页面生命周期缓存`](harness/h4-7a-tiff-derived-browser-preview.md)。
 

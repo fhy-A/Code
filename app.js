@@ -284,9 +284,19 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
   };
 }
 
-async function persistRunCheckpoint(ctx, status = "running", phase = "model", extra = {}) {
+async function persistRunCheckpoint(
+  ctx,
+  status = "running",
+  phase = "model",
+  extra = {},
+  options = {},
+) {
   if (!ctx?.sessionId || ctx.isSubAgent) return;
-  setSessionRunState(ctx.sessionId, makeRunCheckpoint(ctx, status, phase, extra));
+  const checkpoint = makeRunCheckpoint(ctx, status, phase, extra);
+  setSessionRunState(ctx.sessionId, checkpoint);
+  if (options.finalizeTimingTarget) {
+    finalizeRunTiming(ctx.sessionId, options.finalizeTimingTarget);
+  }
   await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats, undefined, {
     persistMessages: ctx.executionOwner === "server-agent",
   });
@@ -9809,6 +9819,7 @@ async function sendMessage(userText, options = {}) {
   if (loopError) {
     const isAbort = loopError?.name === "AbortError";
     const status = isAbort ? "paused" : "failed";
+    let errorRecoveryAssistant = null;
     if (isAbort) finalizePausedRun(ctx);
     // For non-abort errors, rollback to healthy state so the conversation
     // isn't stuck replaying the same broken context on every retry.
@@ -9836,14 +9847,15 @@ async function sendMessage(userText, options = {}) {
       }
       // Append a helpful error notification suggesting recovery options
       const errMsg = loopError?.message || String(loopError);
-      ctx.messages.push({
+      errorRecoveryAssistant = {
         role: "assistant",
         content: loopError?.errorCode
           ? _formatAgentError(loopError)
           : `**${t("errorPrefix")}：${escapeHtml(errMsg)}**\n\n> ${t("errorRecoveryHint")}`,
         meta: { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
         _time: new Date().toISOString(),
-      });
+      };
+      ctx.messages.push(errorRecoveryAssistant);
       setSessionMessages(sessionId, ctx.messages);
       renderSessionMessages(sessionId);
       if (loopError && typeof loopError === "object") {
@@ -9852,6 +9864,8 @@ async function sendMessage(userText, options = {}) {
     }
     await persistRunCheckpoint(ctx, status, "model", {
       lastError: loopError?.message || String(loopError),
+    }, {
+      finalizeTimingTarget: errorRecoveryAssistant,
     }).catch(() => {});
   } else {
     await clearRunCheckpoint(ctx).catch(() => {});

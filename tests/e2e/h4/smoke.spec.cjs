@@ -34,6 +34,7 @@ const EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL";
 const REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER";
 const REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE";
 const REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL";
+const FORCED_FINAL_MODEL_FAILURE_USER = "H4_FORCED_FINAL_MODEL_FAILURE_USER";
 const ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER";
 const ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE";
 const ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL";
@@ -200,6 +201,17 @@ const H4_6N_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "f4d120765d56b4fd397c01caefdb2c9ec0970fcce210a52481f61136d062331a",
   terminalDom: "0894c3038aae4180631183d1f6fc91822be44f06865f318041fb1f996f894229",
   refreshLifecycle: "d9ac00cdbf0bc758c39b7f47d1941ea36c2b2bc07f7f9e264301833308d35725",
+});
+const H4_6O_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "86e0b2c456a1b3cc6733c5315a821f0bb353ed6cb3cc57cb1c38cb94ac0f7fc8",
+  retryExecutionProjection: "c4f4a8432ad9be01f331e72be1c9b6bd709bb7eda508c3b00604a2967d8c31fe",
+  modelToolReceiptProjection: "4d02940043fc3266a6e6bf6e2a94ab7e775dd539401e84f40255daa29ed1b721",
+  forcedFinalFailureProjection: "e8711527a19fc4bb557ba5a70c5bd87ec0f42590feb3d4c495e55b4416dce2f2",
+  runtimeProjection: "c5664f513a21625433061cae70db64840b791260fcc21a4d4812924312e5ee1e",
+  sessionRoleContent: "431b4ed43aa1395a0c9b439806bcdc49d813b0cc0784d01086fccf64401d2e5b",
+  sessionRunState: "eb9c72f48ea2c11e70730a1c1c87491d66fcbe7e822ac879101ee910f599da17",
+  terminalDom: "aae2e342c398f0d712b92ff87c54f10dab19be7cc26fbcebfb67bb24f762ccdf",
+  refreshLifecycle: "60b5a625b74c8855ddde66f04ff48057eb00146ceab75988db20144d2c067f78",
 });
 const H4_7C_SEMANTIC_HASHES = Object.freeze({
   mainToolTrace: "6599ebee8ff79520ee51e2fa2fe2011ce6237091791282c02f6b5525092223c4",
@@ -441,6 +453,18 @@ const REPEATED_RANGE_FAILURE_CONTRACT = Object.freeze({
   })]),
   projectResult: stableRepeatedRangeFailureResult,
   hashes: H4_6K_SEMANTIC_HASHES,
+});
+
+const FORCED_FINAL_MODEL_FAILURE_CONTRACT = Object.freeze({
+  ...REPEATED_RANGE_FAILURE_CONTRACT,
+  key: "H4-6O",
+  scenarioPrefix: "forced-final-model-failure",
+  evidencePrefix: "forced-final-model-failure",
+  userMarker: FORCED_FINAL_MODEL_FAILURE_USER,
+  finalMarker: PARALLEL_FAILURE_ERROR,
+  terminalStatus: "failed",
+  finalHashKey: "forcedFinalFailureProjection",
+  hashes: H4_6O_SEMANTIC_HASHES,
 });
 
 const ARGUMENT_ISOLATION_CALL_ARGUMENTS = Object.freeze([
@@ -1399,6 +1423,8 @@ function durableFailedToolTraceEvidence(snapshot, contract) {
     if (data.replayed != null) projection.replayed = Boolean(data.replayed);
     if (data.failureCount != null) projection.failureCount = Number(data.failureCount);
     if (data.forcedFinal != null) projection.forcedFinal = Boolean(data.forcedFinal);
+    if (data.errorCode != null) projection.errorCode = String(data.errorCode);
+    if (data.error != null) projection.errorPresent = Boolean(String(data.error).trim());
     if (data.result != null) projection.result = contract.projectResult(data.result);
     return projection;
   });
@@ -2083,17 +2109,69 @@ async function expectDecodedImage(locator) {
   }))).toEqual({ complete: true, naturalWidth: 18, naturalHeight: 12 });
 }
 
+function normalizedTiffPreviewMime(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["image/tif", "image/x-tiff"].includes(normalized) ? "image/tiff" : normalized;
+}
+
+function previewRequestKeyHash(request, url) {
+  if (request.method() === "GET") {
+    const attachmentPath = String(url.searchParams.get("path") || "");
+    return canonicalHash({ mime: "image/tiff", attachmentPath });
+  }
+  let payload = null;
+  try {
+    payload = JSON.parse(request.postData() || "null");
+  } catch (_) {
+    payload = null;
+  }
+  return canonicalHash({
+    mime: normalizedTiffPreviewMime(payload?.mime),
+    inlineContentHash: crypto.createHash("sha256")
+      .update(String(payload?.contentBase64 || ""))
+      .digest("hex"),
+  });
+}
+
 async function completeTiffPreviewLifecycle(h4, runtime) {
   const { page } = h4;
   const previewRequests = [];
   let previewPhase = "initialization";
+  let mainDocumentGeneration = 0;
+  let expectedReloadGeneration = 0;
+  let navigationStage = "before-navigation";
+  const recordMainFrameNavigation = (frame) => {
+    if (frame !== page.mainFrame()) return;
+    mainDocumentGeneration += 1;
+    navigationStage = expectedReloadGeneration > 0
+      && mainDocumentGeneration >= expectedReloadGeneration
+      ? "reload-document"
+      : "initial-document";
+    h4.diagnosticSteps.push({
+      step: "tiff-main-document-generation",
+      documentGeneration: mainDocumentGeneration,
+      navigationStage,
+    });
+  };
   const recordPreviewRequest = (request) => {
     const url = new URL(request.url());
     if (url.pathname !== "/api/attachments/preview") return;
+    let frameScope = "unavailable";
+    try {
+      frameScope = request.frame() === page.mainFrame() ? "main" : "subframe";
+    } catch (_) {
+      frameScope = "unavailable";
+    }
     previewRequests.push({
       phase: previewPhase,
       method: request.method(),
       path: url.pathname,
+      keyHash: previewRequestKeyHash(request, url),
+      documentGeneration: mainDocumentGeneration,
+      navigationStage,
+      frameScope,
+      initiator: request.resourceType(),
+      navigationRequest: request.isNavigationRequest(),
     });
   };
   const previewRequestsFor = (phase, method) => previewRequests.filter((request) => (
@@ -2101,8 +2179,10 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
     && request.method === method
     && request.path === "/api/attachments/preview"
   ));
+  page.on("framenavigated", recordMainFrameNavigation);
   page.on("request", recordPreviewRequest);
   await h4.open(runtime);
+  expect(mainDocumentGeneration).toBeGreaterThan(0);
   await assertFrontendRuntime(page, runtime);
   if (runtime === "classic") {
     expect(new URL(page.url()).pathname).toBe(CLASSIC_FALLBACK_PATH);
@@ -2173,6 +2253,18 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
     mime: "image/tiff",
   });
   expect(String(persistedUser._images[0].path || "")).toMatch(/^attachments\//);
+  const persistedPreviewKeyHash = canonicalHash({
+    mime: normalizedTiffPreviewMime(persistedUser._images[0].mime),
+    attachmentPath: String(persistedUser._images[0].path || ""),
+  });
+  expect(previewRequestsFor("message-initial", "GET")[0]).toMatchObject({
+    keyHash: persistedPreviewKeyHash,
+    documentGeneration: mainDocumentGeneration,
+    navigationStage: "initial-document",
+    frameScope: "main",
+    initiator: "fetch",
+    navigationRequest: false,
+  });
   expect(JSON.stringify(sessionBefore.body)).not.toContain("_previewUrl");
   expect(JSON.stringify(sessionBefore.body)).not.toContain("_previewFailed");
 
@@ -2204,12 +2296,31 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
 
   await page.unroute(previewPattern, failPreview);
   previewPhase = "full-refresh";
+  const preRefreshGeneration = mainDocumentGeneration;
+  expectedReloadGeneration = preRefreshGeneration + 1;
+  navigationStage = "reload-requested";
   await h4.reloadRuntime(runtime);
+  expect(mainDocumentGeneration).toBe(expectedReloadGeneration);
   const restoredUser = page.locator("#messages article.msg.user").filter({ hasText: TIFF_IMAGE_USER });
   await expect(restoredUser).toHaveCount(1);
   const restoredPreview = restoredUser.locator("[data-message-image-preview]");
   await expectDecodedImage(restoredPreview);
-  expect(previewRequestsFor("full-refresh", "GET")).toHaveLength(1);
+  const fullRefreshPreviewRequests = previewRequestsFor("full-refresh", "GET");
+  h4.diagnosticSteps.push({
+    step: "tiff-full-refresh-preview-requests",
+    preRefreshGeneration,
+    expectedReloadGeneration,
+    requests: fullRefreshPreviewRequests.map((request) => ({ ...request })),
+  });
+  expect(fullRefreshPreviewRequests).toHaveLength(1);
+  expect(fullRefreshPreviewRequests[0]).toMatchObject({
+    keyHash: persistedPreviewKeyHash,
+    documentGeneration: expectedReloadGeneration,
+    navigationStage: "reload-document",
+    frameScope: "main",
+    initiator: "fetch",
+    navigationRequest: false,
+  });
   await expect(restoredUser.locator("[data-message-image-fallback]")).toBeHidden();
 
   const restoredUserHandle = await restoredUser.elementHandle();
@@ -2270,6 +2381,7 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
     total: 4,
   });
   page.off("request", recordPreviewRequest);
+  page.off("framenavigated", recordMainFrameNavigation);
 
   h4.evidence(`${runtime}-tiff-derived-preview`, {
     runtime,
@@ -2279,6 +2391,11 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
     modelProjectionRecognized: true,
     injectedPreviewFailures,
     previewRequestCounts,
+    previewRequestIdentity: {
+      persistedKeyHash: persistedPreviewKeyHash,
+      initialDocumentGeneration: preRefreshGeneration,
+      refreshDocumentGeneration: expectedReloadGeneration,
+    },
     previewConversions: { succeeded: 2, interceptedFailures: 2 },
     refresh: { agentPost: 0, runtimePost: 0, chat: 0, tool: 0 },
   });
@@ -2332,8 +2449,83 @@ async function completedTurnTimingDomEvidence(page, completedLabel = "用时") {
   };
 }
 
+async function waitForTimingQueueCheckpointConvergence(h4) {
+  const { page } = h4;
+  await expect.poll(() => {
+    const controlIds = h4.controlIds();
+    return {
+      agentRunCount: controlIds.agentRunIds.length,
+      runtimeRunCount: controlIds.runtimeRunIds.length,
+    };
+  }).toEqual({ agentRunCount: 1, runtimeRunCount: 1 });
+
+  const controlIds = h4.controlIds();
+  const agentRunId = controlIds.agentRunIds[0];
+  const runtimeRunId = controlIds.runtimeRunIds[0];
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+
+  let sessionProjection = null;
+  await expect.poll(async () => {
+    const response = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    const runState = response.body?.runState || {};
+    const messages = Array.isArray(response.body?.messages) ? response.body.messages : [];
+    const queuedMessages = Array.isArray(runState.queuedMessages) ? runState.queuedMessages : [];
+    sessionProjection = {
+      status: response.status,
+      runStatus: String(runState.status || ""),
+      phase: String(runState.phase || ""),
+      executionOwner: String(runState.executionOwner || ""),
+      agentRunMatches: String(runState.agentRunId || "") === agentRunId,
+      runtimeRunMatches: String(runState.runtimeRunId || "") === runtimeRunId,
+      queueMarkerMessageCount: messages.filter((message) => {
+        if (message?.role !== "user") return false;
+        if (typeof message.content === "string") return message.content === TIMING_QUEUE_USER;
+        if (!Array.isArray(message.content)) return false;
+        return message.content.some((item) => item?.type === "text" && item.text === TIMING_QUEUE_USER);
+      }).length,
+      queuedCheckpointCount: queuedMessages.filter((item) => item?.userText === TIMING_QUEUE_USER).length,
+    };
+    return sessionProjection;
+  }).toEqual({
+    status: 200,
+    runStatus: "running",
+    phase: "model",
+    executionOwner: "server-agent",
+    agentRunMatches: true,
+    runtimeRunMatches: true,
+    queueMarkerMessageCount: 0,
+    queuedCheckpointCount: 0,
+  });
+
+  const runtimeResponse = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(runtimeResponse.status).toBe(200);
+  expect(runtimeResponse.body).toMatchObject({ runId: runtimeRunId, status: "running" });
+  const convergence = {
+    agentRunIdHash: idHash(agentRunId),
+    runtimeRunIdHash: idHash(runtimeRunId),
+    session: { ...sessionProjection },
+    runtime: {
+      status: String(runtimeResponse.body.status || ""),
+      nextCursor: Number(runtimeResponse.body.nextCursor || 0),
+      eventCount: Array.isArray(runtimeResponse.body.events) ? runtimeResponse.body.events.length : 0,
+    },
+  };
+  h4.diagnosticSteps.push({ step: "timing-queue-checkpoint-converged", state: convergence });
+  return convergence;
+}
+
 async function submitTimingQueueWithCausalEvidence(h4) {
   const { page } = h4;
+  const convergence = await waitForTimingQueueCheckpointConvergence(h4);
   const observationKey = "__h4TimingQueueSubmissionObservation";
   const sessionPutObservations = [];
   const onSessionPut = (request) => {
@@ -2361,8 +2553,16 @@ async function submitTimingQueueWithCausalEvidence(h4) {
     const queuedDispatchCount = matchingMessages.filter((message) => (
       message?.meta?.queuedDispatch && typeof message.meta.queuedDispatch === "object"
     )).length;
+    const queuedDispatchIds = matchingMessages
+      .map((message) => String(message?.meta?.queuedDispatch?.id || ""))
+      .filter(Boolean);
+    const queuedCheckpointIds = matchingCheckpoints
+      .map((item) => String(item?.id || ""))
+      .filter(Boolean);
+    const runState = payload?.runState || {};
     sessionPutObservations.push({
       sequence: sessionPutObservations.length + 1,
+      stage: "queue-transition",
       method: "PUT",
       path: "/api/sessions/[id]",
       queueMarkerPresent: matchingMessages.length > 0 || matchingCheckpoints.length > 0,
@@ -2372,6 +2572,18 @@ async function submitTimingQueueWithCausalEvidence(h4) {
       queuedStatuses: matchingMessages
         .map((message) => String(message?.meta?.queuedDispatch?.status || ""))
         .filter(Boolean),
+      queueIdentityMatches: queuedDispatchIds.length === 1
+        && queuedCheckpointIds.length === 1
+        && queuedDispatchIds[0] === queuedCheckpointIds[0],
+      queueIdentityHash: queuedDispatchIds.length === 1 ? idHash(queuedDispatchIds[0]) : "",
+      runState: {
+        status: String(runState.status || ""),
+        phase: String(runState.phase || ""),
+        executionOwner: String(runState.executionOwner || ""),
+        agentRunPresent: Boolean(String(runState.agentRunId || "")),
+        runtimeRunPresent: Boolean(String(runState.runtimeRunId || "")),
+        queuedMessageCount: Array.isArray(runState.queuedMessages) ? runState.queuedMessages.length : 0,
+      },
     });
   };
 
@@ -2495,6 +2707,7 @@ async function submitTimingQueueWithCausalEvidence(h4) {
     await expect.poll(() => sessionPutObservations.filter((entry) => entry.queueMarkerPresent)).toEqual([
       {
         sequence: expect.any(Number),
+        stage: "queue-transition",
         method: "PUT",
         path: "/api/sessions/[id]",
         queueMarkerPresent: true,
@@ -2502,6 +2715,16 @@ async function submitTimingQueueWithCausalEvidence(h4) {
         queuedDispatchCount: 1,
         queuedCheckpointCount: 1,
         queuedStatuses: ["pending"],
+        queueIdentityMatches: true,
+        queueIdentityHash: expect.stringMatching(/^[a-f0-9]{16}$/),
+        runState: {
+          status: "running",
+          phase: "model",
+          executionOwner: "server-agent",
+          agentRunPresent: true,
+          runtimeRunPresent: true,
+          queuedMessageCount: 1,
+        },
       },
     ]);
     const queueSave = sessionPutObservations.filter((entry) => entry.queueMarkerPresent)[0];
@@ -2517,6 +2740,7 @@ async function submitTimingQueueWithCausalEvidence(h4) {
     h4.diagnosticSteps.push({ step: "timing-queue-dom-projected", count: 1 });
 
     return {
+      checkpointConvergence: convergence,
       eventTypes: keyboardTimeline.map((entry) => entry.type),
       promptNodeStable: keyboardTimeline.every((entry) => (
         (entry.targetNodeId || entry.promptNodeId) === precondition.promptNodeId
@@ -6189,6 +6413,341 @@ async function controlledFixtureAudit(h4, contract) {
   };
 }
 
+function forcedFinalFailureSessionProjection(messages, contract, agentRunId) {
+  const source = Array.isArray(messages) ? messages : [];
+  expect(source.map((message) => message?.role)).toEqual(["user", "assistant"]);
+  expect(source[0]?.content).toBe(contract.userMarker);
+  expect(String(source[1]?.content || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(source[1]?.meta).toMatchObject({ kind: "error-recovery" });
+  expect(String(source[1]?.meta?._model || "")).not.toBe("");
+  expect(Object.prototype.hasOwnProperty.call(source[1], "_responseTime")).toBe(false);
+  expect(String(source[1]?.meta?._responseTime || ""))
+    .toMatch(/^\d+(?:s|m(?: \d+s)?|h(?: \d+m)?)$/);
+  expect(source.some((message) => ["tool-call", "tool-result"].includes(message?.role))).toBe(false);
+  return [
+    { role: "user", marker: "user" },
+    {
+      role: "assistant",
+      marker: "error-recovery",
+      errorMarkerPresent: true,
+      agentRunIdAbsent: !source[1]?.meta?.agentRunId,
+      elapsedPresent: Boolean(String(source[1]?.meta?._responseTime || "").trim()),
+    },
+  ];
+}
+
+function forcedFinalFailureRunStateProjection(runState, agentRunId, runtimeRunIds) {
+  const source = runState && typeof runState === "object" ? runState : {};
+  expect(source).toMatchObject({
+    status: "failed",
+    phase: "model",
+    executionOwner: "server-agent",
+    agentRunId,
+    agentEventCursor: 24,
+    modelRound: 5,
+  });
+  expect(String(source.runtimeRunId || "")).toBe("");
+  expect(String(source.lastError || "")).toContain(PARALLEL_FAILURE_ERROR);
+  return {
+    status: String(source.status || ""),
+    phase: String(source.phase || ""),
+    executionOwner: String(source.executionOwner || ""),
+    agentRunLinked: String(source.agentRunId || "") === agentRunId,
+    agentEventCursor: Number(source.agentEventCursor || 0),
+    runtimeRunCleared: !String(source.runtimeRunId || ""),
+    modelRound: Number(source.modelRound || 0),
+    lastErrorPresent: Boolean(String(source.lastError || "").trim()),
+  };
+}
+
+async function forcedFinalFailureDomEvidence(page, contract) {
+  const messages = page.locator("#messages");
+  const user = messages.locator("article.msg.user").filter({ hasText: contract.userMarker });
+  const errorAssistant = messages.locator("article.msg.assistant")
+    .filter({ hasText: PARALLEL_FAILURE_ERROR });
+  const successfulFinal = messages.locator("article.msg.assistant")
+    .filter({ hasText: REPEATED_RANGE_FAILURE_FINAL });
+  await expect(user).toHaveCount(1);
+  await expect(errorAssistant).toHaveCount(1);
+  await expect(successfulFinal).toHaveCount(0);
+  await expect(messages.locator("article.msg.user")).toHaveCount(1);
+  await expect(messages.locator("article.msg.assistant")).toHaveCount(1);
+  await expect(messages.locator("article.tool-process")).toHaveCount(0);
+  await expect(messages.locator(".execution-trace")).toHaveCount(0);
+  const completedStatus = messages.locator("[data-completed-run-status]");
+  const completedTimer = completedStatus.locator(".completed-run-timer");
+  await expect(completedStatus).toHaveCount(1);
+  await expect(completedStatus.locator(".completed-run-label")).toHaveText(/\S+/);
+  await expect(completedTimer).toHaveText(/^\d+(?:s|m(?: \d+s)?|h(?: \d+m)?)$/);
+  await expect(errorAssistant.locator(".response-info .run-time")).toHaveCount(0);
+  await expect(messages.locator("article.msg.assistant .response-info .run-time")).toHaveCount(0);
+  const ordered = await page.evaluate(({ userMarker, errorMarker }) => {
+    const root = document.querySelector("#messages");
+    const userNode = [...root.querySelectorAll("article.msg.user")]
+      .find((element) => element.textContent.includes(userMarker));
+    const errorNode = [...root.querySelectorAll("article.msg.assistant")]
+      .find((element) => element.textContent.includes(errorMarker));
+    return Boolean(
+      userNode
+      && errorNode
+      && (userNode.compareDocumentPosition(errorNode) & Node.DOCUMENT_POSITION_FOLLOWING),
+    );
+  }, { userMarker: contract.userMarker, errorMarker: PARALLEL_FAILURE_ERROR });
+  expect(ordered).toBe(true);
+  const projection = {
+    sequence: [contract.userMarker, "error-recovery"],
+    counts: {
+      user: 1,
+      assistant: 1,
+      errorRecovery: 1,
+      toolProcess: 0,
+      executionTrace: 0,
+      completedStatus: 1,
+      footerTimer: 0,
+      successfulFinal: 0,
+    },
+    elapsedPresent: Boolean(String(await completedTimer.textContent() || "").trim()),
+    errorMarkerPresent: true,
+    ordered,
+  };
+  return { user, errorAssistant, projection, semanticHash: canonicalHash(projection) };
+}
+
+function activeForcedFinalDomProjection(dom) {
+  return {
+    sequence: dom.projection.sequence,
+    counts: dom.projection.counts,
+    processKeyPresent: Boolean(dom.projection.processKey),
+    outerOpen: dom.projection.outerOpen,
+    itemOpen: dom.projection.itemOpen,
+    outerState: dom.projection.outerState,
+    currentAction: dom.projection.currentAction,
+    items: dom.projection.items,
+    ordered: dom.projection.ordered,
+  };
+}
+
+async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, context) {
+  const {
+    page,
+    requestBoundary,
+    agentRunId,
+    activeTrace,
+    activeEventTypes,
+    runtimeRunIds,
+    initialDom,
+    oldStage,
+    expectedChatRequests,
+    retryBlockedEvents,
+  } = context;
+  const terminalEventTypes = [...activeEventTypes, "failed"];
+  let failedAgent = null;
+  await expect.poll(async () => {
+    failedAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: failedAgent.body?.status,
+      nextCursor: failedAgent.body?.nextCursor,
+      activeRuntimeRunId: failedAgent.body?.activeRuntimeRunId,
+      forceFinalRound: failedAgent.body?.forceFinalRound,
+      errorCode: failedAgent.body?.errorCode,
+      eventTypes: (failedAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "failed",
+    nextCursor: terminalEventTypes.length,
+    activeRuntimeRunId: "",
+    forceFinalRound: true,
+    errorCode: "upstream_error",
+    eventTypes: terminalEventTypes,
+  });
+  expect(failedAgent.status).toBe(200);
+  expect(failedAgent.body.pendingToolCalls).toEqual([]);
+  expect(String(failedAgent.body.error || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect((failedAgent.body.events || []).filter((event) => event.type === "model_completed"))
+    .toHaveLength(contract.expectedResults.length);
+  const failedTrace = durableFailedToolTraceEvidence(failedAgent.body, contract);
+  expect(failedTrace.executionProjection).toEqual(activeTrace.executionProjection);
+  expect(failedTrace.terminalEventCount).toBe(1);
+  expect(failedTrace.eventProjection.at(-1)).toEqual({
+    seq: terminalEventTypes.length,
+    type: "failed",
+    errorCode: "upstream_error",
+    errorPresent: true,
+  });
+
+  await expect.poll(async () => oldStage.evaluate((element) => element.isConnected).catch(() => false))
+    .toBe(false);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(0);
+  const terminalDom = await forcedFinalFailureDomEvidence(page, contract);
+
+  const terminalRuntimeResponses = [];
+  for (const runtimeRunId of runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    terminalRuntimeResponses.push(response.body);
+  }
+  expect(terminalRuntimeResponses.slice(0, -1).map((snapshot) => snapshot.status))
+    .toEqual(Array(contract.expectedResults.length).fill("completed"));
+  const failedRuntime = terminalRuntimeResponses.at(-1);
+  expect(failedRuntime).toMatchObject({
+    runId: runtimeRunIds.at(-1),
+    status: "failed",
+    errorCode: "upstream_error",
+    transient: true,
+    upstreamStatus: 502,
+    nextCursor: 0,
+    events: [],
+  });
+  expect(String(failedRuntime.error || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(failedRuntime.result).toMatchObject({ content: "", reasoning: "", toolCalls: [] });
+  const runtimeProjection = terminalRuntimeResponses.map((snapshot, index) => ({
+    runtimeRunId: `runtime-${index + 1}`,
+    status: String(snapshot.status || ""),
+    nextCursor: Number(snapshot.nextCursor || 0),
+    content: snapshot.result?.content === contract.stageMarker ? "stage" : "empty",
+    ...(index === terminalRuntimeResponses.length - 1 ? {
+      errorCode: String(snapshot.errorCode || ""),
+      errorPresent: Boolean(String(snapshot.error || "").trim()),
+      transient: snapshot.transient === true,
+      upstreamStatus: Number(snapshot.upstreamStatus || 0),
+      eventCount: (snapshot.events || []).length,
+    } : {}),
+  }));
+  expect(runtimeProjection.map((snapshot) => snapshot.nextCursor)).toEqual([4, 3, 3, 3, 0]);
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  let sessionResponse = null;
+  await expect.poll(async () => {
+    sessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      roles: (sessionResponse.body?.messages || []).map((message) => message.role),
+      status: sessionResponse.body?.runState?.status,
+      agentEventCursor: sessionResponse.body?.runState?.agentEventCursor,
+    };
+  }).toEqual({ roles: ["user", "assistant"], status: "failed", agentEventCursor: 24 });
+  expect(sessionResponse.status).toBe(200);
+  const sessionProjection = forcedFinalFailureSessionProjection(
+    sessionResponse.body.messages,
+    contract,
+    agentRunId,
+  );
+  const sessionRunState = forcedFinalFailureRunStateProjection(
+    sessionResponse.body.runState,
+    agentRunId,
+    runtimeRunIds,
+  );
+
+  const durable = await readDurableAgentRecord(h4, agentRunId);
+  expect(durable.record).toMatchObject({
+    status: "failed",
+    nextSeq: terminalEventTypes.length + 1,
+    forceFinalRound: true,
+    errorCode: "upstream_error",
+    pendingToolCalls: [],
+  });
+  expect(Object.prototype.hasOwnProperty.call(durable.record, "activeRuntimeRunId")).toBe(false);
+  expect(String(durable.record.error || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(durable.record.events).toHaveLength(terminalEventTypes.length);
+  expect(Object.keys(durable.record.toolExecutions || {})).toEqual(activeTrace.toolCallIds);
+
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual(expectedChatRequests);
+  expect(metrics.productionToolDelegations).toBe(3);
+  expect(metrics.toolExecutions).toEqual(contract.executedArguments.map((argumentsValue) => ({
+    action: "read_file",
+    ...argumentsValue,
+  })));
+  expect(metrics.unsafeToolRequests).toBe(0);
+  const requests = h4.requestEvidenceSince(requestBoundary);
+  expect(requests.agentPost).toBe(1);
+  expect(requests.runtimePost).toBe(0);
+  expect(requests.agentDelete).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+
+  const executionProjection = failedTrace.executionProjection;
+  const modelToolReceiptProjection = expectedRepeatedModelReceipts(
+    contract.expectedResults.length,
+    contract,
+  );
+  const finalProjection = {
+    modelRequestCount: metrics.chatRequests.length,
+    scenario: metrics.chatRequests.at(-1)?.scenario,
+    ...metrics.chatRequests.at(-1)?.[contract.finalMetric],
+    parentStatus: String(failedAgent.body.status || ""),
+    parentErrorCode: String(failedAgent.body.errorCode || ""),
+    parentErrorPresent: Boolean(String(failedAgent.body.error || "").trim()),
+    forceFinalRound: Boolean(failedAgent.body.forceFinalRound),
+    pendingToolCallCount: failedAgent.body.pendingToolCalls.length,
+    durableExecutionCount: failedTrace.executionProjection.length,
+    retryBlockedEventCount: retryBlockedEvents.length,
+    productionToolDelegations: metrics.productionToolDelegations,
+    toolExecutionCount: metrics.toolExecutions.length,
+    activeDom: activeForcedFinalDomProjection(initialDom),
+  };
+  const hashes = {
+    eventProjection: failedTrace.eventProjectionHash,
+    [contract.executionHashKey]: canonicalHash(executionProjection),
+    modelToolReceiptProjection: canonicalHash(modelToolReceiptProjection),
+    [contract.finalHashKey]: canonicalHash(finalProjection),
+    runtimeProjection: canonicalHash(runtimeProjection),
+    sessionRoleContent: canonicalHash(sessionProjection),
+    sessionRunState: canonicalHash(sessionRunState),
+    terminalDom: terminalDom.semanticHash,
+  };
+  if (Object.keys(contract.hashes).length) {
+    for (const [key, value] of Object.entries(hashes)) {
+      expect(value, `${contract.key} ${key}`).toBe(contract.hashes[key]);
+    }
+  }
+  h4.evidence(`${runtime === "classic" ? "classic-" : ""}${contract.evidencePrefix}-terminal`, {
+    identity: {
+      agentRunId: idHash(agentRunId),
+      toolCallIds: activeTrace.toolCallIds.map(idHash),
+      runtimeRunIds: runtimeRunIds.map(idHash),
+    },
+    counts: {
+      modelRequests: metrics.chatRequests.length,
+      productionToolDelegations: metrics.productionToolDelegations,
+      toolExecutions: metrics.toolExecutions.length,
+      durableExecutions: failedTrace.executionProjection.length,
+      retryBlockedEvents: retryBlockedEvents.length,
+    },
+    runtimeProjection,
+    finalProjection,
+    sessionRunState,
+    hashes,
+  });
+  return {
+    page,
+    agentRunId,
+    sessionId,
+    toolCallIds: activeTrace.toolCallIds,
+    runtimeRunIds,
+    failedTrace,
+    sessionProjection,
+    sessionRunState,
+    terminalDom,
+    metrics,
+    hashes,
+    contract,
+  };
+}
+
 async function completeRepeatedRangeFailureLifecycle(
   h4,
   runtime,
@@ -6212,7 +6771,9 @@ async function completeRepeatedRangeFailureLifecycle(
   );
   expect(activeAgent.status).toBe(200);
   const activeEventTypes = repeatedRangeActiveEventTypes(contract);
-  const terminalEventTypes = [...activeEventTypes, "model_completed", "completed"];
+  const terminalEventTypes = contract.terminalStatus === "failed"
+    ? [...activeEventTypes, "failed"]
+    : [...activeEventTypes, "model_completed", "completed"];
   expect(activeAgent.body).toMatchObject({
     status: "model",
     nextCursor: activeEventTypes.length,
@@ -6356,6 +6917,20 @@ async function completeRepeatedRangeFailureLifecycle(
   await expect(initialDom.outer).toHaveAttribute("open", "");
 
   await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  if (contract.terminalStatus === "failed") {
+    return completeForcedFinalModelFailureTerminal(h4, runtime, contract, {
+      page,
+      requestBoundary,
+      agentRunId,
+      activeTrace,
+      activeEventTypes,
+      runtimeRunIds,
+      initialDom,
+      oldStage,
+      expectedChatRequests,
+      retryBlockedEvents,
+    });
+  }
   await expect(initialDom.finalAnswer).toHaveCount(1);
   const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
   expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
@@ -6784,12 +7359,119 @@ async function completeRepeatedRangeFailureLifecycle(
   };
 }
 
+async function exerciseForcedFinalModelFailureRefresh(h4, runtime, before) {
+  const refreshBoundary = h4.requestBoundary();
+  const metricsBefore = await h4.metrics();
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(before.page);
+  const persistedSession = before.page.locator(
+    `#sessionList button.session-main[data-session-id="${before.sessionId}"]`,
+  );
+  await expect(persistedSession).toHaveCount(1);
+  await persistedSession.click();
+  await expect(before.page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(before.page.locator("#stopBtn")).toBeDisabled();
+  await expect(before.page.locator("#messages .execution-trace")).toHaveCount(0);
+  const domAfter = await forcedFinalFailureDomEvidence(before.page, before.contract);
+  expect(domAfter.projection).toEqual(before.terminalDom.projection);
+
+  const agentAfter = await fetchProductionJson(
+    before.page,
+    `/api/agent/runs/${encodeURIComponent(before.agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfter.status).toBe(200);
+  const failedTraceAfter = durableFailedToolTraceEvidence(agentAfter.body, before.contract);
+  expect(failedTraceAfter).toEqual(before.failedTrace);
+  expect(failedTraceAfter.toolCallIds).toEqual(before.toolCallIds);
+  const sessionAfter = await fetchProductionJson(
+    before.page,
+    `/api/sessions/${encodeURIComponent(before.sessionId)}`,
+  );
+  expect(sessionAfter.status).toBe(200);
+  const sessionProjectionAfter = forcedFinalFailureSessionProjection(
+    sessionAfter.body.messages,
+    before.contract,
+    before.agentRunId,
+  );
+  const sessionRunStateAfter = forcedFinalFailureRunStateProjection(
+    sessionAfter.body.runState,
+    before.agentRunId,
+    before.runtimeRunIds,
+  );
+  expect(sessionProjectionAfter).toEqual(before.sessionProjection);
+  expect(sessionRunStateAfter).toEqual(before.sessionRunState);
+  for (const runtimeRunId of before.runtimeRunIds) {
+    const runtimeAfter = await fetchProductionJson(
+      before.page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(runtimeAfter.status).toBe(200);
+  }
+
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
+  expect(metricsAfter.productionToolDelegations).toBe(3);
+  expect(metricsAfter.unsafeToolRequests).toBe(0);
+  const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
+  const refreshSummary = h4.requestSummarySince(refreshBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshRequests.agentDelete).toBe(0);
+  expect(refreshSummary["POST /proxy/chat"] || 0).toBe(0);
+  expect(Object.entries(refreshSummary).filter(([key]) => key.startsWith("POST /api/tools/")))
+    .toEqual([]);
+  expect(h4.controlIds()).toEqual({
+    agentRunIds: [before.agentRunId],
+    runtimeRunIds: before.runtimeRunIds,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  const refreshProjection = {
+    agentRunStable: failedTraceAfter.agentRunId === before.failedTrace.agentRunId,
+    toolCallsStable: JSON.stringify(failedTraceAfter.toolCallIdHashes)
+      === JSON.stringify(before.failedTrace.toolCallIdHashes),
+    eventProjectionStable: failedTraceAfter.eventProjectionHash
+      === before.failedTrace.eventProjectionHash,
+    sessionProjectionStable: JSON.stringify(sessionProjectionAfter)
+      === JSON.stringify(before.sessionProjection),
+    sessionRunStateStable: JSON.stringify(sessionRunStateAfter)
+      === JSON.stringify(before.sessionRunState),
+    terminalDomStable: JSON.stringify(domAfter.projection)
+      === JSON.stringify(before.terminalDom.projection),
+    requests: {
+      agentPost: refreshRequests.agentPost,
+      runtimePost: refreshRequests.runtimePost,
+      chatDelta: metricsAfter.chatRequests.length - metricsBefore.chatRequests.length,
+      toolDelta: metricsAfter.toolExecutions.length - metricsBefore.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    ...before.hashes,
+    refreshLifecycle: canonicalHash(refreshProjection),
+  };
+  if (Object.keys(before.contract.hashes).length) {
+    expect(hashes).toEqual(before.contract.hashes);
+  }
+  h4.evidence(`${runtime === "classic" ? "classic-" : ""}${before.contract.evidencePrefix}-refresh`, {
+    identity: {
+      agentRunId: idHash(before.agentRunId),
+      toolCallIds: before.toolCallIds.map(idHash),
+    },
+    refresh: refreshProjection,
+    hashes,
+  });
+}
+
 async function exerciseRepeatedRangeFailureTerminalRefresh(
   h4,
   runtime,
   contract = REPEATED_RANGE_FAILURE_CONTRACT,
 ) {
   const before = await completeRepeatedRangeFailureLifecycle(h4, runtime, contract);
+  if (contract.terminalStatus === "failed") {
+    await exerciseForcedFinalModelFailureRefresh(h4, runtime, before);
+    return;
+  }
   const refreshBoundary = h4.requestBoundary();
   const metricsBefore = await h4.metrics();
   await before.page.reload({ waitUntil: "domcontentloaded" });
@@ -6936,6 +7618,22 @@ test("bundle identical read_file executor failures are bounded and reload unique
 
 test("direct classic identical read_file executor failures are bounded and reload uniquely", async ({ h4 }) => {
   await exerciseRepeatedRangeFailureTerminalRefresh(h4, "classic");
+});
+
+test("bundle forced-final model failure rolls back uniquely without replay", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "bundle",
+    FORCED_FINAL_MODEL_FAILURE_CONTRACT,
+  );
+});
+
+test("direct classic forced-final model failure rolls back uniquely without replay", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "classic",
+    FORCED_FINAL_MODEL_FAILURE_CONTRACT,
+  );
 });
 
 test("bundle alternating read_file arguments isolate failure counts and reload uniquely", async ({ h4 }) => {

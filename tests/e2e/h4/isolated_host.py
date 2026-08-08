@@ -50,6 +50,7 @@ EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL"
 REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER"
 REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE"
 REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL"
+FORCED_FINAL_MODEL_FAILURE_USER = "H4_FORCED_FINAL_MODEL_FAILURE_USER"
 ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER"
 ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE"
 ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL"
@@ -361,6 +362,16 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if receipt_count >= len(ARGUMENT_ISOLATION_TOOL_CALL_IDS):
             return "argument-isolation-final", True
         return f"argument-isolation-call-{receipt_count + 1}", receipt_count > 0
+    if FORCED_FINAL_MODEL_FAILURE_USER in user_text:
+        completed_calls = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS)
+        receipt_count = len(completed_calls)
+        if receipt_count >= len(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS):
+            return "forced-final-model-failure-final", True
+        return f"forced-final-model-failure-call-{receipt_count + 1}", receipt_count > 0
     if REPEATED_RANGE_FAILURE_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -856,7 +867,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["missingPathReceipt"] = _missing_path_tool_receipt_projection(payload)
         if scenario == "executor-range-final":
             chat_metric["executorRangeReceipt"] = _executor_range_receipt_projection(payload)
-        if scenario.startswith("repeated-range-failure-"):
+        if scenario.startswith("repeated-range-failure-") \
+                or scenario.startswith("forced-final-model-failure-"):
             chat_metric["repeatedRangeFailureReceipts"] = (
                 _repeated_range_failure_receipt_projection(payload)
             )
@@ -872,7 +884,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["successResetReceipts"] = (
                 _success_reset_receipt_projection(payload)
             )
-        if scenario == "repeated-range-failure-final":
+        if scenario in {
+            "repeated-range-failure-final",
+            "forced-final-model-failure-final",
+        }:
             chat_metric["forcedFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
                 "toolChoicePresent": "tool_choice" in payload,
@@ -910,6 +925,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
             return
+        if scenario == "forced-final-model-failure-final":
+            if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
+                return
+            self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
+            return
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if (
             scenario not in (
@@ -918,6 +938,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "executor-range-call", "missing-file-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
+            and not scenario.startswith("forced-final-model-failure-call-")
             and not scenario.startswith("argument-isolation-call-")
             and not scenario.startswith("signature-alternation-call-")
             and not scenario.startswith("success-reset-call-")
@@ -1031,6 +1052,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
+                or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("argument-isolation-call-") \
                 or scenario.startswith("signature-alternation-call-") \
                 or scenario.startswith("success-reset-call-"):
@@ -1137,7 +1159,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         ),
                     },
                 }]
-            elif scenario.startswith("repeated-range-failure-call-"):
+            elif scenario.startswith("repeated-range-failure-call-") \
+                    or scenario.startswith("forced-final-model-failure-call-"):
                 call_number = int(scenario.rsplit("-", 1)[-1])
                 tool_calls = [{
                     "index": 0,

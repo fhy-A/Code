@@ -471,6 +471,55 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn("lastMsg._responseTime = display", timing)
         self.assertIn("_responseTime: display", timing)
 
+    def test_failed_elapsed_is_finalized_after_checkpoint_capture_before_message_persistence(self):
+        persist_start = APP_SOURCE.index("async function persistRunCheckpoint(")
+        persist_end = APP_SOURCE.index("async function clearRunCheckpoint(ctx)", persist_start)
+        persist_source = APP_SOURCE[persist_start:persist_end]
+        checkpoint_index = persist_source.index(
+            "const checkpoint = makeRunCheckpoint(ctx, status, phase, extra)"
+        )
+        run_state_index = persist_source.index(
+            "setSessionRunState(ctx.sessionId, checkpoint)"
+        )
+        finalize_index = persist_source.index(
+            "finalizeRunTiming(ctx.sessionId, options.finalizeTimingTarget)"
+        )
+        save_index = persist_source.index("await saveSessionState(")
+
+        self.assertEqual(
+            [checkpoint_index, run_state_index, finalize_index, save_index],
+            sorted([checkpoint_index, run_state_index, finalize_index, save_index]),
+        )
+        self.assertIn("if (options.finalizeTimingTarget)", persist_source)
+        self.assertIn(
+            "persistMessages: ctx.executionOwner === \"server-agent\"",
+            persist_source,
+        )
+
+        failure_start = APP_SOURCE.index("  if (loopError) {")
+        failure_end = APP_SOURCE.index("  } else {\n    await clearRunCheckpoint", failure_start)
+        failure_source = APP_SOURCE[failure_start:failure_end]
+        self.assertIn("let errorRecoveryAssistant = null", failure_source)
+        self.assertIn("errorRecoveryAssistant = {", failure_source)
+        self.assertIn("ctx.messages.push(errorRecoveryAssistant)", failure_source)
+        self.assertIn(
+            "finalizeTimingTarget: errorRecoveryAssistant",
+            failure_source,
+        )
+        self.assertLess(
+            failure_source.index("const status = isAbort ? \"paused\" : \"failed\""),
+            failure_source.index("errorRecoveryAssistant = {"),
+        )
+        self.assertLess(
+            failure_source.index("errorRecoveryAssistant = {"),
+            failure_source.index("await persistRunCheckpoint(ctx, status"),
+        )
+        self.assertLess(
+            failure_source.index("await persistRunCheckpoint(ctx, status"),
+            APP_SOURCE.index("if (ownsActiveRunContext(ctx)) setStreaming(false", failure_start)
+            - failure_start,
+        )
+
     def test_missing_historical_elapsed_does_not_render_fake_zero_seconds(self):
         status_start = MESSAGES_SOURCE.index("function renderCompletedRunStatus")
         status_end = MESSAGES_SOURCE.index("function renderUserProjection", status_start)

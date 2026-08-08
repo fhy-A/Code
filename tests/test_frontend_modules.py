@@ -2413,6 +2413,94 @@ process.stdout.write(JSON.stringify({{
         self.assertGreaterEqual(APP_SOURCE.count("hasBackgroundResult("), 3)
         self.assertEqual(APP_SOURCE.count("buildBackgroundResultMessage(job, {"), 2)
 
+    def test_primary_error_recovery_elapsed_survives_serialization_without_footer_duplicate(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+require("./src/ui/messages.js");
+const persistence = window.Code.services.persistence;
+const messagesFeature = window.Code.ui.messages.createMessagesFeature({
+  escapeHtml: (value) => String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;"),
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => String(value),
+  t: (key) => key,
+  getMessageText: (message) => String(message?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => [],
+  getSessionId: () => "session-primary-failure",
+  getSelectedModel: () => "test-model",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => String(value),
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+});
+const source = [
+  {role: "user", content: "primary task"},
+  {
+    role: "assistant",
+    content: "bounded failure",
+    _responseTime: "7s",
+    _model: "test-model",
+    _time: "2026-08-08T00:00:00.000Z",
+    meta: {
+      kind: "error-recovery",
+      _model: "test-model",
+      _responseTime: "7s",
+      _usage: {input: 3, output: 1, cache: 0},
+      _usageScope: "task",
+    },
+  },
+];
+const durable = persistence.serializeSessionMessages(
+  source,
+  {includeModel: true, includeTime: true},
+);
+const restored = JSON.parse(JSON.stringify(durable));
+const savedAgain = persistence.serializeSessionMessages(
+  restored,
+  {includeModel: true, includeTime: true},
+);
+const html = messagesFeature.projectMessages(restored, {hasActiveRun: false});
+const repeatedHtml = messagesFeature.projectMessages(
+  JSON.parse(JSON.stringify(savedAgain)),
+  {hasActiveRun: false},
+);
+process.stdout.write(JSON.stringify({durable, restored, savedAgain, html, repeatedHtml}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        for message in (
+            data["durable"][1],
+            data["restored"][1],
+            data["savedAgain"][1],
+        ):
+            self.assertNotIn("_responseTime", message)
+            self.assertEqual(message["meta"]["kind"], "error-recovery")
+            self.assertEqual(message["meta"]["_responseTime"], "7s")
+            self.assertEqual(message["meta"]["_usage"], {"input": 3, "output": 1, "cache": 0})
+
+        for html in (data["html"], data["repeatedHtml"]):
+            self.assertEqual(html.count("data-completed-run-status"), 1)
+            self.assertEqual(html.count('class="completed-run-timer"'), 1)
+            self.assertEqual(html.count("7s"), 1)
+            self.assertEqual(html.count('class="run-time"'), 0)
+            self.assertEqual(html.count('class="response-info"'), 1)
+        self.assertEqual(data["repeatedHtml"], data["html"])
+
     def test_compaction_context_policy_is_pure_and_backward_compatible(self):
         script = f"""
 global.window = {{}};
