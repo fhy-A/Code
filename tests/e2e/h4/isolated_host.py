@@ -55,6 +55,12 @@ MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
 MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
 TIFF_IMAGE_USER = "H4_TIFF_IMAGE_USER"
 TIFF_IMAGE_FINAL = "H4_TIFF_IMAGE_FINAL"
+TIMING_MAIN_USER = "H4_TIMING_MAIN_USER"
+TIMING_MAIN_FINAL = "H4_TIMING_MAIN_FINAL"
+TIMING_PARALLEL_USER = "H4_TIMING_PARALLEL_USER"
+TIMING_PARALLEL_FINAL = "H4_TIMING_PARALLEL_FINAL"
+TIMING_QUEUE_USER = "H4_TIMING_QUEUE_USER"
+TIMING_QUEUE_FINAL = "H4_TIMING_QUEUE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -329,6 +335,12 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         return "stream-refresh", has_tool_result
     if TIFF_IMAGE_USER in user_text:
         return "tiff-image", has_tool_result
+    if TIMING_PARALLEL_USER in user_text:
+        return "timing-parallel", has_tool_result
+    if TIMING_QUEUE_USER in user_text:
+        return "timing-queue", has_tool_result
+    if TIMING_MAIN_USER in user_text:
+        return "timing-main", has_tool_result
     if CLASSIC_USER in user_text:
         return "classic-text", has_tool_result
     return "plain-text", has_tool_result
@@ -966,6 +978,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "plain-text": PLAIN_FINAL,
                 "classic-text": CLASSIC_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
+                "timing-main": TIMING_MAIN_FINAL,
+                "timing-parallel": TIMING_PARALLEL_FINAL,
+                "timing-queue": TIMING_QUEUE_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [

@@ -144,6 +144,7 @@
     includeUsage = false,
   } = {}) {
     const source = job || {};
+    const normalizedResponseTime = String(responseTime || "").trim();
     const meta = {
       kind: "background-subagent",
       jobId: source.id,
@@ -151,6 +152,7 @@
       error: Boolean(error),
       detachedFromMain: true,
       parentTaskStartedAt: Number(source.parentTaskStartedAt || 0),
+      _responseTime: normalizedResponseTime,
     };
     if (includeUsage) {
       meta._usage = usage;
@@ -162,7 +164,7 @@
       meta,
       _model: model,
       _time: timestamp,
-      _responseTime: responseTime,
+      _responseTime: normalizedResponseTime,
     };
   }
 

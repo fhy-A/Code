@@ -40,6 +40,12 @@ const MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL";
 const MISSING_READ_PATH = "h4-missing-fixture.txt";
 const TIFF_IMAGE_USER = "H4_TIFF_IMAGE_USER";
 const TIFF_IMAGE_FINAL = "H4_TIFF_IMAGE_FINAL";
+const TIMING_MAIN_USER = "H4_TIMING_MAIN_USER";
+const TIMING_MAIN_FINAL = "H4_TIMING_MAIN_FINAL";
+const TIMING_PARALLEL_USER = "H4_TIMING_PARALLEL_USER";
+const TIMING_PARALLEL_FINAL = "H4_TIMING_PARALLEL_FINAL";
+const TIMING_QUEUE_USER = "H4_TIMING_QUEUE_USER";
+const TIMING_QUEUE_FINAL = "H4_TIMING_QUEUE_FINAL";
 const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
 const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
 const TIFF_ATTACHMENT_SHA256 = "42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73";
@@ -1943,6 +1949,146 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
   });
 }
 
+async function selectInterfaceLanguage(page, language) {
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).not.toHaveClass(/hidden/);
+  await page.locator(`[data-settings-lang="${language}"]`).click();
+  await expect(page.locator("html")).toHaveAttribute("lang", language === "zh" ? "zh-CN" : "en");
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#settingsPage")).toHaveClass(/hidden/);
+}
+
+async function completedTurnTimingDomEvidence(page, completedLabel = "用时") {
+  const mainUser = page.locator("#messages article.msg.user").filter({ hasText: TIMING_MAIN_USER });
+  const parallelUser = page.locator("#messages article.msg.user").filter({ hasText: TIMING_PARALLEL_USER });
+  const queueUser = page.locator("#messages article.msg.user").filter({ hasText: TIMING_QUEUE_USER });
+  const mainFinal = page.locator("#messages article.msg.assistant").filter({ hasText: TIMING_MAIN_FINAL });
+  const parallelFinal = page.locator("#messages article.msg.assistant").filter({ hasText: TIMING_PARALLEL_FINAL });
+  const queueFinal = page.locator("#messages article.msg.assistant").filter({ hasText: TIMING_QUEUE_FINAL });
+  const mainHeader = mainUser.locator("xpath=following-sibling::*[1][@data-completed-run-status]");
+  const parallelHeader = parallelUser.locator("xpath=following-sibling::*[1][@data-completed-run-status]");
+  const queueHeader = queueUser.locator("xpath=following-sibling::*[1][@data-completed-run-status]");
+
+  for (const locator of [mainUser, parallelUser, queueUser, mainFinal, parallelFinal, queueFinal]) {
+    await expect(locator).toHaveCount(1);
+  }
+  await expect(page.locator("#messages [data-completed-run-status]")).toHaveCount(2);
+  await expect(mainHeader).toHaveCount(1);
+  await expect(queueHeader).toHaveCount(1);
+  await expect(parallelHeader).toHaveCount(0);
+  await expect(mainHeader.locator(".completed-run-label")).toHaveText(completedLabel);
+  await expect(queueHeader.locator(".completed-run-label")).toHaveText(completedLabel);
+  await expect(mainHeader.locator(".completed-run-timer")).toHaveText(/^\d+(?:s|m(?: \d+s)?|h(?: \d+m)?)$/);
+  await expect(queueHeader.locator(".completed-run-timer")).toHaveText(/^\d+(?:s|m(?: \d+s)?|h(?: \d+m)?)$/);
+  await expect(mainFinal.locator(".response-info .response-token")).toHaveCount(2);
+  await expect(queueFinal.locator(".response-info .response-token")).toHaveCount(2);
+  await expect(mainFinal.locator(".response-info .run-time")).toHaveCount(0);
+  await expect(queueFinal.locator(".response-info .run-time")).toHaveCount(0);
+  await expect(parallelFinal.locator(".response-info .run-time")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info .run-time")).toHaveCount(1);
+
+  return {
+    completedHeaders: 2,
+    primaryFooterTimers: await mainFinal.locator(".response-info .run-time").count(),
+    queuedFooterTimers: await queueFinal.locator(".response-info .run-time").count(),
+    parallelFooterTimers: await parallelFinal.locator(".response-info .run-time").count(),
+    primaryUsageTokens: await mainFinal.locator(".response-info .response-token").count(),
+    queuedUsageTokens: await queueFinal.locator(".response-info .response-token").count(),
+  };
+}
+
+async function completePrimaryTimingOwnershipLifecycle(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    const currentUrl = new URL(page.url());
+    expect(currentUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(currentUrl.search).toBe("");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  await selectInterfaceLanguage(page, "zh");
+
+  await h4.submitGated(TIMING_MAIN_USER);
+  await expect.poll(async () => (await h4.metrics()).chatRequests).toEqual([
+    { scenario: "timing-main", stream: true, hasToolResult: false },
+  ]);
+
+  await page.locator("#prompt").fill(TIMING_QUEUE_USER);
+  await page.locator("#prompt").press("Control+Enter");
+  const queuedUser = page.locator("#messages article.msg.user").filter({ hasText: TIMING_QUEUE_USER });
+  await expect(queuedUser).toHaveCount(1);
+  await expect(queuedUser).toHaveAttribute("data-queued-message-id", /.+/);
+
+  await page.locator("#prompt").fill(`/parallel ${TIMING_PARALLEL_USER}`);
+  await page.locator("#sendBtn").click();
+  const parallelFinal = page.locator("#messages article.msg.assistant").filter({ hasText: TIMING_PARALLEL_FINAL });
+  await expect(parallelFinal).toHaveCount(1);
+  await expect(parallelFinal.locator(".response-info .run-time")).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(1);
+
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TIMING_MAIN_FINAL })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TIMING_QUEUE_FINAL })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+
+  const beforeReloadDom = await completedTurnTimingDomEvidence(page);
+  await selectInterfaceLanguage(page, "en");
+  await expect(page.locator("#messages [data-completed-run-status] .completed-run-label")).toHaveText([
+    "Worked for",
+    "Worked for",
+  ]);
+  await expect(page.locator("#messages")).not.toContainText("用时");
+  await selectInterfaceLanguage(page, "zh");
+  await expect(page.locator("#messages [data-completed-run-status] .completed-run-label")).toHaveText([
+    "用时",
+    "用时",
+  ]);
+
+  const metricsBefore = await h4.metrics();
+  expect(metricsBefore.chatRequests).toEqual([
+    { scenario: "timing-main", stream: true, hasToolResult: false },
+    { scenario: "timing-parallel", stream: true, hasToolResult: false },
+    { scenario: "timing-queue", stream: true, hasToolResult: false },
+  ]);
+  expect(metricsBefore.toolExecutions).toEqual([]);
+  expect(metricsBefore.unsafeToolRequests).toBe(0);
+  const requestBoundary = h4.requestBoundary();
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") {
+    const restoredUrl = new URL(page.url());
+    expect(restoredUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(restoredUrl.search).toBe("");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  const afterReloadDom = await completedTurnTimingDomEvidence(page, "Worked for");
+  expect(afterReloadDom).toEqual(beforeReloadDom);
+  await selectInterfaceLanguage(page, "zh");
+  expect(await completedTurnTimingDomEvidence(page)).toEqual(beforeReloadDom);
+
+  const refreshRequests = h4.requestEvidenceSince(requestBoundary);
+  const refreshSummary = h4.requestSummarySince(requestBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshSummary["POST /proxy/chat"] || 0).toBe(0);
+  expect(Object.entries(refreshSummary).filter(([key]) => key.startsWith("POST /api/tools/")).length).toBe(0);
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+  expect(metricsAfter.toolExecutions).toEqual([]);
+  expect(h4.pageErrors).toEqual([]);
+
+  h4.evidence(`${runtime}-primary-completed-timing-owner`, {
+    runtime,
+    dom: beforeReloadDom,
+    language: { zh: "用时", en: "Worked for" },
+    chatScenarios: metricsBefore.chatRequests.map((request) => request.scenario),
+    refresh: { agentPost: 0, runtimePost: 0, chatPost: 0, toolPost: 0 },
+  });
+}
+
 async function openAutomaticClassicFallback(h4, failureMode) {
   const { page, host } = h4;
   const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
@@ -2441,6 +2587,14 @@ test("bundle TIFF uses derived PNG preview while preserving the original attachm
 
 test("direct classic TIFF uses derived PNG preview while preserving the original attachment", async ({ h4 }) => {
   await completeTiffPreviewLifecycle(h4, "classic");
+});
+
+test("bundle primary completion owns elapsed while queue and parallel remain distinct", async ({ h4 }) => {
+  await completePrimaryTimingOwnershipLifecycle(h4, "bundle");
+});
+
+test("direct classic primary completion owns elapsed while queue and parallel remain distinct", async ({ h4 }) => {
+  await completePrimaryTimingOwnershipLifecycle(h4, "classic");
 });
 
 test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {

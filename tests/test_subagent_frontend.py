@@ -136,7 +136,8 @@ class TestSubAgentFrontend(unittest.TestCase):
         self.assertIn("buildRestoredBackgroundJobData(checkpoint, {", self.source)
         self.assertIn('if (status === "running" && !Number(job.startedAt || 0))', self.source)
         self.assertIn("const submittedAt = Number(job?.queuedAt || job?.startedAt || finishedAt)", self.subagents_source)
-        self.assertIn("_responseTime: responseTime", self.subagents_source)
+        self.assertIn('const normalizedResponseTime = String(responseTime || "").trim()', self.subagents_source)
+        self.assertEqual(self.subagents_source.count("_responseTime: normalizedResponseTime"), 2)
         self.assertGreaterEqual(self.source.count("responseTime: backgroundJobElapsed(job)"), 2)
 
     def test_visible_timing_starts_when_each_message_is_submitted(self):

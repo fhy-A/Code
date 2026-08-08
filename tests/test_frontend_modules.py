@@ -2236,9 +2236,32 @@ process.stdout.write(JSON.stringify({{
     def test_background_result_projection_and_deduplication_are_pure(self):
         script = f"""
 global.window = {{}};
-eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
-eval({json.dumps(SUBAGENTS_SOURCE)});
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+require("./src/ui/messages.js");
+require("./src/agent/subagents.js");
 const subagents = window.Code.agent.subagents;
+const persistence = window.Code.services.persistence;
+const messagesFeature = window.Code.ui.messages.createMessagesFeature({{
+  escapeHtml: (value) => String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;"),
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => String(value),
+  t: (key) => key,
+  getMessageText: (message) => String(message?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => [],
+  getSessionId: () => "session-background-result",
+  getSelectedModel: () => "test-model",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => String(value),
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+}});
 const job = {{id: "job-1", agentRunId: "run-1", parentTaskStartedAt: "500"}};
 const usage = {{input: 3, output: 4, cache: 5}};
 const success = subagents.buildBackgroundResultMessage(job, {{
@@ -2246,7 +2269,7 @@ const success = subagents.buildBackgroundResultMessage(job, {{
   error: false,
   model: "test-model",
   timestamp: "2026-08-01T00:00:00.000Z",
-  responseTime: "2.5s",
+  responseTime: " 2.5s ",
   usage,
   includeUsage: true,
 }});
@@ -2255,8 +2278,39 @@ const failure = subagents.buildBackgroundResultMessage(job, {{
   error: true,
   model: "test-model",
   timestamp: "2026-08-01T00:00:01.000Z",
-  responseTime: "3s",
+  responseTime: " 3s ",
 }});
+const durableSuccess = persistence.serializeSessionMessages(
+  [success],
+  {{includeModel: true, includeTime: true}},
+)[0];
+const durableFailure = persistence.serializeSessionMessages(
+  [failure],
+  {{includeModel: true, includeTime: true}},
+)[0];
+const restoredSuccess = JSON.parse(JSON.stringify(durableSuccess));
+const restoredFailure = JSON.parse(JSON.stringify(durableFailure));
+const savedAgain = persistence.serializeSessionMessages(
+  [restoredSuccess, restoredFailure],
+  {{includeModel: true, includeTime: true}},
+);
+const detachedUser = {{
+  role: "user",
+  content: "parallel task",
+  meta: {{detachedFromMain: true, backgroundDispatch: {{id: "job-1", status: "completed"}}}},
+}};
+const successProjection = messagesFeature.projectMessages(
+  [detachedUser, restoredSuccess],
+  {{hasActiveRun: false}},
+);
+const repeatedSuccessProjection = messagesFeature.projectMessages(
+  [detachedUser, savedAgain[0]],
+  {{hasActiveRun: false}},
+);
+const failureProjection = messagesFeature.projectMessages(
+  [detachedUser, restoredFailure],
+  {{hasActiveRun: false}},
+);
 const messages = [
   {{role: "user", meta: {{kind: "background-subagent", jobId: 7}}}},
   {{role: "assistant", meta: {{kind: "other", jobId: 7}}}},
@@ -2265,6 +2319,12 @@ const messages = [
 process.stdout.write(JSON.stringify({{
   success,
   failure,
+  durableSuccess,
+  durableFailure,
+  savedAgain,
+  successProjection,
+  repeatedSuccessProjection,
+  failureProjection,
   sameUsage: success.meta._usage === usage,
   foundNumber: subagents.hasBackgroundResult(messages, 7),
   foundString: subagents.hasBackgroundResult(messages, "7"),
@@ -2293,6 +2353,7 @@ process.stdout.write(JSON.stringify({{
                 "error": False,
                 "detachedFromMain": True,
                 "parentTaskStartedAt": 500,
+                "_responseTime": "2.5s",
                 "_usage": {"input": 3, "output": 4, "cache": 5},
                 "_usageScope": "task",
             },
@@ -2310,12 +2371,32 @@ process.stdout.write(JSON.stringify({{
                 "error": True,
                 "detachedFromMain": True,
                 "parentTaskStartedAt": 500,
+                "_responseTime": "3s",
             },
             "_model": "test-model",
             "_time": "2026-08-01T00:00:01.000Z",
             "_responseTime": "3s",
         })
         self.assertTrue(data["sameUsage"])
+        for message, elapsed in (
+            (data["success"], "2.5s"),
+            (data["failure"], "3s"),
+        ):
+            self.assertEqual(message["_responseTime"], elapsed)
+            self.assertEqual(message["meta"]["_responseTime"], elapsed)
+        for message, elapsed in (
+            (data["durableSuccess"], "2.5s"),
+            (data["durableFailure"], "3s"),
+            (data["savedAgain"][0], "2.5s"),
+            (data["savedAgain"][1], "3s"),
+        ):
+            self.assertNotIn("_responseTime", message)
+            self.assertEqual(message["meta"]["_responseTime"], elapsed)
+        self.assertEqual(data["successProjection"].count('class="run-time"'), 1)
+        self.assertEqual(data["successProjection"].count("2.5s"), 1)
+        self.assertEqual(data["repeatedSuccessProjection"], data["successProjection"])
+        self.assertEqual(data["failureProjection"].count('class="run-time"'), 1)
+        self.assertEqual(data["failureProjection"].count("3s"), 1)
         self.assertTrue(data["foundNumber"])
         self.assertFalse(data["foundString"])
         self.assertFalse(data["foundMissing"])
@@ -7935,7 +8016,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn('class="role', data["commentary"])
         self.assertNotIn("msg-footer", data["commentary"])
         self.assertIn('data-completed-run-status', completed_html)
-        self.assertIn('class="completed-run-label">processedLabel</span>', completed_html)
+        self.assertIn('class="completed-run-label">completedElapsedLabel</span>', completed_html)
         self.assertEqual(completed_html.count("4s"), 1)
         self.assertLess(completed_html.index("run &lt;task&gt;"), completed_html.index("data-completed-run-status"))
         self.assertIn('class="execution-trace completed"', completed_html)
@@ -8123,6 +8204,210 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-usage-kind="cache-read"', data["cacheStatus"])
         self.assertIn('data-usage-kind="cache-write"', data["cacheStatus"])
         self.assertIn('title="statCacheWriteTitle"', data["cacheStatus"])
+
+    def test_primary_turn_owns_completed_elapsed_while_detached_footer_remains(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+let language = "zh";
+const translations = {
+  zh: {
+    completedElapsedLabel: "用时",
+    processedLabel: "已处理",
+    taskElapsedTitle: "任务总耗时",
+  },
+  en: {
+    completedElapsedLabel: "Worked for",
+    processedLabel: "Worked for",
+    taskElapsedTitle: "Total task time",
+  },
+};
+const feature = createMessagesFeature({
+  escapeHtml,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  t: (key) => translations[language]?.[key] || key,
+  getMessageText: (msg) => String(msg?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => [],
+  getSessionId: () => "session-completed-owner",
+  getSelectedModel: () => "model-1",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => `<answer>${escapeHtml(value)}</answer>`,
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+  getToolActionLabel: (action) => `label:${action}`,
+});
+const usage = {_usage: {input: 12, output: 4}};
+const detachedUser = {
+  role: "user",
+  content: "/parallel inspect independently",
+  meta: {
+    detachedFromMain: true,
+    backgroundDispatch: {id: "parallel-1", status: "completed"},
+  },
+};
+const detachedAssistant = {
+  role: "assistant",
+  content: "parallel result",
+  _responseTime: "2s",
+  meta: {
+    detachedFromMain: true,
+    kind: "background-subagent",
+    jobId: "parallel-1",
+  },
+};
+const mainFinal = {
+  role: "assistant",
+  content: "main final",
+  _responseTime: "9s",
+  meta: usage,
+};
+const parallelFirstMessages = [
+  {role: "user", content: "main task"},
+  detachedUser,
+  detachedAssistant,
+  mainFinal,
+];
+const mainFirstMessages = [
+  {role: "user", content: "main task"},
+  detachedUser,
+  mainFinal,
+  detachedAssistant,
+];
+const toolMessages = [
+  {role: "user", content: "main tool task"},
+  {role: "assistant", content: "inspect", meta: {toolCalls: [
+    {id: "call-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {
+    action: "read_file",
+    toolCallId: "call-1",
+    tool: {action: "read_file", path: "README.md"},
+  }},
+  detachedUser,
+  detachedAssistant,
+  {role: "tool-result", content: "contents", meta: {
+    action: "read_file",
+    toolCallId: "call-1",
+    outcome: "succeeded",
+  }},
+  {role: "assistant", content: "tool final", _responseTime: "8s", meta: usage},
+];
+const queuedMessages = [
+  {role: "user", content: "main task"},
+  {role: "assistant", content: "main final", _responseTime: "5s", meta: usage},
+  {role: "user", content: "queued next", meta: {
+    queuedDispatch: {id: "queue-1", status: "completed"},
+  }},
+  {role: "assistant", content: "queued final", _responseTime: "6s", meta: usage},
+];
+const parallelFirst = feature.projectMessages(parallelFirstMessages, {hasActiveRun: false});
+const mainFirst = feature.projectMessages(mainFirstMessages, {hasActiveRun: false});
+const tool = feature.projectMessages(toolMessages, {hasActiveRun: false});
+const toolExpanded = feature.projectMessages(toolMessages, {
+  hasActiveRun: false,
+  expandedExecutionTraces: new Set(["0"]),
+});
+const queued = feature.projectMessages(queuedMessages, {hasActiveRun: false});
+const refreshed = feature.projectMessages(parallelFirstMessages, {hasActiveRun: false});
+const zh = refreshed;
+language = "en";
+const en = feature.projectMessages(parallelFirstMessages, {hasActiveRun: false});
+process.stdout.write(JSON.stringify({
+  parallelFirst,
+  mainFirst,
+  tool,
+  toolExpanded,
+  queued,
+  refreshed,
+  refreshStable: refreshed === parallelFirst,
+  zh,
+  en,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        def article(html, message_index):
+            marker = f'data-msg-index="{message_index}"'
+            marker_index = html.index(marker)
+            start = html.rfind("<article", 0, marker_index)
+            end = html.index("</article>", marker_index) + len("</article>")
+            return html[start:end]
+
+        parallel_first = data["parallelFirst"]
+        self.assertEqual(parallel_first.count("data-completed-run-status"), 1)
+        self.assertEqual(parallel_first.count("9s"), 1)
+        self.assertEqual(parallel_first.count("2s"), 1)
+        self.assertEqual(parallel_first.count('class="run-time"'), 1)
+        main_footer = article(parallel_first, 3)
+        detached_footer = article(parallel_first, 2)
+        self.assertIn('class="response-info"', main_footer)
+        self.assertIn('data-usage-kind="input"', main_footer)
+        self.assertIn('data-usage-kind="output"', main_footer)
+        self.assertNotIn('class="run-time"', main_footer)
+        self.assertIn('class="run-time"', detached_footer)
+        self.assertIn("2s", detached_footer)
+        self.assertNotIn("data-completed-run-status", article(parallel_first, 1))
+
+        main_first = data["mainFirst"]
+        self.assertEqual(main_first.count("data-completed-run-status"), 1)
+        self.assertEqual(main_first.count("9s"), 1)
+        self.assertEqual(main_first.count("2s"), 1)
+        self.assertNotIn('class="run-time"', article(main_first, 2))
+        self.assertIn('class="run-time"', article(main_first, 3))
+
+        tool = data["tool"]
+        self.assertEqual(tool.count("data-completed-run-status"), 1)
+        self.assertEqual(tool.count("data-tool-process-block"), 1)
+        self.assertEqual(tool.count('class="tool-process-item succeeded"'), 1)
+        self.assertEqual(tool.count('data-tool-process-key="0:1"'), 1)
+        self.assertEqual(tool.count("execution-trace-persistent"), 2)
+        self.assertEqual(tool.count('class="run-time"'), 1)
+        self.assertNotIn('class="run-time"', article(tool, 6))
+        trace_start = tool.index('class="execution-trace completed"')
+        main_final = tool.index("tool final")
+        trace_end = tool.rfind("</section>", trace_start, main_final)
+        self.assertLess(trace_start, tool.index("data-tool-process-block", trace_start))
+        self.assertLess(tool.index("parallel result", trace_start), trace_end)
+        self.assertLess(trace_end, main_final)
+        self.assertEqual(data["toolExpanded"].count("data-tool-process-block"), 1)
+        self.assertEqual(
+            data["toolExpanded"].count('class="execution-trace completed is-expanded"'),
+            1,
+        )
+
+        queued = data["queued"]
+        self.assertEqual(queued.count("data-completed-run-status"), 2)
+        self.assertEqual(queued.count("用时"), 2)
+        self.assertEqual(queued.count('class="run-time"'), 0)
+        self.assertEqual(queued.count("5s"), 1)
+        self.assertEqual(queued.count("6s"), 1)
+        self.assertTrue(data["refreshStable"])
+        self.assertEqual(data["refreshed"].count("data-completed-run-status"), 1)
+
+        self.assertIn('class="completed-run-label">用时</span>', data["zh"])
+        self.assertNotIn('class="completed-run-label">已处理</span>', data["zh"])
+        self.assertIn('class="completed-run-label">Worked for</span>', data["en"])
+        self.assertNotIn('class="completed-run-label">用时</span>', data["en"])
+        self.assertIn('processedLabel: "已处理"', I18N_SOURCE)
+        self.assertIn('completedElapsedLabel: "用时"', I18N_SOURCE)
+        self.assertIn('completedElapsedLabel: "Worked for"', I18N_SOURCE)
 
     def test_messages_ui_binds_copy_and_image_events_without_inline_globals(self):
         self.assertNotIn('onclick="copyMessageText', MESSAGES_SOURCE)

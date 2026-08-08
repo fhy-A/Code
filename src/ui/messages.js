@@ -309,7 +309,7 @@
       if (!elapsed) return "";
       return `<div class="completed-run-status msg" data-completed-run-status>
         <span class="completed-run-line">
-          <span class="completed-run-label">${escapeHtml(t("processedLabel"))}</span>
+          <span class="completed-run-label">${escapeHtml(t("completedElapsedLabel"))}</span>
           <span class="completed-run-timer" title="${escapeHtml(t("taskElapsedTitle"))}">${escapeHtml(elapsed)}</span>
         </span>
       </div>`;
@@ -807,6 +807,7 @@
     function renderFinalAssistantProjection(msg, index, options = {}) {
       const model = msg._model || msg.meta?._model || getSelectedModel() || "Agent";
       const content = (getMessageText(msg) || "").trim();
+      const traceClass = options.tracePersistent ? " execution-trace-persistent" : "";
       if (msg.streaming) {
         const hasVisibleContent = content && !isToolPlanningPlaceholder(content);
         const streamKind = msg._streamProjection === "thinking"
@@ -819,7 +820,7 @@
         );
         const showModel = showContent;
         return `
-          <article class="msg assistant is-streaming${streamKind === "pending" ? " is-pending" : ""}${streamKind === "thinking" ? " agent-commentary" : ""}" data-msg-index="${index}" data-streaming-message="true" data-stream-session="${escapeHtml(getSessionId() || "")}" data-stream-kind="${streamKind}">
+          <article class="msg assistant is-streaming${streamKind === "pending" ? " is-pending" : ""}${streamKind === "thinking" ? " agent-commentary" : ""}${traceClass}" data-msg-index="${index}" data-streaming-message="true" data-stream-session="${escapeHtml(getSessionId() || "")}" data-stream-kind="${streamKind}">
             ${streamKind === "thinking" ? "" : `<div class="role streaming-answer-role${showModel ? "" : " is-empty"}" data-stream-role>${escapeHtml(model)}</div>`}
             <div class="bubble streaming-answer-output${showContent ? "" : " is-empty"}" data-stream-part="answer">${showContent ? renderMarkdown(content) : ""}</div>
             ${renderNetworkRecoveryStatus(getSessionId())}
@@ -831,7 +832,7 @@
       if (isCommentary && isOperationalToolNotice(content)) return "";
       if (isCommentary) {
         return `
-          <article class="msg assistant agent-commentary" data-msg-index="${index}">
+          <article class="msg assistant agent-commentary${traceClass}" data-msg-index="${index}">
             ${renderAssistantContent(content)}
           </article>
         `;
@@ -841,7 +842,7 @@
       const copyButton = renderCopyButton(content);
       const time = formatMessageTime(msg._time);
       return `
-        <article class="msg assistant${msg.meta?.toolCalls?.length ? " agent-commentary" : ""}" data-msg-index="${index}">
+        <article class="msg assistant${msg.meta?.toolCalls?.length ? " agent-commentary" : ""}${traceClass}" data-msg-index="${index}">
           <div class="role">${escapeHtml(model)}</div>
           ${replyReference}
           ${renderAssistantContent(content)}
@@ -1024,8 +1025,10 @@
             && currentUserIndex !== activeUserIndex
             && completedTurnStatuses.has(currentUserIndex)
           );
+          const detachedProjection = isDetachedProjectionMessage(msg);
           const assistantOptions = {
-            includeElapsed: !completedHeaderVisible || isDetachedProjectionMessage(msg),
+            includeElapsed: !completedHeaderVisible || detachedProjection,
+            tracePersistent: detachedProjection && openExecutionTraceUserIndex >= 0,
           };
           if (msg.meta?.toolCalls?.length) {
             if (hasMeaningfulToolCommentary) {
@@ -1045,11 +1048,23 @@
             }
             continue;
           }
+          if (detachedProjection) {
+            flushProcess();
+            rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
+            continue;
+          }
           closeExecutionTrace();
           rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
           continue;
         }
         if (msg.role === "user" && isSteerProjectionMessage(msg) && currentUserIndex >= 0) {
+          flushProcess();
+          rows.push(renderUserProjection(msg, index, {
+            tracePersistent: openExecutionTraceUserIndex >= 0,
+          }));
+          continue;
+        }
+        if (msg.role === "user" && isDetachedProjectionMessage(msg)) {
           flushProcess();
           rows.push(renderUserProjection(msg, index, {
             tracePersistent: openExecutionTraceUserIndex >= 0,
