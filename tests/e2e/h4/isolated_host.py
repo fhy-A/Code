@@ -53,6 +53,9 @@ REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL"
 ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER"
 ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE"
 ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL"
+SIGNATURE_ALTERNATION_USER = "H4_SIGNATURE_ALTERNATION_FAILURE_USER"
+SIGNATURE_ALTERNATION_STAGE = "H4_SIGNATURE_ALTERNATION_FAILURE_STAGE"
+SIGNATURE_ALTERNATION_FINAL = "H4_SIGNATURE_ALTERNATION_FAILURE_FINAL"
 MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER"
 MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
 MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
@@ -84,15 +87,24 @@ REPEATED_RANGE_FAILURE_TOOL_CALL_IDS = tuple(
 ARGUMENT_ISOLATION_TOOL_CALL_IDS = tuple(
     f"h4-argument-isolation-read-call-{index}" for index in range(1, 4)
 )
+SIGNATURE_ALTERNATION_TOOL_CALL_IDS = tuple(
+    f"h4-signature-alternation-read-call-{index}" for index in range(1, 4)
+)
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
+SIGNATURE_ALTERNATION_READ_PATH = "h4-signature-alternation-fixture.txt"
 MALFORMED_TOOL_ARGUMENTS = '{"path":"fixture.txt"'
 ARGUMENT_ISOLATION_TOOL_ARGUMENTS = (
     {"path": READ_PATH, "startLine": 2, "endLine": 1},
     {"path": READ_PATH, "startLine": 3, "endLine": 1},
     {"path": READ_PATH, "startLine": 2, "endLine": 1},
 )
+SIGNATURE_ALTERNATION_TOOL_ARGUMENTS = {
+    "path": SIGNATURE_ALTERNATION_READ_PATH,
+    "startLine": 2,
+    "endLine": 1,
+}
 REFRESH_GATE_NAMES = (
     "before-first-delta",
     "after-second-delta",
@@ -111,6 +123,7 @@ class MetricState:
             "chatRequests": [],
             "toolExecutions": [],
             "productionToolDelegations": 0,
+            "signatureAlternationFixtureTimeline": [],
             "unsafeToolRequests": 0,
             "modelGateWaits": 0,
             "modelCatalogGateTimeline": [],
@@ -304,9 +317,20 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             MISSING_FILE_TOOL_CALL_ID,
             *REPEATED_RANGE_FAILURE_TOOL_CALL_IDS,
             *ARGUMENT_ISOLATION_TOOL_CALL_IDS,
+            *SIGNATURE_ALTERNATION_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
+    if SIGNATURE_ALTERNATION_USER in user_text:
+        completed_calls = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(SIGNATURE_ALTERNATION_TOOL_CALL_IDS)
+        receipt_count = len(completed_calls)
+        if receipt_count >= len(SIGNATURE_ALTERNATION_TOOL_CALL_IDS):
+            return "signature-alternation-final", True
+        return f"signature-alternation-call-{receipt_count + 1}", receipt_count > 0
     if ARGUMENT_ISOLATION_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -550,7 +574,7 @@ def _executor_range_receipt_projection(payload: dict) -> dict | None:
 
 
 def _range_failure_receipt_projection(
-    payload: dict, tool_call_ids: tuple[str, ...],
+    payload: dict, tool_call_ids: tuple[str, ...], *, include_missing_file_error=False,
 ) -> list[dict]:
     aliases = {
         tool_call_id: f"tool-{index + 1}"
@@ -571,7 +595,7 @@ def _range_failure_receipt_projection(
         if not isinstance(result, dict):
             result = {}
         error = str(result.get("error") or "")
-        projections.append({
+        projection = {
             "role": "tool",
             "toolCallId": alias,
             "name": str(message.get("name") or ""),
@@ -585,7 +609,10 @@ def _range_failure_receipt_projection(
             "fieldErrorsPresent": "fieldErrors" in result,
             "retryBlocked": bool(result.get("retryBlocked")),
             "retryLimitReached": bool(result.get("retryLimitReached")),
-        })
+        }
+        if include_missing_file_error:
+            projection["missingFileError"] = error == "文件不存在"
+        projections.append(projection)
     return projections
 
 
@@ -598,6 +625,14 @@ def _repeated_range_failure_receipt_projection(payload: dict) -> list[dict]:
 def _argument_isolation_receipt_projection(payload: dict) -> list[dict]:
     return _range_failure_receipt_projection(
         payload, ARGUMENT_ISOLATION_TOOL_CALL_IDS,
+    )
+
+
+def _signature_alternation_receipt_projection(payload: dict) -> list[dict]:
+    return _range_failure_receipt_projection(
+        payload,
+        SIGNATURE_ALTERNATION_TOOL_CALL_IDS,
+        include_missing_file_error=True,
     )
 
 
@@ -759,6 +794,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["argumentIsolationReceipts"] = (
                 _argument_isolation_receipt_projection(payload)
             )
+        if scenario.startswith("signature-alternation-"):
+            chat_metric["signatureAlternationReceipts"] = (
+                _signature_alternation_receipt_projection(payload)
+            )
         if scenario == "repeated-range-failure-final":
             chat_metric["forcedFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
@@ -773,6 +812,19 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 ),
             }
         if scenario == "argument-isolation-final":
+            chat_metric["normalFinal"] = {
+                "toolsPresent": bool(payload.get("tools")),
+                "toolChoicePresent": "tool_choice" in payload,
+                "recoveryInstructionPresent": any(
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and "identical tool call was blocked" in str(
+                        message.get("content") or ""
+                    )
+                    for message in (payload.get("messages") or [])
+                ),
+            }
+        if scenario == "signature-alternation-final":
             chat_metric["normalFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
                 "toolChoicePresent": "tool_choice" in payload,
@@ -802,6 +854,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("argument-isolation-call-")
+            and not scenario.startswith("signature-alternation-call-")
             and current_chat_count == 1
         ):
             METRICS.increment("modelGateWaits")
@@ -860,6 +913,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "tool-detail-final", "multi-tool-detail-final", "invalid-tool-final",
             "parse-error-tool-final", "missing-path-tool-final", "executor-range-final",
             "missing-file-final", "repeated-range-failure-final", "argument-isolation-final",
+            "signature-alternation-final",
         ):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -887,6 +941,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "missing-file-final": MISSING_FILE_FINAL,
                 "repeated-range-failure-final": REPEATED_RANGE_FAILURE_FINAL,
                 "argument-isolation-final": ARGUMENT_ISOLATION_FINAL,
+                "signature-alternation-final": SIGNATURE_ALTERNATION_FINAL,
             }.get(scenario, TOOL_DETAILS_FINAL)
             if not write_tool_detail_frame(_chunk({
                 "role": "assistant",
@@ -909,7 +964,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
-                or scenario.startswith("argument-isolation-call-"):
+                or scenario.startswith("argument-isolation-call-") \
+                or scenario.startswith("signature-alternation-call-"):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
@@ -1045,6 +1101,22 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }]
                 if call_number == 1:
                     stage_text = ARGUMENT_ISOLATION_STAGE
+            elif scenario.startswith("signature-alternation-call-"):
+                call_number = int(scenario.rsplit("-", 1)[-1])
+                tool_calls = [{
+                    "index": 0,
+                    "id": SIGNATURE_ALTERNATION_TOOL_CALL_IDS[call_number - 1],
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            SIGNATURE_ALTERNATION_TOOL_ARGUMENTS,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }]
+                if call_number == 1:
+                    stage_text = SIGNATURE_ALTERNATION_STAGE
             frames = []
             if stage_text:
                 frames.append(_chunk({"role": "assistant", "content": stage_text}))
@@ -1229,6 +1301,33 @@ def main() -> int:
     if missing_home_target.exists():
         raise RuntimeError("H4 missing-file fixture unexpectedly exists in the isolated home")
 
+    signature_relative = Path(SIGNATURE_ALTERNATION_READ_PATH)
+    if signature_relative.is_absolute() or ".." in signature_relative.parts:
+        raise RuntimeError("H4 signature-alternation fixture is not a safe relative path")
+    signature_project_target = (project_dir / signature_relative).resolve()
+    if project_dir not in signature_project_target.parents:
+        raise RuntimeError("H4 signature-alternation fixture escaped the project root")
+    if signature_project_target.exists():
+        raise RuntimeError("H4 signature-alternation fixture unexpectedly exists")
+    fixture_bytes = (project_dir / READ_PATH).read_bytes()
+    fixture_sha256 = hashlib.sha256(fixture_bytes).hexdigest()
+    signature_alternation_lock = threading.RLock()
+    signature_alternation_invocations = 0
+
+    def signature_alternation_state() -> dict:
+        exists = signature_project_target.exists()
+        hash_matches = (
+            exists
+            and signature_project_target.is_file()
+            and hashlib.sha256(signature_project_target.read_bytes()).hexdigest()
+            == fixture_sha256
+        )
+        return {
+            "observedState": "present" if exists else "missing",
+            "exists": exists,
+            "hashMatches": hash_matches,
+        }
+
     fake_server = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstreamHandler)
     fake_server.daemon_threads = True
     fake_port = fake_server.server_address[1]
@@ -1265,13 +1364,19 @@ def main() -> int:
     original_execute_registered_tool = code_server.execute_registered_tool
 
     def counted_execute_registered_tool(action, payload, *, _arguments_validated=False):
+        nonlocal signature_alternation_invocations
         if action != "read_file":
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 tool action is outside the read-only fixture contract")
         requested = str((payload or {}).get("path") or "")
         payload_keys = set((payload or {}).keys())
         is_missing_read = requested == MISSING_READ_PATH
-        if requested not in {READ_PATH, MISSING_READ_PATH}:
+        is_signature_alternation_read = requested == SIGNATURE_ALTERNATION_READ_PATH
+        if requested not in {
+            READ_PATH,
+            MISSING_READ_PATH,
+            SIGNATURE_ALTERNATION_READ_PATH,
+        }:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 read_file request escaped the fixed synthetic fixture")
         if is_missing_read and payload_keys != {"path"}:
@@ -1282,6 +1387,12 @@ def main() -> int:
         ):
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 missing-file fixture precondition changed")
+        if is_signature_alternation_read and (
+            payload_keys != set(SIGNATURE_ALTERNATION_TOOL_ARGUMENTS)
+            or payload != SIGNATURE_ALTERNATION_TOOL_ARGUMENTS
+        ):
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 signature-alternation request changed the fixed payload")
         start_line = (payload or {}).get("startLine")
         end_line = (payload or {}).get("endLine")
         is_second_multi_read = start_line == 1 and end_line == 1
@@ -1289,22 +1400,57 @@ def main() -> int:
             "before-second-tool-execute",
         ):
             raise TimeoutError("H4 second read_file execution gate timed out")
-        execution_metric = {
-            "action": "read_file",
-            "path": requested,
-        }
-        if start_line is not None:
-            execution_metric["startLine"] = start_line
-        if end_line is not None:
-            execution_metric["endLine"] = end_line
-        METRICS.append("toolExecutions", execution_metric)
-        METRICS.increment("productionToolDelegations")
-        try:
+        def delegate_to_production():
+            execution_metric = {
+                "action": "read_file",
+                "path": requested,
+            }
+            if start_line is not None:
+                execution_metric["startLine"] = start_line
+            if end_line is not None:
+                execution_metric["endLine"] = end_line
+            METRICS.append("toolExecutions", execution_metric)
+            METRICS.increment("productionToolDelegations")
             return original_execute_registered_tool(
                 action,
                 payload,
                 _arguments_validated=_arguments_validated,
             )
+
+        if is_signature_alternation_read:
+            with signature_alternation_lock:
+                signature_alternation_invocations += 1
+                call_number = signature_alternation_invocations
+                if call_number not in (1, 2, 3):
+                    METRICS.increment("unsafeToolRequests")
+                    raise ValueError("H4 signature-alternation call count exceeded the contract")
+                expected_state = "missing" if call_number == 2 else "present"
+                if expected_state == "present":
+                    signature_project_target.write_bytes(fixture_bytes)
+                else:
+                    if not signature_project_target.is_file():
+                        raise RuntimeError("H4 signature-alternation removal target is not a file")
+                    signature_project_target.unlink()
+                state = signature_alternation_state()
+                if state["observedState"] != expected_state:
+                    raise RuntimeError("H4 signature-alternation state switch did not converge")
+                if expected_state == "present" and not state["hashMatches"]:
+                    raise RuntimeError("H4 signature-alternation fixture bytes changed")
+                try:
+                    return delegate_to_production()
+                finally:
+                    counters = METRICS.snapshot()
+                    state_after = signature_alternation_state()
+                    METRICS.append("signatureAlternationFixtureTimeline", {
+                        "callNumber": call_number,
+                        "expectedState": expected_state,
+                        **state_after,
+                        "delegationCount": counters["productionToolDelegations"],
+                        "executionCount": len(counters["toolExecutions"]),
+                    })
+
+        try:
+            return delegate_to_production()
         finally:
             if is_missing_read and (
                 missing_project_target.exists() or missing_home_target.exists()
@@ -1351,7 +1497,6 @@ def main() -> int:
     code_thread = threading.Thread(target=code_httpd.serve_forever, daemon=True)
     code_thread.start()
 
-    fixture_bytes = (project_dir / READ_PATH).read_bytes()
     sensitive_environment_names = sorted(
         name
         for name in os.environ
@@ -1363,7 +1508,7 @@ def main() -> int:
         "fakeUrl": fake_url,
         "codePort": code_port,
         "fakePort": fake_port,
-        "fixtureSha256": hashlib.sha256(fixture_bytes).hexdigest(),
+        "fixtureSha256": fixture_sha256,
         "environment": {
             "parentSentinelPresent": "H4_PARENT_SECRET_SENTINEL" in os.environ,
             "sensitiveNames": sensitive_environment_names,
@@ -1481,12 +1626,19 @@ def main() -> int:
         MODEL_GATE.set()
         MODEL_CATALOG_GATE.release()
         REFRESH_GATES.release_all()
-        code_httpd.shutdown()
-        fake_server.shutdown()
-        code_httpd.server_close()
-        fake_server.server_close()
-        code_thread.join(timeout=3)
-        fake_thread.join(timeout=3)
+        try:
+            code_httpd.shutdown()
+            fake_server.shutdown()
+            code_httpd.server_close()
+            fake_server.server_close()
+            code_thread.join(timeout=3)
+            fake_thread.join(timeout=3)
+        finally:
+            with signature_alternation_lock:
+                if signature_project_target.exists():
+                    signature_project_target.unlink()
+                if signature_project_target.exists():
+                    raise RuntimeError("H4 signature-alternation fixture cleanup failed")
     return 0
 
 
