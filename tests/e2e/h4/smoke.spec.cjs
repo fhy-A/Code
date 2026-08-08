@@ -41,6 +41,10 @@ const SIGNATURE_ALTERNATION_USER = "H4_SIGNATURE_ALTERNATION_FAILURE_USER";
 const SIGNATURE_ALTERNATION_STAGE = "H4_SIGNATURE_ALTERNATION_FAILURE_STAGE";
 const SIGNATURE_ALTERNATION_FINAL = "H4_SIGNATURE_ALTERNATION_FAILURE_FINAL";
 const SIGNATURE_ALTERNATION_READ_PATH = "h4-signature-alternation-fixture.txt";
+const SUCCESS_RESET_USER = "H4_SUCCESS_RESET_FAILURE_USER";
+const SUCCESS_RESET_STAGE = "H4_SUCCESS_RESET_FAILURE_STAGE";
+const SUCCESS_RESET_FINAL = "H4_SUCCESS_RESET_FAILURE_FINAL";
+const SUCCESS_RESET_READ_PATH = "h4-success-reset-fixture.txt";
 const MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER";
 const MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE";
 const MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL";
@@ -186,6 +190,17 @@ const H4_6M_SEMANTIC_HASHES = Object.freeze({
   terminalDom: "5f19d080ae18a0686a4f7e8bd110db2ee06098138345fafa46100f777e9cab09",
   refreshLifecycle: "9eed2e8243028245f646fc0d656840e948b4d1e3cf3bc6b330963b918df9ecb9",
 });
+const H4_6N_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "b396c14c67535bb53f17151d50ce778bdbba80acb024a6e1a5bbafdb9abf3c54",
+  successResetExecutionProjection: "2f8deb0062775cb9a354a981b5716672c341fb6b9f562b6a73bcf327ca190322",
+  modelToolReceiptProjection: "1f86ca8012531c5aa0090128549596797d3d60a1a9abd70a120e1dfa6cc6e7af",
+  normalFinalProjection: "40824ea79a03d0f8e82df043ee3030f20b901b9ebfa94b44995752fed1906b6d",
+  runtimeProjection: "53c3e16055adbbc77fc095010ce4b714fad3d7ef3b5b58078b122063c84624ff",
+  sessionRoleContent: "42f299dc94ade765e72e403dde767f6586285eda79fa7f73955f1662f23ed381",
+  sessionToolMeta: "f4d120765d56b4fd397c01caefdb2c9ec0970fcce210a52481f61136d062331a",
+  terminalDom: "0894c3038aae4180631183d1f6fc91822be44f06865f318041fb1f996f894229",
+  refreshLifecycle: "d9ac00cdbf0bc758c39b7f47d1941ea36c2b2bc07f7f9e264301833308d35725",
+});
 const H4_7C_SEMANTIC_HASHES = Object.freeze({
   mainToolTrace: "6599ebee8ff79520ee51e2fa2fe2011ce6237091791282c02f6b5525092223c4",
   backgroundAgent: "1319a246751c8daa8c6546cfe1b8f2aab159bb00a11b01f908b5d20c7f414545",
@@ -306,6 +321,37 @@ function stableSignatureAlternationResult(result) {
     ...stableRepeatedRangeFailureResult(result),
     missingFileError: error === "文件不存在",
   };
+}
+
+function stableSuccessResetResult(result) {
+  const source = result && typeof result === "object" ? result : {};
+  const error = String(source.error || "");
+  const content = String(source.content || "");
+  const failureCountPresent = Object.prototype.hasOwnProperty.call(source, "failureCount");
+  const projection = {
+    ok: source.ok === false ? false : source.ok,
+    action: String(source.action || ""),
+    path: String(source.path || ""),
+    contentSha256: Object.prototype.hasOwnProperty.call(source, "content")
+      ? crypto.createHash("sha256").update(content).digest("hex")
+      : "",
+    size: Object.prototype.hasOwnProperty.call(source, "size") ? Number(source.size) : null,
+    truncated: Object.prototype.hasOwnProperty.call(source, "truncated")
+      ? Boolean(source.truncated)
+      : null,
+    lineRangePresent: Object.prototype.hasOwnProperty.call(source, "lineRange"),
+    lineRange: Object.prototype.hasOwnProperty.call(source, "lineRange")
+      ? source.lineRange
+      : null,
+    errorCodePresent: Object.prototype.hasOwnProperty.call(source, "errorCode"),
+    errorPresent: Boolean(error.trim()),
+    missingFileError: error === "文件不存在",
+    failureCountPresent,
+    retryBlocked: Boolean(source.retryBlocked),
+    retryLimitReached: Boolean(source.retryLimitReached),
+  };
+  if (failureCountPresent) projection.failureCount = Number(source.failureCount);
+  return projection;
 }
 
 const EXPECTED_REPEATED_RANGE_RESULTS = Object.freeze([
@@ -515,6 +561,92 @@ const SIGNATURE_ALTERNATION_FAILURE_CONTRACT = Object.freeze({
   expectedRetryBlockedEvents: Object.freeze([]),
   projectResult: stableSignatureAlternationResult,
   hashes: H4_6M_SEMANTIC_HASHES,
+});
+
+const SUCCESS_RESET_CALL_ARGUMENTS = Object.freeze(Array.from(
+  { length: 3 },
+  () => Object.freeze({ path: SUCCESS_RESET_READ_PATH }),
+));
+const FIXTURE_CONTENT_SHA256 = crypto.createHash("sha256")
+  .update(FIXTURE_CONTENT)
+  .digest("hex");
+const EXPECTED_SUCCESS_RESET_RESULTS = Object.freeze([
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    path: "",
+    contentSha256: "",
+    size: null,
+    truncated: null,
+    lineRangePresent: false,
+    lineRange: null,
+    errorCodePresent: false,
+    errorPresent: true,
+    missingFileError: true,
+    failureCountPresent: true,
+    retryBlocked: false,
+    retryLimitReached: false,
+    failureCount: 1,
+  }),
+  Object.freeze({
+    ok: true,
+    action: "read_file",
+    path: SUCCESS_RESET_READ_PATH,
+    contentSha256: FIXTURE_CONTENT_SHA256,
+    size: Buffer.byteLength(FIXTURE_CONTENT, "utf8"),
+    truncated: false,
+    lineRangePresent: true,
+    lineRange: null,
+    errorCodePresent: false,
+    errorPresent: false,
+    missingFileError: false,
+    failureCountPresent: false,
+    retryBlocked: false,
+    retryLimitReached: false,
+  }),
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    path: "",
+    contentSha256: "",
+    size: null,
+    truncated: null,
+    lineRangePresent: false,
+    lineRange: null,
+    errorCodePresent: false,
+    errorPresent: true,
+    missingFileError: true,
+    failureCountPresent: true,
+    retryBlocked: false,
+    retryLimitReached: false,
+    failureCount: 1,
+  }),
+]);
+const SUCCESS_RESET_FAILURE_CONTRACT = Object.freeze({
+  key: "H4-6N",
+  scenarioPrefix: "success-reset",
+  evidencePrefix: "success-reset-failure",
+  userMarker: SUCCESS_RESET_USER,
+  stageMarker: SUCCESS_RESET_STAGE,
+  finalMarker: SUCCESS_RESET_FINAL,
+  arguments: SUCCESS_RESET_CALL_ARGUMENTS[0],
+  callArguments: SUCCESS_RESET_CALL_ARGUMENTS,
+  expectedResults: EXPECTED_SUCCESS_RESET_RESULTS,
+  expectedOutcomes: Object.freeze(["failed", "succeeded", "failed"]),
+  executedArguments: SUCCESS_RESET_CALL_ARGUMENTS,
+  receiptMetric: "successResetReceipts",
+  finalMetric: "normalFinal",
+  executionHashKey: "successResetExecutionProjection",
+  finalHashKey: "normalFinalProjection",
+  activeForceFinalRound: false,
+  finalMetricExpected: Object.freeze({
+    toolsPresent: true,
+    toolChoicePresent: true,
+    recoveryInstructionPresent: false,
+  }),
+  expectedRetryBlockedEvents: Object.freeze([]),
+  projectResult: stableSuccessResetResult,
+  hashes: H4_6N_SEMANTIC_HASHES,
 });
 
 function stableMissingFileToolResult(result) {
@@ -5771,6 +5903,10 @@ function repeatedRangeActiveEventTypes(contract) {
   return eventTypes;
 }
 
+function expectedContractOutcome(contract, index) {
+  return contract.expectedOutcomes?.[index] || "failed";
+}
+
 const REPEATED_RANGE_ACTIVE_EVENT_TYPES = Object.freeze(
   repeatedRangeActiveEventTypes(REPEATED_RANGE_FAILURE_CONTRACT),
 );
@@ -5872,7 +6008,8 @@ async function repeatedFailureLifecycleDomEvidence(
   const itemLocators = await items.all();
   const itemProjections = [];
   for (const [index, item] of itemLocators.entries()) {
-    await expect(item).toHaveClass(/\bfailed\b/);
+    const expectedOutcome = expectedContractOutcome(contract, index);
+    await expect(item).toHaveClass(new RegExp(`\\b${expectedOutcome}\\b`));
     const details = item.locator(".tool-process-detail pre");
     await expect(details).toHaveCount(2);
     const texts = await details.allTextContents();
@@ -5904,6 +6041,14 @@ async function repeatedFailureLifecycleDomEvidence(
     if (contract.key === "H4-6M") {
       resultProjection.missingFileFailureVisible = resultText.includes("文件不存在");
     }
+    if (contract.key === "H4-6N") {
+      resultProjection.missingFileFailureVisible = resultText.includes("文件不存在");
+      resultProjection.successContentVisible = (
+        resultText.includes(SUCCESS_RESET_READ_PATH)
+        && resultText.includes("26 B")
+        && countOccurrences(resultText, FIXTURE_CONTENT.trim()) === 1
+      );
+    }
     const projection = {
       tool: index + 1,
       failed: String(await item.getAttribute("class") || "").split(/\s+/).includes("failed"),
@@ -5911,18 +6056,34 @@ async function repeatedFailureLifecycleDomEvidence(
       arguments: argumentProjection,
       result: resultProjection,
     };
-    expect(projection.arguments).toMatchObject({
-      pathPresent: true,
-      startLinePresent: true,
-      endLinePresent: true,
-    });
+    if (contract.key === "H4-6N") {
+      projection.succeeded = String(await item.getAttribute("class") || "")
+        .split(/\s+/).includes("succeeded");
+      expect(projection.arguments).toEqual({
+        pathPresent: true,
+        startLinePresent: false,
+        endLinePresent: false,
+      });
+    } else {
+      expect(projection.arguments).toMatchObject({
+        pathPresent: true,
+        startLinePresent: true,
+        endLinePresent: true,
+      });
+    }
     const expectedResultProjection = {
       nonEmpty: true,
-      rangeFailureVisible: expectedResult.startLineMentioned && expectedResult.endLineMentioned,
+      rangeFailureVisible: Boolean(
+        expectedResult.startLineMentioned && expectedResult.endLineMentioned
+      ),
       repeatedFailureBlockedVisible: expectedResult.retryBlocked,
     };
     if (contract.key === "H4-6M") {
       expectedResultProjection.missingFileFailureVisible = expectedResult.missingFileError;
+    }
+    if (contract.key === "H4-6N") {
+      expectedResultProjection.missingFileFailureVisible = expectedResult.missingFileError;
+      expectedResultProjection.successContentVisible = expectedOutcome === "succeeded";
     }
     expect(projection.result).toEqual(expectedResultProjection);
     itemProjections.push(projection);
@@ -5950,8 +6111,21 @@ async function repeatedFailureLifecycleDomEvidence(
   });
   const projection = {
     sequence: finalCount
-      ? [contract.userMarker, contract.stageMarker, `read_file:failed:${contract.expectedResults.length}`, contract.finalMarker]
-      : [contract.userMarker, contract.stageMarker, `read_file:failed:${contract.expectedResults.length}`],
+      ? [
+        contract.userMarker,
+        contract.stageMarker,
+        contract.key === "H4-6N"
+          ? `read_file:mixed:${contract.expectedResults.length}`
+          : `read_file:failed:${contract.expectedResults.length}`,
+        contract.finalMarker,
+      ]
+      : [
+        contract.userMarker,
+        contract.stageMarker,
+        contract.key === "H4-6N"
+          ? `read_file:mixed:${contract.expectedResults.length}`
+          : `read_file:failed:${contract.expectedResults.length}`,
+      ],
     counts: {
       user: 1,
       commentary: 1,
@@ -5995,18 +6169,23 @@ function expectedRepeatedModelReceipts(
   }));
 }
 
-async function signatureAlternationFixtureAudit(h4, contract) {
-  if (contract.key !== "H4-6M") return null;
+async function controlledFixtureAudit(h4, contract) {
+  if (contract.key !== "H4-6M" && contract.key !== "H4-6N") return null;
   const projectRoot = path.resolve(h4.host.projectDir);
   const target = path.resolve(projectRoot, contract.arguments.path);
   expect(path.dirname(target)).toBe(projectRoot);
-  expect(path.relative(projectRoot, target)).toBe(SIGNATURE_ALTERNATION_READ_PATH);
-  const bytes = await fs.readFile(target);
+  expect(path.relative(projectRoot, target)).toBe(contract.arguments.path);
+  let bytes = null;
+  try {
+    bytes = await fs.readFile(target);
+  } catch (error) {
+    expect(error?.code).toBe("ENOENT");
+  }
   return {
     insideProject: true,
-    exists: true,
-    hashMatches: crypto.createHash("sha256").update(bytes).digest("hex")
-      === crypto.createHash("sha256").update(Buffer.from(FIXTURE_CONTENT, "utf8")).digest("hex"),
+    exists: bytes != null,
+    hashMatches: bytes != null && crypto.createHash("sha256").update(bytes).digest("hex")
+      === FIXTURE_CONTENT_SHA256,
   };
 }
 
@@ -6054,7 +6233,7 @@ async function completeRepeatedRangeFailureLifecycle(
     name: "read_file",
     arguments: contract.callArguments[index],
     status: "completed",
-    outcome: "failed",
+    outcome: expectedContractOutcome(contract, index),
     result,
   })));
   const modelCompletedWithTools = activeTrace.eventProjection.filter((event) => (
@@ -6083,7 +6262,7 @@ async function completeRepeatedRangeFailureLifecycle(
     expect(event).toMatchObject({
       toolCallId: `tool-${index + 1}`,
       name: "read_file",
-      outcome: "failed",
+      outcome: expectedContractOutcome(contract, index),
       result: contract.expectedResults[index],
     });
   }
@@ -6143,7 +6322,16 @@ async function completeRepeatedRangeFailureLifecycle(
   const process = page.locator("#messages article.tool-process");
   await expect(process).toHaveCount(1);
   await expect(process.locator("details.tool-process-item")).toHaveCount(contract.expectedResults.length);
-  await expect(process.locator("details.tool-process-item.failed")).toHaveCount(contract.expectedResults.length);
+  await expect(process.locator("details.tool-process-item.failed")).toHaveCount(
+    contract.expectedResults.filter((_, index) => (
+      expectedContractOutcome(contract, index) === "failed"
+    )).length,
+  );
+  await expect(process.locator("details.tool-process-item.succeeded")).toHaveCount(
+    contract.expectedResults.filter((_, index) => (
+      expectedContractOutcome(contract, index) === "succeeded"
+    )).length,
+  );
   const initialDom = await repeatedFailureLifecycleDomEvidence(page, contract);
   expect(initialDom.projection).toMatchObject({
     counts: {
@@ -6328,7 +6516,7 @@ async function completeRepeatedRangeFailureLifecycle(
       arguments: null,
       native: true,
       replayed: false,
-      outcome: "failed",
+      outcome: expectedContractOutcome(contract, index),
       result: contract.expectedResults[index],
     });
     expect(sessionToolMeta[index * 2].agentEventSeq).toBe(startedEvents[index].seq);
@@ -6385,7 +6573,7 @@ async function completeRepeatedRangeFailureLifecycle(
   });
   expect(metrics.chatRequests).toEqual(expectedChatRequests);
   expect(metrics.toolExecutions).toHaveLength(3);
-  const signatureFixtureAudit = await signatureAlternationFixtureAudit(h4, contract);
+  const signatureFixtureAudit = await controlledFixtureAudit(h4, contract);
   if (contract.key === "H4-6M") {
     const fingerprints = durableExecutions.map((execution) => String(execution?.fingerprint || ""));
     const failureSignatures = durableExecutions.map((execution) => (
@@ -6445,6 +6633,80 @@ async function completeRepeatedRangeFailureLifecycle(
       retryBlocked: contract.expectedResults.map((result) => result.retryBlocked),
       fixtureStates: fixtureTimeline,
       fixtureRestored: signatureFixtureAudit,
+    };
+  }
+  if (contract.key === "H4-6N") {
+    const fingerprints = durableExecutions.map((execution) => String(execution?.fingerprint || ""));
+    const failureSignaturePresent = durableExecutions.map((execution) => (
+      Object.prototype.hasOwnProperty.call(execution || {}, "failureSignature")
+    ));
+    const failureSignatures = durableExecutions.map((execution) => (
+      String(execution?.failureSignature || "")
+    ));
+    expect(fingerprints.every(Boolean)).toBe(true);
+    expect(new Set(fingerprints).size).toBe(1);
+    expect(durableExecutions.map((execution) => String(execution?.outcome || "")))
+      .toEqual(["failed", "succeeded", "failed"]);
+    expect(failureSignaturePresent).toEqual([true, false, true]);
+    expect(failureSignatures[0]).not.toBe("");
+    expect(failureSignatures[0]).toBe(failureSignatures[2]);
+    const successFailureCountAbsent = (
+      !Object.prototype.hasOwnProperty.call(durableExecutions[1] || {}, "failureCount")
+      && !Object.prototype.hasOwnProperty.call(
+        durableExecutions[1]?.result || {},
+        "failureCount",
+      )
+    );
+    expect(successFailureCountAbsent).toBe(true);
+    expect(durableExecutions.map((execution) => parseToolArguments(execution?.arguments)))
+      .toEqual(contract.callArguments);
+    const fixtureTimeline = [
+      {
+        callNumber: 1,
+        expectedState: "missing",
+        observedState: "missing",
+        exists: false,
+        hashMatches: false,
+        delegationCount: 1,
+        executionCount: 1,
+      },
+      {
+        callNumber: 2,
+        expectedState: "present",
+        observedState: "present",
+        exists: true,
+        hashMatches: true,
+        delegationCount: 2,
+        executionCount: 2,
+      },
+      {
+        callNumber: 3,
+        expectedState: "missing",
+        observedState: "missing",
+        exists: false,
+        hashMatches: false,
+        delegationCount: 3,
+        executionCount: 3,
+      },
+    ];
+    expect(metrics.successResetFixtureTimeline).toEqual(fixtureTimeline);
+    expect(signatureFixtureAudit).toEqual({ insideProject: true, exists: false, hashMatches: false });
+    failureIdentityProjection = {
+      canonicalArguments: contract.callArguments.map((argumentsValue) => ({
+        path: argumentsValue.path,
+      })),
+      fingerprintPattern: ["A", "A", "A"],
+      fingerprintStable: new Set(fingerprints).size === 1,
+      outcomePattern: ["failed", "succeeded", "failed"],
+      failureSignaturePattern: ["A", "absent", "A"],
+      firstAndThirdSignatureEqual: failureSignatures[0] === failureSignatures[2],
+      successSignatureAbsent: !failureSignaturePresent[1],
+      failureCountPattern: [1, "absent", 1],
+      successFailureCountAbsent,
+      retryLimitReached: contract.expectedResults.map((result) => result.retryLimitReached),
+      retryBlocked: contract.expectedResults.map((result) => result.retryBlocked),
+      fixtureStates: fixtureTimeline,
+      fixtureMissingAfterFinal: signatureFixtureAudit,
     };
   }
   const requests = h4.requestEvidenceSince(requestBoundary);
@@ -6599,10 +6861,15 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(
   expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
   expect(metricsAfter.productionToolDelegations).toBe(contract.executedArguments.length);
   expect(metricsAfter.unsafeToolRequests).toBe(0);
-  const signatureFixtureAuditAfter = await signatureAlternationFixtureAudit(h4, contract);
+  const signatureFixtureAuditAfter = await controlledFixtureAudit(h4, contract);
   if (contract.key === "H4-6M") {
     expect(metricsAfter.signatureAlternationFixtureTimeline)
       .toEqual(metricsBefore.signatureAlternationFixtureTimeline);
+    expect(signatureFixtureAuditAfter).toEqual(before.signatureFixtureAudit);
+  }
+  if (contract.key === "H4-6N") {
+    expect(metricsAfter.successResetFixtureTimeline)
+      .toEqual(metricsBefore.successResetFixtureTimeline);
     expect(signatureFixtureAuditAfter).toEqual(before.signatureFixtureAudit);
   }
   const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
@@ -6637,6 +6904,11 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(
   };
   if (contract.key === "H4-6M") {
     refreshProjection.signatureFixtureStable = (
+      JSON.stringify(signatureFixtureAuditAfter) === JSON.stringify(before.signatureFixtureAudit)
+    );
+  }
+  if (contract.key === "H4-6N") {
+    refreshProjection.successResetFixtureStable = (
       JSON.stringify(signatureFixtureAuditAfter) === JSON.stringify(before.signatureFixtureAudit)
     );
   }
@@ -6695,6 +6967,22 @@ test("direct classic identical read_file fingerprint alternates failure signatur
     h4,
     "classic",
     SIGNATURE_ALTERNATION_FAILURE_CONTRACT,
+  );
+});
+
+test("bundle identical read_file failure chain resets after success and reloads uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "bundle",
+    SUCCESS_RESET_FAILURE_CONTRACT,
+  );
+});
+
+test("direct classic identical read_file failure chain resets after success and reloads uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "classic",
+    SUCCESS_RESET_FAILURE_CONTRACT,
   );
 });
 

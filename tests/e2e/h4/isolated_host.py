@@ -56,6 +56,9 @@ ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL"
 SIGNATURE_ALTERNATION_USER = "H4_SIGNATURE_ALTERNATION_FAILURE_USER"
 SIGNATURE_ALTERNATION_STAGE = "H4_SIGNATURE_ALTERNATION_FAILURE_STAGE"
 SIGNATURE_ALTERNATION_FINAL = "H4_SIGNATURE_ALTERNATION_FAILURE_FINAL"
+SUCCESS_RESET_USER = "H4_SUCCESS_RESET_FAILURE_USER"
+SUCCESS_RESET_STAGE = "H4_SUCCESS_RESET_FAILURE_STAGE"
+SUCCESS_RESET_FINAL = "H4_SUCCESS_RESET_FAILURE_FINAL"
 MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER"
 MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
 MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
@@ -90,10 +93,14 @@ ARGUMENT_ISOLATION_TOOL_CALL_IDS = tuple(
 SIGNATURE_ALTERNATION_TOOL_CALL_IDS = tuple(
     f"h4-signature-alternation-read-call-{index}" for index in range(1, 4)
 )
+SUCCESS_RESET_TOOL_CALL_IDS = tuple(
+    f"h4-success-reset-read-call-{index}" for index in range(1, 4)
+)
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
 SIGNATURE_ALTERNATION_READ_PATH = "h4-signature-alternation-fixture.txt"
+SUCCESS_RESET_READ_PATH = "h4-success-reset-fixture.txt"
 MALFORMED_TOOL_ARGUMENTS = '{"path":"fixture.txt"'
 ARGUMENT_ISOLATION_TOOL_ARGUMENTS = (
     {"path": READ_PATH, "startLine": 2, "endLine": 1},
@@ -105,6 +112,7 @@ SIGNATURE_ALTERNATION_TOOL_ARGUMENTS = {
     "startLine": 2,
     "endLine": 1,
 }
+SUCCESS_RESET_TOOL_ARGUMENTS = {"path": SUCCESS_RESET_READ_PATH}
 REFRESH_GATE_NAMES = (
     "before-first-delta",
     "after-second-delta",
@@ -124,6 +132,7 @@ class MetricState:
             "toolExecutions": [],
             "productionToolDelegations": 0,
             "signatureAlternationFixtureTimeline": [],
+            "successResetFixtureTimeline": [],
             "unsafeToolRequests": 0,
             "modelGateWaits": 0,
             "modelCatalogGateTimeline": [],
@@ -318,9 +327,20 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             *REPEATED_RANGE_FAILURE_TOOL_CALL_IDS,
             *ARGUMENT_ISOLATION_TOOL_CALL_IDS,
             *SIGNATURE_ALTERNATION_TOOL_CALL_IDS,
+            *SUCCESS_RESET_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
+    if SUCCESS_RESET_USER in user_text:
+        completed_calls = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(SUCCESS_RESET_TOOL_CALL_IDS)
+        receipt_count = len(completed_calls)
+        if receipt_count >= len(SUCCESS_RESET_TOOL_CALL_IDS):
+            return "success-reset-final", True
+        return f"success-reset-call-{receipt_count + 1}", receipt_count > 0
     if SIGNATURE_ALTERNATION_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -636,6 +656,56 @@ def _signature_alternation_receipt_projection(payload: dict) -> list[dict]:
     )
 
 
+def _success_reset_receipt_projection(payload: dict) -> list[dict]:
+    aliases = {
+        tool_call_id: f"tool-{index + 1}"
+        for index, tool_call_id in enumerate(SUCCESS_RESET_TOOL_CALL_IDS)
+    }
+    projections = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        tool_call_id = str(message.get("tool_call_id") or "")
+        alias = aliases.get(tool_call_id)
+        if not alias:
+            continue
+        try:
+            result = json.loads(str(message.get("content") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        error = str(result.get("error") or "")
+        content = str(result.get("content") or "")
+        failure_count_present = "failureCount" in result
+        projection = {
+            "role": "tool",
+            "toolCallId": alias,
+            "name": str(message.get("name") or ""),
+            "ok": result.get("ok"),
+            "action": str(result.get("action") or ""),
+            "path": str(result.get("path") or ""),
+            "contentSha256": (
+                hashlib.sha256(content.encode("utf-8")).hexdigest()
+                if "content" in result else ""
+            ),
+            "size": int(result.get("size") or 0) if "size" in result else None,
+            "truncated": bool(result.get("truncated")) if "truncated" in result else None,
+            "lineRangePresent": "lineRange" in result,
+            "lineRange": result.get("lineRange") if "lineRange" in result else None,
+            "errorCodePresent": "errorCode" in result,
+            "errorPresent": bool(error.strip()),
+            "missingFileError": error == "文件不存在",
+            "failureCountPresent": failure_count_present,
+            "retryBlocked": bool(result.get("retryBlocked")),
+            "retryLimitReached": bool(result.get("retryLimitReached")),
+        }
+        if failure_count_present:
+            projection["failureCount"] = int(result.get("failureCount") or 0)
+        projections.append(projection)
+    return projections
+
+
 def _missing_file_receipt_projection(payload: dict) -> dict | None:
     for message in payload.get("messages") or []:
         if not isinstance(message, dict) or message.get("role") != "tool":
@@ -798,6 +868,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["signatureAlternationReceipts"] = (
                 _signature_alternation_receipt_projection(payload)
             )
+        if scenario.startswith("success-reset-"):
+            chat_metric["successResetReceipts"] = (
+                _success_reset_receipt_projection(payload)
+            )
         if scenario == "repeated-range-failure-final":
             chat_metric["forcedFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
@@ -811,20 +885,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     for message in (payload.get("messages") or [])
                 ),
             }
-        if scenario == "argument-isolation-final":
-            chat_metric["normalFinal"] = {
-                "toolsPresent": bool(payload.get("tools")),
-                "toolChoicePresent": "tool_choice" in payload,
-                "recoveryInstructionPresent": any(
-                    isinstance(message, dict)
-                    and message.get("role") == "system"
-                    and "identical tool call was blocked" in str(
-                        message.get("content") or ""
-                    )
-                    for message in (payload.get("messages") or [])
-                ),
-            }
-        if scenario == "signature-alternation-final":
+        if scenario in {
+            "argument-isolation-final",
+            "signature-alternation-final",
+            "success-reset-final",
+        }:
             chat_metric["normalFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
                 "toolChoicePresent": "tool_choice" in payload,
@@ -855,6 +920,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("argument-isolation-call-")
             and not scenario.startswith("signature-alternation-call-")
+            and not scenario.startswith("success-reset-call-")
             and current_chat_count == 1
         ):
             METRICS.increment("modelGateWaits")
@@ -913,7 +979,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "tool-detail-final", "multi-tool-detail-final", "invalid-tool-final",
             "parse-error-tool-final", "missing-path-tool-final", "executor-range-final",
             "missing-file-final", "repeated-range-failure-final", "argument-isolation-final",
-            "signature-alternation-final",
+            "signature-alternation-final", "success-reset-final",
         ):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -942,6 +1008,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "repeated-range-failure-final": REPEATED_RANGE_FAILURE_FINAL,
                 "argument-isolation-final": ARGUMENT_ISOLATION_FINAL,
                 "signature-alternation-final": SIGNATURE_ALTERNATION_FINAL,
+                "success-reset-final": SUCCESS_RESET_FINAL,
             }.get(scenario, TOOL_DETAILS_FINAL)
             if not write_tool_detail_frame(_chunk({
                 "role": "assistant",
@@ -965,7 +1032,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "missing-file-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("argument-isolation-call-") \
-                or scenario.startswith("signature-alternation-call-"):
+                or scenario.startswith("signature-alternation-call-") \
+                or scenario.startswith("success-reset-call-"):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
@@ -1117,6 +1185,22 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }]
                 if call_number == 1:
                     stage_text = SIGNATURE_ALTERNATION_STAGE
+            elif scenario.startswith("success-reset-call-"):
+                call_number = int(scenario.rsplit("-", 1)[-1])
+                tool_calls = [{
+                    "index": 0,
+                    "id": SUCCESS_RESET_TOOL_CALL_IDS[call_number - 1],
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            SUCCESS_RESET_TOOL_ARGUMENTS,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }]
+                if call_number == 1:
+                    stage_text = SUCCESS_RESET_STAGE
             frames = []
             if stage_text:
                 frames.append(_chunk({"role": "assistant", "content": stage_text}))
@@ -1301,25 +1385,36 @@ def main() -> int:
     if missing_home_target.exists():
         raise RuntimeError("H4 missing-file fixture unexpectedly exists in the isolated home")
 
-    signature_relative = Path(SIGNATURE_ALTERNATION_READ_PATH)
-    if signature_relative.is_absolute() or ".." in signature_relative.parts:
-        raise RuntimeError("H4 signature-alternation fixture is not a safe relative path")
-    signature_project_target = (project_dir / signature_relative).resolve()
-    if project_dir not in signature_project_target.parents:
-        raise RuntimeError("H4 signature-alternation fixture escaped the project root")
-    if signature_project_target.exists():
-        raise RuntimeError("H4 signature-alternation fixture unexpectedly exists")
     fixture_bytes = (project_dir / READ_PATH).read_bytes()
     fixture_sha256 = hashlib.sha256(fixture_bytes).hexdigest()
-    signature_alternation_lock = threading.RLock()
-    signature_alternation_invocations = 0
+    controlled_fixture_lock = threading.RLock()
+    controlled_fixture_invocations = {
+        SIGNATURE_ALTERNATION_READ_PATH: 0,
+        SUCCESS_RESET_READ_PATH: 0,
+    }
 
-    def signature_alternation_state() -> dict:
-        exists = signature_project_target.exists()
+    def controlled_fixture_target(relative_path: str) -> Path:
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("H4 controlled fixture is not a safe relative path")
+        target = (project_dir / relative).resolve()
+        if project_dir not in target.parents:
+            raise RuntimeError("H4 controlled fixture escaped the project root")
+        return target
+
+    controlled_fixture_targets = {
+        relative_path: controlled_fixture_target(relative_path)
+        for relative_path in controlled_fixture_invocations
+    }
+    if any(target.exists() for target in controlled_fixture_targets.values()):
+        raise RuntimeError("H4 controlled fixture unexpectedly exists")
+
+    def controlled_fixture_state(target: Path) -> dict:
+        exists = target.exists()
         hash_matches = (
             exists
-            and signature_project_target.is_file()
-            and hashlib.sha256(signature_project_target.read_bytes()).hexdigest()
+            and target.is_file()
+            and hashlib.sha256(target.read_bytes()).hexdigest()
             == fixture_sha256
         )
         return {
@@ -1364,7 +1459,6 @@ def main() -> int:
     original_execute_registered_tool = code_server.execute_registered_tool
 
     def counted_execute_registered_tool(action, payload, *, _arguments_validated=False):
-        nonlocal signature_alternation_invocations
         if action != "read_file":
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 tool action is outside the read-only fixture contract")
@@ -1372,10 +1466,12 @@ def main() -> int:
         payload_keys = set((payload or {}).keys())
         is_missing_read = requested == MISSING_READ_PATH
         is_signature_alternation_read = requested == SIGNATURE_ALTERNATION_READ_PATH
+        is_success_reset_read = requested == SUCCESS_RESET_READ_PATH
         if requested not in {
             READ_PATH,
             MISSING_READ_PATH,
             SIGNATURE_ALTERNATION_READ_PATH,
+            SUCCESS_RESET_READ_PATH,
         }:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 read_file request escaped the fixed synthetic fixture")
@@ -1393,6 +1489,12 @@ def main() -> int:
         ):
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 signature-alternation request changed the fixed payload")
+        if is_success_reset_read and (
+            payload_keys != set(SUCCESS_RESET_TOOL_ARGUMENTS)
+            or payload != SUCCESS_RESET_TOOL_ARGUMENTS
+        ):
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 success-reset request changed the fixed payload")
         start_line = (payload or {}).get("startLine")
         end_line = (payload or {}).get("endLine")
         is_second_multi_read = start_line == 1 and end_line == 1
@@ -1417,31 +1519,37 @@ def main() -> int:
                 _arguments_validated=_arguments_validated,
             )
 
-        if is_signature_alternation_read:
-            with signature_alternation_lock:
-                signature_alternation_invocations += 1
-                call_number = signature_alternation_invocations
+        if is_signature_alternation_read or is_success_reset_read:
+            with controlled_fixture_lock:
+                controlled_fixture_invocations[requested] += 1
+                call_number = controlled_fixture_invocations[requested]
                 if call_number not in (1, 2, 3):
                     METRICS.increment("unsafeToolRequests")
-                    raise ValueError("H4 signature-alternation call count exceeded the contract")
-                expected_state = "missing" if call_number == 2 else "present"
-                if expected_state == "present":
-                    signature_project_target.write_bytes(fixture_bytes)
+                    raise ValueError("H4 controlled fixture call count exceeded the contract")
+                target = controlled_fixture_targets[requested]
+                if is_signature_alternation_read:
+                    expected_state = "missing" if call_number == 2 else "present"
+                    timeline_metric = "signatureAlternationFixtureTimeline"
                 else:
-                    if not signature_project_target.is_file():
-                        raise RuntimeError("H4 signature-alternation removal target is not a file")
-                    signature_project_target.unlink()
-                state = signature_alternation_state()
+                    expected_state = "present" if call_number == 2 else "missing"
+                    timeline_metric = "successResetFixtureTimeline"
+                if expected_state == "present":
+                    target.write_bytes(fixture_bytes)
+                elif target.exists():
+                    if not target.is_file():
+                        raise RuntimeError("H4 controlled fixture removal target is not a file")
+                    target.unlink()
+                state = controlled_fixture_state(target)
                 if state["observedState"] != expected_state:
-                    raise RuntimeError("H4 signature-alternation state switch did not converge")
+                    raise RuntimeError("H4 controlled fixture state switch did not converge")
                 if expected_state == "present" and not state["hashMatches"]:
-                    raise RuntimeError("H4 signature-alternation fixture bytes changed")
+                    raise RuntimeError("H4 controlled fixture bytes changed")
                 try:
                     return delegate_to_production()
                 finally:
                     counters = METRICS.snapshot()
-                    state_after = signature_alternation_state()
-                    METRICS.append("signatureAlternationFixtureTimeline", {
+                    state_after = controlled_fixture_state(target)
+                    METRICS.append(timeline_metric, {
                         "callNumber": call_number,
                         "expectedState": expected_state,
                         **state_after,
@@ -1634,11 +1742,12 @@ def main() -> int:
             code_thread.join(timeout=3)
             fake_thread.join(timeout=3)
         finally:
-            with signature_alternation_lock:
-                if signature_project_target.exists():
-                    signature_project_target.unlink()
-                if signature_project_target.exists():
-                    raise RuntimeError("H4 signature-alternation fixture cleanup failed")
+            with controlled_fixture_lock:
+                for controlled_target in controlled_fixture_targets.values():
+                    if controlled_target.exists():
+                        controlled_target.unlink()
+                    if controlled_target.exists():
+                        raise RuntimeError("H4 controlled fixture cleanup failed")
     return 0
 
 
