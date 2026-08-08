@@ -34,6 +34,9 @@ const EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL";
 const REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER";
 const REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE";
 const REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL";
+const ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER";
+const ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE";
+const ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL";
 const MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER";
 const MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE";
 const MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL";
@@ -156,6 +159,17 @@ const H4_6K_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "76c4d8cfbc85aefd48242eedea1a13b66314430e17860a837b345142e7e6b211",
   terminalDom: "062793b9555a641084d28f70b8b3028af45ed40847f60ac547222c85dcba36f7",
   refreshLifecycle: "ae09c60e831dec8ffd7295e9baef598b898a1061ac85250d61e2e1936cc6fc44",
+});
+const H4_6L_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "e14d928023c7e8b4b6361e21a298dbb3bb3e8f55e869e55e199463c9df19167f",
+  argumentIsolationExecutionProjection: "aa850a56ead1282c75ecbe2307a48d321623495c9d9710ac79e148c79db735fa",
+  modelToolReceiptProjection: "5ef5d2a1bb4e6724ec42b245ab0bb31dc58739de0946038cff95b2951384f3d4",
+  normalFinalProjection: "be20dba411d3bd89097afd19589d2ebb98182a40d13218ee0fbd920047e23c7a",
+  runtimeProjection: "53c3e16055adbbc77fc095010ce4b714fad3d7ef3b5b58078b122063c84624ff",
+  sessionRoleContent: "3dfadda28fd29faf8cf684f9ef121feccc51b799fa7c0f21d344e2c21191f562",
+  sessionToolMeta: "ac5326e2d5c5599424237d8f760a8302f76a6e2bc687bb630600260642187f7b",
+  terminalDom: "1794c5f4551d5e05cf4dfd6b3bfd272427891dd76c8363285746fd18cbbf8707",
+  refreshLifecycle: "5fc851eaa40059021056e2806c4dbb151f3eb9eb0ae5959487e927beac858f4c",
 });
 const H4_7C_SEMANTIC_HASHES = Object.freeze({
   mainToolTrace: "6599ebee8ff79520ee51e2fa2fe2011ce6237091791282c02f6b5525092223c4",
@@ -324,12 +338,85 @@ const EXPECTED_REPEATED_RANGE_RESULTS = Object.freeze([
 
 const REPEATED_RANGE_FAILURE_CONTRACT = Object.freeze({
   key: "H4-6K",
+  scenarioPrefix: "repeated-range-failure",
+  evidencePrefix: "repeated-range-failure",
   userMarker: REPEATED_RANGE_FAILURE_USER,
   stageMarker: REPEATED_RANGE_FAILURE_STAGE,
   finalMarker: REPEATED_RANGE_FAILURE_FINAL,
   arguments: Object.freeze({ path: "fixture.txt", startLine: 2, endLine: 1 }),
+  callArguments: Object.freeze(Array.from(
+    { length: 4 },
+    () => Object.freeze({ path: "fixture.txt", startLine: 2, endLine: 1 }),
+  )),
+  expectedResults: EXPECTED_REPEATED_RANGE_RESULTS,
+  executedArguments: Object.freeze(Array.from(
+    { length: 3 },
+    () => Object.freeze({ path: "fixture.txt", startLine: 2, endLine: 1 }),
+  )),
+  receiptMetric: "repeatedRangeFailureReceipts",
+  finalMetric: "forcedFinal",
+  executionHashKey: "retryExecutionProjection",
+  finalHashKey: "forcedFinalProjection",
+  activeForceFinalRound: true,
+  finalMetricExpected: Object.freeze({
+    toolsPresent: false,
+    toolChoicePresent: false,
+    recoveryInstructionPresent: true,
+  }),
+  expectedRetryBlockedEvents: Object.freeze([Object.freeze({
+    seq: 20,
+    type: "tool_retry_blocked",
+    failureCount: 3,
+    toolCallId: "tool-4",
+    name: "read_file",
+  })]),
   projectResult: stableRepeatedRangeFailureResult,
   hashes: H4_6K_SEMANTIC_HASHES,
+});
+
+const ARGUMENT_ISOLATION_CALL_ARGUMENTS = Object.freeze([
+  Object.freeze({ path: "fixture.txt", startLine: 2, endLine: 1 }),
+  Object.freeze({ path: "fixture.txt", startLine: 3, endLine: 1 }),
+  Object.freeze({ path: "fixture.txt", startLine: 2, endLine: 1 }),
+]);
+const EXPECTED_ARGUMENT_ISOLATION_RESULTS = Object.freeze([1, 1, 2].map((failureCount) => (
+  Object.freeze({
+    ok: false,
+    action: "read_file",
+    errorCode: "",
+    errorPresent: true,
+    startLineMentioned: true,
+    endLineMentioned: true,
+    failureCount,
+    fieldErrorsPresent: false,
+    retryBlocked: false,
+    retryLimitReached: false,
+  })
+)));
+const ARGUMENT_ISOLATION_FAILURE_CONTRACT = Object.freeze({
+  key: "H4-6L",
+  scenarioPrefix: "argument-isolation",
+  evidencePrefix: "argument-isolation-failure",
+  userMarker: ARGUMENT_ISOLATION_USER,
+  stageMarker: ARGUMENT_ISOLATION_STAGE,
+  finalMarker: ARGUMENT_ISOLATION_FINAL,
+  arguments: ARGUMENT_ISOLATION_CALL_ARGUMENTS[0],
+  callArguments: ARGUMENT_ISOLATION_CALL_ARGUMENTS,
+  expectedResults: EXPECTED_ARGUMENT_ISOLATION_RESULTS,
+  executedArguments: ARGUMENT_ISOLATION_CALL_ARGUMENTS,
+  receiptMetric: "argumentIsolationReceipts",
+  finalMetric: "normalFinal",
+  executionHashKey: "argumentIsolationExecutionProjection",
+  finalHashKey: "normalFinalProjection",
+  activeForceFinalRound: false,
+  finalMetricExpected: Object.freeze({
+    toolsPresent: true,
+    toolChoicePresent: true,
+    recoveryInstructionPresent: false,
+  }),
+  expectedRetryBlockedEvents: Object.freeze([]),
+  projectResult: stableRepeatedRangeFailureResult,
+  hashes: H4_6L_SEMANTIC_HASHES,
 });
 
 function stableMissingFileToolResult(result) {
@@ -1898,14 +1985,20 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
   const restoredUserHandle = await restoredUser.elementHandle();
   expect(restoredUserHandle).toBeTruthy();
   previewPhase = "post-refresh-rerender";
-  const restoredSessionButton = page.locator("#sessionList .session-row.active button.session-main");
-  await expect(restoredSessionButton).toHaveCount(1);
-  await restoredSessionButton.click();
+  const restoredLanguage = await page.locator("html").getAttribute("lang");
+  expect(["en", "zh-CN"]).toContain(restoredLanguage);
+  const originalLanguage = restoredLanguage === "zh-CN" ? "zh" : "en";
+  const alternateLanguage = originalLanguage === "zh" ? "en" : "zh";
+  await selectInterfaceLanguage(page, alternateLanguage);
   await expect.poll(() => restoredUserHandle.evaluate((node) => node.isConnected)).toBe(false);
   await restoredUserHandle.dispose();
   const rerenderedUser = page.locator("#messages article.msg.user").filter({ hasText: TIFF_IMAGE_USER });
   await expect(rerenderedUser).toHaveCount(1);
   const rerenderedPreview = rerenderedUser.locator("[data-message-image-preview]");
+  await expectDecodedImage(rerenderedPreview);
+  expect(previewRequestsFor("post-refresh-rerender", "GET")).toHaveLength(0);
+  await selectInterfaceLanguage(page, originalLanguage);
+  await expect(rerenderedUser).toHaveCount(1);
   await expectDecodedImage(rerenderedPreview);
   expect(previewRequestsFor("post-refresh-rerender", "GET")).toHaveLength(0);
 
@@ -2009,6 +2102,220 @@ async function completedTurnTimingDomEvidence(page, completedLabel = "用时") {
   };
 }
 
+async function submitTimingQueueWithCausalEvidence(h4) {
+  const { page } = h4;
+  const observationKey = "__h4TimingQueueSubmissionObservation";
+  const sessionPutObservations = [];
+  const onSessionPut = (request) => {
+    if (request.method() !== "PUT") return;
+    const requestUrl = new URL(request.url());
+    if (!/^\/api\/sessions\/[^/]+$/.test(requestUrl.pathname)) return;
+
+    let payload = null;
+    try {
+      payload = JSON.parse(request.postData() || "null");
+    } catch (_) {
+      payload = null;
+    }
+    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+    const matchingMessages = messages.filter((message) => {
+      if (message?.role !== "user") return false;
+      if (typeof message.content === "string") return message.content === TIMING_QUEUE_USER;
+      if (!Array.isArray(message.content)) return false;
+      return message.content.some((item) => item?.type === "text" && item.text === TIMING_QUEUE_USER);
+    });
+    const queuedMessages = Array.isArray(payload?.runState?.queuedMessages)
+      ? payload.runState.queuedMessages
+      : [];
+    const matchingCheckpoints = queuedMessages.filter((item) => item?.userText === TIMING_QUEUE_USER);
+    const queuedDispatchCount = matchingMessages.filter((message) => (
+      message?.meta?.queuedDispatch && typeof message.meta.queuedDispatch === "object"
+    )).length;
+    sessionPutObservations.push({
+      sequence: sessionPutObservations.length + 1,
+      method: "PUT",
+      path: "/api/sessions/[id]",
+      queueMarkerPresent: matchingMessages.length > 0 || matchingCheckpoints.length > 0,
+      matchingMessageCount: matchingMessages.length,
+      queuedDispatchCount,
+      queuedCheckpointCount: matchingCheckpoints.length,
+      queuedStatuses: matchingMessages
+        .map((message) => String(message?.meta?.queuedDispatch?.status || ""))
+        .filter(Boolean),
+    });
+  };
+
+  page.on("request", onSessionPut);
+  try {
+    await page.evaluate(({ key, expectedValue }) => {
+      const previous = window[key];
+      if (previous?.cleanup) previous.cleanup();
+      const nodeIds = new WeakMap();
+      let nextNodeId = 1;
+      let nextSequence = 1;
+      const timeline = [];
+      const nodeId = (node) => {
+        if (!node || (typeof node !== "object" && typeof node !== "function")) return "";
+        if (!nodeIds.has(node)) nodeIds.set(node, `node-${nextNodeId++}`);
+        return nodeIds.get(node);
+      };
+      const promptSnapshot = () => {
+        const prompt = document.getElementById("prompt");
+        const form = document.getElementById("chatForm");
+        return {
+          promptNodeId: nodeId(prompt),
+          formNodeId: nodeId(form),
+          promptConnected: Boolean(prompt?.isConnected),
+          promptDisabled: Boolean(prompt?.disabled),
+          activePrompt: document.activeElement === prompt,
+          valueMatches: String(prompt?.value || "") === expectedValue,
+        };
+      };
+      const onKeydown = (event) => {
+        if (event.target?.id !== "prompt" || event.key !== "Enter") return;
+        timeline.push({
+          sequence: nextSequence++,
+          type: "keydown",
+          key: String(event.key || ""),
+          ctrlKey: Boolean(event.ctrlKey),
+          metaKey: Boolean(event.metaKey),
+          shiftKey: Boolean(event.shiftKey),
+          targetNodeId: nodeId(event.target),
+          targetConnected: Boolean(event.target?.isConnected),
+          targetDisabled: Boolean(event.target?.disabled),
+          activePrompt: document.activeElement === event.target,
+          valueMatches: String(event.target?.value || "") === expectedValue,
+        });
+      };
+      const onSubmit = (event) => {
+        if (event.target?.id !== "chatForm") return;
+        const prompt = document.getElementById("prompt");
+        timeline.push({
+          sequence: nextSequence++,
+          type: "submit",
+          formNodeId: nodeId(event.target),
+          formConnected: Boolean(event.target?.isConnected),
+          promptNodeId: nodeId(prompt),
+          promptConnected: Boolean(prompt?.isConnected),
+          promptDisabled: Boolean(prompt?.disabled),
+          activePrompt: document.activeElement === prompt,
+          valueMatches: String(prompt?.value || "") === expectedValue,
+        });
+      };
+      document.addEventListener("keydown", onKeydown, true);
+      document.addEventListener("submit", onSubmit, true);
+      window[key] = {
+        timeline,
+        promptSnapshot,
+        cleanup() {
+          document.removeEventListener("keydown", onKeydown, true);
+          document.removeEventListener("submit", onSubmit, true);
+        },
+      };
+    }, { key: observationKey, expectedValue: TIMING_QUEUE_USER });
+
+    const prompt = page.locator("#prompt");
+    await prompt.fill(TIMING_QUEUE_USER);
+    await expect(prompt).toBeEnabled();
+    await expect(prompt).toBeFocused();
+    await expect(prompt).toHaveValue(TIMING_QUEUE_USER);
+    const precondition = await page.evaluate((key) => window[key]?.promptSnapshot?.(), observationKey);
+    expect(precondition).toEqual({
+      promptNodeId: "node-1",
+      formNodeId: "node-2",
+      promptConnected: true,
+      promptDisabled: false,
+      activePrompt: true,
+      valueMatches: true,
+    });
+    h4.diagnosticSteps.push({ step: "timing-queue-keyboard-precondition", state: precondition });
+
+    await prompt.press("Control+Enter");
+    const keyboardTimeline = await page.evaluate((key) => (
+      Array.isArray(window[key]?.timeline) ? window[key].timeline.map((entry) => ({ ...entry })) : []
+    ), observationKey);
+    h4.diagnosticSteps.push({ step: "timing-queue-keyboard-events", timeline: keyboardTimeline });
+    expect(keyboardTimeline).toEqual([
+      {
+        sequence: 1,
+        type: "keydown",
+        key: "Enter",
+        ctrlKey: true,
+        metaKey: false,
+        shiftKey: false,
+        targetNodeId: "node-1",
+        targetConnected: true,
+        targetDisabled: false,
+        activePrompt: true,
+        valueMatches: true,
+      },
+      {
+        sequence: 2,
+        type: "submit",
+        formNodeId: "node-2",
+        formConnected: true,
+        promptNodeId: "node-1",
+        promptConnected: true,
+        promptDisabled: false,
+        activePrompt: true,
+        valueMatches: true,
+      },
+    ]);
+
+    await expect.poll(() => sessionPutObservations.filter((entry) => entry.queueMarkerPresent)).toEqual([
+      {
+        sequence: expect.any(Number),
+        method: "PUT",
+        path: "/api/sessions/[id]",
+        queueMarkerPresent: true,
+        matchingMessageCount: 1,
+        queuedDispatchCount: 1,
+        queuedCheckpointCount: 1,
+        queuedStatuses: ["pending"],
+      },
+    ]);
+    const queueSave = sessionPutObservations.filter((entry) => entry.queueMarkerPresent)[0];
+    h4.diagnosticSteps.push({
+      step: "timing-queue-session-save",
+      observation: { ...queueSave },
+      observedSessionPuts: sessionPutObservations.map((entry) => ({ ...entry })),
+    });
+
+    const queuedUser = page.locator("#messages article.msg.user").filter({ hasText: TIMING_QUEUE_USER });
+    await expect(queuedUser).toHaveCount(1);
+    await expect(queuedUser).toHaveAttribute("data-queued-message-id", /.+/);
+    h4.diagnosticSteps.push({ step: "timing-queue-dom-projected", count: 1 });
+
+    return {
+      eventTypes: keyboardTimeline.map((entry) => entry.type),
+      promptNodeStable: keyboardTimeline.every((entry) => (
+        (entry.targetNodeId || entry.promptNodeId) === precondition.promptNodeId
+      )),
+      keydownCount: keyboardTimeline.filter((entry) => entry.type === "keydown").length,
+      submitCount: keyboardTimeline.filter((entry) => entry.type === "submit").length,
+      queueSaveCount: 1,
+      queuedDispatchCount: queueSave.queuedDispatchCount,
+      queuedCheckpointCount: queueSave.queuedCheckpointCount,
+      queuedDomCount: 1,
+    };
+  } finally {
+    const finalKeyboardTimeline = await page.evaluate((key) => (
+      Array.isArray(window[key]?.timeline) ? window[key].timeline.map((entry) => ({ ...entry })) : []
+    ), observationKey).catch(() => []);
+    h4.diagnosticSteps.push({
+      step: "timing-queue-causal-final",
+      keyboardTimeline: finalKeyboardTimeline,
+      sessionPuts: sessionPutObservations.map((entry) => ({ ...entry })),
+    });
+    await page.evaluate((key) => {
+      const observation = window[key];
+      if (observation?.cleanup) observation.cleanup();
+      delete window[key];
+    }, observationKey).catch(() => {});
+    page.off("request", onSessionPut);
+  }
+}
+
 async function completePrimaryTimingOwnershipLifecycle(h4, runtime) {
   const { page } = h4;
   await h4.open(runtime);
@@ -2026,11 +2333,7 @@ async function completePrimaryTimingOwnershipLifecycle(h4, runtime) {
     { scenario: "timing-main", stream: true, hasToolResult: false },
   ]);
 
-  await page.locator("#prompt").fill(TIMING_QUEUE_USER);
-  await page.locator("#prompt").press("Control+Enter");
-  const queuedUser = page.locator("#messages article.msg.user").filter({ hasText: TIMING_QUEUE_USER });
-  await expect(queuedUser).toHaveCount(1);
-  await expect(queuedUser).toHaveAttribute("data-queued-message-id", /.+/);
+  const queueSubmission = await submitTimingQueueWithCausalEvidence(h4);
 
   await page.locator("#prompt").fill(`/parallel ${TIMING_PARALLEL_USER}`);
   await page.locator("#sendBtn").click();
@@ -2096,6 +2399,7 @@ async function completePrimaryTimingOwnershipLifecycle(h4, runtime) {
     runtime,
     dom: beforeReloadDom,
     language: { zh: "用时", en: "Worked for" },
+    queueSubmission,
     chatScenarios: metricsBefore.chatRequests.map((request) => request.scenario),
     refresh: { agentPost: 0, runtimePost: 0, chatPost: 0, toolPost: 0 },
   });
@@ -4672,6 +4976,24 @@ async function assertFailureContractFilesystem(h4, contract) {
   return audit;
 }
 
+async function connectedToolItemAndDirectSummary(itemLocator) {
+  const itemNode = await itemLocator.elementHandle();
+  expect(itemNode).not.toBeNull();
+  const summaryNode = await itemNode.$(":scope > summary");
+  expect(summaryNode).not.toBeNull();
+  expect(await itemNode.evaluate((item, summary) => ({
+    itemConnected: item.isConnected,
+    summaryConnected: summary.isConnected,
+    directOwner: summary.parentElement === item
+      && item.querySelector(":scope > summary") === summary,
+  }), summaryNode)).toEqual({
+    itemConnected: true,
+    summaryConnected: true,
+    directOwner: true,
+  });
+  return { itemNode, summaryNode };
+}
+
 async function completeToolFailureLifecycle(h4, runtime, contract) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
@@ -4827,19 +5149,16 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   const oldStage = await initialDom.outer.elementHandle();
   await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(initialDom.outer).toHaveAttribute("open", "");
-  const firstItemNode = await initialDom.item.elementHandle();
-  const firstSummaryNode = await initialDom.item.locator(":scope > summary").elementHandle();
-  expect(firstItemNode).not.toBeNull();
-  expect(firstSummaryNode).not.toBeNull();
-  expect(await firstItemNode.evaluate((item, summary) => (
-    item.querySelector(":scope > summary") === summary
-  ), firstSummaryNode)).toBe(true);
+  const {
+    itemNode: firstItemNode,
+    summaryNode: firstSummaryNode,
+  } = await connectedToolItemAndDirectSummary(initialDom.item);
   await initialDom.item.locator(":scope > summary").click();
   await expect(initialDom.item).toHaveAttribute("open", "");
-  const openedItemNode = await initialDom.item.elementHandle();
-  const openedSummaryNode = await initialDom.item.locator(":scope > summary").elementHandle();
-  expect(openedItemNode).not.toBeNull();
-  expect(openedSummaryNode).not.toBeNull();
+  const {
+    itemNode: openedItemNode,
+    summaryNode: openedSummaryNode,
+  } = await connectedToolItemAndDirectSummary(initialDom.item);
   const capturedItemConnectedAfterFirst = await firstItemNode.evaluate((item) => item.isConnected);
   const openedItemIsCapturedItem = await firstItemNode.evaluate(
     (item, opened) => item === opened,
@@ -4866,10 +5185,10 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   for (const marker of contract.domResultMarkers) {
     await expect(initialDom.details.last()).toContainText(marker);
   }
-  const currentItemNode = await initialDom.item.elementHandle();
-  const currentSummaryNode = await initialDom.item.locator(":scope > summary").elementHandle();
-  expect(currentItemNode).not.toBeNull();
-  expect(currentSummaryNode).not.toBeNull();
+  const {
+    itemNode: currentItemNode,
+    summaryNode: currentSummaryNode,
+  } = await connectedToolItemAndDirectSummary(initialDom.item);
   const openedItemConnectedBeforeSecond = await openedItemNode.evaluate((item) => item.isConnected);
   const currentIsOpenedItem = await openedItemNode.evaluate((item, current) => item === current, currentItemNode);
   const currentSummaryIsOpenedSummary = await openedSummaryNode.evaluate(
@@ -4881,12 +5200,16 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     item.querySelector(":scope > summary") === summary
   ), currentSummaryNode);
   if (currentOpenBeforeSecond) {
-    await currentSummaryNode.click();
+    await initialDom.item.locator(":scope > summary").click();
   } else {
     expect(openedItemConnectedBeforeSecond).toBe(false);
     expect(currentIsOpenedItem).toBe(false);
   }
-  const currentOpenAfterSecond = await currentItemNode.evaluate((item) => item.open);
+  const {
+    itemNode: closedItemNode,
+    summaryNode: closedSummaryNode,
+  } = await connectedToolItemAndDirectSummary(initialDom.item);
+  const currentOpenAfterSecond = await closedItemNode.evaluate((item) => item.open);
   h4.diagnosticSteps.push({
     step: "failed-tool-item-second-click",
     openedItemConnectedBeforeSecond,
@@ -4895,8 +5218,8 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     currentSummaryMatchesItem,
     currentOpenBeforeSecond,
     currentOpenAfterSecond,
-    currentConnectedAfterSecond: await currentItemNode.evaluate((item) => item.isConnected),
-    currentSummaryConnectedAfterSecond: await currentSummaryNode.evaluate((summary) => summary.isConnected),
+    currentConnectedAfterSecond: await closedItemNode.evaluate((item) => item.isConnected),
+    currentSummaryConnectedAfterSecond: await closedSummaryNode.evaluate((summary) => summary.isConnected),
   });
   expect(currentOpenAfterSecond).toBe(false);
   await expect(initialDom.item).not.toHaveAttribute("open", "");
@@ -5339,30 +5662,39 @@ test("direct classic missing read_file path schema failure lifecycle and reload"
   await exerciseToolFailureTerminalRefresh(h4, "classic", MISSING_PATH_TOOL_FAILURE_CONTRACT);
 });
 
-const REPEATED_RANGE_ACTIVE_EVENT_TYPES = Object.freeze([
-  "created",
-  "model_started", "model_completed", "tool_started", "tool_completed", "model_pending",
-  "model_started", "model_completed", "tool_started", "tool_completed", "model_pending",
-  "model_started", "model_completed", "tool_started", "tool_completed", "model_pending",
-  "model_started", "model_completed", "tool_started", "tool_retry_blocked", "tool_completed", "model_pending",
-  "model_started",
-]);
+function repeatedRangeActiveEventTypes(contract) {
+  const eventTypes = ["created"];
+  for (const result of contract.expectedResults) {
+    eventTypes.push("model_started", "model_completed", "tool_started");
+    if (result.retryBlocked) eventTypes.push("tool_retry_blocked");
+    eventTypes.push("tool_completed", "model_pending");
+  }
+  eventTypes.push("model_started");
+  return eventTypes;
+}
+
+const REPEATED_RANGE_ACTIVE_EVENT_TYPES = Object.freeze(
+  repeatedRangeActiveEventTypes(REPEATED_RANGE_FAILURE_CONTRACT),
+);
 const REPEATED_RANGE_TERMINAL_EVENT_TYPES = Object.freeze([
   ...REPEATED_RANGE_ACTIVE_EVENT_TYPES,
   "model_completed",
   "completed",
 ]);
 
-function repeatedFailureSessionRoleContentProjection(messages) {
+function repeatedFailureSessionRoleContentProjection(
+  messages,
+  contract = REPEATED_RANGE_FAILURE_CONTRACT,
+) {
   return (Array.isArray(messages) ? messages : []).map((message) => {
     const role = String(message?.role || "");
     const content = String(message?.content || "");
     if (role === "user") {
-      return { role, marker: content === REPEATED_RANGE_FAILURE_USER ? "user" : "unexpected" };
+      return { role, marker: content === contract.userMarker ? "user" : "unexpected" };
     }
     if (role === "assistant") {
-      if (content === REPEATED_RANGE_FAILURE_STAGE) return { role, marker: "stage" };
-      if (content === REPEATED_RANGE_FAILURE_FINAL) return { role, marker: "final" };
+      if (content === contract.stageMarker) return { role, marker: "stage" };
+      if (content === contract.finalMarker) return { role, marker: "final" };
       return { role, marker: "tool-round", contentPresent: Boolean(content.trim()) };
     }
     if (role === "tool-call") {
@@ -5416,21 +5748,24 @@ function repeatedFailureSessionMetaProjection(messages, agentRunId, toolCallIds)
     });
 }
 
-async function repeatedFailureLifecycleDomEvidence(page) {
+async function repeatedFailureLifecycleDomEvidence(
+  page,
+  contract = REPEATED_RANGE_FAILURE_CONTRACT,
+) {
   const messages = page.locator("#messages");
-  const user = messages.locator("article.msg.user").filter({ hasText: REPEATED_RANGE_FAILURE_USER });
+  const user = messages.locator("article.msg.user").filter({ hasText: contract.userMarker });
   const commentary = messages.locator("article.msg.assistant.agent-commentary")
-    .filter({ hasText: REPEATED_RANGE_FAILURE_STAGE });
+    .filter({ hasText: contract.stageMarker });
   const process = messages.locator("article.tool-process");
   const outer = process.locator("details.tool-process-stage");
   const items = process.locator("details.tool-process-item");
   const finalAnswer = messages.locator("article.msg.assistant")
-    .filter({ hasText: REPEATED_RANGE_FAILURE_FINAL });
+    .filter({ hasText: contract.finalMarker });
   await expect(user).toHaveCount(1);
   await expect(commentary).toHaveCount(1);
   await expect(process).toHaveCount(1);
   await expect(outer).toHaveCount(1);
-  await expect(items).toHaveCount(4);
+  await expect(items).toHaveCount(contract.expectedResults.length);
   const itemLocators = await items.all();
   const itemProjections = [];
   for (const [index, item] of itemLocators.entries()) {
@@ -5440,15 +5775,26 @@ async function repeatedFailureLifecycleDomEvidence(page) {
     const texts = await details.allTextContents();
     const argumentText = String(texts[0] || "").trim();
     const resultText = String(texts[1] || "").trim();
+    const expectedArguments = contract.callArguments[index];
+    const expectedResult = contract.expectedResults[index];
+    const argumentProjection = {
+      pathPresent: argumentText.includes(`"path": "${expectedArguments.path}"`),
+      startLinePresent: argumentText.includes(`"startLine": ${expectedArguments.startLine}`),
+      endLinePresent: argumentText.includes(`"endLine": ${expectedArguments.endLine}`),
+    };
+    if (contract.key === "H4-6L") {
+      argumentProjection.startLine = argumentProjection.startLinePresent
+        ? expectedArguments.startLine
+        : null;
+      argumentProjection.endLine = argumentProjection.endLinePresent
+        ? expectedArguments.endLine
+        : null;
+    }
     const projection = {
       tool: index + 1,
       failed: String(await item.getAttribute("class") || "").split(/\s+/).includes("failed"),
       open: await item.evaluate((element) => element.open),
-      arguments: {
-        pathPresent: argumentText.includes('"path": "fixture.txt"'),
-        startLinePresent: argumentText.includes('"startLine": 2'),
-        endLinePresent: argumentText.includes('"endLine": 1'),
-      },
+      arguments: argumentProjection,
       result: {
         nonEmpty: Boolean(resultText),
         rangeFailureVisible: resultText.includes("startLine") && resultText.includes("endLine"),
@@ -5458,15 +5804,15 @@ async function repeatedFailureLifecycleDomEvidence(page) {
         ),
       },
     };
-    expect(projection.arguments).toEqual({
+    expect(projection.arguments).toMatchObject({
       pathPresent: true,
       startLinePresent: true,
       endLinePresent: true,
     });
     expect(projection.result).toEqual({
       nonEmpty: true,
-      rangeFailureVisible: index < 3,
-      repeatedFailureBlockedVisible: index === 3,
+      rangeFailureVisible: !expectedResult.retryBlocked,
+      repeatedFailureBlockedVisible: expectedResult.retryBlocked,
     });
     itemProjections.push(projection);
   }
@@ -5487,20 +5833,20 @@ async function repeatedFailureLifecycleDomEvidence(page) {
       Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
     ));
   }, {
-    userMarker: REPEATED_RANGE_FAILURE_USER,
-    stageMarker: REPEATED_RANGE_FAILURE_STAGE,
-    finalMarker: REPEATED_RANGE_FAILURE_FINAL,
+    userMarker: contract.userMarker,
+    stageMarker: contract.stageMarker,
+    finalMarker: contract.finalMarker,
   });
   const projection = {
     sequence: finalCount
-      ? [REPEATED_RANGE_FAILURE_USER, REPEATED_RANGE_FAILURE_STAGE, "read_file:failed:4", REPEATED_RANGE_FAILURE_FINAL]
-      : [REPEATED_RANGE_FAILURE_USER, REPEATED_RANGE_FAILURE_STAGE, "read_file:failed:4"],
+      ? [contract.userMarker, contract.stageMarker, `read_file:failed:${contract.expectedResults.length}`, contract.finalMarker]
+      : [contract.userMarker, contract.stageMarker, `read_file:failed:${contract.expectedResults.length}`],
     counts: {
       user: 1,
       commentary: 1,
       toolProcess: 1,
-      toolItem: 4,
-      result: 4,
+      toolItem: contract.expectedResults.length,
+      result: contract.expectedResults.length,
       final: finalCount,
       ordinaryAssistant: await messages.locator("article.msg.assistant:not(.tool-process)").count(),
       assistantTotal: await messages.locator("article.msg.assistant").count(),
@@ -5526,8 +5872,11 @@ async function repeatedFailureLifecycleDomEvidence(page) {
   };
 }
 
-function expectedRepeatedModelReceipts(count) {
-  return EXPECTED_REPEATED_RANGE_RESULTS.slice(0, count).map((result, index) => ({
+function expectedRepeatedModelReceipts(
+  count,
+  contract = REPEATED_RANGE_FAILURE_CONTRACT,
+) {
+  return contract.expectedResults.slice(0, count).map((result, index) => ({
     role: "tool",
     toolCallId: `tool-${index + 1}`,
     name: "read_file",
@@ -5535,14 +5884,18 @@ function expectedRepeatedModelReceipts(count) {
   }));
 }
 
-async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
+async function completeRepeatedRangeFailureLifecycle(
+  h4,
+  runtime,
+  contract = REPEATED_RANGE_FAILURE_CONTRACT,
+) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
   await h4.open(runtime);
   await assertFrontendRuntime(page, runtime);
   if (runtime === "classic") await assertDirectClassicEntry(page);
   await h4.proveNonLoopbackBlocked();
-  await h4.submitGated(REPEATED_RANGE_FAILURE_USER);
+  await h4.submitGated(contract.userMarker);
   const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
   expect(finalDeltaGate[TOOL_FINAL_DELTA_GATE]).toMatchObject({ reached: true, released: false });
 
@@ -5553,25 +5906,27 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
     `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
   );
   expect(activeAgent.status).toBe(200);
+  const activeEventTypes = repeatedRangeActiveEventTypes(contract);
+  const terminalEventTypes = [...activeEventTypes, "model_completed", "completed"];
   expect(activeAgent.body).toMatchObject({
     status: "model",
-    nextCursor: REPEATED_RANGE_ACTIVE_EVENT_TYPES.length,
-    forceFinalRound: true,
+    nextCursor: activeEventTypes.length,
+    forceFinalRound: contract.activeForceFinalRound,
     errorCode: "",
     pendingToolCalls: [],
   });
   expect((activeAgent.body.events || []).map((event) => event.type))
-    .toEqual(REPEATED_RANGE_ACTIVE_EVENT_TYPES);
+    .toEqual(activeEventTypes);
   const activeTrace = durableFailedToolTraceEvidence(
     activeAgent.body,
-    REPEATED_RANGE_FAILURE_CONTRACT,
+    contract,
   );
-  expect(activeTrace.toolCallIds).toHaveLength(4);
-  expect(new Set(activeTrace.toolCallIds).size).toBe(4);
-  expect(activeTrace.executionProjection).toEqual(EXPECTED_REPEATED_RANGE_RESULTS.map((result, index) => ({
+  expect(activeTrace.toolCallIds).toHaveLength(contract.expectedResults.length);
+  expect(new Set(activeTrace.toolCallIds).size).toBe(contract.expectedResults.length);
+  expect(activeTrace.executionProjection).toEqual(contract.expectedResults.map((result, index) => ({
     toolCallId: `tool-${index + 1}`,
     name: "read_file",
-    arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+    arguments: contract.callArguments[index],
     status: "completed",
     outcome: "failed",
     result,
@@ -5579,23 +5934,23 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
   const modelCompletedWithTools = activeTrace.eventProjection.filter((event) => (
     event.type === "model_completed" && Array.isArray(event.toolCalls) && event.toolCalls.length
   ));
-  expect(modelCompletedWithTools).toHaveLength(4);
+  expect(modelCompletedWithTools).toHaveLength(contract.expectedResults.length);
   expect(modelCompletedWithTools.map((event) => event.toolCalls[0])).toEqual(
-    EXPECTED_REPEATED_RANGE_RESULTS.map((_, index) => ({
+    contract.expectedResults.map((_, index) => ({
       toolCallId: `tool-${index + 1}`,
       name: "read_file",
-      arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+      arguments: contract.callArguments[index],
     })),
   );
   const startedEvents = activeTrace.eventProjection.filter((event) => event.type === "tool_started");
   const completedEvents = activeTrace.eventProjection.filter((event) => event.type === "tool_completed");
-  expect(startedEvents).toHaveLength(4);
-  expect(completedEvents).toHaveLength(4);
+  expect(startedEvents).toHaveLength(contract.expectedResults.length);
+  expect(completedEvents).toHaveLength(contract.expectedResults.length);
   for (const [index, event] of startedEvents.entries()) {
     expect(event).toMatchObject({
       toolCallId: `tool-${index + 1}`,
       name: "read_file",
-      arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+      arguments: contract.callArguments[index],
     });
   }
   for (const [index, event] of completedEvents.entries()) {
@@ -5603,24 +5958,18 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
       toolCallId: `tool-${index + 1}`,
       name: "read_file",
       outcome: "failed",
-      result: EXPECTED_REPEATED_RANGE_RESULTS[index],
+      result: contract.expectedResults[index],
     });
   }
   const retryBlockedEvents = activeTrace.eventProjection.filter((event) => event.type === "tool_retry_blocked");
-  expect(retryBlockedEvents).toEqual([{
-    seq: 20,
-    type: "tool_retry_blocked",
-    failureCount: 3,
-    toolCallId: "tool-4",
-    name: "read_file",
-  }]);
+  expect(retryBlockedEvents).toEqual(contract.expectedRetryBlockedEvents);
 
   const modelStartedEvents = activeAgent.body.events.filter((event) => event?.type === "model_started");
-  expect(modelStartedEvents).toHaveLength(5);
+  expect(modelStartedEvents).toHaveLength(contract.expectedResults.length + 1);
   const runtimeRunIds = modelStartedEvents.map((event) => String(event?.data?.runtimeRunId || ""));
   expect(runtimeRunIds.every(Boolean)).toBe(true);
-  expect(new Set(runtimeRunIds).size).toBe(5);
-  expect(activeAgent.body.activeRuntimeRunId).toBe(runtimeRunIds[4]);
+  expect(new Set(runtimeRunIds).size).toBe(contract.expectedResults.length + 1);
+  expect(activeAgent.body.activeRuntimeRunId).toBe(runtimeRunIds.at(-1));
   await expect.poll(() => h4.controlIds()).toEqual({
     agentRunIds: [agentRunId],
     runtimeRunIds,
@@ -5634,61 +5983,55 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
     expect(response.status).toBe(200);
     activeRuntimeResponses.push(response.body);
   }
-  expect(activeRuntimeResponses.slice(0, 4).map((snapshot) => snapshot.status))
-    .toEqual(["completed", "completed", "completed", "completed"]);
-  expect(activeRuntimeResponses[4].status).toBe("running");
-  expect(activeRuntimeResponses[4].events).toEqual([]);
-  expect(activeRuntimeResponses[4].result?.content).toBe("");
-  expect(activeRuntimeResponses[0].result?.content).toBe(REPEATED_RANGE_FAILURE_STAGE);
-  expect(activeRuntimeResponses.slice(1, 4).map((snapshot) => snapshot.result?.content || ""))
-    .toEqual(["", "", ""]);
+  expect(activeRuntimeResponses.slice(0, -1).map((snapshot) => snapshot.status))
+    .toEqual(Array(contract.expectedResults.length).fill("completed"));
+  expect(activeRuntimeResponses.at(-1).status).toBe("running");
+  expect(activeRuntimeResponses.at(-1).events).toEqual([]);
+  expect(activeRuntimeResponses.at(-1).result?.content).toBe("");
+  expect(activeRuntimeResponses[0].result?.content).toBe(contract.stageMarker);
+  expect(activeRuntimeResponses.slice(1, -1).map((snapshot) => snapshot.result?.content || ""))
+    .toEqual(Array(Math.max(0, contract.expectedResults.length - 1)).fill(""));
 
   const metricsActive = await h4.metrics();
-  const expectedChatRequests = [0, 1, 2, 3].map((receiptCount, index) => ({
-    scenario: `repeated-range-failure-call-${index + 1}`,
+  const expectedChatRequests = contract.expectedResults.map((_, index) => ({
+    scenario: `${contract.scenarioPrefix}-call-${index + 1}`,
     stream: true,
-    hasToolResult: receiptCount > 0,
-    repeatedRangeFailureReceipts: expectedRepeatedModelReceipts(receiptCount),
+    hasToolResult: index > 0,
+    [contract.receiptMetric]: expectedRepeatedModelReceipts(index, contract),
   }));
   expectedChatRequests.push({
-    scenario: "repeated-range-failure-final",
+    scenario: `${contract.scenarioPrefix}-final`,
     stream: true,
     hasToolResult: true,
-    repeatedRangeFailureReceipts: expectedRepeatedModelReceipts(4),
-    forcedFinal: {
-      toolsPresent: false,
-      toolChoicePresent: false,
-      recoveryInstructionPresent: true,
-    },
+    [contract.receiptMetric]: expectedRepeatedModelReceipts(contract.expectedResults.length, contract),
+    [contract.finalMetric]: contract.finalMetricExpected,
   });
   expect(metricsActive.chatRequests).toEqual(expectedChatRequests);
   expect(metricsActive.productionToolDelegations).toBe(3);
-  expect(metricsActive.toolExecutions).toEqual([1, 2, 3].map(() => ({
+  expect(metricsActive.toolExecutions).toEqual(contract.executedArguments.map((argumentsValue) => ({
     action: "read_file",
-    path: "fixture.txt",
-    startLine: 2,
-    endLine: 1,
+    ...argumentsValue,
   })));
   expect(metricsActive.unsafeToolRequests).toBe(0);
 
   const process = page.locator("#messages article.tool-process");
   await expect(process).toHaveCount(1);
-  await expect(process.locator("details.tool-process-item")).toHaveCount(4);
-  await expect(process.locator("details.tool-process-item.failed")).toHaveCount(4);
-  const initialDom = await repeatedFailureLifecycleDomEvidence(page);
+  await expect(process.locator("details.tool-process-item")).toHaveCount(contract.expectedResults.length);
+  await expect(process.locator("details.tool-process-item.failed")).toHaveCount(contract.expectedResults.length);
+  const initialDom = await repeatedFailureLifecycleDomEvidence(page, contract);
   expect(initialDom.projection).toMatchObject({
     counts: {
       user: 1,
       commentary: 1,
       toolProcess: 1,
-      toolItem: 4,
-      result: 4,
+      toolItem: contract.expectedResults.length,
+      result: contract.expectedResults.length,
       final: 0,
       ordinaryAssistant: 1,
       assistantTotal: 2,
     },
     outerOpen: false,
-    itemOpen: [false, false, false, false],
+    itemOpen: Array(contract.expectedResults.length).fill(false),
     outerState: { running: true, failed: false },
     currentAction: "read_file",
     ordered: true,
@@ -5703,17 +6046,18 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
   const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
   expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
   expect(await oldStage.evaluate((element) => element.isConnected)).toBe(false);
-  const afterFinalDeltaDom = await repeatedFailureLifecycleDomEvidence(page);
+  const afterFinalDeltaDom = await repeatedFailureLifecycleDomEvidence(page, contract);
   expect(afterFinalDeltaDom.projection.processKey).toBe(initialDom.projection.processKey);
   expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
-  expect(afterFinalDeltaDom.projection.itemOpen).toEqual([false, false, false, false]);
+  expect(afterFinalDeltaDom.projection.itemOpen)
+    .toEqual(Array(contract.expectedResults.length).fill(false));
   expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: false, failed: true });
   expect(afterFinalDeltaDom.projection.counts).toMatchObject({
     user: 1,
     commentary: 1,
     toolProcess: 1,
-    toolItem: 4,
-    result: 4,
+    toolItem: contract.expectedResults.length,
+    result: contract.expectedResults.length,
     final: 1,
     ordinaryAssistant: 2,
     assistantTotal: 3,
@@ -5736,17 +6080,17 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
     };
   }).toEqual({
     status: "completed",
-    nextCursor: REPEATED_RANGE_TERMINAL_EVENT_TYPES.length,
+    nextCursor: terminalEventTypes.length,
     activeRuntimeRunId: "",
     forceFinalRound: false,
     errorCode: "",
-    eventTypes: REPEATED_RANGE_TERMINAL_EVENT_TYPES,
+    eventTypes: terminalEventTypes,
   });
   expect(completedAgent.status).toBe(200);
   expect(completedAgent.body.pendingToolCalls).toEqual([]);
   const completedTrace = durableFailedToolTraceEvidence(
     completedAgent.body,
-    REPEATED_RANGE_FAILURE_CONTRACT,
+    contract,
   );
   expect(completedTrace.executionProjection).toEqual(activeTrace.executionProjection);
   expect(completedTrace.terminalEventCount).toBe(1);
@@ -5755,10 +6099,11 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
   await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
   await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
 
-  const terminalDom = await repeatedFailureLifecycleDomEvidence(page);
+  const terminalDom = await repeatedFailureLifecycleDomEvidence(page, contract);
   expect(terminalDom.projection.processKey).toBe(initialDom.projection.processKey);
   expect(terminalDom.projection.outerOpen).toBe(false);
-  expect(terminalDom.projection.itemOpen).toEqual([false, false, false, false]);
+  expect(terminalDom.projection.itemOpen)
+    .toEqual(Array(contract.expectedResults.length).fill(false));
   expect(terminalDom.projection.outerState).toEqual({ running: false, failed: true });
   const completedTraceElement = page.locator("#messages .execution-trace.completed");
   const completedTraceToggle = completedTraceElement.locator(":scope > [data-execution-trace-toggle]");
@@ -5794,14 +6139,18 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
     terminalRuntimeResponses.push(response.body);
   }
   expect(terminalRuntimeResponses.map((snapshot) => snapshot.result?.content || ""))
-    .toEqual([REPEATED_RANGE_FAILURE_STAGE, "", "", "", REPEATED_RANGE_FAILURE_FINAL]);
+    .toEqual([
+      contract.stageMarker,
+      ...Array(Math.max(0, contract.expectedResults.length - 1)).fill(""),
+      contract.finalMarker,
+    ]);
   const runtimeProjection = terminalRuntimeResponses.map((snapshot, index) => ({
     runtimeRunId: `runtime-${index + 1}`,
     status: String(snapshot.status || ""),
     nextCursor: Number(snapshot.nextCursor || 0),
-    content: snapshot.result?.content === REPEATED_RANGE_FAILURE_STAGE
+    content: snapshot.result?.content === contract.stageMarker
       ? "stage"
-      : (snapshot.result?.content === REPEATED_RANGE_FAILURE_FINAL ? "final" : "empty"),
+      : (snapshot.result?.content === contract.finalMarker ? "final" : "empty"),
   }));
 
   const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
@@ -5813,29 +6162,31 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
     `/api/sessions/${encodeURIComponent(sessionId)}`,
   );
   expect(sessionResponse.status).toBe(200);
-  expect((sessionResponse.body.messages || []).map((message) => message.role)).toEqual([
-    "user",
-    "assistant", "tool-call", "tool-result",
-    "assistant", "tool-call", "tool-result",
-    "assistant", "tool-call", "tool-result",
-    "assistant", "tool-call", "tool-result",
-    "assistant",
-  ]);
-  const sessionProjection = repeatedFailureSessionRoleContentProjection(sessionResponse.body.messages);
+  const expectedSessionRoles = ["user"];
+  for (let index = 0; index < contract.expectedResults.length; index += 1) {
+    expectedSessionRoles.push("assistant", "tool-call", "tool-result");
+  }
+  expectedSessionRoles.push("assistant");
+  expect((sessionResponse.body.messages || []).map((message) => message.role))
+    .toEqual(expectedSessionRoles);
+  const sessionProjection = repeatedFailureSessionRoleContentProjection(
+    sessionResponse.body.messages,
+    contract,
+  );
   const sessionToolMeta = repeatedFailureSessionMetaProjection(
     sessionResponse.body.messages,
     agentRunId,
     activeTrace.toolCallIds,
   );
-  expect(sessionToolMeta).toHaveLength(8);
-  for (let index = 0; index < 4; index += 1) {
+  expect(sessionToolMeta).toHaveLength(contract.expectedResults.length * 2);
+  for (let index = 0; index < contract.expectedResults.length; index += 1) {
     expect(sessionToolMeta[index * 2]).toMatchObject({
       role: "tool-call",
       toolCallId: `tool-${index + 1}`,
       agentRunId: "agent-1",
       agentEventType: "tool_started",
       action: "read_file",
-      arguments: REPEATED_RANGE_FAILURE_CONTRACT.arguments,
+      arguments: contract.callArguments[index],
       native: true,
       replayed: false,
       outcome: "",
@@ -5851,7 +6202,7 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
       native: true,
       replayed: false,
       outcome: "failed",
-      result: EXPECTED_REPEATED_RANGE_RESULTS[index],
+      result: contract.expectedResults[index],
     });
     expect(sessionToolMeta[index * 2].agentEventSeq).toBe(startedEvents[index].seq);
     expect(sessionToolMeta[index * 2 + 1].agentEventSeq).toBe(completedEvents[index].seq);
@@ -5860,15 +6211,44 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
   const durable = await readDurableAgentRecord(h4, agentRunId);
   expect(durable.record).toMatchObject({
     status: "completed",
-    nextSeq: REPEATED_RANGE_TERMINAL_EVENT_TYPES.length + 1,
+    nextSeq: terminalEventTypes.length + 1,
     forceFinalRound: false,
     pendingToolCalls: [],
   });
-  expect(durable.record.events).toHaveLength(REPEATED_RANGE_TERMINAL_EVENT_TYPES.length);
+  expect(durable.record.events).toHaveLength(terminalEventTypes.length);
   expect(Object.keys(durable.record.toolExecutions || {})).toEqual(activeTrace.toolCallIds);
   for (const [index, toolCallId] of activeTrace.toolCallIds.entries()) {
     expect(stableRepeatedRangeFailureResult(durable.record.toolExecutions[toolCallId]?.result))
-      .toEqual(EXPECTED_REPEATED_RANGE_RESULTS[index]);
+      .toEqual(contract.expectedResults[index]);
+  }
+  let failureIdentityProjection = null;
+  if (contract.key === "H4-6L") {
+    const durableExecutions = activeTrace.toolCallIds.map((toolCallId) => (
+      durable.record.toolExecutions[toolCallId]
+    ));
+    const fingerprints = durableExecutions.map((execution) => String(execution?.fingerprint || ""));
+    const failureSignatures = durableExecutions.map((execution) => (
+      String(execution?.failureSignature || "")
+    ));
+    expect(fingerprints.every(Boolean)).toBe(true);
+    expect(fingerprints[0]).toBe(fingerprints[2]);
+    expect(fingerprints[1]).not.toBe(fingerprints[0]);
+    expect(failureSignatures.every(Boolean)).toBe(true);
+    expect(new Set(failureSignatures).size).toBe(1);
+    failureIdentityProjection = {
+      arguments: contract.callArguments.map((argumentsValue) => ({
+        path: argumentsValue.path,
+        startLine: argumentsValue.startLine,
+        endLine: argumentsValue.endLine,
+      })),
+      fingerprintPattern: ["A", "B", "A"],
+      firstAndThirdFingerprintEqual: fingerprints[0] === fingerprints[2],
+      secondFingerprintIndependent: fingerprints[1] !== fingerprints[0],
+      failureSignatureStable: new Set(failureSignatures).size === 1,
+      failureCounts: contract.expectedResults.map((result) => result.failureCount),
+      retryLimitReached: contract.expectedResults.map((result) => result.retryLimitReached),
+      retryBlocked: contract.expectedResults.map((result) => result.retryBlocked),
+    };
   }
 
   const metrics = await h4.metrics();
@@ -5884,12 +6264,18 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
   expect(requests.agentDelete).toBe(0);
   expect(h4.pageErrors).toEqual([]);
 
-  const retryExecutionProjection = completedTrace.executionProjection;
-  const modelToolReceiptProjection = expectedRepeatedModelReceipts(4);
-  const forcedFinalProjection = {
+  const executionProjection = completedTrace.executionProjection;
+  const executionHashProjection = failureIdentityProjection == null
+    ? executionProjection
+    : { executions: executionProjection, identity: failureIdentityProjection };
+  const modelToolReceiptProjection = expectedRepeatedModelReceipts(
+    contract.expectedResults.length,
+    contract,
+  );
+  const finalProjection = {
     modelRequestCount: metrics.chatRequests.length,
-    scenario: metrics.chatRequests[4]?.scenario,
-    ...metrics.chatRequests[4]?.forcedFinal,
+    scenario: metrics.chatRequests.at(-1)?.scenario,
+    ...metrics.chatRequests.at(-1)?.[contract.finalMetric],
     parentStatus: completedAgent.body.status,
     parentErrorCode: String(completedAgent.body.errorCode || ""),
     forceFinalRound: Boolean(completedAgent.body.forceFinalRound),
@@ -5897,20 +6283,20 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
   };
   const hashes = {
     eventProjection: completedTrace.eventProjectionHash,
-    retryExecutionProjection: canonicalHash(retryExecutionProjection),
+    [contract.executionHashKey]: canonicalHash(executionHashProjection),
     modelToolReceiptProjection: canonicalHash(modelToolReceiptProjection),
-    forcedFinalProjection: canonicalHash(forcedFinalProjection),
+    [contract.finalHashKey]: canonicalHash(finalProjection),
     runtimeProjection: canonicalHash(runtimeProjection),
     sessionRoleContent: canonicalHash(sessionProjection),
     sessionToolMeta: canonicalHash(sessionToolMeta),
     terminalDom: terminalDom.semanticHash,
   };
-  if (Object.keys(H4_6K_SEMANTIC_HASHES).length) {
+  if (Object.keys(contract.hashes).length) {
     for (const [key, value] of Object.entries(hashes)) {
-      expect(value, `H4-6K ${key}`).toBe(H4_6K_SEMANTIC_HASHES[key]);
+      expect(value, `${contract.key} ${key}`).toBe(contract.hashes[key]);
     }
   }
-  h4.evidence(`${runtime === "classic" ? "classic-" : ""}repeated-range-failure-terminal`, {
+  h4.evidence(`${runtime === "classic" ? "classic-" : ""}${contract.evidencePrefix}-terminal`, {
     identity: {
       agentRunId: idHash(agentRunId),
       toolCallIds: activeTrace.toolCallIds.map(idHash),
@@ -5925,7 +6311,8 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
       retryBlockedEvents: retryBlockedEvents.length,
     },
     runtimeProjection,
-    forcedFinalProjection,
+    finalProjection,
+    failureIdentityProjection,
     hashes,
   });
   return {
@@ -5939,12 +6326,18 @@ async function completeRepeatedRangeFailureLifecycle(h4, runtime) {
     sessionToolMeta,
     terminalDom,
     metrics,
+    failureIdentityProjection,
     hashes,
+    contract,
   };
 }
 
-async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
-  const before = await completeRepeatedRangeFailureLifecycle(h4, runtime);
+async function exerciseRepeatedRangeFailureTerminalRefresh(
+  h4,
+  runtime,
+  contract = REPEATED_RANGE_FAILURE_CONTRACT,
+) {
+  const before = await completeRepeatedRangeFailureLifecycle(h4, runtime, contract);
   const refreshBoundary = h4.requestBoundary();
   const metricsBefore = await h4.metrics();
   await before.page.reload({ waitUntil: "domcontentloaded" });
@@ -5959,10 +6352,11 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
   await expect(before.page.locator("#stopBtn")).toBeDisabled();
   await expect(before.page.locator("#messages .execution-trace.active")).toHaveCount(0);
   await expect(before.page.locator("#messages .execution-trace.completed")).toHaveCount(1);
-  const domAfter = await repeatedFailureLifecycleDomEvidence(before.page);
+  const domAfter = await repeatedFailureLifecycleDomEvidence(before.page, contract);
   expect(domAfter.projection).toEqual(before.terminalDom.projection);
   expect(domAfter.projection.outerOpen).toBe(false);
-  expect(domAfter.projection.itemOpen).toEqual([false, false, false, false]);
+  expect(domAfter.projection.itemOpen)
+    .toEqual(Array(contract.expectedResults.length).fill(false));
   const traceAfterReload = before.page.locator("#messages .execution-trace.completed");
   const traceToggleAfterReload = traceAfterReload.locator(":scope > [data-execution-trace-toggle]");
   await expect(traceAfterReload).not.toHaveClass(/\bis-expanded\b/);
@@ -5989,7 +6383,7 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
   expect(agentAfter.status).toBe(200);
   const completedTraceAfter = durableFailedToolTraceEvidence(
     agentAfter.body,
-    REPEATED_RANGE_FAILURE_CONTRACT,
+    contract,
   );
   expect(completedTraceAfter).toEqual(before.completedTrace);
   expect(completedTraceAfter.toolCallIds).toEqual(before.toolCallIds);
@@ -5998,7 +6392,10 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
     `/api/sessions/${encodeURIComponent(before.sessionId)}`,
   );
   expect(sessionAfter.status).toBe(200);
-  const sessionProjectionAfter = repeatedFailureSessionRoleContentProjection(sessionAfter.body.messages);
+  const sessionProjectionAfter = repeatedFailureSessionRoleContentProjection(
+    sessionAfter.body.messages,
+    contract,
+  );
   const sessionToolMetaAfter = repeatedFailureSessionMetaProjection(
     sessionAfter.body.messages,
     before.agentRunId,
@@ -6009,7 +6406,7 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
   const metricsAfter = await h4.metrics();
   expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
   expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
-  expect(metricsAfter.productionToolDelegations).toBe(3);
+  expect(metricsAfter.productionToolDelegations).toBe(contract.executedArguments.length);
   expect(metricsAfter.unsafeToolRequests).toBe(0);
   const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
   expect(refreshRequests.agentPost).toBe(0);
@@ -6045,10 +6442,10 @@ async function exerciseRepeatedRangeFailureTerminalRefresh(h4, runtime) {
     ...before.hashes,
     refreshLifecycle: canonicalHash(refreshProjection),
   };
-  if (Object.keys(H4_6K_SEMANTIC_HASHES).length) {
-    expect(hashes).toEqual(H4_6K_SEMANTIC_HASHES);
+  if (Object.keys(contract.hashes).length) {
+    expect(hashes).toEqual(contract.hashes);
   }
-  h4.evidence(`${runtime === "classic" ? "classic-" : ""}repeated-range-failure-refresh`, {
+  h4.evidence(`${runtime === "classic" ? "classic-" : ""}${contract.evidencePrefix}-refresh`, {
     identity: {
       agentRunId: idHash(before.agentRunId),
       toolCallIds: before.toolCallIds.map(idHash),
@@ -6065,6 +6462,22 @@ test("bundle identical read_file executor failures are bounded and reload unique
 
 test("direct classic identical read_file executor failures are bounded and reload uniquely", async ({ h4 }) => {
   await exerciseRepeatedRangeFailureTerminalRefresh(h4, "classic");
+});
+
+test("bundle alternating read_file arguments isolate failure counts and reload uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "bundle",
+    ARGUMENT_ISOLATION_FAILURE_CONTRACT,
+  );
+});
+
+test("direct classic alternating read_file arguments isolate failure counts and reload uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "classic",
+    ARGUMENT_ISOLATION_FAILURE_CONTRACT,
+  );
 });
 
 async function startMultiToolDetailAtSecondExecute(h4, runtime) {

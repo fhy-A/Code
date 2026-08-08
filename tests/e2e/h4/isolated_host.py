@@ -50,6 +50,9 @@ EXECUTOR_RANGE_FINAL = "H4_EXECUTOR_RANGE_FAILURE_FINAL"
 REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER"
 REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE"
 REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL"
+ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER"
+ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE"
+ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL"
 MISSING_FILE_USER = "H4_MISSING_FILE_FAILURE_USER"
 MISSING_FILE_STAGE = "H4_MISSING_FILE_FAILURE_STAGE"
 MISSING_FILE_FINAL = "H4_MISSING_FILE_FAILURE_FINAL"
@@ -78,10 +81,18 @@ EXECUTOR_RANGE_TOOL_CALL_ID = "h4-executor-range-read-call-1"
 REPEATED_RANGE_FAILURE_TOOL_CALL_IDS = tuple(
     f"h4-repeated-range-read-call-{index}" for index in range(1, 5)
 )
+ARGUMENT_ISOLATION_TOOL_CALL_IDS = tuple(
+    f"h4-argument-isolation-read-call-{index}" for index in range(1, 4)
+)
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
 MALFORMED_TOOL_ARGUMENTS = '{"path":"fixture.txt"'
+ARGUMENT_ISOLATION_TOOL_ARGUMENTS = (
+    {"path": READ_PATH, "startLine": 2, "endLine": 1},
+    {"path": READ_PATH, "startLine": 3, "endLine": 1},
+    {"path": READ_PATH, "startLine": 2, "endLine": 1},
+)
 REFRESH_GATE_NAMES = (
     "before-first-delta",
     "after-second-delta",
@@ -292,9 +303,20 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             EXECUTOR_RANGE_TOOL_CALL_ID,
             MISSING_FILE_TOOL_CALL_ID,
             *REPEATED_RANGE_FAILURE_TOOL_CALL_IDS,
+            *ARGUMENT_ISOLATION_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
         }:
             has_tool_result = True
+    if ARGUMENT_ISOLATION_USER in user_text:
+        completed_calls = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(ARGUMENT_ISOLATION_TOOL_CALL_IDS)
+        receipt_count = len(completed_calls)
+        if receipt_count >= len(ARGUMENT_ISOLATION_TOOL_CALL_IDS):
+            return "argument-isolation-final", True
+        return f"argument-isolation-call-{receipt_count + 1}", receipt_count > 0
     if REPEATED_RANGE_FAILURE_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -527,10 +549,12 @@ def _executor_range_receipt_projection(payload: dict) -> dict | None:
     return None
 
 
-def _repeated_range_failure_receipt_projection(payload: dict) -> list[dict]:
+def _range_failure_receipt_projection(
+    payload: dict, tool_call_ids: tuple[str, ...],
+) -> list[dict]:
     aliases = {
         tool_call_id: f"tool-{index + 1}"
-        for index, tool_call_id in enumerate(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS)
+        for index, tool_call_id in enumerate(tool_call_ids)
     }
     projections = []
     for message in payload.get("messages") or []:
@@ -563,6 +587,18 @@ def _repeated_range_failure_receipt_projection(payload: dict) -> list[dict]:
             "retryLimitReached": bool(result.get("retryLimitReached")),
         })
     return projections
+
+
+def _repeated_range_failure_receipt_projection(payload: dict) -> list[dict]:
+    return _range_failure_receipt_projection(
+        payload, REPEATED_RANGE_FAILURE_TOOL_CALL_IDS,
+    )
+
+
+def _argument_isolation_receipt_projection(payload: dict) -> list[dict]:
+    return _range_failure_receipt_projection(
+        payload, ARGUMENT_ISOLATION_TOOL_CALL_IDS,
+    )
 
 
 def _missing_file_receipt_projection(payload: dict) -> dict | None:
@@ -719,8 +755,25 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["repeatedRangeFailureReceipts"] = (
                 _repeated_range_failure_receipt_projection(payload)
             )
+        if scenario.startswith("argument-isolation-"):
+            chat_metric["argumentIsolationReceipts"] = (
+                _argument_isolation_receipt_projection(payload)
+            )
         if scenario == "repeated-range-failure-final":
             chat_metric["forcedFinal"] = {
+                "toolsPresent": bool(payload.get("tools")),
+                "toolChoicePresent": "tool_choice" in payload,
+                "recoveryInstructionPresent": any(
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and "identical tool call was blocked" in str(
+                        message.get("content") or ""
+                    )
+                    for message in (payload.get("messages") or [])
+                ),
+            }
+        if scenario == "argument-isolation-final":
+            chat_metric["normalFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
                 "toolChoicePresent": "tool_choice" in payload,
                 "recoveryInstructionPresent": any(
@@ -748,6 +801,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "executor-range-call", "missing-file-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
+            and not scenario.startswith("argument-isolation-call-")
             and current_chat_count == 1
         ):
             METRICS.increment("modelGateWaits")
@@ -805,7 +859,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario in (
             "tool-detail-final", "multi-tool-detail-final", "invalid-tool-final",
             "parse-error-tool-final", "missing-path-tool-final", "executor-range-final",
-            "missing-file-final", "repeated-range-failure-final",
+            "missing-file-final", "repeated-range-failure-final", "argument-isolation-final",
         ):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -832,6 +886,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "executor-range-final": EXECUTOR_RANGE_FINAL,
                 "missing-file-final": MISSING_FILE_FINAL,
                 "repeated-range-failure-final": REPEATED_RANGE_FAILURE_FINAL,
+                "argument-isolation-final": ARGUMENT_ISOLATION_FINAL,
             }.get(scenario, TOOL_DETAILS_FINAL)
             if not write_tool_detail_frame(_chunk({
                 "role": "assistant",
@@ -853,7 +908,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call",
-        ) or scenario.startswith("repeated-range-failure-call-"):
+        ) or scenario.startswith("repeated-range-failure-call-") \
+                or scenario.startswith("argument-isolation-call-"):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
@@ -973,6 +1029,22 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }]
                 if call_number == 1:
                     stage_text = REPEATED_RANGE_FAILURE_STAGE
+            elif scenario.startswith("argument-isolation-call-"):
+                call_number = int(scenario.rsplit("-", 1)[-1])
+                tool_calls = [{
+                    "index": 0,
+                    "id": ARGUMENT_ISOLATION_TOOL_CALL_IDS[call_number - 1],
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            ARGUMENT_ISOLATION_TOOL_ARGUMENTS[call_number - 1],
+                            separators=(",", ":"),
+                        ),
+                    },
+                }]
+                if call_number == 1:
+                    stage_text = ARGUMENT_ISOLATION_STAGE
             frames = []
             if stage_text:
                 frames.append(_chunk({"role": "assistant", "content": stage_text}))
