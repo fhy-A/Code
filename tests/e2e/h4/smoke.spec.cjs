@@ -46,6 +46,8 @@ const TIMING_PARALLEL_USER = "H4_TIMING_PARALLEL_USER";
 const TIMING_PARALLEL_FINAL = "H4_TIMING_PARALLEL_FINAL";
 const TIMING_QUEUE_USER = "H4_TIMING_QUEUE_USER";
 const TIMING_QUEUE_FINAL = "H4_TIMING_QUEUE_FINAL";
+const PARALLEL_FAILURE_USER = "H4_PARALLEL_MODEL_FAILURE_USER";
+const PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE";
 const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
 const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
 const TIFF_ATTACHMENT_SHA256 = "42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73";
@@ -154,6 +156,16 @@ const H4_6K_SEMANTIC_HASHES = Object.freeze({
   sessionToolMeta: "76c4d8cfbc85aefd48242eedea1a13b66314430e17860a837b345142e7e6b211",
   terminalDom: "062793b9555a641084d28f70b8b3028af45ed40847f60ac547222c85dcba36f7",
   refreshLifecycle: "ae09c60e831dec8ffd7295e9baef598b898a1061ac85250d61e2e1936cc6fc44",
+});
+const H4_7C_SEMANTIC_HASHES = Object.freeze({
+  mainToolTrace: "6599ebee8ff79520ee51e2fa2fe2011ce6237091791282c02f6b5525092223c4",
+  backgroundAgent: "1319a246751c8daa8c6546cfe1b8f2aab159bb00a11b01f908b5d20c7f414545",
+  backgroundRuntime: "6b71bc4b26a681050327da18905949caaa9ae806dd78747dc9708bba1a5f76d1",
+  sessionRoleContent: "9846dc82c8e7a82b181c41ee23ecc25b0ac6bf25df1fe0564e5fea8b605e9ab7",
+  backgroundMeta: "e26b1c4a7e1a70f87ab60335fcd655331a2601f2a7dd6882e63821d2eb8d5baa",
+  domOwnership: "0c317c7fffaaa70a224e2193072f71dfaac66f64f5f5b755d918abcca106d584",
+  requestCounts: "e90926ff643c4cff6ab16720a27dedbd1b5f4561b874e7bbe4ef7d3e63eaba1e",
+  refreshLifecycle: "0cb60f329ee95fbe0953c4712394e8aa085b7c83a13680c2ec444b8d1ce37681",
 });
 
 function idHash(value) {
@@ -2089,6 +2101,740 @@ async function completePrimaryTimingOwnershipLifecycle(h4, runtime) {
   });
 }
 
+function detachedParallelFailureSessionEvidence(
+  messages,
+  mainAgentRunId,
+  backgroundAgentRunId,
+  toolCallId,
+) {
+  const source = Array.isArray(messages) ? messages : [];
+  const roleContent = roleContentProjection(source);
+  expect(roleContent.map((message) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "tool-call",
+    "tool-result",
+    "user",
+    "assistant",
+    "assistant",
+  ]);
+  expect(roleContent[0].content).toBe(TOOL_DETAILS_USER);
+  expect(roleContent[1].content).toBe(TOOL_DETAILS_STAGE);
+  expect(String(roleContent[2].content || "")).toContain("read_file");
+  expect(String(roleContent[2].content || "")).toContain("fixture.txt");
+  expect(countOccurrences(String(roleContent[2].content || ""), "fixture.txt")).toBe(1);
+  expect(String(roleContent[3].content || "")).toContain("fixture.txt");
+  expect(String(roleContent[3].content || "")).toContain("26 B");
+  expect(String(roleContent[3].content || "")).toContain(FIXTURE_CONTENT.trim());
+  expect(countOccurrences(
+    String(roleContent[3].content || ""),
+    FIXTURE_CONTENT.trim(),
+  )).toBe(1);
+  expect(roleContent[4].content).toBe(PARALLEL_FAILURE_USER);
+  expect(roleContent[5].content).toBe(PARALLEL_FAILURE_ERROR);
+  expect(roleContent[6].content).toBe(TOOL_DETAILS_FINAL);
+
+  const backgroundUser = source.find((message) => (
+    message?.role === "user"
+    && message?.content === PARALLEL_FAILURE_USER
+    && message?.meta?.backgroundDispatch?.id
+  ));
+  const backgroundAssistant = source.find((message) => (
+    message?.role === "assistant"
+    && message?.content === PARALLEL_FAILURE_ERROR
+    && message?.meta?.kind === "background-subagent"
+  ));
+  expect(backgroundUser).toBeTruthy();
+  expect(backgroundAssistant).toBeTruthy();
+  const jobId = String(backgroundUser.meta.backgroundDispatch.id || "");
+  expect(jobId).not.toBe("");
+  expect(backgroundUser.meta).toMatchObject({
+    detachedFromMain: true,
+    backgroundDispatch: {
+      id: jobId,
+      status: "failed",
+      agentRunId: backgroundAgentRunId,
+    },
+  });
+  expect(String(backgroundUser.meta.backgroundDispatch.detail || "")).toContain(
+    PARALLEL_FAILURE_ERROR,
+  );
+  expect(Number(backgroundUser.meta.backgroundDispatch.parentTaskStartedAt || 0)).toBeGreaterThan(0);
+  expect(backgroundAssistant.meta).toMatchObject({
+    kind: "background-subagent",
+    jobId,
+    agentRunId: backgroundAgentRunId,
+    error: true,
+    detachedFromMain: true,
+  });
+  expect(Number(backgroundAssistant.meta.parentTaskStartedAt || 0)).toBeGreaterThan(0);
+  expect(String(backgroundAssistant.meta._responseTime || "")).toMatch(/^\d+(?:s|m(?: \d+s)?|h(?: \d+m)?)$/);
+
+  const mainToolMeta = sessionToolMetaProjection(source, mainAgentRunId, toolCallId);
+  expect(mainToolMeta).toHaveLength(2);
+  expect(mainToolMeta.map((message) => message.role)).toEqual(["tool-call", "tool-result"]);
+  expect(mainToolMeta.every((message) => message.toolCallId === "tool-1")).toBe(true);
+  expect(mainToolMeta.at(-1)?.result).toEqual({
+    ok: true,
+    action: "read_file",
+    path: "fixture.txt",
+    content: FIXTURE_CONTENT,
+    size: 26,
+    truncated: false,
+    lineRange: null,
+  });
+
+  return {
+    roleContent,
+    jobId,
+    mainToolMeta,
+    backgroundMeta: {
+      user: {
+        detachedFromMain: backgroundUser.meta.detachedFromMain === true,
+        status: String(backgroundUser.meta.backgroundDispatch.status || ""),
+        jobIdLinked: String(backgroundUser.meta.backgroundDispatch.id || "") === jobId,
+        agentRunLinked: String(backgroundUser.meta.backgroundDispatch.agentRunId || "")
+          === backgroundAgentRunId,
+        detailContainsFailure: String(backgroundUser.meta.backgroundDispatch.detail || "")
+          .includes(PARALLEL_FAILURE_ERROR),
+        parentTaskStartedAtPresent: Number(
+          backgroundUser.meta.backgroundDispatch.parentTaskStartedAt || 0,
+        ) > 0,
+      },
+      assistant: {
+        kind: String(backgroundAssistant.meta.kind || ""),
+        detachedFromMain: backgroundAssistant.meta.detachedFromMain === true,
+        error: backgroundAssistant.meta.error === true,
+        jobIdLinked: String(backgroundAssistant.meta.jobId || "") === jobId,
+        agentRunLinked: String(backgroundAssistant.meta.agentRunId || "")
+          === backgroundAgentRunId,
+        responseTimePresent: Boolean(String(backgroundAssistant.meta._responseTime || "")),
+        parentTaskStartedAtPresent: Number(backgroundAssistant.meta.parentTaskStartedAt || 0) > 0,
+      },
+      mainToolMeta,
+    },
+  };
+}
+
+async function detachedParallelFailureDomEvidence(
+  page,
+  { finalVisible = false, terminal = false, tracePlacement = "" } = {},
+) {
+  const messages = page.locator("#messages");
+  const mainUser = messages.locator("article.msg.user").filter({ hasText: TOOL_DETAILS_USER });
+  const mainStage = messages.locator("article.msg.assistant.agent-commentary")
+    .filter({ hasText: TOOL_DETAILS_STAGE });
+  const mainFinal = messages.locator("article.msg.assistant").filter({ hasText: TOOL_DETAILS_FINAL });
+  const backgroundUser = messages.locator("article.msg.user").filter({ hasText: PARALLEL_FAILURE_USER });
+  const backgroundAssistant = messages.locator("article.msg.assistant")
+    .filter({ hasText: PARALLEL_FAILURE_ERROR });
+  const toolDom = await toolDetailLifecycleDomEvidence(page);
+
+  for (const locator of [mainUser, mainStage, backgroundUser, backgroundAssistant]) {
+    await expect(locator).toHaveCount(1);
+  }
+  await expect(mainFinal).toHaveCount(finalVisible ? 1 : 0);
+  await expect(messages.locator("article.tool-process")).toHaveCount(1);
+  await expect(messages.locator("article.tool-process details.tool-process-item")).toHaveCount(1);
+  await expect(messages.locator("article.tool-process .tool-process-detail pre")).toHaveCount(2);
+  await expect(toolDom.process).not.toContainText(PARALLEL_FAILURE_USER);
+  await expect(toolDom.process).not.toContainText(PARALLEL_FAILURE_ERROR);
+  const expectedTracePlacement = tracePlacement || (terminal ? "persistent" : "outside");
+  if (expectedTracePlacement === "persistent") {
+    await expect(backgroundUser).toHaveClass(/\bexecution-trace-persistent\b/);
+    await expect(backgroundAssistant).toHaveClass(/\bexecution-trace-persistent\b/);
+    await expect(backgroundUser.locator(
+      "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
+    ))
+      .toHaveCount(1);
+    await expect(backgroundAssistant.locator(
+      "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
+    ))
+      .toHaveCount(1);
+  } else if (expectedTracePlacement === "outside") {
+    await expect(backgroundUser).not.toHaveClass(/\bexecution-trace-persistent\b/);
+    await expect(backgroundAssistant).not.toHaveClass(/\bexecution-trace-persistent\b/);
+    await expect(backgroundUser.locator(
+      "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
+    ))
+      .toHaveCount(0);
+    await expect(backgroundAssistant.locator(
+      "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
+    ))
+      .toHaveCount(0);
+  }
+  await expect(backgroundAssistant.locator("[data-background-reply-id]")).toHaveCount(1);
+  await expect(backgroundAssistant.locator(".response-info .run-time")).toHaveCount(1);
+  await expect(backgroundUser.locator("xpath=following-sibling::*[1][@data-completed-run-status]"))
+    .toHaveCount(0);
+  await expect(messages.locator("[data-completed-run-status]")).toHaveCount(terminal ? 1 : 0);
+  if (terminal) {
+    await expect(mainFinal.locator(".response-info .run-time")).toHaveCount(0);
+    await expect(mainFinal.locator(".response-info .response-token")).toHaveCount(2);
+  }
+  await expect(messages.locator("article.msg.assistant .response-info .run-time")).toHaveCount(1);
+
+  const ordered = await page.evaluate((markers) => {
+    const root = document.querySelector("#messages");
+    const find = (selector, marker) => [...root.querySelectorAll(selector)]
+      .find((element) => (element.textContent || "").includes(marker));
+    const nodes = [
+      find("article.msg.user", markers.mainUser),
+      find("article.msg.assistant.agent-commentary", markers.mainStage),
+      root.querySelector("article.tool-process"),
+    ];
+    const final = find("article.msg.assistant", markers.mainFinal);
+    const detached = [
+      find("article.msg.user", markers.backgroundUser),
+      find("article.msg.assistant", markers.backgroundError),
+    ];
+    if (markers.terminal) {
+      nodes.push(...detached);
+      if (final) nodes.push(final);
+    } else {
+      if (final) nodes.push(final);
+      nodes.push(...detached);
+    }
+    return nodes.every(Boolean) && nodes.slice(0, -1).every((node, index) => (
+      Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ));
+  }, {
+    mainUser: TOOL_DETAILS_USER,
+    mainStage: TOOL_DETAILS_STAGE,
+    backgroundUser: PARALLEL_FAILURE_USER,
+    backgroundError: PARALLEL_FAILURE_ERROR,
+    mainFinal: TOOL_DETAILS_FINAL,
+    terminal,
+  });
+  expect(ordered).toBe(true);
+
+  return {
+    toolDom,
+    backgroundUser,
+    backgroundAssistant,
+    mainFinal,
+    projection: {
+      terminal,
+      finalVisible,
+      ordered,
+      counts: {
+        mainUser: await mainUser.count(),
+        mainStage: await mainStage.count(),
+        mainFinal: await mainFinal.count(),
+        backgroundUser: await backgroundUser.count(),
+        backgroundAssistant: await backgroundAssistant.count(),
+        toolProcesses: await messages.locator("article.tool-process").count(),
+        toolItems: await messages.locator("article.tool-process details.tool-process-item").count(),
+        toolResults: await messages.locator("article.tool-process .tool-process-detail pre").count() - 1,
+        completedStatuses: await messages.locator("[data-completed-run-status]").count(),
+        primaryFooterTimers: terminal
+          ? await mainFinal.locator(".response-info .run-time").count()
+          : 0,
+        backgroundFooterTimers: await backgroundAssistant
+          .locator(".response-info .run-time").count(),
+        backgroundReferences: await backgroundAssistant.locator("[data-background-reply-id]").count(),
+      },
+      processKey: toolDom.projection.processKey,
+      toolOuterOpen: toolDom.projection.outerOpen,
+      toolStage: toolDom.projection.stageClass.split(/\s+/).filter(Boolean).sort(),
+      backgroundTracePlacement: {
+        userPersistent: await backgroundUser.evaluate((element) => (
+          element.classList.contains("execution-trace-persistent")
+        )),
+        assistantPersistent: await backgroundAssistant.evaluate((element) => (
+          element.classList.contains("execution-trace-persistent")
+        )),
+        userTraceAncestors: await backgroundUser.locator(
+          "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
+        ).count(),
+        assistantTraceAncestors: await backgroundAssistant.locator(
+          "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
+        ).count(),
+      },
+      backgroundOwnsCompletedStatus: false,
+      backgroundInsideToolProcess: false,
+    },
+  };
+}
+
+async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    const currentUrl = new URL(page.url());
+    expect(currentUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(currentUrl.search).toBe("");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  const requestBoundary = h4.requestBoundary();
+  await h4.submitGated(TOOL_DETAILS_USER);
+  await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+
+  const initialToolDom = await toolDetailLifecycleDomEvidence(page);
+  expect(initialToolDom.projection).toMatchObject({
+    counts: {
+      user: 1,
+      commentary: 1,
+      toolProcess: 1,
+      toolItem: 1,
+      result: 1,
+      final: 0,
+      ordinaryAssistant: 1,
+      assistantTotal: 2,
+    },
+    processKey: "0:1",
+    outerOpen: false,
+    itemOpen: false,
+    ordered: true,
+  });
+  await initialToolDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(initialToolDom.outer).toHaveAttribute("open", "");
+  const processKey = String(await initialToolDom.outer.getAttribute("data-tool-process-key") || "");
+  expect(processKey).toBe("0:1");
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const mainAgentRunId = h4.controlIds().agentRunIds[0];
+  const activeMainAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(activeMainAgent.status).toBe(200);
+  expect(activeMainAgent.body).toMatchObject({
+    agentRunId: mainAgentRunId,
+    status: "model",
+    nextCursor: 7,
+  });
+  expect(activeMainAgent.body.pendingToolCalls).toEqual([]);
+  const activeMainTrace = durableToolTraceEvidence(activeMainAgent.body);
+  expect(activeMainTrace.eventProjection.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "tool_completed",
+    "model_pending",
+    "model_started",
+  ]);
+  expect(activeMainTrace.toolCallIds).toHaveLength(1);
+  const toolCallId = activeMainTrace.toolCallIds[0];
+  expect(activeMainTrace.executionProjection).toEqual([{
+    toolCallId: "tool-1",
+    name: "read_file",
+    arguments: { path: "fixture.txt" },
+    status: "completed",
+    outcome: "succeeded",
+    result: {
+      ok: true,
+      action: "read_file",
+      path: "fixture.txt",
+      content: FIXTURE_CONTENT,
+      size: 26,
+      truncated: false,
+      lineRange: null,
+    },
+  }]);
+  const mainRuntimeRunIds = activeMainAgent.body.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(mainRuntimeRunIds).toHaveLength(2);
+  expect(mainRuntimeRunIds.every(Boolean)).toBe(true);
+  expect(activeMainAgent.body.activeRuntimeRunId).toBe(mainRuntimeRunIds[1]);
+
+  await page.locator("#prompt").fill(`/parallel ${PARALLEL_FAILURE_USER}`);
+  await page.locator("#sendBtn").click();
+  const backgroundAssistant = page.locator("#messages article.msg.assistant")
+    .filter({ hasText: PARALLEL_FAILURE_ERROR });
+  await expect(backgroundAssistant).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const backgroundAgentRunId = h4.controlIds().agentRunIds
+    .find((agentRunId) => agentRunId !== mainAgentRunId);
+  expect(backgroundAgentRunId).toBeTruthy();
+
+  let failedBackgroundAgent = null;
+  await expect.poll(async () => {
+    failedBackgroundAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: failedBackgroundAgent.body?.status,
+      nextCursor: failedBackgroundAgent.body?.nextCursor,
+      eventTypes: (failedBackgroundAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "failed",
+    nextCursor: 3,
+    eventTypes: ["created", "model_started", "failed"],
+  });
+  expect(failedBackgroundAgent.status).toBe(200);
+  expect(failedBackgroundAgent.body).toMatchObject({
+    agentRunId: backgroundAgentRunId,
+    status: "failed",
+    error: PARALLEL_FAILURE_ERROR,
+    errorCode: "upstream_error",
+    round: 0,
+    activeRuntimeRunId: "",
+    pendingToolCalls: [],
+    toolExecutions: [],
+  });
+  expect(failedBackgroundAgent.body.events[1]).toMatchObject({
+    seq: 2,
+    type: "model_started",
+    data: { round: 1 },
+  });
+  expect(failedBackgroundAgent.body.events[2]).toMatchObject({
+    seq: 3,
+    type: "failed",
+    data: {
+      error: PARALLEL_FAILURE_ERROR,
+      errorCode: "upstream_error",
+    },
+  });
+  const backgroundRuntimeRunId = String(
+    failedBackgroundAgent.body.events[1]?.data?.runtimeRunId || "",
+  );
+  expect(backgroundRuntimeRunId).not.toBe("");
+  const failedBackgroundRuntime = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(backgroundRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(failedBackgroundRuntime.status).toBe(200);
+  expect(failedBackgroundRuntime.body).toMatchObject({
+    runId: backgroundRuntimeRunId,
+    sessionId: activeMainAgent.body.sessionId,
+    status: "failed",
+    error: PARALLEL_FAILURE_ERROR,
+    errorCode: "upstream_error",
+    transient: true,
+    upstreamStatus: 502,
+    nextCursor: 0,
+    events: [],
+  });
+  expect(failedBackgroundRuntime.body.result).toMatchObject({
+    content: "",
+    reasoning: "",
+    toolCalls: [],
+  });
+
+  const stillActiveMainAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(stillActiveMainAgent.status).toBe(200);
+  expect(stillActiveMainAgent.body).toMatchObject({
+    status: "model",
+    activeRuntimeRunId: mainRuntimeRunIds[1],
+    nextCursor: 7,
+  });
+  expect(durableToolTraceEvidence(stillActiveMainAgent.body).executionProjection)
+    .toEqual(activeMainTrace.executionProjection);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(1);
+  await expect(page.locator("#stopBtn")).toBeEnabled();
+
+  const activeDom = await detachedParallelFailureDomEvidence(page);
+  expect(activeDom.toolDom.projection.processKey).toBe(processKey);
+  expect(activeDom.toolDom.projection.outerOpen).toBe(true);
+  expect(activeDom.toolDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
+  expect(activeDom.toolDom.projection.formattedResult).toEqual({
+    pathPresent: true,
+    sizePresent: true,
+    fixtureContentCount: 1,
+  });
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBe(activeMainAgent.body.sessionId);
+  const activeSession = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(activeSession.status).toBe(200);
+  expect(Array.isArray(activeSession.body.runState?.backgroundRuns)
+    ? activeSession.body.runState.backgroundRuns
+    : []).toEqual([]);
+  const activeBackgroundMessages = activeSession.body.messages.filter((message) => (
+    message?.meta?.kind === "background-subagent"
+  ));
+  expect(activeBackgroundMessages).toHaveLength(1);
+  expect(activeBackgroundMessages[0].meta.agentRunId).toBe(backgroundAgentRunId);
+
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TOOL_DETAILS_FINAL }))
+    .toHaveCount(1);
+  await h4.waitGate(TOOL_TERMINAL_GATE);
+  const preTerminalDom = await detachedParallelFailureDomEvidence(page, {
+    finalVisible: true,
+    tracePlacement: "transitional",
+  });
+  expect(preTerminalDom.toolDom.projection.processKey).toBe(processKey);
+  expect(preTerminalDom.toolDom.projection.outerOpen).toBe(true);
+  expect(preTerminalDom.toolDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
+
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+  let completedMainAgent = null;
+  await expect.poll(async () => {
+    completedMainAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedMainAgent.body?.status,
+      nextCursor: completedMainAgent.body?.nextCursor,
+      eventTypes: (completedMainAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 9,
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "tool_completed",
+      "model_pending",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+  });
+  expect(completedMainAgent.body).toMatchObject({
+    activeRuntimeRunId: "",
+    pendingToolCalls: [],
+    errorCode: "",
+  });
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+  const terminalDom = await detachedParallelFailureDomEvidence(page, {
+    finalVisible: true,
+    terminal: true,
+  });
+  expect(terminalDom.toolDom.projection.processKey).toBe(processKey);
+  expect(terminalDom.toolDom.projection.outerOpen).toBe(false);
+  expect(terminalDom.toolDom.projection.itemOpen).toBe(false);
+  expect(terminalDom.toolDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
+
+  const terminalSession = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(terminalSession.status).toBe(200);
+  expect(Array.isArray(terminalSession.body.runState?.backgroundRuns)
+    ? terminalSession.body.runState.backgroundRuns
+    : []).toEqual([]);
+  const sessionEvidence = detachedParallelFailureSessionEvidence(
+    terminalSession.body.messages,
+    mainAgentRunId,
+    backgroundAgentRunId,
+    toolCallId,
+  );
+
+  const metricsBeforeReload = await h4.metrics();
+  expect(metricsBeforeReload.chatRequests).toEqual([
+    { scenario: "tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "tool-detail-final", stream: true, hasToolResult: true },
+    { scenario: "parallel-model-failure", stream: true, hasToolResult: false },
+  ]);
+  expect(metricsBeforeReload.toolExecutions).toEqual([
+    { action: "read_file", path: "fixture.txt" },
+  ]);
+  expect(metricsBeforeReload.productionToolDelegations).toBe(1);
+  expect(metricsBeforeReload.unsafeToolRequests).toBe(0);
+  const requestsBeforeReload = h4.requestEvidenceSince(requestBoundary);
+  expect(requestsBeforeReload.agentPost).toBe(2);
+  expect(requestsBeforeReload.runtimePost).toBe(0);
+  expect(requestsBeforeReload.agentDelete).toBe(0);
+
+  const completedMainTrace = durableToolTraceEvidence(completedMainAgent.body);
+  const mainToolProjection = {
+    status: completedMainTrace.status,
+    nextCursor: completedMainTrace.nextCursor,
+    pendingToolCallCount: completedMainTrace.pendingToolCallCount,
+    terminalEventCount: completedMainTrace.terminalEventCount,
+    eventProjection: completedMainTrace.eventProjection,
+    executionProjection: completedMainTrace.executionProjection,
+    resultProjection: completedMainTrace.resultProjection,
+  };
+  const backgroundAgentProjection = {
+    status: String(failedBackgroundAgent.body.status || ""),
+    errorCode: String(failedBackgroundAgent.body.errorCode || ""),
+    errorMarkerPresent: String(failedBackgroundAgent.body.error || "")
+      .includes(PARALLEL_FAILURE_ERROR),
+    round: Number(failedBackgroundAgent.body.round || 0),
+    nextCursor: Number(failedBackgroundAgent.body.nextCursor || 0),
+    activeRuntimeCleared: !failedBackgroundAgent.body.activeRuntimeRunId,
+    pendingToolCallCount: failedBackgroundAgent.body.pendingToolCalls.length,
+    toolExecutionCount: failedBackgroundAgent.body.toolExecutions.length,
+    events: failedBackgroundAgent.body.events.map((event) => ({
+      seq: Number(event.seq || 0),
+      type: String(event.type || ""),
+      ...(event?.data?.round != null ? { round: Number(event.data.round) } : {}),
+      ...(event?.type === "model_started" ? { runtimeLinked: Boolean(event.data.runtimeRunId) } : {}),
+      ...(event?.type === "failed" ? {
+        errorCode: String(event.data.errorCode || ""),
+        errorMarkerPresent: String(event.data.error || "").includes(PARALLEL_FAILURE_ERROR),
+      } : {}),
+    })),
+  };
+  const backgroundRuntimeProjection = {
+    status: String(failedBackgroundRuntime.body.status || ""),
+    errorCode: String(failedBackgroundRuntime.body.errorCode || ""),
+    errorMarkerPresent: String(failedBackgroundRuntime.body.error || "")
+      .includes(PARALLEL_FAILURE_ERROR),
+    transient: failedBackgroundRuntime.body.transient === true,
+    upstreamStatus: Number(failedBackgroundRuntime.body.upstreamStatus || 0),
+    nextCursor: Number(failedBackgroundRuntime.body.nextCursor || 0),
+    eventCount: failedBackgroundRuntime.body.events.length,
+    result: {
+      contentEmpty: !failedBackgroundRuntime.body.result?.content,
+      reasoningEmpty: !failedBackgroundRuntime.body.result?.reasoning,
+      toolCallCount: (failedBackgroundRuntime.body.result?.toolCalls || []).length,
+    },
+  };
+  const requestProjection = {
+    agentRunPost: requestsBeforeReload.agentPost,
+    runtimePost: requestsBeforeReload.runtimePost,
+    chat: metricsBeforeReload.chatRequests.length,
+    toolExecutions: metricsBeforeReload.toolExecutions.length,
+    backgroundToolExecutions: 0,
+  };
+
+  const refreshBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") {
+    const restoredUrl = new URL(page.url());
+    expect(restoredUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(restoredUrl.search).toBe("");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  const restoredSessionButton = page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(restoredSessionButton).toHaveCount(1);
+  await restoredSessionButton.click();
+  const restoredDom = await detachedParallelFailureDomEvidence(page, {
+    finalVisible: true,
+    terminal: true,
+  });
+  expect(restoredDom.projection).toEqual(terminalDom.projection);
+  expect(restoredDom.toolDom.projection.processKey).toBe(processKey);
+
+  const mainAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  const backgroundAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+  );
+  const backgroundRuntimeAfterReload = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(backgroundRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(mainAfterReload.status).toBe(200);
+  expect(backgroundAfterReload.status).toBe(200);
+  expect(backgroundRuntimeAfterReload.status).toBe(200);
+  expect({
+    status: durableToolTraceEvidence(mainAfterReload.body).status,
+    nextCursor: durableToolTraceEvidence(mainAfterReload.body).nextCursor,
+    pendingToolCallCount: durableToolTraceEvidence(mainAfterReload.body).pendingToolCallCount,
+    terminalEventCount: durableToolTraceEvidence(mainAfterReload.body).terminalEventCount,
+    eventProjection: durableToolTraceEvidence(mainAfterReload.body).eventProjection,
+    executionProjection: durableToolTraceEvidence(mainAfterReload.body).executionProjection,
+    resultProjection: durableToolTraceEvidence(mainAfterReload.body).resultProjection,
+  }).toEqual(mainToolProjection);
+  expect(backgroundAfterReload.body.agentRunId).toBe(backgroundAgentRunId);
+  expect(backgroundAfterReload.body.status).toBe("failed");
+  expect(backgroundAfterReload.body.events).toEqual(failedBackgroundAgent.body.events);
+  expect(backgroundAfterReload.body.toolExecutions).toEqual([]);
+  expect(backgroundRuntimeAfterReload.body).toEqual(failedBackgroundRuntime.body);
+
+  const sessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionAfterReload.status).toBe(200);
+  expect(Array.isArray(sessionAfterReload.body.runState?.backgroundRuns)
+    ? sessionAfterReload.body.runState.backgroundRuns
+    : []).toEqual([]);
+  const restoredSessionEvidence = detachedParallelFailureSessionEvidence(
+    sessionAfterReload.body.messages,
+    mainAgentRunId,
+    backgroundAgentRunId,
+    toolCallId,
+  );
+  expect(restoredSessionEvidence.roleContent).toEqual(sessionEvidence.roleContent);
+  expect(restoredSessionEvidence.backgroundMeta).toEqual(sessionEvidence.backgroundMeta);
+
+  const metricsAfterReload = await h4.metrics();
+  expect(metricsAfterReload.chatRequests).toEqual(metricsBeforeReload.chatRequests);
+  expect(metricsAfterReload.toolExecutions).toEqual(metricsBeforeReload.toolExecutions);
+  const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
+  const refreshSummary = h4.requestSummarySince(refreshBoundary);
+  expect(refreshRequests.agentPost).toBe(0);
+  expect(refreshRequests.runtimePost).toBe(0);
+  expect(refreshRequests.agentDelete).toBe(0);
+  expect(refreshSummary["POST /proxy/chat"] || 0).toBe(0);
+  expect(Object.entries(refreshSummary).filter(([key]) => key.startsWith("POST /api/tools/")))
+    .toEqual([]);
+  expect(h4.controlIds().agentRunIds).toEqual([mainAgentRunId, backgroundAgentRunId]);
+  expect(h4.pageErrors).toEqual([]);
+
+  const refreshProjection = {
+    mainAgentStable: mainAfterReload.body.agentRunId === mainAgentRunId,
+    backgroundAgentStable: backgroundAfterReload.body.agentRunId === backgroundAgentRunId,
+    backgroundRuntimeStable: backgroundRuntimeAfterReload.body.runId === backgroundRuntimeRunId,
+    processKeyStable: restoredDom.toolDom.projection.processKey === processKey,
+    sessionRoleContentStable: JSON.stringify(restoredSessionEvidence.roleContent)
+      === JSON.stringify(sessionEvidence.roleContent),
+    backgroundMetaStable: JSON.stringify(restoredSessionEvidence.backgroundMeta)
+      === JSON.stringify(sessionEvidence.backgroundMeta),
+    backgroundCheckpointCount: Array.isArray(sessionAfterReload.body.runState?.backgroundRuns)
+      ? sessionAfterReload.body.runState.backgroundRuns.length
+      : 0,
+    domUnique: restoredDom.projection,
+    requests: {
+      agentRunPost: refreshRequests.agentPost,
+      runtimePost: refreshRequests.runtimePost,
+      chat: metricsAfterReload.chatRequests.length - metricsBeforeReload.chatRequests.length,
+      toolExecutions: metricsAfterReload.toolExecutions.length - metricsBeforeReload.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    mainToolTrace: canonicalHash(mainToolProjection),
+    backgroundAgent: canonicalHash(backgroundAgentProjection),
+    backgroundRuntime: canonicalHash(backgroundRuntimeProjection),
+    sessionRoleContent: canonicalHash(sessionEvidence.roleContent),
+    backgroundMeta: canonicalHash(sessionEvidence.backgroundMeta),
+    domOwnership: canonicalHash(terminalDom.projection),
+    requestCounts: canonicalHash(requestProjection),
+    refreshLifecycle: canonicalHash(refreshProjection),
+  };
+  expect(hashes).toEqual(H4_7C_SEMANTIC_HASHES);
+  h4.evidence(`${runtime}-detached-parallel-failure-isolation`, {
+    runtime,
+    identities: {
+      mainAgentRunId: idHash(mainAgentRunId),
+      backgroundAgentRunId: idHash(backgroundAgentRunId),
+      backgroundRuntimeRunId: idHash(backgroundRuntimeRunId),
+      toolCallId: idHash(toolCallId),
+      jobId: idHash(sessionEvidence.jobId),
+    },
+    eventTypes: {
+      main: completedMainAgent.body.events.map((event) => event.type),
+      background: failedBackgroundAgent.body.events.map((event) => event.type),
+    },
+    runtime: backgroundRuntimeProjection,
+    requests: requestProjection,
+    refresh: refreshProjection.requests,
+    dom: terminalDom.projection,
+    hashes,
+  });
+}
+
 async function openAutomaticClassicFallback(h4, failureMode) {
   const { page, host } = h4;
   const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
@@ -2595,6 +3341,14 @@ test("bundle primary completion owns elapsed while queue and parallel remain dis
 
 test("direct classic primary completion owns elapsed while queue and parallel remain distinct", async ({ h4 }) => {
   await completePrimaryTimingOwnershipLifecycle(h4, "classic");
+});
+
+test("bundle detached parallel model failure stays isolated and reloads uniquely", async ({ h4 }) => {
+  await exerciseDetachedParallelFailureIsolation(h4, "bundle");
+});
+
+test("direct classic detached parallel model failure stays isolated and reloads uniquely", async ({ h4 }) => {
+  await exerciseDetachedParallelFailureIsolation(h4, "classic");
 });
 
 test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {

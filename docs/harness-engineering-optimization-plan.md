@@ -578,6 +578,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **H4-7B 补充状态（2026-08-08）**：H4-7B 修正 detached 用户消息与主任务 turn 所有权不一致：detached 用户仍可见但不再接管主任务完成状态或工具轨迹，主任务及完成后的普通排队任务只在顶部以“用时/Worked for + 时长”各展示一次耗时，对应 assistant 页脚只保留 Token；detached/background/`/parallel` assistant 继续保留自己的单一页脚耗时。后台结果在统一构造入口只规范化一次 `responseTime`，同值镜像到顶层与 `meta._responseTime`，复用既有 Session 序列化恢复，不修改计时算法、Session JSONL 格式、AgentRun、Runtime 或事件协议，也不迁移旧缺失耗时。详见 [`H4-7B 主任务完成计时唯一投影`](harness/h4-7b-primary-completion-elapsed-projection.md)。
 
+**H4-7C 补充状态（2026-08-08）**：H4-7C 在活动主任务的单 `read_file` 工具生命周期中注入一个 detached `/parallel` 固定 HTTP 502，证明独立 background AgentRun 以 `created → model_started → failed` 闭合，失败 Runtime 为 `upstream_error/502/transient=true` 且零 SSE；主任务工具轨迹、完成状态与计时所有权不受污染并最终 completed。detached 终态沿用 `execution-trace-persistent` 可见规则，但不取得工具或顶部完成状态所有权。bundle/direct classic 的首次计数均为 AgentRun POST 2、Runtime POST 0、chat 3、tool execution 1，完整 reload 后四项增量全 0，八项语义哈希一致。详见 [`H4-7C detached parallel 模型失败隔离与终态刷新唯一性`](harness/h4-7c-detached-parallel-failure-isolation.md)。
+
 **工作项**：
 
 1. 列出现有 AgentRun 状态、事件类型、事件载荷和前端处理函数。
@@ -677,6 +679,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 **H4-7A 阶段更新（2026-08-08）**：上段剩余项中的“图片”现已由 H4-7A 收窄完成 TIFF 派生浏览器预览、失败卡片和页面生命周期请求去重；其他图片格式完整矩阵、TIFF 多页浏览、真实外部模型与发布门禁仍未覆盖。H4-7A 不改变 AgentRun/Runtime、Session JSONL 或模型请求协议，完整证据与限制见 [`H4-7A TIFF 派生浏览器预览与页面生命周期缓存`](harness/h4-7a-tiff-derived-browser-preview.md)。
 
 **H4-7B 阶段更新（2026-08-08）**：上段剩余项中的队列/并行真实 DOM 生命周期现已收窄完成“完成耗时唯一投影”部分：主任务、普通排队任务与 detached/background/`/parallel` 的耗时所有权、页脚/顶部位置、中英文即时切换及完整刷新零新增请求已闭合；队列/并行的其他生命周期、取消、错误和工具组合仍不由本阶段推定通过。完整证据与限制见 [`H4-7B 主任务完成计时唯一投影`](harness/h4-7b-primary-completion-elapsed-projection.md)。
+
+**H4-7C 阶段更新（2026-08-08）**：队列/并行真实 DOM 生命周期继续收窄完成 detached `/parallel` 单次确定性模型失败隔离：background 独立 failed，不改变活动主任务工具归组、完成计时或最终 completed；同进程完整 reload 保持失败终态唯一且不创建新 Run、chat 或工具执行。显式取消、超时、排队失败/取消、Child、active/cross-process background 恢复及新并发产品语义仍未覆盖。完整证据与限制见 [`H4-7C detached parallel 模型失败隔离与终态刷新唯一性`](harness/h4-7c-detached-parallel-failure-isolation.md)。
 
 **工作项**：
 

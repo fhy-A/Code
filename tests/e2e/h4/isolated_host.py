@@ -61,6 +61,8 @@ TIMING_PARALLEL_USER = "H4_TIMING_PARALLEL_USER"
 TIMING_PARALLEL_FINAL = "H4_TIMING_PARALLEL_FINAL"
 TIMING_QUEUE_USER = "H4_TIMING_QUEUE_USER"
 TIMING_QUEUE_FINAL = "H4_TIMING_QUEUE_FINAL"
+PARALLEL_FAILURE_USER = "H4_PARALLEL_MODEL_FAILURE_USER"
+PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -303,6 +305,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if receipt_count >= len(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS):
             return "repeated-range-failure-final", True
         return f"repeated-range-failure-call-{receipt_count + 1}", receipt_count > 0
+    if PARALLEL_FAILURE_USER in user_text:
+        return "parallel-model-failure", has_tool_result
     if INVALID_TOOL_USER in user_text:
         return ("invalid-tool-final" if has_tool_result else "invalid-tool-call", has_tool_result)
     if PARSE_ERROR_TOOL_USER in user_text:
@@ -733,6 +737,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario == "tiff-image":
             chat_metric["imageProjection"] = _tiff_model_image_projection(payload)
         METRICS.append("chatRequests", chat_metric)
+        if scenario == "parallel-model-failure":
+            self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
+            return
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if (
             scenario not in (
