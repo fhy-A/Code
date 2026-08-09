@@ -31,6 +31,17 @@ GIF 继续使用浏览器原生动画预览；PNG、JPEG、WebP、BMP 与 ICO �
 
 完整刷新会自然重建页面缓存，因此允许对持久化 TIFF 发起一次新的 GET。缓存对象、Blob URL 与失败状态不写入消息、`_images`、content、Session JSONL、AgentRun、模型请求或保存 payload。
 
+### dispose 终结态收尾
+
+累计稳定性实现为页面缓存增加了与普通清理分离的 `dispose` 终结语义：
+
+- `dispose` 后立即清空 entries，所有已经 ready 的 Blob URL 各撤销一次；重复调用 `dispose` 不会重复撤销。
+- `dispose` 前已经 pending 的请求即使稍后成功，也只撤销刚生成的 Blob URL，不再写入 cache、不调用 `onSettled`、不触发消息重绘。
+- `dispose` 后 `ensure` 对任意 key 都稳定返回空结果，不再调用 `requestPreview`；`source` 与 `status` 也不暴露已终结 entry。
+- 页面卸载先把 `persistedTiffPreviewCache` 置为 disposed，再继续既有保存与计时收尾。旧 document 随后的 `renderSessionMessages` 或预览查询不能重建 GET；新 document 每次自然创建全新的页面缓存。
+
+H4 继续严格区分 document generation：旧页进入 dispose 后 GET 增量为 0，新页面恢复后对同一持久化 TIFF 发起且只发起 1 次 GET。该收尾不跨页面复用 cache，不新增 localStorage、全局耐久缓存、磁盘缩略图或预览持久化字段。
+
 ## 精确浏览器请求证据
 
 bundle 与 direct classic 使用同一预览逻辑和 H4 场景，按 method、path 与 phase 得到完全相同的计数：
@@ -50,9 +61,9 @@ bundle 与 direct classic 使用同一预览逻辑和 H4 场景，按 method、p
 
 浏览器同时冻结原 TIFF SHA-256 `42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73`、单一磁盘附件、Session `image/tiff`、零派生字段、模型 PNG 识别，以及刷新后的 AgentRun POST、Runtime POST、chat、工具执行四项零增量。
 
-## 实现哈希
+## 原阶段实现哈希
 
-文档收口前冻结的 SHA-256：
+原 H4-7A 收口时冻结的 SHA-256：
 
 | 文件 | SHA-256 |
 |---|---|
@@ -67,7 +78,7 @@ bundle 与 direct classic 使用同一预览逻辑和 H4 场景，按 method、p
 | `tests/test_image_vision_and_browser_refresh.py` | `c25b71b20ff8a55fa7b7e932df1debee608467ea6a99f72d803dcbe7e23ac93b` |
 | `tests/test_routes.py` | `250989454a4c5c54086078d34d667f24898eaeff93bab31faf21f3bc8df39600` |
 
-## 验证
+## 原阶段验证与累计复验
 
 实现完成时的有效结果：
 
@@ -82,12 +93,14 @@ bundle 与 direct classic 使用同一预览逻辑和 H4 场景，按 method、p
 - 完整 Python：`1121 passed, 751 subtests passed`；
 - `npm run check:frontend`、Node/Python 语法、`git diff --check` 与资源清理：通过。
 
-文档收口只重跑缓存定向、TIFF 路由/安全定向、两条 TIFF H4、前端构建/新鲜度、语法和 diff；在上述十个文件哈希不变的前提下，沿用同一实现文件形态的两轮标准 H4 与完整 pytest 结果，不把未重跑项描述为文档收口后重跑。
+原专题文档收口只重跑缓存定向、TIFF 路由/安全定向、两条 TIFF H4、前端构建/新鲜度、语法和 diff；在上述十个文件哈希不变的前提下，沿用同一实现文件形态的两轮标准 H4 与完整 pytest 结果，不把未重跑项描述为文档收口后重跑。
 
-先前失败诊断产生的五个受忽略文件已清理；最终 H4 子进程、临时根和 `output/h4-playwright` 文件均为 0。
+原 H4-7A 收口时，先前失败诊断产生的五个受忽略文件已清理，H4 子进程、临时根和 `output/h4-playwright` 文件均为 0。
+
+页面缓存 dispose 收尾包含在累计实现提交 `8178be99e8ede82d739902d6c8f37afc76846abb` 中。该最终树下，缓存定向、bundle/direct classic TIFF、前端定向与 H4 infrastructure 通过；连续两轮标准 H4 均为 `51 passed`、单 worker、`retries=0`；完整 pytest 为 `1131 passed, 751 subtests passed`；`npm run check:frontend`、Node/Python 语法与 `git diff --check` 通过。当前专题更新只执行 Markdown、链接、哈希引用、diff 与三文件白名单检查，不重跑长矩阵。
 
 ## 证明边界与回退
 
-H4-7A 只证明固定有效 TIFF 在 bundle/direct classic 中的发送前、发送后、放大、刷新、失败卡片与页面生命周期请求去重；不证明 TIFF 多页浏览、完整图片格式矩阵、SVG/AVIF/HEIC、动画/多尺寸选择、真实外部模型或发布门禁。
+H4-7A 只证明固定有效 TIFF 在 bundle/direct classic 中的发送前、发送后、放大、刷新、失败卡片、页面生命周期请求去重与旧页 dispose 终结；不证明异常或孤儿历史附件记录、多标签页共享缓存、跨进程缓存恢复、持久化缩略图、TIFF 多页浏览、完整图片格式矩阵、SVG/AVIF/HEIC、动画/多尺寸选择、真实外部模型或发布门禁。queue/steer、多并行失败、工具型 follow-up 与后台工具副作用不属于图片预览场景，本阶段也不作推论；主观视觉质量仍只沿用原人工确认，不由新增 dispose 自动证据替代。
 
 独立回退只需撤销本阶段十个实现/测试文件及收口文档；没有预览数据迁移、Session JSONL 迁移或磁盘缩略图清理动作。原 TIFF 数据和既有会话格式无需回写。
