@@ -65,6 +65,22 @@ const PARALLEL_FAILURE_USER = "H4_PARALLEL_MODEL_FAILURE_USER";
 const PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE";
 const PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER";
 const PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL";
+const QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER";
+const QUESTIONNAIRE_FINAL = "H4_QUESTIONNAIRE_FINAL";
+const QUESTIONNAIRE_TOOL_CALL_ID = "h4-questionnaire-call-1";
+const QUESTIONNAIRE_REQUEST_ID = `user-input-${QUESTIONNAIRE_TOOL_CALL_ID}`;
+const QUESTIONNAIRE_TITLE = "H4_QUESTIONNAIRE_TITLE";
+const QUESTIONNAIRE_REASON = "H4_QUESTIONNAIRE_REASON";
+const QUESTIONNAIRE_QUESTION_ID = "h4-questionnaire-choice";
+const QUESTIONNAIRE_PROMPT = "H4_QUESTIONNAIRE_PROMPT";
+const QUESTIONNAIRE_OPTION_A = Object.freeze({
+  value: "h4-option-a",
+  label: "H4_QUESTIONNAIRE_OPTION_A",
+});
+const QUESTIONNAIRE_OPTION_B = Object.freeze({
+  value: "h4-option-b",
+  label: "H4_QUESTIONNAIRE_OPTION_B",
+});
 const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
 const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
 const TIFF_ATTACHMENT_SHA256 = "42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73";
@@ -245,6 +261,17 @@ const H4_SYNC_1_SEMANTIC_HASHES = Object.freeze({
   followupDom: "b7b1505cf4fed62478c535a9ad86fab9291a26ac8318ac04d47ef0dc742fc8a6",
   requestCounts: "51357c34453ca7e453830920b00500004f0183b75bcf58b9e8e56121e52860fb",
   refreshLifecycle: "4f728a8ceb1d29f8c888e828cd1b27d21fbdb1508e030fa29a5aa3ffd4ba281f",
+});
+const H4_8A_SEMANTIC_HASHES = Object.freeze({
+  waitingEventProjection: "6f07ddb587ba352d15f3b9d8608d3b89c475f3f3217ec713304b31b0e5a6da41",
+  waitingSnapshot: "722b86175ddd43f7306b459d5f6410a0a7c8a8f3ad5b8075cfb6dd2bc8506c3b",
+  inputSubmissionProjection: "1bc729f0df83ed708bbf5f1c397a6aaef4d73788d50ccfb7e45473859cd1bc27",
+  runtimeProjection: "c828f32c0eef8d43d9464fce985d82603cc6817b9f1ce948be2fd343e8c4652c",
+  sessionRoleContent: "ba570ba870a189929e69069ec42c83747102a292b8118a153900185c27686bf0",
+  sessionInputMeta: "30fbb18d20b9db9ab076b932eb1fa9fc11aeaf11f61249f7248db17380234559",
+  waitingDom: "f0586513d93fe803d143b3929fd4e56c13fa317de5dcd9dd6ce1d4f1fe351dad",
+  terminalDom: "37c2441c6730d71c5b4af6e34798778c004c163686bb5fcee31179cf1fd69f8b",
+  refreshLifecycle: "fe57c8d69de127f1cfd2b85d1bfb78878aaede36c381a19e2a1a616bba080629",
 });
 
 function idHash(value) {
@@ -1987,6 +2014,7 @@ async function fetchProductionJson(page, pathName) {
 function describeLoopbackRequest(request) {
   const url = new URL(request.url());
   const method = request.method();
+  const agentActionMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)\/(input|resume)$/);
   const agentMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
   const runtimeMatch = url.pathname.match(/^\/api\/runtime\/runs\/([^/]+)$/);
   if (url.pathname === "/api/agent/runs") {
@@ -1994,6 +2022,17 @@ function describeLoopbackRequest(request) {
   }
   if (url.pathname === "/api/runtime/runs") {
     return { at: Date.now(), method, path: "/api/runtime/runs", kind: "runtime", idHash: "", cursor: 0 };
+  }
+  if (agentActionMatch) {
+    const action = String(agentActionMatch[2] || "");
+    return {
+      at: Date.now(),
+      method,
+      path: `/api/agent/runs/[id]/${action}`,
+      kind: `agent-${action}`,
+      idHash: idHash(decodeURIComponent(agentActionMatch[1])),
+      cursor: 0,
+    };
   }
   if (agentMatch) {
     return {
@@ -4575,6 +4614,1001 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   });
 }
 
+function questionnaireArgumentsProjection(value) {
+  const source = value && typeof value === "object" ? value : parseToolArguments(value);
+  const questions = Array.isArray(source?.questions) ? source.questions : [];
+  const question = questions[0] && typeof questions[0] === "object" ? questions[0] : {};
+  const options = Array.isArray(question.options) ? question.options : [];
+  return {
+    titleMatches: String(source?.title || "") === QUESTIONNAIRE_TITLE,
+    reasonMatches: String(source?.reason || "") === QUESTIONNAIRE_REASON,
+    questionCount: questions.length,
+    question: {
+      idMatches: String(question.id || "") === QUESTIONNAIRE_QUESTION_ID,
+      promptMatches: String(question.prompt || "") === QUESTIONNAIRE_PROMPT,
+      type: String(question.type || ""),
+      required: question.required === true,
+      allowOther: question.allowOther === true,
+      options: options.map((option) => ({
+        value: String(option?.value || ""),
+        labelMatches: [QUESTIONNAIRE_OPTION_A.label, QUESTIONNAIRE_OPTION_B.label]
+          .includes(String(option?.label || "")),
+        descriptionPresent: Boolean(String(option?.description || "").trim()),
+      })),
+    },
+  };
+}
+
+function stableQuestionnaireResult(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const answers = Array.isArray(source.answers) ? source.answers : [];
+  const answer = answers[0] && typeof answers[0] === "object" ? answers[0] : {};
+  const values = Array.isArray(answer.values) ? answer.values.map(String) : [];
+  return {
+    ok: source.ok === true,
+    action: String(source.action || ""),
+    requestIdMatches: String(source.requestId || "") === QUESTIONNAIRE_REQUEST_ID,
+    titleMatches: String(source.title || "") === QUESTIONNAIRE_TITLE,
+    answerCount: answers.length,
+    answer: {
+      idMatches: String(answer.id || "") === QUESTIONNAIRE_QUESTION_ID,
+      promptMatches: String(answer.prompt || "") === QUESTIONNAIRE_PROMPT,
+      type: String(answer.type || ""),
+      status: String(answer.status || ""),
+      values,
+      selectedValueMatches: values.length === 1 && values[0] === QUESTIONNAIRE_OPTION_B.value,
+      answerLabelMatches: String(answer.answer || "") === QUESTIONNAIRE_OPTION_B.label,
+      otherEmpty: !String(answer.other || ""),
+    },
+    summaryMatches: String(source.summary || "").includes(QUESTIONNAIRE_PROMPT)
+      && String(source.summary || "").includes(QUESTIONNAIRE_OPTION_B.label),
+    failureCountAbsent: !Object.prototype.hasOwnProperty.call(source, "failureCount"),
+    failureSignatureAbsent: !Object.prototype.hasOwnProperty.call(source, "failureSignature"),
+    retryFieldsAbsent: !Object.prototype.hasOwnProperty.call(source, "retryBlocked")
+      && !Object.prototype.hasOwnProperty.call(source, "retryLimitReached"),
+  };
+}
+
+function questionnaireEventProjection(snapshot) {
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const runtimeIds = events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  const runtimeAliases = new Map(runtimeIds.map((runId, index) => [runId, `runtime-${index + 1}`]));
+  return events.map((event) => {
+    const data = event?.data || {};
+    const projected = {
+      seq: Number(event?.seq || 0),
+      type: String(event?.type || ""),
+    };
+    if (data.round != null) projected.round = Number(data.round);
+    if (data.runtimeRunId) {
+      projected.runtimeRunId = runtimeAliases.get(String(data.runtimeRunId)) || "mismatch";
+    }
+    if (data.content != null) {
+      projected.content = String(data.content) === QUESTIONNAIRE_FINAL ? "final" : "empty";
+    }
+    if (data.finishReason != null) projected.finishReason = String(data.finishReason);
+    if (Array.isArray(data.toolCalls)) {
+      projected.toolCalls = data.toolCalls.map((call) => ({
+        toolCallMatches: String(call?.id || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+        name: String(call?.function?.name || call?.name || ""),
+        arguments: questionnaireArgumentsProjection(
+          call?.function?.arguments ?? call?.arguments,
+        ),
+      }));
+    }
+    if (data.toolCallId) {
+      projected.toolCallMatches = String(data.toolCallId) === QUESTIONNAIRE_TOOL_CALL_ID;
+    }
+    if (data.name != null) projected.name = String(data.name || "");
+    if (data.arguments != null) projected.arguments = questionnaireArgumentsProjection(data.arguments);
+    if (data.requestId != null) {
+      projected.requestIdMatches = String(data.requestId) === QUESTIONNAIRE_REQUEST_ID;
+    }
+    if (Array.isArray(data.questions)) {
+      projected.inputRequest = questionnaireArgumentsProjection({
+        title: data.title,
+        reason: data.reason,
+        questions: data.questions,
+      });
+    }
+    if (data.outcome != null) projected.outcome = String(data.outcome);
+    if (data.replayed != null) projected.replayed = Boolean(data.replayed);
+    if (data.result != null) projected.result = stableQuestionnaireResult(data.result);
+    if (data.resumeStatus != null) projected.resumeStatus = String(data.resumeStatus);
+    if (data.reason != null) projected.reason = String(data.reason);
+    return projected;
+  });
+}
+
+function questionnaireExecutionProjection(snapshot) {
+  return (Array.isArray(snapshot?.toolExecutions) ? snapshot.toolExecutions : []).map((execution) => ({
+    toolCallMatches: String(execution?.toolCallId || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+    name: String(execution?.name || ""),
+    arguments: questionnaireArgumentsProjection(execution?.arguments),
+    status: String(execution?.status || ""),
+    outcome: String(execution?.outcome || ""),
+    result: execution?.result == null ? null : stableQuestionnaireResult(execution.result),
+    failureCountAbsent: !Object.prototype.hasOwnProperty.call(execution || {}, "failureCount"),
+    failureSignatureAbsent: !Object.prototype.hasOwnProperty.call(execution || {}, "failureSignature"),
+  }));
+}
+
+function questionnaireRunStateProjection(runState, agentRunId) {
+  const source = runState && typeof runState === "object" ? runState : {};
+  const request = source.userInputRequest && typeof source.userInputRequest === "object"
+    ? source.userInputRequest
+    : null;
+  const question = request?.questions?.[0] || {};
+  return {
+    status: String(source.status || ""),
+    phase: String(source.phase || ""),
+    executionOwner: String(source.executionOwner || ""),
+    agentRunMatches: String(source.agentRunId || "") === agentRunId,
+    runtimeRunCleared: !String(source.runtimeRunId || ""),
+    cursor: Number(source.agentEventCursor || 0),
+    modelRound: Number(source.modelRound || 0),
+    request: request ? {
+      requestIdMatches: String(request.id || "") === QUESTIONNAIRE_REQUEST_ID,
+      toolCallMatches: String(request.toolCallId || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+      agentRunMatches: String(request.agentRunId || "") === agentRunId,
+      titleMatches: String(request.title || "") === QUESTIONNAIRE_TITLE,
+      reasonMatches: String(request.reason || "") === QUESTIONNAIRE_REASON,
+      status: String(request.status || ""),
+      questionCount: Array.isArray(request.questions) ? request.questions.length : 0,
+      question: {
+        idMatches: String(question.id || "") === QUESTIONNAIRE_QUESTION_ID,
+        type: String(question.type || ""),
+        status: String(question.status || ""),
+        selectedCount: Array.isArray(question.selected) ? question.selected.length : -1,
+        optionValues: Array.isArray(question.options)
+          ? question.options.map((option) => String(option?.value || ""))
+          : [],
+      },
+    } : null,
+  };
+}
+
+function questionnaireWaitingSnapshotProjection(snapshot, session, agentRunId) {
+  const pending = snapshot?.pendingInput || {};
+  const questions = Array.isArray(pending.questions) ? pending.questions : [];
+  return {
+    agent: {
+      status: String(snapshot?.status || ""),
+      nextCursor: Number(snapshot?.nextCursor || 0),
+      round: Number(snapshot?.round || 0),
+      activeRuntimeCleared: !String(snapshot?.activeRuntimeRunId || ""),
+      pendingToolCallCount: Array.isArray(snapshot?.pendingToolCalls)
+        ? snapshot.pendingToolCalls.length
+        : -1,
+      pendingInput: {
+        requestIdMatches: String(pending.requestId || "") === QUESTIONNAIRE_REQUEST_ID,
+        toolCallMatches: String(pending.toolCallId || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+        titleMatches: String(pending.title || "") === QUESTIONNAIRE_TITLE,
+        reasonMatches: String(pending.reason || "") === QUESTIONNAIRE_REASON,
+        questionCount: questions.length,
+        question: questionnaireArgumentsProjection({ questions }).question,
+      },
+      executions: questionnaireExecutionProjection(snapshot),
+    },
+    session: {
+      roles: (session?.messages || []).map((message) => String(message?.role || "")),
+      runState: questionnaireRunStateProjection(session?.runState, agentRunId),
+    },
+  };
+}
+
+function questionnaireSessionRoleProjection(messages) {
+  return (Array.isArray(messages) ? messages : []).map((message) => {
+    const role = String(message?.role || "");
+    const meta = message?.meta || {};
+    let kind = "";
+    if (role === "user" && message?.content === QUESTIONNAIRE_USER) kind = "initial-user";
+    else if (role === "assistant" && message?.content === QUESTIONNAIRE_FINAL) kind = "final";
+    else if (
+      role === "assistant"
+      && Array.isArray(meta.toolCalls)
+      && meta.toolCalls.length > 0
+    ) kind = "tool-owner";
+    else if (role === "tool-call" && meta.action === "request_user_input") kind = "questionnaire-call";
+    else if (meta.kind === "user-input-summary") kind = "input-summary";
+    else if (role === "tool-result" && meta.action === "request_user_input") kind = "questionnaire-result";
+    return { role, kind };
+  });
+}
+
+function questionnaireSessionInputMetaProjection(messages, agentRunId) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => (
+      ["tool-call", "tool-result"].includes(message?.role)
+      || message?.meta?.kind === "user-input-summary"
+    ))
+    .map((message) => {
+      const meta = message?.meta || {};
+      if (meta.kind === "user-input-summary") {
+        const answer = Array.isArray(meta.answers) ? meta.answers[0] : null;
+        return {
+          role: String(message.role || ""),
+          kind: "user-input-summary",
+          system: meta._system === true,
+          skipApi: meta.skipApi === true,
+          requestIdMatches: String(meta.requestId || "") === QUESTIONNAIRE_REQUEST_ID,
+          titleMatches: String(meta.title || "") === QUESTIONNAIRE_TITLE,
+          answer: stableQuestionnaireResult({
+            ok: true,
+            action: "request_user_input",
+            requestId: meta.requestId,
+            title: meta.title,
+            answers: answer ? [answer] : [],
+            summary: message.content,
+          }),
+        };
+      }
+      const result = meta.result && typeof meta.result === "object"
+        ? stableQuestionnaireResult(meta.result)
+        : null;
+      return {
+        role: String(message.role || ""),
+        toolCallMatches: String(meta.toolCallId || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+        agentRunMatches: String(meta.agentRunId || "") === agentRunId,
+        eventType: String(meta.agentEventType || ""),
+        eventSeq: Number(meta.agentEventSeq || 0),
+        action: String(meta.action || ""),
+        native: meta.native === true,
+        replayed: Boolean(meta.replayed),
+        outcome: String(meta.outcome || ""),
+        arguments: message.role === "tool-call"
+          ? questionnaireArgumentsProjection(meta.tool || {})
+          : null,
+        result,
+      };
+    });
+}
+
+function questionnaireRequestProjection(h4, boundary, beforeMetrics, afterMetrics) {
+  const requests = h4.requestEvidenceSince(boundary);
+  const summary = h4.requestSummarySince(boundary);
+  return {
+    agentRunPost: requests.agentPost,
+    runtimePost: requests.runtimePost,
+    agentDelete: requests.agentDelete,
+    inputPost: summary["POST /api/agent/runs/[id]/input"] || 0,
+    resumePost: summary["POST /api/agent/runs/[id]/resume"] || 0,
+    browserProxyChatPost: summary["POST /proxy/chat"] || 0,
+    browserToolPost: Object.entries(summary)
+      .filter(([key]) => key.startsWith("POST /api/tools/"))
+      .reduce((total, [, count]) => total + count, 0),
+    upstreamChatDelta: afterMetrics.chatRequests.length - beforeMetrics.chatRequests.length,
+    productionDelegationDelta: Number(afterMetrics.productionToolDelegations || 0)
+      - Number(beforeMetrics.productionToolDelegations || 0),
+    productionToolExecutionDelta: afterMetrics.toolExecutions.length
+      - beforeMetrics.toolExecutions.length,
+  };
+}
+
+async function questionnaireDomProjection(h4, phase) {
+  const expected = phase === "waiting" ? {
+    panel: { visible: true, cards: 1, questions: 1, options: 2, checked: 0, confirms: 1 },
+    messages: { initialUser: 1, toolProcesses: 1, toolItems: 1, summaries: 0, finals: 0 },
+    tool: { action: "request_user_input", argumentDetails: 1, resultDetails: 0 },
+    order: ["initial-user", "tool-process"],
+  } : {
+    panel: { visible: false, cards: 0, questions: 0, options: 0, checked: 0, confirms: 0 },
+    messages: { initialUser: 1, toolProcesses: 1, toolItems: 1, summaries: 1, finals: 1 },
+    tool: { action: "request_user_input", argumentDetails: 1, resultDetails: 1 },
+    order: ["initial-user", "tool-process", "input-summary", "final"],
+  };
+  return waitForMessageProjection(h4, {
+    label: `questionnaire-${phase}`,
+    expected,
+    sourceFacts: {
+      phase,
+      userMarker: QUESTIONNAIRE_USER,
+      finalMarker: QUESTIONNAIRE_FINAL,
+      questionId: QUESTIONNAIRE_QUESTION_ID,
+      promptMarker: QUESTIONNAIRE_PROMPT,
+      selectedLabel: QUESTIONNAIRE_OPTION_B.label,
+    },
+    sample: (facts) => {
+      const panel = document.querySelector("#userInputPanel");
+      const root = document.querySelector("#messages");
+      const users = [...root.querySelectorAll("article.msg.user")]
+        .filter((node) => node.textContent.includes(facts.userMarker));
+      const processStages = [...root.querySelectorAll(
+        'article.tool-process > details.tool-process-stage[data-current-action="request_user_input"]',
+      )];
+      const processes = processStages.map((stage) => stage.closest("article.tool-process"));
+      const process = processes[0] || null;
+      const item = process?.querySelector("details.tool-process-item") || null;
+      const details = item ? [...item.querySelectorAll(".tool-process-detail pre")] : [];
+      const summaries = [...root.querySelectorAll("article.user-input-flow")]
+        .filter((node) => (
+          node.textContent.includes(facts.promptMarker)
+          && node.textContent.includes(facts.selectedLabel)
+        ));
+      const finals = [...root.querySelectorAll("article.msg.assistant")]
+        .filter((node) => node.textContent.includes(facts.finalMarker));
+      const nodes = [
+        { label: "initial-user", node: users[0] || null },
+        { label: "tool-process", node: process },
+        ...(facts.phase === "terminal" ? [
+          { label: "input-summary", node: summaries[0] || null },
+          { label: "final", node: finals[0] || null },
+        ] : []),
+      ].filter((entry) => entry.node);
+      nodes.sort((left, right) => (
+        left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+      ));
+      return {
+        panel: {
+          visible: Boolean(panel && !panel.classList.contains("hidden")),
+          cards: panel?.querySelectorAll(".user-input-card").length || 0,
+          questions: panel?.querySelectorAll(`[data-question-id="${facts.questionId}"]`).length || 0,
+          options: panel?.querySelectorAll('input[type="radio"]').length || 0,
+          checked: panel?.querySelectorAll('input[type="radio"]:checked').length || 0,
+          confirms: panel?.querySelectorAll('[data-user-input-action="confirm"]').length || 0,
+        },
+        messages: {
+          initialUser: users.length,
+          toolProcesses: processes.length,
+          toolItems: process?.querySelectorAll("details.tool-process-item").length || 0,
+          summaries: summaries.length,
+          finals: finals.length,
+        },
+        tool: {
+          action: String(process?.querySelector("details.tool-process-stage")?.dataset.currentAction || ""),
+          argumentDetails: details.length > 0 ? 1 : 0,
+          resultDetails: Math.max(0, details.length - 1),
+        },
+        order: nodes.map((entry) => entry.label),
+      };
+    },
+  });
+}
+
+async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  await h4.proveNonLoopbackBlocked();
+
+  const lifecycleBoundary = h4.requestBoundary();
+  const lifecycleMetricsBefore = await h4.metrics();
+  await page.locator("#prompt").fill(QUESTIONNAIRE_USER);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user").filter({ hasText: QUESTIONNAIRE_USER }))
+    .toHaveCount(1);
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  let waitingAgentResponse = null;
+  await expect.poll(async () => {
+    waitingAgentResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: waitingAgentResponse.body?.status,
+      eventTypes: (waitingAgentResponse.body?.events || []).map((event) => event.type),
+      requestIdMatches: waitingAgentResponse.body?.pendingInput?.requestId === QUESTIONNAIRE_REQUEST_ID,
+      executionStatuses: (waitingAgentResponse.body?.toolExecutions || [])
+        .map((execution) => execution.status),
+    };
+  }).toEqual({
+    status: "waiting_user_input",
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "user_input_required",
+    ],
+    requestIdMatches: true,
+    executionStatuses: ["waiting_user_input"],
+  });
+  expect(waitingAgentResponse.status).toBe(200);
+  const waitingAgent = waitingAgentResponse.body;
+  const waitingEvents = questionnaireEventProjection(waitingAgent);
+  expect(waitingAgent.nextCursor).toBe(waitingEvents.at(-1)?.seq);
+  expect(waitingEvents.map((event) => event.seq)).toEqual(
+    waitingEvents.map((_, index) => index + 1),
+  );
+  expect(waitingAgent.pendingInput).toMatchObject({
+    requestId: QUESTIONNAIRE_REQUEST_ID,
+    toolCallId: QUESTIONNAIRE_TOOL_CALL_ID,
+    title: QUESTIONNAIRE_TITLE,
+    reason: QUESTIONNAIRE_REASON,
+  });
+  expect(waitingAgent.pendingToolCalls).toHaveLength(1);
+  expect(waitingAgent.activeRuntimeRunId).toBe("");
+  const waitingExecution = questionnaireExecutionProjection(waitingAgent);
+  expect(waitingExecution).toEqual([{
+    toolCallMatches: true,
+    name: "request_user_input",
+    arguments: questionnaireArgumentsProjection({
+      title: QUESTIONNAIRE_TITLE,
+      reason: QUESTIONNAIRE_REASON,
+      questions: waitingAgent.pendingInput.questions,
+    }),
+    status: "waiting_user_input",
+    outcome: "",
+    result: null,
+    failureCountAbsent: true,
+    failureSignatureAbsent: true,
+  }]);
+
+  const firstRuntimeRunId = String(
+    waitingAgent.events.find((event) => event?.type === "model_started")?.data?.runtimeRunId || "",
+  );
+  expect(firstRuntimeRunId).not.toBe("");
+  const firstRuntimeResponse = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(firstRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(firstRuntimeResponse.status).toBe(200);
+  expect(firstRuntimeResponse.body).toMatchObject({
+    runId: firstRuntimeRunId,
+    status: "completed",
+  });
+  expect(firstRuntimeResponse.body.nextCursor).toBeGreaterThan(0);
+  expect(firstRuntimeResponse.body.events).toHaveLength(firstRuntimeResponse.body.nextCursor);
+  expect(firstRuntimeResponse.body.result).toMatchObject({
+    content: "",
+    finishReason: "tool_calls",
+  });
+  expect(firstRuntimeResponse.body.result?.toolCalls).toHaveLength(1);
+  expect(firstRuntimeResponse.body.result?.toolCalls?.[0]).toMatchObject({
+    id: QUESTIONNAIRE_TOOL_CALL_ID,
+    function: { name: "request_user_input" },
+  });
+
+  const waitingDom = await questionnaireDomProjection(h4, "waiting");
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(1);
+  await expect(page.locator("#stopBtn")).toBeEnabled();
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  let waitingSessionResponse = null;
+  await expect.poll(async () => {
+    waitingSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: waitingSessionResponse.status,
+      roles: (waitingSessionResponse.body?.messages || []).map((message) => message.role),
+      runStatus: waitingSessionResponse.body?.runState?.status,
+      cursor: waitingSessionResponse.body?.runState?.agentEventCursor,
+      requestId: waitingSessionResponse.body?.runState?.userInputRequest?.id,
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call"],
+    runStatus: "waiting-user-input",
+    cursor: waitingAgent.nextCursor,
+    requestId: QUESTIONNAIRE_REQUEST_ID,
+  });
+  const waitingSnapshot = questionnaireWaitingSnapshotProjection(
+    waitingAgent,
+    waitingSessionResponse.body,
+    agentRunId,
+  );
+  expect(waitingSnapshot.agent.status).toBe("waiting_user_input");
+  expect(waitingSnapshot.agent.pendingInput).toMatchObject({
+    requestIdMatches: true,
+    toolCallMatches: true,
+    titleMatches: true,
+    reasonMatches: true,
+    questionCount: 1,
+  });
+  expect(waitingSnapshot.session.runState).toMatchObject({
+    status: "waiting-user-input",
+    phase: "tools",
+    executionOwner: "server-agent",
+    agentRunMatches: true,
+    runtimeRunCleared: true,
+    cursor: waitingAgent.nextCursor,
+    modelRound: 1,
+    request: {
+      requestIdMatches: true,
+      toolCallMatches: true,
+      agentRunMatches: true,
+      status: "pending",
+      questionCount: 1,
+    },
+  });
+
+  const metricsAtWaiting = await h4.metrics();
+  expect(metricsAtWaiting.chatRequests).toEqual([{
+    scenario: "questionnaire-call",
+    stream: true,
+    hasToolResult: false,
+  }]);
+  expect(metricsAtWaiting.toolExecutions).toEqual([]);
+  expect(metricsAtWaiting.productionToolDelegations).toBe(0);
+  expect(metricsAtWaiting.unsafeToolRequests).toBe(0);
+  expect(metricsAtWaiting.production.agentRuns).toHaveLength(1);
+  expect(metricsAtWaiting.production.runtimeRuns).toHaveLength(1);
+
+  const waitingReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const restoredWaitingDom = await questionnaireDomProjection(h4, "waiting");
+  expect(restoredWaitingDom).toEqual(waitingDom);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  const waitingAgentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(waitingAgentAfterReload.status).toBe(200);
+  expect(questionnaireEventProjection(waitingAgentAfterReload.body)).toEqual(waitingEvents);
+  expect(questionnaireExecutionProjection(waitingAgentAfterReload.body)).toEqual(waitingExecution);
+  expect(waitingAgentAfterReload.body.pendingInput?.requestId).toBe(QUESTIONNAIRE_REQUEST_ID);
+  const waitingSessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(waitingSessionAfterReload.status).toBe(200);
+  expect(questionnaireWaitingSnapshotProjection(
+    waitingAgentAfterReload.body,
+    waitingSessionAfterReload.body,
+    agentRunId,
+  )).toEqual(waitingSnapshot);
+  const metricsAfterWaitingReload = await h4.metrics();
+  expect(metricsAfterWaitingReload.chatRequests).toEqual(metricsAtWaiting.chatRequests);
+  expect(metricsAfterWaitingReload.toolExecutions).toEqual(metricsAtWaiting.toolExecutions);
+  expect(metricsAfterWaitingReload.productionToolDelegations)
+    .toBe(metricsAtWaiting.productionToolDelegations);
+  const waitingReloadRequests = questionnaireRequestProjection(
+    h4,
+    waitingReloadBoundary,
+    metricsAtWaiting,
+    metricsAfterWaitingReload,
+  );
+  expect(waitingReloadRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 0,
+    resumePost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 0,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  expect(waitingAgentAfterReload.body.toolExecutions).toHaveLength(1);
+
+  const submissionBoundary = h4.requestBoundary();
+  const option = page.locator(
+    `#userInputPanel [data-question-id="${QUESTIONNAIRE_QUESTION_ID}"] input[type="radio"][value="${QUESTIONNAIRE_OPTION_B.value}"]`,
+  );
+  const confirm = page.locator(
+    `#userInputPanel [data-question-id="${QUESTIONNAIRE_QUESTION_ID}"] [data-user-input-action="confirm"]`,
+  );
+  await expect(option).toHaveCount(1);
+  await expect(option).not.toBeChecked();
+  await option.check();
+  await expect(option).toBeChecked();
+  await expect(confirm).toHaveCount(1);
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+
+  const final = page.locator("#messages article.msg.assistant")
+    .filter({ hasText: QUESTIONNAIRE_FINAL });
+  await expect(final).toHaveCount(1);
+  let completedAgentResponse = null;
+  await expect.poll(async () => {
+    completedAgentResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedAgentResponse.body?.status,
+      eventTypes: (completedAgentResponse.body?.events || []).map((event) => event.type),
+      pendingInput: completedAgentResponse.body?.pendingInput ?? null,
+    };
+  }).toEqual({
+    status: "completed",
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "user_input_required",
+      "user_input_submitted",
+      "tool_completed",
+      "waiting_credentials",
+      "resumed",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+    pendingInput: null,
+  });
+  const completedAgent = completedAgentResponse.body;
+  const terminalEvents = questionnaireEventProjection(completedAgent);
+  expect(completedAgent.nextCursor).toBe(terminalEvents.at(-1)?.seq);
+  expect(terminalEvents.map((event) => event.seq)).toEqual(
+    terminalEvents.map((_, index) => index + 1),
+  );
+  expect(completedAgent.agentRunId).toBe(agentRunId);
+  expect(completedAgent.activeRuntimeRunId).toBe("");
+  expect(completedAgent.pendingToolCalls).toEqual([]);
+  expect(completedAgent.result?.content).toBe(QUESTIONNAIRE_FINAL);
+  const terminalExecution = questionnaireExecutionProjection(completedAgent);
+  expect(terminalExecution).toHaveLength(1);
+  expect(terminalExecution[0]).toMatchObject({
+    toolCallMatches: true,
+    name: "request_user_input",
+    status: "completed",
+    outcome: "succeeded",
+    failureCountAbsent: true,
+    failureSignatureAbsent: true,
+    result: {
+      ok: true,
+      action: "request_user_input",
+      requestIdMatches: true,
+      titleMatches: true,
+      answerCount: 1,
+      answer: {
+        idMatches: true,
+        promptMatches: true,
+        type: "single",
+        status: "resolved",
+        values: [QUESTIONNAIRE_OPTION_B.value],
+        selectedValueMatches: true,
+        answerLabelMatches: true,
+        otherEmpty: true,
+      },
+      summaryMatches: true,
+      failureCountAbsent: true,
+      failureSignatureAbsent: true,
+      retryFieldsAbsent: true,
+    },
+  });
+  const runtimeRunIds = completedAgent.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(runtimeRunIds).toHaveLength(2);
+  expect(new Set(runtimeRunIds).size).toBe(2);
+  const runtimeSnapshots = [];
+  for (const runtimeRunId of runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("completed");
+    expect(response.body.nextCursor).toBeGreaterThan(0);
+    expect(response.body.events).toHaveLength(response.body.nextCursor);
+    runtimeSnapshots.push(response.body);
+  }
+  const runtimeProjection = runtimeSnapshots.map((snapshot, index) => ({
+    runtime: `runtime-${index + 1}`,
+    status: String(snapshot.status || ""),
+    nextCursor: Number(snapshot.nextCursor || 0),
+    eventTypes: (snapshot.events || []).map((event) => String(event?.type || "")),
+    content: snapshot.result?.content === QUESTIONNAIRE_FINAL ? "final" : "empty",
+    finishReason: String(snapshot.result?.finishReason || ""),
+    toolCalls: (snapshot.result?.toolCalls || []).map((call) => ({
+      toolCallMatches: String(call?.id || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+      name: String(call?.function?.name || ""),
+      arguments: questionnaireArgumentsProjection(call?.function?.arguments),
+    })),
+  }));
+  expect(runtimeProjection[0]).toMatchObject({
+    runtime: "runtime-1",
+    status: "completed",
+    content: "empty",
+    finishReason: "tool_calls",
+    toolCalls: [{ toolCallMatches: true, name: "request_user_input" }],
+  });
+  expect(runtimeProjection[1]).toMatchObject({
+    runtime: "runtime-2",
+    status: "completed",
+    content: "final",
+    finishReason: "stop",
+    toolCalls: [],
+  });
+
+  const terminalDom = await questionnaireDomProjection(h4, "terminal");
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+  let terminalSessionResponse = null;
+  await expect.poll(async () => {
+    terminalSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: terminalSessionResponse.status,
+      roles: (terminalSessionResponse.body?.messages || []).map((message) => message.role),
+      runStateKeys: Object.keys(terminalSessionResponse.body?.runState || {}).sort(),
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call", "user", "tool-result", "assistant"],
+    runStateKeys: [],
+  });
+  const sessionRoleContent = questionnaireSessionRoleProjection(
+    terminalSessionResponse.body.messages,
+  );
+  expect(sessionRoleContent).toEqual([
+    { role: "user", kind: "initial-user" },
+    { role: "assistant", kind: "tool-owner" },
+    { role: "tool-call", kind: "questionnaire-call" },
+    { role: "user", kind: "input-summary" },
+    { role: "tool-result", kind: "questionnaire-result" },
+    { role: "assistant", kind: "final" },
+  ]);
+  const terminalToolOwner = terminalSessionResponse.body.messages[1];
+  expect(Array.isArray(terminalToolOwner?.meta?.toolCalls)).toBe(true);
+  expect(terminalToolOwner.meta.toolCalls).toHaveLength(1);
+  expect(terminalToolOwner.meta.toolCalls[0]).toMatchObject({
+    id: QUESTIONNAIRE_TOOL_CALL_ID,
+    function: { name: "request_user_input" },
+  });
+  const terminalFinalAssistant = terminalSessionResponse.body.messages[5];
+  expect(terminalFinalAssistant).toMatchObject({
+    role: "assistant",
+    content: QUESTIONNAIRE_FINAL,
+  });
+  expect(Array.isArray(terminalFinalAssistant.meta?.toolCalls)).toBe(true);
+  expect(terminalFinalAssistant.meta.toolCalls).toHaveLength(0);
+  const sessionInputMeta = questionnaireSessionInputMetaProjection(
+    terminalSessionResponse.body.messages,
+    agentRunId,
+  );
+  expect(sessionInputMeta).toHaveLength(3);
+  expect(sessionInputMeta.map((item) => item.role)).toEqual(["tool-call", "user", "tool-result"]);
+  expect(sessionInputMeta[0]).toMatchObject({
+    toolCallMatches: true,
+    agentRunMatches: true,
+    eventType: "tool_started",
+    action: "request_user_input",
+    native: true,
+    replayed: false,
+  });
+  expect(sessionInputMeta[1]).toMatchObject({
+    kind: "user-input-summary",
+    system: true,
+    skipApi: true,
+    requestIdMatches: true,
+    titleMatches: true,
+  });
+  expect(sessionInputMeta[2]).toMatchObject({
+    toolCallMatches: true,
+    agentRunMatches: true,
+    eventType: "tool_completed",
+    action: "request_user_input",
+    native: true,
+    replayed: false,
+    outcome: "succeeded",
+  });
+
+  const metricsAtTerminal = await h4.metrics();
+  expect(metricsAtTerminal.chatRequests).toEqual([
+    { scenario: "questionnaire-call", stream: true, hasToolResult: false },
+    {
+      scenario: "questionnaire-final",
+      stream: true,
+      hasToolResult: true,
+      questionnaireReceipt: {
+        receiptCount: 1,
+        parseable: true,
+        nameMatches: true,
+        ok: true,
+        actionMatches: true,
+        requestIdMatches: true,
+        titleMatches: true,
+        answerCount: 1,
+        questionIdMatches: true,
+        promptMatches: true,
+        singleChoice: true,
+        resolved: true,
+        valueCount: 1,
+        selectedValueMatches: true,
+        answerLabelMatches: true,
+        otherEmpty: true,
+        summaryMatches: true,
+      },
+    },
+  ]);
+  expect(metricsAtTerminal.toolExecutions).toEqual([]);
+  expect(metricsAtTerminal.productionToolDelegations).toBe(0);
+  expect(metricsAtTerminal.unsafeToolRequests).toBe(0);
+  expect(metricsAtTerminal.production.agentRuns).toHaveLength(1);
+  expect(metricsAtTerminal.production.runtimeRuns).toHaveLength(2);
+  const submissionRequests = questionnaireRequestProjection(
+    h4,
+    submissionBoundary,
+    metricsAfterWaitingReload,
+    metricsAtTerminal,
+  );
+  expect(submissionRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 1,
+    resumePost: 1,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 1,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  const totalRequests = questionnaireRequestProjection(
+    h4,
+    lifecycleBoundary,
+    lifecycleMetricsBefore,
+    metricsAtTerminal,
+  );
+  expect(totalRequests).toEqual({
+    agentRunPost: 1,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 1,
+    resumePost: 1,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 2,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+
+  const terminalRefreshBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  const restoredTerminalDom = await questionnaireDomProjection(h4, "terminal");
+  expect(restoredTerminalDom).toEqual(terminalDom);
+  const agentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfterReload.status).toBe(200);
+  expect(questionnaireEventProjection(agentAfterReload.body)).toEqual(terminalEvents);
+  expect(questionnaireExecutionProjection(agentAfterReload.body)).toEqual(terminalExecution);
+  const sessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionAfterReload.status).toBe(200);
+  expect(questionnaireSessionRoleProjection(sessionAfterReload.body.messages))
+    .toEqual(sessionRoleContent);
+  expect(questionnaireSessionInputMetaProjection(sessionAfterReload.body.messages, agentRunId))
+    .toEqual(sessionInputMeta);
+  expect(Object.keys(sessionAfterReload.body.runState || {})).toEqual([]);
+  const runtimeProjectionAfterReload = [];
+  for (const runtimeRunId of runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    runtimeProjectionAfterReload.push({
+      status: String(response.body?.status || ""),
+      nextCursor: Number(response.body?.nextCursor || 0),
+      eventTypes: (response.body?.events || []).map((event) => String(event?.type || "")),
+      content: response.body?.result?.content === QUESTIONNAIRE_FINAL ? "final" : "empty",
+      finishReason: String(response.body?.result?.finishReason || ""),
+      toolCallCount: (response.body?.result?.toolCalls || []).length,
+    });
+  }
+  expect(runtimeProjectionAfterReload).toEqual(runtimeProjection.map((snapshot) => ({
+    status: snapshot.status,
+    nextCursor: snapshot.nextCursor,
+    eventTypes: snapshot.eventTypes,
+    content: snapshot.content,
+    finishReason: snapshot.finishReason,
+    toolCallCount: snapshot.toolCalls.length,
+  })));
+  const metricsAfterTerminalReload = await h4.metrics();
+  expect(metricsAfterTerminalReload.chatRequests).toEqual(metricsAtTerminal.chatRequests);
+  expect(metricsAfterTerminalReload.toolExecutions).toEqual(metricsAtTerminal.toolExecutions);
+  const terminalReloadRequests = questionnaireRequestProjection(
+    h4,
+    terminalRefreshBoundary,
+    metricsAtTerminal,
+    metricsAfterTerminalReload,
+  );
+  expect(terminalReloadRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 0,
+    resumePost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 0,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([agentRunId]));
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(new Set(runtimeRunIds));
+  expect(h4.pageErrors).toEqual([]);
+
+  const inputSubmissionProjection = {
+    requests: submissionRequests,
+    events: terminalEvents.slice(waitingEvents.length, 9),
+    execution: terminalExecution,
+    sameAgentRun: completedAgent.agentRunId === waitingAgent.agentRunId,
+    interactionExecutionCount: completedAgent.toolExecutions.length,
+  };
+  const refreshLifecycle = {
+    waiting: {
+      sameAgentRun: waitingAgentAfterReload.body.agentRunId === agentRunId,
+      sameRequest: waitingAgentAfterReload.body.pendingInput?.requestId === QUESTIONNAIRE_REQUEST_ID,
+      sameSnapshot: JSON.stringify(questionnaireWaitingSnapshotProjection(
+        waitingAgentAfterReload.body,
+        waitingSessionAfterReload.body,
+        agentRunId,
+      )) === JSON.stringify(waitingSnapshot),
+      dom: restoredWaitingDom,
+      requests: waitingReloadRequests,
+      interactionExecutionDelta: waitingAgentAfterReload.body.toolExecutions.length
+        - waitingAgent.toolExecutions.length,
+    },
+    terminal: {
+      sameAgentRun: agentAfterReload.body.agentRunId === agentRunId,
+      sameEvents: JSON.stringify(questionnaireEventProjection(agentAfterReload.body))
+        === JSON.stringify(terminalEvents),
+      sameSession: JSON.stringify(questionnaireSessionRoleProjection(sessionAfterReload.body.messages))
+        === JSON.stringify(sessionRoleContent),
+      sameInputMeta: JSON.stringify(
+        questionnaireSessionInputMetaProjection(sessionAfterReload.body.messages, agentRunId),
+      ) === JSON.stringify(sessionInputMeta),
+      dom: restoredTerminalDom,
+      requests: terminalReloadRequests,
+      interactionExecutionDelta: agentAfterReload.body.toolExecutions.length
+        - completedAgent.toolExecutions.length,
+    },
+  };
+  const hashes = {
+    waitingEventProjection: canonicalHash(waitingEvents),
+    waitingSnapshot: canonicalHash(waitingSnapshot),
+    inputSubmissionProjection: canonicalHash(inputSubmissionProjection),
+    runtimeProjection: canonicalHash(runtimeProjection),
+    sessionRoleContent: canonicalHash(sessionRoleContent),
+    sessionInputMeta: canonicalHash(sessionInputMeta),
+    waitingDom: canonicalHash(waitingDom),
+    terminalDom: canonicalHash(terminalDom),
+    refreshLifecycle: canonicalHash(refreshLifecycle),
+  };
+  if (Object.values(H4_8A_SEMANTIC_HASHES).every(Boolean)) {
+    expect(hashes).toEqual(H4_8A_SEMANTIC_HASHES);
+  } else {
+    expect(runtime).toBe("bundle");
+  }
+  h4.evidence(`${runtime}-questionnaire-refresh-submit-continue`, {
+    runtime,
+    counts: {
+      agentRuns: metricsAtTerminal.production.agentRuns.length,
+      runtimes: metricsAtTerminal.production.runtimeRuns.length,
+      upstreamChat: metricsAtTerminal.chatRequests.length,
+      inputPost: totalRequests.inputPost,
+      resumePost: totalRequests.resumePost,
+      registeredDelegations: metricsAtTerminal.productionToolDelegations,
+      registeredExecutions: metricsAtTerminal.toolExecutions.length,
+      interactionExecutions: completedAgent.toolExecutions.length,
+    },
+    events: terminalEvents.map((event) => event.type),
+    runtimeCursors: runtimeProjection.map((snapshot) => snapshot.nextCursor),
+    waitingReload: waitingReloadRequests,
+    terminalReload: terminalReloadRequests,
+    hashes,
+  });
+}
+
 async function openAutomaticClassicFallback(h4, failureMode) {
   const { page, host } = h4;
   const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
@@ -5089,6 +6123,14 @@ test("bundle detached parallel model failure stays isolated and reloads uniquely
 
 test("direct classic detached parallel model failure stays isolated and reloads uniquely", async ({ h4 }) => {
   await exerciseDetachedParallelFailureIsolation(h4, "classic");
+});
+
+test("bundle questionnaire survives reload, submits once, and resumes same AgentRun", async ({ h4 }) => {
+  await exerciseQuestionnaireRefreshLifecycle(h4, "bundle");
+});
+
+test("direct classic questionnaire survives reload, submits once, and resumes same AgentRun", async ({ h4 }) => {
+  await exerciseQuestionnaireRefreshLifecycle(h4, "classic");
 });
 
 test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {

@@ -76,6 +76,8 @@ PARALLEL_FAILURE_USER = "H4_PARALLEL_MODEL_FAILURE_USER"
 PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE"
 PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER"
 PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL"
+QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER"
+QUESTIONNAIRE_FINAL = "H4_QUESTIONNAIRE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -102,6 +104,24 @@ SUCCESS_RESET_TOOL_CALL_IDS = tuple(
     f"h4-success-reset-read-call-{index}" for index in range(1, 4)
 )
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
+QUESTIONNAIRE_TOOL_CALL_ID = "h4-questionnaire-call-1"
+QUESTIONNAIRE_TITLE = "H4_QUESTIONNAIRE_TITLE"
+QUESTIONNAIRE_REASON = "H4_QUESTIONNAIRE_REASON"
+QUESTIONNAIRE_QUESTION_ID = "h4-questionnaire-choice"
+QUESTIONNAIRE_PROMPT = "H4_QUESTIONNAIRE_PROMPT"
+QUESTIONNAIRE_OPTIONS = (
+    {
+        "value": "h4-option-a",
+        "label": "H4_QUESTIONNAIRE_OPTION_A",
+        "description": "H4_QUESTIONNAIRE_OPTION_A_DESCRIPTION",
+    },
+    {
+        "value": "h4-option-b",
+        "label": "H4_QUESTIONNAIRE_OPTION_B",
+        "description": "H4_QUESTIONNAIRE_OPTION_B_DESCRIPTION",
+    },
+)
+QUESTIONNAIRE_SELECTED_OPTION = QUESTIONNAIRE_OPTIONS[1]
 READ_PATH = "fixture.txt"
 FIXTURE_CONTENT = "H4_SYNTHETIC_FILE_CONTENT\n"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
@@ -335,8 +355,20 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             *SIGNATURE_ALTERNATION_TOOL_CALL_IDS,
             *SUCCESS_RESET_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
+            QUESTIONNAIRE_TOOL_CALL_ID,
         }:
             has_tool_result = True
+    if QUESTIONNAIRE_USER in user_text:
+        has_questionnaire_receipt = any(
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") == QUESTIONNAIRE_TOOL_CALL_ID
+            for message in messages
+        )
+        return (
+            "questionnaire-final" if has_questionnaire_receipt else "questionnaire-call",
+            has_questionnaire_receipt,
+        )
     if SUCCESS_RESET_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -543,6 +575,53 @@ def _parallel_failure_followup_context_projection(payload: dict) -> dict:
             "contentMatchesFixture": FIXTURE_CONTENT.strip() in receipt_text,
             "sizeMatchesFixture": "26 B" in receipt_text,
         },
+    }
+
+
+def _questionnaire_receipt_projection(payload: dict) -> dict:
+    receipts = [
+        message
+        for message in (payload.get("messages") or [])
+        if isinstance(message, dict)
+        and message.get("role") == "tool"
+        and str(message.get("tool_call_id") or "") == QUESTIONNAIRE_TOOL_CALL_ID
+    ]
+    parsed = False
+    result = {}
+    if len(receipts) == 1:
+        try:
+            candidate = json.loads(str(receipts[0].get("content") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            candidate = {}
+        if isinstance(candidate, dict):
+            result = candidate
+            parsed = True
+    answers = result.get("answers") if isinstance(result.get("answers"), list) else []
+    answer = answers[0] if len(answers) == 1 and isinstance(answers[0], dict) else {}
+    values = answer.get("values") if isinstance(answer.get("values"), list) else []
+    summary = str(result.get("summary") or "")
+    expected_request_id = f"user-input-{QUESTIONNAIRE_TOOL_CALL_ID}"
+    return {
+        "receiptCount": len(receipts),
+        "parseable": parsed,
+        "nameMatches": len(receipts) == 1
+        and str(receipts[0].get("name") or "") == "request_user_input",
+        "ok": result.get("ok") is True,
+        "actionMatches": str(result.get("action") or "") == "request_user_input",
+        "requestIdMatches": str(result.get("requestId") or "") == expected_request_id,
+        "titleMatches": str(result.get("title") or "") == QUESTIONNAIRE_TITLE,
+        "answerCount": len(answers),
+        "questionIdMatches": str(answer.get("id") or "") == QUESTIONNAIRE_QUESTION_ID,
+        "promptMatches": str(answer.get("prompt") or "") == QUESTIONNAIRE_PROMPT,
+        "singleChoice": str(answer.get("type") or "") == "single",
+        "resolved": str(answer.get("status") or "") == "resolved",
+        "valueCount": len(values),
+        "selectedValueMatches": values == [QUESTIONNAIRE_SELECTED_OPTION["value"]],
+        "answerLabelMatches": str(answer.get("answer") or "")
+        == QUESTIONNAIRE_SELECTED_OPTION["label"],
+        "otherEmpty": not str(answer.get("other") or ""),
+        "summaryMatches": QUESTIONNAIRE_PROMPT in summary
+        and QUESTIONNAIRE_SELECTED_OPTION["label"] in summary,
     }
 
 
@@ -1046,6 +1125,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["followupContext"] = (
                 _parallel_failure_followup_context_projection(payload)
             )
+        if scenario == "questionnaire-final":
+            chat_metric["questionnaireReceipt"] = (
+                _questionnaire_receipt_projection(payload)
+            )
         METRICS.append("chatRequests", chat_metric)
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
@@ -1091,7 +1174,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             scenario not in (
                 "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
-                "executor-range-call", "missing-file-call",
+                "executor-range-call", "missing-file-call", "questionnaire-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("forced-final-model-failure-call-")
@@ -1204,7 +1287,41 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_tool_detail_frame("[DONE]")
             return
 
-        if scenario in (
+        if scenario == "questionnaire-call":
+            questionnaire_arguments = {
+                "title": QUESTIONNAIRE_TITLE,
+                "reason": QUESTIONNAIRE_REASON,
+                "questions": [{
+                    "id": QUESTIONNAIRE_QUESTION_ID,
+                    "prompt": QUESTIONNAIRE_PROMPT,
+                    "type": "single",
+                    "required": True,
+                    "allowOther": False,
+                    "options": list(QUESTIONNAIRE_OPTIONS),
+                }],
+            }
+            frames = [
+                _chunk({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": QUESTIONNAIRE_TOOL_CALL_ID,
+                        "type": "function",
+                        "function": {
+                            "name": "request_user_input",
+                            "arguments": json.dumps(
+                                questionnaire_arguments, separators=(",", ":"),
+                            ),
+                        },
+                    }],
+                }),
+                _chunk(
+                    {},
+                    "tool_calls",
+                    {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
+                ),
+            ]
+        elif scenario in (
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call",
@@ -1399,6 +1516,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "timing-parallel": TIMING_PARALLEL_FINAL,
                 "timing-queue": TIMING_QUEUE_FINAL,
                 "parallel-failure-followup": PARALLEL_FAILURE_FOLLOWUP_FINAL,
+                "questionnaire-final": QUESTIONNAIRE_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [

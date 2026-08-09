@@ -5910,7 +5910,13 @@ async function finishServerAgentUserInputRequest(request) {
     updatedAt: new Date().toISOString(),
   };
   setSessionRunState(request.sessionId, nextState);
-  await saveSessionState(request.sessionId, getSessionMessages(request.sessionId), getSessionStats(request.sessionId));
+  await saveSessionState(
+    request.sessionId,
+    getSessionMessages(request.sessionId),
+    getSessionStats(request.sessionId),
+    undefined,
+    { persistMessages: true },
+  );
   if (request.sessionId === state.sessionId) {
     clearPermissionNotify();
     renderMessages();
