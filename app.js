@@ -4685,11 +4685,29 @@ function placeMainResultByCompletionOrder(messages, mainMessage, taskStartedAt) 
   const orderingKey = Number(taskStartedAt || 0);
   const mainIndex = messages.indexOf(mainMessage);
   if (!orderingKey || mainIndex < 0) return false;
+  const hasSameParentDetachedResult = messages.some((message) => {
+    const jobId = String(message?.meta?.jobId || "");
+    if (
+      message?.role !== "assistant"
+      || message.meta?.kind !== "background-subagent"
+      || message.meta?.detachedFromMain !== true
+      || Number(message.meta?.parentTaskStartedAt || 0) !== orderingKey
+      || !jobId
+    ) return false;
+    return messages.some((candidate) => (
+      candidate?.role === "user"
+      && candidate.meta?.detachedFromMain === true
+      && String(candidate.meta?.backgroundDispatch?.id || "") === jobId
+      && Number(candidate.meta?.backgroundDispatch?.parentTaskStartedAt || 0) === orderingKey
+    ));
+  });
+  if (hasSameParentDetachedResult) return false;
   let lastCompletedBackground = -1;
   messages.forEach((message, index) => {
     if (
       message?.role === "assistant"
       && message.meta?.kind === "background-subagent"
+      && message.meta?.detachedFromMain !== true
       && Number(message.meta?.parentTaskStartedAt || 0) === orderingKey
     ) {
       lastCompletedBackground = index;
@@ -11775,7 +11793,7 @@ async function init() {
 
   // Flush unpersisted messages on page close (best-effort via sendBeacon)
   window.addEventListener("beforeunload", () => {
-    persistedTiffPreviewCache.clear();
+    persistedTiffPreviewCache.dispose();
     const sid = state.sessionId;
     if (!sid) return;
     persistActiveRunTimerCheckpoint(sid);

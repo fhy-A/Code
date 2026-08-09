@@ -51,6 +51,98 @@ LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_same_parent_detached_result_keeps_main_result_in_its_original_slot(self):
+        ordering_start = APP_SOURCE.index(
+            "function placeMainResultByCompletionOrder(messages, mainMessage, taskStartedAt)"
+        )
+        ordering_end = APP_SOURCE.index("function stopLiveTimer()", ordering_start)
+        ordering_source = APP_SOURCE[ordering_start:ordering_end]
+        script = f"""
+eval({json.dumps(ordering_source)});
+const main = {{role: "assistant", content: "main-final", meta: {{}}}};
+const detachedUser = {{
+  role: "user",
+  content: "parallel-user",
+  meta: {{
+    detachedFromMain: true,
+    backgroundDispatch: {{id: "job-1", parentTaskStartedAt: 500}},
+  }},
+}};
+const detachedResult = {{
+  role: "assistant",
+  content: "parallel-error",
+  meta: {{
+    kind: "background-subagent",
+    jobId: "job-1",
+    detachedFromMain: true,
+    parentTaskStartedAt: 500,
+  }},
+}};
+const detachedMessages = [main, detachedUser, detachedResult];
+const detachedChanged = placeMainResultByCompletionOrder(detachedMessages, main, 500);
+
+const orphanMain = {{role: "assistant", content: "orphan-main", meta: {{}}}};
+const orphanDetached = {{
+  role: "assistant",
+  content: "orphan-detached",
+  meta: {{
+    kind: "background-subagent",
+    jobId: "orphan-job",
+    detachedFromMain: true,
+    parentTaskStartedAt: 500,
+  }},
+}};
+const orphanMessages = [orphanMain, orphanDetached];
+const orphanChanged = placeMainResultByCompletionOrder(orphanMessages, orphanMain, 500);
+
+const legacyMain = {{role: "assistant", content: "legacy-main", meta: {{}}}};
+const legacyBackground = {{
+  role: "assistant",
+  content: "legacy-background",
+  meta: {{kind: "background-subagent", parentTaskStartedAt: 500}},
+}};
+const legacyMessages = [legacyMain, legacyBackground];
+const legacyChanged = placeMainResultByCompletionOrder(legacyMessages, legacyMain, 500);
+
+const queueMain = {{role: "assistant", content: "queue-main", meta: {{}}}};
+const queuedUser = {{role: "user", content: "queued", meta: {{queuedDispatch: {{id: "q-1"}}}}}};
+const queueMessages = [queueMain, queuedUser];
+const queueChanged = placeMainResultByCompletionOrder(queueMessages, queueMain, 500);
+
+process.stdout.write(JSON.stringify({{
+  detachedChanged,
+  detachedOrder: detachedMessages.map((message) => message.content),
+  detachedIdentityStable: detachedMessages[0] === main
+    && detachedMessages[1] === detachedUser
+    && detachedMessages[2] === detachedResult,
+  orphanChanged,
+  orphanOrder: orphanMessages.map((message) => message.content),
+  legacyChanged,
+  legacyOrder: legacyMessages.map((message) => message.content),
+  queueChanged,
+  queueOrder: queueMessages.map((message) => message.content),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "detachedChanged": False,
+            "detachedOrder": ["main-final", "parallel-user", "parallel-error"],
+            "detachedIdentityStable": True,
+            "orphanChanged": False,
+            "orphanOrder": ["orphan-main", "orphan-detached"],
+            "legacyChanged": True,
+            "legacyOrder": ["legacy-background", "legacy-main"],
+            "queueChanged": False,
+            "queueOrder": ["queue-main", "queued"],
+        })
+
     def test_send_preconditions_are_localized_and_check_model_before_key(self):
         queue_start = APP_SOURCE.index("async function enqueueSessionMessage(")
         queue_end = APP_SOURCE.index("async function cancelQueuedSessionMessage(", queue_start)
@@ -6120,6 +6212,63 @@ const deferred = () => {
   cache.clear();
   pendingRequests[3].resolve("blob:late-after-clear");
   await latePromise;
+
+  const createDisposalCache = () => {
+    const requests = [];
+    const pending = [];
+    const revokedUrls = [];
+    const settledEntries = [];
+    const instance = images.createDerivedBrowserPreviewCache({
+      requestPreview: (image) => {
+        requests.push({...image});
+        const request = deferred();
+        pending.push(request);
+        return request.promise;
+      },
+      urlApi: {revokeObjectURL: (url) => revokedUrls.push(url)},
+      onSettled: (entry) => settledEntries.push({key: entry.key, status: entry.status}),
+    });
+    return {instance, pending, requests, revokedUrls, settledEntries};
+  };
+  const disposeTarget = {mime: "image/tiff", path: "attachments/dispose.tiff"};
+
+  const failedDisposal = createDisposalCache();
+  const failedDisposalPromise = failedDisposal.instance.ensure(disposeTarget);
+  await Promise.resolve();
+  failedDisposal.pending[0].reject(new Error("synthetic disposed failure"));
+  await failedDisposalPromise;
+  const failedBeforeDispose = {
+    requestCount: failedDisposal.requests.length,
+    status: failedDisposal.instance.status(disposeTarget),
+  };
+  failedDisposal.instance.dispose();
+  failedDisposal.instance.dispose();
+  const failedAfterDisposeValue = await failedDisposal.instance.ensure(disposeTarget);
+
+  const pendingDisposal = createDisposalCache();
+  const pendingDisposalPromise = pendingDisposal.instance.ensure(disposeTarget);
+  await Promise.resolve();
+  pendingDisposal.instance.dispose();
+  pendingDisposal.instance.dispose();
+  pendingDisposal.pending[0].resolve("blob:pending-after-dispose");
+  const pendingAfterDisposeValue = await pendingDisposalPromise;
+  const pendingRepeatValue = await pendingDisposal.instance.ensure(disposeTarget);
+
+  const readyDisposal = createDisposalCache();
+  const readyDisposalPromise = readyDisposal.instance.ensure(disposeTarget);
+  await Promise.resolve();
+  readyDisposal.pending[0].resolve("blob:ready-before-dispose");
+  await readyDisposalPromise;
+  const readyBeforeDispose = readyDisposal.instance.source(disposeTarget);
+  readyDisposal.instance.dispose();
+  readyDisposal.instance.dispose();
+  const readyAfterDisposeValue = await readyDisposal.instance.ensure(disposeTarget);
+
+  const freshPageCache = createDisposalCache();
+  const freshPagePromise = freshPageCache.instance.ensure(disposeTarget);
+  await Promise.resolve();
+  freshPageCache.pending[0].resolve("blob:fresh-page");
+  const freshPageValue = await freshPagePromise;
   process.stdout.write(JSON.stringify({
     derived: ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/x-icon", "image/tiff"]
       .map((mime) => images.requiresDerivedBrowserPreview(mime)),
@@ -6139,6 +6288,40 @@ const deferred = () => {
       revoked,
       settled,
       clearedStatuses: [cache.status(first), cache.status(failed), cache.status(other), cache.status(late)],
+    },
+    disposal: {
+      failed: {
+        before: failedBeforeDispose,
+        afterValue: failedAfterDisposeValue,
+        requestCount: failedDisposal.requests.length,
+        source: failedDisposal.instance.source(disposeTarget),
+        status: failedDisposal.instance.status(disposeTarget),
+        revoked: failedDisposal.revokedUrls,
+        settled: failedDisposal.settledEntries,
+      },
+      pending: {
+        values: [pendingAfterDisposeValue, pendingRepeatValue],
+        requestCount: pendingDisposal.requests.length,
+        source: pendingDisposal.instance.source(disposeTarget),
+        status: pendingDisposal.instance.status(disposeTarget),
+        revoked: pendingDisposal.revokedUrls,
+        settled: pendingDisposal.settledEntries,
+      },
+      ready: {
+        beforeSource: readyBeforeDispose,
+        afterValue: readyAfterDisposeValue,
+        requestCount: readyDisposal.requests.length,
+        source: readyDisposal.instance.source(disposeTarget),
+        status: readyDisposal.instance.status(disposeTarget),
+        revoked: readyDisposal.revokedUrls,
+        settled: readyDisposal.settledEntries,
+      },
+      freshPage: {
+        value: freshPageValue,
+        requestCount: freshPageCache.requests.length,
+        source: freshPageCache.instance.source(disposeTarget),
+        status: freshPageCache.instance.status(disposeTarget),
+      },
     },
     sources: {
       composerTiff: images.imagePreviewSource({mime: "image/tiff", _previewUrl: previewUrl, base64: "ORIGINAL"}),
@@ -6219,6 +6402,44 @@ const deferred = () => {
             {"key": "image/tiff\u0000attachments/c.tiff", "status": "ready"},
         ])
         self.assertEqual(data["cache"]["clearedStatuses"], ["", "", "", ""])
+        self.assertEqual(data["disposal"]["failed"], {
+            "before": {"requestCount": 1, "status": "failed"},
+            "afterValue": "",
+            "requestCount": 1,
+            "source": "",
+            "status": "",
+            "revoked": [],
+            "settled": [{
+                "key": "image/tiff\u0000attachments/dispose.tiff",
+                "status": "failed",
+            }],
+        })
+        self.assertEqual(data["disposal"]["pending"], {
+            "values": ["", ""],
+            "requestCount": 1,
+            "source": "",
+            "status": "",
+            "revoked": ["blob:pending-after-dispose"],
+            "settled": [],
+        })
+        self.assertEqual(data["disposal"]["ready"], {
+            "beforeSource": "blob:ready-before-dispose",
+            "afterValue": "",
+            "requestCount": 1,
+            "source": "",
+            "status": "",
+            "revoked": ["blob:ready-before-dispose"],
+            "settled": [{
+                "key": "image/tiff\u0000attachments/dispose.tiff",
+                "status": "ready",
+            }],
+        })
+        self.assertEqual(data["disposal"]["freshPage"], {
+            "value": "blob:fresh-page",
+            "requestCount": 1,
+            "source": "blob:fresh-page",
+            "status": "ready",
+        })
         self.assertEqual(data["sources"]["composerTiff"], data["previewUrl"])
         self.assertEqual(data["sources"]["pendingTiffWithoutPreview"], "")
         self.assertEqual(
@@ -6247,6 +6468,7 @@ const deferred = () => {
         self.assertNotIn("_previewUrl", PERSISTENCE_SOURCE)
         self.assertNotIn("_previewFailed", PERSISTENCE_SOURCE)
         self.assertIn("const persistedTiffPreviewCache = createDerivedBrowserPreviewCache", APP_SOURCE)
+        self.assertIn("persistedTiffPreviewCache.dispose();", APP_SOURCE)
         self.assertNotIn("persistedTiffPreviewCache", PERSISTENCE_SOURCE)
 
     def test_skills_memory_feature_ranks_and_loads_context_without_app_globals(self):

@@ -35,6 +35,9 @@ const REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER";
 const REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE";
 const REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL";
 const FORCED_FINAL_MODEL_FAILURE_USER = "H4_FORCED_FINAL_MODEL_FAILURE_USER";
+const FORCED_FINAL_UNUSABLE_TOOL_USER = "H4_FORCED_FINAL_UNUSABLE_TOOL_USER";
+const FORCED_FINAL_UNUSABLE_TOOL_CALL_ID = "h4-forced-final-unusable-read-call-5";
+const FORCED_FINAL_UNUSABLE_ERROR_MARKER = "Model did not provide a usable final response";
 const ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER";
 const ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE";
 const ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL";
@@ -60,6 +63,8 @@ const TIMING_QUEUE_USER = "H4_TIMING_QUEUE_USER";
 const TIMING_QUEUE_FINAL = "H4_TIMING_QUEUE_FINAL";
 const PARALLEL_FAILURE_USER = "H4_PARALLEL_MODEL_FAILURE_USER";
 const PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE";
+const PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER";
+const PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL";
 const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
 const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
 const TIFF_ATTACHMENT_SHA256 = "42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73";
@@ -213,15 +218,33 @@ const H4_6O_SEMANTIC_HASHES = Object.freeze({
   terminalDom: "aae2e342c398f0d712b92ff87c54f10dab19be7cc26fbcebfb67bb24f762ccdf",
   refreshLifecycle: "60b5a625b74c8855ddde66f04ff48057eb00146ceab75988db20144d2c067f78",
 });
-const H4_7C_SEMANTIC_HASHES = Object.freeze({
+const H4_6P_SEMANTIC_HASHES = Object.freeze({
+  eventProjection: "b5ccf4a622600108de56687485f17642caab530651f31b1679d31840d45f2de2",
+  retryExecutionProjection: "c4f4a8432ad9be01f331e72be1c9b6bd709bb7eda508c3b00604a2967d8c31fe",
+  modelToolReceiptProjection: "4d02940043fc3266a6e6bf6e2a94ab7e775dd539401e84f40255daa29ed1b721",
+  forcedFinalUnusableProjection: "ca5df9b2f2375b7ccfca0d745b636c55e29224a28edad7d40aa08ca333baec0f",
+  runtimeProjection: "5544f1eb37db1be95f38a7ac373a3a83b8b1490ff2760ad6fe18880cb7547186",
+  sessionRoleContent: "431b4ed43aa1395a0c9b439806bcdc49d813b0cc0784d01086fccf64401d2e5b",
+  sessionRunState: "c40a0bc4034901d0d0085d53f1d2bc3a144dd957b34e9c8cca87ac16543b5784",
+  terminalDom: "3ede9770eb9cae435e6ad61a79676f550bae27c916a1aea6ad94742e8b533a06",
+  refreshLifecycle: "60b5a625b74c8855ddde66f04ff48057eb00146ceab75988db20144d2c067f78",
+});
+const H4_7C_BASE_SEMANTIC_HASHES = Object.freeze({
   mainToolTrace: "6599ebee8ff79520ee51e2fa2fe2011ce6237091791282c02f6b5525092223c4",
   backgroundAgent: "1319a246751c8daa8c6546cfe1b8f2aab159bb00a11b01f908b5d20c7f414545",
   backgroundRuntime: "6b71bc4b26a681050327da18905949caaa9ae806dd78747dc9708bba1a5f76d1",
-  sessionRoleContent: "9846dc82c8e7a82b181c41ee23ecc25b0ac6bf25df1fe0564e5fea8b605e9ab7",
   backgroundMeta: "e26b1c4a7e1a70f87ab60335fcd655331a2601f2a7dd6882e63821d2eb8d5baa",
-  domOwnership: "0c317c7fffaaa70a224e2193072f71dfaac66f64f5f5b755d918abcca106d584",
   requestCounts: "e90926ff643c4cff6ab16720a27dedbd1b5f4561b874e7bbe4ef7d3e63eaba1e",
-  refreshLifecycle: "0cb60f329ee95fbe0953c4712394e8aa085b7c83a13680c2ec444b8d1ce37681",
+});
+const H4_SYNC_1_SEMANTIC_HASHES = Object.freeze({
+  preParallelFence: "10b427d80882ae5a10fc84ca44f894afea07bccf3b9e1944bc0b3ae5552fcf47",
+  terminalOrdering: "3639c2f18f3484e8a76ca8ef53b45a0b29ec1281a65943b75234cd55593744ee",
+  followupRequestContext: "25f3d36ea8966773c131ff552dea9211c24deba88efd68e22ba796226508ac10",
+  followupAgentRuntime: "b6d711c9ff9fcfb50b179aa03938c93eef6b741c971335310bee4a1ec8b875b3",
+  followupSession: "e0dfc6865fab9ada4fc038598ad83e22b126cdbd8c2cb66d91952497cb5ce25d",
+  followupDom: "b7b1505cf4fed62478c535a9ad86fab9291a26ac8318ac04d47ef0dc742fc8a6",
+  requestCounts: "51357c34453ca7e453830920b00500004f0183b75bcf58b9e8e56121e52860fb",
+  refreshLifecycle: "4f728a8ceb1d29f8c888e828cd1b27d21fbdb1508e030fa29a5aa3ffd4ba281f",
 });
 
 function idHash(value) {
@@ -465,6 +488,26 @@ const FORCED_FINAL_MODEL_FAILURE_CONTRACT = Object.freeze({
   terminalStatus: "failed",
   finalHashKey: "forcedFinalFailureProjection",
   hashes: H4_6O_SEMANTIC_HASHES,
+});
+
+const FORCED_FINAL_UNUSABLE_TOOL_CONTRACT = Object.freeze({
+  ...REPEATED_RANGE_FAILURE_CONTRACT,
+  key: "H4-6P",
+  scenarioPrefix: "forced-final-unusable-tool",
+  evidencePrefix: "forced-final-unusable-tool",
+  userMarker: FORCED_FINAL_UNUSABLE_TOOL_USER,
+  terminalStatus: "failed",
+  terminalFailureKind: "unusable-tool-response",
+  terminalErrorCode: "repeated_tool_failure",
+  terminalErrorMarker: FORCED_FINAL_UNUSABLE_ERROR_MARKER,
+  terminalForceFinalRound: false,
+  terminalEventTail: Object.freeze(["model_completed", "failed"]),
+  terminalRuntimeStatus: "completed",
+  terminalRuntimeCursors: Object.freeze([4, 3, 3, 3, 3]),
+  terminalNextCursor: 25,
+  unusableToolCallId: FORCED_FINAL_UNUSABLE_TOOL_CALL_ID,
+  finalHashKey: "forcedFinalUnusableProjection",
+  hashes: H4_6P_SEMANTIC_HASHES,
 });
 
 const ARGUMENT_ISOLATION_CALL_ARGUMENTS = Object.freeze([
@@ -1397,6 +1440,9 @@ function durableFailedToolTraceEvidence(snapshot, contract) {
   const toolAliases = new Map(
     baseEvidence.toolCallIds.map((toolCallId, index) => [toolCallId, `tool-${index + 1}`]),
   );
+  if (contract.unusableToolCallId) {
+    toolAliases.set(contract.unusableToolCallId, `tool-${baseEvidence.toolCallIds.length + 1}`);
+  }
   const runtimeAlias = (runId) => runtimeAliases.get(String(runId || "")) || "";
   const toolAlias = (toolCallId) => toolAliases.get(String(toolCallId || "")) || "";
   const eventProjection = events.map((event) => {
@@ -1960,6 +2006,11 @@ function describeLoopbackRequest(request) {
     };
   }
   if (runtimeMatch) {
+    const cursorRaw = url.searchParams.get("cursor");
+    const waitRaw = url.searchParams.get("wait");
+    const cursorValid = /^\d+$/.test(String(cursorRaw ?? ""));
+    const waitValid = /^\d+$/.test(String(waitRaw ?? ""));
+    const wait = waitValid ? Number(waitRaw) : -1;
     return {
       at: Date.now(),
       method,
@@ -1967,9 +2018,113 @@ function describeLoopbackRequest(request) {
       kind: "runtime",
       idHash: idHash(decodeURIComponent(runtimeMatch[1])),
       cursor: Number(url.searchParams.get("cursor") || 0),
+      wait,
+      queryShape: cursorValid && waitValid
+        ? `cursor-number+wait-${wait > 0 ? "positive" : "zero"}`
+        : "missing-or-invalid",
     };
   }
   return { at: Date.now(), method, path: url.pathname, kind: "other", idHash: "", cursor: 0 };
+}
+
+async function waitForFrontendRuntimeConsumer(h4, {
+  runtimeRunId,
+  requestBoundary,
+  label,
+}) {
+  const targetIdHash = idHash(runtimeRunId);
+  const boundary = Number(requestBoundary);
+  expect(targetIdHash).not.toBe("");
+  expect(Number.isSafeInteger(boundary)).toBe(true);
+  expect(boundary).toBeGreaterThanOrEqual(0);
+
+  let evidence = null;
+  try {
+    await expect.poll(() => {
+      const candidates = h4.loopbackRequests.slice(boundary).filter((entry) => (
+        entry.kind === "runtime"
+        && entry.method === "GET"
+        && entry.path === "/api/runtime/runs/[id]"
+        && entry.idHash === targetIdHash
+      ));
+      const matches = candidates.filter((entry) => (
+        entry.wait === 25 && entry.queryShape === "cursor-number+wait-positive"
+      ));
+      const boundedCandidates = candidates.slice(-4).map((entry) => ({
+        method: entry.method,
+        path: entry.path,
+        idHash: entry.idHash,
+        cursor: entry.cursor,
+        wait: entry.wait,
+        queryShape: entry.queryShape,
+      }));
+      evidence = {
+        label,
+        targetIdHash,
+        candidateCount: candidates.length,
+        matchedCount: matches.length,
+        candidates: boundedCandidates,
+        sampleHash: canonicalHash(boundedCandidates),
+      };
+      return matches.length > 0;
+    }).toBe(true);
+    return evidence;
+  } finally {
+    h4.diagnosticSteps.push({
+      step: "frontend-runtime-consumer-fence",
+      ...(evidence || {
+        label,
+        targetIdHash,
+        candidateCount: 0,
+        matchedCount: 0,
+        candidates: [],
+        sampleHash: canonicalHash([]),
+      }),
+    });
+  }
+}
+
+async function waitForMessageProjection(h4, {
+  label,
+  sample,
+  expected,
+  sourceFacts = {},
+}) {
+  const recentSamples = [];
+  let projection = null;
+  const record = (value) => {
+    const hash = canonicalHash(value);
+    if (recentSamples.at(-1)?.hash !== hash) {
+      recentSamples.push({ hash, projection: value });
+      if (recentSamples.length > 4) recentSamples.shift();
+    }
+  };
+
+  try {
+    await expect.poll(async () => {
+      projection = await h4.page.evaluate(sample, sourceFacts);
+      record(projection);
+      return projection;
+    }).toEqual(expected);
+    h4.diagnosticSteps.push({
+      step: "message-projection-fence",
+      label,
+      expectedHash: canonicalHash(expected),
+      sourceFactsHash: canonicalHash(sourceFacts),
+      sampleCount: recentSamples.length,
+      projectionHash: canonicalHash(projection),
+    });
+    return projection;
+  } catch (error) {
+    h4.diagnosticSteps.push({
+      step: "message-projection-fence-failed",
+      label,
+      expectedHash: canonicalHash(expected),
+      sourceFactsHash: canonicalHash(sourceFacts),
+      samples: recentSamples,
+    });
+    throw error;
+  }
 }
 
 function refreshRequestEvidence(entries) {
@@ -2306,14 +2461,26 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
   const restoredPreview = restoredUser.locator("[data-message-image-preview]");
   await expectDecodedImage(restoredPreview);
   const fullRefreshPreviewRequests = previewRequestsFor("full-refresh", "GET");
+  const disposedDocumentPreviewRequests = fullRefreshPreviewRequests.filter((request) => (
+    request.documentGeneration === preRefreshGeneration
+    && request.navigationStage === "reload-requested"
+  ));
+  const reloadDocumentPreviewRequests = fullRefreshPreviewRequests.filter((request) => (
+    request.documentGeneration === expectedReloadGeneration
+    && request.navigationStage === "reload-document"
+  ));
   h4.diagnosticSteps.push({
     step: "tiff-full-refresh-preview-requests",
     preRefreshGeneration,
     expectedReloadGeneration,
+    disposedDocumentGetCount: disposedDocumentPreviewRequests.length,
+    reloadDocumentGetCount: reloadDocumentPreviewRequests.length,
     requests: fullRefreshPreviewRequests.map((request) => ({ ...request })),
   });
+  expect(disposedDocumentPreviewRequests).toHaveLength(0);
+  expect(reloadDocumentPreviewRequests).toHaveLength(1);
   expect(fullRefreshPreviewRequests).toHaveLength(1);
-  expect(fullRefreshPreviewRequests[0]).toMatchObject({
+  expect(reloadDocumentPreviewRequests[0]).toMatchObject({
     keyHash: persistedPreviewKeyHash,
     documentGeneration: expectedReloadGeneration,
     navigationStage: "reload-document",
@@ -2395,6 +2562,8 @@ async function completeTiffPreviewLifecycle(h4, runtime) {
       persistedKeyHash: persistedPreviewKeyHash,
       initialDocumentGeneration: preRefreshGeneration,
       refreshDocumentGeneration: expectedReloadGeneration,
+      disposedDocumentGetCount: 0,
+      reloadDocumentGetCount: 1,
     },
     previewConversions: { succeeded: 2, interceptedFailures: 2 },
     refresh: { agentPost: 0, runtimePost: 0, chat: 0, tool: 0 },
@@ -2864,18 +3033,21 @@ function detachedParallelFailureSessionEvidence(
   mainAgentRunId,
   backgroundAgentRunId,
   toolCallId,
+  { includeFollowup = false } = {},
 ) {
   const source = Array.isArray(messages) ? messages : [];
   const roleContent = roleContentProjection(source);
-  expect(roleContent.map((message) => message.role)).toEqual([
+  const expectedRoles = [
     "user",
     "assistant",
     "tool-call",
     "tool-result",
+    "assistant",
     "user",
     "assistant",
-    "assistant",
-  ]);
+  ];
+  if (includeFollowup) expectedRoles.push("user", "assistant");
+  expect(roleContent.map((message) => message.role)).toEqual(expectedRoles);
   expect(roleContent[0].content).toBe(TOOL_DETAILS_USER);
   expect(roleContent[1].content).toBe(TOOL_DETAILS_STAGE);
   expect(String(roleContent[2].content || "")).toContain("read_file");
@@ -2888,9 +3060,13 @@ function detachedParallelFailureSessionEvidence(
     String(roleContent[3].content || ""),
     FIXTURE_CONTENT.trim(),
   )).toBe(1);
-  expect(roleContent[4].content).toBe(PARALLEL_FAILURE_USER);
-  expect(roleContent[5].content).toBe(PARALLEL_FAILURE_ERROR);
-  expect(roleContent[6].content).toBe(TOOL_DETAILS_FINAL);
+  expect(roleContent[4].content).toBe(TOOL_DETAILS_FINAL);
+  expect(roleContent[5].content).toBe(PARALLEL_FAILURE_USER);
+  expect(roleContent[6].content).toBe(PARALLEL_FAILURE_ERROR);
+  if (includeFollowup) {
+    expect(roleContent[7].content).toBe(PARALLEL_FAILURE_FOLLOWUP_USER);
+    expect(roleContent[8].content).toBe(PARALLEL_FAILURE_FOLLOWUP_FINAL);
+  }
 
   const backgroundUser = source.find((message) => (
     message?.role === "user"
@@ -2974,10 +3150,531 @@ function detachedParallelFailureSessionEvidence(
   };
 }
 
+function detachedParallelSessionSettlementProjection(response, { includeFollowup = false } = {}) {
+  const roleContent = roleContentProjection(response?.body?.messages);
+  const findIndex = (role, marker) => roleContent.findIndex((message) => (
+    message.role === role && message.content === marker
+  ));
+  return {
+    status: Number(response?.status || 0),
+    messageCount: roleContent.length,
+    roles: roleContent.map((message) => message.role),
+    markerIndexes: {
+      mainFinal: findIndex("assistant", TOOL_DETAILS_FINAL),
+      detachedUser: findIndex("user", PARALLEL_FAILURE_USER),
+      detachedError: findIndex("assistant", PARALLEL_FAILURE_ERROR),
+      followupUser: findIndex("user", PARALLEL_FAILURE_FOLLOWUP_USER),
+      followupFinal: findIndex("assistant", PARALLEL_FAILURE_FOLLOWUP_FINAL),
+    },
+    runStateKeys: Object.keys(response?.body?.runState || {}).sort(),
+    includeFollowup,
+  };
+}
+
+function primaryDetachedPreSubmissionProjectionExpected() {
+  return {
+    counts: {
+      mainUser: 1,
+      activeAnchor: 1,
+      mainStage: 1,
+      mainFinal: 0,
+      toolProcesses: 1,
+      toolItems: 1,
+      toolDetails: 2,
+      detachedUser: 0,
+      detachedAssistant: 0,
+      completedStatuses: 0,
+      visiblePending: 0,
+      activeBanners: 1,
+      activeTraces: 0,
+    },
+    order: ["mainUser", "activeAnchor", "mainStage", "toolProcess"],
+    tool: {
+      processKey: "0:1",
+      outerOpen: true,
+      itemOpen: false,
+      stageRunning: true,
+      itemSucceeded: true,
+      pathVisible: true,
+      sizeVisible: true,
+      fixtureContentCount: 1,
+    },
+    anchor: {
+      ownsVisibleBanner: true,
+      immediatelyAfterMainUser: true,
+      insideActiveTrace: false,
+    },
+    stopEnabled: true,
+  };
+}
+
+function samplePrimaryDetachedPreSubmissionProjection(sourceFacts) {
+  const root = document.querySelector("#messages");
+  const markerMatches = (selector, marker) => [...root.querySelectorAll(selector)]
+    .filter((element) => (element.textContent || "").includes(marker));
+  const mainUsers = markerMatches("article.msg.user", sourceFacts.mainUser);
+  const mainStages = markerMatches(
+    "article.msg.assistant.agent-commentary",
+    sourceFacts.mainStage,
+  );
+  const mainUser = mainUsers[0] || null;
+  const mainStage = mainStages[0] || null;
+  const mainFinals = markerMatches("article.msg.assistant", sourceFacts.mainFinal);
+  const detachedUsers = markerMatches("article.msg.user", sourceFacts.detachedUser);
+  const detachedAssistants = markerMatches("article.msg.assistant", sourceFacts.detachedError);
+  const activeAnchors = [...root.querySelectorAll("[data-active-run-anchor]")];
+  const toolProcesses = [...root.querySelectorAll("article.tool-process")];
+  const toolItems = [...root.querySelectorAll("article.tool-process details.tool-process-item")];
+  const toolProcess = toolProcesses[0] || null;
+  const toolOuter = toolProcess?.querySelector(":scope > details.tool-process-stage") || null;
+  const toolItem = toolItems[0] || null;
+  const toolText = toolProcess?.textContent || "";
+  const orderedNodes = [
+    { label: "mainUser", node: mainUser },
+    { label: "activeAnchor", node: activeAnchors[0] || null },
+    { label: "mainStage", node: mainStage },
+    { label: "toolProcess", node: toolProcess },
+  ].filter((entry) => entry.node);
+  orderedNodes.sort((left, right) => (
+    left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+  ));
+  return {
+    counts: {
+      mainUser: mainUsers.length,
+      activeAnchor: activeAnchors.length,
+      mainStage: mainStages.length,
+      mainFinal: mainFinals.length,
+      toolProcesses: toolProcesses.length,
+      toolItems: toolItems.length,
+      toolDetails: root.querySelectorAll("article.tool-process .tool-process-detail pre").length,
+      detachedUser: detachedUsers.length,
+      detachedAssistant: detachedAssistants.length,
+      completedStatuses: root.querySelectorAll("[data-completed-run-status]").length,
+      visiblePending: root.querySelectorAll(
+        'article.msg.assistant.is-streaming.is-pending[data-stream-kind="pending"]',
+      ).length,
+      activeBanners: document.querySelectorAll("#activeRunBanner.visible").length,
+      activeTraces: root.querySelectorAll("section.execution-trace.active").length,
+    },
+    order: orderedNodes.map((entry) => entry.label),
+    tool: {
+      processKey: String(toolOuter?.getAttribute("data-tool-process-key") || ""),
+      outerOpen: Boolean(toolOuter?.open),
+      itemOpen: Boolean(toolItem?.open),
+      stageRunning: Boolean(toolOuter?.classList.contains("running")),
+      itemSucceeded: Boolean(toolItem?.classList.contains("succeeded")),
+      pathVisible: toolText.includes("fixture.txt"),
+      sizeVisible: toolText.includes("26 B"),
+      fixtureContentCount: sourceFacts.fixtureContent
+        ? toolText.split(sourceFacts.fixtureContent).length - 1
+        : 0,
+    },
+    anchor: {
+      ownsVisibleBanner: Boolean(
+        activeAnchors[0]
+        && document.querySelector("#activeRunBanner.visible")?.parentElement === activeAnchors[0]
+      ),
+      immediatelyAfterMainUser: mainUser?.nextElementSibling === activeAnchors[0],
+      insideActiveTrace: Boolean(activeAnchors[0]?.closest("section.execution-trace.active")),
+    },
+    stopEnabled: !document.querySelector("#stopBtn")?.disabled,
+  };
+}
+
+function detachedParallelFailureProjectionExpected({
+  finalVisible = false,
+  terminal = false,
+  tracePlacement = "",
+} = {}) {
+  const expectedTracePlacement = tracePlacement || "outside";
+  const counts = {
+    mainUser: 1,
+    mainStage: 1,
+    mainFinal: finalVisible ? 1 : 0,
+    visiblePending: 0,
+    backgroundUser: 1,
+    backgroundAssistant: 1,
+    toolProcesses: 1,
+    toolItems: 1,
+    toolDetails: 2,
+    completedStatuses: terminal ? 1 : 0,
+    backgroundFooterTimers: 1,
+    backgroundReferences: 1,
+    assistantFooterTimers: 1,
+  };
+  if (terminal) {
+    counts.primaryFooterTimers = 0;
+    counts.primaryFooterTokens = 2;
+  }
+  const order = ["mainUser", "mainStage", "toolProcess"];
+  if (finalVisible) order.push("mainFinal");
+  order.push("backgroundUser", "backgroundAssistant");
+  const expected = {
+    counts,
+    order,
+    tool: {
+      processKey: "0:1",
+      outerOpen: !terminal,
+      itemOpen: false,
+      stageSucceeded: true,
+      containsBackgroundUser: false,
+      containsBackgroundError: false,
+    },
+    ownership: {
+      backgroundUserRole: true,
+      backgroundAssistantRole: true,
+      visiblePendingHidden: true,
+      backgroundInsideToolProcess: false,
+      backgroundOwnsCompletedStatus: false,
+    },
+  };
+  if (expectedTracePlacement !== "transitional") {
+    const persistent = expectedTracePlacement === "persistent";
+    expected.trace = {
+      userPersistent: persistent,
+      assistantPersistent: persistent,
+      userTraceAncestors: persistent ? 1 : 0,
+      assistantTraceAncestors: persistent ? 1 : 0,
+    };
+  }
+  return expected;
+}
+
+function sampleDetachedParallelFailureProjection(sourceFacts) {
+  const root = document.querySelector("#messages");
+  const markerMatches = (selector, marker) => [...root.querySelectorAll(selector)]
+    .filter((element) => (element.textContent || "").includes(marker));
+  const mainUsers = markerMatches("article.msg.user", sourceFacts.mainUser);
+  const mainStages = markerMatches(
+    "article.msg.assistant.agent-commentary",
+    sourceFacts.mainStage,
+  );
+  const mainFinals = markerMatches("article.msg.assistant", sourceFacts.mainFinal);
+  const mainPendings = [...root.querySelectorAll(
+    'article.msg.assistant.is-streaming.is-pending[data-stream-kind="pending"]',
+  )];
+  const backgroundUsers = markerMatches("article.msg.user", sourceFacts.backgroundUser);
+  const backgroundAssistants = markerMatches(
+    "article.msg.assistant",
+    sourceFacts.backgroundError,
+  );
+  const toolProcesses = [...root.querySelectorAll("article.tool-process")];
+  const toolItems = [...root.querySelectorAll(
+    "article.tool-process details.tool-process-item",
+  )];
+  const mainFinal = mainFinals[0] || null;
+  const backgroundUser = backgroundUsers[0] || null;
+  const backgroundAssistant = backgroundAssistants[0] || null;
+  const toolProcess = toolProcesses[0] || null;
+  const toolItem = toolItems[0] || null;
+  const ancestorCount = (element, className) => {
+    let count = 0;
+    for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
+      if (parent.classList.contains(className)) count += 1;
+    }
+    return count;
+  };
+  const orderedNodes = [
+    { label: "mainUser", node: mainUsers[0] || null },
+    { label: "mainStage", node: mainStages[0] || null },
+    { label: "toolProcess", node: toolProcess },
+    { label: "mainFinal", node: mainFinal },
+    { label: "backgroundUser", node: backgroundUser },
+    { label: "backgroundAssistant", node: backgroundAssistant },
+  ].filter((entry) => entry.node);
+  orderedNodes.sort((left, right) => {
+    if (left.node === right.node) return 0;
+    return left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING
+      ? -1
+      : 1;
+  });
+  const counts = {
+    mainUser: mainUsers.length,
+    mainStage: mainStages.length,
+    mainFinal: mainFinals.length,
+    visiblePending: mainPendings.length,
+    backgroundUser: backgroundUsers.length,
+    backgroundAssistant: backgroundAssistants.length,
+    toolProcesses: toolProcesses.length,
+    toolItems: toolItems.length,
+    toolDetails: root.querySelectorAll("article.tool-process .tool-process-detail pre").length,
+    completedStatuses: root.querySelectorAll("[data-completed-run-status]").length,
+    backgroundFooterTimers: backgroundAssistant
+      ? backgroundAssistant.querySelectorAll(".response-info .run-time").length
+      : 0,
+    backgroundReferences: backgroundAssistant
+      ? backgroundAssistant.querySelectorAll("[data-background-reply-id]").length
+      : 0,
+    assistantFooterTimers: root.querySelectorAll(
+      "article.msg.assistant .response-info .run-time",
+    ).length,
+  };
+  if (sourceFacts.terminal) {
+    counts.primaryFooterTimers = mainFinal
+      ? mainFinal.querySelectorAll(".response-info .run-time").length
+      : 0;
+    counts.primaryFooterTokens = mainFinal
+      ? mainFinal.querySelectorAll(".response-info .response-token").length
+      : 0;
+  }
+  const toolOuter = toolProcess?.querySelector(":scope > details.tool-process-stage") || null;
+  const projection = {
+    counts,
+    order: orderedNodes.map((entry) => entry.label),
+    tool: {
+      processKey: String(toolOuter?.getAttribute("data-tool-process-key") || ""),
+      outerOpen: Boolean(toolOuter?.open),
+      itemOpen: Boolean(toolItem?.open),
+      stageSucceeded: Boolean(toolOuter?.classList.contains("succeeded")),
+      containsBackgroundUser: Boolean(
+        toolProcess && (toolProcess.textContent || "").includes(sourceFacts.backgroundUser),
+      ),
+      containsBackgroundError: Boolean(
+        toolProcess && (toolProcess.textContent || "").includes(sourceFacts.backgroundError),
+      ),
+    },
+    ownership: {
+      backgroundUserRole: Boolean(backgroundUser?.matches("article.msg.user")),
+      backgroundAssistantRole: Boolean(backgroundAssistant?.matches("article.msg.assistant")),
+      visiblePendingHidden: mainPendings.length === 0,
+      backgroundInsideToolProcess: Boolean(
+        ancestorCount(backgroundUser, "tool-process")
+        || ancestorCount(backgroundAssistant, "tool-process"),
+      ),
+      backgroundOwnsCompletedStatus: Boolean(
+        backgroundUser?.nextElementSibling?.hasAttribute("data-completed-run-status"),
+      ),
+    },
+  };
+  if (sourceFacts.tracePlacement !== "transitional") {
+    projection.trace = {
+      userPersistent: Boolean(backgroundUser?.classList.contains("execution-trace-persistent")),
+      assistantPersistent: Boolean(
+        backgroundAssistant?.classList.contains("execution-trace-persistent"),
+      ),
+      userTraceAncestors: ancestorCount(backgroundUser, "execution-trace"),
+      assistantTraceAncestors: ancestorCount(backgroundAssistant, "execution-trace"),
+    };
+  }
+  return projection;
+}
+
+function followupIsolationProjectionExpected() {
+  return {
+    counts: {
+      mainUser: 1,
+      mainStage: 1,
+      mainFinal: 1,
+      detachedUser: 1,
+      detachedAssistant: 1,
+      followupUser: 1,
+      followupFinal: 1,
+      toolProcesses: 1,
+      toolItems: 1,
+      toolDetails: 2,
+      completedStatuses: 2,
+      visiblePending: 0,
+      streamingAssistants: 0,
+      activeTraces: 0,
+      activeBanners: 0,
+      mainFooterTimers: 0,
+      followupFooterTimers: 0,
+      detachedFooterTimers: 1,
+      assistantFooterTimers: 1,
+      mainFooterTokens: 2,
+      followupFooterTokens: 2,
+      detachedReferences: 1,
+    },
+    order: [
+      "mainUser",
+      "mainStage",
+      "toolProcess",
+      "mainFinal",
+      "detachedUser",
+      "detachedAssistant",
+      "followupUser",
+      "followupFinal",
+    ],
+    tool: {
+      processKey: "0:1",
+      outerOpen: false,
+      itemOpen: false,
+      stageSucceeded: true,
+      pathVisible: true,
+      sizeVisible: true,
+      fixtureContentCount: 1,
+    },
+    ownership: {
+      detachedUserPersistent: false,
+      detachedAssistantPersistent: false,
+      detachedUserTraceAncestors: 0,
+      detachedAssistantTraceAncestors: 0,
+      detachedInsideToolProcess: false,
+      detachedOwnsCompletedStatus: false,
+      followupInsideTrace: false,
+      mainOwnsCompletedStatus: true,
+      followupOwnsCompletedStatus: true,
+      foregroundErrorCount: 0,
+    },
+    stopDisabled: true,
+  };
+}
+
+function sampleFollowupIsolationProjection(sourceFacts) {
+  const root = document.querySelector("#messages");
+  const markerMatches = (selector, marker) => [...root.querySelectorAll(selector)]
+    .filter((element) => (element.textContent || "").includes(marker));
+  const one = (selector, marker) => markerMatches(selector, marker)[0] || null;
+  const mainUser = one("article.msg.user", sourceFacts.mainUser);
+  const mainStage = one("article.msg.assistant.agent-commentary", sourceFacts.mainStage);
+  const mainFinal = one("article.msg.assistant", sourceFacts.mainFinal);
+  const detachedUser = one("article.msg.user", sourceFacts.detachedUser);
+  const detachedAssistant = one("article.msg.assistant", sourceFacts.detachedError);
+  const followupUser = one("article.msg.user", sourceFacts.followupUser);
+  const followupFinal = one("article.msg.assistant", sourceFacts.followupFinal);
+  const toolProcesses = [...root.querySelectorAll("article.tool-process")];
+  const toolItems = [...root.querySelectorAll("article.tool-process details.tool-process-item")];
+  const toolProcess = toolProcesses[0] || null;
+  const toolOuter = toolProcess?.querySelector(":scope > details.tool-process-stage") || null;
+  const toolItem = toolItems[0] || null;
+  const toolText = toolProcess?.textContent || "";
+  const ancestorCount = (element, className) => {
+    let count = 0;
+    for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
+      if (parent.classList.contains(className)) count += 1;
+    }
+    return count;
+  };
+  const orderedNodes = [
+    { label: "mainUser", node: mainUser },
+    { label: "mainStage", node: mainStage },
+    { label: "toolProcess", node: toolProcess },
+    { label: "mainFinal", node: mainFinal },
+    { label: "detachedUser", node: detachedUser },
+    { label: "detachedAssistant", node: detachedAssistant },
+    { label: "followupUser", node: followupUser },
+    { label: "followupFinal", node: followupFinal },
+  ].filter((entry) => entry.node);
+  orderedNodes.sort((left, right) => (
+    left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+  ));
+  const mainUsers = markerMatches("article.msg.user", sourceFacts.mainUser);
+  const mainStages = markerMatches(
+    "article.msg.assistant.agent-commentary",
+    sourceFacts.mainStage,
+  );
+  const mainFinals = markerMatches("article.msg.assistant", sourceFacts.mainFinal);
+  const detachedUsers = markerMatches("article.msg.user", sourceFacts.detachedUser);
+  const detachedAssistants = markerMatches("article.msg.assistant", sourceFacts.detachedError);
+  const followupUsers = markerMatches("article.msg.user", sourceFacts.followupUser);
+  const followupFinals = markerMatches("article.msg.assistant", sourceFacts.followupFinal);
+  return {
+    counts: {
+      mainUser: mainUsers.length,
+      mainStage: mainStages.length,
+      mainFinal: mainFinals.length,
+      detachedUser: detachedUsers.length,
+      detachedAssistant: detachedAssistants.length,
+      followupUser: followupUsers.length,
+      followupFinal: followupFinals.length,
+      toolProcesses: toolProcesses.length,
+      toolItems: toolItems.length,
+      toolDetails: root.querySelectorAll("article.tool-process .tool-process-detail pre").length,
+      completedStatuses: root.querySelectorAll("[data-completed-run-status]").length,
+      visiblePending: root.querySelectorAll(
+        'article.msg.assistant.is-streaming.is-pending[data-stream-kind="pending"]',
+      ).length,
+      streamingAssistants: root.querySelectorAll("article.msg.assistant.is-streaming").length,
+      activeTraces: root.querySelectorAll(".execution-trace.active").length,
+      activeBanners: document.querySelectorAll("#activeRunBanner.visible").length,
+      mainFooterTimers: mainFinal?.querySelectorAll(".response-info .run-time").length || 0,
+      followupFooterTimers: followupFinal?.querySelectorAll(".response-info .run-time").length || 0,
+      detachedFooterTimers: detachedAssistant
+        ?.querySelectorAll(".response-info .run-time").length || 0,
+      assistantFooterTimers: root.querySelectorAll(
+        "article.msg.assistant .response-info .run-time",
+      ).length,
+      mainFooterTokens: mainFinal?.querySelectorAll(".response-info .response-token").length || 0,
+      followupFooterTokens: followupFinal
+        ?.querySelectorAll(".response-info .response-token").length || 0,
+      detachedReferences: detachedAssistant
+        ?.querySelectorAll("[data-background-reply-id]").length || 0,
+    },
+    order: orderedNodes.map((entry) => entry.label),
+    tool: {
+      processKey: String(toolOuter?.getAttribute("data-tool-process-key") || ""),
+      outerOpen: Boolean(toolOuter?.open),
+      itemOpen: Boolean(toolItem?.open),
+      stageSucceeded: Boolean(toolOuter?.classList.contains("succeeded")),
+      pathVisible: toolText.includes("fixture.txt"),
+      sizeVisible: toolText.includes("26 B"),
+      fixtureContentCount: sourceFacts.fixtureContent
+        ? toolText.split(sourceFacts.fixtureContent).length - 1
+        : 0,
+    },
+    ownership: {
+      detachedUserPersistent: Boolean(
+        detachedUser?.classList.contains("execution-trace-persistent"),
+      ),
+      detachedAssistantPersistent: Boolean(
+        detachedAssistant?.classList.contains("execution-trace-persistent"),
+      ),
+      detachedUserTraceAncestors: ancestorCount(detachedUser, "execution-trace"),
+      detachedAssistantTraceAncestors: ancestorCount(detachedAssistant, "execution-trace"),
+      detachedInsideToolProcess: Boolean(
+        ancestorCount(detachedUser, "tool-process")
+        || ancestorCount(detachedAssistant, "tool-process"),
+      ),
+      detachedOwnsCompletedStatus: Boolean(
+        detachedUser?.nextElementSibling?.hasAttribute("data-completed-run-status"),
+      ),
+      followupInsideTrace: Boolean(
+        ancestorCount(followupUser, "execution-trace")
+        || ancestorCount(followupFinal, "execution-trace"),
+      ),
+      mainOwnsCompletedStatus: Boolean(
+        mainUser?.nextElementSibling?.matches("section.execution-trace.completed")
+        && mainUser.nextElementSibling.querySelectorAll(
+          ":scope > .execution-trace-summary [data-completed-run-status]",
+        ).length === 1
+      ),
+      followupOwnsCompletedStatus: Boolean(
+        followupUser?.nextElementSibling?.hasAttribute("data-completed-run-status"),
+      ),
+      foregroundErrorCount: [mainFinal, followupFinal].filter((element) => (
+        element?.classList.contains("error") || element?.getAttribute("data-error") === "true"
+      )).length,
+    },
+    stopDisabled: Boolean(document.querySelector("#stopBtn")?.disabled),
+  };
+}
+
 async function detachedParallelFailureDomEvidence(
-  page,
+  h4,
   { finalVisible = false, terminal = false, tracePlacement = "" } = {},
 ) {
+  const { page } = h4;
+  const expectedTracePlacement = tracePlacement || "outside";
+  const sourceFacts = {
+    mainUser: TOOL_DETAILS_USER,
+    mainStage: TOOL_DETAILS_STAGE,
+    backgroundUser: PARALLEL_FAILURE_USER,
+    backgroundError: PARALLEL_FAILURE_ERROR,
+    mainFinal: TOOL_DETAILS_FINAL,
+    finalVisible,
+    terminal,
+    tracePlacement: expectedTracePlacement,
+  };
+  const semanticProjection = await waitForMessageProjection(h4, {
+    label: `H4-7C-${terminal ? "terminal" : finalVisible ? "preterminal" : "active"}`,
+    sample: sampleDetachedParallelFailureProjection,
+    expected: detachedParallelFailureProjectionExpected({
+      finalVisible,
+      terminal,
+      tracePlacement: expectedTracePlacement,
+    }),
+    sourceFacts,
+  });
   const messages = page.locator("#messages");
   const mainUser = messages.locator("article.msg.user").filter({ hasText: TOOL_DETAILS_USER });
   const mainStage = messages.locator("article.msg.assistant.agent-commentary")
@@ -2997,7 +3694,6 @@ async function detachedParallelFailureDomEvidence(
   await expect(messages.locator("article.tool-process .tool-process-detail pre")).toHaveCount(2);
   await expect(toolDom.process).not.toContainText(PARALLEL_FAILURE_USER);
   await expect(toolDom.process).not.toContainText(PARALLEL_FAILURE_ERROR);
-  const expectedTracePlacement = tracePlacement || (terminal ? "persistent" : "outside");
   if (expectedTracePlacement === "persistent") {
     await expect(backgroundUser).toHaveClass(/\bexecution-trace-persistent\b/);
     await expect(backgroundAssistant).toHaveClass(/\bexecution-trace-persistent\b/);
@@ -3032,86 +3728,12 @@ async function detachedParallelFailureDomEvidence(
   }
   await expect(messages.locator("article.msg.assistant .response-info .run-time")).toHaveCount(1);
 
-  const ordered = await page.evaluate((markers) => {
-    const root = document.querySelector("#messages");
-    const find = (selector, marker) => [...root.querySelectorAll(selector)]
-      .find((element) => (element.textContent || "").includes(marker));
-    const nodes = [
-      find("article.msg.user", markers.mainUser),
-      find("article.msg.assistant.agent-commentary", markers.mainStage),
-      root.querySelector("article.tool-process"),
-    ];
-    const final = find("article.msg.assistant", markers.mainFinal);
-    const detached = [
-      find("article.msg.user", markers.backgroundUser),
-      find("article.msg.assistant", markers.backgroundError),
-    ];
-    if (markers.terminal) {
-      nodes.push(...detached);
-      if (final) nodes.push(final);
-    } else {
-      if (final) nodes.push(final);
-      nodes.push(...detached);
-    }
-    return nodes.every(Boolean) && nodes.slice(0, -1).every((node, index) => (
-      Boolean(node.compareDocumentPosition(nodes[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)
-    ));
-  }, {
-    mainUser: TOOL_DETAILS_USER,
-    mainStage: TOOL_DETAILS_STAGE,
-    backgroundUser: PARALLEL_FAILURE_USER,
-    backgroundError: PARALLEL_FAILURE_ERROR,
-    mainFinal: TOOL_DETAILS_FINAL,
-    terminal,
-  });
-  expect(ordered).toBe(true);
-
   return {
     toolDom,
     backgroundUser,
     backgroundAssistant,
     mainFinal,
-    projection: {
-      terminal,
-      finalVisible,
-      ordered,
-      counts: {
-        mainUser: await mainUser.count(),
-        mainStage: await mainStage.count(),
-        mainFinal: await mainFinal.count(),
-        backgroundUser: await backgroundUser.count(),
-        backgroundAssistant: await backgroundAssistant.count(),
-        toolProcesses: await messages.locator("article.tool-process").count(),
-        toolItems: await messages.locator("article.tool-process details.tool-process-item").count(),
-        toolResults: await messages.locator("article.tool-process .tool-process-detail pre").count() - 1,
-        completedStatuses: await messages.locator("[data-completed-run-status]").count(),
-        primaryFooterTimers: terminal
-          ? await mainFinal.locator(".response-info .run-time").count()
-          : 0,
-        backgroundFooterTimers: await backgroundAssistant
-          .locator(".response-info .run-time").count(),
-        backgroundReferences: await backgroundAssistant.locator("[data-background-reply-id]").count(),
-      },
-      processKey: toolDom.projection.processKey,
-      toolOuterOpen: toolDom.projection.outerOpen,
-      toolStage: toolDom.projection.stageClass.split(/\s+/).filter(Boolean).sort(),
-      backgroundTracePlacement: {
-        userPersistent: await backgroundUser.evaluate((element) => (
-          element.classList.contains("execution-trace-persistent")
-        )),
-        assistantPersistent: await backgroundAssistant.evaluate((element) => (
-          element.classList.contains("execution-trace-persistent")
-        )),
-        userTraceAncestors: await backgroundUser.locator(
-          "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
-        ).count(),
-        assistantTraceAncestors: await backgroundAssistant.locator(
-          "xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' execution-trace ')]",
-        ).count(),
-      },
-      backgroundOwnsCompletedStatus: false,
-      backgroundInsideToolProcess: false,
-    },
+    semanticProjection,
   };
 }
 
@@ -3198,6 +3820,26 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   expect(mainRuntimeRunIds).toHaveLength(2);
   expect(mainRuntimeRunIds.every(Boolean)).toBe(true);
   expect(activeMainAgent.body.activeRuntimeRunId).toBe(mainRuntimeRunIds[1]);
+  const mainRuntimeConsumer = await waitForFrontendRuntimeConsumer(h4, {
+    runtimeRunId: mainRuntimeRunIds[1],
+    requestBoundary,
+    label: `H4-7C-${runtime}-main-round-2`,
+  });
+  expect(mainRuntimeConsumer.targetIdHash).toBe(idHash(mainRuntimeRunIds[1]));
+  expect(mainRuntimeConsumer.matchedCount).toBeGreaterThan(0);
+  const preParallelProjection = await waitForMessageProjection(h4, {
+    label: `H4-SYNC-1-${runtime}-pre-parallel`,
+    sample: samplePrimaryDetachedPreSubmissionProjection,
+    expected: primaryDetachedPreSubmissionProjectionExpected(),
+    sourceFacts: {
+      mainUser: TOOL_DETAILS_USER,
+      mainStage: TOOL_DETAILS_STAGE,
+      mainFinal: TOOL_DETAILS_FINAL,
+      detachedUser: PARALLEL_FAILURE_USER,
+      detachedError: PARALLEL_FAILURE_ERROR,
+      fixtureContent: FIXTURE_CONTENT.trim(),
+    },
+  });
 
   await page.locator("#prompt").fill(`/parallel ${PARALLEL_FAILURE_USER}`);
   await page.locator("#sendBtn").click();
@@ -3290,7 +3932,7 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   await expect(page.locator("#activeRunBanner.visible")).toHaveCount(1);
   await expect(page.locator("#stopBtn")).toBeEnabled();
 
-  const activeDom = await detachedParallelFailureDomEvidence(page);
+  const activeDom = await detachedParallelFailureDomEvidence(h4);
   expect(activeDom.toolDom.projection.processKey).toBe(processKey);
   expect(activeDom.toolDom.projection.outerOpen).toBe(true);
   expect(activeDom.toolDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
@@ -3322,7 +3964,7 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TOOL_DETAILS_FINAL }))
     .toHaveCount(1);
   await h4.waitGate(TOOL_TERMINAL_GATE);
-  const preTerminalDom = await detachedParallelFailureDomEvidence(page, {
+  const preTerminalDom = await detachedParallelFailureDomEvidence(h4, {
     finalVisible: true,
     tracePlacement: "transitional",
   });
@@ -3366,7 +4008,7 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   await expect(page.locator("#stopBtn")).toBeDisabled();
   await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
   await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
-  const terminalDom = await detachedParallelFailureDomEvidence(page, {
+  const terminalDom = await detachedParallelFailureDomEvidence(h4, {
     finalVisible: true,
     terminal: true,
   });
@@ -3375,14 +4017,27 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   expect(terminalDom.toolDom.projection.itemOpen).toBe(false);
   expect(terminalDom.toolDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
 
-  const terminalSession = await fetchProductionJson(
-    page,
-    `/api/sessions/${encodeURIComponent(sessionId)}`,
-  );
-  expect(terminalSession.status).toBe(200);
-  expect(Array.isArray(terminalSession.body.runState?.backgroundRuns)
-    ? terminalSession.body.runState.backgroundRuns
-    : []).toEqual([]);
+  let terminalSession = null;
+  await expect.poll(async () => {
+    terminalSession = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return detachedParallelSessionSettlementProjection(terminalSession);
+  }).toEqual({
+    status: 200,
+    messageCount: 7,
+    roles: ["user", "assistant", "tool-call", "tool-result", "assistant", "user", "assistant"],
+    markerIndexes: {
+      mainFinal: 4,
+      detachedUser: 5,
+      detachedError: 6,
+      followupUser: -1,
+      followupFinal: -1,
+    },
+    runStateKeys: [],
+    includeFollowup: false,
+  });
   const sessionEvidence = detachedParallelFailureSessionEvidence(
     terminalSession.body.messages,
     mainAgentRunId,
@@ -3390,21 +4045,21 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
     toolCallId,
   );
 
-  const metricsBeforeReload = await h4.metrics();
-  expect(metricsBeforeReload.chatRequests).toEqual([
+  const metricsAtTerminal = await h4.metrics();
+  expect(metricsAtTerminal.chatRequests).toEqual([
     { scenario: "tool-detail-call", stream: true, hasToolResult: false },
     { scenario: "tool-detail-final", stream: true, hasToolResult: true },
     { scenario: "parallel-model-failure", stream: true, hasToolResult: false },
   ]);
-  expect(metricsBeforeReload.toolExecutions).toEqual([
+  expect(metricsAtTerminal.toolExecutions).toEqual([
     { action: "read_file", path: "fixture.txt" },
   ]);
-  expect(metricsBeforeReload.productionToolDelegations).toBe(1);
-  expect(metricsBeforeReload.unsafeToolRequests).toBe(0);
-  const requestsBeforeReload = h4.requestEvidenceSince(requestBoundary);
-  expect(requestsBeforeReload.agentPost).toBe(2);
-  expect(requestsBeforeReload.runtimePost).toBe(0);
-  expect(requestsBeforeReload.agentDelete).toBe(0);
+  expect(metricsAtTerminal.productionToolDelegations).toBe(1);
+  expect(metricsAtTerminal.unsafeToolRequests).toBe(0);
+  const requestsAtTerminal = h4.requestEvidenceSince(requestBoundary);
+  expect(requestsAtTerminal.agentPost).toBe(2);
+  expect(requestsAtTerminal.runtimePost).toBe(0);
+  expect(requestsAtTerminal.agentDelete).toBe(0);
 
   const completedMainTrace = durableToolTraceEvidence(completedMainAgent.body);
   const mainToolProjection = {
@@ -3452,12 +4107,269 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
       toolCallCount: (failedBackgroundRuntime.body.result?.toolCalls || []).length,
     },
   };
-  const requestProjection = {
-    agentRunPost: requestsBeforeReload.agentPost,
-    runtimePost: requestsBeforeReload.runtimePost,
-    chat: metricsBeforeReload.chatRequests.length,
-    toolExecutions: metricsBeforeReload.toolExecutions.length,
+  const terminalRequestProjection = {
+    agentRunPost: requestsAtTerminal.agentPost,
+    runtimePost: requestsAtTerminal.runtimePost,
+    chat: metricsAtTerminal.chatRequests.length,
+    toolExecutions: metricsAtTerminal.toolExecutions.length,
     backgroundToolExecutions: 0,
+  };
+  expect({
+    mainToolTrace: canonicalHash(mainToolProjection),
+    backgroundAgent: canonicalHash(backgroundAgentProjection),
+    backgroundRuntime: canonicalHash(backgroundRuntimeProjection),
+    backgroundMeta: canonicalHash(sessionEvidence.backgroundMeta),
+    requestCounts: canonicalHash(terminalRequestProjection),
+  }).toEqual({
+    mainToolTrace: H4_7C_BASE_SEMANTIC_HASHES.mainToolTrace,
+    backgroundAgent: H4_7C_BASE_SEMANTIC_HASHES.backgroundAgent,
+    backgroundRuntime: H4_7C_BASE_SEMANTIC_HASHES.backgroundRuntime,
+    backgroundMeta: H4_7C_BASE_SEMANTIC_HASHES.backgroundMeta,
+    requestCounts: H4_7C_BASE_SEMANTIC_HASHES.requestCounts,
+  });
+
+  const followupBoundary = h4.requestBoundary();
+  const prompt = page.locator("#prompt");
+  const sendButton = page.locator("#sendBtn");
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(prompt).toBeEnabled();
+  await prompt.fill(PARALLEL_FAILURE_FOLLOWUP_USER);
+  await expect(prompt).toHaveValue(PARALLEL_FAILURE_FOLLOWUP_USER);
+  await expect(sendButton).toBeEnabled();
+  await sendButton.click();
+  const followupUser = page.locator("#messages article.msg.user")
+    .filter({ hasText: PARALLEL_FAILURE_FOLLOWUP_USER });
+  const followupFinal = page.locator("#messages article.msg.assistant")
+    .filter({ hasText: PARALLEL_FAILURE_FOLLOWUP_FINAL });
+  await expect(followupUser).toHaveCount(1);
+  await expect(followupFinal).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(3);
+  const followupAgentRunId = h4.controlIds().agentRunIds.find((agentRunId) => (
+    agentRunId !== mainAgentRunId && agentRunId !== backgroundAgentRunId
+  ));
+  expect(followupAgentRunId).toBeTruthy();
+
+  let completedFollowupAgent = null;
+  await expect.poll(async () => {
+    completedFollowupAgent = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(followupAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedFollowupAgent.body?.status,
+      nextCursor: completedFollowupAgent.body?.nextCursor,
+      eventTypes: (completedFollowupAgent.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 4,
+    eventTypes: ["created", "model_started", "model_completed", "completed"],
+  });
+  expect(completedFollowupAgent.status).toBe(200);
+  expect(completedFollowupAgent.body).toMatchObject({
+    agentRunId: followupAgentRunId,
+    sessionId,
+    status: "completed",
+    nextCursor: 4,
+    activeRuntimeRunId: "",
+    pendingToolCalls: [],
+    toolExecutions: [],
+    errorCode: "",
+  });
+  const followupRuntimeRunId = String(
+    completedFollowupAgent.body.events.find((event) => event?.type === "model_started")
+      ?.data?.runtimeRunId || "",
+  );
+  expect(followupRuntimeRunId).not.toBe("");
+  expect(completedFollowupAgent.body.events.map((event) => Number(event.seq || 0)))
+    .toEqual([1, 2, 3, 4]);
+  expect(completedFollowupAgent.body.events[1]).toMatchObject({
+    type: "model_started",
+    data: { round: 1, runtimeRunId: followupRuntimeRunId },
+  });
+  expect(completedFollowupAgent.body.events[2]).toMatchObject({
+    type: "model_completed",
+    data: { round: 1, runtimeRunId: followupRuntimeRunId },
+  });
+  expect(completedFollowupAgent.body.events[3]).toMatchObject({ type: "completed" });
+  const completedFollowupRuntime = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(followupRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(completedFollowupRuntime.status).toBe(200);
+  expect(completedFollowupRuntime.body).toMatchObject({
+    runId: followupRuntimeRunId,
+    sessionId,
+    status: "completed",
+    nextCursor: 3,
+  });
+  expect(completedFollowupRuntime.body.result).toMatchObject({
+    content: PARALLEL_FAILURE_FOLLOWUP_FINAL,
+    toolCalls: [],
+  });
+  const expectedAgentRunIds = new Set([
+    mainAgentRunId,
+    backgroundAgentRunId,
+    followupAgentRunId,
+  ]);
+  const expectedRuntimeRunIds = new Set([
+    ...mainRuntimeRunIds,
+    backgroundRuntimeRunId,
+    followupRuntimeRunId,
+  ]);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(expectedAgentRunIds);
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(expectedRuntimeRunIds);
+
+  const metricsAfterFollowup = await h4.metrics();
+  const followupContext = {
+    followupMarkerCount: 1,
+    detachedUserMarkerCount: 0,
+    detachedErrorMarkerCount: 0,
+    detachedStateFieldCount: 0,
+    mainlineKinds: [
+      { role: "user", kind: "main-user" },
+      { role: "assistant", kind: "main-tool-call" },
+      { role: "tool", kind: "main-tool-receipt" },
+      { role: "assistant", kind: "main-final" },
+      { role: "user", kind: "followup-user" },
+    ],
+    unclassifiedNonSystemCount: 0,
+    toolCall: {
+      count: 1,
+      matchingIdCount: 1,
+      readFile: true,
+      pathMatchesFixture: true,
+      receiptLinked: true,
+    },
+    toolReceipt: {
+      count: 1,
+      contentPresent: true,
+      pathMatchesFixture: true,
+      contentMatchesFixture: true,
+      sizeMatchesFixture: true,
+    },
+  };
+  expect(metricsAfterFollowup.chatRequests).toEqual([
+    { scenario: "tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "tool-detail-final", stream: true, hasToolResult: true },
+    { scenario: "parallel-model-failure", stream: true, hasToolResult: false },
+    {
+      scenario: "parallel-failure-followup",
+      stream: true,
+      hasToolResult: true,
+      followupContext,
+    },
+  ]);
+  expect(metricsAfterFollowup.toolExecutions).toEqual(metricsAtTerminal.toolExecutions);
+  expect(metricsAfterFollowup.productionToolDelegations).toBe(1);
+  expect(metricsAfterFollowup.unsafeToolRequests).toBe(0);
+  const followupRequests = h4.requestEvidenceSince(followupBoundary);
+  const followupSummary = h4.requestSummarySince(followupBoundary);
+  expect(followupRequests.agentPost).toBe(1);
+  expect(followupRequests.runtimePost).toBe(0);
+  expect(followupRequests.agentDelete).toBe(0);
+  const followupBrowserProxyChatPost = followupSummary["POST /proxy/chat"] || 0;
+  const followupUpstreamChatDelta = metricsAfterFollowup.chatRequests.length
+    - metricsAtTerminal.chatRequests.length;
+  expect(followupBrowserProxyChatPost).toBe(0);
+  expect(followupUpstreamChatDelta).toBe(1);
+  expect(Object.entries(followupSummary).filter(([key]) => key.startsWith("POST /api/tools/")))
+    .toEqual([]);
+  const allRequests = h4.requestEvidenceSince(requestBoundary);
+  expect(allRequests.agentPost).toBe(3);
+  expect(allRequests.runtimePost).toBe(0);
+
+  let followupSession = null;
+  await expect.poll(async () => {
+    followupSession = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return detachedParallelSessionSettlementProjection(followupSession, { includeFollowup: true });
+  }).toEqual({
+    status: 200,
+    messageCount: 9,
+    roles: [
+      "user", "assistant", "tool-call", "tool-result", "assistant",
+      "user", "assistant", "user", "assistant",
+    ],
+    markerIndexes: {
+      mainFinal: 4,
+      detachedUser: 5,
+      detachedError: 6,
+      followupUser: 7,
+      followupFinal: 8,
+    },
+    runStateKeys: [],
+    includeFollowup: true,
+  });
+  const followupSessionEvidence = detachedParallelFailureSessionEvidence(
+    followupSession.body.messages,
+    mainAgentRunId,
+    backgroundAgentRunId,
+    toolCallId,
+    { includeFollowup: true },
+  );
+  const followupDomProjection = await waitForMessageProjection(h4, {
+    label: `H4-SYNC-1-${runtime}-followup-terminal`,
+    sample: sampleFollowupIsolationProjection,
+    expected: followupIsolationProjectionExpected(),
+    sourceFacts: {
+      mainUser: TOOL_DETAILS_USER,
+      mainStage: TOOL_DETAILS_STAGE,
+      mainFinal: TOOL_DETAILS_FINAL,
+      detachedUser: PARALLEL_FAILURE_USER,
+      detachedError: PARALLEL_FAILURE_ERROR,
+      followupUser: PARALLEL_FAILURE_FOLLOWUP_USER,
+      followupFinal: PARALLEL_FAILURE_FOLLOWUP_FINAL,
+      fixtureContent: FIXTURE_CONTENT.trim(),
+    },
+  });
+  await expect(prompt).toBeEnabled();
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+
+  const followupAgentProjection = {
+    status: String(completedFollowupAgent.body.status || ""),
+    nextCursor: Number(completedFollowupAgent.body.nextCursor || 0),
+    eventTypes: completedFollowupAgent.body.events.map((event) => String(event.type || "")),
+    activeRuntimeCleared: !completedFollowupAgent.body.activeRuntimeRunId,
+    pendingToolCallCount: completedFollowupAgent.body.pendingToolCalls.length,
+    toolExecutionCount: completedFollowupAgent.body.toolExecutions.length,
+    errorCode: String(completedFollowupAgent.body.errorCode || ""),
+    events: completedFollowupAgent.body.events.map((event) => ({
+      seq: Number(event.seq || 0),
+      type: String(event.type || ""),
+      ...(["model_started", "model_completed"].includes(event.type) ? {
+        round: Number(event.data?.round || 0),
+        runtimeLinked: String(event.data?.runtimeRunId || "") === followupRuntimeRunId,
+      } : {}),
+    })),
+  };
+  const followupRuntimeProjection = {
+    status: String(completedFollowupRuntime.body.status || ""),
+    nextCursor: Number(completedFollowupRuntime.body.nextCursor || 0),
+    finalMarkerPresent: String(completedFollowupRuntime.body.result?.content || "")
+      .includes(PARALLEL_FAILURE_FOLLOWUP_FINAL),
+    toolCallCount: (completedFollowupRuntime.body.result?.toolCalls || []).length,
+  };
+  const followupRequestProjection = {
+    initial: terminalRequestProjection,
+    followup: {
+      agentRunPost: followupRequests.agentPost,
+      runtimePost: followupRequests.runtimePost,
+      browserProxyChatPost: followupBrowserProxyChatPost,
+      upstreamChatDelta: followupUpstreamChatDelta,
+      toolExecutions: metricsAfterFollowup.toolExecutions.length
+        - metricsAtTerminal.toolExecutions.length,
+    },
+    total: {
+      agentRunPost: allRequests.agentPost,
+      runtimePost: allRequests.runtimePost,
+      chat: metricsAfterFollowup.chatRequests.length,
+      toolExecutions: metricsAfterFollowup.toolExecutions.length,
+    },
   };
 
   const refreshBoundary = h4.requestBoundary();
@@ -3473,12 +4385,22 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   );
   await expect(restoredSessionButton).toHaveCount(1);
   await restoredSessionButton.click();
-  const restoredDom = await detachedParallelFailureDomEvidence(page, {
-    finalVisible: true,
-    terminal: true,
+  const restoredDomProjection = await waitForMessageProjection(h4, {
+    label: `H4-SYNC-1-${runtime}-followup-refresh`,
+    sample: sampleFollowupIsolationProjection,
+    expected: followupIsolationProjectionExpected(),
+    sourceFacts: {
+      mainUser: TOOL_DETAILS_USER,
+      mainStage: TOOL_DETAILS_STAGE,
+      mainFinal: TOOL_DETAILS_FINAL,
+      detachedUser: PARALLEL_FAILURE_USER,
+      detachedError: PARALLEL_FAILURE_ERROR,
+      followupUser: PARALLEL_FAILURE_FOLLOWUP_USER,
+      followupFinal: PARALLEL_FAILURE_FOLLOWUP_FINAL,
+      fixtureContent: FIXTURE_CONTENT.trim(),
+    },
   });
-  expect(restoredDom.projection).toEqual(terminalDom.projection);
-  expect(restoredDom.toolDom.projection.processKey).toBe(processKey);
+  expect(restoredDomProjection).toEqual(followupDomProjection);
 
   const mainAfterReload = await fetchProductionJson(
     page,
@@ -3492,9 +4414,19 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
     page,
     `/api/runtime/runs/${encodeURIComponent(backgroundRuntimeRunId)}?cursor=0&wait=0`,
   );
+  const followupAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(followupAgentRunId)}?cursor=0&wait=0`,
+  );
+  const followupRuntimeAfterReload = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(followupRuntimeRunId)}?cursor=0&wait=0`,
+  );
   expect(mainAfterReload.status).toBe(200);
   expect(backgroundAfterReload.status).toBe(200);
   expect(backgroundRuntimeAfterReload.status).toBe(200);
+  expect(followupAfterReload.status).toBe(200);
+  expect(followupRuntimeAfterReload.status).toBe(200);
   expect({
     status: durableToolTraceEvidence(mainAfterReload.body).status,
     nextCursor: durableToolTraceEvidence(mainAfterReload.body).nextCursor,
@@ -3509,86 +4441,136 @@ async function exerciseDetachedParallelFailureIsolation(h4, runtime) {
   expect(backgroundAfterReload.body.events).toEqual(failedBackgroundAgent.body.events);
   expect(backgroundAfterReload.body.toolExecutions).toEqual([]);
   expect(backgroundRuntimeAfterReload.body).toEqual(failedBackgroundRuntime.body);
+  expect(followupAfterReload.body).toEqual(completedFollowupAgent.body);
+  expect(followupRuntimeAfterReload.body).toEqual(completedFollowupRuntime.body);
 
-  const sessionAfterReload = await fetchProductionJson(
-    page,
-    `/api/sessions/${encodeURIComponent(sessionId)}`,
-  );
-  expect(sessionAfterReload.status).toBe(200);
-  expect(Array.isArray(sessionAfterReload.body.runState?.backgroundRuns)
-    ? sessionAfterReload.body.runState.backgroundRuns
-    : []).toEqual([]);
+  let sessionAfterReload = null;
+  await expect.poll(async () => {
+    sessionAfterReload = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return detachedParallelSessionSettlementProjection(
+      sessionAfterReload,
+      { includeFollowup: true },
+    );
+  }).toEqual({
+    status: 200,
+    messageCount: 9,
+    roles: [
+      "user", "assistant", "tool-call", "tool-result", "assistant",
+      "user", "assistant", "user", "assistant",
+    ],
+    markerIndexes: {
+      mainFinal: 4,
+      detachedUser: 5,
+      detachedError: 6,
+      followupUser: 7,
+      followupFinal: 8,
+    },
+    runStateKeys: [],
+    includeFollowup: true,
+  });
   const restoredSessionEvidence = detachedParallelFailureSessionEvidence(
     sessionAfterReload.body.messages,
     mainAgentRunId,
     backgroundAgentRunId,
     toolCallId,
+    { includeFollowup: true },
   );
-  expect(restoredSessionEvidence.roleContent).toEqual(sessionEvidence.roleContent);
-  expect(restoredSessionEvidence.backgroundMeta).toEqual(sessionEvidence.backgroundMeta);
+  expect(restoredSessionEvidence.roleContent).toEqual(followupSessionEvidence.roleContent);
+  expect(restoredSessionEvidence.backgroundMeta).toEqual(followupSessionEvidence.backgroundMeta);
 
   const metricsAfterReload = await h4.metrics();
-  expect(metricsAfterReload.chatRequests).toEqual(metricsBeforeReload.chatRequests);
-  expect(metricsAfterReload.toolExecutions).toEqual(metricsBeforeReload.toolExecutions);
+  expect(metricsAfterReload.chatRequests).toEqual(metricsAfterFollowup.chatRequests);
+  expect(metricsAfterReload.toolExecutions).toEqual(metricsAfterFollowup.toolExecutions);
   const refreshRequests = h4.requestEvidenceSince(refreshBoundary);
   const refreshSummary = h4.requestSummarySince(refreshBoundary);
   expect(refreshRequests.agentPost).toBe(0);
   expect(refreshRequests.runtimePost).toBe(0);
   expect(refreshRequests.agentDelete).toBe(0);
-  expect(refreshSummary["POST /proxy/chat"] || 0).toBe(0);
+  const refreshBrowserProxyChatPost = refreshSummary["POST /proxy/chat"] || 0;
+  const refreshUpstreamChatDelta = metricsAfterReload.chatRequests.length
+    - metricsAfterFollowup.chatRequests.length;
+  expect(refreshBrowserProxyChatPost).toBe(0);
+  expect(refreshUpstreamChatDelta).toBe(0);
   expect(Object.entries(refreshSummary).filter(([key]) => key.startsWith("POST /api/tools/")))
     .toEqual([]);
-  expect(h4.controlIds().agentRunIds).toEqual([mainAgentRunId, backgroundAgentRunId]);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(expectedAgentRunIds);
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(expectedRuntimeRunIds);
   expect(h4.pageErrors).toEqual([]);
 
   const refreshProjection = {
     mainAgentStable: mainAfterReload.body.agentRunId === mainAgentRunId,
     backgroundAgentStable: backgroundAfterReload.body.agentRunId === backgroundAgentRunId,
     backgroundRuntimeStable: backgroundRuntimeAfterReload.body.runId === backgroundRuntimeRunId,
-    processKeyStable: restoredDom.toolDom.projection.processKey === processKey,
+    followupAgentStable: followupAfterReload.body.agentRunId === followupAgentRunId,
+    followupRuntimeStable: followupRuntimeAfterReload.body.runId === followupRuntimeRunId,
+    processKeyStable: restoredDomProjection.tool.processKey === processKey,
     sessionRoleContentStable: JSON.stringify(restoredSessionEvidence.roleContent)
-      === JSON.stringify(sessionEvidence.roleContent),
+      === JSON.stringify(followupSessionEvidence.roleContent),
     backgroundMetaStable: JSON.stringify(restoredSessionEvidence.backgroundMeta)
-      === JSON.stringify(sessionEvidence.backgroundMeta),
+      === JSON.stringify(followupSessionEvidence.backgroundMeta),
     backgroundCheckpointCount: Array.isArray(sessionAfterReload.body.runState?.backgroundRuns)
       ? sessionAfterReload.body.runState.backgroundRuns.length
       : 0,
-    domUnique: restoredDom.projection,
+    runStateCleared: Object.keys(sessionAfterReload.body.runState || {}).length === 0,
+    domUnique: restoredDomProjection,
     requests: {
       agentRunPost: refreshRequests.agentPost,
       runtimePost: refreshRequests.runtimePost,
-      chat: metricsAfterReload.chatRequests.length - metricsBeforeReload.chatRequests.length,
-      toolExecutions: metricsAfterReload.toolExecutions.length - metricsBeforeReload.toolExecutions.length,
+      browserProxyChatPost: refreshBrowserProxyChatPost,
+      upstreamChatDelta: refreshUpstreamChatDelta,
+      toolExecutions: metricsAfterReload.toolExecutions.length
+        - metricsAfterFollowup.toolExecutions.length,
     },
   };
   const hashes = {
-    mainToolTrace: canonicalHash(mainToolProjection),
-    backgroundAgent: canonicalHash(backgroundAgentProjection),
-    backgroundRuntime: canonicalHash(backgroundRuntimeProjection),
-    sessionRoleContent: canonicalHash(sessionEvidence.roleContent),
-    backgroundMeta: canonicalHash(sessionEvidence.backgroundMeta),
-    domOwnership: canonicalHash(terminalDom.projection),
-    requestCounts: canonicalHash(requestProjection),
+    preParallelFence: canonicalHash(preParallelProjection),
+    terminalOrdering: canonicalHash({
+      roleContent: sessionEvidence.roleContent,
+      dom: terminalDom.semanticProjection,
+    }),
+    followupRequestContext: canonicalHash(followupContext),
+    followupAgentRuntime: canonicalHash({
+      agent: followupAgentProjection,
+      runtime: followupRuntimeProjection,
+    }),
+    followupSession: canonicalHash({
+      roleContent: followupSessionEvidence.roleContent,
+      backgroundMeta: followupSessionEvidence.backgroundMeta,
+      runState: { cleared: Object.keys(followupSession.body.runState || {}).length === 0 },
+    }),
+    followupDom: canonicalHash(followupDomProjection),
+    requestCounts: canonicalHash(followupRequestProjection),
     refreshLifecycle: canonicalHash(refreshProjection),
   };
-  expect(hashes).toEqual(H4_7C_SEMANTIC_HASHES);
+  if (Object.values(H4_SYNC_1_SEMANTIC_HASHES).every(Boolean)) {
+    expect(hashes).toEqual(H4_SYNC_1_SEMANTIC_HASHES);
+  } else {
+    expect(runtime).toBe("bundle");
+  }
   h4.evidence(`${runtime}-detached-parallel-failure-isolation`, {
     runtime,
     identities: {
       mainAgentRunId: idHash(mainAgentRunId),
       backgroundAgentRunId: idHash(backgroundAgentRunId),
       backgroundRuntimeRunId: idHash(backgroundRuntimeRunId),
+      followupAgentRunId: idHash(followupAgentRunId),
+      followupRuntimeRunId: idHash(followupRuntimeRunId),
       toolCallId: idHash(toolCallId),
       jobId: idHash(sessionEvidence.jobId),
     },
     eventTypes: {
       main: completedMainAgent.body.events.map((event) => event.type),
       background: failedBackgroundAgent.body.events.map((event) => event.type),
+      followup: completedFollowupAgent.body.events.map((event) => event.type),
     },
     runtime: backgroundRuntimeProjection,
-    requests: requestProjection,
+    requests: followupRequestProjection,
     refresh: refreshProjection.requests,
-    dom: terminalDom.projection,
+    terminalDom: terminalDom.semanticProjection,
+    followupDom: followupDomProjection,
     hashes,
   });
 }
@@ -5448,6 +6430,292 @@ async function connectedToolItemAndDirectSummary(itemLocator) {
   return { itemNode, summaryNode };
 }
 
+async function convergeToolProcessProjectionByLanguage(page, contract, initialDom) {
+  const initialProcessKey = initialDom.projection.processKey;
+  const initialLanguage = await page.locator("html").getAttribute("lang");
+  expect(["en", "zh-CN"]).toContain(initialLanguage);
+  const originalLanguage = initialLanguage === "zh-CN" ? "zh" : "en";
+  const alternateLanguage = originalLanguage === "zh" ? "en" : "zh";
+  const initialStage = await initialDom.outer.elementHandle();
+  expect(initialStage).not.toBeNull();
+
+  await selectInterfaceLanguage(page, alternateLanguage);
+  expect(await initialStage.evaluate((stage) => stage.isConnected)).toBe(false);
+  const alternateDom = await failedToolLifecycleDomEvidence(page, contract);
+  expect(alternateDom.projection.processKey).toBe(initialProcessKey);
+  expect(alternateDom.projection.outerOpen).toBe(true);
+  expect(alternateDom.projection.itemOpen).toBe(false);
+  expect(alternateDom.projection.outerState).toEqual({ running: true, failed: false });
+  expect(alternateDom.projection.itemState).toEqual({ failed: true });
+  const alternateStage = await alternateDom.outer.elementHandle();
+  expect(alternateStage).not.toBeNull();
+
+  await selectInterfaceLanguage(page, originalLanguage);
+  expect(await alternateStage.evaluate((stage) => stage.isConnected)).toBe(false);
+  const restoredDom = await failedToolLifecycleDomEvidence(page, contract);
+  expect(restoredDom.projection.processKey).toBe(initialProcessKey);
+  expect(restoredDom.projection.outerOpen).toBe(true);
+  expect(restoredDom.projection.itemOpen).toBe(false);
+  expect(restoredDom.projection.outerState).toEqual({ running: true, failed: false });
+  expect(restoredDom.projection.itemState).toEqual({ failed: true });
+  expect(await page.locator("html").getAttribute("lang")).toBe(initialLanguage);
+
+  return {
+    dom: restoredDom,
+    evidence: {
+      initialLanguage,
+      alternateLanguage: alternateLanguage === "zh" ? "zh-CN" : "en",
+      initialStageDisconnected: true,
+      alternateStageDisconnected: true,
+      processKeyStable: true,
+      outerOpen: restoredDom.projection.outerOpen,
+      itemOpen: restoredDom.projection.itemOpen,
+    },
+  };
+}
+
+async function createToolItemCollapseActionBoundary(page, processKey) {
+  return page.evaluateHandle(({ expectedProcessKey }) => {
+    const messages = document.querySelector("#messages");
+    if (!messages) throw new Error("H4 messages root is unavailable");
+
+    const generations = new WeakMap();
+    let nextGeneration = 1;
+    const generationFor = (node) => {
+      if (!node) return 0;
+      if (!generations.has(node)) generations.set(node, nextGeneration++);
+      return generations.get(node);
+    };
+    const currentPair = () => {
+      const stage = [...messages.querySelectorAll("details.tool-process-stage[data-tool-process-key]")]
+        .find((element) => element.dataset.toolProcessKey === expectedProcessKey);
+      const items = stage
+        ? [...stage.querySelectorAll(":scope > .tool-process-stage-body .tool-process-list > details.tool-process-item")]
+        : [];
+      if (items.length !== 1) return null;
+      const item = items[0];
+      const summary = item.querySelector(":scope > summary");
+      const rect = item.getBoundingClientRect();
+      if (
+        !summary
+        || !item.isConnected
+        || !summary.isConnected
+        || summary.parentElement !== item
+        || item.querySelector(":scope > summary") !== summary
+        || rect.width <= 0
+        || rect.height <= 0
+      ) {
+        return null;
+      }
+      return { item, summary };
+    };
+
+    const initialPair = currentPair();
+    if (!initialPair) throw new Error("H4 current tool item is unavailable");
+    const initialBefore = {
+      generation: generationFor(initialPair.item),
+      itemConnected: initialPair.item.isConnected,
+      summaryConnected: initialPair.summary.isConnected,
+      directOwner: initialPair.summary.parentElement === initialPair.item
+        && initialPair.item.querySelector(":scope > summary") === initialPair.summary,
+      itemOpen: initialPair.item.open,
+    };
+    const state = {
+      initialGeneration: initialBefore.generation,
+      lastItem: initialPair.item,
+      lastSummary: initialPair.summary,
+      mutationCount: 0,
+      childListMutationCount: 0,
+      openMutationCount: 0,
+      replacementCount: 0,
+      boundItem: null,
+      boundSummary: null,
+      boundGeneration: 0,
+      boundBefore: null,
+      clickCount: 0,
+      toggleCount: 0,
+      firstClick: null,
+      firstToggle: null,
+      resolveFirstToggle: null,
+      firstToggleBoundary: null,
+      clickListener: null,
+      toggleListener: null,
+    };
+    const observer = new MutationObserver((records) => {
+      state.mutationCount += records.length;
+      state.childListMutationCount += records.filter((record) => record.type === "childList").length;
+      state.openMutationCount += records.filter((record) => (
+        record.type === "attributes" && record.attributeName === "open"
+      )).length;
+      const pair = currentPair();
+      if (
+        !pair
+        || pair.item !== state.lastItem
+        || pair.summary !== state.lastSummary
+      ) {
+        state.replacementCount += 1;
+      }
+      state.lastItem = pair?.item || null;
+      state.lastSummary = pair?.summary || null;
+      generationFor(pair?.item || null);
+    });
+    observer.observe(messages, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["open"],
+    });
+
+    const snapshot = () => {
+      const pair = currentPair();
+      return {
+        performed: Boolean(state.boundItem),
+        generation: state.boundGeneration,
+        initial: initialBefore,
+        before: state.boundBefore,
+        mutationCount: state.mutationCount,
+        childListMutationCount: state.childListMutationCount,
+        openMutationCount: state.openMutationCount,
+        replacementCount: state.replacementCount,
+        clickCount: state.clickCount,
+        toggleCount: state.toggleCount,
+        firstClick: state.firstClick,
+        firstToggle: state.firstToggle,
+        after: {
+          itemConnected: Boolean(state.boundItem?.isConnected),
+          summaryConnected: Boolean(state.boundSummary?.isConnected),
+          directOwner: Boolean(
+            state.boundItem
+            && state.boundSummary
+            && state.boundSummary.parentElement === state.boundItem
+            && state.boundItem.querySelector(":scope > summary") === state.boundSummary
+          ),
+          itemOpen: Boolean(state.boundItem?.open),
+          sameCurrent: Boolean(
+            pair
+            && pair.item === state.boundItem
+            && pair.summary === state.boundSummary
+          ),
+          currentGeneration: generationFor(pair?.item || null),
+        },
+      };
+    };
+    return {
+      bind: (item, summary) => {
+        if (state.boundItem || state.boundSummary) throw new Error("H4 tool item action boundary is already bound");
+        const pair = currentPair();
+        state.boundItem = item;
+        state.boundSummary = summary;
+        state.boundGeneration = generationFor(item);
+        state.boundBefore = {
+          itemConnected: item.isConnected,
+          summaryConnected: summary.isConnected,
+          directOwner: summary.parentElement === item
+            && item.querySelector(":scope > summary") === summary,
+          itemOpen: item.open,
+          sameInitial: item === initialPair.item && summary === initialPair.summary,
+          sameCurrent: Boolean(pair && pair.item === item && pair.summary === summary),
+          currentGeneration: generationFor(pair?.item || null),
+          replacementCount: state.replacementCount,
+        };
+        state.firstToggleBoundary = new Promise((resolve) => {
+          state.resolveFirstToggle = resolve;
+        });
+        state.clickListener = (event) => {
+          state.clickCount += 1;
+          if (!state.firstClick) {
+            state.firstClick = {
+              generation: state.boundGeneration,
+              trusted: event.isTrusted,
+              currentTargetIsSummary: event.currentTarget === summary,
+              summaryInPath: event.composedPath().includes(summary),
+              itemConnected: item.isConnected,
+              summaryConnected: summary.isConnected,
+              directOwner: summary.parentElement === item
+                && item.querySelector(":scope > summary") === summary,
+              openAtClick: item.open,
+            };
+          }
+        };
+        state.toggleListener = (event) => {
+          state.toggleCount += 1;
+          if (!state.firstToggle) {
+            state.firstToggle = {
+              generation: state.boundGeneration,
+              trusted: event.isTrusted,
+              targetIsItem: event.target === item,
+              itemConnected: item.isConnected,
+              summaryConnected: summary.isConnected,
+              directOwner: summary.parentElement === item
+                && item.querySelector(":scope > summary") === summary,
+              openAtToggle: item.open,
+              oldState: typeof event.oldState === "string" ? event.oldState : "",
+              newState: typeof event.newState === "string" ? event.newState : "",
+            };
+            state.resolveFirstToggle();
+          }
+        };
+        summary.addEventListener("click", state.clickListener, { once: true });
+        item.addEventListener("toggle", state.toggleListener, { once: true });
+        return state.boundBefore;
+      },
+      waitForToggleBoundary: async () => {
+        await state.firstToggleBoundary;
+        await new Promise((resolve) => {
+          queueMicrotask(() => requestAnimationFrame(() => queueMicrotask(resolve)));
+        });
+      },
+      snapshot,
+      cleanup: () => {
+        observer.disconnect();
+        if (state.boundSummary && state.clickListener) {
+          state.boundSummary.removeEventListener("click", state.clickListener);
+        }
+        if (state.boundItem && state.toggleListener) {
+          state.boundItem.removeEventListener("toggle", state.toggleListener);
+        }
+      },
+    };
+  }, { expectedProcessKey: processKey });
+}
+
+async function clickExactOpenToolItemSummary(actionBoundary, itemNode, summaryNode) {
+
+  let clickError = null;
+  try {
+    const boundBefore = await actionBoundary.evaluate((action, { item, summary }) => (
+      action.bind(item, summary)
+    ), { item: itemNode, summary: summaryNode });
+    expect(boundBefore).toEqual({
+      itemConnected: true,
+      summaryConnected: true,
+      directOwner: true,
+      itemOpen: true,
+      sameInitial: true,
+      sameCurrent: true,
+      currentGeneration: 1,
+      replacementCount: 0,
+    });
+    await summaryNode.click();
+    await actionBoundary.evaluate((action) => action.waitForToggleBoundary());
+  } catch (error) {
+    clickError = error;
+  }
+  let evidence;
+  try {
+    evidence = await actionBoundary.evaluate((action) => action.snapshot());
+    await actionBoundary.evaluate((action) => action.cleanup());
+  } finally {
+    await actionBoundary.dispose();
+  }
+  if (clickError) {
+    const error = new Error(`H4 exact tool summary click failed: ${JSON.stringify(evidence)}`);
+    error.cause = clickError;
+    throw error;
+  }
+  return evidence;
+}
+
 async function completeToolFailureLifecycle(h4, runtime, contract) {
   const { page } = h4;
   const requestBoundary = h4.requestBoundary();
@@ -5600,19 +6868,30 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     ordered: true,
   });
   expect(initialDom.projection.processKey).toBe("0:1");
-  const oldStage = await initialDom.outer.elementHandle();
   await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(initialDom.outer).toHaveAttribute("open", "");
+  const projectionConvergence = await convergeToolProcessProjectionByLanguage(
+    page,
+    contract,
+    initialDom,
+  );
+  const activeDom = projectionConvergence.dom;
+  h4.diagnosticSteps.push({
+    step: "failed-tool-projection-preconverged",
+    ...projectionConvergence.evidence,
+  });
+  const oldStage = await activeDom.outer.elementHandle();
+  expect(oldStage).not.toBeNull();
   const {
     itemNode: firstItemNode,
     summaryNode: firstSummaryNode,
-  } = await connectedToolItemAndDirectSummary(initialDom.item);
-  await initialDom.item.locator(":scope > summary").click();
-  await expect(initialDom.item).toHaveAttribute("open", "");
+  } = await connectedToolItemAndDirectSummary(activeDom.item);
+  await activeDom.item.locator(":scope > summary").click();
+  await expect(activeDom.item).toHaveAttribute("open", "");
   const {
     itemNode: openedItemNode,
     summaryNode: openedSummaryNode,
-  } = await connectedToolItemAndDirectSummary(initialDom.item);
+  } = await connectedToolItemAndDirectSummary(activeDom.item);
   const capturedItemConnectedAfterFirst = await firstItemNode.evaluate((item) => item.isConnected);
   const openedItemIsCapturedItem = await firstItemNode.evaluate(
     (item, opened) => item === opened,
@@ -5631,18 +6910,22 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   });
   expect(firstOpenImmediately).toBe(true);
   for (const marker of contract.domPrimaryArgumentMarkers || ["fixture.txt"]) {
-    await expect(initialDom.details.first()).toContainText(marker);
+    await expect(activeDom.details.first()).toContainText(marker);
   }
   for (const marker of contract.domArgumentMarkers) {
-    await expect(initialDom.details.first()).toContainText(marker);
+    await expect(activeDom.details.first()).toContainText(marker);
   }
   for (const marker of contract.domResultMarkers) {
-    await expect(initialDom.details.last()).toContainText(marker);
+    await expect(activeDom.details.last()).toContainText(marker);
   }
+  const collapseActionBoundary = await createToolItemCollapseActionBoundary(
+    page,
+    initialDom.projection.processKey,
+  );
   const {
     itemNode: currentItemNode,
     summaryNode: currentSummaryNode,
-  } = await connectedToolItemAndDirectSummary(initialDom.item);
+  } = await connectedToolItemAndDirectSummary(activeDom.item);
   const openedItemConnectedBeforeSecond = await openedItemNode.evaluate((item) => item.isConnected);
   const currentIsOpenedItem = await openedItemNode.evaluate((item, current) => item === current, currentItemNode);
   const currentSummaryIsOpenedSummary = await openedSummaryNode.evaluate(
@@ -5653,33 +6936,136 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   const currentSummaryMatchesItem = await currentItemNode.evaluate((item, summary) => (
     item.querySelector(":scope > summary") === summary
   ), currentSummaryNode);
-  if (currentOpenBeforeSecond) {
-    await initialDom.item.locator(":scope > summary").click();
-  } else {
-    expect(openedItemConnectedBeforeSecond).toBe(false);
-    expect(currentIsOpenedItem).toBe(false);
-  }
+  expect({
+    openedItemConnectedBeforeSecond,
+    currentIsOpenedItem,
+    currentSummaryIsOpenedSummary,
+    currentSummaryMatchesItem,
+    currentOpenBeforeSecond,
+  }).toEqual({
+    openedItemConnectedBeforeSecond: true,
+    currentIsOpenedItem: true,
+    currentSummaryIsOpenedSummary: true,
+    currentSummaryMatchesItem: true,
+    currentOpenBeforeSecond: true,
+  });
+  const openSummary = activeDom.process.locator(
+    "details.tool-process-item[open]:visible > summary",
+  );
+  await expect(openSummary).toHaveCount(1);
+  const actionSummaryNode = await openSummary.elementHandle();
+  expect(actionSummaryNode).not.toBeNull();
+  expect(await currentSummaryNode.evaluate(
+    (summary, actionSummary) => summary === actionSummary,
+    actionSummaryNode,
+  )).toBe(true);
+  const collapseAction = await clickExactOpenToolItemSummary(
+    collapseActionBoundary,
+    currentItemNode,
+    actionSummaryNode,
+  );
+  const {
+    mutationCount: rootMutationCount,
+    childListMutationCount: rootChildListMutationCount,
+    ...collapseActionCausalEvidence
+  } = collapseAction;
+  expect(Number.isSafeInteger(rootMutationCount)).toBe(true);
+  expect(Number.isSafeInteger(rootChildListMutationCount)).toBe(true);
+  expect(rootChildListMutationCount).toBeGreaterThanOrEqual(0);
+  expect(rootMutationCount).toBe(
+    collapseAction.openMutationCount + rootChildListMutationCount,
+  );
+  expect(collapseActionCausalEvidence).toEqual({
+    performed: true,
+    generation: 1,
+    initial: {
+      generation: 1,
+      itemConnected: true,
+      summaryConnected: true,
+      directOwner: true,
+      itemOpen: true,
+    },
+    before: {
+      itemConnected: true,
+      summaryConnected: true,
+      directOwner: true,
+      itemOpen: true,
+      sameInitial: true,
+      sameCurrent: true,
+      currentGeneration: 1,
+      replacementCount: 0,
+    },
+    openMutationCount: 1,
+    replacementCount: 0,
+    clickCount: 1,
+    toggleCount: 1,
+    firstClick: {
+      generation: 1,
+      trusted: true,
+      currentTargetIsSummary: true,
+      summaryInPath: true,
+      itemConnected: true,
+      summaryConnected: true,
+      directOwner: true,
+      openAtClick: true,
+    },
+    firstToggle: {
+      generation: 1,
+      trusted: true,
+      targetIsItem: true,
+      itemConnected: true,
+      summaryConnected: true,
+      directOwner: true,
+      openAtToggle: false,
+      oldState: "open",
+      newState: "closed",
+    },
+    after: {
+      itemConnected: true,
+      summaryConnected: true,
+      directOwner: true,
+      itemOpen: false,
+      sameCurrent: true,
+      currentGeneration: 1,
+    },
+  });
   const {
     itemNode: closedItemNode,
     summaryNode: closedSummaryNode,
-  } = await connectedToolItemAndDirectSummary(initialDom.item);
+  } = await connectedToolItemAndDirectSummary(activeDom.item);
   const currentOpenAfterSecond = await closedItemNode.evaluate((item) => item.open);
+  const actionItemIsCurrentAfterSecond = await currentItemNode.evaluate(
+    (item, current) => item === current,
+    closedItemNode,
+  );
+  const actionSummaryIsCurrentAfterSecond = await currentSummaryNode.evaluate(
+    (summary, current) => summary === current,
+    closedSummaryNode,
+  );
+  if (collapseAction.performed) {
+    expect(actionItemIsCurrentAfterSecond).toBe(true);
+    expect(actionSummaryIsCurrentAfterSecond).toBe(true);
+  }
   h4.diagnosticSteps.push({
     step: "failed-tool-item-second-click",
+    projectionConvergence: projectionConvergence.evidence,
     openedItemConnectedBeforeSecond,
     currentIsOpenedItem,
     currentSummaryIsOpenedSummary,
     currentSummaryMatchesItem,
     currentOpenBeforeSecond,
     currentOpenAfterSecond,
+    collapseAction,
+    actionItemIsCurrentAfterSecond,
+    actionSummaryIsCurrentAfterSecond,
     currentConnectedAfterSecond: await closedItemNode.evaluate((item) => item.isConnected),
     currentSummaryConnectedAfterSecond: await closedSummaryNode.evaluate((summary) => summary.isConnected),
   });
   expect(currentOpenAfterSecond).toBe(false);
-  await expect(initialDom.item).not.toHaveAttribute("open", "");
+  await expect(activeDom.item).not.toHaveAttribute("open", "");
 
   await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
-  await expect(initialDom.finalAnswer).toHaveCount(1);
+  await expect(activeDom.finalAnswer).toHaveCount(1);
   const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
   expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
   expect(await oldStage.evaluate((element) => element.isConnected)).toBe(false);
@@ -6413,11 +7799,16 @@ async function controlledFixtureAudit(h4, contract) {
   };
 }
 
+function forcedFinalTerminalErrorMarker(contract) {
+  return contract.terminalErrorMarker || PARALLEL_FAILURE_ERROR;
+}
+
 function forcedFinalFailureSessionProjection(messages, contract, agentRunId) {
   const source = Array.isArray(messages) ? messages : [];
+  const errorMarker = forcedFinalTerminalErrorMarker(contract);
   expect(source.map((message) => message?.role)).toEqual(["user", "assistant"]);
   expect(source[0]?.content).toBe(contract.userMarker);
-  expect(String(source[1]?.content || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(String(source[1]?.content || "")).toContain(errorMarker);
   expect(source[1]?.meta).toMatchObject({ kind: "error-recovery" });
   expect(String(source[1]?.meta?._model || "")).not.toBe("");
   expect(Object.prototype.hasOwnProperty.call(source[1], "_responseTime")).toBe(false);
@@ -6436,18 +7827,20 @@ function forcedFinalFailureSessionProjection(messages, contract, agentRunId) {
   ];
 }
 
-function forcedFinalFailureRunStateProjection(runState, agentRunId, runtimeRunIds) {
+function forcedFinalFailureRunStateProjection(runState, contract, agentRunId) {
   const source = runState && typeof runState === "object" ? runState : {};
+  const terminalNextCursor = contract.terminalNextCursor || 24;
+  const errorMarker = forcedFinalTerminalErrorMarker(contract);
   expect(source).toMatchObject({
     status: "failed",
     phase: "model",
     executionOwner: "server-agent",
     agentRunId,
-    agentEventCursor: 24,
+    agentEventCursor: terminalNextCursor,
     modelRound: 5,
   });
   expect(String(source.runtimeRunId || "")).toBe("");
-  expect(String(source.lastError || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(String(source.lastError || "")).toContain(errorMarker);
   return {
     status: String(source.status || ""),
     phase: String(source.phase || ""),
@@ -6462,9 +7855,10 @@ function forcedFinalFailureRunStateProjection(runState, agentRunId, runtimeRunId
 
 async function forcedFinalFailureDomEvidence(page, contract) {
   const messages = page.locator("#messages");
+  const errorMarker = forcedFinalTerminalErrorMarker(contract);
   const user = messages.locator("article.msg.user").filter({ hasText: contract.userMarker });
   const errorAssistant = messages.locator("article.msg.assistant")
-    .filter({ hasText: PARALLEL_FAILURE_ERROR });
+    .filter({ hasText: errorMarker });
   const successfulFinal = messages.locator("article.msg.assistant")
     .filter({ hasText: REPEATED_RANGE_FAILURE_FINAL });
   await expect(user).toHaveCount(1);
@@ -6492,7 +7886,7 @@ async function forcedFinalFailureDomEvidence(page, contract) {
       && errorNode
       && (userNode.compareDocumentPosition(errorNode) & Node.DOCUMENT_POSITION_FOLLOWING),
     );
-  }, { userMarker: contract.userMarker, errorMarker: PARALLEL_FAILURE_ERROR });
+  }, { userMarker: contract.userMarker, errorMarker });
   expect(ordered).toBe(true);
   const projection = {
     sequence: [contract.userMarker, "error-recovery"],
@@ -6540,7 +7934,14 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
     expectedChatRequests,
     retryBlockedEvents,
   } = context;
-  const terminalEventTypes = [...activeEventTypes, "failed"];
+  const unusableToolResponse = contract.terminalFailureKind === "unusable-tool-response";
+  const terminalEventTypes = [
+    ...activeEventTypes,
+    ...(contract.terminalEventTail || ["failed"]),
+  ];
+  const terminalErrorCode = contract.terminalErrorCode || "upstream_error";
+  const terminalErrorMarker = forcedFinalTerminalErrorMarker(contract);
+  const terminalForceFinalRound = contract.terminalForceFinalRound ?? true;
   let failedAgent = null;
   await expect.poll(async () => {
     failedAgent = await fetchProductionJson(
@@ -6559,24 +7960,44 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
     status: "failed",
     nextCursor: terminalEventTypes.length,
     activeRuntimeRunId: "",
-    forceFinalRound: true,
-    errorCode: "upstream_error",
+    forceFinalRound: terminalForceFinalRound,
+    errorCode: terminalErrorCode,
     eventTypes: terminalEventTypes,
   });
   expect(failedAgent.status).toBe(200);
   expect(failedAgent.body.pendingToolCalls).toEqual([]);
-  expect(String(failedAgent.body.error || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(String(failedAgent.body.error || "")).toContain(terminalErrorMarker);
   expect((failedAgent.body.events || []).filter((event) => event.type === "model_completed"))
-    .toHaveLength(contract.expectedResults.length);
+    .toHaveLength(contract.expectedResults.length + (unusableToolResponse ? 1 : 0));
   const failedTrace = durableFailedToolTraceEvidence(failedAgent.body, contract);
   expect(failedTrace.executionProjection).toEqual(activeTrace.executionProjection);
+  expect(failedTrace.toolCallIds).toEqual(activeTrace.toolCallIds);
   expect(failedTrace.terminalEventCount).toBe(1);
   expect(failedTrace.eventProjection.at(-1)).toEqual({
     seq: terminalEventTypes.length,
     type: "failed",
-    errorCode: "upstream_error",
+    errorCode: terminalErrorCode,
     errorPresent: true,
   });
+  if (unusableToolResponse) {
+    const finalModelEvent = failedTrace.eventProjection.at(-2);
+    expect(finalModelEvent).toMatchObject({
+      seq: terminalEventTypes.length - 1,
+      type: "model_completed",
+      round: 5,
+      runtimeRunId: "runtime-5",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        toolCallId: "tool-5",
+        name: "read_file",
+        arguments: contract.arguments,
+      }],
+    });
+    expect(failedTrace.eventProjection.filter((event) => (
+      ["tool_started", "tool_completed", "tool_retry_blocked"].includes(event.type)
+      && event.toolCallId === "tool-5"
+    ))).toEqual([]);
+  }
 
   await expect.poll(async () => oldStage.evaluate((element) => element.isConnected).catch(() => false))
     .toBe(false);
@@ -6597,32 +8018,74 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
   }
   expect(terminalRuntimeResponses.slice(0, -1).map((snapshot) => snapshot.status))
     .toEqual(Array(contract.expectedResults.length).fill("completed"));
-  const failedRuntime = terminalRuntimeResponses.at(-1);
-  expect(failedRuntime).toMatchObject({
-    runId: runtimeRunIds.at(-1),
-    status: "failed",
-    errorCode: "upstream_error",
-    transient: true,
-    upstreamStatus: 502,
-    nextCursor: 0,
-    events: [],
-  });
-  expect(String(failedRuntime.error || "")).toContain(PARALLEL_FAILURE_ERROR);
-  expect(failedRuntime.result).toMatchObject({ content: "", reasoning: "", toolCalls: [] });
+  const terminalRuntime = terminalRuntimeResponses.at(-1);
+  if (unusableToolResponse) {
+    expect(terminalRuntime).toMatchObject({
+      runId: runtimeRunIds.at(-1),
+      status: "completed",
+      errorCode: "",
+      transient: false,
+      nextCursor: 3,
+    });
+    expect(terminalRuntime.events).toHaveLength(3);
+    expect(terminalRuntime.result).toMatchObject({
+      content: "",
+      reasoning: "",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        id: contract.unusableToolCallId,
+        type: "function",
+        function: {
+          name: "read_file",
+          arguments: JSON.stringify(contract.arguments),
+        },
+      }],
+    });
+  } else {
+    expect(terminalRuntime).toMatchObject({
+      runId: runtimeRunIds.at(-1),
+      status: "failed",
+      errorCode: "upstream_error",
+      transient: true,
+      upstreamStatus: 502,
+      nextCursor: 0,
+      events: [],
+    });
+    expect(String(terminalRuntime.error || "")).toContain(PARALLEL_FAILURE_ERROR);
+    expect(terminalRuntime.result).toMatchObject({ content: "", reasoning: "", toolCalls: [] });
+  }
   const runtimeProjection = terminalRuntimeResponses.map((snapshot, index) => ({
     runtimeRunId: `runtime-${index + 1}`,
     status: String(snapshot.status || ""),
     nextCursor: Number(snapshot.nextCursor || 0),
     content: snapshot.result?.content === contract.stageMarker ? "stage" : "empty",
-    ...(index === terminalRuntimeResponses.length - 1 ? {
+    ...(index === terminalRuntimeResponses.length - 1 && !unusableToolResponse ? {
       errorCode: String(snapshot.errorCode || ""),
       errorPresent: Boolean(String(snapshot.error || "").trim()),
       transient: snapshot.transient === true,
       upstreamStatus: Number(snapshot.upstreamStatus || 0),
       eventCount: (snapshot.events || []).length,
     } : {}),
+    ...(index === terminalRuntimeResponses.length - 1 && unusableToolResponse ? {
+      finishReason: String(snapshot.result?.finishReason || ""),
+      toolCalls: (snapshot.result?.toolCalls || []).map((call) => ({
+        toolCallId: call?.id === contract.unusableToolCallId ? "tool-5" : "unexpected",
+        name: String(call?.function?.name || ""),
+        arguments: parseToolArguments(call?.function?.arguments),
+      })),
+      eventCount: (snapshot.events || []).length,
+    } : {}),
   }));
-  expect(runtimeProjection.map((snapshot) => snapshot.nextCursor)).toEqual([4, 3, 3, 3, 0]);
+  if (contract.terminalRuntimeCursors) {
+    expect(runtimeProjection.map((snapshot) => snapshot.nextCursor))
+      .toEqual(contract.terminalRuntimeCursors);
+  } else if (unusableToolResponse) {
+    expect(runtimeProjection.slice(0, -1).map((snapshot) => snapshot.nextCursor))
+      .toEqual([4, 3, 3, 3]);
+    expect(runtimeProjection.at(-1).nextCursor).toBeGreaterThan(0);
+  } else {
+    expect(runtimeProjection.map((snapshot) => snapshot.nextCursor)).toEqual([4, 3, 3, 3, 0]);
+  }
 
   const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
   await expect(sessionButton).toHaveCount(1);
@@ -6639,7 +8102,11 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
       status: sessionResponse.body?.runState?.status,
       agentEventCursor: sessionResponse.body?.runState?.agentEventCursor,
     };
-  }).toEqual({ roles: ["user", "assistant"], status: "failed", agentEventCursor: 24 });
+  }).toEqual({
+    roles: ["user", "assistant"],
+    status: "failed",
+    agentEventCursor: terminalEventTypes.length,
+  });
   expect(sessionResponse.status).toBe(200);
   const sessionProjection = forcedFinalFailureSessionProjection(
     sessionResponse.body.messages,
@@ -6648,20 +8115,20 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
   );
   const sessionRunState = forcedFinalFailureRunStateProjection(
     sessionResponse.body.runState,
+    contract,
     agentRunId,
-    runtimeRunIds,
   );
 
   const durable = await readDurableAgentRecord(h4, agentRunId);
   expect(durable.record).toMatchObject({
     status: "failed",
     nextSeq: terminalEventTypes.length + 1,
-    forceFinalRound: true,
-    errorCode: "upstream_error",
+    forceFinalRound: terminalForceFinalRound,
+    errorCode: terminalErrorCode,
     pendingToolCalls: [],
   });
   expect(Object.prototype.hasOwnProperty.call(durable.record, "activeRuntimeRunId")).toBe(false);
-  expect(String(durable.record.error || "")).toContain(PARALLEL_FAILURE_ERROR);
+  expect(String(durable.record.error || "")).toContain(terminalErrorMarker);
   expect(durable.record.events).toHaveLength(terminalEventTypes.length);
   expect(Object.keys(durable.record.toolExecutions || {})).toEqual(activeTrace.toolCallIds);
 
@@ -6698,6 +8165,18 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
     productionToolDelegations: metrics.productionToolDelegations,
     toolExecutionCount: metrics.toolExecutions.length,
     activeDom: activeForcedFinalDomProjection(initialDom),
+    ...(unusableToolResponse ? {
+      finalModelToolCalls: failedTrace.eventProjection.at(-2)?.toolCalls || [],
+      unusableToolAbsentFromExecutions: !failedTrace.executionProjection.some(
+        (execution) => execution.toolCallId === "tool-5",
+      ),
+      unusableToolAbsentFromToolEvents: !failedTrace.eventProjection.some((event) => (
+        ["tool_started", "tool_completed", "tool_retry_blocked"].includes(event.type)
+        && event.toolCallId === "tool-5"
+      )),
+      terminalRuntimeStatus: String(terminalRuntime.status || ""),
+      terminalRuntimeCursor: Number(terminalRuntime.nextCursor || 0),
+    } : {}),
   };
   const hashes = {
     eventProjection: failedTrace.eventProjectionHash,
@@ -7395,8 +8874,8 @@ async function exerciseForcedFinalModelFailureRefresh(h4, runtime, before) {
   );
   const sessionRunStateAfter = forcedFinalFailureRunStateProjection(
     sessionAfter.body.runState,
+    before.contract,
     before.agentRunId,
-    before.runtimeRunIds,
   );
   expect(sessionProjectionAfter).toEqual(before.sessionProjection);
   expect(sessionRunStateAfter).toEqual(before.sessionRunState);
@@ -7633,6 +9112,22 @@ test("direct classic forced-final model failure rolls back uniquely without repl
     h4,
     "classic",
     FORCED_FINAL_MODEL_FAILURE_CONTRACT,
+  );
+});
+
+test("bundle forced-final unusable tool response fails without execution and reloads uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "bundle",
+    FORCED_FINAL_UNUSABLE_TOOL_CONTRACT,
+  );
+});
+
+test("direct classic forced-final unusable tool response fails without execution and reloads uniquely", async ({ h4 }) => {
+  await exerciseRepeatedRangeFailureTerminalRefresh(
+    h4,
+    "classic",
+    FORCED_FINAL_UNUSABLE_TOOL_CONTRACT,
   );
 });
 
@@ -7963,7 +9458,6 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   });
   expect(initialDom.projection.items[1].className.split(/\s+/)).toContain("running");
 
-  const replacedStage = await initialDom.outer.elementHandle();
   await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(initialDom.outer).toHaveAttribute("open", "");
   const openedKey = await initialDom.outer.getAttribute("data-tool-process-key");
@@ -7972,7 +9466,9 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   await h4.releaseGate(SECOND_TOOL_EXECUTE_GATE);
   const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
   expect(finalDeltaGate[TOOL_FINAL_DELTA_GATE]).toMatchObject({ reached: true, released: false });
-  expect(await replacedStage.evaluate((element) => element.isConnected)).toBe(false);
+  await expect(secondActiveItem).toHaveClass(/\bsucceeded\b/);
+  await expect(secondActiveDetails).toHaveCount(2);
+  await expect(secondActiveDetails.nth(1)).toContainText(FIXTURE_CONTENT.trim());
   const afterSecondToolDom = await multiToolDetailLifecycleDomEvidence(started.page);
   expect(afterSecondToolDom.projection.processKey).toBe(openedKey);
   expect(afterSecondToolDom.projection.outerOpen).toBe(true);

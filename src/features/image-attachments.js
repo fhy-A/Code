@@ -149,6 +149,7 @@
     const urlApi = options.urlApi || global.URL;
     const onSettled = typeof options.onSettled === "function" ? options.onSettled : () => {};
     const entries = new Map();
+    let disposed = false;
 
     function notifySettled(key, entry) {
       try {
@@ -166,6 +167,7 @@
     }
 
     function ensure(image = {}) {
+      if (disposed) return Promise.resolve("");
       const key = derivedBrowserPreviewCacheKey(image);
       if (!key) return Promise.resolve("");
       const existing = entries.get(key);
@@ -182,10 +184,16 @@
         urlRevoked: false,
       };
       entry.promise = Promise.resolve()
-        .then(() => requestPreview(entry.image, { urlApi }))
+        .then(() => {
+          if (disposed || entries.get(key) !== entry) return "";
+          return requestPreview(entry.image, { urlApi });
+        })
         .then((url) => {
-          if (!url) throw new Error("derived image preview is unavailable");
-          if (entries.get(key) !== entry) {
+          if (!url) {
+            if (disposed || entries.get(key) !== entry) return "";
+            throw new Error("derived image preview is unavailable");
+          }
+          if (disposed || entries.get(key) !== entry) {
             revokeEntryUrl(entry, url);
             return "";
           }
@@ -206,11 +214,13 @@
     }
 
     function source(image = {}) {
+      if (disposed) return "";
       const entry = entries.get(derivedBrowserPreviewCacheKey(image));
       return entry?.status === "ready" ? entry.url : "";
     }
 
     function status(image = {}) {
+      if (disposed) return "";
       return entries.get(derivedBrowserPreviewCacheKey(image))?.status || "";
     }
 
@@ -222,7 +232,13 @@
       });
     }
 
-    return Object.freeze({ clear, ensure, source, status });
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      clear();
+    }
+
+    return Object.freeze({ clear, dispose, ensure, source, status });
   }
 
   function parseImageDataUrl(value) {

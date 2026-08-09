@@ -51,6 +51,7 @@ REPEATED_RANGE_FAILURE_USER = "H4_REPEATED_RANGE_FAILURE_USER"
 REPEATED_RANGE_FAILURE_STAGE = "H4_REPEATED_RANGE_FAILURE_STAGE"
 REPEATED_RANGE_FAILURE_FINAL = "H4_REPEATED_RANGE_FAILURE_FINAL"
 FORCED_FINAL_MODEL_FAILURE_USER = "H4_FORCED_FINAL_MODEL_FAILURE_USER"
+FORCED_FINAL_UNUSABLE_TOOL_USER = "H4_FORCED_FINAL_UNUSABLE_TOOL_USER"
 ARGUMENT_ISOLATION_USER = "H4_ARGUMENT_ISOLATION_FAILURE_USER"
 ARGUMENT_ISOLATION_STAGE = "H4_ARGUMENT_ISOLATION_FAILURE_STAGE"
 ARGUMENT_ISOLATION_FINAL = "H4_ARGUMENT_ISOLATION_FAILURE_FINAL"
@@ -73,6 +74,8 @@ TIMING_QUEUE_USER = "H4_TIMING_QUEUE_USER"
 TIMING_QUEUE_FINAL = "H4_TIMING_QUEUE_FINAL"
 PARALLEL_FAILURE_USER = "H4_PARALLEL_MODEL_FAILURE_USER"
 PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE"
+PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER"
+PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -88,6 +91,7 @@ EXECUTOR_RANGE_TOOL_CALL_ID = "h4-executor-range-read-call-1"
 REPEATED_RANGE_FAILURE_TOOL_CALL_IDS = tuple(
     f"h4-repeated-range-read-call-{index}" for index in range(1, 5)
 )
+FORCED_FINAL_UNUSABLE_TOOL_CALL_ID = "h4-forced-final-unusable-read-call-5"
 ARGUMENT_ISOLATION_TOOL_CALL_IDS = tuple(
     f"h4-argument-isolation-read-call-{index}" for index in range(1, 4)
 )
@@ -99,6 +103,7 @@ SUCCESS_RESET_TOOL_CALL_IDS = tuple(
 )
 MISSING_FILE_TOOL_CALL_ID = "h4-missing-file-read-call-1"
 READ_PATH = "fixture.txt"
+FIXTURE_CONTENT = "H4_SYNTHETIC_FILE_CONTENT\n"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
 SIGNATURE_ALTERNATION_READ_PATH = "h4-signature-alternation-fixture.txt"
 SUCCESS_RESET_READ_PATH = "h4-success-reset-fixture.txt"
@@ -372,6 +377,16 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if receipt_count >= len(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS):
             return "forced-final-model-failure-final", True
         return f"forced-final-model-failure-call-{receipt_count + 1}", receipt_count > 0
+    if FORCED_FINAL_UNUSABLE_TOOL_USER in user_text:
+        completed_calls = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS)
+        receipt_count = len(completed_calls)
+        if receipt_count >= len(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS):
+            return "forced-final-unusable-tool-final", True
+        return f"forced-final-unusable-tool-call-{receipt_count + 1}", receipt_count > 0
     if REPEATED_RANGE_FAILURE_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -382,6 +397,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if receipt_count >= len(REPEATED_RANGE_FAILURE_TOOL_CALL_IDS):
             return "repeated-range-failure-final", True
         return f"repeated-range-failure-call-{receipt_count + 1}", receipt_count > 0
+    if PARALLEL_FAILURE_FOLLOWUP_USER in user_text:
+        return "parallel-failure-followup", has_tool_result
     if PARALLEL_FAILURE_USER in user_text:
         return "parallel-model-failure", has_tool_result
     if INVALID_TOOL_USER in user_text:
@@ -425,6 +442,108 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     if CLASSIC_USER in user_text:
         return "classic-text", has_tool_result
     return "plain-text", has_tool_result
+
+
+def _parallel_failure_followup_context_projection(payload: dict) -> dict:
+    messages = [
+        message
+        for message in (payload.get("messages") or [])
+        if isinstance(message, dict)
+    ]
+    detached_state_keys = {
+        "backgroundDispatch", "backgroundJobId", "detached", "detachedFromMain", "jobId",
+    }
+    mainline_kinds = []
+    unclassified_non_system = 0
+    stage_tool_calls = []
+    matching_receipts = []
+
+    for message in messages:
+        role = str(message.get("role") or "")
+        text = _message_text(message)
+        kind = ""
+        if role == "user" and TOOL_DETAILS_USER in text:
+            kind = "main-user"
+        elif role == "assistant" and TOOL_DETAILS_STAGE in text:
+            kind = "main-tool-call"
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                function = function if isinstance(function, dict) else {}
+                try:
+                    arguments = json.loads(str(function.get("arguments") or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    arguments = {}
+                stage_tool_calls.append({
+                    "matchesKnownId": str(tool_call.get("id") or "") == TOOL_CALL_ID,
+                    "name": str(function.get("name") or ""),
+                    "arguments": arguments if isinstance(arguments, dict) else {},
+                })
+        elif role == "tool" and str(message.get("tool_call_id") or "") == TOOL_CALL_ID:
+            kind = "main-tool-receipt"
+            matching_receipts.append(_message_text(message))
+        elif role == "assistant" and TOOL_DETAILS_FINAL in text:
+            kind = "main-final"
+        elif role == "user" and PARALLEL_FAILURE_FOLLOWUP_USER in text:
+            kind = "followup-user"
+        elif role != "system":
+            unclassified_non_system += 1
+        if kind:
+            mainline_kinds.append({"role": role, "kind": kind})
+
+    receipt_text = matching_receipts[0] if len(matching_receipts) == 1 else ""
+    matching_tool_calls = [
+        tool_call for tool_call in stage_tool_calls if tool_call["matchesKnownId"]
+    ]
+    matching_tool_call = matching_tool_calls[0] if len(matching_tool_calls) == 1 else {}
+    return {
+        "followupMarkerCount": sum(
+            1
+            for message in messages
+            if message.get("role") == "user"
+            and PARALLEL_FAILURE_FOLLOWUP_USER in _message_text(message)
+        ),
+        "detachedUserMarkerCount": sum(
+            1
+            for message in messages
+            if message.get("role") == "user"
+            and PARALLEL_FAILURE_USER in _message_text(message)
+        ),
+        "detachedErrorMarkerCount": sum(
+            1
+            for message in messages
+            if message.get("role") == "assistant"
+            and PARALLEL_FAILURE_ERROR in _message_text(message)
+        ),
+        "detachedStateFieldCount": sum(
+            1
+            for message in messages
+            if detached_state_keys.intersection(message)
+            or (
+                isinstance(message.get("meta"), dict)
+                and detached_state_keys.intersection(message["meta"])
+            )
+        ),
+        "mainlineKinds": mainline_kinds,
+        "unclassifiedNonSystemCount": unclassified_non_system,
+        "toolCall": {
+            "count": len(stage_tool_calls),
+            "matchingIdCount": len(matching_tool_calls),
+            "readFile": str(matching_tool_call.get("name") or "") == "read_file",
+            "pathMatchesFixture": str(
+                (matching_tool_call.get("arguments") or {}).get("path") or ""
+            ) == READ_PATH,
+            "receiptLinked": len(matching_tool_calls) == 1 and len(matching_receipts) == 1,
+        },
+        "toolReceipt": {
+            "count": len(matching_receipts),
+            "contentPresent": bool(receipt_text.strip()),
+            "pathMatchesFixture": READ_PATH in receipt_text,
+            "contentMatchesFixture": FIXTURE_CONTENT.strip() in receipt_text,
+            "sizeMatchesFixture": "26 B" in receipt_text,
+        },
+    }
 
 
 def _tiff_model_image_projection(payload: dict) -> dict:
@@ -868,7 +987,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario == "executor-range-final":
             chat_metric["executorRangeReceipt"] = _executor_range_receipt_projection(payload)
         if scenario.startswith("repeated-range-failure-") \
-                or scenario.startswith("forced-final-model-failure-"):
+                or scenario.startswith("forced-final-model-failure-") \
+                or scenario.startswith("forced-final-unusable-tool-"):
             chat_metric["repeatedRangeFailureReceipts"] = (
                 _repeated_range_failure_receipt_projection(payload)
             )
@@ -887,6 +1007,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario in {
             "repeated-range-failure-final",
             "forced-final-model-failure-final",
+            "forced-final-unusable-tool-final",
         }:
             chat_metric["forcedFinal"] = {
                 "toolsPresent": bool(payload.get("tools")),
@@ -921,6 +1042,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["missingFileReceipt"] = _missing_file_receipt_projection(payload)
         if scenario == "tiff-image":
             chat_metric["imageProjection"] = _tiff_model_image_projection(payload)
+        if scenario == "parallel-failure-followup":
+            chat_metric["followupContext"] = (
+                _parallel_failure_followup_context_projection(payload)
+            )
         METRICS.append("chatRequests", chat_metric)
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
@@ -929,6 +1054,37 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
                 return
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
+            return
+        if scenario == "forced-final-unusable-tool-final":
+            if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
+                return
+            data = _sse_payload([
+                _chunk({"role": "assistant", "tool_calls": [{
+                    "index": 0,
+                    "id": FORCED_FINAL_UNUSABLE_TOOL_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": READ_PATH, "startLine": 2, "endLine": 1},
+                            separators=(",", ":"),
+                        ),
+                    },
+                }]}),
+                _chunk(
+                    {},
+                    "tool_calls",
+                    {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
+                ),
+            ])
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
             return
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if (
@@ -939,6 +1095,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("forced-final-model-failure-call-")
+            and not scenario.startswith("forced-final-unusable-tool-call-")
             and not scenario.startswith("argument-isolation-call-")
             and not scenario.startswith("signature-alternation-call-")
             and not scenario.startswith("success-reset-call-")
@@ -1053,6 +1210,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "missing-file-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
+                or scenario.startswith("forced-final-unusable-tool-call-") \
                 or scenario.startswith("argument-isolation-call-") \
                 or scenario.startswith("signature-alternation-call-") \
                 or scenario.startswith("success-reset-call-"):
@@ -1160,7 +1318,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     },
                 }]
             elif scenario.startswith("repeated-range-failure-call-") \
-                    or scenario.startswith("forced-final-model-failure-call-"):
+                    or scenario.startswith("forced-final-model-failure-call-") \
+                    or scenario.startswith("forced-final-unusable-tool-call-"):
                 call_number = int(scenario.rsplit("-", 1)[-1])
                 tool_calls = [{
                     "index": 0,
@@ -1239,6 +1398,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,
                 "timing-queue": TIMING_QUEUE_FINAL,
+                "parallel-failure-followup": PARALLEL_FAILURE_FOLLOWUP_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [

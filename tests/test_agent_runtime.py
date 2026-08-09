@@ -2159,6 +2159,106 @@ class TestDurableAgentRuntime(unittest.TestCase):
             for execution in restored["tool_executions"].values()
         ))
 
+    def test_agent_rejects_forced_final_tool_call_without_executing_it(self):
+        tool_rounds = []
+        for index in range(1, 5):
+            tool_rounds.append([{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": f"forced-final-failure-{index}",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "missing.txt"}),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }])
+        unusable_tool_call_id = "forced-final-unusable-tool-call"
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = tool_rounds + [[{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": unusable_tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "missing.txt"}),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }]]
+
+        failing_executor = mock.Mock(
+            side_effect=ValueError("synthetic file failure"),
+        )
+        with mock.patch.dict(
+            server_mod.SERVER_TOOL_REGISTRY["read_file"],
+            {"execute": failing_executor},
+        ):
+            run = server_mod._create_agent_run(
+                "session-forced-final-unusable-tool",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": "return an unusable tool call in the forced final round",
+                    }],
+                },
+                self.base_url,
+                ["forced-final-unusable-key"],
+                allowed_tools=["read_file"],
+                max_rounds=6,
+            )
+            self._wait_terminal(run)
+
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "repeated_tool_failure")
+        self.assertEqual(failing_executor.call_count, 3)
+        self.assertEqual(_AgentUpstream.calls, 5)
+        self.assertNotIn("tools", _AgentUpstream.payloads[-1])
+        self.assertNotIn("tool_choice", _AgentUpstream.payloads[-1])
+        self.assertTrue(any(
+            message.get("role") == "system"
+            and "identical tool call was blocked" in str(
+                message.get("content") or ""
+            )
+            for message in _AgentUpstream.payloads[-1]["messages"]
+        ))
+        self.assertFalse(snapshot["forceFinalRound"])
+        self.assertEqual(snapshot["pendingToolCalls"], [])
+        self.assertEqual(len(snapshot["toolExecutions"]), 4)
+        self.assertNotIn(
+            unusable_tool_call_id,
+            {execution["toolCallId"] for execution in snapshot["toolExecutions"]},
+        )
+        event_types = [event["type"] for event in snapshot["events"]]
+        self.assertEqual(event_types.count("model_completed"), 5)
+        self.assertEqual(event_types.count("tool_started"), 4)
+        self.assertEqual(event_types.count("tool_completed"), 4)
+        self.assertEqual(event_types.count("tool_retry_blocked"), 1)
+        self.assertEqual(event_types[-2:], ["model_completed", "failed"])
+        final_model_event = [
+            event for event in snapshot["events"]
+            if event["type"] == "model_completed"
+        ][-1]
+        self.assertEqual(
+            final_model_event["data"]["toolCalls"][0]["id"],
+            unusable_tool_call_id,
+        )
+        self.assertFalse(any(
+            event.get("data", {}).get("toolCallId") == unusable_tool_call_id
+            for event in snapshot["events"]
+            if event["type"] in {
+                "tool_started", "tool_completed", "tool_retry_blocked",
+            }
+        ))
+
     def test_agent_allows_changed_arguments_after_three_identical_failures(self):
         scripted_rounds = []
         for index in range(1, 4):
