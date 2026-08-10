@@ -139,11 +139,13 @@ async function main() {
   let injectedFailureObserved = false;
   let environment = null;
   let toolBoundary = null;
+  let proposeEditFixture = null;
   let controlStdoutIsolation = null;
 
   try {
     host = await startIsolatedHost();
     environment = host.ready.environment;
+    proposeEditFixture = host.ready.proposeEditFixture;
     assert.deepEqual(environment, {
       parentSentinelPresent: false,
       sensitiveNames: [],
@@ -158,6 +160,56 @@ async function main() {
       unsafeDelta: 2,
       delegationDelta: 1,
       toolExecutionDelta: 1,
+      registryMutationActions: {
+        rejectedWrite: true,
+        rejectedDelete: true,
+        unsafeDelta: 2,
+        delegationDelta: 0,
+        toolExecutionDelta: 0,
+      },
+      proposeEdit: {
+        rejectedPathEscape: true,
+        rejectedKeys: true,
+        rejectedBytes: true,
+        rejectedApplyAction: true,
+        rejectedApplyPathEscape: true,
+        rejectedApplyKeys: true,
+        rejectedApplyBytes: true,
+        allowedProposal: true,
+        proposalApplied: false,
+        initialFilePreserved: true,
+        backupCountUnchanged: true,
+        unsafeDelta: 7,
+        delegationDelta: 1,
+        toolExecutionDelta: 1,
+        proposalDelegationDelta: 1,
+        applyDelegationDelta: 0,
+        writeDelta: 0,
+        backupDelta: 0,
+        proposalTimelineDelta: 1,
+        applyTimelineDelta: 0,
+        writeTimelineDelta: 0,
+        backupTimelineDelta: 0,
+      },
+      runCommand: {
+        rejectedRunCommand: true,
+        attemptDelta: 1,
+        unsafeDelta: 1,
+        entryIsRejectStub: true,
+        capturedOriginalCallable: true,
+        stubReferencesOriginal: false,
+        outputCallbackDelta: 0,
+        processCallbackDelta: 0,
+        projectTreeUnchanged: true,
+        homeTreeUnchanged: true,
+        artifactsTreeUnchanged: true,
+        allTreesUnchanged: true,
+      },
+    });
+    assert.deepEqual(proposeEditFixture, {
+      path: "h4-propose-edit-fixture.txt",
+      initialSha256: "f12af1cc9275e5511341e977ac8ad5b13050b8eb8951b4a78555018cdbcaebe3",
+      targetSha256: "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef",
     });
 
     controlStdoutIsolation = await runControlStdoutIsolationPressure(host);
@@ -253,6 +305,7 @@ async function main() {
     sensitiveEnvironmentNameCount: environment.sensitiveNames.length,
     homeIsIsolated: environment.homeIsIsolated,
     toolBoundary,
+    proposeEditFixture,
     controlStdoutIsolation: {
       ...stdoutIsolationSource,
       requestCount: controlStdoutIsolation.requestCount,

@@ -164,6 +164,28 @@ MIXED_QUESTIONNAIRE_OTHER = "H4_MIXED_MULTIPLE_OTHER"
 MIXED_QUESTIONNAIRE_TEXT_ID = "h4-mixed-text"
 MIXED_QUESTIONNAIRE_TEXT_PROMPT = "H4_MIXED_TEXT_PROMPT"
 MIXED_QUESTIONNAIRE_TEXT_ANSWER = "H4_MIXED_TEXT_ANSWER"
+EDIT_AUTHORIZATION_APPROVE_USER = "H4_EDIT_AUTHORIZATION_APPROVE_USER"
+EDIT_AUTHORIZATION_REJECT_USER = "H4_EDIT_AUTHORIZATION_REJECT_USER"
+EDIT_AUTHORIZATION_STAGE = "H4_EDIT_AUTHORIZATION_STAGE"
+EDIT_AUTHORIZATION_APPROVE_FINAL = "H4_EDIT_AUTHORIZATION_APPROVE_FINAL"
+EDIT_AUTHORIZATION_REJECT_FINAL = "H4_EDIT_AUTHORIZATION_REJECT_FINAL"
+PROPOSE_EDIT_TOOL_CALL_ID = "h4-propose-edit-call-1"
+PROPOSE_EDIT_PATH = "h4-propose-edit-fixture.txt"
+PROPOSE_EDIT_OLD_TEXT = "H4_PROPOSE_EDIT_INITIAL"
+PROPOSE_EDIT_NEW_TEXT = "H4_PROPOSE_EDIT_TARGET"
+PROPOSE_EDIT_INITIAL_CONTENT = f"{PROPOSE_EDIT_OLD_TEXT}\n"
+PROPOSE_EDIT_TARGET_CONTENT = f"{PROPOSE_EDIT_NEW_TEXT}\n"
+PROPOSE_EDIT_INITIAL_SHA256 = (
+    "f12af1cc9275e5511341e977ac8ad5b13050b8eb8951b4a78555018cdbcaebe3"
+)
+PROPOSE_EDIT_TARGET_SHA256 = (
+    "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef"
+)
+PROPOSE_EDIT_TOOL_ARGUMENTS = {
+    "path": PROPOSE_EDIT_PATH,
+    "oldText": PROPOSE_EDIT_OLD_TEXT,
+    "newText": PROPOSE_EDIT_NEW_TEXT,
+}
 READ_PATH = "fixture.txt"
 FIXTURE_CONTENT = "H4_SYNTHETIC_FILE_CONTENT\n"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
@@ -199,6 +221,15 @@ class MetricState:
             "chatRequests": [],
             "toolExecutions": [],
             "productionToolDelegations": 0,
+            "productionEditProposalDelegations": 0,
+            "productionEditApplyDelegations": 0,
+            "productionEditWrites": 0,
+            "productionEditBackups": 0,
+            "runCommandAttempts": [],
+            "proposeEditProposalTimeline": [],
+            "proposeEditApplyTimeline": [],
+            "proposeEditWriteTimeline": [],
+            "proposeEditBackupTimeline": [],
             "signatureAlternationFixtureTimeline": [],
             "successResetFixtureTimeline": [],
             "unsafeToolRequests": 0,
@@ -420,6 +451,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             *MULTI_TOOL_CALL_IDS,
             QUESTIONNAIRE_TOOL_CALL_ID,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
+            PROPOSE_EDIT_TOOL_CALL_ID,
         }:
             has_tool_result = True
     for questionnaire_contract in (
@@ -435,6 +467,16 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         )
         if questionnaire_scenario:
             return questionnaire_scenario
+    for user_marker, scenario_prefix in (
+        (EDIT_AUTHORIZATION_APPROVE_USER, "edit-authorization-approve"),
+        (EDIT_AUTHORIZATION_REJECT_USER, "edit-authorization-reject"),
+    ):
+        if user_marker in user_text:
+            return (
+                f"{scenario_prefix}-final" if has_tool_result
+                else f"{scenario_prefix}-call",
+                has_tool_result,
+            )
     if SUCCESS_RESET_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -754,6 +796,27 @@ def _questionnaire_receipt_projection(payload: dict) -> dict:
         "otherEmpty": not str(answer.get("other") or ""),
         "summaryMatches": QUESTIONNAIRE_PROMPT in summary
         and QUESTIONNAIRE_SELECTED_OPTION["label"] in summary,
+    }
+
+
+def _edit_authorization_receipt_projection(payload: dict, *, approved: bool) -> dict:
+    receipts, parsed, result = _questionnaire_receipt_result(
+        payload, PROPOSE_EDIT_TOOL_CALL_ID,
+    )
+    expected_action = "apply_edit" if approved else "propose_edit"
+    return {
+        "decision": "approved" if approved else "rejected",
+        "receiptCount": len(receipts),
+        "parseable": parsed,
+        "nameMatches": len(receipts) == 1
+        and str(receipts[0].get("name") or "") == "propose_edit",
+        "ok": result.get("ok") is True,
+        "actionMatches": str(result.get("action") or "") == expected_action,
+        "pathMatches": str(result.get("path") or "") == PROPOSE_EDIT_PATH,
+        "applied": result.get("applied") is True,
+        "rejected": result.get("rejected") is True,
+        "replayed": result.get("replayed") is True,
+        "backupPresent": bool(str(result.get("backupPath") or "")),
     }
 
 
@@ -1366,6 +1429,16 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["mixedQuestionnaireReceipt"] = (
                 _mixed_questionnaire_receipt_projection(payload)
             )
+        if scenario in {
+            "edit-authorization-approve-final",
+            "edit-authorization-reject-final",
+        }:
+            chat_metric["editAuthorizationReceipt"] = (
+                _edit_authorization_receipt_projection(
+                    payload,
+                    approved=scenario == "edit-authorization-approve-final",
+                )
+            )
         METRICS.append("chatRequests", chat_metric)
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
@@ -1412,7 +1485,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
                 "executor-range-call", "missing-file-call", "questionnaire-call",
-                "mixed-questionnaire-call",
+                "mixed-questionnaire-call", "edit-authorization-approve-call",
+                "edit-authorization-reject-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("forced-final-model-failure-call-")
@@ -1553,7 +1627,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         elif scenario in (
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
-            "missing-file-call",
+            "missing-file-call", "edit-authorization-approve-call",
+            "edit-authorization-reject-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -1569,6 +1644,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "missing-path-tool-call": MISSING_PATH_TOOL_STAGE,
                 "executor-range-call": EXECUTOR_RANGE_STAGE,
                 "missing-file-call": MISSING_FILE_STAGE,
+                "edit-authorization-approve-call": EDIT_AUTHORIZATION_STAGE,
+                "edit-authorization-reject-call": EDIT_AUTHORIZATION_STAGE,
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -1663,6 +1740,21 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         ),
                     },
                 }]
+            elif scenario in {
+                "edit-authorization-approve-call",
+                "edit-authorization-reject-call",
+            }:
+                tool_calls = [{
+                    "index": 0,
+                    "id": PROPOSE_EDIT_TOOL_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "propose_edit",
+                        "arguments": json.dumps(
+                            PROPOSE_EDIT_TOOL_ARGUMENTS, separators=(",", ":"),
+                        ),
+                    },
+                }]
             elif scenario.startswith("repeated-range-failure-call-") \
                     or scenario.startswith("forced-final-model-failure-call-") \
                     or scenario.startswith("forced-final-unusable-tool-call-"):
@@ -1747,6 +1839,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "parallel-failure-followup": PARALLEL_FAILURE_FOLLOWUP_FINAL,
                 "questionnaire-final": QUESTIONNAIRE_FINAL,
                 "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
+                "edit-authorization-approve-final": EDIT_AUTHORIZATION_APPROVE_FINAL,
+                "edit-authorization-reject-final": EDIT_AUTHORIZATION_REJECT_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [
@@ -1918,6 +2012,12 @@ def main() -> int:
 
     fixture_bytes = (project_dir / READ_PATH).read_bytes()
     fixture_sha256 = hashlib.sha256(fixture_bytes).hexdigest()
+    propose_edit_initial_bytes = PROPOSE_EDIT_INITIAL_CONTENT.encode("utf-8")
+    propose_edit_target_bytes = PROPOSE_EDIT_TARGET_CONTENT.encode("utf-8")
+    if hashlib.sha256(propose_edit_initial_bytes).hexdigest() != PROPOSE_EDIT_INITIAL_SHA256:
+        raise RuntimeError("H4 propose_edit initial fixture hash changed")
+    if hashlib.sha256(propose_edit_target_bytes).hexdigest() != PROPOSE_EDIT_TARGET_SHA256:
+        raise RuntimeError("H4 propose_edit target fixture hash changed")
     controlled_fixture_lock = threading.RLock()
     controlled_fixture_invocations = {
         SIGNATURE_ALTERNATION_READ_PATH: 0,
@@ -1939,6 +2039,40 @@ def main() -> int:
     }
     if any(target.exists() for target in controlled_fixture_targets.values()):
         raise RuntimeError("H4 controlled fixture unexpectedly exists")
+
+    propose_edit_target = controlled_fixture_target(PROPOSE_EDIT_PATH)
+    if not propose_edit_target.exists():
+        propose_edit_target.write_bytes(propose_edit_initial_bytes)
+    if not propose_edit_target.is_file():
+        raise RuntimeError("H4 propose_edit fixture is not a file")
+
+    def propose_edit_fixture_state() -> dict:
+        if not propose_edit_target.exists():
+            return {
+                "state": "missing",
+                "exists": False,
+                "initialHashMatches": False,
+                "targetHashMatches": False,
+            }
+        if not propose_edit_target.is_file():
+            return {
+                "state": "not-file",
+                "exists": True,
+                "initialHashMatches": False,
+                "targetHashMatches": False,
+            }
+        observed_sha256 = hashlib.sha256(propose_edit_target.read_bytes()).hexdigest()
+        initial_matches = observed_sha256 == PROPOSE_EDIT_INITIAL_SHA256
+        target_matches = observed_sha256 == PROPOSE_EDIT_TARGET_SHA256
+        return {
+            "state": "initial" if initial_matches else "target" if target_matches else "unexpected",
+            "exists": True,
+            "initialHashMatches": initial_matches,
+            "targetHashMatches": target_matches,
+        }
+
+    if propose_edit_fixture_state()["state"] not in {"initial", "target"}:
+        raise RuntimeError("H4 propose_edit fixture bytes changed")
 
     def controlled_fixture_state(target: Path) -> dict:
         exists = target.exists()
@@ -1988,8 +2122,235 @@ def main() -> int:
     })
 
     original_execute_registered_tool = code_server.execute_registered_tool
+    original_execute_apply_edit_proposal = code_server.execute_apply_edit_proposal
+    original_execute_run_command_tool = code_server.execute_run_command_tool
+    expected_proposal_keys = {
+        "ok", "action", "proposalId", "path", "diff", "newContent",
+        "mtime", "baseHash", "newHash", "applied",
+    }
+    expected_proposal_diff = code_server.make_unified_diff(
+        PROPOSE_EDIT_INITIAL_CONTENT,
+        PROPOSE_EDIT_TARGET_CONTENT,
+        PROPOSE_EDIT_PATH,
+    )
+    if code_server._edit_content_hash(
+        PROPOSE_EDIT_INITIAL_CONTENT,
+    ) != PROPOSE_EDIT_INITIAL_SHA256:
+        raise RuntimeError("H4 propose_edit production base hash changed")
+    if code_server._edit_content_hash(
+        PROPOSE_EDIT_TARGET_CONTENT,
+    ) != PROPOSE_EDIT_TARGET_SHA256:
+        raise RuntimeError("H4 propose_edit production target hash changed")
+
+    def propose_edit_backup_state() -> dict:
+        backups = sorted(
+            path for path in code_server.FILE_BACKUP_DIR.rglob("*.bak")
+            if path.is_file()
+        )
+        return {
+            "count": len(backups),
+            "initialContentMatches": sum(
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                == PROPOSE_EDIT_INITIAL_SHA256
+                for path in backups
+            ),
+        }
+
+    def owned_tree_fingerprint(base: Path) -> dict:
+        entries = []
+        for candidate in sorted(base.rglob("*")):
+            if candidate.is_symlink():
+                raise RuntimeError("H4 owned tree contains an unexpected symlink")
+            relative = candidate.relative_to(base).as_posix()
+            if candidate.is_dir():
+                entries.append({
+                    "path": relative,
+                    "kind": "directory",
+                    "size": 0,
+                    "sha256": "",
+                })
+            elif candidate.is_file():
+                raw = candidate.read_bytes()
+                entries.append({
+                    "path": relative,
+                    "kind": "file",
+                    "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                })
+            else:
+                raise RuntimeError("H4 owned tree contains an unsupported entry")
+        encoded = json.dumps(
+            entries,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return {
+            "entryCount": len(entries),
+            "fingerprint": hashlib.sha256(encoded).hexdigest(),
+        }
+
+    def proposal_shape_matches(proposal) -> bool:
+        if not isinstance(proposal, dict) or set(proposal) != expected_proposal_keys:
+            return False
+        mtime = proposal.get("mtime")
+        if isinstance(mtime, bool) or not isinstance(mtime, int) or mtime < 0:
+            return False
+        expected_id = hashlib.sha256(
+            (
+                f"{PROPOSE_EDIT_PATH}\0{mtime}\0{PROPOSE_EDIT_INITIAL_SHA256}"
+                f"\0{PROPOSE_EDIT_TARGET_SHA256}"
+            ).encode("utf-8")
+        ).hexdigest()
+        return (
+            proposal.get("ok") is True
+            and str(proposal.get("action") or "") == "propose_edit"
+            and str(proposal.get("proposalId") or "") == expected_id
+            and str(proposal.get("path") or "") == PROPOSE_EDIT_PATH
+            and str(proposal.get("diff") or "") == expected_proposal_diff
+            and str(proposal.get("newContent") or "") == PROPOSE_EDIT_TARGET_CONTENT
+            and str(proposal.get("baseHash") or "") == PROPOSE_EDIT_INITIAL_SHA256
+            and str(proposal.get("newHash") or "") == PROPOSE_EDIT_TARGET_SHA256
+            and proposal.get("applied") is False
+        )
+
+    def proposal_result_projection(proposal) -> dict:
+        proposal = proposal if isinstance(proposal, dict) else {}
+        proposal_id = str(proposal.get("proposalId") or "")
+        return {
+            "shapeMatches": proposal_shape_matches(proposal),
+            "ok": proposal.get("ok") is True,
+            "actionMatches": str(proposal.get("action") or "") == "propose_edit",
+            "pathMatches": str(proposal.get("path") or "") == PROPOSE_EDIT_PATH,
+            "proposalIdPresent": bool(re.fullmatch(r"[0-9a-f]{64}", proposal_id)),
+            "baseHashMatches": str(proposal.get("baseHash") or "")
+            == PROPOSE_EDIT_INITIAL_SHA256,
+            "newHashMatches": str(proposal.get("newHash") or "")
+            == PROPOSE_EDIT_TARGET_SHA256,
+            "newContentHashMatches": hashlib.sha256(
+                str(proposal.get("newContent") or "").encode("utf-8")
+            ).hexdigest() == PROPOSE_EDIT_TARGET_SHA256,
+            "applied": proposal.get("applied") is True,
+        }
+
+    def apply_result_projection(result, proposal) -> dict:
+        result = result if isinstance(result, dict) else {}
+        return {
+            "ok": result.get("ok") is True,
+            "actionMatches": str(result.get("action") or "") == "apply_edit",
+            "pathMatches": str(result.get("path") or "") == PROPOSE_EDIT_PATH,
+            "proposalIdMatches": str(result.get("proposalId") or "")
+            == str((proposal or {}).get("proposalId") or ""),
+            "applied": result.get("applied") is True,
+            "replayed": result.get("replayed") is True,
+            "backupPresent": bool(str(result.get("backupPath") or "")),
+        }
+
+    def delegate_propose_edit_to_production(action, payload, *, _arguments_validated):
+        file_before = propose_edit_fixture_state()
+        backups_before = propose_edit_backup_state()
+        METRICS.append("toolExecutions", {
+            "action": "propose_edit",
+            "path": PROPOSE_EDIT_PATH,
+            "payloadKeysMatch": set(payload) == set(PROPOSE_EDIT_TOOL_ARGUMENTS),
+            "payloadBytesMatch": payload == PROPOSE_EDIT_TOOL_ARGUMENTS,
+        })
+        METRICS.increment("productionToolDelegations")
+        METRICS.increment("productionEditProposalDelegations")
+        result = None
+        try:
+            result = original_execute_registered_tool(
+                action,
+                payload,
+                _arguments_validated=_arguments_validated,
+            )
+            return result
+        finally:
+            file_after = propose_edit_fixture_state()
+            backups_after = propose_edit_backup_state()
+            METRICS.append("proposeEditProposalTimeline", {
+                "action": "propose_edit",
+                "path": PROPOSE_EDIT_PATH,
+                "payloadKeysMatch": set(payload) == set(PROPOSE_EDIT_TOOL_ARGUMENTS),
+                "payloadBytesMatch": payload == PROPOSE_EDIT_TOOL_ARGUMENTS,
+                "fileBefore": file_before,
+                "fileAfter": file_after,
+                "backupCountBefore": backups_before["count"],
+                "backupCountAfter": backups_after["count"],
+                "result": proposal_result_projection(result),
+            })
+            if result is not None and not proposal_shape_matches(result):
+                raise RuntimeError("H4 production propose_edit result changed contract")
+            if file_after != file_before or backups_after != backups_before:
+                raise RuntimeError("H4 propose_edit generated a write or backup")
+
+    def counted_execute_apply_edit_proposal(proposal):
+        if not proposal_shape_matches(proposal):
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 apply_edit proposal escaped the fixed synthetic contract")
+        file_before = propose_edit_fixture_state()
+        backups_before = propose_edit_backup_state()
+        if file_before["state"] not in {"initial", "target"}:
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 apply_edit fixture precondition changed")
+        METRICS.increment("productionEditApplyDelegations")
+        result = None
+        try:
+            result = original_execute_apply_edit_proposal(proposal)
+            return result
+        finally:
+            file_after = propose_edit_fixture_state()
+            backups_after = propose_edit_backup_state()
+            write_observed = (
+                file_before["state"] == "initial"
+                and file_after["state"] == "target"
+            )
+            backup_delta = backups_after["count"] - backups_before["count"]
+            initial_backup_delta = (
+                backups_after["initialContentMatches"]
+                - backups_before["initialContentMatches"]
+            )
+            if write_observed:
+                METRICS.increment("productionEditWrites")
+            for _ in range(max(0, backup_delta)):
+                METRICS.increment("productionEditBackups")
+            METRICS.append("proposeEditApplyTimeline", {
+                "proposalShapeMatches": proposal_shape_matches(proposal),
+                "fileBefore": file_before,
+                "fileAfter": file_after,
+                "result": apply_result_projection(result, proposal),
+            })
+            METRICS.append("proposeEditWriteTimeline", {
+                "fileBefore": file_before,
+                "fileAfter": file_after,
+                "writeObserved": write_observed,
+                "targetHashMatches": file_after["targetHashMatches"],
+            })
+            METRICS.append("proposeEditBackupTimeline", {
+                "beforeCount": backups_before["count"],
+                "afterCount": backups_after["count"],
+                "delta": backup_delta,
+                "initialContentMatchDelta": initial_backup_delta,
+                "backupObserved": backup_delta == 1 and initial_backup_delta == 1,
+            })
 
     def counted_execute_registered_tool(action, payload, *, _arguments_validated=False):
+        if action == "propose_edit":
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != set(PROPOSE_EDIT_TOOL_ARGUMENTS)
+                or payload != PROPOSE_EDIT_TOOL_ARGUMENTS
+            ):
+                METRICS.increment("unsafeToolRequests")
+                raise ValueError("H4 propose_edit request changed the exact fixed payload")
+            if propose_edit_fixture_state()["state"] != "initial":
+                METRICS.increment("unsafeToolRequests")
+                raise ValueError("H4 propose_edit fixture precondition changed")
+            return delegate_propose_edit_to_production(
+                action,
+                payload,
+                _arguments_validated=_arguments_validated,
+            )
         if action != "read_file":
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 tool action is outside the read-only fixture contract")
@@ -2096,6 +2457,25 @@ def main() -> int:
             ):
                 raise RuntimeError("H4 missing-file fixture was created during execution")
 
+    def rejected_execute_run_command_tool(
+        body,
+        *,
+        cancel_event=None,
+        output_callback=None,
+        process_callback=None,
+    ):
+        payload = body if isinstance(body, dict) else {}
+        METRICS.increment("unsafeToolRequests")
+        METRICS.append("runCommandAttempts", {
+            "payloadIsObject": isinstance(body, dict),
+            "keyCount": len(payload),
+            "commandPresent": bool(str(payload.get("command") or "").strip()),
+            "cancelEventPresent": cancel_event is not None,
+            "outputCallbackPresent": callable(output_callback),
+            "processCallbackPresent": callable(process_callback),
+        })
+        raise ValueError("H4 run_command is outside the isolated fixture contract")
+
     def probe_tool_boundary():
         before = METRICS.snapshot()
         rejected_action = False
@@ -2109,23 +2489,245 @@ def main() -> int:
         except ValueError:
             rejected_path = True
         allowed_result = counted_execute_registered_tool("read_file", {"path": READ_PATH})
-        after = METRICS.snapshot()
+        after_read = METRICS.snapshot()
+
+        rejected_write = False
+        rejected_delete = False
+        try:
+            counted_execute_registered_tool("write_file", {"path": PROPOSE_EDIT_PATH})
+        except ValueError:
+            rejected_write = True
+        try:
+            counted_execute_registered_tool("delete_file", {"path": PROPOSE_EDIT_PATH})
+        except ValueError:
+            rejected_delete = True
+        after_registry_rejections = METRICS.snapshot()
+
+        edit_before = after_registry_rejections
+        rejected_proposal_path = False
+        rejected_proposal_keys = False
+        rejected_proposal_bytes = False
+        for field, invalid_payload in (
+            (
+                "path",
+                {**PROPOSE_EDIT_TOOL_ARGUMENTS, "path": "../outside.txt"},
+            ),
+            (
+                "keys",
+                {**PROPOSE_EDIT_TOOL_ARGUMENTS, "unexpected": True},
+            ),
+            (
+                "bytes",
+                {**PROPOSE_EDIT_TOOL_ARGUMENTS, "oldText": "H4_WRONG_BYTES"},
+            ),
+        ):
+            try:
+                counted_execute_registered_tool("propose_edit", invalid_payload)
+            except ValueError:
+                if field == "path":
+                    rejected_proposal_path = True
+                elif field == "keys":
+                    rejected_proposal_keys = True
+                else:
+                    rejected_proposal_bytes = True
+
+        edit_file_before = propose_edit_fixture_state()
+        edit_backups_before = propose_edit_backup_state()
+        allowed_proposal = counted_execute_registered_tool(
+            "propose_edit",
+            dict(PROPOSE_EDIT_TOOL_ARGUMENTS),
+        )
+
+        rejected_apply_action = False
+        rejected_apply_path = False
+        rejected_apply_keys = False
+        rejected_apply_bytes = False
+        invalid_proposals = []
+        for field, replacement in (
+            ("action", {"action": "apply_edit"}),
+            ("path", {"path": "../outside.txt"}),
+            ("keys", {"unexpected": True}),
+            ("bytes", {"newContent": "H4_WRONG_BYTES\n"}),
+        ):
+            candidate = deepcopy(allowed_proposal)
+            candidate.update(replacement)
+            invalid_proposals.append((field, candidate))
+        for field, invalid_proposal in invalid_proposals:
+            try:
+                counted_execute_apply_edit_proposal(invalid_proposal)
+            except ValueError:
+                if field == "action":
+                    rejected_apply_action = True
+                elif field == "path":
+                    rejected_apply_path = True
+                elif field == "keys":
+                    rejected_apply_keys = True
+                else:
+                    rejected_apply_bytes = True
+        edit_file_after = propose_edit_fixture_state()
+        edit_backups_after = propose_edit_backup_state()
+        edit_after = METRICS.snapshot()
+
+        run_trees_before = {
+            "project": owned_tree_fingerprint(project_dir),
+            "home": owned_tree_fingerprint(isolated_home),
+            "artifacts": owned_tree_fingerprint(artifacts_dir),
+        }
+        run_before = edit_after
+        output_callbacks = []
+        process_callbacks = []
+        rejected_run_command = False
+        try:
+            code_server.execute_run_command_tool(
+                {"command": "H4_RUN_COMMAND_MUST_NOT_EXECUTE"},
+                output_callback=lambda *_args: output_callbacks.append(True),
+                process_callback=lambda *_args: process_callbacks.append(True),
+            )
+        except ValueError:
+            rejected_run_command = True
+        run_after = METRICS.snapshot()
+        run_trees_after = {
+            "project": owned_tree_fingerprint(project_dir),
+            "home": owned_tree_fingerprint(isolated_home),
+            "artifacts": owned_tree_fingerprint(artifacts_dir),
+        }
+        reject_stub_symbols = {
+            *rejected_execute_run_command_tool.__code__.co_names,
+            *rejected_execute_run_command_tool.__code__.co_freevars,
+            *rejected_execute_run_command_tool.__code__.co_cellvars,
+        }
+
         return {
             "rejectedAction": rejected_action,
             "rejectedPath": rejected_path,
             "allowedRead": bool(allowed_result.get("ok")),
-            "unsafeDelta": after["unsafeToolRequests"] - before["unsafeToolRequests"],
+            "unsafeDelta": (
+                after_read["unsafeToolRequests"] - before["unsafeToolRequests"]
+            ),
             "delegationDelta": (
-                after["productionToolDelegations"]
+                after_read["productionToolDelegations"]
                 - before["productionToolDelegations"]
             ),
             "toolExecutionDelta": (
-                len(after["toolExecutions"])
+                len(after_read["toolExecutions"])
                 - len(before["toolExecutions"])
             ),
+            "registryMutationActions": {
+                "rejectedWrite": rejected_write,
+                "rejectedDelete": rejected_delete,
+                "unsafeDelta": (
+                    after_registry_rejections["unsafeToolRequests"]
+                    - after_read["unsafeToolRequests"]
+                ),
+                "delegationDelta": (
+                    after_registry_rejections["productionToolDelegations"]
+                    - after_read["productionToolDelegations"]
+                ),
+                "toolExecutionDelta": (
+                    len(after_registry_rejections["toolExecutions"])
+                    - len(after_read["toolExecutions"])
+                ),
+            },
+            "proposeEdit": {
+                "rejectedPathEscape": rejected_proposal_path,
+                "rejectedKeys": rejected_proposal_keys,
+                "rejectedBytes": rejected_proposal_bytes,
+                "rejectedApplyAction": rejected_apply_action,
+                "rejectedApplyPathEscape": rejected_apply_path,
+                "rejectedApplyKeys": rejected_apply_keys,
+                "rejectedApplyBytes": rejected_apply_bytes,
+                "allowedProposal": proposal_shape_matches(allowed_proposal),
+                "proposalApplied": allowed_proposal.get("applied") is True,
+                "initialFilePreserved": (
+                    edit_file_before["state"] == "initial"
+                    and edit_file_after == edit_file_before
+                ),
+                "backupCountUnchanged": edit_backups_after == edit_backups_before,
+                "unsafeDelta": (
+                    edit_after["unsafeToolRequests"]
+                    - edit_before["unsafeToolRequests"]
+                ),
+                "delegationDelta": (
+                    edit_after["productionToolDelegations"]
+                    - edit_before["productionToolDelegations"]
+                ),
+                "toolExecutionDelta": (
+                    len(edit_after["toolExecutions"])
+                    - len(edit_before["toolExecutions"])
+                ),
+                "proposalDelegationDelta": (
+                    edit_after["productionEditProposalDelegations"]
+                    - edit_before["productionEditProposalDelegations"]
+                ),
+                "applyDelegationDelta": (
+                    edit_after["productionEditApplyDelegations"]
+                    - edit_before["productionEditApplyDelegations"]
+                ),
+                "writeDelta": (
+                    edit_after["productionEditWrites"]
+                    - edit_before["productionEditWrites"]
+                ),
+                "backupDelta": (
+                    edit_after["productionEditBackups"]
+                    - edit_before["productionEditBackups"]
+                ),
+                "proposalTimelineDelta": (
+                    len(edit_after["proposeEditProposalTimeline"])
+                    - len(edit_before["proposeEditProposalTimeline"])
+                ),
+                "applyTimelineDelta": (
+                    len(edit_after["proposeEditApplyTimeline"])
+                    - len(edit_before["proposeEditApplyTimeline"])
+                ),
+                "writeTimelineDelta": (
+                    len(edit_after["proposeEditWriteTimeline"])
+                    - len(edit_before["proposeEditWriteTimeline"])
+                ),
+                "backupTimelineDelta": (
+                    len(edit_after["proposeEditBackupTimeline"])
+                    - len(edit_before["proposeEditBackupTimeline"])
+                ),
+            },
+            "runCommand": {
+                "rejectedRunCommand": rejected_run_command,
+                "attemptDelta": (
+                    len(run_after["runCommandAttempts"])
+                    - len(run_before["runCommandAttempts"])
+                ),
+                "unsafeDelta": (
+                    run_after["unsafeToolRequests"]
+                    - run_before["unsafeToolRequests"]
+                ),
+                "entryIsRejectStub": (
+                    code_server.execute_run_command_tool
+                    is rejected_execute_run_command_tool
+                ),
+                "capturedOriginalCallable": callable(original_execute_run_command_tool),
+                "stubReferencesOriginal": any(
+                    name in reject_stub_symbols
+                    for name in (
+                        "original_execute_run_command_tool",
+                        "delegate_run_command_to_production",
+                    )
+                ),
+                "outputCallbackDelta": len(output_callbacks),
+                "processCallbackDelta": len(process_callbacks),
+                "projectTreeUnchanged": (
+                    run_trees_after["project"] == run_trees_before["project"]
+                ),
+                "homeTreeUnchanged": (
+                    run_trees_after["home"] == run_trees_before["home"]
+                ),
+                "artifactsTreeUnchanged": (
+                    run_trees_after["artifacts"] == run_trees_before["artifacts"]
+                ),
+                "allTreesUnchanged": run_trees_after == run_trees_before,
+            },
         }
 
     code_server.execute_registered_tool = counted_execute_registered_tool
+    code_server.execute_apply_edit_proposal = counted_execute_apply_edit_proposal
+    code_server.execute_run_command_tool = rejected_execute_run_command_tool
     code_server.ThreadingHTTPServer.daemon_threads = True
     code_server._migrate_sessions_to_hierarchy()
     code_server._migrate_codex_project_sessions_support()
@@ -2148,6 +2750,11 @@ def main() -> int:
         "codePort": code_port,
         "fakePort": fake_port,
         "fixtureSha256": fixture_sha256,
+        "proposeEditFixture": {
+            "path": PROPOSE_EDIT_PATH,
+            "initialSha256": PROPOSE_EDIT_INITIAL_SHA256,
+            "targetSha256": PROPOSE_EDIT_TARGET_SHA256,
+        },
         "environment": {
             "parentSentinelPresent": "H4_PARENT_SECRET_SENTINEL" in os.environ,
             "sensitiveNames": sensitive_environment_names,

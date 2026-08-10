@@ -5418,6 +5418,8 @@ async function finishServerAgentAuthorizationRequest(item, approved) {
       item.sessionId,
       getSessionMessages(item.sessionId),
       getSessionStats(item.sessionId),
+      undefined,
+      { persistMessages: true },
     ).catch((error) => {
       console.error("Failed to persist server authorization result:", error);
     });
@@ -8733,7 +8735,13 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
       updatedAt: new Date().toISOString(),
     };
     setSessionRunState(ctx.sessionId, nextState);
-    await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats).catch((error) => {
+    await saveSessionState(
+      ctx.sessionId,
+      ctx.messages,
+      ctx.stats,
+      undefined,
+      { persistMessages: true },
+    ).catch((error) => {
       console.error("Failed to persist server authorization request:", error);
     });
   }

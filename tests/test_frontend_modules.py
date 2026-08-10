@@ -2838,6 +2838,71 @@ process.stdout.write(JSON.stringify({{
             "resumePersistedSessionRun(summary).catch",
         ):
             self.assertIn(expected, APP_SOURCE)
+
+        request_start = APP_SOURCE.index("async function requestServerAgentAuthorization(")
+        request_end = APP_SOURCE.index("async function runServerAgentLoop(", request_start)
+        request_source = APP_SOURCE[request_start:request_end]
+        request_foreground_start = request_source.index(
+            "  } else {", request_source.index("if (ctx.isDetachedBackground)")
+        )
+        request_foreground_end = request_source.index(
+            "  state.authorizationPanelCollapsed", request_foreground_start
+        )
+        request_foreground = request_source[request_foreground_start:request_foreground_end]
+        request_projection_index = request_source.index(
+            "const editId = ensureServerAuthorizationProjection(ctx, pendingAuthorization)"
+        )
+        request_run_state_index = request_source.index(
+            "setSessionRunState(ctx.sessionId, nextState)", request_foreground_start
+        )
+        request_save_index = request_source.index(
+            "await saveSessionState(", request_run_state_index
+        )
+        self.assertEqual(
+            [request_projection_index, request_run_state_index, request_save_index],
+            sorted([request_projection_index, request_run_state_index, request_save_index]),
+        )
+        self.assertIn("authorizationRequest: serializeAuthorizationRequest(request)", request_foreground)
+        self.assertIn("{ persistMessages: true }", request_foreground)
+
+        finish_start = APP_SOURCE.index("async function finishServerAgentAuthorizationRequest(")
+        finish_end = APP_SOURCE.index("function resolveAuthorization(", finish_start)
+        finish_source = APP_SOURCE[finish_start:finish_end]
+        finish_foreground_start = finish_source.index(
+            "  } else {", finish_source.index("if (item.detachedBackground)")
+        )
+        finish_foreground_end = finish_source.index(
+            "  if (item.sessionId === state.sessionId)", finish_foreground_start
+        )
+        finish_foreground = finish_source[finish_foreground_start:finish_foreground_end]
+        submit_index = finish_source.index("await agentRuntime.submitAgentAuthorization(")
+        decision_projection_index = finish_source.index(
+            "markServerAuthorizationProjection(item, result, approved)"
+        )
+        clear_request_index = finish_source.index(
+            "state.authorizationRequests = state.authorizationRequests.filter"
+        )
+        run_state_clear_index = finish_source.index(
+            "authorizationRequest: null", finish_foreground_start
+        )
+        set_state_index = finish_source.index(
+            "setSessionRunState(item.sessionId, nextState)", finish_foreground_start
+        )
+        save_index = finish_source.index("await saveSessionState(", set_state_index)
+        resolver_index = finish_source.index("  if (resolver) {", save_index)
+        resume_index = finish_source.index("resumePersistedSessionRun(summary)", resolver_index)
+        ordered = [
+            submit_index,
+            decision_projection_index,
+            clear_request_index,
+            run_state_clear_index,
+            set_state_index,
+            save_index,
+            resolver_index,
+            resume_index,
+        ]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertIn("{ persistMessages: true }", finish_foreground)
         self.assertIn(
             "Boolean(meta.serverManaged && !serverExecuting && !applied && !rejected",
             DIFF_SOURCE,

@@ -172,6 +172,63 @@ const MIXED_QUESTIONNAIRE_CONTRACT = Object.freeze({
     },
   ],
 });
+const EDIT_AUTHORIZATION_TOOL_CALL_ID = "h4-propose-edit-call-1";
+const EDIT_AUTHORIZATION_PATH = "h4-propose-edit-fixture.txt";
+const EDIT_AUTHORIZATION_INITIAL = "H4_PROPOSE_EDIT_INITIAL";
+const EDIT_AUTHORIZATION_TARGET = "H4_PROPOSE_EDIT_TARGET";
+const EDIT_AUTHORIZATION_INITIAL_SHA256 = "f12af1cc9275e5511341e977ac8ad5b13050b8eb8951b4a78555018cdbcaebe3";
+const EDIT_AUTHORIZATION_TARGET_SHA256 = "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef";
+const EDIT_AUTHORIZATION_STAGE = "H4_EDIT_AUTHORIZATION_STAGE";
+const EDIT_AUTHORIZATION_CONTRACT = Object.freeze({
+  toolCallId: EDIT_AUTHORIZATION_TOOL_CALL_ID,
+  path: EDIT_AUTHORIZATION_PATH,
+  arguments: {
+    path: EDIT_AUTHORIZATION_PATH,
+    oldText: EDIT_AUTHORIZATION_INITIAL,
+    newText: EDIT_AUTHORIZATION_TARGET,
+  },
+  initialSha256: EDIT_AUTHORIZATION_INITIAL_SHA256,
+  targetSha256: EDIT_AUTHORIZATION_TARGET_SHA256,
+  stageMarker: EDIT_AUTHORIZATION_STAGE,
+  branches: {
+    approved: {
+      userMarker: "H4_EDIT_AUTHORIZATION_APPROVE_USER",
+      finalMarker: "H4_EDIT_AUTHORIZATION_APPROVE_FINAL",
+      scenarioPrefix: "edit-authorization-approve",
+      action: "approve",
+      decision: "approved",
+      resultAction: "apply_edit",
+      resultOk: true,
+      resultDiffPresent: true,
+      expectedSha256: EDIT_AUTHORIZATION_TARGET_SHA256,
+      applied: true,
+      rejected: false,
+      outcome: "succeeded",
+      backupPresent: true,
+      applyDelegations: 1,
+      writes: 1,
+      backups: 1,
+    },
+    rejected: {
+      userMarker: "H4_EDIT_AUTHORIZATION_REJECT_USER",
+      finalMarker: "H4_EDIT_AUTHORIZATION_REJECT_FINAL",
+      scenarioPrefix: "edit-authorization-reject",
+      action: "reject-all",
+      decision: "rejected",
+      resultAction: "propose_edit",
+      resultOk: false,
+      resultDiffPresent: false,
+      expectedSha256: EDIT_AUTHORIZATION_INITIAL_SHA256,
+      applied: false,
+      rejected: true,
+      outcome: "failed",
+      backupPresent: false,
+      applyDelegations: 0,
+      writes: 0,
+      backups: 0,
+    },
+  },
+});
 const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
 const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
 const TIFF_ATTACHMENT_SHA256 = "42e6678c560a178b49da1cbc67c4f75a7f545975edbb96f23500ff98066f0b73";
@@ -374,6 +431,30 @@ const H4_8B_SEMANTIC_HASHES = Object.freeze({
   sessionInputMeta: "89823e3f8e29025bd03d50d33bd063f70ca68d6558a7f465ca5b83dd5591b820",
   terminalDom: "bcd0070502f78af981739b6116e93adbaa2d5f3c5f542f6d827de3c3eac7b7c1",
   refreshLifecycle: "12189043590d29b528a2beaac58e4f1c49f66d0d0a1e4ff2889c3dd7b69f612f",
+});
+const H4_8C_SEMANTIC_HASHES = Object.freeze({
+  approved: Object.freeze({
+    waitingEventProjection: "87a7ea23fa306ad3d2251d5245ed7e0ce8541971c944568def98b13b00fec4f3",
+    waitingSnapshot: "9c19fd9e30893a77a584551ededdbe9ace115cf6fc5d928c3b7649e70ade07f2",
+    waitingDom: "880e7bd7c6f2e62d84a0c8bcaf4ccdea7de3504ec0b36ca00063aa8ea75ba618",
+    decisionSubmissionProjection: "10ee72f265dd84bd02f177a7ed8330f2b949f6a4c9bb57ee661381ded560179a",
+    runtimeProjection: "b942ee79bdd556a07c170919de5e110853d0b0be853efeba554f364cc36f0540",
+    sessionRoleContent: "f6ef57520b2b66ebb11473e695aa43897363bbf6876c62e652de04a6a792ebb0",
+    sessionAuthorizationMeta: "817262e2d16999b26b98a8c25711160d387e238f5c62fa385e3132ff1382aac2",
+    terminalDom: "30a687f6910faf0e82f18e0097187cd7b021957270c18370c7cab2774c65602d",
+    refreshLifecycle: "8cd5d4b2c4c6de7fa02758a00429fcdca4877a25f6ae7e4b58fa24dc4ad67c04",
+  }),
+  rejected: Object.freeze({
+    waitingEventProjection: "87a7ea23fa306ad3d2251d5245ed7e0ce8541971c944568def98b13b00fec4f3",
+    waitingSnapshot: "9c19fd9e30893a77a584551ededdbe9ace115cf6fc5d928c3b7649e70ade07f2",
+    waitingDom: "880e7bd7c6f2e62d84a0c8bcaf4ccdea7de3504ec0b36ca00063aa8ea75ba618",
+    decisionSubmissionProjection: "2e4006664b0b78311fbb351d43957db74af5cea392479b9b5b3df69646faad3e",
+    runtimeProjection: "b942ee79bdd556a07c170919de5e110853d0b0be853efeba554f364cc36f0540",
+    sessionRoleContent: "f6ef57520b2b66ebb11473e695aa43897363bbf6876c62e652de04a6a792ebb0",
+    sessionAuthorizationMeta: "789eb128e116eede40ace51e8118457fab6214bfb58692afe708cac7b3434275",
+    terminalDom: "292de41a94f02fdbe4ba3a58cf6be4a9e218b34157a8fc191a240282cc18fb12",
+    refreshLifecycle: "a020554dd7822809017c01e41e0fbcf85879e2ea019f9ad16670c76d0a599ed3",
+  }),
 });
 
 function idHash(value) {
@@ -2116,7 +2197,9 @@ async function fetchProductionJson(page, pathName) {
 function describeLoopbackRequest(request) {
   const url = new URL(request.url());
   const method = request.method();
-  const agentActionMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)\/(input|resume)$/);
+  const agentActionMatch = url.pathname.match(
+    /^\/api\/agent\/runs\/([^/]+)\/(input|resume|authorization)$/,
+  );
   const agentMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
   const runtimeMatch = url.pathname.match(/^\/api\/runtime\/runs\/([^/]+)$/);
   if (url.pathname === "/api/agent/runs") {
@@ -7153,6 +7236,1816 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
   });
 }
 
+function editAuthorizationArgumentsProjection(value) {
+  const source = value && typeof value === "object" ? value : parseToolArguments(value);
+  return {
+    keysExact: JSON.stringify(Object.keys(source || {}).sort())
+      === JSON.stringify(["newText", "oldText", "path"]),
+    pathMatches: String(source?.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+    oldTextMatches: String(source?.oldText || "") === EDIT_AUTHORIZATION_INITIAL,
+    newTextMatches: String(source?.newText || "") === EDIT_AUTHORIZATION_TARGET,
+  };
+}
+
+function editAuthorizationDiffProjection(value) {
+  const diff = String(value || "").replace(/\r\n/g, "\n");
+  const count = (marker) => diff.split(marker).length - 1;
+  return {
+    present: Boolean(diff),
+    oldMarkerOnce: count(`-${EDIT_AUTHORIZATION_INITIAL}`) === 1,
+    newMarkerOnce: count(`+${EDIT_AUTHORIZATION_TARGET}`) === 1,
+    oldHeaderMatches: diff.includes(`--- a/${EDIT_AUTHORIZATION_CONTRACT.path}`),
+    newHeaderMatches: diff.includes(`+++ b/${EDIT_AUTHORIZATION_CONTRACT.path}`),
+  };
+}
+
+function editAuthorizationPendingProjection(value, authorizationId = "") {
+  const source = value && typeof value === "object" ? value : {};
+  const sourceAuthorizationId = String(source.authorizationId || "");
+  const proposalId = String(source.proposalId || "");
+  return {
+    authorizationIdPresent: /^[0-9a-f]{64}$/.test(sourceAuthorizationId),
+    authorizationIdMatches: Boolean(authorizationId)
+      && sourceAuthorizationId === authorizationId,
+    toolCallMatches: String(source.toolCallId || "")
+      === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+    action: String(source.action || ""),
+    proposalIdPresent: /^[0-9a-f]{64}$/.test(proposalId),
+    pathMatches: String(source.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+    diff: editAuthorizationDiffProjection(source.diff),
+    decision: String(source.decision || ""),
+    requestedAtPresent: Boolean(String(source.requestedAt || "")),
+    privateFieldsAbsent: ["proposal", "newContent", "baseHash", "newHash"]
+      .every((field) => !Object.prototype.hasOwnProperty.call(source, field)),
+  };
+}
+
+function editAuthorizationResultProjection(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const proposalId = String(source.proposalId || "");
+  return {
+    ok: source.ok === true,
+    action: String(source.action || ""),
+    proposalIdPresent: /^[0-9a-f]{64}$/.test(proposalId),
+    pathMatches: String(source.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+    diff: editAuthorizationDiffProjection(source.diff),
+    applied: source.applied === true,
+    rejected: source.rejected === true,
+    replayed: source.replayed === true,
+    backupPresent: Boolean(String(source.backupPath || "")),
+    conflict: source.conflict === true,
+    errorPresent: Boolean(String(source.error || "")),
+    privateFieldsAbsent: ["newContent", "baseHash", "newHash"]
+      .every((field) => !Object.prototype.hasOwnProperty.call(source, field)),
+    retryFieldsAbsent: ["failureCount", "failureSignature", "retryBlocked", "retryLimitReached"]
+      .every((field) => !Object.prototype.hasOwnProperty.call(source, field)),
+  };
+}
+
+function editAuthorizationEventProjection(snapshot, authorizationId) {
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const runtimeIds = events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  const runtimeAliases = new Map(
+    runtimeIds.map((runId, index) => [runId, `runtime-${index + 1}`]),
+  );
+  return events.map((event) => {
+    const data = event?.data || {};
+    const projected = {
+      seq: Number(event?.seq || 0),
+      type: String(event?.type || ""),
+    };
+    if (data.round != null) projected.round = Number(data.round);
+    if (data.runtimeRunId) {
+      projected.runtimeRunId = runtimeAliases.get(String(data.runtimeRunId)) || "mismatch";
+    }
+    if (data.content != null) {
+      const content = String(data.content || "");
+      projected.content = content === EDIT_AUTHORIZATION_CONTRACT.stageMarker
+        ? "stage"
+        : Object.values(EDIT_AUTHORIZATION_CONTRACT.branches)
+          .some((branch) => branch.finalMarker === content)
+          ? "final"
+          : "empty";
+    }
+    if (data.finishReason != null) projected.finishReason = String(data.finishReason || "");
+    if (Array.isArray(data.toolCalls)) {
+      projected.toolCalls = data.toolCalls.map((call) => ({
+        toolCallMatches: String(call?.id || "") === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+        name: String(call?.function?.name || call?.name || ""),
+        arguments: editAuthorizationArgumentsProjection(
+          call?.function?.arguments ?? call?.arguments,
+        ),
+      }));
+    }
+    if (data.toolCallId != null) {
+      projected.toolCallMatches = String(data.toolCallId || "")
+        === EDIT_AUTHORIZATION_CONTRACT.toolCallId;
+    }
+    if (data.name != null) projected.name = String(data.name || "");
+    if (data.arguments != null) {
+      projected.arguments = editAuthorizationArgumentsProjection(data.arguments);
+    }
+    if (event?.type === "authorization_required") {
+      projected.authorization = editAuthorizationPendingProjection(data, authorizationId);
+    }
+    if (event?.type === "authorization_submitted") {
+      projected.authorizationIdMatches = Boolean(authorizationId)
+        && String(data.authorizationId || "") === authorizationId;
+      projected.decision = String(data.decision || "");
+    }
+    if (data.result != null) projected.result = editAuthorizationResultProjection(data.result);
+    if (data.outcome != null) projected.outcome = String(data.outcome || "");
+    if (data.replayed != null) projected.replayed = Boolean(data.replayed);
+    if (data.resumeStatus != null) projected.resumeStatus = String(data.resumeStatus || "");
+    if (data.status != null) projected.status = String(data.status || "");
+    if (data.reason != null) projected.reason = String(data.reason || "");
+    return projected;
+  });
+}
+
+function editAuthorizationExecutionProjection(snapshot) {
+  return (Array.isArray(snapshot?.toolExecutions) ? snapshot.toolExecutions : [])
+    .map((execution) => ({
+      toolCallMatches: String(execution?.toolCallId || "")
+        === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+      name: String(execution?.name || ""),
+      arguments: editAuthorizationArgumentsProjection(execution?.arguments),
+      status: String(execution?.status || ""),
+      outcome: String(execution?.outcome || ""),
+      authorizationDecision: String(execution?.authorizationDecision || ""),
+      result: execution?.result == null
+        ? null
+        : editAuthorizationResultProjection(execution.result),
+      publicFailureCountAbsent: !Object.prototype.hasOwnProperty.call(
+        execution || {}, "failureCount",
+      ),
+      publicFailureSignatureAbsent: !Object.prototype.hasOwnProperty.call(
+        execution || {},
+        "failureSignature",
+      ),
+    }));
+}
+
+function editAuthorizationSessionRoleProjection(messages, branch) {
+  return (Array.isArray(messages) ? messages : []).map((message) => {
+    const role = String(message?.role || "");
+    const meta = message?.meta || {};
+    let kind = "";
+    if (role === "user" && message?.content === branch.userMarker) kind = "initial-user";
+    else if (role === "assistant" && message?.content === branch.finalMarker) kind = "final";
+    else if (role === "assistant" && Array.isArray(meta.toolCalls) && meta.toolCalls.length > 0) {
+      kind = "tool-owner";
+    } else if (role === "tool-call" && meta.action === "propose_edit") {
+      kind = "edit-call";
+    } else if (role === "tool-result" && meta.action === "propose_edit") {
+      kind = "edit-result";
+    }
+    return { role, kind };
+  });
+}
+
+function editAuthorizationSessionMetaProjection(messages, agentRunId, authorizationId) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => ["tool-call", "tool-result"].includes(String(message?.role || "")))
+    .map((message) => {
+      const meta = message?.meta || {};
+      const isResult = message.role === "tool-result";
+      return {
+        role: String(message.role || ""),
+        toolCallMatches: String(meta.toolCallId || "")
+          === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+        agentRunMatches: String(meta.agentRunId || "") === agentRunId,
+        eventType: String(meta.agentEventType || ""),
+        eventSeq: Number(meta.agentEventSeq || 0),
+        action: String(meta.action || ""),
+        native: meta.native === true,
+        serverManaged: meta.serverManaged === true,
+        replayed: Boolean(meta.replayed),
+        outcome: String(meta.outcome || ""),
+        arguments: !isResult ? editAuthorizationArgumentsProjection({
+          path: meta.tool?.path,
+          oldText: meta.tool?.oldText,
+          newText: meta.tool?.newText,
+        }) : null,
+        authorization: isResult ? {
+          authorizationIdMatches: String(meta.authorizationId || "") === authorizationId,
+          authorizationAction: String(meta.authorizationAction || ""),
+          pendingEditPresent: Boolean(String(meta.pendingEditId || "")),
+          pathMatches: String(meta.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+          decision: String(meta.authorizationDecision || ""),
+          applied: meta.applied === true,
+          rejected: meta.rejected === true,
+          result: meta.result && typeof meta.result === "object"
+            ? editAuthorizationResultProjection(meta.result)
+            : null,
+          authorizationResult: meta.authorizationResult && typeof meta.authorizationResult === "object"
+            ? editAuthorizationResultProjection(meta.authorizationResult)
+            : null,
+        } : null,
+      };
+    });
+}
+
+function editAuthorizationSessionDiffProjection(messages, pendingAuthorization) {
+  const source = pendingAuthorization && typeof pendingAuthorization === "object"
+    ? pendingAuthorization
+    : {};
+  const matches = (Array.isArray(messages) ? messages : []).filter((message) => (
+    message?.role === "tool-result"
+    && message?.meta?.action === "propose_edit"
+    && message?.meta?.serverManaged === true
+  ));
+  const message = matches[0] || {};
+  const meta = message.meta || {};
+  const proposalId = String(source.proposalId || "");
+  return {
+    resultCount: matches.length,
+    content: editAuthorizationDiffProjection(message.content),
+    pendingEditIdMatches: Boolean(proposalId)
+      && String(meta.pendingEditId || "") === `server-edit-${proposalId}`,
+    pathMatches: String(meta.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+    authorizationIdMatches: Boolean(String(source.authorizationId || ""))
+      && String(meta.authorizationId || "") === String(source.authorizationId),
+    toolCallMatches: String(meta.toolCallId || "")
+      === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+  };
+}
+
+function editAuthorizationRunStateProjection(runState, agentRunId, authorizationId, sessionId) {
+  const source = runState && typeof runState === "object" ? runState : {};
+  const request = source.authorizationRequest && typeof source.authorizationRequest === "object"
+    ? source.authorizationRequest
+    : {};
+  const tool = request.tool && typeof request.tool === "object" ? request.tool : {};
+  return {
+    status: String(source.status || ""),
+    phase: String(source.phase || ""),
+    executionOwner: String(source.executionOwner || ""),
+    permissionProfile: String(source.permissionProfile || ""),
+    agentRunMatches: String(source.agentRunId || "") === agentRunId,
+    runtimeRunCleared: !String(source.runtimeRunId || ""),
+    cursor: Number(source.agentEventCursor || 0),
+    modelRound: Number(source.modelRound || 0),
+    request: {
+      idMatches: String(request.id || "") === `server-authorization-${authorizationId}`,
+      sessionIdMatches: String(request.sessionId || "") === sessionId,
+      sourceKey: String(request.sourceKey || ""),
+      sourceLabelPresent: Boolean(String(request.sourceLabel || "")),
+      editIdMatches: String(request.editId || "")
+        === `server-edit-${String(request.proposalId || "")}`,
+      status: String(request.status || ""),
+      selected: request.selected === true,
+      serverAgent: request.serverAgent === true,
+      detachedBackground: request.detachedBackground === true,
+      backgroundJobCleared: !String(request.backgroundJobId || ""),
+      agentRunMatches: String(request.agentRunId || "") === agentRunId,
+      authorizationIdMatches: String(request.authorizationId || "") === authorizationId,
+      proposalIdPresent: /^[0-9a-f]{64}$/.test(String(request.proposalId || "")),
+      toolCallMatches: String(request.toolCallId || "")
+        === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+      tool: {
+        action: String(tool.action || ""),
+        pathMatches: String(tool.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+        commandEmpty: !String(tool.command || ""),
+        descriptionEmpty: !String(tool.description || ""),
+      },
+      stats: {
+        additions: Number(request.stats?.additions ?? -1),
+        removals: Number(request.stats?.removals ?? -1),
+      },
+    },
+  };
+}
+
+function editAuthorizationWaitingSnapshotProjection(agent, session, agentRunId, authorizationId) {
+  return {
+    agent: {
+      status: String(agent?.status || ""),
+      permissionProfile: String(agent?.permissionProfile || ""),
+      nextCursor: Number(agent?.nextCursor || 0),
+      round: Number(agent?.round || 0),
+      activeRuntimeCleared: !String(agent?.activeRuntimeRunId || ""),
+      pendingToolCallCount: Array.isArray(agent?.pendingToolCalls)
+        ? agent.pendingToolCalls.length
+        : -1,
+      pendingAuthorization: editAuthorizationPendingProjection(
+        agent?.pendingAuthorization,
+        authorizationId,
+      ),
+      executions: editAuthorizationExecutionProjection(agent),
+    },
+    session: {
+      roles: editAuthorizationSessionRoleProjection(
+        session?.messages,
+        EDIT_AUTHORIZATION_CONTRACT.branches.approved,
+      ).map((item) => item.role),
+      runState: editAuthorizationRunStateProjection(
+        session?.runState,
+        agentRunId,
+        authorizationId,
+        String(session?.id || ""),
+      ),
+      meta: editAuthorizationSessionMetaProjection(
+        session?.messages,
+        agentRunId,
+        authorizationId,
+      ),
+      diff: editAuthorizationSessionDiffProjection(
+        session?.messages,
+        agent?.pendingAuthorization,
+      ),
+    },
+  };
+}
+
+function editAuthorizationFileStateProjection(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    state: String(source.state || ""),
+    exists: source.exists === true,
+    initialHashMatches: source.initialHashMatches === true,
+    targetHashMatches: source.targetHashMatches === true,
+  };
+}
+
+function editAuthorizationMetricsProjection(metrics) {
+  const source = metrics && typeof metrics === "object" ? metrics : {};
+  return {
+    counters: {
+      registeredDelegations: Number(source.productionToolDelegations || 0),
+      proposalDelegations: Number(source.productionEditProposalDelegations || 0),
+      applyDelegations: Number(source.productionEditApplyDelegations || 0),
+      writes: Number(source.productionEditWrites || 0),
+      backups: Number(source.productionEditBackups || 0),
+      unsafe: Number(source.unsafeToolRequests || 0),
+    },
+    registeredExecutions: (source.toolExecutions || []).map((execution) => ({
+      action: String(execution?.action || ""),
+      pathMatches: String(execution?.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+      payloadKeysMatch: execution?.payloadKeysMatch === true,
+      payloadBytesMatch: execution?.payloadBytesMatch === true,
+    })),
+    proposalTimeline: (source.proposeEditProposalTimeline || []).map((item) => ({
+      action: String(item?.action || ""),
+      pathMatches: String(item?.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+      payloadKeysMatch: item?.payloadKeysMatch === true,
+      payloadBytesMatch: item?.payloadBytesMatch === true,
+      fileBefore: editAuthorizationFileStateProjection(item?.fileBefore),
+      fileAfter: editAuthorizationFileStateProjection(item?.fileAfter),
+      backupCountBefore: Number(item?.backupCountBefore || 0),
+      backupCountAfter: Number(item?.backupCountAfter || 0),
+      result: {
+        shapeMatches: item?.result?.shapeMatches === true,
+        ok: item?.result?.ok === true,
+        actionMatches: item?.result?.actionMatches === true,
+        pathMatches: item?.result?.pathMatches === true,
+        proposalIdPresent: item?.result?.proposalIdPresent === true,
+        baseHashMatches: item?.result?.baseHashMatches === true,
+        newHashMatches: item?.result?.newHashMatches === true,
+        newContentHashMatches: item?.result?.newContentHashMatches === true,
+        applied: item?.result?.applied === true,
+      },
+    })),
+    applyTimeline: (source.proposeEditApplyTimeline || []).map((item) => ({
+      proposalShapeMatches: item?.proposalShapeMatches === true,
+      fileBefore: editAuthorizationFileStateProjection(item?.fileBefore),
+      fileAfter: editAuthorizationFileStateProjection(item?.fileAfter),
+      result: {
+        ok: item?.result?.ok === true,
+        actionMatches: item?.result?.actionMatches === true,
+        pathMatches: item?.result?.pathMatches === true,
+        proposalIdMatches: item?.result?.proposalIdMatches === true,
+        applied: item?.result?.applied === true,
+        replayed: item?.result?.replayed === true,
+        backupPresent: item?.result?.backupPresent === true,
+      },
+    })),
+    writeTimeline: (source.proposeEditWriteTimeline || []).map((item) => ({
+      fileBefore: editAuthorizationFileStateProjection(item?.fileBefore),
+      fileAfter: editAuthorizationFileStateProjection(item?.fileAfter),
+      writeObserved: item?.writeObserved === true,
+      targetHashMatches: item?.targetHashMatches === true,
+    })),
+    backupTimeline: (source.proposeEditBackupTimeline || []).map((item) => ({
+      beforeCount: Number(item?.beforeCount || 0),
+      afterCount: Number(item?.afterCount || 0),
+      delta: Number(item?.delta || 0),
+      initialContentMatchDelta: Number(item?.initialContentMatchDelta || 0),
+      backupObserved: item?.backupObserved === true,
+    })),
+  };
+}
+
+function editAuthorizationRequestProjection(h4, boundary, beforeMetrics, afterMetrics, agentRunId) {
+  const requests = h4.requestEvidenceSince(boundary);
+  const summary = h4.requestSummarySince(boundary);
+  const entries = h4.loopbackRequests.slice(Number(boundary) || 0);
+  const targetHash = idHash(agentRunId);
+  const actionTarget = (kind) => {
+    const matches = entries.filter((entry) => entry.kind === kind && entry.method === "POST");
+    return {
+      count: matches.length,
+      allTargetRun: Boolean(targetHash) && matches.every((entry) => entry.idHash === targetHash),
+    };
+  };
+  return {
+    agentRunPost: requests.agentPost,
+    runtimePost: requests.runtimePost,
+    agentDelete: requests.agentDelete,
+    authorizationPost: summary["POST /api/agent/runs/[id]/authorization"] || 0,
+    resumePost: summary["POST /api/agent/runs/[id]/resume"] || 0,
+    inputPost: summary["POST /api/agent/runs/[id]/input"] || 0,
+    browserProxyChatPost: summary["POST /proxy/chat"] || 0,
+    browserToolPost: Object.entries(summary)
+      .filter(([key]) => key.startsWith("POST /api/tools/"))
+      .reduce((total, [, count]) => total + count, 0),
+    upstreamChatDelta: afterMetrics.chatRequests.length - beforeMetrics.chatRequests.length,
+    registeredDelegationDelta: Number(afterMetrics.productionToolDelegations || 0)
+      - Number(beforeMetrics.productionToolDelegations || 0),
+    registeredExecutionDelta: afterMetrics.toolExecutions.length
+      - beforeMetrics.toolExecutions.length,
+    proposalDelegationDelta: Number(afterMetrics.productionEditProposalDelegations || 0)
+      - Number(beforeMetrics.productionEditProposalDelegations || 0),
+    applyDelegationDelta: Number(afterMetrics.productionEditApplyDelegations || 0)
+      - Number(beforeMetrics.productionEditApplyDelegations || 0),
+    writeDelta: Number(afterMetrics.productionEditWrites || 0)
+      - Number(beforeMetrics.productionEditWrites || 0),
+    backupDelta: Number(afterMetrics.productionEditBackups || 0)
+      - Number(beforeMetrics.productionEditBackups || 0),
+    unsafeDelta: Number(afterMetrics.unsafeToolRequests || 0)
+      - Number(beforeMetrics.unsafeToolRequests || 0),
+    targets: {
+      authorization: actionTarget("agent-authorization"),
+      resume: actionTarget("agent-resume"),
+    },
+  };
+}
+
+function expectEditAuthorizationArguments(projection) {
+  expect(projection).toEqual({
+    keysExact: true,
+    pathMatches: true,
+    oldTextMatches: true,
+    newTextMatches: true,
+  });
+}
+
+function expectEditAuthorizationPending(projection) {
+  expect(projection).toEqual({
+    authorizationIdPresent: true,
+    authorizationIdMatches: true,
+    toolCallMatches: true,
+    action: "apply_edit",
+    proposalIdPresent: true,
+    pathMatches: true,
+    diff: {
+      present: true,
+      oldMarkerOnce: true,
+      newMarkerOnce: true,
+      oldHeaderMatches: true,
+      newHeaderMatches: true,
+    },
+    decision: "pending",
+    requestedAtPresent: true,
+    privateFieldsAbsent: true,
+  });
+}
+
+function expectEditAuthorizationResult(projection, branch, { proposal = false } = {}) {
+  expect(projection).toEqual({
+    ok: proposal ? true : branch.resultOk,
+    action: proposal ? "propose_edit" : branch.resultAction,
+    proposalIdPresent: true,
+    pathMatches: true,
+    diff: proposal || branch.resultDiffPresent ? {
+      present: true,
+      oldMarkerOnce: true,
+      newMarkerOnce: true,
+      oldHeaderMatches: true,
+      newHeaderMatches: true,
+    } : {
+      present: false,
+      oldMarkerOnce: false,
+      newMarkerOnce: false,
+      oldHeaderMatches: false,
+      newHeaderMatches: false,
+    },
+    applied: proposal ? false : branch.applied,
+    rejected: proposal ? false : branch.rejected,
+    replayed: false,
+    backupPresent: proposal ? false : branch.backupPresent,
+    conflict: false,
+    errorPresent: proposal ? false : branch.rejected,
+    privateFieldsAbsent: true,
+    retryFieldsAbsent: true,
+  });
+}
+
+function expectEditAuthorizationZeroRequests(projection) {
+  expect(projection).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    authorizationPost: 0,
+    resumePost: 0,
+    inputPost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 0,
+    registeredDelegationDelta: 0,
+    registeredExecutionDelta: 0,
+    proposalDelegationDelta: 0,
+    applyDelegationDelta: 0,
+    writeDelta: 0,
+    backupDelta: 0,
+    unsafeDelta: 0,
+    targets: {
+      authorization: { count: 0, allTargetRun: true },
+      resume: { count: 0, allTargetRun: true },
+    },
+  });
+}
+
+function expectEditAuthorizationMetrics(projection, branch, phase) {
+  const terminal = phase === "terminal";
+  expect(projection.counters).toEqual({
+    registeredDelegations: 1,
+    proposalDelegations: 1,
+    applyDelegations: terminal ? branch.applyDelegations : 0,
+    writes: terminal ? branch.writes : 0,
+    backups: terminal ? branch.backups : 0,
+    unsafe: 0,
+  });
+  expect(projection.registeredExecutions).toEqual([{
+    action: "propose_edit",
+    pathMatches: true,
+    payloadKeysMatch: true,
+    payloadBytesMatch: true,
+  }]);
+  expect(projection.proposalTimeline).toHaveLength(1);
+  expect(projection.proposalTimeline[0]).toEqual({
+    action: "propose_edit",
+    pathMatches: true,
+    payloadKeysMatch: true,
+    payloadBytesMatch: true,
+    fileBefore: {
+      state: "initial",
+      exists: true,
+      initialHashMatches: true,
+      targetHashMatches: false,
+    },
+    fileAfter: {
+      state: "initial",
+      exists: true,
+      initialHashMatches: true,
+      targetHashMatches: false,
+    },
+    backupCountBefore: 0,
+    backupCountAfter: 0,
+    result: {
+      shapeMatches: true,
+      ok: true,
+      actionMatches: true,
+      pathMatches: true,
+      proposalIdPresent: true,
+      baseHashMatches: true,
+      newHashMatches: true,
+      newContentHashMatches: true,
+      applied: false,
+    },
+  });
+  const approvedTerminal = terminal && branch.applied;
+  expect(projection.applyTimeline).toHaveLength(approvedTerminal ? 1 : 0);
+  expect(projection.writeTimeline).toHaveLength(approvedTerminal ? 1 : 0);
+  expect(projection.backupTimeline).toHaveLength(approvedTerminal ? 1 : 0);
+  if (!approvedTerminal) return;
+  const initialState = {
+    state: "initial",
+    exists: true,
+    initialHashMatches: true,
+    targetHashMatches: false,
+  };
+  const targetState = {
+    state: "target",
+    exists: true,
+    initialHashMatches: false,
+    targetHashMatches: true,
+  };
+  expect(projection.applyTimeline[0]).toEqual({
+    proposalShapeMatches: true,
+    fileBefore: initialState,
+    fileAfter: targetState,
+    result: {
+      ok: true,
+      actionMatches: true,
+      pathMatches: true,
+      proposalIdMatches: true,
+      applied: true,
+      replayed: false,
+      backupPresent: true,
+    },
+  });
+  expect(projection.writeTimeline[0]).toEqual({
+    fileBefore: initialState,
+    fileAfter: targetState,
+    writeObserved: true,
+    targetHashMatches: true,
+  });
+  expect(projection.backupTimeline[0]).toEqual({
+    beforeCount: 0,
+    afterCount: 1,
+    delta: 1,
+    initialContentMatchDelta: 1,
+    backupObserved: true,
+  });
+}
+
+async function restoreEditAuthorizationTestConfig(h4) {
+  const { page } = h4;
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const permission = page.locator("#permPillBtn");
+  if (await permission.getAttribute("data-value") !== "accept") {
+    await permission.click();
+    const option = page.locator('#permPillDropdown .model-pill-option[data-value="accept"]');
+    await expect(option).toHaveCount(1);
+    await expect(option).toBeVisible();
+    await option.click();
+  }
+  await expect(permission).toHaveAttribute("data-value", "accept");
+  expect(await page.evaluate(() => localStorage.getItem("code-permission-profile")))
+    .toBe("accept");
+}
+
+async function editAuthorizationDomProjection(h4, phase, branch) {
+  const waiting = phase === "waiting";
+  const expected = {
+    permission: { pill: "accept", stored: "accept" },
+    panel: waiting ? {
+      visible: true,
+      cards: 1,
+      groups: 1,
+      rows: 1,
+      selected: 1,
+      disabled: 0,
+      pathMatches: true,
+      approveButtons: 1,
+      approveEnabled: 1,
+      rejectButtons: 1,
+      rejectEnabled: 1,
+      viewButtons: 1,
+      statPairs: 1,
+    } : {
+      visible: false,
+      cards: 0,
+      groups: 0,
+      rows: 0,
+      selected: 0,
+      disabled: 0,
+      pathMatches: false,
+      approveButtons: 0,
+      approveEnabled: 0,
+      rejectButtons: 0,
+      rejectEnabled: 0,
+      viewButtons: 0,
+      statPairs: 0,
+    },
+    messages: {
+      initialUsers: 1,
+      stages: 1,
+      toolProcesses: 1,
+      toolItems: 1,
+      editSuggestions: 1,
+      finals: waiting ? 0 : 1,
+    },
+    tool: {
+      action: "propose_edit",
+      stageState: waiting ? "running" : branch.outcome,
+      itemState: waiting ? "running" : branch.outcome,
+      argumentDetails: 1,
+      resultDetails: 1,
+    },
+    edit: {
+      pathMatches: true,
+      review: waiting,
+      applied: !waiting && branch.applied,
+      rejected: !waiting && branch.rejected,
+      additions: 1,
+      removals: 1,
+    },
+    order: waiting
+      ? ["initial-user", "stage", "tool-process", "edit-suggestion"]
+      : ["initial-user", "stage", "tool-process", "edit-suggestion", "final"],
+  };
+  return waitForMessageProjection(h4, {
+    label: `edit-authorization-${branch.decision}-${phase}`,
+    expected,
+    sourceFacts: {
+      phase,
+      userMarker: branch.userMarker,
+      stageMarker: EDIT_AUTHORIZATION_CONTRACT.stageMarker,
+      finalMarker: branch.finalMarker,
+      path: EDIT_AUTHORIZATION_CONTRACT.path,
+    },
+    sample: (facts) => {
+      const panel = document.querySelector("#authorizationPanel");
+      const root = document.querySelector("#messages");
+      const users = [...root.querySelectorAll("article.msg.user")]
+        .filter((node) => node.textContent.includes(facts.userMarker));
+      const stages = [...root.querySelectorAll("article.msg.assistant.agent-commentary")]
+        .filter((node) => node.textContent.includes(facts.stageMarker));
+      const processStages = [...root.querySelectorAll(
+        'article.tool-process > details.tool-process-stage[data-current-action="propose_edit"]',
+      )];
+      const processes = processStages.map((stage) => stage.closest("article.tool-process"));
+      const process = processes[0] || null;
+      const processStage = processStages[0] || null;
+      const item = process?.querySelector("details.tool-process-item") || null;
+      const details = item ? [...item.querySelectorAll(".tool-process-detail pre")] : [];
+      const suggestions = [...root.querySelectorAll("article.msg.assistant.edit-suggestion")]
+        .filter((node) => node.querySelector(".tool-edit-target")?.dataset.path === facts.path);
+      const suggestion = suggestions[0] || null;
+      const status = suggestion?.querySelector(".tool-edit-status") || null;
+      const finals = [...root.querySelectorAll("article.msg.assistant")]
+        .filter((node) => node.textContent.includes(facts.finalMarker));
+      const row = panel?.querySelector(".authorization-row") || null;
+      const approve = panel?.querySelector('[data-auth-action="approve"]') || null;
+      const reject = panel?.querySelector('[data-auth-action="reject-all"]') || null;
+      const ordered = [
+        { label: "initial-user", node: users[0] || null },
+        { label: "stage", node: stages[0] || null },
+        { label: "tool-process", node: process },
+        { label: "edit-suggestion", node: suggestion },
+        ...(facts.phase === "terminal" ? [{ label: "final", node: finals[0] || null }] : []),
+      ].filter((entry) => entry.node);
+      ordered.sort((left, right) => (
+        left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+      ));
+      const classState = (node, values) => values.find((value) => node?.classList.contains(value)) || "";
+      return {
+        permission: {
+          pill: String(document.querySelector("#permPillBtn")?.dataset.value || ""),
+          stored: String(localStorage.getItem("code-permission-profile") || ""),
+        },
+        panel: {
+          visible: Boolean(panel && !panel.classList.contains("hidden")),
+          cards: panel?.querySelectorAll(".authorization-card").length || 0,
+          groups: panel?.querySelectorAll(".authorization-group").length || 0,
+          rows: panel?.querySelectorAll(".authorization-row").length || 0,
+          selected: panel?.querySelectorAll("[data-auth-select]:checked").length || 0,
+          disabled: panel?.querySelectorAll("[data-auth-select]:disabled").length || 0,
+          pathMatches: row?.querySelector(".authorization-target")?.textContent.trim() === facts.path,
+          approveButtons: panel?.querySelectorAll('[data-auth-action="approve"]').length || 0,
+          approveEnabled: approve && !approve.disabled ? 1 : 0,
+          rejectButtons: panel?.querySelectorAll('[data-auth-action="reject-all"]').length || 0,
+          rejectEnabled: reject && !reject.disabled ? 1 : 0,
+          viewButtons: panel?.querySelectorAll("[data-auth-view]").length || 0,
+          statPairs: panel?.querySelectorAll(".authorization-stats").length || 0,
+        },
+        messages: {
+          initialUsers: users.length,
+          stages: stages.length,
+          toolProcesses: processes.length,
+          toolItems: process?.querySelectorAll("details.tool-process-item").length || 0,
+          editSuggestions: suggestions.length,
+          finals: finals.length,
+        },
+        tool: {
+          action: String(processStage?.dataset.currentAction || ""),
+          stageState: classState(processStage, ["running", "succeeded", "failed"]),
+          itemState: classState(item, ["running", "succeeded", "failed"]),
+          argumentDetails: details.length > 0 ? 1 : 0,
+          resultDetails: details.length > 1 ? 1 : 0,
+        },
+        edit: {
+          pathMatches: suggestion?.querySelector(".tool-edit-target")?.dataset.path === facts.path,
+          review: Boolean(status?.classList.contains("is-review")),
+          applied: Boolean(status?.classList.contains("is-applied")),
+          rejected: Boolean(status?.classList.contains("is-rejected")),
+          additions: suggestion?.querySelectorAll(".diff-line.diff-add").length || 0,
+          removals: suggestion?.querySelectorAll(".diff-line.diff-remove").length || 0,
+        },
+        order: ordered.map((entry) => entry.label),
+      };
+    },
+  });
+}
+
+async function beginEditAuthorizationLifecycle(h4, runtime, branchName) {
+  const branch = EDIT_AUTHORIZATION_CONTRACT.branches[branchName];
+  expect(branch).toBeTruthy();
+  expect(h4.host.ready.proposeEditFixture).toEqual({
+    path: EDIT_AUTHORIZATION_CONTRACT.path,
+    initialSha256: EDIT_AUTHORIZATION_CONTRACT.initialSha256,
+    targetSha256: EDIT_AUTHORIZATION_CONTRACT.targetSha256,
+  });
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  await restoreEditAuthorizationTestConfig(h4);
+  await h4.proveNonLoopbackBlocked();
+
+  const lifecycleBoundary = h4.requestBoundary();
+  const lifecycleMetricsBefore = await h4.metrics();
+  await page.locator("#prompt").fill(branch.userMarker);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user").filter({ hasText: branch.userMarker }))
+    .toHaveCount(1);
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  let waitingAgentResponse = null;
+  await expect.poll(async () => {
+    waitingAgentResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: waitingAgentResponse.body?.status,
+      permissionProfile: waitingAgentResponse.body?.permissionProfile,
+      eventTypes: (waitingAgentResponse.body?.events || []).map((event) => event.type),
+      toolCallMatches: waitingAgentResponse.body?.pendingAuthorization?.toolCallId
+        === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+      action: waitingAgentResponse.body?.pendingAuthorization?.action,
+      executionStatuses: (waitingAgentResponse.body?.toolExecutions || [])
+        .map((execution) => execution.status),
+    };
+  }).toEqual({
+    status: "waiting_authorization",
+    permissionProfile: "accept",
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "authorization_required",
+    ],
+    toolCallMatches: true,
+    action: "apply_edit",
+    executionStatuses: ["waiting_authorization"],
+  });
+  expect(waitingAgentResponse.status).toBe(200);
+  const waitingAgent = waitingAgentResponse.body;
+  const authorizationId = String(waitingAgent.pendingAuthorization?.authorizationId || "");
+  expect(authorizationId).toMatch(/^[0-9a-f]{64}$/);
+  expect(waitingAgent.agentRunId).toBe(agentRunId);
+  expect(waitingAgent.pendingToolCalls).toHaveLength(1);
+  expect(waitingAgent.activeRuntimeRunId).toBe("");
+  expect(waitingAgent.allowedTools).toContain("propose_edit");
+  expectEditAuthorizationPending(
+    editAuthorizationPendingProjection(waitingAgent.pendingAuthorization, authorizationId),
+  );
+
+  const waitingEvents = editAuthorizationEventProjection(waitingAgent, authorizationId);
+  expect(waitingEvents.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+  expect(waitingAgent.nextCursor).toBe(5);
+  expect(waitingEvents[1]).toMatchObject({
+    type: "model_started",
+    round: 1,
+    runtimeRunId: "runtime-1",
+  });
+  expect(waitingEvents[2]).toMatchObject({
+    type: "model_completed",
+    content: "stage",
+    finishReason: "tool_calls",
+    toolCalls: [{ toolCallMatches: true, name: "propose_edit" }],
+  });
+  expectEditAuthorizationArguments(waitingEvents[2].toolCalls[0].arguments);
+  expect(waitingEvents[3]).toMatchObject({
+    type: "tool_started",
+    toolCallMatches: true,
+    name: "propose_edit",
+  });
+  expectEditAuthorizationArguments(waitingEvents[3].arguments);
+  expectEditAuthorizationPending(waitingEvents[4].authorization);
+
+  const waitingExecution = editAuthorizationExecutionProjection(waitingAgent);
+  expect(waitingExecution).toHaveLength(1);
+  expect(waitingExecution[0]).toMatchObject({
+    toolCallMatches: true,
+    name: "propose_edit",
+    status: "waiting_authorization",
+    outcome: "succeeded",
+    authorizationDecision: "",
+    publicFailureCountAbsent: true,
+    publicFailureSignatureAbsent: true,
+  });
+  expectEditAuthorizationArguments(waitingExecution[0].arguments);
+  expectEditAuthorizationResult(waitingExecution[0].result, branch, { proposal: true });
+
+  const firstRuntimeRunId = String(
+    waitingAgent.events.find((event) => event?.type === "model_started")?.data?.runtimeRunId || "",
+  );
+  expect(firstRuntimeRunId).not.toBe("");
+  const firstRuntimeResponse = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(firstRuntimeRunId)}?cursor=0&wait=0`,
+  );
+  expect(firstRuntimeResponse.status).toBe(200);
+  expect(firstRuntimeResponse.body).toMatchObject({
+    runId: firstRuntimeRunId,
+    status: "completed",
+  });
+  expect(firstRuntimeResponse.body.nextCursor).toBeGreaterThan(0);
+  expect(firstRuntimeResponse.body.events).toHaveLength(firstRuntimeResponse.body.nextCursor);
+  expect(firstRuntimeResponse.body.result).toMatchObject({
+    content: EDIT_AUTHORIZATION_CONTRACT.stageMarker,
+    finishReason: "tool_calls",
+  });
+  expect(firstRuntimeResponse.body.result?.toolCalls).toHaveLength(1);
+  expect(firstRuntimeResponse.body.result.toolCalls[0]).toMatchObject({
+    id: EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+    function: { name: "propose_edit" },
+  });
+  expectEditAuthorizationArguments(editAuthorizationArgumentsProjection(
+    firstRuntimeResponse.body.result.toolCalls[0].function.arguments,
+  ));
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  let waitingSessionResponse = null;
+  await expect.poll(async () => {
+    waitingSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: waitingSessionResponse.status,
+      roles: (waitingSessionResponse.body?.messages || []).map((message) => message.role),
+      runStatus: waitingSessionResponse.body?.runState?.status,
+      permissionProfile: waitingSessionResponse.body?.runState?.permissionProfile,
+      cursor: waitingSessionResponse.body?.runState?.agentEventCursor,
+      authorizationMatches: waitingSessionResponse.body?.runState?.authorizationRequest
+        ?.authorizationId === authorizationId,
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call", "tool-result"],
+    runStatus: "waiting-authorization",
+    permissionProfile: "accept",
+    cursor: waitingAgent.nextCursor,
+    authorizationMatches: true,
+  });
+  const waitingSession = waitingSessionResponse.body;
+  const waitingSnapshot = editAuthorizationWaitingSnapshotProjection(
+    waitingAgent,
+    waitingSession,
+    agentRunId,
+    authorizationId,
+  );
+  expect(waitingSnapshot.agent).toMatchObject({
+    status: "waiting_authorization",
+    permissionProfile: "accept",
+    nextCursor: 5,
+    round: 1,
+    activeRuntimeCleared: true,
+    pendingToolCallCount: 1,
+  });
+  expectEditAuthorizationPending(waitingSnapshot.agent.pendingAuthorization);
+  expect(waitingSnapshot.session.roles).toEqual(["user", "assistant", "tool-call", "tool-result"]);
+  expect(waitingSnapshot.session.runState).toEqual({
+    status: "waiting-authorization",
+    phase: "tools",
+    executionOwner: "server-agent",
+    permissionProfile: "accept",
+    agentRunMatches: true,
+    runtimeRunCleared: true,
+    cursor: 5,
+    modelRound: 1,
+    request: {
+      idMatches: true,
+      sessionIdMatches: true,
+      sourceKey: "main",
+      sourceLabelPresent: true,
+      editIdMatches: true,
+      status: "pending",
+      selected: true,
+      serverAgent: true,
+      detachedBackground: false,
+      backgroundJobCleared: true,
+      agentRunMatches: true,
+      authorizationIdMatches: true,
+      proposalIdPresent: true,
+      toolCallMatches: true,
+      tool: {
+        action: "apply_edit",
+        pathMatches: true,
+        commandEmpty: true,
+        descriptionEmpty: true,
+      },
+      stats: { additions: 1, removals: 1 },
+    },
+  });
+  expect(waitingSnapshot.session.meta).toHaveLength(2);
+  expect(waitingSnapshot.session.meta[0]).toMatchObject({
+    role: "tool-call",
+    toolCallMatches: true,
+    agentRunMatches: true,
+    eventType: "tool_started",
+    eventSeq: 4,
+    action: "propose_edit",
+    native: true,
+    serverManaged: false,
+    replayed: false,
+    outcome: "",
+    authorization: null,
+  });
+  expectEditAuthorizationArguments(waitingSnapshot.session.meta[0].arguments);
+  expect(waitingSnapshot.session.meta[1]).toEqual({
+    role: "tool-result",
+    toolCallMatches: true,
+    agentRunMatches: true,
+    eventType: "",
+    eventSeq: 0,
+    action: "propose_edit",
+    native: true,
+    serverManaged: true,
+    replayed: false,
+    outcome: "",
+    arguments: null,
+    authorization: {
+      authorizationIdMatches: true,
+      authorizationAction: "apply_edit",
+      pendingEditPresent: true,
+      pathMatches: true,
+      decision: "",
+      applied: false,
+      rejected: false,
+      result: null,
+      authorizationResult: null,
+    },
+  });
+  expect(waitingSnapshot.session.diff).toEqual({
+    resultCount: 1,
+    content: {
+      present: true,
+      oldMarkerOnce: true,
+      newMarkerOnce: true,
+      oldHeaderMatches: true,
+      newHeaderMatches: true,
+    },
+    pendingEditIdMatches: true,
+    pathMatches: true,
+    authorizationIdMatches: true,
+    toolCallMatches: true,
+  });
+  expect(waitingSnapshot.session.diff.content)
+    .toEqual(waitingSnapshot.agent.pendingAuthorization.diff);
+  const waitingRoleContent = editAuthorizationSessionRoleProjection(
+    waitingSession.messages,
+    branch,
+  );
+  expect(waitingRoleContent).toEqual([
+    { role: "user", kind: "initial-user" },
+    { role: "assistant", kind: "tool-owner" },
+    { role: "tool-call", kind: "edit-call" },
+    { role: "tool-result", kind: "edit-result" },
+  ]);
+  const waitingDom = await editAuthorizationDomProjection(h4, "waiting", branch);
+  expect(waitingDom.edit).toEqual({
+    pathMatches: true,
+    review: true,
+    applied: false,
+    rejected: false,
+    additions: 1,
+    removals: 1,
+  });
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(1);
+  await expect(page.locator("#stopBtn")).toBeEnabled();
+
+  const metricsAtWaiting = await h4.metrics();
+  expect(metricsAtWaiting.chatRequests).toEqual([{
+    scenario: `${branch.scenarioPrefix}-call`,
+    stream: true,
+    hasToolResult: false,
+  }]);
+  expect(metricsAtWaiting.production.agentRuns).toHaveLength(1);
+  expect(metricsAtWaiting.production.runtimeRuns).toHaveLength(1);
+  const waitingMetrics = editAuthorizationMetricsProjection(metricsAtWaiting);
+  expectEditAuthorizationMetrics(waitingMetrics, branch, "waiting");
+
+  return {
+    page,
+    runtime,
+    branchName,
+    branch,
+    lifecycleBoundary,
+    lifecycleMetricsBefore,
+    agentRunId,
+    authorizationId,
+    sessionId,
+    waitingAgent,
+    waitingAgentResponse,
+    waitingEvents,
+    waitingExecution,
+    firstRuntimeRunId,
+    firstRuntimeResponse,
+    waitingSession,
+    waitingSessionResponse,
+    waitingSnapshot,
+    waitingRoleContent,
+    waitingDom,
+    metricsAtWaiting,
+    waitingMetrics,
+  };
+}
+
+async function reloadWaitingEditAuthorizationLifecycle(h4, started) {
+  const {
+    page,
+    runtime,
+    branch,
+    agentRunId,
+    authorizationId,
+    sessionId,
+    waitingEvents,
+    waitingExecution,
+    waitingSnapshot,
+    waitingDom,
+    metricsAtWaiting,
+  } = started;
+  const waitingReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  const restoredWaitingDom = await editAuthorizationDomProjection(h4, "waiting", branch);
+  expect(restoredWaitingDom).toEqual(waitingDom);
+  const permissionRestored = await page.locator("#permPillBtn").getAttribute("data-value")
+    === "accept";
+  expect(permissionRestored).toBe(true);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  const waitingAgentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(waitingAgentAfterReload.status).toBe(200);
+  expect(waitingAgentAfterReload.body.agentRunId).toBe(agentRunId);
+  expect(waitingAgentAfterReload.body.pendingAuthorization?.authorizationId).toBe(authorizationId);
+  expect(editAuthorizationEventProjection(waitingAgentAfterReload.body, authorizationId))
+    .toEqual(waitingEvents);
+  expect(editAuthorizationExecutionProjection(waitingAgentAfterReload.body))
+    .toEqual(waitingExecution);
+  const waitingSessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(waitingSessionAfterReload.status).toBe(200);
+  expect(editAuthorizationWaitingSnapshotProjection(
+    waitingAgentAfterReload.body,
+    waitingSessionAfterReload.body,
+    agentRunId,
+    authorizationId,
+  )).toEqual(waitingSnapshot);
+  expect(editAuthorizationSessionDiffProjection(
+    waitingSessionAfterReload.body.messages,
+    waitingAgentAfterReload.body.pendingAuthorization,
+  )).toEqual(waitingSnapshot.session.diff);
+  const metricsAfterWaitingReload = await h4.metrics();
+  expect(metricsAfterWaitingReload.chatRequests).toEqual(metricsAtWaiting.chatRequests);
+  expect(editAuthorizationMetricsProjection(metricsAfterWaitingReload))
+    .toEqual(editAuthorizationMetricsProjection(metricsAtWaiting));
+  const waitingReloadRequests = editAuthorizationRequestProjection(
+    h4,
+    waitingReloadBoundary,
+    metricsAtWaiting,
+    metricsAfterWaitingReload,
+    agentRunId,
+  );
+  expectEditAuthorizationZeroRequests(waitingReloadRequests);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([agentRunId]));
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(new Set([started.firstRuntimeRunId]));
+  expect(h4.pageErrors).toEqual([]);
+  return {
+    waitingReloadBoundary,
+    restoredWaitingDom,
+    waitingAgentAfterReload,
+    waitingSessionAfterReload,
+    metricsAfterWaitingReload,
+    waitingReloadRequests,
+    permissionRestored,
+  };
+}
+
+async function completeEditAuthorizationLifecycle(h4, started, waitingReload) {
+  const {
+    page,
+    branch,
+    agentRunId,
+    authorizationId,
+    sessionId,
+    waitingAgent,
+    waitingEvents,
+  } = started;
+  const decisionBoundary = h4.requestBoundary();
+  const decisionMetricsBefore = waitingReload.metricsAfterWaitingReload;
+  const row = page.locator("#authorizationPanel .authorization-row");
+  const decisionButton = page.locator(
+    `#authorizationPanel [data-auth-action="${branch.action}"]`,
+  );
+  await expect(row).toHaveCount(1);
+  await expect(row.locator("[data-auth-select]")).toBeChecked();
+  await expect(decisionButton).toHaveCount(1);
+  await expect(decisionButton).toBeEnabled();
+  await decisionButton.click();
+
+  const final = page.locator("#messages article.msg.assistant")
+    .filter({ hasText: branch.finalMarker });
+  await expect(final).toHaveCount(1);
+  let completedAgentResponse = null;
+  await expect.poll(async () => {
+    completedAgentResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedAgentResponse.body?.status,
+      eventTypes: (completedAgentResponse.body?.events || []).map((event) => event.type),
+      pendingAuthorization: completedAgentResponse.body?.pendingAuthorization ?? null,
+    };
+  }).toEqual({
+    status: "completed",
+    eventTypes: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "authorization_required",
+      "authorization_submitted",
+      "tool_completed",
+      "waiting_credentials",
+      "resumed",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+    pendingAuthorization: null,
+  });
+  expect(completedAgentResponse.status).toBe(200);
+  const completedAgent = completedAgentResponse.body;
+  expect(completedAgent.agentRunId).toBe(agentRunId);
+  expect(completedAgent.permissionProfile).toBe("accept");
+  expect(completedAgent.activeRuntimeRunId).toBe("");
+  expect(completedAgent.pendingToolCalls).toEqual([]);
+  expect(completedAgent.result?.content).toBe(branch.finalMarker);
+
+  const terminalEvents = editAuthorizationEventProjection(completedAgent, authorizationId);
+  expect(terminalEvents.map((event) => event.seq)).toEqual(
+    terminalEvents.map((_, index) => index + 1),
+  );
+  expect(terminalEvents).toHaveLength(12);
+  expect(completedAgent.nextCursor).toBe(12);
+  expect(terminalEvents.slice(0, waitingEvents.length)).toEqual(waitingEvents);
+  expect(terminalEvents[5]).toMatchObject({
+    type: "authorization_submitted",
+    toolCallMatches: true,
+    authorizationIdMatches: true,
+    decision: branch.decision,
+  });
+  expect(terminalEvents[6]).toMatchObject({
+    type: "tool_completed",
+    toolCallMatches: true,
+    name: "propose_edit",
+    outcome: branch.outcome,
+    replayed: false,
+  });
+  expectEditAuthorizationResult(terminalEvents[6].result, branch);
+  expect(terminalEvents[7]).toMatchObject({
+    type: "waiting_credentials",
+    resumeStatus: "model",
+    reason: "authorization_submitted",
+  });
+  expect(terminalEvents[8]).toMatchObject({ type: "resumed", status: "model" });
+  expect(terminalEvents[9]).toMatchObject({
+    type: "model_started",
+    round: 2,
+    runtimeRunId: "runtime-2",
+  });
+  expect(terminalEvents[10]).toMatchObject({
+    type: "model_completed",
+    content: "final",
+    finishReason: "stop",
+    toolCalls: [],
+  });
+  expect(terminalEvents[11]).toMatchObject({ type: "completed" });
+
+  const terminalExecution = editAuthorizationExecutionProjection(completedAgent);
+  expect(terminalExecution).toHaveLength(1);
+  expect(terminalExecution[0]).toMatchObject({
+    toolCallMatches: true,
+    name: "propose_edit",
+    status: "completed",
+    outcome: branch.outcome,
+    authorizationDecision: branch.decision,
+    publicFailureCountAbsent: true,
+    publicFailureSignatureAbsent: true,
+  });
+  expectEditAuthorizationArguments(terminalExecution[0].arguments);
+  expectEditAuthorizationResult(terminalExecution[0].result, branch);
+
+  const runtimeRunIds = completedAgent.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(runtimeRunIds).toHaveLength(2);
+  expect(new Set(runtimeRunIds).size).toBe(2);
+  const runtimeSnapshots = [];
+  for (const runtimeRunId of runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("completed");
+    expect(response.body.nextCursor).toBeGreaterThan(0);
+    expect(response.body.events).toHaveLength(response.body.nextCursor);
+    runtimeSnapshots.push(response.body);
+  }
+  const runtimeProjection = runtimeSnapshots.map((snapshot, index) => ({
+    runtime: `runtime-${index + 1}`,
+    status: String(snapshot.status || ""),
+    nextCursor: Number(snapshot.nextCursor || 0),
+    eventTypes: (snapshot.events || []).map((event) => String(event?.type || "")),
+    content: snapshot.result?.content === EDIT_AUTHORIZATION_CONTRACT.stageMarker
+      ? "stage"
+      : snapshot.result?.content === branch.finalMarker
+        ? "final"
+        : "empty",
+    finishReason: String(snapshot.result?.finishReason || ""),
+    toolCalls: (snapshot.result?.toolCalls || []).map((call) => ({
+      toolCallMatches: String(call?.id || "") === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+      name: String(call?.function?.name || ""),
+      arguments: editAuthorizationArgumentsProjection(call?.function?.arguments),
+    })),
+  }));
+  expect(runtimeProjection[0]).toMatchObject({
+    runtime: "runtime-1",
+    status: "completed",
+    content: "stage",
+    finishReason: "tool_calls",
+    toolCalls: [{ toolCallMatches: true, name: "propose_edit" }],
+  });
+  expectEditAuthorizationArguments(runtimeProjection[0].toolCalls[0].arguments);
+  expect(runtimeProjection[1]).toMatchObject({
+    runtime: "runtime-2",
+    status: "completed",
+    content: "final",
+    finishReason: "stop",
+    toolCalls: [],
+  });
+
+  let terminalSessionResponse = null;
+  await expect.poll(async () => {
+    terminalSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: terminalSessionResponse.status,
+      roles: (terminalSessionResponse.body?.messages || []).map((message) => message.role),
+      runStateKeys: Object.keys(terminalSessionResponse.body?.runState || {}).sort(),
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call", "tool-result", "assistant"],
+    runStateKeys: [],
+  });
+  const terminalSession = terminalSessionResponse.body;
+  const terminalToolOwner = terminalSession.messages[1];
+  expect(terminalToolOwner.meta?.toolCalls).toHaveLength(1);
+  expect(terminalToolOwner.meta.toolCalls[0]).toMatchObject({
+    id: EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+    function: { name: "propose_edit" },
+  });
+  expectEditAuthorizationArguments(editAuthorizationArgumentsProjection(
+    terminalToolOwner.meta.toolCalls[0].function.arguments,
+  ));
+  const terminalFinal = terminalSession.messages[4];
+  expect(terminalFinal).toMatchObject({ role: "assistant", content: branch.finalMarker });
+  expect(terminalFinal.meta?.toolCalls).toEqual([]);
+
+  const sessionRoleContent = editAuthorizationSessionRoleProjection(
+    terminalSession.messages,
+    branch,
+  );
+  expect(sessionRoleContent).toEqual([
+    { role: "user", kind: "initial-user" },
+    { role: "assistant", kind: "tool-owner" },
+    { role: "tool-call", kind: "edit-call" },
+    { role: "tool-result", kind: "edit-result" },
+    { role: "assistant", kind: "final" },
+  ]);
+  const sessionAuthorizationMeta = editAuthorizationSessionMetaProjection(
+    terminalSession.messages,
+    agentRunId,
+    authorizationId,
+  );
+  expect(sessionAuthorizationMeta).toHaveLength(2);
+  expect(sessionAuthorizationMeta[0]).toMatchObject({
+    role: "tool-call",
+    toolCallMatches: true,
+    agentRunMatches: true,
+    eventType: "tool_started",
+    eventSeq: 4,
+    action: "propose_edit",
+    native: true,
+    serverManaged: false,
+    replayed: false,
+    outcome: "",
+    authorization: null,
+  });
+  expectEditAuthorizationArguments(sessionAuthorizationMeta[0].arguments);
+  expect(sessionAuthorizationMeta[1]).toMatchObject({
+    role: "tool-result",
+    toolCallMatches: true,
+    agentRunMatches: true,
+    eventType: "tool_completed",
+    eventSeq: 7,
+    action: "propose_edit",
+    native: true,
+    serverManaged: true,
+    replayed: false,
+    outcome: branch.outcome,
+    arguments: null,
+    authorization: {
+      authorizationIdMatches: true,
+      authorizationAction: "apply_edit",
+      pendingEditPresent: true,
+      pathMatches: true,
+      decision: branch.decision,
+      applied: branch.applied,
+      rejected: branch.rejected,
+    },
+  });
+  expectEditAuthorizationResult(sessionAuthorizationMeta[1].authorization.result, branch);
+  expectEditAuthorizationResult(
+    sessionAuthorizationMeta[1].authorization.authorizationResult,
+    branch,
+  );
+
+  const terminalDom = await editAuthorizationDomProjection(h4, "terminal", branch);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
+  await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
+
+  const metricsAtTerminal = await h4.metrics();
+  expect(metricsAtTerminal.chatRequests).toEqual([
+    { scenario: `${branch.scenarioPrefix}-call`, stream: true, hasToolResult: false },
+    {
+      scenario: `${branch.scenarioPrefix}-final`,
+      stream: true,
+      hasToolResult: true,
+      editAuthorizationReceipt: {
+        decision: branch.decision,
+        receiptCount: 1,
+        parseable: true,
+        nameMatches: true,
+        ok: branch.resultOk,
+        actionMatches: true,
+        pathMatches: true,
+        applied: branch.applied,
+        rejected: branch.rejected,
+        replayed: false,
+        backupPresent: branch.backupPresent,
+      },
+    },
+  ]);
+  expect(metricsAtTerminal.production.agentRuns).toHaveLength(1);
+  expect(metricsAtTerminal.production.runtimeRuns).toHaveLength(2);
+  const terminalMetrics = editAuthorizationMetricsProjection(metricsAtTerminal);
+  expectEditAuthorizationMetrics(terminalMetrics, branch, "terminal");
+
+  const decisionRequests = editAuthorizationRequestProjection(
+    h4,
+    decisionBoundary,
+    decisionMetricsBefore,
+    metricsAtTerminal,
+    agentRunId,
+  );
+  expect(decisionRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    authorizationPost: 1,
+    resumePost: 1,
+    inputPost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 1,
+    registeredDelegationDelta: 0,
+    registeredExecutionDelta: 0,
+    proposalDelegationDelta: 0,
+    applyDelegationDelta: branch.applyDelegations,
+    writeDelta: branch.writes,
+    backupDelta: branch.backups,
+    unsafeDelta: 0,
+    targets: {
+      authorization: { count: 1, allTargetRun: true },
+      resume: { count: 1, allTargetRun: true },
+    },
+  });
+  const totalRequests = editAuthorizationRequestProjection(
+    h4,
+    started.lifecycleBoundary,
+    started.lifecycleMetricsBefore,
+    metricsAtTerminal,
+    agentRunId,
+  );
+  expect(totalRequests).toEqual({
+    agentRunPost: 1,
+    runtimePost: 0,
+    agentDelete: 0,
+    authorizationPost: 1,
+    resumePost: 1,
+    inputPost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 2,
+    registeredDelegationDelta: 1,
+    registeredExecutionDelta: 1,
+    proposalDelegationDelta: 1,
+    applyDelegationDelta: branch.applyDelegations,
+    writeDelta: branch.writes,
+    backupDelta: branch.backups,
+    unsafeDelta: 0,
+    targets: {
+      authorization: { count: 1, allTargetRun: true },
+      resume: { count: 1, allTargetRun: true },
+    },
+  });
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([agentRunId]));
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(new Set(runtimeRunIds));
+  expect(completedAgent.toolExecutions).toHaveLength(1);
+  expect(waitingAgent.toolExecutions).toHaveLength(1);
+  expect(h4.pageErrors).toEqual([]);
+  return {
+    decisionBoundary,
+    final,
+    completedAgentResponse,
+    completedAgent,
+    terminalEvents,
+    terminalExecution,
+    runtimeRunIds,
+    runtimeSnapshots,
+    runtimeProjection,
+    terminalSessionResponse,
+    terminalSession,
+    sessionRoleContent,
+    sessionAuthorizationMeta,
+    terminalDom,
+    metricsAtTerminal,
+    terminalMetrics,
+    decisionRequests,
+    totalRequests,
+  };
+}
+
+async function reloadCompletedEditAuthorizationLifecycle(h4, started, completed) {
+  const {
+    page,
+    runtime,
+    branch,
+    agentRunId,
+    authorizationId,
+    sessionId,
+  } = started;
+  const terminalReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  const restoredTerminalDom = await editAuthorizationDomProjection(h4, "terminal", branch);
+  expect(restoredTerminalDom).toEqual(completed.terminalDom);
+  const permissionRestored = await page.locator("#permPillBtn").getAttribute("data-value")
+    === "accept";
+  expect(permissionRestored).toBe(true);
+  const agentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentAfterReload.status).toBe(200);
+  expect(agentAfterReload.body.agentRunId).toBe(agentRunId);
+  expect(editAuthorizationEventProjection(agentAfterReload.body, authorizationId))
+    .toEqual(completed.terminalEvents);
+  expect(editAuthorizationExecutionProjection(agentAfterReload.body))
+    .toEqual(completed.terminalExecution);
+  const sessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionAfterReload.status).toBe(200);
+  expect(Object.keys(sessionAfterReload.body.runState || {})).toEqual([]);
+  expect(editAuthorizationSessionRoleProjection(sessionAfterReload.body.messages, branch))
+    .toEqual(completed.sessionRoleContent);
+  expect(editAuthorizationSessionMetaProjection(
+    sessionAfterReload.body.messages,
+    agentRunId,
+    authorizationId,
+  )).toEqual(completed.sessionAuthorizationMeta);
+  const runtimeSnapshotsAfterReload = [];
+  for (const runtimeRunId of completed.runtimeRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.runId).toBe(runtimeRunId);
+    runtimeSnapshotsAfterReload.push(response.body);
+  }
+  const runtimeProjectionAfterReload = runtimeSnapshotsAfterReload.map((snapshot) => ({
+    status: String(snapshot?.status || ""),
+    nextCursor: Number(snapshot?.nextCursor || 0),
+    eventTypes: (snapshot?.events || []).map((event) => String(event?.type || "")),
+    content: snapshot?.result?.content === EDIT_AUTHORIZATION_CONTRACT.stageMarker
+      ? "stage"
+      : snapshot?.result?.content === branch.finalMarker
+        ? "final"
+        : "empty",
+    finishReason: String(snapshot?.result?.finishReason || ""),
+    toolCallCount: (snapshot?.result?.toolCalls || []).length,
+  }));
+  expect(runtimeProjectionAfterReload).toEqual(completed.runtimeProjection.map((snapshot) => ({
+    status: snapshot.status,
+    nextCursor: snapshot.nextCursor,
+    eventTypes: snapshot.eventTypes,
+    content: snapshot.content,
+    finishReason: snapshot.finishReason,
+    toolCallCount: snapshot.toolCalls.length,
+  })));
+  const metricsAfterTerminalReload = await h4.metrics();
+  expect(metricsAfterTerminalReload.chatRequests).toEqual(completed.metricsAtTerminal.chatRequests);
+  expect(editAuthorizationMetricsProjection(metricsAfterTerminalReload))
+    .toEqual(completed.terminalMetrics);
+  const terminalReloadRequests = editAuthorizationRequestProjection(
+    h4,
+    terminalReloadBoundary,
+    completed.metricsAtTerminal,
+    metricsAfterTerminalReload,
+    agentRunId,
+  );
+  expectEditAuthorizationZeroRequests(terminalReloadRequests);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([agentRunId]));
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(new Set(completed.runtimeRunIds));
+  expect(h4.pageErrors).toEqual([]);
+  return {
+    terminalReloadBoundary,
+    restoredTerminalDom,
+    agentAfterReload,
+    sessionAfterReload,
+    runtimeSnapshotsAfterReload,
+    runtimeProjectionAfterReload,
+    metricsAfterTerminalReload,
+    terminalReloadRequests,
+    permissionRestored,
+  };
+}
+
+async function exerciseEditAuthorizationLifecycle(h4, runtime, branchName) {
+  const started = await beginEditAuthorizationLifecycle(h4, runtime, branchName);
+  const waitingReload = await reloadWaitingEditAuthorizationLifecycle(h4, started);
+  const completed = await completeEditAuthorizationLifecycle(h4, started, waitingReload);
+  const terminalReload = await reloadCompletedEditAuthorizationLifecycle(
+    h4,
+    started,
+    completed,
+  );
+  const { branch, agentRunId, authorizationId } = started;
+  const decisionSubmissionProjection = {
+    requests: completed.decisionRequests,
+    events: completed.terminalEvents.slice(started.waitingEvents.length, 9),
+    execution: completed.terminalExecution,
+    sameAgentRun: completed.completedAgent.agentRunId === started.waitingAgent.agentRunId,
+    authorizationCleared: completed.completedAgent.pendingAuthorization == null,
+    fileEffects: {
+      proposalDelegations: completed.terminalMetrics.counters.proposalDelegations,
+      applyDelegations: completed.terminalMetrics.counters.applyDelegations,
+      writes: completed.terminalMetrics.counters.writes,
+      backups: completed.terminalMetrics.counters.backups,
+    },
+  };
+  const refreshLifecycle = {
+    waiting: {
+      sameAgentRun: waitingReload.waitingAgentAfterReload.body.agentRunId === agentRunId,
+      sameAuthorization: waitingReload.waitingAgentAfterReload.body.pendingAuthorization
+        ?.authorizationId === authorizationId,
+      sameSnapshot: JSON.stringify(editAuthorizationWaitingSnapshotProjection(
+        waitingReload.waitingAgentAfterReload.body,
+        waitingReload.waitingSessionAfterReload.body,
+        agentRunId,
+        authorizationId,
+      )) === JSON.stringify(started.waitingSnapshot),
+      dom: waitingReload.restoredWaitingDom,
+      requests: waitingReload.waitingReloadRequests,
+      permissionRestored: waitingReload.permissionRestored,
+    },
+    terminal: {
+      sameAgentRun: terminalReload.agentAfterReload.body.agentRunId === agentRunId,
+      sameEvents: JSON.stringify(editAuthorizationEventProjection(
+        terminalReload.agentAfterReload.body,
+        authorizationId,
+      )) === JSON.stringify(completed.terminalEvents),
+      sameSession: JSON.stringify(editAuthorizationSessionRoleProjection(
+        terminalReload.sessionAfterReload.body.messages,
+        branch,
+      )) === JSON.stringify(completed.sessionRoleContent),
+      sameAuthorizationMeta: JSON.stringify(editAuthorizationSessionMetaProjection(
+        terminalReload.sessionAfterReload.body.messages,
+        agentRunId,
+        authorizationId,
+      )) === JSON.stringify(completed.sessionAuthorizationMeta),
+      dom: terminalReload.restoredTerminalDom,
+      requests: terminalReload.terminalReloadRequests,
+      permissionRestored: terminalReload.permissionRestored,
+    },
+  };
+  expect(refreshLifecycle.waiting.permissionRestored).toBe(true);
+  expect(refreshLifecycle.terminal.permissionRestored).toBe(true);
+  const hashes = {
+    waitingEventProjection: canonicalHash(started.waitingEvents),
+    waitingSnapshot: canonicalHash(started.waitingSnapshot),
+    waitingDom: canonicalHash(started.waitingDom),
+    decisionSubmissionProjection: canonicalHash(decisionSubmissionProjection),
+    runtimeProjection: canonicalHash(completed.runtimeProjection),
+    sessionRoleContent: canonicalHash(completed.sessionRoleContent),
+    sessionAuthorizationMeta: canonicalHash(completed.sessionAuthorizationMeta),
+    terminalDom: canonicalHash(completed.terminalDom),
+    refreshLifecycle: canonicalHash(refreshLifecycle),
+  };
+  const frozenHashKeys = Object.keys(hashes).sort();
+  for (const branchHashes of Object.values(H4_8C_SEMANTIC_HASHES)) {
+    expect(Object.keys(branchHashes).sort()).toEqual(frozenHashKeys);
+    const branchHashValues = Object.values(branchHashes);
+    const allEmpty = branchHashValues.every((value) => value === "");
+    const allFrozen = branchHashValues.every((value) => /^[0-9a-f]{64}$/.test(value));
+    expect(allEmpty || allFrozen).toBe(true);
+  }
+  const frozenHashes = H4_8C_SEMANTIC_HASHES[branchName];
+  const frozenHashValues = Object.values(frozenHashes);
+  const frozenReady = frozenHashValues.every((value) => /^[0-9a-f]{64}$/.test(value));
+  if (frozenReady) {
+    expect(hashes).toEqual(frozenHashes);
+  } else {
+    expect(frozenHashValues.every((value) => value === "")).toBe(true);
+    expect(runtime).toBe("bundle");
+  }
+  h4.evidence(`${runtime}-edit-authorization-${branch.decision}-reload`, {
+    runtime,
+    decision: branch.decision,
+    fixture: h4.host.ready.proposeEditFixture,
+    identities: {
+      agentRunId: idHash(agentRunId),
+      authorizationId: idHash(authorizationId),
+    },
+    counts: {
+      agentRuns: completed.metricsAtTerminal.production.agentRuns.length,
+      runtimes: completed.metricsAtTerminal.production.runtimeRuns.length,
+      upstreamChat: completed.metricsAtTerminal.chatRequests.length,
+      agentRunPost: completed.totalRequests.agentRunPost,
+      authorizationPost: completed.totalRequests.authorizationPost,
+      resumePost: completed.totalRequests.resumePost,
+      registeredDelegations: completed.terminalMetrics.counters.registeredDelegations,
+      registeredExecutions: completed.terminalMetrics.registeredExecutions.length,
+      proposalDelegations: completed.terminalMetrics.counters.proposalDelegations,
+      applyDelegations: completed.terminalMetrics.counters.applyDelegations,
+      writes: completed.terminalMetrics.counters.writes,
+      backups: completed.terminalMetrics.counters.backups,
+      unsafe: completed.terminalMetrics.counters.unsafe,
+    },
+    agentCursors: {
+      waiting: started.waitingAgent.nextCursor,
+      terminal: completed.completedAgent.nextCursor,
+    },
+    eventTypes: completed.terminalEvents.map((event) => event.type),
+    runtimeCursors: completed.runtimeProjection.map((snapshot) => snapshot.nextCursor),
+    waiting: {
+      snapshot: started.waitingSnapshot,
+      dom: started.waitingDom,
+    },
+    terminal: {
+      sessionRoleContent: completed.sessionRoleContent,
+      sessionAuthorizationMeta: completed.sessionAuthorizationMeta,
+      dom: completed.terminalDom,
+    },
+    fileEffects: {
+      registeredExecutions: completed.terminalMetrics.registeredExecutions,
+      proposalTimeline: completed.terminalMetrics.proposalTimeline,
+      applyTimeline: completed.terminalMetrics.applyTimeline,
+      writeTimeline: completed.terminalMetrics.writeTimeline,
+      backupTimeline: completed.terminalMetrics.backupTimeline,
+    },
+    decisionRequests: completed.decisionRequests,
+    waitingReload: waitingReload.waitingReloadRequests,
+    terminalReload: terminalReload.terminalReloadRequests,
+    hashes,
+  });
+}
+
 async function openAutomaticClassicFallback(h4, failureMode) {
   const { page, host } = h4;
   const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
@@ -7683,6 +9576,22 @@ test("bundle mixed questionnaire preserves progress across reload and submits on
 
 test("direct classic mixed questionnaire preserves progress across reload and submits once", async ({ h4 }) => {
   await exerciseMixedQuestionnaireProgressLifecycle(h4, "classic");
+});
+
+test("bundle edit authorization approve survives reload and applies exactly once", async ({ h4 }) => {
+  await exerciseEditAuthorizationLifecycle(h4, "bundle", "approved");
+});
+
+test("direct classic edit authorization approve survives reload and applies exactly once", async ({ h4 }) => {
+  await exerciseEditAuthorizationLifecycle(h4, "classic", "approved");
+});
+
+test("bundle edit authorization reject survives reload without applying", async ({ h4 }) => {
+  await exerciseEditAuthorizationLifecycle(h4, "bundle", "rejected");
+});
+
+test("direct classic edit authorization reject survives reload without applying", async ({ h4 }) => {
+  await exerciseEditAuthorizationLifecycle(h4, "classic", "rejected");
 });
 
 test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {
