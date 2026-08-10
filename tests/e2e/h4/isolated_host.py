@@ -78,6 +78,8 @@ PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER"
 PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL"
 QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER"
 QUESTIONNAIRE_FINAL = "H4_QUESTIONNAIRE_FINAL"
+MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER"
+MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 STREAM_USER = "H4_STREAM_REFRESH_USER"
@@ -122,6 +124,46 @@ QUESTIONNAIRE_OPTIONS = (
     },
 )
 QUESTIONNAIRE_SELECTED_OPTION = QUESTIONNAIRE_OPTIONS[1]
+MIXED_QUESTIONNAIRE_TOOL_CALL_ID = "h4-mixed-questionnaire-call-1"
+MIXED_QUESTIONNAIRE_TITLE = "H4_MIXED_QUESTIONNAIRE_TITLE"
+MIXED_QUESTIONNAIRE_REASON = "H4_MIXED_QUESTIONNAIRE_REASON"
+MIXED_QUESTIONNAIRE_SINGLE_ID = "h4-mixed-single"
+MIXED_QUESTIONNAIRE_SINGLE_PROMPT = "H4_MIXED_SINGLE_PROMPT"
+MIXED_QUESTIONNAIRE_SINGLE_OPTIONS = (
+    {
+        "value": "h4-mixed-single-a",
+        "label": "H4_MIXED_SINGLE_OPTION_A",
+        "description": "H4_MIXED_SINGLE_OPTION_A_DESCRIPTION",
+    },
+    {
+        "value": "h4-mixed-single-b",
+        "label": "H4_MIXED_SINGLE_OPTION_B",
+        "description": "H4_MIXED_SINGLE_OPTION_B_DESCRIPTION",
+    },
+)
+MIXED_QUESTIONNAIRE_MULTIPLE_ID = "h4-mixed-multiple"
+MIXED_QUESTIONNAIRE_MULTIPLE_PROMPT = "H4_MIXED_MULTIPLE_PROMPT"
+MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS = (
+    {
+        "value": "h4-mixed-multiple-a",
+        "label": "H4_MIXED_MULTIPLE_OPTION_A",
+        "description": "H4_MIXED_MULTIPLE_OPTION_A_DESCRIPTION",
+    },
+    {
+        "value": "h4-mixed-multiple-b",
+        "label": "H4_MIXED_MULTIPLE_OPTION_B",
+        "description": "H4_MIXED_MULTIPLE_OPTION_B_DESCRIPTION",
+    },
+    {
+        "value": "h4-mixed-multiple-c",
+        "label": "H4_MIXED_MULTIPLE_OPTION_C",
+        "description": "H4_MIXED_MULTIPLE_OPTION_C_DESCRIPTION",
+    },
+)
+MIXED_QUESTIONNAIRE_OTHER = "H4_MIXED_MULTIPLE_OTHER"
+MIXED_QUESTIONNAIRE_TEXT_ID = "h4-mixed-text"
+MIXED_QUESTIONNAIRE_TEXT_PROMPT = "H4_MIXED_TEXT_PROMPT"
+MIXED_QUESTIONNAIRE_TEXT_ANSWER = "H4_MIXED_TEXT_ANSWER"
 READ_PATH = "fixture.txt"
 FIXTURE_CONTENT = "H4_SYNTHETIC_FILE_CONTENT\n"
 MISSING_READ_PATH = "h4-missing-fixture.txt"
@@ -336,6 +378,27 @@ def _message_text(message: dict) -> str:
     return str(content or "")
 
 
+def _questionnaire_scenario(
+    messages: list,
+    user_text: str,
+    user_marker: str,
+    tool_call_id: str,
+    scenario_prefix: str,
+) -> tuple[str, bool] | None:
+    if user_marker not in user_text:
+        return None
+    has_receipt = any(
+        isinstance(message, dict)
+        and message.get("role") == "tool"
+        and str(message.get("tool_call_id") or "") == tool_call_id
+        for message in messages
+    )
+    return (
+        f"{scenario_prefix}-final" if has_receipt else f"{scenario_prefix}-call",
+        has_receipt,
+    )
+
+
 def _scenario_for(payload: dict) -> tuple[str, bool]:
     messages = payload.get("messages") or []
     user_text = ""
@@ -356,19 +419,22 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             *SUCCESS_RESET_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
             QUESTIONNAIRE_TOOL_CALL_ID,
+            MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
         }:
             has_tool_result = True
-    if QUESTIONNAIRE_USER in user_text:
-        has_questionnaire_receipt = any(
-            isinstance(message, dict)
-            and message.get("role") == "tool"
-            and str(message.get("tool_call_id") or "") == QUESTIONNAIRE_TOOL_CALL_ID
-            for message in messages
+    for questionnaire_contract in (
+        (
+            MIXED_QUESTIONNAIRE_USER,
+            MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
+            "mixed-questionnaire",
+        ),
+        (QUESTIONNAIRE_USER, QUESTIONNAIRE_TOOL_CALL_ID, "questionnaire"),
+    ):
+        questionnaire_scenario = _questionnaire_scenario(
+            messages, user_text, *questionnaire_contract,
         )
-        return (
-            "questionnaire-final" if has_questionnaire_receipt else "questionnaire-call",
-            has_questionnaire_receipt,
-        )
+        if questionnaire_scenario:
+            return questionnaire_scenario
     if SUCCESS_RESET_USER in user_text:
         completed_calls = {
             str(message.get("tool_call_id") or "")
@@ -578,13 +644,62 @@ def _parallel_failure_followup_context_projection(payload: dict) -> dict:
     }
 
 
-def _questionnaire_receipt_projection(payload: dict) -> dict:
+def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
+    if scenario == "questionnaire-call":
+        return QUESTIONNAIRE_TOOL_CALL_ID, {
+            "title": QUESTIONNAIRE_TITLE,
+            "reason": QUESTIONNAIRE_REASON,
+            "questions": [{
+                "id": QUESTIONNAIRE_QUESTION_ID,
+                "prompt": QUESTIONNAIRE_PROMPT,
+                "type": "single",
+                "required": True,
+                "allowOther": False,
+                "options": list(QUESTIONNAIRE_OPTIONS),
+            }],
+        }
+    if scenario == "mixed-questionnaire-call":
+        return MIXED_QUESTIONNAIRE_TOOL_CALL_ID, {
+            "title": MIXED_QUESTIONNAIRE_TITLE,
+            "reason": MIXED_QUESTIONNAIRE_REASON,
+            "questions": [
+                {
+                    "id": MIXED_QUESTIONNAIRE_SINGLE_ID,
+                    "prompt": MIXED_QUESTIONNAIRE_SINGLE_PROMPT,
+                    "type": "single",
+                    "required": True,
+                    "allowOther": False,
+                    "options": list(MIXED_QUESTIONNAIRE_SINGLE_OPTIONS),
+                },
+                {
+                    "id": MIXED_QUESTIONNAIRE_MULTIPLE_ID,
+                    "prompt": MIXED_QUESTIONNAIRE_MULTIPLE_PROMPT,
+                    "type": "multiple",
+                    "required": True,
+                    "allowOther": True,
+                    "options": list(MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS),
+                },
+                {
+                    "id": MIXED_QUESTIONNAIRE_TEXT_ID,
+                    "prompt": MIXED_QUESTIONNAIRE_TEXT_PROMPT,
+                    "type": "text",
+                    "required": True,
+                    "allowOther": False,
+                },
+            ],
+        }
+    raise ValueError(f"unsupported questionnaire scenario: {scenario}")
+
+
+def _questionnaire_receipt_result(
+    payload: dict, tool_call_id: str,
+) -> tuple[list, bool, dict]:
     receipts = [
         message
         for message in (payload.get("messages") or [])
         if isinstance(message, dict)
         and message.get("role") == "tool"
-        and str(message.get("tool_call_id") or "") == QUESTIONNAIRE_TOOL_CALL_ID
+        and str(message.get("tool_call_id") or "") == tool_call_id
     ]
     parsed = False
     result = {}
@@ -596,6 +711,23 @@ def _questionnaire_receipt_projection(payload: dict) -> dict:
         if isinstance(candidate, dict):
             result = candidate
             parsed = True
+    return receipts, parsed, result
+
+
+def _markers_once_in_order(value: object, markers: tuple[str, ...]) -> bool:
+    text = str(value or "")
+    positions = [text.find(marker) for marker in markers]
+    return (
+        all(position >= 0 for position in positions)
+        and positions == sorted(positions)
+        and all(text.count(marker) == 1 for marker in markers)
+    )
+
+
+def _questionnaire_receipt_projection(payload: dict) -> dict:
+    receipts, parsed, result = _questionnaire_receipt_result(
+        payload, QUESTIONNAIRE_TOOL_CALL_ID,
+    )
     answers = result.get("answers") if isinstance(result.get("answers"), list) else []
     answer = answers[0] if len(answers) == 1 and isinstance(answers[0], dict) else {}
     values = answer.get("values") if isinstance(answer.get("values"), list) else []
@@ -622,6 +754,107 @@ def _questionnaire_receipt_projection(payload: dict) -> dict:
         "otherEmpty": not str(answer.get("other") or ""),
         "summaryMatches": QUESTIONNAIRE_PROMPT in summary
         and QUESTIONNAIRE_SELECTED_OPTION["label"] in summary,
+    }
+
+
+def _mixed_questionnaire_receipt_projection(payload: dict) -> dict:
+    receipts, parsed, result = _questionnaire_receipt_result(
+        payload, MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
+    )
+    answers = result.get("answers") if isinstance(result.get("answers"), list) else []
+    answer_by_id = {
+        str(answer.get("id") or ""): answer
+        for answer in answers
+        if isinstance(answer, dict)
+    }
+    single = answer_by_id.get(MIXED_QUESTIONNAIRE_SINGLE_ID, {})
+    multiple = answer_by_id.get(MIXED_QUESTIONNAIRE_MULTIPLE_ID, {})
+    text_answer = answer_by_id.get(MIXED_QUESTIONNAIRE_TEXT_ID, {})
+    single_values = (
+        single.get("values") if isinstance(single.get("values"), list) else []
+    )
+    multiple_values = (
+        multiple.get("values")
+        if isinstance(multiple.get("values"), list)
+        else []
+    )
+    multiple_answer_markers = (
+        MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS[0]["label"],
+        MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS[2]["label"],
+        MIXED_QUESTIONNAIRE_OTHER,
+    )
+    summary_markers = (
+        MIXED_QUESTIONNAIRE_SINGLE_PROMPT,
+        MIXED_QUESTIONNAIRE_SINGLE_OPTIONS[1]["label"],
+        MIXED_QUESTIONNAIRE_MULTIPLE_PROMPT,
+        *multiple_answer_markers,
+        MIXED_QUESTIONNAIRE_TEXT_PROMPT,
+        MIXED_QUESTIONNAIRE_TEXT_ANSWER,
+    )
+    expected_ids = [
+        MIXED_QUESTIONNAIRE_SINGLE_ID,
+        MIXED_QUESTIONNAIRE_MULTIPLE_ID,
+        MIXED_QUESTIONNAIRE_TEXT_ID,
+    ]
+    return {
+        "receiptCount": len(receipts),
+        "parseable": parsed,
+        "nameMatches": len(receipts) == 1
+        and str(receipts[0].get("name") or "") == "request_user_input",
+        "ok": result.get("ok") is True,
+        "actionMatches": str(result.get("action") or "") == "request_user_input",
+        "requestIdMatches": str(result.get("requestId") or "")
+        == f"user-input-{MIXED_QUESTIONNAIRE_TOOL_CALL_ID}",
+        "titleMatches": str(result.get("title") or "")
+        == MIXED_QUESTIONNAIRE_TITLE,
+        "answerCount": len(answers),
+        "answerOrderMatches": [
+            str(answer.get("id") or "")
+            for answer in answers
+            if isinstance(answer, dict)
+        ] == expected_ids,
+        "allResolved": all(
+            str(answer_by_id.get(question_id, {}).get("status") or "")
+            == "resolved"
+            for question_id in expected_ids
+        ),
+        "typesMatch": [
+            str(answer_by_id.get(question_id, {}).get("type") or "")
+            for question_id in expected_ids
+        ] == ["single", "multiple", "text"],
+        "promptsMatch": [
+            str(answer_by_id.get(question_id, {}).get("prompt") or "")
+            for question_id in expected_ids
+        ] == [
+            MIXED_QUESTIONNAIRE_SINGLE_PROMPT,
+            MIXED_QUESTIONNAIRE_MULTIPLE_PROMPT,
+            MIXED_QUESTIONNAIRE_TEXT_PROMPT,
+        ],
+        "singleValueCount": len(single_values),
+        "singleSelectionMatches": single_values
+        == [MIXED_QUESTIONNAIRE_SINGLE_OPTIONS[1]["value"]],
+        "singleAnswerMatches": str(single.get("answer") or "")
+        == MIXED_QUESTIONNAIRE_SINGLE_OPTIONS[1]["label"],
+        "singleOtherEmpty": not str(single.get("other") or ""),
+        "multipleValueCount": len(multiple_values),
+        "multipleSelectionsMatch": multiple_values == [
+            MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS[0]["value"],
+            MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS[2]["value"],
+        ],
+        "multipleOtherMatches": str(multiple.get("other") or "")
+        == MIXED_QUESTIONNAIRE_OTHER,
+        "multipleAnswerMarkersMatch": _markers_once_in_order(
+            multiple.get("answer"), multiple_answer_markers,
+        ),
+        "textValuesAbsent": text_answer.get("values") is None,
+        "textMatches": str(text_answer.get("text") or "")
+        == MIXED_QUESTIONNAIRE_TEXT_ANSWER,
+        "textAnswerMatches": str(text_answer.get("answer") or "")
+        == MIXED_QUESTIONNAIRE_TEXT_ANSWER,
+        "textOtherEmpty": not str(text_answer.get("other") or ""),
+        "summaryMarkersMatch": _markers_once_in_order(
+            result.get("summary"), summary_markers,
+        ),
     }
 
 
@@ -1129,6 +1362,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["questionnaireReceipt"] = (
                 _questionnaire_receipt_projection(payload)
             )
+        if scenario == "mixed-questionnaire-final":
+            chat_metric["mixedQuestionnaireReceipt"] = (
+                _mixed_questionnaire_receipt_projection(payload)
+            )
         METRICS.append("chatRequests", chat_metric)
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
@@ -1175,6 +1412,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
                 "executor-range-call", "missing-file-call", "questionnaire-call",
+                "mixed-questionnaire-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("forced-final-model-failure-call-")
@@ -1287,25 +1525,16 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_tool_detail_frame("[DONE]")
             return
 
-        if scenario == "questionnaire-call":
-            questionnaire_arguments = {
-                "title": QUESTIONNAIRE_TITLE,
-                "reason": QUESTIONNAIRE_REASON,
-                "questions": [{
-                    "id": QUESTIONNAIRE_QUESTION_ID,
-                    "prompt": QUESTIONNAIRE_PROMPT,
-                    "type": "single",
-                    "required": True,
-                    "allowOther": False,
-                    "options": list(QUESTIONNAIRE_OPTIONS),
-                }],
-            }
+        if scenario in ("questionnaire-call", "mixed-questionnaire-call"):
+            questionnaire_tool_call_id, questionnaire_arguments = (
+                _questionnaire_call_contract(scenario)
+            )
             frames = [
                 _chunk({
                     "role": "assistant",
                     "tool_calls": [{
                         "index": 0,
-                        "id": QUESTIONNAIRE_TOOL_CALL_ID,
+                        "id": questionnaire_tool_call_id,
                         "type": "function",
                         "function": {
                             "name": "request_user_input",
@@ -1517,6 +1746,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "timing-queue": TIMING_QUEUE_FINAL,
                 "parallel-failure-followup": PARALLEL_FAILURE_FOLLOWUP_FINAL,
                 "questionnaire-final": QUESTIONNAIRE_FINAL,
+                "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [
