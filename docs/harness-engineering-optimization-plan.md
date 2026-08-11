@@ -698,6 +698,10 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 **H4-7C 阶段更新（2026-08-08）**：队列/并行真实 DOM 生命周期继续收窄完成 detached `/parallel` 单次确定性模型失败隔离：background 独立 failed，不改变活动主任务工具归组、完成计时或最终 completed；同进程完整 reload 保持失败终态唯一且不创建新 Run、chat 或工具执行。显式取消、超时、排队失败/取消、Child、active/cross-process background 恢复及新并发产品语义仍未覆盖。完整证据与限制见 [`H4-7C detached parallel 模型失败隔离与终态刷新唯一性`](harness/h4-7c-detached-parallel-failure-isolation.md)。
 
+**Harness 第一轮完成状态（2026-08-12）**：第一轮已经按 [`Harness 第一轮完成线`](harness/harness-round-1-completion-line.md) 在冻结证据树 `618f876fb7d09f821b302eaf5a731f367fd894ac` 完成。H4-8D 固定 approved stale conflict、H4-8E 问卷等待态与单项队列刷新顺序、H4-8F authorization POST 到达生产 handler 前失败后的单次手动安全重试，以及 H4-8G detached `/parallel` 编辑授权在 current/last-active Session 完整刷新后的恢复均已形成 bundle/direct classic 对等专题和独立提交；详见 [`H4-8D`](harness/h4-8d-approved-stale-edit-conflict.md)、[`H4-8E`](harness/h4-8e-questionnaire-queue-refresh-order.md)、[`H4-8F`](harness/h4-8f-authorization-request-failure-retry.md) 与 [`H4-8G`](harness/h4-8g-detached-parallel-edit-authorization-refresh.md)。最终文件树的两轮 H4 为 `67 passed (3.9m)` 与 `67 passed (4.4m)`，均为 1 worker、0 retry、各 67 条 cleanup；相关回归、完整 pytest、replay、frontend/语法/diff 和资源审计按完成线闭合。
+
+该完成状态只覆盖完成线定义的有限固定场景，不表示通用 exactly-once、授权恢复完整覆盖、并发/多标签页/多 actor 或浏览器矩阵穷举，也不覆盖 active worker 跨进程恢复、真实外网/模型/凭据、主观视觉或可访问性。以下 H4 工作项与验收条款保留为原路线设计记录；它们不再表示第一轮仍未完成，也不自动授权 H4-8H、H5 或任何下一 TODO。
+
 **工作项**：
 
 1. 引入轻量浏览器测试依赖和隔离测试服务。
@@ -883,14 +887,8 @@ H0 阶段先测量基线，再确定最终阈值。建议持续跟踪：
 
 ---
 
-## 十七、建议的准确下一步
+## 十七、第一轮完成后的启动边界
 
-下一阶段只启动 **H0-1：现有事件与状态事实清单**，不修改运行时行为：
+截至 2026-08-12，原“下一阶段只启动 H0-1”的指令已经随 H0～H4 第一轮完成而过期，不再作为当前执行入口。当前没有自动选定的下一 Harness 阶段。
 
-1. 从 `server.py` 提取所有 AgentRun 状态、事件生产点和载荷字段。
-2. 从 `agent-runtime.js`、`app.js` 和 `src/ui/` 提取全部事件消费和状态判断点。
-3. 生成一份可测试的映射表，标记孤立事件、重复含义、无消费者字段和前端推断状态。
-4. 为纯文本、单工具、多工具、问卷、授权、压缩、取消和刷新恢复准备首批脱敏轨迹。
-5. 运行当前完整回归并记录基线，不做功能修改。
-
-H0-1 验收后，再单独确认 H0-2 的轨迹夹具格式和脱敏规则。不得在同一阶段直接进入 reducer 重写或 `server.py` 大规模拆分。
+后续如需从统一 [`TODO`](../TODO.md) 启动新的 Harness 工作，必须重新执行需求分析与实施确认门禁：先选择唯一目标，核对专题证据未覆盖的真实缺口，明确生产/协议/持久化/安全边界、兼容与回退、自动和人工验收，再由用户或绑定审批会话授权。不得从第一轮完成声明自动启动 H4-8H、H5、active 跨进程恢复、其他浏览器矩阵或任何功能路线。

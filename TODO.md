@@ -1,6 +1,6 @@
 ﻿# Code TODO
 
-_上次更新：2026-08-09_
+_上次更新：2026-08-12_
 
 本清单只保留尚未完成的工作；已交付内容统一从 [`docs/development-log/README.md`](docs/development-log/README.md) 索引查阅。
 
@@ -25,25 +25,10 @@ _上次更新：2026-08-09_
 
 ## P1 · Code 核心能力
 
-- 按 [`Harness 工程优化指导`](docs/harness-engineering-optimization-plan.md) 继续完成 H4 剩余浏览器生命周期；H0～H3、replay 发布门禁、H4-1 浏览器基础设施与首批冒烟、H4-2 默认 bundle 刷新恢复、H4-3 classic fallback 直接入口刷新兼容、H4-4 自动 bundle 失败降级、H4-5A completed AgentRun 跨进程终态重载、H4-5B1 终态工具轨迹跨进程零重执行、H4-6A 默认 bundle 工具详情生命周期、H4-6B direct classic 工具详情对等、H4-6C 默认 bundle 同轮双工具生命周期、H4-6D direct classic 同轮双工具对等、H4-6E 默认 bundle `read_file` 参数校验失败生命周期、H4-6F direct classic 对等、H4-6G bundle/direct classic `read_file` 行范围生产执行器失败、H4-6H bundle/direct classic `read_file` 缺文件生产执行器失败、H4-6I bundle/direct classic 工具参数 JSON 解析失败及 H4-6J bundle/direct classic 缺少必填 `path` 的 schema 失败闭环均已收口，长期事实见对应专题和开发日志。
-  - H4-2 已完成默认 bundle 的同进程模型流式刷新恢复：首增量前刷新、已有两段后刷新继续追加、已有两段后刷新再取消均复用同一 AgentRun/Runtime，未创建第二上游请求或重复 assistant；活动 Session JSONL 不保存部分正文及 `streaming/_streamProjection`，成功终态才保存完整正文。
-  - 2026-08-07 真实 Code Dev 复验发现并修正了启动阶段的模型目录阻塞：AgentRun/Runtime 恢复现在位于 `refreshModels()` 之前，但仍在平台同步与认证失效检查之后。慢目录闸门回归证明目录阻塞期间已发起 Runtime GET 并恢复前缀/取消；人工结果是刷新后短暂等待即恢复正常流式，当前基本满足需求。这不声称正文瞬时恢复；后续若追求更低延迟，须单独度量 Session/平台同步、AgentRun GET、Runtime GET 和首个 DOM 追赶的时间线，不得通过新建第二刷新状态机或把临时流式字段写入 JSONL 规避。
-  - H4-3 已完成 classic fallback 直接入口的同进程刷新兼容：三条 classic 场景复用 H4-2 的相同恢复流程、闸门和断言，保持同一 AgentRun/Runtime、DOM 前缀不回退及取消终态闭合。
-  - H4-4 已完成默认根入口的自动失败降级：真实 Chromium 分别注入单次 bundle-load 与 bundle-init 故障，固定对应 fallback 原因、单次 classic 初始化和降级后纯文本任务闭环；隔离 host 同时以严格命令身份/退出分类关闭 shutdown 响应与正常 exit(0) 的竞态，不会吞掉非零、signal 或非 shutdown 错误。提交前曾独立出现一次 stop-time metrics 超时；阶段按门禁停止并增加白名单阶段 breadcrumb，随后一次定向与累计三轮标准 11 例矩阵连续通过，但历史超时仍未复现、根因未定位，诊断不代表放宽 5 秒上限、stop-time metrics 或严格清理门禁。
-  - H4-5A 已完成 completed/terminal 纯文本 AgentRun 的真实跨进程重载：进程 A 完成持久化并退出、端口关闭后，进程 B 以新 PID、新随机端口和新 origin 复用同一受控数据根；浏览器通过生产 Session 列表/UI 打开同一 Session，B 读取同一 completed AgentRun，旧 Runtime 返回 404 且不创建新 Run、Runtime、chat 或工具执行，Session JSONL 与 DOM user/assistant/final 保持唯一。普通前台 `clientRequestId` 当前为空，本阶段只验证 A/B 保存同一实际值。
-  - H4-6A 已完成默认 bundle 单只读工具的真实详情生命周期：运行中用户展开在第二轮正文重绘后保持，同一稳定 key 不变；服务端 completed 后等待前端 banner、stop 和 active/completed trace 四项收敛，再证明工具组自动折叠。完成态通过父 trace→工具组→单项三层真实点击查看参数与格式化结果；完整刷新后三层默认折叠且 AgentRun POST、Runtime POST、chat、工具执行增量均为 0，展开偏好不持久化。
-  - H4-6B 已完成 direct classic 的单只读工具详情对等：复用 H4-6A 相同生产模块、双闸门和参数化流程，保持运行中重绘展开、前端终态折叠、完成态三层交互、完整刷新默认折叠与四项增量为 0；classic 精确标记为 `classic-fallback` 且无 bundle ready，本阶段不属于自动 bundle 故障降级。
-  - H4-6C 已完成默认 bundle 的同轮双只读工具详情生命周期：T1/T2 均受限为 `read_file("fixture.txt")`，第二调用只增加 `startLine=1/endLine=1`；测试侧闸门固定 T1 completed/T2 running 的执行边界，终态闭合 11 事件、Session 两对 tool-call/tool-result、单组双项 T1→T2、重绘保持展开、刷新默认折叠及四项零增量。自动证据只证明结构稳定性，不证明人眼感知的整片闪烁、布局跳动或滚动问题已解决。
-  - H4-6D 已完成 direct classic 的同轮双只读工具对等：参数化复用 H4-6C 的同一双工具任务、三个闸门及 AgentRun/Runtime/Session/DOM 链，保持 11 事件、T1→T2、单组双项重绘与刷新四项零增量；classic 精确标记为 `classic-fallback` 且无 bundle ready，不属于自动故障降级场景，八类领域哈希与 bundle 完全相同。
-  - H4-6E 已完成默认 bundle 的生产 `read_file` 参数 schema 校验失败生命周期：固定合法 path 加 `unexpected` 额外字段，生产 `additional_property` 在执行器前拒绝，失败回执进入第二轮且父 Run completed；闭合九事件、Runtime cursor `4/0 → 4/3`、Session 五角色链、失败工具组两相 DOM 语义和刷新四项零增量。
-  - H4-6F 已完成 direct classic 的同一参数校验失败对等：直接加载 `/dist/frontend/index.classic.html`，精确标记为 `classic-fallback`、无 bundle ready 和 fallback query；复用 H4-6E 同一生产链、失败语义、刷新零增量及八类领域哈希，不属于自动 bundle 故障降级。
-  - H4-6G 已完成 bundle 与 direct classic 的生产 `read_file` 行范围执行器失败闭环：固定 schema-valid `{"path":"fixture.txt","startLine":2,"endLine":1}` 真实进入 `execute_registered_tool → execute_read_file_tool`，生产委托/执行各一次并在执行器内失败；父 Run 经第二轮固定终答 completed，刷新后 AgentRun POST、Runtime POST、chat、工具执行四项增量均为 0，两种入口八类语义哈希一致。这不是 `invalid_tool_arguments`，也不代表其他文件系统或执行器失败已覆盖。
-  - H4-6H 已完成 bundle 与 direct classic 的生产 `read_file` 缺文件执行器失败闭环：固定 `{"path":"h4-missing-fixture.txt"}` 通过生产 schema 和精确测试侧安全分支后，仍调用原 `execute_registered_tool → execute_read_file_tool`，由 project target 的存在性检查抛出“文件不存在”；生产委托/执行各一次、unsafe 为 0，父 Run 九事件 completed，Runtime `4/0 → 4/3`、Session 五角色、失败 DOM 与刷新四项零增量闭合，两种入口八类语义哈希一致。isolated home 同名不存在只作额外隔离审计，不属于生产失败因果链。
-  - H4-6I 已完成 bundle 与 direct classic 的生产工具参数 JSON 解析失败闭环：固定原始 malformed JSON `{"path":"fixture.txt"` 真实进入 `json.loads()` / `parseError` 并在执行器前失败，生产委托/执行与 unsafe 均为 0；AgentRun 持久化原始坏 JSON，Session/UI 则只保留规范化的 `read_file` action、无 path 且不保留原文。父 Run 九事件 completed，Runtime `4/0 → 4/3`、Session 五角色、失败 DOM 与刷新四项零增量闭合，两种入口八类语义哈希一致。
-  - H4-6J 已完成 bundle 与 direct classic 的生产 `read_file` 缺少必填 `path` schema 失败闭环：固定合法 JSON 原始字符串 `"{}"` 命中唯一 `path/required/is required`，在执行器前失败且生产委托/执行与 unsafe 均为 0；AgentRun 仍持久化唯一失败 execution，失败 receipt 进入第二轮并使父 Run 九事件 completed。Session/UI 保留 `read_file` action、无 path，Runtime `4/0 → 4/3`、Session 五角色、失败 DOM、刷新四项零增量和八类 bundle/classic 对等哈希闭合。共享失败 helper 另以具体旧节点断开证明活动态重绘替换节点，并改为只对当前仍 open 的具体节点折叠，未放宽任何产品或测试门禁。
-  - H4-6K 已完成 bundle 与 direct classic 的相同 `read_file` 执行器失败限流闭环：同一 schema-valid 行范围失败前三次真实执行并得到 `failureCount=1/2/3`，第三次标记 `retryLimitReached`；第四个新 toolCallId 的同指纹调用以 `repeated_tool_failure/retryBlocked` 阻断且不进入执行器，第五轮移除 tools/tool_choice 并固定终答，父 Run 以 25 事件 completed。Session 四对工具消息、单组四个失败项、刷新四项零增量及九类 bundle/classic 对等哈希闭合；执行前 schema/parse 失败不属于本限流证据。
-  - H4-2/H4-3 取消只保证已有正文保留、唯一暂停、唯一 DELETE、cancelled 且无成功终答；本地合成上游可能有一个在途片段先于取消收敛落盘，不承诺点击后绝无新字节。H4-5A/H4-5B1 不证明 active Run 自动续流、部分正文跨进程保留、同 origin/原标签页重连、Runtime 持久化或工具副作用 exactly-once。
-  - 真实剩余事项：active worker 跨进程消费已完成 receipt 的产品语义门禁（须先明确 explicit/auto resume 及是否允许新模型请求），异构多工具、其他 required 字段与其他解析错误、权限/编码/大文件及其他工具执行器失败、不同参数/工具或错误交替的限流、强制终答失败分支、其他 classic 失败类型、工具取消/长输出详情，以及问卷/授权、压缩、图片、队列/并行/Child 等真实 DOM 生命周期；后续阶段确认前不得把 HTML 投影、离线 replay、自动降级、同进程模型流式刷新、terminal 工具轨迹零重执行或 H4-6A～H4-6K 证据扩张为这些路径已通过。H1～H4 稳定后才扩大 Context Envelope、结构化计划、生命周期 Hook 与 Workflow。
+- Harness 第一轮已经按 [`Harness 第一轮完成线`](docs/harness/harness-round-1-completion-line.md) 在冻结证据树 `618f876fb7d09f821b302eaf5a731f367fd894ac` 完成；H0～H3、replay 发布门禁以及 H4-1～H4-8G 的有限证明边界统一从专题和开发日志查阅，不再在 TODO 重复维护已完成差量。本结论不表示通用 exactly-once、授权恢复完整覆盖或全部浏览器/并发组合已经通过，也不自动启动 H4-8H、H5 或下一事项。
+  - 后续轮次真实剩余：active worker 跨进程消费已完成 receipt 的产品语义门禁，须先明确 explicit/auto resume 以及是否允许新模型请求；不得由 terminal 跨进程重载证据推定 active 恢复已经完成。
+  - 后续轮次真实剩余：异构多工具、其他 required 字段与未覆盖解析错误、权限/编码/大文件及其他工具执行器失败、不同参数/工具或错误交替达到阈值后的行为、其他模型错误/恢复策略、其他 classic 失败类型、工具取消与长输出详情。
+  - 后续轮次真实剩余：超出第一轮固定场景的压缩、图片、队列/并行、background/detached、Child、多 proposal/pending、多标签页/actor、服务重启/crash window、Firefox/WebKit、真实外网/模型/凭据及主观视觉/可访问性生命周期。后续阶段必须重新确认目标、自动验收和安全边界，不得从本次完成判定选择下一项。
 - 调整消息输入框与页面主题背景的层级：深色主题下让输入框使用略浅的中性主题底色（如灰色），避免输入区域与页面背景融为一体；浅色主题也应通过统一设计令牌保持可辨识但不过度突出。实现时一并核对默认、悬停、聚焦、禁用、拖放附件和多行展开状态，以及开发构建、正式构建与经典回退页面，保证文本、占位符、边框和操作按钮的对比度不回归。
 - 重新评估顶部“工具日志”的产品定位：当前单个任务内的阶段工具组已承担工具时序、当前动作、展开详情和完成统述，顶部全局工具记录总览存在信息重复且独立阅读价值不明确。先盘点它是否仍服务于跨任务观察、后台/并行任务、失败定位或快速跳转；若没有不可替代职责则移除，并同步清理状态、事件订阅和空白布局；若保留则扩展为明确的全局活动/异常入口，不再重复逐条展示当前任务已有记录。验收需覆盖普通任务、队列、并行与 Child AgentRun、任务切换、失败/取消、刷新恢复和无工具任务，且不得丢失唯一可见的错误或进行中状态。
 - 优化新消息发送后的阅读锚点与流式滚动：当用户原本位于会话底部并发送新消息时，临时把该用户消息定位在输入框上方一段稳定距离，为模型首段回答和后续工具/思考轨迹预留屏幕中部空间，避免内容从最底部起步及流式增长造成频繁视口抖动；用户已经向上浏览历史时不得强制抢回滚动位置。方案需先对照当前 Codex 的实际消息布局、发送后锚定、流式跟随和用户接管滚动行为；[OpenAI 官方更新日志](https://learn.chatgpt.com/docs/changelog#codex-2026-06-16-app)目前只公开提到改进了 assistant message actions 与 transcript layout，未披露具体滚动算法，因此实现依据必须来自当前版本的可复现实测，而不是根据描述推测。优先评估稳定锚点/动态占位与按帧合并滚动更新，明确占位何时释放、用户滚动何时接管，并覆盖短/长回答、工具组展开折叠、图片、窗口缩放、移动尺寸、刷新恢复、队列和并行任务；验收以发送后首帧位置稳定、流式过程无明显闪动、用户手动滚动不被打断为准。

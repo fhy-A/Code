@@ -4,7 +4,9 @@
 
 本文为 Harness 第一轮工程建立一个有限、可复现、可验收的完成边界。它定义“何时可以宣布第一轮完成”，不替代统一 `TODO`、开发日志、日志索引或活动交接，也不把正在开发、仅完成 bootstrap 或尚未提交的证据提前记为完成事实。
 
-第一轮只有在本文“完成定义”中的必选项和最终门禁全部通过后才能结束。单条用例通过、候选哈希生成、局部实现完成或一次环境补证都不构成阶段完成。后续 H4-8D 及本轮其他专题在收口时应引用本文，并按各自真实文件树、验证结果和独立本地提交记录完成事实。
+第一轮只有在本文“完成定义”中的必选项和最终门禁全部通过后才能结束。单条用例通过、候选哈希生成、局部实现完成或一次环境补证都不构成阶段完成。各专题在收口时引用本文，并按各自真实文件树、验证结果和独立本地提交记录完成事实。
+
+截至 2026-08-12 的综合核对，本文五项完成定义已经在冻结证据树 `618f876fb7d09f821b302eaf5a731f367fd894ac` 全部闭合。该结论只适用于本文定义的有限第一轮边界，不扩张任何专题的证明范围。
 
 ## 完成定义
 
@@ -51,30 +53,36 @@ H4-8D 只有在独立语义哈希固化后，bundle 与 direct classic 逐项相
 - 每轮结束时 H4/isolated-host/Chromium 相关进程、对应监听、受控临时根和仓库 fixture 均归零；成功与失败诊断按批准规则保留，不用清理掩盖结果；
 - 每个完成专题准确记录证明边界、兼容与回退，最终以明确白名单创建独立本地提交；第一轮收口不自动授权 push、tag、release 或下一阶段工作。
 
-## 当前已完成
+## 完成证据矩阵
 
-截至本文起草时，下列与本完成线直接相关的事实已经由专题和本地提交收口。这里引用的是各提交对应最终文件树上的历史验证事实，不表示本次文档起草重新运行了这些矩阵，也不表示第一轮已经完成。
+下列事实均已形成专题和独立本地提交。这里引用各提交对应最终文件树上的历史验证事实；本次综合收口不重新运行、重基线或改写既有 H4 测试。
 
-| 已提交阶段 | 已完成边界 | 专题 | 提交 |
-|---|---|---|---|
-| H3 replay 发布门禁 | 离线 replay、检查点恢复与发布门禁基线 | [`h3-final-coverage-release-gate.md`](h3-final-coverage-release-gate.md) | `7705b3d414446c19c22b4799498cd7ec2b3bfadd` |
-| H4-8A | 固定 required single-choice 问卷等待态刷新、一次 input/resume、同 Run 完成与终态零重放 | [`h4-8a-request-user-input-refresh-resume.md`](h4-8a-request-user-input-refresh-resume.md) | `b8349ade4ed45eadebd9f2bef9f03bfb3e3c62fc` |
-| H4-8B | 固定三题 mixed questionnaire 的渐进进度、Q2 完成后且 Q3 尚未填写时刷新、一次提交与终态零重放 | [`h4-8b-mixed-questionnaire-progress-refresh.md`](h4-8b-mixed-questionnaire-progress-refresh.md) | `68d8165cc27695d7e3f13fe7b68341c6f42bc058` |
-| H4-8C | 固定单一编辑建议的前台批准/拒绝、等待态与终态刷新恢复、受控副作用边界 | [`h4-8c-edit-authorization-refresh-resume.md`](h4-8c-edit-authorization-refresh-resume.md) | `282636a9297054a47db311b2e47c73f2d92b6450` |
+| 完成项 | 已完成边界 | 专题 | 提交 | 判定 |
+|---|---|---|---|---|
+| H3 replay 发布门禁 | 离线 replay、检查点恢复与发布门禁基线 | [`h3-final-coverage-release-gate.md`](h3-final-coverage-release-gate.md) | `7705b3d414446c19c22b4799498cd7ec2b3bfadd` | 已完成 |
+| H4-8A | 固定 required single-choice 问卷等待态刷新、一次 input/resume、同 Run 完成与终态零重放 | [`h4-8a-request-user-input-refresh-resume.md`](h4-8a-request-user-input-refresh-resume.md) | `b8349ade4ed45eadebd9f2bef9f03bfb3e3c62fc` | 已完成 |
+| H4-8B | 固定三题 mixed questionnaire 的渐进进度、Q2 完成后且 Q3 尚未填写时刷新、一次提交与终态零重放 | [`h4-8b-mixed-questionnaire-progress-refresh.md`](h4-8b-mixed-questionnaire-progress-refresh.md) | `68d8165cc27695d7e3f13fe7b68341c6f42bc058` | 已完成 |
+| H4-8C | 固定单一编辑建议的前台批准/拒绝、等待态与终态刷新恢复、受控副作用边界 | [`h4-8c-edit-authorization-refresh-resume.md`](h4-8c-edit-authorization-refresh-resume.md) | `282636a9297054a47db311b2e47c73f2d92b6450` | 已完成 |
+| 完成定义 1：H4-8D | 固定 approved stale conflict 保留第三方内容，生产 apply/write/backup 为 `1/0/0`，刷新零业务重放 | [`h4-8d-approved-stale-edit-conflict.md`](h4-8d-approved-stale-edit-conflict.md) | `0e349e3d34264263567d1297732552af5f1f587e` | 已完成 |
+| 完成定义 2：H4-8E | 固定问卷等待态、唯一队列项跨刷新保持，主 Run 完成后只提升一次并形成独立 Run | [`h4-8e-questionnaire-queue-refresh-order.md`](h4-8e-questionnaire-queue-refresh-order.md) | `387a3a3bff5e432f4362998c19680df9ce7e53ac` | 已完成 |
+| 完成定义 3：H4-8F | 第一次 authorization POST 在生产 handler 前失败，用户通过现有入口单次手动重试，耐久决策与副作用唯一 | [`h4-8f-authorization-request-failure-retry.md`](h4-8f-authorization-request-failure-retry.md) | `8cd6116aa2b7fcc71c5919b90d733a4869a1b12a` | 已完成 |
+| 完成定义 4：H4-8G | 只读审计确认无需新产品决策或协议/持久化/安全扩张后，完成固定 detached `/parallel` 编辑授权刷新恢复 | [`h4-8g-detached-parallel-edit-authorization-refresh.md`](h4-8g-detached-parallel-edit-authorization-refresh.md) | `618f876fb7d09f821b302eaf5a731f367fd894ac` | 已完成 |
+| 完成定义 5：最终集成门禁 | A～G 哈希对等、双轮 H4、相关回归、完整 pytest、replay、构建/语法/diff 与资源审计在最终证据树闭合 | 同上及各专题 | `618f876fb7d09f821b302eaf5a731f367fd894ac` | 已完成 |
 
-H4-8A 与 H4-8B 是“问卷等待态 + 队列刷新顺序”后续证据的复用基线；H4-8C 是 H4-8D、授权失败安全重试和 `/parallel` 审计的前台授权基线。它们不能代替上述剩余场景，也不得为了新场景重新冻结。
+H4-8A/B/C 继续作为后续组合的既有基线，H4-8D/E/F/G 没有重新冻结它们。完成定义 4 的审计结论是“满足条件并实施固定场景”，不是把 background、detached 或 `/parallel` 的所有授权恢复路径声明为已经覆盖。
 
-## 剩余门禁
+## 综合完成判定
 
-第一轮当前仍需完成：
+冻结证据树上的最终门禁为：
 
-1. H4-8D 的哈希固化、bundle/direct classic 对等、完整阶段矩阵、专题和独立提交；
-2. 问卷等待态与队列刷新顺序的方案审计、固定浏览器证据、哈希与回归收口；
-3. 授权请求失败后安全重试的现行入口审计、固定失败证据、无重复决策或副作用证明及回归收口；
-4. `/parallel` 编辑授权恢复的只读价值/可行性审计，以及仅在本文条件满足时执行的可选实施；
-5. 所有新增阶段完成后的最终双轮 H4、相关回归、完整 pytest、Harness replay、构建/语法/diff、资源和独立提交门禁。
+- 标准 H4 第一轮为 `67 passed (3.9m)`，独立 infra 后专用 output 的第二轮为 `67 passed (4.4m)`；两轮均为 1 worker、0 retry、各 67 条 cleanup，A～G 受门禁哈希跨 bundle/direct classic、跨轮一致；
+- 相关十文件回归为 `680 passed, 260 subtests passed, 1 warning in 34.74s`；唯一 warning 为既有损坏 TIFF/EXIF Pillow 负测；
+- 完整 `tests` pytest 为 `1126 passed, 751 subtests passed, 3 warnings in 93.48s`；三条 warning 均为既有损坏 TIFF/EXIF Pillow 负测；
+- Harness replay 保持 `17 fixtures / 124 events / 25 checkpoints / 25 checkpoint recoveries / 4 explicit recoveries`，suite hash 为 `166a8141c50e8cf17748a04e2b6aa994323c563e9d8d22d3aa4f6d17682030c2`；
+- `npm run check:frontend`、`npm run verify:frontend`、Node 语法、Python AST 与 `git diff --check` 均通过；既有 `server.py:4949` invalid escape `\C` SyntaxWarning 不计入 pytest warning；
+- H4/isolated-host/Python/Chromium 相关进程、监听、临时根、fixture、backup 与 H4 pyc 均归零；R059C～R059L ignored outputs、R059M passed output 和 `%TEMP%` 诊断证据按批准边界保留，未通过清理掩盖结果。
 
-以上项目通过前，不得使用“Harness 第一轮完成”“授权恢复已完整覆盖”或等价表述。
+据此，Harness 第一轮在本文定义的有限工程边界内完成。该判定不表示通用 exactly-once、授权恢复完整覆盖、并发/多标签页/多 actor 组合穷举、服务重启或跨进程 active 恢复、Firefox/WebKit、真实外网/模型/凭据、主观视觉或可访问性已经通过，也不授权启动 H4-8H、H5 或任何下一 TODO。
 
 ## 延期边界
 
@@ -90,8 +98,8 @@ H4-8A 与 H4-8B 是“问卷等待态 + 队列刷新顺序”后续证据的复�
 
 延期项不得反向扩大第一轮完成定义。后续如主动把某一延期项纳入第一轮，必须先明确新增范围、自动验收和风险，再重新评估计划时间；不能在实施过程中无边界追加组合。
 
-## 计划时间
+## 历史计划时间
 
-从当前基线到第一轮结束，在不出现新的产品决策、协议/安全范围扩张或基础设施阻塞时，计划值为 **2～3 个工作日**。这是排期估算，不是完成承诺；任何必选门禁出现真实首差异时，应先停止并按证据修订方案。
+本文起草时曾按不出现新产品决策、协议/安全范围扩张或基础设施阻塞的前提估算 **2～3 个工作日**；主动纳入延期项时曾估算为 **5～8 个工作日**。这些数字只保留为历史计划，不再表示当前剩余工期或新的实施承诺。
 
-若主动把上述延期项纳入本轮，组合与回归范围可能把计划扩展到 **5～8 个工作日**。延期项默认不纳入，因此不能用其尚未实施作为阻止第一轮按本文边界完成的理由。
+第一轮已经按本文有限边界完成。延期项继续作为后续候选存在，但不得自动并入第一轮、启动 H4-8H/H5，或由本完成判定选择下一项。
