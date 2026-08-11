@@ -10137,13 +10137,73 @@ els.messages.addEventListener("scroll", () => {
 
 els.prompt.addEventListener("paste", (e) => { handleImagePaste(e); });
 
-els.prompt.addEventListener("drop", (e) => { e.preventDefault(); e.stopPropagation(); handleImageDrop(e); });
+let composerFileDragDepth = 0;
 
-els.prompt.addEventListener("dragover", (e) => { e.preventDefault(); });
+function isComposerFileDrag(e) {
 
-els.chatForm.addEventListener("drop", (e) => { e.preventDefault(); handleImageDrop(e); });
+  const types = Array.from(e?.dataTransfer?.types || []);
 
-els.chatForm.addEventListener("dragover", (e) => { e.preventDefault(); });
+  return types.includes("Files") || Number(e?.dataTransfer?.files?.length || 0) > 0;
+
+}
+
+function setComposerDragActive(active) {
+
+  els.chatForm.classList.toggle("drag-active", Boolean(active));
+
+}
+
+function clearComposerDragActive() {
+
+  composerFileDragDepth = 0;
+
+  setComposerDragActive(false);
+
+}
+
+els.chatForm.addEventListener("dragenter", (e) => {
+
+  if (!isComposerFileDrag(e)) return;
+
+  e.preventDefault();
+
+  composerFileDragDepth += 1;
+
+  setComposerDragActive(true);
+
+});
+
+els.chatForm.addEventListener("dragover", (e) => {
+
+  e.preventDefault();
+
+  if (!isComposerFileDrag(e)) return;
+
+  setComposerDragActive(true);
+
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+
+});
+
+els.chatForm.addEventListener("dragleave", () => {
+
+  if (composerFileDragDepth === 0) return;
+
+  composerFileDragDepth = Math.max(0, composerFileDragDepth - 1);
+
+  if (composerFileDragDepth === 0) setComposerDragActive(false);
+
+});
+
+els.chatForm.addEventListener("drop", (e) => {
+
+  e.preventDefault();
+
+  clearComposerDragActive();
+
+  handleImageDrop(e);
+
+});
 
 
 

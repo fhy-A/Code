@@ -11722,5 +11722,71 @@ process.stdout.write(JSON.stringify(orderProjects(projects, ["c"]).map((item) =>
         self.assertIn("await refreshSessions();", APP_SOURCE[init_start:init_end])
 
 
+class ComposerThemeAndFileDragTests(unittest.TestCase):
+    def test_composer_surfaces_follow_the_active_theme(self):
+        for declaration in (
+            "--composer-surface: color-mix(in srgb, var(--bg) 94%, var(--text) 6%);",
+            "--composer-surface-hover: color-mix(in srgb, var(--bg) 92%, var(--text) 8%);",
+            "--composer-surface-disabled: color-mix(in srgb, var(--bg) 97%, var(--text) 3%);",
+            "--composer-surface-drag: color-mix(in srgb, var(--composer-surface) 88%, var(--accent) 12%);",
+        ):
+            self.assertIn(declaration, STYLE_SOURCE)
+
+        self.assertIn(".composer:not(.drag-active):not(:focus-within):not(:has(textarea:disabled)):hover", STYLE_SOURCE)
+        self.assertIn(".chat-pane.empty-chat .composer:focus-within", STYLE_SOURCE)
+        self.assertIn(".chat-pane.empty-chat .composer:has(textarea:disabled)", STYLE_SOURCE)
+        self.assertIn(".chat-pane.empty-chat .composer.drag-active", STYLE_SOURCE)
+        self.assertIn("background: var(--composer-surface-drag);", STYLE_SOURCE)
+
+        thumbs_start = STYLE_SOURCE.index(".image-thumbs {")
+        thumbs_end = STYLE_SOURCE.index("}", thumbs_start)
+        self.assertIn("background: transparent;", STYLE_SOURCE[thumbs_start:thumbs_end])
+        bar_start = STYLE_SOURCE.index(".composer-bar {", STYLE_SOURCE.index("/* Main canvas"))
+        bar_end = STYLE_SOURCE.index("}", bar_start)
+        self.assertIn("background: transparent;", STYLE_SOURCE[bar_start:bar_end])
+
+    def test_composer_text_states_keep_theme_readability(self):
+        placeholder_start = STYLE_SOURCE.index(".composer textarea::placeholder")
+        placeholder_end = STYLE_SOURCE.index("}", placeholder_start)
+        placeholder_source = STYLE_SOURCE[placeholder_start:placeholder_end]
+        self.assertIn("color: var(--muted);", placeholder_source)
+        self.assertIn("opacity: 1;", placeholder_source)
+        self.assertIn("caret-color: var(--accent);", STYLE_SOURCE)
+        self.assertIn(".composer textarea:disabled", STYLE_SOURCE)
+        self.assertIn("-webkit-text-fill-color: var(--muted);", STYLE_SOURCE)
+
+    def test_composer_file_drag_state_is_form_scoped_and_depth_stable(self):
+        drag_start = APP_SOURCE.index("let composerFileDragDepth = 0;")
+        drag_end = APP_SOURCE.index('els.prompt.addEventListener("input"', drag_start)
+        drag_source = APP_SOURCE[drag_start:drag_end]
+
+        self.assertIn('types.includes("Files")', drag_source)
+        self.assertIn('classList.toggle("drag-active", Boolean(active))', drag_source)
+        self.assertIn("composerFileDragDepth += 1;", drag_source)
+        self.assertIn("if (composerFileDragDepth === 0) return;", drag_source)
+        self.assertIn("Math.max(0, composerFileDragDepth - 1)", drag_source)
+        for event_name in ("dragenter", "dragover", "dragleave", "drop"):
+            self.assertEqual(
+                drag_source.count(f'els.chatForm.addEventListener("{event_name}"'),
+                1,
+            )
+
+        self.assertNotIn('els.prompt.addEventListener("drop"', APP_SOURCE)
+        self.assertNotIn('els.prompt.addEventListener("dragover"', APP_SOURCE)
+        drop_start = drag_source.index('els.chatForm.addEventListener("drop"')
+        drop_source = drag_source[drop_start:]
+        self.assertLess(
+            drop_source.index("clearComposerDragActive();"),
+            drop_source.index("handleImageDrop(e);"),
+        )
+
+    def test_file_drag_feedback_preserves_existing_image_candidate_semantics(self):
+        handler_start = APP_SOURCE.index("function handleImageDrop(e)")
+        handler_end = APP_SOURCE.index("function updateAssistantMessage", handler_start)
+        handler_source = APP_SOURCE[handler_start:handler_end]
+        self.assertIn("if (isImageFileCandidate(file))", handler_source)
+        self.assertIn("queueImageFile(file);", handler_source)
+
+
 if __name__ == "__main__":
     unittest.main()
