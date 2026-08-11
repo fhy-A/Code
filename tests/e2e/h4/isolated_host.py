@@ -78,6 +78,8 @@ PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER"
 PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL"
 QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER"
 QUESTIONNAIRE_FINAL = "H4_QUESTIONNAIRE_FINAL"
+QUEUE_QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER_QUEUE"
+QUEUE_QUESTIONNAIRE_FINAL = QUESTIONNAIRE_FINAL
 MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER"
 MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
@@ -448,12 +450,14 @@ def _questionnaire_scenario(
 def _scenario_for(payload: dict) -> tuple[str, bool]:
     messages = payload.get("messages") or []
     user_text = ""
+    user_texts = []
     has_tool_result = False
     for message in messages:
         if not isinstance(message, dict):
             continue
         if message.get("role") == "user":
             user_text = _message_text(message)
+            user_texts.append(user_text)
         if message.get("role") == "tool" or message.get("tool_call_id") in {
             TOOL_CALL_ID, INVALID_TOOL_CALL_ID, PARSE_ERROR_TOOL_CALL_ID,
             MISSING_PATH_TOOL_CALL_ID,
@@ -469,6 +473,17 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             PROPOSE_EDIT_TOOL_CALL_ID,
         }:
             has_tool_result = True
+    queue_questionnaire_scenario = _questionnaire_scenario(
+        messages,
+        "\n".join(user_texts),
+        QUEUE_QUESTIONNAIRE_USER,
+        QUESTIONNAIRE_TOOL_CALL_ID,
+        "queue-questionnaire",
+    )
+    if queue_questionnaire_scenario:
+        if any(TIMING_QUEUE_USER in text for text in user_texts):
+            return "queue-questionnaire-promoted", has_tool_result
+        return queue_questionnaire_scenario
     for questionnaire_contract in (
         (
             MIXED_QUESTIONNAIRE_USER,
@@ -702,8 +717,41 @@ def _parallel_failure_followup_context_projection(payload: dict) -> dict:
     }
 
 
+def _queue_questionnaire_context_projection(payload: dict) -> dict:
+    marker_contract = (
+        ("questionnaire-user", "user", QUEUE_QUESTIONNAIRE_USER),
+        ("questionnaire-final", "assistant", QUEUE_QUESTIONNAIRE_FINAL),
+        ("queued-user", "user", TIMING_QUEUE_USER),
+    )
+    marker_order = []
+    marker_positions = {alias: [] for alias, _, _ in marker_contract}
+    for message_index, message in enumerate(payload.get("messages") or []):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        text = _message_text(message)
+        for alias, expected_role, marker in marker_contract:
+            if role == expected_role and marker in text:
+                marker_order.append(alias)
+                marker_positions[alias].append(message_index)
+
+    questionnaire_final_positions = marker_positions["questionnaire-final"]
+    queued_user_positions = marker_positions["queued-user"]
+    return {
+        "questionnaireUserCount": len(marker_positions["questionnaire-user"]),
+        "questionnaireFinalCount": len(questionnaire_final_positions),
+        "queuedUserCount": len(queued_user_positions),
+        "markerOrder": marker_order,
+        "mainFinalPrecedesQueuedUser": (
+            len(questionnaire_final_positions) == 1
+            and len(queued_user_positions) == 1
+            and questionnaire_final_positions[0] < queued_user_positions[0]
+        ),
+    }
+
+
 def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
-    if scenario == "questionnaire-call":
+    if scenario in ("questionnaire-call", "queue-questionnaire-call"):
         return QUESTIONNAIRE_TOOL_CALL_ID, {
             "title": QUESTIONNAIRE_TITLE,
             "reason": QUESTIONNAIRE_REASON,
@@ -1463,6 +1511,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             chat_metric["questionnaireReceipt"] = (
                 _questionnaire_receipt_projection(payload)
             )
+        if scenario in {
+            "queue-questionnaire-call",
+            "queue-questionnaire-final",
+            "queue-questionnaire-promoted",
+        }:
+            chat_metric["queueContext"] = (
+                _queue_questionnaire_context_projection(payload)
+            )
+        if scenario == "queue-questionnaire-final":
+            chat_metric["questionnaireReceipt"] = (
+                _questionnaire_receipt_projection(payload)
+            )
         if scenario == "mixed-questionnaire-final":
             chat_metric["mixedQuestionnaireReceipt"] = (
                 _mixed_questionnaire_receipt_projection(payload)
@@ -1527,7 +1587,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
                 "executor-range-call", "missing-file-call", "questionnaire-call",
-                "mixed-questionnaire-call", "edit-authorization-approve-call",
+                "mixed-questionnaire-call", "queue-questionnaire-call",
+                "edit-authorization-approve-call",
                 "edit-authorization-reject-call", "edit-authorization-conflict-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
@@ -1641,7 +1702,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             write_tool_detail_frame("[DONE]")
             return
 
-        if scenario in ("questionnaire-call", "mixed-questionnaire-call"):
+        if scenario in (
+            "questionnaire-call", "mixed-questionnaire-call",
+            "queue-questionnaire-call",
+        ):
             questionnaire_tool_call_id, questionnaire_arguments = (
                 _questionnaire_call_contract(scenario)
             )
@@ -1882,6 +1946,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "timing-queue": TIMING_QUEUE_FINAL,
                 "parallel-failure-followup": PARALLEL_FAILURE_FOLLOWUP_FINAL,
                 "questionnaire-final": QUESTIONNAIRE_FINAL,
+                "queue-questionnaire-final": QUEUE_QUESTIONNAIRE_FINAL,
+                "queue-questionnaire-promoted": TIMING_QUEUE_FINAL,
                 "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
                 "edit-authorization-approve-final": EDIT_AUTHORIZATION_APPROVE_FINAL,
                 "edit-authorization-reject-final": EDIT_AUTHORIZATION_REJECT_FINAL,

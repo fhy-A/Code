@@ -66,6 +66,7 @@ const PARALLEL_FAILURE_ERROR = "H4_PARALLEL_MODEL_FAILURE";
 const PARALLEL_FAILURE_FOLLOWUP_USER = "H4_PARALLEL_FAILURE_FOLLOWUP_USER";
 const PARALLEL_FAILURE_FOLLOWUP_FINAL = "H4_PARALLEL_FAILURE_FOLLOWUP_FINAL";
 const QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER";
+const QUEUE_QUESTIONNAIRE_USER = `${QUESTIONNAIRE_USER}_QUEUE`;
 const QUESTIONNAIRE_FINAL = "H4_QUESTIONNAIRE_FINAL";
 const QUESTIONNAIRE_TOOL_CALL_ID = "h4-questionnaire-call-1";
 const QUESTIONNAIRE_REQUEST_ID = `user-input-${QUESTIONNAIRE_TOOL_CALL_ID}`;
@@ -490,6 +491,34 @@ const H4_8D_SEMANTIC_HASHES = Object.freeze({
   sessionAuthorizationMeta: "b8b0df63df027b536446ed665706b7e87ac84e6e304c3fcebdbcbb444137240d",
   terminalDom: "b564237ff8ab8a1bf5578a8181f17a6c711d3b15789bbfecacefc8eff862389d",
   refreshLifecycle: "a349197ae9a3805e700b57bb13464687e37307f4b923f85f1426d6d4dc184f1a",
+});
+const H4_8E_SEMANTIC_HASH_KEYS = Object.freeze([
+  "waitingEventProjection",
+  "waitingQuestionnaireSnapshot",
+  "queueSubmissionProjection",
+  "waitingQueueSession",
+  "waitingDom",
+  "waitingRefreshLifecycle",
+  "inputSubmissionProjection",
+  "queuePromotionProjection",
+  "runtimeProjection",
+  "sessionRoleContent",
+  "terminalDom",
+  "refreshLifecycle",
+]);
+const H4_8E_SEMANTIC_HASHES = Object.freeze({
+  waitingEventProjection: "6f07ddb587ba352d15f3b9d8608d3b89c475f3f3217ec713304b31b0e5a6da41",
+  waitingQuestionnaireSnapshot: "722b86175ddd43f7306b459d5f6410a0a7c8a8f3ad5b8075cfb6dd2bc8506c3b",
+  queueSubmissionProjection: "8fa3b6d9e440913edceefca2c9e1855e7b7be51341fb68faffe7fef9d0269556",
+  waitingQueueSession: "225ef8c09bb0f7b09463209501568d754d2cd4a795bba060a7e667d2b8c01eeb",
+  waitingDom: "499509b21abbc0a3f6805561df5918183df04267737159089aa56aee7010bff6",
+  waitingRefreshLifecycle: "d114d05ecf65efe64f8c21b589dfde91e0f6dafd7c44616fa83eaeeb11076cd8",
+  inputSubmissionProjection: "53765f8c4d304eeeb2db40c7d74404d1db3f8838450d862660a28cfa243b434b",
+  queuePromotionProjection: "513394446016e85f76718ef0c65945b3f24a47867e39e04232f3968d4a18446a",
+  runtimeProjection: "f7f333b2b0573c96ee9b2a489019f32d7724c5273a5963896884378e1a9eb7ba",
+  sessionRoleContent: "e9a93e5e49bde42f63d3047001afa5f79c78373f1365378367311022d15f71ec",
+  terminalDom: "d2dc405690fcf7c80ad84ffaca0496aba43b40e2ebd528971a462a82ba9da90d",
+  refreshLifecycle: "1583ae3f119ccbc86c8ec055d7d486a7c3a607cfd79fd9728ecadd8907cf55e0",
 });
 
 function idHash(value) {
@@ -5503,6 +5532,446 @@ async function reloadCompletedQuestionnaireLifecycle(h4, started, completed) {
   };
 }
 
+function queueQuestionnaireMessageHasMarker(message, marker) {
+  if (typeof message?.content === "string") return message.content === marker;
+  return Array.isArray(message?.content)
+    && message.content.some((item) => item?.type === "text" && item.text === marker);
+}
+
+function queueQuestionnaireSteerPostCount(entries) {
+  return (Array.isArray(entries) ? entries : []).filter((entry) => (
+    entry?.method === "POST"
+    && /^\/api\/agent\/runs\/[^/]+\/steer$/.test(String(entry?.path || ""))
+  )).length;
+}
+
+function queueQuestionnaireIdentity(session) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const runState = session?.runState && typeof session.runState === "object"
+    ? session.runState
+    : {};
+  const queuedUsers = messages.filter((message) => (
+    message?.role === "user"
+    && queueQuestionnaireMessageHasMarker(message, TIMING_QUEUE_USER)
+  ));
+  const checkpoints = (Array.isArray(runState.queuedMessages) ? runState.queuedMessages : [])
+    .filter((item) => item?.userText === TIMING_QUEUE_USER);
+  return {
+    queuedUsers,
+    checkpoints,
+    dispatchId: String(queuedUsers[0]?.meta?.queuedDispatch?.id || ""),
+    checkpointId: String(checkpoints[0]?.id || ""),
+    clientRequestId: String(checkpoints[0]?.clientRequestId || ""),
+  };
+}
+
+function waitingQueueSessionProjection(session, mainAgentRunId, firstRuntimeRunId) {
+  const identity = queueQuestionnaireIdentity(session);
+  const runState = session?.runState || {};
+  const forbiddenIdentities = new Set([
+    String(mainAgentRunId || ""),
+    String(firstRuntimeRunId || ""),
+    QUESTIONNAIRE_REQUEST_ID,
+    QUESTIONNAIRE_TOOL_CALL_ID,
+  ].filter(Boolean));
+  const queueIdentities = [identity.dispatchId, identity.checkpointId, identity.clientRequestId];
+  return {
+    roles: (session?.messages || []).map((message) => String(message?.role || "")),
+    queue: {
+      queuedUserCount: identity.queuedUsers.length,
+      checkpointCount: identity.checkpoints.length,
+      dispatchStatus: String(identity.queuedUsers[0]?.meta?.queuedDispatch?.status || ""),
+      checkpointStatus: String(identity.checkpoints[0]?.status || ""),
+      detachedFromMain: identity.queuedUsers[0]?.meta?.detachedFromMain === true,
+      identityClosed: Boolean(identity.dispatchId)
+        && queueIdentities.every((value) => value === identity.dispatchId),
+      identityDisjoint: queueIdentities.every((value) => (
+        Boolean(value) && !forbiddenIdentities.has(value)
+      )),
+    },
+    runState: {
+      status: String(runState.status || ""),
+      phase: String(runState.phase || ""),
+      executionOwner: String(runState.executionOwner || ""),
+      mainAgentRunMatches: String(runState.agentRunId || "") === mainAgentRunId,
+      runtimeRunCleared: !String(runState.runtimeRunId || ""),
+      cursor: Number(runState.agentEventCursor || 0),
+      modelRound: Number(runState.modelRound || 0),
+      queueCount: Array.isArray(runState.queuedMessages) ? runState.queuedMessages.length : 0,
+      questionnaireIdentityMatches: String(runState.userInputRequest?.id || "")
+        === QUESTIONNAIRE_REQUEST_ID
+        && String(runState.userInputRequest?.toolCallId || "") === QUESTIONNAIRE_TOOL_CALL_ID
+        && String(runState.userInputRequest?.agentRunId || "") === mainAgentRunId,
+    },
+  };
+}
+
+function terminalQueueSessionProjection(session, queueItemId, queuedAgent) {
+  const identity = queueQuestionnaireIdentity(session);
+  const queuedFinals = (session?.messages || []).filter((message) => (
+    message?.role === "assistant"
+    && queueQuestionnaireMessageHasMarker(message, TIMING_QUEUE_FINAL)
+  ));
+  return {
+    runStateCleared: Object.keys(session?.runState || {}).length === 0,
+    queuedUserCount: identity.queuedUsers.length,
+    queuedFinalCount: queuedFinals.length,
+    checkpointCount: identity.checkpoints.length,
+    dispatchStatus: String(identity.queuedUsers[0]?.meta?.queuedDispatch?.status || ""),
+    detachedFromMain: identity.queuedUsers[0]?.meta?.detachedFromMain === true,
+    queueIdentityRetained: Boolean(queueItemId) && identity.dispatchId === queueItemId,
+    clientRequestMatches: Boolean(queueItemId)
+      && String(queuedAgent?.clientRequestId || "") === queueItemId,
+  };
+}
+
+function queueQuestionnaireSessionRoleProjection(messages) {
+  const source = Array.isArray(messages) ? messages : [];
+  const normalized = source.map((message) => (
+    message?.role === "user"
+      && queueQuestionnaireMessageHasMarker(message, QUEUE_QUESTIONNAIRE_USER)
+      ? { ...message, content: QUESTIONNAIRE_USER }
+      : message
+  ));
+  return questionnaireSessionRoleProjection(normalized).map((item, index) => {
+    const message = source[index];
+    if (message?.role === "user" && queueQuestionnaireMessageHasMarker(message, TIMING_QUEUE_USER)) {
+      return { role: "user", kind: "queued-user" };
+    }
+    if (
+      message?.role === "assistant"
+      && queueQuestionnaireMessageHasMarker(message, TIMING_QUEUE_FINAL)
+    ) {
+      return { role: "assistant", kind: "queued-final" };
+    }
+    return item;
+  });
+}
+
+async function queueQuestionnaireDomProjection(h4, phase) {
+  const expected = phase === "waiting" ? {
+    counts: {
+      mainUser: 1,
+      toolProcess: 1,
+      inputSummary: 0,
+      mainFinal: 0,
+      queuedUser: 1,
+      queuedFinal: 0,
+      queuedDataId: 1,
+    },
+    order: ["main-user", "tool-process", "queued-user"],
+  } : {
+    counts: {
+      mainUser: 1,
+      toolProcess: 1,
+      inputSummary: 1,
+      mainFinal: 1,
+      queuedUser: 1,
+      queuedFinal: 1,
+      queuedDataId: 1,
+    },
+    order: [
+      "main-user",
+      "tool-process",
+      "input-summary",
+      "main-final",
+      "queued-user",
+      "queued-final",
+    ],
+  };
+  return waitForMessageProjection(h4, {
+    label: `queue-questionnaire-${phase}`,
+    expected,
+    sourceFacts: {
+      phase,
+      mainUserMarker: QUEUE_QUESTIONNAIRE_USER,
+      mainFinalMarker: QUESTIONNAIRE_FINAL,
+      queuedUserMarker: TIMING_QUEUE_USER,
+      queuedFinalMarker: TIMING_QUEUE_FINAL,
+      promptMarker: QUESTIONNAIRE_PROMPT,
+      selectedLabel: QUESTIONNAIRE_OPTION_B.label,
+    },
+    sample: (facts) => {
+      const root = document.querySelector("#messages");
+      const mainUsers = [...root.querySelectorAll("article.msg.user")]
+        .filter((node) => node.textContent.includes(facts.mainUserMarker));
+      const processes = [...root.querySelectorAll(
+        'article.tool-process > details.tool-process-stage[data-current-action="request_user_input"]',
+      )].map((stage) => stage.closest("article.tool-process"));
+      const summaries = [...root.querySelectorAll("article.user-input-flow")]
+        .filter((node) => (
+          node.textContent.includes(facts.promptMarker)
+          && node.textContent.includes(facts.selectedLabel)
+        ));
+      const mainFinals = [...root.querySelectorAll("article.msg.assistant")]
+        .filter((node) => node.textContent.includes(facts.mainFinalMarker));
+      const queuedUsers = [...root.querySelectorAll("article.msg.user")]
+        .filter((node) => node.textContent.includes(facts.queuedUserMarker));
+      const queuedFinals = [...root.querySelectorAll("article.msg.assistant")]
+        .filter((node) => node.textContent.includes(facts.queuedFinalMarker));
+      const nodes = [
+        { label: "main-user", node: mainUsers[0] || null },
+        { label: "tool-process", node: processes[0] || null },
+        { label: "input-summary", node: summaries[0] || null },
+        { label: "main-final", node: mainFinals[0] || null },
+        { label: "queued-user", node: queuedUsers[0] || null },
+        { label: "queued-final", node: queuedFinals[0] || null },
+      ].filter((entry) => entry.node);
+      nodes.sort((left, right) => (
+        left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+      ));
+      return {
+        counts: {
+          mainUser: mainUsers.length,
+          toolProcess: processes.length,
+          inputSummary: summaries.length,
+          mainFinal: mainFinals.length,
+          queuedUser: queuedUsers.length,
+          queuedFinal: queuedFinals.length,
+          queuedDataId: queuedUsers.filter((node) => Boolean(node.dataset.queuedMessageId)).length,
+        },
+        order: nodes.map((entry) => entry.label),
+      };
+    },
+  });
+}
+
+async function submitQuestionnaireQueueBridge(h4, started, metricsBefore) {
+  const { page, sessionId, agentRunId, firstRuntimeRunId } = started;
+  const requestBoundary = h4.requestBoundary();
+  const queueSaves = [];
+  const recordSessionSave = (request) => {
+    if (request.method() !== "PUT") return;
+    if (!/^\/api\/sessions\/[^/]+$/.test(new URL(request.url()).pathname)) return;
+    let payload = null;
+    try {
+      payload = JSON.parse(request.postData() || "null");
+    } catch {}
+    const identity = queueQuestionnaireIdentity(payload);
+    if (!identity.queuedUsers.length && !identity.checkpoints.length) return;
+    queueSaves.push({
+      queuedUserCount: identity.queuedUsers.length,
+      checkpointCount: identity.checkpoints.length,
+      identityClosed: Boolean(identity.dispatchId)
+        && identity.dispatchId === identity.checkpointId
+        && identity.dispatchId === identity.clientRequestId,
+      status: String(payload?.runState?.status || ""),
+      phase: String(payload?.runState?.phase || ""),
+      mainAgentRunMatches: String(payload?.runState?.agentRunId || "") === agentRunId,
+    });
+  };
+  page.on("request", recordSessionSave);
+  let sessionResponse = null;
+  try {
+    const prompt = page.locator("#prompt");
+    await prompt.fill(TIMING_QUEUE_USER);
+    await expect(prompt).toBeEnabled();
+    await expect(prompt).toBeFocused();
+    await expect(prompt).toHaveValue(TIMING_QUEUE_USER);
+    await prompt.press("Control+Enter");
+    const interaction = {
+      source: "real-composer",
+      chord: "Control+Enter",
+      pressCount: 1,
+    };
+
+    let waitingProjection = null;
+    await expect.poll(async () => {
+      sessionResponse = await fetchProductionJson(
+        page,
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+      );
+      waitingProjection = waitingQueueSessionProjection(
+        sessionResponse.body,
+        agentRunId,
+        firstRuntimeRunId,
+      );
+      return { status: sessionResponse.status, projection: waitingProjection };
+    }).toEqual({
+      status: 200,
+      projection: {
+        roles: ["user", "assistant", "tool-call", "user"],
+        queue: {
+          queuedUserCount: 1,
+          checkpointCount: 1,
+          dispatchStatus: "pending",
+          checkpointStatus: "pending",
+          detachedFromMain: true,
+          identityClosed: true,
+          identityDisjoint: true,
+        },
+        runState: {
+          status: "waiting-user-input",
+          phase: "tools",
+          executionOwner: "server-agent",
+          mainAgentRunMatches: true,
+          runtimeRunCleared: true,
+          cursor: started.waitingAgent.nextCursor,
+          modelRound: 1,
+          queueCount: 1,
+          questionnaireIdentityMatches: true,
+        },
+      },
+    });
+    await expect.poll(() => queueSaves).toEqual([{
+      queuedUserCount: 1,
+      checkpointCount: 1,
+      identityClosed: true,
+      status: "waiting-user-input",
+      phase: "tools",
+      mainAgentRunMatches: true,
+    }]);
+    const identity = queueQuestionnaireIdentity(sessionResponse.body);
+    expect(identity.dispatchId).not.toBe("");
+    const queuedUser = page.locator("#messages article.msg.user")
+      .filter({ hasText: TIMING_QUEUE_USER });
+    await expect(queuedUser).toHaveCount(1);
+    await expect(queuedUser).toHaveAttribute("data-queued-message-id", identity.dispatchId);
+
+    const metricsAfter = await h4.metrics();
+    expect(metricsAfter.chatRequests).toEqual(metricsBefore.chatRequests);
+    expect(metricsAfter.toolExecutions).toEqual(metricsBefore.toolExecutions);
+    const requests = questionnaireRequestProjection(
+      h4,
+      requestBoundary,
+      metricsBefore,
+      metricsAfter,
+    );
+    const steerPost = queueQuestionnaireSteerPostCount(
+      h4.loopbackRequests.slice(requestBoundary),
+    );
+    expect(steerPost).toBe(0);
+    expect(requests).toEqual({
+      agentRunPost: 0,
+      runtimePost: 0,
+      agentDelete: 0,
+      inputPost: 0,
+      resumePost: 0,
+      browserProxyChatPost: 0,
+      browserToolPost: 0,
+      upstreamChatDelta: 0,
+      productionDelegationDelta: 0,
+      productionToolExecutionDelta: 0,
+    });
+    expect(h4.controlIds()).toEqual({
+      agentRunIds: [agentRunId],
+      runtimeRunIds: [firstRuntimeRunId],
+    });
+    return {
+      queueItemId: identity.dispatchId,
+      sessionResponse,
+      metricsAfter,
+      projection: {
+        interaction,
+        saveCount: queueSaves.length,
+        save: queueSaves[0],
+        requests,
+        steerPost,
+        queue: waitingProjection.queue,
+      },
+      waitingSession: waitingProjection,
+    };
+  } finally {
+    page.off("request", recordSessionSave);
+    h4.diagnosticSteps.push({
+      step: "questionnaire-queue-submit",
+      saveCount: queueSaves.length,
+      saves: queueSaves,
+    });
+  }
+}
+
+function startQuestionnaireQueuePromotionObservation(page) {
+  const timeline = [];
+  const counts = { checkpointClearedSaves: 0, queuePromotionPosts: 0 };
+  const observeRequest = (request) => {
+    const requestUrl = new URL(request.url());
+    if (request.method() === "POST" && requestUrl.pathname === "/api/agent/runs") {
+      counts.queuePromotionPosts += 1;
+      timeline.push({ sequence: timeline.length + 1, type: "queue-promoted" });
+      return;
+    }
+    if (request.method() !== "PUT" || !/^\/api\/sessions\/[^/]+$/.test(requestUrl.pathname)) {
+      return;
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(request.postData() || "null");
+    } catch {}
+    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+    const runState = payload?.runState || {};
+    const mainFinalPresent = messages.some((message) => (
+      message?.role === "assistant"
+      && queueQuestionnaireMessageHasMarker(message, QUESTIONNAIRE_FINAL)
+    ));
+    const queuePending = (Array.isArray(runState.queuedMessages) ? runState.queuedMessages : [])
+      .filter((item) => item?.userText === TIMING_QUEUE_USER && item?.status === "pending")
+      .length === 1;
+    const foregroundCleared = !String(runState.status || "")
+      && !String(runState.agentRunId || "")
+      && !String(runState.runtimeRunId || "");
+    if (mainFinalPresent && queuePending && foregroundCleared) {
+      counts.checkpointClearedSaves += 1;
+      if (!timeline.some((entry) => entry.type === "main-terminal-checkpoint-cleared")) {
+        timeline.push({
+          sequence: timeline.length + 1,
+          type: "main-terminal-checkpoint-cleared",
+        });
+      }
+    }
+  };
+  page.on("request", observeRequest);
+  return {
+    timeline,
+    counts,
+    stop() {
+      page.off("request", observeRequest);
+    },
+  };
+}
+
+function queuedAgentEventProjection(snapshot) {
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const runtimeIds = events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  const runtimeAliases = new Map(runtimeIds.map((runId, index) => [runId, `runtime-${index + 1}`]));
+  return events.map((event) => {
+    const data = event?.data || {};
+    const projected = { seq: Number(event?.seq || 0), type: String(event?.type || "") };
+    if (data.round != null) projected.round = Number(data.round);
+    if (data.runtimeRunId) {
+      projected.runtimeRunId = runtimeAliases.get(String(data.runtimeRunId)) || "mismatch";
+    }
+    if (data.content != null) {
+      projected.content = String(data.content) === TIMING_QUEUE_FINAL ? "queued-final" : "empty";
+    }
+    if (data.finishReason != null) projected.finishReason = String(data.finishReason || "");
+    return projected;
+  });
+}
+
+function queueQuestionnaireRuntimeProjection(entries) {
+  return entries.map(({ owner, snapshot }, index) => ({
+    runtime: `runtime-${index + 1}`,
+    owner,
+    status: String(snapshot?.status || ""),
+    nextCursor: Number(snapshot?.nextCursor || 0),
+    eventTypes: (snapshot?.events || []).map((event) => String(event?.type || "")),
+    content: snapshot?.result?.content === QUESTIONNAIRE_FINAL
+      ? "questionnaire-final"
+      : snapshot?.result?.content === TIMING_QUEUE_FINAL
+        ? "queued-final"
+        : "empty",
+    finishReason: String(snapshot?.result?.finishReason || ""),
+    toolCalls: (snapshot?.result?.toolCalls || []).map((call) => ({
+      toolCallMatches: String(call?.id || "") === QUESTIONNAIRE_TOOL_CALL_ID,
+      name: String(call?.function?.name || ""),
+      arguments: questionnaireArgumentsProjection(call?.function?.arguments),
+    })),
+  }));
+}
+
 async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
   const started = await beginQuestionnaireLifecycle(h4, runtime, {
     userMarker: QUESTIONNAIRE_USER,
@@ -5951,6 +6420,717 @@ async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
     },
     events: terminalEvents.map((event) => event.type),
     runtimeCursors: runtimeProjection.map((snapshot) => snapshot.nextCursor),
+    waitingReload: waitingReloadRequests,
+    terminalReload: terminalReloadRequests,
+    hashes,
+  });
+}
+
+async function exerciseQuestionnaireQueueRefreshLifecycle(h4, runtime) {
+  expect(Object.keys(H4_8E_SEMANTIC_HASHES)).toEqual(H4_8E_SEMANTIC_HASH_KEYS);
+  const configuredHashes = Object.values(H4_8E_SEMANTIC_HASHES);
+  const bootstrapMode = configuredHashes.every((value) => value === "");
+  const frozenMode = configuredHashes.every((value) => /^[a-f0-9]{64}$/.test(value));
+  expect(bootstrapMode || frozenMode).toBe(true);
+  if (bootstrapMode) expect(runtime).toBe("bundle");
+
+  const started = await beginQuestionnaireLifecycle(h4, runtime, {
+    userMarker: QUEUE_QUESTIONNAIRE_USER,
+    toolCallId: QUESTIONNAIRE_TOOL_CALL_ID,
+    requestId: QUESTIONNAIRE_REQUEST_ID,
+    title: QUESTIONNAIRE_TITLE,
+    reason: QUESTIONNAIRE_REASON,
+    assertToolArguments: (value) => {
+      const projection = questionnaireArgumentsProjection(value);
+      expect(projection).toMatchObject({
+        titleMatches: true,
+        reasonMatches: true,
+        questionCount: 1,
+        question: {
+          idMatches: true,
+          promptMatches: true,
+          type: "single",
+          required: true,
+          allowOther: false,
+        },
+      });
+      expect(projection.question.options).toHaveLength(2);
+    },
+  });
+  const {
+    page,
+    agentRunId,
+    firstRuntimeRunId,
+    waitingAgent,
+    sessionId,
+  } = started;
+  const waitingEvents = questionnaireEventProjection(waitingAgent);
+  expect(waitingEvents.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "user_input_required",
+  ]);
+  expect(waitingAgent.nextCursor).toBe(waitingEvents.at(-1)?.seq);
+  expect(waitingEvents.map((event) => event.seq)).toEqual(
+    waitingEvents.map((_, index) => index + 1),
+  );
+  const waitingExecution = questionnaireExecutionProjection(waitingAgent);
+  expect(waitingExecution).toEqual([{
+    toolCallMatches: true,
+    name: "request_user_input",
+    arguments: questionnaireArgumentsProjection({
+      title: QUESTIONNAIRE_TITLE,
+      reason: QUESTIONNAIRE_REASON,
+      questions: waitingAgent.pendingInput.questions,
+    }),
+    status: "waiting_user_input",
+    outcome: "",
+    result: null,
+    failureCountAbsent: true,
+    failureSignatureAbsent: true,
+  }]);
+  const waitingQuestionnaireDom = await questionnaireDomProjection(h4, "waiting");
+
+  let waitingSessionResponse = null;
+  await expect.poll(async () => {
+    waitingSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: waitingSessionResponse.status,
+      roles: (waitingSessionResponse.body?.messages || []).map((message) => message.role),
+      runStatus: waitingSessionResponse.body?.runState?.status,
+      cursor: waitingSessionResponse.body?.runState?.agentEventCursor,
+      requestId: waitingSessionResponse.body?.runState?.userInputRequest?.id,
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call"],
+    runStatus: "waiting-user-input",
+    cursor: waitingAgent.nextCursor,
+    requestId: QUESTIONNAIRE_REQUEST_ID,
+  });
+  const waitingQuestionnaireSnapshot = questionnaireWaitingSnapshotProjection(
+    waitingAgent,
+    waitingSessionResponse.body,
+    agentRunId,
+  );
+  const initialQueueContext = {
+    questionnaireUserCount: 1,
+    questionnaireFinalCount: 0,
+    queuedUserCount: 0,
+    markerOrder: ["questionnaire-user"],
+    mainFinalPrecedesQueuedUser: false,
+  };
+  const metricsAtWaiting = await h4.metrics();
+  expect(metricsAtWaiting.chatRequests).toEqual([{
+    scenario: "queue-questionnaire-call",
+    stream: true,
+    hasToolResult: false,
+    queueContext: initialQueueContext,
+  }]);
+
+  const queueBridge = await submitQuestionnaireQueueBridge(h4, started, metricsAtWaiting);
+  expect(await questionnaireDomProjection(h4, "waiting")).toEqual(waitingQuestionnaireDom);
+  const waitingQueueDom = await queueQuestionnaireDomProjection(h4, "waiting");
+  const waitingDom = {
+    questionnaire: waitingQuestionnaireDom,
+    queue: waitingQueueDom,
+  };
+
+  const waitingReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const restoredWaitingQuestionnaireDom = await questionnaireDomProjection(h4, "waiting");
+  const restoredWaitingQueueDom = await queueQuestionnaireDomProjection(h4, "waiting");
+  expect({
+    questionnaire: restoredWaitingQuestionnaireDom,
+    queue: restoredWaitingQueueDom,
+  }).toEqual(waitingDom);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+
+  const waitingAgentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(waitingAgentAfterReload.status).toBe(200);
+  expect(questionnaireEventProjection(waitingAgentAfterReload.body)).toEqual(waitingEvents);
+  expect(questionnaireExecutionProjection(waitingAgentAfterReload.body)).toEqual(waitingExecution);
+  expect(waitingAgentAfterReload.body.pendingInput?.requestId).toBe(QUESTIONNAIRE_REQUEST_ID);
+  const waitingSessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(waitingSessionAfterReload.status).toBe(200);
+  const restoredQueueIdentity = queueQuestionnaireIdentity(waitingSessionAfterReload.body);
+  expect(restoredQueueIdentity.dispatchId).toBe(queueBridge.queueItemId);
+  expect(restoredQueueIdentity.checkpointId).toBe(queueBridge.queueItemId);
+  expect(restoredQueueIdentity.clientRequestId).toBe(queueBridge.queueItemId);
+  const restoredWaitingQueueSession = waitingQueueSessionProjection(
+    waitingSessionAfterReload.body,
+    agentRunId,
+    firstRuntimeRunId,
+  );
+  expect(restoredWaitingQueueSession).toEqual(queueBridge.waitingSession);
+  const restoredQuestionnaireSnapshot = questionnaireWaitingSnapshotProjection(
+    waitingAgentAfterReload.body,
+    waitingSessionAfterReload.body,
+    agentRunId,
+  );
+  expect(restoredQuestionnaireSnapshot.agent).toEqual(waitingQuestionnaireSnapshot.agent);
+  expect(restoredQuestionnaireSnapshot.session.runState)
+    .toEqual(waitingQuestionnaireSnapshot.session.runState);
+  expect(restoredQuestionnaireSnapshot.session.roles)
+    .toEqual(["user", "assistant", "tool-call", "user"]);
+  const metricsAfterWaitingReload = await h4.metrics();
+  expect(metricsAfterWaitingReload.chatRequests).toEqual(metricsAtWaiting.chatRequests);
+  expect(metricsAfterWaitingReload.toolExecutions).toEqual(metricsAtWaiting.toolExecutions);
+  const waitingReloadRequests = questionnaireRequestProjection(
+    h4,
+    waitingReloadBoundary,
+    queueBridge.metricsAfter,
+    metricsAfterWaitingReload,
+  );
+  expect(waitingReloadRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 0,
+    resumePost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 0,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  expect(h4.controlIds()).toEqual({
+    agentRunIds: [agentRunId],
+    runtimeRunIds: [firstRuntimeRunId],
+  });
+  const waitingRefreshLifecycle = {
+    sameMainAgentRun: waitingAgentAfterReload.body.agentRunId === agentRunId,
+    sameRequest: waitingAgentAfterReload.body.pendingInput?.requestId === QUESTIONNAIRE_REQUEST_ID,
+    sameEvents: JSON.stringify(questionnaireEventProjection(waitingAgentAfterReload.body))
+      === JSON.stringify(waitingEvents),
+    sameQueueSession: JSON.stringify(restoredWaitingQueueSession)
+      === JSON.stringify(queueBridge.waitingSession),
+    sameDom: JSON.stringify({
+      questionnaire: restoredWaitingQuestionnaireDom,
+      queue: restoredWaitingQueueDom,
+    }) === JSON.stringify(waitingDom),
+    requests: waitingReloadRequests,
+    counts: {
+      agentRuns: metricsAfterWaitingReload.production.agentRuns.length,
+      runtimes: metricsAfterWaitingReload.production.runtimeRuns.length,
+      upstreamChat: metricsAfterWaitingReload.chatRequests.length,
+      interactionExecutionDelta: waitingAgentAfterReload.body.toolExecutions.length
+        - waitingAgent.toolExecutions.length,
+      pendingQueue: restoredWaitingQueueSession.queue.checkpointCount,
+      promotionDelta: 0,
+    },
+  };
+
+  const submissionBoundary = h4.requestBoundary();
+  const promotionObservation = startQuestionnaireQueuePromotionObservation(page);
+  try {
+    const option = page.locator(
+      `#userInputPanel [data-question-id="${QUESTIONNAIRE_QUESTION_ID}"] input[type="radio"][value="${QUESTIONNAIRE_OPTION_B.value}"]`,
+    );
+    const confirm = page.locator(
+      `#userInputPanel [data-question-id="${QUESTIONNAIRE_QUESTION_ID}"] [data-user-input-action="confirm"]`,
+    );
+    await expect(option).toHaveCount(1);
+    await expect(option).not.toBeChecked();
+    await option.check();
+    await expect(option).toBeChecked();
+    await expect(confirm).toHaveCount(1);
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(page.locator("#messages article.msg.assistant")
+      .filter({ hasText: QUESTIONNAIRE_FINAL })).toHaveCount(1);
+    await expect(page.locator("#messages article.msg.assistant")
+      .filter({ hasText: TIMING_QUEUE_FINAL })).toHaveCount(1);
+    await expect.poll(() => promotionObservation.timeline).toEqual([
+      { sequence: 1, type: "main-terminal-checkpoint-cleared" },
+      { sequence: 2, type: "queue-promoted" },
+    ]);
+    expect(promotionObservation.counts.checkpointClearedSaves).toBeGreaterThan(0);
+    expect(promotionObservation.counts.queuePromotionPosts).toBe(1);
+  } finally {
+    promotionObservation.stop();
+  }
+
+  await expect.poll(() => {
+    const ids = h4.controlIds();
+    return { agentRuns: ids.agentRunIds.length, runtimes: ids.runtimeRunIds.length };
+  }).toEqual({ agentRuns: 2, runtimes: 3 });
+  const controlIds = h4.controlIds();
+  const queuedAgentRunId = controlIds.agentRunIds.find((runId) => runId !== agentRunId);
+  expect(queuedAgentRunId).toBeTruthy();
+  expect(queuedAgentRunId).not.toBe(queueBridge.queueItemId);
+
+  const mainAgentResponse = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  const queuedAgentResponse = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(queuedAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(mainAgentResponse.status).toBe(200);
+  expect(queuedAgentResponse.status).toBe(200);
+  const completedMainAgent = mainAgentResponse.body;
+  const completedQueuedAgent = queuedAgentResponse.body;
+  expect(completedMainAgent).toMatchObject({
+    agentRunId,
+    status: "completed",
+    activeRuntimeRunId: "",
+    pendingInput: null,
+    result: { content: QUESTIONNAIRE_FINAL },
+  });
+  expect(completedQueuedAgent).toMatchObject({
+    agentRunId: queuedAgentRunId,
+    clientRequestId: queueBridge.queueItemId,
+    status: "completed",
+    activeRuntimeRunId: "",
+    pendingInput: null,
+    result: { content: TIMING_QUEUE_FINAL },
+  });
+  const mainEvents = questionnaireEventProjection(completedMainAgent);
+  expect(mainEvents.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "user_input_required",
+    "user_input_submitted",
+    "tool_completed",
+    "waiting_credentials",
+    "resumed",
+    "model_started",
+    "model_completed",
+    "completed",
+  ]);
+  expect(mainEvents.map((event) => event.seq)).toEqual(
+    mainEvents.map((_, index) => index + 1),
+  );
+  const mainExecution = questionnaireExecutionProjection(completedMainAgent);
+  expect(mainExecution).toHaveLength(1);
+  const queuedEvents = queuedAgentEventProjection(completedQueuedAgent);
+  expect(queuedEvents.map((event) => event.seq)).toEqual(
+    queuedEvents.map((_, index) => index + 1),
+  );
+  expect(queuedEvents.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "completed",
+  ]);
+  expect(queuedEvents[0]?.type).toBe("created");
+  expect(queuedEvents.at(-1)?.type).toBe("completed");
+  expect(queuedEvents.filter((event) => event.type === "model_started")).toHaveLength(1);
+  expect(queuedEvents.filter((event) => event.type === "model_completed")).toHaveLength(1);
+  expect(completedQueuedAgent.toolExecutions).toEqual([]);
+
+  const mainRuntimeRunIds = completedMainAgent.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  const queuedRuntimeRunIds = completedQueuedAgent.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(mainRuntimeRunIds).toHaveLength(2);
+  expect(queuedRuntimeRunIds).toHaveLength(1);
+  expect(new Set([...mainRuntimeRunIds, ...queuedRuntimeRunIds]).size).toBe(3);
+  expect(new Set(controlIds.runtimeRunIds)).toEqual(
+    new Set([...mainRuntimeRunIds, ...queuedRuntimeRunIds]),
+  );
+  const runtimeEntries = [];
+  for (const [index, runtimeRunId] of mainRuntimeRunIds.entries()) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("completed");
+    runtimeEntries.push({ owner: `main-${index + 1}`, snapshot: response.body });
+  }
+  const queuedRuntimeResponse = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(queuedRuntimeRunIds[0])}?cursor=0&wait=0`,
+  );
+  expect(queuedRuntimeResponse.status).toBe(200);
+  expect(queuedRuntimeResponse.body.status).toBe("completed");
+  runtimeEntries.push({ owner: "queued", snapshot: queuedRuntimeResponse.body });
+  const runtimeProjection = queueQuestionnaireRuntimeProjection(runtimeEntries);
+  expect(runtimeProjection.map((entry) => ({
+    owner: entry.owner,
+    status: entry.status,
+    content: entry.content,
+    finishReason: entry.finishReason,
+    toolCallCount: entry.toolCalls.length,
+  }))).toEqual([
+    {
+      owner: "main-1",
+      status: "completed",
+      content: "empty",
+      finishReason: "tool_calls",
+      toolCallCount: 1,
+    },
+    {
+      owner: "main-2",
+      status: "completed",
+      content: "questionnaire-final",
+      finishReason: "stop",
+      toolCallCount: 0,
+    },
+    {
+      owner: "queued",
+      status: "completed",
+      content: "queued-final",
+      finishReason: "stop",
+      toolCallCount: 0,
+    },
+  ]);
+
+  let terminalSessionResponse = null;
+  await expect.poll(async () => {
+    terminalSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: terminalSessionResponse.status,
+      roles: (terminalSessionResponse.body?.messages || []).map((message) => message.role),
+      runStateKeys: Object.keys(terminalSessionResponse.body?.runState || {}).sort(),
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call", "user", "tool-result", "assistant", "user", "assistant"],
+    runStateKeys: [],
+  });
+  const sessionRoleContent = queueQuestionnaireSessionRoleProjection(
+    terminalSessionResponse.body.messages,
+  );
+  expect(sessionRoleContent).toEqual([
+    { role: "user", kind: "initial-user" },
+    { role: "assistant", kind: "tool-owner" },
+    { role: "tool-call", kind: "questionnaire-call" },
+    { role: "user", kind: "input-summary" },
+    { role: "tool-result", kind: "questionnaire-result" },
+    { role: "assistant", kind: "final" },
+    { role: "user", kind: "queued-user" },
+    { role: "assistant", kind: "queued-final" },
+  ]);
+  const terminalQueueSession = terminalQueueSessionProjection(
+    terminalSessionResponse.body,
+    queueBridge.queueItemId,
+    completedQueuedAgent,
+  );
+  expect(terminalQueueSession).toEqual({
+    runStateCleared: true,
+    queuedUserCount: 1,
+    queuedFinalCount: 1,
+    checkpointCount: 0,
+    dispatchStatus: "completed",
+    detachedFromMain: false,
+    queueIdentityRetained: true,
+    clientRequestMatches: true,
+  });
+
+  const terminalQuestionnaireDom = await questionnaireDomProjection(h4, "terminal");
+  const terminalQueueDom = await queueQuestionnaireDomProjection(h4, "terminal");
+  const terminalDom = {
+    questionnaire: terminalQuestionnaireDom,
+    queue: terminalQueueDom,
+  };
+
+  const completedQueueContext = {
+    questionnaireUserCount: 1,
+    questionnaireFinalCount: 1,
+    queuedUserCount: 1,
+    markerOrder: ["questionnaire-user", "questionnaire-final", "queued-user"],
+    mainFinalPrecedesQueuedUser: true,
+  };
+  const metricsAtTerminal = await h4.metrics();
+  expect(metricsAtTerminal.chatRequests.map((request) => ({
+    scenario: request.scenario,
+    hasToolResult: request.hasToolResult,
+    queueContext: request.queueContext,
+  }))).toEqual([
+    {
+      scenario: "queue-questionnaire-call",
+      hasToolResult: false,
+      queueContext: initialQueueContext,
+    },
+    {
+      scenario: "queue-questionnaire-final",
+      hasToolResult: true,
+      queueContext: initialQueueContext,
+    },
+    {
+      scenario: "queue-questionnaire-promoted",
+      hasToolResult: true,
+      queueContext: completedQueueContext,
+    },
+  ]);
+  expect(metricsAtTerminal.chatRequests[1].questionnaireReceipt).toMatchObject({
+    receiptCount: 1,
+    parseable: true,
+    selectedValueMatches: true,
+  });
+  expect(metricsAtTerminal.toolExecutions).toEqual([]);
+  expect(metricsAtTerminal.productionToolDelegations).toBe(0);
+  expect(metricsAtTerminal.unsafeToolRequests).toBe(0);
+  expect(metricsAtTerminal.production.agentRuns).toHaveLength(2);
+  expect(metricsAtTerminal.production.runtimeRuns).toHaveLength(3);
+  const submissionRequests = questionnaireRequestProjection(
+    h4,
+    submissionBoundary,
+    metricsAfterWaitingReload,
+    metricsAtTerminal,
+  );
+  expect(submissionRequests).toEqual({
+    agentRunPost: 1,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 1,
+    resumePost: 1,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 2,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  const totalRequests = questionnaireRequestProjection(
+    h4,
+    started.lifecycleBoundary,
+    started.lifecycleMetricsBefore,
+    metricsAtTerminal,
+  );
+  expect(totalRequests).toEqual({
+    agentRunPost: 2,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 1,
+    resumePost: 1,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 3,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  const lifecycleSteerPost = queueQuestionnaireSteerPostCount(
+    h4.loopbackRequests.slice(started.lifecycleBoundary),
+  );
+  expect(lifecycleSteerPost).toBe(0);
+
+  const inputSubmissionProjection = {
+    requests: {
+      inputPost: submissionRequests.inputPost,
+      resumePost: submissionRequests.resumePost,
+      mainContinuationChat: 1,
+    },
+    events: mainEvents.slice(waitingEvents.length, 9),
+    execution: mainExecution,
+    sameMainAgentRun: completedMainAgent.agentRunId === agentRunId,
+    interactionExecutionCount: completedMainAgent.toolExecutions.length,
+    mainContinuationQueueMarkerCount: metricsAtTerminal.chatRequests[1]
+      .queueContext.queuedUserCount,
+  };
+  const queuePromotionProjection = {
+    requests: {
+      agentRunPost: submissionRequests.agentRunPost,
+      queuedUpstreamChat: submissionRequests.upstreamChatDelta - 1,
+      steerPost: lifecycleSteerPost,
+    },
+    causalTimeline: promotionObservation.timeline,
+    causalCounts: {
+      mainTerminalCheckpointObserved: promotionObservation.counts.checkpointClearedSaves > 0,
+      queuePromotionPosts: promotionObservation.counts.queuePromotionPosts,
+    },
+    mainCompletedBeforePromotion: promotionObservation.timeline.map((entry) => entry.type)
+      .join(",") === "main-terminal-checkpoint-cleared,queue-promoted",
+    identities: {
+      distinctAgentRuns: completedQueuedAgent.agentRunId !== completedMainAgent.agentRunId,
+      clientRequestMatchesQueue: completedQueuedAgent.clientRequestId === queueBridge.queueItemId,
+      queueSeparateFromQuestionnaire: ![
+        QUESTIONNAIRE_REQUEST_ID,
+        QUESTIONNAIRE_TOOL_CALL_ID,
+        agentRunId,
+      ].includes(queueBridge.queueItemId),
+    },
+    queuedAgent: {
+      status: String(completedQueuedAgent.status || ""),
+      nextCursor: Number(completedQueuedAgent.nextCursor || 0),
+      events: queuedEvents,
+      executionCount: completedQueuedAgent.toolExecutions.length,
+    },
+    terminalQueueSession,
+  };
+
+  const terminalReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
+  const restoredTerminalQuestionnaireDom = await questionnaireDomProjection(h4, "terminal");
+  const restoredTerminalQueueDom = await queueQuestionnaireDomProjection(h4, "terminal");
+  expect({
+    questionnaire: restoredTerminalQuestionnaireDom,
+    queue: restoredTerminalQueueDom,
+  }).toEqual(terminalDom);
+  const mainAgentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  const queuedAgentAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(queuedAgentRunId)}?cursor=0&wait=0`,
+  );
+  const terminalSessionAfterReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(mainAgentAfterReload.status).toBe(200);
+  expect(queuedAgentAfterReload.status).toBe(200);
+  expect(terminalSessionAfterReload.status).toBe(200);
+  expect(questionnaireEventProjection(mainAgentAfterReload.body)).toEqual(mainEvents);
+  expect(questionnaireExecutionProjection(mainAgentAfterReload.body)).toEqual(mainExecution);
+  expect(queuedAgentEventProjection(queuedAgentAfterReload.body)).toEqual(queuedEvents);
+  expect(queueQuestionnaireSessionRoleProjection(terminalSessionAfterReload.body.messages))
+    .toEqual(sessionRoleContent);
+  expect(terminalQueueSessionProjection(
+    terminalSessionAfterReload.body,
+    queueBridge.queueItemId,
+    queuedAgentAfterReload.body,
+  )).toEqual(terminalQueueSession);
+
+  const runtimeEntriesAfterReload = [];
+  for (const [index, runtimeRunId] of mainRuntimeRunIds.entries()) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    runtimeEntriesAfterReload.push({ owner: `main-${index + 1}`, snapshot: response.body });
+  }
+  const queuedRuntimeAfterReload = await fetchProductionJson(
+    page,
+    `/api/runtime/runs/${encodeURIComponent(queuedRuntimeRunIds[0])}?cursor=0&wait=0`,
+  );
+  expect(queuedRuntimeAfterReload.status).toBe(200);
+  runtimeEntriesAfterReload.push({ owner: "queued", snapshot: queuedRuntimeAfterReload.body });
+  expect(queueQuestionnaireRuntimeProjection(runtimeEntriesAfterReload)).toEqual(runtimeProjection);
+  const metricsAfterTerminalReload = await h4.metrics();
+  expect(metricsAfterTerminalReload.chatRequests).toEqual(metricsAtTerminal.chatRequests);
+  expect(metricsAfterTerminalReload.toolExecutions).toEqual(metricsAtTerminal.toolExecutions);
+  const terminalReloadRequests = questionnaireRequestProjection(
+    h4,
+    terminalReloadBoundary,
+    metricsAtTerminal,
+    metricsAfterTerminalReload,
+  );
+  expect(terminalReloadRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 0,
+    resumePost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 0,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  const terminalReloadSteerPost = queueQuestionnaireSteerPostCount(
+    h4.loopbackRequests.slice(terminalReloadBoundary),
+  );
+  expect(terminalReloadSteerPost).toBe(0);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(
+    new Set([agentRunId, queuedAgentRunId]),
+  );
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(
+    new Set([...mainRuntimeRunIds, ...queuedRuntimeRunIds]),
+  );
+  expect(h4.pageErrors).toEqual([]);
+  const refreshLifecycle = {
+    sameAgents: questionnaireEventProjection(mainAgentAfterReload.body).length === mainEvents.length
+      && queuedAgentEventProjection(queuedAgentAfterReload.body).length === queuedEvents.length,
+    sameRuntimes: JSON.stringify(queueQuestionnaireRuntimeProjection(runtimeEntriesAfterReload))
+      === JSON.stringify(runtimeProjection),
+    sameSession: JSON.stringify(queueQuestionnaireSessionRoleProjection(
+      terminalSessionAfterReload.body.messages,
+    )) === JSON.stringify(sessionRoleContent),
+    sameDom: JSON.stringify({
+      questionnaire: restoredTerminalQuestionnaireDom,
+      queue: restoredTerminalQueueDom,
+    }) === JSON.stringify(terminalDom),
+    requests: terminalReloadRequests,
+    counts: {
+      agentRuns: metricsAfterTerminalReload.production.agentRuns.length,
+      runtimes: metricsAfterTerminalReload.production.runtimeRuns.length,
+      upstreamChat: metricsAfterTerminalReload.chatRequests.length,
+      inputDelta: 0,
+      resumeDelta: 0,
+      steerDelta: terminalReloadSteerPost,
+      promotionDelta: terminalReloadRequests.agentRunPost,
+      registeredToolDelta: metricsAfterTerminalReload.toolExecutions.length
+        - metricsAtTerminal.toolExecutions.length,
+      interactionExecutionDelta: mainAgentAfterReload.body.toolExecutions.length
+        - completedMainAgent.toolExecutions.length,
+    },
+  };
+
+  const hashes = {
+    waitingEventProjection: canonicalHash(waitingEvents),
+    waitingQuestionnaireSnapshot: canonicalHash(waitingQuestionnaireSnapshot),
+    queueSubmissionProjection: canonicalHash(queueBridge.projection),
+    waitingQueueSession: canonicalHash(queueBridge.waitingSession),
+    waitingDom: canonicalHash(waitingDom),
+    waitingRefreshLifecycle: canonicalHash(waitingRefreshLifecycle),
+    inputSubmissionProjection: canonicalHash(inputSubmissionProjection),
+    queuePromotionProjection: canonicalHash(queuePromotionProjection),
+    runtimeProjection: canonicalHash(runtimeProjection),
+    sessionRoleContent: canonicalHash(sessionRoleContent),
+    terminalDom: canonicalHash(terminalDom),
+    refreshLifecycle: canonicalHash(refreshLifecycle),
+  };
+  expect(Object.keys(hashes)).toEqual(H4_8E_SEMANTIC_HASH_KEYS);
+  if (frozenMode) expect(hashes).toEqual(H4_8E_SEMANTIC_HASHES);
+
+  h4.evidence(`${runtime}-questionnaire-queue-refresh-order`, {
+    runtime,
+    counts: {
+      agentRuns: metricsAtTerminal.production.agentRuns.length,
+      runtimes: metricsAtTerminal.production.runtimeRuns.length,
+      upstreamChat: metricsAtTerminal.chatRequests.length,
+      inputPost: totalRequests.inputPost,
+      resumePost: totalRequests.resumePost,
+      enqueue: queueBridge.projection.saveCount,
+      promotion: submissionRequests.agentRunPost,
+      interactionExecutions: completedMainAgent.toolExecutions.length,
+      registeredDelegations: metricsAtTerminal.productionToolDelegations,
+      registeredExecutions: metricsAtTerminal.toolExecutions.length,
+    },
+    agents: {
+      main: { status: completedMainAgent.status, eventTypes: mainEvents.map((event) => event.type) },
+      queued: { status: completedQueuedAgent.status, eventTypes: queuedEvents.map((event) => event.type) },
+      distinct: completedMainAgent.agentRunId !== completedQueuedAgent.agentRunId,
+      queueClientRequestClosed: completedQueuedAgent.clientRequestId === queueBridge.queueItemId,
+    },
+    runtimeCursors: runtimeProjection.map((snapshot) => snapshot.nextCursor),
+    sessionOrder: sessionRoleContent,
+    domOrder: terminalDom.queue.order,
+    chatContexts: metricsAtTerminal.chatRequests.map((request) => request.queueContext),
+    promotionCausality: promotionObservation.timeline,
+    promotionObservationCounts: promotionObservation.counts,
     waitingReload: waitingReloadRequests,
     terminalReload: terminalReloadRequests,
     hashes,
@@ -10382,6 +11562,14 @@ test("bundle questionnaire survives reload, submits once, and resumes same Agent
 
 test("direct classic questionnaire survives reload, submits once, and resumes same AgentRun", async ({ h4 }) => {
   await exerciseQuestionnaireRefreshLifecycle(h4, "classic");
+});
+
+test("bundle questionnaire queue survives waiting reload and promotes after main completion", async ({ h4 }) => {
+  await exerciseQuestionnaireQueueRefreshLifecycle(h4, "bundle");
+});
+
+test("direct classic questionnaire queue survives waiting reload and promotes after main completion", async ({ h4 }) => {
+  await exerciseQuestionnaireQueueRefreshLifecycle(h4, "classic");
 });
 
 test("bundle mixed questionnaire preserves progress across reload and submits once", async ({ h4 }) => {
