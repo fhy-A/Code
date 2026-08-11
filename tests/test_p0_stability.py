@@ -200,8 +200,16 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
 class TestFrontendRefreshRecovery(unittest.TestCase):
     def test_completed_session_restore_scrolls_after_layout(self):
         self.assertIn("function scheduleMessagesScrollToBottom(sessionId = state.sessionId)", APP_SOURCE)
-        self.assertIn("if (state.sessionId !== sessionId) return", APP_SOURCE)
-        self.assertIn("els.messages.scrollTop = els.messages.scrollHeight", APP_SOURCE)
+        schedule_start = APP_SOURCE.index(
+            "function scheduleMessagesScrollToBottom(sessionId = state.sessionId)"
+        )
+        schedule_end = APP_SOURCE.index("function patchStreamingAssistantMessage", schedule_start)
+        schedule_source = APP_SOURCE[schedule_start:schedule_end]
+        self.assertIn("if (!sessionId || state.sessionId !== sessionId) return", schedule_source)
+        self.assertIn("messageScrollController?.forceToLatest(sessionId)", schedule_source)
+        self.assertNotIn("scrollTop", schedule_source)
+        self.assertIn("function createMessageScrollController(options = {})", MESSAGES_SOURCE)
+        self.assertIn("container.scrollTop = maxScrollTop()", MESSAGES_SOURCE)
 
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
         load_start = SESSIONS_SOURCE.index("async function loadSession(sessionId)", navigation_start)

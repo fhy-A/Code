@@ -11788,5 +11788,707 @@ class ComposerThemeAndFileDragTests(unittest.TestCase):
         self.assertIn("queueImageFile(file);", handler_source)
 
 
+class MessageScrollControllerTests(unittest.TestCase):
+    def test_scroll_controller_preserves_position_and_coalesces_following_updates(self):
+        script = r"""
+global.window = global;
+global.Code = { ui: {} };
+require("./src/ui/messages.js");
+
+function classList() {
+  const values = new Set();
+  return {
+    toggle(name, force) {
+      const next = force === undefined ? !values.has(name) : Boolean(force);
+      if (next) values.add(name); else values.delete(name);
+      return next;
+    },
+    contains(name) { return values.has(name); },
+  };
+}
+
+function eventTarget(extra = {}) {
+  const listeners = new Map();
+  return Object.assign({
+    classList: classList(),
+    dataset: {},
+    attributes: {},
+    tabIndex: -1,
+    addEventListener(type, callback, options) { listeners.set(type, { callback, options }); },
+    removeEventListener(type, callback) {
+      if (listeners.get(type)?.callback === callback) listeners.delete(type);
+    },
+    emit(type, event = {}) {
+      listeners.get(type)?.callback({ target: this, ...event });
+    },
+    listenerCount(type) { return listeners.has(type) ? 1 : 0; },
+    listenerOptions(type) { return listeners.get(type)?.options; },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+  }, extra);
+}
+
+let nextFrame = 1;
+const frames = new Map();
+const requestFrame = (callback) => {
+  const id = nextFrame++;
+  frames.set(id, callback);
+  return id;
+};
+const cancelFrame = (id) => frames.delete(id);
+const flushFrames = () => {
+  const callbacks = Array.from(frames.values());
+  frames.clear();
+  callbacks.forEach((callback) => callback());
+};
+
+const resizeObservers = [];
+class FakeResizeObserver {
+  constructor(callback) { this.callback = callback; resizeObservers.push(this); }
+  observe() {}
+  disconnect() {}
+}
+
+const container = eventTarget({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600 });
+const button = eventTarget();
+const focusCalls = [];
+let expandedSelection = false;
+global.getSelection = () => ({ isCollapsed: !expandedSelection });
+const focusTarget = { focus(options) { focusCalls.push(options); } };
+const controller = Code.ui.messages.createMessageScrollController({
+  container,
+  content: {},
+  button,
+  focusTarget,
+  requestAnimationFrame: requestFrame,
+  cancelAnimationFrame: cancelFrame,
+  ResizeObserver: FakeResizeObserver,
+  getLabel: (key) => `label:${key}`,
+});
+
+controller.setSession("s1");
+controller.connect();
+const passiveIntentListeners = ["wheel", "touchstart", "touchmove", "touchend", "touchcancel"]
+  .every((type) => container.listenerOptions(type)?.passive === true);
+controller.onContentChanged("s1");
+const pendingBeforeWheel = controller.snapshot();
+container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+const wheelIntent = controller.snapshot();
+const wheelIntentTop = container.scrollTop;
+flushFrames();
+const wheelTopAfterFlush = container.scrollTop;
+container.scrollTop = 576;
+container.emit("scroll");
+const handedOff = controller.snapshot();
+const smallAwayFrames = frames.size;
+container.scrollHeight = 1120;
+controller.onContentChanged("s1");
+const afterSmallGrowth = controller.snapshot();
+const afterSmallGrowthTop = container.scrollTop;
+const afterSmallGrowthFrames = frames.size;
+container.scrollTop = 550;
+container.emit("scroll");
+const revealed = controller.snapshot();
+container.scrollTop = 700;
+container.emit("scroll");
+const visibleNearBottom = controller.snapshot();
+container.scrollTop = 550;
+container.emit("scroll");
+container.scrollHeight = 1200;
+const preservedTop = container.scrollTop;
+controller.onContentChanged("s1");
+const afterGrowth = controller.snapshot();
+const afterGrowthTop = container.scrollTop;
+controller.setRunning(true, "s1");
+const runningClass = button.classList.contains("is-running");
+const runningLabel = button.attributes["aria-label"];
+controller.setRunning(false, "other-session");
+const isolatedRunning = controller.snapshot().running;
+controller.setSuppressed(true);
+const suppressedVisible = button.classList.contains("visible");
+controller.setSuppressed(false);
+const restoredVisible = button.classList.contains("visible");
+
+container.scrollTop = 799;
+container.emit("scroll");
+flushFrames();
+container.scrollHeight = 1400;
+controller.onContentChanged("s1");
+controller.onContentChanged("s1");
+const coalescedFrames = frames.size;
+flushFrames();
+const followedTop = container.scrollTop;
+
+container.scrollTop = 700;
+container.emit("scroll");
+button.emit("click");
+const clickedTop = container.scrollTop;
+const focusPreventedScroll = focusCalls[0]?.preventScroll === true;
+
+controller.setRunning(true, "s1");
+controller.setSession("s2");
+const reset = controller.snapshot();
+controller.setRunning(true, "s1");
+const foreignSessionIgnored = controller.snapshot().running;
+container.scrollHeight = 1600;
+resizeObservers[0].callback();
+resizeObservers[0].callback();
+const resizeFrames = frames.size;
+flushFrames();
+const resizedTop = container.scrollTop;
+
+controller.forceToLatest("s2");
+flushFrames();
+controller.onContentChanged("s2");
+const pendingBeforeIgnoredInputs = controller.snapshot();
+container.emit("wheel", { deltaX: 0, deltaY: 20, ctrlKey: false });
+const afterDownwardWheel = controller.snapshot();
+container.emit("wheel", { deltaX: 30, deltaY: -20, ctrlKey: false });
+const afterHorizontalWheel = controller.snapshot();
+container.emit("wheel", { deltaX: 0, deltaY: -20, ctrlKey: true });
+const afterCtrlWheel = controller.snapshot();
+container.emit("click");
+const afterOrdinaryClick = controller.snapshot();
+container.emit("touchstart", { touches: [{ clientY: 100 }] });
+container.emit("touchend", { touches: [] });
+const afterTouchTap = controller.snapshot();
+container.emit("touchstart", { touches: [{ clientY: 100 }] });
+container.emit("touchmove", { touches: [{ clientY: 102 }] });
+container.emit("touchend", { touches: [] });
+const afterTouchJitter = controller.snapshot();
+expandedSelection = true;
+container.emit("touchstart", { touches: [{ clientY: 100 }] });
+container.emit("touchmove", { touches: [{ clientY: 112 }] });
+expandedSelection = false;
+const afterSelectionMove = controller.snapshot();
+
+container.emit("touchstart", { touches: [{ clientY: 100 }] });
+container.emit("touchmove", { touches: [{ clientY: 104 }] });
+const touchIntent = controller.snapshot();
+const touchIntentTop = container.scrollTop;
+flushFrames();
+const touchTopAfterFlush = container.scrollTop;
+container.scrollHeight = 1800;
+controller.onContentChanged("s2");
+const touchAfterGrowth = controller.snapshot();
+const touchTopAfterGrowth = container.scrollTop;
+controller.disconnect();
+const afterDisconnect = controller.snapshot();
+const listenersAfterDisconnect = [
+  "scroll", "wheel", "touchstart", "touchmove", "touchend", "touchcancel",
+].reduce((total, type) => total + container.listenerCount(type), 0)
+  + button.listenerCount("click");
+
+process.stdout.write(JSON.stringify({
+  passiveIntentListeners,
+  pendingBeforeWheel,
+  wheelIntent,
+  wheelIntentTop,
+  wheelTopAfterFlush,
+  handedOff,
+  smallAwayFrames,
+  afterSmallGrowth,
+  afterSmallGrowthTop,
+  afterSmallGrowthFrames,
+  revealed,
+  visibleNearBottom,
+  preservedTop,
+  afterGrowth,
+  afterGrowthTop,
+  runningClass,
+  runningLabel,
+  isolatedRunning,
+  suppressedVisible,
+  restoredVisible,
+  coalescedFrames,
+  followedTop,
+  clickedTop,
+  focusPreventedScroll,
+  reset,
+  foreignSessionIgnored,
+  resizeFrames,
+  resizedTop,
+  pendingBeforeIgnoredInputs,
+  afterDownwardWheel,
+  afterHorizontalWheel,
+  afterCtrlWheel,
+  afterOrdinaryClick,
+  afterTouchTap,
+  afterTouchJitter,
+  afterSelectionMove,
+  touchIntent,
+  touchIntentTop,
+  touchTopAfterFlush,
+  touchAfterGrowth,
+  touchTopAfterGrowth,
+  afterDisconnect,
+  listenersAfterDisconnect,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["passiveIntentListeners"])
+        self.assertTrue(data["pendingBeforeWheel"]["following"])
+        self.assertTrue(data["pendingBeforeWheel"]["framePending"])
+        self.assertFalse(data["wheelIntent"]["following"])
+        self.assertTrue(data["wheelIntent"]["awaitingUserScroll"])
+        self.assertFalse(data["wheelIntent"]["framePending"])
+        self.assertEqual(data["wheelIntentTop"], 600)
+        self.assertEqual(data["wheelTopAfterFlush"], 600)
+        self.assertFalse(data["handedOff"]["following"])
+        self.assertFalse(data["handedOff"]["awaitingUserScroll"])
+        self.assertFalse(data["handedOff"]["visible"])
+        self.assertEqual(data["handedOff"]["distance"], 24)
+        self.assertEqual(data["smallAwayFrames"], 0)
+        self.assertFalse(data["afterSmallGrowth"]["following"])
+        self.assertFalse(data["afterSmallGrowth"]["visible"])
+        self.assertEqual(data["afterSmallGrowth"]["distance"], 144)
+        self.assertEqual(data["afterSmallGrowthTop"], 576)
+        self.assertEqual(data["afterSmallGrowthFrames"], 0)
+        self.assertTrue(data["revealed"]["visible"])
+        self.assertFalse(data["revealed"]["following"])
+        self.assertEqual(data["revealed"]["distance"], 170)
+        self.assertFalse(data["visibleNearBottom"]["following"])
+        self.assertTrue(data["visibleNearBottom"]["visible"])
+        self.assertEqual(data["visibleNearBottom"]["distance"], 20)
+        self.assertEqual(data["preservedTop"], 550)
+        self.assertEqual(data["afterGrowth"]["distance"], 250)
+        self.assertEqual(data["afterGrowthTop"], 550)
+        self.assertTrue(data["runningClass"])
+        self.assertEqual(data["runningLabel"], "label:scrollToLatestRunning")
+        self.assertTrue(data["isolatedRunning"])
+        self.assertFalse(data["suppressedVisible"])
+        self.assertTrue(data["restoredVisible"])
+        self.assertEqual(data["coalescedFrames"], 1)
+        self.assertEqual(data["followedTop"], 1000)
+        self.assertEqual(data["clickedTop"], 1000)
+        self.assertTrue(data["focusPreventedScroll"])
+        self.assertEqual(data["reset"]["sessionId"], "s2")
+        self.assertTrue(data["reset"]["following"])
+        self.assertFalse(data["reset"]["visible"])
+        self.assertFalse(data["reset"]["running"])
+        self.assertFalse(data["foreignSessionIgnored"])
+        self.assertEqual(data["resizeFrames"], 1)
+        self.assertEqual(data["resizedTop"], 1200)
+        for key in (
+            "pendingBeforeIgnoredInputs",
+            "afterDownwardWheel",
+            "afterHorizontalWheel",
+            "afterCtrlWheel",
+            "afterOrdinaryClick",
+            "afterTouchTap",
+            "afterTouchJitter",
+            "afterSelectionMove",
+        ):
+            self.assertTrue(data[key]["following"], key)
+            self.assertFalse(data[key]["awaitingUserScroll"], key)
+            self.assertTrue(data[key]["framePending"], key)
+        self.assertFalse(data["touchIntent"]["following"])
+        self.assertTrue(data["touchIntent"]["awaitingUserScroll"])
+        self.assertFalse(data["touchIntent"]["framePending"])
+        self.assertEqual(data["touchIntentTop"], 1200)
+        self.assertEqual(data["touchTopAfterFlush"], 1200)
+        self.assertTrue(data["touchAfterGrowth"]["awaitingUserScroll"])
+        self.assertEqual(data["touchTopAfterGrowth"], 1200)
+        self.assertFalse(data["afterDisconnect"]["awaitingUserScroll"])
+        self.assertEqual(data["listenersAfterDisconnect"], 0)
+
+    def test_scroll_controller_guards_short_overflow_until_real_scroll(self):
+        script = r"""
+global.window = global;
+global.Code = { ui: {} };
+global.getSelection = () => ({ isCollapsed: true });
+require("./src/ui/messages.js");
+
+function classList() {
+  const values = new Set();
+  return {
+    toggle(name, force) {
+      const next = force === undefined ? !values.has(name) : Boolean(force);
+      if (next) values.add(name); else values.delete(name);
+      return next;
+    },
+    contains(name) { return values.has(name); },
+  };
+}
+
+function eventTarget(extra = {}) {
+  const listeners = new Map();
+  return Object.assign({
+    classList: classList(),
+    dataset: {},
+    attributes: {},
+    tabIndex: -1,
+    addEventListener(type, callback, options) { listeners.set(type, { callback, options }); },
+    removeEventListener(type, callback) {
+      if (listeners.get(type)?.callback === callback) listeners.delete(type);
+    },
+    emit(type, event = {}) {
+      listeners.get(type)?.callback({ target: this, ...event });
+    },
+    listenerCount(type) { return listeners.has(type) ? 1 : 0; },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+  }, extra);
+}
+
+function createHarness(overflow) {
+  let rawScrollTop = overflow;
+  const scrollWrites = [];
+  const container = eventTarget({
+    clientHeight: 400,
+    scrollHeight: 400 + overflow,
+  });
+  Object.defineProperty(container, "scrollTop", {
+    configurable: true,
+    get() { return rawScrollTop; },
+    set(value) {
+      rawScrollTop = Number(value);
+      scrollWrites.push(rawScrollTop);
+    },
+  });
+  const button = eventTarget();
+  const frames = new Map();
+  let nextFrame = 1;
+  let resizeCallback = null;
+  class FakeResizeObserver {
+    constructor(callback) { resizeCallback = callback; }
+    observe() {}
+    disconnect() {}
+  }
+  const controller = Code.ui.messages.createMessageScrollController({
+    container,
+    content: {},
+    button,
+    requestAnimationFrame(callback) {
+      const id = nextFrame++;
+      frames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) { frames.delete(id); },
+    ResizeObserver: FakeResizeObserver,
+  });
+  controller.setSession("s1");
+  controller.connect();
+  return {
+    button,
+    container,
+    controller,
+    frames,
+    resize() { resizeCallback?.(); },
+    scrollWrites,
+    setBrowserScrollTop(value) { rawScrollTop = Number(value); },
+  };
+}
+
+function guardedScenario(overflow, intent, running) {
+  const harness = createHarness(overflow);
+  const { container, controller, frames, scrollWrites } = harness;
+  controller.setRunning(running, "s1");
+  controller.onContentChanged("s1");
+  const pending = controller.snapshot();
+  if (intent === "touch") {
+    container.emit("touchstart", { touches: [{ clientY: 100 }] });
+    container.emit("touchmove", { touches: [{ clientY: 104 }] });
+  } else {
+    container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+  }
+  const afterIntent = controller.snapshot();
+  let afterTouchEnd = null;
+  let afterTouchCancel = null;
+  if (intent === "touch") {
+    container.emit("touchend", { touches: [] });
+    afterTouchEnd = controller.snapshot();
+    container.emit("touchcancel", { touches: [] });
+    afterTouchCancel = controller.snapshot();
+  }
+
+  const movement = overflow >= 600 ? 200 : Math.min(20, overflow);
+  const intendedTop = overflow - movement;
+  harness.setBrowserScrollTop(intendedTop);
+  scrollWrites.length = 0;
+  container.scrollHeight += 7;
+  controller.onContentChanged("s1");
+  controller.onContentChanged("s1");
+  harness.resize();
+  harness.resize();
+  const beforeRealScroll = controller.snapshot();
+  const topBeforeRealScroll = container.scrollTop;
+  const writesBeforeRealScroll = scrollWrites.slice();
+
+  container.emit("scroll");
+  const afterRealScroll = controller.snapshot();
+  const capturedTop = container.scrollTop;
+  container.scrollHeight += 11;
+  controller.onContentChanged("s1");
+  harness.resize();
+  const afterLaterChanges = controller.snapshot();
+  const topAfterLaterChanges = container.scrollTop;
+  return {
+    afterIntent,
+    afterLaterChanges,
+    afterRealScroll,
+    afterTouchCancel,
+    afterTouchEnd,
+    beforeRealScroll,
+    capturedTop,
+    framesAfterIntent: frames.size,
+    intent,
+    intendedTop,
+    overflow,
+    pending,
+    running,
+    topAfterLaterChanges,
+    topBeforeRealScroll,
+    writesBeforeRealScroll,
+  };
+}
+
+function toleranceScenario(distance) {
+  const harness = createHarness(30);
+  harness.setBrowserScrollTop(30 - distance);
+  harness.container.emit("scroll");
+  return { distance, snapshot: harness.controller.snapshot() };
+}
+
+function insufficientOverflowScenario(overflow, intent) {
+  const harness = createHarness(overflow);
+  harness.controller.onContentChanged("s1");
+  if (intent === "touch") {
+    harness.container.emit("touchstart", { touches: [{ clientY: 100 }] });
+    harness.container.emit("touchmove", { touches: [{ clientY: 104 }] });
+  } else {
+    harness.container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+  }
+  return { overflow, intent, snapshot: harness.controller.snapshot() };
+}
+
+function cleanupScenarios() {
+  const clickHarness = createHarness(600);
+  clickHarness.controller.onContentChanged("s1");
+  clickHarness.container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+  const awaitingBeforeClick = clickHarness.controller.snapshot();
+  clickHarness.button.emit("click");
+  const afterClick = clickHarness.controller.snapshot();
+
+  clickHarness.container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+  const awaitingBeforeSession = clickHarness.controller.snapshot();
+  clickHarness.controller.setSession("s2");
+  const afterSession = clickHarness.controller.snapshot();
+
+  clickHarness.controller.onContentChanged("s2");
+  clickHarness.container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+  const awaitingBeforeDisconnect = clickHarness.controller.snapshot();
+  clickHarness.controller.disconnect();
+  const afterDisconnect = clickHarness.controller.snapshot();
+
+  const directScrollHarness = createHarness(600);
+  directScrollHarness.setBrowserScrollTop(500);
+  directScrollHarness.container.emit("scroll");
+  const directScroll = directScrollHarness.controller.snapshot();
+  directScrollHarness.container.scrollHeight += 20;
+  directScrollHarness.controller.onContentChanged("s1");
+  directScrollHarness.resize();
+  const directScrollTopAfterChanges = directScrollHarness.container.scrollTop;
+
+  return {
+    afterClick,
+    afterDisconnect,
+    afterSession,
+    awaitingBeforeClick,
+    awaitingBeforeDisconnect,
+    awaitingBeforeSession,
+    directScroll,
+    directScrollTopAfterChanges,
+  };
+}
+
+const guarded = [];
+for (const overflow of [10, 30, 80, 150, 600]) {
+  guarded.push(guardedScenario(overflow, "wheel", true));
+  guarded.push(guardedScenario(overflow, "touch", false));
+}
+const insufficient = [];
+for (const overflow of [0, 1, 2]) {
+  insufficient.push(insufficientOverflowScenario(overflow, "wheel"));
+  insufficient.push(insufficientOverflowScenario(overflow, "touch"));
+}
+process.stdout.write(JSON.stringify({
+  cleanup: cleanupScenarios(),
+  guarded,
+  insufficient,
+  tolerance: [1, 2, 3].map(toleranceScenario),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        self.assertEqual(len(data["guarded"]), 10)
+        for scenario in data["guarded"]:
+            label = f'{scenario["intent"]}:{scenario["overflow"]}'
+            self.assertTrue(scenario["pending"]["following"], label)
+            self.assertTrue(scenario["pending"]["framePending"], label)
+            self.assertFalse(scenario["afterIntent"]["following"], label)
+            self.assertTrue(scenario["afterIntent"]["awaitingUserScroll"], label)
+            self.assertFalse(scenario["afterIntent"]["framePending"], label)
+            self.assertEqual(scenario["framesAfterIntent"], 0, label)
+            if scenario["intent"] == "touch":
+                self.assertTrue(scenario["afterTouchEnd"]["awaitingUserScroll"], label)
+                self.assertTrue(scenario["afterTouchCancel"]["awaitingUserScroll"], label)
+            self.assertTrue(scenario["beforeRealScroll"]["awaitingUserScroll"], label)
+            self.assertEqual(scenario["writesBeforeRealScroll"], [], label)
+            self.assertEqual(scenario["topBeforeRealScroll"], scenario["intendedTop"], label)
+            self.assertFalse(scenario["afterRealScroll"]["awaitingUserScroll"], label)
+            self.assertFalse(scenario["afterRealScroll"]["following"], label)
+            self.assertEqual(scenario["capturedTop"], scenario["intendedTop"], label)
+            self.assertEqual(scenario["topAfterLaterChanges"], scenario["intendedTop"], label)
+            self.assertFalse(scenario["afterLaterChanges"]["awaitingUserScroll"], label)
+            self.assertEqual(
+                scenario["afterRealScroll"]["visible"],
+                scenario["overflow"] >= 600,
+                label,
+            )
+
+        for scenario in data["insufficient"]:
+            label = f'{scenario["intent"]}:{scenario["overflow"]}'
+            self.assertTrue(scenario["snapshot"]["following"], label)
+            self.assertFalse(scenario["snapshot"]["awaitingUserScroll"], label)
+            self.assertTrue(scenario["snapshot"]["framePending"], label)
+
+        tolerance = {item["distance"]: item["snapshot"] for item in data["tolerance"]}
+        self.assertTrue(tolerance[1]["following"])
+        self.assertTrue(tolerance[2]["following"])
+        self.assertFalse(tolerance[3]["following"])
+        for snapshot in tolerance.values():
+            self.assertFalse(snapshot["awaitingUserScroll"])
+
+        cleanup = data["cleanup"]
+        for key in (
+            "awaitingBeforeClick",
+            "awaitingBeforeSession",
+            "awaitingBeforeDisconnect",
+        ):
+            self.assertTrue(cleanup[key]["awaitingUserScroll"], key)
+        for key in ("afterClick", "afterSession", "afterDisconnect"):
+            self.assertFalse(cleanup[key]["awaitingUserScroll"], key)
+        self.assertTrue(cleanup["afterClick"]["following"])
+        self.assertTrue(cleanup["afterSession"]["following"])
+        self.assertFalse(cleanup["directScroll"]["following"])
+        self.assertFalse(cleanup["directScroll"]["awaitingUserScroll"])
+        self.assertEqual(cleanup["directScrollTopAfterChanges"], 500)
+
+    def test_scroll_to_latest_dom_theme_accessibility_and_app_wiring(self):
+        for expected in (
+            'id="scrollToBottomBtn"',
+            'data-i18n-title="scrollToLatest"',
+            'data-i18n-aria-label="scrollToLatest"',
+            'class="scroll-to-bottom-idle-icon"',
+            'class="scroll-to-bottom-running-icon"',
+        ):
+            self.assertIn(expected, INDEX_SOURCE)
+
+        for expected in (
+            'scrollToLatest: "回到最新消息"',
+            'scrollToLatestRunning: "任务运行中，回到最新消息"',
+            'scrollToLatest: "Jump to latest message"',
+            'scrollToLatestRunning: "Task running, jump to latest message"',
+        ):
+            self.assertIn(expected, I18N_SOURCE)
+
+        for expected in (
+            "--scroll-jump-surface: color-mix(",
+            ".scroll-to-bottom-btn.visible",
+            ".scroll-to-bottom-btn.is-running .scroll-to-bottom-running-icon",
+            ".scroll-to-bottom-btn:focus-visible",
+            "@keyframes scroll-jump-progress",
+            "@media (prefers-reduced-motion: reduce)",
+            ".chat-pane.empty-chat .scroll-to-bottom-btn",
+        ):
+            self.assertIn(expected, STYLE_SOURCE)
+
+        running_start = STYLE_SOURCE.index(".scroll-to-bottom-running-icon {")
+        running_end = STYLE_SOURCE.index("}", running_start)
+        running_source = STYLE_SOURCE[running_start:running_end]
+        for expected in (
+            "display: none;",
+            "align-items: center;",
+            "justify-content: center;",
+            "gap: 3.5px;",
+        ):
+            self.assertIn(expected, running_source)
+        dot_start = STYLE_SOURCE.index(".scroll-to-bottom-running-icon > span {")
+        dot_end = STYLE_SOURCE.index("}", dot_start)
+        self.assertIn("position: static;", STYLE_SOURCE[dot_start:dot_end])
+        for index, delay in ((1, "-.24s"), (2, "-.12s"), (3, "0s")):
+            selector = f".scroll-to-bottom-running-icon > span:nth-child({index}) {{"
+            state_start = STYLE_SOURCE.index(selector)
+            state_end = STYLE_SOURCE.index("}", state_start)
+            state_source = STYLE_SOURCE[state_start:state_end]
+            self.assertIn(f"animation-delay: {delay};", state_source)
+            self.assertNotRegex(state_source, r"\b(?:bottom|left|right)\s*:")
+        active_start = STYLE_SOURCE.index(
+            ".scroll-to-bottom-btn.is-running .scroll-to-bottom-running-icon {"
+        )
+        active_end = STYLE_SOURCE.index("}", active_start)
+        self.assertIn("display: flex;", STYLE_SOURCE[active_start:active_end])
+        button_start = STYLE_SOURCE.index(".scroll-to-bottom-btn {")
+        button_end = STYLE_SOURCE.index("}", button_start)
+        button_source = STYLE_SOURCE[button_start:button_end]
+        self.assertIn("width: 40px;", button_source)
+        self.assertIn("height: 40px;", button_source)
+        reduced_start = STYLE_SOURCE.index(
+            "@media (prefers-reduced-motion: reduce)", active_end
+        )
+        reduced_end = STYLE_SOURCE.index("}\n}", reduced_start) + 3
+        reduced_source = STYLE_SOURCE[reduced_start:reduced_end]
+        self.assertIn("animation: none;", reduced_source)
+        self.assertIn("transform: none;", reduced_source)
+
+        for expected in (
+            "createMessageScrollController",
+            "messageScrollController?.forceToLatest(sessionId)",
+            "messageScrollController?.onContentChanged(sessionId)",
+            "messageScrollController?.onViewportChanged(state.sessionId)",
+            "messageScrollController?.setSuppressed(true)",
+            "messageScrollController?.setSuppressed(false)",
+            "messageScrollController?.setRunning(active, sessionId)",
+        ):
+            self.assertIn(expected, APP_SOURCE)
+        self.assertNotIn("els.messages.scrollTop = els.messages.scrollHeight", APP_SOURCE)
+        self.assertNotIn("state._followOutput", APP_SOURCE)
+
+        self.assertIn("function createMessageScrollController(options = {})", MESSAGES_SOURCE)
+        self.assertIn("const bottomTolerance = Number(options.bottomTolerance ?? 2)", MESSAGES_SOURCE)
+        self.assertNotIn("followThreshold", MESSAGES_SOURCE)
+        self.assertIn("const revealThreshold = Number(options.revealThreshold ?? 160)", MESSAGES_SOURCE)
+        self.assertIn('focusTarget.focus({ preventScroll: true })', MESSAGES_SOURCE)
+        self.assertIn('root.addEventListener("toggle"', MESSAGES_SOURCE)
+        controller_start = MESSAGES_SOURCE.index("function createMessageScrollController(options = {})")
+        controller_end = MESSAGES_SOURCE.index("function tokenCount", controller_start)
+        controller_source = MESSAGES_SOURCE[controller_start:controller_end]
+        for expected in (
+            "function relinquishFollowingForUpwardIntent()",
+            "let awaitingUserScroll = false",
+            "maxScrollTop() <= bottomTolerance",
+            'container.addEventListener("wheel", onWheelIntent, passiveListenerOptions)',
+            'container.addEventListener("touchstart", onTouchStart, passiveListenerOptions)',
+            'container.addEventListener("touchmove", onTouchMove, passiveListenerOptions)',
+            'container?.removeEventListener?.("wheel", onWheelIntent, passiveListenerOptions)',
+            'container?.removeEventListener?.("touchmove", onTouchMove, passiveListenerOptions)',
+        ):
+            self.assertIn(expected, controller_source)
+        self.assertNotIn("preventDefault", controller_source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,7 @@ const {
   createMarkdownFeature,
   resolveSyntaxPatterns: _resolveSyntaxPatterns,
 } = window.Code.ui.markdown;
-const { createMessagesFeature } = window.Code.ui.messages;
+const { createMessageScrollController, createMessagesFeature } = window.Code.ui.messages;
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
 const {
@@ -161,6 +161,7 @@ function upgradeStaticIcons() {
 }
 
 const state = createAppState(localStorage);
+let messageScrollController = null;
 const {
   ensureSessionRun,
   getSessionRunState,
@@ -511,6 +512,8 @@ function syncActiveStreamingState() {
   );
   state.isStreaming = Boolean(run?.isStreaming);
   state.abortController = run?.abortController || null;
+  messageScrollController?.setSession(state.sessionId);
+  messageScrollController?.setRunning(state.isStreaming, state.sessionId);
   els.stopBtn.disabled = !state.isStreaming;
   updateSendButtonState();
   renderSessions();
@@ -536,6 +539,7 @@ function syncComposerSafeArea() {
   // Composer bottom: 24px, keep a 4px gap above so the last message
   // never slides underneath the composer edge.
   els.chatPane.style.setProperty("--composer-safe-bottom", `${composerHeight + 28}px`);
+  messageScrollController?.onViewportChanged(state.sessionId);
 }
 
 function setupComposerSafeArea() {
@@ -648,6 +652,8 @@ const els = {
   messages: document.getElementById("messages"),
 
   messageList: document.getElementById("messageList"),
+
+  scrollToBottomBtn: document.getElementById("scrollToBottomBtn"),
 
   prompt: document.getElementById("prompt"),
 
@@ -919,9 +925,8 @@ messagesFeature = createMessagesFeature({
   getToolActionLabel: _toolActionLabel,
   getImagePreviewSource: messageImagePreviewSource,
   onImagePreview: showImageOverlay,
-  onImageLoad: () => {
-    if (els.messages) els.messages.scrollTop = els.messages.scrollHeight;
-  },
+  onImageLoad: () => messageScrollController?.onContentChanged(state.sessionId),
+  onLayoutChange: () => messageScrollController?.onContentChanged(state.sessionId),
   onManualCompactionRetry: (compactionId) => (
     retryManualCompactionPersistence(state.sessionId, compactionId)
   ),
@@ -936,6 +941,17 @@ const {
   showIconCopyFeedback,
 } = messagesFeature;
 bindMessageInteractions(els.messageList);
+
+messageScrollController = createMessageScrollController({
+  container: els.messages,
+  content: els.messageList,
+  button: els.scrollToBottomBtn,
+  focusTarget: els.prompt,
+  getLabel: (key) => t(key),
+  ResizeObserver: window.ResizeObserver,
+});
+messageScrollController.connect();
+messageScrollController.setSession(state.sessionId);
 
 const panelsFeature = createPanelsFeature({
   elements: els,
@@ -2083,8 +2099,6 @@ const streamingRenderQueue = new Map();
 const streamingProjectionTimers = new Map();
 const STREAM_PROJECTION_GRACE_MS = 180;
 let streamingRenderFrame = 0;
-let messageRestoreScrollFrame = 0;
-
 function clearStreamingProjectionTimer(sessionId, index) {
   const key = `${sessionId}:${index}`;
   const timer = streamingProjectionTimers.get(key);
@@ -2107,17 +2121,8 @@ function scheduleStreamingAnswerProjection(sessionId, index) {
 }
 
 function scheduleMessagesScrollToBottom(sessionId = state.sessionId) {
-  if (!els.messages || !sessionId) return;
-  if (messageRestoreScrollFrame) cancelAnimationFrame(messageRestoreScrollFrame);
-
-  state._followOutput = true;
-  messageRestoreScrollFrame = requestAnimationFrame(() => {
-    messageRestoreScrollFrame = requestAnimationFrame(() => {
-      messageRestoreScrollFrame = 0;
-      if (state.sessionId !== sessionId) return;
-      els.messages.scrollTop = els.messages.scrollHeight;
-    });
-  });
+  if (!sessionId || state.sessionId !== sessionId) return;
+  messageScrollController?.forceToLatest(sessionId);
 }
 
 function patchStreamingAssistantMessage(sessionId, index) {
@@ -2154,7 +2159,7 @@ function patchStreamingAssistantMessage(sessionId, index) {
     );
   }
 
-  if (state._followOutput !== false) els.messages.scrollTop = els.messages.scrollHeight;
+  messageScrollController?.onContentChanged(sessionId);
 }
 
 function scheduleStreamingAssistantPatch(sessionId, index) {
@@ -2632,6 +2637,7 @@ function playWelcomeMotion(root) {
 
 function renderMessages() {
 
+  messageScrollController?.setSession(state.sessionId);
   renderUserInputPanel();
   renderAuthorizationPanel();
 
@@ -2684,6 +2690,8 @@ function renderMessages() {
     renderToolLog();
 
     applyI18n(); // translate dynamically rendered welcome HTML
+    messageScrollController?.setRunning(isSessionStreaming(state.sessionId), state.sessionId);
+    messageScrollController?.onContentChanged(state.sessionId);
     return;
 
   }
@@ -2696,6 +2704,7 @@ function renderMessages() {
   const msgs = state.messages;
   const run = ensureSessionRun(state.sessionId);
   const hasActiveRun = Boolean(run?.isStreaming && run?.taskStartTime);
+  messageScrollController?.setRunning(Boolean(run?.isStreaming), state.sessionId);
   const branchMarker = getBranchFlowMarker();
   const expandedExecutionTraces = new Set(
     Array.from(
@@ -2727,7 +2736,7 @@ function renderMessages() {
     renderToolLog();
     updateStatsPanel();
     renderTimeline();
-    scheduleMessagesScrollToBottom(state.sessionId);
+    messageScrollController?.onContentChanged(state.sessionId);
     return;
   }
   state._lastRenderedHtml = renderKey;
@@ -2748,7 +2757,7 @@ function renderMessages() {
   renderToolLog();
   updateStatsPanel();
   renderTimeline();
-  scheduleMessagesScrollToBottom(state.sessionId);
+  messageScrollController?.onContentChanged(state.sessionId);
   return;
 
 
@@ -4519,6 +4528,7 @@ function setStreaming(active, sessionId = state.sessionId) {
     state.isStreaming = active;
     state.abortController = run?.abortController || null;
   }
+  messageScrollController?.setRunning(active, sessionId);
 
   els.stopBtn.disabled = !isSessionStreaming(state.sessionId);
   if (els.createBranchBtn) els.createBranchBtn.disabled = state.isStreaming;
@@ -5303,12 +5313,14 @@ function renderAuthorizationPanel() {
   if (getUserInputRequest(state.sessionId)?.status === "pending") {
     panel.classList.add("hidden");
     panel.innerHTML = "";
+    messageScrollController?.setSuppressed(false);
     return;
   }
   const items = pendingAuthorizations();
   if (!items.length) {
     panel.classList.add("hidden");
     panel.innerHTML = "";
+    messageScrollController?.setSuppressed(false);
     return;
   }
 
@@ -5320,6 +5332,7 @@ function renderAuthorizationPanel() {
 
   panel.classList.toggle("is-collapsed", state.authorizationPanelCollapsed);
   panel.classList.remove("hidden");
+  messageScrollController?.setSuppressed(true);
   panel.innerHTML = `
     <button class="authorization-collapsed-bar" type="button" data-auth-action="toggle">
       <span>${t("awaitingApproval", { count: items.length })}</span><span aria-hidden="true">›</span>
@@ -6719,7 +6732,7 @@ async function extractAndSuggestMemories() {
   const transcript = recent.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${getMsgText(m).slice(0, 500)}`).join("\n\n");
   const idx = state.messages.push({ role: "assistant", content: t("scanningConversation"), streaming: true, _streamProjection: "answer", _model: getSelectedModel() }) - 1;
   renderMessages();
-  els.messages.scrollTop = els.messages.scrollHeight;
+  messageScrollController?.onContentChanged(state.sessionId);
   try {
     const payload = {
       model: getSelectedModel(),
@@ -6750,7 +6763,7 @@ async function extractAndSuggestMemories() {
     state.messages[idx] = { role: "assistant", content: "Memory extraction failed: " + (e.message || e), streaming: false };
   }
   renderMessages();
-  els.messages.scrollTop = els.messages.scrollHeight;
+  messageScrollController?.onContentChanged(state.sessionId);
 }
 
 async function applyPendingEdit(editId) {
@@ -10030,7 +10043,6 @@ function handleUiSlashCommand(text) {
 function clearCurrentSession() {
   cacheActiveSessionState();
   invalidateForegroundSessionNavigation();
-  state._followOutput = false;
   state.explicitSkill = null;
   state._lastRenderedHtml = null;
   if (state._pendingThoughtRender) { cancelAnimationFrame(state._pendingThoughtRender); state._pendingThoughtRender = null; }
@@ -10116,23 +10128,6 @@ function finishSidebarDrag(event) {
   document.body.classList.remove("resizing-sidebar");
 
 }
-
-
-
-
-
-els.messages.addEventListener("scroll", () => {
-
-  if (!state.isStreaming) return;
-
-  const el = els.messages;
-
-  const distToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-
-  state._followOutput = distToBottom < 80;
-
-});
-
 
 
 els.prompt.addEventListener("paste", (e) => { handleImagePaste(e); });
@@ -10914,7 +10909,7 @@ els.chatForm.addEventListener("submit", async (event) => {
 
     syncActiveStreamingState();
 
-    els.messages.scrollTop = els.messages.scrollHeight;
+    messageScrollController?.onContentChanged(state.sessionId);
 
     if (state.sessionId) saveSessionState(state.sessionId, getSessionMessages(state.sessionId), getSessionStats(state.sessionId)).catch(() => {});
     if (submittedSessionId && !isSessionStreaming(submittedSessionId)) {

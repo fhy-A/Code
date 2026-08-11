@@ -7207,11 +7207,130 @@ button:focus-visible,
   --composer-surface-hover: color-mix(in srgb, var(--bg) 92%, var(--text) 8%);
   --composer-surface-disabled: color-mix(in srgb, var(--bg) 97%, var(--text) 3%);
   --composer-surface-drag: color-mix(in srgb, var(--composer-surface) 88%, var(--accent) 12%);
+  --scroll-jump-surface: color-mix(in srgb, var(--bg) 88%, var(--text) 12%);
+  --scroll-jump-surface-hover: color-mix(in srgb, var(--bg) 82%, var(--text) 18%);
+  --scroll-jump-surface-active: color-mix(in srgb, var(--bg) 76%, var(--text) 24%);
+  --scroll-jump-border: color-mix(in srgb, var(--text) 24%, var(--line));
+  --scroll-jump-icon: color-mix(in srgb, var(--text) 84%, var(--accent) 16%);
+  --scroll-jump-shadow: color-mix(in srgb, var(--text) 14%, transparent);
 }
 
 .messages {
   inset: 0 0 var(--composer-safe-bottom, 120px) 0;
   padding: 32px clamp(20px, 4vw, 52px) 20px;
+}
+
+.scroll-to-bottom-btn {
+  position: absolute;
+  z-index: 7;
+  left: 50%;
+  bottom: calc(var(--composer-safe-bottom, 120px) + 12px);
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--scroll-jump-border);
+  border-radius: 999px;
+  color: var(--scroll-jump-icon);
+  background: var(--scroll-jump-surface);
+  box-shadow: 0 8px 24px var(--scroll-jump-shadow);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, 8px) scale(.94);
+  transition: opacity .16s ease, visibility .16s ease, transform .16s ease,
+    background-color .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+
+.scroll-to-bottom-btn.visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.scroll-to-bottom-btn:hover {
+  background: var(--scroll-jump-surface-hover);
+  border-color: color-mix(in srgb, var(--scroll-jump-border) 64%, var(--accent) 36%);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--scroll-jump-shadow) 76%, var(--accent) 24%);
+}
+
+.scroll-to-bottom-btn:active {
+  background: var(--scroll-jump-surface-active);
+  transform: translate(-50%, 1px) scale(.97);
+}
+
+.scroll-to-bottom-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent),
+    0 8px 24px var(--scroll-jump-shadow);
+}
+
+.scroll-to-bottom-idle-icon {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.scroll-to-bottom-running-icon {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 3.5px;
+  width: 21px;
+  height: 16px;
+}
+
+.scroll-to-bottom-running-icon > span {
+  position: static;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: scroll-jump-progress 1.15s ease-in-out infinite;
+}
+
+.scroll-to-bottom-running-icon > span:nth-child(1) {
+  animation-delay: -.24s;
+}
+
+.scroll-to-bottom-running-icon > span:nth-child(2) {
+  animation-delay: -.12s;
+}
+
+.scroll-to-bottom-running-icon > span:nth-child(3) {
+  animation-delay: 0s;
+}
+
+.scroll-to-bottom-btn.is-running .scroll-to-bottom-idle-icon {
+  display: none;
+}
+
+.scroll-to-bottom-btn.is-running .scroll-to-bottom-running-icon {
+  display: flex;
+}
+
+.chat-pane.empty-chat .scroll-to-bottom-btn {
+  display: none;
+}
+
+@keyframes scroll-jump-progress {
+  0%, 65%, 100% { opacity: .38; transform: translateY(0); }
+  32% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-to-bottom-running-icon > span {
+    animation: none;
+    opacity: .8;
+    transform: none;
+  }
 }
 
 .chat-pane.empty-chat {

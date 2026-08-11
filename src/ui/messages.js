@@ -7,6 +7,296 @@
   const COPY_SVG = '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M761.088 715.3152a38.7072 38.7072 0 0 1 0-77.4144 37.4272 37.4272 0 0 0 37.4272-37.4272V265.0112a37.4272 37.4272 0 0 0-37.4272-37.4272H425.6256a37.4272 37.4272 0 0 0-37.4272 37.4272 38.7072 38.7072 0 1 1-77.4144 0 115.0976 115.0976 0 0 1 114.8416-114.8416h335.4624a115.0976 115.0976 0 0 1 114.8416 114.8416v335.4624a115.0976 115.0976 0 0 1-114.8416 114.8416z"/><path d="M589.4656 883.0976H268.1856a121.1392 121.1392 0 0 1-121.2928-121.2928v-322.56a121.1392 121.1392 0 0 1 121.2928-121.344h321.28a121.1392 121.1392 0 0 1 121.2928 121.2928v322.56c1.28 67.1232-54.1696 121.344-121.2928 121.344zM268.1856 395.3152a43.52 43.52 0 0 0-43.8784 43.8784v322.56a43.52 43.52 0 0 0 43.8784 43.8784h321.28a43.52 43.52 0 0 0 43.8784-43.8784v-322.56a43.52 43.52 0 0 0-43.8784-43.8784z"/></svg>';
   const COPY_DONE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
 
+  function createMessageScrollController(options = {}) {
+    const container = options.container;
+    const content = options.content || container;
+    const button = options.button || null;
+    const focusTarget = options.focusTarget || null;
+    const bottomTolerance = Number(options.bottomTolerance ?? 2);
+    const revealThreshold = Number(options.revealThreshold ?? 160);
+    const requestFrame = options.requestAnimationFrame
+      || global.requestAnimationFrame?.bind(global)
+      || ((callback) => global.setTimeout(callback, 0));
+    const cancelFrame = options.cancelAnimationFrame
+      || global.cancelAnimationFrame?.bind(global)
+      || global.clearTimeout?.bind(global)
+      || (() => {});
+    const ResizeObserverClass = options.ResizeObserver || global.ResizeObserver;
+    const getLabel = options.getLabel || ((key) => key);
+    let sessionId = String(options.sessionId || "");
+    let following = true;
+    let visible = false;
+    let suppressed = false;
+    let running = false;
+    let frameId = null;
+    let resizeObserver = null;
+    let connected = false;
+    let preservedScrollTop = Number(container?.scrollTop || 0);
+    let awaitingUserScroll = false;
+    let touchStartY = null;
+    const passiveListenerOptions = { passive: true };
+
+    function maxScrollTop() {
+      if (!container) return 0;
+      return Math.max(0, Number(container.scrollHeight || 0) - Number(container.clientHeight || 0));
+    }
+
+    function distanceToBottom() {
+      if (!container) return 0;
+      return Math.max(0, maxScrollTop() - Number(container.scrollTop || 0));
+    }
+
+    function updateButton() {
+      if (!button) return;
+      const presented = visible && !suppressed;
+      const labelKey = running ? "scrollToLatestRunning" : "scrollToLatest";
+      const label = getLabel(labelKey);
+      button.classList.toggle("visible", presented);
+      button.classList.toggle("is-running", running);
+      button.setAttribute("aria-hidden", String(!presented));
+      button.tabIndex = presented ? 0 : -1;
+      button.dataset.i18nTitle = labelKey;
+      button.dataset.i18nAriaLabel = labelKey;
+      button.title = label;
+      button.setAttribute("aria-label", label);
+    }
+
+    function cancelScheduledFrame() {
+      if (frameId == null) return;
+      cancelFrame(frameId);
+      frameId = null;
+    }
+
+    function relinquishFollowingForUpwardIntent() {
+      if (!following || maxScrollTop() <= bottomTolerance) return false;
+      following = false;
+      awaitingUserScroll = true;
+      cancelScheduledFrame();
+      preservedScrollTop = Number(container?.scrollTop || 0);
+      if (distanceToBottom() >= revealThreshold) visible = true;
+      updateButton();
+      return true;
+    }
+
+    function onWheelIntent(event) {
+      const deltaX = Number(event?.deltaX || 0);
+      const deltaY = Number(event?.deltaY || 0);
+      if (
+        event?.ctrlKey
+        || deltaY >= 0
+        || Math.abs(deltaY) <= Math.abs(deltaX)
+      ) return;
+      relinquishFollowingForUpwardIntent();
+    }
+
+    function clearTouchIntent() {
+      touchStartY = null;
+    }
+
+    function onTouchStart(event) {
+      const touches = event?.touches;
+      if (Number(touches?.length || 0) !== 1) {
+        clearTouchIntent();
+        return;
+      }
+      const clientY = Number(touches[0]?.clientY);
+      touchStartY = Number.isFinite(clientY) ? clientY : null;
+    }
+
+    function onTouchMove(event) {
+      if (touchStartY == null) return;
+      const touches = event?.touches;
+      if (Number(touches?.length || 0) !== 1) {
+        clearTouchIntent();
+        return;
+      }
+      const selection = global.getSelection?.();
+      if (selection?.isCollapsed === false) {
+        clearTouchIntent();
+        return;
+      }
+      const clientY = Number(touches[0]?.clientY);
+      if (!Number.isFinite(clientY) || clientY - touchStartY <= bottomTolerance) return;
+      relinquishFollowingForUpwardIntent();
+      clearTouchIntent();
+    }
+
+    function reconcile() {
+      const distance = distanceToBottom();
+      if (following && distance <= bottomTolerance) {
+        visible = false;
+      } else if (!following && distance >= revealThreshold) {
+        visible = true;
+      }
+      updateButton();
+    }
+
+    function scheduleFollow() {
+      if (!container || !following || frameId != null) return;
+      frameId = requestFrame(() => {
+        frameId = null;
+        if (!following) return;
+        container.scrollTop = maxScrollTop();
+        preservedScrollTop = Number(container.scrollTop || 0);
+        reconcile();
+      });
+    }
+
+    function resetForSession(nextSessionId) {
+      cancelScheduledFrame();
+      sessionId = String(nextSessionId || "");
+      following = true;
+      visible = false;
+      suppressed = false;
+      running = false;
+      awaitingUserScroll = false;
+      preservedScrollTop = Number(container?.scrollTop || 0);
+      clearTouchIntent();
+      updateButton();
+    }
+
+    function ensureSession(nextSessionId) {
+      const next = String(nextSessionId || "");
+      if (next === sessionId) return false;
+      resetForSession(next);
+      return true;
+    }
+
+    function onUserScroll() {
+      awaitingUserScroll = false;
+      const distance = distanceToBottom();
+      preservedScrollTop = Number(container?.scrollTop || 0);
+      if (distance <= bottomTolerance) {
+        following = true;
+        visible = false;
+        scheduleFollow();
+      } else {
+        following = false;
+        cancelScheduledFrame();
+        if (distance >= revealThreshold) visible = true;
+      }
+      updateButton();
+    }
+
+    function onContentChanged(ownerSessionId = sessionId) {
+      ensureSession(ownerSessionId);
+      if (following) scheduleFollow();
+      else if (awaitingUserScroll) reconcile();
+      else {
+        container.scrollTop = Math.min(preservedScrollTop, maxScrollTop());
+        reconcile();
+      }
+    }
+
+    function onViewportChanged(ownerSessionId = sessionId) {
+      if (String(ownerSessionId || "") !== sessionId) return;
+      if (following) scheduleFollow();
+      else if (awaitingUserScroll) reconcile();
+      else {
+        container.scrollTop = Math.min(preservedScrollTop, maxScrollTop());
+        reconcile();
+      }
+    }
+
+    function forceToLatest(nextSessionId = sessionId) {
+      ensureSession(nextSessionId);
+      following = true;
+      awaitingUserScroll = false;
+      visible = false;
+      updateButton();
+      if (container) {
+        container.scrollTop = maxScrollTop();
+        preservedScrollTop = Number(container.scrollTop || 0);
+      }
+      scheduleFollow();
+    }
+
+    function jumpToLatest() {
+      forceToLatest(sessionId);
+      if (focusTarget?.focus) focusTarget.focus({ preventScroll: true });
+    }
+
+    function setSuppressed(nextSuppressed) {
+      suppressed = Boolean(nextSuppressed);
+      if (!suppressed) reconcile();
+      else updateButton();
+    }
+
+    function setRunning(nextRunning, ownerSessionId = sessionId) {
+      if (String(ownerSessionId || "") !== sessionId) return false;
+      running = Boolean(nextRunning);
+      updateButton();
+      return true;
+    }
+
+    function setSession(nextSessionId) {
+      ensureSession(nextSessionId);
+    }
+
+    function connect() {
+      if (connected || !container?.addEventListener) return false;
+      connected = true;
+      container.addEventListener("scroll", onUserScroll, passiveListenerOptions);
+      container.addEventListener("wheel", onWheelIntent, passiveListenerOptions);
+      container.addEventListener("touchstart", onTouchStart, passiveListenerOptions);
+      container.addEventListener("touchmove", onTouchMove, passiveListenerOptions);
+      container.addEventListener("touchend", clearTouchIntent, passiveListenerOptions);
+      container.addEventListener("touchcancel", clearTouchIntent, passiveListenerOptions);
+      button?.addEventListener?.("click", jumpToLatest);
+      if (typeof ResizeObserverClass === "function") {
+        resizeObserver = new ResizeObserverClass(() => onViewportChanged(sessionId));
+        resizeObserver.observe(container);
+        if (content && content !== container) resizeObserver.observe(content);
+      }
+      updateButton();
+      return true;
+    }
+
+    function disconnect() {
+      awaitingUserScroll = false;
+      if (!connected) return;
+      connected = false;
+      cancelScheduledFrame();
+      clearTouchIntent();
+      container?.removeEventListener?.("scroll", onUserScroll, passiveListenerOptions);
+      container?.removeEventListener?.("wheel", onWheelIntent, passiveListenerOptions);
+      container?.removeEventListener?.("touchstart", onTouchStart, passiveListenerOptions);
+      container?.removeEventListener?.("touchmove", onTouchMove, passiveListenerOptions);
+      container?.removeEventListener?.("touchend", clearTouchIntent, passiveListenerOptions);
+      container?.removeEventListener?.("touchcancel", clearTouchIntent, passiveListenerOptions);
+      button?.removeEventListener?.("click", jumpToLatest);
+      resizeObserver?.disconnect?.();
+      resizeObserver = null;
+    }
+
+    function snapshot() {
+      return Object.freeze({
+        sessionId,
+        following,
+        visible,
+        suppressed,
+        running,
+        awaitingUserScroll,
+        framePending: frameId != null,
+        distance: distanceToBottom(),
+      });
+    }
+
+    return Object.freeze({
+      connect,
+      disconnect,
+      forceToLatest,
+      jumpToLatest,
+      onContentChanged,
+      onUserScroll,
+      onViewportChanged,
+      setRunning,
+      setSession,
+      setSuppressed,
+      snapshot,
+    });
+  }
+
   function tokenCount(value) {
     const count = Number(value);
     return Number.isFinite(count) ? Math.max(0, count) : 0;
@@ -139,6 +429,7 @@
     ));
     const onImagePreview = options.onImagePreview || (() => {});
     const onImageLoad = options.onImageLoad || (() => {});
+    const onLayoutChange = options.onLayoutChange || (() => {});
     const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
     const boundInteractionRoots = new WeakSet();
 
@@ -200,6 +491,7 @@
           const trace = traceToggle.closest("[data-execution-trace]");
           const expanded = Boolean(trace?.classList.toggle("is-expanded"));
           traceToggle.setAttribute("aria-expanded", String(expanded));
+          onLayoutChange();
           return;
         }
         const copyButton = event.target?.closest?.(".msg-copy-btn");
@@ -224,6 +516,11 @@
       root.addEventListener("load", (event) => {
         const image = event.target?.closest?.("[data-message-scroll-on-load]");
         if (image && (!root.contains || root.contains(image))) onImageLoad(image);
+      }, true);
+      root.addEventListener("toggle", (event) => {
+        if (event.target?.matches?.("details") && (!root.contains || root.contains(event.target))) {
+          onLayoutChange();
+        }
       }, true);
       root.addEventListener("error", (event) => {
         const image = event.target?.closest?.("[data-message-image-preview]");
@@ -1131,6 +1428,7 @@
   }
 
   Code.ui.messages = Object.freeze({
+    createMessageScrollController,
     createMessagesFeature,
     hasUsageStats,
     isInternalMessage,

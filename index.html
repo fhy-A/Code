@@ -179,6 +179,16 @@
           </div>
           <div class="chat-timeline" id="chatTimeline" role="navigation"
             data-i18n-aria-label="timelineNavigation" aria-label="会话时间线"></div>
+          <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" type="button"
+            data-i18n-title="scrollToLatest" data-i18n-aria-label="scrollToLatest"
+            title="回到最新消息" aria-label="回到最新消息" aria-hidden="true" tabindex="-1">
+            <svg class="scroll-to-bottom-idle-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 4v14M6.5 12.5 12 18l5.5-5.5"/>
+            </svg>
+            <span class="scroll-to-bottom-running-icon" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+          </button>
           <section id="authorizationPanel" class="authorization-panel hidden" aria-live="polite"></section>
           <form id="chatForm" class="composer">
             <section id="userInputPanel" class="user-input-panel hidden" aria-live="assertive"></section>
