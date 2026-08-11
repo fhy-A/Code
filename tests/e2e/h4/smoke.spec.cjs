@@ -178,6 +178,7 @@ const EDIT_AUTHORIZATION_INITIAL = "H4_PROPOSE_EDIT_INITIAL";
 const EDIT_AUTHORIZATION_TARGET = "H4_PROPOSE_EDIT_TARGET";
 const EDIT_AUTHORIZATION_INITIAL_SHA256 = "f12af1cc9275e5511341e977ac8ad5b13050b8eb8951b4a78555018cdbcaebe3";
 const EDIT_AUTHORIZATION_TARGET_SHA256 = "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef";
+const EDIT_AUTHORIZATION_THIRD_PARTY_SHA256 = "3ca2970e23df18316faba0c55fde5881e36d215d02499ee36e3e257113ebe931";
 const EDIT_AUTHORIZATION_STAGE = "H4_EDIT_AUTHORIZATION_STAGE";
 const EDIT_AUTHORIZATION_CONTRACT = Object.freeze({
   toolCallId: EDIT_AUTHORIZATION_TOOL_CALL_ID,
@@ -228,6 +229,28 @@ const EDIT_AUTHORIZATION_CONTRACT = Object.freeze({
       backups: 0,
     },
   },
+});
+const EDIT_AUTHORIZATION_CONFLICT_CONTRACT = Object.freeze({
+  userMarker: "H4_EDIT_AUTHORIZATION_CONFLICT_USER",
+  finalMarker: "H4_EDIT_AUTHORIZATION_CONFLICT_FINAL",
+  scenarioPrefix: "edit-authorization-conflict",
+  action: "approve",
+  decision: "approved",
+  resultAction: "apply_edit",
+  resultOk: false,
+  resultDiffPresent: false,
+  applied: false,
+  rejected: true,
+  resultRejected: false,
+  outcome: "failed",
+  backupPresent: false,
+  applyDelegations: 1,
+  writes: 0,
+  backups: 0,
+  conflict: true,
+  errorPresent: true,
+  conflictReason: "File modified by another session, please re-read.",
+  expectedSha256: EDIT_AUTHORIZATION_THIRD_PARTY_SHA256,
 });
 const TIFF_ATTACHMENT_NAME = "h4-preview.tiff";
 const TIFF_ATTACHMENT_BASE64 = "SUkqAFAAAACABUrsmBQSBwWEQeFQaGQmGwuHRGIROHxWJRaKReNRmORiPRuPx2QSORSWQyeSSiTSmWSuXSqYS2Yy+ZTWaTeZzmbTqcTKAgAKAAABAwABAAAAEgAAAAEBAwABAAAADAAAAAIBAwADAAAAzgAAAAMBAwABAAAABQAAAAYBAwABAAAAAgAAABEBBAABAAAACAAAABUBAwABAAAAAwAAABYBAwABAAAADAAAABcBBAABAAAARwAAABwBAwABAAAAAQAAAAAAAAAIAAgACAA=";
@@ -455,6 +478,18 @@ const H4_8C_SEMANTIC_HASHES = Object.freeze({
     terminalDom: "292de41a94f02fdbe4ba3a58cf6be4a9e218b34157a8fc191a240282cc18fb12",
     refreshLifecycle: "a020554dd7822809017c01e41e0fbcf85879e2ea019f9ad16670c76d0a599ed3",
   }),
+});
+const H4_8D_SEMANTIC_HASHES = Object.freeze({
+  waitingEventProjection: "87a7ea23fa306ad3d2251d5245ed7e0ce8541971c944568def98b13b00fec4f3",
+  waitingSnapshot: "9c19fd9e30893a77a584551ededdbe9ace115cf6fc5d928c3b7649e70ade07f2",
+  waitingDom: "880e7bd7c6f2e62d84a0c8bcaf4ccdea7de3504ec0b36ca00063aa8ea75ba618",
+  thirdPartyTransitionProjection: "07a021c9dedf08a455140666ebc27a063eb61d996fb71b8ead63b358dea10b1f",
+  conflictSubmissionProjection: "6903528a33064bdbd1204523546ff9a4144083782e28452b9c7b9ee1a6948ac8",
+  runtimeProjection: "b942ee79bdd556a07c170919de5e110853d0b0be853efeba554f364cc36f0540",
+  sessionRoleContent: "f6ef57520b2b66ebb11473e695aa43897363bbf6876c62e652de04a6a792ebb0",
+  sessionAuthorizationMeta: "b8b0df63df027b536446ed665706b7e87ac84e6e304c3fcebdbcbb444137240d",
+  terminalDom: "b564237ff8ab8a1bf5578a8181f17a6c711d3b15789bbfecacefc8eff862389d",
+  refreshLifecycle: "a349197ae9a3805e700b57bb13464687e37307f4b923f85f1426d6d4dc184f1a",
 });
 
 function idHash(value) {
@@ -7365,6 +7400,22 @@ function editAuthorizationEventProjection(snapshot, authorizationId) {
   });
 }
 
+function editAuthorizationConflictEventProjection(snapshot, authorizationId) {
+  const projected = editAuthorizationEventProjection(snapshot, authorizationId);
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  return projected.map((event, index) => (
+    String(events[index]?.data?.content || "") === EDIT_AUTHORIZATION_CONFLICT_CONTRACT.finalMarker
+      ? { ...event, content: "final" }
+      : event
+  ));
+}
+
+function editAuthorizationEventProjectionForBranch(snapshot, authorizationId, branch) {
+  return branch?.conflict === true
+    ? editAuthorizationConflictEventProjection(snapshot, authorizationId)
+    : editAuthorizationEventProjection(snapshot, authorizationId);
+}
+
 function editAuthorizationExecutionProjection(snapshot) {
   return (Array.isArray(snapshot?.toolExecutions) ? snapshot.toolExecutions : [])
     .map((execution) => ({
@@ -7638,6 +7689,131 @@ function editAuthorizationMetricsProjection(metrics) {
   };
 }
 
+function editAuthorizationConflictFileStateProjection(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    ...editAuthorizationFileStateProjection(source),
+    thirdPartyHashMatches: source.thirdPartyHashMatches === true,
+  };
+}
+
+function editAuthorizationThirdPartyTransitionProjection(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const callbacks = source.productionCallbacks && typeof source.productionCallbacks === "object"
+    ? source.productionCallbacks
+    : {};
+  return {
+    accepted: source.accepted === true,
+    reason: String(source.reason || ""),
+    commandKeysExact: source.commandKeysExact === true,
+    attempt: Number(source.attempt || 0),
+    pathMatches: String(source.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+    fileBefore: editAuthorizationConflictFileStateProjection(source.fileBefore),
+    fileAfter: editAuthorizationConflictFileStateProjection(source.fileAfter),
+    fixedBytes: {
+      byteLength: Number(source.fixedBytes?.byteLength || 0),
+      sha256Matches: String(source.fixedBytes?.sha256 || "")
+        === EDIT_AUTHORIZATION_THIRD_PARTY_SHA256,
+      hashMatches: source.fixedBytes?.hashMatches === true,
+    },
+    projectTreeUnchanged: source.projectTreeUnchanged === true,
+    projectTreeChangedOnlyAtFixedPath: source.projectTreeChangedOnlyAtFixedPath === true,
+    homeTreeUnchanged: source.homeTreeUnchanged === true,
+    artifactsTreeUnchanged: source.artifactsTreeUnchanged === true,
+    backupCountBefore: Number(source.backupCountBefore || 0),
+    backupCountAfter: Number(source.backupCountAfter || 0),
+    productionCallbacks: {
+      registeredDelegations: Number(callbacks.registeredDelegations || 0),
+      proposalDelegations: Number(callbacks.proposalDelegations || 0),
+      applyDelegations: Number(callbacks.applyDelegations || 0),
+      writes: Number(callbacks.writes || 0),
+      backups: Number(callbacks.backups || 0),
+      toolExecutions: Number(callbacks.toolExecutions || 0),
+      runCommandAttempts: Number(callbacks.runCommandAttempts || 0),
+    },
+  };
+}
+
+function editAuthorizationConflictMetricsProjection(metrics) {
+  const source = metrics && typeof metrics === "object" ? metrics : {};
+  return {
+    counters: {
+      conflictObservations: Number(source.productionEditConflictObservations || 0),
+      transitionAttempts: Number(source.proposeEditThirdPartyTransitionAttempts || 0),
+      transitionWrites: Number(source.proposeEditThirdPartyTransitionWrites || 0),
+      transitionRejections: Number(source.proposeEditThirdPartyTransitionRejections || 0),
+    },
+    transitionTimeline: (source.proposeEditThirdPartyTransitionTimeline || [])
+      .map(editAuthorizationThirdPartyTransitionProjection),
+    conflictTimeline: (source.proposeEditConflictTimeline || []).map((item) => ({
+      observed: item?.observed === true,
+      exceptionTypeMatches: item?.exceptionTypeMatches === true,
+      fileBefore: editAuthorizationConflictFileStateProjection(item?.fileBefore),
+      fileAfter: editAuthorizationConflictFileStateProjection(item?.fileAfter),
+      fixturePreserved: item?.fixturePreserved === true,
+      backupDelta: Number(item?.backupDelta || 0),
+    })),
+    applyTimeline: (source.proposeEditApplyTimeline || []).map((item) => ({
+      proposalShapeMatches: item?.proposalShapeMatches === true,
+      conflictObserved: item?.conflictObserved === true,
+      fileBefore: editAuthorizationConflictFileStateProjection(item?.fileBefore),
+      fileAfter: editAuthorizationConflictFileStateProjection(item?.fileAfter),
+      resultPresent: Boolean(item?.result && (
+        item.result.ok === true
+        || item.result.actionMatches === true
+        || item.result.pathMatches === true
+        || item.result.proposalIdMatches === true
+        || item.result.applied === true
+        || item.result.replayed === true
+        || item.result.backupPresent === true
+      )),
+    })),
+    writeTimeline: (source.proposeEditWriteTimeline || []).map((item) => ({
+      fileBefore: editAuthorizationConflictFileStateProjection(item?.fileBefore),
+      fileAfter: editAuthorizationConflictFileStateProjection(item?.fileAfter),
+      writeObserved: item?.writeObserved === true,
+      targetHashMatches: item?.targetHashMatches === true,
+    })),
+    backupTimeline: (source.proposeEditBackupTimeline || []).map((item) => ({
+      beforeCount: Number(item?.beforeCount || 0),
+      afterCount: Number(item?.afterCount || 0),
+      delta: Number(item?.delta || 0),
+      initialContentMatchDelta: Number(item?.initialContentMatchDelta || 0),
+      backupObserved: item?.backupObserved === true,
+    })),
+  };
+}
+
+function editAuthorizationConflictRawResultProjection(value, proposalId) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    keysExact: JSON.stringify(Object.keys(source).sort()) === JSON.stringify([
+      "action",
+      "applied",
+      "conflict",
+      "currentMtime",
+      "error",
+      "ok",
+      "path",
+      "proposalId",
+    ]),
+    ok: source.ok === true,
+    action: String(source.action || ""),
+    proposalIdMatches: Boolean(proposalId)
+      && String(source.proposalId || "") === String(proposalId),
+    pathMatches: String(source.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+    conflict: source.conflict === true,
+    applied: source.applied === true,
+    currentMtimePresent: Object.prototype.hasOwnProperty.call(source, "currentMtime")
+      && Number.isInteger(source.currentMtime)
+      && source.currentMtime > 0,
+    errorPresent: Boolean(String(source.error || "").trim()),
+    rejectedAbsent: !Object.prototype.hasOwnProperty.call(source, "rejected"),
+    replayedAbsent: !Object.prototype.hasOwnProperty.call(source, "replayed"),
+    backupPathAbsent: !Object.prototype.hasOwnProperty.call(source, "backupPath"),
+  };
+}
+
 function editAuthorizationRequestProjection(h4, boundary, beforeMetrics, afterMetrics, agentRunId) {
   const requests = h4.requestEvidenceSince(boundary);
   const summary = h4.requestSummarySince(boundary);
@@ -7714,6 +7890,13 @@ function expectEditAuthorizationPending(projection) {
 }
 
 function expectEditAuthorizationResult(projection, branch, { proposal = false } = {}) {
+  const resultRejected = Object.prototype.hasOwnProperty.call(branch, "resultRejected")
+    ? branch.resultRejected
+    : branch.rejected;
+  const conflict = !proposal && branch.conflict === true;
+  const errorPresent = !proposal && Object.prototype.hasOwnProperty.call(branch, "errorPresent")
+    ? branch.errorPresent
+    : (!proposal && branch.rejected);
   expect(projection).toEqual({
     ok: proposal ? true : branch.resultOk,
     action: proposal ? "propose_edit" : branch.resultAction,
@@ -7733,14 +7916,38 @@ function expectEditAuthorizationResult(projection, branch, { proposal = false } 
       newHeaderMatches: false,
     },
     applied: proposal ? false : branch.applied,
-    rejected: proposal ? false : branch.rejected,
+    rejected: proposal ? false : resultRejected,
     replayed: false,
     backupPresent: proposal ? false : branch.backupPresent,
-    conflict: false,
-    errorPresent: proposal ? false : branch.rejected,
+    conflict,
+    errorPresent,
     privateFieldsAbsent: true,
     retryFieldsAbsent: true,
   });
+}
+
+function editAuthorizationReceiptExpectation(branch) {
+  const resultRejected = Object.prototype.hasOwnProperty.call(branch, "resultRejected")
+    ? branch.resultRejected
+    : branch.rejected;
+  const projection = {
+    decision: branch.decision,
+    receiptCount: 1,
+    parseable: true,
+    nameMatches: true,
+    ok: branch.resultOk,
+    actionMatches: true,
+    pathMatches: true,
+    applied: branch.applied,
+    rejected: resultRejected,
+    replayed: false,
+    backupPresent: branch.backupPresent,
+  };
+  if (branch.conflict === true) {
+    projection.conflict = true;
+    projection.errorPresent = true;
+  }
+  return projection;
 }
 
 function expectEditAuthorizationZeroRequests(projection) {
@@ -7816,11 +8023,49 @@ function expectEditAuthorizationMetrics(projection, branch, phase) {
       applied: false,
     },
   });
-  const approvedTerminal = terminal && branch.applied;
-  expect(projection.applyTimeline).toHaveLength(approvedTerminal ? 1 : 0);
-  expect(projection.writeTimeline).toHaveLength(approvedTerminal ? 1 : 0);
-  expect(projection.backupTimeline).toHaveLength(approvedTerminal ? 1 : 0);
-  if (!approvedTerminal) return;
+  const appliedTerminal = terminal && branch.applied;
+  const conflictTerminal = terminal && branch.conflict === true;
+  const applyAttempted = appliedTerminal || conflictTerminal;
+  expect(projection.applyTimeline).toHaveLength(applyAttempted ? 1 : 0);
+  expect(projection.writeTimeline).toHaveLength(applyAttempted ? 1 : 0);
+  expect(projection.backupTimeline).toHaveLength(applyAttempted ? 1 : 0);
+  if (conflictTerminal) {
+    const thirdPartyState = {
+      state: "third-party",
+      exists: true,
+      initialHashMatches: false,
+      targetHashMatches: false,
+    };
+    expect(projection.applyTimeline[0]).toEqual({
+      proposalShapeMatches: true,
+      fileBefore: thirdPartyState,
+      fileAfter: thirdPartyState,
+      result: {
+        ok: false,
+        actionMatches: false,
+        pathMatches: false,
+        proposalIdMatches: false,
+        applied: false,
+        replayed: false,
+        backupPresent: false,
+      },
+    });
+    expect(projection.writeTimeline[0]).toEqual({
+      fileBefore: thirdPartyState,
+      fileAfter: thirdPartyState,
+      writeObserved: false,
+      targetHashMatches: false,
+    });
+    expect(projection.backupTimeline[0]).toEqual({
+      beforeCount: 0,
+      afterCount: 0,
+      delta: 0,
+      initialContentMatchDelta: 0,
+      backupObserved: false,
+    });
+    return;
+  }
+  if (!appliedTerminal) return;
   const initialState = {
     state: "initial",
     exists: true,
@@ -8035,8 +8280,8 @@ async function editAuthorizationDomProjection(h4, phase, branch) {
   });
 }
 
-async function beginEditAuthorizationLifecycle(h4, runtime, branchName) {
-  const branch = EDIT_AUTHORIZATION_CONTRACT.branches[branchName];
+async function beginEditAuthorizationLifecycle(h4, runtime, branchName, branchOverride = null) {
+  const branch = branchOverride || EDIT_AUTHORIZATION_CONTRACT.branches[branchName];
   expect(branch).toBeTruthy();
   expect(h4.host.ready.proposeEditFixture).toEqual({
     path: EDIT_AUTHORIZATION_CONTRACT.path,
@@ -8103,7 +8348,11 @@ async function beginEditAuthorizationLifecycle(h4, runtime, branchName) {
     editAuthorizationPendingProjection(waitingAgent.pendingAuthorization, authorizationId),
   );
 
-  const waitingEvents = editAuthorizationEventProjection(waitingAgent, authorizationId);
+  const waitingEvents = editAuthorizationEventProjectionForBranch(
+    waitingAgent,
+    authorizationId,
+    branch,
+  );
   expect(waitingEvents.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
   expect(waitingAgent.nextCursor).toBe(5);
   expect(waitingEvents[1]).toMatchObject({
@@ -8390,7 +8639,11 @@ async function reloadWaitingEditAuthorizationLifecycle(h4, started) {
   expect(waitingAgentAfterReload.status).toBe(200);
   expect(waitingAgentAfterReload.body.agentRunId).toBe(agentRunId);
   expect(waitingAgentAfterReload.body.pendingAuthorization?.authorizationId).toBe(authorizationId);
-  expect(editAuthorizationEventProjection(waitingAgentAfterReload.body, authorizationId))
+  expect(editAuthorizationEventProjectionForBranch(
+    waitingAgentAfterReload.body,
+    authorizationId,
+    branch,
+  ))
     .toEqual(waitingEvents);
   expect(editAuthorizationExecutionProjection(waitingAgentAfterReload.body))
     .toEqual(waitingExecution);
@@ -8446,7 +8699,8 @@ async function completeEditAuthorizationLifecycle(h4, started, waitingReload) {
     waitingEvents,
   } = started;
   const decisionBoundary = h4.requestBoundary();
-  const decisionMetricsBefore = waitingReload.metricsAfterWaitingReload;
+  const decisionMetricsBefore = waitingReload.decisionMetricsBefore
+    || waitingReload.metricsAfterWaitingReload;
   const row = page.locator("#authorizationPanel .authorization-row");
   const decisionButton = page.locator(
     `#authorizationPanel [data-auth-action="${branch.action}"]`,
@@ -8497,7 +8751,11 @@ async function completeEditAuthorizationLifecycle(h4, started, waitingReload) {
   expect(completedAgent.pendingToolCalls).toEqual([]);
   expect(completedAgent.result?.content).toBe(branch.finalMarker);
 
-  const terminalEvents = editAuthorizationEventProjection(completedAgent, authorizationId);
+  const terminalEvents = editAuthorizationEventProjectionForBranch(
+    completedAgent,
+    authorizationId,
+    branch,
+  );
   expect(terminalEvents.map((event) => event.seq)).toEqual(
     terminalEvents.map((_, index) => index + 1),
   );
@@ -8703,19 +8961,7 @@ async function completeEditAuthorizationLifecycle(h4, started, waitingReload) {
       scenario: `${branch.scenarioPrefix}-final`,
       stream: true,
       hasToolResult: true,
-      editAuthorizationReceipt: {
-        decision: branch.decision,
-        receiptCount: 1,
-        parseable: true,
-        nameMatches: true,
-        ok: branch.resultOk,
-        actionMatches: true,
-        pathMatches: true,
-        applied: branch.applied,
-        rejected: branch.rejected,
-        replayed: false,
-        backupPresent: branch.backupPresent,
-      },
+      editAuthorizationReceipt: editAuthorizationReceiptExpectation(branch),
     },
   ]);
   expect(metricsAtTerminal.production.agentRuns).toHaveLength(1);
@@ -8831,7 +9077,11 @@ async function reloadCompletedEditAuthorizationLifecycle(h4, started, completed)
   );
   expect(agentAfterReload.status).toBe(200);
   expect(agentAfterReload.body.agentRunId).toBe(agentRunId);
-  expect(editAuthorizationEventProjection(agentAfterReload.body, authorizationId))
+  expect(editAuthorizationEventProjectionForBranch(
+    agentAfterReload.body,
+    authorizationId,
+    branch,
+  ))
     .toEqual(completed.terminalEvents);
   expect(editAuthorizationExecutionProjection(agentAfterReload.body))
     .toEqual(completed.terminalExecution);
@@ -9039,6 +9289,570 @@ async function exerciseEditAuthorizationLifecycle(h4, runtime, branchName) {
       writeTimeline: completed.terminalMetrics.writeTimeline,
       backupTimeline: completed.terminalMetrics.backupTimeline,
     },
+    decisionRequests: completed.decisionRequests,
+    waitingReload: waitingReload.waitingReloadRequests,
+    terminalReload: terminalReload.terminalReloadRequests,
+    hashes,
+  });
+}
+
+function expectEditAuthorizationConflictMetrics(projection, phase, transitionProjection = null) {
+  const transitioned = phase !== "waiting";
+  const terminal = phase === "terminal";
+  expect(projection.counters).toEqual({
+    conflictObservations: terminal ? 1 : 0,
+    transitionAttempts: transitioned ? 1 : 0,
+    transitionWrites: transitioned ? 1 : 0,
+    transitionRejections: 0,
+  });
+  expect(projection.transitionTimeline).toHaveLength(transitioned ? 1 : 0);
+  if (transitioned) expect(projection.transitionTimeline[0]).toEqual(transitionProjection);
+  expect(projection.conflictTimeline).toHaveLength(terminal ? 1 : 0);
+  expect(projection.applyTimeline).toHaveLength(terminal ? 1 : 0);
+  expect(projection.writeTimeline).toHaveLength(terminal ? 1 : 0);
+  expect(projection.backupTimeline).toHaveLength(terminal ? 1 : 0);
+  if (!terminal) return;
+  const thirdPartyState = {
+    state: "third-party",
+    exists: true,
+    initialHashMatches: false,
+    targetHashMatches: false,
+    thirdPartyHashMatches: true,
+  };
+  expect(projection.conflictTimeline[0]).toEqual({
+    observed: true,
+    exceptionTypeMatches: true,
+    fileBefore: thirdPartyState,
+    fileAfter: thirdPartyState,
+    fixturePreserved: true,
+    backupDelta: 0,
+  });
+  expect(projection.applyTimeline[0]).toEqual({
+    proposalShapeMatches: true,
+    conflictObserved: true,
+    fileBefore: thirdPartyState,
+    fileAfter: thirdPartyState,
+    resultPresent: false,
+  });
+  expect(projection.writeTimeline[0]).toEqual({
+    fileBefore: thirdPartyState,
+    fileAfter: thirdPartyState,
+    writeObserved: false,
+    targetHashMatches: false,
+  });
+  expect(projection.backupTimeline[0]).toEqual({
+    beforeCount: 0,
+    afterCount: 0,
+    delta: 0,
+    initialContentMatchDelta: 0,
+    backupObserved: false,
+  });
+}
+
+async function editAuthorizationConflictDomProjection(h4, projection, label) {
+  const { page } = h4;
+  const visibleConflict = await waitForMessageProjection(h4, {
+    label,
+    expected: {
+      action: "propose_edit",
+      pathMatches: true,
+      stageFailed: true,
+      itemFailed: true,
+      resultDetails: 1,
+      errorPresent: true,
+      editReview: false,
+      editApplied: false,
+      editRejected: true,
+      finals: 1,
+    },
+    sourceFacts: {
+      path: EDIT_AUTHORIZATION_CONTRACT.path,
+      finalMarker: EDIT_AUTHORIZATION_CONFLICT_CONTRACT.finalMarker,
+    },
+    sample: (facts) => {
+      const root = document.querySelector("#messages");
+      const stage = root?.querySelector(
+        'article.tool-process > details.tool-process-stage[data-current-action="propose_edit"]',
+      ) || null;
+      const item = stage?.querySelector("details.tool-process-item") || null;
+      const details = item ? [...item.querySelectorAll(".tool-process-detail pre")] : [];
+      const suggestion = [...(root?.querySelectorAll(
+        "article.msg.assistant.edit-suggestion",
+      ) || [])].find((node) => (
+        node.querySelector(".tool-edit-target")?.dataset.path === facts.path
+      )) || null;
+      const status = suggestion?.querySelector(".tool-edit-status") || null;
+      const finals = [...(root?.querySelectorAll("article.msg.assistant") || [])]
+        .filter((node) => node.textContent.includes(facts.finalMarker));
+      return {
+        action: String(stage?.dataset.currentAction || ""),
+        pathMatches: suggestion?.querySelector(".tool-edit-target")?.dataset.path === facts.path,
+        stageFailed: Boolean(stage?.classList.contains("failed")),
+        itemFailed: Boolean(item?.classList.contains("failed")),
+        resultDetails: details.length > 1 ? 1 : 0,
+        errorPresent: Boolean(String(details[1]?.textContent || "").trim()),
+        editReview: Boolean(status?.classList.contains("is-review")),
+        editApplied: Boolean(status?.classList.contains("is-applied")),
+        editRejected: Boolean(status?.classList.contains("is-rejected")),
+        finals: finals.length,
+      };
+    },
+  });
+  const terminalTrace = page.locator("#messages .execution-trace.completed");
+  await expect(terminalTrace).toHaveCount(1);
+  await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
+  const terminalTraceToggle = terminalTrace.locator(":scope > [data-execution-trace-toggle]");
+  await expect(terminalTraceToggle).toHaveCount(1);
+  await expect(terminalTraceToggle).toHaveAttribute("aria-expanded", "false");
+  const stage = terminalTrace.locator(
+    'article.tool-process > details.tool-process-stage[data-current-action="propose_edit"]',
+  );
+  await expect(stage).toHaveCount(1);
+  const item = stage.locator("details.tool-process-item");
+  await expect(item).toHaveCount(1);
+  const resultDetails = item.locator(".tool-process-detail");
+  await expect(resultDetails).toHaveCount(2);
+  const resultRegion = resultDetails.nth(1);
+  const resultPre = resultRegion.locator("pre");
+  await expect(resultPre).toHaveCount(1);
+  await expect(resultRegion).toBeHidden();
+  await expect(resultPre).toBeHidden();
+
+  await terminalTraceToggle.click();
+  await expect(terminalTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(terminalTraceToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(stage.locator(":scope > summary.tool-process-stage-summary")).toBeVisible();
+  await stage.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(stage).toHaveAttribute("open", "");
+  await expect(item.locator(":scope > summary")).toBeVisible();
+  await item.locator(":scope > summary").click();
+  await expect(item).toHaveAttribute("open", "");
+  await expect(resultRegion).toBeVisible();
+  await expect(resultPre).toBeVisible();
+  await expect(resultPre).toHaveText(EDIT_AUTHORIZATION_CONFLICT_CONTRACT.conflictReason);
+  const renderedResult = String(await resultPre.innerText()).trim();
+  const resultVisible = await resultPre.isVisible();
+  const conflictReasonMatches = renderedResult
+    === EDIT_AUTHORIZATION_CONFLICT_CONTRACT.conflictReason
+    && countOccurrences(
+      renderedResult,
+      EDIT_AUTHORIZATION_CONFLICT_CONTRACT.conflictReason,
+    ) === 1;
+  expect(resultVisible).toBe(true);
+  expect(conflictReasonMatches).toBe(true);
+
+  await item.locator(":scope > summary").click();
+  await expect(item).not.toHaveAttribute("open", "");
+  await stage.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(stage).not.toHaveAttribute("open", "");
+  await terminalTraceToggle.click();
+  await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
+  await expect(terminalTraceToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(resultPre).toBeHidden();
+  return {
+    ...projection,
+    conflictVisible: visibleConflict,
+    resultVisible,
+    conflictReasonMatches,
+  };
+}
+
+async function exerciseEditAuthorizationConflictLifecycle(h4, runtime) {
+  const branch = EDIT_AUTHORIZATION_CONFLICT_CONTRACT;
+  const started = await beginEditAuthorizationLifecycle(h4, runtime, "conflict", branch);
+  const waitingReload = await reloadWaitingEditAuthorizationLifecycle(h4, started);
+  const transitionReady = h4.host.ready.proposeEditThirdPartyTransition;
+  expect(transitionReady).toEqual({
+    command: "transition-propose-edit-third-party",
+    path: EDIT_AUTHORIZATION_CONTRACT.path,
+    expectedBeforeSha256: EDIT_AUTHORIZATION_CONTRACT.initialSha256,
+    byteLength: 28,
+    targetSha256: EDIT_AUTHORIZATION_THIRD_PARTY_SHA256,
+  });
+
+  const waitingConflictMetrics = editAuthorizationConflictMetricsProjection(
+    waitingReload.metricsAfterWaitingReload,
+  );
+  expectEditAuthorizationConflictMetrics(waitingConflictMetrics, "waiting");
+  const transitionBoundary = h4.requestBoundary();
+  const transitionMetricsBefore = waitingReload.metricsAfterWaitingReload;
+  const transitionResponse = await h4.host.command(transitionReady.command);
+  expect(transitionResponse.ok).toBe(true);
+  const transitionProjection = editAuthorizationThirdPartyTransitionProjection(
+    transitionResponse.transition,
+  );
+  expect(transitionProjection).toEqual({
+    accepted: true,
+    reason: "",
+    commandKeysExact: true,
+    attempt: 1,
+    pathMatches: true,
+    fileBefore: {
+      state: "initial",
+      exists: true,
+      initialHashMatches: true,
+      targetHashMatches: false,
+      thirdPartyHashMatches: false,
+    },
+    fileAfter: {
+      state: "third-party",
+      exists: true,
+      initialHashMatches: false,
+      targetHashMatches: false,
+      thirdPartyHashMatches: true,
+    },
+    fixedBytes: {
+      byteLength: 28,
+      sha256Matches: true,
+      hashMatches: true,
+    },
+    projectTreeUnchanged: false,
+    projectTreeChangedOnlyAtFixedPath: true,
+    homeTreeUnchanged: true,
+    artifactsTreeUnchanged: true,
+    backupCountBefore: 0,
+    backupCountAfter: 0,
+    productionCallbacks: {
+      registeredDelegations: 0,
+      proposalDelegations: 0,
+      applyDelegations: 0,
+      writes: 0,
+      backups: 0,
+      toolExecutions: 0,
+      runCommandAttempts: 0,
+    },
+  });
+  const metricsAfterTransition = await h4.metrics();
+  expect(metricsAfterTransition.chatRequests).toEqual(transitionMetricsBefore.chatRequests);
+  expect(editAuthorizationMetricsProjection(metricsAfterTransition))
+    .toEqual(editAuthorizationMetricsProjection(transitionMetricsBefore));
+  const transitionedConflictMetrics = editAuthorizationConflictMetricsProjection(
+    metricsAfterTransition,
+  );
+  expectEditAuthorizationConflictMetrics(
+    transitionedConflictMetrics,
+    "transitioned",
+    transitionProjection,
+  );
+  expect(metricsAfterTransition.production.agentRuns).toHaveLength(1);
+  expect(metricsAfterTransition.production.runtimeRuns).toHaveLength(1);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([started.agentRunId]));
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(new Set([started.firstRuntimeRunId]));
+  const transitionRequests = editAuthorizationRequestProjection(
+    h4,
+    transitionBoundary,
+    transitionMetricsBefore,
+    metricsAfterTransition,
+    started.agentRunId,
+  );
+  expectEditAuthorizationZeroRequests(transitionRequests);
+
+  const completed = await completeEditAuthorizationLifecycle(h4, started, {
+    ...waitingReload,
+    decisionMetricsBefore: metricsAfterTransition,
+  });
+  expect(completed.runtimeProjection.map((snapshot) => snapshot.nextCursor)).toEqual([4, 3]);
+  const terminalConflictMetrics = editAuthorizationConflictMetricsProjection(
+    completed.metricsAtTerminal,
+  );
+  expectEditAuthorizationConflictMetrics(
+    terminalConflictMetrics,
+    "terminal",
+    transitionProjection,
+  );
+  const terminalDom = await editAuthorizationConflictDomProjection(
+    h4,
+    completed.terminalDom,
+    `${runtime}-edit-authorization-conflict-terminal`,
+  );
+  expect(terminalDom.conflictVisible).toEqual({
+    action: "propose_edit",
+    pathMatches: true,
+    stageFailed: true,
+    itemFailed: true,
+    resultDetails: 1,
+    errorPresent: true,
+    editReview: false,
+    editApplied: false,
+    editRejected: true,
+    finals: 1,
+  });
+  expect(terminalDom.resultVisible).toBe(true);
+  expect(terminalDom.conflictReasonMatches).toBe(true);
+  const terminalResultMeta = completed.sessionAuthorizationMeta[1].authorization;
+  expect(terminalResultMeta).toMatchObject({
+    decision: "approved",
+    applied: false,
+    rejected: true,
+  });
+  expectEditAuthorizationResult(terminalResultMeta.result, branch);
+  expectEditAuthorizationResult(terminalResultMeta.authorizationResult, branch);
+  const proposalId = String(started.waitingAgent.pendingAuthorization?.proposalId || "");
+  expect(proposalId).toMatch(/^[0-9a-f]{64}$/);
+  const rawConflictResult = editAuthorizationConflictRawResultProjection(
+    completed.completedAgent.events[6]?.data?.result,
+    proposalId,
+  );
+  expect(rawConflictResult).toEqual({
+    keysExact: true,
+    ok: false,
+    action: "apply_edit",
+    proposalIdMatches: true,
+    pathMatches: true,
+    conflict: true,
+    applied: false,
+    currentMtimePresent: true,
+    errorPresent: true,
+    rejectedAbsent: true,
+    replayedAbsent: true,
+    backupPathAbsent: true,
+  });
+
+  const terminalReload = await reloadCompletedEditAuthorizationLifecycle(
+    h4,
+    started,
+    completed,
+  );
+  const restoredConflictDom = await editAuthorizationConflictDomProjection(
+    h4,
+    terminalReload.restoredTerminalDom,
+    `${runtime}-edit-authorization-conflict-terminal-reload`,
+  );
+  expect(restoredConflictDom).toEqual(terminalDom);
+  const reloadedConflictMetrics = editAuthorizationConflictMetricsProjection(
+    terminalReload.metricsAfterTerminalReload,
+  );
+  expect(reloadedConflictMetrics).toEqual(terminalConflictMetrics);
+  expectEditAuthorizationConflictMetrics(
+    reloadedConflictMetrics,
+    "terminal",
+    transitionProjection,
+  );
+  const reloadedRawConflictResult = editAuthorizationConflictRawResultProjection(
+    terminalReload.agentAfterReload.body.events[6]?.data?.result,
+    proposalId,
+  );
+  expect(reloadedRawConflictResult).toEqual(rawConflictResult);
+
+  const conflictSubmissionProjection = {
+    requests: completed.decisionRequests,
+    events: completed.terminalEvents.slice(started.waitingEvents.length, 9),
+    execution: completed.terminalExecution,
+    sameAgentRun: completed.completedAgent.agentRunId === started.waitingAgent.agentRunId,
+    authorizationCleared: completed.completedAgent.pendingAuthorization == null,
+    layers: {
+      submittedDecision: completed.terminalEvents[5].decision,
+      rawResult: rawConflictResult,
+      eventResult: completed.terminalEvents[6].result,
+      projectedDecision: terminalResultMeta.decision,
+      projectedApplied: terminalResultMeta.applied,
+      projectedRejected: terminalResultMeta.rejected,
+    },
+    fileEffects: {
+      base: completed.terminalMetrics,
+      conflict: terminalConflictMetrics,
+    },
+  };
+  expect(conflictSubmissionProjection.layers).toEqual({
+    submittedDecision: "approved",
+    rawResult: {
+      keysExact: true,
+      ok: false,
+      action: "apply_edit",
+      proposalIdMatches: true,
+      pathMatches: true,
+      conflict: true,
+      applied: false,
+      currentMtimePresent: true,
+      errorPresent: true,
+      rejectedAbsent: true,
+      replayedAbsent: true,
+      backupPathAbsent: true,
+    },
+    eventResult: {
+      ok: false,
+      action: "apply_edit",
+      proposalIdPresent: true,
+      pathMatches: true,
+      diff: {
+        present: false,
+        oldMarkerOnce: false,
+        newMarkerOnce: false,
+        oldHeaderMatches: false,
+        newHeaderMatches: false,
+      },
+      applied: false,
+      rejected: false,
+      replayed: false,
+      backupPresent: false,
+      conflict: true,
+      errorPresent: true,
+      privateFieldsAbsent: true,
+      retryFieldsAbsent: true,
+    },
+    projectedDecision: "approved",
+    projectedApplied: false,
+    projectedRejected: true,
+  });
+
+  const refreshLifecycle = {
+    waiting: {
+      sameAgentRun: waitingReload.waitingAgentAfterReload.body.agentRunId === started.agentRunId,
+      sameAuthorization: waitingReload.waitingAgentAfterReload.body.pendingAuthorization
+        ?.authorizationId === started.authorizationId,
+      sameSnapshot: JSON.stringify(editAuthorizationWaitingSnapshotProjection(
+        waitingReload.waitingAgentAfterReload.body,
+        waitingReload.waitingSessionAfterReload.body,
+        started.agentRunId,
+        started.authorizationId,
+      )) === JSON.stringify(started.waitingSnapshot),
+      dom: waitingReload.restoredWaitingDom,
+      requests: waitingReload.waitingReloadRequests,
+      conflictMetrics: waitingConflictMetrics,
+      permissionRestored: waitingReload.permissionRestored,
+    },
+    terminal: {
+      sameAgentRun: terminalReload.agentAfterReload.body.agentRunId === started.agentRunId,
+      sameEvents: JSON.stringify(editAuthorizationConflictEventProjection(
+        terminalReload.agentAfterReload.body,
+        started.authorizationId,
+      )) === JSON.stringify(completed.terminalEvents),
+      sameSession: JSON.stringify(editAuthorizationSessionRoleProjection(
+        terminalReload.sessionAfterReload.body.messages,
+        branch,
+      )) === JSON.stringify(completed.sessionRoleContent),
+      sameAuthorizationMeta: JSON.stringify(editAuthorizationSessionMetaProjection(
+        terminalReload.sessionAfterReload.body.messages,
+        started.agentRunId,
+        started.authorizationId,
+      )) === JSON.stringify(completed.sessionAuthorizationMeta),
+      sameRawConflict: JSON.stringify(reloadedRawConflictResult)
+        === JSON.stringify(rawConflictResult),
+      resultVisible: restoredConflictDom.resultVisible,
+      conflictReasonMatches: restoredConflictDom.conflictReasonMatches,
+      dom: restoredConflictDom,
+      requests: terminalReload.terminalReloadRequests,
+      conflictMetrics: reloadedConflictMetrics,
+      permissionRestored: terminalReload.permissionRestored,
+    },
+  };
+  expect(refreshLifecycle.waiting).toMatchObject({
+    sameAgentRun: true,
+    sameAuthorization: true,
+    sameSnapshot: true,
+    permissionRestored: true,
+  });
+  expect(refreshLifecycle.terminal).toMatchObject({
+    sameAgentRun: true,
+    sameEvents: true,
+    sameSession: true,
+    sameAuthorizationMeta: true,
+    sameRawConflict: true,
+    resultVisible: true,
+    conflictReasonMatches: true,
+    permissionRestored: true,
+  });
+  const thirdPartyTransitionProjection = {
+    ready: {
+      commandMatches: transitionReady.command === "transition-propose-edit-third-party",
+      pathMatches: transitionReady.path === EDIT_AUTHORIZATION_CONTRACT.path,
+      initialHashMatches: transitionReady.expectedBeforeSha256
+        === EDIT_AUTHORIZATION_CONTRACT.initialSha256,
+      byteLength: Number(transitionReady.byteLength || 0),
+      targetHashMatches: transitionReady.targetSha256
+        === EDIT_AUTHORIZATION_THIRD_PARTY_SHA256,
+    },
+    transition: transitionProjection,
+    metrics: transitionedConflictMetrics,
+    requests: transitionRequests,
+    sameAgentRun: metricsAfterTransition.production.agentRuns.length === 1
+      && metricsAfterTransition.production.agentRuns[0]?.agentRunId
+        === idHash(started.agentRunId),
+    sameRuntime: metricsAfterTransition.production.runtimeRuns.length === 1
+      && metricsAfterTransition.production.runtimeRuns[0]?.runtimeRunId
+        === idHash(started.firstRuntimeRunId),
+  };
+  expect(thirdPartyTransitionProjection.ready).toEqual({
+    commandMatches: true,
+    pathMatches: true,
+    initialHashMatches: true,
+    byteLength: 28,
+    targetHashMatches: true,
+  });
+  expect(thirdPartyTransitionProjection).toMatchObject({
+    sameAgentRun: true,
+    sameRuntime: true,
+  });
+
+  const hashes = {
+    waitingEventProjection: canonicalHash(started.waitingEvents),
+    waitingSnapshot: canonicalHash(started.waitingSnapshot),
+    waitingDom: canonicalHash(started.waitingDom),
+    thirdPartyTransitionProjection: canonicalHash(thirdPartyTransitionProjection),
+    conflictSubmissionProjection: canonicalHash(conflictSubmissionProjection),
+    runtimeProjection: canonicalHash(completed.runtimeProjection),
+    sessionRoleContent: canonicalHash(completed.sessionRoleContent),
+    sessionAuthorizationMeta: canonicalHash(completed.sessionAuthorizationMeta),
+    terminalDom: canonicalHash(terminalDom),
+    refreshLifecycle: canonicalHash(refreshLifecycle),
+  };
+  const frozenHashKeys = Object.keys(H4_8D_SEMANTIC_HASHES).sort();
+  expect(Object.keys(hashes).sort()).toEqual(frozenHashKeys);
+  const frozenHashValues = Object.values(H4_8D_SEMANTIC_HASHES);
+  const allEmpty = frozenHashValues.every((value) => value === "");
+  const allFrozen = frozenHashValues.every((value) => /^[0-9a-f]{64}$/.test(value));
+  expect(allEmpty || allFrozen).toBe(true);
+  if (allFrozen) {
+    expect(hashes).toEqual(H4_8D_SEMANTIC_HASHES);
+  } else {
+    expect(allEmpty).toBe(true);
+    expect(runtime).toBe("bundle");
+  }
+
+  h4.evidence(`${runtime}-edit-authorization-conflict-reload`, {
+    runtime,
+    decision: branch.decision,
+    identities: {
+      agentRunId: idHash(started.agentRunId),
+      authorizationId: idHash(started.authorizationId),
+    },
+    counts: {
+      agentRuns: completed.metricsAtTerminal.production.agentRuns.length,
+      runtimes: completed.metricsAtTerminal.production.runtimeRuns.length,
+      upstreamChat: completed.metricsAtTerminal.chatRequests.length,
+      agentRunPost: completed.totalRequests.agentRunPost,
+      authorizationPost: completed.totalRequests.authorizationPost,
+      resumePost: completed.totalRequests.resumePost,
+      registeredDelegations: completed.terminalMetrics.counters.registeredDelegations,
+      registeredExecutions: completed.terminalMetrics.registeredExecutions.length,
+      proposalDelegations: completed.terminalMetrics.counters.proposalDelegations,
+      applyDelegations: completed.terminalMetrics.counters.applyDelegations,
+      writes: completed.terminalMetrics.counters.writes,
+      backups: completed.terminalMetrics.counters.backups,
+      conflictObservations: terminalConflictMetrics.counters.conflictObservations,
+      transitionAttempts: terminalConflictMetrics.counters.transitionAttempts,
+      transitionWrites: terminalConflictMetrics.counters.transitionWrites,
+      transitionRejections: terminalConflictMetrics.counters.transitionRejections,
+      unsafe: completed.terminalMetrics.counters.unsafe,
+    },
+    agentCursors: {
+      waiting: started.waitingAgent.nextCursor,
+      terminal: completed.completedAgent.nextCursor,
+    },
+    eventTypes: completed.terminalEvents.map((event) => event.type),
+    runtimeCursors: completed.runtimeProjection.map((snapshot) => snapshot.nextCursor),
+    waiting: {
+      snapshot: started.waitingSnapshot,
+      dom: started.waitingDom,
+    },
+    transition: thirdPartyTransitionProjection,
+    terminal: {
+      layers: conflictSubmissionProjection.layers,
+      sessionRoleContent: completed.sessionRoleContent,
+      sessionAuthorizationMeta: completed.sessionAuthorizationMeta,
+      dom: terminalDom,
+    },
+    fileEffects: terminalConflictMetrics,
     decisionRequests: completed.decisionRequests,
     waitingReload: waitingReload.waitingReloadRequests,
     terminalReload: terminalReload.terminalReloadRequests,
@@ -9592,6 +10406,14 @@ test("bundle edit authorization reject survives reload without applying", async 
 
 test("direct classic edit authorization reject survives reload without applying", async ({ h4 }) => {
   await exerciseEditAuthorizationLifecycle(h4, "classic", "rejected");
+});
+
+test("bundle approved stale edit conflict preserves third-party content across reload", async ({ h4 }) => {
+  await exerciseEditAuthorizationConflictLifecycle(h4, "bundle");
+});
+
+test("direct classic approved stale edit conflict preserves third-party content across reload", async ({ h4 }) => {
+  await exerciseEditAuthorizationConflictLifecycle(h4, "classic");
 });
 
 test("completed AgentRun reloads uniquely across real service processes", async ({ h4 }) => {

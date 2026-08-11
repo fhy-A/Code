@@ -9,6 +9,23 @@ const {
 
 const SENTINEL_NAME = "H4_PARENT_SECRET_SENTINEL";
 const INJECTED_FAILURE = "H4_INJECTED_BEFORE_BROWSER";
+const THIRD_PARTY_TRANSITION_COMMAND = "transition-propose-edit-third-party";
+const THIRD_PARTY_TRANSITION_CONTRACT = Object.freeze({
+  command: THIRD_PARTY_TRANSITION_COMMAND,
+  path: "h4-propose-edit-fixture.txt",
+  expectedBeforeSha256: "f12af1cc9275e5511341e977ac8ad5b13050b8eb8951b4a78555018cdbcaebe3",
+  byteLength: 28,
+  targetSha256: "3ca2970e23df18316faba0c55fde5881e36d215d02499ee36e3e257113ebe931",
+});
+const ZERO_PRODUCTION_CALLBACKS = Object.freeze({
+  registeredDelegations: 0,
+  proposalDelegations: 0,
+  applyDelegations: 0,
+  writes: 0,
+  backups: 0,
+  toolExecutions: 0,
+  runCommandAttempts: 0,
+});
 
 async function pathExists(target) {
   try {
@@ -97,6 +114,234 @@ async function runControlStdoutIsolationPressure(host) {
   };
 }
 
+function productionCallbackCounts(metrics) {
+  return {
+    registeredDelegations: Number(metrics.productionToolDelegations || 0),
+    proposalDelegations: Number(metrics.productionEditProposalDelegations || 0),
+    applyDelegations: Number(metrics.productionEditApplyDelegations || 0),
+    writes: Number(metrics.productionEditWrites || 0),
+    backups: Number(metrics.productionEditBackups || 0),
+    toolExecutions: (metrics.toolExecutions || []).length,
+    runCommandAttempts: (metrics.runCommandAttempts || []).length,
+  };
+}
+
+function callbackDelta(before, after) {
+  return Object.fromEntries(Object.keys(ZERO_PRODUCTION_CALLBACKS).map((key) => (
+    [key, Number(after[key] || 0) - Number(before[key] || 0)]
+  )));
+}
+
+async function exerciseThirdPartyTransitionPrecondition(host) {
+  const initialState = {
+    state: "initial",
+    exists: true,
+    initialHashMatches: true,
+    targetHashMatches: false,
+    thirdPartyHashMatches: false,
+  };
+  const metricsBefore = await host.metrics();
+  const callbacksBefore = productionCallbackCounts(metricsBefore);
+  const response = await host.command(THIRD_PARTY_TRANSITION_COMMAND);
+  assert.equal(response.ok, false);
+  assert.deepEqual(response.transition, {
+    accepted: false,
+    reason: "proposal-precondition-not-ready",
+    commandKeysExact: true,
+    attempt: 1,
+    path: THIRD_PARTY_TRANSITION_CONTRACT.path,
+    fileBefore: initialState,
+    fileAfter: initialState,
+    fixedBytes: {
+      byteLength: THIRD_PARTY_TRANSITION_CONTRACT.byteLength,
+      sha256: THIRD_PARTY_TRANSITION_CONTRACT.targetSha256,
+      hashMatches: false,
+    },
+    projectTreeUnchanged: true,
+    projectTreeChangedOnlyAtFixedPath: false,
+    homeTreeUnchanged: true,
+    artifactsTreeUnchanged: true,
+    backupCountBefore: 0,
+    backupCountAfter: 0,
+    productionCallbacks: ZERO_PRODUCTION_CALLBACKS,
+  });
+  const metricsAfter = await host.metrics();
+  assert.deepEqual(
+    callbackDelta(callbacksBefore, productionCallbackCounts(metricsAfter)),
+    ZERO_PRODUCTION_CALLBACKS,
+  );
+  assert.equal(
+    metricsAfter.proposeEditThirdPartyTransitionAttempts
+      - metricsBefore.proposeEditThirdPartyTransitionAttempts,
+    1,
+  );
+  assert.equal(
+    metricsAfter.proposeEditThirdPartyTransitionWrites
+      - metricsBefore.proposeEditThirdPartyTransitionWrites,
+    0,
+  );
+  assert.equal(
+    metricsAfter.proposeEditThirdPartyTransitionRejections
+      - metricsBefore.proposeEditThirdPartyTransitionRejections,
+    1,
+  );
+  assert.deepEqual(
+    metricsAfter.proposeEditThirdPartyTransitionTimeline.slice(
+      metricsBefore.proposeEditThirdPartyTransitionTimeline.length,
+    ),
+    [response.transition],
+  );
+  return response.transition;
+}
+
+async function exerciseThirdPartyTransitionBoundary(host) {
+  assert.deepEqual(host.ready.proposeEditThirdPartyTransition, THIRD_PARTY_TRANSITION_CONTRACT);
+  const initialState = {
+    state: "initial",
+    exists: true,
+    initialHashMatches: true,
+    targetHashMatches: false,
+    thirdPartyHashMatches: false,
+  };
+  const thirdPartyState = {
+    state: "third-party",
+    exists: true,
+    initialHashMatches: false,
+    targetHashMatches: false,
+    thirdPartyHashMatches: true,
+  };
+  const fixedBytesBefore = {
+    byteLength: THIRD_PARTY_TRANSITION_CONTRACT.byteLength,
+    sha256: THIRD_PARTY_TRANSITION_CONTRACT.targetSha256,
+    hashMatches: false,
+  };
+  const fixedBytesAfter = { ...fixedBytesBefore, hashMatches: true };
+  const metricsBefore = await host.metrics();
+  const callbacksBefore = productionCallbackCounts(metricsBefore);
+
+  const invalidDetails = [
+    { path: THIRD_PARTY_TRANSITION_CONTRACT.path },
+    { path: "../outside" },
+    { path: "C:\\H4_SYNTHETIC_ABSOLUTE\\fixture.txt" },
+    { body: "H4_UNTRUSTED_THIRD_PARTY_BYTES" },
+    { targetSha256: "0".repeat(64) },
+    { expectedBeforeSha256: THIRD_PARTY_TRANSITION_CONTRACT.expectedBeforeSha256 },
+    { byteLength: THIRD_PARTY_TRANSITION_CONTRACT.byteLength },
+  ];
+  const invalid = [];
+  const firstAttempt = Number(metricsBefore.proposeEditThirdPartyTransitionAttempts || 0) + 1;
+  for (const [index, details] of invalidDetails.entries()) {
+    const response = await host.command(THIRD_PARTY_TRANSITION_COMMAND, details);
+    assert.equal(response.ok, false);
+    assert.deepEqual(response.transition, {
+      accepted: false,
+      reason: "payload-not-allowed",
+      commandKeysExact: false,
+      attempt: firstAttempt + index,
+      path: THIRD_PARTY_TRANSITION_CONTRACT.path,
+      fileBefore: initialState,
+      fileAfter: initialState,
+      fixedBytes: fixedBytesBefore,
+      projectTreeUnchanged: true,
+      projectTreeChangedOnlyAtFixedPath: false,
+      homeTreeUnchanged: true,
+      artifactsTreeUnchanged: true,
+      backupCountBefore: 0,
+      backupCountAfter: 0,
+      productionCallbacks: ZERO_PRODUCTION_CALLBACKS,
+    });
+    invalid.push(response.transition);
+  }
+
+  const accepted = await host.command(THIRD_PARTY_TRANSITION_COMMAND);
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(accepted.transition, {
+    accepted: true,
+    reason: "",
+    commandKeysExact: true,
+    attempt: firstAttempt + invalid.length,
+    path: THIRD_PARTY_TRANSITION_CONTRACT.path,
+    fileBefore: initialState,
+    fileAfter: thirdPartyState,
+    fixedBytes: fixedBytesAfter,
+    projectTreeUnchanged: false,
+    projectTreeChangedOnlyAtFixedPath: true,
+    homeTreeUnchanged: true,
+    artifactsTreeUnchanged: true,
+    backupCountBefore: 0,
+    backupCountAfter: 0,
+    productionCallbacks: ZERO_PRODUCTION_CALLBACKS,
+  });
+
+  const repeated = await host.command(THIRD_PARTY_TRANSITION_COMMAND);
+  assert.equal(repeated.ok, false);
+  assert.deepEqual(repeated.transition, {
+    accepted: false,
+    reason: "already-transitioned",
+    commandKeysExact: true,
+    attempt: firstAttempt + invalid.length + 1,
+    path: THIRD_PARTY_TRANSITION_CONTRACT.path,
+    fileBefore: thirdPartyState,
+    fileAfter: thirdPartyState,
+    fixedBytes: fixedBytesAfter,
+    projectTreeUnchanged: true,
+    projectTreeChangedOnlyAtFixedPath: false,
+    homeTreeUnchanged: true,
+    artifactsTreeUnchanged: true,
+    backupCountBefore: 0,
+    backupCountAfter: 0,
+    productionCallbacks: ZERO_PRODUCTION_CALLBACKS,
+  });
+
+  const metricsAfter = await host.metrics();
+  const callbacksAfter = productionCallbackCounts(metricsAfter);
+  assert.deepEqual(callbackDelta(callbacksBefore, callbacksAfter), ZERO_PRODUCTION_CALLBACKS);
+  assert.equal(
+    metricsAfter.proposeEditThirdPartyTransitionAttempts
+      - metricsBefore.proposeEditThirdPartyTransitionAttempts,
+    invalid.length + 2,
+  );
+  assert.equal(
+    metricsAfter.proposeEditThirdPartyTransitionWrites
+      - metricsBefore.proposeEditThirdPartyTransitionWrites,
+    1,
+  );
+  assert.equal(
+    metricsAfter.proposeEditThirdPartyTransitionRejections
+      - metricsBefore.proposeEditThirdPartyTransitionRejections,
+    invalid.length + 1,
+  );
+  assert.deepEqual(
+    metricsAfter.proposeEditThirdPartyTransitionTimeline.slice(
+      metricsBefore.proposeEditThirdPartyTransitionTimeline.length,
+    ),
+    [...invalid, accepted.transition, repeated.transition],
+  );
+  assert.equal(
+    metricsAfter.productionEditConflictObservations
+      - metricsBefore.productionEditConflictObservations,
+    0,
+  );
+  assert.deepEqual(
+    metricsAfter.proposeEditConflictTimeline.slice(
+      metricsBefore.proposeEditConflictTimeline.length,
+    ),
+    [],
+  );
+  return {
+    contract: THIRD_PARTY_TRANSITION_CONTRACT,
+    invalid,
+    accepted: accepted.transition,
+    repeated: repeated.transition,
+    counters: {
+      attempts: invalid.length + 2,
+      writes: 1,
+      rejections: invalid.length + 1,
+    },
+    productionCallbacks: callbackDelta(callbacksBefore, callbacksAfter),
+  };
+}
+
 async function main() {
   const stdoutIsolationSource = await assertControlStdoutIsolationSourceContract();
   const expectedStopExit = classifyPendingCommandOnChildExit({
@@ -140,17 +385,27 @@ async function main() {
   let environment = null;
   let toolBoundary = null;
   let proposeEditFixture = null;
+  let proposeEditThirdPartyTransition = null;
+  let thirdPartyTransitionPrecondition = null;
+  let thirdPartyTransitionBoundary = null;
+  let thirdPartyFixturePath = null;
   let controlStdoutIsolation = null;
 
   try {
     host = await startIsolatedHost();
     environment = host.ready.environment;
     proposeEditFixture = host.ready.proposeEditFixture;
+    proposeEditThirdPartyTransition = host.ready.proposeEditThirdPartyTransition;
     assert.deepEqual(environment, {
       parentSentinelPresent: false,
       sensitiveNames: [],
       homeIsIsolated: true,
     });
+    assert.deepEqual(
+      proposeEditThirdPartyTransition,
+      THIRD_PARTY_TRANSITION_CONTRACT,
+    );
+    thirdPartyTransitionPrecondition = await exerciseThirdPartyTransitionPrecondition(host);
 
     toolBoundary = await host.probeToolBoundary();
     assert.deepEqual(toolBoundary, {
@@ -211,6 +466,12 @@ async function main() {
       initialSha256: "f12af1cc9275e5511341e977ac8ad5b13050b8eb8951b4a78555018cdbcaebe3",
       targetSha256: "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef",
     });
+    thirdPartyTransitionBoundary = await exerciseThirdPartyTransitionBoundary(host);
+    thirdPartyFixturePath = path.join(
+      host.projectDir,
+      THIRD_PARTY_TRANSITION_CONTRACT.path,
+    );
+    assert.equal(await pathExists(thirdPartyFixturePath), true);
 
     controlStdoutIsolation = await runControlStdoutIsolationPressure(host);
 
@@ -236,6 +497,7 @@ async function main() {
   assert.equal(cleanup.rootRemoved, true);
   assert.deepEqual(cleanup.cleanupErrors, []);
   assert.strictEqual(await host.stop(), cleanup);
+  assert.equal(await pathExists(thirdPartyFixturePath), false);
 
   const restartHost = await startIsolatedHost();
   const restartPaths = {
@@ -306,6 +568,9 @@ async function main() {
     homeIsIsolated: environment.homeIsIsolated,
     toolBoundary,
     proposeEditFixture,
+    proposeEditThirdPartyTransition,
+    thirdPartyTransitionPrecondition,
+    thirdPartyTransitionBoundary,
     controlStdoutIsolation: {
       ...stdoutIsolationSource,
       requestCount: controlStdoutIsolation.requestCount,

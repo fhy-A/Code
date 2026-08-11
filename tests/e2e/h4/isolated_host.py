@@ -166,9 +166,11 @@ MIXED_QUESTIONNAIRE_TEXT_PROMPT = "H4_MIXED_TEXT_PROMPT"
 MIXED_QUESTIONNAIRE_TEXT_ANSWER = "H4_MIXED_TEXT_ANSWER"
 EDIT_AUTHORIZATION_APPROVE_USER = "H4_EDIT_AUTHORIZATION_APPROVE_USER"
 EDIT_AUTHORIZATION_REJECT_USER = "H4_EDIT_AUTHORIZATION_REJECT_USER"
+EDIT_AUTHORIZATION_CONFLICT_USER = "H4_EDIT_AUTHORIZATION_CONFLICT_USER"
 EDIT_AUTHORIZATION_STAGE = "H4_EDIT_AUTHORIZATION_STAGE"
 EDIT_AUTHORIZATION_APPROVE_FINAL = "H4_EDIT_AUTHORIZATION_APPROVE_FINAL"
 EDIT_AUTHORIZATION_REJECT_FINAL = "H4_EDIT_AUTHORIZATION_REJECT_FINAL"
+EDIT_AUTHORIZATION_CONFLICT_FINAL = "H4_EDIT_AUTHORIZATION_CONFLICT_FINAL"
 PROPOSE_EDIT_TOOL_CALL_ID = "h4-propose-edit-call-1"
 PROPOSE_EDIT_PATH = "h4-propose-edit-fixture.txt"
 PROPOSE_EDIT_OLD_TEXT = "H4_PROPOSE_EDIT_INITIAL"
@@ -180,6 +182,13 @@ PROPOSE_EDIT_INITIAL_SHA256 = (
 )
 PROPOSE_EDIT_TARGET_SHA256 = (
     "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef"
+)
+PROPOSE_EDIT_THIRD_PARTY_CONTENT = "H4_PROPOSE_EDIT_THIRD_PARTY\n"
+PROPOSE_EDIT_THIRD_PARTY_SHA256 = (
+    "3ca2970e23df18316faba0c55fde5881e36d215d02499ee36e3e257113ebe931"
+)
+PROPOSE_EDIT_THIRD_PARTY_TRANSITION_COMMAND = (
+    "transition-propose-edit-third-party"
 )
 PROPOSE_EDIT_TOOL_ARGUMENTS = {
     "path": PROPOSE_EDIT_PATH,
@@ -225,11 +234,17 @@ class MetricState:
             "productionEditApplyDelegations": 0,
             "productionEditWrites": 0,
             "productionEditBackups": 0,
+            "productionEditConflictObservations": 0,
             "runCommandAttempts": [],
             "proposeEditProposalTimeline": [],
             "proposeEditApplyTimeline": [],
             "proposeEditWriteTimeline": [],
             "proposeEditBackupTimeline": [],
+            "proposeEditConflictTimeline": [],
+            "proposeEditThirdPartyTransitionAttempts": 0,
+            "proposeEditThirdPartyTransitionWrites": 0,
+            "proposeEditThirdPartyTransitionRejections": 0,
+            "proposeEditThirdPartyTransitionTimeline": [],
             "signatureAlternationFixtureTimeline": [],
             "successResetFixtureTimeline": [],
             "unsafeToolRequests": 0,
@@ -470,6 +485,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     for user_marker, scenario_prefix in (
         (EDIT_AUTHORIZATION_APPROVE_USER, "edit-authorization-approve"),
         (EDIT_AUTHORIZATION_REJECT_USER, "edit-authorization-reject"),
+        (EDIT_AUTHORIZATION_CONFLICT_USER, "edit-authorization-conflict"),
     ):
         if user_marker in user_text:
             return (
@@ -817,6 +833,28 @@ def _edit_authorization_receipt_projection(payload: dict, *, approved: bool) -> 
         "rejected": result.get("rejected") is True,
         "replayed": result.get("replayed") is True,
         "backupPresent": bool(str(result.get("backupPath") or "")),
+    }
+
+
+def _edit_authorization_conflict_receipt_projection(payload: dict) -> dict:
+    receipts, parsed, result = _questionnaire_receipt_result(
+        payload, PROPOSE_EDIT_TOOL_CALL_ID,
+    )
+    return {
+        "decision": "approved",
+        "receiptCount": len(receipts),
+        "parseable": parsed,
+        "nameMatches": len(receipts) == 1
+        and str(receipts[0].get("name") or "") == "propose_edit",
+        "ok": result.get("ok") is True,
+        "actionMatches": str(result.get("action") or "") == "apply_edit",
+        "pathMatches": str(result.get("path") or "") == PROPOSE_EDIT_PATH,
+        "applied": result.get("applied") is True,
+        "rejected": result.get("rejected") is True,
+        "replayed": result.get("replayed") is True,
+        "backupPresent": bool(str(result.get("backupPath") or "")),
+        "conflict": result.get("conflict") is True,
+        "errorPresent": bool(str(result.get("error") or "")),
     }
 
 
@@ -1439,6 +1477,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     approved=scenario == "edit-authorization-approve-final",
                 )
             )
+        if scenario == "edit-authorization-conflict-final":
+            chat_metric["editAuthorizationReceipt"] = (
+                _edit_authorization_conflict_receipt_projection(payload)
+            )
         METRICS.append("chatRequests", chat_metric)
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
@@ -1486,7 +1528,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
                 "executor-range-call", "missing-file-call", "questionnaire-call",
                 "mixed-questionnaire-call", "edit-authorization-approve-call",
-                "edit-authorization-reject-call",
+                "edit-authorization-reject-call", "edit-authorization-conflict-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("forced-final-model-failure-call-")
@@ -1628,7 +1670,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "tool-call", "tool-detail-call", "multi-tool-detail-call", "invalid-tool-call",
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call", "edit-authorization-approve-call",
-            "edit-authorization-reject-call",
+            "edit-authorization-reject-call", "edit-authorization-conflict-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -1646,6 +1688,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "missing-file-call": MISSING_FILE_STAGE,
                 "edit-authorization-approve-call": EDIT_AUTHORIZATION_STAGE,
                 "edit-authorization-reject-call": EDIT_AUTHORIZATION_STAGE,
+                "edit-authorization-conflict-call": EDIT_AUTHORIZATION_STAGE,
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -1743,6 +1786,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             elif scenario in {
                 "edit-authorization-approve-call",
                 "edit-authorization-reject-call",
+                "edit-authorization-conflict-call",
             }:
                 tool_calls = [{
                     "index": 0,
@@ -1841,6 +1885,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
                 "edit-authorization-approve-final": EDIT_AUTHORIZATION_APPROVE_FINAL,
                 "edit-authorization-reject-final": EDIT_AUTHORIZATION_REJECT_FINAL,
+                "edit-authorization-conflict-final": EDIT_AUTHORIZATION_CONFLICT_FINAL,
                 "tool-final": TOOL_FINAL,
             }[scenario]
             frames = [
@@ -2014,10 +2059,16 @@ def main() -> int:
     fixture_sha256 = hashlib.sha256(fixture_bytes).hexdigest()
     propose_edit_initial_bytes = PROPOSE_EDIT_INITIAL_CONTENT.encode("utf-8")
     propose_edit_target_bytes = PROPOSE_EDIT_TARGET_CONTENT.encode("utf-8")
+    propose_edit_third_party_bytes = PROPOSE_EDIT_THIRD_PARTY_CONTENT.encode("utf-8")
     if hashlib.sha256(propose_edit_initial_bytes).hexdigest() != PROPOSE_EDIT_INITIAL_SHA256:
         raise RuntimeError("H4 propose_edit initial fixture hash changed")
     if hashlib.sha256(propose_edit_target_bytes).hexdigest() != PROPOSE_EDIT_TARGET_SHA256:
         raise RuntimeError("H4 propose_edit target fixture hash changed")
+    if (
+        hashlib.sha256(propose_edit_third_party_bytes).hexdigest()
+        != PROPOSE_EDIT_THIRD_PARTY_SHA256
+    ):
+        raise RuntimeError("H4 propose_edit third-party fixture hash changed")
     controlled_fixture_lock = threading.RLock()
     controlled_fixture_invocations = {
         SIGNATURE_ALTERNATION_READ_PATH: 0,
@@ -2053,6 +2104,7 @@ def main() -> int:
                 "exists": False,
                 "initialHashMatches": False,
                 "targetHashMatches": False,
+                "thirdPartyHashMatches": False,
             }
         if not propose_edit_target.is_file():
             return {
@@ -2060,15 +2112,23 @@ def main() -> int:
                 "exists": True,
                 "initialHashMatches": False,
                 "targetHashMatches": False,
+                "thirdPartyHashMatches": False,
             }
         observed_sha256 = hashlib.sha256(propose_edit_target.read_bytes()).hexdigest()
         initial_matches = observed_sha256 == PROPOSE_EDIT_INITIAL_SHA256
         target_matches = observed_sha256 == PROPOSE_EDIT_TARGET_SHA256
+        third_party_matches = observed_sha256 == PROPOSE_EDIT_THIRD_PARTY_SHA256
         return {
-            "state": "initial" if initial_matches else "target" if target_matches else "unexpected",
+            "state": (
+                "initial" if initial_matches
+                else "target" if target_matches
+                else "third-party" if third_party_matches
+                else "unexpected"
+            ),
             "exists": True,
             "initialHashMatches": initial_matches,
             "targetHashMatches": target_matches,
+            "thirdPartyHashMatches": third_party_matches,
         }
 
     if propose_edit_fixture_state()["state"] not in {"initial", "target"}:
@@ -2156,7 +2216,7 @@ def main() -> int:
             ),
         }
 
-    def owned_tree_fingerprint(base: Path) -> dict:
+    def owned_tree_entries(base: Path) -> list[dict]:
         entries = []
         for candidate in sorted(base.rglob("*")):
             if candidate.is_symlink():
@@ -2179,6 +2239,10 @@ def main() -> int:
                 })
             else:
                 raise RuntimeError("H4 owned tree contains an unsupported entry")
+        return entries
+
+    def owned_tree_fingerprint(base: Path) -> dict:
+        entries = owned_tree_entries(base)
         encoded = json.dumps(
             entries,
             ensure_ascii=True,
@@ -2189,6 +2253,168 @@ def main() -> int:
             "entryCount": len(entries),
             "fingerprint": hashlib.sha256(encoded).hexdigest(),
         }
+
+    def production_callback_delta(before: dict, after: dict) -> dict:
+        return {
+            "registeredDelegations": (
+                after["productionToolDelegations"]
+                - before["productionToolDelegations"]
+            ),
+            "proposalDelegations": (
+                after["productionEditProposalDelegations"]
+                - before["productionEditProposalDelegations"]
+            ),
+            "applyDelegations": (
+                after["productionEditApplyDelegations"]
+                - before["productionEditApplyDelegations"]
+            ),
+            "writes": (
+                after["productionEditWrites"]
+                - before["productionEditWrites"]
+            ),
+            "backups": (
+                after["productionEditBackups"]
+                - before["productionEditBackups"]
+            ),
+            "toolExecutions": (
+                len(after["toolExecutions"])
+                - len(before["toolExecutions"])
+            ),
+            "runCommandAttempts": (
+                len(after["runCommandAttempts"])
+                - len(before["runCommandAttempts"])
+            ),
+        }
+
+    def fixed_third_party_tree_transition(before: list[dict], after: list[dict]) -> bool:
+        before_by_path = {entry["path"]: entry for entry in before}
+        after_by_path = {entry["path"]: entry for entry in after}
+        if set(before_by_path) != set(after_by_path):
+            return False
+        for relative_path in before_by_path:
+            if relative_path == PROPOSE_EDIT_PATH:
+                continue
+            if before_by_path[relative_path] != after_by_path[relative_path]:
+                return False
+        return before_by_path.get(PROPOSE_EDIT_PATH) == {
+            "path": PROPOSE_EDIT_PATH,
+            "kind": "file",
+            "size": len(propose_edit_initial_bytes),
+            "sha256": PROPOSE_EDIT_INITIAL_SHA256,
+        } and after_by_path.get(PROPOSE_EDIT_PATH) == {
+            "path": PROPOSE_EDIT_PATH,
+            "kind": "file",
+            "size": len(propose_edit_third_party_bytes),
+            "sha256": PROPOSE_EDIT_THIRD_PARTY_SHA256,
+        }
+
+    def transition_propose_edit_third_party(command: dict) -> dict:
+        with controlled_fixture_lock:
+            metrics_before = METRICS.snapshot()
+            file_before = propose_edit_fixture_state()
+            backups_before = propose_edit_backup_state()
+            project_entries_before = owned_tree_entries(project_dir)
+            home_tree_before = owned_tree_fingerprint(isolated_home)
+            artifacts_tree_before = owned_tree_fingerprint(artifacts_dir)
+            attempt = metrics_before["proposeEditThirdPartyTransitionAttempts"] + 1
+            METRICS.increment("proposeEditThirdPartyTransitionAttempts")
+
+            accepted = False
+            reason = ""
+            command_keys_exact = set(command) == {"id", "command"}
+            proposal_ready = (
+                metrics_before["productionEditProposalDelegations"] == 1
+                and len(metrics_before["proposeEditProposalTimeline"]) == 1
+                and metrics_before["productionEditApplyDelegations"] == 0
+                and metrics_before["productionEditWrites"] == 0
+                and metrics_before["productionEditBackups"] == 0
+            )
+            already_transitioned = (
+                metrics_before["proposeEditThirdPartyTransitionWrites"] != 0
+            )
+            if not command_keys_exact:
+                reason = "payload-not-allowed"
+            elif already_transitioned:
+                reason = "already-transitioned"
+            elif not proposal_ready:
+                reason = "proposal-precondition-not-ready"
+            elif file_before["state"] != "initial":
+                reason = "fixture-precondition-changed"
+            elif backups_before["count"] != 0:
+                reason = "backup-precondition-changed"
+            else:
+                propose_edit_target.write_bytes(propose_edit_third_party_bytes)
+                METRICS.increment("proposeEditThirdPartyTransitionWrites")
+                accepted = True
+
+            if not accepted:
+                METRICS.increment("proposeEditThirdPartyTransitionRejections")
+
+            file_after = propose_edit_fixture_state()
+            backups_after = propose_edit_backup_state()
+            project_entries_after = owned_tree_entries(project_dir)
+            home_tree_after = owned_tree_fingerprint(isolated_home)
+            artifacts_tree_after = owned_tree_fingerprint(artifacts_dir)
+            metrics_after = METRICS.snapshot()
+            production_callbacks = production_callback_delta(
+                metrics_before, metrics_after,
+            )
+            project_tree_unchanged = project_entries_after == project_entries_before
+            project_tree_changed_only_at_fixed_path = fixed_third_party_tree_transition(
+                project_entries_before, project_entries_after,
+            )
+            home_tree_unchanged = home_tree_after == home_tree_before
+            artifacts_tree_unchanged = artifacts_tree_after == artifacts_tree_before
+            backup_count_unchanged = backups_after == backups_before
+            fixed_bytes_match = (
+                file_after["state"] == "third-party"
+                and file_after["thirdPartyHashMatches"] is True
+                and propose_edit_target.stat().st_size
+                == len(propose_edit_third_party_bytes)
+            )
+
+            if any(production_callbacks.values()):
+                raise RuntimeError("H4 third-party transition invoked production callbacks")
+            if not home_tree_unchanged or not artifacts_tree_unchanged:
+                raise RuntimeError("H4 third-party transition escaped the project tree")
+            if not backup_count_unchanged:
+                raise RuntimeError("H4 third-party transition changed edit backups")
+            if accepted and (
+                not fixed_bytes_match or not project_tree_changed_only_at_fixed_path
+            ):
+                raise RuntimeError("H4 third-party transition changed unexpected bytes")
+            if not accepted and (
+                not project_tree_unchanged or file_after != file_before
+            ):
+                raise RuntimeError("H4 rejected third-party transition changed the fixture")
+
+            timeline_item = {
+                "accepted": accepted,
+                "reason": reason,
+                "commandKeysExact": command_keys_exact,
+                "attempt": attempt,
+                "path": PROPOSE_EDIT_PATH,
+                "fileBefore": file_before,
+                "fileAfter": file_after,
+                "fixedBytes": {
+                    "byteLength": len(propose_edit_third_party_bytes),
+                    "sha256": PROPOSE_EDIT_THIRD_PARTY_SHA256,
+                    "hashMatches": fixed_bytes_match,
+                },
+                "projectTreeUnchanged": project_tree_unchanged,
+                "projectTreeChangedOnlyAtFixedPath": (
+                    project_tree_changed_only_at_fixed_path
+                ),
+                "homeTreeUnchanged": home_tree_unchanged,
+                "artifactsTreeUnchanged": artifacts_tree_unchanged,
+                "backupCountBefore": backups_before["count"],
+                "backupCountAfter": backups_after["count"],
+                "productionCallbacks": production_callbacks,
+            }
+            METRICS.append(
+                "proposeEditThirdPartyTransitionTimeline", timeline_item,
+            )
+            return timeline_item
 
     def proposal_shape_matches(proposal) -> bool:
         if not isinstance(proposal, dict) or set(proposal) != expected_proposal_keys:
@@ -2290,14 +2516,33 @@ def main() -> int:
             raise ValueError("H4 apply_edit proposal escaped the fixed synthetic contract")
         file_before = propose_edit_fixture_state()
         backups_before = propose_edit_backup_state()
-        if file_before["state"] not in {"initial", "target"}:
+        transition_metrics = METRICS.snapshot()
+        accepted_transitions = [
+            item
+            for item in transition_metrics["proposeEditThirdPartyTransitionTimeline"]
+            if item.get("accepted") is True
+        ]
+        fixed_third_party_transition = (
+            file_before["state"] == "third-party"
+            and transition_metrics["proposeEditThirdPartyTransitionWrites"] == 1
+            and len(accepted_transitions) == 1
+        )
+        if (
+            file_before["state"] not in {"initial", "target"}
+            and not fixed_third_party_transition
+        ):
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 apply_edit fixture precondition changed")
         METRICS.increment("productionEditApplyDelegations")
         result = None
+        conflict_observed = False
         try:
             result = original_execute_apply_edit_proposal(proposal)
             return result
+        except code_server.EditConflictError:
+            conflict_observed = True
+            METRICS.increment("productionEditConflictObservations")
+            raise
         finally:
             file_after = propose_edit_fixture_state()
             backups_after = propose_edit_backup_state()
@@ -2318,6 +2563,7 @@ def main() -> int:
                 "proposalShapeMatches": proposal_shape_matches(proposal),
                 "fileBefore": file_before,
                 "fileAfter": file_after,
+                "conflictObserved": conflict_observed,
                 "result": apply_result_projection(result, proposal),
             })
             METRICS.append("proposeEditWriteTimeline", {
@@ -2333,6 +2579,15 @@ def main() -> int:
                 "initialContentMatchDelta": initial_backup_delta,
                 "backupObserved": backup_delta == 1 and initial_backup_delta == 1,
             })
+            if conflict_observed:
+                METRICS.append("proposeEditConflictTimeline", {
+                    "observed": True,
+                    "exceptionTypeMatches": True,
+                    "fileBefore": file_before,
+                    "fileAfter": file_after,
+                    "fixturePreserved": file_after == file_before,
+                    "backupDelta": backup_delta,
+                })
 
     def counted_execute_registered_tool(action, payload, *, _arguments_validated=False):
         if action == "propose_edit":
@@ -2755,6 +3010,13 @@ def main() -> int:
             "initialSha256": PROPOSE_EDIT_INITIAL_SHA256,
             "targetSha256": PROPOSE_EDIT_TARGET_SHA256,
         },
+        "proposeEditThirdPartyTransition": {
+            "command": PROPOSE_EDIT_THIRD_PARTY_TRANSITION_COMMAND,
+            "path": PROPOSE_EDIT_PATH,
+            "expectedBeforeSha256": PROPOSE_EDIT_INITIAL_SHA256,
+            "byteLength": len(propose_edit_third_party_bytes),
+            "targetSha256": PROPOSE_EDIT_THIRD_PARTY_SHA256,
+        },
         "environment": {
             "parentSentinelPresent": "H4_PARENT_SECRET_SENTINEL" in os.environ,
             "sensitiveNames": sensitive_environment_names,
@@ -2862,6 +3124,15 @@ def main() -> int:
                     "id": request_id,
                     "ok": True,
                     "contract": probe_tool_boundary(),
+                })
+                continue
+            if operation == PROPOSE_EDIT_THIRD_PARTY_TRANSITION_COMMAND:
+                transition = transition_propose_edit_third_party(command)
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": transition["accepted"],
+                    "transition": transition,
                 })
                 continue
             if operation == "shutdown":
