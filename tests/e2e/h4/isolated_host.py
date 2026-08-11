@@ -615,6 +615,27 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     return "plain-text", has_tool_result
 
 
+def _detached_edit_artifact_count(payload: dict) -> int:
+    messages = payload.get("messages")
+    messages = messages if isinstance(messages, list) else []
+    serialized_messages = json.dumps(
+        messages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    artifacts = (
+        EDIT_AUTHORIZATION_APPROVE_USER,
+        EDIT_AUTHORIZATION_STAGE,
+        EDIT_AUTHORIZATION_APPROVE_FINAL,
+        PROPOSE_EDIT_TOOL_CALL_ID,
+        PROPOSE_EDIT_PATH,
+        PROPOSE_EDIT_OLD_TEXT,
+        PROPOSE_EDIT_NEW_TEXT,
+    )
+    return sum(serialized_messages.count(artifact) for artifact in artifacts)
+
+
 def _parallel_failure_followup_context_projection(payload: dict) -> dict:
     messages = [
         message
@@ -1504,9 +1525,12 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario == "tiff-image":
             chat_metric["imageProjection"] = _tiff_model_image_projection(payload)
         if scenario == "parallel-failure-followup":
-            chat_metric["followupContext"] = (
-                _parallel_failure_followup_context_projection(payload)
-            )
+            followup_context = _parallel_failure_followup_context_projection(payload)
+            if METRICS.snapshot()["productionEditProposalDelegations"] > 0:
+                followup_context["detachedEditArtifactCount"] = (
+                    _detached_edit_artifact_count(payload)
+                )
+            chat_metric["followupContext"] = followup_context
         if scenario == "questionnaire-final":
             chat_metric["questionnaireReceipt"] = (
                 _questionnaire_receipt_projection(payload)

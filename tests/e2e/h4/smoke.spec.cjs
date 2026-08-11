@@ -554,6 +554,40 @@ function canonicalHash(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+// H4-8G covers only a full-page reload of the current/last-active Session.
+// Runtime Session switches, sidebar/list refreshes, and extra refreshSessions calls
+// remain outside this evidence boundary because they have a separate recovery gap.
+const H4_8G_SEMANTIC_HASH_KEYS = Object.freeze([
+  "preParallelFence",
+  "waitingAgentProjection",
+  "waitingActiveDom",
+  "mainTerminalIsolation",
+  "waitingSessionProjection",
+  "waitingReloadLifecycle",
+  "decisionSubmissionProjection",
+  "backgroundTerminalAgentRuntime",
+  "backgroundTerminalSession",
+  "backgroundTerminalDom",
+  "followupRequestContext",
+  "followupTerminal",
+  "terminalReloadLifecycle",
+]);
+const H4_8G_SEMANTIC_HASHES = Object.freeze({
+  preParallelFence: "540ae88a41e13cf77f9913ffa5b7f4489dcc536cd5a5e9905abcad6752ce0937",
+  waitingAgentProjection: "ff426ad3e9ae36b9e379c0bfdfdfd5714b051d5a297eb173144dd16346807fff",
+  waitingActiveDom: "9abe49fc00c52d00e69b2384cc064fba456dfbd34aa11bc7f397b4504b371f9a",
+  mainTerminalIsolation: "8fe0ed85dd2c22ce19ca32a885ac13c945de697a657a8ad495b42c9bfc8ffc9a",
+  waitingSessionProjection: "572f009990f75aecf216df0acf4ddaecc2da366c80e413b77014ed938f7d0c33",
+  waitingReloadLifecycle: "63b8e49eb3859368e05d11a626f2a480ea0c48e7b871dfb2e6cf6b25306c0dee",
+  decisionSubmissionProjection: "f827f34e4647001078fa290a45e1ccb7c1ba1bc2ffb797f1728ddaf20d774d8c",
+  backgroundTerminalAgentRuntime: "a24f62f7ed7658581125e902877352fe76d5fba3c1ecd2fdf6340659d4f6eb36",
+  backgroundTerminalSession: "2677c782ad9882dd4be181859e6d8b7b0843d6794f7cc0952ef85cb8ad10f94b",
+  backgroundTerminalDom: "39e1428311504cabd0a8004d711809c9203859dfce8cebc631e9ebff3ed00325",
+  followupRequestContext: "cb728e9a97ebb86660b16c0089f79ae136847abf36b8f329780789bd94aee8f5",
+  followupTerminal: "ae54a71daf8cdab6fecfdcb06c579a887b17141504c6a9426541f00d30a3d864",
+  terminalReloadLifecycle: "ffad15908367bd4a8139e755ea7aa00ab208b90776e25cf96432ce9e08a9acad",
+});
+
 function roleContentProjection(messages) {
   return (Array.isArray(messages) ? messages : []).map((message) => ({
     role: String(message?.role || ""),
@@ -11641,6 +11675,3006 @@ async function openAutomaticClassicFallback(h4, failureMode) {
   }
 }
 
+function detachedParallelAuthorizationUsageProjection(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const cache = Number(
+    source.cache
+      ?? source.prompt_cache_hit_tokens
+      ?? source.cache_read_tokens
+      ?? source.cache_read_input_tokens
+      ?? source.cached_input_tokens
+      ?? source.prompt_tokens_details?.cached_tokens
+      ?? source.input_tokens_details?.cached_tokens
+      ?? 0,
+  );
+  const cacheWriteReported = [
+    "cacheWrite", "cache_creation_input_tokens", "cache_write_input_tokens", "cache_write_tokens",
+  ].some((key) => source[key] != null);
+  const cacheWrite = Number(
+    source.cacheWrite
+      ?? source.cache_creation_input_tokens
+      ?? source.cache_write_input_tokens
+      ?? source.cache_write_tokens
+      ?? 0,
+  );
+  const input = source.input != null
+    ? Number(source.input || 0)
+    : source.prompt_tokens != null
+      ? Number(source.prompt_tokens || 0)
+      : Number(source.input_tokens || 0)
+        + ((source.cache_read_input_tokens != null || source.cache_creation_input_tokens != null)
+          ? cache + cacheWrite
+          : 0);
+  return {
+    input,
+    output: Number(source.output ?? source.completion_tokens ?? source.output_tokens ?? 0),
+    cache,
+    cost: Number(source.cost || 0),
+    ...(cacheWriteReported
+      ? { cacheWrite }
+      : {}),
+  };
+}
+
+function detachedParallelAuthorizationUsageEqual(left, right) {
+  const leftProjection = detachedParallelAuthorizationUsageProjection(left);
+  const rightProjection = detachedParallelAuthorizationUsageProjection(right);
+  const keys = ["input", "output", "cache", "cost", "cacheWrite"];
+  const ordered = (projection) => Object.fromEntries(
+    keys
+      .filter((key) => Object.prototype.hasOwnProperty.call(projection, key))
+      .map((key) => [key, projection[key]]),
+  );
+  return JSON.stringify(ordered(leftProjection)) === JSON.stringify(ordered(rightProjection));
+}
+
+function detachedParallelAuthorizationUsageDelta(after, before) {
+  const next = detachedParallelAuthorizationUsageProjection(after);
+  const previous = detachedParallelAuthorizationUsageProjection(before);
+  const keys = [...new Set([...Object.keys(next), ...Object.keys(previous)])].sort();
+  return Object.fromEntries(keys.map((key) => [key, Number(next[key] || 0) - Number(previous[key] || 0)]));
+}
+
+function detachedParallelAuthorizationAgentProjection(
+  snapshot,
+  authorizationId,
+  { sessionId = "", mainAgentRunId = "", jobId = "" } = {},
+) {
+  const source = snapshot && typeof snapshot === "object" ? snapshot : {};
+  return {
+    status: String(source.status || ""),
+    permissionProfile: String(source.permissionProfile || ""),
+    nextCursor: Number(source.nextCursor || 0),
+    round: Number(source.round || 0),
+    activeRuntimeCleared: !String(source.activeRuntimeRunId || ""),
+    pendingToolCallCount: Array.isArray(source.pendingToolCalls) ? source.pendingToolCalls.length : -1,
+    identity: {
+      sameSession: Boolean(sessionId) && String(source.sessionId || "") === sessionId,
+      distinctFromMain: Boolean(mainAgentRunId)
+        && String(source.agentRunId || "") !== mainAgentRunId,
+      clientRequestMatchesJob: Boolean(jobId)
+        && String(source.clientRequestId || "") === jobId,
+      topLevel: !String(source.parentAgentRunId || "")
+        && !String(source.parentToolCallId || "")
+        && Number(source.agentDepth || 0) === 0,
+    },
+    pendingAuthorization: source.pendingAuthorization == null
+      ? null
+      : editAuthorizationPendingProjection(source.pendingAuthorization, authorizationId),
+    events: editAuthorizationEventProjection(source, authorizationId),
+    executions: editAuthorizationExecutionProjection(source),
+    usage: detachedParallelAuthorizationUsageProjection(source.usage || source.result?.usage),
+  };
+}
+
+function detachedParallelAuthorizationMainProjection(snapshot, toolCallId) {
+  const source = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const events = Array.isArray(source.events) ? source.events : [];
+  const execution = (Array.isArray(source.toolExecutions) ? source.toolExecutions : [])[0] || {};
+  const executionArguments = parseToolArguments(execution.arguments);
+  return {
+    status: String(source.status || ""),
+    nextCursor: Number(source.nextCursor || 0),
+    activeRuntimeCleared: !String(source.activeRuntimeRunId || ""),
+    pendingToolCallCount: Array.isArray(source.pendingToolCalls) ? source.pendingToolCalls.length : -1,
+    eventTypes: events.map((event) => String(event?.type || "")),
+    runtimeCount: events.filter((event) => event?.type === "model_started").length,
+    execution: {
+      count: Array.isArray(source.toolExecutions) ? source.toolExecutions.length : -1,
+      toolCallMatches: Boolean(toolCallId) && String(execution.toolCallId || "") === toolCallId,
+      action: String(execution.name || ""),
+      arguments: executionArguments,
+      status: String(execution.status || ""),
+      outcome: String(execution.outcome || ""),
+      resultOk: execution.result?.ok === true,
+      resultPathMatchesFixture: String(execution.result?.path || "") === "fixture.txt",
+      resultContentMatchesFixture: String(execution.result?.content || "") === FIXTURE_CONTENT,
+    },
+  };
+}
+
+function detachedParallelAuthorizationCheckpointProjection(checkpoint, links) {
+  const source = checkpoint && typeof checkpoint === "object" ? checkpoint : {};
+  const expectedKeys = [
+    "agentRunId", "clientRequestId", "cwd", "deadlineAt", "id", "maxTokens", "model",
+    "parentTaskStartedAt", "permissionProfile", "primaryRoot", "queuedAt", "rootPaths",
+    "startedAt", "status", "taskPrompt", "temperature", "thinkingLevel", "toolPreset",
+    "userText", "cursor",
+  ].sort();
+  return {
+    keysExact: JSON.stringify(Object.keys(source).sort()) === JSON.stringify(expectedKeys),
+    status: String(source.status || ""),
+    cursor: Number(source.cursor || 0),
+    identity: {
+      jobPresent: Boolean(String(source.id || "")),
+      jobMatches: Boolean(links.jobId) && String(source.id || "") === links.jobId,
+      clientRequestMatchesJob: Boolean(String(source.id || ""))
+        && String(source.clientRequestId || "") === String(source.id || ""),
+      agentRunMatches: Boolean(links.backgroundAgentRunId)
+        && String(source.agentRunId || "") === links.backgroundAgentRunId,
+    },
+    task: {
+      userMarkerMatches: String(source.userText || "") === links.backgroundUserMarker,
+      promptContainsMarker: String(source.taskPrompt || "").includes(links.backgroundUserMarker),
+      modelMatches: String(source.model || "") === MODEL_ID,
+      permissionProfile: String(source.permissionProfile || ""),
+      toolPreset: String(source.toolPreset || ""),
+      thinkingLevelPresent: Boolean(String(source.thinkingLevel || "")),
+      cwdPresent: Boolean(String(source.cwd || "")),
+      primaryRootPresent: Boolean(String(source.primaryRoot || "")),
+      rootPathCount: Array.isArray(source.rootPaths) ? source.rootPaths.length : -1,
+    },
+    timingPresent: {
+      parentTaskStartedAt: Number(source.parentTaskStartedAt || 0) > 0,
+      queuedAt: Number(source.queuedAt || 0) > 0,
+      startedAt: Number(source.startedAt || 0) > 0,
+      deadlineAt: Number(source.deadlineAt || 0) > 0,
+    },
+  };
+}
+
+function detachedParallelAuthorizationSessionProjection(session, links) {
+  const source = session && typeof session === "object" ? session : {};
+  const messages = Array.isArray(source.messages) ? source.messages : [];
+  const backgroundRuns = Array.isArray(source.runState?.backgroundRuns)
+    ? source.runState.backgroundRuns
+    : [];
+  const classify = (message) => {
+    const role = String(message?.role || "");
+    const content = String(message?.content || "");
+    const meta = message?.meta || {};
+    if (role === "user" && content === TOOL_DETAILS_USER) return "main-user";
+    if (role === "assistant" && content === TOOL_DETAILS_STAGE) return "main-tool-owner";
+    if (role === "tool-call" && meta.action === "read_file") return "main-read-call";
+    if (role === "tool-result" && meta.action === "read_file") return "main-read-result";
+    if (role === "assistant" && content === TOOL_DETAILS_FINAL) return "main-final";
+    if (role === "user" && content.includes(links.backgroundUserMarker)
+        && meta.detachedFromMain === true) return "background-user";
+    if (role === "tool-result" && meta.action === "propose_edit"
+        && meta.detachedFromMain === true) return "background-edit";
+    if (role === "assistant" && content === links.backgroundFinalMarker
+        && meta.kind === "background-subagent") return "background-final";
+    if (role === "user" && content === PARALLEL_FAILURE_FOLLOWUP_USER) return "followup-user";
+    if (role === "assistant" && content === PARALLEL_FAILURE_FOLLOWUP_FINAL) return "followup-final";
+    return "unknown";
+  };
+  const classified = messages.map((message) => ({
+    role: String(message?.role || ""),
+    kind: classify(message),
+  }));
+  const backgroundUserMessages = messages.filter((message) => classify(message) === "background-user");
+  const backgroundEditMessages = messages.filter((message) => classify(message) === "background-edit");
+  const backgroundFinalMessages = messages.filter((message) => classify(message) === "background-final");
+  const backgroundUser = backgroundUserMessages[0] || {};
+  const backgroundEdit = backgroundEditMessages[0] || {};
+  const backgroundFinal = backgroundFinalMessages[0] || {};
+  const userDispatch = backgroundUser.meta?.backgroundDispatch || {};
+  const editMeta = backgroundEdit.meta || {};
+  const finalMeta = backgroundFinal.meta || {};
+  const checkpoint = backgroundRuns[0] || {};
+  const authorizationResult = editMeta.authorizationResult && typeof editMeta.authorizationResult === "object"
+    ? editAuthorizationResultProjection(editMeta.authorizationResult)
+    : null;
+  return {
+    sessionMatches: Boolean(links.sessionId) && String(source.id || "") === links.sessionId,
+    rolesKinds: classified,
+    unknownCount: classified.filter((item) => item.kind === "unknown").length,
+    runStateKeys: Object.keys(source.runState || {}).sort(),
+    checkpointCount: backgroundRuns.length,
+    checkpoint: backgroundRuns.length === 1
+      ? detachedParallelAuthorizationCheckpointProjection(checkpoint, links)
+      : null,
+    background: {
+      user: {
+        count: backgroundUserMessages.length,
+        detached: backgroundUser.meta?.detachedFromMain === true,
+        jobMatches: Boolean(links.jobId) && String(userDispatch.id || "") === links.jobId,
+        agentRunMatches: Boolean(links.backgroundAgentRunId)
+          && String(userDispatch.agentRunId || "") === links.backgroundAgentRunId,
+        status: String(userDispatch.status || ""),
+        parentTaskStartedAtPresent: Number(userDispatch.parentTaskStartedAt || 0) > 0,
+      },
+      edit: {
+        count: backgroundEditMessages.length,
+        detached: editMeta.detachedFromMain === true,
+        backgroundJobMatches: Boolean(links.jobId)
+          && String(editMeta.backgroundJobId || "") === links.jobId,
+        agentRunMatches: Boolean(links.backgroundAgentRunId)
+          && String(editMeta.agentRunId || "") === links.backgroundAgentRunId,
+        authorizationMatches: Boolean(links.authorizationId)
+          && String(editMeta.authorizationId || "") === links.authorizationId,
+        toolCallMatches: String(editMeta.toolCallId || "")
+          === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+        pathMatches: String(editMeta.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+        serverManaged: editMeta.serverManaged === true,
+        native: editMeta.native === true,
+        decision: String(editMeta.authorizationDecision || ""),
+        applied: editMeta.applied === true,
+        rejected: editMeta.rejected === true,
+        diff: editAuthorizationDiffProjection(backgroundEdit.content),
+        authorizationResult,
+      },
+      final: {
+        count: backgroundFinalMessages.length,
+        detached: finalMeta.detachedFromMain === true,
+        kind: String(finalMeta.kind || ""),
+        error: finalMeta.error === true,
+        jobMatches: Boolean(links.jobId) && String(finalMeta.jobId || "") === links.jobId,
+        agentRunMatches: Boolean(links.backgroundAgentRunId)
+          && String(finalMeta.agentRunId || "") === links.backgroundAgentRunId,
+        parentTaskStartedAtPresent: Number(finalMeta.parentTaskStartedAt || 0) > 0,
+        responseTimePresent: Boolean(String(finalMeta._responseTime || "")),
+        usageScope: String(finalMeta._usageScope || ""),
+        usage: detachedParallelAuthorizationUsageProjection(finalMeta._usage),
+      },
+    },
+    stats: detachedParallelAuthorizationUsageProjection(source.stats),
+  };
+}
+
+function detachedParallelAuthorizationSessionHashProjection(projection) {
+  const source = projection && typeof projection === "object" ? projection : {};
+  const checkpoint = source.checkpoint && typeof source.checkpoint === "object"
+    ? source.checkpoint
+    : null;
+  const user = source.background?.user || {};
+  const edit = source.background?.edit || {};
+  const final = source.background?.final || {};
+  return {
+    sessionMatches: source.sessionMatches === true,
+    rolesKinds: Array.isArray(source.rolesKinds) ? source.rolesKinds : [],
+    unknownCount: Number(source.unknownCount ?? -1),
+    runStateKeys: Array.isArray(source.runStateKeys) ? source.runStateKeys : [],
+    checkpointCount: Number(source.checkpointCount ?? -1),
+    checkpoint: checkpoint == null
+      ? null
+      : {
+          keysExact: checkpoint.keysExact === true,
+          status: String(checkpoint.status || ""),
+          cursor: Number(checkpoint.cursor || 0),
+          identity: checkpoint.identity,
+        },
+    background: {
+      user: {
+        count: Number(user.count ?? -1),
+        detached: user.detached === true,
+        jobMatches: user.jobMatches === true,
+        agentRunMatches: user.agentRunMatches === true,
+        status: String(user.status || ""),
+        parentTaskStartedAtPresent: user.parentTaskStartedAtPresent === true,
+      },
+      edit: {
+        count: Number(edit.count ?? -1),
+        detached: edit.detached === true,
+        backgroundJobMatches: edit.backgroundJobMatches === true,
+        agentRunMatches: edit.agentRunMatches === true,
+        authorizationMatches: edit.authorizationMatches === true,
+        toolCallMatches: edit.toolCallMatches === true,
+        pathMatches: edit.pathMatches === true,
+        serverManaged: edit.serverManaged === true,
+        native: edit.native === true,
+        decision: String(edit.decision || ""),
+        applied: edit.applied === true,
+        rejected: edit.rejected === true,
+        diff: edit.diff,
+      },
+      final: Number(final.count || 0) === 0
+        ? { count: 0 }
+        : {
+            count: Number(final.count || 0),
+            detached: final.detached === true,
+            kind: String(final.kind || ""),
+            error: final.error === true,
+            jobMatches: final.jobMatches === true,
+            agentRunMatches: final.agentRunMatches === true,
+            parentTaskStartedAtPresent: final.parentTaskStartedAtPresent === true,
+            responseTimePresent: final.responseTimePresent === true,
+            usageScope: String(final.usageScope || ""),
+          },
+    },
+  };
+}
+
+function detachedParallelAuthorizationMetricsProjection(metrics) {
+  const source = metrics && typeof metrics === "object" ? metrics : {};
+  const edit = editAuthorizationMetricsProjection(source);
+  return {
+    counts: {
+      durableAgentRuns: Array.isArray(source.production?.agentRuns)
+        ? source.production.agentRuns.length
+        : -1,
+      runtimes: Array.isArray(source.production?.runtimeRuns)
+        ? source.production.runtimeRuns.length
+        : -1,
+      upstreamChat: Array.isArray(source.chatRequests) ? source.chatRequests.length : -1,
+    },
+    chatRequests: Array.isArray(source.chatRequests) ? source.chatRequests : [],
+    registeredExecutions: (Array.isArray(source.toolExecutions) ? source.toolExecutions : [])
+      .map((execution) => ({
+        action: String(execution?.action || ""),
+        pathMatchesFixture: String(execution?.path || "") === "fixture.txt",
+        pathMatchesEdit: String(execution?.path || "") === EDIT_AUTHORIZATION_CONTRACT.path,
+        payloadKeysMatch: execution?.payloadKeysMatch === true,
+        payloadBytesMatch: execution?.payloadBytesMatch === true,
+      })),
+    edit,
+  };
+}
+
+function expectDetachedParallelAuthorizationMetrics(projection, phase) {
+  const terminal = phase === "terminal";
+  expect(projection.edit.counters).toEqual({
+    registeredDelegations: 2,
+    proposalDelegations: 1,
+    applyDelegations: terminal ? 1 : 0,
+    writes: terminal ? 1 : 0,
+    backups: terminal ? 1 : 0,
+    unsafe: 0,
+  });
+  expect(projection.registeredExecutions).toEqual([
+    {
+      action: "read_file",
+      pathMatchesFixture: true,
+      pathMatchesEdit: false,
+      payloadKeysMatch: false,
+      payloadBytesMatch: false,
+    },
+    {
+      action: "propose_edit",
+      pathMatchesFixture: false,
+      pathMatchesEdit: true,
+      payloadKeysMatch: true,
+      payloadBytesMatch: true,
+    },
+  ]);
+  expectEditAuthorizationMetrics({
+    ...projection.edit,
+    counters: { ...projection.edit.counters, registeredDelegations: 1 },
+    registeredExecutions: projection.edit.registeredExecutions.filter((item) => (
+      item.action === "propose_edit"
+    )),
+  }, EDIT_AUTHORIZATION_CONTRACT.branches.approved, phase);
+}
+
+function detachedParallelAuthorizationRuntimeProjection(snapshot, alias, owner) {
+  const source = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const content = String(source.result?.content || "");
+  const contentKind = content === TOOL_DETAILS_STAGE
+    ? "main-stage"
+    : content === TOOL_DETAILS_FINAL
+      ? "main-final"
+      : content === EDIT_AUTHORIZATION_STAGE
+        ? "background-stage"
+        : content === EDIT_AUTHORIZATION_CONTRACT.branches.approved.finalMarker
+          ? "background-final"
+          : content === PARALLEL_FAILURE_FOLLOWUP_FINAL
+            ? "followup-final"
+            : "empty";
+  return {
+    runtime: alias,
+    owner,
+    status: String(source.status || ""),
+    nextCursor: Number(source.nextCursor || 0),
+    content: contentKind,
+    finishReason: String(source.result?.finishReason || ""),
+    toolCalls: (Array.isArray(source.result?.toolCalls) ? source.result.toolCalls : [])
+      .map((call) => ({
+        toolCallMatches: String(call?.id || "") === EDIT_AUTHORIZATION_CONTRACT.toolCallId,
+        name: String(call?.function?.name || ""),
+        arguments: String(call?.function?.name || "") === "propose_edit"
+          ? editAuthorizationArgumentsProjection(call?.function?.arguments)
+          : { pathMatchesFixture: parseToolArguments(call?.function?.arguments)?.path === "fixture.txt" },
+      })),
+  };
+}
+
+async function detachedParallelAuthorizationDomProjection(h4, phase) {
+  const branch = EDIT_AUTHORIZATION_CONTRACT.branches.approved;
+  const phaseFacts = {
+    "main-active": {
+      mainFinal: 0,
+      backgroundFinal: 0,
+      followupUser: 0,
+      followupFinal: 0,
+      panelVisible: true,
+      panelRows: 1,
+      selected: 1,
+      panelPathMatches: true,
+      approveEnabled: 1,
+      rejectEnabled: 1,
+      activeBanners: 1,
+      completedStatuses: 0,
+      stopEnabled: true,
+      promptEnabled: true,
+      editReview: true,
+      editApplied: false,
+      backgroundReferences: 0,
+      backgroundTimers: 0,
+      mainOwnsCompletedStatus: false,
+      backgroundOwnsCompletedStatus: false,
+      followupOwnsCompletedStatus: false,
+      order: [
+        "main-user", "main-stage", "main-tool", "background-user",
+        "background-edit-process", "background-edit",
+      ],
+    },
+    "main-terminal-waiting": {
+      mainFinal: 1,
+      backgroundFinal: 0,
+      followupUser: 0,
+      followupFinal: 0,
+      panelVisible: true,
+      panelRows: 1,
+      selected: 1,
+      panelPathMatches: true,
+      approveEnabled: 1,
+      rejectEnabled: 1,
+      activeBanners: 0,
+      completedStatuses: 1,
+      stopEnabled: false,
+      promptEnabled: true,
+      editReview: true,
+      editApplied: false,
+      backgroundReferences: 0,
+      backgroundTimers: 0,
+      mainOwnsCompletedStatus: true,
+      backgroundOwnsCompletedStatus: false,
+      followupOwnsCompletedStatus: false,
+      order: [
+        "main-user", "main-stage", "main-tool", "main-final", "background-user",
+        "background-edit-process", "background-edit",
+      ],
+    },
+    "background-terminal": {
+      mainFinal: 1,
+      backgroundFinal: 1,
+      followupUser: 0,
+      followupFinal: 0,
+      panelVisible: false,
+      panelRows: 0,
+      selected: 0,
+      panelPathMatches: false,
+      approveEnabled: 0,
+      rejectEnabled: 0,
+      activeBanners: 0,
+      completedStatuses: 1,
+      stopEnabled: false,
+      promptEnabled: true,
+      editReview: false,
+      editApplied: true,
+      backgroundReferences: 1,
+      backgroundTimers: 1,
+      mainOwnsCompletedStatus: true,
+      backgroundOwnsCompletedStatus: false,
+      followupOwnsCompletedStatus: false,
+      order: [
+        "main-user", "main-stage", "main-tool", "main-final", "background-user",
+        "background-edit-process", "background-edit", "background-final",
+      ],
+    },
+    "followup-terminal": {
+      mainFinal: 1,
+      backgroundFinal: 1,
+      followupUser: 1,
+      followupFinal: 1,
+      panelVisible: false,
+      panelRows: 0,
+      selected: 0,
+      panelPathMatches: false,
+      approveEnabled: 0,
+      rejectEnabled: 0,
+      activeBanners: 0,
+      completedStatuses: 2,
+      stopEnabled: false,
+      promptEnabled: true,
+      editReview: false,
+      editApplied: true,
+      backgroundReferences: 1,
+      backgroundTimers: 1,
+      mainOwnsCompletedStatus: true,
+      backgroundOwnsCompletedStatus: false,
+      followupOwnsCompletedStatus: true,
+      order: [
+        "main-user", "main-stage", "main-tool", "main-final", "background-user",
+        "background-edit-process", "background-edit", "background-final",
+        "followup-user", "followup-final",
+      ],
+    },
+  }[phase];
+  expect(phaseFacts).toBeTruthy();
+  let projection = null;
+  let assertedProjection = null;
+  await expect.poll(async () => {
+    projection = await h4.page.evaluate((facts) => {
+      const root = document.querySelector("#messages");
+      const panel = document.querySelector("#authorizationPanel");
+      const one = (selector, marker) => [...root.querySelectorAll(selector)]
+        .find((node) => (node.textContent || "").includes(marker)) || null;
+      const all = (selector, marker) => [...root.querySelectorAll(selector)]
+        .filter((node) => (node.textContent || "").includes(marker));
+      const mainUser = one("article.msg.user", facts.mainUser);
+      const mainStage = one("article.msg.assistant.agent-commentary", facts.mainStage);
+      const mainFinal = one("article.msg.assistant", facts.mainFinal);
+      const backgroundUser = one("article.msg.user", facts.backgroundUser);
+      const backgroundFinal = one("article.msg.assistant", facts.backgroundFinal);
+      const followupUser = one("article.msg.user", facts.followupUser);
+      const followupFinal = one("article.msg.assistant", facts.followupFinal);
+      const readStages = [...root.querySelectorAll(
+        'article.tool-process > details.tool-process-stage[data-current-action="read_file"]',
+      )];
+      const editStages = [...root.querySelectorAll(
+        'article.tool-process > details.tool-process-stage[data-current-action="propose_edit"]',
+      )];
+      const readProcess = readStages[0]?.closest("article.tool-process") || null;
+      const editProcess = editStages[0]?.closest("article.tool-process") || null;
+      const suggestions = [...root.querySelectorAll("article.msg.assistant.edit-suggestion")]
+        .filter((node) => node.querySelector(".tool-edit-target")?.dataset.path === facts.editPath);
+      const suggestion = suggestions[0] || null;
+      const editStatus = suggestion?.querySelector(".tool-edit-status") || null;
+      const row = panel?.querySelector(".authorization-row") || null;
+      const approve = panel?.querySelector('[data-auth-action="approve"]') || null;
+      const reject = panel?.querySelector('[data-auth-action="reject-all"]') || null;
+      const ordered = [
+        { label: "main-user", node: mainUser },
+        { label: "main-stage", node: mainStage },
+        { label: "main-tool", node: readProcess },
+        { label: "main-final", node: mainFinal },
+        { label: "background-user", node: backgroundUser },
+        { label: "background-edit-process", node: editProcess },
+        { label: "background-edit", node: suggestion },
+        { label: "background-final", node: backgroundFinal },
+        { label: "followup-user", node: followupUser },
+        { label: "followup-final", node: followupFinal },
+      ].filter((entry) => entry.node);
+      ordered.sort((left, right) => (
+        left.node === right.node
+          ? 0
+          : left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING
+            ? -1
+            : 1
+      ));
+      return {
+        permission: {
+          pill: String(document.querySelector("#permPillBtn")?.dataset.value || ""),
+          stored: String(localStorage.getItem("code-permission-profile") || ""),
+        },
+        panel: {
+          visible: Boolean(panel && !panel.classList.contains("hidden")),
+          rows: panel?.querySelectorAll(".authorization-row").length || 0,
+          selected: panel?.querySelectorAll("[data-auth-select]:checked").length || 0,
+          pathMatches: row?.querySelector(".authorization-target")?.textContent.trim()
+            === facts.editPath,
+          approveEnabled: approve && !approve.disabled ? 1 : 0,
+          rejectEnabled: reject && !reject.disabled ? 1 : 0,
+        },
+        counts: {
+          mainUser: all("article.msg.user", facts.mainUser).length,
+          mainStage: all("article.msg.assistant.agent-commentary", facts.mainStage).length,
+          mainFinal: all("article.msg.assistant", facts.mainFinal).length,
+          backgroundUser: all("article.msg.user", facts.backgroundUser).length,
+          backgroundStage: all(
+            "article.msg.assistant.agent-commentary",
+            facts.backgroundStage,
+          ).length,
+          backgroundFinal: all("article.msg.assistant", facts.backgroundFinal).length,
+          followupUser: all("article.msg.user", facts.followupUser).length,
+          followupFinal: all("article.msg.assistant", facts.followupFinal).length,
+          readProcesses: readStages.length,
+          editProcesses: editStages.length,
+          editSuggestions: suggestions.length,
+          activeBanners: document.querySelectorAll("#activeRunBanner.visible").length,
+          completedStatuses: root.querySelectorAll("[data-completed-run-status]").length,
+          backgroundReferences: backgroundFinal
+            ?.querySelectorAll("[data-background-reply-id]").length || 0,
+          backgroundTimers: backgroundFinal
+            ?.querySelectorAll(".response-info .run-time").length || 0,
+        },
+        edit: {
+          review: Boolean(editStatus?.classList.contains("is-review")),
+          applied: Boolean(editStatus?.classList.contains("is-applied")),
+          rejected: Boolean(editStatus?.classList.contains("is-rejected")),
+          additions: suggestion?.querySelectorAll(".diff-line.diff-add").length || 0,
+          removals: suggestion?.querySelectorAll(".diff-line.diff-remove").length || 0,
+        },
+        ownership: {
+          backgroundInsideMainTool: Boolean(
+            readProcess?.contains(backgroundUser)
+            || readProcess?.contains(suggestion)
+            || readProcess?.contains(backgroundFinal),
+          ),
+          backgroundFinalOwnsCompletedStatus: Boolean(
+            backgroundUser?.nextElementSibling?.hasAttribute("data-completed-run-status"),
+          ),
+          mainOwnsCompletedStatus: Boolean(
+            mainUser?.nextElementSibling?.matches("section.execution-trace.completed")
+            && mainUser.nextElementSibling.querySelectorAll(
+              ":scope > .execution-trace-summary [data-completed-run-status]",
+            ).length === 1,
+          ),
+          followupOwnsCompletedStatus: Boolean(
+            followupUser?.nextElementSibling?.hasAttribute("data-completed-run-status"),
+          ),
+        },
+        order: ordered.map((entry) => entry.label),
+        controls: {
+          stopEnabled: !document.querySelector("#stopBtn")?.disabled,
+          promptEnabled: !document.querySelector("#prompt")?.disabled,
+        },
+      };
+    }, {
+      mainUser: TOOL_DETAILS_USER,
+      mainStage: TOOL_DETAILS_STAGE,
+      mainFinal: TOOL_DETAILS_FINAL,
+      backgroundUser: branch.userMarker,
+      backgroundStage: EDIT_AUTHORIZATION_STAGE,
+      backgroundFinal: branch.finalMarker,
+      followupUser: PARALLEL_FAILURE_FOLLOWUP_USER,
+      followupFinal: PARALLEL_FAILURE_FOLLOWUP_FINAL,
+      editPath: EDIT_AUTHORIZATION_CONTRACT.path,
+    });
+    assertedProjection = {
+      permission: projection.permission,
+      panel: {
+        visible: projection.panel.visible,
+        rows: projection.panel.rows,
+        selected: projection.panel.selected,
+        pathMatches: projection.panel.pathMatches,
+        approveEnabled: projection.panel.approveEnabled,
+        rejectEnabled: projection.panel.rejectEnabled,
+      },
+      counts: {
+        mainUser: projection.counts.mainUser,
+        mainStage: projection.counts.mainStage,
+        mainFinal: projection.counts.mainFinal,
+        backgroundUser: projection.counts.backgroundUser,
+        backgroundStage: projection.counts.backgroundStage,
+        backgroundFinal: projection.counts.backgroundFinal,
+        followupUser: projection.counts.followupUser,
+        followupFinal: projection.counts.followupFinal,
+        readProcesses: projection.counts.readProcesses,
+        editProcesses: projection.counts.editProcesses,
+        editSuggestions: projection.counts.editSuggestions,
+        activeBanners: projection.counts.activeBanners,
+        completedStatuses: projection.counts.completedStatuses,
+        backgroundReferences: projection.counts.backgroundReferences,
+        backgroundTimers: projection.counts.backgroundTimers,
+      },
+      edit: {
+        review: projection.edit.review,
+        applied: projection.edit.applied,
+        rejected: projection.edit.rejected,
+        additions: projection.edit.additions,
+        removals: projection.edit.removals,
+      },
+      ownership: {
+        backgroundInsideMainTool: projection.ownership.backgroundInsideMainTool,
+        backgroundOwnsCompletedStatus: projection.ownership.backgroundFinalOwnsCompletedStatus,
+        mainOwnsCompletedStatus: projection.ownership.mainOwnsCompletedStatus,
+        followupOwnsCompletedStatus: projection.ownership.followupOwnsCompletedStatus,
+      },
+      order: projection.order,
+      controls: projection.controls,
+    };
+    return assertedProjection;
+  }).toEqual({
+    permission: { pill: "accept", stored: "accept" },
+    panel: {
+      visible: phaseFacts.panelVisible,
+      rows: phaseFacts.panelRows,
+      selected: phaseFacts.selected,
+      pathMatches: phaseFacts.panelPathMatches,
+      approveEnabled: phaseFacts.approveEnabled,
+      rejectEnabled: phaseFacts.rejectEnabled,
+    },
+    counts: {
+      mainUser: 1,
+      mainStage: 1,
+      mainFinal: phaseFacts.mainFinal,
+      backgroundUser: 1,
+      backgroundStage: 0,
+      backgroundFinal: phaseFacts.backgroundFinal,
+      followupUser: phaseFacts.followupUser,
+      followupFinal: phaseFacts.followupFinal,
+      readProcesses: 1,
+      editProcesses: 1,
+      editSuggestions: 1,
+      activeBanners: phaseFacts.activeBanners,
+      completedStatuses: phaseFacts.completedStatuses,
+      backgroundReferences: phaseFacts.backgroundReferences,
+      backgroundTimers: phaseFacts.backgroundTimers,
+    },
+    edit: {
+      review: phaseFacts.editReview,
+      applied: phaseFacts.editApplied,
+      rejected: false,
+      additions: 1,
+      removals: 1,
+    },
+    ownership: {
+      backgroundInsideMainTool: false,
+      backgroundOwnsCompletedStatus: phaseFacts.backgroundOwnsCompletedStatus,
+      mainOwnsCompletedStatus: phaseFacts.mainOwnsCompletedStatus,
+      followupOwnsCompletedStatus: phaseFacts.followupOwnsCompletedStatus,
+    },
+    order: phaseFacts.order,
+    controls: {
+      stopEnabled: phaseFacts.stopEnabled,
+      promptEnabled: phaseFacts.promptEnabled,
+    },
+  });
+  return assertedProjection;
+}
+
+async function fetchDetachedParallelAuthorizationRuntimes(page, descriptors) {
+  const snapshots = [];
+  for (const descriptor of descriptors) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/runtime/runs/${encodeURIComponent(descriptor.runtimeRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.runId).toBe(descriptor.runtimeRunId);
+    snapshots.push(detachedParallelAuthorizationRuntimeProjection(
+      response.body,
+      descriptor.alias,
+      descriptor.owner,
+    ));
+  }
+  return snapshots;
+}
+
+async function exerciseDetachedParallelEditAuthorizationLifecycle(h4, runtime) {
+  const branch = EDIT_AUTHORIZATION_CONTRACT.branches.approved;
+  expect(h4.host.ready.proposeEditFixture).toEqual({
+    path: EDIT_AUTHORIZATION_CONTRACT.path,
+    initialSha256: EDIT_AUTHORIZATION_CONTRACT.initialSha256,
+    targetSha256: EDIT_AUTHORIZATION_CONTRACT.targetSha256,
+  });
+  expect(Object.keys(H4_8G_SEMANTIC_HASHES)).toEqual(H4_8G_SEMANTIC_HASH_KEYS);
+  const configuredHashes = Object.values(H4_8G_SEMANTIC_HASHES);
+  const bootstrapMode = configuredHashes.every((value) => value === "");
+  const frozenMode = configuredHashes.every((value) => /^[0-9a-f]{64}$/.test(value));
+  expect(bootstrapMode || frozenMode).toBe(true);
+  if (bootstrapMode) expect(runtime).toBe("bundle");
+
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") {
+    const currentUrl = new URL(page.url());
+    expect(currentUrl.pathname).toBe(CLASSIC_FALLBACK_PATH);
+    expect(currentUrl.search).toBe("");
+    expect(await page.locator("html").getAttribute("data-code-frontend-ready")).toBeNull();
+  }
+  await restoreEditAuthorizationTestConfig(h4);
+  await h4.proveNonLoopbackBlocked();
+
+  const lifecycleBoundary = h4.requestBoundary();
+  const lifecycleMetricsBefore = await h4.metrics();
+  await h4.submitGated(TOOL_DETAILS_USER);
+  await h4.waitGate(TOOL_FINAL_DELTA_GATE);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const mainAgentRunId = h4.controlIds().agentRunIds[0];
+  const activeMainResponse = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(activeMainResponse.status).toBe(200);
+  expect(activeMainResponse.body).toMatchObject({
+    agentRunId: mainAgentRunId,
+    status: "model",
+    nextCursor: 7,
+  });
+  expect(activeMainResponse.body.events.map((event) => event.type)).toEqual([
+    "created",
+    "model_started",
+    "model_completed",
+    "tool_started",
+    "tool_completed",
+    "model_pending",
+    "model_started",
+  ]);
+  const mainToolExecutions = Array.isArray(activeMainResponse.body.toolExecutions)
+    ? activeMainResponse.body.toolExecutions
+    : [];
+  expect(mainToolExecutions).toHaveLength(1);
+  const mainToolCallId = String(mainToolExecutions[0]?.toolCallId || "");
+  expect(mainToolCallId).not.toBe("");
+  const activeMainProjection = detachedParallelAuthorizationMainProjection(
+    activeMainResponse.body,
+    mainToolCallId,
+  );
+  expect(activeMainProjection).toEqual({
+    status: "model",
+    nextCursor: 7,
+    activeRuntimeCleared: false,
+    pendingToolCallCount: 0,
+    eventTypes: [
+      "created", "model_started", "model_completed", "tool_started", "tool_completed",
+      "model_pending", "model_started",
+    ],
+    runtimeCount: 2,
+    execution: {
+      count: 1,
+      toolCallMatches: true,
+      action: "read_file",
+      arguments: { path: "fixture.txt" },
+      status: "completed",
+      outcome: "succeeded",
+      resultOk: true,
+      resultPathMatchesFixture: true,
+      resultContentMatchesFixture: true,
+    },
+  });
+  const mainRuntimeRunIds = activeMainResponse.body.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(mainRuntimeRunIds).toHaveLength(2);
+  expect(new Set(mainRuntimeRunIds).size).toBe(2);
+  expect(mainRuntimeRunIds.every(Boolean)).toBe(true);
+  expect(activeMainResponse.body.activeRuntimeRunId).toBe(mainRuntimeRunIds[1]);
+  const mainRuntimeConsumer = await waitForFrontendRuntimeConsumer(h4, {
+    runtimeRunId: mainRuntimeRunIds[1],
+    requestBoundary: lifecycleBoundary,
+    label: `H4-8G-${runtime}-main-round-2-consumer`,
+  });
+  expect(mainRuntimeConsumer.targetIdHash).toBe(idHash(mainRuntimeRunIds[1]));
+  expect(mainRuntimeConsumer.matchedCount).toBeGreaterThan(0);
+  const mainRuntimeConsumerFence = {
+    targetMatches: mainRuntimeConsumer.targetIdHash === idHash(mainRuntimeRunIds[1]),
+    positiveWaitObserved: mainRuntimeConsumer.matchedCount > 0,
+  };
+  expect(mainRuntimeConsumerFence).toEqual({
+    targetMatches: true,
+    positiveWaitObserved: true,
+  });
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = String(await sessionButton.getAttribute("data-session-id") || "");
+  expect(sessionId).not.toBe("");
+  expect(activeMainResponse.body.sessionId).toBe(sessionId);
+  const sharedPreParallelExpected = primaryDetachedPreSubmissionProjectionExpected();
+  const naturalCollapsedPreParallelExpected = {
+    ...sharedPreParallelExpected,
+    tool: { ...sharedPreParallelExpected.tool, outerOpen: false },
+  };
+  const preParallelDom = await waitForMessageProjection(h4, {
+    label: `H4-8G-${runtime}-pre-parallel`,
+    sample: samplePrimaryDetachedPreSubmissionProjection,
+    expected: naturalCollapsedPreParallelExpected,
+    sourceFacts: {
+      mainUser: TOOL_DETAILS_USER,
+      mainStage: TOOL_DETAILS_STAGE,
+      mainFinal: TOOL_DETAILS_FINAL,
+      detachedUser: branch.userMarker,
+      detachedError: branch.finalMarker,
+      fixtureContent: FIXTURE_CONTENT.trim(),
+    },
+  });
+  const preParallelFence = {
+    main: activeMainProjection,
+    dom: preParallelDom,
+    consumer: mainRuntimeConsumerFence,
+    identities: {
+      sessionMatches: activeMainResponse.body.sessionId === sessionId,
+      durableAgentRunCount: h4.controlIds().agentRunIds.length,
+      runtimeCount: mainRuntimeRunIds.length,
+    },
+  };
+  expect(preParallelFence.identities).toEqual({
+    sessionMatches: true,
+    durableAgentRunCount: 1,
+    runtimeCount: 2,
+  });
+
+  await page.locator("#prompt").fill(`/parallel ${branch.userMarker}`);
+  await page.locator("#sendBtn").click();
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const backgroundAgentRunId = h4.controlIds().agentRunIds.find((agentRunId) => (
+    agentRunId !== mainAgentRunId
+  ));
+  expect(backgroundAgentRunId).toBeTruthy();
+  let waitingBackgroundResponse = null;
+  await expect.poll(async () => {
+    waitingBackgroundResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: waitingBackgroundResponse.body?.status,
+      nextCursor: waitingBackgroundResponse.body?.nextCursor,
+      events: (waitingBackgroundResponse.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "waiting_authorization",
+    nextCursor: 5,
+    events: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "authorization_required",
+    ],
+  });
+  expect(waitingBackgroundResponse.status).toBe(200);
+  const waitingBackgroundAgent = waitingBackgroundResponse.body;
+  const authorizationId = String(
+    waitingBackgroundAgent.pendingAuthorization?.authorizationId || "",
+  );
+  expect(authorizationId).toMatch(/^[0-9a-f]{64}$/);
+  const initialWaitingEvents = editAuthorizationEventProjection(
+    waitingBackgroundAgent,
+    authorizationId,
+  );
+  expect(initialWaitingEvents.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+  expect(initialWaitingEvents[1]).toMatchObject({
+    type: "model_started",
+    round: 1,
+    runtimeRunId: "runtime-1",
+  });
+  expect(initialWaitingEvents[2]).toMatchObject({
+    type: "model_completed",
+    content: "stage",
+    finishReason: "tool_calls",
+    toolCalls: [{ toolCallMatches: true, name: "propose_edit" }],
+  });
+  expectEditAuthorizationArguments(initialWaitingEvents[2].toolCalls[0].arguments);
+  expect(initialWaitingEvents[3]).toMatchObject({
+    type: "tool_started",
+    toolCallMatches: true,
+    name: "propose_edit",
+  });
+  expectEditAuthorizationArguments(initialWaitingEvents[3].arguments);
+  expectEditAuthorizationPending(initialWaitingEvents[4].authorization);
+  const initialWaitingExecution = editAuthorizationExecutionProjection(waitingBackgroundAgent);
+  expect(initialWaitingExecution).toHaveLength(1);
+  expect(initialWaitingExecution[0]).toMatchObject({
+    toolCallMatches: true,
+    name: "propose_edit",
+    status: "waiting_authorization",
+    outcome: "succeeded",
+    authorizationDecision: "",
+    publicFailureCountAbsent: true,
+    publicFailureSignatureAbsent: true,
+  });
+  expectEditAuthorizationArguments(initialWaitingExecution[0].arguments);
+  expectEditAuthorizationResult(initialWaitingExecution[0].result, branch, { proposal: true });
+  let waitingBeforeMainSessionResponse = null;
+  await expect.poll(async () => {
+    waitingBeforeMainSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    const checkpoints = Array.isArray(waitingBeforeMainSessionResponse.body?.runState?.backgroundRuns)
+      ? waitingBeforeMainSessionResponse.body.runState.backgroundRuns
+      : [];
+    return {
+      status: waitingBeforeMainSessionResponse.status,
+      checkpointCount: checkpoints.length,
+      checkpointStatus: checkpoints[0]?.status,
+      checkpointCursor: checkpoints[0]?.cursor,
+      backgroundAgentMatches: checkpoints[0]?.agentRunId === backgroundAgentRunId,
+      clientRequestMatchesJob: Boolean(String(checkpoints[0]?.id || ""))
+        && checkpoints[0]?.clientRequestId === checkpoints[0]?.id,
+      foregroundAuthorizationAbsent: !Object.prototype.hasOwnProperty.call(
+        waitingBeforeMainSessionResponse.body?.runState || {},
+        "authorizationRequest",
+      ),
+    };
+  }).toEqual({
+    status: 200,
+    checkpointCount: 1,
+    checkpointStatus: "waiting-authorization",
+    checkpointCursor: 5,
+    backgroundAgentMatches: true,
+    clientRequestMatchesJob: true,
+    foregroundAuthorizationAbsent: true,
+  });
+  const waitingCheckpointBeforeMainTerminal =
+    waitingBeforeMainSessionResponse.body.runState.backgroundRuns[0];
+  const jobId = String(waitingCheckpointBeforeMainTerminal.id || "");
+  expect(jobId).not.toBe("");
+  const links = {
+    sessionId,
+    mainAgentRunId,
+    backgroundAgentRunId,
+    authorizationId,
+    jobId,
+    backgroundUserMarker: branch.userMarker,
+    backgroundFinalMarker: branch.finalMarker,
+  };
+  const waitingCheckpointBeforeMainTerminalProjection =
+    detachedParallelAuthorizationCheckpointProjection(
+      waitingCheckpointBeforeMainTerminal,
+      links,
+    );
+  expect(waitingCheckpointBeforeMainTerminalProjection).toMatchObject({
+    keysExact: true,
+    status: "waiting-authorization",
+    cursor: 5,
+    identity: {
+      jobPresent: true,
+      jobMatches: true,
+      clientRequestMatchesJob: true,
+      agentRunMatches: true,
+    },
+  });
+  const waitingAgentBeforeMainTerminalProjection =
+    detachedParallelAuthorizationAgentProjection(
+      waitingBackgroundAgent,
+      authorizationId,
+      links,
+    );
+  const waitingActiveDom = await detachedParallelAuthorizationDomProjection(h4, "main-active");
+
+  // The host's main final-delta gate is deliberately short. Before releasing it,
+  // capture only the narrow background checkpoint/identity fence above; all deep
+  // waiting audits happen after the main Run is terminal and the background remains pending.
+  await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: TOOL_DETAILS_FINAL }))
+    .toHaveCount(1);
+  await h4.waitGate(TOOL_TERMINAL_GATE);
+  await h4.releaseGate(TOOL_TERMINAL_GATE);
+
+  let completedMainResponse = null;
+  await expect.poll(async () => {
+    completedMainResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedMainResponse.body?.status,
+      nextCursor: completedMainResponse.body?.nextCursor,
+      events: (completedMainResponse.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 9,
+    events: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "tool_completed",
+      "model_pending",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+  });
+  const completedMainAgent = completedMainResponse.body;
+  const mainUsage = detachedParallelAuthorizationUsageProjection(
+    completedMainAgent.usage || completedMainAgent.result?.usage,
+  );
+  expect(mainUsage).toEqual({ input: 24, output: 8, cache: 0, cost: 0 });
+  const terminalMainProjection = detachedParallelAuthorizationMainProjection(
+    completedMainAgent,
+    mainToolCallId,
+  );
+  expect(terminalMainProjection).toEqual({
+    status: "completed",
+    nextCursor: 9,
+    activeRuntimeCleared: true,
+    pendingToolCallCount: 0,
+    eventTypes: [
+      "created", "model_started", "model_completed", "tool_started", "tool_completed",
+      "model_pending", "model_started", "model_completed", "completed",
+    ],
+    runtimeCount: 2,
+    execution: activeMainProjection.execution,
+  });
+
+  const waitingAfterMainResponse = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(waitingAfterMainResponse.status).toBe(200);
+  expect(waitingAfterMainResponse.body.agentRunId).toBe(backgroundAgentRunId);
+  expect(waitingAfterMainResponse.body.status).toBe("waiting_authorization");
+  expect(waitingAfterMainResponse.body.pendingAuthorization?.authorizationId).toBe(authorizationId);
+  expect(editAuthorizationEventProjection(waitingAfterMainResponse.body, authorizationId))
+    .toEqual(initialWaitingEvents);
+  expect(editAuthorizationExecutionProjection(waitingAfterMainResponse.body))
+    .toEqual(initialWaitingExecution);
+
+  let waitingSessionResponse = null;
+  await expect.poll(async () => {
+    waitingSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    const checkpoints = Array.isArray(waitingSessionResponse.body?.runState?.backgroundRuns)
+      ? waitingSessionResponse.body.runState.backgroundRuns
+      : [];
+    return {
+      status: waitingSessionResponse.status,
+      roles: (waitingSessionResponse.body?.messages || []).map((message) => message.role),
+      runStateKeys: Object.keys(waitingSessionResponse.body?.runState || {}).sort(),
+      checkpointCount: checkpoints.length,
+      checkpointStatus: checkpoints[0]?.status,
+      checkpointCursor: checkpoints[0]?.cursor,
+      backgroundAgentMatches: checkpoints[0]?.agentRunId === backgroundAgentRunId,
+      foregroundAuthorizationAbsent: !Object.prototype.hasOwnProperty.call(
+        waitingSessionResponse.body?.runState || {},
+        "authorizationRequest",
+      ),
+    };
+  }).toEqual({
+    status: 200,
+    roles: ["user", "assistant", "tool-call", "tool-result", "assistant", "user", "tool-result"],
+    runStateKeys: ["backgroundRuns"],
+    checkpointCount: 1,
+    checkpointStatus: "waiting-authorization",
+    checkpointCursor: 5,
+    backgroundAgentMatches: true,
+    foregroundAuthorizationAbsent: true,
+  });
+  const waitingSession = waitingSessionResponse.body;
+  const checkpoint = waitingSession.runState.backgroundRuns[0];
+  const waitingCheckpointAfterMainTerminalProjection =
+    detachedParallelAuthorizationCheckpointProjection(checkpoint, links);
+  expect(waitingCheckpointAfterMainTerminalProjection)
+    .toEqual(waitingCheckpointBeforeMainTerminalProjection);
+  const waitingAgentProjection = detachedParallelAuthorizationAgentProjection(
+    waitingAfterMainResponse.body,
+    authorizationId,
+    links,
+  );
+  expect(waitingAgentProjection).toMatchObject({
+    status: "waiting_authorization",
+    permissionProfile: "accept",
+    nextCursor: 5,
+    round: 1,
+    activeRuntimeCleared: true,
+    pendingToolCallCount: 1,
+    identity: {
+      sameSession: true,
+      distinctFromMain: true,
+      clientRequestMatchesJob: true,
+      topLevel: true,
+    },
+  });
+  expectEditAuthorizationPending(waitingAgentProjection.pendingAuthorization);
+  expect(waitingAgentProjection.events).toEqual(initialWaitingEvents);
+  expect(waitingAgentProjection.executions).toEqual(initialWaitingExecution);
+  expect(waitingAgentProjection).toEqual(waitingAgentBeforeMainTerminalProjection);
+  const waitingAgentHashProjection = {
+    state: {
+      status: waitingAgentProjection.status,
+      permissionProfile: waitingAgentProjection.permissionProfile,
+      nextCursor: waitingAgentProjection.nextCursor,
+      round: waitingAgentProjection.round,
+      activeRuntimeCleared: waitingAgentProjection.activeRuntimeCleared,
+      pendingToolCallCount: waitingAgentProjection.pendingToolCallCount,
+      identity: waitingAgentProjection.identity,
+    },
+    eventSeqs: waitingAgentProjection.events.map((event) => event.seq),
+    eventTypes: waitingAgentProjection.events.map((event) => event.type),
+    pendingAuthorization: waitingAgentProjection.pendingAuthorization,
+    executionState: waitingAgentProjection.executions.map((execution) => ({
+      status: execution.status,
+      outcome: execution.outcome,
+      authorizationDecision: execution.authorizationDecision,
+    })),
+  };
+  expect(waitingAgentHashProjection).toEqual({
+    state: {
+      status: "waiting_authorization",
+      permissionProfile: "accept",
+      nextCursor: 5,
+      round: 1,
+      activeRuntimeCleared: true,
+      pendingToolCallCount: 1,
+      identity: {
+        sameSession: true,
+        distinctFromMain: true,
+        clientRequestMatchesJob: true,
+        topLevel: true,
+      },
+    },
+    eventSeqs: [1, 2, 3, 4, 5],
+    eventTypes: [
+      "created", "model_started", "model_completed", "tool_started", "authorization_required",
+    ],
+    pendingAuthorization: {
+      authorizationIdPresent: true,
+      authorizationIdMatches: true,
+      toolCallMatches: true,
+      action: "apply_edit",
+      proposalIdPresent: true,
+      pathMatches: true,
+      diff: {
+        present: true,
+        oldMarkerOnce: true,
+        newMarkerOnce: true,
+        oldHeaderMatches: true,
+        newHeaderMatches: true,
+      },
+      decision: "pending",
+      requestedAtPresent: true,
+      privateFieldsAbsent: true,
+    },
+    executionState: [{
+      status: "waiting_authorization",
+      outcome: "succeeded",
+      authorizationDecision: "",
+    }],
+  });
+  const waitingSessionProjection = detachedParallelAuthorizationSessionProjection(
+    waitingSession,
+    links,
+  );
+  expect(waitingSessionProjection.stats).toEqual(mainUsage);
+  expect(waitingSessionProjection.sessionMatches).toBe(true);
+  expect(waitingSessionProjection.rolesKinds).toEqual([
+    { role: "user", kind: "main-user" },
+    { role: "assistant", kind: "main-tool-owner" },
+    { role: "tool-call", kind: "main-read-call" },
+    { role: "tool-result", kind: "main-read-result" },
+    { role: "assistant", kind: "main-final" },
+    { role: "user", kind: "background-user" },
+    { role: "tool-result", kind: "background-edit" },
+  ]);
+  expect(waitingSessionProjection.unknownCount).toBe(0);
+  expect(waitingSessionProjection.runStateKeys).toEqual(["backgroundRuns"]);
+  expect(waitingSessionProjection.checkpointCount).toBe(1);
+  expect(waitingSessionProjection.checkpoint).toMatchObject({
+    keysExact: true,
+    status: "waiting-authorization",
+    cursor: 5,
+    identity: {
+      jobPresent: true,
+      jobMatches: true,
+      clientRequestMatchesJob: true,
+      agentRunMatches: true,
+    },
+    task: {
+      userMarkerMatches: true,
+      promptContainsMarker: true,
+      modelMatches: true,
+      permissionProfile: "accept",
+    },
+  });
+  expect(waitingSessionProjection.background.user).toMatchObject({
+    count: 1,
+    detached: true,
+    jobMatches: true,
+    agentRunMatches: true,
+    status: "waiting-authorization",
+    parentTaskStartedAtPresent: true,
+  });
+  expect(waitingSessionProjection.background.edit).toMatchObject({
+    count: 1,
+    detached: true,
+    backgroundJobMatches: true,
+    agentRunMatches: true,
+    authorizationMatches: true,
+    toolCallMatches: true,
+    pathMatches: true,
+    serverManaged: true,
+    native: true,
+    decision: "",
+    applied: false,
+    rejected: false,
+    authorizationResult: null,
+  });
+  expect(waitingSessionProjection.background.edit.diff).toEqual({
+    present: true,
+    oldMarkerOnce: true,
+    newMarkerOnce: true,
+    oldHeaderMatches: true,
+    newHeaderMatches: true,
+  });
+  expect(waitingSessionProjection.background.final.count).toBe(0);
+  const waitingSessionHashProjection = detachedParallelAuthorizationSessionHashProjection(
+    waitingSessionProjection,
+  );
+  expect(waitingSessionHashProjection).toEqual({
+    sessionMatches: true,
+    rolesKinds: [
+      { role: "user", kind: "main-user" },
+      { role: "assistant", kind: "main-tool-owner" },
+      { role: "tool-call", kind: "main-read-call" },
+      { role: "tool-result", kind: "main-read-result" },
+      { role: "assistant", kind: "main-final" },
+      { role: "user", kind: "background-user" },
+      { role: "tool-result", kind: "background-edit" },
+    ],
+    unknownCount: 0,
+    runStateKeys: ["backgroundRuns"],
+    checkpointCount: 1,
+    checkpoint: {
+      keysExact: true,
+      status: "waiting-authorization",
+      cursor: 5,
+      identity: {
+        jobPresent: true,
+        jobMatches: true,
+        clientRequestMatchesJob: true,
+        agentRunMatches: true,
+      },
+    },
+    background: {
+      user: {
+        count: 1,
+        detached: true,
+        jobMatches: true,
+        agentRunMatches: true,
+        status: "waiting-authorization",
+        parentTaskStartedAtPresent: true,
+      },
+      edit: {
+        count: 1,
+        detached: true,
+        backgroundJobMatches: true,
+        agentRunMatches: true,
+        authorizationMatches: true,
+        toolCallMatches: true,
+        pathMatches: true,
+        serverManaged: true,
+        native: true,
+        decision: "",
+        applied: false,
+        rejected: false,
+        diff: {
+          present: true,
+          oldMarkerOnce: true,
+          newMarkerOnce: true,
+          oldHeaderMatches: true,
+          newHeaderMatches: true,
+        },
+      },
+      final: { count: 0 },
+    },
+  });
+  const mainTerminalDom = await detachedParallelAuthorizationDomProjection(
+    h4,
+    "main-terminal-waiting",
+  );
+  const waitingMetricsRaw = await h4.metrics();
+  const waitingMetrics = detachedParallelAuthorizationMetricsProjection(waitingMetricsRaw);
+  expect(waitingMetrics.counts).toEqual({ durableAgentRuns: 2, runtimes: 3, upstreamChat: 3 });
+  expect(waitingMetrics.chatRequests).toEqual([
+    { scenario: "tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "tool-detail-final", stream: true, hasToolResult: true },
+    { scenario: "edit-authorization-approve-call", stream: true, hasToolResult: false },
+  ]);
+  expectDetachedParallelAuthorizationMetrics(waitingMetrics, "waiting");
+  const initialFileState = waitingMetrics.edit.proposalTimeline[0]?.fileAfter;
+  expect(initialFileState).toEqual({
+    state: "initial",
+    exists: true,
+    initialHashMatches: true,
+    targetHashMatches: false,
+  });
+  const requestsAtMainTerminal = editAuthorizationRequestProjection(
+    h4,
+    lifecycleBoundary,
+    lifecycleMetricsBefore,
+    waitingMetricsRaw,
+    backgroundAgentRunId,
+  );
+  expect(requestsAtMainTerminal).toMatchObject({
+    agentRunPost: 2,
+    runtimePost: 0,
+    authorizationPost: 0,
+    resumePost: 0,
+    inputPost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 3,
+    registeredDelegationDelta: 2,
+    registeredExecutionDelta: 2,
+    proposalDelegationDelta: 1,
+    applyDelegationDelta: 0,
+    writeDelta: 0,
+    backupDelta: 0,
+    unsafeDelta: 0,
+  });
+  expectEditAuthorizationZeroRequests({
+    ...requestsAtMainTerminal,
+    agentRunPost: 0,
+    upstreamChatDelta: 0,
+    registeredDelegationDelta: 0,
+    registeredExecutionDelta: 0,
+    proposalDelegationDelta: 0,
+  });
+  const mainTerminalIsolation = {
+    main: terminalMainProjection,
+    backgroundStillWaiting: JSON.stringify(waitingAgentProjection)
+      === JSON.stringify(waitingAgentBeforeMainTerminalProjection),
+    checkpointRetained: JSON.stringify(waitingCheckpointAfterMainTerminalProjection)
+      === JSON.stringify(waitingCheckpointBeforeMainTerminalProjection),
+    foregroundCheckpointCleared: waitingSessionProjection.runStateKeys
+      .every((key) => key === "backgroundRuns"),
+    file: initialFileState,
+    dom: mainTerminalDom,
+    counts: waitingMetrics.counts,
+  };
+  expect(mainTerminalIsolation.backgroundStillWaiting).toBe(true);
+  expect(mainTerminalIsolation.checkpointRetained).toBe(true);
+  expect(mainTerminalIsolation.foregroundCheckpointCleared).toBe(true);
+
+  const waitingReloadOrigin = new URL(page.url()).origin;
+  const waitingReloadConfigUrl = `${waitingReloadOrigin}/api/config`;
+  const waitingReloadRouteScope = page.context();
+  const waitingReloadBoundary = h4.requestBoundary();
+  let waitingReloadConfigRouteInstalled = false;
+  let waitingReloadRequestListenerInstalled = false;
+  let waitingReloadConfigReleased = false;
+  let waitingReloadConfigRequest = null;
+  let waitingReloadConfigRouteCount = 0;
+  let waitingReloadConfigRequestCount = 0;
+  const waitingReloadCreateRequests = [];
+  let resolveWaitingReloadConfigRelease = null;
+  const waitingReloadConfigRelease = new Promise((resolve) => {
+    resolveWaitingReloadConfigRelease = resolve;
+  });
+  const releaseWaitingReloadConfig = () => {
+    if (waitingReloadConfigReleased) return;
+    waitingReloadConfigReleased = true;
+    resolveWaitingReloadConfigRelease();
+  };
+  const waitingReloadConfigHandler = async (route) => {
+    waitingReloadConfigRouteCount += 1;
+    waitingReloadConfigRequest = route.request();
+    await waitingReloadConfigRelease;
+    await route.fallback();
+  };
+  const waitingReloadRequestListener = (request) => {
+    const requestUrl = new URL(request.url());
+    if (
+      request.method() === "GET"
+      && requestUrl.origin === waitingReloadOrigin
+      && requestUrl.pathname === "/api/config"
+      && requestUrl.search === ""
+    ) {
+      waitingReloadConfigRequestCount += 1;
+    }
+    if (
+      request.method() === "POST"
+      && requestUrl.origin === waitingReloadOrigin
+      && requestUrl.pathname === "/api/agent/runs"
+      && requestUrl.search === ""
+    ) {
+      waitingReloadCreateRequests.push(request);
+    }
+  };
+  let waitingReloadSettlementPromise = null;
+  let waitingReloadCreateRequest = null;
+  let waitingReloadConfigGateProjection = null;
+  try {
+    page.on("request", waitingReloadRequestListener);
+    waitingReloadRequestListenerInstalled = true;
+    await waitingReloadRouteScope.route(
+      waitingReloadConfigUrl,
+      waitingReloadConfigHandler,
+      { times: 1 },
+    );
+    waitingReloadConfigRouteInstalled = true;
+    waitingReloadSettlementPromise = h4.reloadRuntime(runtime).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error }),
+    );
+    await expect.poll(() => waitingReloadConfigRouteCount).toBe(1);
+    expect(waitingReloadConfigRequestCount).toBe(1);
+    const waitingReloadConfigRequestUrl = new URL(waitingReloadConfigRequest.url());
+    const waitingReloadConfigRequestProjection = {
+      methodGet: waitingReloadConfigRequest.method() === "GET",
+      sameOrigin: waitingReloadConfigRequestUrl.origin === waitingReloadOrigin,
+      exactPath: waitingReloadConfigRequestUrl.pathname === "/api/config",
+      queryEmpty: waitingReloadConfigRequestUrl.search === "",
+    };
+    expect(waitingReloadConfigRequestProjection).toEqual({
+      methodGet: true,
+      sameOrigin: true,
+      exactPath: true,
+      queryEmpty: true,
+    });
+    await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+      element.value = fakeUrl;
+    }, h4.host.ready.fakeUrl);
+    await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+    const waitingReloadConfigValueMatchesFake = await page.locator("#baseUrl").inputValue()
+      === h4.host.ready.fakeUrl;
+    expect(waitingReloadConfigValueMatchesFake).toBe(true);
+    const agentRunCreateBeforeConfigRelease = h4.requestEvidenceSince(waitingReloadBoundary).agentPost;
+    expect(agentRunCreateBeforeConfigRelease).toBe(0);
+    releaseWaitingReloadConfig();
+    const waitingReloadSettlement = await waitingReloadSettlementPromise;
+    if (!waitingReloadSettlement.ok) throw waitingReloadSettlement.error;
+    expect(waitingReloadConfigRequestCount).toBe(1);
+    await expect.poll(() => waitingReloadCreateRequests.length).toBe(1);
+    waitingReloadCreateRequest = waitingReloadCreateRequests[0];
+    const waitingReloadConfigResponse = await waitingReloadConfigRequest.response();
+    const waitingReloadContextSummary = h4.requestSummarySince(waitingReloadBoundary);
+    const waitingReloadContextConfigGets = Number(
+      waitingReloadContextSummary["GET /api/config"] || 0,
+    );
+    expect(waitingReloadContextConfigGets).toBe(1);
+    waitingReloadConfigGateProjection = {
+      routeCount: waitingReloadConfigRouteCount,
+      requestCount: waitingReloadConfigRequestCount,
+      contextCatchAllConfigGet: waitingReloadContextConfigGets,
+      request: waitingReloadConfigRequestProjection,
+      configRestoredBeforeRelease: waitingReloadConfigValueMatchesFake,
+      agentRunCreateBeforeRelease: agentRunCreateBeforeConfigRelease,
+      released: waitingReloadConfigReleased,
+      response: {
+        present: waitingReloadConfigResponse != null,
+        successful: waitingReloadConfigResponse?.ok() === true,
+        status2xx: Number(waitingReloadConfigResponse?.status() || 0) >= 200
+          && Number(waitingReloadConfigResponse?.status() || 0) < 300,
+      },
+    };
+    expect(waitingReloadConfigGateProjection).toEqual({
+      routeCount: 1,
+      requestCount: 1,
+      contextCatchAllConfigGet: 1,
+      request: {
+        methodGet: true,
+        sameOrigin: true,
+        exactPath: true,
+        queryEmpty: true,
+      },
+      configRestoredBeforeRelease: true,
+      agentRunCreateBeforeRelease: 0,
+      released: true,
+      response: { present: true, successful: true, status2xx: true },
+    });
+  } finally {
+    releaseWaitingReloadConfig();
+    if (waitingReloadSettlementPromise) await waitingReloadSettlementPromise;
+    if (waitingReloadRequestListenerInstalled) {
+      page.off("request", waitingReloadRequestListener);
+    }
+    if (waitingReloadConfigRouteInstalled) {
+      await waitingReloadRouteScope.unroute(waitingReloadConfigUrl, waitingReloadConfigHandler);
+    }
+  }
+  let waitingReloadCreateBody = null;
+  let waitingReloadCreateBodyParseable = true;
+  try {
+    waitingReloadCreateBody = waitingReloadCreateRequest.postDataJSON();
+  } catch {
+    waitingReloadCreateBodyParseable = false;
+  }
+  const waitingReloadCreateBodyObject = waitingReloadCreateBody
+    && typeof waitingReloadCreateBody === "object"
+    && !Array.isArray(waitingReloadCreateBody)
+    ? waitingReloadCreateBody
+    : {};
+  const waitingReloadCreateRequestUrl = new URL(waitingReloadCreateRequest.url());
+  const waitingReloadCreateTransportProjection = {
+    methodPost: waitingReloadCreateRequest.method() === "POST",
+    sameOrigin: waitingReloadCreateRequestUrl.origin === waitingReloadOrigin,
+    exactPath: waitingReloadCreateRequestUrl.pathname === "/api/agent/runs",
+    queryEmpty: waitingReloadCreateRequestUrl.search === "",
+    bodyParseable: waitingReloadCreateBodyParseable,
+    bodyKeysExact: JSON.stringify(Object.keys(waitingReloadCreateBodyObject).sort())
+      === JSON.stringify([
+        "allowedTools", "baseUrl", "clientRequestId", "contextLimit", "cwd", "keys",
+        "maxRounds", "payload", "permissionProfile", "sessionId",
+      ]),
+    sessionMatches: String(waitingReloadCreateBodyObject.sessionId || "") === sessionId,
+    clientRequestMatchesJob: String(waitingReloadCreateBodyObject.clientRequestId || "") === jobId,
+    baseUrlMatchesFake: String(waitingReloadCreateBodyObject.baseUrl || "")
+      === h4.host.ready.fakeUrl,
+    keysExactSynthetic: Array.isArray(waitingReloadCreateBodyObject.keys)
+      && waitingReloadCreateBodyObject.keys.length === 1
+      && waitingReloadCreateBodyObject.keys[0] === h4.host.syntheticKey,
+  };
+  expect(waitingReloadCreateTransportProjection).toEqual({
+    methodPost: true,
+    sameOrigin: true,
+    exactPath: true,
+    queryEmpty: true,
+    bodyParseable: true,
+    bodyKeysExact: true,
+    sessionMatches: true,
+    clientRequestMatchesJob: true,
+    baseUrlMatchesFake: true,
+    keysExactSynthetic: true,
+  });
+  const waitingReloadCreateResponse = await waitingReloadCreateRequest.response();
+  let waitingReloadCreateResponseBody = null;
+  let waitingReloadCreateResponseBodyParseable = true;
+  try {
+    waitingReloadCreateResponseBody = await waitingReloadCreateResponse?.json();
+  } catch {
+    waitingReloadCreateResponseBodyParseable = false;
+  }
+  const waitingReloadCreateResponseObject = waitingReloadCreateResponseBody
+    && typeof waitingReloadCreateResponseBody === "object"
+    && !Array.isArray(waitingReloadCreateResponseBody)
+    ? waitingReloadCreateResponseBody
+    : {};
+  const waitingReloadCreateResponseProjection = {
+    present: waitingReloadCreateResponse != null,
+    successful: waitingReloadCreateResponse?.ok() === true,
+    status2xx: Number(waitingReloadCreateResponse?.status() || 0) >= 200
+      && Number(waitingReloadCreateResponse?.status() || 0) < 300,
+    bodyParseable: waitingReloadCreateResponseBodyParseable,
+    agentRunMatches: String(waitingReloadCreateResponseObject.agentRunId || "")
+      === backgroundAgentRunId,
+    clientRequestMatchesJob: String(waitingReloadCreateResponseObject.clientRequestId || "")
+      === jobId,
+  };
+  expect(waitingReloadCreateResponseProjection).toEqual({
+    present: true,
+    successful: true,
+    status2xx: true,
+    bodyParseable: true,
+    agentRunMatches: true,
+    clientRequestMatchesJob: true,
+  });
+  await restoreEditAuthorizationTestConfig(h4);
+  const restoredActiveSession = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(restoredActiveSession).toHaveCount(1);
+  expect(await restoredActiveSession.getAttribute("data-session-id")).toBe(sessionId);
+  const restoredWaitingDom = await detachedParallelAuthorizationDomProjection(
+    h4,
+    "main-terminal-waiting",
+  );
+  expect(restoredWaitingDom).toEqual(mainTerminalDom);
+  const mainAfterWaitingReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  const backgroundAfterWaitingReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(mainAfterWaitingReload.status).toBe(200);
+  expect(backgroundAfterWaitingReload.status).toBe(200);
+  expect(detachedParallelAuthorizationMainProjection(mainAfterWaitingReload.body, mainToolCallId))
+    .toEqual(terminalMainProjection);
+  const waitingAgentAfterReloadProjection = detachedParallelAuthorizationAgentProjection(
+    backgroundAfterWaitingReload.body,
+    authorizationId,
+    links,
+  );
+  expect(waitingAgentAfterReloadProjection).toEqual(waitingAgentProjection);
+  const waitingSessionAfterReloadResponse = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(waitingSessionAfterReloadResponse.status).toBe(200);
+  const waitingSessionAfterReloadProjection = detachedParallelAuthorizationSessionProjection(
+    waitingSessionAfterReloadResponse.body,
+    links,
+  );
+  expect(waitingSessionAfterReloadProjection).toEqual(waitingSessionProjection);
+  const metricsAfterWaitingReloadRaw = await h4.metrics();
+  const metricsAfterWaitingReload = detachedParallelAuthorizationMetricsProjection(
+    metricsAfterWaitingReloadRaw,
+  );
+  expect(metricsAfterWaitingReload).toEqual(waitingMetrics);
+  const waitingReloadRequests = editAuthorizationRequestProjection(
+    h4,
+    waitingReloadBoundary,
+    waitingMetricsRaw,
+    metricsAfterWaitingReloadRaw,
+    backgroundAgentRunId,
+  );
+  expect(waitingReloadRequests.agentRunPost).toBe(1);
+  expectEditAuthorizationZeroRequests({ ...waitingReloadRequests, agentRunPost: 0 });
+  const allRequestsAfterWaitingReload = h4.requestEvidenceSince(lifecycleBoundary);
+  expect(allRequestsAfterWaitingReload.agentPost).toBe(3);
+  expect(allRequestsAfterWaitingReload.runtimePost).toBe(0);
+  const waitingReloadLifecycle = {
+    currentSessionPreserved: String(await restoredActiveSession.getAttribute("data-session-id") || "")
+      === sessionId,
+    mainStable: JSON.stringify(detachedParallelAuthorizationMainProjection(
+      mainAfterWaitingReload.body,
+      mainToolCallId,
+    )) === JSON.stringify(terminalMainProjection),
+    backgroundStable: JSON.stringify(waitingAgentAfterReloadProjection)
+      === JSON.stringify(waitingAgentProjection),
+    sessionStable: JSON.stringify(waitingSessionAfterReloadProjection)
+      === JSON.stringify(waitingSessionProjection),
+    domStable: JSON.stringify(restoredWaitingDom) === JSON.stringify(mainTerminalDom),
+    configGate: waitingReloadConfigGateProjection,
+    reattachTransport: {
+      agentRunCreatePost: waitingReloadRequests.agentRunPost,
+      request: waitingReloadCreateTransportProjection,
+      response: waitingReloadCreateResponseProjection,
+      sameDurableAgentRun: backgroundAfterWaitingReload.body.agentRunId === backgroundAgentRunId,
+      sameClientRequest: backgroundAfterWaitingReload.body.clientRequestId === jobId,
+    },
+    businessDeltas: { ...waitingReloadRequests, agentRunPost: 0 },
+  };
+  expect(waitingReloadLifecycle).toEqual({
+    currentSessionPreserved: true,
+    mainStable: true,
+    backgroundStable: true,
+    sessionStable: true,
+    domStable: true,
+    configGate: {
+      routeCount: 1,
+      requestCount: 1,
+      contextCatchAllConfigGet: 1,
+      request: {
+        methodGet: true,
+        sameOrigin: true,
+        exactPath: true,
+        queryEmpty: true,
+      },
+      configRestoredBeforeRelease: true,
+      agentRunCreateBeforeRelease: 0,
+      released: true,
+      response: { present: true, successful: true, status2xx: true },
+    },
+    reattachTransport: {
+      agentRunCreatePost: 1,
+      request: waitingReloadCreateTransportProjection,
+      response: waitingReloadCreateResponseProjection,
+      sameDurableAgentRun: true,
+      sameClientRequest: true,
+    },
+    businessDeltas: { ...waitingReloadRequests, agentRunPost: 0 },
+  });
+
+  const decisionBoundary = h4.requestBoundary();
+  const decisionMetricsBeforeRaw = metricsAfterWaitingReloadRaw;
+  const authorizationRow = page.locator("#authorizationPanel .authorization-row");
+  const approveButton = page.locator('#authorizationPanel [data-auth-action="approve"]');
+  await expect(authorizationRow).toHaveCount(1);
+  await expect(authorizationRow.locator("[data-auth-select]")).toBeChecked();
+  await expect(approveButton).toHaveCount(1);
+  await expect(approveButton).toBeEnabled();
+  const decisionOrigin = new URL(page.url()).origin;
+  const backgroundResumePath = `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}/resume`;
+  const backgroundResumeRequests = [];
+  let backgroundResumeListenerInstalled = false;
+  const backgroundResumeRequestListener = (request) => {
+    const requestUrl = new URL(request.url());
+    if (
+      request.method() === "POST"
+      && requestUrl.origin === decisionOrigin
+      && requestUrl.pathname === backgroundResumePath
+      && requestUrl.search === ""
+    ) {
+      backgroundResumeRequests.push(request);
+    }
+  };
+  let backgroundResumeTransportProjection = null;
+  try {
+    page.on("request", backgroundResumeRequestListener);
+    backgroundResumeListenerInstalled = true;
+    await approveButton.click();
+    await expect.poll(() => backgroundResumeRequests.length).toBe(1);
+    const backgroundResumeRequest = backgroundResumeRequests[0];
+    const backgroundResumeRequestUrl = new URL(backgroundResumeRequest.url());
+    let backgroundResumeRequestBody = null;
+    let backgroundResumeRequestBodyParseable = true;
+    try {
+      backgroundResumeRequestBody = backgroundResumeRequest.postDataJSON();
+    } catch {
+      backgroundResumeRequestBodyParseable = false;
+    }
+    const backgroundResumeRequestBodyObject = backgroundResumeRequestBody
+      && typeof backgroundResumeRequestBody === "object"
+      && !Array.isArray(backgroundResumeRequestBody)
+      ? backgroundResumeRequestBody
+      : {};
+    const backgroundResumeResponse = await backgroundResumeRequest.response();
+    let backgroundResumeResponseBody = null;
+    let backgroundResumeResponseBodyParseable = true;
+    try {
+      backgroundResumeResponseBody = await backgroundResumeResponse?.json();
+    } catch {
+      backgroundResumeResponseBodyParseable = false;
+    }
+    const backgroundResumeResponseBodyObject = backgroundResumeResponseBody
+      && typeof backgroundResumeResponseBody === "object"
+      && !Array.isArray(backgroundResumeResponseBody)
+      ? backgroundResumeResponseBody
+      : {};
+    backgroundResumeTransportProjection = {
+      request: {
+        methodPost: backgroundResumeRequest.method() === "POST",
+        sameOrigin: backgroundResumeRequestUrl.origin === decisionOrigin,
+        targetBackgroundRun: backgroundResumeRequestUrl.pathname === backgroundResumePath,
+        queryEmpty: backgroundResumeRequestUrl.search === "",
+        bodyParseable: backgroundResumeRequestBodyParseable,
+        bodyKeysExact: JSON.stringify(Object.keys(backgroundResumeRequestBodyObject).sort())
+          === JSON.stringify(["baseUrl", "keys"]),
+        baseUrlMatchesFake: String(backgroundResumeRequestBodyObject.baseUrl || "")
+          === h4.host.ready.fakeUrl,
+        keysExactSynthetic: Array.isArray(backgroundResumeRequestBodyObject.keys)
+          && backgroundResumeRequestBodyObject.keys.length === 1
+          && backgroundResumeRequestBodyObject.keys[0] === h4.host.syntheticKey,
+      },
+      response: {
+        present: backgroundResumeResponse != null,
+        successful: backgroundResumeResponse?.ok() === true,
+        status2xx: Number(backgroundResumeResponse?.status() || 0) >= 200
+          && Number(backgroundResumeResponse?.status() || 0) < 300,
+        bodyParseable: backgroundResumeResponseBodyParseable,
+        bodyKeysExact: JSON.stringify(Object.keys(backgroundResumeResponseBodyObject).sort())
+          === JSON.stringify(["agentRunId", "status"]),
+        sameAgentRun: String(backgroundResumeResponseBodyObject.agentRunId || "")
+          === backgroundAgentRunId,
+        statusModel: String(backgroundResumeResponseBodyObject.status || "") === "model",
+      },
+    };
+    expect(backgroundResumeTransportProjection).toEqual({
+      request: {
+        methodPost: true,
+        sameOrigin: true,
+        targetBackgroundRun: true,
+        queryEmpty: true,
+        bodyParseable: true,
+        bodyKeysExact: true,
+        baseUrlMatchesFake: true,
+        keysExactSynthetic: true,
+      },
+      response: {
+        present: true,
+        successful: true,
+        status2xx: true,
+        bodyParseable: true,
+        bodyKeysExact: true,
+        sameAgentRun: true,
+        statusModel: true,
+      },
+    });
+  } finally {
+    if (backgroundResumeListenerInstalled) {
+      page.off("request", backgroundResumeRequestListener);
+    }
+  }
+
+  let completedBackgroundResponse = null;
+  await expect.poll(async () => {
+    completedBackgroundResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedBackgroundResponse.body?.status,
+      nextCursor: completedBackgroundResponse.body?.nextCursor,
+      events: (completedBackgroundResponse.body?.events || []).map((event) => event.type),
+      pendingAuthorization: completedBackgroundResponse.body?.pendingAuthorization ?? null,
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 12,
+    events: [
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "authorization_required",
+      "authorization_submitted",
+      "tool_completed",
+      "waiting_credentials",
+      "resumed",
+      "model_started",
+      "model_completed",
+      "completed",
+    ],
+    pendingAuthorization: null,
+  });
+  const completedBackgroundAgent = completedBackgroundResponse.body;
+  expect(completedBackgroundAgent.result?.content).toBe(branch.finalMarker);
+  const backgroundTerminalProjection = detachedParallelAuthorizationAgentProjection(
+    completedBackgroundAgent,
+    authorizationId,
+    links,
+  );
+  expect(backgroundTerminalProjection).toMatchObject({
+    status: "completed",
+    permissionProfile: "accept",
+    nextCursor: 12,
+    round: 2,
+    activeRuntimeCleared: true,
+    pendingToolCallCount: 0,
+    identity: {
+      sameSession: true,
+      distinctFromMain: true,
+      clientRequestMatchesJob: true,
+      topLevel: true,
+    },
+    pendingAuthorization: null,
+  });
+  expect(backgroundTerminalProjection.events.map((event) => event.seq)).toEqual([
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+  ]);
+  expect(backgroundTerminalProjection.events.slice(0, 5)).toEqual(initialWaitingEvents);
+  expect(backgroundTerminalProjection.events[5]).toMatchObject({
+    type: "authorization_submitted",
+    toolCallMatches: true,
+    authorizationIdMatches: true,
+    decision: "approved",
+  });
+  expect(backgroundTerminalProjection.events[6]).toMatchObject({
+    type: "tool_completed",
+    toolCallMatches: true,
+    name: "propose_edit",
+    outcome: "succeeded",
+    replayed: false,
+  });
+  expectEditAuthorizationResult(backgroundTerminalProjection.events[6].result, branch);
+  expect(backgroundTerminalProjection.events[7]).toMatchObject({
+    type: "waiting_credentials",
+    resumeStatus: "model",
+    reason: "authorization_submitted",
+  });
+  expect(backgroundTerminalProjection.events[8]).toMatchObject({ type: "resumed", status: "model" });
+  expect(backgroundTerminalProjection.events[9]).toMatchObject({
+    type: "model_started",
+    round: 2,
+    runtimeRunId: "runtime-2",
+  });
+  expect(backgroundTerminalProjection.events[10]).toMatchObject({
+    type: "model_completed",
+    content: "final",
+    finishReason: "stop",
+    toolCalls: [],
+  });
+  expect(backgroundTerminalProjection.events[11]).toMatchObject({ type: "completed" });
+  expect(backgroundTerminalProjection.executions).toHaveLength(1);
+  expect(backgroundTerminalProjection.executions[0]).toMatchObject({
+    toolCallMatches: true,
+    name: "propose_edit",
+    status: "completed",
+    outcome: "succeeded",
+    authorizationDecision: "approved",
+    publicFailureCountAbsent: true,
+    publicFailureSignatureAbsent: true,
+  });
+  expectEditAuthorizationArguments(backgroundTerminalProjection.executions[0].arguments);
+  expectEditAuthorizationResult(backgroundTerminalProjection.executions[0].result, branch);
+  const backgroundTerminalAgentHashProjection = {
+    state: {
+      status: backgroundTerminalProjection.status,
+      permissionProfile: backgroundTerminalProjection.permissionProfile,
+      nextCursor: backgroundTerminalProjection.nextCursor,
+      round: backgroundTerminalProjection.round,
+      activeRuntimeCleared: backgroundTerminalProjection.activeRuntimeCleared,
+      pendingToolCallCount: backgroundTerminalProjection.pendingToolCallCount,
+      identity: backgroundTerminalProjection.identity,
+      authorizationCleared: backgroundTerminalProjection.pendingAuthorization == null,
+    },
+    eventSeqs: backgroundTerminalProjection.events.map((event) => event.seq),
+    eventTypes: backgroundTerminalProjection.events.map((event) => event.type),
+    execution: backgroundTerminalProjection.executions.map((execution) => ({
+      status: execution.status,
+      outcome: execution.outcome,
+      authorizationDecision: execution.authorizationDecision,
+      result: {
+        ok: execution.result?.ok === true,
+        action: String(execution.result?.action || ""),
+        applied: execution.result?.applied === true,
+        rejected: execution.result?.rejected === true,
+        replayed: execution.result?.replayed === true,
+        backupPresent: execution.result?.backupPresent === true,
+        conflict: execution.result?.conflict === true,
+        errorPresent: execution.result?.errorPresent === true,
+      },
+    })),
+  };
+  expect(backgroundTerminalAgentHashProjection).toEqual({
+    state: {
+      status: "completed",
+      permissionProfile: "accept",
+      nextCursor: 12,
+      round: 2,
+      activeRuntimeCleared: true,
+      pendingToolCallCount: 0,
+      identity: {
+        sameSession: true,
+        distinctFromMain: true,
+        clientRequestMatchesJob: true,
+        topLevel: true,
+      },
+      authorizationCleared: true,
+    },
+    eventSeqs: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    eventTypes: [
+      "created", "model_started", "model_completed", "tool_started", "authorization_required",
+      "authorization_submitted", "tool_completed", "waiting_credentials", "resumed",
+      "model_started", "model_completed", "completed",
+    ],
+    execution: [{
+      status: "completed",
+      outcome: "succeeded",
+      authorizationDecision: "approved",
+      result: {
+        ok: true,
+        action: "apply_edit",
+        applied: true,
+        rejected: false,
+        replayed: false,
+        backupPresent: true,
+        conflict: false,
+        errorPresent: false,
+      },
+    }],
+  });
+
+  const backgroundRuntimeRunIds = completedBackgroundAgent.events
+    .filter((event) => event?.type === "model_started")
+    .map((event) => String(event?.data?.runtimeRunId || ""));
+  expect(backgroundRuntimeRunIds).toHaveLength(2);
+  expect(new Set(backgroundRuntimeRunIds).size).toBe(2);
+  const backgroundRuntimeSnapshots = await fetchDetachedParallelAuthorizationRuntimes(page, [
+    { runtimeRunId: backgroundRuntimeRunIds[0], alias: "background-runtime-1", owner: "background" },
+    { runtimeRunId: backgroundRuntimeRunIds[1], alias: "background-runtime-2", owner: "background" },
+  ]);
+  const backgroundRuntimeProjection = backgroundRuntimeSnapshots;
+  expect(backgroundRuntimeProjection.map((item) => item.nextCursor)).toEqual([4, 3]);
+  expect(backgroundRuntimeProjection[0]).toMatchObject({
+    runtime: "background-runtime-1",
+    owner: "background",
+    status: "completed",
+    content: "background-stage",
+    finishReason: "tool_calls",
+    toolCalls: [{ toolCallMatches: true, name: "propose_edit" }],
+  });
+  expectEditAuthorizationArguments(backgroundRuntimeProjection[0].toolCalls[0].arguments);
+  expect(backgroundRuntimeProjection[1]).toMatchObject({
+    runtime: "background-runtime-2",
+    owner: "background",
+    status: "completed",
+    content: "background-final",
+    finishReason: "stop",
+    toolCalls: [],
+  });
+
+  const mainAfterBackground = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(mainAfterBackground.status).toBe(200);
+  expect(detachedParallelAuthorizationMainProjection(mainAfterBackground.body, mainToolCallId))
+    .toEqual(terminalMainProjection);
+  let backgroundTerminalSessionResponse = null;
+  await expect.poll(async () => {
+    backgroundTerminalSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: backgroundTerminalSessionResponse.status,
+      roles: (backgroundTerminalSessionResponse.body?.messages || []).map((message) => message.role),
+      runStateKeys: Object.keys(backgroundTerminalSessionResponse.body?.runState || {}).sort(),
+      backgroundFinals: (backgroundTerminalSessionResponse.body?.messages || []).filter((message) => (
+        message?.role === "assistant"
+        && message?.meta?.kind === "background-subagent"
+      )).length,
+    };
+  }).toEqual({
+    status: 200,
+    roles: [
+      "user", "assistant", "tool-call", "tool-result", "assistant",
+      "user", "tool-result", "assistant",
+    ],
+    runStateKeys: [],
+    backgroundFinals: 1,
+  });
+  const backgroundTerminalSession = backgroundTerminalSessionResponse.body;
+  const backgroundTerminalSessionProjection = detachedParallelAuthorizationSessionProjection(
+    backgroundTerminalSession,
+    links,
+  );
+  expect(backgroundTerminalSessionProjection.sessionMatches).toBe(true);
+  expect(backgroundTerminalSessionProjection.rolesKinds).toEqual([
+    { role: "user", kind: "main-user" },
+    { role: "assistant", kind: "main-tool-owner" },
+    { role: "tool-call", kind: "main-read-call" },
+    { role: "tool-result", kind: "main-read-result" },
+    { role: "assistant", kind: "main-final" },
+    { role: "user", kind: "background-user" },
+    { role: "tool-result", kind: "background-edit" },
+    { role: "assistant", kind: "background-final" },
+  ]);
+  expect(backgroundTerminalSessionProjection.unknownCount).toBe(0);
+  expect(backgroundTerminalSessionProjection.runStateKeys).toEqual([]);
+  expect(backgroundTerminalSessionProjection.checkpointCount).toBe(0);
+  expect(backgroundTerminalSessionProjection.background.user).toMatchObject({
+    count: 1,
+    detached: true,
+    jobMatches: true,
+    agentRunMatches: true,
+    status: "completed",
+    parentTaskStartedAtPresent: true,
+  });
+  expect(backgroundTerminalSessionProjection.background.edit).toMatchObject({
+    count: 1,
+    detached: true,
+    backgroundJobMatches: true,
+    agentRunMatches: true,
+    authorizationMatches: true,
+    toolCallMatches: true,
+    pathMatches: true,
+    serverManaged: true,
+    native: true,
+    decision: "approved",
+    applied: true,
+    rejected: false,
+  });
+  expect(backgroundTerminalSessionProjection.background.edit.diff).toEqual({
+    present: true,
+    oldMarkerOnce: true,
+    newMarkerOnce: true,
+    oldHeaderMatches: true,
+    newHeaderMatches: true,
+  });
+  expectEditAuthorizationResult(
+    backgroundTerminalSessionProjection.background.edit.authorizationResult,
+    branch,
+  );
+  expect(backgroundTerminalSessionProjection.background.final).toMatchObject({
+    count: 1,
+    detached: true,
+    kind: "background-subagent",
+    error: false,
+    jobMatches: true,
+    agentRunMatches: true,
+    parentTaskStartedAtPresent: true,
+    responseTimePresent: true,
+    usageScope: "task",
+  });
+  const backgroundUsage = detachedParallelAuthorizationUsageProjection(
+    completedBackgroundAgent.usage || completedBackgroundAgent.result?.usage,
+  );
+  expect(backgroundUsage).toEqual({ input: 24, output: 8, cache: 0, cost: 0 });
+  expect(backgroundTerminalSessionProjection.background.final.usage).toEqual(backgroundUsage);
+  const backgroundSessionUsageDelta = detachedParallelAuthorizationUsageDelta(
+    backgroundTerminalSession.stats,
+    waitingSessionProjection.stats,
+  );
+  expect(backgroundSessionUsageDelta).toEqual(backgroundUsage);
+  const backgroundUsageExactlyOnce = {
+    waitingSessionMatchesMain: detachedParallelAuthorizationUsageEqual(
+      waitingSessionProjection.stats,
+      mainUsage,
+    ),
+    finalMatchesAgent: detachedParallelAuthorizationUsageEqual(
+      backgroundTerminalSessionProjection.background.final.usage,
+      backgroundUsage,
+    ),
+    sessionDeltaMatchesAgent: detachedParallelAuthorizationUsageEqual(
+      backgroundSessionUsageDelta,
+      backgroundUsage,
+    ),
+  };
+  expect(backgroundUsageExactlyOnce).toEqual({
+    waitingSessionMatchesMain: true,
+    finalMatchesAgent: true,
+    sessionDeltaMatchesAgent: true,
+  });
+  const backgroundTerminalSessionHashProjection =
+    detachedParallelAuthorizationSessionHashProjection(backgroundTerminalSessionProjection);
+  expect(backgroundTerminalSessionHashProjection).toEqual({
+    sessionMatches: true,
+    rolesKinds: [
+      { role: "user", kind: "main-user" },
+      { role: "assistant", kind: "main-tool-owner" },
+      { role: "tool-call", kind: "main-read-call" },
+      { role: "tool-result", kind: "main-read-result" },
+      { role: "assistant", kind: "main-final" },
+      { role: "user", kind: "background-user" },
+      { role: "tool-result", kind: "background-edit" },
+      { role: "assistant", kind: "background-final" },
+    ],
+    unknownCount: 0,
+    runStateKeys: [],
+    checkpointCount: 0,
+    checkpoint: null,
+    background: {
+      user: {
+        count: 1,
+        detached: true,
+        jobMatches: true,
+        agentRunMatches: true,
+        status: "completed",
+        parentTaskStartedAtPresent: true,
+      },
+      edit: {
+        count: 1,
+        detached: true,
+        backgroundJobMatches: true,
+        agentRunMatches: true,
+        authorizationMatches: true,
+        toolCallMatches: true,
+        pathMatches: true,
+        serverManaged: true,
+        native: true,
+        decision: "approved",
+        applied: true,
+        rejected: false,
+        diff: {
+          present: true,
+          oldMarkerOnce: true,
+          newMarkerOnce: true,
+          oldHeaderMatches: true,
+          newHeaderMatches: true,
+        },
+      },
+      final: {
+        count: 1,
+        detached: true,
+        kind: "background-subagent",
+        error: false,
+        jobMatches: true,
+        agentRunMatches: true,
+        parentTaskStartedAtPresent: true,
+        responseTimePresent: true,
+        usageScope: "task",
+      },
+    },
+  });
+
+  const backgroundFinal = page.locator("#messages article.msg.assistant")
+    .filter({ hasText: branch.finalMarker });
+  await expect(backgroundFinal).toHaveCount(1);
+  const backgroundTerminalDom = await detachedParallelAuthorizationDomProjection(
+    h4,
+    "background-terminal",
+  );
+  const terminalMetricsRaw = await h4.metrics();
+  const terminalMetrics = detachedParallelAuthorizationMetricsProjection(terminalMetricsRaw);
+  expect(terminalMetrics.counts).toEqual({ durableAgentRuns: 2, runtimes: 4, upstreamChat: 4 });
+  expect(terminalMetrics.chatRequests).toEqual([
+    { scenario: "tool-detail-call", stream: true, hasToolResult: false },
+    { scenario: "tool-detail-final", stream: true, hasToolResult: true },
+    { scenario: "edit-authorization-approve-call", stream: true, hasToolResult: false },
+    {
+      scenario: "edit-authorization-approve-final",
+      stream: true,
+      hasToolResult: true,
+      editAuthorizationReceipt: editAuthorizationReceiptExpectation(branch),
+    },
+  ]);
+  expectDetachedParallelAuthorizationMetrics(terminalMetrics, "terminal");
+  const decisionRequests = editAuthorizationRequestProjection(
+    h4,
+    decisionBoundary,
+    decisionMetricsBeforeRaw,
+    terminalMetricsRaw,
+    backgroundAgentRunId,
+  );
+  expect(decisionRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    authorizationPost: 1,
+    resumePost: 1,
+    inputPost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 1,
+    registeredDelegationDelta: 0,
+    registeredExecutionDelta: 0,
+    proposalDelegationDelta: 0,
+    applyDelegationDelta: 1,
+    writeDelta: 1,
+    backupDelta: 1,
+    unsafeDelta: 0,
+    targets: {
+      authorization: { count: 1, allTargetRun: true },
+      resume: { count: 1, allTargetRun: true },
+    },
+  });
+  const decisionSubmissionProjection = {
+    requests: decisionRequests,
+    resumeTransport: backgroundResumeTransportProjection,
+    events: backgroundTerminalProjection.events.slice(5, 9),
+    execution: backgroundTerminalProjection.executions,
+    sameAgentRun: completedBackgroundAgent.agentRunId === backgroundAgentRunId,
+    authorizationCleared: completedBackgroundAgent.pendingAuthorization == null,
+    fileEffects: {
+      proposalDelegations: terminalMetrics.edit.counters.proposalDelegations,
+      applyDelegations: terminalMetrics.edit.counters.applyDelegations,
+      writes: terminalMetrics.edit.counters.writes,
+      backups: terminalMetrics.edit.counters.backups,
+      file: terminalMetrics.edit.applyTimeline[0]?.fileAfter,
+      replayed: terminalMetrics.edit.applyTimeline[0]?.result?.replayed,
+    },
+  };
+  expect(decisionSubmissionProjection.sameAgentRun).toBe(true);
+  expect(decisionSubmissionProjection.authorizationCleared).toBe(true);
+  expect(decisionSubmissionProjection.fileEffects).toEqual({
+    proposalDelegations: 1,
+    applyDelegations: 1,
+    writes: 1,
+    backups: 1,
+    file: {
+      state: "target",
+      exists: true,
+      initialHashMatches: false,
+      targetHashMatches: true,
+    },
+    replayed: false,
+  });
+  const decisionSubmissionHashProjection = {
+    requests: decisionSubmissionProjection.requests,
+    resumeTransport: decisionSubmissionProjection.resumeTransport,
+    transitions: [
+      {
+        type: decisionSubmissionProjection.events[0]?.type,
+        toolCallMatches: decisionSubmissionProjection.events[0]?.toolCallMatches === true,
+        authorizationIdMatches:
+          decisionSubmissionProjection.events[0]?.authorizationIdMatches === true,
+        decision: String(decisionSubmissionProjection.events[0]?.decision || ""),
+      },
+      {
+        type: decisionSubmissionProjection.events[1]?.type,
+        toolCallMatches: decisionSubmissionProjection.events[1]?.toolCallMatches === true,
+        name: String(decisionSubmissionProjection.events[1]?.name || ""),
+        outcome: String(decisionSubmissionProjection.events[1]?.outcome || ""),
+        replayed: decisionSubmissionProjection.events[1]?.replayed === true,
+        result: {
+          ok: decisionSubmissionProjection.events[1]?.result?.ok === true,
+          action: String(decisionSubmissionProjection.events[1]?.result?.action || ""),
+          applied: decisionSubmissionProjection.events[1]?.result?.applied === true,
+          backupPresent: decisionSubmissionProjection.events[1]?.result?.backupPresent === true,
+        },
+      },
+      {
+        type: decisionSubmissionProjection.events[2]?.type,
+        resumeStatus: String(decisionSubmissionProjection.events[2]?.resumeStatus || ""),
+        reason: String(decisionSubmissionProjection.events[2]?.reason || ""),
+      },
+      {
+        type: decisionSubmissionProjection.events[3]?.type,
+        status: String(decisionSubmissionProjection.events[3]?.status || ""),
+      },
+    ],
+    execution: decisionSubmissionProjection.execution.map((execution) => ({
+      status: execution.status,
+      outcome: execution.outcome,
+      authorizationDecision: execution.authorizationDecision,
+    })),
+    sameAgentRun: decisionSubmissionProjection.sameAgentRun,
+    authorizationCleared: decisionSubmissionProjection.authorizationCleared,
+    fileEffects: decisionSubmissionProjection.fileEffects,
+  };
+  expect(decisionSubmissionHashProjection).toEqual({
+    requests: decisionRequests,
+    resumeTransport: {
+      request: {
+        methodPost: true,
+        sameOrigin: true,
+        targetBackgroundRun: true,
+        queryEmpty: true,
+        bodyParseable: true,
+        bodyKeysExact: true,
+        baseUrlMatchesFake: true,
+        keysExactSynthetic: true,
+      },
+      response: {
+        present: true,
+        successful: true,
+        status2xx: true,
+        bodyParseable: true,
+        bodyKeysExact: true,
+        sameAgentRun: true,
+        statusModel: true,
+      },
+    },
+    transitions: [
+      {
+        type: "authorization_submitted",
+        toolCallMatches: true,
+        authorizationIdMatches: true,
+        decision: "approved",
+      },
+      {
+        type: "tool_completed",
+        toolCallMatches: true,
+        name: "propose_edit",
+        outcome: "succeeded",
+        replayed: false,
+        result: { ok: true, action: "apply_edit", applied: true, backupPresent: true },
+      },
+      { type: "waiting_credentials", resumeStatus: "model", reason: "authorization_submitted" },
+      { type: "resumed", status: "model" },
+    ],
+    execution: [{ status: "completed", outcome: "succeeded", authorizationDecision: "approved" }],
+    sameAgentRun: true,
+    authorizationCleared: true,
+    fileEffects: {
+      proposalDelegations: 1,
+      applyDelegations: 1,
+      writes: 1,
+      backups: 1,
+      file: {
+        state: "target",
+        exists: true,
+        initialHashMatches: false,
+        targetHashMatches: true,
+      },
+      replayed: false,
+    },
+  });
+
+  const followupBoundary = h4.requestBoundary();
+  const prompt = page.locator("#prompt");
+  await expect(prompt).toBeEnabled();
+  await prompt.fill(PARALLEL_FAILURE_FOLLOWUP_USER);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user")
+    .filter({ hasText: PARALLEL_FAILURE_FOLLOWUP_USER })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant")
+    .filter({ hasText: PARALLEL_FAILURE_FOLLOWUP_FINAL })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(3);
+  const followupAgentRunId = h4.controlIds().agentRunIds.find((agentRunId) => (
+    agentRunId !== mainAgentRunId && agentRunId !== backgroundAgentRunId
+  ));
+  expect(followupAgentRunId).toBeTruthy();
+  let completedFollowupResponse = null;
+  await expect.poll(async () => {
+    completedFollowupResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(followupAgentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedFollowupResponse.body?.status,
+      nextCursor: completedFollowupResponse.body?.nextCursor,
+      events: (completedFollowupResponse.body?.events || []).map((event) => event.type),
+    };
+  }).toEqual({
+    status: "completed",
+    nextCursor: 4,
+    events: ["created", "model_started", "model_completed", "completed"],
+  });
+  const completedFollowupAgent = completedFollowupResponse.body;
+  expect(completedFollowupAgent).toMatchObject({
+    agentRunId: followupAgentRunId,
+    sessionId,
+    status: "completed",
+    nextCursor: 4,
+    activeRuntimeRunId: "",
+    pendingToolCalls: [],
+    toolExecutions: [],
+    errorCode: "",
+  });
+  const followupRuntimeRunId = String(
+    completedFollowupAgent.events.find((event) => event?.type === "model_started")
+      ?.data?.runtimeRunId || "",
+  );
+  expect(followupRuntimeRunId).not.toBe("");
+  const followupRuntimeSnapshots = await fetchDetachedParallelAuthorizationRuntimes(page, [{
+    runtimeRunId: followupRuntimeRunId,
+    alias: "followup-runtime-1",
+    owner: "followup",
+  }]);
+  const followupRuntimeProjection = followupRuntimeSnapshots[0];
+  expect(followupRuntimeProjection).toEqual({
+    runtime: "followup-runtime-1",
+    owner: "followup",
+    status: "completed",
+    nextCursor: 3,
+    content: "followup-final",
+    finishReason: "stop",
+    toolCalls: [],
+  });
+  const followupMetricsRaw = await h4.metrics();
+  const followupMetrics = detachedParallelAuthorizationMetricsProjection(followupMetricsRaw);
+  // The legacy H4-7C classifier has no H4-8G marker vocabulary. Its unclassified
+  // count catches standalone non-system leaks, while the conditional full-message
+  // artifact count also catches embedded or system-message leaks.
+  const expectedFollowupContext = {
+    followupMarkerCount: 1,
+    detachedUserMarkerCount: 0,
+    detachedErrorMarkerCount: 0,
+    detachedStateFieldCount: 0,
+    detachedEditArtifactCount: 0,
+    mainlineKinds: [
+      { role: "user", kind: "main-user" },
+      { role: "assistant", kind: "main-tool-call" },
+      { role: "tool", kind: "main-tool-receipt" },
+      { role: "assistant", kind: "main-final" },
+      { role: "user", kind: "followup-user" },
+    ],
+    unclassifiedNonSystemCount: 0,
+    toolCall: {
+      count: 1,
+      matchingIdCount: 1,
+      readFile: true,
+      pathMatchesFixture: true,
+      receiptLinked: true,
+    },
+    toolReceipt: {
+      count: 1,
+      contentPresent: true,
+      pathMatchesFixture: true,
+      contentMatchesFixture: true,
+      sizeMatchesFixture: true,
+    },
+  };
+  expect(followupMetrics.counts).toEqual({ durableAgentRuns: 3, runtimes: 5, upstreamChat: 5 });
+  const expectedFollowupChatRequest = {
+    scenario: "parallel-failure-followup",
+    stream: true,
+    hasToolResult: true,
+    followupContext: expectedFollowupContext,
+  };
+  expect(followupMetrics.chatRequests).toEqual([
+    ...terminalMetrics.chatRequests,
+    expectedFollowupChatRequest,
+  ]);
+  const actualFollowupChatRequest = followupMetrics.chatRequests.at(-1);
+  expect(actualFollowupChatRequest).toEqual(expectedFollowupChatRequest);
+  const actualFollowupContext = actualFollowupChatRequest.followupContext;
+  expect(actualFollowupContext).toEqual(expectedFollowupContext);
+  expect(followupMetrics.registeredExecutions).toEqual(terminalMetrics.registeredExecutions);
+  expect(followupMetrics.edit).toEqual(terminalMetrics.edit);
+  const followupRequests = editAuthorizationRequestProjection(
+    h4,
+    followupBoundary,
+    terminalMetricsRaw,
+    followupMetricsRaw,
+    followupAgentRunId,
+  );
+  expect(followupRequests.agentRunPost).toBe(1);
+  expect(followupRequests.upstreamChatDelta).toBe(1);
+  expectEditAuthorizationZeroRequests({
+    ...followupRequests,
+    agentRunPost: 0,
+    upstreamChatDelta: 0,
+  });
+  const allRequestsAtFollowup = h4.requestEvidenceSince(lifecycleBoundary);
+  expect(allRequestsAtFollowup.agentPost).toBe(4);
+  expect(allRequestsAtFollowup.runtimePost).toBe(0);
+
+  let followupSessionResponse = null;
+  await expect.poll(async () => {
+    followupSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      status: followupSessionResponse.status,
+      roles: (followupSessionResponse.body?.messages || []).map((message) => message.role),
+      runStateKeys: Object.keys(followupSessionResponse.body?.runState || {}).sort(),
+    };
+  }).toEqual({
+    status: 200,
+    roles: [
+      "user", "assistant", "tool-call", "tool-result", "assistant",
+      "user", "tool-result", "assistant", "user", "assistant",
+    ],
+    runStateKeys: [],
+  });
+  const followupSessionProjection = detachedParallelAuthorizationSessionProjection(
+    followupSessionResponse.body,
+    links,
+  );
+  expect(followupSessionProjection.sessionMatches).toBe(true);
+  expect(followupSessionProjection.rolesKinds).toEqual([
+    ...backgroundTerminalSessionProjection.rolesKinds,
+    { role: "user", kind: "followup-user" },
+    { role: "assistant", kind: "followup-final" },
+  ]);
+  expect(followupSessionProjection.unknownCount).toBe(0);
+  expect(followupSessionProjection.runStateKeys).toEqual([]);
+  expect(followupSessionProjection.checkpointCount).toBe(0);
+  expect(followupSessionProjection.background).toEqual(
+    backgroundTerminalSessionProjection.background,
+  );
+  const followupBackgroundStable = JSON.stringify(followupSessionProjection.background)
+    === JSON.stringify(backgroundTerminalSessionProjection.background);
+  expect(followupBackgroundStable).toBe(true);
+  const followupUsage = detachedParallelAuthorizationUsageProjection(
+    completedFollowupAgent.usage || completedFollowupAgent.result?.usage,
+  );
+  expect(followupUsage).toEqual({ input: 13, output: 5, cache: 0, cost: 0 });
+  const followupSessionUsageDelta = detachedParallelAuthorizationUsageDelta(
+    followupSessionProjection.stats,
+    backgroundTerminalSessionProjection.stats,
+  );
+  expect(followupSessionUsageDelta).toEqual(followupUsage);
+  const followupUsageExactlyOnce = {
+    agentMatchesExpected: detachedParallelAuthorizationUsageEqual(
+      followupUsage,
+      { input: 13, output: 5, cache: 0, cost: 0 },
+    ),
+    sessionDeltaMatchesAgent: detachedParallelAuthorizationUsageEqual(
+      followupSessionUsageDelta,
+      followupUsage,
+    ),
+  };
+  expect(followupUsageExactlyOnce).toEqual({
+    agentMatchesExpected: true,
+    sessionDeltaMatchesAgent: true,
+  });
+  const followupSessionHashProjection = detachedParallelAuthorizationSessionHashProjection(
+    followupSessionProjection,
+  );
+  expect({
+    sessionMatches: followupSessionHashProjection.sessionMatches,
+    rolesKinds: followupSessionHashProjection.rolesKinds,
+    unknownCount: followupSessionHashProjection.unknownCount,
+    runStateKeys: followupSessionHashProjection.runStateKeys,
+    checkpointCount: followupSessionHashProjection.checkpointCount,
+    checkpoint: followupSessionHashProjection.checkpoint,
+  }).toEqual({
+    sessionMatches: true,
+    rolesKinds: [
+      ...backgroundTerminalSessionHashProjection.rolesKinds,
+      { role: "user", kind: "followup-user" },
+      { role: "assistant", kind: "followup-final" },
+    ],
+    unknownCount: 0,
+    runStateKeys: [],
+    checkpointCount: 0,
+    checkpoint: null,
+  });
+  expect(followupSessionHashProjection.background).toEqual(
+    backgroundTerminalSessionHashProjection.background,
+  );
+  const followupDom = await detachedParallelAuthorizationDomProjection(h4, "followup-terminal");
+  const followupAgentProjection = {
+    status: String(completedFollowupAgent.status || ""),
+    nextCursor: Number(completedFollowupAgent.nextCursor || 0),
+    eventTypes: completedFollowupAgent.events.map((event) => String(event?.type || "")),
+    activeRuntimeCleared: !String(completedFollowupAgent.activeRuntimeRunId || ""),
+    pendingToolCallCount: completedFollowupAgent.pendingToolCalls.length,
+    toolExecutionCount: completedFollowupAgent.toolExecutions.length,
+    sameSession: completedFollowupAgent.sessionId === sessionId,
+    resultMatches: completedFollowupAgent.result?.content === PARALLEL_FAILURE_FOLLOWUP_FINAL,
+  };
+  expect(followupAgentProjection).toEqual({
+    status: "completed",
+    nextCursor: 4,
+    eventTypes: ["created", "model_started", "model_completed", "completed"],
+    activeRuntimeCleared: true,
+    pendingToolCallCount: 0,
+    toolExecutionCount: 0,
+    sameSession: true,
+    resultMatches: true,
+  });
+  const followupTerminal = {
+    agent: followupAgentProjection,
+    runtime: followupRuntimeProjection,
+    session: followupSessionProjection,
+    dom: followupDom,
+    requests: followupRequests,
+    counts: followupMetrics.counts,
+    fileEffectsStable: JSON.stringify(followupMetrics.edit)
+      === JSON.stringify(terminalMetrics.edit),
+  };
+  expect(followupTerminal.fileEffectsStable).toBe(true);
+
+  const terminalRuntimeDescriptors = [
+    { runtimeRunId: mainRuntimeRunIds[0], alias: "main-runtime-1", owner: "main" },
+    { runtimeRunId: mainRuntimeRunIds[1], alias: "main-runtime-2", owner: "main" },
+    { runtimeRunId: backgroundRuntimeRunIds[0], alias: "background-runtime-1", owner: "background" },
+    { runtimeRunId: backgroundRuntimeRunIds[1], alias: "background-runtime-2", owner: "background" },
+    { runtimeRunId: followupRuntimeRunId, alias: "followup-runtime-1", owner: "followup" },
+  ];
+  const terminalRuntimeSnapshots = await fetchDetachedParallelAuthorizationRuntimes(
+    page,
+    terminalRuntimeDescriptors,
+  );
+  const terminalRuntimeProjection = terminalRuntimeSnapshots;
+  expect(terminalRuntimeProjection).toEqual([
+    {
+      runtime: "main-runtime-1",
+      owner: "main",
+      status: "completed",
+      nextCursor: 4,
+      content: "main-stage",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        toolCallMatches: false,
+        name: "read_file",
+        arguments: { pathMatchesFixture: true },
+      }],
+    },
+    {
+      runtime: "main-runtime-2",
+      owner: "main",
+      status: "completed",
+      nextCursor: 3,
+      content: "main-final",
+      finishReason: "stop",
+      toolCalls: [],
+    },
+    {
+      runtime: "background-runtime-1",
+      owner: "background",
+      status: "completed",
+      nextCursor: 4,
+      content: "background-stage",
+      finishReason: "tool_calls",
+      toolCalls: [{
+        toolCallMatches: true,
+        name: "propose_edit",
+        arguments: {
+          keysExact: true,
+          pathMatches: true,
+          oldTextMatches: true,
+          newTextMatches: true,
+        },
+      }],
+    },
+    {
+      runtime: "background-runtime-2",
+      owner: "background",
+      status: "completed",
+      nextCursor: 3,
+      content: "background-final",
+      finishReason: "stop",
+      toolCalls: [],
+    },
+    {
+      runtime: "followup-runtime-1",
+      owner: "followup",
+      status: "completed",
+      nextCursor: 3,
+      content: "followup-final",
+      finishReason: "stop",
+      toolCalls: [],
+    },
+  ]);
+  expect(terminalRuntimeProjection.slice(2, 4)).toEqual(backgroundRuntimeProjection);
+
+  const terminalReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  const terminalActiveSession = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(terminalActiveSession).toHaveCount(1);
+  expect(await terminalActiveSession.getAttribute("data-session-id")).toBe(sessionId);
+  const terminalDomAfterReload = await detachedParallelAuthorizationDomProjection(
+    h4,
+    "followup-terminal",
+  );
+  expect(terminalDomAfterReload).toEqual(followupDom);
+
+  const mainAfterTerminalReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(mainAgentRunId)}?cursor=0&wait=0`,
+  );
+  const backgroundAfterTerminalReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(backgroundAgentRunId)}?cursor=0&wait=0`,
+  );
+  const followupAfterTerminalReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(followupAgentRunId)}?cursor=0&wait=0`,
+  );
+  expect(mainAfterTerminalReload.status).toBe(200);
+  expect(backgroundAfterTerminalReload.status).toBe(200);
+  expect(followupAfterTerminalReload.status).toBe(200);
+  expect(detachedParallelAuthorizationMainProjection(
+    mainAfterTerminalReload.body,
+    mainToolCallId,
+  )).toEqual(terminalMainProjection);
+  expect(detachedParallelAuthorizationAgentProjection(
+    backgroundAfterTerminalReload.body,
+    authorizationId,
+    links,
+  )).toEqual(backgroundTerminalProjection);
+  expect({
+    status: String(followupAfterTerminalReload.body.status || ""),
+    nextCursor: Number(followupAfterTerminalReload.body.nextCursor || 0),
+    eventTypes: followupAfterTerminalReload.body.events.map((event) => String(event?.type || "")),
+    activeRuntimeCleared: !String(followupAfterTerminalReload.body.activeRuntimeRunId || ""),
+    pendingToolCallCount: followupAfterTerminalReload.body.pendingToolCalls.length,
+    toolExecutionCount: followupAfterTerminalReload.body.toolExecutions.length,
+    sameSession: followupAfterTerminalReload.body.sessionId === sessionId,
+    resultMatches: followupAfterTerminalReload.body.result?.content
+      === PARALLEL_FAILURE_FOLLOWUP_FINAL,
+  }).toEqual(followupAgentProjection);
+  const runtimeSnapshotsAfterReload = await fetchDetachedParallelAuthorizationRuntimes(
+    page,
+    terminalRuntimeDescriptors,
+  );
+  expect(runtimeSnapshotsAfterReload).toEqual(terminalRuntimeProjection);
+  const sessionAfterTerminalReloadResponse = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionAfterTerminalReloadResponse.status).toBe(200);
+  const sessionAfterTerminalReloadProjection = detachedParallelAuthorizationSessionProjection(
+    sessionAfterTerminalReloadResponse.body,
+    links,
+  );
+  expect(sessionAfterTerminalReloadProjection).toEqual(followupSessionProjection);
+  const metricsAfterTerminalReloadRaw = await h4.metrics();
+  const metricsAfterTerminalReload = detachedParallelAuthorizationMetricsProjection(
+    metricsAfterTerminalReloadRaw,
+  );
+  expect(metricsAfterTerminalReload).toEqual(followupMetrics);
+  const terminalReloadRequests = editAuthorizationRequestProjection(
+    h4,
+    terminalReloadBoundary,
+    followupMetricsRaw,
+    metricsAfterTerminalReloadRaw,
+    backgroundAgentRunId,
+  );
+  expectEditAuthorizationZeroRequests(terminalReloadRequests);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([
+    mainAgentRunId,
+    backgroundAgentRunId,
+    followupAgentRunId,
+  ]));
+  expect(new Set(h4.controlIds().runtimeRunIds)).toEqual(new Set([
+    ...mainRuntimeRunIds,
+    ...backgroundRuntimeRunIds,
+    followupRuntimeRunId,
+  ]));
+  expect(h4.pageErrors).toEqual([]);
+
+  const backgroundTerminalAgentRuntime = {
+    agent: backgroundTerminalProjection,
+    runtimes: backgroundRuntimeProjection,
+  };
+  const followupRequestContext = {
+    context: actualFollowupContext,
+    isolated: actualFollowupContext.detachedUserMarkerCount === 0
+      && actualFollowupContext.detachedErrorMarkerCount === 0
+      && actualFollowupContext.detachedStateFieldCount === 0
+      && actualFollowupContext.detachedEditArtifactCount === 0
+      && actualFollowupContext.unclassifiedNonSystemCount === 0,
+  };
+  expect(followupRequestContext.isolated).toBe(true);
+  const terminalReloadLifecycle = {
+    currentSessionPreserved: String(await terminalActiveSession.getAttribute("data-session-id") || "")
+      === sessionId,
+    agentsStable: {
+      main: JSON.stringify(detachedParallelAuthorizationMainProjection(
+        mainAfterTerminalReload.body,
+        mainToolCallId,
+      )) === JSON.stringify(terminalMainProjection),
+      background: JSON.stringify(detachedParallelAuthorizationAgentProjection(
+        backgroundAfterTerminalReload.body,
+        authorizationId,
+        links,
+      )) === JSON.stringify(backgroundTerminalProjection),
+      followup: JSON.stringify({
+        status: String(followupAfterTerminalReload.body.status || ""),
+        nextCursor: Number(followupAfterTerminalReload.body.nextCursor || 0),
+        eventTypes: followupAfterTerminalReload.body.events.map((event) => String(event?.type || "")),
+        activeRuntimeCleared: !String(followupAfterTerminalReload.body.activeRuntimeRunId || ""),
+        pendingToolCallCount: followupAfterTerminalReload.body.pendingToolCalls.length,
+        toolExecutionCount: followupAfterTerminalReload.body.toolExecutions.length,
+        sameSession: followupAfterTerminalReload.body.sessionId === sessionId,
+        resultMatches: followupAfterTerminalReload.body.result?.content
+          === PARALLEL_FAILURE_FOLLOWUP_FINAL,
+      }) === JSON.stringify(followupAgentProjection),
+    },
+    runtimeStable: JSON.stringify(runtimeSnapshotsAfterReload)
+      === JSON.stringify(terminalRuntimeProjection),
+    sessionStable: JSON.stringify(sessionAfterTerminalReloadProjection)
+      === JSON.stringify(followupSessionProjection),
+    domStable: JSON.stringify(terminalDomAfterReload) === JSON.stringify(followupDom),
+    metricsStable: JSON.stringify(metricsAfterTerminalReload) === JSON.stringify(followupMetrics),
+    requests: terminalReloadRequests,
+    fileAndBackupStable: JSON.stringify(metricsAfterTerminalReload.edit)
+      === JSON.stringify(terminalMetrics.edit),
+  };
+  expect(terminalReloadLifecycle).toEqual({
+    currentSessionPreserved: true,
+    agentsStable: { main: true, background: true, followup: true },
+    runtimeStable: true,
+    sessionStable: true,
+    domStable: true,
+    metricsStable: true,
+    requests: terminalReloadRequests,
+    fileAndBackupStable: true,
+  });
+  const backgroundTerminalAgentRuntimeHashProjection = {
+    agent: backgroundTerminalAgentHashProjection,
+    runtimes: backgroundRuntimeProjection,
+  };
+  const followupTerminalHashProjection = {
+    agent: followupAgentProjection,
+    runtime: followupRuntimeProjection,
+    session: followupSessionHashProjection,
+    backgroundStable: followupBackgroundStable,
+    usageExactlyOnce: followupUsageExactlyOnce,
+    dom: followupDom,
+    requests: followupRequests,
+    counts: followupMetrics.counts,
+    fileEffectsStable: followupTerminal.fileEffectsStable,
+  };
+  const hashInputs = {
+    preParallelFence,
+    waitingAgentProjection: waitingAgentHashProjection,
+    waitingActiveDom,
+    mainTerminalIsolation,
+    waitingSessionProjection: waitingSessionHashProjection,
+    waitingReloadLifecycle,
+    decisionSubmissionProjection: decisionSubmissionHashProjection,
+    backgroundTerminalAgentRuntime: backgroundTerminalAgentRuntimeHashProjection,
+    backgroundTerminalSession: {
+      session: backgroundTerminalSessionHashProjection,
+      usageExactlyOnce: backgroundUsageExactlyOnce,
+    },
+    backgroundTerminalDom,
+    followupRequestContext,
+    followupTerminal: followupTerminalHashProjection,
+    terminalReloadLifecycle,
+  };
+  expect(Object.keys(hashInputs)).toEqual(H4_8G_SEMANTIC_HASH_KEYS);
+  const hashes = Object.fromEntries(
+    Object.entries(hashInputs).map(([key, value]) => [key, canonicalHash(value)]),
+  );
+  expect(Object.keys(hashes)).toEqual(H4_8G_SEMANTIC_HASH_KEYS);
+  if (frozenMode) {
+    expect(hashes).toEqual(H4_8G_SEMANTIC_HASHES);
+  } else {
+    expect(bootstrapMode).toBe(true);
+    expect(runtime).toBe("bundle");
+  }
+
+  h4.evidence(`${runtime}-detached-parallel-edit-authorization-reload`, {
+    runtime,
+    scope: {
+      currentLastActiveSessionFullReload: true,
+      sessionSwitchExcluded: true,
+      sidebarRefreshExcluded: true,
+      extraRefreshSessionsExcluded: true,
+    },
+    counts: {
+      durableAgentRuns: followupMetrics.counts.durableAgentRuns,
+      runtimes: followupMetrics.counts.runtimes,
+      upstreamChat: followupMetrics.counts.upstreamChat,
+      agentRunCreateTransportTotal: allRequestsAtFollowup.agentPost,
+      waitingReloadAgentRunCreateTransport: waitingReloadRequests.agentRunPost,
+      authorization: decisionRequests.authorizationPost,
+      resume: decisionRequests.resumePost,
+      registeredDelegations: followupMetrics.edit.counters.registeredDelegations,
+      registeredExecutions: followupMetrics.registeredExecutions.length,
+      proposal: followupMetrics.edit.counters.proposalDelegations,
+      apply: followupMetrics.edit.counters.applyDelegations,
+      write: followupMetrics.edit.counters.writes,
+      backup: followupMetrics.edit.counters.backups,
+    },
+    eventTypes: {
+      main: terminalMainProjection.eventTypes,
+      background: backgroundTerminalProjection.events.map((event) => event.type),
+      followup: followupAgentProjection.eventTypes,
+    },
+    runtimeCursors: terminalRuntimeProjection.map((snapshot) => snapshot.nextCursor),
+    waiting: {
+      agent: waitingAgentProjection,
+      session: waitingSessionProjection,
+      dom: mainTerminalDom,
+      reload: waitingReloadLifecycle,
+    },
+    decision: decisionSubmissionProjection,
+    terminal: {
+      background: backgroundTerminalAgentRuntime,
+      session: backgroundTerminalSessionProjection,
+      dom: backgroundTerminalDom,
+      followup: followupTerminal,
+    },
+    followupContext: followupRequestContext,
+    terminalReload: terminalReloadLifecycle,
+    hashes,
+  });
+}
+
 async function assertRefreshIdentityContract(h4, { cancelled = false } = {}) {
   const requests = h4.requestEvidence();
   const metrics = await h4.metrics();
@@ -17197,4 +20231,12 @@ test("classic-refresh-then-cancel", async ({ h4 }) => {
     runtime: "classic",
     evidenceLabel: "classic-refresh-then-cancel",
   });
+});
+
+test("bundle detached parallel edit authorization survives main completion and full reload", async ({ h4 }) => {
+  await exerciseDetachedParallelEditAuthorizationLifecycle(h4, "bundle");
+});
+
+test("direct classic detached parallel edit authorization survives main completion and full reload", async ({ h4 }) => {
+  await exerciseDetachedParallelEditAuthorizationLifecycle(h4, "classic");
 });
