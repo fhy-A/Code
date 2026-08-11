@@ -520,6 +520,30 @@ const H4_8E_SEMANTIC_HASHES = Object.freeze({
   terminalDom: "d2dc405690fcf7c80ad84ffaca0496aba43b40e2ebd528971a462a82ba9da90d",
   refreshLifecycle: "1583ae3f119ccbc86c8ec055d7d486a7c3a607cfd79fd9728ecadd8907cf55e0",
 });
+const H4_8F_SEMANTIC_HASH_KEYS = Object.freeze([
+  "waitingEventProjection",
+  "waitingSnapshot",
+  "waitingDom",
+  "failedAttemptProjection",
+  "retrySubmissionProjection",
+  "runtimeProjection",
+  "sessionRoleContent",
+  "sessionAuthorizationMeta",
+  "terminalDom",
+  "refreshLifecycle",
+]);
+const H4_8F_SEMANTIC_HASHES = Object.freeze({
+  waitingEventProjection: "87a7ea23fa306ad3d2251d5245ed7e0ce8541971c944568def98b13b00fec4f3",
+  waitingSnapshot: "9c19fd9e30893a77a584551ededdbe9ace115cf6fc5d928c3b7649e70ade07f2",
+  waitingDom: "880e7bd7c6f2e62d84a0c8bcaf4ccdea7de3504ec0b36ca00063aa8ea75ba618",
+  failedAttemptProjection: "d906f98034b76a14083d4bd3bbe9f7e0d8cf05584de83eaf68ca20c20a636e70",
+  retrySubmissionProjection: "5de63672ddec48bf0de379cf9f24abf06eff143b2309d73da2a3a70669694c13",
+  runtimeProjection: "b942ee79bdd556a07c170919de5e110853d0b0be853efeba554f364cc36f0540",
+  sessionRoleContent: "f6ef57520b2b66ebb11473e695aa43897363bbf6876c62e652de04a6a792ebb0",
+  sessionAuthorizationMeta: "817262e2d16999b26b98a8c25711160d387e238f5c62fa385e3132ff1382aac2",
+  terminalDom: "30a687f6910faf0e82f18e0097187cd7b021957270c18370c7cab2774c65602d",
+  refreshLifecycle: "fc229f1032cb024b68f1b4755e69c590e58f2ad2a1a0ef7c604e8c38359403d3",
+});
 
 function idHash(value) {
   const raw = String(value || "");
@@ -9039,6 +9063,64 @@ function editAuthorizationRequestProjection(h4, boundary, beforeMetrics, afterMe
   };
 }
 
+function editAuthorizationRetryRequestProjection(
+  request,
+  expectedUrl,
+  agentRunId,
+  authorizationId,
+) {
+  const url = new URL(request.url());
+  let body = null;
+  let bodyParseable = true;
+  try {
+    body = request.postDataJSON();
+  } catch {
+    bodyParseable = false;
+  }
+  const bodyObject = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const runMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)\/authorization$/);
+  return {
+    method: request.method(),
+    exactUrl: request.url() === expectedUrl,
+    targetRunMatches: Boolean(runMatch)
+      && decodeURIComponent(runMatch[1]) === agentRunId,
+    queryEmpty: url.search === "",
+    hashEmpty: url.hash === "",
+    body: {
+      parseable: bodyParseable,
+      keysExact: JSON.stringify(Object.keys(bodyObject).sort())
+        === JSON.stringify(["authorizationId", "decision"]),
+      authorizationIdMatches: String(bodyObject.authorizationId || "") === authorizationId,
+      decision: String(bodyObject.decision || ""),
+    },
+  };
+}
+
+async function editAuthorizationRetryUiProjection(page) {
+  return page.evaluate(() => {
+    const panel = document.querySelector("#authorizationPanel");
+    const row = panel?.querySelector(".authorization-row") || null;
+    const selected = row?.querySelector("[data-auth-select]") || null;
+    const approve = panel?.querySelector('[data-auth-action="approve"]') || null;
+    const errorToasts = [...document.querySelectorAll("#toastContainer .toast.error")];
+    return {
+      panelVisible: Boolean(panel && !panel.classList.contains("hidden")),
+      rowCount: panel?.querySelectorAll(".authorization-row").length || 0,
+      rowSubmitting: Boolean(row?.classList.contains("is-submitting")),
+      selected: Boolean(selected?.checked),
+      selectionDisabled: Boolean(selected?.disabled),
+      approveCount: panel?.querySelectorAll('[data-auth-action="approve"]').length || 0,
+      approveEnabled: Boolean(approve && !approve.disabled),
+      errorToastCount: errorToasts.length,
+      errorToastVisible: errorToasts.some((toast) => {
+        const style = getComputedStyle(toast);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      }),
+      errorToastNonEmpty: errorToasts.some((toast) => Boolean(toast.textContent.trim())),
+    };
+  });
+}
+
 function expectEditAuthorizationArguments(projection) {
   expect(projection).toEqual({
     keysExact: true,
@@ -11040,6 +11122,439 @@ async function exerciseEditAuthorizationConflictLifecycle(h4, runtime) {
   });
 }
 
+async function exerciseEditAuthorizationRetryLifecycle(h4, runtime) {
+  expect(Object.keys(H4_8F_SEMANTIC_HASHES)).toEqual(H4_8F_SEMANTIC_HASH_KEYS);
+  const configuredHashes = Object.values(H4_8F_SEMANTIC_HASHES);
+  const bootstrapMode = configuredHashes.every((value) => value === "");
+  const frozenMode = configuredHashes.every((value) => /^[a-f0-9]{64}$/.test(value));
+  expect(bootstrapMode || frozenMode).toBe(true);
+  if (bootstrapMode) expect(runtime).toBe("bundle");
+
+  const started = await beginEditAuthorizationLifecycle(h4, runtime, "approved");
+  const waitingReload = await reloadWaitingEditAuthorizationLifecycle(h4, started);
+  const {
+    page,
+    branch,
+    agentRunId,
+    authorizationId,
+    sessionId,
+  } = started;
+  const authorizationUrl = new URL(
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}/authorization`,
+    h4.host.ready.codeUrl,
+  ).toString();
+  const authorizationRequests = [];
+  const authorizationFailures = [];
+  const injectedRequests = [];
+  let injectionCount = 0;
+  let signalIntercepted = null;
+  const firstIntercepted = new Promise((resolve) => {
+    signalIntercepted = resolve;
+  });
+  let openAbortGate = null;
+  let abortGateOpened = false;
+  const abortGate = new Promise((resolve) => {
+    openAbortGate = () => {
+      if (abortGateOpened) return;
+      abortGateOpened = true;
+      resolve();
+    };
+  });
+  const isAuthorizationRequest = (request) => {
+    const url = new URL(request.url());
+    return url.origin === new URL(h4.host.ready.codeUrl).origin
+      && /^\/api\/agent\/runs\/[^/]+\/authorization$/.test(url.pathname)
+      && request.method() === "POST";
+  };
+  const onRequest = (request) => {
+    if (!isAuthorizationRequest(request)) return;
+    authorizationRequests.push(editAuthorizationRetryRequestProjection(
+      request,
+      authorizationUrl,
+      agentRunId,
+      authorizationId,
+    ));
+  };
+  const onRequestFailed = (request) => {
+    if (!isAuthorizationRequest(request)) return;
+    authorizationFailures.push({
+      request: editAuthorizationRetryRequestProjection(
+        request,
+        authorizationUrl,
+        agentRunId,
+        authorizationId,
+      ),
+      errorPresent: Boolean(String(request.failure()?.errorText || "")),
+    });
+  };
+  const faultHandler = async (route) => {
+    injectionCount += 1;
+    const projection = editAuthorizationRetryRequestProjection(
+      route.request(),
+      authorizationUrl,
+      agentRunId,
+      authorizationId,
+    );
+    injectedRequests.push(projection);
+    signalIntercepted(projection);
+    await abortGate;
+    await route.abort("failed");
+  };
+
+  let requestListenerInstalled = false;
+  let failedListenerInstalled = false;
+  let routeInstalled = false;
+  let firstClickPromise = null;
+  try {
+    page.on("request", onRequest);
+    requestListenerInstalled = true;
+    page.on("requestfailed", onRequestFailed);
+    failedListenerInstalled = true;
+    await page.route(authorizationUrl, faultHandler, { times: 1 });
+    routeInstalled = true;
+
+    const expectedRequest = {
+      method: "POST",
+      exactUrl: true,
+      targetRunMatches: true,
+      queryEmpty: true,
+      hashEmpty: true,
+      body: {
+        parseable: true,
+        keysExact: true,
+        authorizationIdMatches: true,
+        decision: "approved",
+      },
+    };
+    const expectedUiBase = {
+      panelVisible: true,
+      rowCount: 1,
+      selected: true,
+      approveCount: 1,
+    };
+    expect(await editAuthorizationRetryUiProjection(page)).toEqual({
+      ...expectedUiBase,
+      rowSubmitting: false,
+      selectionDisabled: false,
+      approveEnabled: true,
+      errorToastCount: 0,
+      errorToastVisible: false,
+      errorToastNonEmpty: false,
+    });
+
+    const failureBoundary = h4.requestBoundary();
+    const failureMetricsBefore = await h4.metrics();
+    const failureControlIdsBefore = h4.controlIds();
+    const decisionButton = page.locator('#authorizationPanel [data-auth-action="approve"]');
+    firstClickPromise = decisionButton.click();
+    const interceptedProjection = await firstIntercepted;
+    expect(injectionCount).toBe(1);
+    expect(interceptedProjection).toEqual(expectedRequest);
+    expect(injectedRequests).toEqual([expectedRequest]);
+    await expect.poll(() => authorizationRequests.length).toBe(1);
+    expect(authorizationRequests).toEqual([expectedRequest]);
+    const submittingUi = await editAuthorizationRetryUiProjection(page);
+    expect(submittingUi).toEqual({
+      ...expectedUiBase,
+      rowSubmitting: true,
+      selectionDisabled: true,
+      approveEnabled: false,
+      errorToastCount: 0,
+      errorToastVisible: false,
+      errorToastNonEmpty: false,
+    });
+
+    openAbortGate();
+    await firstClickPromise;
+    firstClickPromise = null;
+    await expect.poll(() => authorizationFailures.length).toBe(1);
+    expect(authorizationFailures).toEqual([{
+      request: expectedRequest,
+      errorPresent: true,
+    }]);
+    let recoveredUi = null;
+    await expect.poll(async () => {
+      recoveredUi = await editAuthorizationRetryUiProjection(page);
+      return recoveredUi;
+    }).toEqual({
+      ...expectedUiBase,
+      rowSubmitting: false,
+      selectionDisabled: false,
+      approveEnabled: true,
+      errorToastCount: 1,
+      errorToastVisible: true,
+      errorToastNonEmpty: true,
+    });
+
+    const failedAgentResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    expect(failedAgentResponse.status).toBe(200);
+    expect(failedAgentResponse.body.agentRunId).toBe(agentRunId);
+    expect(failedAgentResponse.body.status).toBe("waiting_authorization");
+    expect(failedAgentResponse.body.nextCursor).toBe(5);
+    expect(failedAgentResponse.body.pendingAuthorization?.authorizationId).toBe(authorizationId);
+    expect(failedAgentResponse.body.pendingAuthorization?.decision).toBe("pending");
+    const failedEvents = editAuthorizationEventProjection(
+      failedAgentResponse.body,
+      authorizationId,
+    );
+    expect(failedEvents).toEqual(started.waitingEvents);
+    expect(failedEvents.map((event) => event.type)).toEqual([
+      "created",
+      "model_started",
+      "model_completed",
+      "tool_started",
+      "authorization_required",
+    ]);
+    const failedExecution = editAuthorizationExecutionProjection(failedAgentResponse.body);
+    expect(failedExecution).toEqual(started.waitingExecution);
+    expect(failedExecution).toHaveLength(1);
+    expect(failedExecution[0].authorizationDecision).toBe("");
+
+    const failedSessionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    expect(failedSessionResponse.status).toBe(200);
+    const failedSnapshot = editAuthorizationWaitingSnapshotProjection(
+      failedAgentResponse.body,
+      failedSessionResponse.body,
+      agentRunId,
+      authorizationId,
+    );
+    expect(failedSnapshot).toEqual(started.waitingSnapshot);
+    expect(editAuthorizationSessionDiffProjection(
+      failedSessionResponse.body.messages,
+      failedAgentResponse.body.pendingAuthorization,
+    )).toEqual(started.waitingSnapshot.session.diff);
+    const failedDom = await editAuthorizationDomProjection(h4, "waiting", branch);
+    expect(failedDom).toEqual(started.waitingDom);
+
+    const metricsAfterFailure = await h4.metrics();
+    expect(metricsAfterFailure.chatRequests).toEqual(failureMetricsBefore.chatRequests);
+    const failedMetrics = editAuthorizationMetricsProjection(metricsAfterFailure);
+    expect(failedMetrics).toEqual(editAuthorizationMetricsProjection(failureMetricsBefore));
+    expectEditAuthorizationMetrics(failedMetrics, branch, "waiting");
+    const failureRequests = editAuthorizationRequestProjection(
+      h4,
+      failureBoundary,
+      failureMetricsBefore,
+      metricsAfterFailure,
+      agentRunId,
+    );
+    expectEditAuthorizationZeroRequests(failureRequests);
+    expect(authorizationRequests).toEqual([expectedRequest]);
+    expect(authorizationFailures).toHaveLength(1);
+    const failureControlIdsAfter = h4.controlIds();
+    expect(failureControlIdsAfter).toEqual(failureControlIdsBefore);
+    expect(new Set(failureControlIdsAfter.agentRunIds)).toEqual(new Set([agentRunId]));
+    expect(new Set(failureControlIdsAfter.runtimeRunIds))
+      .toEqual(new Set([started.firstRuntimeRunId]));
+
+    const completed = await completeEditAuthorizationLifecycle(h4, started, {
+      ...waitingReload,
+      decisionMetricsBefore: metricsAfterFailure,
+    });
+    await expect.poll(() => authorizationRequests.length).toBe(2);
+    expect(authorizationRequests).toEqual([expectedRequest, expectedRequest]);
+    expect(authorizationFailures).toEqual([{
+      request: expectedRequest,
+      errorPresent: true,
+    }]);
+    expect(injectionCount).toBe(1);
+    expect(completed.decisionRequests.authorizationPost).toBe(1);
+    expect(completed.decisionRequests.resumePost).toBe(1);
+    expect(completed.terminalEvents.filter((event) => event.type === "authorization_submitted"))
+      .toHaveLength(1);
+    expect(completed.terminalEvents.filter((event) => event.type === "resumed"))
+      .toHaveLength(1);
+    expect(completed.terminalExecution[0].result.replayed).toBe(false);
+    expect(completed.terminalMetrics.counters).toMatchObject({
+      applyDelegations: 1,
+      writes: 1,
+      backups: 1,
+    });
+    const terminalReload = await reloadCompletedEditAuthorizationLifecycle(
+      h4,
+      started,
+      completed,
+    );
+    expect(authorizationRequests).toEqual([expectedRequest, expectedRequest]);
+    expect(authorizationFailures).toHaveLength(1);
+
+    const failedAttemptProjection = {
+      transport: {
+        attempts: 1,
+        failed: 1,
+        injected: injectionCount,
+        forwarded: failureRequests.authorizationPost,
+        request: authorizationRequests[0],
+        failure: authorizationFailures[0],
+      },
+      ui: {
+        submitting: submittingUi,
+        recovered: recoveredUi,
+      },
+      durable: {
+        status: String(failedAgentResponse.body.status || ""),
+        cursor: Number(failedAgentResponse.body.nextCursor || 0),
+        authorizationSubmitted: failedEvents
+          .filter((event) => event.type === "authorization_submitted").length,
+        resumed: failedEvents.filter((event) => event.type === "resumed").length,
+        pendingDecision: String(
+          failedAgentResponse.body.pendingAuthorization?.decision || "",
+        ),
+        executionDecisionEmpty: failedExecution[0].authorizationDecision === "",
+        sameEvents: JSON.stringify(failedEvents) === JSON.stringify(started.waitingEvents),
+        sameExecution: JSON.stringify(failedExecution)
+          === JSON.stringify(started.waitingExecution),
+      },
+      state: {
+        sameSnapshot: JSON.stringify(failedSnapshot) === JSON.stringify(started.waitingSnapshot),
+        sameDom: JSON.stringify(failedDom) === JSON.stringify(started.waitingDom),
+        sameControlIds: JSON.stringify(failureControlIdsAfter)
+          === JSON.stringify(failureControlIdsBefore),
+      },
+      requests: failureRequests,
+      fileEffects: {
+        applyDelegations: failedMetrics.counters.applyDelegations,
+        writes: failedMetrics.counters.writes,
+        backups: failedMetrics.counters.backups,
+        applyTimelineCount: failedMetrics.applyTimeline.length,
+        writeTimelineCount: failedMetrics.writeTimeline.length,
+        backupTimelineCount: failedMetrics.backupTimeline.length,
+      },
+    };
+    const retrySubmissionProjection = {
+      transport: {
+        attempts: authorizationRequests.length,
+        failed: authorizationFailures.length,
+        injected: injectionCount,
+        forwarded: completed.decisionRequests.authorizationPost,
+        requests: authorizationRequests,
+      },
+      requests: completed.decisionRequests,
+      events: completed.terminalEvents.slice(started.waitingEvents.length, 9),
+      execution: completed.terminalExecution,
+      sameAgentRun: completed.completedAgent.agentRunId === started.waitingAgent.agentRunId,
+      authorizationCleared: completed.completedAgent.pendingAuthorization == null,
+      durableAuthorizationCount: completed.terminalEvents
+        .filter((event) => event.type === "authorization_submitted").length,
+      resumeCount: completed.terminalEvents.filter((event) => event.type === "resumed").length,
+      replayed: completed.terminalExecution[0].result.replayed,
+      fileEffects: {
+        applyDelegations: completed.terminalMetrics.counters.applyDelegations,
+        writes: completed.terminalMetrics.counters.writes,
+        backups: completed.terminalMetrics.counters.backups,
+      },
+    };
+    const refreshLifecycle = {
+      waiting: {
+        sameAgentRun: waitingReload.waitingAgentAfterReload.body.agentRunId === agentRunId,
+        sameAuthorization: waitingReload.waitingAgentAfterReload.body.pendingAuthorization
+          ?.authorizationId === authorizationId,
+        sameSnapshot: JSON.stringify(editAuthorizationWaitingSnapshotProjection(
+          waitingReload.waitingAgentAfterReload.body,
+          waitingReload.waitingSessionAfterReload.body,
+          agentRunId,
+          authorizationId,
+        )) === JSON.stringify(started.waitingSnapshot),
+        dom: waitingReload.restoredWaitingDom,
+        requests: waitingReload.waitingReloadRequests,
+        permissionRestored: waitingReload.permissionRestored,
+      },
+      terminal: {
+        sameAgentRun: terminalReload.agentAfterReload.body.agentRunId === agentRunId,
+        sameEvents: JSON.stringify(editAuthorizationEventProjection(
+          terminalReload.agentAfterReload.body,
+          authorizationId,
+        )) === JSON.stringify(completed.terminalEvents),
+        sameSession: JSON.stringify(editAuthorizationSessionRoleProjection(
+          terminalReload.sessionAfterReload.body.messages,
+          branch,
+        )) === JSON.stringify(completed.sessionRoleContent),
+        sameAuthorizationMeta: JSON.stringify(editAuthorizationSessionMetaProjection(
+          terminalReload.sessionAfterReload.body.messages,
+          agentRunId,
+          authorizationId,
+        )) === JSON.stringify(completed.sessionAuthorizationMeta),
+        dom: terminalReload.restoredTerminalDom,
+        requests: terminalReload.terminalReloadRequests,
+        permissionRestored: terminalReload.permissionRestored,
+      },
+      transport: {
+        attempts: authorizationRequests.length,
+        failed: authorizationFailures.length,
+        injected: injectionCount,
+      },
+    };
+    expect(refreshLifecycle.waiting.permissionRestored).toBe(true);
+    expect(refreshLifecycle.terminal.permissionRestored).toBe(true);
+    const hashes = {
+      waitingEventProjection: canonicalHash(started.waitingEvents),
+      waitingSnapshot: canonicalHash(started.waitingSnapshot),
+      waitingDom: canonicalHash(started.waitingDom),
+      failedAttemptProjection: canonicalHash(failedAttemptProjection),
+      retrySubmissionProjection: canonicalHash(retrySubmissionProjection),
+      runtimeProjection: canonicalHash(completed.runtimeProjection),
+      sessionRoleContent: canonicalHash(completed.sessionRoleContent),
+      sessionAuthorizationMeta: canonicalHash(completed.sessionAuthorizationMeta),
+      terminalDom: canonicalHash(completed.terminalDom),
+      refreshLifecycle: canonicalHash(refreshLifecycle),
+    };
+    expect(Object.keys(hashes)).toEqual(H4_8F_SEMANTIC_HASH_KEYS);
+    if (frozenMode) {
+      expect(hashes).toEqual(H4_8F_SEMANTIC_HASHES);
+    } else {
+      expect(bootstrapMode).toBe(true);
+      expect(runtime).toBe("bundle");
+    }
+
+    h4.evidence(`${runtime}-edit-authorization-pre-server-retry`, {
+      runtime,
+      transport: {
+        attempts: authorizationRequests.length,
+        failed: authorizationFailures.length,
+        injected: injectionCount,
+        forwarded: completed.decisionRequests.authorizationPost,
+      },
+      counts: {
+        agentRuns: completed.metricsAtTerminal.production.agentRuns.length,
+        runtimes: completed.metricsAtTerminal.production.runtimeRuns.length,
+        upstreamChat: completed.metricsAtTerminal.chatRequests.length,
+        authorizationPost: completed.totalRequests.authorizationPost,
+        resumePost: completed.totalRequests.resumePost,
+        registeredDelegations: completed.terminalMetrics.counters.registeredDelegations,
+        registeredExecutions: completed.terminalMetrics.registeredExecutions.length,
+        proposalDelegations: completed.terminalMetrics.counters.proposalDelegations,
+        applyDelegations: completed.terminalMetrics.counters.applyDelegations,
+        writes: completed.terminalMetrics.counters.writes,
+        backups: completed.terminalMetrics.counters.backups,
+      },
+      failure: failedAttemptProjection,
+      eventTypes: completed.terminalEvents.map((event) => event.type),
+      runtimeCursors: completed.runtimeProjection.map((snapshot) => snapshot.nextCursor),
+      retry: retrySubmissionProjection,
+      terminal: {
+        sessionRoleContent: completed.sessionRoleContent,
+        sessionAuthorizationMeta: completed.sessionAuthorizationMeta,
+        dom: completed.terminalDom,
+      },
+      waitingReload: waitingReload.waitingReloadRequests,
+      terminalReload: terminalReload.terminalReloadRequests,
+      hashes,
+    });
+  } finally {
+    openAbortGate();
+    if (firstClickPromise) await firstClickPromise.catch(() => {});
+    if (requestListenerInstalled) page.off("request", onRequest);
+    if (failedListenerInstalled) page.off("requestfailed", onRequestFailed);
+    if (routeInstalled) await page.unroute(authorizationUrl, faultHandler);
+  }
+}
+
 async function openAutomaticClassicFallback(h4, failureMode) {
   const { page, host } = h4;
   const expectedReason = failureMode === "load" ? "bundle-load" : "bundle-init";
@@ -11594,6 +12109,14 @@ test("bundle edit authorization reject survives reload without applying", async 
 
 test("direct classic edit authorization reject survives reload without applying", async ({ h4 }) => {
   await exerciseEditAuthorizationLifecycle(h4, "classic", "rejected");
+});
+
+test("bundle edit authorization retries once after pre-server failure and applies exactly once", async ({ h4 }) => {
+  await exerciseEditAuthorizationRetryLifecycle(h4, "bundle");
+});
+
+test("direct classic edit authorization retries once after pre-server failure and applies exactly once", async ({ h4 }) => {
+  await exerciseEditAuthorizationRetryLifecycle(h4, "classic");
 });
 
 test("bundle approved stale edit conflict preserves third-party content across reload", async ({ h4 }) => {
