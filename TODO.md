@@ -59,7 +59,7 @@ _上次更新：2026-08-12_
 
 ## P2 · 规划与自动化
 
-- 在现有 AgentRun / Child AgentRun 上实现结构化计划：步骤依赖、并发槽位、预算、验证证据和恢复状态。
+- 按 [《Code Goal 复杂长任务规划、执行与验收开发指导》](docs/goal-mode-development-guide.md) 在现有 AgentRun / Child AgentRun 上实现 Goal 持久执行闭环：顶层步骤只使用 `pending / in_progress / completed` 三态，以普通消息为主要控制面，支持安全的跨轮自动续跑、恢复和证据验收；机器证据满足条件后方可自动完成，主观 UI/业务验收必须等待用户明确 PASS。当前仅完成产品与工程指导，`/goal`、Goal 工具、持久化 reducer、自动续跑和最小计划 UI 均未实施。
 - 基于现有持久 AgentRun 事件流设计内部生命周期 Hook / 订阅机制：第一阶段只支持脱敏、非阻塞、只读的事件观察，用于渠道测试证据采集、任务与授权通知、审计记录和结束验收；事件至少覆盖运行、模型轮、工具轮、授权及终态，并提供稳定的版本化结构、超时隔离和失败降级，严禁记录 workbar Access Token、API Key 或 Authorization 头。完成安全、兼容和恢复测试后，再评估受限的执行前策略能力；在此之前不开放任意本地脚本、工具参数改写或自动批准权限。
 - 结构化计划稳定后，再评估 Cron、Monitor、Workflow 与 worktree 隔离。
 - 评估 macOS / Linux 支持与原生客户端形态。
