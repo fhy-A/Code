@@ -14,6 +14,8 @@
 
 本目录同时是整个 workbar 项目的产品级状态事实源。即使实现改动发生在根目录、`new-api-source` 或其他兄弟目录，已经完成的重要事实、产品决策和真实验证结果仍统一写入本目录的 `docs/development-log/YYYY/YYYY-MM-DD.md` 并更新索引，未完成事项统一写入本目录的 `TODO.md`。实现所在子仓库只保留与自身实现或部署直接相关的专题文档，不得另建平行的通用开发日志或项目 TODO。
 
+新增、更新、移动或完成产品级事项时，必须遵守 `TODO.md` 顶部的 canonical 维护契约：保留稳定 ID、唯一主域与唯一执行状态，跨域只写依赖/关联引用，完成事实进入开发日志，活动 handoff 只引用任务 ID/链接；不要在协作规则中复制字段模板。
+
 任务结束时：
 
 - 阶段已经完成：将重要改动和真实验证结果写入 `docs/development-log/YYYY/YYYY-MM-DD.md`，更新日志索引，将剩余事项写入 `TODO.md`，并移除已经收口的 `docs/development-handoff.md`。
