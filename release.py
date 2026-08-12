@@ -29,6 +29,8 @@ import sys
 import time
 from pathlib import Path
 
+from verification import CHECKS, SYNTAX_CHECK_IDS, get_release_check_ids
+
 ROOT = Path(__file__).resolve().parent
 VERSION_FILE = ROOT / "VERSION"
 VERSION_INFO_FILE = ROOT / "file_version_info.txt"
@@ -105,6 +107,13 @@ def _build_proxy_env(proxy_url):
 # 工具函数
 # ═══════════════════════════════════════════════════════════════
 
+def _console_safe(value):
+    """Return text that can always be written to the active console."""
+    text = str(value)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="backslashreplace").decode(encoding)
+
+
 def run(cmd, *, cwd=None, timeout=300, description=None):
     """运行命令，返回 (returncode, stdout, stderr)。自动注入代理环境变量。"""
     cwd = cwd or ROOT
@@ -125,9 +134,9 @@ def run(cmd, *, cwd=None, timeout=300, description=None):
     )
     if result.returncode != 0:
         if result.stderr:
-            print(f"  STDERR:\n{result.stderr[-500:]}")
+            print(_console_safe(f"  STDERR:\n{result.stderr[-500:]}"))
         if result.stdout:
-            print(f"  STDOUT:\n{result.stdout[-500:]}")
+            print(_console_safe(f"  STDOUT:\n{result.stdout[-500:]}"))
     return result.returncode, result.stdout, result.stderr
 
 
@@ -309,10 +318,11 @@ def verify_version_consistency(new_version, old_version, dry_run=False):
 
 def run_tests():
     print("\n-- 全量测试 --")
+    spec = CHECKS["pytest_full"]
     rc, stdout, stderr = run(
-        [sys.executable, "-m", "pytest", "tests", "-q"],
+        list(spec.command),
         description="pytest tests -q",
-        timeout=180,
+        timeout=spec.timeout,
     )
     if rc != 0:
         lines = (stdout + stderr).splitlines()
@@ -325,8 +335,7 @@ def run_tests():
 def run_harness_replay_gate():
     """Run the published single-run replay command as a release gate."""
     print("\n-- Harness replay 门禁 --")
-    npm_executable = "npm.cmd" if os.name == "nt" else "npm"
-    command = [npm_executable, "run", "verify:harness-replay"]
+    spec = CHECKS["harness_replay"]
 
     def bounded_diagnostic(*values):
         parts = []
@@ -343,9 +352,9 @@ def run_harness_replay_gate():
 
     try:
         rc, stdout, stderr = run(
-            command,
+            list(spec.command),
             description="npm run verify:harness-replay",
-            timeout=30,
+            timeout=spec.timeout,
         )
     except subprocess.TimeoutExpired as exc:
         die(
@@ -368,25 +377,25 @@ def run_harness_replay_gate():
 
 def run_syntax_checks():
     print("\n-- 语法检查 --")
-    checks = [
-        (["node", "--check", "app.js"], "node --check app.js"),
-        (["node", "--check", "agent-runtime.js"], "node --check agent-runtime.js"),
-        ([sys.executable, "-m", "py_compile", "server.py"], "py_compile server.py"),
-        ([sys.executable, "-m", "py_compile", "launcher.py"], "py_compile launcher.py"),
-        ([sys.executable, "-m", "py_compile", "build_exe.py"], "py_compile build_exe.py"),
-    ]
-    for cmd, desc in checks:
-        rc, stdout, stderr = run(cmd, description=desc)
+    for check_id in SYNTAX_CHECK_IDS:
+        spec = CHECKS[check_id]
+        rc, stdout, stderr = run(
+            list(spec.command),
+            description=spec.label,
+            timeout=spec.timeout,
+        )
         if rc != 0:
-            die(f"语法检查失败: {desc}\n{stdout}{stderr}")
-        ok(desc)
+            die(f"语法检查失败: {spec.label}\n{stdout}{stderr}")
+        ok(spec.label)
     ok("所有语法检查通过")
 
 
 def run_git_diff_check():
+    spec = CHECKS["git_diff_check"]
     rc, stdout, stderr = run(
-        ["git", "diff", "--check"],
+        list(spec.command),
         description="git diff --check",
+        timeout=spec.timeout,
     )
     if rc != 0:
         die(f"git diff --check 失败:\n{stdout}{stderr}")
@@ -396,25 +405,61 @@ def run_git_diff_check():
 def prepare_frontend_assets(build=True):
     """Build when allowed, then require fresh and syntactically valid assets."""
     print("\n-- 前端构建门禁 --")
-    commands = []
+    check_ids = []
     if build:
-        commands.append((
-            ["node", str(FRONTEND_BUILD_SCRIPT)],
-            "build frontend bundle",
-        ))
-    commands.extend((
-        (
-            ["node", str(FRONTEND_BUILD_SCRIPT), "--check"],
-            "verify frontend freshness",
-        ),
-        (["node", "--check", str(FRONTEND_BUNDLE)], "check frontend bundle syntax"),
-    ))
+        check_ids.append("frontend_build")
+    check_ids.extend(("frontend_freshness", "frontend_bundle_syntax"))
 
-    for command, description in commands:
-        rc, stdout, stderr = run(command, description=description, timeout=120)
+    for check_id in check_ids:
+        spec = CHECKS[check_id]
+        rc, stdout, stderr = run(
+            list(spec.command),
+            description=spec.label,
+            timeout=spec.timeout,
+        )
         if rc != 0:
-            die(f"前端构建门禁失败: {description}\n{stdout}{stderr}")
-        ok(description)
+            die(f"前端构建门禁失败: {spec.label}\n{stdout}{stderr}")
+        ok(spec.label)
+
+
+def run_release_quality_checks(*, dry_run, skip_tests):
+    """Run the shared release definition once with legacy release policies."""
+    check_ids = get_release_check_ids(dry_run=dry_run, skip_tests=skip_tests)
+    consumed = []
+
+    frontend_ids = tuple(
+        check_id
+        for check_id in check_ids
+        if check_id in {
+            "frontend_build",
+            "frontend_freshness",
+            "frontend_bundle_syntax",
+        }
+    )
+    if frontend_ids:
+        prepare_frontend_assets(build="frontend_build" in frontend_ids)
+        consumed.extend(frontend_ids)
+
+    if "pytest_full" in check_ids:
+        run_tests()
+        consumed.append("pytest_full")
+    if "harness_replay" in check_ids:
+        run_harness_replay_gate()
+        consumed.append("harness_replay")
+    if "git_diff_check" in check_ids:
+        run_git_diff_check()
+        consumed.append("git_diff_check")
+
+    if skip_tests:
+        warn("跳过测试（--skip-tests）")
+
+    syntax_ids = tuple(check_id for check_id in check_ids if check_id in SYNTAX_CHECK_IDS)
+    if syntax_ids:
+        run_syntax_checks()
+        consumed.extend(syntax_ids)
+
+    if tuple(consumed) != check_ids:
+        die("共享 release 验证定义包含未被执行的检查项")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -897,17 +942,10 @@ def main():
     print("\n" + "=" * 60)
     print("  Phase 2: 代码质量检查")
     print("=" * 60)
-    prepare_frontend_assets(build=not args.dry_run)
-    if not args.skip_tests:
-
-        if not args.dry_run:
-            run_tests()
-            run_harness_replay_gate()
-            run_git_diff_check()
-        run_syntax_checks()
-    else:
-        warn("跳过测试（--skip-tests）")
-        run_syntax_checks()
+    run_release_quality_checks(
+        dry_run=args.dry_run,
+        skip_tests=args.skip_tests,
+    )
 
     # ── Phase 3: 构建 EXE ──
     print("\n" + "=" * 60)

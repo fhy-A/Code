@@ -153,6 +153,14 @@ Date: 2026-07-27
         )
         self.assertIn("if initial_errors and args.yes", source)
 
+    def test_release_command_diagnostics_are_safe_for_legacy_console_encoding(self):
+        raw = tempfile.SpooledTemporaryFile()
+        import io
+
+        stream = io.TextIOWrapper(raw, encoding="gbk")
+        with mock.patch.object(release.sys, "stdout", stream):
+            self.assertIn("\\u2713", release._console_safe("status: \u2713"))
+
     def test_frontend_release_gate_builds_then_verifies(self):
         successful = (0, "ok", "")
         with mock.patch.object(
@@ -197,7 +205,7 @@ Date: 2026-07-27
     def test_frontend_release_gate_runs_before_exe_packaging(self):
         source = inspect.getsource(release.main)
         self.assertLess(
-            source.index("prepare_frontend_assets"),
+            source.index("run_release_quality_checks"),
             source.index("build_exe"),
         )
 
@@ -257,11 +265,10 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
                 self.assertLessEqual(len(stop_release.call_args.args[0]), 2100)
 
     def test_replay_gate_runs_after_pytest_before_diff_syntax_and_exe(self):
-        source = inspect.getsource(release.main)
-        self.assertLess(source.index("run_tests()"), source.index("run_harness_replay_gate()"))
-        self.assertLess(source.index("run_harness_replay_gate()"), source.index("run_git_diff_check()"))
-        self.assertLess(source.index("run_harness_replay_gate()"), source.index("run_syntax_checks()"))
-        self.assertLess(source.index("run_harness_replay_gate()"), source.index("build_exe(new_version)"))
+        source = inspect.getsource(release.run_release_quality_checks)
+        self.assertLess(source.index('"pytest_full"'), source.index('"harness_replay"'))
+        self.assertLess(source.index('"harness_replay"'), source.index('"git_diff_check"'))
+        self.assertLess(source.index('"git_diff_check"'), source.index("SYNTAX_CHECK_IDS"))
 
     def test_skip_tests_does_not_execute_replay_gate(self):
         class StopAfterBuild(Exception):
