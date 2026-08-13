@@ -50,6 +50,115 @@
   }
 
   const FILE_TIME_WIDE_SIDEBAR_MIN = 320;
+  const SILENT_FILE_REFRESH_DELAY_MS = 32;
+  const SILENT_FILE_REFRESH_SEEN_LIMIT = 256;
+
+  function normalizeFileTreeIdentity(value = "") {
+    return String(value || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+  }
+
+  function createSilentFileTreeRefreshController(options = {}) {
+    const captureView = options.captureView;
+    const requestItems = options.requestItems;
+    const applyItems = options.applyItems;
+    const isViewCurrent = options.isViewCurrent;
+    const hostSetTimeout = global.setTimeout || globalThis.setTimeout;
+    const hostClearTimeout = global.clearTimeout || globalThis.clearTimeout;
+    const setTimer = options.setTimeout || hostSetTimeout.bind(globalThis);
+    const clearTimer = options.clearTimeout || hostClearTimeout.bind(globalThis);
+    const delayMs = Math.max(0, Number(options.delayMs ?? SILENT_FILE_REFRESH_DELAY_MS));
+    const seenLimit = Math.max(1, Number(options.seenLimit ?? SILENT_FILE_REFRESH_SEEN_LIMIT));
+
+    if (!captureView || !requestItems || !applyItems || !isViewCurrent) {
+      throw new Error("Silent file refresh requires capture, request, apply, and current-view checks");
+    }
+
+    let timerId = null;
+    let generation = 0;
+    let requestCount = 0;
+    let applyCount = 0;
+    let pendingRoots = new Set();
+    const seenTurns = new Set();
+    const seenOrder = [];
+
+    function rememberTurn(turnId) {
+      if (!turnId || seenTurns.has(turnId)) return false;
+      seenTurns.add(turnId);
+      seenOrder.push(turnId);
+      while (seenOrder.length > seenLimit) {
+        seenTurns.delete(seenOrder.shift());
+      }
+      return true;
+    }
+
+    function cancelPendingTimer() {
+      if (timerId === null) return;
+      clearTimer(timerId);
+      timerId = null;
+    }
+
+    function invalidate() {
+      generation += 1;
+      pendingRoots = new Set();
+      cancelPendingTimer();
+    }
+
+    async function flush() {
+      cancelPendingTimer();
+      const scheduledRoots = pendingRoots;
+      pendingRoots = new Set();
+      const view = captureView();
+      if (!view) return false;
+      const rootIdentity = normalizeFileTreeIdentity(view.root);
+      if (scheduledRoots.size && !scheduledRoots.has(rootIdentity)) return false;
+
+      const requestGeneration = generation;
+      requestCount += 1;
+      let data;
+      try {
+        data = await requestItems(view);
+      } catch (_) {
+        return false;
+      }
+      if (requestGeneration !== generation || !isViewCurrent(view, data)) return false;
+      applyItems(data, view);
+      applyCount += 1;
+      return true;
+    }
+
+    function schedule({ turnId = "", root = "" } = {}) {
+      const stableTurnId = String(turnId || "").trim();
+      if (!rememberTurn(stableTurnId)) return false;
+      const view = captureView();
+      if (!view) return false;
+      const visibleRoot = normalizeFileTreeIdentity(view.root);
+      const requestedRoot = normalizeFileTreeIdentity(root);
+      if (requestedRoot && requestedRoot !== visibleRoot) return false;
+
+      generation += 1;
+      pendingRoots.add(visibleRoot);
+      if (timerId === null) {
+        timerId = setTimer(() => { void flush(); }, delayMs);
+      }
+      return true;
+    }
+
+    function snapshot() {
+      return Object.freeze({
+        generation,
+        pending: timerId !== null,
+        requestCount,
+        applyCount,
+        seenCount: seenTurns.size,
+      });
+    }
+
+    return Object.freeze({ schedule, flush, invalidate, snapshot });
+  }
 
   function formatFileTimestamp(value, now = new Date()) {
     const date = value instanceof Date ? value : new Date(value || "");
@@ -343,9 +452,42 @@
       });
     }
 
+    const silentRefresh = createSilentFileTreeRefreshController({
+      captureView() {
+        if (state._noProject || !elements.fileTree || !elements.projectRoot) return null;
+        return {
+          root: String(state._fileRoot || elements.projectRoot.value || ""),
+          dir: String(state.currentDir || ""),
+          search: String(elements.fileSearch?.value || ""),
+          previewPath: String(state.previewPath || ""),
+          scrollTop: Number(elements.fileTree.scrollTop || 0),
+        };
+      },
+      requestItems(view) {
+        return apiJson(`/api/files?path=${encodeURIComponent(view.dir)}`);
+      },
+      isViewCurrent(view, data) {
+        return normalizeFileTreeIdentity(state._fileRoot || elements.projectRoot?.value) === normalizeFileTreeIdentity(view.root)
+          && normalizeFileTreeIdentity(state.currentDir) === normalizeFileTreeIdentity(view.dir)
+          && normalizeFileTreeIdentity(data?.root) === normalizeFileTreeIdentity(view.root)
+          && normalizeFileTreeIdentity(data?.path) === normalizeFileTreeIdentity(view.dir);
+      },
+      applyItems(data) {
+        const preservedScrollTop = Number(elements.fileTree.scrollTop || 0);
+        state._fileItems = Array.isArray(data?.items) ? data.items : [];
+        renderFileTree();
+        elements.fileTree.scrollTop = preservedScrollTop;
+      },
+      setTimeout: options.setTimeout,
+      clearTimeout: options.clearTimeout,
+      delayMs: options.silentRefreshDelayMs,
+    });
+
     async function loadFiles(path = state.currentDir) {
+      silentRefresh.invalidate();
       const data = await apiJson(`/api/files?path=${encodeURIComponent(path || "")}`);
       state.currentDir = data.path || "";
+      state._fileRoot = data.root || "";
       renderPathBar(state.currentDir);
       elements.cwdPathText.textContent = shortPath(data.root || "");
       elements.fileSearch.value = "";
@@ -531,6 +673,9 @@
     return Object.freeze({
       bind,
       loadFiles,
+      scheduleSilentRefresh: silentRefresh.schedule,
+      flushSilentRefresh: silentRefresh.flush,
+      snapshotSilentRefresh: silentRefresh.snapshot,
       renderFileTree,
       setFileTimeDensity,
       addRecentFolder,
@@ -546,6 +691,9 @@
     sortFileItems,
     formatFileTimestamp,
     FILE_TIME_WIDE_SIDEBAR_MIN,
+    SILENT_FILE_REFRESH_DELAY_MS,
+    normalizeFileTreeIdentity,
+    createSilentFileTreeRefreshController,
     createFilesFeature,
   });
 })(window);

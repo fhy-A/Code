@@ -6056,6 +6056,224 @@ const feature = createFilesFeature({
             {"name": "demo.txt", "contentBase64": "aGk="},
         )
 
+    def test_silent_file_tree_refresh_coalesces_latest_wins_and_preserves_view_state(self):
+        script = r"""
+global.window = {
+  Code: {features: {}},
+  setTimeout,
+  clearTimeout,
+};
+require("./src/features/files.js");
+const {createSilentFileTreeRefreshController} = window.Code.features.files;
+
+const timers = [];
+const requests = [];
+const pending = [];
+const applied = [];
+let view = {root: "C:/demo", dir: "src", search: "needle", previewPath: "src/a.js", scrollTop: 41};
+const controller = createSilentFileTreeRefreshController({
+  captureView: () => view ? {...view} : null,
+  requestItems: (captured) => {
+    requests.push({...captured});
+    return new Promise((resolve, reject) => pending.push({resolve, reject, captured}));
+  },
+  applyItems: (data, captured) => applied.push({data, captured}),
+  isViewCurrent: (captured, data) => Boolean(
+    view
+    && view.root === captured.root
+    && view.dir === captured.dir
+    && data.root === captured.root
+    && data.path === captured.dir
+  ),
+  setTimeout: (callback) => { timers.push(callback); return timers.length; },
+  clearTimeout: () => {},
+  delayMs: 0,
+});
+
+(async () => {
+  const scheduledFirst = controller.schedule({turnId: "run-1", root: "c:\\demo\\"});
+  const duplicateFirst = controller.schedule({turnId: "run-1", root: "C:/demo"});
+  const scheduledSecond = controller.schedule({turnId: "run-2", root: "C:/demo"});
+  timers.shift()();
+  await Promise.resolve();
+  pending[0].resolve({root: "C:/demo", path: "src", items: [{name: "old.js"}]});
+  await Promise.resolve();
+  await Promise.resolve();
+  const afterCoalesced = controller.snapshot();
+
+  controller.schedule({turnId: "run-3", root: "C:/demo"});
+  timers.shift()();
+  await Promise.resolve();
+  controller.schedule({turnId: "run-4", root: "C:/demo"});
+  timers.shift()();
+  await Promise.resolve();
+  pending[2].resolve({root: "C:/demo", path: "src", items: [{name: "latest.js"}]});
+  await Promise.resolve();
+  await Promise.resolve();
+  pending[1].resolve({root: "C:/demo", path: "src", items: [{name: "stale.js"}]});
+  await Promise.resolve();
+  await Promise.resolve();
+
+  controller.schedule({turnId: "run-5", root: "C:/demo"});
+  timers.shift()();
+  await Promise.resolve();
+  pending[3].reject(new Error("offline"));
+  await Promise.resolve();
+  await Promise.resolve();
+  const afterFailure = controller.snapshot();
+
+  const otherProject = controller.schedule({turnId: "run-other", root: "C:/other"});
+  view = null;
+  const noProject = controller.schedule({turnId: "run-6", root: "C:/demo"});
+  process.stdout.write(JSON.stringify({
+    scheduledFirst,
+    duplicateFirst,
+    scheduledSecond,
+    requests,
+    applied,
+    afterCoalesced,
+    afterFailure,
+    otherProject,
+    noProject,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["scheduledFirst"])
+        self.assertFalse(data["duplicateFirst"])
+        self.assertTrue(data["scheduledSecond"])
+        self.assertEqual(len(data["requests"]), 4)
+        self.assertEqual(data["requests"][0]["search"], "needle")
+        self.assertEqual(data["requests"][0]["previewPath"], "src/a.js")
+        self.assertEqual(data["requests"][0]["scrollTop"], 41)
+        self.assertEqual(len(data["applied"]), 2)
+        self.assertEqual(data["applied"][0]["data"]["items"], [{"name": "old.js"}])
+        self.assertEqual(data["applied"][1]["data"]["items"], [{"name": "latest.js"}])
+        self.assertEqual(data["afterCoalesced"]["requestCount"], 1)
+        self.assertEqual(data["afterCoalesced"]["applyCount"], 1)
+        self.assertEqual(data["afterFailure"]["requestCount"], 4)
+        self.assertEqual(data["afterFailure"]["applyCount"], 2)
+        self.assertFalse(data["otherProject"])
+        self.assertFalse(data["noProject"])
+
+    def test_file_feature_silent_refresh_keeps_search_selection_scroll_and_handles_empty_tree(self):
+        script = r"""
+global.window = {Code: {features: {}}, setTimeout, clearTimeout};
+require("./src/features/files.js");
+const {createFilesFeature} = window.Code.features.files;
+const callbacks = [];
+const fileTree = {
+  innerHTML: "",
+  scrollTop: 63,
+  classList: {toggle() {}},
+  querySelectorAll: () => [],
+};
+const state = {
+  currentDir: "src",
+  _fileRoot: "C:/demo",
+  _fileItems: [{name: "old.js", path: "src/old.js", type: "file"}],
+  previewPath: "src/keep.js",
+};
+const elements = {
+  fileTree,
+  projectRoot: {value: "C:/demo"},
+  fileSearch: {value: "keep"},
+  filePathBar: {style: {}, innerHTML: "", querySelectorAll: () => [], scrollWidth: 0, clientWidth: 100},
+  cwdPathText: {textContent: "~\\demo"},
+  goUp: {disabled: false},
+  newFolderBtn: {disabled: false},
+  refreshFiles: {disabled: false},
+};
+let nextItems = [];
+const calls = [];
+const feature = createFilesFeature({
+  state,
+  elements,
+  t: (key) => key,
+  escapeHtml: (value) => String(value),
+  apiJson: async (url) => { calls.push(url); return {root: "C:/demo", path: "src", items: nextItems}; },
+  setTimeout: (callback) => { callbacks.push(callback); return callbacks.length; },
+  clearTimeout: () => {},
+  silentRefreshDelayMs: 0,
+});
+(async () => {
+  const scheduled = feature.scheduleSilentRefresh({turnId: "run-empty", root: "C:/demo"});
+  callbacks.shift()();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const empty = {
+    items: state._fileItems,
+    dir: state.currentDir,
+    search: elements.fileSearch.value,
+    previewPath: state.previewPath,
+    scrollTop: fileTree.scrollTop,
+    snapshot: feature.snapshotSilentRefresh(),
+  };
+  nextItems = [{name: "keep.js", path: "src/keep.js", type: "file"}];
+  feature.scheduleSilentRefresh({turnId: "run-new", root: "C:/demo"});
+  callbacks.shift()();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  process.stdout.write(JSON.stringify({scheduled, calls, empty, final: {
+    items: state._fileItems,
+    dir: state.currentDir,
+    search: elements.fileSearch.value,
+    previewPath: state.previewPath,
+    scrollTop: fileTree.scrollTop,
+    snapshot: feature.snapshotSilentRefresh(),
+  }}));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["scheduled"])
+        self.assertEqual(data["calls"], ["/api/files?path=src", "/api/files?path=src"])
+        self.assertEqual(data["empty"]["items"], [])
+        self.assertEqual(data["empty"]["dir"], "src")
+        self.assertEqual(data["empty"]["search"], "keep")
+        self.assertEqual(data["empty"]["previewPath"], "src/keep.js")
+        self.assertEqual(data["empty"]["scrollTop"], 63)
+        self.assertEqual(data["final"]["items"], [{"name": "keep.js", "path": "src/keep.js", "type": "file"}])
+        self.assertEqual(data["final"]["dir"], "src")
+        self.assertEqual(data["final"]["search"], "keep")
+        self.assertEqual(data["final"]["previewPath"], "src/keep.js")
+        self.assertEqual(data["final"]["scrollTop"], 63)
+        self.assertEqual(data["final"]["snapshot"]["requestCount"], 2)
+        self.assertEqual(data["final"]["snapshot"]["applyCount"], 2)
+
+    def test_silent_file_tree_refresh_is_wired_only_to_real_terminal_boundaries(self):
+        self.assertIn("function scheduleTerminalFileTreeRefresh(ctx, terminalStatus)", APP_SOURCE)
+        self.assertIn('if (!["completed", "failed", "cancelled"].includes', APP_SOURCE)
+        self.assertIn("backgroundJobId: job.id", APP_SOURCE)
+        self.assertIn("job.status === \"completed\" ? \"completed\" : \"failed\"", APP_SOURCE)
+        self.assertIn("recoveryError ? (recoveryError?.name === \"AbortError\" ? \"cancelled\" : \"failed\") : \"completed\"", APP_SOURCE)
+        self.assertIn("loopError ? (loopError?.name === \"AbortError\" ? \"cancelled\" : \"failed\") : \"completed\"", APP_SOURCE)
+        terminal_schedule = APP_SOURCE.index("scheduleTerminalFileTreeRefresh(\n    ctx,", APP_SOURCE.index("async function sendMessage"))
+        final_save = APP_SOURCE.index("await saveSessionState(sessionId, ctx.messages, ctx.stats);", terminal_schedule)
+        self.assertLess(terminal_schedule, final_save)
+        self.assertNotIn("scheduleTerminalFileTreeRefresh", APP_SOURCE[APP_SOURCE.index("async function enqueueSessionMessage"):APP_SOURCE.index("async function submitSessionSteer")])
+        self.assertNotIn("scheduleTerminalFileTreeRefresh", APP_SOURCE[APP_SOURCE.index("async function finishServerAgentUserInputRequest"):APP_SOURCE.index("function renderUserInputQuestion")])
+        self.assertNotIn("scheduleTerminalFileTreeRefresh", APP_SOURCE[APP_SOURCE.index("async function requestServerAgentAuthorization"):APP_SOURCE.index("async function runServerAgentLoop")])
+        self.assertIn("scheduleSilentRefresh: silentRefresh.schedule", FILES_SOURCE)
+        self.assertIn("silentRefresh.invalidate();", FILES_SOURCE)
+
     def test_image_attachment_mime_facts_cover_input_matrix(self):
         script = r"""
 global.window = {};

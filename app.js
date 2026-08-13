@@ -1205,8 +1205,31 @@ const filesFeature = createFilesFeature({
   insertPromptText,
   saveProjectRoot,
 });
-const { loadFiles, renderFileTree, addRecentFolder, setFileTimeDensity } = filesFeature;
+const {
+  loadFiles,
+  scheduleSilentRefresh: scheduleSilentFileTreeRefresh,
+  renderFileTree,
+  addRecentFolder,
+  setFileTimeDensity,
+} = filesFeature;
 filesFeature.bind();
+
+function scheduleTerminalFileTreeRefresh(ctx, terminalStatus) {
+  if (!["completed", "failed", "cancelled"].includes(String(terminalStatus || ""))) return false;
+  const backgroundJobId = String(ctx?.backgroundJobId || "");
+  const requestId = String(
+    backgroundJobId
+    || ctx?.clientRequestId
+    || ctx?.agentRunId
+    || ctx?.runtimeRunId
+    || "",
+  );
+  if (!requestId) return false;
+  return scheduleSilentFileTreeRefresh({
+    turnId: `${backgroundJobId ? "background" : "foreground"}:${requestId}`,
+    root: String(ctx?.cwd || ctx?.primaryRoot || ""),
+  });
+}
 
 
 
@@ -5804,6 +5827,10 @@ async function resumePersistedSessionRun(summary) {
       await saveSessionState(summary.id, ctx.messages, ctx.stats, session.title).catch(() => {});
       if (summary.id === state.sessionId) renderSessionMessages(summary.id);
       renderSessions();
+      scheduleTerminalFileTreeRefresh(
+        ctx,
+        recoveryError ? (recoveryError?.name === "AbortError" ? "cancelled" : "failed") : "completed",
+      );
     }
 
     if (!recoveryError) {
@@ -7622,6 +7649,11 @@ function pumpBackgroundDispatcher() {
         job.resolve({ ok: false, error: message });
       })
       .finally(() => {
+        scheduleTerminalFileTreeRefresh({
+          backgroundJobId: job.id,
+          cwd: job.cwd,
+          primaryRoot: job.primaryRoot,
+        }, job.status === "completed" ? "completed" : "failed");
         dispatcher.activeCount = Math.max(0, dispatcher.activeCount - 1);
         const finished = dispatcher.jobs.filter((item) => item.status === "completed" || item.status === "failed");
         if (finished.length > 50) {
@@ -9679,6 +9711,7 @@ async function sendMessage(userText, options = {}) {
   }
   const run = ensureSessionRun(sessionId);
   const ctx = buildRunContext(sessionId, options);
+  if (!ctx.clientRequestId) ctx.clientRequestId = `foreground-${sessionId}-${submittedAt}`;
   ctx.taskUsage = { input: 0, output: 0, cache: 0 };
   // Make the active context accessible for background sub-agent dispatch
   ctx._taskPrompt = userText;
@@ -9941,6 +9974,10 @@ async function sendMessage(userText, options = {}) {
   }
 
   if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);
+  scheduleTerminalFileTreeRefresh(
+    ctx,
+    loopError ? (loopError?.name === "AbortError" ? "cancelled" : "failed") : "completed",
+  );
   await saveSessionState(sessionId, ctx.messages, ctx.stats);
   renderSessions();
 
