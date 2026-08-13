@@ -1118,9 +1118,15 @@ input:focus, select:focus, textarea:focus {
   --message-stack-gap: 26px;
   --user-message-meta-height: 26px;
   --user-message-meta-offset: 2px;
+  --message-reading-anchor-space: 0px;
   display: block;
   width: 100%;
   min-width: 0;
+}
+
+.message-list.has-reading-anchor-space {
+  padding-bottom: var(--message-reading-anchor-space);
+  overflow-anchor: none;
 }
 .messages::-webkit-scrollbar { width: 6px; }
 .messages::-webkit-scrollbar-thumb { background: var(--sidebar-scroll-thumb); border-radius: 3px; }

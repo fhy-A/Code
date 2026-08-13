@@ -12325,6 +12325,440 @@ process.stdout.write(JSON.stringify({full, plain, withImage, imageOnly}));
 
 
 class MessageScrollControllerTests(unittest.TestCase):
+    def test_reading_anchor_consumes_space_and_releases_on_downward_intent(self):
+        script = r"""
+global.window = global;
+global.Code = { ui: {} };
+global.getSelection = () => ({ isCollapsed: true });
+require("./src/ui/messages.js");
+
+function classList() {
+  const values = new Set();
+  return {
+    toggle(name, force) {
+      const next = force === undefined ? !values.has(name) : Boolean(force);
+      if (next) values.add(name); else values.delete(name);
+      return next;
+    },
+    contains(name) { return values.has(name); },
+  };
+}
+
+function eventTarget(extra = {}) {
+  const listeners = new Map();
+  return Object.assign({
+    classList: classList(),
+    dataset: {},
+    attributes: {},
+    tabIndex: -1,
+    addEventListener(type, callback, options) { listeners.set(type, { callback, options }); },
+    removeEventListener(type, callback) {
+      if (listeners.get(type)?.callback === callback) listeners.delete(type);
+    },
+    emit(type, event = {}) { listeners.get(type)?.callback({ target: this, ...event }); },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+  }, extra);
+}
+
+let rawScrollTop = 200;
+let reserve = 0;
+let realHeight = 600;
+const scrollWrites = [];
+const container = eventTarget({ clientHeight: 400 });
+Object.defineProperties(container, {
+  scrollTop: {
+    configurable: true,
+    get() { return rawScrollTop; },
+    set(value) { rawScrollTop = Number(value); scrollWrites.push(rawScrollTop); },
+  },
+  scrollHeight: {
+    configurable: true,
+    get() { return realHeight + reserve; },
+  },
+});
+const content = eventTarget({
+  style: { setProperty(_name, value) { reserve = Number.parseInt(value, 10) || 0; } },
+});
+const button = eventTarget();
+const frames = new Map();
+let nextFrame = 1;
+function requestFrame(callback) { const id = nextFrame++; frames.set(id, callback); return id; }
+function cancelFrame(id) { frames.delete(id); }
+function flushFrames() {
+  const callbacks = [...frames.values()];
+  frames.clear();
+  callbacks.forEach((callback) => callback());
+}
+const controller = Code.ui.messages.createMessageScrollController({
+  container,
+  content,
+  button,
+  requestAnimationFrame: requestFrame,
+  cancelAnimationFrame: cancelFrame,
+  ResizeObserver: null,
+  isCompactViewport: () => false,
+  findAnchorElement: (index) => index === 4 ? { offsetTop: 500 } : null,
+  measureAnchorTop: (element) => element.offsetTop,
+  applyAnchorReserve(value) { reserve = Number(value || 0); },
+});
+controller.setSession("s1");
+controller.connect();
+
+const began = controller.beginReadingAnchor("s1", 4);
+const initial = controller.snapshot();
+flushFrames();
+const afterInitialFrame = controller.snapshot();
+
+realHeight += 100;
+controller.onContentChanged("s1");
+flushFrames();
+const afterGrowth = controller.snapshot();
+
+container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
+rawScrollTop -= 24;
+container.emit("scroll");
+const afterUp = controller.snapshot();
+const reserveAfterUp = reserve;
+
+realHeight -= 40;
+controller.onContentChanged("s1");
+const afterShrink = controller.snapshot();
+const reserveAfterShrink = reserve;
+
+realHeight += 220;
+controller.onContentChanged("s1");
+flushFrames();
+const afterExhaustion = controller.snapshot();
+
+realHeight -= 220;
+controller.onContentChanged("s1");
+flushFrames();
+const afterExhaustionShrink = controller.snapshot();
+
+container.emit("wheel", { deltaX: 0, deltaY: 20, ctrlKey: false });
+const afterDownIntent = controller.snapshot();
+const reserveAfterDownIntent = reserve;
+
+button.emit("click");
+flushFrames();
+const afterJump = controller.snapshot();
+const realBottomAfterJump = rawScrollTop;
+
+controller.beginReadingAnchor("s1", 4);
+flushFrames();
+container.emit("scroll");
+rawScrollTop -= 20;
+container.emit("scroll");
+const beforeDirectDown = controller.snapshot();
+rawScrollTop += 8;
+container.emit("scroll");
+const afterDirectDown = controller.snapshot();
+
+controller.beginReadingAnchor("s1", 4);
+controller.forceToLatest("s1");
+flushFrames();
+const afterForce = controller.snapshot();
+
+controller.beginReadingAnchor("s1", 4);
+controller.setSession("s2");
+const afterSession = controller.snapshot();
+
+const compactController = Code.ui.messages.createMessageScrollController({
+  container,
+  content,
+  button,
+  requestAnimationFrame: requestFrame,
+  cancelAnimationFrame: cancelFrame,
+  ResizeObserver: null,
+  isCompactViewport: () => true,
+  findAnchorElement: () => ({ offsetTop: 500 }),
+  measureAnchorTop: (element) => element.offsetTop,
+  applyAnchorReserve(value) { reserve = Number(value || 0); },
+});
+compactController.setSession("mobile");
+const compactBegan = compactController.beginReadingAnchor("mobile", 1);
+const compact = compactController.snapshot();
+
+let layoutRawTop = 468;
+let layoutReserve = 268;
+let layoutRealHeight = 600;
+let layoutAnchorTop = 500;
+const layoutContainer = eventTarget({ clientHeight: 400 });
+Object.defineProperties(layoutContainer, {
+  scrollTop: {
+    configurable: true,
+    get() { return layoutRawTop; },
+    set(value) { layoutRawTop = Number(value); },
+  },
+  scrollHeight: {
+    configurable: true,
+    get() { return layoutRealHeight + layoutReserve; },
+  },
+});
+const layoutController = Code.ui.messages.createMessageScrollController({
+  container: layoutContainer,
+  content,
+  button,
+  requestAnimationFrame: requestFrame,
+  cancelAnimationFrame: cancelFrame,
+  ResizeObserver: null,
+  isCompactViewport: () => false,
+  findAnchorElement: () => ({ offsetTop: layoutAnchorTop }),
+  measureAnchorTop: (element) => element.offsetTop,
+  applyAnchorReserve(value) { layoutReserve = Number(value || 0); },
+});
+layoutController.setSession("layout");
+layoutController.connect();
+layoutController.beginReadingAnchor("layout", 2);
+flushFrames();
+layoutController.onContentChanged("layout");
+frames.clear();
+layoutContainer.emit("wheel", { deltaX: 0, deltaY: -20, ctrlKey: false });
+const layoutAfterIntent = layoutController.snapshot();
+layoutRawTop -= 20;
+layoutContainer.emit("scroll");
+const layoutAfterUp = layoutController.snapshot();
+layoutAnchorTop += 50;
+layoutRealHeight += 50;
+layoutRawTop += 50;
+layoutController.onContentChanged("layout");
+layoutContainer.emit("scroll");
+const layoutAfterProgrammaticShift = layoutController.snapshot();
+layoutRawTop -= 10;
+layoutContainer.emit("scroll");
+const layoutAfterUserUp = layoutController.snapshot();
+
+let visibleRawTop = 468;
+let visibleReserve = 268;
+const visibleRealHeight = 600;
+const visibleContainer = eventTarget({ clientHeight: 400 });
+Object.defineProperties(visibleContainer, {
+  scrollTop: {
+    configurable: true,
+    get() { return visibleRawTop; },
+    set(value) { visibleRawTop = Number(value); },
+  },
+  scrollHeight: {
+    configurable: true,
+    get() { return visibleRealHeight + visibleReserve; },
+  },
+});
+const visibleButton = eventTarget();
+const visibilityController = Code.ui.messages.createMessageScrollController({
+  container: visibleContainer,
+  content,
+  button: visibleButton,
+  requestAnimationFrame: requestFrame,
+  cancelAnimationFrame: cancelFrame,
+  ResizeObserver: null,
+  isCompactViewport: () => false,
+  findAnchorElement: () => ({ offsetTop: 500 }),
+  measureAnchorTop: (element) => element.offsetTop,
+  applyAnchorReserve(value) { visibleReserve = Number(value || 0); },
+});
+visibilityController.setSession("visibility");
+visibilityController.connect();
+visibilityController.beginReadingAnchor("visibility", 3);
+flushFrames();
+visibleContainer.emit("scroll");
+const visibilityInitial = visibilityController.snapshot();
+visibleContainer.emit("wheel", { deltaX: 0, deltaY: -20, ctrlKey: false });
+visibleRawTop -= 20;
+visibleContainer.emit("scroll");
+const visibilityAfter20 = visibilityController.snapshot();
+visibleRawTop -= 40;
+visibleContainer.emit("scroll");
+const visibilityAfter60 = visibilityController.snapshot();
+visibleContainer.emit("wheel", { deltaX: 0, deltaY: 12, ctrlKey: false });
+const visibilityAfterBlankRelease = visibilityController.snapshot();
+
+visibilityController.beginReadingAnchor("visibility", 3);
+flushFrames();
+visibleContainer.emit("scroll");
+visibleRawTop = 41;
+visibleContainer.emit("scroll");
+const visibilityAt159 = visibilityController.snapshot();
+visibleRawTop = 40;
+visibleContainer.emit("scroll");
+const visibilityAt160 = visibilityController.snapshot();
+visibleRawTop = 200;
+visibleContainer.emit("scroll");
+const visibilityReturned = visibilityController.snapshot();
+
+process.stdout.write(JSON.stringify({
+  afterDirectDown,
+  afterDownIntent,
+  afterExhaustion,
+  afterExhaustionShrink,
+  afterForce,
+  afterGrowth,
+  afterInitialFrame,
+  afterJump,
+  afterSession,
+  afterShrink,
+  afterUp,
+  began,
+  beforeDirectDown,
+  compact,
+  compactBegan,
+  initial,
+  layoutAfterProgrammaticShift,
+  layoutAfterIntent,
+  layoutAfterUp,
+  layoutAfterUserUp,
+  realBottomAfterJump,
+  reserveAfterDownIntent,
+  reserveAfterShrink,
+  reserveAfterUp,
+  scrollWrites,
+  visibilityAfter20,
+  visibilityAfter60,
+  visibilityAfterBlankRelease,
+  visibilityAt159,
+  visibilityAt160,
+  visibilityInitial,
+  visibilityReturned,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["began"])
+        self.assertEqual(data["initial"]["readingAnchor"]["messageIndex"], 4)
+        self.assertEqual(data["initial"]["readingAnchor"]["remainingReserve"], 268)
+        self.assertEqual(data["afterInitialFrame"]["readingAnchor"]["remainingReserve"], 268)
+        self.assertEqual(data["afterGrowth"]["readingAnchor"]["remainingReserve"], 168)
+        self.assertEqual(data["afterGrowth"]["realContentDistance"], 0)
+        self.assertFalse(data["afterGrowth"]["visible"])
+        self.assertFalse(data["afterUp"]["following"])
+        self.assertEqual(data["reserveAfterUp"], 144)
+        self.assertEqual(data["afterUp"]["readingAnchor"]["userConsumedReserve"], 24)
+        self.assertLessEqual(data["reserveAfterShrink"], data["reserveAfterUp"])
+        self.assertEqual(data["afterShrink"]["readingAnchor"]["remainingReserve"], 144)
+        self.assertEqual(data["afterExhaustion"]["readingAnchor"]["remainingReserve"], 0)
+        self.assertEqual(data["afterExhaustionShrink"]["readingAnchor"]["remainingReserve"], 0)
+        self.assertIsNone(data["afterDownIntent"]["readingAnchor"])
+        self.assertEqual(data["reserveAfterDownIntent"], 0)
+        self.assertIsNone(data["afterJump"]["readingAnchor"])
+        self.assertEqual(data["realBottomAfterJump"], 260)
+        self.assertIsNotNone(data["beforeDirectDown"]["readingAnchor"])
+        self.assertFalse(data["beforeDirectDown"]["following"])
+        self.assertEqual(data["beforeDirectDown"]["readingAnchor"]["userConsumedReserve"], 20)
+        self.assertIsNone(data["afterDirectDown"]["readingAnchor"])
+        self.assertIsNone(data["afterForce"]["readingAnchor"])
+        self.assertIsNone(data["afterSession"]["readingAnchor"])
+        self.assertTrue(data["compactBegan"])
+        self.assertEqual(data["compact"]["readingAnchor"]["targetScrollTop"], 480)
+        self.assertFalse(data["layoutAfterIntent"]["following"])
+        self.assertTrue(data["layoutAfterIntent"]["awaitingUserScroll"])
+        self.assertLess(data["layoutAfterUp"]["readingAnchor"]["remainingReserve"], 268)
+        consumed_after_up = data["layoutAfterUp"]["readingAnchor"]["userConsumedReserve"]
+        self.assertGreater(consumed_after_up, 0)
+        self.assertEqual(
+            data["layoutAfterProgrammaticShift"]["readingAnchor"]["remainingReserve"],
+            data["layoutAfterUp"]["readingAnchor"]["remainingReserve"],
+        )
+        self.assertEqual(
+            data["layoutAfterProgrammaticShift"]["readingAnchor"]["userConsumedReserve"],
+            consumed_after_up,
+        )
+        self.assertEqual(
+            data["layoutAfterUserUp"]["readingAnchor"]["remainingReserve"],
+            data["layoutAfterProgrammaticShift"]["readingAnchor"]["remainingReserve"] - 10,
+        )
+        self.assertEqual(
+            data["layoutAfterUserUp"]["readingAnchor"]["userConsumedReserve"],
+            consumed_after_up + 10,
+        )
+        self.assertEqual(data["visibilityInitial"]["realContentDistance"], 0)
+        self.assertFalse(data["visibilityInitial"]["visible"])
+        self.assertEqual(data["visibilityAfter20"]["realContentDistance"], 0)
+        self.assertEqual(data["visibilityAfter20"]["distance"], 20)
+        self.assertFalse(data["visibilityAfter20"]["visible"])
+        self.assertEqual(data["visibilityAfter60"]["realContentDistance"], 0)
+        self.assertEqual(data["visibilityAfter60"]["distance"], 60)
+        self.assertFalse(data["visibilityAfter60"]["visible"])
+        self.assertIsNone(data["visibilityAfterBlankRelease"]["readingAnchor"])
+        self.assertEqual(data["visibilityAfterBlankRelease"]["realContentDistance"], 0)
+        self.assertFalse(data["visibilityAfterBlankRelease"]["visible"])
+        self.assertEqual(data["visibilityAt159"]["realContentDistance"], 159)
+        self.assertFalse(data["visibilityAt159"]["visible"])
+        self.assertEqual(data["visibilityAt160"]["realContentDistance"], 160)
+        self.assertTrue(data["visibilityAt160"]["visible"])
+        self.assertEqual(data["visibilityReturned"]["realContentDistance"], 0)
+        self.assertFalse(data["visibilityReturned"]["visible"])
+
+    def test_reading_anchor_wiring_and_css_contract(self):
+        controller_start = MESSAGES_SOURCE.index("function createMessageScrollController(options = {})")
+        controller_end = MESSAGES_SOURCE.index("function createLongTextDisplayController", controller_start)
+        controller_source = MESSAGES_SOURCE[controller_start:controller_end]
+        for expected in (
+            "function beginReadingAnchor(ownerSessionId, messageIndex)",
+            "function reconcileReadingAnchor(initialize = false)",
+            "function captureAnchorLayoutAdjustment()",
+            "function consumeAnchorReserveForUpwardScroll(distance)",
+            "function releaseReadingAnchorForDownwardIntent()",
+            "function realContentDistanceToBottom()",
+            "Math.min(currentReserve, requiredReserve)",
+            "content?.style?.setProperty?.(\"--message-reading-anchor-space\", next)",
+            "if (deltaY < 0) relinquishFollowingForUpwardIntent()",
+            "else if (deltaY > 0) releaseReadingAnchorForDownwardIntent()",
+        ):
+            self.assertIn(expected, controller_source)
+        anchor_start = controller_source.index("function reconcileReadingAnchor(initialize = false)")
+        anchor_end = controller_source.index("function updateButton()", anchor_start)
+        anchor_source = controller_source[anchor_start:anchor_end]
+        self.assertNotIn("setTimeout", anchor_source)
+        self.assertNotIn("preventDefault", controller_source)
+
+        self.assertIn("--message-reading-anchor-space: 0px;", STYLE_SOURCE)
+        self.assertIn(".message-list.has-reading-anchor-space", STYLE_SOURCE)
+        self.assertIn("padding-bottom: var(--message-reading-anchor-space);", STYLE_SOURCE)
+        self.assertIn("overflow-anchor: none;", STYLE_SOURCE)
+
+        self.assertIn(
+            "messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);",
+            APP_SOURCE,
+        )
+        self.assertIn(
+            "messageScrollController?.beginReadingAnchor(\n      ctx.sessionId,\n      ctx.messages.indexOf(userMessage),",
+            APP_SOURCE,
+        )
+        self.assertIn(
+            "await submitSessionSteer(ctx, message, { createReadingAnchor: false });",
+            APP_SOURCE,
+        )
+        queue_source = APP_SOURCE[
+            APP_SOURCE.index("async function enqueueSessionMessage("):
+            APP_SOURCE.index("async function submitSessionSteer(")
+        ]
+        parallel_source = APP_SOURCE[
+            APP_SOURCE.index("async function dispatchBackgroundSubAgent("):
+            APP_SOURCE.index("async function restoreBackgroundJobsForSession(")
+        ]
+        self.assertNotIn("beginReadingAnchor", queue_source)
+        self.assertNotIn("beginReadingAnchor", parallel_source)
+
+        send_source = APP_SOURCE[
+            APP_SOURCE.index("async function sendMessage("):
+            APP_SOURCE.index("function getSelectedModel()")
+        ]
+        self.assertLess(
+            send_source.index("renderSessionMessages(sessionId);"),
+            send_source.index("messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);"),
+        )
+        self.assertLess(
+            send_source.index("messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);"),
+            send_source.index("setStreaming(true, sessionId);"),
+        )
+        self.assertIn("if (options.createReadingAnchor !== false && ctx.sessionId === state.sessionId)", APP_SOURCE)
+        self.assertIn("if (Number(error?.status || 0) === 409)", APP_SOURCE)
+
     def test_scroll_controller_preserves_position_and_coalesces_following_updates(self):
         script = r"""
 global.window = global;

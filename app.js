@@ -7070,7 +7070,7 @@ function followUpMessageText(message) {
   return String(message.content.find((item) => item?.type === "text")?.text || "");
 }
 
-async function submitSessionSteer(ctx, userMessage) {
+async function submitSessionSteer(ctx, userMessage, options = {}) {
   const dispatch = userMessage?.meta?.steerDispatch;
   if (!ctx?.agentRunId || !dispatch?.clientRequestId) return null;
   const response = await agentRuntime.steerAgentRun(ctx.agentRunId, {
@@ -7086,6 +7086,12 @@ async function submitSessionSteer(ctx, userMessage) {
     persistMessages: true,
   });
   renderSessionMessages(ctx.sessionId);
+  if (options.createReadingAnchor !== false && ctx.sessionId === state.sessionId) {
+    messageScrollController?.beginReadingAnchor(
+      ctx.sessionId,
+      ctx.messages.indexOf(userMessage),
+    );
+  }
   return response;
 }
 
@@ -7153,7 +7159,7 @@ async function resumePendingSessionSteers(ctx) {
   ));
   for (const message of pending) {
     try {
-      await submitSessionSteer(ctx, message);
+      await submitSessionSteer(ctx, message, { createReadingAnchor: false });
     } catch (error) {
       if (Number(error?.status || 0) !== 409) continue;
       await enqueueSessionMessage(
@@ -9853,6 +9859,7 @@ async function sendMessage(userText, options = {}) {
   }
 
   renderSessionMessages(sessionId);
+  messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);
 
   // Anchor the model name and expose the active state before persistence so
   // first-send feedback is not blocked on metadata writes.

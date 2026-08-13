@@ -209,7 +209,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn("messageScrollController?.forceToLatest(sessionId)", schedule_source)
         self.assertNotIn("scrollTop", schedule_source)
         self.assertIn("function createMessageScrollController(options = {})", MESSAGES_SOURCE)
-        self.assertIn("container.scrollTop = maxScrollTop()", MESSAGES_SOURCE)
+        self.assertIn("writeScrollTop(maxScrollTop())", MESSAGES_SOURCE)
 
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
         load_start = SESSIONS_SOURCE.index("async function loadSession(sessionId)", navigation_start)

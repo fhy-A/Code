@@ -23,6 +23,26 @@
       || (() => {});
     const ResizeObserverClass = options.ResizeObserver || global.ResizeObserver;
     const getLabel = options.getLabel || ((key) => key);
+    const isCompactViewport = options.isCompactViewport
+      || (() => Boolean(global.matchMedia?.("(max-width: 900px)")?.matches));
+    const findAnchorElement = options.findAnchorElement || ((messageIndex) => (
+      content?.querySelector?.(`.msg.user[data-msg-index="${messageIndex}"]`) || null
+    ));
+    const measureAnchorTop = options.measureAnchorTop || ((element) => {
+      if (!element || !container) return null;
+      const elementRect = element.getBoundingClientRect?.();
+      const containerRect = container.getBoundingClientRect?.();
+      if (elementRect && containerRect) {
+        return Number(container.scrollTop || 0) + Number(elementRect.top || 0) - Number(containerRect.top || 0);
+      }
+      const offsetTop = Number(element.offsetTop);
+      return Number.isFinite(offsetTop) ? offsetTop : null;
+    });
+    const applyAnchorReserve = options.applyAnchorReserve || ((pixels) => {
+      const next = `${Math.max(0, Math.round(Number(pixels || 0)))}px`;
+      content?.style?.setProperty?.("--message-reading-anchor-space", next);
+      content?.classList?.toggle?.("has-reading-anchor-space", Number(pixels || 0) > 0);
+    });
     let sessionId = String(options.sessionId || "");
     let following = true;
     let visible = false;
@@ -34,6 +54,9 @@
     let preservedScrollTop = Number(container?.scrollTop || 0);
     let awaitingUserScroll = false;
     let touchStartY = null;
+    let readingAnchor = null;
+    let lastObservedScrollTop = Number(container?.scrollTop || 0);
+    let programmaticScrollTarget = null;
     const passiveListenerOptions = { passive: true };
 
     function maxScrollTop() {
@@ -43,7 +66,134 @@
 
     function distanceToBottom() {
       if (!container) return 0;
-      return Math.max(0, maxScrollTop() - Number(container.scrollTop || 0));
+      const physicalDistance = Math.max(0, maxScrollTop() - Number(container.scrollTop || 0));
+      const consumedReadingDistance = Number(readingAnchor?.userConsumedReserve || 0);
+      return Math.max(0, physicalDistance + consumedReadingDistance);
+    }
+
+    function realContentDistanceToBottom() {
+      if (!container) return 0;
+      const temporaryReserve = Number(readingAnchor?.remainingReserve || 0);
+      const realContentBottom = Math.max(
+        0,
+        Number(container.scrollHeight || 0) - temporaryReserve,
+      );
+      const viewportBottom = Number(container.scrollTop || 0) + Number(container.clientHeight || 0);
+      return Math.max(0, realContentBottom - viewportBottom);
+    }
+
+    function writeScrollTop(value) {
+      if (!container) return;
+      const next = Math.max(0, Number(value || 0));
+      programmaticScrollTarget = next;
+      container.scrollTop = next;
+      lastObservedScrollTop = Number(container.scrollTop || next);
+      preservedScrollTop = lastObservedScrollTop;
+    }
+
+    function setAnchorReserve(value) {
+      if (!readingAnchor) return 0;
+      const next = Math.max(0, Math.round(Number(value || 0)));
+      readingAnchor.remainingReserve = next;
+      applyAnchorReserve(next);
+      return next;
+    }
+
+    function clearReadingAnchor() {
+      if (readingAnchor) setAnchorReserve(0);
+      readingAnchor = null;
+      applyAnchorReserve(0);
+    }
+
+    function anchorOffset() {
+      return isCompactViewport() ? 20 : 32;
+    }
+
+    function reconcileReadingAnchor(initialize = false) {
+      if (!readingAnchor || !container) return false;
+      const element = findAnchorElement(readingAnchor.messageIndex);
+      const measuredTop = measureAnchorTop(element);
+      if (!Number.isFinite(measuredTop)) {
+        clearReadingAnchor();
+        return false;
+      }
+      const currentReserve = Number(readingAnchor.remainingReserve || 0);
+      const realScrollHeight = Math.max(0, Number(container.scrollHeight || 0) - currentReserve);
+      const desiredTop = Math.max(0, Math.round(measuredTop - anchorOffset()));
+      const requiredReserve = Math.max(
+        0,
+        Math.round(desiredTop + Number(container.clientHeight || 0) - realScrollHeight),
+      );
+      const nextReserve = initialize
+        ? requiredReserve
+        : Math.min(currentReserve, requiredReserve);
+      setAnchorReserve(nextReserve);
+      readingAnchor.targetScrollTop = Math.min(desiredTop, maxScrollTop());
+      readingAnchor.initialized = true;
+      return true;
+    }
+
+    function captureAnchorLayoutAdjustment() {
+      if (!readingAnchor || awaitingUserScroll || !container) return;
+      const currentScrollTop = Number(container.scrollTop || 0);
+      if (Math.abs(currentScrollTop - lastObservedScrollTop) <= bottomTolerance) return;
+      programmaticScrollTarget = Number(readingAnchor.targetScrollTop || currentScrollTop);
+      lastObservedScrollTop = currentScrollTop;
+      preservedScrollTop = currentScrollTop;
+    }
+
+    function beginReadingAnchor(ownerSessionId, messageIndex) {
+      if (String(ownerSessionId || "") !== sessionId || !Number.isInteger(Number(messageIndex))) return false;
+      cancelScheduledFrame();
+      clearReadingAnchor();
+      readingAnchor = {
+        initialized: false,
+        messageIndex: Number(messageIndex),
+        remainingReserve: 0,
+        targetScrollTop: 0,
+        userConsumedReserve: 0,
+      };
+      following = true;
+      visible = false;
+      awaitingUserScroll = false;
+      if (!reconcileReadingAnchor(true)) {
+        scheduleFollow();
+        return false;
+      }
+      writeScrollTop(readingAnchor.targetScrollTop);
+      updateButton();
+      scheduleFollow();
+      return true;
+    }
+
+    function consumeAnchorReserveForUpwardScroll(distance) {
+      if (!readingAnchor) return 0;
+      const consumed = Math.min(
+        Number(readingAnchor.remainingReserve || 0),
+        Math.max(0, Number(distance || 0)),
+      );
+      if (consumed <= 0) return 0;
+      readingAnchor.userConsumedReserve += consumed;
+      setAnchorReserve(readingAnchor.remainingReserve - consumed);
+      return consumed;
+    }
+
+    function releaseReadingAnchorForDownwardIntent() {
+      if (!readingAnchor || following) return false;
+      clearReadingAnchor();
+      awaitingUserScroll = false;
+      programmaticScrollTarget = null;
+      preservedScrollTop = Number(container?.scrollTop || 0);
+      lastObservedScrollTop = preservedScrollTop;
+      const distance = distanceToBottom();
+      if (distance <= bottomTolerance) {
+        following = true;
+        scheduleFollow();
+      } else {
+        following = false;
+      }
+      reconcile();
+      return true;
     }
 
     function updateButton() {
@@ -68,25 +218,23 @@
     }
 
     function relinquishFollowingForUpwardIntent() {
-      if (!following || maxScrollTop() <= bottomTolerance) return false;
-      following = false;
+      if (maxScrollTop() <= bottomTolerance || (!following && !readingAnchor)) return false;
+      if (following) following = false;
       awaitingUserScroll = true;
       cancelScheduledFrame();
+      programmaticScrollTarget = null;
       preservedScrollTop = Number(container?.scrollTop || 0);
-      if (distanceToBottom() >= revealThreshold) visible = true;
-      updateButton();
+      lastObservedScrollTop = preservedScrollTop;
+      reconcile();
       return true;
     }
 
     function onWheelIntent(event) {
       const deltaX = Number(event?.deltaX || 0);
       const deltaY = Number(event?.deltaY || 0);
-      if (
-        event?.ctrlKey
-        || deltaY >= 0
-        || Math.abs(deltaY) <= Math.abs(deltaX)
-      ) return;
-      relinquishFollowingForUpwardIntent();
+      if (event?.ctrlKey || Math.abs(deltaY) <= Math.abs(deltaX)) return;
+      if (deltaY < 0) relinquishFollowingForUpwardIntent();
+      else if (deltaY > 0) releaseReadingAnchorForDownwardIntent();
     }
 
     function clearTouchIntent() {
@@ -116,16 +264,19 @@
         return;
       }
       const clientY = Number(touches[0]?.clientY);
-      if (!Number.isFinite(clientY) || clientY - touchStartY <= bottomTolerance) return;
-      relinquishFollowingForUpwardIntent();
+      if (!Number.isFinite(clientY)) return;
+      const delta = clientY - touchStartY;
+      if (delta > bottomTolerance) relinquishFollowingForUpwardIntent();
+      else if (delta < -bottomTolerance) releaseReadingAnchorForDownwardIntent();
+      else return;
       clearTouchIntent();
     }
 
     function reconcile() {
-      const distance = distanceToBottom();
-      if (following && distance <= bottomTolerance) {
+      const realContentDistance = realContentDistanceToBottom();
+      if (following || realContentDistance <= bottomTolerance) {
         visible = false;
-      } else if (!following && distance >= revealThreshold) {
+      } else if (!visible && realContentDistance >= revealThreshold) {
         visible = true;
       }
       updateButton();
@@ -136,14 +287,18 @@
       frameId = requestFrame(() => {
         frameId = null;
         if (!following) return;
-        container.scrollTop = maxScrollTop();
-        preservedScrollTop = Number(container.scrollTop || 0);
+        if (readingAnchor) reconcileReadingAnchor(false);
+        const target = readingAnchor?.remainingReserve > 0
+          ? Number(readingAnchor.targetScrollTop || 0)
+          : maxScrollTop();
+        writeScrollTop(target);
         reconcile();
       });
     }
 
     function resetForSession(nextSessionId) {
       cancelScheduledFrame();
+      clearReadingAnchor();
       sessionId = String(nextSessionId || "");
       following = true;
       visible = false;
@@ -151,6 +306,8 @@
       running = false;
       awaitingUserScroll = false;
       preservedScrollTop = Number(container?.scrollTop || 0);
+      lastObservedScrollTop = preservedScrollTop;
+      programmaticScrollTarget = null;
       clearTouchIntent();
       updateButton();
     }
@@ -163,50 +320,90 @@
     }
 
     function onUserScroll() {
+      const currentScrollTop = Number(container?.scrollTop || 0);
+      const hadProgrammaticScrollTarget = programmaticScrollTarget != null;
+      if (
+        hadProgrammaticScrollTarget
+        && Math.abs(currentScrollTop - programmaticScrollTarget) <= bottomTolerance
+      ) {
+        programmaticScrollTarget = null;
+        lastObservedScrollTop = currentScrollTop;
+        preservedScrollTop = currentScrollTop;
+        reconcile();
+        return;
+      }
+      if (
+        hadProgrammaticScrollTarget
+        && readingAnchor
+        && currentScrollTop < programmaticScrollTarget - bottomTolerance
+      ) {
+        lastObservedScrollTop = Number(programmaticScrollTarget);
+      }
+      programmaticScrollTarget = null;
+      const delta = currentScrollTop - lastObservedScrollTop;
+      const userScrollWasAwaited = awaitingUserScroll;
       awaitingUserScroll = false;
+      if (
+        readingAnchor
+        && !hadProgrammaticScrollTarget
+        && delta < -bottomTolerance
+      ) {
+        following = false;
+        cancelScheduledFrame();
+        consumeAnchorReserveForUpwardScroll(-delta);
+      } else if (readingAnchor && !following && delta > bottomTolerance) {
+        releaseReadingAnchorForDownwardIntent();
+      }
       const distance = distanceToBottom();
       preservedScrollTop = Number(container?.scrollTop || 0);
+      lastObservedScrollTop = preservedScrollTop;
       if (distance <= bottomTolerance) {
         following = true;
-        visible = false;
         scheduleFollow();
       } else {
         following = false;
         cancelScheduledFrame();
-        if (distance >= revealThreshold) visible = true;
       }
-      updateButton();
+      reconcile();
     }
 
     function onContentChanged(ownerSessionId = sessionId) {
       ensureSession(ownerSessionId);
+      if (readingAnchor) {
+        reconcileReadingAnchor(false);
+        captureAnchorLayoutAdjustment();
+      }
       if (following) scheduleFollow();
-      else if (awaitingUserScroll) reconcile();
+      else if (awaitingUserScroll || readingAnchor) reconcile();
       else {
-        container.scrollTop = Math.min(preservedScrollTop, maxScrollTop());
+        writeScrollTop(Math.min(preservedScrollTop, maxScrollTop()));
         reconcile();
       }
     }
 
     function onViewportChanged(ownerSessionId = sessionId) {
       if (String(ownerSessionId || "") !== sessionId) return;
+      if (readingAnchor) {
+        reconcileReadingAnchor(false);
+        captureAnchorLayoutAdjustment();
+      }
       if (following) scheduleFollow();
-      else if (awaitingUserScroll) reconcile();
+      else if (awaitingUserScroll || readingAnchor) reconcile();
       else {
-        container.scrollTop = Math.min(preservedScrollTop, maxScrollTop());
+        writeScrollTop(Math.min(preservedScrollTop, maxScrollTop()));
         reconcile();
       }
     }
 
     function forceToLatest(nextSessionId = sessionId) {
       ensureSession(nextSessionId);
+      clearReadingAnchor();
       following = true;
       awaitingUserScroll = false;
       visible = false;
       updateButton();
       if (container) {
-        container.scrollTop = maxScrollTop();
-        preservedScrollTop = Number(container.scrollTop || 0);
+        writeScrollTop(maxScrollTop());
       }
       scheduleFollow();
     }
@@ -254,9 +451,11 @@
 
     function disconnect() {
       awaitingUserScroll = false;
+      clearReadingAnchor();
       if (!connected) return;
       connected = false;
       cancelScheduledFrame();
+      programmaticScrollTarget = null;
       clearTouchIntent();
       container?.removeEventListener?.("scroll", onUserScroll, passiveListenerOptions);
       container?.removeEventListener?.("wheel", onWheelIntent, passiveListenerOptions);
@@ -277,13 +476,16 @@
         suppressed,
         running,
         awaitingUserScroll,
+        readingAnchor: readingAnchor ? Object.freeze({ ...readingAnchor }) : null,
         framePending: frameId != null,
         distance: distanceToBottom(),
+        realContentDistance: realContentDistanceToBottom(),
       });
     }
 
     return Object.freeze({
       connect,
+      beginReadingAnchor,
       disconnect,
       forceToLatest,
       jumpToLatest,
