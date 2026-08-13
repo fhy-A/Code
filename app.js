@@ -33,7 +33,11 @@ const {
   createMarkdownFeature,
   resolveSyntaxPatterns: _resolveSyntaxPatterns,
 } = window.Code.ui.markdown;
-const { createMessageScrollController, createMessagesFeature } = window.Code.ui.messages;
+const {
+  createLongTextDisplayController,
+  createMessageScrollController,
+  createMessagesFeature,
+} = window.Code.ui.messages;
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
 const {
@@ -162,6 +166,7 @@ function upgradeStaticIcons() {
 
 const state = createAppState(localStorage);
 let messageScrollController = null;
+let longTextDisplayController = null;
 const {
   ensureSessionRun,
   getSessionRunState,
@@ -657,6 +662,8 @@ const els = {
 
   prompt: document.getElementById("prompt"),
 
+  composerInputToggle: document.getElementById("composerInputToggle"),
+
   chatForm: document.getElementById("chatForm"),
 
   sendBtn: document.getElementById("sendBtn"),
@@ -952,6 +959,18 @@ messageScrollController = createMessageScrollController({
 });
 messageScrollController.connect();
 messageScrollController.setSession(state.sessionId);
+longTextDisplayController = createLongTextDisplayController({
+  root: els.messageList,
+  textarea: els.prompt,
+  composerToggle: els.composerInputToggle,
+  sessionId: state.sessionId,
+  getLabel: (key) => t(key),
+  onLayoutChange: () => {
+    syncComposerSafeArea();
+    messageScrollController?.onContentChanged(state.sessionId);
+  },
+});
+longTextDisplayController.connect();
 
 const panelsFeature = createPanelsFeature({
   elements: els,
@@ -2638,6 +2657,7 @@ function playWelcomeMotion(root) {
 function renderMessages() {
 
   messageScrollController?.setSession(state.sessionId);
+  longTextDisplayController?.setSession(state.sessionId);
   renderUserInputPanel();
   renderAuthorizationPanel();
 
@@ -2691,6 +2711,7 @@ function renderMessages() {
 
     applyI18n(); // translate dynamically rendered welcome HTML
     messageScrollController?.setRunning(isSessionStreaming(state.sessionId), state.sessionId);
+    longTextDisplayController?.syncUserMessages(state.sessionId);
     messageScrollController?.onContentChanged(state.sessionId);
     return;
 
@@ -2736,6 +2757,7 @@ function renderMessages() {
     renderToolLog();
     updateStatsPanel();
     renderTimeline();
+    longTextDisplayController?.syncUserMessages(state.sessionId);
     messageScrollController?.onContentChanged(state.sessionId);
     return;
   }
@@ -2757,6 +2779,7 @@ function renderMessages() {
   renderToolLog();
   updateStatsPanel();
   renderTimeline();
+  longTextDisplayController?.syncUserMessages(state.sessionId);
   messageScrollController?.onContentChanged(state.sessionId);
   return;
 
@@ -4224,6 +4247,7 @@ function insertPromptText(text) {
   resolveAtImages();
 
   updateSendButtonState();
+  longTextDisplayController?.refreshComposer();
 
 }
 
@@ -10214,6 +10238,7 @@ els.prompt.addEventListener("input", () => {
   const lines = ta.value.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 60)), 0);
 
   ta.rows = Math.max(2, Math.min(lines, 5));
+  longTextDisplayController?.refreshComposer();
 
   // Slash suggestion
 
@@ -10818,6 +10843,7 @@ els.chatForm.addEventListener("submit", async (event) => {
   if (parallelTask === null && handleUiSlashCommand(text)) {
     els.prompt.value = "";
     els.prompt.rows = 2;
+    longTextDisplayController?.resetComposer();
     updateSendButtonState();
     return;
   }
@@ -10828,6 +10854,7 @@ els.chatForm.addEventListener("submit", async (event) => {
     const taskText = parallelTask !== null ? parallelTask : text;
     els.prompt.value = "";
     els.prompt.rows = 2;
+    longTextDisplayController?.resetComposer();
     clearAttachedImages();
     renderImageThumbs();
     updateSendButtonState();
@@ -10853,6 +10880,7 @@ els.chatForm.addEventListener("submit", async (event) => {
   els.prompt.value = "";
 
   els.prompt.rows = 2;
+  longTextDisplayController?.resetComposer();
 
   updateSendButtonState();
 

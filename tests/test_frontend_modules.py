@@ -11788,6 +11788,324 @@ class ComposerThemeAndFileDragTests(unittest.TestCase):
         self.assertIn("queueImageFile(file);", handler_source)
 
 
+class LongTextDisplayTests(unittest.TestCase):
+    def test_long_text_display_uses_real_overflow_and_page_local_state(self):
+        script = r"""
+global.window = global;
+global.Code = {ui: {}};
+global.innerHeight = 400;
+const windowListeners = new Map();
+global.addEventListener = (type, handler) => windowListeners.set(type, handler);
+global.removeEventListener = (type, handler) => {
+  if (windowListeners.get(type) === handler) windowListeners.delete(type);
+};
+require("./src/ui/messages.js");
+const {createLongTextDisplayController} = window.Code.ui.messages;
+
+function classList(initial = []) {
+  const values = new Set(initial);
+  return {
+    add: (...names) => names.forEach((name) => values.add(name)),
+    remove: (...names) => names.forEach((name) => values.delete(name)),
+    toggle(name, force) {
+      const next = force === undefined ? !values.has(name) : Boolean(force);
+      if (next) values.add(name); else values.delete(name);
+      return next;
+    },
+    contains: (name) => values.has(name),
+    values: () => [...values],
+  };
+}
+
+function eventTarget(extra = {}) {
+  const listeners = new Map();
+  return Object.assign({
+    hidden: false,
+    dataset: {},
+    attributes: {},
+    classList: classList(),
+    addEventListener(type, handler) { listeners.set(type, handler); },
+    removeEventListener(type, handler) {
+      if (listeners.get(type) === handler) listeners.delete(type);
+    },
+    emit(type, event = {}) { listeners.get(type)?.(event); },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    listenerTypes: () => [...listeners.keys()],
+  }, extra);
+}
+
+function messageFixture(key, scrollHeight, collapsedHeight) {
+  const button = eventTarget({dataset: {userMessageToggle: key}});
+  button.closest = (selector) => selector === "[data-user-message-toggle]" ? button : null;
+  const wrapper = {
+    dataset: {userMessageText: key},
+    classList: classList(["is-collapsed"]),
+    scrollHeight,
+    get clientHeight() {
+      return this.classList.contains("is-collapsed") ? Math.min(scrollHeight, collapsedHeight) : scrollHeight;
+    },
+    parentElement: {querySelector: () => button},
+  };
+  return {wrapper, button};
+}
+
+const longMessage = messageFixture("7", 260, 140);
+const shortMessage = messageFixture("8", 100, 140);
+const root = eventTarget({
+  contains: () => true,
+  querySelectorAll: (selector) => selector === "[data-user-message-text]"
+    ? [longMessage.wrapper, shortMessage.wrapper]
+    : [],
+});
+const style = {
+  height: "",
+  removeProperty(name) { if (name === "height") this.height = ""; },
+};
+let focusCount = 0;
+const textarea = eventTarget({
+  value: "FULL DRAFT CONTENT",
+  scrollHeight: 600,
+  scrollTop: 17,
+  selectionStart: 5,
+  selectionEnd: 11,
+  selectionDirection: "forward",
+  style,
+  focus(options) { focusCount += 1; this.focusOptions = options; },
+  setSelectionRange(start, end, direction) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+    this.selectionDirection = direction;
+  },
+});
+const composerToggle = eventTarget();
+let layoutChanges = 0;
+const controller = createLongTextDisplayController({
+  root,
+  textarea,
+  composerToggle,
+  sessionId: "session-a",
+  getLabel: (key) => `label:${key}`,
+  getComputedStyle: () => ({
+    lineHeight: "20",
+    paddingTop: "10",
+    paddingBottom: "10",
+    getPropertyValue: (name) => name === "--composer-compact-max-height" ? "120px" : "",
+  }),
+  getViewportHeight: () => 400,
+  onLayoutChange: () => { layoutChanges += 1; },
+});
+
+const firstConnect = controller.connect();
+const initial = {
+  composerHidden: composerToggle.hidden,
+  longHidden: longMessage.button.hidden,
+  shortHidden: shortMessage.button.hidden,
+  longExpanded: longMessage.button.attributes["aria-expanded"],
+};
+let prevented = false;
+composerToggle.emit("mousedown", {preventDefault: () => { prevented = true; }});
+composerToggle.emit("click");
+const composerExpanded = {
+  value: textarea.value,
+  height: textarea.style.height,
+  selection: [textarea.selectionStart, textarea.selectionEnd, textarea.selectionDirection],
+  scrollTop: textarea.scrollTop,
+  focused: focusCount,
+  preventScroll: textarea.focusOptions?.preventScroll,
+  prevented,
+  expanded: controller.snapshot().composerExpanded,
+};
+composerToggle.emit("mousedown", {preventDefault() {}});
+composerToggle.emit("click");
+const composerCollapsed = {
+  value: textarea.value,
+  height: textarea.style.height,
+  expanded: controller.snapshot().composerExpanded,
+  focused: focusCount,
+};
+
+root.emit("click", {target: longMessage.button});
+const expandedMessage = {
+  expanded: longMessage.wrapper.classList.contains("is-expanded"),
+  aria: longMessage.button.attributes["aria-expanded"],
+  state: controller.snapshot().expandedUserMessages,
+};
+controller.syncUserMessages("session-a");
+const redrawPreserved = longMessage.wrapper.classList.contains("is-expanded");
+controller.setSession("session-b");
+controller.syncUserMessages("session-b");
+const sessionReset = {
+  collapsed: longMessage.wrapper.classList.contains("is-collapsed"),
+  aria: longMessage.button.attributes["aria-expanded"],
+  state: controller.snapshot().expandedUserMessages,
+};
+
+textarea.scrollHeight = 100;
+textarea.emit("input");
+const compactDraft = {
+  hidden: composerToggle.hidden,
+  expanded: controller.snapshot().composerExpanded,
+};
+controller.disconnect();
+
+process.stdout.write(JSON.stringify({
+  firstConnect,
+  initial,
+  composerExpanded,
+  composerCollapsed,
+  expandedMessage,
+  redrawPreserved,
+  sessionReset,
+  compactDraft,
+  layoutChanges,
+  rootListeners: root.listenerTypes(),
+  textareaListeners: textarea.listenerTypes(),
+  toggleListeners: composerToggle.listenerTypes(),
+  windowListeners: [...windowListeners.keys()],
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["firstConnect"])
+        self.assertEqual(data["initial"], {
+            "composerHidden": False,
+            "longHidden": False,
+            "shortHidden": True,
+            "longExpanded": "false",
+        })
+        self.assertEqual(data["composerExpanded"]["value"], "FULL DRAFT CONTENT")
+        self.assertEqual(data["composerExpanded"]["height"], "180px")
+        self.assertEqual(data["composerExpanded"]["selection"], [5, 11, "forward"])
+        self.assertEqual(data["composerExpanded"]["scrollTop"], 17)
+        self.assertTrue(data["composerExpanded"]["preventScroll"])
+        self.assertTrue(data["composerExpanded"]["prevented"])
+        self.assertTrue(data["composerExpanded"]["expanded"])
+        self.assertEqual(data["composerCollapsed"], {
+            "value": "FULL DRAFT CONTENT",
+            "height": "",
+            "expanded": False,
+            "focused": 2,
+        })
+        self.assertEqual(data["expandedMessage"], {
+            "expanded": True,
+            "aria": "true",
+            "state": ["7"],
+        })
+        self.assertTrue(data["redrawPreserved"])
+        self.assertEqual(data["sessionReset"], {
+            "collapsed": True,
+            "aria": "false",
+            "state": [],
+        })
+        self.assertEqual(data["compactDraft"], {"hidden": True, "expanded": False})
+        self.assertEqual(data["layoutChanges"], 3)
+        self.assertEqual(data["rootListeners"], [])
+        self.assertEqual(data["textareaListeners"], [])
+        self.assertEqual(data["toggleListeners"], [])
+        self.assertEqual(data["windowListeners"], [])
+
+    def test_user_projection_keeps_full_markdown_copy_and_attachments(self):
+        script = r"""
+global.window = global;
+global.Code = {ui: {}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;");
+const feature = createMessagesFeature({
+  escapeHtml,
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  t: (key) => key,
+});
+const full = "Line one\n\n```js\nconst full = true;\n```\nFinal line";
+const plain = feature.renderUserProjection({role: "user", content: full}, 4);
+const withImage = feature.renderUserProjection({
+  role: "user",
+  content: [{type: "text", text: full}, {type: "image", source: "ignored"}],
+  _images: [{path: "attachments/full.png", name: "full.png", mime: "image/png"}],
+}, 5);
+const imageOnly = feature.renderUserProjection({
+  role: "user",
+  content: "",
+  _images: [{path: "attachments/only.png", name: "only.png", mime: "image/png"}],
+}, 6);
+process.stdout.write(JSON.stringify({full, plain, withImage, imageOnly}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        escaped_full = data["full"].replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+        for html in (data["plain"], data["withImage"]):
+            self.assertIn(escaped_full, html)
+            self.assertIn("data-user-message-text", html)
+            self.assertIn("data-user-message-toggle", html)
+            self.assertIn(f'data-copy-text="{escaped_full}"', html)
+            self.assertIn('aria-expanded="false"', html)
+            self.assertIn('data-i18n-aria-label="expandUserMessage"', html)
+        self.assertIn("attachments%2Ffull.png", data["withImage"])
+        self.assertLess(
+            data["withImage"].index("attachments%2Ffull.png"),
+            data["withImage"].index("data-user-message-text"),
+        )
+        self.assertIn("attachments%2Fonly.png", data["imageOnly"])
+        self.assertNotIn("data-user-message-text", data["imageOnly"])
+        self.assertNotIn("data-user-message-toggle", data["imageOnly"])
+
+    def test_long_text_contract_preserves_full_dispatch_data_and_accessibility(self):
+        controller_start = MESSAGES_SOURCE.index("function createLongTextDisplayController")
+        controller_end = MESSAGES_SOURCE.index("function tokenCount", controller_start)
+        controller_source = MESSAGES_SOURCE[controller_start:controller_end]
+        self.assertNotIn("textarea.value =", controller_source)
+        self.assertNotIn(".slice(", controller_source)
+        self.assertIn("textarea.selectionStart", controller_source)
+        self.assertIn("textarea.setSelectionRange", controller_source)
+        self.assertIn("expandedUserMessages.clear();", controller_source)
+        self.assertIn("onLayoutChange();", controller_source)
+
+        submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
+        submit_end = APP_SOURCE.index('els.newChat.addEventListener("click"', submit_start)
+        submit_source = APP_SOURCE[submit_start:submit_end]
+        self.assertIn("let text = els.prompt.value.trim();", submit_source)
+        self.assertIn("const taskText = parallelTask !== null ? parallelTask : text;", submit_source)
+        self.assertIn("dispatch(sessionId, taskText, imgs)", submit_source)
+        self.assertIn("dispatchBackgroundSubAgent(sessionId, taskText, imgs)", submit_source)
+        self.assertIn("await sendMessage(text, {", submit_source)
+
+        for key in (
+            "expandComposerInput",
+            "collapseComposerInput",
+            "expandUserMessage",
+            "collapseUserMessage",
+        ):
+            self.assertIn(f'{key}: "', I18N_SOURCE)
+        self.assertIn('aria-controls="prompt"', INDEX_SOURCE)
+        self.assertIn('data-i18n-aria-label="expandComposerInput"', INDEX_SOURCE)
+        self.assertIn("max-height: min(45vh, 420px);", STYLE_SOURCE)
+        self.assertIn("--composer-compact-max-height: 154px;", STYLE_SOURCE)
+        self.assertIn("--user-message-collapsed-lines: 8;", STYLE_SOURCE)
+        self.assertIn("--user-message-collapsed-lines: 6;", STYLE_SOURCE)
+        self.assertIn("--user-message-collapsed-height: 14.08em;", STYLE_SOURCE)
+        self.assertIn("--user-message-collapsed-height: 10.56em;", STYLE_SOURCE)
+        self.assertIn(".user-message-text.is-overflowing.is-collapsed::after", STYLE_SOURCE)
+        self.assertNotIn("transition: max-height", STYLE_SOURCE)
+
+
 class MessageScrollControllerTests(unittest.TestCase):
     def test_scroll_controller_preserves_position_and_coalesces_following_updates(self):
         script = r"""
@@ -12474,7 +12792,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('focusTarget.focus({ preventScroll: true })', MESSAGES_SOURCE)
         self.assertIn('root.addEventListener("toggle"', MESSAGES_SOURCE)
         controller_start = MESSAGES_SOURCE.index("function createMessageScrollController(options = {})")
-        controller_end = MESSAGES_SOURCE.index("function tokenCount", controller_start)
+        controller_end = MESSAGES_SOURCE.index("function createLongTextDisplayController", controller_start)
         controller_source = MESSAGES_SOURCE[controller_start:controller_end]
         for expected in (
             "function relinquishFollowingForUpwardIntent()",

@@ -193,6 +193,9 @@
           <form id="chatForm" class="composer">
             <section id="userInputPanel" class="user-input-panel hidden" aria-live="assertive"></section>
             <textarea id="prompt" rows="2" data-i18n="inputPlaceholder" placeholder="描述需求、粘贴代码，或输入 / 调用命令"></textarea>
+            <button id="composerInputToggle" class="composer-input-toggle" type="button" hidden
+              data-i18n="expandComposerInput" data-i18n-title="expandComposerInput" data-i18n-aria-label="expandComposerInput"
+              aria-controls="prompt" aria-expanded="false" aria-label="展开输入" title="展开输入">展开输入</button>
             <div class="composer-bar">
               <div class="bar-left">
                 <button id="attachFile" class="bar-btn" type="button" title="选择项目文件并插入路径" data-i18n-title="addFile">+</button>

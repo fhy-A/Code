@@ -297,6 +297,262 @@
     });
   }
 
+  function createLongTextDisplayController(options = {}) {
+    const root = options.root || null;
+    const textarea = options.textarea || null;
+    const composerToggle = options.composerToggle || null;
+    const getLabel = options.getLabel || ((key) => key);
+    const onLayoutChange = options.onLayoutChange || (() => {});
+    const getStyle = options.getComputedStyle
+      || global.getComputedStyle?.bind(global)
+      || (() => ({}));
+    const getViewportHeight = options.getViewportHeight
+      || (() => Number(global.innerHeight || 0));
+    const overflowTolerance = Number(options.overflowTolerance ?? 1);
+    const compactLines = Number(options.compactLines ?? 5);
+    const expandedComposerMax = Number(options.expandedComposerMax ?? 420);
+    const expandedComposerViewportRatio = Number(options.expandedComposerViewportRatio ?? 0.45);
+    let sessionId = String(options.sessionId || "");
+    let composerExpanded = false;
+    let connected = false;
+    let pendingComposerSelection = null;
+    const expandedUserMessages = new Set();
+
+    function numberStyle(style, property) {
+      const value = Number.parseFloat(style?.[property] || 0);
+      return Number.isFinite(value) ? value : 0;
+    }
+
+    function compactComposerHeight() {
+      if (!textarea) return 0;
+      const style = getStyle(textarea) || {};
+      const lineHeight = numberStyle(style, "lineHeight") || 24;
+      const padding = numberStyle(style, "paddingTop") + numberStyle(style, "paddingBottom");
+      const cssThreshold = Number.parseFloat(
+        style.getPropertyValue?.("--composer-compact-max-height") || "",
+      );
+      return Number.isFinite(cssThreshold) && cssThreshold > 0
+        ? cssThreshold
+        : lineHeight * compactLines + padding;
+    }
+
+    function composerHasCompactOverflow() {
+      if (!textarea) return false;
+      return Number(textarea.scrollHeight || 0) > compactComposerHeight() + overflowTolerance;
+    }
+
+    function setTextareaHeight(value) {
+      if (!textarea?.style) return;
+      if (!value && typeof textarea.style.removeProperty === "function") {
+        textarea.style.removeProperty("height");
+        return;
+      }
+      textarea.style.height = value || "";
+    }
+
+    function updateComposerToggle(overflowing) {
+      if (!composerToggle) return;
+      const labelKey = composerExpanded ? "collapseComposerInput" : "expandComposerInput";
+      const label = getLabel(labelKey);
+      composerToggle.hidden = !overflowing;
+      composerToggle.dataset.i18n = labelKey;
+      composerToggle.dataset.i18nTitle = labelKey;
+      composerToggle.dataset.i18nAriaLabel = labelKey;
+      composerToggle.textContent = label;
+      composerToggle.title = label;
+      composerToggle.setAttribute("aria-expanded", String(composerExpanded));
+      composerToggle.setAttribute("aria-label", label);
+    }
+
+    function refreshComposer(refreshOptions = {}) {
+      if (!textarea) return false;
+      if (refreshOptions.resetExpanded) composerExpanded = false;
+      const overflowing = composerHasCompactOverflow();
+      if (!overflowing) composerExpanded = false;
+      textarea.classList.toggle("is-expanded", composerExpanded);
+      if (composerExpanded) {
+        setTextareaHeight("auto");
+        const viewportLimit = Math.max(0, getViewportHeight() * expandedComposerViewportRatio);
+        const maxHeight = viewportLimit > 0
+          ? Math.min(expandedComposerMax, viewportLimit)
+          : expandedComposerMax;
+        setTextareaHeight(`${Math.min(Number(textarea.scrollHeight || 0), maxHeight)}px`);
+      } else {
+        setTextareaHeight("");
+      }
+      updateComposerToggle(overflowing);
+      return overflowing;
+    }
+
+    function captureComposerSelection() {
+      if (!textarea) return null;
+      return {
+        start: Number(textarea.selectionStart || 0),
+        end: Number(textarea.selectionEnd || 0),
+        direction: textarea.selectionDirection || "none",
+        scrollTop: Number(textarea.scrollTop || 0),
+      };
+    }
+
+    function restoreComposerSelection(selection) {
+      if (!textarea || !selection) return;
+      textarea.focus?.({ preventScroll: true });
+      textarea.setSelectionRange?.(selection.start, selection.end, selection.direction);
+      textarea.scrollTop = selection.scrollTop;
+    }
+
+    function onComposerMouseDown(event) {
+      pendingComposerSelection = captureComposerSelection();
+      event?.preventDefault?.();
+    }
+
+    function toggleComposer() {
+      if (!textarea || composerToggle?.hidden) return false;
+      const selection = pendingComposerSelection || captureComposerSelection();
+      pendingComposerSelection = null;
+      composerExpanded = !composerExpanded;
+      refreshComposer();
+      restoreComposerSelection(selection);
+      onLayoutChange();
+      return true;
+    }
+
+    function messageParts(wrapper) {
+      const key = String(wrapper?.dataset?.userMessageText || "");
+      const button = wrapper?.parentElement?.querySelector?.(`[data-user-message-toggle="${key}"]`)
+        || null;
+      return { key, button };
+    }
+
+    function updateUserMessage(wrapper) {
+      if (!wrapper) return false;
+      const { key, button } = messageParts(wrapper);
+      if (!key || !button) return false;
+      const previousOverflow = wrapper.classList.contains("is-overflowing");
+      const previousExpanded = wrapper.classList.contains("is-expanded");
+      wrapper.classList.add("is-collapsed");
+      wrapper.classList.remove("is-expanded");
+      const overflowing = Number(wrapper.scrollHeight || 0)
+        > Number(wrapper.clientHeight || 0) + overflowTolerance;
+      if (!overflowing) expandedUserMessages.delete(key);
+      const expanded = overflowing && expandedUserMessages.has(key);
+      wrapper.classList.toggle("is-overflowing", overflowing);
+      wrapper.classList.toggle("is-collapsed", !expanded);
+      wrapper.classList.toggle("is-expanded", expanded);
+      const labelKey = expanded ? "collapseUserMessage" : "expandUserMessage";
+      const label = getLabel(labelKey);
+      button.hidden = !overflowing;
+      button.dataset.i18n = labelKey;
+      button.dataset.i18nTitle = labelKey;
+      button.dataset.i18nAriaLabel = labelKey;
+      button.textContent = label;
+      button.title = label;
+      button.setAttribute("aria-expanded", String(expanded));
+      button.setAttribute("aria-label", label);
+      return previousOverflow !== overflowing || previousExpanded !== expanded;
+    }
+
+    function syncUserMessages(nextSessionId = sessionId) {
+      setSession(nextSessionId);
+      if (!root?.querySelectorAll) return false;
+      let changed = false;
+      root.querySelectorAll("[data-user-message-text]").forEach((wrapper) => {
+        changed = updateUserMessage(wrapper) || changed;
+      });
+      return changed;
+    }
+
+    function findUserMessage(key) {
+      if (!root?.querySelectorAll) return null;
+      return Array.from(root.querySelectorAll("[data-user-message-text]"))
+        .find((wrapper) => String(wrapper.dataset?.userMessageText || "") === key) || null;
+    }
+
+    function toggleUserMessage(key) {
+      const normalized = String(key || "");
+      const wrapper = findUserMessage(normalized);
+      if (!wrapper?.classList.contains("is-overflowing")) return false;
+      if (expandedUserMessages.has(normalized)) expandedUserMessages.delete(normalized);
+      else expandedUserMessages.add(normalized);
+      updateUserMessage(wrapper);
+      onLayoutChange();
+      return true;
+    }
+
+    function onRootClick(event) {
+      const button = event.target?.closest?.("[data-user-message-toggle]");
+      if (!button || (root?.contains && !root.contains(button))) return;
+      toggleUserMessage(button.dataset.userMessageToggle || "");
+    }
+
+    function setSession(nextSessionId) {
+      const next = String(nextSessionId || "");
+      if (next === sessionId) return false;
+      sessionId = next;
+      expandedUserMessages.clear();
+      composerExpanded = false;
+      refreshComposer({ resetExpanded: true });
+      return true;
+    }
+
+    function resetComposer() {
+      composerExpanded = false;
+      pendingComposerSelection = null;
+      refreshComposer({ resetExpanded: true });
+    }
+
+    function onResize() {
+      refreshComposer();
+      syncUserMessages(sessionId);
+      onLayoutChange();
+    }
+
+    function connect() {
+      if (connected) return false;
+      connected = true;
+      root?.addEventListener?.("click", onRootClick);
+      textarea?.addEventListener?.("input", refreshComposer);
+      composerToggle?.addEventListener?.("mousedown", onComposerMouseDown);
+      composerToggle?.addEventListener?.("click", toggleComposer);
+      global.addEventListener?.("resize", onResize);
+      refreshComposer();
+      syncUserMessages(sessionId);
+      return true;
+    }
+
+    function disconnect() {
+      if (!connected) return;
+      connected = false;
+      root?.removeEventListener?.("click", onRootClick);
+      textarea?.removeEventListener?.("input", refreshComposer);
+      composerToggle?.removeEventListener?.("mousedown", onComposerMouseDown);
+      composerToggle?.removeEventListener?.("click", toggleComposer);
+      global.removeEventListener?.("resize", onResize);
+      pendingComposerSelection = null;
+      expandedUserMessages.clear();
+    }
+
+    function snapshot() {
+      return Object.freeze({
+        sessionId,
+        composerExpanded,
+        expandedUserMessages: Object.freeze([...expandedUserMessages]),
+      });
+    }
+
+    return Object.freeze({
+      connect,
+      disconnect,
+      refreshComposer,
+      resetComposer,
+      setSession,
+      snapshot,
+      syncUserMessages,
+      toggleComposer,
+      toggleUserMessage,
+    });
+  }
+
   function tokenCount(value) {
     const count = Number(value);
     return Number.isFinite(count) ? Math.max(0, count) : 0;
@@ -545,6 +801,13 @@
       return `<button class="msg-copy-btn" type="button" title="${t("copy")}" aria-label="${t("copy")}" data-copy-text="${escapeHtml(text)}">${COPY_SVG}</button>`;
     }
 
+    function renderUserTextProjection(text, index) {
+      if (!text) return "";
+      const key = String(index);
+      const contentId = `user-message-text-${key}`;
+      return `<div class="user-message-text is-collapsed" id="${contentId}" data-user-message-text="${key}"><div class="bubble">${renderMarkdown(text)}</div></div><button class="user-message-toggle" type="button" hidden data-user-message-toggle="${key}" data-i18n="expandUserMessage" data-i18n-title="expandUserMessage" data-i18n-aria-label="expandUserMessage" aria-controls="${contentId}" aria-expanded="false" aria-label="${t("expandUserMessage")}" title="${t("expandUserMessage")}">${t("expandUserMessage")}</button>`;
+    }
+
     function formatMessageTime(isoString) {
       if (!isoString) return "";
       const date = new Date(isoString);
@@ -735,7 +998,7 @@
       if (!text && images.length === 0) return "";
       if (images.length) {
         const imageGroup = `<div class="bubble bubble-img msg-image-group">${imageItems}</div>`;
-        const textBubble = text ? `<div class="bubble">${renderMarkdown(text)}</div>` : "";
+        const textBubble = renderUserTextProjection(text, index);
         const batchMeta = text
           ? `<div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div>`
           : dispatchStatus
@@ -744,7 +1007,7 @@
         return `<article class="msg user msg-image-batch${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
       }
       const textArticle = text
-        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area"><div class="bubble">${renderMarkdown(text)}</div><div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
+        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
         : "";
       return textArticle;
     }
@@ -1428,6 +1691,7 @@
   }
 
   Code.ui.messages = Object.freeze({
+    createLongTextDisplayController,
     createMessageScrollController,
     createMessagesFeature,
     hasUsageStats,
