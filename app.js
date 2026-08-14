@@ -152,7 +152,6 @@ function upgradeStaticIcons() {
   iconOnly("refreshFiles", "refresh");
   iconLabel("settingsMenuBtn", "settings");
   iconOnly("toggleSidebar", "panel");
-  iconLabel("toolLogToggle", "tools");
   iconLabel("togglePreview", "preview");
   iconOnly("attachFile", "plus");
   iconOnly("refreshPreview", "refresh");
@@ -242,7 +241,6 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (!state.sessionId) els.sessionTitle.value = t("sessionTitleDefault");
     if (typeof renderSessions === "function") renderSessions();
     if (typeof renderMessages === "function") renderMessages();
-    if (typeof renderToolLog === "function") renderToolLog();
     if (typeof renderProjectEditFolders === "function" && editingProjectId) {
       renderProjectEditFolders();
     }
@@ -758,15 +756,7 @@ const els = {
 
   themeToggle: document.getElementById("themeToggle"),
 
-  toolLogToggle: document.getElementById("toolLogToggle"),
-
   statsPanel: document.getElementById("statsPanel"),
-
-  toolLogPanel: document.getElementById("toolLogPanel"),
-
-  toolLogSummary: document.getElementById("toolLogSummary"),
-
-  toolLogList: document.getElementById("toolLogList"),
 
   systemPromptText: document.getElementById("systemPromptText"),
 
@@ -1011,7 +1001,6 @@ const panelsFeature = createPanelsFeature({
   getSystemPrompt,
   copyText,
   onRenderBranchTree: () => branchesFeature?.renderBranchTree(),
-  onRenderToolLog: () => renderToolLog(),
   onBranchPanelOpenChanged: (open) => {
     state.branchPanelOpen = open;
   },
@@ -2810,8 +2799,6 @@ function renderMessages() {
 
     updateStatsPanel();
 
-    renderToolLog();
-
     applyI18n(); // translate dynamically rendered welcome HTML
     messageScrollController?.setRunning(isSessionStreaming(state.sessionId), state.sessionId);
     longTextDisplayController?.syncUserMessages(state.sessionId);
@@ -2875,7 +2862,6 @@ function renderMessages() {
   if (state._lastRenderedHtml === renderKey) {
     mountActiveRunBanner();
     syncActiveRunBanner(state.sessionId);
-    renderToolLog();
     updateStatsPanel();
     renderTimeline();
     longTextDisplayController?.syncUserMessages(state.sessionId);
@@ -2900,7 +2886,6 @@ function renderMessages() {
   bindCopyButtons();
   bindMessageActions();
   bindClickablePaths();
-  renderToolLog();
   updateStatsPanel();
   renderTimeline();
   longTextDisplayController?.syncUserMessages(state.sessionId);
@@ -2931,87 +2916,6 @@ function isProcessMessage(msg) {
   return /^准备调用\s*\d*\s*个?工具/.test(content) || /^准备调用工具/.test(content);
 
 }
-
-
-function getToolLogDetail(msg) {
-  var meta = msg.meta || {};
-  var tool = meta.tool || {};
-  if (tool.path || meta.path) return tool.path || meta.path;
-  if (tool.query || tool.pattern) return tool.query || tool.pattern;
-  if (tool.command) return tool.command;
-  return (getMsgText(msg)).split("\n")[0] || "tool";
-}
-
-function renderToolLog() {
-
-  if (!els.toolLogList || !els.toolLogSummary) return;
-
-  const items = state.messages
-
-    .map((msg, index) => ({ msg, index }))
-
-    .filter(({ msg }) => msg.role === "tool-call" || msg.role === "tool-result");
-
-
-
-  if (items.length === 0) {
-
-    els.toolLogSummary.textContent = t("toolLogEmpty");
-
-    els.toolLogList.innerHTML = `<div class="muted-line">${t("toolLogHint")}</div>`;
-
-    return;
-
-  }
-
-
-
-  const callCount = items.filter(({ msg }) => msg.role === "tool-call").length;
-
-  const resultCount = items.filter(({ msg }) => msg.role === "tool-result").length;
-
-  const errorCount = items.filter(({ msg }) => (getMsgText(msg)).startsWith(t("toolExecFailed"))).length;
-
-  els.toolLogSummary.textContent = `${items.length} ${t("toolActions")}: ${callCount} ${t("toolCalls")}, ${resultCount} ${t("toolResults")}${errorCount ? `, ${errorCount} ${t("toolFailures")}` : ""}`;
-
-  els.toolLogList.innerHTML = items
-
-    .map(({ msg, index }, i) => {
-
-      const meta = msg.meta || {};
-
-      const action = meta.action || meta.tool?.action || "tool";
-
-      const isResult = msg.role === "tool-result";
-
-      const isError = isResult && (getMsgText(msg)).startsWith(t("toolExecFailed"));
-
-      const kind = isResult ? "result" : "call";
-
-      const detail = getToolLogDetail(msg);
-
-      const source = meta.native ? "native" : "text";
-
-      return `
-
-        <div class="tool-log-item ${kind} ${isError ? "error" : ""}">
-
-          <div class="tool-log-title">${escapeHtml(action)}</div>
-
-          <div class="tool-log-detail" title="${escapeHtml(detail)}">#${i + 1} ${escapeHtml(detail)}</div>
-
-          <span class="tool-log-pill">${isError ? "error" : kind} ${t("fmtToolLogSep")} ${source}</span>
-
-        </div>
-
-      `;
-
-    })
-
-    .join("");
-
-}
-
 
 
 function renderAssistantContent(content) {

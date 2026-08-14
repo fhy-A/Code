@@ -89,7 +89,6 @@
         <button id="toggleSidebar" class="tool-btn sidebar-icon-btn" type="button" title="收起/展开侧栏" data-i18n-title="toggleSidebar"></button>
 
 <button id="toggleBranches" class="tool-btn text-tool" type="button" data-i18n="branchesBtn" data-i18n-title="branchesBtnTip"><svg class="tool-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg> Branches</button>
-        <button id="toolLogToggle" class="tool-btn text-tool" type="button"><svg class="tool-icon" viewBox="0 0 1024 1024" width="14" height="14"><path d="M814.9 1009.1c-38.4 0-74.7-14.9-104.5-42.7l-258.1-256 76.8-76.8 12.8 12.8 29.9-29.9 46.9 46.9-46.9 46.9 196.3 196.3c23.5 23.5 64 23.5 89.6 0l53.3-53.3c25.6-25.6 25.6-64 0-89.6l-196.3-196.3-46.9 46.9-46.9-46.9 29.9-29.9-10.7-14.9 76.8-76.8 256 258.1c57.6 57.6 57.6 151.5 0 209.1l-53.3 53.3c-29.9 29.9-66.1 42.7-104.5 42.7z" fill="currentColor"/><path d="M328.5 490.7l-85.3-83.2-113.1-59.7L6.4 189.9 196.3 0l157.9 123.7 59.7 115.2 89.6 87.5-59.7 61.9-130.1-130.1 10.7-8.5-36.3-70.4-85.3-64-81.1 81.1 64 85.3 70.4 36.3 8.5-10.7 123.7 123.7z" fill="currentColor"/><path d="M179.2 1009.1c-29.9 0-57.6-10.7-81.1-34.1l-53.3-53.3c-44.8-44.8-44.8-117.3 0-162.1l452.3-452.3c-12.8-83.2 12.8-166.4 72.5-226.1C650.7 0 772.3-19.2 874.7 34.1l51.2 27.7-149.3 149.3 32 32 149.3-149.3 27.7 51.2c53.3 102.4 34.1 224-46.9 305.1-59.7 59.7-145.1 85.3-226.1 72.5L260.3 977.1c-21.3 21.3-51.2 32-81.1 32z m576-917.3c-44.8 0-89.6 17.1-123.7 51.2-44.8 44.8-61.9 108.8-44.8 168.5l6.4 23.5L106.7 821.3c-10.7 10.7-10.7 29.9 0 40.5l53.3 53.3c10.7 10.7 29.9 10.7 40.5 0l486.4-486.4 23.5 6.4c59.7 17.1 125.9-2.1 168.5-44.8 38.4-38.4 57.6-93.9 51.2-145.1L810.7 364.8 657.1 213.3l119.5-119.5c-6.4-2.1-14.9-2.1-21.3-2.1z" fill="currentColor"/></svg> Tools</button>
         <div class="toolbar-spacer"></div>
         <div class="session-transfer-actions" role="group" data-i18n-aria-label="sessionTransferActions" aria-label="会话导入与导出">
           <button id="importSessions" class="tool-btn transfer-icon-btn import-entry-btn" type="button"
@@ -149,14 +148,6 @@
           <div class="metric"><span data-i18n="cache">Cache</span><b id="tokenCache">0</b></div>
           <div class="metric" id="tokenCacheWriteRow" hidden><span data-i18n="cacheWrite">Cache write</span><b id="tokenCacheWrite">0</b></div>
           <div class="metric"><span data-i18n="context">Context</span><b id="tokenContext">0%（超 95% 自动压缩）</b></div>
-        </div>
-      </section>
-
-      <section class="top-panel tool-log-panel" id="toolLogPanel">
-        <div class="sys-col wide">
-          <h3 data-i18n="toolLog">Tool Log</h3>
-          <div id="toolLogSummary" class="tool-log-summary" data-i18n="toolLogEmpty">暂无工具动作</div>
-          <div id="toolLogList" class="tool-log-list"></div>
         </div>
       </section>
 

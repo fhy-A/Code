@@ -106,7 +106,6 @@
     const getDocument = options.getDocument || (() => global.document);
     const copyText = options.copyText || (async () => false);
     const onRenderBranchTree = options.onRenderBranchTree || (() => {});
-    const onRenderToolLog = options.onRenderToolLog || (() => {});
     const onBranchPanelOpenChanged = options.onBranchPanelOpenChanged || (() => {});
     let bound = false;
 
@@ -138,10 +137,8 @@
 
     function closeTopPanels() {
       elements.statsPanel?.classList.remove("open");
-      elements.toolLogPanel?.classList.remove("open");
       elements.branchPanel?.classList.remove("open");
       elements.usageStrip?.classList.remove("active");
-      elements.toolLogToggle?.classList.remove("active");
       elements.toggleBranches?.classList.remove("active");
       onBranchPanelOpenChanged(false);
     }
@@ -220,14 +217,6 @@
       if (open) onRenderBranchTree();
     }
 
-    function toggleToolLogPanel() {
-      const open = !elements.toolLogPanel.classList.contains("open");
-      closeTopPanels();
-      onRenderToolLog();
-      elements.toolLogPanel.classList.toggle("open", open);
-      elements.toolLogToggle.classList.toggle("active", open);
-    }
-
     function toggleStatsPanel() {
       const open = !elements.statsPanel.classList.contains("open");
       closeTopPanels();
@@ -236,10 +225,6 @@
     }
 
     function dismissPanelsForTarget(target) {
-      if (!target?.closest?.("#toolLogPanel") && !target?.closest?.("#toolLogToggle")) {
-        elements.toolLogPanel?.classList.remove("open");
-        elements.toolLogToggle?.classList.remove("active");
-      }
       if (!target?.closest?.("#statsPanel") && !target?.closest?.("#usageStrip")) {
         elements.statsPanel?.classList.remove("open");
         elements.usageStrip?.classList.remove("active");
@@ -263,7 +248,6 @@
       if (bound) return;
       bound = true;
       elements.toggleBranches?.addEventListener("click", toggleBranchPanel);
-      elements.toolLogToggle?.addEventListener("click", toggleToolLogPanel);
       elements.usageStrip?.addEventListener("click", toggleStatsPanel);
       elements.copySessionPath?.addEventListener("click", copySessionPath);
       getDocument()?.addEventListener("click", (event) => dismissPanelsForTarget(event.target));
@@ -278,7 +262,6 @@
       sessionFilePath,
       toggleBranchPanel,
       toggleStatsPanel,
-      toggleToolLogPanel,
       updateStatsPanel,
     });
   }

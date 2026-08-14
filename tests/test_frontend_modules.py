@@ -10253,6 +10253,38 @@ process.stdout.write(JSON.stringify({
 
     def test_panels_ui_owns_session_stats_fields_and_top_panel_interactions(self):
         self.assertIn("Code.ui.panels = Object.freeze", PANELS_SOURCE)
+        for removed_id in (
+            "toolLogToggle",
+            "toolLogPanel",
+            "toolLogSummary",
+            "toolLogList",
+        ):
+            self.assertNotIn(removed_id, INDEX_SOURCE)
+            self.assertNotIn(removed_id, APP_SOURCE)
+        self.assertNotIn("function getToolLogDetail(", APP_SOURCE)
+        self.assertNotIn("function renderToolLog(", APP_SOURCE)
+        self.assertNotIn("toggleToolLogPanel", PANELS_SOURCE)
+        self.assertNotIn("onRenderToolLog", PANELS_SOURCE)
+        self.assertNotIn(".tool-log-", STYLE_SOURCE)
+        for removed_key in (
+            "toolLog:",
+            "toolLogEmpty:",
+            "toolLogHint:",
+            "toolActions:",
+            "toolCalls:",
+            "toolResults:",
+            "toolFailures:",
+            "fmtToolLogSep:",
+            'toolLogToggle: "toolLog"',
+        ):
+            self.assertNotIn(removed_key, I18N_SOURCE)
+        self.assertIn('id="statsPanel"', INDEX_SOURCE)
+        self.assertIn('id="branchPanel"', INDEX_SOURCE)
+        self.assertIn('id="toggleBranches"', INDEX_SOURCE)
+        self.assertIn('id="togglePreview"', INDEX_SOURCE)
+        self.assertIn("elements.msgTools.textContent", PANELS_SOURCE)
+        self.assertIn('tools: "工具"', I18N_SOURCE)
+        self.assertIn('tools: "Tools"', I18N_SOURCE)
         for obsolete in (
             "function closeTopPanels(",
             "function sessionFilePath(",
@@ -10295,7 +10327,7 @@ const makeElement = (id) => {
   };
 };
 const elementNames = [
-  "statsPanel", "toolLogPanel", "branchPanel", "usageStrip", "toolLogToggle",
+  "statsPanel", "branchPanel", "usageStrip",
   "toggleBranches", "copySessionPath", "statInput", "statOutput", "statCache",
   "statContext", "ctxRingFill", "sessionCreated", "sessionUpdated", "sessionSource", "sessionFile",
   "msgUser", "msgAssistant", "msgTools", "msgTotal", "tokenInput", "tokenOutput",
@@ -10306,7 +10338,6 @@ const documentListeners = {};
 const document = {addEventListener: (type, callback) => { documentListeners[type] = callback; }};
 let branchOpen = false;
 let branchRenders = 0;
-let toolRenders = 0;
 let systemPromptReads = 0;
 let usageStats = {input: 120, output: 30, cache: 10, cacheWrite: 5};
 const messages = [
@@ -10340,7 +10371,6 @@ const feature = createPanelsFeature({
   getDocument: () => document,
   copyText: async () => true,
   onRenderBranchTree: () => { branchRenders += 1; },
-  onRenderToolLog: () => { toolRenders += 1; },
   onBranchPanelOpenChanged: (open) => { branchOpen = open; },
 });
 feature.bind();
@@ -10354,13 +10384,10 @@ const cacheWriteHiddenWhenMissing = elements.tokenCacheWriteRow.hidden;
 const systemPromptReadsWithLastUsage = systemPromptReads;
 feature.toggleStatsPanel();
 const statsWasOpen = elements.statsPanel.classes.has("open") && elements.usageStrip.classes.has("active");
-feature.toggleToolLogPanel();
-const toolWasOpen = elements.toolLogPanel.classes.has("open") && !elements.statsPanel.classes.has("open");
 feature.toggleBranchPanel();
-const branchWasOpen = branchOpen && elements.branchPanel.classes.has("open") && !elements.toolLogPanel.classes.has("open");
+const branchWasOpen = branchOpen && elements.branchPanel.classes.has("open") && !elements.statsPanel.classes.has("open");
 feature.dismissPanelsForTarget({closest: () => null});
 const allClosed = !elements.statsPanel.classes.has("open")
-  && !elements.toolLogPanel.classes.has("open")
   && !elements.branchPanel.classes.has("open")
   && !branchOpen;
 const fallback = calculateSessionStats({
@@ -10396,11 +10423,9 @@ process.stdout.write(JSON.stringify({
   },
   systemPromptReadsWithLastUsage,
   statsWasOpen,
-  toolWasOpen,
   branchWasOpen,
   allClosed,
   branchRenders,
-  toolRenders,
   fallback,
   statsWithoutCacheWrite,
   absolutePath: resolveSessionFilePath({id: "s1"}, {sessionId: "s1", absolutePath: "D:/sessions/s1.jsonl"}),
@@ -10449,11 +10474,9 @@ process.stdout.write(JSON.stringify({
         })
         self.assertEqual(data["systemPromptReadsWithLastUsage"], 0)
         self.assertTrue(data["statsWasOpen"])
-        self.assertTrue(data["toolWasOpen"])
         self.assertTrue(data["branchWasOpen"])
         self.assertTrue(data["allClosed"])
         self.assertEqual(data["branchRenders"], 1)
-        self.assertEqual(data["toolRenders"], 1)
         self.assertEqual(data["fallback"]["contextTokens"], 14)
         self.assertFalse(data["fallback"]["cacheWriteReported"])
         self.assertFalse(data["statsWithoutCacheWrite"]["cacheWriteReported"])

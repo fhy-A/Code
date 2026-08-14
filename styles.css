@@ -875,12 +875,6 @@ input:focus, select:focus, textarea:focus {
   font-size: 11px;
 }
 
-.tool-log-panel {
-  grid-template-columns: minmax(520px, 1fr);
-  max-height: min(420px, calc(100vh - 120px));
-  overflow: auto;
-}
-
 /* ── Branch Panel ── */
 .branch-panel {
   grid-template-columns: minmax(260px, 1fr);
@@ -1620,60 +1614,6 @@ input:focus, select:focus, textarea:focus {
   color: var(--text);
   font-size: 12px;
   line-height: 1.65;
-}
-
-.tool-log-summary {
-  margin-bottom: 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.tool-log-list {
-  display: grid;
-  gap: 8px;
-}
-
-.tool-log-item {
-  display: grid;
-  grid-template-columns: 86px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 34px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel-3);
-  color: var(--text);
-  font-size: 12px;
-}
-
-.tool-log-item.result {
-  border-color: color-mix(in srgb, var(--green) 24%, var(--line));
-}
-
-.tool-log-item.error {
-  border-color: color-mix(in srgb, var(--red) 35%, var(--line));
-}
-
-.tool-log-title {
-  font-weight: 700;
-  color: var(--text);
-}
-
-.tool-log-detail {
-  overflow: hidden;
-  color: var(--muted);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.tool-log-pill {
-  padding: 2px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  background: var(--panel);
-  font-size: 11px;
 }
 
 .thinking-process {
