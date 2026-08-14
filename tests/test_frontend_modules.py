@@ -8228,7 +8228,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("&lt;new&gt;", data["rendered"])
         self.assertNotIn("<new>", data["rendered"])
         self.assertIn("is-collapsed", data["longRendered"])
-        self.assertIn("展开全部 44 行", data["longRendered"])
+        self.assertIn("expandDiff", data["longRendered"])
         self.assertIn("src/&lt;demo&gt;.js", data["pendingCard"])
         self.assertIn('class="diff-stat diff-stat-add">+1', data["pendingCard"])
         self.assertIn('class="diff-stat diff-stat-remove">−1', data["pendingCard"])
@@ -8243,6 +8243,458 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["noChangesCard"], "")
         self.assertTrue(data["isEdit"])
         self.assertFalse(data["isNotEdit"])
+
+    def test_edit_diff_disclosure_is_transient_independent_and_accessible(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/diff.js");
+const {createDiffFeature, createEditDiffDisclosureState} = window.Code.ui.diff;
+const escapeHtml = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+const disclosure = createEditDiffDisclosureState();
+disclosure.setSession("session-a");
+let pendingEdits = {};
+let authorizationRequests = [];
+const feature = createDiffFeature({
+  escapeHtml,
+  highlightSyntax: (value) => escapeHtml(value),
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  renderCopyButton: () => "<copy></copy>",
+  t: (key, vars = {}) => vars.count == null ? key : `${key}:${vars.count}`,
+  getMessageText: (msg) => String(msg.content || ""),
+  getPendingEdits: () => pendingEdits,
+  getAuthorizationRequests: () => authorizationRequests,
+  getPermissionProfile: () => "accept",
+  isEditDiffExpanded: (editId) => disclosure.isExpanded(editId),
+  isEditDiffFullyExpanded: (editId) => disclosure.isFullyExpanded(editId),
+});
+const shortDiff = [
+  "--- a/demo.txt",
+  "+++ b/demo.txt",
+  "@@ -1 +1 @@",
+  "-old",
+  "+new",
+].join("\n");
+const edit = (id, overrides = {}) => ({
+  role: "tool-result",
+  content: shortDiff,
+  meta: {pendingEditId: id, action: "propose_edit", path: `${id}.txt`, ...overrides},
+});
+const defaultCard = feature.renderEditSuggestionProjection(edit("edit-1"), 4);
+disclosure.setExpanded("edit-1", true);
+const expandedCard = feature.renderEditSuggestionProjection(edit("edit-1"), 4);
+authorizationRequests = [{status: "pending", editId: "edit-1"}];
+const waitingCard = feature.renderEditSuggestionProjection(edit("edit-1"), 4);
+authorizationRequests = [];
+pendingEdits = {"edit-1": {applied: true}};
+const appliedCard = feature.renderEditSuggestionProjection(edit("edit-1", {applied: true}), 4);
+pendingEdits = {};
+const rejectedCard = feature.renderEditSuggestionProjection(edit("edit-1", {rejected: true}), 4);
+const failedCard = feature.renderEditSuggestionProjection(edit("edit-1", {outcome: "failed"}), 4);
+const independentCard = feature.renderEditSuggestionProjection(edit("edit-2"), 5);
+const writeCard = feature.renderEditSuggestionProjection({
+  role: "tool-result",
+  content: "first\nsecond",
+  meta: {pendingEditId: "edit-write", action: "write_file", path: "created.txt"},
+}, 6);
+const markdownCard = feature.renderEditSuggestionProjection({
+  role: "tool-result",
+  content: "Plain edit explanation without a Diff body.",
+  meta: {pendingEditId: "edit-markdown", action: "propose_edit", path: "plain.txt"},
+}, 7);
+const longDiff = [
+  "--- a/long.txt",
+  "+++ b/long.txt",
+  "@@ -1,41 +1,41 @@",
+  ...Array.from({length: 41}, (_, index) => ` line-${index + 1}`),
+].join("\n");
+disclosure.setExpanded("edit-long", true);
+const boundedLongCard = feature.renderEditSuggestionProjection({
+  role: "tool-result",
+  content: longDiff,
+  meta: {pendingEditId: "edit-long", action: "propose_edit", path: "long.txt"},
+}, 7);
+disclosure.setFullyExpanded("edit-long", true);
+const fullLongCard = feature.renderEditSuggestionProjection({
+  role: "tool-result",
+  content: longDiff,
+  meta: {pendingEditId: "edit-long", action: "propose_edit", path: "long.txt"},
+}, 7);
+const sameSessionKept = disclosure.setSession("session-a");
+const beforeSwitch = disclosure.snapshot();
+const switched = disclosure.setSession("session-b");
+const afterSwitch = disclosure.snapshot();
+process.stdout.write(JSON.stringify({
+  defaultCard,
+  expandedCard,
+  waitingCard,
+  appliedCard,
+  rejectedCard,
+  failedCard,
+  independentCard,
+  writeCard,
+  markdownCard,
+  boundedLongCard,
+  fullLongCard,
+  sameSessionKept,
+  beforeSwitch,
+  switched,
+  afterSwitch,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertIn("data-edit-diff-toggle", data["defaultCard"])
+        self.assertIn('aria-expanded="false"', data["defaultCard"])
+        self.assertIn("data-edit-diff-body hidden", data["defaultCard"])
+        self.assertIn('class="apply-edit-btn"', data["defaultCard"])
+        self.assertIn('class="reject-edit-btn"', data["defaultCard"])
+        self.assertIn('aria-controls="edit-diff-edit-1-4"', data["defaultCard"])
+        self.assertIn('aria-expanded="true"', data["expandedCard"])
+        self.assertNotIn("data-edit-diff-body hidden", data["expandedCard"])
+        self.assertIn('aria-expanded="true"', data["waitingCard"])
+        self.assertIn('aria-expanded="true"', data["appliedCard"])
+        self.assertIn('aria-expanded="true"', data["rejectedCard"])
+        self.assertIn('aria-expanded="true"', data["failedCard"])
+        self.assertIn("is-rejected", data["rejectedCard"])
+        self.assertIn('aria-expanded="false"', data["independentCard"])
+        self.assertIn("data-edit-diff-body hidden", data["independentCard"])
+        self.assertIn('aria-expanded="false"', data["writeCard"])
+        self.assertIn("write-file-preview", data["writeCard"])
+        self.assertNotIn("data-edit-diff-toggle", data["markdownCard"])
+        self.assertNotIn("data-edit-diff-body", data["markdownCard"])
+        self.assertIn("tool-edit-markdown", data["markdownCard"])
+        self.assertIn('class="code-block diff-block is-collapsed"', data["boundedLongCard"])
+        self.assertIn("expandDiff:44", data["boundedLongCard"])
+        self.assertIn('class="code-block diff-block is-expanded"', data["fullLongCard"])
+        self.assertIn("collapseDiff", data["fullLongCard"])
+        self.assertFalse(data["sameSessionKept"])
+        self.assertEqual(data["beforeSwitch"], {
+            "sessionId": "session-a",
+            "expanded": ["edit-1", "edit-long"],
+            "fullyExpanded": ["edit-long"],
+        })
+        self.assertTrue(data["switched"])
+        self.assertEqual(data["afterSwitch"], {
+            "sessionId": "session-b",
+            "expanded": [],
+            "fullyExpanded": [],
+        })
+
+        self.assertIn("editDiffDisclosureState.setSession(state.sessionId);", APP_SOURCE)
+        self.assertIn("editDiffDisclosureState.setExpanded(id, nextExpanded);", APP_SOURCE)
+        self.assertIn("editDiffDisclosureState.setFullyExpanded(editId, expanded);", APP_SOURCE)
+        self.assertGreaterEqual(
+            APP_SOURCE.count("messageScrollController?.onContentChanged(state.sessionId);"),
+            5,
+        )
+        self.assertIn(".tool-edit-diff[hidden]", STYLE_SOURCE)
+        self.assertIn(".edit-diff-toggle:focus-visible", STYLE_SOURCE)
+        self.assertIn('expandEditDiff: "查看 Diff"', I18N_SOURCE)
+        self.assertIn('collapseEditDiff: "Collapse Diff"', I18N_SOURCE)
+
+    def test_server_edit_instance_identity_separates_repeated_proposals(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/diff.js");
+const {
+  createDiffFeature,
+  createEditDiffDisclosureState,
+  getEditSuggestionInstanceId,
+} = window.Code.ui.diff;
+const sharedPendingId = "server-edit-shared-proposal";
+const metaA = {
+  pendingEditId: sharedPendingId,
+  serverManaged: true,
+  authorizationId: "authorization-a",
+  agentRunId: "run-a",
+  toolCallId: "call-shared",
+};
+const metaB = {
+  pendingEditId: sharedPendingId,
+  serverManaged: true,
+  authorizationId: "authorization-b",
+  agentRunId: "run-b",
+  toolCallId: "call-shared",
+};
+const instanceA = getEditSuggestionInstanceId(metaA);
+const instanceB = getEditSuggestionInstanceId(metaB);
+const disclosure = createEditDiffDisclosureState();
+disclosure.setSession("session-repeated");
+disclosure.setExpanded(instanceA, true);
+let pendingEdits = {
+  [instanceA]: {rejected: true, resolved: true},
+};
+let authorizationRequests = [{status: "pending", editId: instanceB}];
+const escapeHtml = (value) => String(value)
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+const feature = createDiffFeature({
+  escapeHtml,
+  t: (key) => key,
+  getMessageText: (message) => String(message.content || ""),
+  getPendingEdits: () => pendingEdits,
+  getAuthorizationRequests: () => authorizationRequests,
+  getPermissionProfile: () => "accept",
+  isEditDiffExpanded: (editId) => disclosure.isExpanded(editId),
+  isEditDiffFullyExpanded: (editId) => disclosure.isFullyExpanded(editId),
+});
+const diff = [
+  "--- a/same.txt",
+  "+++ b/same.txt",
+  "@@ -1 +1 @@",
+  "-old",
+  "+new",
+].join("\n");
+const render = (meta, index) => feature.renderEditSuggestionProjection({
+  role: "tool-result",
+  content: diff,
+  meta: {action: "propose_edit", path: "same.txt", ...meta},
+}, index);
+const rejectedA = render(metaA, 4);
+const waitingB = render(metaB, 9);
+disclosure.setExpanded(instanceB, true);
+authorizationRequests = [];
+pendingEdits = {
+  ...pendingEdits,
+  [instanceB]: {applied: true, resolved: true},
+};
+const appliedB = render({...metaB, applied: true}, 9);
+process.stdout.write(JSON.stringify({
+  instanceA,
+  instanceB,
+  sameInstanceA: getEditSuggestionInstanceId({...metaA}) === instanceA,
+  historicalFallback: getEditSuggestionInstanceId({
+    pendingEditId: sharedPendingId,
+    serverManaged: true,
+    agentRunId: "old-run",
+    toolCallId: "old-call",
+  }),
+  finalFallback: getEditSuggestionInstanceId({
+    pendingEditId: sharedPendingId,
+    serverManaged: true,
+  }),
+  localIdentity: getEditSuggestionInstanceId({
+    pendingEditId: "local-edit",
+    serverManaged: false,
+    authorizationId: "ignored-authorization",
+  }),
+  rejectedA,
+  waitingB,
+  appliedB,
+  disclosure: disclosure.snapshot(),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["instanceA"], "server-edit-authorization-authorization-a")
+        self.assertEqual(data["instanceB"], "server-edit-authorization-authorization-b")
+        self.assertNotEqual(data["instanceA"], data["instanceB"])
+        self.assertTrue(data["sameInstanceA"])
+        self.assertEqual(
+            data["historicalFallback"],
+            "server-edit-call-old-run-old-call",
+        )
+        self.assertEqual(data["finalFallback"], "server-edit-shared-proposal")
+        self.assertEqual(data["localIdentity"], "local-edit")
+        self.assertIn('data-edit-id="server-edit-authorization-authorization-a"', data["rejectedA"])
+        self.assertIn('aria-expanded="true"', data["rejectedA"])
+        self.assertIn("is-rejected", data["rejectedA"])
+        self.assertIn('data-edit-id="server-edit-authorization-authorization-b"', data["waitingB"])
+        self.assertIn('aria-expanded="false"', data["waitingB"])
+        self.assertIn("waitingApproval", data["waitingB"])
+        self.assertNotIn("is-rejected", data["waitingB"])
+        self.assertIn('aria-expanded="true"', data["appliedB"])
+        self.assertIn("is-applied", data["appliedB"])
+        self.assertEqual(
+            data["disclosure"]["expanded"],
+            [
+                "server-edit-authorization-authorization-a",
+                "server-edit-authorization-authorization-b",
+            ],
+        )
+
+        self.assertIn("getEditSuggestionInstanceId(projection.meta) || pendingEditId", APP_SOURCE)
+        self.assertIn("message.meta?.agentRunId === ctx.agentRunId", APP_SOURCE)
+        self.assertIn("projection.meta.authorizationId = authorizationId;", APP_SOURCE)
+        self.assertIn("restored.editId = getEditSuggestionInstanceId({", APP_SOURCE)
+        self.assertIn("serverManaged: restored.serverAgent === true", APP_SOURCE)
+        self.assertEqual(
+            APP_SOURCE.count("getEditSuggestionInstanceId(projection.meta) || pendingEditId"),
+            2,
+        )
+
+    def test_authorization_view_reveals_edit_diff_without_mutating_authorization(self):
+        helper_start = APP_SOURCE.index("let authorizationViewHighlightTimer")
+        helper_end = APP_SOURCE.index("function bindCopyButtons", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const vm = require("node:vm");
+const label = {{dataset: {{}}, textContent: ""}};
+const attrs = new Map([
+  ["aria-controls", "edit-diff-edit-1-4"],
+  ["aria-expanded", "false"],
+]);
+const button = {{
+  dataset: {{editId: "edit-1"}},
+  title: "",
+  getAttribute(name) {{ return attrs.get(name) || ""; }},
+  setAttribute(name, value) {{ attrs.set(name, String(value)); }},
+  querySelector(selector) {{ return selector === "[data-edit-diff-label]" ? label : null; }},
+}};
+const body = {{hidden: true}};
+const classes = new Set();
+let scrollOptions = null;
+const target = {{
+  querySelector(selector) {{ return selector === ".edit-diff-toggle" ? button : null; }},
+  scrollIntoView(options) {{ scrollOptions = options; }},
+  classList: {{
+    add(value) {{ classes.add(value); }},
+    remove(value) {{ classes.delete(value); }},
+    contains(value) {{ return classes.has(value); }},
+  }},
+}};
+let targetPresent = false;
+const messages = {{
+  querySelector() {{ return targetPresent ? target : null; }},
+  querySelectorAll() {{ return classes.has("is-authorization-view-target") ? [target] : []; }},
+}};
+const stateCalls = [];
+let layoutCalls = 0;
+let timerSequence = 0;
+const timers = new Map();
+const context = {{
+  String,
+  Boolean,
+  CSS: {{escape: (value) => String(value)}},
+  els: {{messages}},
+  document: {{getElementById: (id) => id === "edit-diff-edit-1-4" ? body : null}},
+  editDiffDisclosureState: {{
+    setExpanded(editId, expanded) {{ stateCalls.push([editId, expanded]); }},
+  }},
+  messageScrollController: {{onContentChanged() {{ layoutCalls += 1; }}}},
+  state: {{sessionId: "session-a"}},
+  t: (key) => `label:${{key}}`,
+  setTimeout(callback, delay) {{
+    timerSequence += 1;
+    timers.set(timerSequence, {{callback, delay}});
+    return timerSequence;
+  }},
+  clearTimeout(timerId) {{ timers.delete(timerId); }},
+}};
+vm.createContext(context);
+vm.runInContext({json.dumps(helper_source)}, context);
+const missing = context.revealAuthorizationEdit("missing");
+const missingSnapshot = {{stateCalls: stateCalls.length, layoutCalls, timers: timers.size}};
+targetPresent = true;
+const revealed = context.revealAuthorizationEdit("edit-1");
+const revealTimer = timers.get(timerSequence);
+const revealedSnapshot = {{
+  stateCalls: [...stateCalls],
+  layoutCalls,
+  bodyHidden: body.hidden,
+  ariaExpanded: attrs.get("aria-expanded"),
+  ariaLabel: attrs.get("aria-label"),
+  labelKey: label.dataset.i18n,
+  labelText: label.textContent,
+  scrollOptions,
+  highlighted: classes.has("is-authorization-view-target"),
+  timerDelay: revealTimer?.delay || 0,
+}};
+revealTimer.callback();
+const highlightedAfterTimer = classes.has("is-authorization-view-target");
+context.setRenderedEditDiffExpanded("edit-1", false);
+process.stdout.write(JSON.stringify({{
+  missing,
+  missingSnapshot,
+  revealed,
+  revealedSnapshot,
+  highlightedAfterTimer,
+  collapsed: {{
+    stateCalls,
+    layoutCalls,
+    bodyHidden: body.hidden,
+    ariaExpanded: attrs.get("aria-expanded"),
+    ariaLabel: attrs.get("aria-label"),
+    labelKey: label.dataset.i18n,
+    labelText: label.textContent,
+  }},
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertFalse(data["missing"])
+        self.assertEqual(data["missingSnapshot"], {
+            "stateCalls": 0,
+            "layoutCalls": 0,
+            "timers": 0,
+        })
+        self.assertTrue(data["revealed"])
+        self.assertEqual(data["revealedSnapshot"], {
+            "stateCalls": [["edit-1", True]],
+            "layoutCalls": 0,
+            "bodyHidden": False,
+            "ariaExpanded": "true",
+            "ariaLabel": "label:collapseEditDiff",
+            "labelKey": "collapseEditDiff",
+            "labelText": "label:collapseEditDiff",
+            "scrollOptions": {"behavior": "smooth", "block": "center"},
+            "highlighted": True,
+            "timerDelay": 1400,
+        })
+        self.assertFalse(data["highlightedAfterTimer"])
+        self.assertEqual(data["collapsed"], {
+            "stateCalls": [["edit-1", True], ["edit-1", False]],
+            "layoutCalls": 1,
+            "bodyHidden": True,
+            "ariaExpanded": "false",
+            "ariaLabel": "label:expandEditDiff",
+            "labelKey": "expandEditDiff",
+            "labelText": "label:expandEditDiff",
+        })
+        self.assertIn("revealAuthorizationEdit(viewButton.dataset.authView);", APP_SOURCE)
+        self.assertIn("return;", APP_SOURCE[
+            APP_SOURCE.index('const viewButton = event.target.closest("[data-auth-view]");'):
+            APP_SOURCE.index("function toolProgressSummary", helper_end)
+        ])
+        for forbidden in (
+            "authorizationRequests",
+            "resolveAuthorization",
+            "renderAuthorizationPanel",
+            ".selected",
+        ):
+            self.assertNotIn(forbidden, helper_source)
+        self.assertIn(
+            ".edit-suggestion.is-authorization-view-target .tool-edit-card",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".edit-suggestion.is-authorization-view-target .tool-edit-head",
+            STYLE_SOURCE,
+        )
+        self.assertIn("color-mix(in srgb, var(--accent) 26%, transparent)", STYLE_SOURCE)
 
     def test_messages_ui_owns_grouping_projection_and_response_status(self):
         self.assertIn("Code.ui.messages = Object.freeze", MESSAGES_SOURCE)
@@ -10194,7 +10646,10 @@ process.stdout.write(JSON.stringify({
         self.assertIn("const { createI18nRuntime } = window.Code.core.i18n", APP_SOURCE)
         self.assertIn("const { t, setLang, applyI18n } = createI18nRuntime", APP_SOURCE)
         self.assertIn("const { apiJson } = window.Code.services.apiClient", APP_SOURCE)
-        self.assertIn("const { createDiffFeature } = window.Code.ui.diff", APP_SOURCE)
+        self.assertIn("createDiffFeature,", APP_SOURCE)
+        self.assertIn("createEditDiffDisclosureState,", APP_SOURCE)
+        self.assertIn("getEditSuggestionInstanceId,", APP_SOURCE)
+        self.assertIn("} = window.Code.ui.diff;", APP_SOURCE)
         self.assertIn("const diffFeature = createDiffFeature", APP_SOURCE)
         self.assertIn("const { createPreviewFeature } = window.Code.features.preview", APP_SOURCE)
         self.assertIn("const previewFeature = createPreviewFeature", APP_SOURCE)

@@ -28,7 +28,11 @@ const {
   buildSessionSavePayload,
   createSessionPersistence,
 } = window.Code.services.persistence;
-const { createDiffFeature } = window.Code.ui.diff;
+const {
+  createDiffFeature,
+  createEditDiffDisclosureState,
+  getEditSuggestionInstanceId,
+} = window.Code.ui.diff;
 const {
   createMarkdownFeature,
   resolveSyntaxPatterns: _resolveSyntaxPatterns,
@@ -166,6 +170,7 @@ function upgradeStaticIcons() {
 }
 
 const state = createAppState(localStorage);
+const editDiffDisclosureState = createEditDiffDisclosureState();
 let messageScrollController = null;
 let longTextDisplayController = null;
 const {
@@ -875,6 +880,8 @@ const diffFeature = createDiffFeature({
   getPendingEdits: () => state.pendingEdits,
   getAuthorizationRequests: () => state.authorizationRequests,
   getPermissionProfile,
+  isEditDiffExpanded: (editId) => editDiffDisclosureState.isExpanded(editId),
+  isEditDiffFullyExpanded: (editId) => editDiffDisclosureState.isFullyExpanded(editId),
 });
 const {
   getDiffStats,
@@ -1735,6 +1742,65 @@ function splitThoughtContent(text = "") {
 
 
 
+let authorizationViewHighlightTimer = null;
+
+function findEditSuggestion(editId) {
+  const id = String(editId || "");
+  if (!id || !els.messages) return null;
+  return els.messages.querySelector(
+    `article.edit-suggestion[data-edit-id="${CSS.escape(id)}"]`,
+  );
+}
+
+function setRenderedEditDiffExpanded(editId, expanded, options = {}) {
+  const id = String(editId || "");
+  const target = findEditSuggestion(id);
+  const button = target?.querySelector(".edit-diff-toggle") || null;
+  const contentId = button?.getAttribute("aria-controls") || "";
+  const body = contentId ? document.getElementById(contentId) : null;
+  if (!id || !target || !button || !body) return target;
+
+  const nextExpanded = Boolean(expanded);
+  const key = nextExpanded ? "collapseEditDiff" : "expandEditDiff";
+  editDiffDisclosureState.setExpanded(id, nextExpanded);
+  body.hidden = !nextExpanded;
+  button.setAttribute("aria-expanded", String(nextExpanded));
+  button.dataset.i18nAriaLabel = key;
+  button.dataset.i18nTitle = key;
+  button.setAttribute("aria-label", t(key));
+  button.title = t(key);
+  const label = button.querySelector("[data-edit-diff-label]");
+  if (label) {
+    label.dataset.i18n = key;
+    label.textContent = t(key);
+  }
+  if (options.notifyLayout !== false) {
+    messageScrollController?.onContentChanged(state.sessionId);
+  }
+  return target;
+}
+
+function revealAuthorizationEdit(editId) {
+  const target = findEditSuggestion(editId);
+  if (!target) return false;
+
+  setRenderedEditDiffExpanded(editId, true, { notifyLayout: false });
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  if (authorizationViewHighlightTimer != null) {
+    clearTimeout(authorizationViewHighlightTimer);
+  }
+  els.messages.querySelectorAll(".is-authorization-view-target").forEach((node) => {
+    node.classList.remove("is-authorization-view-target");
+  });
+  target.classList.add("is-authorization-view-target");
+  authorizationViewHighlightTimer = setTimeout(() => {
+    target.classList.remove("is-authorization-view-target");
+    authorizationViewHighlightTimer = null;
+  }, 1400);
+  return true;
+}
+
 function bindCopyButtons() {
 
   document.querySelectorAll(".copy-code").forEach((btn) => {
@@ -1810,6 +1876,18 @@ function bindCopyButtons() {
       btn.textContent = expanded
         ? t("collapseDiff")
         : t("expandDiff", { count: block.querySelectorAll(".diff-line").length });
+      const editId = btn.closest("article.edit-suggestion")?.dataset.editId || "";
+      if (editId) editDiffDisclosureState.setFullyExpanded(editId, expanded);
+      messageScrollController?.onContentChanged(state.sessionId);
+    });
+  });
+
+  document.querySelectorAll(".edit-diff-toggle").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const editId = btn.dataset.editId || "";
+      const expanded = btn.getAttribute("aria-expanded") !== "true";
+      setRenderedEditDiffExpanded(editId, expanded);
     });
   });
 
@@ -2680,6 +2758,7 @@ function playWelcomeMotion(root) {
 
 function renderMessages() {
 
+  editDiffDisclosureState.setSession(state.sessionId);
   messageScrollController?.setSession(state.sessionId);
   longTextDisplayController?.setSession(state.sessionId);
   renderUserInputPanel();
@@ -5366,6 +5445,13 @@ function restoreAuthorizationRequest(sessionId, savedRequest) {
   }
   if (existing) return existing;
   const restored = JSON.parse(JSON.stringify(savedRequest));
+  restored.editId = getEditSuggestionInstanceId({
+    pendingEditId: restored.editId,
+    serverManaged: restored.serverAgent === true,
+    authorizationId: restored.authorizationId,
+    agentRunId: restored.agentRunId,
+    toolCallId: restored.toolCallId,
+  }) || String(restored.editId || "");
   restored.selected = restored.selected !== false;
   restored.status = "pending";
   state.authorizationRequests.push(restored);
@@ -5573,9 +5659,8 @@ function bindAuthorizationPanel() {
     }
     const viewButton = event.target.closest("[data-auth-view]");
     if (viewButton) {
-      const editId = viewButton.dataset.authView;
-      const target = els.messages.querySelector(`[data-edit-id="${CSS.escape(editId)}"]`)?.closest(".edit-suggestion");
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+      revealAuthorizationEdit(viewButton.dataset.authView);
+      return;
     }
   });
 }
@@ -8519,6 +8604,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
   let projection = ctx.messages.find((message) => (
     message?.role === "tool-result"
     && message.meta?.serverManaged
+    && message.meta?.agentRunId === ctx.agentRunId
     && message.meta?.toolCallId === toolCallId
     && message.meta?.pendingEditId
   ));
@@ -8527,7 +8613,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
   const displayAction = delegatedEditCompletion
     ? String(projection.meta?.action || "propose_edit")
     : (toolAction === "propose_edit" || resultAction === "apply_edit" ? "propose_edit" : resultAction);
-  const editId = projection?.meta?.pendingEditId
+  const pendingEditId = projection?.meta?.pendingEditId
     || `server-edit-${String(result?.proposalId || toolCallId || event?.seq || Date.now())}`;
   const applied = Boolean(projection?.meta?.applied)
     || result?.applied === true
@@ -8556,7 +8642,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
     ...agentEventMeta(ctx, event, "tool_completed"),
     action: displayAction,
     path: String(result?.path || projection.meta?.path || ""),
-    pendingEditId: editId,
+    pendingEditId,
     toolCallId,
     serverManaged: true,
     native: true,
@@ -8568,6 +8654,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
     rejected,
     authorizationResult: result || null,
   };
+  const editId = getEditSuggestionInstanceId(projection.meta) || pendingEditId;
   state.pendingEdits[editId] = {
     ...(state.pendingEdits[editId] || {}),
     path: projection.meta.path,
@@ -8690,7 +8777,7 @@ function ensureServerAuthorizationProjection(ctx, pendingAuthorization) {
     return "";
   }
   const proposalId = String(pendingAuthorization.proposalId || authorizationId);
-  const editId = `server-edit-${proposalId}`;
+  const pendingEditId = `server-edit-${proposalId}`;
   const displayAction = authorizationAction === "apply_edit" ? "propose_edit" : authorizationAction;
   let projection = ctx.messages.find((message) => (
     message?.role === "tool-result" && message.meta?.authorizationId === authorizationId
@@ -8703,7 +8790,7 @@ function ensureServerAuthorizationProjection(ctx, pendingAuthorization) {
         action: displayAction,
         authorizationAction,
         path: String(pendingAuthorization.path || ""),
-        pendingEditId: editId,
+        pendingEditId,
         authorizationId,
         agentRunId: ctx.agentRunId,
         toolCallId: String(pendingAuthorization.toolCallId || ""),
@@ -8717,11 +8804,13 @@ function ensureServerAuthorizationProjection(ctx, pendingAuthorization) {
     projection.meta.action = displayAction;
     projection.meta.authorizationAction = authorizationAction;
     projection.meta.path = String(pendingAuthorization.path || projection.meta.path || "");
-    projection.meta.pendingEditId = editId;
+    projection.meta.pendingEditId = pendingEditId;
+    projection.meta.authorizationId = authorizationId;
     projection.meta.agentRunId = ctx.agentRunId;
     projection.meta.toolCallId = String(pendingAuthorization.toolCallId || projection.meta.toolCallId || "");
     projection.meta.serverManaged = true;
   }
+  const editId = getEditSuggestionInstanceId(projection.meta) || pendingEditId;
   state.pendingEdits[editId] = {
     path: String(pendingAuthorization.path || ""),
     resolved: Boolean(projection.meta?.applied || projection.meta?.rejected),

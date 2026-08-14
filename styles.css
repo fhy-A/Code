@@ -8271,6 +8271,15 @@ body.theme-dark .chat-pane.empty-chat .composer {
   background: transparent;
 }
 
+.edit-suggestion.is-authorization-view-target .tool-edit-card {
+  border-radius: 8px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.edit-suggestion.is-authorization-view-target .tool-edit-head {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
 .tool-edit-head {
   min-height: 40px;
   padding: 0 2px 9px;
@@ -8293,6 +8302,51 @@ body.theme-dark .chat-pane.empty-chat .composer {
 
 .tool-edit-diff {
   padding: 10px 0 0;
+}
+
+.tool-edit-diff[hidden] {
+  display: none;
+}
+
+.edit-diff-toggle {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 6px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel-2) 72%, transparent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
+}
+
+.edit-diff-toggle:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel-2));
+}
+
+.edit-diff-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.edit-diff-toggle-chevron {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  transform-origin: center;
+}
+
+.edit-diff-toggle[aria-expanded="true"] .edit-diff-toggle-chevron {
+  transform: rotate(225deg) translate(-1px, -1px);
 }
 
 .tool-edit-diff .diff-block {

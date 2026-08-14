@@ -33,6 +33,64 @@
     return !!meta.pendingEditId && (["propose_edit", "apply_edit", "write_file", "delete_file"].includes(action) || !!meta.newContent);
   }
 
+  function getEditSuggestionInstanceId(meta = {}) {
+    const pendingEditId = String(meta.pendingEditId || "");
+    if (!meta.serverManaged) return pendingEditId;
+
+    const authorizationId = String(meta.authorizationId || "");
+    if (authorizationId) return `server-edit-authorization-${authorizationId}`;
+
+    const agentRunId = String(meta.agentRunId || "");
+    const toolCallId = String(meta.toolCallId || "");
+    if (agentRunId && toolCallId) return `server-edit-call-${agentRunId}-${toolCallId}`;
+    return pendingEditId;
+  }
+
+  function createEditDiffDisclosureState() {
+    let sessionId = null;
+    const expanded = new Set();
+    const fullyExpanded = new Set();
+    const normalizeId = (value) => String(value || "");
+
+    function setSession(nextSessionId) {
+      const next = normalizeId(nextSessionId);
+      if (sessionId === next) return false;
+      sessionId = next;
+      expanded.clear();
+      fullyExpanded.clear();
+      return true;
+    }
+
+    function setExpanded(editId, value) {
+      const id = normalizeId(editId);
+      if (!id) return false;
+      if (value) expanded.add(id);
+      else expanded.delete(id);
+      return true;
+    }
+
+    function setFullyExpanded(editId, value) {
+      const id = normalizeId(editId);
+      if (!id) return false;
+      if (value) fullyExpanded.add(id);
+      else fullyExpanded.delete(id);
+      return true;
+    }
+
+    return Object.freeze({
+      isExpanded: (editId) => expanded.has(normalizeId(editId)),
+      isFullyExpanded: (editId) => fullyExpanded.has(normalizeId(editId)),
+      setExpanded,
+      setFullyExpanded,
+      setSession,
+      snapshot: () => ({
+        sessionId: sessionId || "",
+        expanded: Array.from(expanded),
+        fullyExpanded: Array.from(fullyExpanded),
+      }),
+    });
+  }
+
   function createDiffFeature(options = {}) {
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
     const highlightSyntax = options.highlightSyntax || ((value) => escapeHtml(value));
@@ -43,8 +101,10 @@
     const getPendingEdits = options.getPendingEdits || (() => ({}));
     const getAuthorizationRequests = options.getAuthorizationRequests || (() => []);
     const getPermissionProfile = options.getPermissionProfile || (() => "accept");
+    const isEditDiffExpanded = options.isEditDiffExpanded || (() => false);
+    const isEditDiffFullyExpanded = options.isEditDiffFullyExpanded || (() => false);
 
-    function renderDiff(text) {
+    function renderDiff(text, renderOptions = {}) {
       const lines = normalizeDiffText(text).split("\n");
       let lang = null;
       for (const line of lines) {
@@ -101,12 +161,15 @@
       }).join("");
 
       const isLong = lines.length > 40;
-      return `<div class="code-block diff-block${isLong ? " is-collapsed" : ""}"><div class="diff-lines">${html}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="false">展开全部 ${lines.length} 行</button>` : ""}</div>`;
+      const expanded = isLong && renderOptions.expanded === true;
+      const expandLabel = expanded ? t("collapseDiff") : t("expandDiff", { count: lines.length });
+      return `<div class="code-block diff-block${isLong ? (expanded ? " is-expanded" : " is-collapsed") : ""}"><div class="diff-lines">${html}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="${expanded}">${escapeHtml(expandLabel)}</button>` : ""}</div>`;
     }
 
     function renderEditSuggestionProjection(msg, index) {
       const meta = msg.meta || {};
       const pendingId = meta.pendingEditId;
+      const editInstanceId = getEditSuggestionInstanceId(meta) || pendingId;
       const action = meta.action || meta.tool?.action || "propose_edit";
       const target = meta.path || meta.tool?.path || "";
       const content = getMessageText(msg).trim();
@@ -115,11 +178,11 @@
       const pendingEdits = getPendingEdits() || {};
       const authorizationRequests = getAuthorizationRequests() || [];
       const permissionProfile = getPermissionProfile();
-      const editState = pendingEdits[pendingId] || {};
+      const editState = pendingEdits[editInstanceId] || {};
       const applied = !!(meta.applied || editState.applied);
       const rejected = !!(meta.rejected || editState.rejected || editState.resolved && !editState.applied);
       const serverExecuting = Boolean(meta.serverManaged && meta.authorizationDecision === "approved" && !applied && !rejected);
-      const isPending = authorizationRequests.some((item) => item.status === "pending" && item.editId === pendingId);
+      const isPending = authorizationRequests.some((item) => item.status === "pending" && item.editId === editInstanceId);
       // Server-managed edits that were approved: treat as applied (model handles retries).
       const autoApplied = Boolean(meta.serverManaged && meta.authorizationDecision === "approved" && !applied && !rejected);
       const queued = isPending || Boolean(meta.serverManaged && !serverExecuting && !applied && !rejected && !autoApplied);
@@ -128,16 +191,20 @@
       if (/^\(no changes\)$/i.test(diffText.trim())) return "";
       const isDiff = /(^|\n)(--- |\+\+\+ |@@ )/.test(diffText);
       const isWriteFile = action === "write_file";
+      const hasDiffBody = isDiff || isWriteFile;
+      const diffExpanded = hasDiffBody && isEditDiffExpanded(editInstanceId);
+      const diffFullyExpanded = hasDiffBody && isEditDiffFullyExpanded(editInstanceId);
       let body;
       if (isDiff) {
-        body = renderDiff(diffText);
+        body = renderDiff(diffText, { expanded: diffFullyExpanded });
       } else if (isWriteFile) {
         const ext = (target || "").split(".").pop().toLowerCase() || "";
         const lines = content.split("\n");
         const lineCount = lines.length;
         const isLong = lineCount > 40;
         const lineHtml = lines.map((line, i) => `<span class="diff-line diff-add"><span class="diff-gutter">+</span><span class="diff-num">${i + 1}</span><span class="diff-code">${highlightSyntax(line, ext)}</span></span>`).join("");
-        body = `<div class="code-block write-file-preview${isLong ? " is-collapsed" : ""}"><div class="diff-lines">${lineHtml}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="false">展开全部 ${lineCount} 行</button>` : ""}</div>`;
+        const expandLabel = diffFullyExpanded ? t("collapseDiff") : t("expandDiff", { count: lineCount });
+        body = `<div class="code-block write-file-preview${isLong ? (diffFullyExpanded ? " is-expanded" : " is-collapsed") : ""}"><div class="diff-lines">${lineHtml}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="${diffFullyExpanded}">${escapeHtml(expandLabel)}</button>` : ""}</div>`;
       } else {
         body = `<div class="tool-edit-markdown">${renderMarkdown(content)}</div>`;
       }
@@ -146,6 +213,10 @@
       const effectiveApplied = applied || autoApplied;
       const status = effectiveApplied ? t("appliedLabel") : (rejected ? t("rejectedLabel") : (proposalOnly ? t("proposalOnly") : (serverExecuting ? t("processingLabel") : (queued ? t("waitingApproval") : t("pendingConfirmation")))));
       const statusClass = effectiveApplied ? "is-applied" : (rejected ? "is-rejected" : "is-review");
+      const disclosureKey = diffExpanded ? "collapseEditDiff" : "expandEditDiff";
+      const disclosureLabel = t(disclosureKey);
+      const safeEditInstanceId = String(editInstanceId).replace(/[^A-Za-z0-9_-]/g, "-");
+      const diffContentId = `edit-diff-${safeEditInstanceId}-${index}`;
 
       let actions = "";
       if (!applied && !rejected && !queued && !proposalOnly && !meta.serverManaged) {
@@ -158,7 +229,7 @@
       }
 
       return `
-        <article class="msg assistant edit-suggestion" data-msg-index="${index}" data-edit-id="${escapeHtml(pendingId)}">
+        <article class="msg assistant edit-suggestion" data-msg-index="${index}" data-edit-id="${escapeHtml(editInstanceId)}">
           <div class="tool-edit-card">
             <div class="tool-edit-head">
               <div class="tool-edit-heading">
@@ -169,9 +240,10 @@
                 ${isDiff ? `<span class="diff-stat diff-stat-add">+${stats.additions}</span><span class="diff-stat diff-stat-remove">−${stats.removals}</span>` : (isWriteFile ? `<span class="diff-stat diff-stat-add">+${stats.additions || content.split("\n").length} lines</span>` : "")}
                 ${isDiff || isWriteFile ? renderCopyButton(content) : ""}
                 <span class="tool-edit-status ${statusClass}">${escapeHtml(status)}</span>
+                ${hasDiffBody ? `<button class="edit-diff-toggle" type="button" data-edit-diff-toggle data-edit-id="${escapeHtml(editInstanceId)}" aria-expanded="${diffExpanded}" aria-controls="${escapeHtml(diffContentId)}" aria-label="${escapeHtml(disclosureLabel)}" title="${escapeHtml(disclosureLabel)}" data-i18n-aria-label="${disclosureKey}" data-i18n-title="${disclosureKey}"><span data-edit-diff-label data-i18n="${disclosureKey}">${escapeHtml(disclosureLabel)}</span><span class="edit-diff-toggle-chevron" aria-hidden="true"></span></button>` : ""}
               </div>
             </div>
-            <div class="tool-edit-diff">${body}</div>
+            <div class="tool-edit-diff"${hasDiffBody ? ` id="${escapeHtml(diffContentId)}" data-edit-diff-body${diffExpanded ? "" : " hidden"}` : ""}>${body}</div>
             ${actions}
           </div>
         </article>
@@ -180,6 +252,7 @@
 
     return Object.freeze({
       getDiffStats,
+      getEditSuggestionInstanceId,
       isEditSuggestionMessage,
       normalizeDiffText,
       renderDiff,
@@ -188,8 +261,10 @@
   }
 
   Code.ui.diff = Object.freeze({
+    createEditDiffDisclosureState,
     createDiffFeature,
     getDiffStats,
+    getEditSuggestionInstanceId,
     isEditSuggestionMessage,
     normalizeDiffText,
   });

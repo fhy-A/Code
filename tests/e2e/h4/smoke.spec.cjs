@@ -9227,7 +9227,7 @@ function editAuthorizationRunStateProjection(runState, agentRunId, authorization
       sourceKey: String(request.sourceKey || ""),
       sourceLabelPresent: Boolean(String(request.sourceLabel || "")),
       editIdMatches: String(request.editId || "")
-        === `server-edit-${String(request.proposalId || "")}`,
+        === `server-edit-authorization-${authorizationId}`,
       status: String(request.status || ""),
       selected: request.selected === true,
       serverAgent: request.serverAgent === true,
@@ -10018,6 +10018,116 @@ async function editAuthorizationDomProjection(h4, phase, branch) {
       };
     },
   });
+}
+
+async function expectEditDiffDisclosure(h4, expanded) {
+  const suggestion = h4.page.locator("article.msg.assistant.edit-suggestion")
+    .filter({ has: h4.page.locator(".tool-edit-target", { hasText: EDIT_AUTHORIZATION_CONTRACT.path }) });
+  await expect(suggestion).toHaveCount(1);
+  const toggle = suggestion.locator(".edit-diff-toggle");
+  await expect(toggle).toHaveCount(1);
+  await expect(toggle).toHaveAttribute("aria-expanded", String(expanded));
+  const contentId = await toggle.getAttribute("aria-controls");
+  expect(contentId).toBeTruthy();
+  const body = suggestion.locator(`#${contentId}`);
+  await expect(body).toHaveCount(1);
+  expect(await body.evaluate((element) => element.hidden)).toBe(!expanded);
+  await expect(suggestion.locator(".tool-edit-target")).toHaveCount(1);
+  await expect(suggestion.locator(".diff-stat-add")).toHaveText("+1");
+  await expect(suggestion.locator(".diff-stat-remove")).toHaveText("−1");
+  await expect(suggestion.locator(".tool-edit-status")).toHaveCount(1);
+  return toggle;
+}
+
+async function editAuthorizationPanelInteractionProjection(page) {
+  return page.evaluate(() => {
+    const panel = document.querySelector("#authorizationPanel");
+    const row = panel?.querySelector(".authorization-row") || null;
+    const selected = row?.querySelector("[data-auth-select]") || null;
+    const group = panel?.querySelector("[data-auth-group]") || null;
+    const approve = panel?.querySelector('[data-auth-action="approve"]') || null;
+    const reject = panel?.querySelector('[data-auth-action="reject-all"]') || null;
+    return {
+      visible: Boolean(panel && !panel.classList.contains("hidden")),
+      collapsed: Boolean(panel?.classList.contains("is-collapsed")),
+      rows: panel?.querySelectorAll(".authorization-row").length || 0,
+      selected: Boolean(selected?.checked),
+      selectionDisabled: Boolean(selected?.disabled),
+      groupSelected: Boolean(group?.checked),
+      approveEnabled: Boolean(approve && !approve.disabled),
+      rejectEnabled: Boolean(reject && !reject.disabled),
+      viewButtons: panel?.querySelectorAll("[data-auth-view]").length || 0,
+      submitting: Boolean(row?.classList.contains("is-submitting")),
+    };
+  });
+}
+
+async function expectAuthorizationViewRevealsEdit(h4, started, options = {}) {
+  const { page, agentRunId } = started;
+  const panelBefore = await editAuthorizationPanelInteractionProjection(page);
+  expect(panelBefore).toEqual({
+    visible: true,
+    collapsed: false,
+    rows: 1,
+    selected: true,
+    selectionDisabled: false,
+    groupSelected: true,
+    approveEnabled: true,
+    rejectEnabled: true,
+    viewButtons: 1,
+    submitting: false,
+  });
+  const viewButton = page.locator("#authorizationPanel [data-auth-view]");
+  await expect(viewButton).toHaveCount(1);
+
+  if (options.verifyMissingTarget) {
+    const originalEditId = await viewButton.getAttribute("data-auth-view");
+    const missingBoundary = h4.requestBoundary();
+    const missingMetricsBefore = await h4.metrics();
+    await viewButton.evaluate((button) => { button.dataset.authView = "missing-edit"; });
+    await viewButton.click();
+    await expectEditDiffDisclosure(h4, false);
+    await expect(page.locator("#messages .is-authorization-view-target")).toHaveCount(0);
+    expect(await editAuthorizationPanelInteractionProjection(page)).toEqual(panelBefore);
+    const missingMetricsAfter = await h4.metrics();
+    expectEditAuthorizationZeroRequests(editAuthorizationRequestProjection(
+      h4,
+      missingBoundary,
+      missingMetricsBefore,
+      missingMetricsAfter,
+      agentRunId,
+    ));
+    await viewButton.evaluate((button, editId) => { button.dataset.authView = editId; }, originalEditId);
+  }
+
+  const revealBoundary = h4.requestBoundary();
+  const revealMetricsBefore = await h4.metrics();
+  await viewButton.click();
+  await expectEditDiffDisclosure(h4, true);
+  const suggestion = page.locator("article.msg.assistant.edit-suggestion")
+    .filter({ has: page.locator(".tool-edit-target", { hasText: EDIT_AUTHORIZATION_CONTRACT.path }) });
+  await expect(suggestion).toHaveClass(/is-authorization-view-target/);
+  await expect.poll(() => suggestion.evaluate((element) => {
+    const targetRect = element.getBoundingClientRect();
+    const viewportRect = document.querySelector("#messages")?.getBoundingClientRect();
+    return Boolean(
+      viewportRect
+      && targetRect.bottom > viewportRect.top
+      && targetRect.top < viewportRect.bottom,
+    );
+  })).toBe(true);
+  expect(await editAuthorizationPanelInteractionProjection(page)).toEqual(panelBefore);
+  const revealMetricsAfter = await h4.metrics();
+  expectEditAuthorizationZeroRequests(editAuthorizationRequestProjection(
+    h4,
+    revealBoundary,
+    revealMetricsBefore,
+    revealMetricsAfter,
+    agentRunId,
+  ));
+  if (options.waitForHighlightClear) {
+    await expect(suggestion).not.toHaveClass(/is-authorization-view-target/, { timeout: 3000 });
+  }
 }
 
 async function beginEditAuthorizationLifecycle(h4, runtime, branchName, branchOverride = null) {
@@ -10898,13 +11008,27 @@ async function reloadCompletedEditAuthorizationLifecycle(h4, started, completed)
 
 async function exerciseEditAuthorizationLifecycle(h4, runtime, branchName) {
   const started = await beginEditAuthorizationLifecycle(h4, runtime, branchName);
+  const waitingToggle = await expectEditDiffDisclosure(h4, false);
+  await waitingToggle.focus();
+  await waitingToggle.press("Enter");
+  await expectEditDiffDisclosure(h4, true);
+  await waitingToggle.press("Space");
+  await expectEditDiffDisclosure(h4, false);
+  await expectAuthorizationViewRevealsEdit(h4, started, {
+    verifyMissingTarget: true,
+    waitForHighlightClear: true,
+  });
   const waitingReload = await reloadWaitingEditAuthorizationLifecycle(h4, started);
+  await expectEditDiffDisclosure(h4, false);
+  await expectAuthorizationViewRevealsEdit(h4, started);
   const completed = await completeEditAuthorizationLifecycle(h4, started, waitingReload);
+  await expectEditDiffDisclosure(h4, true);
   const terminalReload = await reloadCompletedEditAuthorizationLifecycle(
     h4,
     started,
     completed,
   );
+  await expectEditDiffDisclosure(h4, false);
   const { branch, agentRunId, authorizationId } = started;
   const decisionSubmissionProjection = {
     requests: completed.decisionRequests,
@@ -11033,6 +11157,245 @@ async function exerciseEditAuthorizationLifecycle(h4, runtime, branchName) {
     waitingReload: waitingReload.waitingReloadRequests,
     terminalReload: terminalReload.terminalReloadRequests,
     hashes,
+  });
+}
+
+async function exerciseRepeatedEditAuthorizationIdentity(h4, runtime) {
+  const rejected = EDIT_AUTHORIZATION_CONTRACT.branches.rejected;
+  const approved = EDIT_AUTHORIZATION_CONTRACT.branches.approved;
+  const startedA = await beginEditAuthorizationLifecycle(h4, runtime, "rejected");
+  await expectAuthorizationViewRevealsEdit(h4, startedA);
+  const instanceA = `server-edit-authorization-${startedA.authorizationId}`;
+  const cardA = h4.page.locator(
+    `article.edit-suggestion[data-edit-id="${instanceA}"]`,
+  );
+  await expect(cardA).toHaveCount(1);
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+  const completedA = await completeEditAuthorizationLifecycle(h4, startedA, {
+    decisionMetricsBefore: startedA.metricsAtWaiting,
+  });
+  await expect(cardA.locator(".tool-edit-status")).toHaveClass(/is-rejected/);
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+
+  const { page } = h4;
+  const sessionBeforeBoundary = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(startedA.sessionId)}`,
+  );
+  expect(sessionBeforeBoundary.status).toBe(200);
+  const boundaryMessages = [
+    ...(sessionBeforeBoundary.body?.messages || []),
+    {
+      role: "assistant",
+      content: "H4 compact boundary for a repeated edit authorization run.",
+      meta: {
+        kind: "compact-summary",
+        compressed: (sessionBeforeBoundary.body?.messages || []).length,
+        estimatedSaved: 1,
+      },
+      _time: new Date().toISOString(),
+    },
+  ];
+  const boundarySave = await page.evaluate(async ({sessionId, messages}) => {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({messages, runState: {}}),
+    });
+    return {status: response.status, body: await response.json()};
+  }, {sessionId: startedA.sessionId, messages: boundaryMessages});
+  expect(boundarySave.status).toBe(200);
+  expect(boundarySave.body?.messages).toHaveLength(boundaryMessages.length);
+  await h4.reloadRuntime(runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  await expect(cardA.locator(".tool-edit-status")).toHaveClass(/is-rejected/);
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "false");
+  const traceA = page.locator("#messages .execution-trace.completed").filter({has: cardA});
+  await expect(traceA).toHaveCount(1);
+  await traceA.locator(":scope > [data-execution-trace-toggle]").click();
+  await expect(traceA).toHaveClass(/is-expanded/);
+  await cardA.locator(".edit-diff-toggle").click();
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+
+  await page.locator("#prompt").fill(approved.userMarker);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user").filter({ hasText: approved.userMarker }))
+    .toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const agentRunIdB = h4.controlIds().agentRunIds.find((id) => id !== startedA.agentRunId);
+  expect(agentRunIdB).toBeTruthy();
+  let waitingBResponse = null;
+  await expect.poll(async () => {
+    waitingBResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunIdB)}?cursor=0&wait=0`,
+    );
+    return {
+      status: waitingBResponse.body?.status,
+      action: waitingBResponse.body?.pendingAuthorization?.action,
+      proposalId: waitingBResponse.body?.pendingAuthorization?.proposalId,
+    };
+  }).toEqual({
+    status: "waiting_authorization",
+    action: "apply_edit",
+    proposalId: startedA.waitingAgent.pendingAuthorization.proposalId,
+  });
+  const authorizationIdB = String(
+    waitingBResponse.body?.pendingAuthorization?.authorizationId || "",
+  );
+  expect(authorizationIdB).toMatch(/^[0-9a-f]{64}$/);
+  expect(authorizationIdB).not.toBe(startedA.authorizationId);
+  const instanceB = `server-edit-authorization-${authorizationIdB}`;
+  expect(instanceB).not.toBe(instanceA);
+
+  const cardB = page.locator(`article.edit-suggestion[data-edit-id="${instanceB}"]`);
+  await expect(page.locator("article.edit-suggestion")).toHaveCount(2);
+  await expect(cardA).toHaveCount(1);
+  await expect(cardB).toHaveCount(1);
+  await expect(cardA.locator(".tool-edit-status")).toHaveClass(/is-rejected/);
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(cardB.locator(".tool-edit-status")).toHaveClass(/is-review/);
+  await expect(cardB.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "false");
+  const viewB = page.locator("#authorizationPanel [data-auth-view]");
+  await expect(viewB).toHaveCount(1);
+  await expect(viewB).toHaveAttribute("data-auth-view", instanceB);
+  await viewB.click();
+  await expect(cardB.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(cardB).toHaveClass(/is-authorization-view-target/);
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(cardA.locator(".tool-edit-status")).toHaveClass(/is-rejected/);
+
+  const approveButton = page.locator('#authorizationPanel [data-auth-action="approve"]');
+  await expect(approveButton).toHaveCount(1);
+  await expect(approveButton).toBeEnabled();
+  await approveButton.click();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: approved.finalMarker,
+  })).toHaveCount(1);
+  let completedBResponse = null;
+  await expect.poll(async () => {
+    completedBResponse = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunIdB)}?cursor=0&wait=0`,
+    );
+    return {
+      status: completedBResponse.body?.status,
+      pendingAuthorization: completedBResponse.body?.pendingAuthorization ?? null,
+    };
+  }).toEqual({status: "completed", pendingAuthorization: null});
+  await expect(cardA.locator(".tool-edit-status")).toHaveClass(/is-rejected/);
+  await expect(cardB.locator(".tool-edit-status")).toHaveClass(/is-applied/);
+  await expect(cardA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(cardB.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "true");
+
+  const sessionResponse = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(startedA.sessionId)}`,
+  );
+  expect(sessionResponse.status).toBe(200);
+  const editMessages = (sessionResponse.body?.messages || []).filter((message) => (
+    message?.role === "tool-result"
+    && message.meta?.serverManaged === true
+    && message.meta?.action === "propose_edit"
+  ));
+  expect(editMessages).toHaveLength(2);
+  expect(editMessages.map((message) => message.meta.pendingEditId)).toEqual([
+    `server-edit-${startedA.waitingAgent.pendingAuthorization.proposalId}`,
+    `server-edit-${startedA.waitingAgent.pendingAuthorization.proposalId}`,
+  ]);
+  expect(editMessages.map((message) => message.meta.authorizationId)).toEqual([
+    startedA.authorizationId,
+    authorizationIdB,
+  ]);
+  expect(editMessages.map((message) => ({
+    agentRunId: message.meta.agentRunId,
+    applied: message.meta.applied === true,
+    rejected: message.meta.rejected === true,
+  }))).toEqual([
+    {agentRunId: startedA.agentRunId, applied: false, rejected: true},
+    {agentRunId: agentRunIdB, applied: true, rejected: false},
+  ]);
+
+  const metrics = await h4.metrics();
+  const editMetrics = editAuthorizationMetricsProjection(metrics);
+  expect(metrics.chatRequests).toEqual([
+    {scenario: `${rejected.scenarioPrefix}-call`, stream: true, hasToolResult: false},
+    {
+      scenario: `${rejected.scenarioPrefix}-final`,
+      stream: true,
+      hasToolResult: true,
+      editAuthorizationReceipt: editAuthorizationReceiptExpectation(rejected),
+    },
+    {scenario: `${approved.scenarioPrefix}-call`, stream: true, hasToolResult: false},
+    {
+      scenario: `${approved.scenarioPrefix}-final`,
+      stream: true,
+      hasToolResult: true,
+      editAuthorizationReceipt: editAuthorizationReceiptExpectation(approved),
+    },
+  ]);
+  expect(metrics.production.agentRuns).toHaveLength(2);
+  expect(metrics.production.runtimeRuns).toHaveLength(4);
+  expect(editMetrics.counters).toEqual({
+    registeredDelegations: 2,
+    proposalDelegations: 2,
+    applyDelegations: 1,
+    writes: 1,
+    backups: 1,
+    unsafe: 0,
+  });
+  expect(editMetrics.registeredExecutions).toHaveLength(2);
+  expect(editMetrics.proposalTimeline).toHaveLength(2);
+  expect(editMetrics.applyTimeline).toHaveLength(1);
+  expect(editMetrics.writeTimeline).toHaveLength(1);
+  expect(editMetrics.backupTimeline).toHaveLength(1);
+  const totalRequests = h4.requestEvidenceSince(startedA.lifecycleBoundary);
+  const requestSummary = h4.requestSummarySince(startedA.lifecycleBoundary);
+  expect(totalRequests.agentPost).toBe(2);
+  expect(totalRequests.runtimePost).toBe(0);
+  expect(totalRequests.agentDelete).toBe(0);
+  expect(requestSummary["POST /api/agent/runs/[id]/authorization"]).toBe(2);
+  expect(requestSummary["POST /api/agent/runs/[id]/resume"]).toBe(2);
+  expect(Object.entries(requestSummary)
+    .filter(([key]) => key.startsWith("POST /api/tools/"))
+    .reduce((sum, [, count]) => sum + count, 0)).toBe(0);
+
+  const metricsBeforeReload = await h4.metrics();
+  const reloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  const restoredA = page.locator(`article.edit-suggestion[data-edit-id="${instanceA}"]`);
+  const restoredB = page.locator(`article.edit-suggestion[data-edit-id="${instanceB}"]`);
+  await expect(page.locator("article.edit-suggestion")).toHaveCount(2);
+  await expect(restoredA.locator(".tool-edit-status")).toHaveClass(/is-rejected/);
+  await expect(restoredB.locator(".tool-edit-status")).toHaveClass(/is-applied/);
+  await expect(restoredA.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "false");
+  await expect(restoredB.locator(".edit-diff-toggle")).toHaveAttribute("aria-expanded", "false");
+  const metricsAfterReload = await h4.metrics();
+  expect(metricsAfterReload.chatRequests).toEqual(metricsBeforeReload.chatRequests);
+  expect(metricsAfterReload.production.agentRuns).toEqual(metricsBeforeReload.production.agentRuns);
+  expect(metricsAfterReload.production.runtimeRuns).toEqual(metricsBeforeReload.production.runtimeRuns);
+  expect(editAuthorizationMetricsProjection(metricsAfterReload)).toEqual(editMetrics);
+  const reloadRequests = h4.requestEvidenceSince(reloadBoundary);
+  const reloadSummary = h4.requestSummarySince(reloadBoundary);
+  expect(reloadRequests.agentPost).toBe(0);
+  expect(reloadRequests.runtimePost).toBe(0);
+  expect(reloadRequests.agentDelete).toBe(0);
+  expect(reloadSummary["POST /api/agent/runs/[id]/authorization"] || 0).toBe(0);
+  expect(reloadSummary["POST /api/agent/runs/[id]/resume"] || 0).toBe(0);
+  expect(Object.entries(reloadSummary)
+    .filter(([key]) => key.startsWith("POST /api/tools/"))
+    .reduce((sum, [, count]) => sum + count, 0)).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-repeated-edit-authorization-instance-identity`, {
+    runtime,
+    proposalIdentityShared: true,
+    authorizationIdentityDistinct: true,
+    cards: 2,
+    decisions: ["rejected", "approved"],
+    effects: editMetrics.counters,
+    refreshDefaultCollapsed: true,
+    duplicateEffects: false,
   });
 }
 
@@ -15587,6 +15950,14 @@ test("bundle edit authorization reject survives reload without applying", async 
 
 test("direct classic edit authorization reject survives reload without applying", async ({ h4 }) => {
   await exerciseEditAuthorizationLifecycle(h4, "classic", "rejected");
+});
+
+test("bundle repeated identical edit proposals keep independent authorization cards", async ({ h4 }) => {
+  await exerciseRepeatedEditAuthorizationIdentity(h4, "bundle");
+});
+
+test("direct classic repeated identical edit proposals keep independent authorization cards", async ({ h4 }) => {
+  await exerciseRepeatedEditAuthorizationIdentity(h4, "classic");
 });
 
 test("bundle edit authorization retries once after pre-server failure and applies exactly once", async ({ h4 }) => {
