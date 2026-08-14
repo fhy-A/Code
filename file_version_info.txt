@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 6, 1, 0),
-    prodvers=(0, 6, 1, 0),
+    filevers=(0, 6, 2, 0),
+    prodvers=(0, 6, 2, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,12 +15,12 @@ VSVersionInfo(
         '040904B0',
         [StringStruct('CompanyName', 'Code'),
          StringStruct('FileDescription', 'Code - AI Coding Assistant'),
-         StringStruct('FileVersion', '0.6.1'),
+         StringStruct('FileVersion', '0.6.2'),
          StringStruct('InternalName', 'Code'),
          StringStruct('LegalCopyright', ''),
-         StringStruct('OriginalFilename', 'Code-v0.6.1.exe'),
+         StringStruct('OriginalFilename', 'Code-v0.6.2.exe'),
          StringStruct('ProductName', 'Code'),
-         StringStruct('ProductVersion', '0.6.1')])
+         StringStruct('ProductVersion', '0.6.2')])
     ]),
     VarFileInfo([VarStruct('Translation', [0x0409, 1200])])
   ]
