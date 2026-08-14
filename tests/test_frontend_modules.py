@@ -8332,9 +8332,9 @@ const activeTraceMessages = [
 const activeAnswerHtml = feature.projectMessages(activeTraceMessages, {
   hasActiveRun: true,
 });
-const expandedActiveAnswerHtml = feature.projectMessages(activeTraceMessages, {
+const collapsedActiveAnswerHtml = feature.projectMessages(activeTraceMessages, {
   hasActiveRun: true,
-  expandedExecutionTraces: new Set(["0"]),
+  collapsedExecutionTraces: new Set(["0"]),
 });
 const activeThinkingHtml = feature.projectMessages([
   {role: "user", content: "active thinking"},
@@ -8401,6 +8401,83 @@ const expandedActiveTailHtml = feature.projectMessages(activeCompletedTailMessag
 const completedCollapsedTailHtml = feature.projectMessages(activeCompletedTailMessages, {
   hasActiveRun: false,
   expandedToolProcesses: new Set(["0:1"]),
+});
+const activeToolGapMessages = [
+  {role: "user", content: "active multi-round tool stage"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "gap-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "gap-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "contents", meta: {action: "read_file", toolCallId: "gap-1", outcome: "succeeded"}},
+  {role: "assistant", content: "reviewing the first result"},
+];
+const activeToolGapHtml = feature.projectMessages(activeToolGapMessages, {
+  hasActiveRun: true,
+  expandedToolProcesses: new Set(["session-1:gap-1"]),
+  expandedToolItems: new Set(["session-1:gap-1:gap-1"]),
+});
+const activeFailedToolGapMessages = [
+  {role: "user", content: "active failed tool stage"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "failed-gap-1", function: {name: "read_file", arguments: '{"path":"missing.txt"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "failed-gap-1", tool: {action: "read_file", path: "missing.txt"}}},
+  {role: "tool-result", content: "missing", meta: {action: "read_file", toolCallId: "failed-gap-1", outcome: "failed", result: {ok: false, error: "missing"}}},
+  {role: "assistant", content: "trying a safe alternative"},
+];
+const activeFailedToolGapHtml = feature.projectMessages(activeFailedToolGapMessages, {
+  hasActiveRun: true,
+  expandedToolProcesses: new Set(["session-1:failed-gap-1"]),
+  expandedToolItems: new Set(["session-1:failed-gap-1:failed-gap-1"]),
+});
+const activeFailedThenRetryHtml = feature.projectMessages([
+  {role: "user", content: "retry after a failed tool"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "failed-gap-1", function: {name: "read_file", arguments: '{"path":"missing.txt"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "failed-gap-1", tool: {action: "read_file", path: "missing.txt"}}},
+  {role: "tool-result", content: "missing", meta: {action: "read_file", toolCallId: "failed-gap-1", outcome: "failed", result: {ok: false, error: "missing"}}},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "failed-gap-2", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "failed-gap-2", tool: {action: "read_file", path: "README.md"}}},
+], {
+  hasActiveRun: true,
+  expandedToolProcesses: new Set(["session-1:failed-gap-1"]),
+  expandedToolItems: new Set([
+    "session-1:failed-gap-1:failed-gap-1",
+    "session-1:failed-gap-1:failed-gap-2",
+  ]),
+});
+const activeQuestionnaireWaitingHtml = feature.projectMessages([
+  {role: "user", content: "ask before continuing"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "questionnaire-gap-1", function: {name: "request_user_input", arguments: '{"questions":[]}' }},
+  ]}},
+  {role: "tool-call", meta: {
+    action: "request_user_input",
+    toolCallId: "questionnaire-gap-1",
+    tool: {action: "request_user_input"},
+  }},
+], {
+  hasActiveRun: true,
+  expandedToolProcesses: new Set(["session-1:questionnaire-gap-1"]),
+  expandedToolItems: new Set(["session-1:questionnaire-gap-1:questionnaire-gap-1"]),
+});
+const activeAuthorizationWaitingHtml = feature.projectMessages([
+  {role: "user", content: "authorize before continuing"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "authorization-gap-1", function: {name: "propose_edit", arguments: '{"path":"src/a.js"}' }},
+  ]}},
+  {role: "tool-call", meta: {
+    action: "propose_edit",
+    toolCallId: "authorization-gap-1",
+    tool: {action: "propose_edit", path: "src/a.js"},
+  }},
+], {
+  hasActiveRun: true,
+  expandedToolProcesses: new Set(["session-1:authorization-gap-1"]),
+  expandedToolItems: new Set(["session-1:authorization-gap-1:authorization-gap-1"]),
 });
 const autoCompactionHtml = feature.projectMessages([
   {role: "user", content: "continue a long task"},
@@ -8526,7 +8603,7 @@ process.stdout.write(JSON.stringify({
   simpleCompletedHtml,
   compactSummaryHtml,
   activeAnswerHtml,
-  expandedActiveAnswerHtml,
+  collapsedActiveAnswerHtml,
   activeThinkingHtml,
   emptyRecoveryHtml,
   operationalHtml,
@@ -8534,6 +8611,11 @@ process.stdout.write(JSON.stringify({
   activeCompletedTailHtml,
   expandedActiveTailHtml,
   completedCollapsedTailHtml,
+  activeToolGapHtml,
+  activeFailedToolGapHtml,
+  activeFailedThenRetryHtml,
+  activeQuestionnaireWaitingHtml,
+  activeAuthorizationWaitingHtml,
   autoCompactionHtml,
   manualCompactionRunningHtml,
   manualCompactionCompletedHtml,
@@ -8665,13 +8747,10 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("execution-trace", data["simpleCompletedHtml"])
         self.assertIn("data-completed-run-status", data["simpleCompletedHtml"])
         active_answer_html = data["activeAnswerHtml"]
-        self.assertIn('class="execution-trace active"', active_answer_html)
+        self.assertIn('class="execution-trace active is-expanded"', active_answer_html)
         self.assertIn('data-execution-trace="0"', active_answer_html)
-        self.assertNotIn(
-            'class="execution-trace active is-expanded"',
-            active_answer_html,
-        )
-        active_trace_start = active_answer_html.index('class="execution-trace active"')
+        self.assertIn('class="execution-trace active is-expanded"', active_answer_html)
+        active_trace_start = active_answer_html.index('class="execution-trace active is-expanded"')
         active_summary = active_answer_html.index('class="execution-trace-summary"', active_trace_start)
         active_anchor = active_answer_html.index("data-active-run-anchor", active_summary)
         active_body = active_answer_html.index('class="execution-trace-body"', active_anchor)
@@ -8685,17 +8764,24 @@ process.stdout.write(JSON.stringify({
         self.assertLess(active_commentary, active_tools)
         self.assertLess(active_tools, active_trace_end)
         self.assertLess(active_trace_end, active_final)
+        self.assertIn('class="execution-trace active"', data["collapsedActiveAnswerHtml"])
+        self.assertNotIn(
+            'class="execution-trace active is-expanded"',
+            data["collapsedActiveAnswerHtml"],
+        )
         self.assertIn(
             'class="execution-trace active is-expanded"',
-            data["expandedActiveAnswerHtml"],
+            data["activeThinkingHtml"],
         )
-        self.assertNotIn("execution-trace", data["activeThinkingHtml"])
         self.assertLess(
             data["activeThinkingHtml"].index("data-active-run-anchor"),
             data["activeThinkingHtml"].index("checkpoint"),
         )
         self.assertIn("next checkpoint", data["activeThinkingHtml"])
-        self.assertNotIn("execution-trace", data["emptyRecoveryHtml"])
+        self.assertIn(
+            'class="execution-trace active is-expanded"',
+            data["emptyRecoveryHtml"],
+        )
         self.assertLess(
             data["emptyRecoveryHtml"].index("data-active-run-anchor"),
             data["emptyRecoveryHtml"].index("data-tool-process-block"),
@@ -8708,8 +8794,11 @@ process.stdout.write(JSON.stringify({
         )
         self.assertNotIn("toolProcessRanCommand", pending_tail_summary)
         answer_stage_summary = data["activeAnswerHtml"].split('<div class="tool-process-stage-body">', 1)[0]
-        self.assertIn("<strong>toolProcessRanCommand</strong>", answer_stage_summary)
-        self.assertNotIn("<code>", answer_stage_summary)
+        self.assertIn(
+            "<strong>label:run_command</strong><code>git status --short</code>",
+            answer_stage_summary,
+        )
+        self.assertNotIn("toolProcessRanCommand", answer_stage_summary)
         self.assertNotIn("正在读取 README.md", data["operationalHtml"])
         self.assertNotIn("正在执行 git status --short", data["operationalHtml"])
         self.assertIn("meaningful checkpoint", data["operationalHtml"])
@@ -8741,9 +8830,53 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("toolProcessInspectedFile", active_tail_summary)
         self.assertNotIn("toolProcessRanCommand", active_tail_summary)
         self.assertIn('data-tool-process-key="0:1"', data["activeCompletedTailHtml"])
-        self.assertNotIn('<details class="tool-process-stage running" data-current-action="run_command" data-tool-process-key="0:1" open>', data["activeCompletedTailHtml"])
-        self.assertIn('<details class="tool-process-stage running" data-current-action="run_command" data-tool-process-key="0:1" open>', data["expandedActiveTailHtml"])
+        self.assertNotRegex(
+            data["activeCompletedTailHtml"],
+            r'<details class="tool-process-stage running"[^>]+ open>',
+        )
+        self.assertRegex(
+            data["expandedActiveTailHtml"],
+            r'<details class="tool-process-stage running"[^>]+ open>',
+        )
         self.assertNotIn('data-tool-process-key="0:1" open', data["completedCollapsedTailHtml"])
+        for gap_html in (data["activeToolGapHtml"], data["activeFailedToolGapHtml"]):
+            gap_summary = gap_html.split('<div class="tool-process-stage-body">', 1)[0]
+            self.assertIn('class="tool-process-stage running"', gap_summary)
+            self.assertRegex(
+                gap_html,
+                r'<details class="tool-process-stage running"[^>]+ open>',
+            )
+            self.assertRegex(
+                gap_html,
+                r'<details class="tool-process-item (?:succeeded|failed)"[^>]+ open>',
+            )
+        failed_then_retry_html = data["activeFailedThenRetryHtml"]
+        self.assertEqual(failed_then_retry_html.count("data-tool-process-block"), 1)
+        self.assertEqual(failed_then_retry_html.count('class="tool-process-stage running"'), 1)
+        self.assertIn('data-tool-process-id="session-1:failed-gap-1"', failed_then_retry_html)
+        self.assertNotIn('data-tool-process-id="session-1:failed-gap-2"', failed_then_retry_html)
+        self.assertEqual(failed_then_retry_html.count('class="tool-process-item '), 2)
+        self.assertRegex(
+            failed_then_retry_html,
+            r'<details class="tool-process-item failed"[^>]+ open>',
+        )
+        self.assertRegex(
+            failed_then_retry_html,
+            r'<details class="tool-process-item running"[^>]+ open>',
+        )
+        for waiting_html in (
+            data["activeQuestionnaireWaitingHtml"],
+            data["activeAuthorizationWaitingHtml"],
+        ):
+            self.assertIn('class="tool-process-stage running"', waiting_html)
+            self.assertRegex(
+                waiting_html,
+                r'<details class="tool-process-stage running"[^>]+ open>',
+            )
+            self.assertRegex(
+                waiting_html,
+                r'<details class="tool-process-item running"[^>]+ open>',
+            )
         self.assertIn('data-current-action="run_command"', data["runningStage"])
         self.assertIn('class="tool-process-stage running"', data["runningStage"])
         running_stage_summary = data["runningStage"].split('<div class="tool-process-stage-body">', 1)[0]
@@ -10493,8 +10626,10 @@ process.stdout.write(JSON.stringify({
         self.assertLess(expanded_second_steer, expanded_final)
 
         active_html = data["active"]
-        self.assertNotIn('class="execution-trace active"', active_html)
-        self.assertLess(active_html.index("data-active-run-anchor"), active_html.index("first checkpoint"))
+        self.assertIn('class="execution-trace active is-expanded"', active_html)
+        active_trace_body = active_html.index('class="execution-trace-body"')
+        self.assertLess(active_html.index("data-active-run-anchor"), active_trace_body)
+        self.assertLess(active_trace_body, active_html.index("first checkpoint"))
         self.assertLess(active_html.index("data-tool-process-block"), active_html.index("steer instruction"))
 
     def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
@@ -10570,6 +10705,522 @@ process.stdout.write(JSON.stringify({
         self.assertIn("result,", tool_projection)
         self.assertIn("argumentAliases:", tool_projection)
 
+    def test_tool_fold_controls_block_primary_selection_without_disabling_body_copy(self):
+        for selector in (
+            ".execution-trace-summary {",
+            ".tool-process-stage > summary {",
+            ".tool-process-item > summary {",
+        ):
+            rule_start = STYLE_SOURCE.index(selector)
+            rule_end = STYLE_SOURCE.index("}", rule_start)
+            rule = STYLE_SOURCE[rule_start:rule_end]
+            self.assertIn("-webkit-user-select: none", rule)
+            self.assertIn("user-select: none", rule)
+        self.assertIn(
+            ".execution-trace-summary:focus-visible:not(.is-pointer-focus)",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".tool-process-stage > summary:focus-visible:not(.is-pointer-focus)",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".tool-process-item > summary:focus-visible:not(.is-pointer-focus)",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".execution-trace-summary.is-pointer-focus:focus {\n  outline: none;",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".tool-process-stage > summary.is-pointer-focus:focus,\n"
+            ".tool-process-item > summary.is-pointer-focus:focus {\n"
+            "  outline: none;",
+            STYLE_SOURCE,
+        )
+        sync_start = MESSAGES_SOURCE.index("function syncProjectedElement(")
+        sync_end = MESSAGES_SOURCE.index("function reconcileToolProcessItem(", sync_start)
+        sync_projection = MESSAGES_SOURCE[sync_start:sync_end]
+        self.assertIn(
+            'current.classList?.contains?.("is-pointer-focus") === true',
+            sync_projection,
+        )
+        self.assertIn(
+            'current.classList?.add?.("is-pointer-focus")',
+            sync_projection,
+        )
+
+        script = r"""
+global.window = global;
+window.Code = {ui: {}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const handlers = {};
+const root = {
+  addEventListener(type, handler, options) {
+    handlers[type] = handlers[type] || [];
+    handlers[type].push({handler, options});
+  },
+  contains: () => true,
+};
+const feature = createMessagesFeature({
+  escapeHtml: (value) => String(value ?? ""),
+  t: (key) => key,
+});
+feature.bindInteractions(root);
+
+const FOLD_SELECTOR = "[data-execution-trace-toggle], .tool-process-stage > summary, .tool-process-item > summary";
+const INTERACTIVE_SELECTOR = "a, button, input, textarea, select, [contenteditable='true']";
+const focusOptions = [];
+const attributes = {};
+let expanded = true;
+let syntheticClicks = 0;
+let documentFocused = true;
+const pendingFocusCleanups = [];
+global.queueMicrotask = (callback) => pendingFocusCleanups.push(callback);
+const flushFocusCleanups = () => {
+  while (pendingFocusCleanups.length) pendingFocusCleanups.shift()();
+};
+const ownerDocument = {
+  activeElement: null,
+  body: null,
+  documentElement: null,
+  hasFocus: () => documentFocused,
+};
+ownerDocument.body = {ownerDocument};
+ownerDocument.documentElement = {ownerDocument};
+const sameDocumentTarget = {ownerDocument};
+const controlClasses = new Set();
+const trace = {
+  classList: {toggle() { expanded = !expanded; return expanded; }},
+};
+const control = {
+  ownerDocument,
+  classList: {
+    add(value) { controlClasses.add(value); },
+    remove(value) { controlClasses.delete(value); },
+    contains(value) { return controlClasses.has(value); },
+  },
+  contains(node) { return node === this.link; },
+  focus(options) {
+    ownerDocument.activeElement = this;
+    focusOptions.push(options || null);
+  },
+  setAttribute(name, value) { attributes[name] = value; },
+  click() {
+    syntheticClicks += 1;
+    handlers.click[0].handler({target: this});
+  },
+  closest(selector) {
+    if (selector === FOLD_SELECTOR) return this;
+    if (selector === "[data-execution-trace-toggle]") return this;
+    if (selector === "[data-execution-trace]") return trace;
+    return null;
+  },
+};
+const link = {
+  closest(selector) {
+    if (selector === FOLD_SELECTOR) return control;
+    if (selector === INTERACTIVE_SELECTOR) return this;
+    return null;
+  },
+};
+control.link = link;
+const body = {closest: () => null};
+
+const runMouseDown = (target, button) => {
+  let prevented = 0;
+  handlers.mousedown[0].handler({
+    target,
+    button,
+    preventDefault() { prevented += 1; },
+  });
+  return prevented;
+};
+const primaryPrevented = runMouseDown(control, 0);
+const pointerMarked = control.classList.contains("is-pointer-focus");
+const secondaryPrevented = runMouseDown(control, 2);
+const nestedLinkPrevented = runMouseDown(link, 0);
+const bodyPrevented = runMouseDown(body, 0);
+handlers.keydown[0].handler({
+  target: control,
+  key: "Tab",
+  preventDefault() { throw new Error("Tab must retain native navigation"); },
+});
+const keyboardClearedPointerMark = !control.classList.contains("is-pointer-focus");
+runMouseDown(control, 0);
+documentFocused = false;
+handlers.focusout[0].handler({target: control, relatedTarget: null});
+flushFocusCleanups();
+const pageBlurPreservedPointerMark = control.classList.contains("is-pointer-focus");
+documentFocused = true;
+const pageRestorePreservedPointerMark = control.classList.contains("is-pointer-focus");
+ownerDocument.activeElement = ownerDocument.body;
+handlers.focusout[0].handler({target: control, relatedTarget: null});
+flushFocusCleanups();
+const transientBodyFocusPreservedPointerMark = control.classList.contains("is-pointer-focus");
+ownerDocument.activeElement = sameDocumentTarget;
+handlers.focusout[0].handler({target: control, relatedTarget: sameDocumentTarget});
+flushFocusCleanups();
+const sameDocumentFocusClearedPointerMark = !control.classList.contains("is-pointer-focus");
+runMouseDown(control, 0);
+ownerDocument.activeElement = sameDocumentTarget;
+handlers.focusout[0].handler({target: control, relatedTarget: null});
+flushFocusCleanups();
+const activeElementFocusClearedPointerMark = !control.classList.contains("is-pointer-focus");
+runMouseDown(control, 0);
+let keyboardPrevented = 0;
+handlers.keydown[0].handler({
+  target: control,
+  key: "Enter",
+  preventDefault() { keyboardPrevented += 1; },
+});
+handlers.keydown[0].handler({
+  target: control,
+  key: " ",
+  preventDefault() { keyboardPrevented += 1; },
+});
+
+process.stdout.write(JSON.stringify({
+  mouseDownHandlers: handlers.mousedown.length,
+  primaryPrevented,
+  secondaryPrevented,
+  nestedLinkPrevented,
+  bodyPrevented,
+  focusOptions,
+  pointerMarked,
+  keyboardClearedPointerMark,
+  pageBlurPreservedPointerMark,
+  pageRestorePreservedPointerMark,
+  transientBodyFocusPreservedPointerMark,
+  sameDocumentFocusClearedPointerMark,
+  activeElementFocusClearedPointerMark,
+  keyboardPrevented,
+  syntheticClicks,
+  expanded,
+  ariaExpanded: attributes["aria-expanded"],
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "mouseDownHandlers": 1,
+            "primaryPrevented": 1,
+            "secondaryPrevented": 0,
+            "nestedLinkPrevented": 0,
+            "bodyPrevented": 0,
+            "focusOptions": [
+                {"preventScroll": True},
+                {"preventScroll": True},
+                {"preventScroll": True},
+                {"preventScroll": True},
+            ],
+            "pointerMarked": True,
+            "keyboardClearedPointerMark": True,
+            "pageBlurPreservedPointerMark": True,
+            "pageRestorePreservedPointerMark": True,
+            "transientBodyFocusPreservedPointerMark": True,
+            "sameDocumentFocusClearedPointerMark": True,
+            "activeElementFocusClearedPointerMark": True,
+            "keyboardPrevented": 2,
+            "syntheticClicks": 2,
+            "expanded": True,
+            "ariaExpanded": "true",
+        })
+
+    def test_tool_process_reconciliation_keeps_group_and_item_identity(self):
+        projection_start = MESSAGES_SOURCE.index("function renderToolProcessProjection")
+        projection_end = MESSAGES_SOURCE.index("function renderAssistantResponseInfo", projection_start)
+        projection = MESSAGES_SOURCE[projection_start:projection_end]
+        self.assertIn('data-tool-process-id="${escapeHtml(processId)}"', projection)
+        self.assertIn('data-tool-call-id="${escapeHtml(toolCallId)}"', projection)
+        self.assertIn('data-tool-process-item-key="${escapeHtml(itemKey)}"', projection)
+        self.assertIn("options.allowExpanded", projection)
+        self.assertIn("expandedToolItems.has(itemKey)", projection)
+
+        reconcile_start = MESSAGES_SOURCE.index("function reconcileToolProcessNodes(")
+        reconcile_end = MESSAGES_SOURCE.index("function createMessagesFeature", reconcile_start)
+        reconcile = MESSAGES_SOURCE[reconcile_start:reconcile_end]
+        self.assertIn("currentStages = new Map()", reconcile)
+        self.assertIn("currentItems = new Map()", reconcile)
+        self.assertIn("reconcileToolProcessItem(currentItem, projectedItem)", reconcile)
+        self.assertIn("projectedItem.replaceWith?.(currentItem)", reconcile)
+        self.assertIn("projectedArticle.replaceWith?.(currentArticle)", reconcile)
+        self.assertNotIn("setTimeout", reconcile)
+        self.assertNotIn("opacity", reconcile)
+
+        flush_start = MESSAGES_SOURCE.index("const flushProcess = (options = {}) =>")
+        flush_end = MESSAGES_SOURCE.index("const openCompletedExecutionTrace", flush_start)
+        flush_process = MESSAGES_SOURCE[flush_start:flush_end]
+        self.assertIn("const activeForegroundStage = hasActiveRun", flush_process)
+        self.assertIn("currentUserIndex === activeUserIndex", flush_process)
+        self.assertIn(
+            "pendingProcess.every(({ msg }) => !isDetachedProjectionMessage(msg))",
+            flush_process,
+        )
+        self.assertIn(
+            "activeStage: Boolean(options.activeStage) || activeForegroundStage",
+            flush_process,
+        )
+        self.assertNotIn("setTimeout", flush_process)
+
+        script = r"""
+global.window = global;
+window.Code = {ui: {}};
+require("./src/ui/messages.js");
+const {reconcileToolProcessNodes} = window.Code.ui.messages;
+
+class Element {
+  constructor(tagName, attrs = {}) {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = {...attrs};
+    this.attributeChanges = [];
+    this.childNodes = [];
+    this.parentElement = null;
+  }
+  get dataset() {
+    const output = {};
+    for (const [name, value] of Object.entries(this.attrs)) {
+      if (!name.startsWith("data-")) continue;
+      const key = name.slice(5).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+      output[key] = value;
+    }
+    return output;
+  }
+  get className() { return this.attrs.class || ""; }
+  getAttributeNames() { return Object.keys(this.attrs); }
+  getAttribute(name) { return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null; }
+  setAttribute(name, value) {
+    const next = String(value);
+    if (this.attrs[name] !== next) this.attributeChanges.push({name, action: "set", value: next});
+    this.attrs[name] = next;
+  }
+  removeAttribute(name) {
+    if (Object.hasOwn(this.attrs, name)) this.attributeChanges.push({name, action: "remove"});
+    delete this.attrs[name];
+  }
+  append(...nodes) {
+    for (const node of nodes) {
+      if (node.parentElement) node.parentElement.childNodes = node.parentElement.childNodes.filter((item) => item !== node);
+      node.parentElement = this;
+      this.childNodes.push(node);
+    }
+  }
+  replaceChildren(...nodes) {
+    for (const child of this.childNodes) child.parentElement = null;
+    this.childNodes = [];
+    this.append(...nodes);
+  }
+  replaceWith(node) {
+    const parent = this.parentElement;
+    if (!parent) return;
+    const index = parent.childNodes.indexOf(this);
+    if (node.parentElement) node.parentElement.childNodes = node.parentElement.childNodes.filter((item) => item !== node);
+    parent.childNodes[index] = node;
+    node.parentElement = parent;
+    this.parentElement = null;
+  }
+  matches(selector) {
+    const first = selector.split(" ").at(-1);
+    const tag = first.match(/^[a-z]+/i)?.[0] || "";
+    if (tag && this.tagName !== tag.toUpperCase()) return false;
+    for (const className of [...first.matchAll(/\.([a-z0-9_-]+)/gi)].map((match) => match[1])) {
+      if (!this.className.split(/\s+/).includes(className)) return false;
+    }
+    for (const attribute of [...first.matchAll(/\[([^\]=]+)(?:="([^"]*)")?\]/g)]) {
+      if (!Object.hasOwn(this.attrs, attribute[1])) return false;
+      if (attribute[2] != null && this.attrs[attribute[1]] !== attribute[2]) return false;
+    }
+    return true;
+  }
+  descendants() { return this.childNodes.flatMap((child) => [child, ...child.descendants()]); }
+  querySelectorAll(selector) {
+    const normalized = selector.replace(/^:scope\s*>\s*/, "");
+    const direct = selector.startsWith(":scope");
+    return (direct ? this.childNodes : this.descendants()).filter((node) => node.matches(normalized));
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (node.matches(selector)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+}
+
+const el = (tag, attrs, ...children) => {
+  const node = new Element(tag, attrs);
+  node.append(...children);
+  return node;
+};
+const toolItem = (id, outcome, marker, open = false) => el("details", {
+  class: `tool-process-item ${outcome}`,
+  "data-tool-call-id": id,
+  "data-tool-process-item-key": `session-1:call-1:${id}`,
+  ...(open ? {open: ""} : {}),
+}, el("summary", {"data-marker": `${marker}-summary`}), el("div", {class: "tool-process-body", "data-marker": marker}));
+const group = (outcome, marker, items, open = false) => {
+  const stage = el("details", {
+    class: `tool-process-stage ${outcome}`,
+    "data-tool-process-id": "session-1:call-1",
+    "data-tool-process-key": "0:1",
+    ...(open ? {open: ""} : {}),
+  }, el("summary", {class: "tool-process-stage-summary", "data-marker": `${marker}-summary`}),
+     el("div", {class: "tool-process-stage-body", "data-marker": marker},
+       el("div", {class: "tool-process-list"}, ...items)));
+  return el("article", {class: "msg assistant tool-process"}, stage);
+};
+const trace = (state, marker, article, expanded = true) => el("section", {
+  class: `execution-trace ${state}${expanded ? " is-expanded" : ""}`,
+  "data-execution-trace": "0",
+}, el("div", {
+  class: "execution-trace-summary",
+  "aria-expanded": String(expanded),
+  "data-marker": `${marker}-summary`,
+}), el("div", {class: "execution-trace-body", "data-marker": marker}, article));
+const currentItem1 = toolItem("call-1", "running", "old-1", true);
+const currentItem2 = toolItem("call-2", "running", "old-2", true);
+const currentArticle = group("running", "old-group", [currentItem1, currentItem2], true);
+const currentTrace = trace("active", "old-trace", currentArticle, true);
+const currentRoot = el("div", {}, currentTrace);
+const projectedItem1 = toolItem("call-1", "succeeded", "new-1", true);
+const projectedItem2 = toolItem("call-2", "failed", "new-2", true);
+const projectedArticle = group("failed", "new-group", [projectedItem1, projectedItem2], true);
+const projectedTrace = trace("active", "new-trace", projectedArticle, true);
+const projectedRoot = el("div", {}, projectedTrace);
+const result = reconcileToolProcessNodes(currentRoot, projectedRoot);
+const nextTrace = projectedRoot.querySelector("section.execution-trace[data-execution-trace]");
+const nextArticle = projectedRoot.querySelector("article.tool-process");
+const nextStage = nextArticle.querySelector("details.tool-process-stage[data-tool-process-id]");
+const nextItems = nextStage.querySelectorAll("details.tool-process-item[data-tool-call-id]");
+
+const sequenceItem1 = toolItem("call-1", "running", "sequence-start-1", true);
+const sequenceArticle = group("running", "sequence-start", [sequenceItem1], true);
+const sequenceRoot = el("div", {}, sequenceArticle);
+const sequenceStage = sequenceArticle.querySelector("details.tool-process-stage[data-tool-process-id]");
+const sequenceTimeline = [];
+let sequenceItem2 = null;
+const reconcileSequence = (projectedArticleValue, label) => {
+  const projectedRootValue = el("div", {}, projectedArticleValue);
+  reconcileToolProcessNodes(sequenceRoot, projectedRootValue);
+  sequenceRoot.replaceChildren(...projectedRootValue.childNodes);
+  const stage = sequenceRoot.querySelector("details.tool-process-stage[data-tool-process-id]");
+  const items = stage.querySelectorAll("details.tool-process-item[data-tool-call-id]");
+  if (items.length > 1 && !sequenceItem2) sequenceItem2 = items[1];
+  sequenceTimeline.push({
+    label,
+    sameStage: stage === sequenceStage,
+    sameItem1: items[0] === sequenceItem1,
+    sameItem2: items.length < 2 || items[1] === sequenceItem2,
+    stageOpen: Object.hasOwn(stage.attrs, "open"),
+    itemOpen: items.map((item) => Object.hasOwn(item.attrs, "open")),
+    itemClasses: items.map((item) => item.className),
+  });
+};
+reconcileSequence(group("running", "gap-after-tool-1", [
+  toolItem("call-1", "succeeded", "gap-1", true),
+], true), "tool1-completed-model-gap");
+reconcileSequence(group("running", "tool-2-started", [
+  toolItem("call-1", "succeeded", "tool2-start-1", true),
+  toolItem("call-2", "running", "tool2-start-2", false),
+], true), "tool2-started");
+reconcileSequence(group("running", "gap-after-tool-2", [
+  toolItem("call-1", "succeeded", "gap-2-1", true),
+  toolItem("call-2", "succeeded", "gap-2-2", false),
+], true), "tool2-completed-model-gap");
+reconcileSequence(group("succeeded", "terminal", [
+  toolItem("call-1", "succeeded", "terminal-1", false),
+  toolItem("call-2", "succeeded", "terminal-2", false),
+], false), "terminal");
+process.stdout.write(JSON.stringify({
+  result,
+  sameTrace: nextTrace === currentTrace,
+  sameArticle: nextArticle === currentArticle,
+  sameStage: nextStage === currentArticle.querySelector("details.tool-process-stage[data-tool-process-id]"),
+  sameItems: nextItems[0] === currentItem1 && nextItems[1] === currentItem2,
+  stageClass: nextStage.className,
+  stageOpen: Object.hasOwn(nextStage.attrs, "open"),
+  itemClasses: nextItems.map((item) => item.className),
+  itemOpen: nextItems.map((item) => Object.hasOwn(item.attrs, "open")),
+  stageMarker: nextStage.querySelector(":scope > summary").getAttribute("data-marker"),
+  itemMarkers: nextItems.map((item) => item.querySelector(":scope > .tool-process-body").getAttribute("data-marker")),
+  traceClass: nextTrace.className,
+  traceMarker: nextTrace.querySelector(":scope > .execution-trace-summary").getAttribute("data-marker"),
+  sequenceTimeline,
+  stageOpenMutations: sequenceStage.attributeChanges.filter((change) => change.name === "open"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "result": {"traces": 1, "groups": 1, "items": 2},
+            "sameTrace": True,
+            "sameArticle": True,
+            "sameStage": True,
+            "sameItems": True,
+            "stageClass": "tool-process-stage failed",
+            "stageOpen": True,
+            "itemClasses": ["tool-process-item succeeded", "tool-process-item failed"],
+            "itemOpen": [True, True],
+            "stageMarker": "new-group-summary",
+            "itemMarkers": ["new-1", "new-2"],
+            "traceClass": "execution-trace active is-expanded",
+            "traceMarker": "new-trace-summary",
+            "sequenceTimeline": [
+                {
+                    "label": "tool1-completed-model-gap",
+                    "sameStage": True,
+                    "sameItem1": True,
+                    "sameItem2": True,
+                    "stageOpen": True,
+                    "itemOpen": [True],
+                    "itemClasses": ["tool-process-item succeeded"],
+                },
+                {
+                    "label": "tool2-started",
+                    "sameStage": True,
+                    "sameItem1": True,
+                    "sameItem2": True,
+                    "stageOpen": True,
+                    "itemOpen": [True, False],
+                    "itemClasses": ["tool-process-item succeeded", "tool-process-item running"],
+                },
+                {
+                    "label": "tool2-completed-model-gap",
+                    "sameStage": True,
+                    "sameItem1": True,
+                    "sameItem2": True,
+                    "stageOpen": True,
+                    "itemOpen": [True, False],
+                    "itemClasses": ["tool-process-item succeeded", "tool-process-item succeeded"],
+                },
+                {
+                    "label": "terminal",
+                    "sameStage": True,
+                    "sameItem1": True,
+                    "sameItem2": True,
+                    "stageOpen": False,
+                    "itemOpen": [False, False],
+                    "itemClasses": ["tool-process-item succeeded", "tool-process-item succeeded"],
+                },
+            ],
+            "stageOpenMutations": [{"name": "open", "action": "remove"}],
+        })
+
     def test_streaming_projection_switches_kind_without_leaking_raw_reasoning(self):
         projection_start = MESSAGES_SOURCE.index("function renderFinalAssistantProjection")
         projection_end = MESSAGES_SOURCE.index("function projectMessages", projection_start)
@@ -10608,7 +11259,9 @@ process.stdout.write(JSON.stringify({
         render_start = APP_SOURCE.index("function renderMessages()")
         render_end = APP_SOURCE.index("function isProcessMessage", render_start)
         render = APP_SOURCE[render_start:render_end]
-        self.assertIn("els.messageList.innerHTML = html", render)
+        self.assertIn("projectedMessageList.innerHTML = html", render)
+        self.assertIn("reconcileToolProcessNodes(els.messageList, projectedMessageList)", render)
+        self.assertNotIn("els.messageList.innerHTML = html", render)
         self.assertNotIn("els.messages.innerHTML = html", render)
         self.assertIn("pruneStaleStreamingNodes(state.sessionId)", render)
 
@@ -11009,14 +11662,37 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn('data-active-run-anchor', MESSAGES_SOURCE)
         self.assertIn("const expandedExecutionTraces = new Set(", render)
-        self.assertIn('.execution-trace.is-expanded[data-execution-trace]', render)
+        self.assertIn('.execution-trace.completed.is-expanded[data-execution-trace]', render)
+        self.assertIn("const collapsedExecutionTraces = hasActiveRun", render)
+        self.assertIn(
+            '.execution-trace.active:not(.is-expanded)[data-execution-trace]',
+            render,
+        )
         self.assertIn("const expandedToolProcesses = hasActiveRun", render)
-        self.assertIn('details.tool-process-stage[open][data-tool-process-key]', render)
+        self.assertIn('details.tool-process-stage[open][data-tool-process-id]', render)
+        self.assertIn("const expandedToolItems = hasActiveRun", render)
+        self.assertIn('details.tool-process-item[open][data-tool-process-item-key]', render)
         self.assertIn("const html = projectMessages(msgs, {", render)
         self.assertIn("expandedExecutionTraces,", render)
+        self.assertIn("collapsedExecutionTraces,", render)
         self.assertIn("expandedToolProcesses,", render)
-        self.assertLess(render.index("parkActiveRunBanner();\n  els.messageList.innerHTML = html"), render.index("mountActiveRunBanner();", render.index("els.messageList.innerHTML = html")))
-        mounted_index = render.index("mountActiveRunBanner();", render.index("els.messageList.innerHTML = html"))
+        self.assertIn("reconcileToolProcessNodes(els.messageList, projectedMessageList);", render)
+        self.assertIn(
+            "els.messageList.replaceChildren(...Array.from(projectedMessageList.childNodes));",
+            render,
+        )
+        self.assertEqual(render.count("messageScrollController?.onContentChanged(state.sessionId);"), 3)
+        reconcile_index = render.index("reconcileToolProcessNodes(els.messageList, projectedMessageList);")
+        replace_index = render.index("els.messageList.replaceChildren")
+        scroll_index = render.index("messageScrollController?.onContentChanged(state.sessionId);", replace_index)
+        self.assertLess(reconcile_index, replace_index)
+        self.assertLess(replace_index, scroll_index)
+        self.assertNotIn(
+            "messageScrollController?.onContentChanged(state.sessionId);",
+            render[reconcile_index:replace_index],
+        )
+        self.assertLess(render.index("parkActiveRunBanner();\n  const projectedMessageList"), replace_index)
+        mounted_index = render.index("mountActiveRunBanner();", replace_index)
         self.assertLess(mounted_index, render.index("syncActiveRunBanner(state.sessionId);", mounted_index))
         self.assertNotIn("syncActiveRunBanner(state.sessionId);", render[:render.index("if (state.messages.length === 0)")])
 

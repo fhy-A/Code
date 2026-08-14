@@ -272,7 +272,7 @@ const H4_5B1_SEMANTIC_HASHES = Object.freeze({
   finalResult: "e40fb4ba752c3fe25f985c5aa78152ee6ce0166330aa57ca7d67e8a68e24bdef",
 });
 const H4_6A_ACTIVE_TO_TERMINAL_HASHES = Object.freeze({
-  lifecycle: "de27ce93297dad0a99c9215080d8ffd891d893ad30a2ed88884ecbeaeff31487",
+  lifecycle: "d92a7ea2efcf54bb4d2dfaf238a3ac8e0c050abe019ee20c06cd627458640985",
   eventProjection: "36658361b00ce7bff3f3464099e27fe81273845e2ab85a62c0229814128b9d48",
   sessionRoleContent: "c6b7c90baeafb1c29e38d431bdbaf28a1ca282d54d47ac2d024601ad3d3e442a",
   terminalDom: "71a1ebdf6f609fc44a8408f20d15659626e8b6d11bf033b3665be510bf470712",
@@ -2125,6 +2125,450 @@ async function toolDetailLifecycleDomEvidence(page) {
     projection,
     semanticHash: canonicalHash(projection),
   };
+}
+
+async function installToolExpansionTimeline(page) {
+  await page.evaluate(() => {
+    const root = document.querySelector("#messages");
+    if (!root || window.__h4ToolExpansionTimeline) return;
+    const nodeIds = new WeakMap();
+    let nextNodeId = 1;
+    let lastSignature = "";
+    const nodeId = (node) => {
+      if (!node) return 0;
+      if (!nodeIds.has(node)) nodeIds.set(node, nextNodeId++);
+      return nodeIds.get(node);
+    };
+    const snapshot = (reason) => {
+      const trace = root.querySelector("section.execution-trace");
+      const stage = root.querySelector("details.tool-process-stage");
+      const items = [...root.querySelectorAll("details.tool-process-item")];
+      const streaming = root.querySelector("[data-streaming-message=true]");
+      const sample = {
+        at: performance.now(),
+        reason,
+        trace: trace ? {
+          node: nodeId(trace),
+          key: String(trace.dataset.executionTrace || ""),
+          connected: trace.isConnected,
+          expanded: trace.classList.contains("is-expanded"),
+          state: trace.classList.contains("active") ? "active" : "completed",
+        } : null,
+        stage: stage ? {
+          node: nodeId(stage),
+          key: String(stage.dataset.toolProcessId || stage.dataset.toolProcessKey || ""),
+          connected: stage.isConnected,
+          open: stage.open,
+          state: [...stage.classList].find((value) => ["running", "succeeded", "failed", "cancelled"].includes(value)) || "",
+        } : null,
+        items: items.map((item) => ({
+          node: nodeId(item),
+          key: String(item.dataset.toolCallId || item.dataset.toolProcessItemKey || ""),
+          connected: item.isConnected,
+          open: item.open,
+          state: [...item.classList].find((value) => ["running", "succeeded", "failed", "cancelled"].includes(value)) || "",
+        })),
+        streamKind: String(streaming?.dataset.streamKind || ""),
+      };
+      const signature = JSON.stringify({
+        trace: sample.trace,
+        stage: sample.stage,
+        items: sample.items,
+        streamKind: sample.streamKind,
+      });
+      if (signature === lastSignature) return;
+      lastSignature = signature;
+      window.__h4ToolExpansionTimeline.samples.push(sample);
+    };
+    const observer = new MutationObserver((records) => {
+      const reasons = [...new Set(records.map((record) => (
+        record.type === "attributes"
+          ? `${record.target.matches?.("details") ? "details" : "node"}:${record.attributeName}`
+          : "childList"
+      )))];
+      snapshot(reasons.join(","));
+      requestAnimationFrame(() => snapshot("animation-frame"));
+    });
+    const userActions = [];
+    root.addEventListener("click", (event) => {
+      const target = event.target?.closest?.("[data-execution-trace-toggle], details > summary");
+      if (!target) return;
+      userActions.push({ at: performance.now(), type: "click", node: nodeId(target.parentElement) });
+    }, true);
+    root.addEventListener("toggle", (event) => {
+      if (!event.target?.matches?.("details")) return;
+      userActions.push({
+        at: performance.now(),
+        type: "toggle",
+        node: nodeId(event.target),
+        open: event.target.open,
+      });
+    }, true);
+    window.__h4ToolExpansionTimeline = { samples: [], userActions, observer };
+    observer.observe(root, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: ["class", "open", "aria-expanded", "data-stream-kind"],
+    });
+    snapshot("installed");
+  });
+}
+
+async function readToolExpansionTimeline(page) {
+  return page.evaluate(() => ({
+    samples: window.__h4ToolExpansionTimeline?.samples || [],
+    userActions: window.__h4ToolExpansionTimeline?.userActions || [],
+  }));
+}
+
+async function resetToolExpansionTimeline(page) {
+  await page.evaluate(() => {
+    const timeline = window.__h4ToolExpansionTimeline;
+    if (!timeline) return;
+    timeline.samples.splice(0);
+    timeline.userActions.splice(0);
+  });
+}
+
+async function browserSelectionProjection(page) {
+  return page.evaluate(() => {
+    const selection = window.getSelection();
+    const text = String(selection || "");
+    const common = selection?.rangeCount ? selection.getRangeAt(0).commonAncestorContainer : null;
+    const commonElement = common?.nodeType === Node.ELEMENT_NODE ? common : common?.parentElement;
+    return {
+      collapsed: !selection || selection.rangeCount === 0 || selection.isCollapsed,
+      length: text.length,
+      text: text.slice(0, 256),
+      common: String(commonElement?.className || commonElement?.nodeName || ""),
+    };
+  });
+}
+
+async function clearBrowserSelection(page) {
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+}
+
+async function ensureToolFoldState(page, { traceExpanded = true, stageOpen = false, itemOpen = false } = {}) {
+  const trace = page.locator("#messages .execution-trace.active");
+  const traceToggle = trace.locator(":scope > [data-execution-trace-toggle]");
+  if (await trace.count()) {
+    const current = await trace.evaluate((element) => element.classList.contains("is-expanded"));
+    if (current !== traceExpanded) await traceToggle.click();
+  }
+  const stage = page.locator("#messages details.tool-process-stage").first();
+  const stageSummary = stage.locator(":scope > summary.tool-process-stage-summary");
+  const item = page.locator("#messages details.tool-process-item").first();
+  const itemSummary = item.locator(":scope > summary");
+  if (await stage.count()) {
+    let currentStageOpen = await stage.evaluate((element) => element.open);
+    if (await item.count()) {
+      const currentItemOpen = await item.evaluate((element) => element.open);
+      if (currentItemOpen !== itemOpen) {
+        if (!currentStageOpen) {
+          await stageSummary.click();
+          currentStageOpen = true;
+        }
+        await itemSummary.click();
+      }
+    }
+    if (currentStageOpen !== stageOpen) await stageSummary.click();
+  }
+  await clearBrowserSelection(page);
+}
+
+async function performGuardedMouseGesture(page, locator, {
+  clickCount = 1,
+  dragX = 0,
+  positionRatio = 0.5,
+} = {}) {
+  await locator.waitFor({ state: "visible" });
+  await clearBrowserSelection(page);
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  const x = box.x + Math.max(2, Math.min(box.width - 2, box.width * positionRatio));
+  const y = box.y + Math.max(2, Math.min(box.height - 2, box.height * 0.5));
+  if (dragX) {
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dragX, y, { steps: Math.max(2, Math.abs(dragX)) });
+    await page.mouse.up();
+  } else {
+    await page.mouse.click(x, y, { clickCount, delay: 18 });
+  }
+  const selection = await browserSelectionProjection(page);
+  expect(selection).toMatchObject({ collapsed: true, length: 0 });
+  return selection;
+}
+
+async function assertSelectableMessageContent(page, locator, expectedText) {
+  await locator.waitFor({ state: "visible" });
+  expect(await locator.textContent()).toContain(expectedText);
+  await clearBrowserSelection(page);
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(
+    box.x + Math.max(3, Math.min(box.width - 3, box.width * 0.45)),
+    box.y + Math.max(3, Math.min(box.height - 3, box.height * 0.5)),
+    { clickCount: 3, delay: 18 },
+  );
+  const selection = await browserSelectionProjection(page);
+  expect(selection.collapsed).toBe(false);
+  expect(selection.length).toBeGreaterThan(0);
+  await clearBrowserSelection(page);
+}
+
+async function installFoldFocusLifecycleTimeline(control) {
+  await control.evaluate((element) => {
+    const timeline = [];
+    const snapshot = (eventName, event = null) => {
+      const style = getComputedStyle(element);
+      timeline.push({
+        event: eventName,
+        at: performance.now(),
+        targetIsControl: event?.target === element,
+        relatedWithinDocument: Boolean(event?.relatedTarget?.ownerDocument === document),
+        documentFocused: document.hasFocus(),
+        documentVisible: document.visibilityState,
+        activeIsControl: document.activeElement === element,
+        pointerMarked: element.classList.contains("is-pointer-focus"),
+        focusVisible: element.matches(":focus-visible"),
+        outlineStyle: style.outlineStyle,
+        outlineWidth: style.outlineWidth,
+      });
+    };
+    const documentEvents = ["mousedown", "focus", "focusout", "blur", "visibilitychange"];
+    documentEvents.forEach((eventName) => {
+      document.addEventListener(eventName, (event) => {
+        snapshot(`document-${eventName}`, event);
+        queueMicrotask(() => snapshot(`document-${eventName}-microtask`, event));
+      }, true);
+    });
+    ["blur", "focus", "pageshow"].forEach((eventName) => {
+      window.addEventListener(eventName, (event) => {
+        snapshot(`window-${eventName}`, event);
+        queueMicrotask(() => snapshot(`window-${eventName}-microtask`, event));
+      }, true);
+    });
+    window.__h4FoldFocusLifecycle = { element, timeline, snapshot };
+    snapshot("installed");
+  });
+}
+
+async function readFoldFocusLifecycleTimeline(page) {
+  return page.evaluate(() => window.__h4FoldFocusLifecycle?.timeline || []);
+}
+
+async function foldFocusProjection(control) {
+  return control.evaluate((element) => ({
+    active: document.activeElement === element,
+    documentFocused: document.hasFocus(),
+    pointerMarked: element.classList.contains("is-pointer-focus"),
+    focusVisible: element.matches(":focus-visible"),
+    outlineStyle: getComputedStyle(element).outlineStyle,
+    outlineWidth: getComputedStyle(element).outlineWidth,
+  }));
+}
+
+async function assertFoldFocusAcrossEntryRestore(page, trace, traceToggle) {
+  await page.bringToFront();
+  await installFoldFocusLifecycleTimeline(traceToggle);
+  await traceToggle.click();
+  await expect(trace).not.toHaveClass(/\bis-expanded\b/);
+  expect(await foldFocusProjection(traceToggle)).toMatchObject({
+    active: true,
+    documentFocused: true,
+    pointerMarked: true,
+    outlineStyle: "none",
+  });
+
+  const primaryUrl = new URL(page.url());
+  const primaryIsClassic = primaryUrl.pathname.endsWith("/dist/frontend/index.classic.html");
+  const alternateUrl = primaryIsClassic
+    ? `${primaryUrl.origin}/`
+    : `${primaryUrl.origin}/dist/frontend/index.classic.html`;
+  const alternateRuntime = primaryIsClassic ? "bundle" : "classic-fallback";
+  const alternatePage = await page.context().newPage();
+  try {
+    await alternatePage.goto(alternateUrl, { waitUntil: "domcontentloaded" });
+    await expect(alternatePage.locator("html")).toHaveAttribute(
+      "data-frontend-runtime",
+      alternateRuntime,
+    );
+    if (alternateRuntime === "bundle") {
+      await expect(alternatePage.locator("html")).toHaveAttribute("data-code-frontend-ready", "true");
+    }
+    await alternatePage.bringToFront();
+    await page.waitForTimeout(60);
+    expect(await foldFocusProjection(traceToggle)).toMatchObject({
+      pointerMarked: true,
+      outlineStyle: "none",
+    });
+
+    await page.bringToFront();
+    await page.waitForTimeout(60);
+    expect(await foldFocusProjection(traceToggle)).toMatchObject({
+      active: true,
+      documentFocused: true,
+      pointerMarked: true,
+      outlineStyle: "none",
+    });
+  } finally {
+    await alternatePage.close();
+  }
+
+  const focusTimeline = await readFoldFocusLifecycleTimeline(page);
+  expect(focusTimeline.some((sample) => sample.event === "document-mousedown")).toBe(true);
+  const unfocusedSamples = focusTimeline.filter((sample) => !sample.documentFocused);
+  expect(unfocusedSamples.every((sample) => sample.pointerMarked)).toBe(true);
+  expect(unfocusedSamples.every((sample) => sample.outlineStyle === "none")).toBe(true);
+
+  await page.keyboard.press("Tab");
+  await expect(traceToggle).not.toHaveClass(/\bis-pointer-focus\b/);
+  await page.keyboard.press("Shift+Tab");
+  await expect(traceToggle).toBeFocused();
+  const keyboardFocus = await foldFocusProjection(traceToggle);
+  expect(keyboardFocus.pointerMarked).toBe(false);
+  expect(keyboardFocus.outlineStyle).not.toBe("none");
+  expect(keyboardFocus.outlineWidth).not.toBe("0px");
+  await traceToggle.press("Enter");
+  await expect(trace).toHaveClass(/\bis-expanded\b/);
+  return focusTimeline;
+}
+
+async function assertToolFoldSelectionProtection(page) {
+  const trace = page.locator("#messages .execution-trace.active");
+  const traceToggle = trace.locator(":scope > [data-execution-trace-toggle]");
+  const stage = page.locator("#messages details.tool-process-stage").first();
+  const stageSummary = stage.locator(":scope > summary.tool-process-stage-summary");
+  const item = page.locator("#messages details.tool-process-item").first();
+  const itemSummary = item.locator(":scope > summary");
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+
+  for (const control of [traceToggle, stageSummary, itemSummary]) {
+    const contract = await control.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const primary = new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      element.dispatchEvent(primary);
+      const primaryFocused = document.activeElement === element;
+      const secondary = new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+      });
+      element.dispatchEvent(secondary);
+      return {
+        userSelect: style.userSelect,
+        webkitUserSelect: style.webkitUserSelect,
+        primaryPrevented: primary.defaultPrevented,
+        secondaryPrevented: secondary.defaultPrevented,
+        primaryFocused,
+      };
+    });
+    expect(contract).toEqual({
+      userSelect: "none",
+      webkitUserSelect: "none",
+      primaryPrevented: true,
+      secondaryPrevented: false,
+      primaryFocused: true,
+    });
+  }
+
+  for (const [control, restore] of [
+    [itemSummary, async () => itemSummary.click()],
+    [stageSummary, async () => stageSummary.click()],
+  ]) {
+    await control.click();
+    const pointerFocus = await control.evaluate((element) => ({
+      marked: element.classList.contains("is-pointer-focus"),
+      outlineStyle: getComputedStyle(element).outlineStyle,
+    }));
+    expect(pointerFocus).toEqual({ marked: true, outlineStyle: "none" });
+    await restore();
+  }
+
+  const focusTimeline = await assertFoldFocusAcrossEntryRestore(page, trace, traceToggle);
+  expect(focusTimeline.length).toBeGreaterThan(1);
+
+  await performGuardedMouseGesture(page, traceToggle.locator(".execution-trace-chevron"), {
+    clickCount: 2,
+  });
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+  await performGuardedMouseGesture(page, stageSummary.locator("strong").first(), {
+    clickCount: 3,
+  });
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+  await performGuardedMouseGesture(page, itemSummary.locator(".tool-process-chevron"), {
+    clickCount: 2,
+  });
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+  await performGuardedMouseGesture(page, traceToggle, { dragX: 4, positionRatio: 0.7 });
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+  await performGuardedMouseGesture(page, stageSummary, { dragX: 5, positionRatio: 0.65 });
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+  await performGuardedMouseGesture(page, itemSummary, { dragX: 3, positionRatio: 0.6 });
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: true, itemOpen: true });
+
+  await traceToggle.focus();
+  await traceToggle.press("Enter");
+  await expect(trace).not.toHaveClass(/\bis-expanded\b/);
+  await traceToggle.press(" ");
+  await expect(trace).toHaveClass(/\bis-expanded\b/);
+  await expect(traceToggle).toBeFocused();
+
+  await assertSelectableMessageContent(
+    page,
+    page.locator("#messages article.msg.assistant.agent-commentary").filter({ hasText: TOOL_DETAILS_STAGE }),
+    TOOL_DETAILS_STAGE,
+  );
+  await assertSelectableMessageContent(
+    page,
+    item.locator(".tool-process-detail pre").last(),
+    FIXTURE_CONTENT.trim(),
+  );
+  await ensureToolFoldState(page, { traceExpanded: true, stageOpen: false, itemOpen: false });
+}
+
+async function beginActiveRerenderSelectionProbe(page, traceToggle) {
+  await clearBrowserSelection(page);
+  await page.evaluate(() => {
+    window.__h4SelectionProbeClickBlocker = (event) => {
+      if (!event.target?.closest?.("[data-execution-trace-toggle]")) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    document.addEventListener("click", window.__h4SelectionProbeClickBlocker, true);
+  });
+  const target = traceToggle.locator(".active-run-anchor").first();
+  await target.waitFor({ state: "visible" });
+  const box = await target.boundingBox();
+  expect(box).not.toBeNull();
+  const point = {
+    x: box.x + Math.max(3, Math.min(box.width - 3, box.width * 0.4)),
+    y: box.y + Math.max(3, Math.min(box.height - 3, box.height * 0.5)),
+  };
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  await page.mouse.move(point.x + 3, point.y, { steps: 3 });
+  return point;
+}
+
+async function finishActiveRerenderSelectionProbe(page, point) {
+  await page.mouse.move(point.x + 5, point.y, { steps: 2 });
+  await page.mouse.up();
+  await page.evaluate(() => {
+    document.removeEventListener("click", window.__h4SelectionProbeClickBlocker, true);
+    delete window.__h4SelectionProbeClickBlocker;
+  });
+  const selection = await browserSelectionProjection(page);
+  expect(selection).toMatchObject({ collapsed: true, length: 0 });
+  return selection;
 }
 
 async function failedToolLifecycleDomEvidence(page, contract) {
@@ -16001,19 +16445,79 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
     },
   }]);
 
-  const replacedStage = await initialDom.outer.elementHandle();
+  const stableStage = await initialDom.outer.elementHandle();
+  const stableItem = await initialDom.item.elementHandle();
+  const initialTrace = page.locator("#messages .execution-trace.active");
+  await expect(initialTrace).toHaveCount(1);
+  await expect(initialTrace).toHaveClass(/\bis-expanded\b/);
+  const stableTrace = await initialTrace.elementHandle();
+  await assertToolFoldSelectionProtection(page);
+  await installToolExpansionTimeline(page);
   await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(initialDom.outer).toHaveAttribute("open", "");
+  await initialDom.item.locator(":scope > summary").click();
+  await expect(initialDom.item).toHaveAttribute("open", "");
   const openedKey = await initialDom.outer.getAttribute("data-tool-process-key");
   expect(openedKey).toBe(initialDom.projection.processKey);
 
+  // The first tool is already complete while the same foreground AgentRun is
+  // waiting on its next model round. This gap used to project the group as
+  // terminal and briefly remove `open` before the final delta arrived.
+  const modelGapDom = await toolDetailLifecycleDomEvidence(page);
+  const modelGapStage = await modelGapDom.outer.elementHandle();
+  const modelGapItem = await modelGapDom.item.elementHandle();
+  expect(await stableStage.evaluate((element, current) => element === current, modelGapStage)).toBe(true);
+  expect(await stableItem.evaluate((element, current) => element === current, modelGapItem)).toBe(true);
+  expect(modelGapDom.projection.outerOpen).toBe(true);
+  expect(modelGapDom.projection.itemOpen).toBe(true);
+  expect(modelGapDom.projection.stageClass.split(/\s+/)).toContain("running");
+
+  const activeTraceToggleBeforeRerender = page.locator(
+    "#messages .execution-trace.active > [data-execution-trace-toggle]",
+  );
+  const selectionProbePoint = await beginActiveRerenderSelectionProbe(
+    page,
+    activeTraceToggleBeforeRerender,
+  );
   await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
   await expect(initialDom.finalAnswer).toHaveCount(1);
+  const activeRerenderSelection = await finishActiveRerenderSelectionProbe(
+    page,
+    selectionProbePoint,
+  );
+  expect(activeRerenderSelection).toMatchObject({ collapsed: true, length: 0 });
   const terminalGateSnapshot = await h4.waitGate(TOOL_TERMINAL_GATE);
-  expect(await replacedStage.evaluate((element) => element.isConnected)).toBe(false);
   const rerenderedDom = await toolDetailLifecycleDomEvidence(page);
+  const expansionTimeline = await readToolExpansionTimeline(page);
+  expect(expansionTimeline.samples.length).toBeGreaterThan(0);
+  const firstExpandedSample = expansionTimeline.samples.findIndex((sample) => (
+    sample.stage?.open && sample.items.some((item) => item.open)
+  ));
+  expect(firstExpandedSample).toBeGreaterThanOrEqual(0);
+  const activeSamples = expansionTimeline.samples.slice(firstExpandedSample)
+    .filter((sample) => sample.stage);
+  const traceSamples = activeSamples.filter((sample) => sample.trace?.state === "active");
+  expect(traceSamples.length).toBeGreaterThan(0);
+  expect(new Set(traceSamples.map((sample) => sample.trace.node)).size).toBe(1);
+  expect(traceSamples.every((sample) => sample.trace.connected && sample.trace.expanded)).toBe(true);
+  expect(new Set(activeSamples.map((sample) => sample.stage.node)).size).toBe(1);
+  expect(activeSamples.every((sample) => sample.stage.connected && sample.stage.open)).toBe(true);
+  expect(new Set(activeSamples.flatMap((sample) => sample.items.map((item) => item.node))).size).toBe(1);
+  expect(activeSamples.flatMap((sample) => sample.items).every((item) => (
+    item.connected && item.open
+  ))).toBe(true);
+  const rerenderedTrace = await page.locator("#messages .execution-trace.active").elementHandle();
+  expect(await stableTrace.evaluate((element, current) => element === current, rerenderedTrace)).toBe(true);
+  expect(await stableTrace.evaluate((element) => element.isConnected)).toBe(true);
+  const rerenderedStage = await rerenderedDom.outer.elementHandle();
+  const rerenderedItem = await rerenderedDom.item.elementHandle();
+  expect(await stableStage.evaluate((element, current) => element === current, rerenderedStage)).toBe(true);
+  expect(await stableItem.evaluate((element, current) => element === current, rerenderedItem)).toBe(true);
+  expect(await stableStage.evaluate((element) => element.isConnected)).toBe(true);
+  expect(await stableItem.evaluate((element) => element.isConnected)).toBe(true);
   expect(rerenderedDom.projection.processKey).toBe(openedKey);
   expect(rerenderedDom.projection.outerOpen).toBe(true);
+  expect(rerenderedDom.projection.itemOpen).toBe(true);
   expect(rerenderedDom.projection.counts).toMatchObject({
     toolProcess: 1,
     toolItem: 1,
@@ -16032,6 +16536,36 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
     reached: true,
     released: false,
   });
+
+  // A user-owned collapse is the other stable state: ordinary active rerenders
+  // must not force the execution trace or either tool details node back open.
+  await rerenderedDom.item.locator(":scope > summary").click();
+  await expect(rerenderedDom.item).not.toHaveAttribute("open", "");
+  await rerenderedDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
+  await expect(rerenderedDom.outer).not.toHaveAttribute("open", "");
+  const activeTraceToggle = page.locator(
+    "#messages .execution-trace.active > [data-execution-trace-toggle]",
+  );
+  await activeTraceToggle.click();
+  await expect(page.locator("#messages .execution-trace.active")).not.toHaveClass(/\bis-expanded\b/);
+  await resetToolExpansionTimeline(page);
+  const activeLanguage = await page.locator("html").getAttribute("lang");
+  const originalLanguage = activeLanguage === "zh-CN" ? "zh" : "en";
+  const alternateLanguage = originalLanguage === "zh" ? "en" : "zh";
+  await selectInterfaceLanguage(page, alternateLanguage);
+  await selectInterfaceLanguage(page, originalLanguage);
+  const collapsedDom = await toolDetailLifecycleDomEvidence(page);
+  await expect(page.locator("#messages .execution-trace.active")).not.toHaveClass(/\bis-expanded\b/);
+  expect(collapsedDom.projection.outerOpen).toBe(false);
+  expect(collapsedDom.projection.itemOpen).toBe(false);
+  const collapsedTimeline = await readToolExpansionTimeline(page);
+  expect(collapsedTimeline.samples.every((sample) => (
+    !sample.trace || !sample.trace.expanded
+  ))).toBe(true);
+  expect(collapsedTimeline.samples.every((sample) => (
+    !sample.stage || !sample.stage.open
+  ))).toBe(true);
+  expect(collapsedTimeline.samples.flatMap((sample) => sample.items).every((item) => !item.open)).toBe(true);
 
   await h4.releaseGate(TOOL_TERMINAL_GATE);
   let completedAgent = null;
@@ -16067,6 +16601,12 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
   await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
   const terminalDom = await toolDetailLifecycleDomEvidence(page);
+  const terminalStage = await terminalDom.outer.elementHandle();
+  const terminalItem = await terminalDom.item.elementHandle();
+  expect(await stableStage.evaluate((element, current) => element === current, terminalStage)).toBe(true);
+  expect(await stableItem.evaluate((element, current) => element === current, terminalItem)).toBe(true);
+  expect(await stableStage.evaluate((element) => element.isConnected)).toBe(true);
+  expect(await stableItem.evaluate((element) => element.isConnected)).toBe(true);
   expect(terminalDom.projection.processKey).toBe(openedKey);
   expect(terminalDom.projection.outerOpen).toBe(false);
   expect(terminalDom.projection.itemOpen).toBe(false);
@@ -16081,6 +16621,9 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
 
   const terminalTrace = page.locator("#messages .execution-trace.completed");
   await expect(terminalTrace).toHaveCount(1);
+  const terminalTraceHandle = await terminalTrace.elementHandle();
+  expect(await stableTrace.evaluate((element, current) => element === current, terminalTraceHandle)).toBe(true);
+  expect(await stableTrace.evaluate((element) => element.isConnected)).toBe(true);
   await expect(terminalTrace).not.toHaveClass(/\bis-expanded\b/);
   const terminalTraceToggle = terminalTrace.locator(":scope > [data-execution-trace-toggle]");
   await expect(terminalTraceToggle).toHaveCount(1);
@@ -16149,7 +16692,7 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   const lifecycleProjection = {
     processKey: terminalDom.projection.processKey,
     openTransitions: ["closed", "open", "open-after-rerender", "closed-terminal", "open-inspect", "closed-inspect"],
-    productionRerenderReplacedStage: true,
+    productionRerenderPreservedStage: true,
     eventTypes: completedTrace.eventProjection.map((event) => event.type),
     counts: terminalDom.projection.counts,
     ordered: terminalDom.projection.ordered,
@@ -16507,22 +17050,31 @@ async function convergeToolProcessProjectionByLanguage(page, contract, initialDo
   const originalLanguage = initialLanguage === "zh-CN" ? "zh" : "en";
   const alternateLanguage = originalLanguage === "zh" ? "en" : "zh";
   const initialStage = await initialDom.outer.elementHandle();
+  const initialItem = await initialDom.item.elementHandle();
   expect(initialStage).not.toBeNull();
+  expect(initialItem).not.toBeNull();
 
   await selectInterfaceLanguage(page, alternateLanguage);
-  expect(await initialStage.evaluate((stage) => stage.isConnected)).toBe(false);
   const alternateDom = await failedToolLifecycleDomEvidence(page, contract);
+  const alternateStage = await alternateDom.outer.elementHandle();
+  const alternateItem = await alternateDom.item.elementHandle();
+  expect(await initialStage.evaluate((stage, current) => stage === current, alternateStage)).toBe(true);
+  expect(await initialItem.evaluate((item, current) => item === current, alternateItem)).toBe(true);
+  expect(await initialStage.evaluate((stage) => stage.isConnected)).toBe(true);
   expect(alternateDom.projection.processKey).toBe(initialProcessKey);
   expect(alternateDom.projection.outerOpen).toBe(true);
   expect(alternateDom.projection.itemOpen).toBe(false);
   expect(alternateDom.projection.outerState).toEqual({ running: true, failed: false });
   expect(alternateDom.projection.itemState).toEqual({ failed: true });
-  const alternateStage = await alternateDom.outer.elementHandle();
   expect(alternateStage).not.toBeNull();
 
   await selectInterfaceLanguage(page, originalLanguage);
-  expect(await alternateStage.evaluate((stage) => stage.isConnected)).toBe(false);
   const restoredDom = await failedToolLifecycleDomEvidence(page, contract);
+  const restoredStage = await restoredDom.outer.elementHandle();
+  const restoredItem = await restoredDom.item.elementHandle();
+  expect(await alternateStage.evaluate((stage, current) => stage === current, restoredStage)).toBe(true);
+  expect(await alternateItem.evaluate((item, current) => item === current, restoredItem)).toBe(true);
+  expect(await alternateStage.evaluate((stage) => stage.isConnected)).toBe(true);
   expect(restoredDom.projection.processKey).toBe(initialProcessKey);
   expect(restoredDom.projection.outerOpen).toBe(true);
   expect(restoredDom.projection.itemOpen).toBe(false);
@@ -16535,8 +17087,8 @@ async function convergeToolProcessProjectionByLanguage(page, contract, initialDo
     evidence: {
       initialLanguage,
       alternateLanguage: alternateLanguage === "zh" ? "zh-CN" : "en",
-      initialStageDisconnected: true,
-      alternateStageDisconnected: true,
+      initialStageStable: true,
+      alternateStageStable: true,
       processKeyStable: true,
       outerOpen: restoredDom.projection.outerOpen,
       itemOpen: restoredDom.projection.itemOpen,
@@ -16950,8 +17502,8 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
     step: "failed-tool-projection-preconverged",
     ...projectionConvergence.evidence,
   });
-  const oldStage = await activeDom.outer.elementHandle();
-  expect(oldStage).not.toBeNull();
+  const stableStage = await activeDom.outer.elementHandle();
+  expect(stableStage).not.toBeNull();
   const {
     itemNode: firstItemNode,
     summaryNode: firstSummaryNode,
@@ -17138,12 +17690,17 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   await expect(activeDom.finalAnswer).toHaveCount(1);
   const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
   expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
-  expect(await oldStage.evaluate((element) => element.isConnected)).toBe(false);
   const afterFinalDeltaDom = await failedToolLifecycleDomEvidence(page, contract);
+  const afterFinalStage = await afterFinalDeltaDom.outer.elementHandle();
+  const afterFinalItem = await afterFinalDeltaDom.item.elementHandle();
+  expect(await stableStage.evaluate((element, current) => element === current, afterFinalStage)).toBe(true);
+  expect(await closedItemNode.evaluate((element, current) => element === current, afterFinalItem)).toBe(true);
+  expect(await stableStage.evaluate((element) => element.isConnected)).toBe(true);
+  expect(await closedItemNode.evaluate((element) => element.isConnected)).toBe(true);
   expect(afterFinalDeltaDom.projection.processKey).toBe(initialDom.projection.processKey);
   expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
   expect(afterFinalDeltaDom.projection.itemOpen).toBe(false);
-  expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: false, failed: true });
+  expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: true, failed: false });
   expect(afterFinalDeltaDom.projection.itemState).toEqual({ failed: true });
   expect(afterFinalDeltaDom.projection.counts).toMatchObject({
     user: 1,
@@ -18069,13 +18626,14 @@ async function completeForcedFinalModelFailureTerminal(h4, runtime, contract, co
     ))).toEqual([]);
   }
 
-  await expect.poll(async () => oldStage.evaluate((element) => element.isConnected).catch(() => false))
-    .toBe(false);
   await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
   await expect(page.locator("#stopBtn")).toBeDisabled();
   await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
   await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(0);
   const terminalDom = await forcedFinalFailureDomEvidence(page, contract);
+  const terminalStage = await terminalDom.outer.elementHandle();
+  expect(await oldStage.evaluate((element, current) => element === current, terminalStage)).toBe(true);
+  expect(await oldStage.evaluate((element) => element.isConnected)).toBe(true);
 
   const terminalRuntimeResponses = [];
   for (const runtimeRunId of runtimeRunIds) {
@@ -18483,13 +19041,15 @@ async function completeRepeatedRangeFailureLifecycle(
   await expect(initialDom.finalAnswer).toHaveCount(1);
   const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
   expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
-  expect(await oldStage.evaluate((element) => element.isConnected)).toBe(false);
   const afterFinalDeltaDom = await repeatedFailureLifecycleDomEvidence(page, contract);
+  const afterFinalStage = await afterFinalDeltaDom.outer.elementHandle();
+  expect(await oldStage.evaluate((element, current) => element === current, afterFinalStage)).toBe(true);
+  expect(await oldStage.evaluate((element) => element.isConnected)).toBe(true);
   expect(afterFinalDeltaDom.projection.processKey).toBe(initialDom.projection.processKey);
   expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
   expect(afterFinalDeltaDom.projection.itemOpen)
     .toEqual(Array(contract.expectedResults.length).fill(false));
-  expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: false, failed: true });
+  expect(afterFinalDeltaDom.projection.outerState).toEqual({ running: true, failed: false });
   expect(afterFinalDeltaDom.projection.counts).toMatchObject({
     user: 1,
     commentary: 1,
@@ -19532,6 +20092,21 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   await expect(initialDom.outer).toHaveAttribute("open", "");
   const openedKey = await initialDom.outer.getAttribute("data-tool-process-key");
   expect(openedKey).toBe(initialDom.projection.processKey);
+  const stableStage = await initialDom.outer.elementHandle();
+  const stableItems = await Promise.all(initialDom.items.map((item) => item.elementHandle()));
+
+  const secondToolGapDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  const secondToolGapStage = await secondToolGapDom.outer.elementHandle();
+  const secondToolGapItems = await Promise.all(secondToolGapDom.items.map((item) => item.elementHandle()));
+  expect(await stableStage.evaluate((element, current) => element === current, secondToolGapStage)).toBe(true);
+  for (let index = 0; index < stableItems.length; index += 1) {
+    expect(await stableItems[index].evaluate(
+      (element, current) => element === current,
+      secondToolGapItems[index],
+    )).toBe(true);
+  }
+  expect(secondToolGapDom.projection.outerOpen).toBe(true);
+  expect(secondToolGapDom.projection.stageClass.split(/\s+/)).toContain("running");
 
   await h4.releaseGate(SECOND_TOOL_EXECUTE_GATE);
   const finalDeltaGate = await h4.waitGate(TOOL_FINAL_DELTA_GATE);
@@ -19540,6 +20115,15 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   await expect(secondActiveDetails).toHaveCount(2);
   await expect(secondActiveDetails.nth(1)).toContainText(FIXTURE_CONTENT.trim());
   const afterSecondToolDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  const afterSecondStage = await afterSecondToolDom.outer.elementHandle();
+  const afterSecondItems = await Promise.all(afterSecondToolDom.items.map((item) => item.elementHandle()));
+  expect(await stableStage.evaluate((element, current) => element === current, afterSecondStage)).toBe(true);
+  for (let index = 0; index < stableItems.length; index += 1) {
+    expect(await stableItems[index].evaluate(
+      (element, current) => element === current,
+      afterSecondItems[index],
+    )).toBe(true);
+  }
   expect(afterSecondToolDom.projection.processKey).toBe(openedKey);
   expect(afterSecondToolDom.projection.outerOpen).toBe(true);
   expect(afterSecondToolDom.projection.counts).toMatchObject({ toolProcess: 1, toolItems: 2, results: 2, final: 0 });
@@ -19558,6 +20142,15 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   const terminalGate = await h4.waitGate(TOOL_TERMINAL_GATE);
   expect(terminalGate[TOOL_TERMINAL_GATE]).toMatchObject({ reached: true, released: false });
   const afterFinalDeltaDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  const afterFinalStage = await afterFinalDeltaDom.outer.elementHandle();
+  const afterFinalItems = await Promise.all(afterFinalDeltaDom.items.map((item) => item.elementHandle()));
+  expect(await stableStage.evaluate((element, current) => element === current, afterFinalStage)).toBe(true);
+  for (let index = 0; index < stableItems.length; index += 1) {
+    expect(await stableItems[index].evaluate(
+      (element, current) => element === current,
+      afterFinalItems[index],
+    )).toBe(true);
+  }
   expect(afterFinalDeltaDom.projection.processKey).toBe(openedKey);
   expect(afterFinalDeltaDom.projection.outerOpen).toBe(true);
   expect(afterFinalDeltaDom.projection.counts.final).toBe(1);
@@ -19569,6 +20162,15 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   expect(completedTrace.toolCallIds).toEqual([started.firstToolCallId, started.secondToolCallId]);
   expect(completedTrace.executionProjection).toEqual(expectedMultiToolExecutionProjection());
   const terminalDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  const terminalStage = await terminalDom.outer.elementHandle();
+  const terminalItems = await Promise.all(terminalDom.items.map((item) => item.elementHandle()));
+  expect(await stableStage.evaluate((element, current) => element === current, terminalStage)).toBe(true);
+  for (let index = 0; index < stableItems.length; index += 1) {
+    expect(await stableItems[index].evaluate(
+      (element, current) => element === current,
+      terminalItems[index],
+    )).toBe(true);
+  }
   expect(terminalDom.projection.processKey).toBe(openedKey);
   expect(terminalDom.projection.outerOpen).toBe(false);
   expect(terminalDom.projection.items.map((item) => item.open)).toEqual([false, false]);

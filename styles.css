@@ -4203,6 +4203,8 @@ body.theme-dark .syn-fn { color: #61afef; }
   width: 100%;
   list-style: none;
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .execution-trace-summary > .completed-run-status.msg,
@@ -4244,10 +4246,14 @@ body.theme-dark .syn-fn { color: #61afef; }
   margin-top: 10px;
 }
 
-.execution-trace-summary:focus-visible {
+.execution-trace-summary:focus-visible:not(.is-pointer-focus) {
   border-radius: 6px;
   outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: 3px;
+}
+
+.execution-trace-summary.is-pointer-focus:focus {
+  outline: none;
 }
 
 .execution-trace-body > :is(.msg, .tool-process) {
@@ -8025,6 +8031,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
   list-style: none;
   cursor: pointer;
   color: var(--muted);
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -8035,11 +8042,16 @@ body.theme-dark .chat-pane.empty-chat .composer {
   color: var(--text);
 }
 
-.tool-process-stage > summary:focus-visible,
-.tool-process-item > summary:focus-visible {
+.tool-process-stage > summary:focus-visible:not(.is-pointer-focus),
+.tool-process-item > summary:focus-visible:not(.is-pointer-focus) {
   border-radius: 6px;
   outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
   outline-offset: 2px;
+}
+
+.tool-process-stage > summary.is-pointer-focus:focus,
+.tool-process-item > summary.is-pointer-focus:focus {
+  outline: none;
 }
 
 .tool-process-stage-heading {
@@ -8118,6 +8130,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
   list-style: none;
   cursor: pointer;
   color: var(--muted);
+  -webkit-user-select: none;
   user-select: none;
 }
 

@@ -37,6 +37,7 @@ const {
   createLongTextDisplayController,
   createMessageScrollController,
   createMessagesFeature,
+  reconcileToolProcessNodes,
 } = window.Code.ui.messages;
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
@@ -2752,15 +2753,31 @@ function renderMessages() {
   const branchMarker = getBranchFlowMarker();
   const expandedExecutionTraces = new Set(
     Array.from(
-      els.messageList.querySelectorAll(".execution-trace.is-expanded[data-execution-trace]"),
+      els.messageList.querySelectorAll(".execution-trace.completed.is-expanded[data-execution-trace]"),
       (trace) => trace.dataset.executionTrace,
     ).filter(Boolean),
   );
+  const collapsedExecutionTraces = hasActiveRun
+    ? new Set(
+      Array.from(
+        els.messageList.querySelectorAll(".execution-trace.active:not(.is-expanded)[data-execution-trace]"),
+        (trace) => trace.dataset.executionTrace,
+      ).filter(Boolean),
+    )
+    : new Set();
   const expandedToolProcesses = hasActiveRun
     ? new Set(
       Array.from(
-        els.messageList.querySelectorAll("details.tool-process-stage[open][data-tool-process-key]"),
-        (stage) => stage.dataset.toolProcessKey,
+        els.messageList.querySelectorAll("details.tool-process-stage[open][data-tool-process-id]"),
+        (stage) => stage.dataset.toolProcessId,
+      ).filter(Boolean),
+    )
+    : new Set();
+  const expandedToolItems = hasActiveRun
+    ? new Set(
+      Array.from(
+        els.messageList.querySelectorAll("details.tool-process-item[open][data-tool-process-item-key]"),
+        (item) => item.dataset.toolProcessItemKey,
       ).filter(Boolean),
     )
     : new Set();
@@ -2768,7 +2785,9 @@ function renderMessages() {
     hasActiveRun,
     branchMarker,
     expandedExecutionTraces,
+    collapsedExecutionTraces,
     expandedToolProcesses,
+    expandedToolItems,
   });
   const stableHtml = html
     .replace(/<span class="streaming-timer">[^<]*<\/span>/g, '<span class="streaming-timer"></span>')
@@ -2792,7 +2811,10 @@ function renderMessages() {
   // Because the browser cannot paint between these operations, the banner's
   // timer and animation remain continuous without ghost nodes or flicker.
   parkActiveRunBanner();
-  els.messageList.innerHTML = html;
+  const projectedMessageList = els.messageList.cloneNode(false);
+  projectedMessageList.innerHTML = html;
+  reconcileToolProcessNodes(els.messageList, projectedMessageList);
+  els.messageList.replaceChildren(...Array.from(projectedMessageList.childNodes));
   mountActiveRunBanner();
   syncActiveRunBanner(state.sessionId);
 

@@ -863,6 +863,139 @@
     ));
   }
 
+  function syncProjectedElement(current, projected, options = {}) {
+    if (!current || !projected) return false;
+    const preserveChildren = options.preserveChildren === true;
+    const preservePointerFocus = current.classList?.contains?.("is-pointer-focus") === true;
+    const currentNames = typeof current.getAttributeNames === "function"
+      ? current.getAttributeNames()
+      : Array.from(current.attributes || [], (attribute) => attribute.name);
+    const projectedNames = typeof projected.getAttributeNames === "function"
+      ? projected.getAttributeNames()
+      : Array.from(projected.attributes || [], (attribute) => attribute.name);
+    const projectedSet = new Set(projectedNames);
+    currentNames.forEach((name) => {
+      if (!projectedSet.has(name)) current.removeAttribute?.(name);
+    });
+    projectedNames.forEach((name) => {
+      const value = projected.getAttribute?.(name);
+      if (current.getAttribute?.(name) !== value) current.setAttribute?.(name, value);
+    });
+    if (!preserveChildren && typeof current.replaceChildren === "function") {
+      current.replaceChildren(...Array.from(projected.childNodes || []));
+    }
+    if (preservePointerFocus) current.classList?.add?.("is-pointer-focus");
+    return true;
+  }
+
+  function reconcileToolProcessItem(currentItem, projectedItem) {
+    if (!currentItem || !projectedItem) return false;
+    const currentSummary = currentItem.querySelector?.(":scope > summary") || null;
+    const projectedSummary = projectedItem.querySelector?.(":scope > summary") || null;
+    const currentBody = currentItem.querySelector?.(":scope > .tool-process-body") || null;
+    const projectedBody = projectedItem.querySelector?.(":scope > .tool-process-body") || null;
+    syncProjectedElement(currentItem, projectedItem, { preserveChildren: true });
+    syncProjectedElement(currentSummary, projectedSummary);
+    syncProjectedElement(currentBody, projectedBody);
+    return true;
+  }
+
+  function reconcileToolProcessNodes(currentRoot, projectedRoot) {
+    if (!currentRoot?.querySelectorAll || !projectedRoot?.querySelectorAll) {
+      return { traces: 0, groups: 0, items: 0 };
+    }
+    const currentStages = new Map();
+    Array.from(currentRoot.querySelectorAll(
+      "details.tool-process-stage[data-tool-process-id]",
+    )).forEach((stage) => {
+      const processId = String(stage.dataset?.toolProcessId || "");
+      if (processId && !currentStages.has(processId)) currentStages.set(processId, stage);
+    });
+
+    let groups = 0;
+    let items = 0;
+    Array.from(projectedRoot.querySelectorAll("article.tool-process")).forEach((projectedArticle) => {
+      const projectedStage = projectedArticle.querySelector?.(
+        "details.tool-process-stage[data-tool-process-id]",
+      );
+      const processId = String(projectedStage?.dataset?.toolProcessId || "");
+      const currentStage = processId ? currentStages.get(processId) : null;
+      const currentArticle = currentStage?.closest?.("article.tool-process") || null;
+      if (!currentArticle || !projectedStage) return;
+
+      const currentItems = new Map();
+      Array.from(currentStage.querySelectorAll(
+        "details.tool-process-item[data-tool-call-id]",
+      )).forEach((item) => {
+        const toolCallId = String(item.dataset?.toolCallId || "");
+        if (toolCallId && !currentItems.has(toolCallId)) currentItems.set(toolCallId, item);
+      });
+      Array.from(projectedStage.querySelectorAll(
+        "details.tool-process-item[data-tool-call-id]",
+      )).forEach((projectedItem) => {
+        const toolCallId = String(projectedItem.dataset?.toolCallId || "");
+        const currentItem = toolCallId ? currentItems.get(toolCallId) : null;
+        if (!currentItem) return;
+        reconcileToolProcessItem(currentItem, projectedItem);
+        projectedItem.replaceWith?.(currentItem);
+        items += 1;
+      });
+
+      const currentSummary = currentStage.querySelector?.(
+        ":scope > summary.tool-process-stage-summary",
+      ) || null;
+      const projectedSummary = projectedStage.querySelector?.(
+        ":scope > summary.tool-process-stage-summary",
+      ) || null;
+      const currentBody = currentStage.querySelector?.(
+        ":scope > .tool-process-stage-body",
+      ) || null;
+      const projectedBody = projectedStage.querySelector?.(
+        ":scope > .tool-process-stage-body",
+      ) || null;
+      syncProjectedElement(currentArticle, projectedArticle, { preserveChildren: true });
+      syncProjectedElement(currentStage, projectedStage, { preserveChildren: true });
+      syncProjectedElement(currentSummary, projectedSummary);
+      syncProjectedElement(currentBody, projectedBody);
+      projectedArticle.replaceWith?.(currentArticle);
+      groups += 1;
+    });
+
+    const currentTraces = new Map();
+    Array.from(currentRoot.querySelectorAll(
+      "section.execution-trace[data-execution-trace]",
+    )).forEach((trace) => {
+      const traceId = String(trace.dataset?.executionTrace || "");
+      if (traceId && !currentTraces.has(traceId)) currentTraces.set(traceId, trace);
+    });
+    let traces = 0;
+    Array.from(projectedRoot.querySelectorAll(
+      "section.execution-trace[data-execution-trace]",
+    )).forEach((projectedTrace) => {
+      const traceId = String(projectedTrace.dataset?.executionTrace || "");
+      const currentTrace = traceId ? currentTraces.get(traceId) : null;
+      if (!currentTrace) return;
+      const currentSummary = currentTrace.querySelector?.(
+        ":scope > .execution-trace-summary",
+      ) || null;
+      const projectedSummary = projectedTrace.querySelector?.(
+        ":scope > .execution-trace-summary",
+      ) || null;
+      const currentBody = currentTrace.querySelector?.(
+        ":scope > .execution-trace-body",
+      ) || null;
+      const projectedBody = projectedTrace.querySelector?.(
+        ":scope > .execution-trace-body",
+      ) || null;
+      syncProjectedElement(currentTrace, projectedTrace, { preserveChildren: true });
+      syncProjectedElement(currentSummary, projectedSummary);
+      syncProjectedElement(currentBody, projectedBody);
+      projectedTrace.replaceWith?.(currentTrace);
+      traces += 1;
+    });
+    return { traces, groups, items };
+  }
+
   function createMessagesFeature(options = {}) {
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
     const formatCompact = options.formatCompact || ((value) => String(value ?? 0));
@@ -942,6 +1075,59 @@
     function bindInteractions(root) {
       if (!root || typeof root.addEventListener !== "function" || boundInteractionRoots.has(root)) return false;
       boundInteractionRoots.add(root);
+      const foldControlSelector = [
+        "[data-execution-trace-toggle]",
+        ".tool-process-stage > summary",
+        ".tool-process-item > summary",
+      ].join(", ");
+
+      root.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) return;
+        const foldControl = event.target?.closest?.(foldControlSelector);
+        if (!foldControl || (root.contains && !root.contains(foldControl))) return;
+        const nestedInteractive = event.target?.closest?.(
+          "a, button, input, textarea, select, [contenteditable='true']",
+        );
+        if (nestedInteractive && nestedInteractive !== foldControl
+            && (!foldControl.contains || foldControl.contains(nestedInteractive))) return;
+        event.preventDefault();
+        foldControl.classList?.add("is-pointer-focus");
+        try {
+          foldControl.focus?.({ preventScroll: true });
+        } catch (_) {
+          foldControl.focus?.();
+        }
+      });
+
+      root.addEventListener("focusout", (event) => {
+        const foldControl = event.target?.closest?.(foldControlSelector);
+        if (!foldControl || (root.contains && !root.contains(foldControl))) return;
+        const ownerDocument = foldControl.ownerDocument || root.ownerDocument || global.document;
+        const relatedTarget = event.relatedTarget || null;
+        const defer = typeof global.queueMicrotask === "function"
+          ? global.queueMicrotask.bind(global)
+          : (callback) => Promise.resolve().then(callback);
+        defer(() => {
+          if (!foldControl.classList?.contains?.("is-pointer-focus")) return;
+          const documentFocused = typeof ownerDocument?.hasFocus === "function"
+            ? ownerDocument.hasFocus()
+            : true;
+          if (!documentFocused) return;
+          const activeElement = ownerDocument?.activeElement || null;
+          const relatedWithinDocument = Boolean(
+            relatedTarget && relatedTarget.ownerDocument === ownerDocument,
+          );
+          const activeMovedWithinDocument = Boolean(
+            activeElement
+            && activeElement !== foldControl
+            && activeElement !== ownerDocument?.body
+            && activeElement !== ownerDocument?.documentElement,
+          );
+          if (relatedWithinDocument || activeMovedWithinDocument) {
+            foldControl.classList.remove("is-pointer-focus");
+          }
+        });
+      });
 
       root.addEventListener("click", (event) => {
         const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
@@ -989,6 +1175,10 @@
         fallback.hidden = false;
       }, true);
       root.addEventListener("keydown", (event) => {
+        const foldControl = event.target?.closest?.(foldControlSelector);
+        if (foldControl && (!root.contains || root.contains(foldControl))) {
+          foldControl.classList?.remove("is-pointer-focus");
+        }
         if (!["Enter", " "].includes(event.key)) return;
         const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
         if (!traceToggle || (root.contains && !root.contains(traceToggle))) return;
@@ -1130,33 +1320,6 @@
               && !isOperationalToolNotice(content))) {
           turns.add(userIndex);
         }
-      });
-      return turns;
-    }
-
-    function collectFinalAnswerTurns(messages) {
-      const turns = new Set();
-      let userIndex = -1;
-      messages.forEach((msg, index) => {
-        if (!msg || isInternalMessage(msg)) return;
-        if (msg.role === "user"
-            && !isSteerProjectionMessage(msg)
-            && !["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)
-            && !msg.meta?.detachedFromMain) {
-          userIndex = index;
-          return;
-        }
-        if (userIndex < 0
-            || msg.role !== "assistant"
-            || msg.meta?.toolCalls?.length
-            || msg.meta?.kind === "auto-context-compaction"
-            || isDetachedProjectionMessage(msg)) return;
-        const content = (getMessageText(msg) || "").trim();
-        if (!content
-            || isToolPlanningPlaceholder(content)
-            || isOperationalToolNotice(content)
-            || (msg.streaming && msg._streamProjection !== "answer")) return;
-        turns.add(userIndex);
       });
       return turns;
     }
@@ -1474,11 +1637,25 @@
         : completedProcessSummary(visibleCalls);
       const headingTarget = stageIsActive ? currentCall.target : "";
       const processKey = String(options.processKey || serial);
-      const open = options.open ? " open" : "";
+      const firstToolCallId = String(visibleCalls.find((call) => call.id)?.id || processKey);
+      const processId = `${String(getSessionId() || "")}:${firstToolCallId}`;
+      const expandedToolProcesses = options.expandedToolProcesses instanceof Set
+        ? options.expandedToolProcesses
+        : new Set(options.expandedToolProcesses || []);
+      const expandedToolItems = options.expandedToolItems instanceof Set
+        ? options.expandedToolItems
+        : new Set(options.expandedToolItems || []);
+      const open = (
+        options.open
+        || (
+          options.allowExpanded
+          && (expandedToolProcesses.has(processId) || expandedToolProcesses.has(processKey))
+        )
+      ) ? " open" : "";
 
       return `
         <article class="msg assistant tool-process" data-tool-process-block="${serial}">
-          <details class="tool-process-stage ${escapeHtml(processOutcome)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}"${open}>
+          <details class="tool-process-stage ${escapeHtml(processOutcome)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}" data-tool-process-id="${escapeHtml(processId)}"${open}>
             <summary class="tool-process-stage-summary">
               <span class="tool-process-stage-heading"><strong>${escapeHtml(headingText)}</strong>${headingTarget ? `<code>${escapeHtml(headingTarget)}</code>` : ""}</span>
               <span class="tool-process-stage-chevron" aria-hidden="true"></span>
@@ -1489,7 +1666,13 @@
                   const action = getToolActionLabel(call.action);
                   const argumentsText = processCallArguments(call);
                   const resultText = processCallResult(call);
-                  return `<details class="tool-process-item ${escapeHtml(call.outcome)}">
+                  const toolCallId = String(call.id || "");
+                  const itemKey = `${processId}:${toolCallId}`;
+                  const itemOpen = options.allowExpanded
+                    && (expandedToolItems.has(itemKey) || expandedToolItems.has(toolCallId))
+                    ? " open"
+                    : "";
+                  return `<details class="tool-process-item ${escapeHtml(call.outcome)}" data-tool-call-id="${escapeHtml(toolCallId)}" data-tool-process-item-key="${escapeHtml(itemKey)}"${itemOpen}>
                     <summary>
                       <span class="tool-process-indicator ${escapeHtml(call.outcome)}" aria-hidden="true"></span>
                       <span class="tool-process-row-heading"><strong>${escapeHtml(action)}</strong>${call.target ? `<code>${escapeHtml(call.target)}</code>` : ""}</span>
@@ -1618,13 +1801,18 @@
       const branchMarker = projection.branchMarker || null;
       const completedTurnStatuses = collectCompletedTurnStatuses(messages);
       const executionTraceTurns = collectExecutionTraceTurns(messages);
-      const finalAnswerTurns = collectFinalAnswerTurns(messages);
       const expandedExecutionTraces = projection.expandedExecutionTraces instanceof Set
         ? projection.expandedExecutionTraces
         : new Set(projection.expandedExecutionTraces || []);
+      const collapsedExecutionTraces = projection.collapsedExecutionTraces instanceof Set
+        ? projection.collapsedExecutionTraces
+        : new Set(projection.collapsedExecutionTraces || []);
       const expandedToolProcesses = projection.expandedToolProcesses instanceof Set
         ? projection.expandedToolProcesses
         : new Set(projection.expandedToolProcesses || []);
+      const expandedToolItems = projection.expandedToolItems instanceof Set
+        ? projection.expandedToolItems
+        : new Set(projection.expandedToolItems || []);
       const rows = [];
       const queuedTailMessages = [];
       const claimedToolResultIndexes = new Set();
@@ -1670,6 +1858,9 @@
       };
       const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
+        const activeForegroundStage = hasActiveRun
+          && currentUserIndex === activeUserIndex
+          && pendingProcess.every(({ msg }) => !isDetachedProjectionMessage(msg));
         const existingIndexes = new Set(pendingProcess.map((item) => item.index));
         const runIds = new Set(pendingProcess
           .map((item) => String(item.msg?.meta?.agentRunId || ""))
@@ -1699,7 +1890,10 @@
         rows.push(renderToolProcessProjection(pendingProcess, processSerial, {
           ...options,
           processKey,
-          open: hasActiveRun && expandedToolProcesses.has(processKey),
+          activeStage: Boolean(options.activeStage) || activeForegroundStage,
+          allowExpanded: hasActiveRun,
+          expandedToolProcesses,
+          expandedToolItems,
         }));
         pendingProcess = [];
         return true;
@@ -1715,7 +1909,7 @@
         openExecutionTraceUserIndex = userIndex;
       };
       const openActiveExecutionTrace = (userIndex) => {
-        const expanded = expandedExecutionTraces.has(String(userIndex));
+        const expanded = !collapsedExecutionTraces.has(String(userIndex));
         rows.push(`<section class="execution-trace active${expanded ? " is-expanded" : ""}" data-execution-trace="${userIndex}">
           <div class="execution-trace-summary" role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle>
             ${takeActiveRunAnchor()}
@@ -1838,7 +2032,7 @@
           currentUserIndex = index;
           rows.push(renderUserProjection(msg, index));
           if (index === activeUserIndex) {
-            if (executionTraceTurns.has(index) && finalAnswerTurns.has(index)) {
+            if (executionTraceTurns.has(index)) {
               openActiveExecutionTrace(index);
             } else {
               insertActiveRunAnchor();
@@ -1884,6 +2078,7 @@
       renderCopyButton,
       renderCopyIconSvg,
       renderFinalAssistantProjection,
+      reconcileToolProcessNodes,
       renderToolProcessProjection,
       renderUserInputSummaryProjection,
       renderUserProjection,
@@ -1901,5 +2096,6 @@
     isOperationalToolNotice,
     isToolPlanningPlaceholder,
     normalizeResponseUsage,
+    reconcileToolProcessNodes,
   });
 })(window);
