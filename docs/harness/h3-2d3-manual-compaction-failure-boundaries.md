@@ -33,16 +33,18 @@ suite 按固定顺序执行以下 19 个场景：
 确定性 suite hash 为：
 
 ```text
-50ff1567e7477d6438bfc7e8175a3936f04177a089a4b4ae5acc0a93a0a2a657
+b586b27ea2f2c4330f3468f60d539cb92aa3e8b44beeb740eae449fb8aca5fa9
 ```
 
 文件基线为：
 
 | 文件 | SHA-256 |
 |---|---|
-| failure-boundary fixture | `a65b4d1a8c90a553487a6092bc9d60fa8d95606567f01458bca8c17fdc3d96a3` |
+| failure-boundary fixture | `1b65532c2c30c7218e19a1237971debcea2a730c540fe55be51f23bb60cc37a4` |
 | failure-boundary schema | `09853dca0a91eec09b28b430ef1d45fee696ee19b1cff6fe0966bf828e5a47fc` |
-| failure-boundary test | `84946a126cf6804a6899b7e00fdc9b1916f0e4f6049f1f2ad0363311ad0607fb` |
+| failure-boundary test | `120cf3289e7a52e4b670fe8c2923e37589e667fce5db99d3341ae6243c14c246` |
+
+2026-08-14 发布门禁受控刷新连续生成两次相同证据。19 个场景的 marker、调用、目标 Session、保存重试、脱敏、锁恢复和副作用字段均保持不变；CODE-004 的 UI 结构只改变每个场景的 `uiHash`，两个带 pending 投影的场景同时改变 `pendingUiHash`，随后派生更新 19 个 `scenarioHash`、D2 source fixture 哈希和 suite hash。该刷新没有删除断言或扩大冻结边界。
 
 ## Session 所有权与保存链
 
@@ -92,9 +94,9 @@ $.results.operation-lock-render-throws.lockRecovery.operationCount
 
 `save-response-lost-after-server-write` 先让真实临时 `save_session` 完成磁盘写入，再由响应适配器抛出合成连接错误；后续使用目标 Session 当前状态重试并通过生产 `read_jsonl()` 复读，最终只存在一个 summary 和一个 marker。`state-appended-before-retry`、`target-changes-during-retry` 与显式重试场景共同证明重试不会使用过期完整快照覆盖后续消息或标题；请求期间状态继续变化时，不会错误清除 pending。
 
-## H3-2D2 受控重基线
+## H3-2D2 历史受控重基线
 
-D3 修改了 `compactConversation()` 精确切片及其依赖，因此 H3-2D2 从提交 `f5a57e2` 的收口基线受控更新到当前最终基线。只允许以下结构证据变化：
+D3 修改了 `compactConversation()` 精确切片及其依赖，因此 H3-2D2 从提交 `f5a57e2` 的收口基线受控更新到当时的 D3 收口基线。下表保留该次历史对比；当前发布门禁值以上方 2026-08-14 受控刷新和 H3-2D2 专题为准。该次只允许以下结构证据变化：
 
 | 对象 | H3-2D2 收口值 | H3-2D3 最终值 |
 |---|---|---|

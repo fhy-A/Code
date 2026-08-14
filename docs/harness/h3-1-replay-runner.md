@@ -50,7 +50,7 @@ H3-2D1 新增独立、严格版本化的七格式图片 MIME evidence suite。PN
 
 H3-2D2 新增独立、严格版本化的手动压缩成功路径 evidence suite。测试执行当前 `app.js` 中 `compactConversation()` 的精确源码切片，而不是公开模块 API；被动 stub 只返回固定摘要或捕获调用，状态变化来自真实切片。捕获的 archive payload 随后交给真实 `CodeHandler.archive_session()`，最终消息继续经过生产持久化、模型上下文和 UI HTML 投影入口；详见 [`H3-2D2 手动压缩成功路径与完整可见历史契约`](h3-2d2-manual-compaction-visible-history.md)。它也不是 Run replay，不并入任何单 Run或 multi-run 数量。
 
-H3-2D3 新增独立、严格版本化的手动压缩失败与持久化边界 evidence suite，并在生产侧固定目标 Session 所有权、统一 per-Session 保存链、非阻断 archive 警告、两次自动保存、显式保存重试、脱敏有界错误和可靠操作锁清理。suite 固定 19 个场景，hash 为 `50ff1567e7477d6438bfc7e8175a3936f04177a089a4b4ae5acc0a93a0a2a657`；详见 [`H3-2D3 手动压缩失败与持久化边界`](h3-2d3-manual-compaction-failure-boundaries.md)。它同样不并入 Run replay 数量。
+H3-2D3 新增独立、严格版本化的手动压缩失败与持久化边界 evidence suite，并在生产侧固定目标 Session 所有权、统一 per-Session 保存链、非阻断 archive 警告、两次自动保存、显式保存重试、脱敏有界错误和可靠操作锁清理。suite 固定 19 个场景；2026-08-14 因已提交的 CODE-004 UI 结构变化受控刷新后，当前 hash 为 `b586b27ea2f2c4330f3468f60d539cb92aa3e8b44beeb740eae449fb8aca5fa9`，marker、调用、保存、Session 所有权、脱敏、锁恢复和副作用语义未变；详见 [`H3-2D3 手动压缩失败与持久化边界`](h3-2d3-manual-compaction-failure-boundaries.md)。它同样不并入 Run replay 数量。
 
 ## 测试与回归
 

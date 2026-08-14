@@ -22,7 +22,7 @@ SCHEMA_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.schema.j
 FIXTURE_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.json"
 APP_PATH = ROOT / "app.js"
 
-EXPECTED_FIXTURE_SHA256 = "1fac9a92faae6084d578d94daa8e7cd3e7a68beb57df94734f065c4927170384"
+EXPECTED_FIXTURE_SHA256 = "c3ea5a28bc980ef0bd60d12effeb442a6ce7032b77a41b6f34672f41e3cdee91"
 EXPECTED_SLICE_SHA256 = "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5"
 EXPECTED_PROFILE = {
     "id": "h3-2d2-manual-compaction-visible-history",
@@ -464,11 +464,44 @@ class EvidenceContractError(AssertionError):
 
 
 class VisibleTextParser(HTMLParser):
+    VOID_ELEMENTS = frozenset(
+        {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }
+    )
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts = []
+        self.hidden_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        is_hidden = self.hidden_depth > 0 or any(
+            name.lower() == "hidden" for name, _value in attrs
+        )
+        if is_hidden and tag.lower() not in self.VOID_ELEMENTS:
+            self.hidden_depth += 1
+
+    def handle_endtag(self, _tag):
+        if self.hidden_depth > 0:
+            self.hidden_depth -= 1
 
     def handle_data(self, data):
+        if self.hidden_depth > 0:
+            return
         normalized = " ".join(data.split())
         if normalized:
             self.parts.append(normalized)
@@ -937,6 +970,18 @@ class TestHarnessManualCompactionVisibleHistory(unittest.TestCase):
         cls.validator = Draft202012Validator(
             cls.schema,
             format_checker=FormatChecker(),
+        )
+
+    def test_visible_text_parser_ignores_hidden_subtrees(self):
+        rendered_html = (
+            '<div>visible before<button type="button" hidden>hidden label'
+            "<span>nested hidden label</span></button>"
+            '<span>visible after</span><template hidden="">'
+            "<p>hidden template content</p></template></div>"
+        )
+        self.assertEqual(
+            collect_visible_text(rendered_html),
+            "visible before\nvisible after",
         )
 
     def test_fixture_schema_profile_source_slice_and_hash(self):

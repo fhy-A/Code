@@ -45,8 +45,10 @@ GIF 与 TIFF 的两帧/两页 fixture 只证明当前模型投影选择第 0 帧
 
 | 对象 | SHA-256 |
 |---|---|
-| H3-2D1 fixture | `51606a657d95a8c421feef3a8b5415d178efc66e72bfc53dac64a19d009288e1` |
+| H3-2D1 fixture | `8f3cdd6354987a977df545f5db1209e5f869924b01d8884c9e1b33784c5afad3` |
 | H3-2D1 schema | `ac367f82b9df44a858186c02e2f6b90cd8150bcfb128ce544ced77defc94c39c` |
+
+2026-08-14 发布门禁复核确认，CODE-004 的用户长文本收起结构只改变了七个案例各自的 `renderUserHtmlSha256` 与 `projectMessagesHtmlSha256`。同一证据连续生成两次完全一致；原 MIME、原始/派生字节、data URL、JSONL 往返、模型投影、RGBA 语义、稳定性与零副作用字段全部保持不变，因此只受控刷新上述 14 个 UI HTML 哈希和 fixture 文件哈希，没有放宽图片契约。
 
 H3-2D1 是独立图片证据。默认单 Run `17/124/25/25/4`、H3-2C1、H3-2B1 与 H3-2B2 的计数和全部 fixture/replay/状态哈希均保持不变。
 

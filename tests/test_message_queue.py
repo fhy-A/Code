@@ -209,7 +209,10 @@ class TestRunningMessageQueue(unittest.TestCase):
         resume_end = APP_SOURCE.index("async function cancelQueuedSessionMessage", resume_start)
         resume = APP_SOURCE[resume_start:resume_end]
         self.assertIn('steerDispatch?.status === "submitting"', resume)
-        self.assertIn("await submitSessionSteer(ctx, message)", resume)
+        self.assertIn(
+            "await submitSessionSteer(ctx, message, { createReadingAnchor: false })",
+            resume,
+        )
         self.assertIn("existingMessage: message", resume)
         self.assertIn("await resumePendingSessionSteers(ctx)", APP_SOURCE)
 

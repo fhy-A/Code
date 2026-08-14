@@ -53,16 +53,18 @@ sessions/archive/session-h3-2d2-synthetic_2026-08-06T10-00-00.000Z.jsonl
 
 | 对象 | SHA-256 |
 |---|---|
-| evidence fixture 文件 | `56584599d968fd7cfcdfad17cc56ed59a7ec8d18c7ab27b5fbe33d5ec3eda586` |
+| evidence fixture 文件 | `c3ea5a28bc980ef0bd60d12effeb442a6ce7032b77a41b6f34672f41e3cdee91` |
 | evidence schema 文件 | `3b1426da4a914ec89d72988636a18b515c2cbf3a72e66043664b4021fc52eba5` |
-| 精确源码切片 | `1264f4f9d7d46c15012b4d0d092d52819f2e8c41daf5c4561ec0286b733052b8` |
+| 精确源码切片 | `6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5` |
 | 源历史 / archive 复制历史 | `0ecd9f0f2ccacca9d5a4e3281dfabc1cf6d09c4c81da867977d302b0598e40bf` |
-| 确定性 replay 状态 | `36e0206d1be87e80bade8a0d6a568fa1f6e2e19747e858964727e0f21b1d4c26` |
+| 确定性 replay 状态 | `a61a4b547574cd33c084695b4459d0aa36237a252198f06f403a97eb726cb85e` |
 | 最终内存 messages | `a71218ce9c3bf1ea776dc170938c5aa918d8d23793bf34a7a3d27b9e0c5abd2e` |
 | archive payload / record | `dd417968b48653557514100ca51a99cb276070dbd610502745ef577c48ff39e9` / `0540ccaef10e329c8d212f8f5a8076d4cf2d04063af89fee71247b7ba83c0df1` |
 | 最终 JSONL 往返 | `3a8f9f210d9e5daccc56789cd4a1ef8c144d89a829f6f55f68eff8d32e58779f` |
 | 模型 context / API payload | `8d5972e4b0b9548099d2efbb95ecb1f14ff8d9dbe1bf62c603d3ec93d3108958` / `0e5dccd19e37ab2c5b814916035a27965b77121333605c65701707f0dc53b330` |
-| UI HTML / 可见文本 | `7253fa07caca7bb89087ce706d45889ada1a305492f2b2bd9204a027a85f651c` / `92145b03f68be59e0a83c45b0f7288d78c1a36faada1edc8e8833b4ed047b397` |
+| UI HTML / 可见文本 | `7c8f25181b67f43a364155790f7d889359e3600b75a77087328bbd4ad6195cd8` / `92145b03f68be59e0a83c45b0f7288d78c1a36faada1edc8e8833b4ed047b397` |
+
+2026-08-14 发布门禁复核把 HTML `hidden` 子树从可见文本解析中排除。连续两次生成得到相同证据：12 个可见历史哨兵、顺序、唯一性和可见文本哈希保持不变，仅 CODE-004 引入的原始 UI HTML 结构哈希及其派生 `replayHash` 变化；源历史、archive、保存、模型上下文、Session 所有权和零副作用字段均未变化。
 
 默认单 Run `17/124/25/25/4`、H3-2C1、H3-2B1 与 H3-2B2 的计数和全部 fixture/replay/状态哈希均保持不变。
 
