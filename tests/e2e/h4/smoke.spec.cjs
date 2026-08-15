@@ -272,17 +272,17 @@ const H4_5B1_SEMANTIC_HASHES = Object.freeze({
   finalResult: "e40fb4ba752c3fe25f985c5aa78152ee6ce0166330aa57ca7d67e8a68e24bdef",
 });
 const H4_6A_ACTIVE_TO_TERMINAL_HASHES = Object.freeze({
-  lifecycle: "d92a7ea2efcf54bb4d2dfaf238a3ac8e0c050abe019ee20c06cd627458640985",
+  lifecycle: "f8bfdadeae2e8ed429de34cdfc8390591b6e0624d6a4c57516a23b882be58e16",
   eventProjection: "36658361b00ce7bff3f3464099e27fe81273845e2ab85a62c0229814128b9d48",
   sessionRoleContent: "c6b7c90baeafb1c29e38d431bdbaf28a1ca282d54d47ac2d024601ad3d3e442a",
-  terminalDom: "71a1ebdf6f609fc44a8408f20d15659626e8b6d11bf033b3665be510bf470712",
+  terminalDom: "42dad437f12fb976eddd95e5aaed3e50449a8c4cad1bccc9c9101ab0d7344610",
 });
 const H4_6A_TERMINAL_REFRESH_HASHES = Object.freeze({
   refreshLifecycle: "0712a70b1ad23f9d33ab31b780df8c48deebbeaae784e80a4976daf0e7452ec8",
   eventProjection: "36658361b00ce7bff3f3464099e27fe81273845e2ab85a62c0229814128b9d48",
   sessionRoleContent: "c6b7c90baeafb1c29e38d431bdbaf28a1ca282d54d47ac2d024601ad3d3e442a",
   sessionToolMeta: "587b9b6365a9811779ab0bac530de558af1dfca14d31c70ac2cce71ae0973fe9",
-  terminalDom: "71a1ebdf6f609fc44a8408f20d15659626e8b6d11bf033b3665be510bf470712",
+  terminalDom: "42dad437f12fb976eddd95e5aaed3e50449a8c4cad1bccc9c9101ab0d7344610",
 });
 const H4_6C_ACTIVE_TO_TERMINAL_HASHES = Object.freeze({
   lifecycle: "f5445145789b337ffba49dcec350a483981be281d52e9144f23fefd8cde3307d",
@@ -2127,6 +2127,38 @@ async function toolDetailLifecycleDomEvidence(page) {
   };
 }
 
+async function toolProcessShimmerStyle(summary) {
+  return summary.evaluate((element) => {
+    const projectStyle = (node) => {
+      if (!node) return null;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return {
+        animationName: style.animationName,
+        animationDuration: style.animationDuration,
+        animationIterationCount: style.animationIterationCount,
+        backgroundClip: style.backgroundClip,
+        backgroundColor: style.backgroundColor,
+        backgroundImage: style.backgroundImage,
+        backgroundPosition: style.backgroundPosition,
+        backgroundSize: style.backgroundSize,
+        color: style.color,
+        webkitTextFillColor: style.webkitTextFillColor,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    return {
+      summary: projectStyle(element),
+      chevron: projectStyle(element.querySelector(".tool-process-stage-chevron")),
+      heading: projectStyle(element.querySelector(".tool-process-stage-heading")),
+      textParts: [...element.querySelectorAll(
+        ".tool-process-stage-heading > strong, .tool-process-stage-heading > code",
+      )].map(projectStyle),
+    };
+  });
+}
+
 async function installToolExpansionTimeline(page) {
   await page.evaluate(() => {
     const root = document.querySelector("#messages");
@@ -2480,10 +2512,11 @@ async function assertToolFoldSelectionProtection(page) {
     });
   }
 
-  for (const [control, restore] of [
+  const toggleControls = [
     [itemSummary, async () => itemSummary.click()],
     [stageSummary, async () => stageSummary.click()],
-  ]) {
+  ];
+  for (const [control, restore] of toggleControls) {
     await control.click();
     const pointerFocus = await control.evaluate((element) => ({
       marked: element.classList.contains("is-pointer-focus"),
@@ -16721,6 +16754,35 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   });
   expect(initialDom.projection.processKey).toBe("0:1");
   expect(initialDom.projection.stageClass.split(/\s+/)).toContain("running");
+  expect(initialDom.projection.stageClass.split(/\s+/)).not.toContain("tool-active");
+  expect(initialDom.projection.stageClass.split(/\s+/)).toContain("single-tool");
+  const initialStageSummary = initialDom.outer.locator(
+    ":scope > summary.tool-process-stage-summary",
+  );
+  const animatedShimmer = await toolProcessShimmerStyle(initialStageSummary);
+  expect(animatedShimmer.summary).toMatchObject({
+    animationName: "none",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+  });
+  expect(animatedShimmer.chevron).toMatchObject({
+    animationName: "none",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+  });
+  expect(animatedShimmer.heading).toMatchObject({
+    animationName: "none",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+  });
+  expect(animatedShimmer.textParts).toHaveLength(2);
+  for (const part of animatedShimmer.textParts) {
+    expect(part).toMatchObject({
+      animationName: "none",
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      backgroundImage: "none",
+    });
+  }
   expect(initialDom.projection.heading).toContain("Read File");
   expect(initialDom.projection.heading).toContain("fixture.txt");
   expect(initialDom.projection.argumentText).toContain('"path": "fixture.txt"');
@@ -16826,8 +16888,11 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   await installToolExpansionTimeline(page);
   await initialDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(initialDom.outer).toHaveAttribute("open", "");
+  await expect(initialDom.item).not.toHaveAttribute("open", "");
+  await expect(initialDom.process.locator(".tool-process-detail pre").first()).toBeHidden();
   await initialDom.item.locator(":scope > summary").click();
   await expect(initialDom.item).toHaveAttribute("open", "");
+  await expect(initialDom.process.locator(".tool-process-detail pre").first()).toBeVisible();
   const openedKey = await initialDom.outer.getAttribute("data-tool-process-key");
   expect(openedKey).toBe(initialDom.projection.processKey);
 
@@ -16842,6 +16907,10 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   expect(modelGapDom.projection.outerOpen).toBe(true);
   expect(modelGapDom.projection.itemOpen).toBe(true);
   expect(modelGapDom.projection.stageClass.split(/\s+/)).toContain("running");
+  expect(modelGapDom.projection.stageClass.split(/\s+/)).not.toContain("tool-active");
+  expect((await toolProcessShimmerStyle(
+    modelGapDom.outer.locator(":scope > summary.tool-process-stage-summary"),
+  )).heading.animationName).toBe("none");
 
   const activeTraceToggleBeforeRerender = page.locator(
     "#messages .execution-trace.active > [data-execution-trace-toggle]",
@@ -16861,11 +16930,27 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   const rerenderedDom = await toolDetailLifecycleDomEvidence(page);
   const expansionTimeline = await readToolExpansionTimeline(page);
   expect(expansionTimeline.samples.length).toBeGreaterThan(0);
-  const firstExpandedSample = expansionTimeline.samples.findIndex((sample) => (
-    sample.stage?.open && sample.items.some((item) => item.open)
+  const firstGroupExpandedSample = expansionTimeline.samples.findIndex((sample) => (
+    sample.stage?.open && sample.items.every((item) => !item.open)
   ));
-  expect(firstExpandedSample).toBeGreaterThanOrEqual(0);
-  const activeSamples = expansionTimeline.samples.slice(firstExpandedSample)
+  const firstItemExpandedSample = expansionTimeline.samples.findIndex((sample, index) => (
+    index > firstGroupExpandedSample
+    && sample.stage?.open
+    && sample.items.some((item) => item.open)
+  ));
+  expect(firstGroupExpandedSample).toBeGreaterThanOrEqual(0);
+  expect(firstItemExpandedSample).toBeGreaterThan(firstGroupExpandedSample);
+  const groupOnlySamples = expansionTimeline.samples.slice(
+    firstGroupExpandedSample,
+    firstItemExpandedSample,
+  ).filter((sample) => sample.stage);
+  expect(groupOnlySamples.length).toBeGreaterThan(0);
+  expect(groupOnlySamples.every((sample) => (
+    sample.stage.connected
+    && sample.stage.open
+    && sample.items.every((item) => item.connected && !item.open)
+  ))).toBe(true);
+  const activeSamples = expansionTimeline.samples.slice(firstItemExpandedSample)
     .filter((sample) => sample.stage);
   const traceSamples = activeSamples.filter((sample) => sample.trace?.state === "active");
   expect(traceSamples.length).toBeGreaterThan(0);
@@ -16909,7 +16994,7 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   });
 
   // A user-owned collapse is the other stable state: ordinary active rerenders
-  // must not force the execution trace or either tool details node back open.
+  // must not force the execution trace, tool group, or tool item back open.
   await rerenderedDom.item.locator(":scope > summary").click();
   await expect(rerenderedDom.item).not.toHaveAttribute("open", "");
   await rerenderedDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
@@ -16929,6 +17014,9 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   await expect(page.locator("#messages .execution-trace.active")).not.toHaveClass(/\bis-expanded\b/);
   expect(collapsedDom.projection.outerOpen).toBe(false);
   expect(collapsedDom.projection.itemOpen).toBe(false);
+  expect((await toolProcessShimmerStyle(
+    collapsedDom.outer.locator(":scope > summary.tool-process-stage-summary"),
+  )).heading.animationName).toBe("none");
   const collapsedTimeline = await readToolExpansionTimeline(page);
   expect(collapsedTimeline.samples.every((sample) => (
     !sample.trace || !sample.trace.expanded
@@ -16982,7 +17070,31 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   expect(terminalDom.projection.outerOpen).toBe(false);
   expect(terminalDom.projection.itemOpen).toBe(false);
   expect(terminalDom.projection.stageClass.split(/\s+/)).toContain("succeeded");
-  expect(terminalDom.projection.heading).toBe("Inspected a file");
+  expect(terminalDom.projection.stageClass.split(/\s+/)).toContain("single-tool");
+  const terminalShimmer = await toolProcessShimmerStyle(
+    terminalDom.outer.locator(":scope > summary.tool-process-stage-summary"),
+  );
+  expect(terminalShimmer.summary).toMatchObject({
+    animationName: "none",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+  });
+  expect(terminalShimmer.chevron).toMatchObject({
+    animationName: "none",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+  });
+  expect(terminalShimmer.heading).toMatchObject({
+    animationName: "none",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+  });
+  expect(terminalShimmer.textParts.every((part) => (
+    part.animationName === "none"
+    && part.backgroundColor === "rgba(0, 0, 0, 0)"
+    && part.backgroundImage === "none"
+  ))).toBe(true);
+  expect(terminalDom.projection.heading).toBe(initialDom.projection.heading);
   expect(terminalDom.projection.resultText).toBe(initialDom.projection.resultText);
   expect(terminalDom.projection.formattedResult).toEqual({
     pathPresent: true,
@@ -17007,6 +17119,8 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   ).toBeVisible();
   await terminalDom.outer.locator(":scope > summary.tool-process-stage-summary").click();
   await expect(terminalDom.outer).toHaveAttribute("open", "");
+  await expect(terminalDom.item).not.toHaveAttribute("open", "");
+  await expect(terminalDom.process.locator(".tool-process-detail pre").first()).toBeHidden();
   await terminalDom.item.locator(":scope > summary").click();
   await expect(terminalDom.item).toHaveAttribute("open", "");
   await expect(terminalDom.process.locator(".tool-process-detail pre").first()).toBeVisible();
@@ -17062,7 +17176,16 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
 
   const lifecycleProjection = {
     processKey: terminalDom.projection.processKey,
-    openTransitions: ["closed", "open", "open-after-rerender", "closed-terminal", "open-inspect", "closed-inspect"],
+    openTransitions: [
+      "group-closed",
+      "group-open-item-closed",
+      "item-open",
+      "item-open-after-rerender",
+      "terminal-collapsed",
+      "group-open-item-closed-inspect",
+      "item-open-inspect",
+      "collapsed-inspect",
+    ],
     productionRerenderPreservedStage: true,
     eventTypes: completedTrace.eventProjection.map((event) => event.type),
     counts: terminalDom.projection.counts,
@@ -17183,7 +17306,22 @@ async function exerciseToolDetailTerminalRefresh(h4, runtime) {
   const domBefore = await toolDetailLifecycleDomEvidence(page);
   expect(domBefore.projection.outerOpen).toBe(false);
   expect(domBefore.projection.itemOpen).toBe(false);
-  expect(domBefore.projection.heading).toBe("Inspected a file");
+  const beforeRefreshShimmer = await toolProcessShimmerStyle(
+    domBefore.outer.locator(":scope > summary.tool-process-stage-summary"),
+  );
+  expect(beforeRefreshShimmer.summary).toMatchObject({
+    animationName: "none",
+    backgroundImage: "none",
+  });
+  expect(beforeRefreshShimmer.heading).toMatchObject({
+    animationName: "none",
+    backgroundImage: "none",
+  });
+  expect(beforeRefreshShimmer.textParts.every((part) => (
+    part.animationName === "none" && part.backgroundImage === "none"
+  ))).toBe(true);
+  expect(domBefore.projection.heading).toContain("Read File");
+  expect(domBefore.projection.heading).toContain("fixture.txt");
   expect(domBefore.projection.formattedResult).toEqual({
     pathPresent: true,
     sizePresent: true,
@@ -17205,9 +17343,12 @@ async function exerciseToolDetailTerminalRefresh(h4, runtime) {
     domBefore.outer.locator(":scope > summary.tool-process-stage-summary"),
   ).toBeVisible();
   await domBefore.outer.locator(":scope > summary.tool-process-stage-summary").click();
-  await domBefore.item.locator(":scope > summary").click();
   await expect(domBefore.outer).toHaveAttribute("open", "");
+  await expect(domBefore.item).not.toHaveAttribute("open", "");
+  await expect(domBefore.process.locator(".tool-process-detail pre").first()).toBeHidden();
+  await domBefore.item.locator(":scope > summary").click();
   await expect(domBefore.item).toHaveAttribute("open", "");
+  await expect(domBefore.process.locator(".tool-process-detail pre").first()).toBeVisible();
 
   const metricsBefore = await h4.metrics();
   const refreshBoundary = h4.requestBoundary();
@@ -17227,6 +17368,20 @@ async function exerciseToolDetailTerminalRefresh(h4, runtime) {
   expect(domAfter.projection.outerOpen).toBe(false);
   expect(domAfter.projection.itemOpen).toBe(false);
   expect(domAfter.projection).toEqual(domBefore.projection);
+  const afterRefreshShimmer = await toolProcessShimmerStyle(
+    domAfter.outer.locator(":scope > summary.tool-process-stage-summary"),
+  );
+  expect(afterRefreshShimmer.summary).toMatchObject({
+    animationName: "none",
+    backgroundImage: "none",
+  });
+  expect(afterRefreshShimmer.heading).toMatchObject({
+    animationName: "none",
+    backgroundImage: "none",
+  });
+  expect(afterRefreshShimmer.textParts.every((part) => (
+    part.animationName === "none" && part.backgroundImage === "none"
+  ))).toBe(true);
   expect(domAfter.projection.formattedResult).toEqual({
     pathPresent: true,
     sizePresent: true,
@@ -17247,8 +17402,10 @@ async function exerciseToolDetailTerminalRefresh(h4, runtime) {
     domAfter.outer.locator(":scope > summary.tool-process-stage-summary"),
   ).toBeVisible();
   await domAfter.outer.locator(":scope > summary.tool-process-stage-summary").click();
-  await domAfter.item.locator(":scope > summary").click();
   await expect(domAfter.outer).toHaveAttribute("open", "");
+  await expect(domAfter.item).not.toHaveAttribute("open", "");
+  await expect(domAfter.process.locator(".tool-process-detail pre").last()).toBeHidden();
+  await domAfter.item.locator(":scope > summary").click();
   await expect(domAfter.item).toHaveAttribute("open", "");
   await expect(domAfter.process.locator(".tool-process-detail pre").last()).toContainText("fixture.txt");
   await expect(domAfter.process.locator(".tool-process-detail pre").last()).toContainText("26 B");
@@ -17338,7 +17495,7 @@ async function exerciseToolDetailTerminalRefresh(h4, runtime) {
     },
     refresh: refreshProjection,
     hashes,
-    expansionBoundary: "page-local outer and item details reset to collapsed on full reload",
+      expansionBoundary: "page-local outer and item details reset to collapsed on full reload",
     },
   );
 }

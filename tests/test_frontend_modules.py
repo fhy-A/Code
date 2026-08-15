@@ -8854,6 +8854,22 @@ const completedCollapsedTailHtml = feature.projectMessages(activeCompletedTailMe
   hasActiveRun: false,
   expandedToolProcesses: new Set(["0:1"]),
 });
+const activeSeparatedStagesHtml = feature.projectMessages([
+  {role: "user", content: "active separated stages"},
+  {role: "assistant", content: "", meta: {toolCalls: [
+    {id: "separated-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+    {id: "separated-1b", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "read_file", toolCallId: "separated-1", tool: {action: "read_file", path: "README.md"}}},
+  {role: "tool-result", content: "contents", meta: {action: "read_file", toolCallId: "separated-1", outcome: "succeeded"}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "separated-1b", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "separated-1b", outcome: "succeeded"}},
+  {role: "assistant", content: "checkpoint between stages", meta: {toolCalls: [
+    {id: "separated-2", function: {name: "run_command", arguments: '{"command":"git status --short"}'}},
+  ]}},
+  {role: "tool-call", meta: {action: "run_command", toolCallId: "separated-2", tool: {action: "run_command", command: "git status --short"}}},
+  {role: "tool-result", content: "clean", meta: {action: "run_command", toolCallId: "separated-2", outcome: "succeeded"}},
+], {hasActiveRun: true});
 const activeToolGapMessages = [
   {role: "user", content: "active multi-round tool stage"},
   {role: "assistant", content: "", meta: {toolCalls: [
@@ -9063,6 +9079,7 @@ process.stdout.write(JSON.stringify({
   activeCompletedTailHtml,
   expandedActiveTailHtml,
   completedCollapsedTailHtml,
+  activeSeparatedStagesHtml,
   activeToolGapHtml,
   activeFailedToolGapHtml,
   activeFailedThenRetryHtml,
@@ -9239,7 +9256,8 @@ process.stdout.write(JSON.stringify({
             data["emptyRecoveryHtml"].index("data-tool-process-block"),
         )
         pending_tail_summary = data["emptyRecoveryHtml"].split('<div class="tool-process-stage-body">', 1)[0]
-        self.assertIn('class="tool-process-stage running"', pending_tail_summary)
+        self.assertIn('class="tool-process-stage running single-tool"', pending_tail_summary)
+        self.assertNotIn("tool-active", pending_tail_summary)
         self.assertIn(
             "<strong>label:run_command</strong><code>git status --short</code>",
             pending_tail_summary,
@@ -9275,6 +9293,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("<details open", data["groupedStageHtml"])
         active_tail_summary = data["activeCompletedTailHtml"].split('<div class="tool-process-stage-body">', 1)[0]
         self.assertIn('class="tool-process-stage running"', active_tail_summary)
+        self.assertNotIn("tool-active", active_tail_summary)
         self.assertIn(
             "<strong>label:run_command</strong><code>git status --short</code>",
             active_tail_summary,
@@ -9290,13 +9309,33 @@ process.stdout.write(JSON.stringify({
             data["expandedActiveTailHtml"],
             r'<details class="tool-process-stage running"[^>]+ open>',
         )
-        self.assertNotIn('data-tool-process-key="0:1" open', data["completedCollapsedTailHtml"])
+        self.assertNotRegex(
+            data["completedCollapsedTailHtml"],
+            r'<details class="tool-process-stage succeeded"[^>]+ open>',
+        )
+        separated_html = data["activeSeparatedStagesHtml"]
+        self.assertEqual(separated_html.count("data-tool-process-block"), 2)
+        separated_first = separated_html.split("data-tool-process-block", 2)[1]
+        separated_second = separated_html.split("data-tool-process-block", 2)[2]
+        self.assertIn('class="tool-process-stage succeeded"', separated_first)
+        self.assertNotIn("single-tool", separated_first.split('<div class="tool-process-stage-body">', 1)[0])
+        self.assertIn(
+            "<strong>toolProcessInspectedFile · toolProcessRanCommand</strong>",
+            separated_first,
+        )
+        self.assertIn('class="tool-process-stage running single-tool"', separated_second)
+        self.assertNotIn("tool-active", separated_second.split('<div class="tool-process-stage-body">', 1)[0])
+        self.assertIn(
+            "<strong>label:run_command</strong><code>git status --short</code>",
+            separated_second,
+        )
         for gap_html in (data["activeToolGapHtml"], data["activeFailedToolGapHtml"]):
             gap_summary = gap_html.split('<div class="tool-process-stage-body">', 1)[0]
-            self.assertIn('class="tool-process-stage running"', gap_summary)
+            self.assertIn('class="tool-process-stage running single-tool"', gap_summary)
+            self.assertNotIn("tool-active", gap_summary)
             self.assertRegex(
                 gap_html,
-                r'<details class="tool-process-stage running"[^>]+ open>',
+                r'<details class="tool-process-stage running single-tool"[^>]+ open>',
             )
             self.assertRegex(
                 gap_html,
@@ -9304,7 +9343,7 @@ process.stdout.write(JSON.stringify({
             )
         failed_then_retry_html = data["activeFailedThenRetryHtml"]
         self.assertEqual(failed_then_retry_html.count("data-tool-process-block"), 1)
-        self.assertEqual(failed_then_retry_html.count('class="tool-process-stage running"'), 1)
+        self.assertEqual(failed_then_retry_html.count('class="tool-process-stage running tool-active"'), 1)
         self.assertIn('data-tool-process-id="session-1:failed-gap-1"', failed_then_retry_html)
         self.assertNotIn('data-tool-process-id="session-1:failed-gap-2"', failed_then_retry_html)
         self.assertEqual(failed_then_retry_html.count('class="tool-process-item '), 2)
@@ -9320,17 +9359,17 @@ process.stdout.write(JSON.stringify({
             data["activeQuestionnaireWaitingHtml"],
             data["activeAuthorizationWaitingHtml"],
         ):
-            self.assertIn('class="tool-process-stage running"', waiting_html)
+            self.assertIn('class="tool-process-stage running tool-active single-tool"', waiting_html)
             self.assertRegex(
                 waiting_html,
-                r'<details class="tool-process-stage running"[^>]+ open>',
+                r'<details class="tool-process-stage running tool-active single-tool"[^>]+ open>',
             )
             self.assertRegex(
                 waiting_html,
                 r'<details class="tool-process-item running"[^>]+ open>',
             )
         self.assertIn('data-current-action="run_command"', data["runningStage"])
-        self.assertIn('class="tool-process-stage running"', data["runningStage"])
+        self.assertIn('class="tool-process-stage running tool-active"', data["runningStage"])
         running_stage_summary = data["runningStage"].split('<div class="tool-process-stage-body">', 1)[0]
         self.assertIn(
             "<strong>label:run_command</strong><code>git status --short</code>",
@@ -9832,7 +9871,8 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(data["englishNotice"])
         self.assertNotIn("→ request_user_input", data["html"])
         self.assertEqual(data["html"].count("data-tool-process-block"), 1)
-        self.assertIn("<strong>toolProcessAskedUser</strong>", data["html"])
+        self.assertIn('class="tool-process-stage succeeded single-tool"', data["html"])
+        self.assertNotIn("<strong>toolProcessAskedUser</strong>", data["html"])
         self.assertIn("<strong>label:request_user_input</strong>", data["html"])
         self.assertIn("<strong>toolProcessAskedUserMultiple</strong>", data["multiple"])
         for expected in (
@@ -11060,7 +11100,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(html.count('class="execution-trace completed"'), 1)
         self.assertEqual(html.count("data-completed-run-status"), 1)
         self.assertEqual(html.count("data-tool-process-block"), 2)
-        self.assertEqual(html.count('class="tool-process-stage succeeded"'), 2)
+        self.assertEqual(html.count('class="tool-process-stage succeeded single-tool"'), 2)
         trace_body = html.index('class="execution-trace-body"')
         first_checkpoint = html.index("first checkpoint", trace_body)
         first_tools = html.index("data-tool-process-block", first_checkpoint)
@@ -11085,7 +11125,7 @@ process.stdout.write(JSON.stringify({
             STYLE_SOURCE,
         )
         first_stage = html[first_tools:steer]
-        self.assertIn('class="tool-process-stage succeeded"', first_stage)
+        self.assertIn('class="tool-process-stage succeeded single-tool"', first_stage)
         self.assertNotIn('class="tool-process-stage running"', first_stage)
 
         expanded_html = data["expanded"]
@@ -11182,6 +11222,92 @@ process.stdout.write(JSON.stringify({
         self.assertIn("outcome:", tool_projection)
         self.assertIn("result,", tool_projection)
         self.assertIn("argumentAliases:", tool_projection)
+
+    def test_running_tool_group_shimmer_is_scoped_motion_safe_and_layout_neutral(self):
+        task_running_selector = ".tool-process-stage.running > .tool-process-stage-summary {"
+        group_heading_selector = (
+            ".tool-process-stage.tool-active > .tool-process-stage-summary\n"
+            "  .tool-process-stage-heading {"
+        )
+        reduced_heading_selector = (
+            "  .tool-process-stage.tool-active > .tool-process-stage-summary\n"
+            "    .tool-process-stage-heading {"
+        )
+        reduced_code_selector = (
+            "  .tool-process-stage.tool-active > .tool-process-stage-summary\n"
+            "    .tool-process-stage-heading > code {"
+        )
+        self.assertNotIn(task_running_selector, STYLE_SOURCE)
+        self.assertEqual(STYLE_SOURCE.count(group_heading_selector), 1)
+        self.assertEqual(STYLE_SOURCE.count(reduced_heading_selector), 1)
+        self.assertEqual(STYLE_SOURCE.count(reduced_code_selector), 1)
+
+        rule_start = STYLE_SOURCE.index(group_heading_selector)
+        rule_end = STYLE_SOURCE.index("}", rule_start)
+        rule = STYLE_SOURCE[rule_start:rule_end]
+        self.assertIn("background-color: currentColor", rule)
+        self.assertIn("background-image: linear-gradient(", rule)
+        self.assertIn("color-mix(in srgb, var(--accent) 78%, var(--text))", rule)
+        self.assertEqual(rule.count("color-mix(in srgb, var(--accent) 30%, transparent)"), 2)
+        self.assertIn("background-repeat: no-repeat", rule)
+        self.assertIn("background-size: 36% 100%", rule)
+        self.assertIn("background-position: -58% 0", rule)
+        self.assertIn("background-clip: text", rule)
+        self.assertIn("-webkit-background-clip: text", rule)
+        self.assertIn("-webkit-text-fill-color: transparent", rule)
+        self.assertIn("animation: tool-process-stage-text-shimmer 5.2s ease-in-out infinite", rule)
+        self.assertNotRegex(
+            rule,
+            r"(?m)^\s*(?:color|opacity|width|height|padding|border(?:-[\w-]+)?|transform|pointer-events)\s*:",
+        )
+        self.assertNotIn("mask", rule)
+        self.assertNotIn("::before", rule)
+        self.assertNotIn("::after", rule)
+
+        keyframes_start = STYLE_SOURCE.index("@keyframes tool-process-stage-text-shimmer {")
+        reduced_start = STYLE_SOURCE.index("@media (prefers-reduced-motion: reduce)", keyframes_start)
+        keyframes = STYLE_SOURCE[keyframes_start:reduced_start]
+        self.assertIn("0%,\n  12%", keyframes)
+        self.assertIn("background-position: -58% 0", keyframes)
+        self.assertIn("40%,\n  100%", keyframes)
+        self.assertIn("background-position: 158% 0", keyframes)
+        self.assertAlmostEqual(5.2 * 0.12, 0.6, delta=0.03)
+        self.assertAlmostEqual(5.2 * (0.40 - 0.12), 1.46, delta=0.03)
+        self.assertAlmostEqual(5.2 * (1 - 0.40), 3.12, delta=0.03)
+        self.assertNotRegex(keyframes, r"(?m)^\s*(?:color|opacity|transform)\s*:")
+
+        reduced_rule_start = STYLE_SOURCE.index(reduced_heading_selector, reduced_start)
+        reduced_rule_end = STYLE_SOURCE.index("}", reduced_rule_start)
+        reduced_rule = STYLE_SOURCE[reduced_rule_start:reduced_rule_end]
+        self.assertIn("animation: none", reduced_rule)
+        self.assertIn("color: color-mix(in srgb, var(--accent) 46%, var(--text))", reduced_rule)
+        self.assertIn("background: none", reduced_rule)
+        self.assertIn("-webkit-text-fill-color: currentColor", reduced_rule)
+        self.assertNotRegex(
+            reduced_rule,
+            r"(?m)^\s*(?:opacity|width|height|padding|border(?:-[\w-]+)?|transform|pointer-events)\s*:",
+        )
+
+        reduced_code_start = STYLE_SOURCE.index(reduced_code_selector, reduced_rule_end)
+        reduced_code_end = STYLE_SOURCE.index("}", reduced_code_start)
+        reduced_code_rule = STYLE_SOURCE[reduced_code_start:reduced_code_end]
+        self.assertIn("color: color-mix(in srgb, var(--accent) 34%, var(--muted))", reduced_code_rule)
+        self.assertIn("-webkit-text-fill-color: currentColor", reduced_code_rule)
+        self.assertNotRegex(
+            reduced_code_rule,
+            r"(?m)^\s*(?:animation|opacity|width|height|padding|border(?:-[\w-]+)?|transform|pointer-events)\s*:",
+        )
+
+        self.assertNotIn(".tool-process-stage-heading > strong,", STYLE_SOURCE)
+        self.assertIn("const toolIsActive = detectedOutcome", MESSAGES_SOURCE)
+        self.assertIn('toolIsActive ? "tool-active" : ""', MESSAGES_SOURCE)
+        self.assertIn("const open = (", MESSAGES_SOURCE)
+        self.assertIn("const itemOpen = options.allowExpanded", MESSAGES_SOURCE)
+        self.assertNotIn("const itemOpen = singleToolStage ||", MESSAGES_SOURCE)
+        self.assertNotIn(".tool-process-stage.single-tool .tool-process-item > summary", STYLE_SOURCE)
+
+        self.assertNotIn(".tool-process-item.running > .tool-process-stage-summary", STYLE_SOURCE)
+        self.assertNotIn(".edit-suggestion.running > .tool-process-stage-summary", STYLE_SOURCE)
 
     def test_tool_fold_controls_block_primary_selection_without_disabling_body_copy(self):
         for selector in (

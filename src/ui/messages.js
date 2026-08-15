@@ -1628,14 +1628,22 @@
       if (!visibleCalls.length) return "";
       const currentCall = currentProcessCall(visibleCalls);
       const detectedOutcome = stageProcessOutcome(visibleCalls);
+      const singleToolStage = visibleCalls.length === 1;
+      const toolIsActive = detectedOutcome === "running" || detectedOutcome === "pending";
       const stageIsActive = Boolean(options.activeStage)
-        || detectedOutcome === "running"
-        || detectedOutcome === "pending";
+        || toolIsActive;
       const processOutcome = stageIsActive ? "running" : detectedOutcome;
-      const headingText = stageIsActive
+      const headingText = singleToolStage
+        ? getToolActionLabel(currentCall.action)
+        : stageIsActive
         ? getToolActionLabel(currentCall.action)
         : completedProcessSummary(visibleCalls);
-      const headingTarget = stageIsActive ? currentCall.target : "";
+      const headingTarget = singleToolStage || stageIsActive ? currentCall.target : "";
+      const stageClasses = [
+        processOutcome,
+        toolIsActive ? "tool-active" : "",
+        singleToolStage ? "single-tool" : "",
+      ].filter(Boolean).join(" ");
       const processKey = String(options.processKey || serial);
       const firstToolCallId = String(visibleCalls.find((call) => call.id)?.id || processKey);
       const processId = `${String(getSessionId() || "")}:${firstToolCallId}`;
@@ -1655,7 +1663,7 @@
 
       return `
         <article class="msg assistant tool-process" data-tool-process-block="${serial}">
-          <details class="tool-process-stage ${escapeHtml(processOutcome)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}" data-tool-process-id="${escapeHtml(processId)}"${open}>
+          <details class="tool-process-stage ${escapeHtml(stageClasses)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}" data-tool-process-id="${escapeHtml(processId)}"${open}>
             <summary class="tool-process-stage-summary">
               <span class="tool-process-stage-heading"><strong>${escapeHtml(headingText)}</strong>${headingTarget ? `<code>${escapeHtml(headingTarget)}</code>` : ""}</span>
               <span class="tool-process-stage-chevron" aria-hidden="true"></span>
@@ -1841,6 +1849,21 @@
           }
         }
       }
+      let activeForegroundToolTailIndex = -1;
+      if (activeUserIndex >= 0) {
+        for (let index = messages.length - 1; index > activeUserIndex; index -= 1) {
+          const message = messages[index];
+          if (!message || isInternalMessage(message) || isDetachedProjectionMessage(message)) continue;
+          if (
+            message.role === "tool-call"
+            || message.role === "tool-result"
+            || (message.role === "assistant" && message.meta?.toolCalls?.length)
+          ) {
+            activeForegroundToolTailIndex = index;
+            break;
+          }
+        }
+      }
       let activeRunAnchorInserted = false;
       const branchBoundary = branchMarker
         ? (branchMarker.messageCount > messages.length ? 0 : branchMarker.messageCount)
@@ -1858,9 +1881,6 @@
       };
       const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
-        const activeForegroundStage = hasActiveRun
-          && currentUserIndex === activeUserIndex
-          && pendingProcess.every(({ msg }) => !isDetachedProjectionMessage(msg));
         const existingIndexes = new Set(pendingProcess.map((item) => item.index));
         const runIds = new Set(pendingProcess
           .map((item) => String(item.msg?.meta?.agentRunId || ""))
@@ -1885,6 +1905,10 @@
           pendingProcess.push(resultEntry);
           claimedToolResultIndexes.add(resultEntry.index);
         });
+        const activeForegroundStage = hasActiveRun
+          && currentUserIndex === activeUserIndex
+          && pendingProcess.some(({ index }) => index === activeForegroundToolTailIndex)
+          && pendingProcess.every(({ msg }) => !isDetachedProjectionMessage(msg));
         processSerial += 1;
         const processKey = `${currentUserIndex}:${processSerial}`;
         rows.push(renderToolProcessProjection(pendingProcess, processSerial, {
