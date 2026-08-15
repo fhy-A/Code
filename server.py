@@ -23,6 +23,7 @@ import time
 import webbrowser
 
 import agent_protocol
+from goal_store import GoalService
 from skill_dependencies import (
     build_dependency_operation_plan,
     DependencyManifestError,
@@ -60,6 +61,7 @@ def _resolve_instance_settings(environ=None, *, frozen=None):
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("CODE_DATA_DIR") or (APP_DIR / "data"))
 SESSIONS_DIR = DATA_DIR / "sessions"
+GOALS_DIR = DATA_DIR / "goals"
 PROJECTS_PATH = DATA_DIR / "projects.json"
 PROJECTS_MIGRATION_FLAG = DATA_DIR / ".codex_projects_migrated"
 PROJECT_ROOTS_MIGRATION_FLAG = DATA_DIR / ".codex_project_roots_migrated"
@@ -5418,6 +5420,11 @@ def _session_date_dir(session_id):
 
 def messages_path(session_id):
     return _session_date_dir(session_id) / f"{safe_session_id(session_id)}.jsonl"
+
+
+def goal_service():
+    """Return the server-owned Goal fact service without creating storage on reads."""
+    return GoalService(GOALS_DIR, clock=now_iso)
 
 
 def _session_flat_path(session_id):
@@ -11511,6 +11518,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route == "/api/sessions":
                 self.get_sessions()
                 return
+            if route.startswith("/api/sessions/") and route.endswith("/goal"):
+                self.get_session_goal(route.rsplit("/", 2)[-2])
+                return
             if route.startswith("/api/sessions/"):
                 self.get_session(route.rsplit("/", 1)[-1])
                 return
@@ -12260,6 +12270,14 @@ class CodeHandler(BaseHTTPRequestHandler):
         session["_messageFilePath"] = str(messages_path(session_id).resolve())
         self.send_json(_session_api_record(session))
 
+    def get_session_goal(self, session_id):
+        """Return the trusted read-only Goal projection for one existing Session."""
+        path = session_path(session_id)
+        if not path.exists():
+            self.send_json({"error": "session not found"}, 404)
+            return
+        self.send_json({"data": goal_service().read(session_id).projection()})
+
     def create_session(self):
         body = self.read_body_json()
         session_id = uuid.uuid4().hex[:16]
@@ -12399,6 +12417,10 @@ class CodeHandler(BaseHTTPRequestHandler):
         jpath = messages_path(session_id)
         if jpath.exists():
             shutil.copy2(jpath, archive_dir / f"{safe_session_id(session_id)}_{ts}.jsonl")
+        goal_service().archive(
+            session_id,
+            archive_dir / f"{safe_session_id(session_id)}_{ts}.goal.jsonl",
+        )
         self.send_json({"ok": True, "path": str(path)})
 
     def delete_session(self, session_id):
@@ -12442,6 +12464,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             path.unlink(missing_ok=True)
             jpath.unlink(missing_ok=True)
             _remove_session_index_entry(session_id)
+        goal_service().delete(session_id)
         self.send_json({"ok": True})
 
     def branch_session(self, parent_id):

@@ -150,8 +150,8 @@ _上次更新：2026-08-15_
 ### CODE-019 · Goal 持久执行闭环
 
 - **类型 / 优先级 / 风险**：规划与自动化 / P2 / STRICT
-- **下一动作**：按 [Goal 开发指导](docs/goal-mode-development-guide.md) 在 AgentRun/Child AgentRun 上分阶段实现 `/goal`、工具、持久化 reducer、安全续跑、恢复、证据验收与最小三态计划 UI。
-- **完成定义**：顶层仅 `pending/in_progress/completed`，普通消息为主要控制面；机器证据满足才自动完成，主观 UI/业务必须用户 PASS，旧会话无 Goal 时不变。
+- **下一动作**：第一阶段独立 sidecar 事件事实层已完成；第二阶段按 [Goal 开发指导](docs/goal-mode-development-guide.md) 在该事实层上接入本地确定性的 `/goal` 查询与显式草案创建，并让普通消息提出补充、暂停、恢复、修改或清除意图后由服务端 reducer 确定性校验。本阶段不接自动续跑、模型 Goal 工具或 Goal UI。
+- **完成定义**：第二阶段能够查询和显式创建 Goal 草案，普通消息控制只通过 revision CAS、幂等事件和既有权限边界改变 Goal；刷新/完整重启投影正确且保持 disarmed，不自动创建或恢复 AgentRun。完整 CODE-019 仍须在后续阶段闭合安全续跑、证据验收和最小三态 UI；顶层状态仅 `pending/in_progress/completed`，主观 UI/业务验收必须用户 PASS，旧会话无 Goal 时行为不变。
 
 ### CODE-027 · 文件树递归搜索
 
