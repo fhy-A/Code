@@ -58,6 +58,7 @@ const {
 } = window.Code.features.settings;
 const {
   applySkillTaskPolicy,
+  createGoalControlFeature,
   createSkillsMemoryFeature,
   getSkillToolBudgets,
 } = window.Code.features.skillsMemory;
@@ -1120,6 +1121,17 @@ const skillsMemoryFeature = createSkillsMemoryFeature({
   onPromptChanged: updateSendButtonState,
   onMemoryChanged: updateModePromptPreview,
   trashIcon,
+});
+const goalControlFeature = createGoalControlFeature({
+  apiJson,
+  t,
+  showToast,
+  getSessionId: () => state.sessionId,
+  ensureSession: (title) => createSession(title),
+  getPermissionProfile,
+  getLanguage: () => state.lang,
+  confirm: (message) => window.confirm(message),
+  alert: (message) => window.alert(message),
 });
 const {
   ensureSkillBody,
@@ -2772,7 +2784,7 @@ function renderMessages() {
   if (curMsgs && curMsgs !== state.messages) state.messages = curMsgs;
   pruneStaleStreamingNodes(state.sessionId);
 
-  if (state.messages.length === 0) {
+  if (state.messages.length === 0 && !state.sessionId) {
 
     els.chatPane.classList.add("empty-chat");
 
@@ -10133,6 +10145,7 @@ function saveLocalSettings() {
 }
 
 function handleUiSlashCommand(text) {
+  if (goalControlFeature.handleInput(text)) return true;
   const parts = text.trim().split(/\s+/);
   const cmd = parts[0] || "";
   if (cmd === "/compact") { void compactConversation(); return true; }

@@ -150,8 +150,8 @@ _上次更新：2026-08-15_
 ### CODE-019 · Goal 持久执行闭环
 
 - **类型 / 优先级 / 风险**：规划与自动化 / P2 / STRICT
-- **下一动作**：第一阶段独立 sidecar 事件事实层已完成；第二阶段按 [Goal 开发指导](docs/goal-mode-development-guide.md) 在该事实层上接入本地确定性的 `/goal` 查询与显式草案创建，并让普通消息提出补充、暂停、恢复、修改或清除意图后由服务端 reducer 确定性校验。本阶段不接自动续跑、模型 Goal 工具或 Goal UI。
-- **完成定义**：第二阶段能够查询和显式创建 Goal 草案，普通消息控制只通过 revision CAS、幂等事件和既有权限边界改变 Goal；刷新/完整重启投影正确且保持 disarmed，不自动创建或恢复 AgentRun。完整 CODE-019 仍须在后续阶段闭合安全续跑、证据验收和最小三态 UI；顶层状态仅 `pending/in_progress/completed`，主观 UI/业务验收必须用户 PASS，旧会话无 Goal 时行为不变。
+- **下一动作**：第一阶段独立 sidecar 事实层与第二阶段显式用户控制已完成；下一阶段按 [Goal 开发指导](docs/goal-mode-development-guide.md) 接入受限的模型规划草案，并让每个新的前台 AgentRun 获得有界、只读的当前 Goal 投影。模型输出只作为 3～8 步及验收条件的提议，仍须由服务端校验并经用户确认后写入；本阶段不接 Goal 写工具、证据自动完成、自动续跑或最小 UI。
+- **完成定义**：下一阶段中，`/goal <目标>` 能由受限规划 AgentRun 生成可确认的结构化草案，新前台 AgentRun 能准确回答当前 Goal、步骤与验收边界；无 Goal 的请求保持原提示词和行为，模型不能绕过 revision、幂等、权限或用户确认直接修改持久事实。完整 CODE-019 仍须在后续阶段闭合窄 Goal 工具、证据验收、安全续跑和最小三态 UI；顶层状态仅 `pending/in_progress/completed`，主观 UI/业务验收必须用户 PASS，旧会话无 Goal 时行为不变。
 
 ### CODE-027 · 文件树递归搜索
 

@@ -15891,6 +15891,104 @@ const test = base.test.extend({
   },
 });
 
+async function exerciseExplicitGoalControl(h4, runtime) {
+  const { page } = h4;
+  const runtimeRequests = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === "/proxy/chat" || pathname === "/api/agent/runs") {
+      runtimeRequests.push({ method: request.method(), pathname });
+    }
+  });
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+
+  const readGoal = async () => page.evaluate(async () => {
+    const sessions = await fetch("/api/sessions").then((response) => response.json());
+    const session = sessions.data?.[0];
+    if (!session) return null;
+    const goal = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/goal`)
+      .then((response) => response.json());
+    return { sessionId: session.id, ...goal.data };
+  });
+  const submit = async (text) => {
+    await page.locator("#prompt").fill(text);
+    await page.locator("#sendBtn").click();
+  };
+
+  const draftDialogPromise = page.waitForEvent("dialog");
+  await submit("/goal H4_SAFE_GOAL_CONTROL");
+  const draftDialog = await draftDialogPromise;
+  expect(draftDialog.message()).toContain("H4_SAFE_GOAL_CONTROL");
+  expect(draftDialog.message()).toContain("1. [pending]");
+  expect(draftDialog.message()).toContain("[user] The user-visible scope and completion boundary are explicit");
+  expect(draftDialog.message()).toContain("[agent] The requested outcome is implemented without expanding permissions");
+  await draftDialog.dismiss();
+  await expect(page.locator(".chat-pane")).not.toHaveClass(/empty-chat/);
+  await expect(page.locator(".welcome-screen")).toHaveCount(0);
+  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("awaiting_confirmation");
+  const waiting = await readGoal();
+  expect(waiting.revision).toBe(1);
+
+  const repeatedDraftDialogPromise = page.waitForEvent("dialog");
+  await submit("/goal H4_SAFE_GOAL_CONTROL");
+  const repeatedDraftDialog = await repeatedDraftDialogPromise;
+  expect(repeatedDraftDialog.message()).toContain("H4_SAFE_GOAL_CONTROL");
+  await repeatedDraftDialog.accept();
+  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("active");
+  const active = await readGoal();
+  expect(active.revision).toBe(waiting.revision + 1);
+  expect(active.goal.steps).toHaveLength(3);
+  expect(active.goal.steps.map((step) => step.status)).toEqual([
+    "in_progress", "pending", "pending",
+  ]);
+  expect(active.goal.ownerRunId).toBeNull();
+  expect(active.armed).toBe(false);
+
+  const queryDialogPromise = page.waitForEvent("dialog");
+  await submit("/goal");
+  const queryDialog = await queryDialogPromise;
+  expect(queryDialog.message()).toContain("Goal · active");
+  expect(queryDialog.message()).toContain("1. [in_progress]");
+  expect(queryDialog.message()).toContain("[user] The user-visible scope and completion boundary are explicit");
+  await queryDialog.dismiss();
+  expect((await readGoal()).revision).toBe(active.revision);
+
+  await submit("暂停 Goal");
+  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("paused");
+  await submit("恢复 Goal");
+  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("active");
+
+  const beforeAmbiguous = await readGoal();
+  await page.locator("#prompt").fill("这是一条提到 Goal 但不构成控制的普通消息");
+  expect(await page.locator("#prompt").inputValue()).toContain("不构成控制");
+  expect((await readGoal()).revision).toBe(beforeAmbiguous.revision);
+  await page.locator("#prompt").fill("");
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(page, runtime);
+  const restored = await readGoal();
+  expect(restored.goal.lifecycle).toBe("active");
+  expect(restored.armed).toBe(false);
+  expect(runtimeRequests).toEqual([]);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime === "classic" ? "classic" : "bundle"}-goal-explicit-control`, {
+    runtime,
+    lifecycle: restored.goal.lifecycle,
+    revision: restored.revision,
+    armed: restored.armed,
+    agentRunRequests: runtimeRequests.length,
+  });
+}
+
+test("bundle explicit Goal controls stay local and never create an AgentRun", async ({ h4 }) => {
+  await exerciseExplicitGoalControl(h4, "bundle");
+});
+
+test("direct classic explicit Goal controls match bundle semantics", async ({ h4 }) => {
+  await exerciseExplicitGoalControl(h4, "classic");
+});
+
 test("default bundle completes first plain-text send", async ({ h4 }) => {
   const { page } = h4;
   await h4.open("bundle");

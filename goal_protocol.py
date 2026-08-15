@@ -7,6 +7,8 @@ events into one trusted projection.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import json
@@ -86,6 +88,7 @@ _EVENT_FIELDS = frozenset({
     "createdAt",
     "snapshot",
 })
+_IDEMPOTENCY_ACTOR_SEPARATOR = "~"
 
 
 class GoalProtocolError(ValueError):
@@ -126,6 +129,42 @@ def canonical_json(value: Any) -> str:
 
 def request_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def actor_with_idempotency_hash(actor: str, digest: str) -> str:
+    """Encode a control-request digest inside the existing v1 actor string.
+
+    Protocol v1 already treats ``actor`` as opaque bounded metadata.  Keeping
+    the digest there preserves the exact Stage 1 event field set while allowing
+    the current fold to restore domain-level idempotency after a restart.
+    """
+    if not _SHA256_RE.fullmatch(digest):
+        raise GoalProtocolError("idempotency digest must be lowercase SHA-256")
+    encoded = (
+        base64.urlsafe_b64encode(bytes.fromhex(digest))
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    value = f"{actor}{_IDEMPOTENCY_ACTOR_SEPARATOR}{encoded}"
+    if len(value) > 64:
+        raise GoalProtocolError("Goal actor idempotency metadata exceeds 64 characters")
+    return value
+
+
+def idempotency_hash_from_actor(actor: str) -> str | None:
+    """Return an embedded control digest, or ``None`` for ordinary v1 actors."""
+    _, separator, encoded = actor.rpartition(_IDEMPOTENCY_ACTOR_SEPARATOR)
+    if not separator or len(encoded) != 43:
+        return None
+    try:
+        raw = base64.b64decode(
+            encoded + "=" * (-len(encoded) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, binascii.Error):
+        return None
+    return raw.hex() if len(raw) == 32 else None
 
 
 def _require_dict(value: Any, label: str) -> dict[str, Any]:
@@ -497,5 +536,8 @@ def apply_event(state: GoalFoldState, event: Any) -> GoalFoldState:
     state.revision = normalized["revision"]
     state.last_event_id = normalized["eventId"]
     state.event_ids.add(normalized["eventId"])
-    state.idempotency[key] = normalized["requestHash"]
+    state.idempotency[key] = (
+        idempotency_hash_from_actor(normalized["actor"])
+        or normalized["requestHash"]
+    )
     return state

@@ -19,6 +19,7 @@ from goal_protocol import (
     GoalFoldState,
     GoalProtocolError,
     GoalTransitionError,
+    actor_with_idempotency_hash,
     apply_event,
     canonical_json,
     normalize_snapshot,
@@ -259,6 +260,7 @@ class GoalService:
         *,
         expected_revision: int,
         idempotency_key: str,
+        idempotency_payload: dict[str, Any] | None = None,
         actor: str = "server",
     ) -> dict[str, Any]:
         safe_id = _safe_session_id(session_id)
@@ -277,9 +279,19 @@ class GoalService:
             "snapshot": normalized_snapshot,
         }
         desired_hash = request_hash(desired)
+        idempotency_hash = (
+            request_hash(idempotency_payload)
+            if idempotency_payload is not None
+            else desired_hash
+        )
+        event_actor = (
+            actor_with_idempotency_hash(actor, idempotency_hash)
+            if idempotency_payload is not None
+            else actor
+        )
         with self._mutation_lock(safe_id):
             current = self.read(safe_id)
-            no_op = self._idempotent_result(current, idempotency_key, desired_hash)
+            no_op = self._idempotent_result(current, idempotency_key, idempotency_hash)
             if no_op is not None:
                 return no_op
             if not current.writable:
@@ -298,7 +310,7 @@ class GoalService:
                 "expectedRevision": expected_revision,
                 "idempotencyKey": idempotency_key,
                 "requestHash": desired_hash,
-                "actor": actor,
+                "actor": event_actor,
                 "createdAt": self.clock(),
                 "snapshot": normalized_snapshot,
             }
@@ -319,6 +331,7 @@ class GoalService:
         *,
         expected_revision: int,
         idempotency_key: str,
+        idempotency_payload: dict[str, Any] | None = None,
         actor: str = "server",
     ) -> dict[str, Any]:
         safe_id = _safe_session_id(session_id)
@@ -333,9 +346,19 @@ class GoalService:
             "expectedRevision": expected_revision,
         }
         desired_hash = request_hash(desired)
+        idempotency_hash = (
+            request_hash(idempotency_payload)
+            if idempotency_payload is not None
+            else desired_hash
+        )
+        event_actor = (
+            actor_with_idempotency_hash(actor, idempotency_hash)
+            if idempotency_payload is not None
+            else actor
+        )
         with self._mutation_lock(safe_id):
             current = self.read(safe_id)
-            no_op = self._idempotent_result(current, idempotency_key, desired_hash)
+            no_op = self._idempotent_result(current, idempotency_key, idempotency_hash)
             if no_op is not None:
                 return no_op
             if not current.writable:
@@ -354,7 +377,7 @@ class GoalService:
                 "expectedRevision": expected_revision,
                 "idempotencyKey": idempotency_key,
                 "requestHash": desired_hash,
-                "actor": actor,
+                "actor": event_actor,
                 "createdAt": self.clock(),
                 "snapshot": None,
             }

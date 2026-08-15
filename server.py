@@ -23,7 +23,14 @@ import time
 import webbrowser
 
 import agent_protocol
-from goal_store import GoalService
+from goal_control import GoalConfirmationError, GoalControlError, GoalControlService
+from goal_protocol import GoalProtocolError
+from goal_store import (
+    GoalConflictError,
+    GoalCorruptionError,
+    GoalPersistenceError,
+    GoalService,
+)
 from skill_dependencies import (
     build_dependency_operation_plan,
     DependencyManifestError,
@@ -62,6 +69,7 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("CODE_DATA_DIR") or (APP_DIR / "data"))
 SESSIONS_DIR = DATA_DIR / "sessions"
 GOALS_DIR = DATA_DIR / "goals"
+GOAL_CONTROL_CONFIRMATION_SECRET = os.urandom(32)
 PROJECTS_PATH = DATA_DIR / "projects.json"
 PROJECTS_MIGRATION_FLAG = DATA_DIR / ".codex_projects_migrated"
 PROJECT_ROOTS_MIGRATION_FLAG = DATA_DIR / ".codex_project_roots_migrated"
@@ -5425,6 +5433,15 @@ def messages_path(session_id):
 def goal_service():
     """Return the server-owned Goal fact service without creating storage on reads."""
     return GoalService(GOALS_DIR, clock=now_iso)
+
+
+def goal_control_service():
+    """Return the restricted Goal command layer for this server process."""
+    return GoalControlService(
+        goal_service(),
+        confirmation_secret=GOAL_CONTROL_CONFIRMATION_SECRET,
+        clock=now_iso,
+    )
 
 
 def _session_flat_path(session_id):
@@ -11571,6 +11588,13 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         try:
             route = parse.urlparse(self.path).path
+            if route.startswith("/api/sessions/") and route.endswith("/goal/control"):
+                parts = route.strip("/").split("/")
+                if len(parts) != 5:
+                    self.send_json({"error": "invalid Goal control route"}, 404)
+                    return
+                self.control_session_goal(parts[2])
+                return
             if route.rstrip("/") == "/api/import/sessions":
                 body = self.read_body_json()
                 src = (body.get("source") or "codex").strip()
@@ -12277,6 +12301,24 @@ class CodeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "session not found"}, 404)
             return
         self.send_json({"data": goal_service().read(session_id).projection()})
+
+    def control_session_goal(self, session_id):
+        """Apply one named, revision-bound Goal control to an existing Session."""
+        if not session_path(session_id).exists():
+            self.send_json({"error": "session not found"}, 404)
+            return
+        try:
+            result = goal_control_service().handle(session_id, self.read_body_json())
+        except (GoalControlError, GoalConfirmationError, GoalProtocolError) as exc:
+            self.send_json({"error": str(exc), "errorCode": "goal_control_invalid"}, 400)
+            return
+        except (GoalConflictError, GoalCorruptionError) as exc:
+            self.send_json({"error": str(exc), "errorCode": "goal_control_conflict"}, 409)
+            return
+        except GoalPersistenceError as exc:
+            self.send_json({"error": str(exc), "errorCode": "goal_persistence_failed"}, 503)
+            return
+        self.send_json({"data": result})
 
     def create_session(self):
         body = self.read_body_json()

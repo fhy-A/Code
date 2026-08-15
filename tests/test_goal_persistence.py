@@ -18,6 +18,13 @@ from goal_store import (
 from tests.test_goal_protocol import make_snapshot
 
 
+STAGE1_V1_EVENT_FIELDS = {
+    "protocolVersion", "eventId", "operation", "sessionId", "goalId",
+    "revision", "expectedRevision", "idempotencyKey", "requestHash",
+    "actor", "createdAt", "snapshot",
+}
+
+
 def _process_goal_write(root, session_id, goal_id, result_queue):
     service = GoalService(Path(root))
     try:
@@ -69,6 +76,46 @@ class TestGoalPersistence(unittest.TestCase):
         self.assertEqual(event["expectedRevision"], 0)
         self.assertEqual(event["snapshot"], result["goal"])
         self.assertFalse(result["armed"])
+
+    def test_control_idempotency_uses_only_stage1_v1_event_fields(self):
+        snapshot = make_snapshot(session_id=self.session_id)
+        domain_request = {
+            "controlVersion": 1,
+            "operation": "create_draft",
+            "sessionId": self.session_id,
+            "expectedRevision": 0,
+            "body": {"objective": "bounded"},
+        }
+        self.service.replace(
+            self.session_id,
+            snapshot,
+            expected_revision=0,
+            idempotency_key="control-create-01",
+            idempotency_payload=domain_request,
+            actor="user-control",
+        )
+        path = self.service.events_path(self.session_id)
+        event = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(set(event), STAGE1_V1_EVENT_FIELDS)
+        self.assertNotIn("idempotencyHash", event)
+        self.assertLessEqual(len(event["actor"]), 64)
+        self.assertTrue(event["actor"].startswith("user-control~"))
+        mutation = {
+            "operation": "replace",
+            "sessionId": self.session_id,
+            "goalId": snapshot["goalId"],
+            "expectedRevision": 0,
+            "snapshot": event["snapshot"],
+        }
+        self.assertEqual(event["requestHash"], request_hash(mutation))
+
+        restored = GoalService(self.root).read(self.session_id)
+        self.assertEqual(restored.health, "healthy")
+        self.assertTrue(restored.writable)
+        self.assertEqual(
+            restored.state.idempotency[event["idempotencyKey"]],
+            request_hash(domain_request),
+        )
 
     def test_cas_and_idempotency_same_payload_noop_different_payload_rejected(self):
         snapshot = make_snapshot(session_id=self.session_id)

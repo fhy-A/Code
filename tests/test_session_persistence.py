@@ -208,6 +208,74 @@ class TestGoalSessionLifecycle(unittest.TestCase):
         self.assertEqual(missing.send_json.call_args.args[1], 404)
         self.assertFalse(self.goals_dir.exists())
 
+    def test_goal_control_route_binds_existing_session_without_agent_run_or_message_write(self):
+        session = self.create_session([{"role": "user", "content": "existing"}])
+        message_file = server.messages_path(session["id"])
+        before_messages = message_file.read_bytes()
+        before_runs = set(server._agent_runs)
+        handler = self.make_handler({
+            "operation": "create_draft",
+            "expectedRevision": 0,
+            "idempotencyKey": "route-draft-01",
+            "objective": "验证受限 Goal 路由",
+            "permissionProfile": "read",
+            "language": "zh",
+        })
+        server.CodeHandler.control_session_goal(handler, session["id"])
+        response = handler.send_json.call_args.args[0]["data"]
+        self.assertEqual(response["goal"]["lifecycle"], "awaiting_confirmation")
+        self.assertEqual(message_file.read_bytes(), before_messages)
+        self.assertEqual(set(server._agent_runs), before_runs)
+
+        missing = self.make_handler({
+            "operation": "create_draft",
+            "expectedRevision": 0,
+            "idempotencyKey": "missing-draft-01",
+            "objective": "不得创建孤立 Goal",
+            "permissionProfile": "read",
+            "language": "zh",
+        })
+        server.CodeHandler.control_session_goal(missing, "missing01")
+        self.assertEqual(missing.send_json.call_args.args[1], 404)
+        self.assertFalse(GoalService(self.goals_dir).events_path("missing01").exists())
+
+    def test_goal_control_route_maps_invalid_conflict_and_corruption_without_session_damage(self):
+        session = self.create_session()
+        invalid = self.make_handler({"operation": "create_draft", "snapshot": {}})
+        server.CodeHandler.control_session_goal(invalid, session["id"])
+        self.assertEqual(invalid.send_json.call_args.args[1], 400)
+
+        create = self.make_handler({
+            "operation": "create_draft",
+            "expectedRevision": 0,
+            "idempotencyKey": "route-create-02",
+            "objective": "测试冲突",
+            "permissionProfile": "accept",
+            "language": "zh",
+        })
+        server.CodeHandler.control_session_goal(create, session["id"])
+        goal_id = create.send_json.call_args.args[0]["data"]["goal"]["goalId"]
+        stale = self.make_handler({
+            "operation": "pause",
+            "expectedRevision": 0,
+            "idempotencyKey": "route-stale-02",
+            "goalId": goal_id,
+        })
+        server.CodeHandler.control_session_goal(stale, session["id"])
+        self.assertEqual(stale.send_json.call_args.args[1], 409)
+
+        with open(GoalService(self.goals_dir).events_path(session["id"]), "ab") as handle:
+            handle.write(b'{"partial"')
+        degraded = self.make_handler({
+            "operation": "confirm_draft",
+            "expectedRevision": 1,
+            "idempotencyKey": "route-degraded-02",
+            "goalId": goal_id,
+        })
+        server.CodeHandler.control_session_goal(degraded, session["id"])
+        self.assertEqual(degraded.send_json.call_args.args[1], 409)
+        self.assertTrue(server.session_path(session["id"]).exists())
+
     def test_corrupt_goal_sidecar_does_not_break_session_read(self):
         messages = [{"role": "user", "content": "session remains readable"}]
         session = self.create_session(messages)

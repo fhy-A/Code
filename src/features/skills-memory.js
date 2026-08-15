@@ -162,6 +162,7 @@
   }
 
   const UI_SLASH_COMMANDS = Object.freeze([
+    { name: "goal", descriptionKey: "cmdGoalDesc" },
     { name: "compact", descriptionKey: "cmdCompactDesc" },
     { name: "remember", descriptionKey: "cmdRememberDesc" },
     { name: "export", descriptionKey: "cmdExportDesc" },
@@ -188,6 +189,293 @@
       { key: "commands", label: t("slashCommandsLabel"), items: commandItems },
       { key: "skills", label: t("slashSkillsLabel"), items: skillItems },
     ].filter((group) => group.items.length);
+  }
+
+  function classifyGoalControlInput(input) {
+    const text = String(input || "").trim();
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    const exact = new Map([
+      ["/goal", { kind: "query" }],
+      ["/goal status", { kind: "query" }],
+      ["/goal 状态", { kind: "query" }],
+      ["goal status", { kind: "query" }],
+      ["goal 状态", { kind: "query" }],
+      ["查看 goal 状态", { kind: "query" }],
+      ["/goal confirm", { kind: "confirm" }],
+      ["/goal 确认", { kind: "confirm" }],
+      ["confirm goal", { kind: "confirm" }],
+      ["确认 goal", { kind: "confirm" }],
+      ["/goal pause", { kind: "pause" }],
+      ["/goal 暂停", { kind: "pause" }],
+      ["pause goal", { kind: "pause" }],
+      ["暂停 goal", { kind: "pause" }],
+      ["/goal resume", { kind: "resume" }],
+      ["/goal 恢复", { kind: "resume" }],
+      ["resume goal", { kind: "resume" }],
+      ["恢复 goal", { kind: "resume" }],
+      ["/goal cancel", { kind: "proposal", proposal: { type: "cancel" } }],
+      ["/goal 取消", { kind: "proposal", proposal: { type: "cancel" } }],
+      ["cancel goal", { kind: "proposal", proposal: { type: "cancel" } }],
+      ["取消 goal", { kind: "proposal", proposal: { type: "cancel" } }],
+      ["/goal clear", { kind: "proposal", proposal: { type: "clear" } }],
+      ["/goal 清除", { kind: "proposal", proposal: { type: "clear" } }],
+      ["clear goal", { kind: "proposal", proposal: { type: "clear" } }],
+      ["清除 goal", { kind: "proposal", proposal: { type: "clear" } }],
+    ]);
+    if (exact.has(lower)) return exact.get(lower);
+
+    const prefixes = [
+      [/^补充\s*goal\s*[:：]\s*(.+)$/is, (match) => ({
+        kind: "proposal", proposal: { type: "supplement", text: match[1].trim() },
+      })],
+      [/^supplement\s+goal\s*:\s*(.+)$/is, (match) => ({
+        kind: "proposal", proposal: { type: "supplement", text: match[1].trim() },
+      })],
+      [/^替换\s*goal\s*[:：]\s*(.+)$/is, (match) => ({
+        kind: "proposal", proposal: { type: "revise", objective: match[1].trim() },
+      })],
+      [/^replace\s+goal\s*:\s*(.+)$/is, (match) => ({
+        kind: "proposal", proposal: { type: "revise", objective: match[1].trim() },
+      })],
+      [/^修改\s*goal\s*[:：]\s*(.+)$/is, (match) => ({
+        kind: "structured-revision", source: match[1].trim(),
+      })],
+      [/^revise\s+goal\s*:\s*(.+)$/is, (match) => ({
+        kind: "structured-revision", source: match[1].trim(),
+      })],
+    ];
+    for (const [pattern, create] of prefixes) {
+      const match = text.match(pattern);
+      if (match) return create(match);
+    }
+    const createMatch = text.match(/^\/goal(?:\s+([\s\S]+))?$/i);
+    if (createMatch?.[1]?.trim()) return { kind: "create", objective: createMatch[1].trim() };
+    return null;
+  }
+
+  function createGoalControlFeature(options = {}) {
+    const apiJson = options.apiJson;
+    const t = options.t || ((key) => key);
+    const showToast = options.showToast || (() => {});
+    const getSessionId = options.getSessionId || (() => "");
+    const ensureSession = options.ensureSession || (async () => "");
+    const getPermissionProfile = options.getPermissionProfile || (() => "accept");
+    const getLanguage = options.getLanguage || (() => "zh");
+    const confirmAction = options.confirm || global.confirm?.bind(global) || (() => false);
+    const alertAction = options.alert || global.alert?.bind(global) || ((message) => showToast(message, "info"));
+    let requestSequence = 0;
+    let executionInFlight = false;
+
+    if (typeof apiJson !== "function") throw new Error("Goal control feature requires apiJson");
+
+    function requestKey(operation) {
+      requestSequence += 1;
+      return `goal-${operation}-${Date.now().toString(36)}-${requestSequence.toString(36)}`;
+    }
+
+    function goalUrl(sessionId, control = false) {
+      return `/api/sessions/${encodeURIComponent(sessionId)}/goal${control ? "/control" : ""}`;
+    }
+
+    async function readGoal(sessionId) {
+      const response = await apiJson(goalUrl(sessionId));
+      return response?.data || response;
+    }
+
+    async function postControl(sessionId, body) {
+      const response = await apiJson(goalUrl(sessionId, true), {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return response?.data || response;
+    }
+
+    function requireCurrentGoal(projection) {
+      if (!projection?.goal) throw new Error(t("goalNoCurrent"));
+      return projection.goal;
+    }
+
+    function formatGoal(projection) {
+      if (!projection?.goal) return t("goalNoCurrent");
+      const goal = projection.goal;
+      const lines = [
+        `Goal · ${goal.lifecycle} · r${projection.revision}`,
+        goal.objective,
+        "",
+        ...goal.steps.flatMap((step, index) => [
+          `${index + 1}. [${step.status}] ${step.description}`,
+          ...(step.acceptanceCriteria || []).map((criterion) => (
+            `   - [${criterion.kind}] ${criterion.description}`
+          )),
+        ]),
+      ];
+      return lines.join("\n");
+    }
+
+    function formatDraft(projection) {
+      return `${t("goalDraftConfirm")}\n\n${formatGoal(projection)}`;
+    }
+
+    function formatProposal(proposed) {
+      const diff = proposed?.diff || {};
+      if (diff.type === "cancel") return t("goalCancelConfirm");
+      if (diff.type === "clear") return t("goalClearConfirm");
+      if (diff.type === "supplement") {
+        return `${t("goalChangeConfirm")}\n\n+ ${diff.supplement}`;
+      }
+      const lines = [t("goalChangeConfirm")];
+      if (diff.objective?.before !== diff.objective?.after) {
+        lines.push("", `- ${diff.objective.before}`, `+ ${diff.objective.after}`);
+      }
+      if (diff.steps?.before && diff.steps?.after) {
+        const formatSteps = (steps, prefix) => steps.flatMap((step, index) => [
+          `${prefix} ${index + 1}. ${step.description}`,
+          ...(step.acceptanceCriteria || []).map((criterion) => (
+            `   ${prefix} [${criterion.kind}] ${criterion.description}`
+          )),
+        ]);
+        lines.push(
+          "",
+          t("goalChangeBefore"),
+          ...formatSteps(diff.steps.before, "-"),
+          t("goalChangeAfter"),
+          ...formatSteps(diff.steps.after, "+"),
+        );
+      }
+      return lines.join("\n");
+    }
+
+    async function ensureGoalSession(objective) {
+      let sessionId = String(getSessionId() || "");
+      if (sessionId) return sessionId;
+      await ensureSession(String(objective || "Goal").slice(0, 24));
+      sessionId = String(getSessionId() || "");
+      if (!sessionId) throw new Error(t("createSessionFirst"));
+      return sessionId;
+    }
+
+    async function execute(action) {
+      try {
+        if (action.kind === "query") {
+          const sessionId = String(getSessionId() || "");
+          if (!sessionId) {
+            alertAction(t("goalNoCurrent"));
+            return;
+          }
+          alertAction(formatGoal(await readGoal(sessionId)));
+          return;
+        }
+
+        if (action.kind === "structured-revision") {
+          let parsed;
+          try {
+            parsed = JSON.parse(action.source);
+          } catch (_) {
+            throw new Error(t("goalStructuredRevisionInvalid"));
+          }
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error(t("goalStructuredRevisionInvalid"));
+          }
+          action = { kind: "proposal", proposal: { ...parsed, type: "revise" } };
+        }
+
+        if (action.kind === "create") {
+          const sessionId = await ensureGoalSession(action.objective);
+          const current = await readGoal(sessionId);
+          let draft;
+          if (current?.goal?.lifecycle === "awaiting_confirmation") {
+            if (current.goal.objective !== action.objective) {
+              throw new Error(t("goalDraftAlreadyExists"));
+            }
+            draft = current;
+          } else {
+            if (current?.goal && !["completed", "cancelled"].includes(current.goal.lifecycle)) {
+              throw new Error(t("goalAlreadyExists"));
+            }
+            draft = await postControl(sessionId, {
+              operation: "create_draft",
+              expectedRevision: current.revision,
+              idempotencyKey: requestKey("draft"),
+              objective: action.objective,
+              permissionProfile: getPermissionProfile(),
+              language: getLanguage() === "en" ? "en" : "zh",
+            });
+          }
+          if (!confirmAction(formatDraft(draft))) {
+            showToast(t("goalAwaitingConfirmation"), "info");
+            return;
+          }
+          const activated = await postControl(sessionId, {
+            operation: "confirm_draft",
+            expectedRevision: draft.revision,
+            idempotencyKey: requestKey("confirm"),
+            goalId: draft.goal.goalId,
+          });
+          showToast(t("goalActivated"), "success");
+          return activated;
+        }
+
+        const sessionId = String(getSessionId() || "");
+        if (!sessionId) throw new Error(t("goalNoCurrent"));
+        const current = await readGoal(sessionId);
+        const goal = requireCurrentGoal(current);
+        if (action.kind === "confirm" || action.kind === "pause" || action.kind === "resume") {
+          const operation = action.kind === "confirm" ? "confirm_draft" : action.kind;
+          const changed = await postControl(sessionId, {
+            operation,
+            expectedRevision: current.revision,
+            idempotencyKey: requestKey(operation),
+            goalId: goal.goalId,
+          });
+          const messageKey = action.kind === "confirm"
+            ? "goalActivated"
+            : (action.kind === "pause" ? "goalPaused" : "goalResumed");
+          showToast(t(messageKey), "success");
+          return changed;
+        }
+
+        if (action.kind === "proposal") {
+          const proposed = await postControl(sessionId, {
+            operation: "propose_change",
+            expectedRevision: current.revision,
+            goalId: goal.goalId,
+            proposal: action.proposal,
+          });
+          if (!confirmAction(formatProposal(proposed))) {
+            showToast(t("goalChangeNotApplied"), "info");
+            return;
+          }
+          const changed = await postControl(sessionId, {
+            operation: "confirm_change",
+            expectedRevision: current.revision,
+            idempotencyKey: requestKey("change"),
+            goalId: goal.goalId,
+            confirmationToken: proposed.confirmationToken,
+          });
+          showToast(t("goalChanged"), "success");
+          return changed;
+        }
+      } catch (error) {
+        showToast(t("goalActionFailed", { error: error?.message || String(error) }), "error");
+      }
+    }
+
+    function handleInput(input) {
+      const action = classifyGoalControlInput(input);
+      if (!action) return false;
+      if (executionInFlight) {
+        showToast(t("goalActionInProgress"), "info");
+        return true;
+      }
+      executionInFlight = true;
+      void execute(action).finally(() => {
+        executionInFlight = false;
+      });
+      return true;
+    }
+
+    return Object.freeze({ execute, handleInput, readGoal });
   }
 
   function createSkillsMemoryFeature(options = {}) {
@@ -1510,6 +1798,8 @@
 
   Code.features.skillsMemory = Object.freeze({
     applySkillTaskPolicy,
+    classifyGoalControlInput,
+    createGoalControlFeature,
     EXPLICIT_ONLY_SKILLS,
     createSkillsMemoryFeature,
     formatSkillInstructions,

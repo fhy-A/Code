@@ -992,6 +992,7 @@ process.stdout.write(JSON.stringify({{
         handler_source = APP_SOURCE[handler_start:handler_end]
         script = f"""
 let compactCalls = 0;
+const goalControlFeature = {{handleInput: () => false}};
 function compactConversation() {{ compactCalls += 1; return Promise.resolve(); }}
 function exportMarkdown() {{}}
 function clearCurrentSession() {{}}
@@ -1040,6 +1041,7 @@ global.window = {{Code: {{features: {{}}}}}};
 eval({json.dumps(SKILLS_MEMORY_SOURCE)});
 const translate = (key) => ({{
   cmdCompactDesc: "compact-desc",
+  cmdGoalDesc: "goal-desc",
   cmdRememberDesc: "remember-desc",
   cmdExportDesc: "export-desc",
   cmdClearDesc: "clear-desc",
@@ -1075,11 +1077,12 @@ process.stdout.write(JSON.stringify(groups));
         self.assertEqual(groups[0]["label"], "Commands")
         self.assertEqual(
             [item["name"] for item in groups[0]["items"]],
-            ["compact", "remember", "export", "clear", "branch", "parallel", "help"],
+            ["goal", "compact", "remember", "export", "clear", "branch", "parallel", "help"],
         )
         self.assertEqual(
             [item["description"] for item in groups[0]["items"]],
             [
+                "goal-desc",
                 "compact-desc",
                 "remember-desc",
                 "export-desc",
@@ -1105,6 +1108,315 @@ process.stdout.write(JSON.stringify(groups));
             'cmdParallelDesc: "Start a background Subagent that shares the current project"',
             I18N_SOURCE,
         )
+
+    def test_goal_control_classification_and_confirmed_browser_flow_are_deterministic(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require("./src/features/skills-memory.js");
+const {classifyGoalControlInput, createGoalControlFeature} = window.Code.features.skillsMemory;
+const classifications = {
+  query: classifyGoalControlInput("/goal"),
+  status: classifyGoalControlInput("Goal status"),
+  pause: classifyGoalControlInput("暂停 Goal"),
+  supplement: classifyGoalControlInput("补充 Goal：覆盖移动端"),
+  revise: classifyGoalControlInput('修改 Goal：{"objective":"新目标","steps":["一","二","三"]}'),
+  create: classifyGoalControlInput("/goal 实现一个可验证目标"),
+  ambiguous: classifyGoalControlInput("我觉得 Goal 也许需要调整"),
+};
+const calls = [];
+const alerts = [];
+const confirms = [];
+const toasts = [];
+let projection = {revision: 0, goal: null};
+let sessionId = "session-01";
+let confirmResult = false;
+const feature = createGoalControlFeature({
+  t: (key, params) => params?.error ? `${key}:${params.error}` : key,
+  apiJson: async (url, request = {}) => {
+    const body = request.body ? JSON.parse(request.body) : null;
+    calls.push({url, method: request.method || "GET", body});
+    if (!body) return {data: projection};
+    if (body.operation === "create_draft") {
+      projection = {
+        revision: 1,
+        goal: {
+          goalId: "goal-01",
+          lifecycle: "awaiting_confirmation",
+          objective: body.objective,
+          steps: [
+            {status: "pending", description: "一"},
+            {status: "pending", description: "二"},
+            {status: "pending", description: "三"},
+          ],
+        },
+      };
+      return {data: projection};
+    }
+    if (body.operation === "confirm_draft") {
+      projection = {...projection, revision: 2, goal: {...projection.goal, lifecycle: "active"}};
+      return {data: projection};
+    }
+    if (body.operation === "propose_change") {
+      if (body.proposal.type === "revise") return {data: {
+        revision: projection.revision,
+        diff: {
+          type: "revise",
+          objective: {before: "旧目标", after: body.proposal.objective},
+          steps: {
+            before: [{id: "step-1", description: "旧步骤", acceptanceCriteria: [{kind: "user", description: "旧验收"}]}],
+            after: [{id: "step-1", description: "新步骤", acceptanceCriteria: [{kind: "user", description: "新验收"}]}],
+          },
+        },
+        confirmationToken: "signed-revise-token",
+      }};
+      return {data: {
+        revision: projection.revision,
+        diff: {type: "supplement", supplement: body.proposal.text},
+        confirmationToken: "signed-token",
+      }};
+    }
+    if (body.operation === "confirm_change") {
+      projection = {...projection, revision: projection.revision + 1};
+      return {data: projection};
+    }
+    throw new Error(`unexpected ${body.operation}`);
+  },
+  getSessionId: () => sessionId,
+  ensureSession: async () => { sessionId = "session-created"; },
+  getPermissionProfile: () => "accept",
+  getLanguage: () => "zh",
+  showToast: (message, kind) => toasts.push({message, kind}),
+  alert: (message) => alerts.push(message),
+  confirm: (message) => { confirms.push(message); return confirmResult; },
+});
+(async () => {
+  await feature.execute({kind: "query"});
+  await feature.execute(classifications.create);
+  confirmResult = true;
+  await feature.execute({kind: "confirm"});
+  await feature.execute(classifications.supplement);
+  await feature.execute(classifications.revise);
+  const beforeMalformed = calls.length;
+  await feature.execute({kind: "structured-revision", source: "not-json"});
+  process.stdout.write(JSON.stringify({
+    classifications,
+    calls,
+    alerts,
+    confirms,
+    toasts,
+    beforeMalformed,
+    afterMalformed: calls.length,
+    handledAmbiguous: feature.handleInput("普通消息，不是 Goal 控制"),
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            input=script,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["classifications"]["query"]["kind"], "query")
+        self.assertEqual(data["classifications"]["status"]["kind"], "query")
+        self.assertEqual(data["classifications"]["pause"]["kind"], "pause")
+        self.assertEqual(data["classifications"]["supplement"]["proposal"]["type"], "supplement")
+        self.assertEqual(data["classifications"]["revise"]["kind"], "structured-revision")
+        self.assertEqual(data["classifications"]["create"]["kind"], "create")
+        self.assertIsNone(data["classifications"]["ambiguous"])
+        operations = [call["body"]["operation"] for call in data["calls"] if call["body"]]
+        self.assertEqual(
+            operations,
+            [
+                "create_draft",
+                "confirm_draft",
+                "propose_change",
+                "confirm_change",
+                "propose_change",
+                "confirm_change",
+            ],
+        )
+        self.assertEqual(len(data["alerts"]), 1)
+        self.assertIn("awaiting_confirmation", data["confirms"][0])
+        self.assertIn("覆盖移动端", data["confirms"][1])
+        self.assertIn("[user] 新验收", data["confirms"][2])
+        self.assertEqual(data["beforeMalformed"], data["afterMalformed"])
+        self.assertFalse(data["handledAmbiguous"])
+        self.assertTrue(any(item["message"].startswith("goalActionFailed:") for item in data["toasts"]))
+
+        submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
+        submit_end = APP_SOURCE.index('els.newChat.addEventListener("click"', submit_start)
+        submit_source = APP_SOURCE[submit_start:submit_end]
+        self.assertLess(
+            submit_source.index("handleUiSlashCommand(text)"),
+            submit_source.index("isSessionStreaming(state.sessionId)"),
+        )
+        self.assertIn("goalControlFeature.handleInput(text)", APP_SOURCE)
+        self.assertIn("createGoalControlFeature({", APP_SOURCE)
+
+    def test_goal_draft_and_status_display_all_acceptance_criteria_in_both_languages(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require("./src/features/skills-memory.js");
+const {createGoalControlFeature} = window.Code.features.skillsMemory;
+
+async function exercise(language) {
+  const calls = [];
+  const confirms = [];
+  const alerts = [];
+  const localized = language === "en";
+  let projection = {revision: 0, goal: null};
+  const feature = createGoalControlFeature({
+    t: (key) => key,
+    apiJson: async (_url, request = {}) => {
+      const body = request.body ? JSON.parse(request.body) : null;
+      calls.push(body?.operation || "query");
+      if (!body) return {data: projection};
+      if (body.operation !== "create_draft") throw new Error(`unexpected ${body.operation}`);
+      projection = {
+        revision: 1,
+        goal: {
+          goalId: `goal-${language}`,
+          lifecycle: "awaiting_confirmation",
+          objective: localized ? "Ship a bounded feature" : "交付有界功能",
+          steps: [
+            {
+              status: "pending",
+              description: localized ? "Confirm scope" : "确认范围",
+              acceptanceCriteria: [
+                {kind: "user", description: localized ? "User accepts the scope" : "用户确认范围"},
+                {kind: "machine", description: localized ? "Checks pass" : "检查通过"},
+              ],
+            },
+            {
+              status: "pending",
+              description: localized ? "Implement safely" : "安全实施",
+              acceptanceCriteria: [
+                {kind: "agent", description: localized ? "No permission expansion" : "不扩大权限"},
+              ],
+            },
+            {
+              status: "pending",
+              description: localized ? "Verify outcome" : "验收结果",
+              acceptanceCriteria: [
+                {kind: "user", description: localized ? "User gives final acceptance" : "用户最终验收"},
+              ],
+            },
+          ],
+        },
+      };
+      return {data: projection};
+    },
+    getSessionId: () => `session-${language}`,
+    getPermissionProfile: () => "accept",
+    getLanguage: () => language,
+    confirm: (message) => { confirms.push(message); return false; },
+    alert: (message) => alerts.push(message),
+  });
+  await feature.execute({kind: "create", objective: projection.goal?.objective || "bounded"});
+  await feature.execute({kind: "query"});
+  return {calls, confirmText: confirms[0], alertText: alerts[0]};
+}
+
+Promise.all([exercise("zh"), exercise("en")]).then(([zh, en]) => {
+  process.stdout.write(JSON.stringify({zh, en}));
+}).catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            input=script,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        for language in ("zh", "en"):
+            display = data[language]
+            self.assertEqual(display["calls"], ["query", "create_draft", "query"])
+            self.assertIn("Goal · awaiting_confirmation · r1", display["confirmText"])
+            self.assertIn("1. [pending]", display["confirmText"])
+            self.assertIn("2. [pending]", display["confirmText"])
+            self.assertIn("3. [pending]", display["confirmText"])
+            self.assertIn("Goal · awaiting_confirmation · r1", display["alertText"])
+        self.assertIn("[user] 用户确认范围", data["zh"]["confirmText"])
+        self.assertIn("[machine] 检查通过", data["zh"]["confirmText"])
+        self.assertIn("[agent] 不扩大权限", data["zh"]["alertText"])
+        self.assertIn("[user] User accepts the scope", data["en"]["confirmText"])
+        self.assertIn("[machine] Checks pass", data["en"]["confirmText"])
+        self.assertIn("[agent] No permission expansion", data["en"]["alertText"])
+
+    def test_goal_create_reuses_the_same_waiting_draft_without_a_second_write(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require("./src/features/skills-memory.js");
+const {createGoalControlFeature} = window.Code.features.skillsMemory;
+const calls = [];
+const confirms = [];
+const toasts = [];
+let projection = {
+  revision: 1,
+  goal: {
+    goalId: "goal-existing",
+    lifecycle: "awaiting_confirmation",
+    objective: "做一个不修改项目文件的演示目标",
+    steps: [
+      {status: "pending", description: "确认范围", acceptanceCriteria: [{kind: "user", description: "用户确认"}]},
+      {status: "pending", description: "安全执行", acceptanceCriteria: [{kind: "agent", description: "不写项目"}]},
+      {status: "pending", description: "验收结果", acceptanceCriteria: [{kind: "user", description: "用户验收"}]},
+    ],
+  },
+};
+const feature = createGoalControlFeature({
+  t: (key, params) => params?.error ? `${key}:${params.error}` : key,
+  apiJson: async (_url, request = {}) => {
+    const body = request.body ? JSON.parse(request.body) : null;
+    calls.push(body?.operation || "query");
+    if (!body) return {data: projection};
+    if (body.operation !== "confirm_draft") throw new Error(`unexpected ${body.operation}`);
+    projection = {...projection, revision: 2, goal: {...projection.goal, lifecycle: "active"}};
+    return {data: projection};
+  },
+  getSessionId: () => "session-existing",
+  getPermissionProfile: () => "accept",
+  getLanguage: () => "zh",
+  confirm: (message) => { confirms.push(message); return true; },
+  showToast: (message, kind) => toasts.push({message, kind}),
+});
+(async () => {
+  await feature.execute({kind: "create", objective: projection.goal.objective});
+  projection = {
+    ...projection,
+    revision: 3,
+    goal: {...projection.goal, lifecycle: "awaiting_confirmation", objective: "另一个目标"},
+  };
+  const beforeDifferent = calls.length;
+  await feature.execute({kind: "create", objective: "不同目标"});
+  process.stdout.write(JSON.stringify({calls, confirms, toasts, beforeDifferent}));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            input=script,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["calls"][:2], ["query", "confirm_draft"])
+        self.assertNotIn("create_draft", data["calls"])
+        self.assertIn("[user] 用户确认", data["confirms"][0])
+        self.assertEqual(data["calls"][data["beforeDifferent"]:], ["query"])
+        self.assertTrue(
+            any("goalDraftAlreadyExists" in item["message"] for item in data["toasts"])
+        )
+        self.assertIn("if (state.messages.length === 0 && !state.sessionId)", APP_SOURCE)
 
     def test_settings_shell_is_responsive_and_navigation_is_grouped(self):
         for key in (
@@ -12552,7 +12864,12 @@ process.stdout.write(JSON.stringify({{
         self.assertLess(render.index("parkActiveRunBanner();\n  const projectedMessageList"), replace_index)
         mounted_index = render.index("mountActiveRunBanner();", replace_index)
         self.assertLess(mounted_index, render.index("syncActiveRunBanner(state.sessionId);", mounted_index))
-        self.assertNotIn("syncActiveRunBanner(state.sessionId);", render[:render.index("if (state.messages.length === 0)")])
+        empty_session_guard = "if (state.messages.length === 0 && !state.sessionId)"
+        self.assertIn(empty_session_guard, render)
+        self.assertNotIn(
+            "syncActiveRunBanner(state.sessionId);",
+            render[:render.index(empty_session_guard)],
+        )
 
         helper_start = APP_SOURCE.index("function parkActiveRunBanner")
         helper_end = APP_SOURCE.index("function syncActiveRunBanner", helper_start)
