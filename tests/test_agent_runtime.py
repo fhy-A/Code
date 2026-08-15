@@ -2655,6 +2655,56 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(run["keys"], [])
         self.assertEqual(child["keys"], [])
 
+    def test_child_system_prompt_uses_chinese_control_without_parent_context_inheritance(self):
+        prompt = server_mod._agent_child_system_prompt()
+
+        for expected in (
+            "专注的编程子 Agent",
+            "只完成被委派的任务",
+            "绝不能提升权限",
+            "不能再次委派其他 Agent",
+            "不能发起交互问卷",
+            "使用委派任务本身的语言回复",
+            "重要文件和验证",
+        ):
+            self.assertIn(expected, prompt)
+        for forbidden in (
+            "You are a focused child coding agent",
+            "=== 项目上下文",
+            "=== 长期记忆",
+            "=== 已激活 Skill",
+        ):
+            self.assertNotIn(forbidden, prompt)
+
+    def test_agent_record_roundtrip_preserves_system_prompt_bytes(self):
+        system_prompt = (
+            "安全首段\n\n"
+            "当前时间：2026年08月15日星期六 01:02"
+            "（Asia/Shanghai UTC+08:00）\n\n权限末段"
+        )
+        run = server_mod._create_agent_run(
+            "system-prompt-roundtrip-session",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "inspect without starting"},
+                ],
+            },
+            self.base_url,
+            [],
+            start_worker=False,
+        )
+
+        record = server_mod._agent_run_record(run)
+        restored = server_mod._agent_run_from_record(record)
+
+        self.assertEqual(record["version"], 4)
+        self.assertEqual(record["messages"][0], {"role": "system", "content": system_prompt})
+        self.assertEqual(restored["messages"][0], record["messages"][0])
+        payload, _ = server_mod._agent_model_payload(restored)
+        self.assertEqual(payload["messages"][0]["content"], system_prompt)
+
     def test_restart_reuses_completed_child_without_second_child_request(self):
         parent = server_mod._create_agent_run(
             "delegated-restart-session",

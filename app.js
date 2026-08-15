@@ -81,6 +81,12 @@ const agentRuntime = window.Code.agent.runtime;
 const agentRunReducer = window.Code.agent.runReducer;
 const agentRunProjectionShadow = window.Code.agent.runProjectionShadow;
 const {
+  createSystemPromptSnapshot: createSystemPromptSnapshotData,
+  formatSystemPromptEnvironment,
+  getOrCreateSystemPromptSnapshot,
+  resolveLocalTimeZoneName,
+} = window.Code.agent.systemPrompt;
+const {
   assembleModelRequestPayload,
   hasImageContent,
   mapMessageForApi,
@@ -1485,12 +1491,14 @@ const SYSTEM_SECURITY_LAYER = `
 - 提醒时重点强调数据传输隐患，顺带提及会话记录本地明文存储。
 `.trim();
 
-async function getSystemPrompt(options = {}) {
+async function buildSystemPromptSnapshot(options = {}) {
   // When briefSkills is set (e.g. for token estimation), skip async skill
   // body loading and use only name+description metadata.
   const _loadSkills = !options.briefSkills;
 
-  const customPrompt = els.systemPromptText.value.trim() || defaultSystemPrompt;
+  const customPrompt = String(
+    options.customPrompt ?? els.systemPromptText.value,
+  ).trim() || defaultSystemPrompt;
 
   const permissionProfile = options.permissionProfile || getPermissionProfile();
   const promptMessages = options.messages || state.messages;
@@ -1507,79 +1515,85 @@ async function getSystemPrompt(options = {}) {
   const lastUserMsg = [...promptMessages].reverse().find((m) => m.role === "user");
   const userLang = detectLanguage(lastUserMsg?.content || "");
 
-  const now = new Date();
-  const dateStr = now.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", weekday: "long" });
-  const timeStr = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-  const parts = [
-    SYSTEM_SECURITY_LAYER,
-    customPrompt,
-    `当前时间：${dateStr} ${timeStr}（北京时间） · 当前工作目录：${activeCwd || "未设置"} · v${state.appVersion || "unknown"}`,
-    sourceFolders.length > 1
-      ? `当前项目主文件夹：${primaryRoot || sourceFolders[0]}\n项目源文件夹（均可搜索、读取和编辑）：\n${sourceFolders.map((path) => `- ${path}`).join("\n")}`
-      : "",
-    `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
-  ].filter(Boolean);
-
-  if (allowedToolNames.has("task")) {
-    parts.push(SUBAGENT_DELEGATION_RULES);
-  }
-
-  // Language detection: instruct the model to match the user's language
-  if (userLang !== "Chinese") {
-    parts.push(`## Response Language\nThe user is writing in ${userLang}. Reply in ${userLang} unless the user explicitly asks for another language.`);
-  }
-
+  const capturedAt = options.capturedAt instanceof Date
+    ? new Date(options.capturedAt.getTime())
+    : (options.capturedAt !== undefined ? new Date(options.capturedAt) : new Date());
+  const timeZoneName = options.timeZoneName !== undefined
+    ? String(options.timeZoneName || "")
+    : resolveLocalTimeZoneName();
+  const environment = formatSystemPromptEnvironment({
+    capturedAt,
+    timeZoneName,
+    utcOffsetMinutes: options.utcOffsetMinutes,
+    cwd: activeCwd,
+    appVersion: options.appVersion ?? state.appVersion,
+  });
+  const projectFoldersInstruction = sourceFolders.length > 1
+    ? `当前项目主文件夹：${primaryRoot || sourceFolders[0]}\n项目源文件夹（均可搜索、读取和编辑）：\n${sourceFolders.map((path) => `- ${path}`).join("\n")}`
+    : "";
+  // Legacy source-contract mapping: if (allowedToolNames.has("task")) { parts.push(SUBAGENT_DELEGATION_RULES); }
+  const delegationInstruction = allowedToolNames.has("task")
+    ? SUBAGENT_DELEGATION_RULES
+    : "";
+  const responseLanguageInstruction = userLang !== "Chinese"
+    ? `## Response Language\nThe user is writing in ${userLang}. Reply in ${userLang} unless the user explicitly asks for another language.`
+    : "";
   const projectContext = options.projectContext ?? state.projectContext;
-  if (projectContext?.found) {
-
-    parts.push(`=== 项目上下文（仅本项目，来自 ${projectContext.name}） ===\n${projectContext.content}`);
-
-  }
-
-  if (state.memoryContext?.found) {
-
-    parts.push(`=== 长期记忆（跨会话保留） ===\n以下信息已融入当前上下文，直接使用，不要提及"长期记忆"或"根据记忆"。\n${state.memoryContext.content}`);
-
-  }
+  const projectContextInstruction = projectContext?.found
+    ? `=== 项目上下文（仅本项目，来自 ${projectContext.name}） ===\n${projectContext.content}`
+    : "";
+  const memoryContext = options.memoryContext ?? state.memoryContext;
+  const memoryInstruction = memoryContext?.found
+    ? `=== 长期记忆（跨会话保留） ===\n以下信息已融入当前上下文，直接使用，不要提及"长期记忆"或"根据记忆"。\n${memoryContext.content}`
+    : "";
+  let skillInstruction = "";
 
   // Inject explicit skill first, then auto-matched
-
   if (_loadSkills) {
     if (explicitSkill) {
-
-      const skill = await ensureSkillBody(state.skills.find((s) => s.name === explicitSkill));
-
+      const availableSkills = Array.isArray(options.skills) ? options.skills : state.skills;
+      const skill = await ensureSkillBody(availableSkills.find((s) => s.name === explicitSkill));
       if (skill && skill.body) {
-
-        parts.push(`=== 已激活 Skill: ${skill.name}（正文已加载，不要再次调用 use_skill） ===\n${formatSkillInstructions(skill)}`);
-
+        skillInstruction = `=== 已激活 Skill: ${skill.name}（正文已加载，不要再次调用 use_skill） ===\n${formatSkillInstructions(skill)}`;
       }
-
     } else {
-
       if (lastUserMsg) {
-
         const skillPrompt = await getMatchedSkillPrompts(lastUserMsg.content || "");
-
         if (skillPrompt) {
-
-          parts.push(`=== 匹配的 Skill（正文已加载，不要再次调用 use_skill） ===\n${skillPrompt}`);
-
+          skillInstruction = `=== 匹配的 Skill（正文已加载，不要再次调用 use_skill） ===\n${skillPrompt}`;
         }
-
       }
-
     }
   }
 
-  parts.push(
+  return createSystemPromptSnapshotData({
+    securityLayer: SYSTEM_SECURITY_LAYER,
+    behaviorInstruction: customPrompt,
+    environmentInstruction: environment.instruction,
+    projectFoldersInstruction,
+    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
+    delegationInstruction,
+    responseLanguageInstruction,
+    projectContextInstruction,
+    memoryInstruction,
+    skillInstruction,
+    permissionInstruction: getPermissionInstruction(permissionProfile),
+  }, {
+    capturedAt: environment.capturedAt,
+    timeZone: environment.timeZone,
+  });
+}
 
-    getPermissionInstruction(permissionProfile),
+async function getSystemPrompt(options = {}) {
+  return (await buildSystemPromptSnapshot(options)).prompt;
+}
 
+async function getTaskSystemPrompt(ctx, options = {}) {
+  const snapshot = await getOrCreateSystemPromptSnapshot(
+    ctx,
+    () => buildSystemPromptSnapshot(options),
   );
-
-  return parts.join("\n\n");
-
+  return snapshot.prompt;
 }
 
 
@@ -6305,7 +6319,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
   }
 
   // Sub-agent already has its own system prompt in ctx.messages[0]; don't double-inject.
-  const systemPrompt = ctx?.isSubAgent ? "" : await getSystemPrompt({
+  const systemPromptOptions = {
     messages: modelMessages,
     explicitSkill: ctx?.explicitSkill,
     toolPreset: ctx?.toolPreset,
@@ -6315,7 +6329,12 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     primaryRoot: ctx?.primaryRoot,
     rootPaths: ctx?.rootPaths,
     projectContext: ctx?.projectContext,
-  });
+  };
+  const systemPrompt = ctx?.isSubAgent
+    ? ""
+    : (ctx
+      ? await getTaskSystemPrompt(ctx, systemPromptOptions)
+      : await getSystemPrompt(systemPromptOptions));
   const payload = assembleModelRequestPayload({
     model,
     tools,

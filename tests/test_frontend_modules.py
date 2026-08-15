@@ -31,6 +31,7 @@ SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_tex
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
 MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
+SYSTEM_PROMPT_SOURCE = (ROOT / "src" / "agent" / "system-prompt.js").read_text(encoding="utf-8")
 TOOLS_SOURCE = (ROOT / "src" / "agent" / "tools.js").read_text(encoding="utf-8")
 PERMISSIONS_SOURCE = (ROOT / "src" / "agent" / "permissions.js").read_text(encoding="utf-8")
 QUESTIONNAIRE_SOURCE = (ROOT / "src" / "agent" / "questionnaire.js").read_text(encoding="utf-8")
@@ -2018,6 +2019,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("当前工作目录：C:/project", data["context"]["messages"][0]["content"])
         self.assertIn("主文件夹：C:/workspace", data["context"]["messages"][0]["content"])
         self.assertIn("禁止再次委派子 Agent", data["context"]["messages"][0]["content"])
+        self.assertIn("使用委派任务本身的语言回复", data["context"]["messages"][0]["content"])
         self.assertIn("[DECISION_POINT]", data["context"]["messages"][0]["content"])
         self.assertEqual(data["context"]["stats"], {"input": 0, "output": 0, "cache": 0})
         self.assertEqual(data["context"]["taskUsage"], {"input": 0, "output": 0, "cache": 0})
@@ -3050,6 +3052,240 @@ eval(source);
             ],
         )
 
+    def test_system_prompt_segment_table_preserves_legacy_bytes_and_task_snapshot(self):
+        security_match = re.search(
+            r"const SYSTEM_SECURITY_LAYER = `([\s\S]*?)`\.trim\(\);",
+            APP_SOURCE,
+        )
+        delegation_match = re.search(
+            r"const SUBAGENT_DELEGATION_RULES = `([\s\S]*?)`;",
+            APP_SOURCE,
+        )
+        self.assertIsNotNone(security_match)
+        self.assertIsNotNone(delegation_match)
+        security_layer = security_match.group(1).strip()
+        delegation_rules = delegation_match.group(1)
+        script = r"""
+const crypto = require("crypto");
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/system-prompt.js");
+const prompt = window.Code.agent.systemPrompt;
+(async () => {
+const securityLayer = __SECURITY_LAYER__;
+const delegationRules = __DELEGATION_RULES__;
+const environment = prompt.formatSystemPromptEnvironment({
+  capturedAt: new Date(2026, 7, 15, 1, 2),
+  timeZoneName: "Asia/Shanghai",
+  utcOffsetMinutes: 480,
+  cwd: "C:/work/main",
+  appVersion: "0.6.2",
+});
+const values = {
+  securityLayer,
+  behaviorInstruction: "CUSTOM BEHAVIOR",
+  environmentInstruction: environment.instruction,
+  projectFoldersInstruction: "当前项目主文件夹：C:/work/main\n项目源文件夹（均可搜索、读取和编辑）：\n- C:/work/main\n- C:/work/shared",
+  externalFilesInstruction: "提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。",
+  delegationInstruction: delegationRules,
+  responseLanguageInstruction: "## Response Language\nThe user is writing in English. Reply in English unless the user explicitly asks for another language.",
+  projectContextInstruction: "=== 项目上下文（仅本项目，来自 AGENTS.md） ===\nPROJECT CONTEXT",
+  memoryInstruction: '=== 长期记忆（跨会话保留） ===\n以下信息已融入当前上下文，直接使用，不要提及"长期记忆"或"根据记忆"。\nMEMORY CONTEXT',
+  skillInstruction: "=== 已激活 Skill: fixture-skill（正文已加载，不要再次调用 use_skill） ===\nSKILL BODY",
+  permissionInstruction: "PERMISSION INSTRUCTION",
+};
+const snapshot = prompt.createSystemPromptSnapshot(values, environment);
+const normalizedLegacy = snapshot.prompt.replace(
+  "（Asia/Shanghai UTC+08:00）",
+  "（北京时间）",
+);
+const hash = (value) => crypto.createHash("sha256").update(value, "utf8").digest("hex");
+
+const owner = {sessionId: "session-1"};
+let factoryCalls = 0;
+const factory = async () => {
+  factoryCalls += 1;
+  await Promise.resolve();
+  return snapshot;
+};
+const [cachedA, cachedB] = await Promise.all([
+  prompt.getOrCreateSystemPromptSnapshot(owner, factory),
+  prompt.getOrCreateSystemPromptSnapshot(owner, factory),
+]);
+
+const nextEnvironment = prompt.formatSystemPromptEnvironment({
+  capturedAt: new Date(2026, 7, 16, 3, 4),
+  timeZoneName: "Europe/Paris",
+  utcOffsetMinutes: 120,
+  cwd: "D:/next",
+  appVersion: "0.6.3",
+});
+const nextValues = {
+  ...values,
+  behaviorInstruction: "NEXT BEHAVIOR",
+  environmentInstruction: nextEnvironment.instruction,
+  projectFoldersInstruction: "NEXT ROOTS",
+  projectContextInstruction: "NEXT PROJECT",
+  memoryInstruction: "NEXT MEMORY",
+  skillInstruction: "NEXT SKILL",
+};
+const sameTask = await prompt.getOrCreateSystemPromptSnapshot(
+  owner,
+  async () => prompt.createSystemPromptSnapshot(nextValues, nextEnvironment),
+);
+const nextTask = await prompt.getOrCreateSystemPromptSnapshot(
+  {sessionId: "session-2"},
+  async () => prompt.createSystemPromptSnapshot(nextValues, nextEnvironment),
+);
+
+const retryOwner = {};
+let failureCount = 0;
+try {
+  await prompt.getOrCreateSystemPromptSnapshot(retryOwner, async () => {
+    failureCount += 1;
+    throw new Error("fixture failure");
+  });
+} catch (error) {
+  if (error.message !== "fixture failure") throw error;
+}
+const recovered = await prompt.getOrCreateSystemPromptSnapshot(retryOwner, async () => {
+  failureCount += 1;
+  return snapshot;
+});
+const minimalNames = prompt.buildSystemPromptSegments({
+  securityLayer: "security",
+  behaviorInstruction: "behavior",
+  environmentInstruction: "environment",
+  externalFilesInstruction: "external",
+  permissionInstruction: "permission",
+}).map((segment) => segment.name);
+
+process.stdout.write(JSON.stringify({
+  definitions: prompt.SYSTEM_PROMPT_SEGMENTS,
+  names: snapshot.segmentNames,
+  normalizedLegacyHash: hash(normalizedLegacy),
+  newHash: hash(snapshot.prompt),
+  environment,
+  cachedIdentity: cachedA === cachedB && cachedA === sameTask,
+  factoryCalls,
+  hiddenFromSerialization: !JSON.stringify(owner).includes("CUSTOM BEHAVIOR"),
+  frozen: Object.isFrozen(snapshot) && Object.isFrozen(snapshot.segmentNames),
+  sameTaskPrompt: sameTask.prompt,
+  nextTaskPrompt: nextTask.prompt,
+  failureCount,
+  recovered: recovered === snapshot,
+  minimalNames,
+}));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        script = script.replace(
+            "__SECURITY_LAYER__",
+            json.dumps(security_layer, ensure_ascii=False),
+        ).replace(
+            "__DELEGATION_RULES__",
+            json.dumps(delegation_rules, ensure_ascii=False),
+        )
+        completed = subprocess.run(
+            ["node", "--input-type=commonjs", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["names"],
+            [
+                "security",
+                "behavior",
+                "environment",
+                "project-folders",
+                "external-files",
+                "delegation",
+                "response-language",
+                "project-context",
+                "memory",
+                "skill",
+                "permission",
+            ],
+        )
+        self.assertEqual(data["definitions"][0]["refresh"], "static")
+        self.assertEqual(data["definitions"][-1]["name"], "permission")
+        self.assertEqual(
+            data["normalizedLegacyHash"],
+            "fe75a6a05aab162277a879ac0be027d6cecfe867b1f15d6f819b07bff9226e0b",
+        )
+        self.assertEqual(
+            data["newHash"],
+            "120cb9f8de208a9f2848b1d0f7564c73bbdce739aa2285f2d53049ffecb45d9e",
+        )
+        self.assertEqual(data["environment"]["timeZone"], "Asia/Shanghai UTC+08:00")
+        self.assertIn("（Asia/Shanghai UTC+08:00）", data["environment"]["instruction"])
+        self.assertTrue(data["cachedIdentity"])
+        self.assertEqual(data["factoryCalls"], 1)
+        self.assertTrue(data["hiddenFromSerialization"])
+        self.assertTrue(data["frozen"])
+        self.assertIn("CUSTOM BEHAVIOR", data["sameTaskPrompt"])
+        self.assertNotIn("NEXT BEHAVIOR", data["sameTaskPrompt"])
+        for expected in (
+            "NEXT BEHAVIOR",
+            "D:/next",
+            "v0.6.3",
+            "NEXT ROOTS",
+            "NEXT PROJECT",
+            "NEXT MEMORY",
+            "NEXT SKILL",
+        ):
+            self.assertIn(expected, data["nextTaskPrompt"])
+        self.assertEqual(data["failureCount"], 2)
+        self.assertTrue(data["recovered"])
+        self.assertEqual(
+            data["minimalNames"],
+            ["security", "behavior", "environment", "external-files", "permission"],
+        )
+
+    def test_system_prompt_snapshot_wiring_keeps_retry_and_dynamic_sources_scoped(self):
+        composer_source = SYSTEM_PROMPT_SOURCE
+        prompt_start = APP_SOURCE.index("async function buildSystemPromptSnapshot(")
+        prompt_end = APP_SOURCE.index("async function loadProjectContext()", prompt_start)
+        prompt_source = APP_SOURCE[prompt_start:prompt_end]
+        request_start = APP_SOURCE.index("async function buildModelRequestPayload(")
+        request_end = APP_SOURCE.index("async function _callModelOnceAttempt(", request_start)
+        request_source = APP_SOURCE[request_start:request_end]
+        retry_start = APP_SOURCE.index("// If the request had images and the error suggests")
+        retry_end = APP_SOURCE.index("// Annotate the assistant response", retry_start)
+        retry_source = APP_SOURCE[retry_start:retry_end]
+
+        for expected in (
+            "createSystemPromptSnapshotData({",
+            "formatSystemPromptEnvironment({",
+            "resolveLocalTimeZoneName()",
+            "options.appVersion ?? state.appVersion",
+            "options.memoryContext ?? state.memoryContext",
+            "options.projectContext ?? state.projectContext",
+            "ensureSkillBody(",
+            "getMatchedSkillPrompts(",
+            "getPermissionInstruction(permissionProfile)",
+            "allowedToolNames.has(\"task\")",
+            "userLang !== \"Chinese\"",
+        ):
+            self.assertIn(expected, prompt_source)
+        self.assertIn("getOrCreateSystemPromptSnapshot(", prompt_source)
+        self.assertIn("await getTaskSystemPrompt(ctx, systemPromptOptions)", request_source)
+        self.assertIn("ctx.agentRunId = \"\"", retry_source)
+        self.assertNotIn("_systemPromptSnapshot", retry_source)
+        self.assertIn("} = window.Code.agent.systemPrompt;", APP_SOURCE)
+        self.assertNotIn("const systemPromptComposer =", APP_SOURCE)
+        self.assertLess(
+            FRONTEND_ENTRY_SOURCE.index('import "./agent/system-prompt.js";'),
+            FRONTEND_ENTRY_SOURCE.index('import "../app.js";'),
+        )
+        for forbidden in ("state.", "els.", "ensureSkillBody", "getMatchedSkillPrompts"):
+            self.assertNotIn(forbidden, composer_source)
+        self.assertIn("enumerable: false", composer_source)
+        self.assertIn("agent.systemPrompt = Object.freeze({", composer_source)
+
     def test_core_module_files_exist(self):
         for relative_path in (
             "src/core/namespace.js",
@@ -3076,6 +3312,7 @@ eval(source);
             "src/features/image-attachments.js",
             "src/features/skills-memory.js",
             "src/features/session-import.js",
+            "src/agent/system-prompt.js",
             "src/agent/model-request.js",
             "src/agent/tools.js",
             "src/agent/permissions.js",
@@ -3101,6 +3338,11 @@ eval(source);
         ]
 
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
+        self.assertEqual(len(classic_scripts), 36)
+        self.assertLess(
+            classic_scripts.index("./src/agent/system-prompt.js"),
+            classic_scripts.index("./app.js"),
+        )
         self.assertEqual(classic_scripts[-2:], ["./agent-runtime.js", "./app.js"])
         self.assertIn('data-frontend-runtime="bundle"', INDEX_SOURCE)
         self.assertEqual(INDEX_SOURCE.count('/dist/frontend/code.bundle.js'), 1)
@@ -3205,6 +3447,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('"verify:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('entryPoints: ["src/frontend-entry.js"]', FRONTEND_BUILD_SOURCE)
+        self.assertIn("Expected 36 frontend entry imports", FRONTEND_BUILD_SOURCE)
         self.assertIn('format: "iife"', FRONTEND_BUILD_SOURCE)
         self.assertIn('treeShaking: false', FRONTEND_BUILD_SOURCE)
         self.assertIn('const statePath = path.join(outputDir, "code.bundle.state.json")', FRONTEND_BUILD_SOURCE)
@@ -3359,6 +3602,7 @@ process.stdout.write(JSON.stringify({{
                 for expected in (
                     "src/frontend-entry.js",
                     "src/core/namespace.js",
+                    "src/agent/system-prompt.js",
                     "agent-runtime.js",
                     "app.js",
                 ):
@@ -3769,7 +4013,8 @@ process.stdout.write(JSON.stringify({
         app_imports = APP_SOURCE[:start]
 
         self.assertIn("await loadProjectContextForRoot(", adapter_source)
-        self.assertIn("await getSystemPrompt({", adapter_source)
+        self.assertIn("await getTaskSystemPrompt(ctx, systemPromptOptions)", adapter_source)
+        self.assertIn("await getSystemPrompt(systemPromptOptions)", adapter_source)
         self.assertIn("assembleModelRequestPayload({", adapter_source)
         self.assertNotIn("buildModelRequestMessages,", app_imports)
         self.assertNotIn("function isTransientModelError", APP_SOURCE)
@@ -3859,7 +4104,10 @@ process.stdout.write(JSON.stringify({
             "const { buildNativeToolCallMessage } = agent.modelRequest;",
             TOOLS_SOURCE,
         )
-        self.assertIn("} = window.Code.agent.tools;", APP_SOURCE[:3000])
+        self.assertIn(
+            "} = window.Code.agent.tools;",
+            APP_SOURCE[:APP_SOURCE.index("function upgradeStaticIcons")],
+        )
         self.assertNotIn("function parseJsonLoose", APP_SOURCE)
         self.assertNotIn("function normalizeNativeToolCall", APP_SOURCE)
         self.assertNotIn("function normalizeToolCallList", APP_SOURCE)
@@ -3932,7 +4180,10 @@ process.stdout.write(JSON.stringify({
             ["name", "description", "body"],
         )
         self.assertIn("const nativeTools = [", TOOLS_SOURCE)
-        self.assertIn("nativeTools,", APP_SOURCE[:3000])
+        self.assertIn(
+            "nativeTools,",
+            APP_SOURCE[:APP_SOURCE.index("function upgradeStaticIcons")],
+        )
         self.assertNotIn("const nativeTools = [", APP_SOURCE)
 
     def test_agent_permissions_select_stable_profile_tools_without_shared_mutation(self):
@@ -4037,7 +4288,10 @@ process.stdout.write(JSON.stringify({
                 "unknown": "browser",
             },
         )
-        self.assertIn("} = window.Code.agent.permissions;", APP_SOURCE[:3000])
+        self.assertIn(
+            "} = window.Code.agent.permissions;",
+            APP_SOURCE[:APP_SOURCE.index("function upgradeStaticIcons")],
+        )
         self.assertNotIn("const toolPolicy =", APP_SOURCE)
         self.assertNotIn("function executionOwnerForPermissionProfile", APP_SOURCE)
         self.assertNotIn("function getAllowedToolNamesForProfile", APP_SOURCE)
