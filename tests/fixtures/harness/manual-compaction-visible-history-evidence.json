@@ -311,7 +311,7 @@
       "evidenceIdsAbsentFromApiPayload": true
     },
     "ui": {
-      "htmlHash": "f2147a3ca162c5bad6b0a8f23073009fc491cc0755fec535b25faeef7c0f05a8",
+      "htmlHash": "3cbe833f1823e6f05114ef052c42ca5c18feceb44e78c0c43e4cb6e1f71b0f97",
       "visibleTextHash": "d34fea05af8e7ee5783ddd07b8c3c24d98b15048cf29e4364f9a3c1feb8de5b2",
       "visibleSentinels": [
         "VISIBLE_USER_0",
@@ -340,6 +340,6 @@
       "toolCalls": 0,
       "workerStarts": 0
     },
-    "replayHash": "be8226088739d03f70f6893cb191dc8618261d488e91682311757e2113c85e69"
+    "replayHash": "55ebe25d8b6611208782aefe47cf52950f74ccb55dd88a80881e15aaef6dcd32"
   }
 }

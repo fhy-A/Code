@@ -22,7 +22,7 @@ SCHEMA_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.schema.j
 FIXTURE_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.json"
 APP_PATH = ROOT / "app.js"
 
-EXPECTED_FIXTURE_SHA256 = "558237ae343255080a3d3892571b8f8e7a86d96b3e484f3442f1582a707713dc"
+EXPECTED_FIXTURE_SHA256 = "b68ef1a2570cde8862ba3ea1ee32d17ae4b786239ec633bc367166ab15a8ec1b"
 EXPECTED_SLICE_SHA256 = "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5"
 EXPECTED_PROFILE = {
     "id": "h3-2d2-manual-compaction-visible-history",
