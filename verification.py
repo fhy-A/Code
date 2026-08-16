@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -167,10 +169,11 @@ def get_profile_check_ids(profile: str) -> tuple[str, ...]:
 def get_release_check_ids(*, dry_run: bool, skip_tests: bool) -> tuple[str, ...]:
     """Return the exact ordered quality gates used by release.py.
 
-    This preserves the historical release behavior:
+    This preserves the historical release gate mapping:
     - formal release builds the bundle, then runs the complete release profile;
     - dry-run does not build, run pytest/replay, or inspect the working diff;
-    - --skip-tests still runs frontend build/freshness and syntax checks.
+    - the legacy --skip-tests subset remains defined, but non-dry-run CLI reuse
+      is accepted only through a current sealed prepared credential.
     """
 
     checks = ("frontend_build", *RELEASE_READ_ONLY_CHECK_IDS)
@@ -180,6 +183,43 @@ def get_release_check_ids(*, dry_run: bool, skip_tests: bool) -> tuple[str, ...]
     if dry_run or skip_tests:
         excluded.update(("pytest_full", "harness_replay", "git_diff_check"))
     return tuple(check_id for check_id in checks if check_id not in excluded)
+
+
+def get_release_definition_manifest() -> dict[str, object]:
+    """Return the canonical full-release gate definition for credential binding."""
+
+    root_text = str(ROOT)
+    checks = []
+    for check_id in get_release_check_ids(dry_run=False, skip_tests=False):
+        spec = CHECKS[check_id]
+        command = tuple(
+            str(part).replace(root_text, "<ROOT>")
+            for part in spec.command
+        )
+        checks.append(
+            {
+                "id": spec.check_id,
+                "label": spec.label,
+                "command": command,
+                "timeout": spec.timeout,
+            }
+        )
+    return {
+        "schema": "code-release-verification/v1",
+        "checks": checks,
+    }
+
+
+def get_release_definition_fingerprint() -> str:
+    """Return a stable SHA-256 for the exact formal release gate definition."""
+
+    encoded = json.dumps(
+        get_release_definition_manifest(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 Executor = Callable[[CheckSpec], subprocess.CompletedProcess[str]]

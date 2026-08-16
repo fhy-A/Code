@@ -270,35 +270,23 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
         self.assertLess(source.index('"harness_replay"'), source.index('"git_diff_check"'))
         self.assertLess(source.index('"git_diff_check"'), source.index("SYNTAX_CHECK_IDS"))
 
-    def test_skip_tests_does_not_execute_replay_gate(self):
-        class StopAfterBuild(Exception):
-            pass
-
+    def test_skip_tests_routes_to_prepared_credential_instead_of_trust_skip(self):
         with mock.patch.object(
             release.sys,
             "argv",
             ["release.py", "0.5.99", "--skip-tests", "--no-proxy"],
-        ), mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
-                mock.patch.object(release, "ask", return_value=True), \
-                mock.patch.object(release, "run", return_value=(0, "", "")), \
-                mock.patch.object(release, "update_version_file"), \
-                mock.patch.object(release, "update_version_info"), \
-                mock.patch.object(release, "update_readme"), \
-                mock.patch.object(release, "create_spec_file"), \
-                mock.patch.object(release, "verify_version_consistency"), \
-                mock.patch.object(release, "prepare_frontend_assets"), \
+        ), mock.patch.object(release, "publish_prepared") as publish_prepared, \
                 mock.patch.object(release, "run_tests") as run_tests, \
                 mock.patch.object(release, "run_harness_replay_gate") as replay_gate, \
                 mock.patch.object(release, "run_git_diff_check") as diff_check, \
-                mock.patch.object(release, "run_syntax_checks"), \
-                mock.patch.object(release, "build_exe", side_effect=StopAfterBuild) as build_exe:
-            with self.assertRaises(StopAfterBuild):
-                release.main()
+                mock.patch.object(release, "build_exe") as build_exe:
+            release.main()
 
+        publish_prepared.assert_called_once_with("0.5.99", auto_yes=False)
         run_tests.assert_not_called()
         replay_gate.assert_not_called()
         diff_check.assert_not_called()
-        build_exe.assert_called_once_with("0.5.99")
+        build_exe.assert_not_called()
 
     def test_dry_run_does_not_execute_replay_gate(self):
         class StopAfterChecks(Exception):

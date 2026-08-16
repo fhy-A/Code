@@ -1,6 +1,7 @@
 import io
 import subprocess
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 import release
@@ -129,6 +130,23 @@ class TestVerificationProfiles(unittest.TestCase):
 
 
 class TestSharedReleaseDefinition(unittest.TestCase):
+    def test_release_definition_fingerprint_is_stable_and_excludes_h4(self):
+        manifest = verification.get_release_definition_manifest()
+        self.assertEqual(
+            [item["id"] for item in manifest["checks"]],
+            list(verification.get_release_check_ids(dry_run=False, skip_tests=False)),
+        )
+        self.assertNotIn("h4", [item["id"] for item in manifest["checks"]])
+        first = verification.get_release_definition_fingerprint()
+        self.assertEqual(first, verification.get_release_definition_fingerprint())
+
+        original = verification.CHECKS["pytest_full"]
+        with mock.patch.dict(
+            verification.CHECKS,
+            {"pytest_full": replace(original, timeout=original.timeout + 1)},
+        ):
+            self.assertNotEqual(first, verification.get_release_definition_fingerprint())
+
     def test_formal_release_order_matches_historical_gate_order(self):
         self.assertEqual(
             verification.get_release_check_ids(dry_run=False, skip_tests=False),
