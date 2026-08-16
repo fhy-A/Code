@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
+SERVER_SOURCE = (ROOT / "server.py").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
 STATE_SOURCE = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
@@ -28,6 +29,7 @@ PREVIEW_SOURCE = (ROOT / "src" / "features" / "preview.js").read_text(encoding="
 FILES_SOURCE = (ROOT / "src" / "features" / "files.js").read_text(encoding="utf-8")
 IMAGE_ATTACHMENTS_SOURCE = (ROOT / "src" / "features" / "image-attachments.js").read_text(encoding="utf-8")
 SKILLS_MEMORY_SOURCE = (ROOT / "src" / "features" / "skills-memory.js").read_text(encoding="utf-8")
+GOAL_SOURCE = (ROOT / "src" / "features" / "goal.js").read_text(encoding="utf-8")
 SESSION_IMPORT_SOURCE = (ROOT / "src" / "features" / "session-import.js").read_text(encoding="utf-8")
 BRANCHES_SOURCE = (ROOT / "src" / "features" / "branches.js").read_text(encoding="utf-8")
 MODEL_REQUEST_SOURCE = (ROOT / "src" / "agent" / "model-request.js").read_text(encoding="utf-8")
@@ -986,13 +988,13 @@ process.stdout.write(JSON.stringify({{
             export_source,
         )
 
-    def test_compact_slash_command_reuses_stable_confirmation_flow(self):
+    def test_goal_v2_ui_slash_routing_avoids_legacy_popup_control(self):
         handler_start = APP_SOURCE.index("function handleUiSlashCommand(text)")
         handler_end = APP_SOURCE.index("function clearCurrentSession()", handler_start)
         handler_source = APP_SOURCE[handler_start:handler_end]
         script = f"""
 let compactCalls = 0;
-const goalControlFeature = {{handleInput: () => false}};
+const goalFeature = {{handleSlash: () => false}};
 function compactConversation() {{ compactCalls += 1; return Promise.resolve(); }}
 function exportMarkdown() {{}}
 function clearCurrentSession() {{}}
@@ -1017,6 +1019,9 @@ process.stdout.write(JSON.stringify({{
             "unknown": False,
             "compactCalls": 1,
         })
+        self.assertIn("goalFeature?.handleSlash(text)", handler_source)
+        self.assertNotIn("goalControlFeature", APP_SOURCE)
+        self.assertNotIn("createGoalControlFeature({", APP_SOURCE)
 
         compact_start = APP_SOURCE.index("async function compactConversation()")
         compact_end = APP_SOURCE.index("function hideCompactConfirm()", compact_start)
@@ -1109,246 +1114,46 @@ process.stdout.write(JSON.stringify(groups));
             I18N_SOURCE,
         )
 
-    def test_goal_control_classification_and_confirmed_browser_flow_are_deterministic(self):
-        script = r"""
-global.window = {Code: {features: {}}};
-require("./src/features/skills-memory.js");
-const {classifyGoalControlInput, createGoalControlFeature} = window.Code.features.skillsMemory;
-const classifications = {
-  query: classifyGoalControlInput("/goal"),
-  status: classifyGoalControlInput("Goal status"),
-  pause: classifyGoalControlInput("暂停 Goal"),
-  supplement: classifyGoalControlInput("补充 Goal：覆盖移动端"),
-  revise: classifyGoalControlInput('修改 Goal：{"objective":"新目标","steps":["一","二","三"]}'),
-  create: classifyGoalControlInput("/goal 实现一个可验证目标"),
-  ambiguous: classifyGoalControlInput("我觉得 Goal 也许需要调整"),
-};
-const calls = [];
-const alerts = [];
-const confirms = [];
-const toasts = [];
-let projection = {revision: 0, goal: null};
-let sessionId = "session-01";
-let confirmResult = false;
-const feature = createGoalControlFeature({
-  t: (key, params) => params?.error ? `${key}:${params.error}` : key,
-  apiJson: async (url, request = {}) => {
-    const body = request.body ? JSON.parse(request.body) : null;
-    calls.push({url, method: request.method || "GET", body});
-    if (!body) return {data: projection};
-    if (body.operation === "create_draft") {
-      projection = {
-        revision: 1,
-        goal: {
-          goalId: "goal-01",
-          lifecycle: "awaiting_confirmation",
-          objective: body.objective,
-          steps: [
-            {status: "pending", description: "一"},
-            {status: "pending", description: "二"},
-            {status: "pending", description: "三"},
-          ],
-        },
-      };
-      return {data: projection};
-    }
-    if (body.operation === "confirm_draft") {
-      projection = {...projection, revision: 2, goal: {...projection.goal, lifecycle: "active"}};
-      return {data: projection};
-    }
-    if (body.operation === "propose_change") {
-      if (body.proposal.type === "revise") return {data: {
-        revision: projection.revision,
-        diff: {
-          type: "revise",
-          objective: {before: "旧目标", after: body.proposal.objective},
-          steps: {
-            before: [{id: "step-1", description: "旧步骤", acceptanceCriteria: [{kind: "user", description: "旧验收"}]}],
-            after: [{id: "step-1", description: "新步骤", acceptanceCriteria: [{kind: "user", description: "新验收"}]}],
-          },
-        },
-        confirmationToken: "signed-revise-token",
-      }};
-      return {data: {
-        revision: projection.revision,
-        diff: {type: "supplement", supplement: body.proposal.text},
-        confirmationToken: "signed-token",
-      }};
-    }
-    if (body.operation === "confirm_change") {
-      projection = {...projection, revision: projection.revision + 1};
-      return {data: projection};
-    }
-    throw new Error(`unexpected ${body.operation}`);
-  },
-  getSessionId: () => sessionId,
-  ensureSession: async () => { sessionId = "session-created"; },
-  getPermissionProfile: () => "accept",
-  getLanguage: () => "zh",
-  showToast: (message, kind) => toasts.push({message, kind}),
-  alert: (message) => alerts.push(message),
-  confirm: (message) => { confirms.push(message); return confirmResult; },
-});
-(async () => {
-  await feature.execute({kind: "query"});
-  await feature.execute(classifications.create);
-  confirmResult = true;
-  await feature.execute({kind: "confirm"});
-  await feature.execute(classifications.supplement);
-  await feature.execute(classifications.revise);
-  const beforeMalformed = calls.length;
-  await feature.execute({kind: "structured-revision", source: "not-json"});
-  process.stdout.write(JSON.stringify({
-    classifications,
-    calls,
-    alerts,
-    confirms,
-    toasts,
-    beforeMalformed,
-    afterMalformed: calls.length,
-    handledAmbiguous: feature.handleInput("普通消息，不是 Goal 控制"),
-  }));
-})().catch((error) => { console.error(error); process.exit(1); });
-"""
-        completed = subprocess.run(
-            ["node", "-"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            input=script,
-            check=True,
+    def test_goal_v2_replaces_draft_dialogs_with_compact_event_projection(self):
+        self.assertIn('const { createGoalFeature } = window.Code.features.goal;', APP_SOURCE)
+        self.assertIn("goalFeature = createGoalFeature({", APP_SOURCE)
+        self.assertNotIn("goalControlFeature", APP_SOURCE)
+        self.assertNotIn("createGoalControlFeature({", APP_SOURCE)
+        self.assertIn('route.endswith("/goal-v2/control")', SERVER_SOURCE)
+        self.assertNotIn('route.endswith("/goal/control")', SERVER_SOURCE)
+        self.assertNotIn("window.confirm", GOAL_SOURCE)
+        self.assertNotIn("window.alert", GOAL_SOURCE)
+        self.assertNotIn("step.acceptanceCriteria", GOAL_SOURCE)
+        self.assertNotIn("criterion.kind", GOAL_SOURCE)
+        self.assertNotIn("criterion.description", GOAL_SOURCE)
+        self.assertNotIn("goal-progress-criteria", GOAL_SOURCE)
+        self.assertNotIn("goal-progress-criterion-kind", GOAL_SOURCE)
+        self.assertNotIn(".goal-progress-criteria", STYLE_SOURCE)
+        self.assertNotIn(".goal-progress-criterion-kind", STYLE_SOURCE)
+        for key in (
+            "goalStep_pending",
+            "goalStep_in_progress",
+            "goalStep_completed",
+            "goalCriterion_machine",
+            "goalCriterion_agent",
+            "goalCriterion_user",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+        self.assertIn("inProgressIndexes.length === 1", GOAL_SOURCE)
+        self.assertEqual(GOAL_SOURCE.count("current: progress"), 2)
+        self.assertIn(
+            'goalProgressAriaLabel: "Goal：{objective}，{phase}，进度 {current}/{total}"',
+            I18N_SOURCE,
         )
-        data = json.loads(completed.stdout)
-        self.assertEqual(data["classifications"]["query"]["kind"], "query")
-        self.assertEqual(data["classifications"]["status"]["kind"], "query")
-        self.assertEqual(data["classifications"]["pause"]["kind"], "pause")
-        self.assertEqual(data["classifications"]["supplement"]["proposal"]["type"], "supplement")
-        self.assertEqual(data["classifications"]["revise"]["kind"], "structured-revision")
-        self.assertEqual(data["classifications"]["create"]["kind"], "create")
-        self.assertIsNone(data["classifications"]["ambiguous"])
-        operations = [call["body"]["operation"] for call in data["calls"] if call["body"]]
+        self.assertIn(
+            'goalProgressAriaLabel: "Goal: {objective}, {phase}, progress {current}/{total}"',
+            I18N_SOURCE,
+        )
         self.assertEqual(
-            operations,
-            [
-                "create_draft",
-                "confirm_draft",
-                "propose_change",
-                "confirm_change",
-                "propose_change",
-                "confirm_change",
-            ],
+            I18N_SOURCE.count('goalProgressCount: "{current}/{total}"'),
+            2,
         )
-        self.assertEqual(len(data["alerts"]), 1)
-        self.assertIn("awaiting_confirmation", data["confirms"][0])
-        self.assertIn("覆盖移动端", data["confirms"][1])
-        self.assertIn("[user] 新验收", data["confirms"][2])
-        self.assertEqual(data["beforeMalformed"], data["afterMalformed"])
-        self.assertFalse(data["handledAmbiguous"])
-        self.assertTrue(any(item["message"].startswith("goalActionFailed:") for item in data["toasts"]))
-
-        submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
-        submit_end = APP_SOURCE.index('els.newChat.addEventListener("click"', submit_start)
-        submit_source = APP_SOURCE[submit_start:submit_end]
-        self.assertLess(
-            submit_source.index("handleUiSlashCommand(text)"),
-            submit_source.index("isSessionStreaming(state.sessionId)"),
-        )
-        self.assertIn("goalControlFeature.handleInput(text)", APP_SOURCE)
-        self.assertIn("createGoalControlFeature({", APP_SOURCE)
-
-    def test_goal_draft_and_status_display_all_acceptance_criteria_in_both_languages(self):
-        script = r"""
-global.window = {Code: {features: {}}};
-require("./src/features/skills-memory.js");
-const {createGoalControlFeature} = window.Code.features.skillsMemory;
-
-async function exercise(language) {
-  const calls = [];
-  const confirms = [];
-  const alerts = [];
-  const localized = language === "en";
-  let projection = {revision: 0, goal: null};
-  const feature = createGoalControlFeature({
-    t: (key) => key,
-    apiJson: async (_url, request = {}) => {
-      const body = request.body ? JSON.parse(request.body) : null;
-      calls.push(body?.operation || "query");
-      if (!body) return {data: projection};
-      if (body.operation !== "create_draft") throw new Error(`unexpected ${body.operation}`);
-      projection = {
-        revision: 1,
-        goal: {
-          goalId: `goal-${language}`,
-          lifecycle: "awaiting_confirmation",
-          objective: localized ? "Ship a bounded feature" : "交付有界功能",
-          steps: [
-            {
-              status: "pending",
-              description: localized ? "Confirm scope" : "确认范围",
-              acceptanceCriteria: [
-                {kind: "user", description: localized ? "User accepts the scope" : "用户确认范围"},
-                {kind: "machine", description: localized ? "Checks pass" : "检查通过"},
-              ],
-            },
-            {
-              status: "pending",
-              description: localized ? "Implement safely" : "安全实施",
-              acceptanceCriteria: [
-                {kind: "agent", description: localized ? "No permission expansion" : "不扩大权限"},
-              ],
-            },
-            {
-              status: "pending",
-              description: localized ? "Verify outcome" : "验收结果",
-              acceptanceCriteria: [
-                {kind: "user", description: localized ? "User gives final acceptance" : "用户最终验收"},
-              ],
-            },
-          ],
-        },
-      };
-      return {data: projection};
-    },
-    getSessionId: () => `session-${language}`,
-    getPermissionProfile: () => "accept",
-    getLanguage: () => language,
-    confirm: (message) => { confirms.push(message); return false; },
-    alert: (message) => alerts.push(message),
-  });
-  await feature.execute({kind: "create", objective: projection.goal?.objective || "bounded"});
-  await feature.execute({kind: "query"});
-  return {calls, confirmText: confirms[0], alertText: alerts[0]};
-}
-
-Promise.all([exercise("zh"), exercise("en")]).then(([zh, en]) => {
-  process.stdout.write(JSON.stringify({zh, en}));
-}).catch((error) => { console.error(error); process.exit(1); });
-"""
-        completed = subprocess.run(
-            ["node", "-"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            input=script,
-            check=True,
-        )
-        data = json.loads(completed.stdout)
-        for language in ("zh", "en"):
-            display = data[language]
-            self.assertEqual(display["calls"], ["query", "create_draft", "query"])
-            self.assertIn("Goal · awaiting_confirmation · r1", display["confirmText"])
-            self.assertIn("1. [pending]", display["confirmText"])
-            self.assertIn("2. [pending]", display["confirmText"])
-            self.assertIn("3. [pending]", display["confirmText"])
-            self.assertIn("Goal · awaiting_confirmation · r1", display["alertText"])
-        self.assertIn("[user] 用户确认范围", data["zh"]["confirmText"])
-        self.assertIn("[machine] 检查通过", data["zh"]["confirmText"])
-        self.assertIn("[agent] 不扩大权限", data["zh"]["alertText"])
-        self.assertIn("[user] User accepts the scope", data["en"]["confirmText"])
-        self.assertIn("[machine] Checks pass", data["en"]["confirmText"])
-        self.assertIn("[agent] No permission expansion", data["en"]["alertText"])
+        self.assertNotIn('goalProgressCount: "{completed}/{total}"', I18N_SOURCE)
 
     def test_goal_create_reuses_the_same_waiting_draft_without_a_second_write(self):
         script = r"""
@@ -1946,6 +1751,42 @@ eval(source);
         self.assertFalse((ROOT / "src" / "agent" / "agent-loop.js").exists())
         self.assertNotIn("./src/agent/agent-loop.js", INDEX_SOURCE)
 
+    def test_goal_continuation_switches_agent_runs_without_exposing_reasoning_or_rolling_back(self):
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+        send_start = APP_SOURCE.index("async function sendMessage(userText, options = {})")
+        send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
+        send_source = APP_SOURCE[send_start:send_end]
+        stream_start = APP_SOURCE.index("async function _callModelOnceAttempt(")
+        stream_end = APP_SOURCE.index("function _safeMd", stream_start)
+        stream_source = APP_SOURCE[stream_start:stream_end]
+        completed_start = APP_SOURCE.index("function projectAgentModelCompleted")
+        completed_end = APP_SOURCE.index("function findAgentCompactionProjection", completed_start)
+        completed_source = APP_SOURCE[completed_start:completed_end]
+
+        for expected in (
+            "const continuation = snapshot?.result?.continuation",
+            "ctx.agentRunId = String(continuation.agentRunId)",
+            "ctx.agentEventCursor = 0",
+            "continuationIndex: Number(continuation.index || 0)",
+            "continue;",
+        ):
+            self.assertIn(expected, loop_source)
+        self.assertLess(
+            loop_source.index("const continuation = snapshot?.result?.continuation"),
+            loop_source.index('if (snapshot.status === "completed") {'),
+        )
+        self.assertIn("snapshot.goalOperationsEnabled", loop_source)
+        self.assertIn("err.preservePublicProcess", loop_source)
+        self.assertIn("!loopError?.preservePublicProcess", send_source)
+        self.assertIn("const serverOwnedProjection = isServerOwnedRun(ctx)", stream_source)
+        self.assertIn("const visibleFinalText = serverOwnedProjection", stream_source)
+        self.assertIn("const visibleTurnText = serverOwnedProjection", stream_source)
+        self.assertIn("? String(turnEvent.rawContent || \"\")", stream_source)
+        self.assertIn('const projectedContent = { thought: "", content:', completed_source)
+        self.assertNotIn("data.reasoning", completed_source)
+
     def test_projection_shadow_is_feature_gated_and_observes_all_run_boundaries(self):
         background_start = APP_SOURCE.index("async function runBackgroundSubAgentJob(job)")
         background_end = APP_SOURCE.index("function pumpBackgroundDispatcher()", background_start)
@@ -1968,8 +1809,8 @@ eval(source);
             "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
             foreground,
         )
-        self.assertIn("beginAgentProjectionEvent(ctx, event, projectionReferenceTime)", APP_SOURCE)
-        self.assertIn("completeAgentProjectionEvent(ctx, event, projectionReferenceTime)", APP_SOURCE)
+        self.assertIn("beginAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime)", APP_SOURCE)
+        self.assertIn("completeAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime)", APP_SOURCE)
         self.assertIn("archiveAgentProjectionShadow(ctx)", APP_SOURCE)
         self.assertIn("_agentProjectionShadowSummaries: []", STATE_SOURCE)
         self.assertIn("projectionShadowDiagnostics = Object.freeze", APP_SOURCE)
@@ -3623,6 +3464,7 @@ process.stdout.write(JSON.stringify({
             "src/features/files.js",
             "src/features/image-attachments.js",
             "src/features/skills-memory.js",
+            "src/features/goal.js",
             "src/features/session-import.js",
             "src/agent/system-prompt.js",
             "src/agent/model-request.js",
@@ -3650,7 +3492,7 @@ process.stdout.write(JSON.stringify({
         ]
 
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
-        self.assertEqual(len(classic_scripts), 36)
+        self.assertEqual(len(classic_scripts), 37)
         self.assertLess(
             classic_scripts.index("./src/agent/system-prompt.js"),
             classic_scripts.index("./app.js"),
@@ -3759,7 +3601,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('"verify:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('entryPoints: ["src/frontend-entry.js"]', FRONTEND_BUILD_SOURCE)
-        self.assertIn("Expected 36 frontend entry imports", FRONTEND_BUILD_SOURCE)
+        self.assertIn("Expected 37 frontend entry imports", FRONTEND_BUILD_SOURCE)
         self.assertIn('format: "iife"', FRONTEND_BUILD_SOURCE)
         self.assertIn('treeShaking: false', FRONTEND_BUILD_SOURCE)
         self.assertIn('const statePath = path.join(outputDir, "code.bundle.state.json")', FRONTEND_BUILD_SOURCE)
@@ -11651,6 +11493,20 @@ process.stdout.write(JSON.stringify({
     expandedExecutionTraces: new Set(["0"]),
   }),
   active: feature.projectMessages(messages.slice(0, 5), {hasActiveRun: true}),
+  duplicateCallIds: feature.projectMessages([
+    {role: "user", content: "two runs"},
+    {role: "assistant", content: "first", meta: {agentRunId: "run-a", toolCalls: [
+      {id: "shared-call", function: {name: "read_file", arguments: '{"path":"a.txt"}'}},
+    ]}},
+    {role: "tool-call", meta: {agentRunId: "run-a", action: "read_file", toolCallId: "shared-call"}},
+    {role: "tool-result", content: "A", meta: {agentRunId: "run-a", action: "read_file", toolCallId: "shared-call", outcome: "succeeded"}},
+    {role: "assistant", content: "second", meta: {agentRunId: "run-b", toolCalls: [
+      {id: "shared-call", function: {name: "read_file", arguments: '{"path":"b.txt"}'}},
+    ]}},
+    {role: "tool-call", meta: {agentRunId: "run-b", action: "read_file", toolCallId: "shared-call"}},
+    {role: "tool-result", content: "B failed", meta: {agentRunId: "run-b", action: "read_file", toolCallId: "shared-call", outcome: "failed", result: {ok: false, error: "B failed"}}},
+    {role: "assistant", content: "done"},
+  ], {hasActiveRun: false}),
 }));
 """
         completed = subprocess.run(
@@ -11716,6 +11572,13 @@ process.stdout.write(JSON.stringify({
         self.assertLess(active_trace_body, active_html.index("first checkpoint"))
         self.assertLess(active_html.index("data-tool-process-block"), active_html.index("steer instruction"))
 
+        duplicate_html = data["duplicateCallIds"]
+        self.assertEqual(duplicate_html.count('data-tool-call-id="shared-call"'), 2)
+        self.assertEqual(duplicate_html.count('data-agent-run-id="run-a"'), 1)
+        self.assertEqual(duplicate_html.count('data-agent-run-id="run-b"'), 1)
+        self.assertEqual(duplicate_html.count('class="tool-process-item succeeded"'), 1)
+        self.assertEqual(duplicate_html.count('class="tool-process-item failed"'), 1)
+
     def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
         render_start = MESSAGES_SOURCE.index("function projectMessages(")
         assistant_start = MESSAGES_SOURCE.index('if (msg.role === "assistant") {', render_start)
@@ -11727,10 +11590,12 @@ process.stdout.write(JSON.stringify({
             assistant_block,
         )
         self.assertIn('["pending", "thinking"].includes(msg._streamProjection)', assistant_block)
+        self.assertIn("if (visibleAssistantToolCalls(msg).length) {", assistant_block)
         self.assertIn(
-            "if (msg.meta?.toolCalls?.length) {",
+            "if (isInternalGoalOnlyAssistant(msg) && !isPublicProcessCommentary(msg)) continue;",
             assistant_block,
         )
+        self.assertIn("if (isPublicProcessCommentary(msg)) {", assistant_block)
         self.assertIn("const hasMeaningfulToolCommentary = Boolean(", assistant_block)
         self.assertIn("if (hasMeaningfulToolCommentary) {", assistant_block)
         self.assertIn("rows.push(renderFinalAssistantProjection(msg, index, assistantOptions))", assistant_block)
@@ -12458,7 +12323,264 @@ process.stdout.write(JSON.stringify({
             "updateAssistantMessage(index, rawContent, false, sessionId, targetMessages, true)",
             helper,
         )
-        self.assertLess(helper.index("current.meta.toolCalls = toolCalls"), helper.index("renderSessionMessages"))
+        self.assertIn("const visibleToolCalls =", helper)
+        self.assertLess(
+            helper.index("current.meta.toolCalls = visibleToolCalls"),
+            helper.index("renderSessionMessages"),
+        )
+        self.assertIn("!isInternalGoalToolName(call?.function?.name)", helper)
+
+    def test_agent_run_usage_internal_goal_tools_and_visible_tool_activity_are_projected_once(self):
+        script = r"""
+global.window = global;
+global.Code = {ui: {}};
+require("./src/ui/messages.js");
+const feature = Code.ui.messages.createMessagesFeature({
+  escapeHtml: (value) => String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;"),
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => String(value),
+  renderAssistantContent: (value) => String(value),
+  getMessageText: (message) => String(message?.content || ""),
+  getSessionId: () => "session-goal-projection",
+  getSelectedModel: () => "test-model",
+  getToolActionLabel: (name) => String(name),
+  t: (key) => key,
+});
+const runMeta = {agentRunId: "run-1", agentClientRequestId: "request-1"};
+const completed = [
+  {role: "user", content: "goal task"},
+  {
+    role: "assistant",
+    content: "INTERNAL GOAL COMMENTARY",
+    meta: {
+      ...runMeta,
+      publicProcessCommentary: true,
+      toolCalls: [{id: "goal-1", function: {name: "goal_create", arguments: "{}"}}],
+      _usage: {input: 10, output: 1, cache: 2},
+    },
+  },
+  {role: "tool-call", content: "INTERNAL CALL", meta: {...runMeta, action: "goal_create", toolCallId: "goal-1"}},
+  {role: "tool-result", content: "INTERNAL RESULT", meta: {...runMeta, action: "goal_create", toolCallId: "goal-1", outcome: "succeeded", result: {ok: true}}},
+  {
+    role: "assistant",
+    content: "checking source",
+    meta: {
+      ...runMeta,
+      toolCalls: [{id: "read-1", function: {name: "read_file", arguments: '{"path":"app.js"}'}}],
+      _usage: {input: 20, output: 2, cache: 3},
+    },
+  },
+  {role: "tool-call", content: "", meta: {...runMeta, action: "read_file", toolCallId: "read-1", tool: {action: "read_file", path: "app.js"}}},
+  {role: "tool-result", content: "source", meta: {...runMeta, action: "read_file", toolCallId: "read-1", outcome: "succeeded", result: {ok: true, path: "app.js"}}},
+  {role: "assistant", content: "FINAL ANSWER", meta: {...runMeta, _usage: {input: 30, output: 3, cache: 4}}},
+];
+const completedHtml = feature.projectMessages(completed, {hasActiveRun: true});
+const restoredProcess = [
+  {role: "user", content: "restored Goal process"},
+  {
+    role: "assistant",
+    content: "RESTORED PUBLIC GOAL PROCESS",
+    meta: {
+      ...runMeta,
+      publicProcessCommentary: true,
+      toolCalls: [{id: "goal-restored", function: {name: "goal_complete_step", arguments: "{}"}}],
+    },
+  },
+  {role: "tool-call", content: "HIDDEN GOAL CALL", meta: {...runMeta, action: "goal_complete_step", toolCallId: "goal-restored"}},
+  {role: "tool-result", content: "HIDDEN GOAL RESULT", meta: {...runMeta, action: "goal_complete_step", toolCallId: "goal-restored", outcome: "succeeded"}},
+  {role: "assistant", content: "RESTORED FINAL", _responseTime: "4s", meta: {...runMeta}},
+];
+const restoredHtml = feature.projectMessages(restoredProcess, {hasActiveRun: false});
+const restoredRefreshHtml = feature.projectMessages(
+  JSON.parse(JSON.stringify(restoredProcess)),
+  {hasActiveRun: false},
+);
+const streamingProcess = [
+  {role: "user", content: "live Goal process"},
+  {
+    role: "assistant",
+    content: "LIVE PUBLIC GOAL PROCESS",
+    streaming: true,
+    _streamProjection: "thinking",
+    meta: {...runMeta},
+  },
+];
+const streamingProcessHtml = feature.projectMessages(streamingProcess, {hasActiveRun: true});
+const taskScoped = [
+  {role: "user", content: "task scoped"},
+  {role: "assistant", content: "round", meta: {agentRunId: "run-2", _usage: {input: 7, output: 1, cache: 0}}},
+  {role: "assistant", content: "TASK FINAL", meta: {agentRunId: "run-2", _usage: {input: 99, output: 8, cache: 6}, _usageScope: "task"}},
+];
+const taskHtml = feature.projectMessages(taskScoped, {hasActiveRun: false});
+const pending = [
+  {role: "user", content: "pending tool"},
+  {role: "assistant", content: "reading", meta: {agentRunId: "run-3", toolCalls: [{id: "read-2", function: {name: "read_file", arguments: "{}"}}]}},
+];
+const pendingHtml = feature.projectMessages(pending, {hasActiveRun: true});
+const handoff = [
+  {role: "user", content: "long Goal", id: "origin-4"},
+  {
+    role: "assistant",
+    content: "PUBLIC HANDOFF CHECKPOINT",
+    meta: {
+      agentRunId: "run-4",
+      agentClientRequestId: "request-4",
+      agentUsageGroupId: "origin-4",
+      toolCalls: [{id: "read-4", function: {name: "read_file", arguments: '{"path":"server.py"}'}}],
+      _usage: {input: 44, output: 4, cache: 0},
+      _usageScope: "task",
+      _usageGroupTerminal: false,
+    },
+  },
+  {role: "tool-call", content: "", meta: {agentRunId: "run-4", action: "read_file", toolCallId: "read-4"}},
+  {role: "tool-result", content: "source", meta: {agentRunId: "run-4", action: "read_file", toolCallId: "read-4", outcome: "succeeded", result: {ok: true}}},
+  {
+    role: "assistant",
+    content: "Reading fixture.txt…",
+    meta: {
+      agentRunId: "run-4",
+      agentClientRequestId: "request-4",
+      agentUsageGroupId: "origin-4",
+      toolCalls: [{id: "read-5", function: {name: "read_file", arguments: '{"path":"fixture.txt"}'}}],
+    },
+  },
+  {role: "tool-call", content: "", meta: {agentRunId: "run-4", action: "read_file", toolCallId: "read-5"}},
+  {role: "tool-result", content: "source", meta: {agentRunId: "run-4", action: "read_file", toolCallId: "read-5", outcome: "succeeded", result: {ok: true}}},
+];
+const handoffHtml = feature.projectMessages(handoff, {hasActiveRun: false});
+const completedHandoff = [
+  ...handoff,
+  {
+    role: "assistant",
+    content: "SUCCESSOR FINAL",
+    meta: {
+      agentRunId: "run-5",
+      agentClientRequestId: "request-5",
+      agentUsageGroupId: "origin-4",
+      _usage: {input: 6, output: 2, cache: 1},
+      _usageScope: "task",
+      _usageGroupTerminal: true,
+    },
+  },
+];
+const completedHandoffHtml = feature.projectMessages(completedHandoff, {hasActiveRun: false});
+const threeRuns = [
+  {role: "user", content: "three runs", id: "origin-6"},
+  {role: "assistant", content: "run a old", meta: {agentRunId: "run-a", agentUsageGroupId: "origin-6", _usage: {input: 9, output: 1, cache: 1}, _usageScope: "task", _usageGroupTerminal: false}},
+  {role: "assistant", content: "run a refreshed", meta: {agentRunId: "run-a", agentUsageGroupId: "origin-6", _usage: {input: 10, output: 2, cache: 2}, _usageScope: "task", _usageGroupTerminal: false}},
+  {role: "assistant", content: "run b", meta: {agentRunId: "run-b", agentUsageGroupId: "origin-6", _usage: {input: 20, output: 3, cache: 4}, _usageScope: "task", _usageGroupTerminal: false}},
+  {role: "assistant", content: "run c final", meta: {agentRunId: "run-c", agentUsageGroupId: "origin-6", _usage: {input: 30, output: 5, cache: 6}, _usageScope: "task", _usageGroupTerminal: true}},
+];
+const threeRunsHtml = feature.projectMessages(threeRuns, {hasActiveRun: false});
+const threeRunsRefreshHtml = feature.projectMessages(JSON.parse(JSON.stringify(threeRuns)), {hasActiveRun: false});
+const separateTurns = [
+  {role: "user", content: "first", id: "origin-7"},
+  {role: "assistant", content: "first final", meta: {agentRunId: "run-7", agentUsageGroupId: "origin-7", _usage: {input: 7, output: 1}, _usageScope: "task", _usageGroupTerminal: true}},
+  {role: "user", content: "second", id: "origin-8"},
+  {role: "assistant", content: "second final", meta: {agentRunId: "run-8", agentUsageGroupId: "origin-8", _usage: {input: 8, output: 2}, _usageScope: "task", _usageGroupTerminal: true}},
+];
+const separateTurnsHtml = feature.projectMessages(separateTurns, {hasActiveRun: false});
+process.stdout.write(JSON.stringify({
+  completedHtml,
+  restoredHtml,
+  restoredRefreshHtml,
+  streamingProcessHtml,
+  taskHtml,
+  pendingHtml,
+  handoffHtml,
+  completedHandoffHtml,
+  threeRunsHtml,
+  threeRunsRefreshHtml,
+  separateTurnsHtml,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        completed_html = data["completedHtml"]
+        self.assertEqual(completed_html.count('class="response-info"'), 1)
+        self.assertIn('data-usage-kind="input"', completed_html)
+        self.assertIn(">60</span>", completed_html)
+        self.assertIn(">6</span>", completed_html)
+        self.assertIn("INTERNAL GOAL COMMENTARY", completed_html)
+        self.assertIn('class="msg assistant agent-commentary', completed_html)
+        self.assertNotIn("INTERNAL CALL", completed_html)
+        self.assertNotIn("INTERNAL RESULT", completed_html)
+        self.assertNotIn("goal_create", completed_html)
+        self.assertEqual(completed_html.count('data-tool-call-id="read-1"'), 1)
+        self.assertIn('class="tool-process-stage running single-tool"', completed_html)
+        self.assertNotIn('class="tool-process-stage running tool-active', completed_html)
+        self.assertIn("RESTORED PUBLIC GOAL PROCESS", data["restoredHtml"])
+        self.assertIn("RESTORED FINAL", data["restoredHtml"])
+        self.assertIn('class="execution-trace completed"', data["restoredHtml"])
+        self.assertNotIn('class="execution-trace completed is-expanded"', data["restoredHtml"])
+        self.assertNotIn("goal_complete_step", data["restoredHtml"])
+        self.assertNotIn("HIDDEN GOAL CALL", data["restoredHtml"])
+        self.assertNotIn("HIDDEN GOAL RESULT", data["restoredHtml"])
+        self.assertEqual(data["restoredHtml"], data["restoredRefreshHtml"])
+        self.assertIn("LIVE PUBLIC GOAL PROCESS", data["streamingProcessHtml"])
+        self.assertIn('class="execution-trace active is-expanded"', data["streamingProcessHtml"])
+        self.assertIn('data-stream-kind="thinking"', data["streamingProcessHtml"])
+        self.assertEqual(data["taskHtml"].count('class="response-info"'), 1)
+        self.assertIn(">99</span>", data["taskHtml"])
+        self.assertNotIn(">106</span>", data["taskHtml"])
+        self.assertIn('class="tool-process-stage running tool-active single-tool"', data["pendingHtml"])
+        self.assertIn("PUBLIC HANDOFF CHECKPOINT", data["handoffHtml"])
+        self.assertEqual(data["handoffHtml"].count('class="response-info"'), 0)
+        self.assertEqual(data["handoffHtml"].count('data-tool-call-id="read-4"'), 1)
+        self.assertEqual(data["completedHandoffHtml"].count('class="response-info"'), 1)
+        self.assertIn(">50</span>", data["completedHandoffHtml"])
+        self.assertIn(">6</span>", data["completedHandoffHtml"])
+        self.assertIn(">1</span>", data["completedHandoffHtml"])
+        self.assertEqual(data["threeRunsHtml"].count('class="response-info"'), 1)
+        self.assertIn(">60</span>", data["threeRunsHtml"])
+        self.assertIn(">10</span>", data["threeRunsHtml"])
+        self.assertIn(">12</span>", data["threeRunsHtml"])
+        self.assertEqual(data["threeRunsHtml"], data["threeRunsRefreshHtml"])
+        self.assertEqual(data["separateTurnsHtml"].count('class="response-info"'), 2)
+        self.assertIn(">7</span>", data["separateTurnsHtml"])
+        self.assertIn(">8</span>", data["separateTurnsHtml"])
+
+        attach_start = APP_SOURCE.index("function attachCompletedAgentUsage")
+        attach_end = APP_SOURCE.index("function findLastAssistantMessage", attach_start)
+        attach_source = APP_SOURCE[attach_start:attach_end]
+        self.assertIn("snapshot?.usage || ctx.taskUsage", attach_source)
+        self.assertIn("attachTaskUsageToAssistant(", attach_source)
+        self.assertIn("_agentRunTerminal: true", attach_source)
+        self.assertIn("_usageGroupTerminal: options.groupTerminal !== false", APP_SOURCE)
+        self.assertIn("attachCompletedAgentUsage(ctx, snapshot, { groupTerminal: false })", APP_SOURCE)
+        self.assertIn("ctx.agentUsageGroupId = foregroundOriginMessageId", APP_SOURCE)
+        sync_start = APP_SOURCE.index("function syncTrustedGoalMessageMetadata")
+        sync_end = APP_SOURCE.index("async function saveSessionState", sync_start)
+        sync_source = APP_SOURCE[sync_start:sync_end]
+        self.assertIn('origin.sourceKind === "explicit"', sync_source)
+        self.assertIn('completion.sourceKind === "explicit"', sync_source)
+        self.assertIn("meta._agentRunTerminal === true", sync_source)
+        self.assertIn("delete message.meta.goalCompletion", sync_source)
+        self.assertIn(
+            "syncTrustedGoalMessageMetadata(messages, savedSession?.messages)",
+            APP_SOURCE,
+        )
+        model_start = APP_SOURCE.index("function projectAgentModelCompleted")
+        model_end = APP_SOURCE.index("function findAgentCompactionProjection", model_start)
+        model_source = APP_SOURCE[model_start:model_end]
+        self.assertIn(
+            "const publicProcessCommentary = data.internalOnlyToolCalls === true || toolCalls.length > 0",
+            model_source,
+        )
+        self.assertIn("publicProcessCommentary: true", model_source)
+        self.assertNotIn("ctx.messages.splice(index, 1)", model_source)
+        self.assertNotIn("assistant.meta._usage =", model_source)
 
         stream_start = APP_SOURCE.index("const reader = createSseDataReader(res.body)")
         stream_end = APP_SOURCE.index("function _safeMd", stream_start)
@@ -12470,7 +12592,27 @@ process.stdout.write(JSON.stringify({
             'markStreamingAssistantProjection(assistantIndex, "thinking"',
             stream,
         )
+        self.assertIn("const serverOwnedProjection = isServerOwnedRun(ctx)", stream)
+        self.assertIn(
+            "{ publicProcessCommentary: serverOwnedProjection && toolCalls.length > 0 }",
+            stream,
+        )
+        self.assertIn("visibleFinalText || toolProgressSummary(visibleToolCalls)", stream)
+        self.assertNotIn("visibleFinalText || toolProgressSummary(toolCalls)", stream)
+        self.assertIn("serverOwnedProjection ? turnEvent.text", stream)
+        self.assertNotIn("deferServerOwnedProjection", stream)
+        self.assertNotIn("serverOwnedProjectionVisible", stream)
+        self.assertNotIn("internalGoalOnly", stream)
         self.assertEqual(stream.count("finalizeStreamingAssistantMessage("), 1)
+
+        tool_completion_start = APP_SOURCE.index("function projectAgentToolCompleted")
+        tool_completion_end = APP_SOURCE.index("async function projectAgentEvent", tool_completion_start)
+        tool_completion = APP_SOURCE[tool_completion_start:tool_completion_end]
+        self.assertGreaterEqual(
+            tool_completion.count('String(msg?.meta?.agentRunId || "") === String(ctx.agentRunId || "")')
+            + tool_completion.count('String(message?.meta?.agentRunId || "") === String(ctx.agentRunId || "")'),
+            2,
+        )
 
     def test_active_run_banner_uses_one_stable_task_status(self):
         helper_start = APP_SOURCE.index("function ensureActiveRunBannerStructure")

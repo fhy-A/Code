@@ -19,6 +19,7 @@ import "./features/sessions.js";
 import "./features/branches.js";
 import "./features/settings.js";
 import "./features/skills-memory.js";
+import "./features/goal.js";
 import "./features/preview.js";
 import "./features/files.js";
 import "./features/image-attachments.js";

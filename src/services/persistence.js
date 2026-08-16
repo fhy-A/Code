@@ -8,6 +8,7 @@
     const includeModel = options.includeModel === true;
     const includeTime = options.includeTime === true;
     return (Array.isArray(messages) ? messages : []).map((message) => ({
+      id: message.id || undefined,
       role: message.role,
       content: message.content || "",
       thought: message.thought || "",

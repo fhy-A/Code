@@ -6,6 +6,32 @@
 
   const COPY_SVG = '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M761.088 715.3152a38.7072 38.7072 0 0 1 0-77.4144 37.4272 37.4272 0 0 0 37.4272-37.4272V265.0112a37.4272 37.4272 0 0 0-37.4272-37.4272H425.6256a37.4272 37.4272 0 0 0-37.4272 37.4272 38.7072 38.7072 0 1 1-77.4144 0 115.0976 115.0976 0 0 1 114.8416-114.8416h335.4624a115.0976 115.0976 0 0 1 114.8416 114.8416v335.4624a115.0976 115.0976 0 0 1-114.8416 114.8416z"/><path d="M589.4656 883.0976H268.1856a121.1392 121.1392 0 0 1-121.2928-121.2928v-322.56a121.1392 121.1392 0 0 1 121.2928-121.344h321.28a121.1392 121.1392 0 0 1 121.2928 121.2928v322.56c1.28 67.1232-54.1696 121.344-121.2928 121.344zM268.1856 395.3152a43.52 43.52 0 0 0-43.8784 43.8784v322.56a43.52 43.52 0 0 0 43.8784 43.8784h321.28a43.52 43.52 0 0 0 43.8784-43.8784v-322.56a43.52 43.52 0 0 0-43.8784-43.8784z"/></svg>';
   const COPY_DONE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
+  const INTERNAL_GOAL_TOOL_NAMES = new Set([
+    "goal_create",
+    "goal_set_plan",
+    "goal_revise_plan",
+    "goal_start_step",
+    "goal_complete_step",
+    "goal_raise_gate",
+    "goal_clear_gate",
+    "goal_ready_for_acceptance",
+    "goal_complete",
+  ]);
+
+  function projectedToolName(value) {
+    return String(
+      value?.function?.name
+      || value?.name
+      || value?.action
+      || value?.meta?.action
+      || value?.meta?.tool?.action
+      || "",
+    );
+  }
+
+  function isInternalGoalTool(value) {
+    return INTERNAL_GOAL_TOOL_NAMES.has(projectedToolName(value));
+  }
 
   function createMessageScrollController(options = {}) {
     const container = options.container;
@@ -925,16 +951,16 @@
 
       const currentItems = new Map();
       Array.from(currentStage.querySelectorAll(
-        "details.tool-process-item[data-tool-call-id]",
+        "details.tool-process-item[data-tool-process-item-key]",
       )).forEach((item) => {
-        const toolCallId = String(item.dataset?.toolCallId || "");
-        if (toolCallId && !currentItems.has(toolCallId)) currentItems.set(toolCallId, item);
+        const itemKey = String(item.dataset?.toolProcessItemKey || "");
+        if (itemKey && !currentItems.has(itemKey)) currentItems.set(itemKey, item);
       });
       Array.from(projectedStage.querySelectorAll(
-        "details.tool-process-item[data-tool-call-id]",
+        "details.tool-process-item[data-tool-process-item-key]",
       )).forEach((projectedItem) => {
-        const toolCallId = String(projectedItem.dataset?.toolCallId || "");
-        const currentItem = toolCallId ? currentItems.get(toolCallId) : null;
+        const itemKey = String(projectedItem.dataset?.toolProcessItemKey || "");
+        const currentItem = itemKey ? currentItems.get(itemKey) : null;
         if (!currentItem) return;
         reconcileToolProcessItem(currentItem, projectedItem);
         projectedItem.replaceWith?.(currentItem);
@@ -1023,6 +1049,27 @@
     const onLayoutChange = options.onLayoutChange || (() => {});
     const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
     const boundInteractionRoots = new WeakSet();
+
+    function visibleAssistantToolCalls(msg) {
+      return (Array.isArray(msg?.meta?.toolCalls) ? msg.meta.toolCalls : []).filter((call) => (
+        !isInternalGoalTool(call)
+      ));
+    }
+
+    function isInternalGoalOnlyAssistant(msg) {
+      const calls = Array.isArray(msg?.meta?.toolCalls) ? msg.meta.toolCalls : [];
+      return calls.length > 0 && calls.every(isInternalGoalTool);
+    }
+
+    function isPublicProcessCommentary(msg) {
+      return msg?.meta?.publicProcessCommentary === true;
+    }
+
+    function isVisibleToolProjectionMessage(msg) {
+      if (msg?.role === "assistant") return visibleAssistantToolCalls(msg).length > 0;
+      if (!["tool-call", "tool-result"].includes(String(msg?.role || ""))) return false;
+      return !isInternalGoalTool(msg);
+    }
 
     function renderCopyIconSvg() {
       return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
@@ -1313,7 +1360,8 @@
         }
         if (msg.role !== "assistant") return;
         const content = (getMessageText(msg) || "").trim();
-        if (msg.meta?.toolCalls?.length
+        if (isPublicProcessCommentary(msg)
+            || msg.meta?.toolCalls?.length
             || (msg._streamProjection === "thinking"
               && content
               && !isToolPlanningPlaceholder(content)
@@ -1343,6 +1391,17 @@
           ? `<span class="background-dispatch-status running"><span class="background-dispatch-dot"></span>${t("backgroundRunning")}</span>`
           : "";
       const dispatchStatus = backgroundStatus;
+      const goalOrigin = msg.meta?.goalOrigin;
+      const confirmedGoalOrigin = Boolean(
+        goalOrigin?.confirmed === true
+        && String(msg.id || "")
+        && String(goalOrigin.messageId || "") === String(msg.id || "")
+        && String(goalOrigin.goalId || "")
+        && String(goalOrigin.sourceKind || "") === "explicit"
+      );
+      const goalMarker = confirmedGoalOrigin
+        ? `<span class="goal-message-marker" data-goal-id="${escapeHtml(goalOrigin.goalId)}" title="${escapeHtml(t("goalMessageMarkerTitle"))}">${escapeHtml(t("goalMessageMarker"))}</span>`
+        : "";
       const traceClass = options.tracePersistent ? " execution-trace-persistent" : "";
       const imageItems = images.map((image, imageIndex) => {
         const src = getImagePreviewSource(image);
@@ -1365,14 +1424,14 @@
         const imageGroup = `<div class="bubble bubble-img msg-image-group">${imageItems}</div>`;
         const textBubble = renderUserTextProjection(text, index);
         const batchMeta = text
-          ? `<div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div>`
-          : dispatchStatus
-            ? `<div class="msg-meta">${dispatchStatus}${time}</div>`
+          ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time} ${renderCopyButton(text)}</div>`
+          : (goalMarker || dispatchStatus)
+            ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}</div>`
             : "";
         return `<article class="msg user msg-image-batch${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
       }
       const textArticle = text
-        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
+        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${goalMarker}${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
         : "";
       return textArticle;
     }
@@ -1458,20 +1517,24 @@
       const calls = [];
       const callsById = new Map();
 
-      const ensureCall = (rawCall, fallbackId) => {
+      const ensureCall = (rawCall, fallbackId, agentRunId = "") => {
         const details = toolCallDetails(rawCall);
+        if (isInternalGoalTool({ name: details.action })) return null;
         const id = details.id || fallbackId;
-        let entry = callsById.get(id);
+        const runId = String(agentRunId || "");
+        const identity = `${runId}\u0000${id}`;
+        let entry = callsById.get(identity);
         if (!entry) {
           entry = {
             id,
+            agentRunId: runId,
             action: details.action,
             args: details.args,
             started: false,
             result: null,
             resultMessage: null,
           };
-          callsById.set(id, entry);
+          callsById.set(identity, entry);
           calls.push(entry);
         } else {
           if (details.action) entry.action = details.action;
@@ -1482,24 +1545,28 @@
 
       items.forEach(({ msg, index }, itemIndex) => {
         if (msg.role === "assistant") {
-          (Array.isArray(msg.meta?.toolCalls) ? msg.meta.toolCalls : []).forEach((call, callIndex) => {
-            ensureCall(call, `assistant-${index}-${callIndex}`);
+          visibleAssistantToolCalls(msg).forEach((call, callIndex) => {
+            ensureCall(call, `assistant-${index}-${callIndex}`, msg.meta?.agentRunId);
           });
           return;
         }
         if (msg.role === "tool-call") {
-          const entry = ensureCall(msg, `call-${index}-${itemIndex}`);
+          if (isInternalGoalTool(msg)) return;
+          const entry = ensureCall(msg, `call-${index}-${itemIndex}`, msg.meta?.agentRunId);
+          if (!entry) return;
           entry.started = true;
           entry.callMessage = msg;
           return;
         }
         if (msg.role === "tool-result") {
+          if (isInternalGoalTool(msg)) return;
           const id = String(msg.meta?.toolCallId || `result-${index}-${itemIndex}`);
           const entry = ensureCall({
             id,
             name: msg.meta?.action || "",
             arguments: {},
-          }, id);
+          }, id, msg.meta?.agentRunId);
+          if (!entry) return;
           entry.resultMessage = msg;
           entry.result = msg.meta?.result || msg.meta?.authorizationResult || null;
         }
@@ -1646,7 +1713,11 @@
       ].filter(Boolean).join(" ");
       const processKey = String(options.processKey || serial);
       const firstToolCallId = String(visibleCalls.find((call) => call.id)?.id || processKey);
-      const processId = `${String(getSessionId() || "")}:${firstToolCallId}`;
+      const firstAgentRunId = String(visibleCalls.find((call) => call.agentRunId)?.agentRunId || "");
+      const legacyProcessId = `${String(getSessionId() || "")}:${firstToolCallId}`;
+      const processId = firstAgentRunId
+        ? `${String(getSessionId() || "")}:${firstAgentRunId}:${firstToolCallId}`
+        : legacyProcessId;
       const expandedToolProcesses = options.expandedToolProcesses instanceof Set
         ? options.expandedToolProcesses
         : new Set(options.expandedToolProcesses || []);
@@ -1657,7 +1728,11 @@
         options.open
         || (
           options.allowExpanded
-          && (expandedToolProcesses.has(processId) || expandedToolProcesses.has(processKey))
+          && (
+            expandedToolProcesses.has(processId)
+            || expandedToolProcesses.has(legacyProcessId)
+            || expandedToolProcesses.has(processKey)
+          )
         )
       ) ? " open" : "";
 
@@ -1675,12 +1750,17 @@
                   const argumentsText = processCallArguments(call);
                   const resultText = processCallResult(call);
                   const toolCallId = String(call.id || "");
-                  const itemKey = `${processId}:${toolCallId}`;
+                  const itemKey = `${processId}:${String(call.agentRunId || "")}:${toolCallId}`;
+                  const legacyItemKey = `${legacyProcessId}:${toolCallId}`;
                   const itemOpen = options.allowExpanded
-                    && (expandedToolItems.has(itemKey) || expandedToolItems.has(toolCallId))
+                    && (
+                      expandedToolItems.has(itemKey)
+                      || expandedToolItems.has(legacyItemKey)
+                      || expandedToolItems.has(toolCallId)
+                    )
                     ? " open"
                     : "";
-                  return `<details class="tool-process-item ${escapeHtml(call.outcome)}" data-tool-call-id="${escapeHtml(toolCallId)}" data-tool-process-item-key="${escapeHtml(itemKey)}"${itemOpen}>
+                  return `<details class="tool-process-item ${escapeHtml(call.outcome)}" data-tool-call-id="${escapeHtml(toolCallId)}" data-agent-run-id="${escapeHtml(call.agentRunId || "")}" data-tool-process-item-key="${escapeHtml(itemKey)}"${itemOpen}>
                     <summary>
                       <span class="tool-process-indicator ${escapeHtml(call.outcome)}" aria-hidden="true"></span>
                       <span class="tool-process-row-heading"><strong>${escapeHtml(action)}</strong>${call.target ? `<code>${escapeHtml(call.target)}</code>` : ""}</span>
@@ -1700,12 +1780,140 @@
       `;
     }
 
+    function collectAgentResponseInfoProjection(messages) {
+      const groups = new Map();
+      messages.forEach((message, index) => {
+        if (message?.role !== "assistant") return;
+        const meta = message.meta || {};
+        const usageGroupId = String(meta.agentUsageGroupId || "");
+        const runId = String(meta.agentRunId || meta.agentClientRequestId || "");
+        const key = usageGroupId
+          ? `turn:${usageGroupId}`
+          : (runId ? `run:${runId}` : "");
+        if (!key) return;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ message, index });
+      });
+
+      const projection = new Map();
+      groups.forEach((entries) => {
+        const usageEntries = entries.filter(({ message }) => (
+          hasUsageStats(message?.meta?._usage || message?._usage)
+        ));
+        if (!usageEntries.length) return;
+        entries.forEach(({ index }) => projection.set(index, { suppressResponseInfo: true }));
+
+        const hasManagedTerminal = usageEntries.some(({ message }) => (
+          Object.prototype.hasOwnProperty.call(message?.meta || {}, "_usageGroupTerminal")
+        ));
+        const groupTerminal = !hasManagedTerminal || usageEntries.some(({ message }) => (
+          message?.meta?._usageGroupTerminal === true
+        ));
+        if (!groupTerminal) return;
+
+        const taskEntriesByRun = new Map();
+        usageEntries.forEach((entry) => {
+          const meta = entry.message?.meta || {};
+          if (meta._usageScope !== "task") return;
+          const runKey = String(
+            meta.agentRunId
+            || meta._usageOwner
+            || meta.agentClientRequestId
+            || `message:${entry.index}`,
+          );
+          taskEntriesByRun.set(runKey, entry);
+        });
+        const aggregateEntries = taskEntriesByRun.size
+          ? [...taskEntriesByRun.values()]
+          : usageEntries;
+        const usage = { input: 0, output: 0, cache: 0 };
+        aggregateEntries.forEach(({ message }) => {
+            const part = normalizeResponseUsage(message?.meta?._usage || message?._usage);
+            if (!part) return;
+            usage.input += Number(part.input || 0);
+            usage.output += Number(part.output || 0);
+            usage.cache += Number(part.cache || 0);
+            if (Object.prototype.hasOwnProperty.call(part, "cacheWrite")) {
+              usage.cacheWrite = Number(usage.cacheWrite || 0) + Number(part.cacheWrite || 0);
+            }
+        });
+        const target = [...entries].reverse().find(({ message }) => {
+          if (message.streaming
+              || isInternalGoalOnlyAssistant(message)
+              || isPublicProcessCommentary(message)) return false;
+          if (visibleAssistantToolCalls(message).length) return false;
+          const content = (getMessageText(message) || "").trim();
+          return Boolean(
+            content
+            && !isToolPlanningPlaceholder(content)
+            && !isOperationalToolNotice(content)
+          );
+        }) || [...entries].reverse().find(({ message }) => {
+          if (message.streaming
+              || isInternalGoalOnlyAssistant(message)
+              || isPublicProcessCommentary(message)) return false;
+          const content = (getMessageText(message) || "").trim();
+          return Boolean(
+            content
+            && !isToolPlanningPlaceholder(content)
+            && !isOperationalToolNotice(content)
+          );
+        });
+        if (target && hasUsageStats(usage)) {
+          projection.set(target.index, {
+            suppressResponseInfo: false,
+            responseUsage: usage,
+          });
+        }
+      });
+      return projection;
+    }
+
     function renderAssistantResponseInfo(msg, options = {}) {
+      if (options.suppressResponseInfo) return "";
       const meta = msg.meta || {};
-      const usage = meta._usage || msg._usage || null;
+      const usage = Object.prototype.hasOwnProperty.call(options, "responseUsage")
+        ? options.responseUsage
+        : (meta._usage || msg._usage || null);
       const elapsed = options.includeElapsed === false ? "" : getResponseElapsed(msg);
       if (!hasUsageStats(usage) && !elapsed) return "";
       return `<div class="response-info">${renderCompletedRunStatus(meta._model || msg._model || "", elapsed, usage)}</div>`;
+    }
+
+    function formatGoalCompletionDuration(milliseconds) {
+      const seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
+      const hours = Math.floor(minutes / 60);
+      return `${hours}h ${minutes % 60}m ${remainingSeconds}s`;
+    }
+
+    function renderGoalCompletionMarker(msg) {
+      const marker = msg?.meta?.goalCompletion;
+      if (
+        marker?.confirmed !== true
+        || marker.sourceKind !== "explicit"
+        || !String(marker.goalId || "")
+        || !String(marker.sourceRunId || "")
+        || String(msg?.meta?.agentRunId || "") !== String(marker.sourceRunId || "")
+        || msg?.meta?._agentRunTerminal !== true
+      ) return "";
+      const createdAt = Date.parse(String(marker.createdAt || ""));
+      const completedAt = Date.parse(String(marker.completedAt || ""));
+      if (!Number.isFinite(createdAt) || !Number.isFinite(completedAt) || completedAt < createdAt) {
+        return "";
+      }
+      const duration = formatGoalCompletionDuration(completedAt - createdAt);
+      return `<div class="goal-completion-marker">${escapeHtml(t("goalCompletionMarker", { duration }))}</div>`;
+    }
+
+    function renderAssistantFooter(msg, options = {}, trailing = "") {
+      const responseInfo = renderAssistantResponseInfo(msg, options);
+      const completionMarker = renderGoalCompletionMarker(msg);
+      if (!responseInfo && !completionMarker && !trailing) return "";
+      return `<div class="msg-footer"><div class="msg-footer-status">${responseInfo}${completionMarker}${trailing}</div></div>`;
     }
 
     function renderAutoContextCompaction(msg, index) {
@@ -1780,26 +1988,29 @@
           </article>
         `;
       }
-      if (!content || isToolPlanningPlaceholder(content)) return "";
-      const isCommentary = Boolean(msg.meta?.toolCalls?.length);
+      if (!content
+          || isToolPlanningPlaceholder(content)
+          || (isInternalGoalOnlyAssistant(msg) && !isPublicProcessCommentary(msg))) return "";
+      const isCommentary = isPublicProcessCommentary(msg)
+        || visibleAssistantToolCalls(msg).length > 0;
       if (isCommentary && isOperationalToolNotice(content)) return "";
       if (isCommentary) {
         return `
           <article class="msg assistant agent-commentary${traceClass}" data-msg-index="${index}">
             ${renderAssistantContent(content)}
+            ${renderAssistantFooter(msg, options)}
           </article>
         `;
       }
-      const responseInfo = renderAssistantResponseInfo(msg, options);
       const replyReference = renderBackgroundReplyReference(msg);
       const copyButton = renderCopyButton(content);
       const time = formatMessageTime(msg._time);
       return `
-        <article class="msg assistant${msg.meta?.toolCalls?.length ? " agent-commentary" : ""}${traceClass}" data-msg-index="${index}">
+        <article class="msg assistant${isCommentary ? " agent-commentary" : ""}${traceClass}" data-msg-index="${index}">
           <div class="role">${escapeHtml(model)}</div>
           ${replyReference}
           ${renderAssistantContent(content)}
-          <div class="msg-footer">${responseInfo}<span class="msg-footer-hover">${copyButton}${time ? `<span class="msg-time">${time}</span>` : ""}</span></div>
+          ${renderAssistantFooter(msg, options, `<span class="msg-footer-hover">${copyButton}${time ? `<span class="msg-time">${time}</span>` : ""}</span>`)}
         </article>
       `;
     }
@@ -1821,17 +2032,19 @@
       const expandedToolItems = projection.expandedToolItems instanceof Set
         ? projection.expandedToolItems
         : new Set(projection.expandedToolItems || []);
+      const responseInfoProjection = collectAgentResponseInfoProjection(messages);
       const rows = [];
       const queuedTailMessages = [];
       const claimedToolResultIndexes = new Set();
-      const toolResultsByCallId = new Map();
+      const toolResultsByIdentity = new Map();
       messages.forEach((message, index) => {
-        if (message?.role !== "tool-result" || !message.meta?.toolCallId) return;
-        const id = String(message.meta.toolCallId);
-        if (!toolResultsByCallId.has(id)) toolResultsByCallId.set(id, []);
-        toolResultsByCallId.get(id).push({ msg: message, index });
+        if (message?.role !== "tool-result" || !message.meta?.toolCallId || isInternalGoalTool(message)) return;
+        const identity = `${String(message.meta?.agentRunId || "")}\u0000${String(message.meta.toolCallId)}`;
+        if (!toolResultsByIdentity.has(identity)) toolResultsByIdentity.set(identity, []);
+        toolResultsByIdentity.get(identity).push({ msg: message, index });
       });
       let pendingProcess = [];
+      let pendingProcessAfterRows = [];
       let processSerial = 0;
       let activeUserIndex = -1;
       let currentUserIndex = -1;
@@ -1855,9 +2068,7 @@
           const message = messages[index];
           if (!message || isInternalMessage(message) || isDetachedProjectionMessage(message)) continue;
           if (
-            message.role === "tool-call"
-            || message.role === "tool-result"
-            || (message.role === "assistant" && message.meta?.toolCalls?.length)
+            isVisibleToolProjectionMessage(message)
           ) {
             activeForegroundToolTailIndex = index;
             break;
@@ -1882,25 +2093,22 @@
       const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
         const existingIndexes = new Set(pendingProcess.map((item) => item.index));
-        const runIds = new Set(pendingProcess
-          .map((item) => String(item.msg?.meta?.agentRunId || ""))
-          .filter(Boolean));
-        const callIds = new Set();
-        pendingProcess.forEach(({ msg }) => {
-          if (msg?.role === "assistant") {
-            (Array.isArray(msg.meta?.toolCalls) ? msg.meta.toolCalls : []).forEach((call) => {
-              if (call?.id) callIds.add(String(call.id));
+        const callIdentities = new Set();
+          pendingProcess.forEach(({ msg }) => {
+            if (msg?.role === "assistant") {
+            visibleAssistantToolCalls(msg).forEach((call) => {
+              if (call?.id) {
+                callIdentities.add(`${String(msg.meta?.agentRunId || "")}\u0000${String(call.id)}`);
+              }
             });
           } else if (msg?.role === "tool-call" && msg.meta?.toolCallId) {
-            callIds.add(String(msg.meta.toolCallId));
+            callIdentities.add(`${String(msg.meta?.agentRunId || "")}\u0000${String(msg.meta.toolCallId)}`);
           }
         });
-        callIds.forEach((toolCallId) => {
-          const resultEntry = (toolResultsByCallId.get(toolCallId) || []).find((entry) => {
-            if (existingIndexes.has(entry.index) || claimedToolResultIndexes.has(entry.index)) return false;
-            const resultRunId = String(entry.msg?.meta?.agentRunId || "");
-            return !resultRunId || runIds.size === 0 || runIds.has(resultRunId);
-          });
+        callIdentities.forEach((identity) => {
+          const resultEntry = (toolResultsByIdentity.get(identity) || []).find((entry) => (
+            !existingIndexes.has(entry.index) && !claimedToolResultIndexes.has(entry.index)
+          ));
           if (!resultEntry) return;
           pendingProcess.push(resultEntry);
           claimedToolResultIndexes.add(resultEntry.index);
@@ -1919,7 +2127,9 @@
           expandedToolProcesses,
           expandedToolItems,
         }));
+        if (pendingProcessAfterRows.length) rows.push(...pendingProcessAfterRows);
         pendingProcess = [];
+        pendingProcessAfterRows = [];
         return true;
       };
       const openCompletedExecutionTrace = (userIndex, elapsed) => {
@@ -2009,8 +2219,10 @@
           const assistantOptions = {
             includeElapsed: !completedHeaderVisible || detachedProjection,
             tracePersistent: detachedProjection && openExecutionTraceUserIndex >= 0,
+            ...(responseInfoProjection.get(index) || {}),
           };
-          if (msg.meta?.toolCalls?.length) {
+          if (isInternalGoalOnlyAssistant(msg) && !isPublicProcessCommentary(msg)) continue;
+          if (visibleAssistantToolCalls(msg).length) {
             if (hasMeaningfulToolCommentary) {
               flushProcess();
               rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
@@ -2028,6 +2240,13 @@
             }
             continue;
           }
+          if (isPublicProcessCommentary(msg)) {
+            if (hasMeaningfulToolCommentary) {
+              flushProcess();
+              rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
+            }
+            continue;
+          }
           if (detachedProjection) {
             flushProcess();
             rows.push(renderFinalAssistantProjection(msg, index, assistantOptions));
@@ -2038,10 +2257,11 @@
           continue;
         }
         if (msg.role === "user" && isSteerProjectionMessage(msg) && currentUserIndex >= 0) {
-          flushProcess();
-          rows.push(renderUserProjection(msg, index, {
+          const steerRow = renderUserProjection(msg, index, {
             tracePersistent: openExecutionTraceUserIndex >= 0,
-          }));
+          });
+          if (pendingProcess.length) pendingProcessAfterRows.push(steerRow);
+          else rows.push(steerRow);
           continue;
         }
         if (msg.role === "user" && isDetachedProjectionMessage(msg)) {
@@ -2072,6 +2292,7 @@
           continue;
         }
         if (msg.role === "tool-call" || msg.role === "tool-result") {
+          if (isInternalGoalTool(msg)) continue;
           if (msg.role === "tool-result" && claimedToolResultIndexes.has(index)) continue;
           pendingProcess.push({ msg, index });
         }

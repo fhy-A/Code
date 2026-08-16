@@ -58,10 +58,12 @@ const {
 } = window.Code.features.settings;
 const {
   applySkillTaskPolicy,
-  createGoalControlFeature,
   createSkillsMemoryFeature,
+  formatGoalModelProjection,
   getSkillToolBudgets,
+  mergeGoalModelContext,
 } = window.Code.features.skillsMemory;
+const { createGoalFeature } = window.Code.features.goal;
 const { createPreviewFeature } = window.Code.features.preview;
 const { createFilesFeature, shortPath } = window.Code.features.files;
 const {
@@ -81,6 +83,7 @@ const { createImportBatchRunner } = window.Code.features.sessionImport;
 const agentRuntime = window.Code.agent.runtime;
 const agentRunReducer = window.Code.agent.runReducer;
 const agentRunProjectionShadow = window.Code.agent.runProjectionShadow;
+let goalFeature = null;
 const {
   createSystemPromptSnapshot: createSystemPromptSnapshotData,
   formatSystemPromptEnvironment,
@@ -677,6 +680,18 @@ const els = {
 
   chatForm: document.getElementById("chatForm"),
 
+  goalProgress: document.getElementById("goalProgress"),
+
+  goalProgressSummary: document.getElementById("goalProgressSummary"),
+
+  goalProgressObjective: document.getElementById("goalProgressObjective"),
+
+  goalProgressPhase: document.getElementById("goalProgressPhase"),
+
+  goalProgressCount: document.getElementById("goalProgressCount"),
+
+  goalProgressDetails: document.getElementById("goalProgressDetails"),
+
   sendBtn: document.getElementById("sendBtn"),
 
   stopBtn: document.getElementById("stopBtn"),
@@ -946,6 +961,7 @@ messagesFeature = createMessagesFeature({
 const {
   bindInteractions: bindMessageInteractions,
   hasUsageStats,
+  isOperationalToolNotice,
   isToolPlanningPlaceholder,
   normalizeResponseUsage,
   projectMessages,
@@ -1122,16 +1138,16 @@ const skillsMemoryFeature = createSkillsMemoryFeature({
   onMemoryChanged: updateModePromptPreview,
   trashIcon,
 });
-const goalControlFeature = createGoalControlFeature({
+
+goalFeature = createGoalFeature({
   apiJson,
   t,
+  escapeHtml,
   showToast,
   getSessionId: () => state.sessionId,
-  ensureSession: (title) => createSession(title),
-  getPermissionProfile,
-  getLanguage: () => state.lang,
-  confirm: (message) => window.confirm(message),
-  alert: (message) => window.alert(message),
+  getMessages: () => getSessionMessages(state.sessionId),
+  renderMessages: () => renderSessionMessages(state.sessionId),
+  elements: els,
 });
 const {
   ensureSkillBody,
@@ -1503,6 +1519,34 @@ const SYSTEM_SECURITY_LAYER = `
 - 提醒时重点强调数据传输隐患，顺带提及会话记录本地明文存储。
 `.trim();
 
+const GOAL_AUTONOMOUS_AGENT_INSTRUCTION = `
+## 持久 Goal 操作
+- 仅当当前任务确实复杂、多步骤、长耗时或可能跨多个前台 AgentRun 时，才使用 Goal 内部操作；简单的一次性任务不要创建 Goal。
+- 创建 Goal 必须发生在该任务的项目副作用之前。Goal 操作只记录目标、计划、步骤证据和门禁，不会提升当前权限、工具能力、授权范围或轮次预算。
+- 已有同目标 Goal 时复用并继续；已有不同的非终态 Goal 时不得覆盖、嵌套或改写，应向用户说明冲突。
+- 计划保持 3～8 个产品级步骤，公开步骤状态仅为 pending、in_progress、completed；信息不足、授权等待、失败或阻塞通过 Goal gate 和普通回复说明，不伪造第四种步骤状态。
+- 完成步骤必须为每项验收条件提供有界证据；完成最后一个步骤会在同一次 goal_complete_step 回执中直接完成 Goal，不要再调用通用待验收或第二个完成操作。
+- 调用 Goal 内部操作的工具轮，公开文字只写正在执行的进展、证据发现或简短阶段小结；尤其在调用最后一个 goal_complete_step 时，不要同时输出面向用户的完整最终总结。成功回执后的既有无工具终态轮才是唯一完整答复，必须独立重述最终结论、验收结果和必要边界，不能只说“见上方总结”。
+- 需要用户判断且会影响后续调整的验收，必须属于仍在进行中的具体步骤：先保留该步骤为 in_progress 并记录 waiting_user gate；用户通过后清除 gate、补足 user 证据再完成步骤，用户要求调整时修订计划继续，不能提前完成最后一步。
+- 只有持久化成功回执显示 Goal 已 completed 后才能宣称目标完成；goal_complete_step 失败时必须明确说明 Goal 尚未完成。旧记录若已处于 ready_for_acceptance，只能使用当前提供的兼容完成操作处理。
+`.trim();
+
+const INTERNAL_GOAL_TOOL_NAMES = new Set([
+  "goal_create",
+  "goal_set_plan",
+  "goal_revise_plan",
+  "goal_start_step",
+  "goal_complete_step",
+  "goal_raise_gate",
+  "goal_clear_gate",
+  "goal_ready_for_acceptance",
+  "goal_complete",
+]);
+
+function isInternalGoalToolName(name) {
+  return INTERNAL_GOAL_TOOL_NAMES.has(String(name || ""));
+}
+
 async function buildSystemPromptSnapshot(options = {}) {
   // When briefSkills is set (e.g. for token estimation), skip async skill
   // body loading and use only name+description metadata.
@@ -1511,6 +1555,11 @@ async function buildSystemPromptSnapshot(options = {}) {
   const customPrompt = String(
     options.customPrompt ?? els.systemPromptText.value,
   ).trim() || defaultSystemPrompt;
+  const goalContextInstruction = String(options.goalContextInstruction || "").trim();
+  const goalBehavior = options.goalOperationsEnabled
+    ? mergeGoalModelContext(customPrompt, GOAL_AUTONOMOUS_AGENT_INSTRUCTION)
+    : customPrompt;
+  const behaviorInstruction = mergeGoalModelContext(goalBehavior, goalContextInstruction);
 
   const permissionProfile = options.permissionProfile || getPermissionProfile();
   const promptMessages = options.messages || state.messages;
@@ -1580,7 +1629,7 @@ async function buildSystemPromptSnapshot(options = {}) {
 
   return createSystemPromptSnapshotData({
     securityLayer: SYSTEM_SECURITY_LAYER,
-    behaviorInstruction: customPrompt,
+    behaviorInstruction,
     environmentInstruction: environment.instruction,
     projectFoldersInstruction,
     externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
@@ -1606,6 +1655,20 @@ async function getTaskSystemPrompt(ctx, options = {}) {
     () => buildSystemPromptSnapshot(options),
   );
   return snapshot.prompt;
+}
+
+async function resolveForegroundGoalContext(ctx) {
+  if (!ctx || ctx.isSubAgent || ctx.isDetachedBackground || ctx.goalContextResolved) return;
+  ctx.goalContextResolved = true;
+  try {
+    const response = await apiJson(
+      `/api/sessions/${encodeURIComponent(ctx.sessionId)}/goal-v2`,
+    );
+    const projection = response?.data || response;
+    ctx.goalContextInstruction = formatGoalModelProjection(projection);
+  } catch (_) {
+    ctx.goalContextInstruction = formatGoalModelProjection(null);
+  }
 }
 
 
@@ -2127,7 +2190,7 @@ function ensureActiveRunBannerStructure() {
         </span>
         <div data-active-run-recovery></div>
       </div>
-    `;
+`;
     status = banner.querySelector(".active-run-status");
   }
   return {
@@ -2188,16 +2251,123 @@ function cloneUsageStats(usage) {
   return result;
 }
 
-function attachTaskUsageToAssistant(ctx, assistantIndex) {
+function resolveAgentUsageGroupId(messages, options = {}) {
+  const source = Array.isArray(messages) ? messages : [];
+  const agentRunId = String(options.agentRunId || "");
+  const clientRequestId = String(options.clientRequestId || "");
+  const ownedAssistant = [...source].reverse().find((message) => {
+    if (message?.role !== "assistant") return false;
+    const meta = message.meta || {};
+    const sameRun = agentRunId && String(meta.agentRunId || "") === agentRunId;
+    const sameRequest = clientRequestId
+      && String(meta.agentClientRequestId || "") === clientRequestId;
+    return (sameRun || sameRequest) && String(meta.agentUsageGroupId || "");
+  });
+  if (ownedAssistant) return String(ownedAssistant.meta.agentUsageGroupId || "");
+
+  const latestOrigin = [...source].reverse().find((message) => (
+    message?.role === "user"
+    && message.meta?._system !== true
+    && String(message.meta?.goalOrigin?.messageId || message.id || "")
+  ));
+  return String(
+    latestOrigin?.meta?.goalOrigin?.messageId
+    || latestOrigin?.id
+    || clientRequestId
+    || agentRunId
+    || "",
+  );
+}
+
+function getAgentUsageGroupId(ctx) {
+  if (!ctx) return "";
+  const current = String(ctx.agentUsageGroupId || "");
+  if (current) return current;
+  const resolved = resolveAgentUsageGroupId(ctx.messages, {
+    agentRunId: ctx.agentRunId,
+    clientRequestId: ctx.clientRequestId,
+  });
+  ctx.agentUsageGroupId = resolved;
+  return resolved;
+}
+
+function attachTaskUsageToAssistant(ctx, assistantIndex, usage = null, options = {}) {
   if (!ctx || assistantIndex == null || assistantIndex < 0) return;
-  const taskUsage = cloneUsageStats(ctx.taskUsage || ctx.responseUsage);
+  const taskUsage = cloneUsageStats(usage || ctx.taskUsage || ctx.responseUsage);
   if (!hasUsageStats(taskUsage)) return;
   const msg = ctx.messages?.[assistantIndex];
   if (!msg) return;
+  const agentRunId = String(ctx.agentRunId || "");
+  const clientRequestId = String(ctx.clientRequestId || "");
+  for (const candidate of Array.isArray(ctx.messages) ? ctx.messages : []) {
+    if (candidate?.role !== "assistant") continue;
+    const meta = candidate.meta || {};
+    const sameRun = agentRunId && String(meta.agentRunId || "") === agentRunId;
+    const sameRequest = clientRequestId
+      && String(meta.agentClientRequestId || "") === clientRequestId;
+    if (!sameRun && !sameRequest) continue;
+    candidate.meta = { ...meta };
+    delete candidate.meta._usage;
+    delete candidate.meta._usageScope;
+    delete candidate.meta._usageOwner;
+    delete candidate.meta._usageGroupTerminal;
+  }
+  const usageGroupId = getAgentUsageGroupId(ctx);
   msg.meta = {
     ...(msg.meta || {}),
     _usage: taskUsage,
     _usageScope: "task",
+    _usageOwner: clientRequestId || agentRunId,
+    _usageGroupTerminal: options.groupTerminal !== false,
+    ...(usageGroupId ? { agentUsageGroupId: usageGroupId } : {}),
+  };
+}
+
+function attachCompletedAgentUsage(ctx, snapshot, options = {}) {
+  if (!ctx || !Array.isArray(ctx.messages)) return;
+  const agentRunId = String(ctx.agentRunId || "");
+  let assistantIndex = ctx.messages.findLastIndex((message) => {
+    if (message?.role !== "assistant" || message.streaming) return false;
+    if (String(message?.meta?.agentRunId || "") !== agentRunId) return false;
+    if (isDetachedFromMainContext(message)) return false;
+    if (message.meta?.kind === "auto-context-compaction") return false;
+    if (Array.isArray(message.meta?.toolCalls) && message.meta.toolCalls.length) return false;
+    return Boolean(String(message.content || "").trim());
+  });
+  if (assistantIndex < 0) {
+    // A soft-handoff Run can end after a public commentary+tool turn without a
+    // standalone final answer. Preserve that Run's aggregate usage on its last
+    // public commentary so the terminal turn footer can include it exactly once.
+    assistantIndex = ctx.messages.findLastIndex((message) => {
+      const content = String(message?.content || "").trim();
+      return (
+        message?.role === "assistant"
+        && !message.streaming
+        && String(message?.meta?.agentRunId || "") === agentRunId
+        && !isDetachedFromMainContext(message)
+        && message.meta?.kind !== "auto-context-compaction"
+        && Boolean(content)
+        && !isToolPlanningPlaceholder(content)
+        && !isOperationalToolNotice(content)
+      );
+    });
+  }
+  if (assistantIndex < 0) return;
+  attachTaskUsageToAssistant(
+    ctx,
+    assistantIndex,
+    snapshot?.usage || ctx.taskUsage,
+    options,
+  );
+  for (const message of ctx.messages) {
+    if (message?.role !== "assistant") continue;
+    if (String(message?.meta?.agentRunId || "") !== agentRunId) continue;
+    message.meta = { ...(message.meta || {}) };
+    delete message.meta._agentRunTerminal;
+  }
+  ctx.messages[assistantIndex].meta = {
+    ...(ctx.messages[assistantIndex].meta || {}),
+    _agentRunTerminal: true,
   };
 }
 
@@ -2773,6 +2943,7 @@ function playWelcomeMotion(root) {
 
 function renderMessages() {
 
+  goalFeature?.setSession(state.sessionId);
   editDiffDisclosureState.setSession(state.sessionId);
   messageScrollController?.setSession(state.sessionId);
   longTextDisplayController?.setSession(state.sessionId);
@@ -3899,6 +4070,74 @@ function syncSessionSourceBadgeState(sessionId, savedSession, options = {}) {
   }
 }
 
+function syncTrustedGoalMessageMetadata(localMessages, savedMessages) {
+  if (!Array.isArray(localMessages) || !Array.isArray(savedMessages)) return false;
+  const explicitOrigins = new Map();
+  const explicitCompletions = new Map();
+  for (const message of savedMessages) {
+    const meta = message?.meta || {};
+    const origin = meta.goalOrigin;
+    if (
+      message?.role === "user"
+      && origin?.confirmed === true
+      && origin.sourceKind === "explicit"
+      && String(message.id || "") === String(origin.messageId || "")
+    ) {
+      explicitOrigins.set(String(message.id), origin);
+    }
+    const completion = meta.goalCompletion;
+    if (
+      message?.role === "assistant"
+      && completion?.confirmed === true
+      && completion.sourceKind === "explicit"
+      && meta._agentRunTerminal === true
+      && String(meta.agentRunId || "") === String(completion.sourceRunId || "")
+    ) {
+      explicitCompletions.set(String(completion.sourceRunId), completion);
+    }
+  }
+  let changed = false;
+  for (const message of localMessages) {
+    if (!message || typeof message !== "object") continue;
+    const meta = message.meta && typeof message.meta === "object" ? message.meta : {};
+    if (message.role === "user") {
+      const trusted = explicitOrigins.get(String(message.id || ""));
+      const current = meta.goalOrigin;
+      if (trusted && JSON.stringify(current) !== JSON.stringify(trusted)) {
+        message.meta = { ...meta, goalOrigin: { ...trusted } };
+        changed = true;
+      } else if (!trusted && current?.confirmed === true) {
+        const preliminary = {
+          messageId: String(current.messageId || ""),
+          clientRequestId: String(current.clientRequestId || ""),
+        };
+        message.meta = { ...meta };
+        if (
+          preliminary.messageId === String(message.id || "")
+          && preliminary.clientRequestId
+        ) message.meta.goalOrigin = preliminary;
+        else delete message.meta.goalOrigin;
+        changed = true;
+      }
+      continue;
+    }
+    if (message.role !== "assistant") continue;
+    const trusted = message.meta?._agentRunTerminal === true
+      ? explicitCompletions.get(String(message.meta?.agentRunId || ""))
+      : null;
+    const current = message.meta?.goalCompletion;
+    if (trusted && JSON.stringify(current) !== JSON.stringify(trusted)) {
+      message.meta = { ...(message.meta || {}), goalCompletion: { ...trusted } };
+      changed = true;
+    } else if (!trusted && current) {
+      message.meta = { ...(message.meta || {}) };
+      delete message.meta.goalCompletion;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function saveSessionState(sessionId, messages, stats, title, options = {}) {
 
   if (!sessionId) return;
@@ -3919,6 +4158,13 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
     persistMessages: options.persistMessages === true,
   });
   const savedSession = await persistSessionPayload(sessionId, payload);
+  if (
+    options.persistMessages === true
+    && syncTrustedGoalMessageMetadata(messages, savedSession?.messages)
+    && sessionId === state.sessionId
+  ) {
+    renderSessionMessages(sessionId);
+  }
   syncSessionSourceBadgeState(sessionId, savedSession, {
     notify: options.persistMessages === true,
   });
@@ -5233,7 +5479,15 @@ function markStreamingAssistantProjection(index, projection, sessionId = state.s
   }
 }
 
-function finalizeStreamingAssistantMessage(index, rawContent, toolCalls, sessionId = state.sessionId, messages = null, skipRender = false) {
+function finalizeStreamingAssistantMessage(
+  index,
+  rawContent,
+  toolCalls,
+  sessionId = state.sessionId,
+  messages = null,
+  skipRender = false,
+  options = {},
+) {
   const targetMessages = messages || getSessionMessages(sessionId);
   clearStreamingProjectionTimer(sessionId, index);
   // Finalize the text and tool metadata before one render. Rendering the text
@@ -5241,8 +5495,13 @@ function finalizeStreamingAssistantMessage(index, rawContent, toolCalls, session
   updateAssistantMessage(index, rawContent, false, sessionId, targetMessages, true);
   const current = targetMessages[index];
   current.meta = { ...(current.meta || {}) };
-  if (toolCalls.length) current.meta.toolCalls = toolCalls;
+  const visibleToolCalls = (Array.isArray(toolCalls) ? toolCalls : []).filter((call) => (
+    !isInternalGoalToolName(call?.function?.name)
+  ));
+  if (visibleToolCalls.length) current.meta.toolCalls = visibleToolCalls;
   else delete current.meta.toolCalls;
+  if (options.publicProcessCommentary === true) current.meta.publicProcessCommentary = true;
+  else delete current.meta.publicProcessCommentary;
   if (!skipRender) {
     setSessionMessages(sessionId, targetMessages);
     renderSessionMessages(sessionId);
@@ -5762,6 +6021,10 @@ function buildRecoveredRunContext(session, runState) {
   ctx.responseUsage = { input: 0, output: 0, cache: 0 };
   ctx._taskPrompt = runState.taskPrompt || "";
   ctx.clientRequestId = String(runState.clientRequestId || "");
+  ctx.agentUsageGroupId = resolveAgentUsageGroupId(messages, {
+    agentRunId: runState.agentRunId,
+    clientRequestId: ctx.clientRequestId,
+  });
   ctx.queueItemId = String(runState.queueItemId || "");
   ctx.run = ensureSessionRun(sessionId);
   ctx.runtimeRunId = String(runState.runtimeRunId || "");
@@ -6329,6 +6592,9 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     ).catch(() => ({ found: false, path: null, name: null, content: null }));
     ctx.projectContextResolved = true;
   }
+  if (ctx && !ctx.isSubAgent && !ctx.isDetachedBackground) {
+    await resolveForegroundGoalContext(ctx);
+  }
 
   // Sub-agent already has its own system prompt in ctx.messages[0]; don't double-inject.
   const systemPromptOptions = {
@@ -6341,6 +6607,8 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     primaryRoot: ctx?.primaryRoot,
     rootPaths: ctx?.rootPaths,
     projectContext: ctx?.projectContext,
+    goalContextInstruction: ctx?.goalContextInstruction,
+    goalOperationsEnabled: Boolean(ctx && !ctx.isSubAgent && !ctx.isDetachedBackground),
   };
   const systemPrompt = ctx?.isSubAgent
     ? ""
@@ -6538,6 +6806,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
   const reader = createSseDataReader(res.body);
   const turnAccumulator = createModelTurnAccumulator();
+  const serverOwnedProjection = isServerOwnedRun(ctx);
 
 
 
@@ -6570,14 +6839,24 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       run.runtimeRunId = "";
 
       const toolCalls = normalizeToolCallList(turnAccumulator.getToolCallMap());
-
+      const visibleToolCalls = toolCalls.filter((call) => (
+        !isInternalGoalToolName(call?.function?.name)
+      ));
+      const visibleFinalText = serverOwnedProjection
+        ? String(turnEvent.rawContent || "")
+        : String(turnEvent.combinedText || "");
+      // Server-owned model content is public commentary while a round is in
+      // progress.  The terminal tool list determines whether it remains in the
+      // execution trace or becomes the final answer; private reasoning never
+      // participates because server-owned projection uses rawContent only.
       finalizeStreamingAssistantMessage(
         assistantIndex,
-        turnEvent.combinedText || toolProgressSummary(toolCalls) || "",
+        visibleFinalText || toolProgressSummary(visibleToolCalls) || "",
         toolCalls,
         sessionId,
         _streamMsgs,
         skipRender,
+        { publicProcessCommentary: serverOwnedProjection && toolCalls.length > 0 },
       );
 
       if (!ctx.isSubAgent) {
@@ -6589,20 +6868,47 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
 
     if (turnEvent.receivedToolCallDelta) {
       recordModelResponseStarted(ctx, run, sessionId);
-      markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
+      const streamedToolCalls = normalizeToolCallList(turnAccumulator.getToolCallMap());
+      const hasKnownVisibleTool = streamedToolCalls.some((call) => {
+        const name = String(call?.function?.name || "");
+        return name
+          && !isInternalGoalToolName(name)
+          && (!ctx?.allowedToolNames || ctx.allowedToolNames.has(name));
+      });
+      if (!serverOwnedProjection || hasKnownVisibleTool) {
+        markStreamingAssistantProjection(assistantIndex, "thinking", sessionId, _streamMsgs, skipRender);
+      }
     }
 
-    if (turnEvent.reasoning || turnEvent.text) {
+    const visibleTurnText = serverOwnedProjection
+      ? String(turnEvent.rawContent || "")
+      : String(turnEvent.combinedText || "");
+    if (
+      (serverOwnedProjection ? turnEvent.text : (turnEvent.reasoning || turnEvent.text))
+    ) {
       recordModelResponseStarted(ctx, run, sessionId);
 
       updateAssistantMessage(
         assistantIndex,
-        turnEvent.combinedText,
+        visibleTurnText,
         true,
         sessionId,
         _streamMsgs,
         skipRender,
       );
+
+      if (serverOwnedProjection) {
+        // Write the first public fragment before switching the projection.  A
+        // pending empty assistant intentionally has no DOM node, so reversing
+        // this order would leave the first fragment waiting for another delta.
+        markStreamingAssistantProjection(
+          assistantIndex,
+          "thinking",
+          sessionId,
+          _streamMsgs,
+          skipRender,
+        );
+      }
 
     }
 
@@ -7576,6 +7882,7 @@ async function runBackgroundSubAgentJob(job) {
       allowedTools: serverToolNames,
       maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: job.permissionProfile,
+      runKind: "background",
       cwd: subCtx.cwd || "",
       contextLimit: getModelContextLimit(job.model || getSelectedModel()),
       signal: subCtx.run.abortController.signal,
@@ -7895,10 +8202,11 @@ function agentProjectionSnapshotToolSummaries(snapshot) {
     : Object.values(snapshot?.toolExecutions || {});
   for (const source of snapshotTools) {
     const toolCallId = String(source?.toolCallId || source?.id || "");
-    if (!toolCallId) continue;
+    const name = String(source?.name || source?.action || "");
+    if (!toolCallId || isInternalGoalToolName(name)) continue;
     tools.set(toolCallId, {
       toolCallId,
-      name: String(source?.name || source?.action || ""),
+      name,
       status: String(source?.status || "running"),
       outcome: String(source?.outcome || ""),
       startedAt: String(source?.startedAt || ""),
@@ -7915,11 +8223,12 @@ function agentProjectionMessageToolSummaries(ctx) {
     const messageRunId = String(message?.meta?.agentRunId || "");
     if (!messageRunId || messageRunId !== String(ctx?.agentRunId || "")) continue;
     const toolCallId = String(message?.meta?.toolCallId || message?.meta?.tool?._toolCallId || "");
-    if (!toolCallId) continue;
+    const name = String(message?.meta?.action || message?.meta?.tool?.action || "");
+    if (!toolCallId || isInternalGoalToolName(name)) continue;
     const previous = tools.get(toolCallId) || {};
     tools.set(toolCallId, {
       toolCallId,
-      name: String(message?.meta?.action || message?.meta?.tool?.action || previous.name || ""),
+      name: name || previous.name || "",
       status: message.role === "tool-result" ? "completed" : String(previous.status || "running"),
       outcome: String(message?.meta?.outcome || previous.outcome || ""),
       startedAt: String(previous.startedAt || message?._time || ""),
@@ -8121,8 +8430,11 @@ function findAgentProjectionMessage(ctx, eventType, eventSeq) {
 }
 
 function agentEventMeta(ctx, event, eventType = event?.type) {
+  const usageGroupId = getAgentUsageGroupId(ctx);
   return {
     agentRunId: ctx.agentRunId,
+    agentClientRequestId: String(ctx.clientRequestId || ""),
+    ...(usageGroupId ? { agentUsageGroupId: usageGroupId } : {}),
     agentEventType: eventType,
     agentEventSeq: Number(event?.seq || 0),
   };
@@ -8302,7 +8614,7 @@ async function attachAgentRuntimeProjection(ctx, event, options = {}) {
         ...(projected.meta || {}),
         ...(recoveredAttachment ? {} : agentEventMeta(ctx, event, "model_started")),
         agentRuntimeRunId: runtimeRunId,
-        ...(hasUsage ? { _usage: turnUsage } : {}),
+        ...(hasUsage ? { _usageRecorded: true } : {}),
       };
     }
   } catch (error) {
@@ -8386,14 +8698,17 @@ async function recoverActiveAgentRuntimeProjection(ctx, snapshot) {
 function projectAgentModelCompleted(ctx, event) {
   const data = event?.data || {};
   const runtimeRunId = String(data.runtimeRunId || "");
-  const toolCalls = Array.isArray(data.toolCalls) ? data.toolCalls : [];
-  const combined = data.reasoning
-    ? `<think>${String(data.reasoning)}</think>\n${String(data.content || "")}`
-    : String(data.content || "");
-  const projectedContent = splitThoughtContent(combined);
+  const toolCalls = (Array.isArray(data.toolCalls) ? data.toolCalls : []).filter((call) => (
+    !isInternalGoalToolName(call?.function?.name)
+  ));
+  // Server-owned AgentRun reasoning is private model scratch space.  Only the
+  // public assistant content is durable/projected.
+  const projectedContent = { thought: "", content: String(data.content || "") };
   const completedAt = String(data.completedAt || event?.createdAt || new Date().toISOString());
   let assistant = findAgentAssistantByRuntime(ctx, runtimeRunId);
   markModelResponseStarted(ctx.run, ctx.sessionId);
+
+  const publicProcessCommentary = data.internalOnlyToolCalls === true || toolCalls.length > 0;
 
   if (!assistant) {
     assistant = {
@@ -8407,11 +8722,12 @@ function projectAgentModelCompleted(ctx, event) {
         ...agentEventMeta(ctx, event, "model_completed"),
         agentRuntimeRunId: runtimeRunId,
         toolCalls,
+        ...(publicProcessCommentary ? { publicProcessCommentary: true } : {}),
       },
     };
     ctx.messages.push(assistant);
   } else {
-    assistant.thought = projectedContent.thought || assistant.thought || "";
+    assistant.thought = "";
     assistant.content = projectedContent.content || assistant.content || toolProgressSummary(toolCalls) || "";
     assistant.streaming = false;
     assistant._time = assistant._time || completedAt;
@@ -8421,12 +8737,14 @@ function projectAgentModelCompleted(ctx, event) {
       ...agentEventMeta(ctx, event, "model_completed"),
       agentRuntimeRunId: runtimeRunId,
       toolCalls,
+      ...(publicProcessCommentary ? { publicProcessCommentary: true } : {}),
     };
+    if (!publicProcessCommentary) delete assistant.meta.publicProcessCommentary;
   }
 
-  if (!assistant.meta._usage) {
+  if (!assistant.meta._usageRecorded) {
     const usage = data.usage || {};
-    assistant.meta._usage = cloneUsageStats(usage);
+    assistant.meta._usageRecorded = true;
     setSessionLastUsage(ctx.sessionId, usage);
     updateUsage(usage, ctx.sessionId, ctx);
   }
@@ -8505,6 +8823,7 @@ function projectAgentModelRecovery(ctx, event) {
 }
 
 function projectAgentToolStarted(ctx, event) {
+  if (isInternalGoalToolName(event?.data?.name)) return;
   if (findAgentProjectionMessage(ctx, "tool_started", event?.seq)) return;
   const data = event?.data || {};
   const call = {
@@ -8602,10 +8921,15 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
 }
 
 function projectAgentToolCompleted(ctx, event) {
+  if (isInternalGoalToolName(event?.data?.name)) return;
   if (findAgentProjectionMessage(ctx, "tool_completed", event?.seq)) return;
   const data = event?.data || {};
   const toolCallId = String(data.toolCallId || "");
-  let callMessage = ctx.messages.find((msg) => msg?.role === "tool-call" && msg?.meta?.toolCallId === toolCallId);
+  let callMessage = ctx.messages.find((msg) => (
+    msg?.role === "tool-call"
+    && String(msg?.meta?.agentRunId || "") === String(ctx.agentRunId || "")
+    && String(msg?.meta?.toolCallId || "") === toolCallId
+  ));
   if (!callMessage) {
     const syntheticStart = {
       ...event,
@@ -8618,7 +8942,9 @@ function projectAgentToolCompleted(ctx, event) {
     };
     projectAgentToolStarted(ctx, syntheticStart);
     callMessage = ctx.messages.find((message) => (
-      message?.role === "tool-call" && message?.meta?.toolCallId === toolCallId
+      message?.role === "tool-call"
+      && String(message?.meta?.agentRunId || "") === String(ctx.agentRunId || "")
+      && String(message?.meta?.toolCallId || "") === toolCallId
     ));
     callMessage.meta.agentEventType = "tool_completed_call";
   }
@@ -8643,13 +8969,34 @@ function projectAgentToolCompleted(ctx, event) {
 
 async function projectAgentEvent(ctx, event) {
   const eventType = String(event?.type || "");
+  const internalToolEvent = (
+    isInternalGoalToolName(event?.data?.name)
+    && ["tool_started", "tool_completed"].includes(eventType)
+  );
+  let projectionEvent = event;
+  if (eventType === "model_completed") {
+    const sourceToolCalls = Array.isArray(event.data?.toolCalls) ? event.data.toolCalls : [];
+    const visibleToolCalls = sourceToolCalls.filter((call) => (
+      !isInternalGoalToolName(call?.function?.name)
+    ));
+    projectionEvent = {
+      ...event,
+      data: {
+        ...(event.data || {}),
+        toolCalls: visibleToolCalls,
+        internalOnlyToolCalls: sourceToolCalls.length > 0 && visibleToolCalls.length === 0,
+      },
+    };
+  }
   const projectionReferenceTime = Date.now();
-  const projectionObserved = beginAgentProjectionEvent(ctx, event, projectionReferenceTime);
-  if (eventType === "model_started") await projectAgentModelStarted(ctx, event);
-  else if (eventType === "model_completed") projectAgentModelCompleted(ctx, event);
-  else if (eventType === "model_recovery") projectAgentModelRecovery(ctx, event);
-  else if (eventType === "tool_started") projectAgentToolStarted(ctx, event);
-  else if (eventType === "tool_completed") projectAgentToolCompleted(ctx, event);
+  const projectionObserved = internalToolEvent
+    ? false
+    : beginAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
+  if (eventType === "model_started") await projectAgentModelStarted(ctx, projectionEvent);
+  else if (eventType === "model_completed") projectAgentModelCompleted(ctx, projectionEvent);
+  else if (eventType === "model_recovery") projectAgentModelRecovery(ctx, projectionEvent);
+  else if (eventType === "tool_started") projectAgentToolStarted(ctx, projectionEvent);
+  else if (eventType === "tool_completed") projectAgentToolCompleted(ctx, projectionEvent);
   else if (eventType === "context_compaction_started") {
     projectAgentContextCompaction(ctx, event, "running");
   } else if (eventType === "context_compaction_completed") {
@@ -8658,7 +9005,7 @@ async function projectAgentEvent(ctx, event) {
     projectAgentContextCompaction(ctx, event, "failed");
   }
 
-  if (projectionObserved) completeAgentProjectionEvent(ctx, event, projectionReferenceTime);
+  if (projectionObserved) completeAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
   ctx.agentEventCursor = Math.max(Number(ctx.agentEventCursor || 0), Number(event?.seq || 0));
   ctx.run.agentEventCursor = ctx.agentEventCursor;
   setSessionMessages(ctx.sessionId, ctx.messages);
@@ -8672,6 +9019,9 @@ async function projectAgentEvent(ctx, event) {
     agentEventCursor: ctx.agentEventCursor,
     runtimeRunId: ctx.runtimeRunId || "",
   });
+  if (internalToolEvent && eventType === "tool_completed") {
+    await goalFeature?.refresh(ctx.sessionId, { quiet: true });
+  }
 }
 
 async function requestServerAgentInput(ctx, pendingInput) {
@@ -8926,6 +9276,7 @@ async function runServerAgentLoop(ctx) {
       toolBudgets: skillToolBudgets,
       maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: ctx.permissionProfile || "read",
+      runKind: "foreground",
       cwd: ctx.cwd || "",
       contextLimit: getModelContextLimit(ctx.model || getSelectedModel()),
       signal: ctx.run.abortController.signal,
@@ -8996,8 +9347,62 @@ async function runServerAgentLoop(ctx) {
       await requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization);
       continue;
     }
+    const continuation = snapshot?.result?.continuation;
+    if (
+      continuation
+      && ["completed", "failed"].includes(String(snapshot.status || ""))
+      && String(continuation.agentRunId || "")
+    ) {
+      attachCompletedAgentUsage(ctx, snapshot, { groupTerminal: false });
+      archiveAgentProjectionShadow(ctx);
+      ctx.agentRunId = String(continuation.agentRunId);
+      ctx.clientRequestId = String(continuation.clientRequestId || ctx.clientRequestId || "");
+      ctx.agentEventCursor = 0;
+      ctx.run.agentRunId = ctx.agentRunId;
+      ctx.run.agentEventCursor = 0;
+      ctx.run.modelRound = 0;
+      ctx.runtimeRunId = "";
+      ctx.run.runtimeRunId = "";
+      ctx._activeRuntimeRunId = "";
+      ctx._agentProjectionShadow = null;
+      ctx._agentProjectionShadowArchived = false;
+      ctx._agentProjectionLegacyObservation = null;
+      await persistRunCheckpoint(ctx, "running", "model", {
+        agentRunId: ctx.agentRunId,
+        clientRequestId: ctx.clientRequestId,
+        agentEventCursor: 0,
+        runtimeRunId: "",
+        continuationIndex: Number(continuation.index || 0),
+      });
+      continue;
+    }
     if (snapshot.status === "completed") {
       const result = snapshot.result || {};
+      if (result.continuationPaused && result.continuationMessage) {
+        const alreadyProjected = ctx.messages.some((message) => (
+          message?.meta?.kind === "goal-continuation-paused"
+          && String(message?.meta?.agentRunId || "") === String(ctx.agentRunId || "")
+        ));
+        if (!alreadyProjected) {
+          ctx.messages.push({
+            role: "assistant",
+            content: String(result.continuationMessage),
+            _model: ctx.model || getSelectedModel(),
+            _time: new Date().toISOString(),
+            meta: {
+              kind: "goal-continuation-paused",
+              agentRunId: ctx.agentRunId,
+              agentClientRequestId: String(ctx.clientRequestId || ""),
+              ...(getAgentUsageGroupId(ctx)
+                ? { agentUsageGroupId: getAgentUsageGroupId(ctx) }
+                : {}),
+            },
+          });
+        }
+      }
+      attachCompletedAgentUsage(ctx, snapshot);
+      setSessionMessages(ctx.sessionId, ctx.messages);
+      renderSessionMessages(ctx.sessionId);
       clearObservedAgentRun(ctx);
       return result;
     }
@@ -9008,6 +9413,16 @@ async function runServerAgentLoop(ctx) {
     const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`);
     err.status = snapshot.status;
     err.errorCode = snapshot.errorCode || "";
+    const preservePublicProcess = Boolean(
+      snapshot.goalOperationsEnabled
+      && ["agent_round_limit", "goal_run_hard_limit"].includes(err.errorCode)
+    );
+    if (preservePublicProcess) {
+      attachCompletedAgentUsage(ctx, snapshot);
+      setSessionMessages(ctx.sessionId, ctx.messages);
+      renderSessionMessages(ctx.sessionId);
+    }
+    err.preservePublicProcess = preservePublicProcess;
     if (err.errorCode === "model_access_denied") {
       await refreshModels().catch((refreshError) => {
         console.warn("Failed to refresh models after authorization changed:", refreshError);
@@ -9713,6 +10128,23 @@ function projectOptimisticFirstMessage(userText, model, submittedAt, images = []
   return message;
 }
 
+function ensureForegroundGoalOrigin(message, clientRequestId) {
+  if (!message || message.role !== "user" || !clientRequestId) return "";
+  const currentId = String(message.id || "");
+  const messageId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(currentId)
+    ? currentId
+    : `goal-origin-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  message.id = messageId;
+  message.meta = {
+    ...(message.meta || {}),
+    goalOrigin: {
+      messageId,
+      clientRequestId: String(clientRequestId),
+    },
+  };
+  return messageId;
+}
+
 function reconcileOptimisticFirstMessage(message, content, imageRefs, model) {
   if (!message) return;
   message.content = content;
@@ -9894,6 +10326,15 @@ async function sendMessage(userText, options = {}) {
   if (!existingMessage && !optimisticMessage) {
     ctx.messages.push({ role: "user", content: messageContent, _images: imageRefs.length > 0 ? imageRefs : undefined, _model: ctx.model || model, _time: new Date(submittedAt).toISOString() });
   }
+  const foregroundOriginMessage = existingMessage
+    || optimisticMessage
+    || [...ctx.messages].reverse().find((message) => message?.role === "user");
+  const foregroundOriginMessageId = ensureForegroundGoalOrigin(
+    foregroundOriginMessage,
+    ctx.clientRequestId,
+  );
+  ctx.agentUsageGroupId = foregroundOriginMessageId || ctx.clientRequestId;
+  const explicitGoalAction = goalFeature?.classifyGoalInput(userText);
   // Snapshot the healthy message count so we can rollback on failure
   const snapshotIndex = ctx.messages.length;
   const originalUserContent = messageContent;
@@ -9907,16 +10348,32 @@ async function sendMessage(userText, options = {}) {
   renderSessionMessages(sessionId);
   messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);
 
-  // Anchor the model name and expose the active state before persistence so
-  // first-send feedback is not blocked on metadata writes.
+  await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, {
+    // Explicit Goal creation is server-authoritative and binds the immutable
+    // origin to the persisted user message before goal_created is appended.
+    // Ordinary runs retain the established metadata-only pre-run checkpoint.
+    persistMessages: explicitGoalAction?.kind === "create",
+  });
+
+  // Explicit /goal and autonomous Goal creation share the same v2 fact layer.
+  // The user-owned origin is persisted first; only then may the ordinary
+  // foreground AgentRun start with that Goal already visible in its snapshot.
+  if (explicitGoalAction?.kind === "create") {
+    await goalFeature.prepareExplicitGoal({
+      sessionId,
+      objective: explicitGoalAction.objective,
+      messageId: foregroundOriginMessageId,
+      clientRequestId: ctx.clientRequestId,
+      permissionProfile: ctx.permissionProfile || getPermissionProfile(),
+    });
+  }
+
   if (!claimActiveRunContext(ctx)) {
     throw new Error("Foreground AgentRun already has an active observer");
   }
   run._model = ctx.model || getSelectedModel();
   setStreaming(true, sessionId);
   if (optimisticMessage) scheduleDeferredSessionRefresh(sessionId);
-
-  await saveSessionState(sessionId, ctx.messages, ctx.stats);
 
   await persistRunCheckpoint(ctx, "running", "model").catch(() => {});
 
@@ -9978,7 +10435,7 @@ async function sendMessage(userText, options = {}) {
     if (isAbort) finalizePausedRun(ctx);
     // For non-abort errors, rollback to healthy state so the conversation
     // isn't stuck replaying the same broken context on every retry.
-    if (!isAbort) {
+    if (!isAbort && !loopError?.preservePublicProcess) {
       // Restore user message in case image retry modified it
       const userMsg = ctx.messages[snapshotIndex - 1];
       if (userMsg && userMsg.role === "user") {
@@ -10016,6 +10473,26 @@ async function sendMessage(userText, options = {}) {
       if (loopError && typeof loopError === "object") {
         loopError._codeErrorRendered = true;
       }
+    } else if (!isAbort) {
+      for (const msg of ctx.messages) {
+        if (msg && msg.streaming) {
+          delete msg.streaming;
+          delete msg._streamProjection;
+        }
+      }
+      const errMsg = loopError?.message || String(loopError);
+      errorRecoveryAssistant = {
+        role: "assistant",
+        content: loopError?.errorCode
+          ? _formatAgentError(loopError)
+          : `**${t("errorPrefix")}：${escapeHtml(errMsg)}**\n\n> ${t("errorRecoveryHint")}`,
+        meta: { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
+        _time: new Date().toISOString(),
+      };
+      ctx.messages.push(errorRecoveryAssistant);
+      setSessionMessages(sessionId, ctx.messages);
+      renderSessionMessages(sessionId);
+      if (loopError && typeof loopError === "object") loopError._codeErrorRendered = true;
     }
     await persistRunCheckpoint(ctx, status, "model", {
       lastError: loopError?.message || String(loopError),
@@ -10032,6 +10509,7 @@ async function sendMessage(userText, options = {}) {
     loopError ? (loopError?.name === "AbortError" ? "cancelled" : "failed") : "completed",
   );
   await saveSessionState(sessionId, ctx.messages, ctx.stats);
+  await goalFeature?.refresh(sessionId, { quiet: true });
   renderSessions();
 
   notifyTaskComplete(sessionId);
@@ -10145,7 +10623,7 @@ function saveLocalSettings() {
 }
 
 function handleUiSlashCommand(text) {
-  if (goalControlFeature.handleInput(text)) return true;
+  if (goalFeature?.handleSlash(text)) return true;
   const parts = text.trim().split(/\s+/);
   const cmd = parts[0] || "";
   if (cmd === "/compact") { void compactConversation(); return true; }
@@ -10931,7 +11409,10 @@ els.chatForm.addEventListener("submit", async (event) => {
 
   // Local UI commands are actions on the current view, not model work. Keep
   // them out of both the FIFO queue and the detached parallel dispatcher.
-  if (parallelTask === null && handleUiSlashCommand(text)) {
+  if (
+    parallelTask === null
+    && (handleUiSlashCommand(text) || goalFeature?.handleOrdinary(text))
+  ) {
     els.prompt.value = "";
     els.prompt.rows = 2;
     longTextDisplayController?.resetComposer();
@@ -11988,6 +12469,7 @@ async function init() {
     const msgs = state.messages || [];
     if (msgs.length > 0) {
       const serialized = msgs.map((msg) => ({
+        id: msg.id || undefined,
         role: msg.role, content: msg.content || "", thought: msg.thought || "",
         meta: msg.meta || {}, _images: msg._images || undefined,
         _model: msg._model || undefined, _time: msg._time || undefined,

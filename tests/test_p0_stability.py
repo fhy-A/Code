@@ -421,11 +421,16 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertTrue(server_cancel.rstrip().endswith("return;\n  }"))
         self.assertNotIn("run.abortController.abort()", server_cancel)
 
-    def test_durable_model_projection_always_has_completion_time(self):
+    def test_durable_model_projection_uses_public_content_and_completion_time(self):
         projection_start = APP_SOURCE.index("function projectAgentModelCompleted")
         projection_end = APP_SOURCE.index("function projectAgentToolStarted", projection_start)
         projection = APP_SOURCE[projection_start:projection_end]
-        self.assertIn("const projectedContent = splitThoughtContent(combined)", projection)
+        self.assertIn(
+            'const projectedContent = { thought: "", content: String(data.content || "") }',
+            projection,
+        )
+        self.assertNotIn("data.reasoning", projection)
+        self.assertIn('assistant.thought = ""', projection)
         self.assertIn("data.completedAt || event?.createdAt", projection)
         self.assertIn("_time: completedAt", projection)
         self.assertIn("assistant._time = assistant._time || completedAt", projection)

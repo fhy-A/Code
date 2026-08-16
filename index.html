@@ -182,6 +182,16 @@
           </button>
           <section id="authorizationPanel" class="authorization-panel hidden" aria-live="polite"></section>
           <form id="chatForm" class="composer">
+            <section id="goalProgress" class="goal-progress hidden" aria-live="polite">
+              <button id="goalProgressSummary" class="goal-progress-summary" type="button"
+                aria-expanded="false" aria-controls="goalProgressDetails">
+                <span class="goal-progress-mark" aria-hidden="true">Goal</span>
+                <span id="goalProgressObjective" class="goal-progress-objective"></span>
+                <span id="goalProgressPhase" class="goal-progress-phase"></span>
+                <span id="goalProgressCount" class="goal-progress-count"></span>
+              </button>
+              <div id="goalProgressDetails" class="goal-progress-details" role="region" hidden></div>
+            </section>
             <section id="userInputPanel" class="user-input-panel hidden" aria-live="assertive"></section>
             <textarea id="prompt" rows="2" data-i18n="inputPlaceholder" placeholder="描述需求、粘贴代码，或输入 / 调用命令"></textarea>
             <button id="composerInputToggle" class="composer-input-toggle" type="button" hidden

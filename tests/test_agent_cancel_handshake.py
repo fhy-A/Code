@@ -276,6 +276,72 @@ process.stdout.write(JSON.stringify({ messages, assistant }));
         )
         self.assertIn("return;", projection[cancellation_start:cancellation_end])
 
+    def test_tool_completion_pairs_agent_run_and_tool_call_identity(self):
+        start = APP_SOURCE.index("function projectAgentToolCompleted(ctx, event)")
+        end = APP_SOURCE.index("async function projectAgentEvent", start)
+        projection = APP_SOURCE[start:end]
+        script = f"""
+function isInternalGoalToolName() {{ return false; }}
+function findAgentProjectionMessage() {{ return null; }}
+function normalizeNativeToolCall(call) {{
+  return {{action: call.function.name, _toolCallId: call.id, _native: true}};
+}}
+function formatToolCall() {{ return ""; }}
+function projectAgentToolStarted(ctx, event) {{
+  ctx.messages.push({{
+    role: "tool-call",
+    meta: {{
+      agentRunId: ctx.agentRunId,
+      toolCallId: event.data.toolCallId,
+      action: event.data.name,
+    }},
+  }});
+}}
+let selectedCall = null;
+function projectServerEditToolCompleted(_ctx, _event, callMessage) {{
+  selectedCall = callMessage;
+  return false;
+}}
+function formatToolResult(result) {{ return JSON.stringify(result); }}
+function agentEventMeta(ctx, event, eventType) {{
+  return {{agentRunId: ctx.agentRunId, agentEventType: eventType, agentEventSeq: event.seq}};
+}}
+{projection}
+const runACall = {{role: "tool-call", meta: {{agentRunId: "run-a", toolCallId: "shared", action: "read_file"}}}};
+const runBCall = {{role: "tool-call", meta: {{agentRunId: "run-b", toolCallId: "shared", action: "read_file"}}}};
+const ctx = {{agentRunId: "run-b", messages: [runACall, runBCall]}};
+projectAgentToolCompleted(ctx, {{
+  seq: 9,
+  data: {{
+    toolCallId: "shared",
+    name: "read_file",
+    result: {{ok: true, path: "README.md"}},
+    outcome: "succeeded",
+  }},
+}});
+process.stdout.write(JSON.stringify({{
+  runAType: runACall.meta.agentEventType || "",
+  runBType: runBCall.meta.agentEventType || "",
+  selectedRunId: selectedCall?.meta?.agentRunId || "",
+  result: ctx.messages.at(-1),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["runAType"], "")
+        self.assertEqual(result["runBType"], "")
+        self.assertEqual(result["selectedRunId"], "run-b")
+        self.assertEqual(result["result"]["meta"]["agentRunId"], "run-b")
+        self.assertEqual(result["result"]["meta"]["toolCallId"], "shared")
+        self.assertEqual(result["result"]["meta"]["outcome"], "succeeded")
+
     def test_stream_cleanup_keeps_active_context_message_array_identity(self):
         helper_start = APP_SOURCE.index("function removeKeyFallbackMessages(messages)")
         helper_end = APP_SOURCE.index("async function waitForModelRetry", helper_start)

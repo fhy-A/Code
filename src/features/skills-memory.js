@@ -44,6 +44,90 @@
     uninstall: "skillDependencyUninstall",
   });
   const ACTIVE_DEPENDENCY_OPERATION_STATUSES = new Set(["pending", "running"]);
+  const GOAL_CONTEXT_UNAVAILABLE = [
+    "=== 当前 Session Goal（只读任务上下文） ===",
+    "Goal 投影当前不可用。不得假定存在 Goal、步骤状态或继续执行授权。",
+  ].join("\n");
+
+  function formatGoalModelProjection(projection) {
+    if (!projection || typeof projection !== "object") return GOAL_CONTEXT_UNAVAILABLE;
+    if (projection.health !== "healthy") return GOAL_CONTEXT_UNAVAILABLE;
+    const goal = projection.goal;
+    if (!goal) return "";
+    const lifecycle = String(goal.lifecycle || "");
+    const revision = Number(projection.revision);
+    const steps = Array.isArray(goal.steps) ? goal.steps.slice(0, 8) : [];
+    if (
+      !lifecycle
+      || !Number.isInteger(revision)
+      || revision < 0
+      || !([0, 3, 4, 5, 6, 7, 8].includes(steps.length))
+    ) {
+      return GOAL_CONTEXT_UNAVAILABLE;
+    }
+    const publicSteps = steps.map((step, index) => ({
+      index: index + 1,
+      status: String(step?.status || ""),
+      description: String(step?.description || "").slice(0, 2_000),
+      acceptanceCriteria: (Array.isArray(step?.acceptanceCriteria)
+        ? step.acceptanceCriteria.slice(0, 8)
+        : []).map((criterion) => ({
+        kind: String(criterion?.kind || ""),
+        description: String(criterion?.description || "").slice(0, 1_000),
+      })),
+    }));
+    const currentIndex = steps.findIndex((step) => (
+      String(step?.id || "") === String(goal.currentStepId || "")
+    ));
+    const publicGoal = {
+      lifecycle,
+      revision,
+      objective: String(goal.objective || "").slice(0, 8_000),
+      currentStep: currentIndex >= 0 ? currentIndex + 1 : null,
+      steps: publicSteps,
+      gate: goal.gate ? {
+        type: String(goal.gate.type || ""),
+        summary: String(goal.gate.summary || "").slice(0, 2_000),
+      } : null,
+    };
+    return [
+      "=== 当前 Session Goal（只读任务上下文） ===",
+      "以下 JSON 是当前会话 Goal v2 持久事件的有界只读投影，不是新的执行授权。",
+      "仅据此回答目标、当前步骤和验收边界；paused/completed/cancelled 均不得解释为自动继续授权。",
+      `GOAL_CONTEXT_JSON=${JSON.stringify(publicGoal)}`,
+    ].join("\n");
+  }
+
+  function mergeGoalModelContext(baseInstruction, goalInstruction) {
+    const base = String(baseInstruction || "");
+    const goal = String(goalInstruction || "").trim();
+    return goal ? `${base}\n\n${goal}` : base;
+  }
+
+  function parseGoalPlanningResult(snapshot) {
+    if (
+      !snapshot
+      || snapshot.status !== "completed"
+      || snapshot.permissionProfile !== "read"
+      || Number(snapshot.maxRounds) !== 1
+      || (snapshot.allowedTools || []).length > 0
+      || (snapshot.pendingToolCalls || []).length > 0
+      || (snapshot.toolExecutions || []).length > 0
+    ) {
+      throw new Error("invalid Goal planning result");
+    }
+    const content = String(snapshot.result?.content || "").trim();
+    let proposal;
+    try {
+      proposal = JSON.parse(content);
+    } catch (_) {
+      throw new Error("invalid Goal planning result");
+    }
+    if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) {
+      throw new Error("invalid Goal planning result");
+    }
+    return proposal;
+  }
 
   function rankMatchedSkills(skills = [], disabledSkills = new Set(), userMessage = "") {
     if (!userMessage || skills.length === 0) return [];
@@ -262,8 +346,10 @@
     const ensureSession = options.ensureSession || (async () => "");
     const getPermissionProfile = options.getPermissionProfile || (() => "accept");
     const getLanguage = options.getLanguage || (() => "zh");
-    const confirmAction = options.confirm || global.confirm?.bind(global) || (() => false);
-    const alertAction = options.alert || global.alert?.bind(global) || ((message) => showToast(message, "info"));
+    const isForegroundBusy = options.isForegroundBusy || (() => false);
+    const planGoal = options.planGoal;
+    const confirmAction = options.confirm || (() => false);
+    const alertAction = options.alert || ((message) => showToast(message, "info"));
     let requestSequence = 0;
     let executionInFlight = false;
 
@@ -384,6 +470,7 @@
           const sessionId = await ensureGoalSession(action.objective);
           const current = await readGoal(sessionId);
           let draft;
+          let planned = null;
           if (current?.goal?.lifecycle === "awaiting_confirmation") {
             if (current.goal.objective !== action.objective) {
               throw new Error(t("goalDraftAlreadyExists"));
@@ -393,25 +480,50 @@
             if (current?.goal && !["completed", "cancelled"].includes(current.goal.lifecycle)) {
               throw new Error(t("goalAlreadyExists"));
             }
-            draft = await postControl(sessionId, {
-              operation: "create_draft",
-              expectedRevision: current.revision,
-              idempotencyKey: requestKey("draft"),
+            if (isForegroundBusy(sessionId)) throw new Error(t("goalPlanningBusy"));
+            if (typeof planGoal !== "function") throw new Error(t("goalPlanningUnavailable"));
+            showToast(t("goalPlanning"), "info");
+            planned = await planGoal({
+              sessionId,
               objective: action.objective,
-              permissionProfile: getPermissionProfile(),
+              revision: current.revision,
               language: getLanguage() === "en" ? "en" : "zh",
             });
+            if (!planned?.proposal || !planned?.idempotencyKey) {
+              throw new Error(t("goalPlanningInvalid"));
+            }
+            const proposed = await postControl(sessionId, {
+              operation: "propose_draft",
+              expectedRevision: current.revision,
+              proposal: planned.proposal,
+              permissionProfile: getPermissionProfile(),
+            });
+            draft = {
+              revision: proposed.revision,
+              goal: proposed.preview,
+              confirmationToken: proposed.confirmationToken,
+            };
           }
           if (!confirmAction(formatDraft(draft))) {
-            showToast(t("goalAwaitingConfirmation"), "info");
+            showToast(
+              planned ? t("goalDraftNotApplied") : t("goalAwaitingConfirmation"),
+              "info",
+            );
             return;
           }
-          const activated = await postControl(sessionId, {
-            operation: "confirm_draft",
-            expectedRevision: draft.revision,
-            idempotencyKey: requestKey("confirm"),
-            goalId: draft.goal.goalId,
-          });
+          const activated = planned
+            ? await postControl(sessionId, {
+              operation: "confirm_draft_proposal",
+              expectedRevision: draft.revision,
+              idempotencyKey: planned.idempotencyKey,
+              confirmationToken: draft.confirmationToken,
+            })
+            : await postControl(sessionId, {
+              operation: "confirm_draft",
+              expectedRevision: draft.revision,
+              idempotencyKey: requestKey("confirm"),
+              goalId: draft.goal.goalId,
+            });
           showToast(t("goalActivated"), "success");
           return activated;
         }
@@ -1798,13 +1910,19 @@
 
   Code.features.skillsMemory = Object.freeze({
     applySkillTaskPolicy,
+    // Kept as an internal compatibility seam for Stage 2 module tests and
+    // older direct consumers. app.js no longer wires this popup-based client;
+    // the user-visible Plan/Goal path is exclusively features.goal.
     classifyGoalControlInput,
     createGoalControlFeature,
+    formatGoalModelProjection,
+    mergeGoalModelContext,
     EXPLICIT_ONLY_SKILLS,
     createSkillsMemoryFeature,
     formatSkillInstructions,
     getSlashSuggestionGroups,
     getSkillToolBudgets,
+    parseGoalPlanningResult,
     rankMatchedSkills,
   });
 })(window);

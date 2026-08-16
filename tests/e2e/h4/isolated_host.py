@@ -84,6 +84,55 @@ MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER"
 MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
+GOAL_V2_EXPLICIT_USER = "/goal H4_GOAL_V2_EXPLICIT"
+GOAL_V2_EXPLICIT_FINAL = "H4_GOAL_V2_EXPLICIT_FINAL"
+GOAL_V2_PUBLIC_COMMENTARY = "H4_GOAL_V2_PUBLIC_PROCESS_COMMENTARY"
+GOAL_V2_PRIVATE_REASONING = "H4_GOAL_V2_PRIVATE_REASONING_MUST_NOT_PROJECT"
+GOAL_V2_AUTONOMOUS_USER = "H4_GOAL_V2_AUTONOMOUS"
+GOAL_V2_AUTONOMOUS_FINAL = "H4_GOAL_V2_AUTONOMOUS_FINAL"
+GOAL_V2_AUTONOMOUS_COMPLETE_USER = "H4_GOAL_V2_AUTONOMOUS_COMPLETE"
+GOAL_V2_AUTONOMOUS_COMPLETE_FINAL = "H4_GOAL_V2_AUTONOMOUS_COMPLETE_FINAL"
+GOAL_V2_CONTINUATION_USER = "/goal H4_GOAL_V2_CONTINUATION"
+GOAL_V2_CONTINUATION_STAGE = "H4_GOAL_V2_CONTINUATION_PUBLIC_STAGE"
+GOAL_V2_CONTINUATION_FINAL = "H4_GOAL_V2_CONTINUATION_FINAL"
+GOAL_V2_CONTINUATION_ROOT_CALL_IDS = tuple(
+    f"h4-goal-v2-continuation-root-{index}" for index in range(1, 41)
+)
+GOAL_V2_CONTINUATION_NEXT_CALL_IDS = tuple(
+    f"h4-goal-v2-continuation-next-{index}" for index in range(1, 6)
+)
+GOAL_V2_HARD_LIMIT_USER = "/goal H4_GOAL_V2_HARD_LIMIT"
+GOAL_V2_HARD_LIMIT_STAGE = "H4_GOAL_V2_HARD_LIMIT_PUBLIC_STAGE"
+GOAL_V2_HARD_LIMIT_CALL_IDS = tuple(
+    f"h4-goal-v2-hard-limit-{index}" for index in range(1, 51)
+)
+GOAL_V2_EXPLICIT_CALL_IDS = tuple(
+    f"h4-goal-v2-explicit-{index}" for index in range(1, 5)
+)
+GOAL_V2_AUTONOMOUS_CALL_IDS = tuple(
+    f"h4-goal-v2-autonomous-{index}" for index in range(1, 6)
+)
+GOAL_V2_AUTONOMOUS_COMPLETE_CALL_IDS = tuple(
+    f"h4-goal-v2-autonomous-complete-{index}" for index in range(1, 9)
+)
+GOAL_V2_ACCEPT_SETUP_USER = "/goal H4_GOAL_V2_ACCEPT_SETUP"
+GOAL_V2_ACCEPT_SETUP_FINAL = "H4_GOAL_V2_ACCEPT_SETUP_FINAL"
+GOAL_V2_FINAL_STAGE_SUMMARY = "H4_GOAL_V2_FINAL_STAGE_SUMMARY"
+GOAL_V2_FINAL_SUMMARY_ONE = "H4_GOAL_V2_FINAL_SUMMARY_ONE"
+GOAL_V2_FINAL_SUMMARY_TWO = "H4_GOAL_V2_FINAL_SUMMARY_TWO"
+GOAL_V2_ACCEPT_SETUP_CALL_IDS = tuple(
+    f"h4-goal-v2-accept-setup-{index}" for index in range(1, 8)
+)
+GOAL_V2_GATE_SETUP_USER = "/goal H4_GOAL_V2_GATE_SETUP"
+GOAL_V2_GATE_SETUP_FINAL = "H4_GOAL_V2_GATE_SETUP_FINAL"
+GOAL_V2_GATE_SETUP_CALL_IDS = tuple(
+    f"h4-goal-v2-gate-setup-{index}" for index in range(1, 8)
+)
+GOAL_V2_GATE_USER = "H4_GOAL_V2_GATE_USER_ACCEPTED"
+GOAL_V2_GATE_FINAL = "H4_GOAL_V2_GATE_FINAL"
+GOAL_V2_GATE_CALL_IDS = tuple(
+    f"h4-goal-v2-gate-complete-{index}" for index in range(1, 3)
+)
 STREAM_USER = "H4_STREAM_REFRESH_USER"
 STREAM_ONE = "H4_STREAM_ONE "
 STREAM_TWO = "H4_STREAM_TWO "
@@ -221,6 +270,7 @@ REFRESH_GATE_NAMES = (
     "before-tool-final-delta",
     "before-tool-terminal",
     "before-second-tool-execute",
+    "goal-final-after-first-delta",
 )
 
 
@@ -393,8 +443,11 @@ class RefreshGateState:
             "at": int(state["releasedAt"] or 0),
         })
 
-    def release_all(self) -> None:
+    def release_all(self, exclude: set[str] | None = None) -> None:
+        excluded = exclude or set()
         for name in REFRESH_GATE_NAMES:
+            if name in excluded:
+                continue
             self.release(name)
 
     def snapshot(self) -> dict:
@@ -473,6 +526,53 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             PROPOSE_EDIT_TOOL_CALL_ID,
         }:
             has_tool_result = True
+    joined_user_text = "\n".join(user_texts)
+    if (
+        "goal_agent_continuation_v1" in joined_user_text
+        and "H4_GOAL_V2_CONTINUATION" in joined_user_text
+    ):
+        completed = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(GOAL_V2_CONTINUATION_NEXT_CALL_IDS)
+        if len(completed) >= len(GOAL_V2_CONTINUATION_NEXT_CALL_IDS):
+            return "goal-v2-continuation-next-final", True
+        return f"goal-v2-continuation-next-call-{len(completed) + 1}", bool(completed)
+    if GOAL_V2_CONTINUATION_USER in user_text:
+        completed = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(GOAL_V2_CONTINUATION_ROOT_CALL_IDS)
+        if len(completed) >= len(GOAL_V2_CONTINUATION_ROOT_CALL_IDS):
+            return "goal-v2-continuation-root-final", True
+        return f"goal-v2-continuation-root-call-{len(completed) + 1}", bool(completed)
+    if GOAL_V2_HARD_LIMIT_USER in user_text:
+        completed = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(GOAL_V2_HARD_LIMIT_CALL_IDS)
+        return f"goal-v2-hard-limit-call-{len(completed) + 1}", bool(completed)
+    for marker, prefix, call_ids in (
+        (GOAL_V2_EXPLICIT_USER, "goal-v2-explicit", GOAL_V2_EXPLICIT_CALL_IDS),
+        (GOAL_V2_AUTONOMOUS_COMPLETE_USER, "goal-v2-autonomous-complete", GOAL_V2_AUTONOMOUS_COMPLETE_CALL_IDS),
+        (GOAL_V2_AUTONOMOUS_USER, "goal-v2-autonomous", GOAL_V2_AUTONOMOUS_CALL_IDS),
+        (GOAL_V2_ACCEPT_SETUP_USER, "goal-v2-accept-setup", GOAL_V2_ACCEPT_SETUP_CALL_IDS),
+        (GOAL_V2_GATE_SETUP_USER, "goal-v2-gate-setup", GOAL_V2_GATE_SETUP_CALL_IDS),
+        (GOAL_V2_GATE_USER, "goal-v2-gate-complete", GOAL_V2_GATE_CALL_IDS),
+    ):
+        if marker not in user_text:
+            continue
+        completed = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(call_ids)
+        if len(completed) >= len(call_ids):
+            return f"{prefix}-final", True
+        return f"{prefix}-call-{len(completed) + 1}", bool(completed)
     queue_questionnaire_scenario = _questionnaire_scenario(
         messages,
         "\n".join(user_texts),
@@ -1520,6 +1620,20 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     for message in (payload.get("messages") or [])
                 ),
             }
+        if scenario == "goal-v2-accept-setup-final":
+            chat_metric["goalTerminalResponse"] = {
+                "toolsPresent": bool(payload.get("tools")),
+                "toolChoicePresent": "tool_choice" in payload,
+                "terminalInstructionPresent": any(
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and "one complete, self-contained user-facing final answer"
+                    in str(message.get("content") or "")
+                    and "Do not say that the summary is above"
+                    in str(message.get("content") or "")
+                    for message in (payload.get("messages") or [])
+                ),
+            }
         if scenario == "missing-file-final":
             chat_metric["missingFileReceipt"] = _missing_file_receipt_projection(payload)
         if scenario == "tiff-image":
@@ -1764,7 +1878,16 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 or scenario.startswith("forced-final-unusable-tool-call-") \
                 or scenario.startswith("argument-isolation-call-") \
                 or scenario.startswith("signature-alternation-call-") \
-                or scenario.startswith("success-reset-call-"):
+                or scenario.startswith("success-reset-call-") \
+                or scenario.startswith("goal-v2-explicit-call-") \
+                or scenario.startswith("goal-v2-autonomous-complete-call-") \
+                or scenario.startswith("goal-v2-autonomous-call-") \
+                or scenario.startswith("goal-v2-accept-setup-call-") \
+                or scenario.startswith("goal-v2-gate-setup-call-") \
+                or scenario.startswith("goal-v2-gate-complete-call-") \
+                or scenario.startswith("goal-v2-continuation-root-call-") \
+                or scenario.startswith("goal-v2-continuation-next-call-") \
+                or scenario.startswith("goal-v2-hard-limit-call-"):
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
@@ -1953,8 +2076,276 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }]
                 if call_number == 1:
                     stage_text = SUCCESS_RESET_STAGE
+            elif scenario.startswith("goal-v2-"):
+                call_number = int(scenario.rsplit("-", 1)[-1])
+                autonomous_complete = scenario.startswith("goal-v2-autonomous-complete-")
+                autonomous = scenario.startswith("goal-v2-autonomous-")
+                acceptance_setup = scenario.startswith("goal-v2-accept-setup-")
+                gate_setup = scenario.startswith("goal-v2-gate-setup-")
+                gate_complete = scenario.startswith("goal-v2-gate-complete-")
+                continuation_root = scenario.startswith("goal-v2-continuation-root-")
+                continuation_next = scenario.startswith("goal-v2-continuation-next-")
+                hard_limit = scenario.startswith("goal-v2-hard-limit-")
+                if continuation_root:
+                    call_ids = GOAL_V2_CONTINUATION_ROOT_CALL_IDS
+                elif continuation_next:
+                    call_ids = GOAL_V2_CONTINUATION_NEXT_CALL_IDS
+                elif hard_limit:
+                    call_ids = GOAL_V2_HARD_LIMIT_CALL_IDS
+                elif autonomous_complete:
+                    call_ids = GOAL_V2_AUTONOMOUS_COMPLETE_CALL_IDS
+                elif autonomous:
+                    call_ids = GOAL_V2_AUTONOMOUS_CALL_IDS
+                elif acceptance_setup:
+                    call_ids = GOAL_V2_ACCEPT_SETUP_CALL_IDS
+                elif gate_setup:
+                    call_ids = GOAL_V2_GATE_SETUP_CALL_IDS
+                elif gate_complete:
+                    call_ids = GOAL_V2_GATE_CALL_IDS
+                else:
+                    call_ids = GOAL_V2_EXPLICIT_CALL_IDS
+                plan = [
+                    {
+                        "id": f"h4-goal-step-{index}",
+                        "description": f"H4 Goal stage {index}",
+                        "acceptanceCriteria": [{
+                            "id": f"h4-goal-criterion-{index}",
+                            "kind": "machine",
+                            "description": f"H4 Goal evidence {index}",
+                        }],
+                    }
+                    for index in range(1, 4)
+                ]
+                operations = []
+                if continuation_root:
+                    if call_number == 1:
+                        name, arguments = "goal_set_plan", {"steps": plan}
+                    elif call_number == 2:
+                        name, arguments = "goal_start_step", {"stepId": "h4-goal-step-1"}
+                    else:
+                        name, arguments = "read_file", {"path": READ_PATH}
+                        if call_number == 3:
+                            stage_text = GOAL_V2_CONTINUATION_STAGE
+                    tool_calls = [{
+                        "index": 0,
+                        "id": call_ids[call_number - 1],
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(arguments, separators=(",", ":")),
+                        },
+                    }]
+                    operations = None
+                elif hard_limit:
+                    if call_number == 1:
+                        name, arguments = "goal_set_plan", {"steps": plan}
+                    elif call_number == 2:
+                        name, arguments = "goal_start_step", {"stepId": "h4-goal-step-1"}
+                    elif call_number == 3:
+                        name, arguments = "goal_raise_gate", {
+                            "gateType": "waiting_user",
+                            "summary": "H4 hard-limit fallback keeps the active step gated",
+                        }
+                    else:
+                        name, arguments = "read_file", {"path": READ_PATH}
+                        if call_number == 4:
+                            stage_text = GOAL_V2_HARD_LIMIT_STAGE
+                    tool_calls = [{
+                        "index": 0,
+                        "id": call_ids[call_number - 1],
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(arguments, separators=(",", ":")),
+                        },
+                    }]
+                    operations = None
+                elif continuation_next:
+                    operations.extend([
+                        (
+                            "goal_complete_step",
+                            {
+                                "stepId": "h4-goal-step-1",
+                                "evidence": [{
+                                    "criterionId": "h4-goal-criterion-1",
+                                    "kind": "machine",
+                                    "summary": "The first stage survived the soft handoff",
+                                }],
+                            },
+                        ),
+                        ("goal_start_step", {"stepId": "h4-goal-step-2"}),
+                        (
+                            "goal_complete_step",
+                            {
+                                "stepId": "h4-goal-step-2",
+                                "evidence": [{
+                                    "criterionId": "h4-goal-criterion-2",
+                                    "kind": "machine",
+                                    "summary": "The successor continued the second stage",
+                                }],
+                            },
+                        ),
+                        ("goal_start_step", {"stepId": "h4-goal-step-3"}),
+                        (
+                            "goal_complete_step",
+                            {
+                                "stepId": "h4-goal-step-3",
+                                "evidence": [{
+                                    "criterionId": "h4-goal-criterion-3",
+                                    "kind": "machine",
+                                    "summary": "The successor completed the Goal",
+                                }],
+                            },
+                        ),
+                    ])
+                elif autonomous:
+                    operations.append((
+                        "goal_create",
+                        {"objective": (
+                            GOAL_V2_AUTONOMOUS_COMPLETE_USER
+                            if autonomous_complete
+                            else GOAL_V2_AUTONOMOUS_USER
+                        )},
+                    ))
+                if continuation_root or continuation_next or hard_limit:
+                    pass
+                elif gate_complete:
+                    operations.extend([
+                        ("goal_clear_gate", {}),
+                        (
+                            "goal_complete_step",
+                            {
+                                "stepId": "h4-goal-step-3",
+                                "evidence": [{
+                                    "criterionId": "h4-goal-criterion-3",
+                                    "kind": "user",
+                                    "summary": "The user accepted the concrete final step",
+                                }],
+                            },
+                        ),
+                    ])
+                elif autonomous_complete:
+                    operations.append(("goal_set_plan", {"steps": plan}))
+                    for index in range(1, 4):
+                        operations.extend([
+                            ("goal_start_step", {"stepId": f"h4-goal-step-{index}"}),
+                            (
+                                "goal_complete_step",
+                                {
+                                    "stepId": f"h4-goal-step-{index}",
+                                    "evidence": [{
+                                        "criterionId": f"h4-goal-criterion-{index}",
+                                        "kind": "machine",
+                                        "summary": f"H4 autonomous Goal stage {index} passed",
+                                    }],
+                                },
+                            ),
+                        ])
+                elif gate_setup:
+                    plan[-1]["acceptanceCriteria"][0]["kind"] = "user"
+                    operations.append(("goal_set_plan", {"steps": plan}))
+                    for index in range(1, 3):
+                        operations.extend([
+                            ("goal_start_step", {"stepId": f"h4-goal-step-{index}"}),
+                            (
+                                "goal_complete_step",
+                                {
+                                    "stepId": f"h4-goal-step-{index}",
+                                    "evidence": [{
+                                        "criterionId": f"h4-goal-criterion-{index}",
+                                        "kind": "machine",
+                                        "summary": f"H4 Goal stage {index} passed",
+                                    }],
+                                },
+                            ),
+                        ])
+                    operations.extend([
+                        ("goal_start_step", {"stepId": "h4-goal-step-3"}),
+                        (
+                            "goal_raise_gate",
+                            {
+                                "gateType": "waiting_user",
+                                "summary": "The final step needs user acceptance",
+                            },
+                        ),
+                    ])
+                elif acceptance_setup:
+                    operations.append(("goal_set_plan", {"steps": plan}))
+                    for index in range(1, 4):
+                        operations.extend([
+                            ("goal_start_step", {"stepId": f"h4-goal-step-{index}"}),
+                            (
+                                "goal_complete_step",
+                                {
+                                    "stepId": f"h4-goal-step-{index}",
+                                    "evidence": [{
+                                        "criterionId": f"h4-goal-criterion-{index}",
+                                        "kind": "machine",
+                                        "summary": f"H4 Goal stage {index} passed",
+                                    }],
+                                },
+                            ),
+                        ])
+                else:
+                    operations.extend([
+                        ("goal_set_plan", {"steps": plan}),
+                        ("goal_start_step", {"stepId": "h4-goal-step-1"}),
+                        (
+                            "goal_complete_step",
+                            {
+                                "stepId": "h4-goal-step-1",
+                                "evidence": [{
+                                    "criterionId": "h4-goal-criterion-1",
+                                    "kind": "machine",
+                                    "summary": "H4 Goal stage 1 passed",
+                                }],
+                            },
+                        ),
+                        ("goal_start_step", {"stepId": "h4-goal-step-2"}),
+                    ])
+                if operations is not None:
+                    name, arguments = operations[call_number - 1]
+                    tool_calls = [{
+                        "index": 0,
+                        "id": call_ids[call_number - 1],
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(arguments, separators=(",", ":")),
+                        },
+                    }]
+                    if (
+                        acceptance_setup
+                        and call_number == len(call_ids)
+                        and name == "goal_complete_step"
+                    ):
+                        stage_text = GOAL_V2_FINAL_STAGE_SUMMARY
+                if (
+                    call_number == 1
+                    and tool_calls
+                    and str(tool_calls[0].get("function", {}).get("name", "")).startswith("goal_")
+                ):
+                    # This is intentionally public model content paired only
+                    # with an internal Goal operation. It remains visible as
+                    # task commentary while the internal operation itself is
+                    # omitted from the user-facing tool projection.
+                    stage_text = GOAL_V2_PUBLIC_COMMENTARY
             frames = []
-            if stage_text:
+            if stage_text in {
+                GOAL_V2_PUBLIC_COMMENTARY,
+                GOAL_V2_FINAL_STAGE_SUMMARY,
+            }:
+                midpoint = max(1, len(stage_text) // 2)
+                if stage_text == GOAL_V2_PUBLIC_COMMENTARY:
+                    frames.append(_chunk({
+                        "role": "assistant",
+                        "reasoning_content": GOAL_V2_PRIVATE_REASONING,
+                    }))
+                frames.extend([
+                    _chunk({"role": "assistant", "content": stage_text[:midpoint]}),
+                    _chunk({"content": stage_text[midpoint:]}),
+                ])
+            elif stage_text:
                 frames.append(_chunk({"role": "assistant", "content": stage_text}))
             frames.extend([
                 _chunk({"tool_calls": tool_calls}),
@@ -1977,11 +2368,66 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "edit-authorization-reject-final": EDIT_AUTHORIZATION_REJECT_FINAL,
                 "edit-authorization-conflict-final": EDIT_AUTHORIZATION_CONFLICT_FINAL,
                 "tool-final": TOOL_FINAL,
+                "goal-v2-explicit-final": GOAL_V2_EXPLICIT_FINAL,
+                "goal-v2-autonomous-final": GOAL_V2_AUTONOMOUS_FINAL,
+                "goal-v2-autonomous-complete-final": GOAL_V2_AUTONOMOUS_COMPLETE_FINAL,
+                "goal-v2-accept-setup-final": GOAL_V2_ACCEPT_SETUP_FINAL,
+                "goal-v2-gate-setup-final": GOAL_V2_GATE_SETUP_FINAL,
+                "goal-v2-gate-complete-final": GOAL_V2_GATE_FINAL,
+                "goal-v2-continuation-next-final": GOAL_V2_CONTINUATION_FINAL,
             }[scenario]
-            frames = [
-                _chunk({"role": "assistant", "content": final_text}),
-                _chunk({}, "stop", {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18}),
-            ]
+            if scenario == "goal-v2-continuation-next-final":
+                # Keep the successor visibly in flight long enough for the H4
+                # browser assertion to prove that the parent handoff footer is
+                # suppressed until this user turn reaches its real terminal.
+                time.sleep(1.0)
+            if scenario == "goal-v2-accept-setup-final":
+                frames = [
+                    _chunk({
+                        "role": "assistant",
+                        "content": GOAL_V2_FINAL_SUMMARY_ONE + " ",
+                    }),
+                    _chunk({"content": GOAL_V2_FINAL_SUMMARY_TWO + " "}),
+                    _chunk({"content": final_text}),
+                    _chunk({}, "stop", {
+                        "prompt_tokens": 13,
+                        "completion_tokens": 5,
+                        "total_tokens": 18,
+                    }),
+                ]
+            else:
+                frames = [
+                    _chunk({"role": "assistant", "content": final_text}),
+                    _chunk({}, "stop", {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18}),
+                ]
+
+        if scenario == "goal-v2-accept-setup-final":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for frame_index, frame in enumerate(frames):
+                try:
+                    self.wfile.write(
+                        f"data: {json.dumps(frame, separators=(',', ':'))}\n\n".encode("utf-8")
+                    )
+                    self.wfile.flush()
+                    if (
+                        frame_index == 0
+                        and not REFRESH_GATES.reach_and_wait(
+                            "goal-final-after-first-delta"
+                        )
+                    ):
+                        return
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
 
         data = _sse_payload(frames)
         self.send_response(200)
@@ -3124,7 +3570,7 @@ def main() -> int:
             operation = command.get("command")
             if operation == "release-model":
                 MODEL_GATE.set()
-                REFRESH_GATES.release_all()
+                REFRESH_GATES.release_all(exclude={"goal-final-after-first-delta"})
                 MODEL_CATALOG_GATE.release()
                 _json_line({"type": "response", "id": request_id, "ok": True})
                 continue

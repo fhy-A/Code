@@ -14,6 +14,23 @@ const STREAM_FINAL = `${STREAM_ONE} ${STREAM_TWO} ${STREAM_THREE}`;
 const TOOL_DETAILS_USER = "H4_TOOL_DETAILS_USER";
 const TOOL_DETAILS_STAGE = "H4_TOOL_DETAILS_STAGE";
 const TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL";
+const GOAL_V2_EXPLICIT_USER = "/goal H4_GOAL_V2_EXPLICIT";
+const GOAL_V2_EXPLICIT_FINAL = "H4_GOAL_V2_EXPLICIT_FINAL";
+const GOAL_V2_PUBLIC_COMMENTARY = "H4_GOAL_V2_PUBLIC_PROCESS_COMMENTARY";
+const GOAL_V2_PRIVATE_REASONING = "H4_GOAL_V2_PRIVATE_REASONING_MUST_NOT_PROJECT";
+const GOAL_V2_AUTONOMOUS_USER = "H4_GOAL_V2_AUTONOMOUS";
+const GOAL_V2_AUTONOMOUS_FINAL = "H4_GOAL_V2_AUTONOMOUS_FINAL";
+const GOAL_V2_AUTONOMOUS_COMPLETE_USER = "H4_GOAL_V2_AUTONOMOUS_COMPLETE";
+const GOAL_V2_AUTONOMOUS_COMPLETE_FINAL = "H4_GOAL_V2_AUTONOMOUS_COMPLETE_FINAL";
+const GOAL_V2_ACCEPT_SETUP_FINAL = "H4_GOAL_V2_ACCEPT_SETUP_FINAL";
+const GOAL_V2_FINAL_STAGE_SUMMARY = "H4_GOAL_V2_FINAL_STAGE_SUMMARY";
+const GOAL_V2_FINAL_SUMMARY_ONE = "H4_GOAL_V2_FINAL_SUMMARY_ONE";
+const GOAL_V2_FINAL_SUMMARY_TWO = "H4_GOAL_V2_FINAL_SUMMARY_TWO";
+const GOAL_V2_CONTINUATION_USER = "/goal H4_GOAL_V2_CONTINUATION";
+const GOAL_V2_CONTINUATION_STAGE = "H4_GOAL_V2_CONTINUATION_PUBLIC_STAGE";
+const GOAL_V2_CONTINUATION_FINAL = "H4_GOAL_V2_CONTINUATION_FINAL";
+const GOAL_V2_HARD_LIMIT_USER = "/goal H4_GOAL_V2_HARD_LIMIT";
+const GOAL_V2_HARD_LIMIT_STAGE = "H4_GOAL_V2_HARD_LIMIT_PUBLIC_STAGE";
 const MULTI_TOOL_USER = "H4_MULTI_TOOL_USER";
 const MULTI_TOOL_STAGE = "H4_MULTI_TOOL_STAGE";
 const MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL";
@@ -307,7 +324,7 @@ const H4_6E_SEMANTIC_HASHES = Object.freeze({
   modelToolReceiptProjection: "1b94536a4cc63c2bc3b98c54eb14c329ac585b5ec65bf85c1ca7bbd080ab6c80",
   sessionRoleContent: "cbdcb15dad4b61b34bdf89556131827fc7fd973f88b9b9368e329bf61b1821fb",
   sessionToolMeta: "c62eca9c84fb4d3c94968c2423f8db13cff6ca254fd90eba9bb225c87d438285",
-  activeDom: "3f718cb47d5fb90dcdc0bbc3a425718a43f1c0fe6ee082ce53e90a22cabc2ad4",
+  activeDom: "0c3f4dc543899ad0b7a9e8a45200cef0eafe6968d94876b7b5d27f5cba63b44b",
   terminalDom: "4cdf1271fd50f4060b985a2c9b579bad19b075e0b562881337cd2ddab42b161d",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
@@ -317,7 +334,7 @@ const H4_6G_SEMANTIC_HASHES = Object.freeze({
   modelToolReceiptProjection: "60e752356006ec8f15d661edd9724ebdf24c7a0c1633af5bdf37e75a28a5f0c8",
   sessionRoleContent: "75ae4df19c62ebff5c92cc14b04015238de0a5d4b4a7789d0da50dd965c60e1e",
   sessionToolMeta: "d7ec6a76b4b67e204a24b508b6e548a46e2d92fe9ef8575d6a30bc8b5c5fc500",
-  activeDom: "53db0899dd213b606bd89904aa7f4df93cf6270a535648b812b6cb7c2e7da425",
+  activeDom: "7fb2f4549cd284275d93a6bb48b51c6444f20812776a483b576db67769f2c538",
   terminalDom: "92162bb8446b0556cb897912ea0aa0db129b9682a8a071b96ad07795c335299c",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
@@ -327,7 +344,7 @@ const H4_6H_SEMANTIC_HASHES = Object.freeze({
   modelToolReceiptProjection: "4204a133ea7a8e74a5981668a013feb29d86b7bc492941b4e25c6a64652a2b8d",
   sessionRoleContent: "450f53474e8c9fe65b71409b7efb6c3a222e5f4629bd8dbbc89d6d3b6a05c923",
   sessionToolMeta: "d8e40c3d2d303c0e4c4c6394dde046869f7ffaee8414f960d54dbc3261cb2c7e",
-  activeDom: "b6ae61b6e790e68c2c2d0586fb0d5a62d2074b88d4f6203a35760a78ced8c983",
+  activeDom: "1b3fc49e648653a562df11881b92ae19dc84133bdec9f42b53a82dc10e65398b",
   terminalDom: "2aed54d3a2fdb4e76d6c0fe53e4a223992c116adda0826b08334e1a44d54848f",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
@@ -337,7 +354,7 @@ const H4_6I_SEMANTIC_HASHES = Object.freeze({
   modelToolReceiptProjection: "d86effa558f902e0c15442c8bfe6de8127f7a33178ad77791b5671b432788e5a",
   sessionRoleContent: "dc6b9beeac5d404fd7fd7ff147e4cfb4bd8fdb9eef4fceebb399bbb93cb16497",
   sessionToolMeta: "f460fea9ea4f5fe16f53bace264c0ab3904b5fe5610ac8d82dcb824068f6c1da",
-  activeDom: "e54e3de59dc8d46a78a819ae0b5b65d791462444e1b592cff96bff71c0226cac",
+  activeDom: "f13ebe7cbeceda36df9850b561a0e5b7b8c44872abe9159e0965c65667554f92",
   terminalDom: "0c10ac9845c8e616e880ef9f693636390fffe942d390201d775d343ac0ab72e3",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
@@ -347,7 +364,7 @@ const H4_6J_SEMANTIC_HASHES = Object.freeze({
   modelToolReceiptProjection: "027989be15a449c7cf563e2238404c093361ac7db5ef8dad367b1f6875c6e497",
   sessionRoleContent: "73166b500f99d97a978f7d5c8e057a50d3aa0ea44c062de8e12e13909f2d524b",
   sessionToolMeta: "b912f584b5b211e7b79d2ae517529bc89bbd4dcd77dfd5258b9c9434d5d3a6da",
-  activeDom: "30ec16a776f8ecf36035827abb24185ec2d34050288f1db31ebbaf5f625c72da",
+  activeDom: "655d35bf7daf4dad688b310d360f830a92823c71dc94419ab7714ae9945ab0f8",
   terminalDom: "ee55a3e8a0629a776a81e4a411261227a9a708314f40a7bbcc5c01ce4b3b9c88",
   refreshLifecycle: "04f95460a984cf77cd07b7287db22363a38ee6201d164282f932aee10250d3a4",
 });
@@ -15891,102 +15908,955 @@ const test = base.test.extend({
   },
 });
 
-async function exerciseExplicitGoalControl(h4, runtime) {
+async function assertGoalCompletionFooter(page, finalAssistant, { expectUsage = true } = {}) {
+  const footer = finalAssistant.locator(":scope > .msg-footer");
+  const status = footer.locator(":scope > .msg-footer-status");
+  const hover = status.locator(":scope > .msg-footer-hover");
+  const copy = hover.locator(":scope > .msg-copy-btn");
+  const time = hover.locator(":scope > .msg-time");
+  await expect(footer).toHaveCount(1);
+  await expect(status).toHaveCount(1);
+  await expect(status.locator(":scope > .goal-completion-marker")).toHaveCount(1);
+  await expect(status.locator(":scope > .response-info")).toHaveCount(expectUsage ? 1 : 0);
+  await expect(hover).toHaveCount(1);
+  await expect(copy).toHaveCount(1);
+  await expect(time).toHaveCount(1);
+  expect(await status.evaluate((element, hasUsage) => {
+    const usage = element.querySelector(":scope > .response-info");
+    const completion = element.querySelector(":scope > .goal-completion-marker");
+    const copyButton = element.querySelector(":scope > .msg-footer-hover > .msg-copy-btn");
+    const messageTime = element.querySelector(":scope > .msg-footer-hover > .msg-time");
+    const before = (left, right) => Boolean(
+      left && right && (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING)
+    );
+    return {
+      usageBeforeCompletion: hasUsage ? before(usage, completion) : usage === null,
+      completionBeforeCopy: before(completion, copyButton),
+      copyBeforeTime: before(copyButton, messageTime),
+    };
+  }, expectUsage)).toEqual({
+    usageBeforeCompletion: true,
+    completionBeforeCopy: true,
+    copyBeforeTime: true,
+  });
+  expect(await footer.evaluate((element) => ({
+    flexWrap: getComputedStyle(element).flexWrap,
+    justifyContent: getComputedStyle(element).justifyContent,
+  }))).toEqual({flexWrap: "wrap", justifyContent: "flex-start"});
+  if (await hover.evaluate((element) => (
+    element.ownerDocument.defaultView.matchMedia("(hover: hover) and (pointer: fine)").matches
+  ))) {
+    await page.locator("#prompt").hover();
+    expect(await hover.evaluate((element) => ({
+      opacity: getComputedStyle(element).opacity,
+      maxWidth: getComputedStyle(element).maxWidth,
+      pointerEvents: getComputedStyle(element).pointerEvents,
+    }))).toEqual({opacity: "0", maxWidth: "0px", pointerEvents: "none"});
+    await finalAssistant.hover();
+    await expect.poll(() => hover.evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+    await copy.focus();
+    await page.locator("#prompt").hover();
+    await page.locator("#prompt").focus();
+    await expect.poll(() => hover.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+  } else {
+    await expect.poll(() => hover.evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+    expect(await hover.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("auto");
+  }
+
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Emulation.setTouchEmulationEnabled", {enabled: true, maxTouchPoints: 1});
+    await cdp.send("Emulation.setEmitTouchEventsForMouse", {
+      enabled: true,
+      configuration: "mobile",
+    });
+    await page.setViewportSize({width: 390, height: 844});
+    await expect.poll(() => hover.evaluate((element) => (
+      element.ownerDocument.defaultView.matchMedia("(hover: none), (pointer: coarse)").matches
+    ))).toBe(true);
+    await expect.poll(() => hover.evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+    expect(await hover.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("auto");
+    expect(await footer.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        withinViewport: rect.left >= -0.5 && rect.right <= innerWidth + 0.5,
+        childrenWithinViewport: Array.from(element.querySelectorAll(
+          ":scope > .msg-footer-status > *",
+        )).every((child) => {
+          const childRect = child.getBoundingClientRect();
+          return childRect.left >= -0.5 && childRect.right <= innerWidth + 0.5;
+        }),
+        noPageOverflow: document.documentElement.scrollWidth <= innerWidth + 0.5,
+      };
+    })).toEqual({
+      withinViewport: true,
+      childrenWithinViewport: true,
+      noPageOverflow: true,
+    });
+  } finally {
+    await cdp.send("Emulation.setEmitTouchEventsForMouse", {
+      enabled: false,
+      configuration: "mobile",
+    });
+    await cdp.send("Emulation.setTouchEmulationEnabled", {enabled: false});
+    await cdp.detach();
+    await page.setViewportSize({width: 1280, height: 800});
+  }
+}
+
+async function exerciseGoalV2Projection(h4, runtime, { autonomous = false } = {}) {
   const { page } = h4;
-  const runtimeRequests = [];
-  page.on("request", (request) => {
-    const pathname = new URL(request.url()).pathname;
-    if (pathname === "/proxy/chat" || pathname === "/api/agent/runs") {
-      runtimeRequests.push({ method: request.method(), pathname });
-    }
+  const userMarker = autonomous ? GOAL_V2_AUTONOMOUS_USER : GOAL_V2_EXPLICIT_USER;
+  const finalMarker = autonomous ? GOAL_V2_AUTONOMOUS_FINAL : GOAL_V2_EXPLICIT_FINAL;
+  const expectedObjective = autonomous ? GOAL_V2_AUTONOMOUS_USER : "H4_GOAL_V2_EXPLICIT";
+  let dialogs = 0;
+  page.on("dialog", async (dialog) => {
+    dialogs += 1;
+    await dialog.dismiss();
   });
   await h4.open(runtime);
   await assertFrontendRuntime(page, runtime);
-
-  const readGoal = async () => page.evaluate(async () => {
-    const sessions = await fetch("/api/sessions").then((response) => response.json());
-    const session = sessions.data?.[0];
-    if (!session) return null;
-    const goal = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/goal`)
-      .then((response) => response.json());
-    return { sessionId: session.id, ...goal.data };
-  });
-  const submit = async (text) => {
-    await page.locator("#prompt").fill(text);
-    await page.locator("#sendBtn").click();
-  };
-
-  const draftDialogPromise = page.waitForEvent("dialog");
-  await submit("/goal H4_SAFE_GOAL_CONTROL");
-  const draftDialog = await draftDialogPromise;
-  expect(draftDialog.message()).toContain("H4_SAFE_GOAL_CONTROL");
-  expect(draftDialog.message()).toContain("1. [pending]");
-  expect(draftDialog.message()).toContain("[user] The user-visible scope and completion boundary are explicit");
-  expect(draftDialog.message()).toContain("[agent] The requested outcome is implemented without expanding permissions");
-  await draftDialog.dismiss();
-  await expect(page.locator(".chat-pane")).not.toHaveClass(/empty-chat/);
-  await expect(page.locator(".welcome-screen")).toHaveCount(0);
-  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("awaiting_confirmation");
-  const waiting = await readGoal();
-  expect(waiting.revision).toBe(1);
-
-  const repeatedDraftDialogPromise = page.waitForEvent("dialog");
-  await submit("/goal H4_SAFE_GOAL_CONTROL");
-  const repeatedDraftDialog = await repeatedDraftDialogPromise;
-  expect(repeatedDraftDialog.message()).toContain("H4_SAFE_GOAL_CONTROL");
-  await repeatedDraftDialog.accept();
-  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("active");
-  const active = await readGoal();
-  expect(active.revision).toBe(waiting.revision + 1);
-  expect(active.goal.steps).toHaveLength(3);
-  expect(active.goal.steps.map((step) => step.status)).toEqual([
-    "in_progress", "pending", "pending",
+  await page.evaluate((marker) => {
+    const root = document.querySelector("#messages");
+    const seen = [];
+    const capture = (node) => {
+      const text = node?.nodeType === Node.TEXT_NODE
+        ? String(node.data || "")
+        : String(node?.textContent || "");
+      if (text.includes(marker)) seen.push(text);
+    };
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        capture(record.target);
+        for (const node of record.addedNodes || []) capture(node);
+      }
+    });
+    observer.observe(root, { childList: true, characterData: true, subtree: true });
+    window.__goalPublicCommentaryProbe = { seen, observer };
+  }, GOAL_V2_PUBLIC_COMMENTARY);
+  await h4.submit(userMarker);
+  const finalAssistant = page.locator("#messages article.msg.assistant").filter({ hasText: finalMarker });
+  await expect(finalAssistant).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(0);
+  await expect(page.locator("#messages .tool-process-item")).toHaveCount(0);
+  const publicCommentary = page.locator("#messages article.msg.assistant.agent-commentary")
+    .filter({ hasText: GOAL_V2_PUBLIC_COMMENTARY });
+  await expect(publicCommentary).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(1);
+  await expect(finalAssistant.locator(".response-info")).toHaveCount(1);
+  await expect(finalAssistant.locator(".response-info .response-token")).toHaveCount(2);
+  const usageValues = (await finalAssistant.locator(".response-info .response-token").allTextContents())
+    .map((value) => Number(String(value || "").trim()));
+  const goalToolRounds = autonomous ? 5 : 4;
+  expect(usageValues).toEqual([
+    (goalToolRounds * 11) + 13,
+    (goalToolRounds * 3) + 5,
   ]);
-  expect(active.goal.ownerRunId).toBeNull();
-  expect(active.armed).toBe(false);
+  const messageText = String(await page.locator("#messages").textContent() || "");
+  expect(messageText).not.toContain(GOAL_V2_PRIVATE_REASONING);
+  for (const internalToolName of [
+    "goal_create",
+    "goal_set_plan",
+    "goal_start_step",
+    "goal_complete_step",
+  ]) {
+    expect(messageText).not.toContain(internalToolName);
+  }
 
-  const queryDialogPromise = page.waitForEvent("dialog");
-  await submit("/goal");
-  const queryDialog = await queryDialogPromise;
-  expect(queryDialog.message()).toContain("Goal · active");
-  expect(queryDialog.message()).toContain("1. [in_progress]");
-  expect(queryDialog.message()).toContain("[user] The user-visible scope and completion boundary are explicit");
-  await queryDialog.dismiss();
-  expect((await readGoal()).revision).toBe(active.revision);
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(activeSession).toHaveCount(1);
+  const sessionId = await activeSession.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const readState = async () => page.evaluate(async (currentSessionId) => {
+    const [session, projection] = await Promise.all([
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}`).then((response) => response.json()),
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`).then((response) => response.json()),
+    ]);
+    return { session, projection: projection.data };
+  }, sessionId);
+  await expect.poll(readState).toMatchObject({
+    projection: {
+      health: "healthy",
+      goal: {
+        objective: expectedObjective,
+        sourceKind: autonomous ? "autonomous" : "explicit",
+        lifecycle: "active",
+      },
+    },
+  });
+  const current = await readState();
+  expect(current.session.messages.some((message) => (
+    String(message?.content || "").includes(GOAL_V2_PUBLIC_COMMENTARY)
+    && message?.meta?.publicProcessCommentary === true
+  ))).toBe(true);
+  expect(current.session.messages.every((message) => (
+    !String(message?.content || "").includes(GOAL_V2_PRIVATE_REASONING)
+    && !String(message?.thought || "").includes(GOAL_V2_PRIVATE_REASONING)
+  ))).toBe(true);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const agentSnapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(agentSnapshot.status).toBe(200);
+  expect(agentSnapshot.body.events.some((event) => (
+    event?.type === "model_completed"
+    && String(event?.data?.content || "").includes(GOAL_V2_PUBLIC_COMMENTARY)
+  ))).toBe(true);
+  expect(agentSnapshot.body.events.every((event) => (
+    event?.type !== "model_completed" || String(event?.data?.reasoning || "") === ""
+  ))).toBe(true);
+  const commentaryProjection = await page.evaluate((marker) => {
+    const probe = window.__goalPublicCommentaryProbe;
+    probe?.observer?.disconnect();
+    return {
+      mutationHits: Array.isArray(probe?.seen) ? probe.seen.length : -1,
+      visible: String(document.querySelector("#messages")?.textContent || "").includes(marker),
+    };
+  }, GOAL_V2_PUBLIC_COMMENTARY);
+  expect(commentaryProjection.mutationHits).toBeGreaterThan(0);
+  expect(commentaryProjection.visible).toBe(true);
+  const executionTrace = publicCommentary.locator("xpath=ancestor::section[@data-execution-trace]");
+  await expect(executionTrace).toHaveCount(1);
+  await expect(executionTrace).toHaveClass(/\bcompleted\b/);
+  await expect(executionTrace).not.toHaveClass(/\bis-expanded\b/);
+  await executionTrace.locator("[data-execution-trace-toggle]").click();
+  await expect(executionTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(publicCommentary).toContainText(GOAL_V2_PUBLIC_COMMENTARY);
+  expect(current.projection.goal.steps).toHaveLength(3);
+  expect(current.projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "in_progress", "pending",
+  ]);
+  const originMessages = current.session.messages.filter((message) => (
+    message.meta?.goalOrigin?.confirmed === true
+  ));
+  expect(originMessages).toHaveLength(autonomous ? 0 : 1);
+  if (!autonomous) {
+    expect(originMessages[0].meta.goalOrigin).toMatchObject({
+      goalId: current.projection.goal.goalId,
+      sourceKind: "explicit",
+      confirmed: true,
+    });
+  }
 
-  await submit("暂停 Goal");
-  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("paused");
-  await submit("恢复 Goal");
-  await expect.poll(async () => (await readGoal())?.goal?.lifecycle).toBe("active");
+  const originArticle = page.locator("#messages article.msg.user").filter({ hasText: userMarker });
+  await expect(originArticle.locator(".goal-message-marker")).toHaveCount(autonomous ? 0 : 1);
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(autonomous ? 0 : 1);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(0);
+  const progress = page.locator("#goalProgress");
+  await expect(progress).toBeVisible();
+  await expect(page.locator("#goalProgressObjective")).toHaveText(expectedObjective);
+  await expect(page.locator("#goalProgressCount")).toHaveText("2/3");
+  await page.locator("#goalProgressSummary").click();
+  const details = page.locator("#goalProgressDetails");
+  await expect(details).toBeVisible();
+  await expect(details.locator(".goal-progress-step")).toHaveCount(3);
+  await expect(details.locator(".goal-progress-step-index")).toHaveText(["1", "2", "3"]);
+  await expect(details.locator(".goal-progress-step-status")).toHaveCount(3);
+  await expect(details.locator(".goal-progress-step-description")).toHaveText([
+    "H4 Goal stage 1", "H4 Goal stage 2", "H4 Goal stage 3",
+  ]);
+  await expect(details).not.toContainText("H4 Goal evidence 1");
+  await expect(details).not.toContainText("machine");
+  await expect(details.locator(".goal-progress-criteria")).toHaveCount(0);
+  await expect(details.locator(".goal-progress-criterion-kind")).toHaveCount(0);
+  await details.locator(".goal-progress-step-description").nth(1).click();
+  await expect(details).toBeVisible();
+  await page.locator("#prompt").click();
+  await expect(details).toBeHidden();
+  await expect(page.locator("#prompt")).toBeFocused();
+  await page.locator("#goalProgressSummary").click();
+  await expect(details).toBeVisible();
+  await page.locator("#messages").click({ position: { x: 8, y: 8 } });
+  await expect(details).toBeHidden();
+  await page.locator("#goalProgressSummary").click();
+  await expect(details).toBeVisible();
+  await page.locator("#goalProgressSummary").press("Tab");
+  await expect(details).toBeHidden();
+  await page.locator("#goalProgressSummary").click();
+  await expect(details).toBeVisible();
+  await page.locator("#goalProgressSummary").press("Escape");
+  await expect(page.locator("#goalProgressDetails")).toBeHidden();
+  await expect(page.locator("#goalProgressSummary")).toBeFocused();
 
-  const beforeAmbiguous = await readGoal();
-  await page.locator("#prompt").fill("这是一条提到 Goal 但不构成控制的普通消息");
-  expect(await page.locator("#prompt").inputValue()).toContain("不构成控制");
-  expect((await readGoal()).revision).toBe(beforeAmbiguous.revision);
-  await page.locator("#prompt").fill("");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#goalProgressSummary").click();
+  await expect(details).toBeVisible();
+  await page.locator("#prompt").dispatchEvent("pointerdown", {
+    pointerType: "touch",
+    isPrimary: true,
+  });
+  await page.locator("#prompt").dispatchEvent("click", { detail: 1 });
+  await expect(details).toBeHidden();
+  await page.locator("#toggleSidebar").click();
+  await expect(page.locator("#piShell")).toHaveClass(/sidebar-hidden/);
+  await expect.poll(async () => {
+    const box = await progress.boundingBox();
+    return box.x + box.width;
+  }).toBeLessThanOrEqual(390.5);
+  const progressBox = await progress.boundingBox();
+  expect(progressBox.x).toBeGreaterThanOrEqual(0);
+  expect(progressBox.x + progressBox.width).toBeLessThanOrEqual(390.5);
+  await h4.reloadRuntime(runtime);
+  await expect(progress).toBeVisible();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(autonomous ? 0 : 1);
+  const refreshedCommentary = page.locator("#messages article.msg.assistant.agent-commentary")
+    .filter({ hasText: GOAL_V2_PUBLIC_COMMENTARY });
+  await expect(refreshedCommentary).toHaveCount(1);
+  const refreshedTrace = refreshedCommentary.locator(
+    "xpath=ancestor::section[@data-execution-trace]",
+  );
+  await expect(refreshedTrace).toHaveClass(/\bcompleted\b/);
+  await expect(refreshedTrace).not.toHaveClass(/\bis-expanded\b/);
 
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await assertFrontendRuntime(page, runtime);
-  const restored = await readGoal();
-  expect(restored.goal.lifecycle).toBe("active");
-  expect(restored.armed).toBe(false);
-  expect(runtimeRequests).toEqual([]);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.locator("#toggleSidebar").click();
+  await expect(page.locator("#piShell")).not.toHaveClass(/sidebar-hidden/);
+  await page.locator("#newChat").click();
+  await expect(progress).toBeHidden();
+  await page.locator(`#sessionList button.session-main[data-session-id="${sessionId}"]`).click();
+  await expect(progress).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("2/3");
+  await expect(page.locator("#messages article.msg.assistant.agent-commentary")
+    .filter({ hasText: GOAL_V2_PUBLIC_COMMENTARY })).toHaveCount(1);
+  expect(dialogs).toBe(0);
   expect(h4.pageErrors).toEqual([]);
-  h4.evidence(`${runtime === "classic" ? "classic" : "bundle"}-goal-explicit-control`, {
+  h4.evidence(`${runtime}-goal-v2-${autonomous ? "autonomous" : "explicit"}`, {
     runtime,
-    lifecycle: restored.goal.lifecycle,
-    revision: restored.revision,
-    armed: restored.armed,
-    agentRunRequests: runtimeRequests.length,
+    sessionId,
+    sourceKind: current.projection.goal.sourceKind,
+    revision: current.projection.revision,
+    statuses: current.projection.goal.steps.map((step) => step.status),
+    markerCount: autonomous ? 0 : 1,
+    visibleToolGroups: 0,
+    usageFooters: 1,
+    usageValues,
+    publicCommentaryMutationHits: commentaryProjection.mutationHits,
+    dialogs,
   });
 }
 
-test("bundle explicit Goal controls stay local and never create an AgentRun", async ({ h4 }) => {
-  await exerciseExplicitGoalControl(h4, "bundle");
+test("bundle explicit Goal uses ordinary AgentRun and compact v2 projection", async ({ h4 }) => {
+  await exerciseGoalV2Projection(h4, "bundle");
 });
 
-test("direct classic explicit Goal controls match bundle semantics", async ({ h4 }) => {
-  await exerciseExplicitGoalControl(h4, "classic");
+test("direct classic explicit Goal matches bundle v2 semantics", async ({ h4 }) => {
+  await exerciseGoalV2Projection(h4, "classic");
+});
+
+test("bundle ordinary AgentRun can autonomously create the same Goal v2 projection", async ({ h4 }) => {
+  await exerciseGoalV2Projection(h4, "bundle", { autonomous: true });
+});
+
+test("direct classic ordinary AgentRun autonomous Goal matches bundle", async ({ h4 }) => {
+  await exerciseGoalV2Projection(h4, "classic", { autonomous: true });
+});
+
+async function exerciseGoalV2AutonomousCompletionMarkers(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await h4.submit(GOAL_V2_AUTONOMOUS_COMPLETE_USER);
+  const finalAssistant = page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_AUTONOMOUS_COMPLETE_FINAL,
+  });
+  await expect(finalAssistant).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(0);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(0);
+
+  const sessionId = await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id");
+  const state = await page.evaluate(async (currentSessionId) => {
+    const [session, projection] = await Promise.all([
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}`).then((response) => response.json()),
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`).then((response) => response.json()),
+    ]);
+    return {session, projection: projection.data};
+  }, sessionId);
+  expect(state.projection).toMatchObject({
+    health: "healthy",
+    goal: {sourceKind: "autonomous", lifecycle: "completed"},
+  });
+  expect(state.session.messages.filter((message) => (
+    message.meta?.goalOrigin?.confirmed === true
+  ))).toHaveLength(0);
+  expect(state.session.messages.filter((message) => (
+    message.meta?.goalCompletion?.confirmed === true
+  ))).toHaveLength(0);
+
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(0);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-goal-v2-autonomous-completion-markers`, {
+    runtime,
+    sessionId,
+    lifecycle: state.projection.goal.lifecycle,
+    originMarkers: 0,
+    completionMarkers: 0,
+  });
+}
+
+test("bundle autonomous Goal completion has no explicit-source markers", async ({ h4 }) => {
+  await exerciseGoalV2AutonomousCompletionMarkers(h4, "bundle");
+});
+
+test("direct classic autonomous completion keeps both markers hidden", async ({ h4 }) => {
+  await exerciseGoalV2AutonomousCompletionMarkers(h4, "classic");
+});
+
+async function exerciseGoalV2CrossRunContinuation(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await h4.submit(GOAL_V2_CONTINUATION_USER);
+
+  await expect.poll(
+    () => h4.controlIds().agentRunIds.length,
+    { timeout: 60_000 },
+  ).toBe(2);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_CONTINUATION_STAGE,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(0);
+
+  const finalAssistant = page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_CONTINUATION_FINAL,
+  });
+  await expect(finalAssistant).toHaveCount(1, { timeout: 60_000 });
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+  const agentRunIds = [...h4.controlIds().agentRunIds];
+  expect(agentRunIds).toHaveLength(2);
+  const snapshots = [];
+  for (const agentRunId of agentRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    snapshots.push(response.body);
+  }
+  const parent = snapshots.find((snapshot) => snapshot.result?.continuation);
+  const successor = snapshots.find((snapshot) => snapshot.agentRunId !== parent?.agentRunId);
+  expect(parent).toBeTruthy();
+  expect(successor).toBeTruthy();
+  const completedTrace = page.locator("#messages .execution-trace.completed");
+  await expect(completedTrace).toHaveCount(1);
+  await completedTrace.locator(":scope > [data-execution-trace-toggle]").click();
+  await expect(completedTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  await expect(finalAssistant.locator(".goal-completion-marker")).toHaveCount(1);
+  await assertGoalCompletionFooter(page, finalAssistant);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(1);
+  await expect(finalAssistant.locator(".response-info")).toHaveCount(1);
+  await expect(page.locator("#messages .tool-process-item")).toHaveCount(38);
+  expect(parent).toMatchObject({
+    status: "completed",
+    errorCode: "",
+    maxRounds: 50,
+    goalOperationsEnabled: true,
+  });
+  expect(parent.result.continuation).toMatchObject({
+    agentRunId: successor.agentRunId,
+    reason: "soft_round_limit",
+    index: 1,
+  });
+  expect(successor).toMatchObject({
+    status: "completed",
+    errorCode: "",
+    maxRounds: 50,
+    sessionId: parent.sessionId,
+    permissionProfile: parent.permissionProfile,
+    goalOperationsEnabled: true,
+  });
+  expect(successor.clientRequestId).not.toBe(parent.clientRequestId);
+  expect(parent.events.filter((event) => event.type === "model_completed")).toHaveLength(40);
+  expect(successor.events.filter((event) => event.type === "model_completed")).toHaveLength(6);
+  expect(parent.events
+    .filter((event) => event.type === "model_completed")
+    .every((event) => String(event.data?.reasoning || "") === "")).toBe(true);
+  expect(parent.toolExecutions).toHaveLength(38);
+  expect(successor.toolExecutions).toEqual([]);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_CONTINUATION_STAGE,
+  })).toHaveCount(1, { timeout: 30_000 });
+
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await activeSession.getAttribute("data-session-id");
+  const projection = await page.evaluate(async (currentSessionId) => (
+    fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`)
+      .then((response) => response.json())
+      .then((value) => value.data)
+  ), sessionId);
+  expect(projection).toMatchObject({
+    revision: 8,
+    goal: { lifecycle: "completed", currentStepId: null },
+  });
+  expect(projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "completed",
+  ]);
+
+  const responseTokens = (await page.locator("#messages .response-info .response-token").allTextContents())
+    .map((value) => Number(String(value || "").trim()));
+  expect(responseTokens).toEqual([508, 140]);
+  const sessionSnapshot = await page.evaluate(async (currentSessionId) => (
+    fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}`).then((response) => response.json())
+  ), sessionId);
+  expect(sessionSnapshot.stats).toMatchObject({ input: 508, output: 140 });
+  const completionMessages = sessionSnapshot.messages.filter((message) => (
+    message.meta?.goalCompletion?.confirmed === true
+  ));
+  expect(completionMessages).toHaveLength(1);
+  expect(completionMessages[0].meta.goalCompletion).toMatchObject({
+    goalId: projection.goal.goalId,
+    sourceKind: "explicit",
+    sourceRunId: successor.agentRunId,
+  });
+  const text = String(await page.locator("#messages").textContent() || "");
+  for (const name of [
+    "goal_set_plan", "goal_start_step", "goal_complete_step", "goal_completed",
+  ]) {
+    expect(text).not.toContain(name);
+  }
+  await h4.reloadRuntime(runtime);
+  const reloadedTrace = page.locator("#messages .execution-trace.completed");
+  await expect(reloadedTrace).toHaveCount(1);
+  await reloadedTrace.locator(":scope > [data-execution-trace-toggle]").click();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_CONTINUATION_STAGE,
+  })).toHaveCount(1);
+  await expect(finalAssistant).toHaveCount(1);
+  await expect(finalAssistant.locator(".goal-completion-marker")).toHaveCount(1);
+  await assertGoalCompletionFooter(page, finalAssistant);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(1);
+  expect((await page.locator("#messages .response-info .response-token").allTextContents())
+    .map((value) => Number(String(value || "").trim()))).toEqual([508, 140]);
+  await expect(page.locator("#messages .tool-process-item")).toHaveCount(38);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-goal-v2-cross-run-continuation`, {
+    runtime,
+    sessionId,
+    parentAgentRunId: parent.agentRunId,
+    successorAgentRunId: successor.agentRunId,
+    parentRounds: 40,
+    successorRounds: 6,
+    publicReadTools: 38,
+    responseTokens,
+    goalRevision: projection.revision,
+    lifecycle: projection.goal.lifecycle,
+  });
+}
+
+test("bundle Goal v2 soft-hands off to one successor and preserves public history", async ({ h4 }) => {
+  test.setTimeout(90_000);
+  await exerciseGoalV2CrossRunContinuation(h4, "bundle");
+});
+
+test("direct classic Goal v2 cross-Run continuation matches bundle", async ({ h4 }) => {
+  test.setTimeout(90_000);
+  await exerciseGoalV2CrossRunContinuation(h4, "classic");
+});
+
+test("bundle Goal v2 hard round fallback preserves public history", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  const { page } = h4;
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.submit(GOAL_V2_HARD_LIMIT_USER);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0, { timeout: 60_000 });
+
+  const agentRunIds = [...h4.controlIds().agentRunIds];
+  expect(agentRunIds).toHaveLength(1);
+  const response = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunIds[0])}?cursor=0&wait=0`,
+  );
+  expect(response.status).toBe(200);
+  const snapshot = response.body;
+  expect(snapshot).toMatchObject({
+    status: "failed",
+    errorCode: "goal_run_hard_limit",
+    maxRounds: 50,
+    goalOperationsEnabled: true,
+  });
+  expect(snapshot.result?.continuation).toBeUndefined();
+  expect(snapshot.events.filter((event) => event.type === "model_completed")).toHaveLength(50);
+  expect(snapshot.toolExecutions).toHaveLength(47);
+  expect(snapshot.events
+    .filter((event) => event.type === "model_completed")
+    .every((event) => String(event.data?.reasoning || "") === "")).toBe(true);
+
+  const completedTrace = page.locator("#messages .execution-trace.completed");
+  await expect(completedTrace).toHaveCount(1);
+  await completedTrace.locator(":scope > [data-execution-trace-toggle]").click();
+  await expect(completedTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_HARD_LIMIT_STAGE,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages .tool-process-item")).toHaveCount(47);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(1);
+  const responseTokens = (await page.locator("#messages .response-info .response-token").allTextContents())
+    .map((value) => Number(String(value || "").trim()));
+  expect(responseTokens).toEqual([550, 150]);
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("1/3");
+
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await activeSession.getAttribute("data-session-id");
+  const projection = await page.evaluate(async (currentSessionId) => (
+    fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`)
+      .then((goalResponse) => goalResponse.json())
+      .then((value) => value.data)
+  ), sessionId);
+  expect(projection).toMatchObject({
+    revision: 4,
+    goal: {
+      lifecycle: "active",
+      currentStepId: "h4-goal-step-1",
+      gate: { type: "waiting_user" },
+    },
+  });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(page, "bundle");
+  const persistedSession = page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(persistedSession).toHaveCount(1);
+  await persistedSession.click();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_HARD_LIMIT_STAGE,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(1);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence("bundle-goal-v2-hard-limit-public-history", {
+    sessionId,
+    agentRunId: snapshot.agentRunId,
+    rounds: snapshot.events.filter((event) => event.type === "model_completed").length,
+    publicReadTools: snapshot.toolExecutions.length,
+    responseTokens,
+    goalRevision: projection.revision,
+    gate: projection.goal.gate.type,
+  });
+});
+
+async function exerciseGoalV2DirectCompletion(h4, runtime) {
+  const { page } = h4;
+  let dialogs = 0;
+  page.on("dialog", async (dialog) => {
+    dialogs += 1;
+    await dialog.dismiss();
+  });
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await page.evaluate((markers) => {
+    const root = document.querySelector("#messages");
+    const snapshots = [];
+    const capture = () => {
+      const text = String(root?.textContent || "");
+      if (markers.some((marker) => text.includes(marker))) snapshots.push(text);
+    };
+    const observer = new MutationObserver(capture);
+    observer.observe(root, { childList: true, characterData: true, subtree: true });
+    window.__goalFinalSummaryProbe = { snapshots, observer };
+  }, [
+    GOAL_V2_FINAL_STAGE_SUMMARY,
+    GOAL_V2_FINAL_SUMMARY_ONE,
+    GOAL_V2_FINAL_SUMMARY_TWO,
+  ]);
+  await h4.submit("/goal H4_GOAL_V2_ACCEPT_SETUP");
+  await h4.waitGate("goal-final-after-first-delta");
+  const partialFinal = page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_FINAL_SUMMARY_ONE,
+  });
+  await expect(partialFinal).toHaveCount(1);
+  await expect(partialFinal).not.toContainText(GOAL_V2_FINAL_SUMMARY_TWO);
+  await expect(partialFinal).not.toContainText(GOAL_V2_ACCEPT_SETUP_FINAL);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(1);
+  await h4.releaseGate("goal-final-after-first-delta");
+
+  const setupFinal = page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_ACCEPT_SETUP_FINAL",
+  });
+  await expect(setupFinal).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(setupFinal.locator(".response-info")).toHaveCount(1);
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(0);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  const finalStage = page.locator("#messages article.msg.assistant.agent-commentary").filter({
+    hasText: GOAL_V2_FINAL_STAGE_SUMMARY,
+  });
+  await expect(finalStage).toHaveCount(1);
+  const finalStageTrace = finalStage.locator("xpath=ancestor::section[@data-execution-trace]");
+  await expect(finalStageTrace).toHaveCount(1);
+  await expect(finalStageTrace).toHaveClass(/\bcompleted\b/);
+  await expect(finalStageTrace).not.toHaveClass(/\bis-expanded\b/);
+  await expect(setupFinal).toContainText(GOAL_V2_FINAL_SUMMARY_ONE);
+  await expect(setupFinal).toContainText(GOAL_V2_FINAL_SUMMARY_TWO);
+  await expect(setupFinal).not.toContainText(GOAL_V2_FINAL_STAGE_SUMMARY);
+  await expect(finalStageTrace).not.toContainText(GOAL_V2_FINAL_SUMMARY_ONE);
+  await expect(finalStageTrace).not.toContainText(GOAL_V2_FINAL_SUMMARY_TWO);
+  await expect(finalStageTrace).not.toContainText(GOAL_V2_ACCEPT_SETUP_FINAL);
+  await expect(setupFinal).not.toContainText(/见上方|see above/i);
+  await finalStageTrace.locator("[data-execution-trace-toggle]").click();
+  await expect(finalStageTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(finalStage).toContainText(GOAL_V2_FINAL_STAGE_SUMMARY);
+  const streamProbe = await page.evaluate(() => {
+    const probe = window.__goalFinalSummaryProbe;
+    probe?.observer?.disconnect();
+    return Array.isArray(probe?.snapshots) ? probe.snapshots : [];
+  });
+  expect(streamProbe.some((text) => (
+    text.includes(GOAL_V2_FINAL_SUMMARY_ONE)
+    && !text.includes(GOAL_V2_FINAL_SUMMARY_TWO)
+    && !text.includes(GOAL_V2_ACCEPT_SETUP_FINAL)
+  ))).toBe(true);
+  expect(await page.locator("#messages").evaluate((element, markers) => {
+    const text = String(element.textContent || "");
+    return Object.fromEntries(markers.map((marker) => [
+      marker,
+      text.split(marker).length - 1,
+    ]));
+  }, [
+    GOAL_V2_FINAL_STAGE_SUMMARY,
+    GOAL_V2_FINAL_SUMMARY_ONE,
+    GOAL_V2_FINAL_SUMMARY_TWO,
+    GOAL_V2_ACCEPT_SETUP_FINAL,
+  ])).toEqual({
+    [GOAL_V2_FINAL_STAGE_SUMMARY]: 1,
+    [GOAL_V2_FINAL_SUMMARY_ONE]: 1,
+    [GOAL_V2_FINAL_SUMMARY_TWO]: 1,
+    [GOAL_V2_ACCEPT_SETUP_FINAL]: 1,
+  });
+
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await activeSession.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const readState = async () => page.evaluate(async (currentSessionId) => {
+    const [session, projection] = await Promise.all([
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}`).then((response) => response.json()),
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`).then((response) => response.json()),
+    ]);
+    return { session, projection: projection.data };
+  }, sessionId);
+  await expect.poll(readState).toMatchObject({
+    projection: {
+      revision: 8,
+      health: "healthy",
+      goal: { lifecycle: "completed" },
+    },
+  });
+  const completed = await readState();
+  expect(completed.projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "completed",
+  ]);
+  const confirmedOrigins = completed.session.messages.filter((message) => (
+    message.meta?.goalOrigin?.confirmed === true
+  ));
+  expect(confirmedOrigins).toHaveLength(1);
+  expect(confirmedOrigins[0].meta.goalOrigin.goalId).toBe(
+    completed.projection.goal.goalId,
+  );
+  const completionMessages = completed.session.messages.filter((message) => (
+    message.meta?.goalCompletion?.confirmed === true
+  ));
+  expect(completionMessages).toHaveLength(1);
+  expect(completionMessages[0].meta.goalCompletion).toMatchObject({
+    goalId: completed.projection.goal.goalId,
+    sourceKind: "explicit",
+  });
+  await expect(setupFinal.locator(".goal-completion-marker")).toHaveCount(1);
+  await assertGoalCompletionFooter(page, setupFinal);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  const messageText = String(await page.locator("#messages").textContent() || "");
+  for (const name of [
+    "goal_set_plan", "goal_start_step", "goal_complete_step",
+    "goal_ready_for_acceptance", "goal_complete",
+  ]) {
+    expect(messageText).not.toContain(name);
+  }
+
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant.agent-commentary").filter({
+    hasText: GOAL_V2_FINAL_STAGE_SUMMARY,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_FINAL_SUMMARY_ONE,
+  })).toHaveCount(1);
+  await page.locator("#newChat").click();
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  // Session navigation intentionally ignores switches within 300 ms. The
+  // just-restored session owns that guard, so cross-session acceptance waits
+  // beyond the documented boundary before selecting it again.
+  await page.waitForTimeout(350);
+  await page.locator(`#sessionList button.session-main[data-session-id="${sessionId}"]`).click();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_ACCEPT_SETUP_FINAL",
+  })).toHaveCount(1);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant.agent-commentary").filter({
+    hasText: GOAL_V2_FINAL_STAGE_SUMMARY,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_FINAL_SUMMARY_ONE,
+  })).toHaveCount(1);
+
+  const metrics = await h4.metrics();
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.chatRequests.at(-1)?.scenario).toBe("goal-v2-accept-setup-final");
+  expect(metrics.chatRequests.at(-1)?.goalTerminalResponse).toEqual({
+    toolsPresent: false,
+    toolChoicePresent: false,
+    terminalInstructionPresent: true,
+  });
+  expect(dialogs).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-goal-v2-direct-completion`, {
+    runtime,
+    sessionId,
+    revision: completed.projection.revision,
+    lifecycle: completed.projection.goal.lifecycle,
+    markerCount: 1,
+    visibleToolGroups: 0,
+    usageFooters: 1,
+    finalStageSummaries: 1,
+    fullFinalSummaries: 1,
+    finalSummaryStreamSnapshots: streamProbe.length,
+    terminalToolsPresent: false,
+    dialogs,
+  });
+}
+
+test("bundle final Goal step directly persists completion and hides active progress", async ({ h4 }) => {
+  await exerciseGoalV2DirectCompletion(h4, "bundle");
+});
+
+test("direct classic final Goal step matches bundle direct completion", async ({ h4 }) => {
+  await exerciseGoalV2DirectCompletion(h4, "classic");
+});
+
+async function exerciseGoalV2UserGateCompletion(h4, runtime) {
+  const { page } = h4;
+  let dialogs = 0;
+  page.on("dialog", async (dialog) => {
+    dialogs += 1;
+    await dialog.dismiss();
+  });
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await h4.submit("/goal H4_GOAL_V2_GATE_SETUP");
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_GATE_SETUP_FINAL",
+  })).toHaveCount(1);
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("3/3");
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(0);
+  // The final assistant frame can render just before the foreground run's
+  // terminal projection releases the composer. Wait for that durable boundary
+  // so the acceptance message starts a new AgentRun instead of racing cleanup.
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await activeSession.getAttribute("data-session-id");
+  const readState = async () => page.evaluate(async (currentSessionId) => (
+    fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`)
+      .then((response) => response.json())
+      .then((value) => value.data)
+  ), sessionId);
+  await expect.poll(readState).toMatchObject({
+    revision: 8,
+    goal: {
+      lifecycle: "active",
+      currentStepId: "h4-goal-step-3",
+      gate: { type: "waiting_user" },
+    },
+  });
+  expect((await readState()).goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "in_progress",
+  ]);
+  await page.locator("#goalProgressSummary").click();
+  const gatedDetails = page.locator("#goalProgressDetails");
+  await expect(gatedDetails).toBeVisible();
+  await expect(gatedDetails.locator(".goal-progress-step-index")).toHaveText(["1", "2", "3"]);
+  await expect(gatedDetails.locator(".goal-progress-step-status")).toHaveCount(3);
+  await expect(gatedDetails.locator(".goal-progress-step-description")).toHaveText([
+    "H4 Goal stage 1", "H4 Goal stage 2", "H4 Goal stage 3",
+  ]);
+  await expect(gatedDetails).not.toContainText("H4 Goal evidence 3");
+  await expect(gatedDetails.locator(".goal-progress-criteria")).toHaveCount(0);
+  await gatedDetails.locator(".goal-progress-step-description").last().click();
+  await expect(gatedDetails).toBeVisible();
+  await page.locator("#prompt").click();
+  await expect(gatedDetails).toBeHidden();
+  await page.locator("#goalProgressSummary").click();
+  await expect(gatedDetails).toBeVisible();
+  await page.locator("#goalProgressSummary").press("Escape");
+  await expect(gatedDetails).toBeHidden();
+
+  await h4.submit("H4_GOAL_V2_GATE_USER_ACCEPTED");
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_GATE_FINAL",
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_GATE_SETUP_FINAL",
+  }).locator(".goal-completion-marker")).toHaveCount(0);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_GATE_FINAL",
+  }).locator(".goal-completion-marker")).toHaveCount(1);
+  await assertGoalCompletionFooter(page, page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_GOAL_V2_GATE_FINAL",
+  }));
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(0);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(2);
+  await expect.poll(readState).toMatchObject({
+    revision: 10,
+    goal: { lifecycle: "completed", currentStepId: null, gate: null },
+  });
+
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  expect((await h4.metrics()).toolExecutions).toEqual([]);
+  expect(dialogs).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-goal-v2-user-gate`, {
+    runtime,
+    sessionId,
+    revision: 10,
+    lifecycle: "completed",
+    markerCount: 1,
+    visibleToolGroups: 0,
+    usageFooters: 2,
+    dialogs,
+  });
+}
+
+test("bundle user-gated final step stays active until user evidence arrives", async ({ h4 }) => {
+  await exerciseGoalV2UserGateCompletion(h4, "bundle");
+});
+
+test("direct classic user-gated final step matches bundle completion", async ({ h4 }) => {
+  await exerciseGoalV2UserGateCompletion(h4, "classic");
 });
 
 test("default bundle completes first plain-text send", async ({ h4 }) => {
@@ -17018,6 +17888,9 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
     activeTraceToggleBeforeRerender,
   );
   await h4.releaseGate(TOOL_FINAL_DELTA_GATE);
+  // Public final content streams before the durable terminal packet. Goal
+  // process commentary uses the same live channel but remains in the trace
+  // after its internal operation is classified.
   await expect(initialDom.finalAnswer).toHaveCount(1);
   const activeRerenderSelection = await finishActiveRerenderSelectionProbe(
     page,
@@ -17158,6 +18031,7 @@ async function exerciseToolDetailActiveToTerminal(h4, runtime) {
   await expect(page.locator("#messages .execution-trace.active")).toHaveCount(0);
   await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
   const terminalDom = await toolDetailLifecycleDomEvidence(page);
+  await expect(terminalDom.finalAnswer).toHaveCount(1);
   const terminalStage = await terminalDom.outer.elementHandle();
   const terminalItem = await terminalDom.item.elementHandle();
   expect(await stableStage.evaluate((element, current) => element === current, terminalStage)).toBe(true);
@@ -18380,6 +19254,7 @@ async function completeToolFailureLifecycle(h4, runtime, contract) {
   await expect(page.locator("#messages .execution-trace.completed")).toHaveCount(1);
 
   const terminalDom = await failedToolLifecycleDomEvidence(page, contract);
+  await expect(terminalDom.finalAnswer).toHaveCount(1);
   expect(String(await terminalDom.outer.locator(".tool-process-stage-heading").textContent() || "").trim())
     .not.toBe("");
   expect(terminalDom.projection.processKey).toBe(initialDom.projection.processKey);
@@ -20788,6 +21663,7 @@ async function exerciseMultiToolDetailActiveToTerminal(h4, runtime) {
   expect(completedTrace.toolCallIds).toEqual([started.firstToolCallId, started.secondToolCallId]);
   expect(completedTrace.executionProjection).toEqual(expectedMultiToolExecutionProjection());
   const terminalDom = await multiToolDetailLifecycleDomEvidence(started.page);
+  await expect(terminalDom.finalAnswer).toHaveCount(1);
   const terminalStage = await terminalDom.outer.elementHandle();
   const terminalItems = await Promise.all(terminalDom.items.map((item) => item.elementHandle()));
   expect(await stableStage.evaluate((element, current) => element === current, terminalStage)).toBe(true);
