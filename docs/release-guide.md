@@ -14,13 +14,13 @@ python release.py 0.5.8
 python release.py 0.5.8 --yes
 
 # 两阶段：先做完整验证和构建，不创建提交、标签或远端对象
-python release.py prepare 0.5.8 --yes
+python release.py 0.5.8 --prepare --yes
 
 # 发布完全匹配的 prepared 候选
-python release.py publish-prepared 0.5.8 --yes
+python release.py 0.5.8 --publish-prepared --yes
 
 # 外部发布中断后，审计并续接同一候选
-python release.py resume 0.5.8 --yes
+python release.py 0.5.8 --resume --yes
 
 # 预演：只检查，不改任何文件
 python release.py 0.5.8 --dry-run
@@ -28,6 +28,8 @@ python release.py 0.5.8 --dry-run
 # 兼容入口：只接受当前候选的有效 prepared 凭证
 python release.py 0.5.8 --skip-tests
 ```
+
+版本优先的 `--prepare`、`--publish-prepared`、`--resume` 是 canonical 写法。已有自动化可继续使用等价兼容别名 `python release.py prepare 0.5.8`、`python release.py publish-prepared 0.5.8`、`python release.py resume 0.5.8`；两套语法进入同一实现、凭证和安全门禁。
 
 ---
 
@@ -47,7 +49,7 @@ python release.py 0.5.8 --skip-tests
 
 原有一次性正式路径在不带 `--skip-tests`、不带 `--dry-run` 时继续执行完整门禁，顺序、超时、fail-fast 和 H4 排除边界不变。`--dry-run` 保持只做预演检查，不新增 replay 执行。replay 失败、超时或无法启动都会在 EXE 构建前阻断。
 
-`--skip-tests` 不再接受“刚跑过”的人工声明。非 dry-run 下它只作为 `publish-prepared` 的兼容入口：必须存在与当前 HEAD、index、tracked 候选、发布文件、验证定义、环境、发布说明和 EXE 完全绑定的有效凭证，否则立即失败并提示重新运行 `prepare`。
+`--skip-tests` 不再接受“刚跑过”的人工声明。非 dry-run 下它只作为 `--publish-prepared` 的兼容入口：必须存在与当前 HEAD、index、tracked 候选、发布文件、验证定义、环境、发布说明和 EXE 完全绑定的有效凭证，否则立即失败并提示重新运行 `--prepare`。
 
 ---
 
@@ -56,7 +58,7 @@ python release.py 0.5.8 --skip-tests
 ### 1. Prepare：昂贵验证与本地候选
 
 ```powershell
-python release.py prepare 0.5.8 --yes
+python release.py 0.5.8 --prepare --yes
 ```
 
 `prepare` 在第一次修改版本元数据前先执行远端只读预检：
@@ -79,7 +81,7 @@ python release.py prepare 0.5.8 --yes
 ### 2. Publish prepared：精确复用
 
 ```powershell
-python release.py publish-prepared 0.5.8 --yes
+python release.py 0.5.8 --publish-prepared --yes
 ```
 
 脚本只有在以下证据全部一致时才跳过昂贵门禁：
@@ -96,7 +98,7 @@ python release.py publish-prepared 0.5.8 --yes
 ### 3. Resume：审计后只补缺失步骤
 
 ```powershell
-python release.py resume 0.5.8 --yes
+python release.py 0.5.8 --resume --yes
 ```
 
 `resume` 只接受已经由 `publish-prepared` 启动的同一凭证。它按顺序审计发布提交、`master`、本地/远端 tag、GitHub Release 正文和 EXE 资产：
@@ -191,11 +193,11 @@ python release.py 0.5.8 --yes
 ### 两阶段发版（推荐）
 
 ```powershell
-python release.py prepare 0.5.8 --yes
-python release.py publish-prepared 0.5.8 --yes
+python release.py 0.5.8 --prepare --yes
+python release.py 0.5.8 --publish-prepared --yes
 
 # 如果第二条命令在提交、推送或 Release/资产步骤中断
-python release.py resume 0.5.8 --yes
+python release.py 0.5.8 --resume --yes
 ```
 
 ### 限制
@@ -204,8 +206,8 @@ python release.py resume 0.5.8 --yes
 - Agent 应先写好 `docs/releases/v0.5.8.md` 的无占位中文正文，再运行 `python release.py 0.5.8 --yes`。Phase 5 会保留正文，并刷新日期、版本号、文件大小与 SHA-256。
 - 如果未预先准备正文，脚本会生成带占位提示的中文模板并停止；编辑完成后重新运行即可，已有正文不会再次被覆盖。
 - 无论采用人工还是 Agent 流程，创建标签和 GitHub Release 前都必须再次检查发布说明为中文主体、没有占位文案，并且只覆盖上一标签以来的真实改动。
-- Agent 不得把 `--skip-tests` 当作人工信任开关；没有有效 prepared 凭证时必须重新运行 `prepare`。
-- `prepare` 成功不代表已经获得 push、tag 或 Release 授权；执行 `publish-prepared` / `resume` 前仍需当前阶段的明确发布操作授权。
+- Agent 不得把 `--skip-tests` 当作人工信任开关；没有有效 prepared 凭证时必须重新运行 `--prepare`。
+- `--prepare` 成功不代表已经获得 push、tag 或 Release 授权；执行 `--publish-prepared` / `--resume` 前仍需当前阶段的明确发布操作授权。
 
 ### Agent 无法处理的情况
 

@@ -15,9 +15,10 @@ Code 自动发版脚本
 
 用法：
   python release.py 0.5.8                发版 0.5.8
-  python release.py prepare 0.5.8        完整验证并准备本地候选
-  python release.py publish-prepared 0.5.8  发布精确匹配的候选
-  python release.py resume 0.5.8         审计并续接已开始的发布
+  python release.py 0.5.8 --prepare      完整验证并准备本地候选
+  python release.py 0.5.8 --publish-prepared  发布精确匹配的候选
+  python release.py 0.5.8 --resume       审计并续接已开始的发布
+  python release.py prepare 0.5.8        prepare 的兼容别名
   python release.py 0.5.8 --skip-tests   prepared-only 兼容入口
   python release.py 0.5.8 --dry-run      预演模式
   python release.py 0.5.8 --proxy 127.0.0.1:18081  指定代理
@@ -1169,7 +1170,7 @@ def prepare_release(version):
         }
         save_credential(credential_path, credential)
         ok(f"prepared 凭证已写入 Git 内部路径: code-release/v{version}.json")
-        print(f"  下一步: python release.py publish-prepared {version}")
+        print(f"  下一步: python release.py {version} --publish-prepared")
     except BaseException:
         _restore_release_files(snapshot)
         invalidate_credential(credential_path)
@@ -1629,14 +1630,40 @@ def main():
 示例:
   python release.py 0.5.8              发版 0.5.8
   python release.py 0.5.8 --dry-run    预演模式：只检查不修改
-  python release.py prepare 0.5.8      验证并生成本地 prepared 凭证
-  python release.py publish-prepared 0.5.8  发布精确匹配的 prepared 候选
-  python release.py resume 0.5.8       审计并续接已开始的发布
+  python release.py 0.5.8 --prepare    验证并生成本地 prepared 凭证
+  python release.py 0.5.8 --publish-prepared  发布精确匹配的 prepared 候选
+  python release.py 0.5.8 --resume     审计并续接已开始的发布
+  python release.py prepare 0.5.8      兼容别名（其他两阶段动作同理）
   python release.py 0.5.8 --skip-tests 兼容入口：必须存在有效 prepared 凭证
         """,
     )
-    parser.add_argument("command_or_version", help="版本号，或 prepare / publish-prepared / resume")
-    parser.add_argument("command_version", nargs="?", help="显式路径使用的新版本号")
+    parser.add_argument(
+        "command_or_version",
+        help="版本号，或兼容别名 prepare / publish-prepared / resume",
+    )
+    parser.add_argument("command_version", nargs="?", help="兼容别名使用的新版本号")
+    action_group = parser.add_mutually_exclusive_group()
+    action_group.add_argument(
+        "--prepare",
+        dest="release_action",
+        action="store_const",
+        const="prepare",
+        help="完整验证并生成本地 prepared 候选，不执行外部发布",
+    )
+    action_group.add_argument(
+        "--publish-prepared",
+        dest="release_action",
+        action="store_const",
+        const="publish-prepared",
+        help="发布与当前候选精确绑定的 prepared 凭证",
+    )
+    action_group.add_argument(
+        "--resume",
+        dest="release_action",
+        action="store_const",
+        const="resume",
+        help="审计并续接同一凭证已经开始的外部发布",
+    )
     parser.add_argument(
         "--skip-tests",
         action="store_true",
@@ -1650,15 +1677,17 @@ def main():
     args = parser.parse_args()
 
     if args.command_or_version in RELEASE_ACTIONS:
+        if args.release_action is not None:
+            parser.error("动作 flag 不能与兼容动作子命令组合")
         action = args.command_or_version
         if not args.command_version:
             parser.error(f"{action} 需要版本号")
         new_version = args.command_version
     else:
-        action = "full"
+        action = args.release_action or "full"
         new_version = args.command_or_version
         if args.command_version is not None:
-            parser.error("一次性入口只接受一个版本号")
+            parser.error("版本优先入口只接受一个版本号")
 
     if action != "full" and args.dry_run:
         parser.error("--dry-run 仅适用于原有一次性入口")
@@ -1697,7 +1726,7 @@ def main():
     if args.skip_tests and not args.dry_run:
         warn(
             "--skip-tests 不再接受无依据跳过；正在按兼容模式验证 prepared 凭证，"
-            "后续请改用 publish-prepared",
+            f"后续请改用 python release.py {new_version} --publish-prepared",
         )
         publish_prepared(new_version, auto_yes=args.yes)
         return

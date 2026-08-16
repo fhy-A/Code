@@ -1,8 +1,9 @@
+import io
 import json
 import subprocess
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -558,16 +559,97 @@ class TestPublishResumeIntegration(unittest.TestCase):
 
 
 class TestReleaseCliContracts(unittest.TestCase):
-    def test_two_stage_actions_reject_dry_run_and_skip_tests(self):
-        invalid = (
-            ["release.py", "prepare", "1.2.3", "--dry-run"],
-            ["release.py", "resume", "1.2.3", "--skip-tests"],
+    def assert_rejected_before_action(self, argv):
+        guarded_names = (
+            "parse_version",
+            "detect_windows_proxy",
+            "prepare_release",
+            "publish_prepared",
+            "resume_release",
+            "remote_read_only_preflight",
+            "run",
+            "run_quiet",
         )
-        for argv in invalid:
-            with self.subTest(argv=argv), mock.patch.object(release.sys, "argv", argv):
-                with self.assertRaises(SystemExit) as raised:
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(release.sys, "argv", argv))
+            guarded = {
+                name: stack.enter_context(mock.patch.object(release, name))
+                for name in guarded_names
+            }
+            stderr = io.StringIO()
+            stack.enter_context(redirect_stderr(stderr))
+            with self.assertRaises(SystemExit) as raised:
+                release.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("error:", stderr.getvalue())
+        for name, guarded_call in guarded.items():
+            with self.subTest(argv=argv, guarded=name):
+                guarded_call.assert_not_called()
+
+    def test_version_first_flags_and_compatibility_aliases_dispatch_identically(self):
+        cases = (
+            (
+                "prepare",
+                ["release.py", "1.2.3", "--prepare", "--no-proxy"],
+                ["release.py", "prepare", "1.2.3", "--no-proxy"],
+                "prepare_release",
+                mock.call("1.2.3"),
+            ),
+            (
+                "publish-prepared",
+                ["release.py", "1.2.3", "--publish-prepared", "--no-proxy"],
+                ["release.py", "publish-prepared", "1.2.3", "--no-proxy"],
+                "publish_prepared",
+                mock.call("1.2.3", auto_yes=False),
+            ),
+            (
+                "resume",
+                ["release.py", "1.2.3", "--resume", "--no-proxy"],
+                ["release.py", "resume", "1.2.3", "--no-proxy"],
+                "resume_release",
+                mock.call("1.2.3", auto_yes=False),
+            ),
+        )
+        for action, canonical, alias, expected_name, expected_call in cases:
+            for syntax, argv in (("canonical", canonical), ("alias", alias)):
+                with self.subTest(action=action, syntax=syntax), ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(release.sys, "argv", argv))
+                    actions = {
+                        name: stack.enter_context(mock.patch.object(release, name))
+                        for name in ("prepare_release", "publish_prepared", "resume_release")
+                    }
+                    proxy_detection = stack.enter_context(
+                        mock.patch.object(release, "detect_windows_proxy"),
+                    )
                     release.main()
-                self.assertEqual(raised.exception.code, 2)
+
+                self.assertEqual(actions[expected_name].call_args, expected_call)
+                for name, action_call in actions.items():
+                    if name != expected_name:
+                        action_call.assert_not_called()
+                proxy_detection.assert_not_called()
+
+    def test_all_ambiguous_action_combinations_fail_before_any_action(self):
+        action_flags = ("--prepare", "--publish-prepared", "--resume")
+        action_aliases = ("prepare", "publish-prepared", "resume")
+        invalid = []
+        for index, left in enumerate(action_flags):
+            for right in action_flags[index + 1:]:
+                invalid.append(["release.py", "1.2.3", left, right])
+        for alias in action_aliases:
+            for action_flag in action_flags:
+                invalid.append(["release.py", alias, "1.2.3", action_flag])
+        for action_flag in action_flags:
+            invalid.append(["release.py", "1.2.3", action_flag, "--dry-run"])
+            invalid.append(["release.py", "1.2.3", action_flag, "--skip-tests"])
+        for alias in action_aliases:
+            invalid.append(["release.py", alias, "1.2.3", "--dry-run"])
+            invalid.append(["release.py", alias, "1.2.3", "--skip-tests"])
+
+        for argv in invalid:
+            with self.subTest(argv=argv):
+                self.assert_rejected_before_action(argv)
 
     def test_resume_rejects_a_never_started_prepared_credential(self):
         credential = {
