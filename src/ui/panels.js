@@ -46,6 +46,10 @@
     const input = usageStats.input;
     const output = usageStats.output;
     const cache = usageStats.cache || 0;
+    // Server-persisted stats only carry {input, output, cache, cost}, so a
+    // positive cache total is treated as evidence the upstream reported it;
+    // the explicit flag covers live sessions where zero cache was reported.
+    const cacheReported = Boolean(usageStats.cacheReported) || Number(usageStats.cache) > 0;
     const cacheWriteReported = Object.prototype.hasOwnProperty.call(
       usageStats,
       "cacheWrite",
@@ -74,11 +78,17 @@
     const getContextLimit = options.getContextLimit || (() => 128000);
     const ctxLimit = getContextLimit(options.model || "");
     const contextPct = Math.min(100, (contextTokens / ctxLimit) * 100);
+    const cacheHit =
+      cacheReported && Number(input) > 0
+        ? Math.min(1, Number(cache) / Number(input))
+        : null;
     return {
       counts,
       input,
       output,
       cache,
+      cacheHit,
+      cacheReported,
       cacheWrite,
       cacheWriteReported,
       contextTokens,
@@ -148,6 +158,14 @@
       elements.statInput.textContent = formatCompact(stats.input);
       elements.statOutput.textContent = formatCompact(stats.output);
       elements.statCache.textContent = formatCompact(stats.cache);
+      if (elements.statCacheHit) {
+        const hit = stats.cacheHit;
+        elements.statCacheHit.hidden = hit === null || hit === undefined;
+        elements.statCacheHit.textContent = hit === null || hit === undefined
+          ? ""
+          : `${(hit * 100).toFixed(0)}%`;
+        elements.statCacheHit.title = t("statCacheHitTitle");
+      }
       elements.statContext.textContent = `${stats.contextPct.toFixed(0)}%`;
       elements.usageStrip.title = t("usageStripTitle")
         .replace("{current}", formatCompact(stats.contextTokens || 0))
@@ -197,6 +215,11 @@
       elements.tokenInput.textContent = formatNumber(stats.input);
       elements.tokenOutput.textContent = formatNumber(stats.output);
       elements.tokenCache.textContent = formatNumber(stats.cache);
+      if (elements.tokenCacheHit) {
+        elements.tokenCacheHit.textContent = stats.cacheHit === null || stats.cacheHit === undefined
+          ? "—"
+          : `${(stats.cacheHit * 100).toFixed(0)}%`;
+      }
       if (elements.tokenCacheWriteRow) {
         elements.tokenCacheWriteRow.hidden = !stats.cacheWriteReported;
       }

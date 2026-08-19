@@ -835,6 +835,7 @@ const els = {
   statOutput: document.getElementById("statOutput"),
 
   statCache: document.getElementById("statCache"),
+  statCacheHit: document.getElementById("statCacheHit"),
 
   statContext: document.getElementById("statContext"),
   ctxRingFill: document.getElementById("ctxRingFill"),
@@ -862,6 +863,7 @@ const els = {
   tokenOutput: document.getElementById("tokenOutput"),
 
   tokenCache: document.getElementById("tokenCache"),
+  tokenCacheHit: document.getElementById("tokenCacheHit"),
 
   tokenCacheWriteRow: document.getElementById("tokenCacheWriteRow"),
 
@@ -5522,6 +5524,7 @@ function updateUsage(usage, sessionId = state.sessionId, ctx = null) {
     ledger.input = Number(ledger.input || 0) + Number(normalized.input || 0);
     ledger.output = Number(ledger.output || 0) + Number(normalized.output || 0);
     ledger.cache = Number(ledger.cache || 0) + Number(normalized.cache || 0);
+    if (normalized.hasCacheReported) ledger.cacheReported = true;
     if (Object.prototype.hasOwnProperty.call(normalized, "cacheWrite")) {
       ledger.cacheWrite = (
         Number(ledger.cacheWrite || 0)

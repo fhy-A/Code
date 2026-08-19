@@ -9819,11 +9819,13 @@ process.stdout.write(JSON.stringify({
             "output": 4,
             "cache": 100,
             "cacheWrite": 3,
+            "hasCacheReported": True,
         })
         self.assertEqual(data["openAIUsage"], {
             "input": 100,
             "output": 4,
             "cache": 80,
+            "hasCacheReported": True,
         })
         self.assertIn('data-usage-kind="input"', data["cacheStatus"])
         self.assertIn('data-usage-kind="cache-read"', data["cacheStatus"])
@@ -10933,6 +10935,75 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["codexSource"], "t:sessionSourceCodex")
         self.assertEqual(data["codeSource"], "t:sessionSourceCode")
         self.assertTrue(data["registeredDocumentClick"])
+
+
+    def test_cache_hit_rate_normalization_and_rendering(self):
+        self.assertIn("hasCacheReported", MESSAGES_SOURCE)
+        self.assertIn("cacheHit", PANELS_SOURCE)
+        self.assertIn('id="statCacheHit"', INDEX_SOURCE)
+        script = r"""
+global.window = {Code: {ui: {}}, setTimeout: (callback) => callback()};
+require("./src/ui/messages.js");
+require("./src/ui/panels.js");
+const { normalizeResponseUsage } = window.Code.ui.messages;
+const { calculateSessionStats } = window.Code.ui.panels;
+const withCache = normalizeResponseUsage({
+  prompt_tokens: 100,
+  completion_tokens: 4,
+  prompt_tokens_details: {cached_tokens: 80},
+});
+const withoutCache = normalizeResponseUsage({prompt_tokens: 100, completion_tokens: 4});
+const statsBase = {
+  getContextMessages: (x) => x,
+  estimateTokens: () => 0,
+  getMessageText: () => "",
+  getSystemPrompt: () => "",
+  getContextLimit: () => 100,
+};
+const hit = calculateSessionStats({
+  messages: [],
+  stats: {input: 100, output: 4, cache: 80, cacheReported: true},
+  ...statsBase,
+});
+const hitClamped = calculateSessionStats({
+  messages: [],
+  stats: {input: 50, output: 4, cache: 80, cacheReported: true},
+  ...statsBase,
+});
+const noReport = calculateSessionStats({
+  messages: [],
+  stats: {input: 100, output: 4, cache: 0},
+  ...statsBase,
+});
+const persistedInferred = calculateSessionStats({
+  messages: [],
+  stats: {input: 100, output: 4, cache: 80},
+  ...statsBase,
+});
+process.stdout.write(JSON.stringify({
+  withCache: {cache: withCache.cache, hasCacheReported: withCache.hasCacheReported},
+  withoutCache: {cache: withoutCache.cache, hasCacheReported: withoutCache.hasCacheReported},
+  hit: hit.cacheHit,
+  hitClamped: hitClamped.cacheHit,
+  noReport: noReport.cacheHit,
+  persistedInferred: persistedInferred.cacheHit,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["withCache"], {"cache": 80, "hasCacheReported": True})
+        self.assertEqual(data["withoutCache"], {"cache": 0, "hasCacheReported": False})
+        self.assertEqual(data["hit"], 0.8)
+        self.assertEqual(data["hitClamped"], 1.0)
+        self.assertIsNone(data["noReport"])
+        self.assertEqual(data["persistedInferred"], 0.8)
 
     def test_preview_feature_exports_parsing_urls_and_width_rules(self):
         self.assertIn("features.preview = Object.freeze", PREVIEW_SOURCE)

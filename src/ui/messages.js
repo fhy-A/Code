@@ -799,16 +799,20 @@
 
   function normalizeResponseUsage(usage) {
     if (!usage) return null;
-    const cacheRead = firstReportedToken(usage, [
+    const cacheKeys = [
       "cache",
       "prompt_cache_hit_tokens",
       "cache_read_tokens",
       "cache_read_input_tokens",
       "cached_input_tokens",
-    ]) || tokenCount(
+    ];
+    const cacheRead = firstReportedToken(usage, cacheKeys) || tokenCount(
       usage.prompt_tokens_details?.cached_tokens
       ?? usage.input_tokens_details?.cached_tokens,
     );
+    const hasCacheReported = hasReportedToken(usage, cacheKeys)
+      || usage.prompt_tokens_details?.cached_tokens != null
+      || usage.input_tokens_details?.cached_tokens != null;
     const cacheWriteKeys = [
       "cacheWrite",
       "cache_creation_input_tokens",
@@ -837,6 +841,7 @@
       input,
       output: firstReportedToken(usage, ["output", "completion_tokens", "output_tokens"]),
       cache: cacheRead,
+      hasCacheReported,
     };
     if (cacheWriteReported) normalized.cacheWrite = cacheWrite;
     return normalized;

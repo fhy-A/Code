@@ -791,6 +791,9 @@ input:focus, select:focus, textarea:focus {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
+.stat-cache-hit { margin-left: 4px; font-size: 12px; color: var(--muted); }
+#statCacheHit:not([hidden])::before { content: " · "; font-weight: 400; }
+.metric-sub { margin-left: 6px; font-size: 12px; color: var(--muted); font-weight: 400; }
 .usage-strip b {
   color: var(--text);
 }
