@@ -31,6 +31,14 @@ const GOAL_V2_CONTINUATION_STAGE = "H4_GOAL_V2_CONTINUATION_PUBLIC_STAGE";
 const GOAL_V2_CONTINUATION_FINAL = "H4_GOAL_V2_CONTINUATION_FINAL";
 const GOAL_V2_HARD_LIMIT_USER = "/goal H4_GOAL_V2_HARD_LIMIT";
 const GOAL_V2_HARD_LIMIT_STAGE = "H4_GOAL_V2_HARD_LIMIT_PUBLIC_STAGE";
+const GOAL_V2_GATE_SETUP_USER = "/goal H4_GOAL_V2_GATE_SETUP";
+const GOAL_V2_GATE_SETUP_FINAL = "H4_GOAL_V2_GATE_SETUP_FINAL";
+const GOAL_V2_GATE_REQUEST = "H4_GOAL_V2_GATE_REQUEST_REGION";
+const GOAL_V2_GATE_USER = "H4_GOAL_V2_GATE_USER_ACCEPTED";
+const GOAL_V2_GATE_FAILURE_USER = "H4_GOAL_V2_GATE_SUPPLEMENT_FAIL_REGION";
+const GOAL_V2_GATE_RETRY_USER = "H4_GOAL_V2_GATE_SUPPLEMENT_RETRY_REGION";
+const GOAL_V2_GATE_FAILURE_ERROR = "H4_GOAL_V2_GATE_SUPPLEMENT_UPSTREAM_FAILURE";
+const GOAL_V2_GATE_FINAL = "H4_GOAL_V2_GATE_FINAL";
 const MULTI_TOOL_USER = "H4_MULTI_TOOL_USER";
 const MULTI_TOOL_STAGE = "H4_MULTI_TOOL_STAGE";
 const MULTI_TOOL_FINAL = "H4_MULTI_TOOL_FINAL";
@@ -16749,6 +16757,46 @@ test("direct classic final Goal step matches bundle direct completion", async ({
   await exerciseGoalV2DirectCompletion(h4, "classic");
 });
 
+async function readGoalAcceptanceState(page, sessionId) {
+  return page.evaluate(async (currentSessionId) => {
+    const [session, projection] = await Promise.all([
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}`).then((response) => response.json()),
+      fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`)
+        .then((response) => response.json()),
+    ]);
+    return { session, projection: projection.data };
+  }, sessionId);
+}
+
+async function readObservedAgentSnapshots(h4, page) {
+  const snapshots = [];
+  for (const agentRunId of h4.controlIds().agentRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    snapshots.push(response.body);
+  }
+  return snapshots;
+}
+
+function countModelRounds(snapshot) {
+  return snapshot.events.filter((event) => event.type === "model_completed").length;
+}
+
+async function restoreGoalH4Connection(h4) {
+  const { page } = h4;
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", MODEL_ID);
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  expect(await page.locator("#baseUrl").evaluate((element) => element.value)).toBe(
+    h4.host.ready.fakeUrl,
+  );
+}
+
 async function exerciseGoalV2UserGateCompletion(h4, runtime) {
   const { page } = h4;
   let dialogs = 0;
@@ -16758,37 +16806,71 @@ async function exerciseGoalV2UserGateCompletion(h4, runtime) {
   });
   await h4.open(runtime);
   await assertFrontendRuntime(page, runtime);
-  await h4.submit("/goal H4_GOAL_V2_GATE_SETUP");
-  await expect(page.locator("#messages article.msg.assistant").filter({
-    hasText: "H4_GOAL_V2_GATE_SETUP_FINAL",
-  })).toHaveCount(1);
+  await h4.submit(GOAL_V2_GATE_SETUP_USER);
+  const setupFinal = page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_GATE_SETUP_FINAL,
+  });
+  await expect(setupFinal).toHaveCount(1);
+  await expect(setupFinal).toContainText(GOAL_V2_GATE_REQUEST);
+  await expect(setupFinal.locator(".response-info")).toHaveCount(1);
   await expect(page.locator("#goalProgress")).toBeVisible();
   await expect(page.locator("#goalProgressCount")).toHaveText("3/3");
-  await expect(page.locator("#messages article.tool-process")).toHaveCount(0);
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(1);
   // The final assistant frame can render just before the foreground run's
   // terminal projection releases the composer. Wait for that durable boundary
-  // so the acceptance message starts a new AgentRun instead of racing cleanup.
+  // so the supplement starts a new AgentRun instead of racing cleanup.
   await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
   await expect(page.locator("#stopBtn")).toBeDisabled();
 
   const activeSession = page.locator("#sessionList .session-row.active button.session-main");
   const sessionId = await activeSession.getAttribute("data-session-id");
-  const readState = async () => page.evaluate(async (currentSessionId) => (
-    fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`)
-      .then((response) => response.json())
-      .then((value) => value.data)
-  ), sessionId);
+  expect(sessionId).toBeTruthy();
+  const readState = () => readGoalAcceptanceState(page, sessionId);
   await expect.poll(readState).toMatchObject({
-    revision: 8,
-    goal: {
-      lifecycle: "active",
-      currentStepId: "h4-goal-step-3",
-      gate: { type: "waiting_user" },
+    projection: {
+      revision: 8,
+      goal: {
+        lifecycle: "active",
+        currentStepId: "h4-goal-step-3",
+        gate: { type: "waiting_user" },
+      },
     },
   });
-  expect((await readState()).goal.steps.map((step) => step.status)).toEqual([
+  const waiting = await readState();
+  const goalId = waiting.projection.goal.goalId;
+  expect(goalId).toBeTruthy();
+  expect(waiting.projection.goal.steps.map((step) => step.status)).toEqual([
     "completed", "completed", "in_progress",
   ]);
+  expect(waiting.session.messages.filter((message) => (
+    message.meta?.goalOrigin?.confirmed === true
+    && message.meta.goalOrigin.goalId === goalId
+  ))).toHaveLength(1);
+  await expect(page.locator("#messages article.msg.assistant.agent-commentary").filter({
+    hasText: GOAL_V2_PUBLIC_COMMENTARY,
+  })).toHaveCount(1);
+
+  const setupSnapshots = await readObservedAgentSnapshots(h4, page);
+  expect(setupSnapshots).toHaveLength(1);
+  const setupRun = setupSnapshots[0];
+  expect(setupRun).toMatchObject({
+    status: "completed",
+    sessionId,
+    runKind: "foreground",
+    goalOperationsEnabled: true,
+  });
+  expect(countModelRounds(setupRun)).toBe(9);
+  expect(setupRun.toolExecutions).toHaveLength(1);
+  expect(setupRun.toolExecutions[0]).toMatchObject({
+    name: "read_file",
+    status: "completed",
+    outcome: "succeeded",
+  });
+  expect(Number(setupRun.usage?.total_tokens || 0)).toBeGreaterThan(0);
+  const metricsAtGate = await h4.metrics();
+  expect(metricsAtGate.chatRequests).toHaveLength(9);
+  expect(metricsAtGate.toolExecutions).toEqual([{ action: "read_file", path: "fixture.txt" }]);
+
   await page.locator("#goalProgressSummary").click();
   const gatedDetails = page.locator("#goalProgressDetails");
   await expect(gatedDetails).toBeVisible();
@@ -16808,55 +16890,264 @@ async function exerciseGoalV2UserGateCompletion(h4, runtime) {
   await page.locator("#goalProgressSummary").press("Escape");
   await expect(gatedDetails).toBeHidden();
 
-  await h4.submit("H4_GOAL_V2_GATE_USER_ACCEPTED");
-  await expect(page.locator("#messages article.msg.assistant").filter({
-    hasText: "H4_GOAL_V2_GATE_FINAL",
-  })).toHaveCount(1);
+  const waitingReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await restoreGoalH4Connection(h4);
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("3/3");
+  await expect(setupFinal).toContainText(GOAL_V2_GATE_REQUEST);
+  expect(h4.controlIds().agentRunIds).toEqual([setupRun.agentRunId]);
+  expect((await h4.metrics()).chatRequests).toEqual(metricsAtGate.chatRequests);
+  expect(h4.requestEvidenceSince(waitingReloadBoundary).agentPost).toBe(0);
+  expect((await readState()).projection).toMatchObject({
+    revision: 8,
+    goal: { goalId, currentStepId: "h4-goal-step-3", gate: { type: "waiting_user" } },
+  });
+
+  await page.locator("#newChat").click();
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await page.waitForTimeout(350);
+  await page.locator(`#sessionList button.session-main[data-session-id="${sessionId}"]`).click();
+  await restoreGoalH4Connection(h4);
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("3/3");
+  expect(h4.controlIds().agentRunIds).toEqual([setupRun.agentRunId]);
+  expect((await h4.metrics()).chatRequests).toEqual(metricsAtGate.chatRequests);
+
+  const supplementBoundary = h4.requestBoundary();
+  await h4.submit(GOAL_V2_GATE_USER);
+  const finalAssistant = page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_GATE_FINAL,
+  });
+  await expect(finalAssistant).toHaveCount(1);
+  await expect(finalAssistant.locator(".response-info")).toHaveCount(1);
   await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
   await expect(page.locator("#goalProgress")).toBeHidden();
   await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
   await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
-  await expect(page.locator("#messages article.msg.assistant").filter({
-    hasText: "H4_GOAL_V2_GATE_SETUP_FINAL",
-  }).locator(".goal-completion-marker")).toHaveCount(0);
-  await expect(page.locator("#messages article.msg.assistant").filter({
-    hasText: "H4_GOAL_V2_GATE_FINAL",
-  }).locator(".goal-completion-marker")).toHaveCount(1);
-  await assertGoalCompletionFooter(page, page.locator("#messages article.msg.assistant").filter({
-    hasText: "H4_GOAL_V2_GATE_FINAL",
-  }));
-  await expect(page.locator("#messages article.tool-process")).toHaveCount(0);
+  await expect(setupFinal.locator(".goal-completion-marker")).toHaveCount(0);
+  await expect(finalAssistant.locator(".goal-completion-marker")).toHaveCount(1);
+  await assertGoalCompletionFooter(page, finalAssistant);
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(1);
   await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(2);
   await expect.poll(readState).toMatchObject({
-    revision: 10,
-    goal: { lifecycle: "completed", currentStepId: null, gate: null },
+    projection: {
+      revision: 10,
+      goal: { goalId, lifecycle: "completed", currentStepId: null, gate: null },
+    },
   });
 
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const snapshots = await readObservedAgentSnapshots(h4, page);
+  const replyRun = snapshots.find((snapshot) => (
+    String(snapshot.result?.content || "").includes(GOAL_V2_GATE_FINAL)
+  ));
+  const persistedSetupRun = snapshots.find((snapshot) => snapshot.agentRunId !== replyRun?.agentRunId);
+  expect(replyRun).toBeTruthy();
+  expect(persistedSetupRun?.agentRunId).toBe(setupRun.agentRunId);
+  expect(replyRun).toMatchObject({
+    status: "completed",
+    sessionId,
+    runKind: "foreground",
+    goalOperationsEnabled: true,
+    permissionProfile: setupRun.permissionProfile,
+  });
+  expect(replyRun.clientRequestId).not.toBe(setupRun.clientRequestId);
+  expect(replyRun.result?.continuation).toBeUndefined();
+  expect(countModelRounds(replyRun)).toBe(3);
+  expect(replyRun.toolExecutions).toEqual([]);
+  expect(Number(replyRun.usage?.total_tokens || 0)).toBeGreaterThan(0);
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toHaveLength(12);
+  expect(metricsAfter.toolExecutions).toEqual(metricsAtGate.toolExecutions);
+  expect(h4.requestEvidenceSince(supplementBoundary).agentPost).toBe(1);
+
+  const completed = await readState();
+  expect(completed.projection.goal.goalId).toBe(goalId);
+  expect(completed.projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "completed",
+  ]);
+  expect(completed.session.messages.filter((message) => (
+    message.role === "user" && String(message.content || "").includes(GOAL_V2_GATE_USER)
+  ))).toHaveLength(1);
+  expect(completed.session.messages.filter((message) => (
+    message.meta?.goalOrigin?.confirmed === true
+  ))).toHaveLength(1);
+  const messageText = String(await page.locator("#messages").textContent() || "");
+  expect(countOccurrences(messageText, GOAL_V2_GATE_REQUEST)).toBe(1);
+  expect(countOccurrences(messageText, GOAL_V2_GATE_USER)).toBe(1);
+  for (const name of ["goal_set_plan", "goal_start_step", "goal_raise_gate", "goal_clear_gate", "goal_complete_step"]) {
+    expect(messageText).not.toContain(name);
+  }
+
+  const completedReloadBoundary = h4.requestBoundary();
   await h4.reloadRuntime(runtime);
+  await restoreGoalH4Connection(h4);
   await expect(page.locator("#goalProgress")).toBeHidden();
   await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
   await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
-  expect((await h4.metrics()).toolExecutions).toEqual([]);
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(1);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([
+    setupRun.agentRunId,
+    replyRun.agentRunId,
+  ]));
+  expect((await h4.metrics()).chatRequests).toEqual(metricsAfter.chatRequests);
+  expect(h4.requestEvidenceSince(completedReloadBoundary).agentPost).toBe(0);
   expect(dialogs).toBe(0);
   expect(h4.pageErrors).toEqual([]);
-  h4.evidence(`${runtime}-goal-v2-user-gate`, {
+  h4.evidence(`${runtime}-goal-v2-user-gate-resume`, {
     runtime,
     sessionId,
-    revision: 10,
-    lifecycle: "completed",
-    markerCount: 1,
-    visibleToolGroups: 0,
+    goalId: idHash(goalId),
+    waitingRevision: waiting.projection.revision,
+    completedRevision: completed.projection.revision,
+    agentRuns: 2,
+    setupRounds: countModelRounds(setupRun),
+    replyRounds: countModelRounds(replyRun),
+    modelRequests: metricsAfter.chatRequests.length,
+    successfulTools: metricsAfter.toolExecutions.length,
     usageFooters: 2,
     dialogs,
   });
 }
 
-test("bundle user-gated final step stays active until user evidence arrives", async ({ h4 }) => {
+test("bundle Goal supplement resumes once across reload and session switch", async ({ h4 }) => {
   await exerciseGoalV2UserGateCompletion(h4, "bundle");
 });
 
-test("direct classic user-gated final step matches bundle completion", async ({ h4 }) => {
+test("direct classic Goal supplement matches bundle identity and recovery", async ({ h4 }) => {
   await exerciseGoalV2UserGateCompletion(h4, "classic");
+});
+
+test("bundle failed Goal supplement stays gated and recovers without replay", async ({ h4 }) => {
+  const { page } = h4;
+  await h4.open("bundle");
+  await assertFrontendRuntime(page, "bundle");
+  await h4.submit(GOAL_V2_GATE_SETUP_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_GATE_REQUEST,
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  const sessionId = await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id");
+  const readState = () => readGoalAcceptanceState(page, sessionId);
+  await expect.poll(readState).toMatchObject({
+    projection: { revision: 8, goal: { gate: { type: "waiting_user" } } },
+  });
+  const waiting = await readState();
+  const goalId = waiting.projection.goal.goalId;
+  expect(waiting.projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "in_progress",
+  ]);
+  const setupRunId = h4.controlIds().agentRunIds[0];
+  const metricsAtGate = await h4.metrics();
+  expect(metricsAtGate.chatRequests).toHaveLength(9);
+  expect(metricsAtGate.toolExecutions).toEqual([{ action: "read_file", path: "fixture.txt" }]);
+
+  await restoreGoalH4Connection(h4);
+  await h4.submit(GOAL_V2_GATE_FAILURE_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_GATE_FAILURE_ERROR,
+  })).toHaveCount(1, { timeout: 60_000 });
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  let snapshots = await readObservedAgentSnapshots(h4, page);
+  const failedRun = snapshots.find((snapshot) => snapshot.status === "failed");
+  expect(failedRun).toMatchObject({
+    sessionId,
+    runKind: "foreground",
+    goalOperationsEnabled: true,
+    errorCode: "upstream_error",
+  });
+  expect(String(failedRun.error || "")).toContain(GOAL_V2_GATE_FAILURE_ERROR);
+  expect(failedRun.toolExecutions).toEqual([]);
+  expect(countModelRounds(failedRun)).toBe(0);
+  const afterFailure = await readState();
+  expect(afterFailure.projection).toMatchObject({
+    revision: 8,
+    goal: { goalId, lifecycle: "active", gate: { type: "waiting_user" } },
+  });
+  expect(afterFailure.projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "in_progress",
+  ]);
+  const metricsAfterFailure = await h4.metrics();
+  expect(metricsAfterFailure.chatRequests).toHaveLength(10);
+  expect(metricsAfterFailure.toolExecutions).toEqual(metricsAtGate.toolExecutions);
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("3/3");
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(0);
+
+  const failureReloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime("bundle");
+  await restoreGoalH4Connection(h4);
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_GATE_FAILURE_ERROR,
+  })).toHaveCount(1);
+  expect(new Set(h4.controlIds().agentRunIds)).toEqual(new Set([setupRunId, failedRun.agentRunId]));
+  expect((await h4.metrics()).chatRequests).toEqual(metricsAfterFailure.chatRequests);
+  expect(h4.requestEvidenceSince(failureReloadBoundary).agentPost).toBe(0);
+
+  const recoveryBoundary = h4.requestBoundary();
+  await h4.submit(GOAL_V2_GATE_RETRY_USER);
+  const recoveryFinal = page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_GATE_FINAL,
+  });
+  await expect(recoveryFinal).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(3);
+  snapshots = await readObservedAgentSnapshots(h4, page);
+  const recoveredRun = snapshots.find((snapshot) => (
+    snapshot.agentRunId !== setupRunId && snapshot.agentRunId !== failedRun.agentRunId
+  ));
+  expect(recoveredRun).toMatchObject({
+    status: "completed",
+    sessionId,
+    runKind: "foreground",
+    goalOperationsEnabled: true,
+    permissionProfile: failedRun.permissionProfile,
+  });
+  expect(recoveredRun.toolExecutions).toEqual([]);
+  expect(countModelRounds(recoveredRun)).toBe(3);
+  const recovered = await readState();
+  expect(recovered.projection).toMatchObject({
+    revision: 10,
+    goal: { goalId, lifecycle: "completed", currentStepId: null, gate: null },
+  });
+  expect(recovered.projection.goal.steps.map((step) => step.status)).toEqual([
+    "completed", "completed", "completed",
+  ]);
+  const metricsRecovered = await h4.metrics();
+  expect(metricsRecovered.chatRequests).toHaveLength(13);
+  expect(metricsRecovered.toolExecutions).toEqual(metricsAtGate.toolExecutions);
+  expect(h4.requestEvidenceSince(recoveryBoundary).agentPost).toBe(1);
+  expect(recovered.session.messages.filter((message) => (
+    message.role === "user" && String(message.content || "").includes(GOAL_V2_GATE_FAILURE_USER)
+  ))).toHaveLength(1);
+  expect(recovered.session.messages.filter((message) => (
+    message.role === "user" && String(message.content || "").includes(GOAL_V2_GATE_RETRY_USER)
+  ))).toHaveLength(1);
+  expect(recovered.session.messages.filter((message) => (
+    message.meta?.goalOrigin?.confirmed === true
+  ))).toHaveLength(1);
+  await expect(page.locator("#messages article.tool-process")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant .response-info")).toHaveCount(2);
+  await expect(page.locator("#messages .goal-completion-marker")).toHaveCount(1);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence("bundle-goal-v2-user-gate-failure-recovery", {
+    sessionId,
+    goalId: idHash(goalId),
+    waitingRevision: waiting.projection.revision,
+    failedRevision: afterFailure.projection.revision,
+    recoveredRevision: recovered.projection.revision,
+    agentRuns: snapshots.length,
+    failedErrorCode: failedRun.errorCode,
+    modelRequests: metricsRecovered.chatRequests.length,
+    successfulTools: metricsRecovered.toolExecutions.length,
+    replayedTools: 0,
+  });
 });
 
 test("default bundle completes first plain-text send", async ({ h4 }) => {

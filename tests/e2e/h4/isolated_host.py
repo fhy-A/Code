@@ -125,10 +125,14 @@ GOAL_V2_ACCEPT_SETUP_CALL_IDS = tuple(
 )
 GOAL_V2_GATE_SETUP_USER = "/goal H4_GOAL_V2_GATE_SETUP"
 GOAL_V2_GATE_SETUP_FINAL = "H4_GOAL_V2_GATE_SETUP_FINAL"
+GOAL_V2_GATE_REQUEST = "H4_GOAL_V2_GATE_REQUEST_REGION"
 GOAL_V2_GATE_SETUP_CALL_IDS = tuple(
-    f"h4-goal-v2-gate-setup-{index}" for index in range(1, 8)
+    f"h4-goal-v2-gate-setup-{index}" for index in range(1, 9)
 )
 GOAL_V2_GATE_USER = "H4_GOAL_V2_GATE_USER_ACCEPTED"
+GOAL_V2_GATE_FAILURE_USER = "H4_GOAL_V2_GATE_SUPPLEMENT_FAIL_REGION"
+GOAL_V2_GATE_RETRY_USER = "H4_GOAL_V2_GATE_SUPPLEMENT_RETRY_REGION"
+GOAL_V2_GATE_FAILURE_ERROR = "H4_GOAL_V2_GATE_SUPPLEMENT_UPSTREAM_FAILURE"
 GOAL_V2_GATE_FINAL = "H4_GOAL_V2_GATE_FINAL"
 GOAL_V2_GATE_CALL_IDS = tuple(
     f"h4-goal-v2-gate-complete-{index}" for index in range(1, 3)
@@ -555,6 +559,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             if isinstance(message, dict) and message.get("role") == "tool"
         } & set(GOAL_V2_HARD_LIMIT_CALL_IDS)
         return f"goal-v2-hard-limit-call-{len(completed) + 1}", bool(completed)
+    if GOAL_V2_GATE_FAILURE_USER in user_text:
+        return "goal-v2-gate-supplement-failure", False
     for marker, prefix, call_ids in (
         (GOAL_V2_EXPLICIT_USER, "goal-v2-explicit", GOAL_V2_EXPLICIT_CALL_IDS),
         (GOAL_V2_AUTONOMOUS_COMPLETE_USER, "goal-v2-autonomous-complete", GOAL_V2_AUTONOMOUS_COMPLETE_CALL_IDS),
@@ -562,6 +568,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         (GOAL_V2_ACCEPT_SETUP_USER, "goal-v2-accept-setup", GOAL_V2_ACCEPT_SETUP_CALL_IDS),
         (GOAL_V2_GATE_SETUP_USER, "goal-v2-gate-setup", GOAL_V2_GATE_SETUP_CALL_IDS),
         (GOAL_V2_GATE_USER, "goal-v2-gate-complete", GOAL_V2_GATE_CALL_IDS),
+        (GOAL_V2_GATE_RETRY_USER, "goal-v2-gate-complete", GOAL_V2_GATE_CALL_IDS),
     ):
         if marker not in user_text:
             continue
@@ -1683,6 +1690,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
             return
+        if scenario == "goal-v2-gate-supplement-failure":
+            self._send_json({"error": {"message": GOAL_V2_GATE_FAILURE_ERROR}}, 502)
+            return
         if scenario == "forced-final-model-failure-final":
             if not REFRESH_GATES.reach_and_wait("before-tool-final-delta"):
                 return
@@ -2245,20 +2255,23 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     plan[-1]["acceptanceCriteria"][0]["kind"] = "user"
                     operations.append(("goal_set_plan", {"steps": plan}))
                     for index in range(1, 3):
-                        operations.extend([
-                            ("goal_start_step", {"stepId": f"h4-goal-step-{index}"}),
-                            (
-                                "goal_complete_step",
-                                {
-                                    "stepId": f"h4-goal-step-{index}",
-                                    "evidence": [{
-                                        "criterionId": f"h4-goal-criterion-{index}",
-                                        "kind": "machine",
-                                        "summary": f"H4 Goal stage {index} passed",
-                                    }],
-                                },
-                            ),
-                        ])
+                        operations.append((
+                            "goal_start_step",
+                            {"stepId": f"h4-goal-step-{index}"},
+                        ))
+                        if index == 1:
+                            operations.append(("read_file", {"path": READ_PATH}))
+                        operations.append((
+                            "goal_complete_step",
+                            {
+                                "stepId": f"h4-goal-step-{index}",
+                                "evidence": [{
+                                    "criterionId": f"h4-goal-criterion-{index}",
+                                    "kind": "machine",
+                                    "summary": f"H4 Goal stage {index} passed",
+                                }],
+                            },
+                        ))
                     operations.extend([
                         ("goal_start_step", {"stepId": "h4-goal-step-3"}),
                         (
@@ -2372,7 +2385,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "goal-v2-autonomous-final": GOAL_V2_AUTONOMOUS_FINAL,
                 "goal-v2-autonomous-complete-final": GOAL_V2_AUTONOMOUS_COMPLETE_FINAL,
                 "goal-v2-accept-setup-final": GOAL_V2_ACCEPT_SETUP_FINAL,
-                "goal-v2-gate-setup-final": GOAL_V2_GATE_SETUP_FINAL,
+                "goal-v2-gate-setup-final": (
+                    GOAL_V2_GATE_SETUP_FINAL + " " + GOAL_V2_GATE_REQUEST
+                ),
                 "goal-v2-gate-complete-final": GOAL_V2_GATE_FINAL,
                 "goal-v2-continuation-next-final": GOAL_V2_CONTINUATION_FINAL,
             }[scenario]
