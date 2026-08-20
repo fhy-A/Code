@@ -7,8 +7,9 @@
 1. 阅读 `docs/development-log/README.md`，按索引读取最新日期文件，以及与当前任务直接相关的日期文件；历史归档仅在追溯时按需读取。
 2. 阅读 `TODO.md`，确认未完成事项、优先级和当前任务边界。
 3. 运行 `git status --short` 和 `git log -8 --oneline`，核对分支、提交和共享工作区现场。
-4. 按任务需要读取实现、测试、规范和专题文档，不默认加载完整历史。
-5. 检查 `docs/development-handoff.md` 是否存在。该文件只代表尚未完成的活动任务：用户要求“继续/接手”或当前任务与其范围重叠时必须读取并与 Git、日志、TODO 核对；当前任务无关时不得覆盖，并在可能冲突时提示用户。
+4. **跨运行时写入租约**：Codex/DSH Developer Agent 在对共享 `code` 工作区执行任何写入、暂存、提交或会产生持久副作用的测试前，必须按 canonical `code/docs/approval-relay-protocol.md` 使用唯一 helper `code/scripts/workspace_owner_lease.py` 取得并维护 owner lease；Approval Agent 保持只读且不申请。租约仅提供同一物理 worktree 写入互斥，不授予 push、tag、release、delete 或线上配置权限。
+5. 按任务需要读取实现、测试、规范和专题文档，不默认加载完整历史。
+6. 检查 `docs/development-handoff.md` 是否存在。该文件只代表尚未完成的活动任务：用户要求“继续/接手”或当前任务与其范围重叠时必须读取并与 Git、日志、TODO 核对；当前任务无关时不得覆盖，并在可能冲突时提示用户。
 
 已完成事实以开发日志和可复现结果为准，未完成项目事项以 `TODO.md` 为准，代码现场以 Git 和实际文件为准。活动交接只记录进行中差量，不能成为第四份长期状态源。
 

@@ -401,3 +401,93 @@ During the freeze:
 After compaction or restart, recover the newest freeze-queue message from the approval task. If the approval task was replaced and the old task cannot be found, ask for the old task ID or reconstruct from user-visible evidence; never claim the queue is complete from memory alone.
 
 After completion or abort, report the frozen baseline, released result if any, and queued next-cycle work. Then direct the developer to record accepted queue items in project TODO only after the freeze has ended and the user has chosen the next stage. Do not automatically begin the queue.
+
+---
+
+# Cross-runtime owner lease（跨运行时唯一写者租约）
+
+> 本节是 Codex ↔ DSH 在同一物理 `code` worktree 上切换写者的 canonical 协议。唯一实现是 tracked CLI `scripts/workspace_owner_lease.py`，双方不得创建第二种租约文件、schema 或绕过路径。它不依赖 Codex task API 或 DSH mailbox，适用范围不是分布式锁或跨机器共享。
+
+## 角色与强制顺序
+
+1. Approval Agent 始终只读，不申请、续租、回收或释放 lease；它只核对 Developer Agent 返回的 lease 与 Git 证据。
+2. 绑定的 Codex/DSH Developer Agent 在任何项目文件写入、暂存、提交，或会产生持久副作用的测试前，先核对当前 HEAD、`git status --short`、cached、TODO、最新日志、当前 handoff 和 relayId，再执行 `status` 与 `acquire`。
+3. `acquire` 退出 0 后才可写入。持有者在到期前执行 `renew`，并在每个长阶段或可能跨 TTL 的命令前确认仍为同一 `leaseId`；lease 到期或续租失败后必须停止新写入。
+4. 阶段完成且 cached 已清空后，以匹配的 runtime、approval/developer 身份和 `leaseId` 执行 `release`。切换运行时前，原审批侧停止发送新 relay，原 Developer 释放 lease；新 Developer 以新 relayId 和当前 HEAD 重新申请。
+5. DSH 是 Codex 不可用时的替代开发通道，不是并行写入通道。任一 runtime 发现其他 holder、恢复要求或不确定现场都必须停止，不得靠 mailbox、任务标题或口头声明覆盖 lease。
+6. CODE-034 首次创建 helper 时 helper 尚不存在，因此只允许本阶段一次 bootstrap 写入；helper 可运行后必须立即取得 lease，且该例外写入开发日志。后续会话不存在 bootstrap 例外。
+
+## 唯一 CLI
+
+以下命令从 `code` 目录执行；`--repo` 默认是当前目录，示例使用 JSON 便于 Agent 确定性解析。双方使用可用的 Python 3.10+ 解释器运行同一 tracked 文件。
+
+```powershell
+# 纯只读；不得创建 lock/state/history
+python scripts/workspace_owner_lease.py status --json
+
+# 空闲时原子取得；同一 runtime + approval/developer holder 重试时保留 leaseId 并续租
+python scripts/workspace_owner_lease.py acquire `
+  --runtime codex --approval-id <approval-id> --developer-id <developer-id> `
+  --stage <stage> --relay-id <relay-id> --ttl-seconds 900 --json
+
+# 长阶段到期前续租；必须匹配 holder 与 leaseId
+python scripts/workspace_owner_lease.py renew `
+  --runtime codex --approval-id <approval-id> --developer-id <developer-id> `
+  --lease-id <lease-id> --stage <stage> --relay-id <relay-id> `
+  --ttl-seconds 900 --json
+
+# 完成后释放；只接受匹配 holder 与 leaseId
+python scripts/workspace_owner_lease.py release `
+  --runtime codex --approval-id <approval-id> --developer-id <developer-id> `
+  --lease-id <lease-id> --json
+
+# 仅在 status 明确为 expired 后执行；原子审计并直接建立新 holder lease
+python scripts/workspace_owner_lease.py reclaim `
+  --runtime dsh --approval-id <approval-id> --developer-id <developer-id> `
+  --expected-lease-id <expired-lease-id> --stage <stage> --relay-id <new-relay-id> `
+  --ttl-seconds 900 --json
+```
+
+`--ttl-seconds` 默认 900，允许范围 60～3600 秒。状态以 UTC 记录，并为本机时钟轻微漂移保留 5 秒安全宽限；宽限内仍按 active 处理，不能被 reclaim。系统时钟回拨时 renew 不会让 `renewedAt` 或 `expiresAt` 倒退。长任务必须主动续租，不能把 TTL 当作永久所有权。
+
+## Git-dir 状态、原子性与 schema
+
+CLI 使用 `git rev-parse --absolute-git-dir` 解析当前 worktree 专属 Git-dir；普通仓库和 linked worktree 因而互不混淆。以下本地文件全部位于 Git-dir，不进入工作树、`git status`、提交或业务数据：
+
+- `workbar-owner-lease.json`：唯一活动/过期 lease；
+- `workbar-owner-lease.lock`：跨进程 OS 文件锁载体，不代表活动 lease；
+- `workbar-owner-lease-history.json`：最多 8 条成功 reclaim 的前任摘要；
+- 同名前缀的 `.tmp-*`：原子 replace 中间态；任何残留均视为初始化/更新中断并 fail-closed。
+
+所有修改命令先竞争同一个 Windows `msvcrt.locking` / POSIX `flock` 排他锁，再读取并校验状态，以同目录临时文件、`fsync` 和 `os.replace` 原子更新。空闲竞争只允许一个进程成功；状态损坏、未知 schema、残留临时文件或锁超时不会退化为“无 lease”。`status` 不取得或创建 mutation lock，只读取通过原子 replace 发布的完整快照。
+
+活动 lease schema 固定为 `workbar-owner-lease/v1`，只含以下字段：
+
+| 字段 | 含义 |
+|---|---|
+| `schema` | 固定 `workbar-owner-lease/v1` |
+| `runtime` | `codex` 或 `dsh` |
+| `approvalId` / `developerId` | 当前绑定审批与开发身份 |
+| `stage` / `relayId` | 当前批准阶段与唯一 relay |
+| `baseHead` | 首次 acquire/reclaim 时的当前 HEAD |
+| `leaseId` | UUID；renew 保持不变，reclaim 生成新值 |
+| `acquiredAt` / `renewedAt` / `expiresAt` | UTC ISO-8601 时间 |
+| `ttlSeconds` | 已验证的 TTL |
+
+lease 与 history 禁止保存 token、凭据、业务数据、不必要的绝对路径或项目文件内容。lease 只表达同一物理 worktree 的写入互斥，不授予 push、tag、release、删除、线上配置、真实凭据或其他外部副作用权限。
+
+## 状态、退出码与失败处理
+
+JSON 输出始终包含 `ok`、`status` 和动作/错误字段；文本输出使用稳定单行 `STATUS`、`ACQUIRED`、`RENEWED`、`RECLAIMED`、`RELEASED` 或 `ERROR` 前缀。
+
+| 退出码 | 状态 | 调用方行为 |
+|---|---|---|
+| `0` | `none` / `active` / `expired` 或动作成功 | 仅 acquire/renew/reclaim 成功后可写；`status=expired` 本身不授予写入 |
+| `2` | `invalid_arguments` | 修正 CLI 参数；不得写入 |
+| `3` | `conflict` | 其他 holder、错误 leaseId、active reclaim 或无可释放 lease；立即停止 |
+| `4` | `recovery_required` | 过期普通 acquire、cached 非空、HEAD 漂移、损坏/未知/中断状态；保持 fail-closed |
+| `5` | `environment_error` | Git-dir/HEAD/lock/原子 I/O 无法可靠完成；立即停止 |
+
+普通 `acquire` 永不覆盖过期 lease。`reclaim` 必须在同一排他锁内确认：旧状态完整且已越过时钟宽限、`--expected-lease-id` 匹配、cached 为空、当前 HEAD 等于旧 `baseHead`。全部通过后先保存有界前任摘要，再直接建立新 lease；HEAD 变化、cached 非空、lease/history 损坏或初始化中断都拒绝 reclaim 并要求用户介入。协议不提供 force、静默删除或“损坏即空闲”选项。
+
+进程或会话异常不会永久占有：有效 lease 到期后可按上述审计显式 reclaim；但旧 holder 必须在到期后停止写入。若状态不确定，由用户审阅 Git-dir 与现场后决定处置，任何 Agent 不得自行删除 lease/state/history。
