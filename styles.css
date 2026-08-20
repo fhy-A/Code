@@ -7088,6 +7088,20 @@ button:focus-visible,
   outline-offset: -2px;
 }
 
+/* File tree: keyboard navigation selection and search result chrome. */
+.file-item.focused {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.search-truncated {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.search-status-line,
+.search-count-line {
+  padding: 8px;
+  font-size: 12px;
+}
+
 /* Sidebar: a quieter navigation rail with clearer grouping. */
 .pi-sidebar {
   background: var(--panel);

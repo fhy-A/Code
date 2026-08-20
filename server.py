@@ -5845,6 +5845,10 @@ SKIP_DIRS = {
     ".next", ".nuxt", ".venv", "venv", "env", ".env",
     "__pycache__", "node_modules", ".npm", ".yarn", ".pnpm",
     "dist", "build", "coverage", ".turbo", ".cache",
+    ".gradle", "target", ".output",
+    # Language tool caches
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".eslintcache",
+    ".parcel-cache", ".terraform", ".dart_tool",
     "logs", "backups", "sessions", "file-backups",
     ".tox", ".eggs", "*.egg-info",
     # IDE / editors

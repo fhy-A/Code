@@ -11294,7 +11294,12 @@ document.addEventListener("keydown", (event) => {
   // ── Non-input shortcuts (skip when typing in text fields) ──
   if (tag === "INPUT" || tag === "TEXTAREA") {
     if (event.key === "Escape") {
-      document.activeElement.blur();
+      // The file-tree search box owns its Escape semantics (clear the query
+      // and restore the current-directory list); keep its focus so that box
+      // handler is the single source of truth instead of this generic blur.
+      if (document.activeElement !== document.getElementById("fileSearch")) {
+        document.activeElement.blur();
+      }
     }
     return;
   }

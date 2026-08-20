@@ -6682,6 +6682,465 @@ const feature = createFilesFeature({
         self.assertIn("scheduleSilentRefresh: silentRefresh.schedule", FILES_SOURCE)
         self.assertIn("silentRefresh.invalidate();", FILES_SOURCE)
 
+
+    def test_file_tree_recursive_search_and_keyboard_navigation(self):
+        self.assertIn('runStreamingSearch', FILES_SOURCE)
+        self.assertIn('buildSearchLevels', FILES_SOURCE)
+        self.assertIn('handleFileTreeKeydown', FILES_SOURCE)
+        self.assertIn('tabindex="${index === 0 ? 0 : -1}"', FILES_SOURCE)
+        script = r"""
+global.window = {Code: {features: {}}, setTimeout, clearTimeout};
+require('./src/features/files.js');
+const {createFilesFeature} = window.Code.features.files;
+const listeners = {};
+const globCalls = [];
+const buttons = [];
+const fileTree = {
+  innerHTML: '',
+  scrollTop: 0,
+  classList: {toggle() {}},
+  addEventListener: (name, fn) => { listeners[name] = fn; },
+  querySelectorAll: () => buttons,
+  querySelector: () => null,
+  insertAdjacentHTML: () => {},
+};
+const state = {
+  currentDir: 'src',
+  _fileRoot: 'C:/demo',
+  _fileItems: [{name: 'a.js', path: 'src/a.js', type: 'file'}, {name: 'b.ts', path: 'src/b.ts', type: 'file'}],
+  previewPath: '',
+};
+const elements = {
+  fileTree,
+  projectRoot: {value: 'C:/demo'},
+  fileSearch: {value: '', addEventListener: (name, fn) => { listeners['search-' + name] = fn; }},
+  filePathBar: {style: {}, innerHTML: '', querySelectorAll: () => [], scrollWidth: 0, clientWidth: 100},
+  cwdPathText: {textContent: ''},
+  goUp: {disabled: false, addEventListener: () => {}},
+  newFolderBtn: {disabled: false, addEventListener: () => {}},
+  refreshFiles: {disabled: false, addEventListener: () => {}},
+  fileSortBtn: {addEventListener: () => {}},
+};
+const timers = [];
+const documentRoot = {
+  body: {appendChild: () => {}},
+  getElementById: () => ({textContent: '', addEventListener: () => {}}),
+  addEventListener: () => {},
+  querySelector: () => null,
+  activeElement: null,
+};
+const feature = createFilesFeature({
+  state,
+  elements,
+  t: (key) => key,
+  escapeHtml: (value) => String(value),
+  openFile: (path) => { globCalls.push('open:' + path); },
+  apiJson: async (url, options) => {
+    if (url === '/api/tools/glob_files') {
+      const body = JSON.parse(options.body);
+      globCalls.push('glob:' + body.path + ':' + body.pattern);
+      if (body.path === 'C:/demo/src') {
+        return {ok: true, results: [{path: 'src/deep/config.json', type: 'file'}, {path: 'src/config', type: 'dir'}], truncated: true};
+      }
+      return {ok: true, results: [{path: 'src/deep/config.json', type: 'file'}], truncated: false};
+    }
+    return {root: 'C:/demo', path: 'src', items: state._fileItems};
+  },
+  setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
+  clearTimeout: () => {},
+  storage: {getItem: () => null, setItem: () => {}},
+  documentRoot,
+});
+(async () => {
+  feature.bind();
+  feature.loadFiles();
+  await Promise.resolve(); await Promise.resolve();
+  const rendered = fileTree.innerHTML;
+  const tabIndex0 = rendered.includes('tabindex="0"');
+  const tabIndexNeg = rendered.includes('tabindex="-1"');
+  const ariaSelected = rendered.includes('aria-selected="false"');
+  // 搜索防抖：输入 'config' → 250ms 后调 glob_files（pattern 包装为 *config*）
+  elements.fileSearch.value = 'config';
+  listeners['search-input']();
+  const searchingShown = fileTree.innerHTML.includes('searching');
+  const debounced = timers.length;
+  const timer = timers[timers.length - 1];
+  await timer.fn();
+  // 过期取消：再输入 'cfg' 触发新搜索，旧响应（已返回）仍被丢弃
+  const globBeforeStale = globCalls.length;
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  // 键盘导航：构造按钮 mock（渲染后 querySelectorAll 返回）
+  const btnA = {dataset: {path: 'src/a.js', type: 'file'}, setAttribute: () => {}, classList: {toggle: () => {}}, addEventListener: () => {}, focus: () => { documentRoot.activeElement = btnA; globCalls.push('focus:a'); }, click: () => { globCalls.push('click:a'); }};
+  const btnB = {dataset: {path: 'src/b.ts', type: 'file'}, setAttribute: () => {}, classList: {toggle: () => {}}, addEventListener: () => {}, focus: () => { globCalls.push('focus:b'); }, click: () => { globCalls.push('click:b'); }};
+  buttons.length = 0; buttons.push(btnA, btnB);
+  listeners['keydown']({key: 'ArrowDown', preventDefault: () => {}});
+  listeners['keydown']({key: 'Enter', preventDefault: () => {}});
+  // Esc 退出搜索
+  elements.fileSearch.value = 'config';
+  listeners['keydown']({key: 'Escape', preventDefault: () => {}});
+  process.stdout.write(JSON.stringify({
+    tabIndex0, tabIndexNeg, ariaSelected,
+    searchingShown,
+    debounced: debounced > 0,
+    globCalls,
+    globBeforeStale,
+    searchCleared: elements.fileSearch.value,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["tabIndex0"])
+        self.assertTrue(data["tabIndexNeg"])
+        self.assertTrue(data["ariaSelected"])
+        self.assertTrue(data["searchingShown"])
+        self.assertTrue(data["debounced"])
+        self.assertIn('glob:C:/demo/src:*config*', data["globCalls"])
+        self.assertIn('glob:C:/demo:*config*', data["globCalls"])
+        self.assertIn('focus:a', data["globCalls"])
+        self.assertIn('click:a', data["globCalls"])
+        self.assertEqual(data["searchCleared"], "")
+    def test_file_tree_streaming_search_order_dedupe_limit_cancel_cache(self):
+        self.assertIn('runStreamingSearch', FILES_SOURCE)
+        self.assertIn('buildSearchLevels', FILES_SOURCE)
+        self.assertIn('SEARCH_LIMIT', FILES_SOURCE)
+        script = r"""
+global.window = {Code: {features: {}}, setTimeout, clearTimeout};
+require('./src/features/files.js');
+const {createFilesFeature} = window.Code.features.files;
+const listeners = {};
+const globCalls = [];
+const buttons = [];
+const fileTree = {
+  innerHTML: '',
+  scrollTop: 0,
+  classList: {toggle() {}},
+  addEventListener: (name, fn) => { listeners[name] = fn; },
+  querySelectorAll: () => buttons,
+  querySelector: () => null,
+  insertAdjacentHTML: (pos, html) => { fileTree.innerHTML += html; },
+};
+const state = {
+  currentDir: 'src/deep',
+  _fileRoot: 'C:/demo',
+  _fileItems: [],
+  previewPath: '',
+};
+const elements = {
+  fileTree,
+  projectRoot: {value: 'C:/demo'},
+  fileSearch: {value: '', addEventListener: (name, fn) => { listeners['search-' + name] = fn; }},
+  filePathBar: {style: {}, innerHTML: '', querySelectorAll: () => [], scrollWidth: 0, clientWidth: 100},
+  cwdPathText: {textContent: ''},
+  goUp: {disabled: false, addEventListener: () => {}},
+  newFolderBtn: {disabled: false, addEventListener: () => {}},
+  refreshFiles: {disabled: false, addEventListener: () => {}},
+  fileSortBtn: {addEventListener: () => {}},
+};
+const timers = [];
+const documentRoot = {
+  body: {appendChild: () => {}},
+  getElementById: () => ({textContent: '', addEventListener: () => {}}),
+  addEventListener: () => {},
+  querySelector: () => null,
+  activeElement: null,
+};
+const snapshots = [];
+const bigResults = Array.from({length: 501}, (_, i) => ({path: 'bulk/' + i + '.txt', type: 'file'}));
+const feature = createFilesFeature({
+  state,
+  elements,
+  t: (key, params) => params ? key + JSON.stringify(params) : key,
+  escapeHtml: (value) => String(value),
+  openFile: () => {},
+  apiJson: async (url, options) => {
+    if (url === '/api/tools/glob_files') {
+      const body = JSON.parse(options.body);
+      globCalls.push('glob:' + body.path + ':' + body.pattern);
+      snapshots.push(fileTree.innerHTML);
+      const pattern = body.pattern;
+      if (pattern === '*xy*') return {ok: true, results: [{path: 'src/deep/xy.txt', type: 'file'}]};
+      if (pattern === '*fallback*') return {ok: true, results: [{path: 'outside/x.txt', type: 'file'}, {path: 'src/deep/x.json', type: 'file'}]};
+      if (pattern === '*empty*') return {ok: true, results: [], truncated: false};
+      if (pattern === '*big*') return {ok: true, results: bigResults, truncated: true};
+      if (body.path === 'C:/demo/src/deep') return {ok: true, results: [{path: 'src/deep/x.json', type: 'file'}]};
+      if (body.path === 'C:/demo/src') return {ok: true, results: [{path: 'src/a.js', type: 'file'}, {path: 'src/deep/x.json', type: 'file'}]};
+      return {ok: true, results: [{path: 'config', type: 'dir'}], truncated: false};
+    }
+    return {root: 'C:/demo', path: 'src/deep', items: []};
+  },
+  setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
+  clearTimeout: () => {},
+  storage: {getItem: () => null, setItem: () => {}},
+  documentRoot,
+});
+(async () => {
+  feature.bind();
+  feature.loadFiles();
+  await Promise.resolve(); await Promise.resolve();
+  const out = {};
+  // A: 层级顺序（当前目录→父→根）+ 按 path 去重 + 进度行
+  elements.fileSearch.value = 'cfg';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await Promise.resolve(); await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const htmlA = fileTree.innerHTML;
+  out.order = globCalls.filter((c) => c.includes('*cfg*'));
+  out.dedupeCount = htmlA.split('data-path="src/deep/x.json" data-type="file"').length - 1;
+  out.hasAjs = htmlA.includes('data-path="src/a.js"');
+  out.hasConfigDir = htmlA.includes('data-path="config"');
+  out.progressShown = snapshots.some((s) => s.includes('search-status-line') && s.includes('searchProgress'));
+  out.progressHasY3 = snapshots.some((s) => s.includes('searchProgress') && s.includes('"y":3'));
+  out.progressLevels = snapshots.filter((s) => s.includes('searchProgress')).map((s) => { const m = s.match(/"x":(\d+)/); return m ? Number(m[1]) : null; });
+  out.noProgressWhenDone = !htmlA.includes('search-status-line');
+  out.countLine = htmlA.includes('searchResultCount') && htmlA.includes('"n":3');
+  // B: 全局 500 上限（当前层即达上限，不再请求根层）
+  elements.fileSearch.value = 'big';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await Promise.resolve(); await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const htmlB = fileTree.innerHTML;
+  out.limitHit = htmlB.includes('searchResultCountLimited') && htmlB.includes('"n":500');
+  out.bigRequests = globCalls.filter((c) => c.includes('*big*'));
+  out.bigRows = htmlB.split('file-item-row').length - 1;
+  // C: 新输入取消进行中队列（旧流结果不渲染）
+  elements.fileSearch.value = 'cfg';
+  listeners['search-input']();
+  const cancelTimer = timers[timers.length - 1];
+  cancelTimer.fn(); // start stream without awaiting
+  elements.fileSearch.value = 'xy';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await Promise.resolve(); await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const htmlC = fileTree.innerHTML;
+  out.cancelledHasXy = htmlC.includes('data-path="src/deep/xy.txt"');
+  out.cancelledNoCfg = !htmlC.includes('data-path="src/deep/x.json"') && !htmlC.includes('data-path="src/a.js"');
+  // D: 目录粒度缓存（3s TTL 内同 dir|pattern 不再发请求）
+  const xyBefore = globCalls.filter((c) => c.includes('*xy*')).length;
+  elements.fileSearch.value = 'xy';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await Promise.resolve(); await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const xyAfter = globCalls.filter((c) => c.includes('*xy*')).length;
+  out.cacheHit = xyAfter === xyBefore && xyAfter === 3;
+  // E: 服务端回退检测（子树无匹配时 glob_files 回扫项目根，前端停止队列）
+  const fallbackBefore = globCalls.filter((c) => c.includes('*fallback*')).length;
+  elements.fileSearch.value = 'fallback';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const htmlE = fileTree.innerHTML;
+  out.fallbackRequests = globCalls.filter((c) => c.includes('*fallback*')).length - fallbackBefore;
+  out.fallbackStopped = !htmlE.includes('search-status-line');
+  out.fallbackHasOutside = htmlE.includes('data-path="outside/x.txt"');
+  out.fallbackMergedLocal = htmlE.includes('data-path="src/deep/x.json"');
+  // F: 单层场景（当前目录=项目根）进度文案区分（用新词避开缓存）
+  state.currentDir = '';
+  elements.fileSearch.value = 'cfg2';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  out.singleLevelText = snapshots.some((s) => s.includes('searchProgressSingle'));
+  // G: 空态（无结果）保持「无匹配文件」，不显示总数行
+  state.currentDir = 'src/deep';
+  elements.fileSearch.value = 'empty';
+  listeners['search-input']();
+  await timers[timers.length - 1].fn();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const htmlG = fileTree.innerHTML;
+  out.emptyState = htmlG.includes('noMatchingFiles') && !htmlG.includes('searchResultCount');
+  process.stdout.write(JSON.stringify(out));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["order"], [
+            "glob:C:/demo/src/deep:*cfg*",
+            "glob:C:/demo/src:*cfg*",
+            "glob:C:/demo:*cfg*",
+        ])
+        self.assertEqual(data["dedupeCount"], 1)
+        self.assertTrue(data["hasAjs"])
+        self.assertTrue(data["hasConfigDir"])
+        self.assertTrue(data["progressShown"])
+        self.assertTrue(data["progressHasY3"])
+        self.assertIn(1, data["progressLevels"])
+        self.assertIn(2, data["progressLevels"])
+        self.assertTrue(data["singleLevelText"])
+        self.assertTrue(data["noProgressWhenDone"])
+        self.assertTrue(data["countLine"])
+        self.assertTrue(data["limitHit"])
+        self.assertEqual(data["bigRequests"], ["glob:C:/demo/src/deep:*big*"])
+        self.assertEqual(data["bigRows"], 500)
+        self.assertTrue(data["cancelledHasXy"])
+        self.assertTrue(data["cancelledNoCfg"])
+        self.assertTrue(data["cacheHit"])
+        self.assertTrue(data["emptyState"])
+        self.assertEqual(data["fallbackRequests"], 1)
+        self.assertTrue(data["fallbackStopped"])
+        self.assertTrue(data["fallbackHasOutside"])
+        self.assertTrue(data["fallbackMergedLocal"])
+    def test_file_tree_search_field_keydown_handlers(self):
+        self.assertIn('handleSearchFieldKeydown', FILES_SOURCE)
+        self.assertIn('clearSearchAndRestore', FILES_SOURCE)
+        script = r"""
+global.window = {Code: {features: {}}, setTimeout, clearTimeout};
+require('./src/features/files.js');
+const {createFilesFeature} = window.Code.features.files;
+const listeners = {};
+const fileCalls = [];
+const buttons = [];
+let firstQuery = null;
+const fileTree = {
+  innerHTML: '',
+  scrollTop: 0,
+  classList: {toggle() {}},
+  addEventListener: (name, fn) => { listeners[name] = fn; },
+  querySelectorAll: () => buttons,
+  querySelector: () => firstQuery,
+  insertAdjacentHTML: () => {},
+};
+const state = {
+  currentDir: 'src',
+  _fileRoot: 'C:/demo',
+  _fileItems: [{name: 'a.js', path: 'src/a.js', type: 'file'}],
+  previewPath: '',
+};
+const elements = {
+  fileTree,
+  projectRoot: {value: 'C:/demo'},
+  fileSearch: {value: '', addEventListener: (name, fn) => { listeners['search-' + name] = fn; }},
+  filePathBar: {style: {}, innerHTML: '', querySelectorAll: () => [], scrollWidth: 0, clientWidth: 100},
+  cwdPathText: {textContent: ''},
+  goUp: {disabled: false, addEventListener: () => {}},
+  newFolderBtn: {disabled: false, addEventListener: () => {}},
+  refreshFiles: {disabled: false, addEventListener: () => {}},
+  fileSortBtn: {addEventListener: () => {}},
+};
+const timers = [];
+const documentRoot = {
+  body: {appendChild: () => {}},
+  getElementById: () => ({textContent: '', addEventListener: () => {}}),
+  addEventListener: () => {},
+  querySelector: () => null,
+  activeElement: null,
+};
+const feature = createFilesFeature({
+  state,
+  elements,
+  t: (key) => key,
+  escapeHtml: (value) => String(value),
+  openFile: () => {},
+  apiJson: async (url, options) => {
+    if (url === '/api/tools/glob_files') {
+      const body = JSON.parse(options.body);
+      fileCalls.push('glob:' + body.path);
+      return {ok: true, results: [{path: 'src/zz.json', type: 'file'}]};
+    }
+    fileCalls.push('files:' + url);
+    return {root: 'C:/demo', path: 'src', items: state._fileItems};
+  },
+  setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
+  clearTimeout: () => {},
+  storage: {getItem: () => null, setItem: () => {}},
+  documentRoot,
+});
+(async () => {
+  feature.bind();
+  feature.loadFiles();
+  await Promise.resolve(); await Promise.resolve();
+  const out = {};
+  let preventDefaulted = false;
+  // 1) 搜索框焦点 Esc：清空搜索词并恢复列表
+  elements.fileSearch.value = 'cfg';
+  listeners['search-keydown']({key: 'Escape', preventDefault: () => { preventDefaulted = true; }});
+  out.escCleared = elements.fileSearch.value === '';
+  out.escPrevented = preventDefaulted;
+  // 2) 搜索框焦点 Alt+↑：上一级目录（loadFiles 请求父路径）
+  preventDefaulted = false;
+  listeners['search-keydown']({altKey: true, key: 'ArrowUp', preventDefault: () => { preventDefaulted = true; }});
+  await Promise.resolve(); await Promise.resolve();
+  out.goUpRequested = fileCalls.some((c) => c === 'files:/api/files?path=');
+  out.goUpPrevented = preventDefaulted;
+  // 3) 搜索框焦点 Backspace：不拦截（不 preventDefault、不上级）
+  const callsBefore = fileCalls.length;
+  preventDefaulted = false;
+  listeners['search-keydown']({key: 'Backspace', preventDefault: () => { preventDefaulted = true; }});
+  out.backspaceNotPrevented = !preventDefaulted;
+  out.backspaceNoGoUp = fileCalls.length === callsBefore;
+  // 4) 搜索进行中按 Esc：取消 in-flight 流，旧响应不覆盖列表
+  elements.fileSearch.value = 'cfg';
+  listeners['search-input']();
+  const cancelTimer = timers[timers.length - 1];
+  cancelTimer.fn(); // start stream without awaiting
+  elements.fileSearch.value = 'cfg';
+  listeners['search-keydown']({key: 'Escape', preventDefault: () => {}});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const html = fileTree.innerHTML;
+  out.escCancelledStream = !html.includes('src/zz.json') && !html.includes('searchProgress');
+  // 5) 进入目录（loadFiles）后自动聚焦列表首项（roving tabindex + aria-selected）
+  const focusLog = [];
+  const btnFirst = {dataset: {path: 'src/a.js', type: 'file'}, setAttribute: (n, v) => { btnFirst.aria = btnFirst.aria || {}; btnFirst.aria[n] = v; }, classList: {toggle: () => {}}, addEventListener: () => {}, focus: () => { focusLog.push('focus-first'); }};
+  firstQuery = btnFirst;
+  buttons.length = 0; buttons.push(btnFirst);
+  await feature.loadFiles();
+  await Promise.resolve(); await Promise.resolve();
+  out.autoFocus = focusLog.includes('focus-first') && btnFirst.aria && btnFirst.aria['aria-selected'] === 'true';
+  // 6) 搜索框 Ctrl+↑ 备用上一级（与 Alt+↑ 并存）
+  const goUpCalls = () => fileCalls.filter((c) => c === 'files:/api/files?path=').length;
+  const before6 = goUpCalls();
+  preventDefaulted = false;
+  listeners['search-keydown']({ctrlKey: true, key: 'ArrowUp', preventDefault: () => { preventDefaulted = true; }});
+  await Promise.resolve(); await Promise.resolve();
+  out.ctrlGoUp = preventDefaulted && goUpCalls() === before6 + 1;
+  // 7) 列表焦点 Ctrl+↑ 备用上一级（Backspace 语义保持）
+  const before7 = goUpCalls();
+  preventDefaulted = false;
+  listeners['keydown']({ctrlKey: true, key: 'ArrowUp', preventDefault: () => { preventDefaulted = true; }});
+  await Promise.resolve(); await Promise.resolve();
+  out.listCtrlGoUp = preventDefaulted && goUpCalls() === before7 + 1;
+  process.stdout.write(JSON.stringify(out));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["escCleared"])
+        self.assertTrue(data["escPrevented"])
+        self.assertTrue(data["goUpRequested"])
+        self.assertTrue(data["goUpPrevented"])
+        self.assertTrue(data["backspaceNotPrevented"])
+        self.assertTrue(data["backspaceNoGoUp"])
+        self.assertTrue(data["escCancelledStream"])
+        self.assertTrue(data["autoFocus"])
+        self.assertTrue(data["ctrlGoUp"])
+        self.assertTrue(data["listCtrlGoUp"])
+
     def test_image_attachment_mime_facts_cover_input_matrix(self):
         script = r"""
 global.window = {};

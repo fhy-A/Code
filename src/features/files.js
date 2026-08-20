@@ -346,7 +346,7 @@
 
       const sorted = sortFileItems(filtered, sortMode, ascending);
       elements.fileTree.innerHTML = sorted.length
-        ? sorted.map((item) => {
+        ? sorted.map((item, index) => {
             const extension = item.type === "dir"
               ? ""
               : ((item.name || "").split(".").pop() || "").toLowerCase().slice(0, 6);
@@ -356,7 +356,7 @@
               ? `<small class="file-time" title="${escapeHtml(timestamp.full)}" aria-label="${escapeHtml(timestamp.full)}"><span class="file-time-compact" aria-hidden="true">${escapeHtml(timestamp.compact)}</span><span class="file-time-full" aria-hidden="true">${escapeHtml(timestamp.full)}</span></small>`
               : "";
             return `<div class="file-item-row ${item.path === state.previewPath ? "active" : ""}">
-              <button class="file-item ${item.type}${extensionClass}" type="button" data-path="${escapeHtml(item.path)}" data-type="${item.type}">
+              <button class="file-item ${item.type}${extensionClass}" type="button" data-path="${escapeHtml(item.path)}" data-type="${item.type}" tabindex="${index === 0 ? 0 : -1}" role="option" aria-selected="false">
                 <span class="file-name" title="${escapeHtml(item.name)}">${item.type === "dir" ? "📁 " : ""}${escapeHtml(item.name)}</span>
                 ${timestampHtml}
               </button>
@@ -483,6 +483,14 @@
       delayMs: options.silentRefreshDelayMs,
     });
 
+    function focusFirstFileItem() {
+      const first = elements.fileTree.querySelector(".file-item");
+      if (!first) return;
+      const items = [...elements.fileTree.querySelectorAll(".file-item")];
+      setFileRowSelected(first, items);
+      first.focus();
+    }
+
     async function loadFiles(path = state.currentDir) {
       silentRefresh.invalidate();
       const data = await apiJson(`/api/files?path=${encodeURIComponent(path || "")}`);
@@ -494,6 +502,9 @@
       state._fileItems = data.items || [];
       elements.goUp.disabled = !state.currentDir;
       renderFileTree();
+      // Auto-focus the first list item after switching directories so the
+      // keyboard user can navigate immediately without an extra Tab.
+      focusFirstFileItem();
     }
 
     function goUpDir() {
@@ -502,6 +513,279 @@
       parts.pop();
       loadFiles(parts.join("/"));
     }
+    // ---- Recursive file search (CODE-027) + keyboard navigation (CODE-028) ----
+    const searchSetTimeout = options.setTimeout || (global.setTimeout || globalThis.setTimeout).bind(globalThis);
+    const searchClearTimeout = options.clearTimeout || (global.clearTimeout || globalThis.clearTimeout).bind(globalThis);
+    let searchRequestSeq = 0;
+    let searchTimer = null;
+
+    // Streaming progressive search (R007): directory-grained query cache + per-level
+    // scan queue that starts at the current file-tree directory and expands upward
+    // toward the project root (server glob_files is recursive per path, so each
+    // level covers its whole subtree; results are merged by path, deduplicated).
+    const SEARCH_CACHE_TTL_MS = 3000;
+    const SEARCH_LIMIT = 500;
+    const searchCache = new Map();
+    let searchStream = null; // { seq, results: Map, scanned, total, limitHit, truncatedAny, done }
+
+    function setFileRowSelected(target, items) {
+      items.forEach((el) => {
+        const selected = el === target;
+        el.setAttribute("aria-selected", selected ? "true" : "false");
+        el.classList.toggle("focused", selected);
+      });
+    }
+
+    function buildSearchLevels(startDir, root) {
+      const rootPath = String(root || "").replace(/[\\/]+$/, "");
+      const parts = String(startDir || "").split("/").filter(Boolean);
+      const levels = [];
+      const seen = new Set();
+      const push = (level) => {
+        if (level && !seen.has(level)) {
+          seen.add(level);
+          levels.push(level);
+        }
+      };
+      for (let i = parts.length; i >= 0; i--) {
+        push([rootPath, ...parts.slice(0, i)].filter(Boolean).join("/"));
+      }
+      if (!seen.has(rootPath)) push(rootPath);
+      return levels;
+    }
+
+    function searchProgressText(stream) {
+      if (stream.total <= 1) {
+        // Single level (current dir is the project root): no level counter.
+        return t("searchProgressSingle", { n: stream.results.size });
+      }
+      return t("searchProgress", {
+        n: stream.results.size,
+        x: Math.min(stream.scanned + 1, stream.total),
+        y: stream.total,
+      });
+    }
+
+    function restoreSearchFocus() {
+      const active = documentRoot.activeElement;
+      if (!active || !active.classList || !active.classList.contains("file-item")) return;
+      const path = active.dataset && active.dataset.path;
+      if (!path) return;
+      const items = [...elements.fileTree.querySelectorAll(".file-item")];
+      const match = items.find((el) => el.dataset.path === path);
+      if (match) {
+        setFileRowSelected(match, items);
+        match.focus();
+      }
+    }
+
+    function renderSearchResults() {
+      const stream = searchStream;
+      const results = stream ? [...stream.results.values()] : [];
+      const html = [];
+      if (stream && !stream.done) {
+        html.push(`<div class="muted-line search-status-line">${escapeHtml(searchProgressText(stream))}</div>`);
+      } else if (results.length) {
+        const countLine = stream && stream.limitHit
+          ? t("searchResultCountLimited", { n: SEARCH_LIMIT })
+          : t("searchResultCount", { n: results.length });
+        html.push(`<div class="muted-line search-count-line">${escapeHtml(countLine)}</div>`);
+      }
+      if (results.length) {
+        html.push(results.map((item, index) => {
+            const base = String(item.path || "").split("/").filter(Boolean).pop() || item.path || "";
+            const extension = item.type === "dir"
+              ? ""
+              : (base.split(".").pop() || "").toLowerCase().slice(0, 6);
+            const extensionClass = extension ? ` ext-${extension}` : "";
+            return `<div class="file-item-row search-row">
+              <button class="file-item ${item.type}${extensionClass}" type="button" data-path="${escapeHtml(item.path)}" data-type="${item.type}" tabindex="${index === 0 ? 0 : -1}" role="option" aria-selected="false">
+                <span class="file-name" title="${escapeHtml(item.path)}">${item.type === "dir" ? "📁 " : ""}${escapeHtml(item.path)}</span>
+              </button>
+              <button class="file-at-btn" type="button" data-path="${escapeHtml(item.path)}" title="${t("fileAtTitle")}">@</button>
+            </div>`;
+          }).join(""));
+      } else if (stream && stream.done) {
+        html.push(`<div class="muted-line" style="padding:8px;">${t("noMatchingFiles")}</div>`);
+      }
+      elements.fileTree.innerHTML = html.join("");
+      if (stream?.truncatedAny) {
+        elements.fileTree.insertAdjacentHTML("beforeend", `<div class="muted-line search-truncated">${t("searchTruncated")}</div>`);
+      }
+      bindFileItemActions();
+      restoreSearchFocus();
+    }
+
+    function bindFileItemActions() {
+      elements.fileTree.querySelectorAll(".file-item").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (button.dataset.type === "dir") loadFiles(button.dataset.path);
+          else openFile?.(button.dataset.path);
+        });
+        button.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          showFileContextMenu(
+            event.clientX,
+            event.clientY,
+            button.dataset.path,
+            button.dataset.type,
+          );
+        });
+      });
+      elements.fileTree.querySelectorAll(".file-at-btn").forEach((button) => {
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          insertPromptText?.(`@${button.dataset.path} `);
+        });
+      });
+    }
+
+    async function fetchGlobCached(path, pattern) {
+      const key = `${path}|${pattern}`;
+      const cached = searchCache.get(key);
+      const now = Date.now();
+      if (cached && now - cached.ts < SEARCH_CACHE_TTL_MS) return cached.data;
+      const data = await apiJson("/api/tools/glob_files", {
+        method: "POST",
+        body: JSON.stringify({ pattern, path }),
+      });
+      if (data?.ok) searchCache.set(key, { ts: now, data });
+      return data;
+    }
+
+    async function runStreamingSearch(query) {
+      const seq = ++searchRequestSeq;
+      const pattern = `*${query}*`;
+      const rootPath = String(state._fileRoot || "").replace(/[\\/]+$/, "");
+      const levels = buildSearchLevels(state.currentDir || "", rootPath);
+      const stream = {
+        seq,
+        results: new Map(),
+        scanned: 0,
+        total: levels.length,
+        limitHit: false,
+        truncatedAny: false,
+        done: false,
+      };
+      searchStream = stream;
+      renderSearchResults();
+      try {
+        for (const dir of levels) {
+          if (seq !== searchRequestSeq) return; // cancelled by newer input
+          const data = await fetchGlobCached(dir, pattern);
+          if (seq !== searchRequestSeq) return; // stale response dropped
+          if (data?.ok) {
+            const items = Array.isArray(data.results) ? data.results : [];
+            // Detect the server fallback: glob_files rescans the whole project
+            // root when the requested subtree has no matches. Its response then
+            // already covers the whole project, so stop the queue to avoid
+            // repeating the full scan on every level.
+            const relDir = rootPath ? dir.slice(rootPath.length).replace(/^[\\/]+/, "") : dir;
+            const prefix = relDir ? relDir + "/" : "";
+            const fellBack = Boolean(prefix) && items.some((item) => !String(item.path || "").startsWith(prefix));
+            for (const item of items) {
+              if (stream.results.size >= SEARCH_LIMIT) {
+                stream.limitHit = true;
+                break;
+              }
+              if (item && item.path && !stream.results.has(item.path)) {
+                stream.results.set(item.path, item);
+              }
+            }
+            if (data.truncated) stream.truncatedAny = true;
+            if (fellBack) {
+              stream.scanned = stream.total;
+              break;
+            }
+          }
+          stream.scanned += 1;
+          if (stream.limitHit) break;
+          renderSearchResults(); // incremental render after each level
+        }
+        stream.done = true;
+        if (seq === searchRequestSeq) renderSearchResults();
+      } catch (error) {
+        if (seq !== searchRequestSeq) return;
+        elements.fileTree.innerHTML = `<div class="muted-line" style="padding:8px;">${escapeHtml(String(error.message || error))}</div>`;
+      }
+    }
+
+    function onFileSearchInput() {
+      if (searchTimer !== null) searchClearTimeout(searchTimer);
+      const query = String(elements.fileSearch?.value || "").trim();
+      if (!query) {
+        searchRequestSeq += 1; // cancel any in-flight search
+        searchStream = null;
+        renderFileTree();
+        return;
+      }
+      // Show a searching state while the debounce window elapses.
+      elements.fileTree.innerHTML = `<div class="muted-line search-status">${t("searching")}</div>`;
+      searchTimer = searchSetTimeout(() => {
+        const current = String(elements.fileSearch?.value || "").trim();
+        if (current) runStreamingSearch(current);
+      }, 250);
+    }
+
+    function clearSearchAndRestore() {
+      if (!elements.fileSearch?.value) return false;
+      elements.fileSearch.value = "";
+      searchRequestSeq += 1; // cancel any in-flight search
+      searchStream = null;
+      renderFileTree();
+      const first = elements.fileTree.querySelector(".file-item");
+      first?.focus();
+      return true;
+    }
+
+    function isGoUpKey(event) {
+      // Alt+ArrowUp may be intercepted by IME/system shortcuts on some
+      // setups; Ctrl+ArrowUp is the documented fallback, both stay active.
+      return (event.altKey && event.key === "ArrowUp")
+        || (event.ctrlKey && event.key === "ArrowUp");
+    }
+
+    function handleSearchFieldKeydown(event) {
+      // Esc clears the search and restores the current-directory list;
+      // Alt/Ctrl+ArrowUp navigates to the parent directory (loadFiles clears
+      // the search term as part of restoring the parent listing). Backspace
+      // is intentionally not bound here so text editing keeps priority.
+      if (isGoUpKey(event)) {
+        event.preventDefault();
+        goUpDir();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        clearSearchAndRestore();
+      }
+    }
+
+    function handleFileTreeKeydown(event) {
+      const items = [...elements.fileTree.querySelectorAll(".file-item")];
+      if (!items.length) return;
+      const focusedIndex = items.findIndex((el) => el === documentRoot.activeElement);
+      if (isGoUpKey(event) || event.key === "Backspace") {
+        // Alt/Ctrl+ArrowUp and Backspace navigate to the parent directory;
+        // checked before plain ArrowUp so the fallback key is not treated
+        // as focus movement.
+        event.preventDefault();
+        goUpDir();
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const start = focusedIndex >= 0 ? focusedIndex : (event.key === "ArrowDown" ? -1 : 0);
+        const next = event.key === "ArrowDown"
+          ? Math.min(items.length - 1, start + 1)
+          : Math.max(0, start - 1);
+        const target = items[next] || items[0];
+        setFileRowSelected(target, items);
+        target.focus();
+      } else if (event.key === "Enter" && focusedIndex >= 0) {
+        event.preventDefault();
+        items[focusedIndex].click();
+      } else if (event.key === "Escape") {
+        clearSearchAndRestore();
+      }
+    }
+
 
     function renderRecentFolders() {
       const recentContainer = documentRoot.getElementById("cwdRecentFolders");
@@ -648,7 +932,9 @@
         event.stopPropagation();
         openNewFolder();
       });
-      elements.fileSearch?.addEventListener("input", renderFileTree);
+      elements.fileSearch?.addEventListener("input", onFileSearchInput);
+      elements.fileSearch?.addEventListener("keydown", handleSearchFieldKeydown);
+      elements.fileTree?.addEventListener("keydown", handleFileTreeKeydown);
       elements.fileSortBtn?.addEventListener("click", () => {
         state._fileSortAsc = !state._fileSortAsc;
         storage.setItem("code-sort-asc", state._fileSortAsc);
