@@ -114,7 +114,7 @@ _上次更新：2026-08-20_
 ### CODE-012 · 模型上下文上限事实源
 
 - **类型 / 优先级 / 风险**：能力与配置 / P1 / STRICT
-- **下一动作**：依次评估渠道+模型 `contextWindowTokens` 元数据、显式覆盖（渠道模型 > 模型元数据 > 模型族 > 未知 128K）及只向下的运行时校准；模糊 400 不得自动学习，也不得自动提高上限。
+- **下一动作**：按 [`docs/context-window-budget-development-guide.md`](docs/context-window-budget-development-guide.md) 启动阶段 A+B：统一服务端 resolver 与 metadata/cache v1→v2，再实现用户上下文预算 UI、AgentRun 冻结和三值展示；专家覆盖 C 与向下校准 D 必须另行审批，不得混入首阶段。
 - **完成定义**：128K/200K/1M、自定义别名、同模型不同渠道、缺失/错误元数据和旧 AgentRun 恢复通过；前端百分比、服务端阈值与持久化一致，新增字段可选并可回退现状。
 
 ### CODE-013 · 登录后新手指引

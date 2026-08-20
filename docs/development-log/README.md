@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-20 | `CODE-012` 模型上下文能力与用户预算详细开发指导完成（未实施）：拆分硬能力、Code估算、用户预算、输出预留/安全余量与最终冻结值；确定服务端唯一 resolver、metadata/cache v2、normalized baseUrl+model、多 Key最小合并、旧 Run继承、只向下校准和设置页预算预设。首阶段限定 A+B，专家覆盖/校准后置；CODE-012 仍在 TODO | [查看指导](../context-window-budget-development-guide.md) · [查看日志](2026/2026-08-20.md) |
 | 2026-08-20 | `CODE-033` 复杂 Goal 用户补充后跨 AgentRun 续接验收完成：bundle/direct classic 真实 H4 覆盖 waiting_user 前后 reload、切 Session、普通消息唯一 successor、同 Session/Goal/revision/步骤/权限、单轮 usage 与成功工具不重放，并以 bundle 上游 502 证明失败保持门禁后可安全恢复。用户终端 `3 passed (33.7s)`；Session/Goal control/前端投影/AgentRun 定向 `21+12+7+5 passed`，replay `17/124/25/25/4`、frontend freshness/语法/diff 通过；仅测试与事实文档，无生产协议变化 | [查看](2026/2026-08-20.md) |
 | 2026-08-20 | `CODE-034` 跨运行时 owner lease 完成：新增 Codex/DSH 共用的 tracked Python CLI，以 worktree Git-dir 内 OS 文件锁 + 原子状态实现唯一写者；schema 绑定 runtime、审批/开发身份、stage、HEAD、relay/lease ID 与 TTL，过期只允许审计 HEAD/cached 后显式 reclaim，损坏/中断 fail-closed，history 有界且 Git status 零污染。专用 unittest `12 passed`、`verify.py quick` 六项 PASS；四份协作规则统一引用 canonical 协议，TODO 游标推进至 `CODE-034`，未启动 `CODE-033` | [查看](2026/2026-08-20.md) |
 | 2026-08-20 | `CODE-027` 文件树递归搜索 + `CODE-028` 文件树键盘导航完成（审批 relay file-tree-search-nav R001-R013）：流式渐进搜索（当前目录优先逐级向上、按 path 去重增量渲染、进度行、全局 500 上限、目录粒度缓存 TTL 3s、服务端回退检测）；roving tabindex 键盘导航（↑/↓、Enter、Alt+↑/Ctrl+↑/Backspace、Esc 清空，进入目录自动聚焦）；根因=glob_files 无索引全扫 + 子树无匹配回退全项目根（Desktop 27k ≈7s）；SKIP_DIRS 补全 10 项。前端模块 206 passed、构建 fresh、用户 3011 复测 PASS；本地提交（未 push） | [查看](2026/2026-08-20.md) |
