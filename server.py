@@ -23,6 +23,7 @@ import time
 import webbrowser
 
 import agent_protocol
+import context_calibration
 import context_window
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
 from goal_v2_protocol import GoalV2ProtocolError, require_identifier
@@ -164,6 +165,8 @@ _MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT = 120.0
 _MODEL_RUNTIME_STREAM_IDLE_TIMEOUT = 180.0
 _agent_runs = {}
 _agent_run_lock = threading.RLock()
+_agent_created_at_lock = threading.Lock()
+_agent_last_created_microsecond = 0
 _AGENT_RUN_TERMINAL = {"completed", "failed", "cancelled"}
 _AGENT_RUN_ACTIVE = {"model", "tools"}
 _AGENT_RUN_WAITING = {"waiting_credentials", "waiting_user_input", "waiting_authorization"}
@@ -194,6 +197,19 @@ _agent_workspace_context = threading.local()
 
 class AgentRunConflictError(ValueError):
     """Raised when an AgentRun cannot accept a state-dependent request."""
+
+
+def _agent_created_at_iso():
+    """Return a process-monotonic local timestamp for Run ordering."""
+    global _agent_last_created_microsecond
+    current = time.time_ns() // 1_000
+    with _agent_created_at_lock:
+        current = max(current, _agent_last_created_microsecond + 1)
+        _agent_last_created_microsecond = current
+    seconds, microseconds = divmod(current, 1_000_000)
+    return dt.datetime.fromtimestamp(seconds).replace(
+        microsecond=microseconds
+    ).isoformat(timespec="microseconds")
 
 
 def _runtime_stream_text(value):
@@ -494,17 +510,67 @@ def _cleanup_runtime_runs():
             _model_runtime_runs.pop(run_id, None)
 
 
-def _runtime_error_text(exc):
+def _runtime_error_details(exc):
     status = int(getattr(exc, "code", 0) or 0)
     message = str(exc)
+    payload = None
+    explicit_code = ""
     if isinstance(exc, error.HTTPError):
         try:
             raw = exc.read().decode("utf-8", errors="replace")
             data = json.loads(raw)
-            message = data.get("error", {}).get("message") or data.get("error") or raw or message
+            payload = data if isinstance(data, dict) else None
+            error_value = data.get("error") if isinstance(data, dict) else None
+            if isinstance(error_value, dict):
+                message = error_value.get("message") or raw or message
+                explicit_code = error_value.get("code") or error_value.get("type") or ""
+            elif error_value:
+                message = error_value
+            elif isinstance(data, dict):
+                message = data.get("message") or raw or message
+                explicit_code = data.get("code") or data.get("type") or ""
+            else:
+                message = raw or message
         except Exception:
             pass
-    return status, str(message)[:2000]
+    normalized_message = str(message)[:2000]
+    classification = context_calibration.classify_context_failure(
+        status,
+        payload=payload,
+        code=explicit_code,
+        message=normalized_message,
+    )
+    return status, normalized_message, classification
+
+
+def _runtime_error_text(exc):
+    status, message, _classification = _runtime_error_details(exc)
+    return status, message
+
+
+def _redact_runtime_secrets(run, value):
+    text = str(value or "")
+    for key in run.get("keys") or []:
+        if key:
+            text = text.replace(str(key), "[REDACTED]")
+    return text[:2000]
+
+
+def _runtime_context_failure_attribution(run):
+    with run["condition"]:
+        value = run.get("context_failure_attribution")
+        return context_calibration.normalize_context_failure_attribution(value)
+
+
+def _adopt_runtime_context_failure(agent_run, model_run):
+    attribution = _runtime_context_failure_attribution(model_run)
+    if not attribution:
+        return None
+    with agent_run["condition"]:
+        agent_run["context_failure_attribution"] = attribution
+        agent_run["updated_at"] = now_iso()
+    _persist_agent_run(agent_run)
+    return attribution
 
 
 def _model_runtime_worker(run):
@@ -605,7 +671,27 @@ def _model_runtime_worker(run):
                 return
             except Exception as exc:
                 run["upstream_response"] = None
-                last_status, last_error = _runtime_error_text(exc)
+                last_status, last_error, strict_context = _runtime_error_details(exc)
+                if strict_context.get("matched"):
+                    try:
+                        scope = context_calibration.calibration_scope(
+                            _normalize_runtime_base_url(run["base_url"]),
+                            key,
+                            payload.get("model"),
+                        )
+                    except ValueError:
+                        scope = None
+                    attribution = context_calibration.context_failure_attribution(
+                        scope, last_status, strict_context,
+                    )
+                    if attribution:
+                        with run["condition"]:
+                            run["context_failure_attribution"] = attribution
+                            run["updated_at"] = time.time()
+                    last_error = (
+                        "The upstream rejected the request because it exceeded "
+                        "the model context window"
+                    )
                 if (
                     not received_meaningful_output
                     and time.monotonic() >= first_response_deadline
@@ -619,6 +705,8 @@ def _model_runtime_worker(run):
                         transient=True,
                     )
                     return
+                if strict_context.get("matched"):
+                    break
                 if run["events"] or key_index >= len(keys) - 1:
                     break
                 continue
@@ -632,10 +720,20 @@ def _model_runtime_worker(run):
         if run["cancel_event"].is_set():
             _finish_runtime_run(run, "cancelled")
         else:
-            _finish_runtime_run(run, "failed", last_error, last_status)
+            _finish_runtime_run(
+                run,
+                "failed",
+                _redact_runtime_secrets(run, last_error),
+                last_status,
+            )
     except Exception as exc:
         status, message = _runtime_error_text(exc)
-        _finish_runtime_run(run, "failed", message, status)
+        _finish_runtime_run(
+            run,
+            "failed",
+            _redact_runtime_secrets(run, message),
+            status,
+        )
     finally:
         run["keys"] = []
         run["payload"] = {}
@@ -664,6 +762,7 @@ def _create_model_runtime_run(session_id, payload, base_url, keys):
             "usage": {},
         },
         "tool_call_parts": {},
+        "context_failure_attribution": None,
         "condition": threading.Condition(threading.RLock()),
         "cancel_event": threading.Event(),
         "upstream_response": None,
@@ -999,6 +1098,62 @@ def _agent_model_context_limit(model):
     return context_window.family_limit(model)
 
 
+def _context_calibration_store():
+    """Resolve the store lazily so tests can safely patch DATA_DIR."""
+    return context_calibration.ContextCalibrationStore(DATA_DIR)
+
+
+def _agent_primary_calibration(model, base_url, keys):
+    primary_key = next((str(key) for key in (keys or []) if str(key)), "")
+    if not primary_key:
+        return None
+    try:
+        scope = context_calibration.calibration_scope(
+            _normalize_runtime_base_url(base_url), primary_key, model,
+        )
+    except ValueError:
+        return None
+    resolved = _context_calibration_store().resolve(scope["scopeId"])
+    if resolved.get("capTokens") is None:
+        return None
+    return {
+        "capTokens": int(resolved["capTokens"]),
+        "evidenceKind": str(resolved.get("evidenceKind") or ""),
+        "expiresAt": str(resolved.get("expiresAt") or ""),
+        "scope": scope,
+    }
+
+
+def _agent_requested_max_tokens(request_options):
+    source = request_options if isinstance(request_options, dict) else {}
+    raw = (
+        source.get("max_completion_tokens")
+        if source.get("max_completion_tokens") is not None
+        else source.get("max_tokens")
+    )
+    try:
+        return max(0, int(raw or 4096))
+    except (TypeError, ValueError):
+        return 4096
+
+
+def _agent_context_numbers(context_limit, max_tokens):
+    limit = _normalize_agent_context_limit(context_limit, "", strict=True)
+    try:
+        maximum_output = max(0, int(max_tokens or 0))
+    except (TypeError, ValueError):
+        maximum_output = 0
+    safety = max(4096, int(limit * 0.05))
+    raw_available = limit - maximum_output - safety
+    return {
+        "contextLimit": limit,
+        "safetyMarginTokens": safety,
+        "availableInputTokens": max(1024, raw_available),
+        "compressionTriggerTokens": min(int(limit * 0.90), max(1024, raw_available)),
+        "inputBudgetInsufficient": raw_available < 1024,
+    }
+
+
 def _normalize_agent_context_limit(value, model, *, strict=False):
     if value is None or value == "":
         return _agent_model_context_limit(model)
@@ -1030,7 +1185,7 @@ def _agent_frozen_context_resolution(run):
         (run.get("request") or {}).get("model"),
         strict=True,
     )
-    max_output = max(0, int((run.get("request") or {}).get("max_tokens") or 4096))
+    max_output = _agent_requested_max_tokens(run.get("request"))
     safety = max(4096, int(context_limit * 0.05))
     available = max(1024, context_limit - max_output - safety)
     return {
@@ -1046,6 +1201,10 @@ def _agent_frozen_context_resolution(run):
         ),
         "budgetClamped": bool(run.get("budget_clamped")),
         "budgetAboveEstimate": bool(run.get("budget_above_estimate")),
+        "calibrationCapTokens": run.get("calibration_cap_tokens"),
+        "calibrationEvidenceKind": str(run.get("calibration_evidence_kind") or ""),
+        "calibrationExpiresAt": str(run.get("calibration_expires_at") or ""),
+        "calibrationApplied": bool(run.get("calibration_applied")),
         "inputBudgetInsufficient": False,
     }
 
@@ -1375,6 +1534,260 @@ def _agent_model_tools(run):
     ]
 
 
+_CONTEXT_CALIBRATION_PHASES = {"pending_compaction", "retry_pending", "retrying"}
+
+
+def _normalize_optional_calibration_cap(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        return None
+    return cap if context_window.MIN_TOKENS <= cap <= context_window.MAX_TOKENS else None
+
+
+def _normalize_pending_context_calibration(value):
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "version", "round", "phase", "scope", "candidateTokens",
+        "evidenceKind", "observationId", "createdAt", "originalContext",
+    }
+    if set(value) - allowed or int(value.get("version") or 0) != 1:
+        return None
+    try:
+        round_number = int(value.get("round") or 0)
+        candidate = int(value.get("candidateTokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    phase = str(value.get("phase") or "")
+    evidence_kind = str(value.get("evidenceKind") or "")
+    observation_id = str(value.get("observationId") or "")
+    created_at = str(value.get("createdAt") or "")
+    scope = context_calibration.normalize_calibration_scope(value.get("scope"))
+    original = value.get("originalContext")
+    if (
+        round_number < 1
+        or not context_window.MIN_TOKENS <= candidate <= context_window.MAX_TOKENS
+        or phase not in _CONTEXT_CALIBRATION_PHASES
+        or evidence_kind not in {"explicit_max", "heuristic"}
+        or not re.fullmatch(r"[0-9a-f]{64}", observation_id)
+        or not created_at
+        or len(created_at) > 64
+        or not scope
+        or not isinstance(original, dict)
+    ):
+        return None
+    original_allowed = {
+        "contextLimit", "availableInputTokens", "compressionTriggerTokens",
+        "calibrationCapTokens", "calibrationEvidenceKind",
+        "calibrationExpiresAt", "calibrationApplied",
+    }
+    if set(original) - original_allowed:
+        return None
+    try:
+        original_limit = int(original.get("contextLimit") or 0)
+        original_available = int(original.get("availableInputTokens") or 0)
+        original_trigger = int(original.get("compressionTriggerTokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not context_window.MIN_TOKENS <= original_limit <= context_window.MAX_TOKENS:
+        return None
+    original_cap = original.get("calibrationCapTokens")
+    if original_cap is not None:
+        try:
+            original_cap = int(original_cap)
+        except (TypeError, ValueError):
+            return None
+        if not context_window.MIN_TOKENS <= original_cap <= context_window.MAX_TOKENS:
+            return None
+    return {
+        "version": 1,
+        "round": round_number,
+        "phase": phase,
+        "scope": scope,
+        "candidateTokens": candidate,
+        "evidenceKind": evidence_kind,
+        "observationId": observation_id,
+        "createdAt": created_at,
+        "originalContext": {
+            "contextLimit": original_limit,
+            "availableInputTokens": max(0, original_available),
+            "compressionTriggerTokens": max(0, original_trigger),
+            "calibrationCapTokens": original_cap,
+            "calibrationEvidenceKind": str(
+                original.get("calibrationEvidenceKind") or ""
+            ),
+            "calibrationExpiresAt": str(original.get("calibrationExpiresAt") or "")[:64],
+            "calibrationApplied": bool(original.get("calibrationApplied")),
+        },
+    }
+
+
+def _agent_matching_context_key(run, fingerprint):
+    expected = str(fingerprint or "")
+    for key in run.get("keys") or []:
+        raw = str(key or "")
+        if raw and context_calibration.key_fingerprint(raw) == expected:
+            return raw
+    return ""
+
+
+def _agent_context_original_snapshot(run):
+    return {
+        "contextLimit": int(run.get("context_limit") or 0),
+        "availableInputTokens": int(run.get("available_input_tokens") or 0),
+        "compressionTriggerTokens": int(run.get("compression_trigger_tokens") or 0),
+        "calibrationCapTokens": run.get("calibration_cap_tokens"),
+        "calibrationEvidenceKind": str(run.get("calibration_evidence_kind") or ""),
+        "calibrationExpiresAt": str(run.get("calibration_expires_at") or ""),
+        "calibrationApplied": bool(run.get("calibration_applied")),
+    }
+
+
+def _agent_apply_provisional_calibration(run, pending):
+    candidate = int(pending["candidateTokens"])
+    numbers = _agent_context_numbers(
+        candidate,
+        _agent_requested_max_tokens(run.get("request")),
+    )
+    run["context_limit"] = candidate
+    run["available_input_tokens"] = numbers["availableInputTokens"]
+    run["compression_trigger_tokens"] = numbers["compressionTriggerTokens"]
+    run["calibration_cap_tokens"] = candidate
+    run["calibration_evidence_kind"] = str(pending["evidenceKind"])
+    run["calibration_expires_at"] = ""
+    run["calibration_applied"] = False
+
+
+def _agent_restore_context_before_pending(run, pending):
+    original = pending["originalContext"]
+    run["context_limit"] = int(original["contextLimit"])
+    run["available_input_tokens"] = int(original["availableInputTokens"])
+    run["compression_trigger_tokens"] = int(original["compressionTriggerTokens"])
+    run["calibration_cap_tokens"] = original.get("calibrationCapTokens")
+    run["calibration_evidence_kind"] = str(
+        original.get("calibrationEvidenceKind") or ""
+    )
+    run["calibration_expires_at"] = str(original.get("calibrationExpiresAt") or "")
+    run["calibration_applied"] = bool(original.get("calibrationApplied"))
+
+
+def _agent_prepare_context_calibration(run, round_number):
+    attribution = context_calibration.normalize_context_failure_attribution(
+        run.get("context_failure_attribution")
+    )
+    if not attribution:
+        return None
+    candidate = context_calibration.calibration_candidate(
+        run.get("context_limit"),
+        explicit_maximum=attribution.get("explicitMaximumTokens"),
+        max_tokens=_agent_requested_max_tokens(run.get("request")),
+    )
+    if not candidate:
+        return None
+    observation_id = context_calibration.calibration_observation_id(
+        attribution["scopeId"],
+        run["id"],
+        round_number,
+        candidate["capTokens"],
+        candidate["evidenceKind"],
+    )
+    pending = {
+        "version": 1,
+        "round": int(round_number),
+        "phase": "pending_compaction",
+        "scope": {
+            field: attribution[field]
+            for field in ("scopeId", "connectionId", "keyFingerprint", "modelId")
+        },
+        "candidateTokens": int(candidate["capTokens"]),
+        "evidenceKind": str(candidate["evidenceKind"]),
+        "observationId": observation_id,
+        "createdAt": now_iso(),
+        "originalContext": _agent_context_original_snapshot(run),
+    }
+    normalized = _normalize_pending_context_calibration(pending)
+    if not normalized:
+        return None
+    with run["condition"]:
+        run["pending_context_calibration"] = normalized
+        run["context_recovery_round"] = int(round_number)
+        _agent_apply_provisional_calibration(run, normalized)
+        run["updated_at"] = now_iso()
+    _persist_agent_run(run)
+    return normalized
+
+
+def _agent_set_context_calibration_phase(run, pending, phase):
+    updated = {**pending, "phase": str(phase)}
+    normalized = _normalize_pending_context_calibration(updated)
+    if not normalized:
+        raise ValueError("pending context calibration is invalid")
+    with run["condition"]:
+        run["pending_context_calibration"] = normalized
+        run["updated_at"] = now_iso()
+    _persist_agent_run(run)
+    return normalized
+
+
+def _agent_rollback_context_calibration(run, pending):
+    with run["condition"]:
+        _agent_restore_context_before_pending(run, pending)
+        run["pending_context_calibration"] = None
+        run["updated_at"] = now_iso()
+    _persist_agent_run(run)
+
+
+def _agent_commit_context_calibration(run, pending):
+    scope = pending["scope"]
+    observation = _context_calibration_store().record_success(
+        scope,
+        cap_tokens=pending["candidateTokens"],
+        evidence_kind=pending["evidenceKind"],
+        observation_id=pending["observationId"],
+    )
+    with run["condition"]:
+        run["context_limit"] = int(pending["candidateTokens"])
+        numbers = _agent_context_numbers(
+            run["context_limit"],
+            _agent_requested_max_tokens(run.get("request")),
+        )
+        run["available_input_tokens"] = numbers["availableInputTokens"]
+        run["compression_trigger_tokens"] = numbers["compressionTriggerTokens"]
+        run["calibration_cap_tokens"] = int(observation["capTokens"])
+        run["calibration_evidence_kind"] = str(observation["evidenceKind"])
+        run["calibration_expires_at"] = str(observation["expiresAt"])
+        run["calibration_applied"] = True
+        run["pending_context_calibration"] = None
+        run["updated_at"] = now_iso()
+    _persist_agent_run(run)
+    return observation
+
+
+def _agent_pending_compaction_completed(run, pending):
+    created_at = str(pending.get("createdAt") or "")
+    return any(
+        isinstance(record, dict)
+        and str(record.get("reason") or "") == "context_window_exceeded"
+        and str(record.get("completedAt") or "") >= created_at
+        for record in run.get("compactions") or []
+    )
+
+
+def _agent_wait_for_context_calibration_key(run):
+    with run["condition"]:
+        run["status"] = "waiting_credentials"
+        run["resume_status"] = "model"
+        run["keys"] = []
+        run["updated_at"] = now_iso()
+    _append_agent_event(run, "waiting_credentials", {
+        "resumeStatus": "model",
+        "reason": "context_calibration_key_missing",
+    })
+
+
 def _agent_run_record(run):
     """Return the credential-free durable representation of an Agent run."""
     rounds = _json_clone(run.get("rounds") or [])
@@ -1391,6 +1804,12 @@ def _agent_run_record(run):
     result = _json_clone(run.get("result") or {})
     if isinstance(result, dict):
         result.pop("reasoning", None)
+    context_failure_attribution = context_calibration.normalize_context_failure_attribution(
+        run.get("context_failure_attribution")
+    )
+    pending_context_calibration = _normalize_pending_context_calibration(
+        run.get("pending_context_calibration")
+    )
     return {
         "version": 4,
         "id": run["id"],
@@ -1420,7 +1839,15 @@ def _agent_run_record(run):
         "compressionTriggerTokens": int(run.get("compression_trigger_tokens") or 0),
         "budgetClamped": bool(run.get("budget_clamped")),
         "budgetAboveEstimate": bool(run.get("budget_above_estimate")),
+        "calibrationCapTokens": run.get("calibration_cap_tokens"),
+        "calibrationEvidenceKind": str(run.get("calibration_evidence_kind") or ""),
+        "calibrationExpiresAt": str(run.get("calibration_expires_at") or ""),
+        "calibrationApplied": bool(run.get("calibration_applied")),
         "contextRecoveryRound": int(run.get("context_recovery_round") or 0),
+        **({"contextFailureAttribution": context_failure_attribution}
+           if context_failure_attribution else {}),
+        **({"pendingContextCalibration": pending_context_calibration}
+           if pending_context_calibration else {}),
         "request": _json_clone(run.get("request") or {}),
         "messages": _json_clone(run.get("messages") or []),
         "tools": _json_clone(run.get("tools") or []),
@@ -1560,6 +1987,10 @@ def _agent_snapshot(run, cursor=0):
             "compressionTriggerTokens": int(run.get("compression_trigger_tokens") or 0),
             "budgetClamped": bool(run.get("budget_clamped")),
             "budgetAboveEstimate": bool(run.get("budget_above_estimate")),
+            "calibrationCapTokens": run.get("calibration_cap_tokens"),
+            "calibrationEvidenceKind": str(run.get("calibration_evidence_kind") or ""),
+            "calibrationExpiresAt": str(run.get("calibration_expires_at") or ""),
+            "calibrationApplied": bool(run.get("calibration_applied")),
             "round": len(run.get("rounds") or []),
             "maxRounds": run["max_rounds"],
             "allowedTools": tools,
@@ -2084,6 +2515,20 @@ def _normalize_session_context_resolution(value, *, source_run=None):
         "budgetClamped": bool(value.get("budgetClamped")),
         "budgetAboveEstimate": bool(value.get("budgetAboveEstimate")),
     }
+    calibration_cap = value.get("calibrationCapTokens")
+    if calibration_cap is not None:
+        calibration_cap = bounded_integer("calibrationCapTokens")
+        if calibration_cap is None:
+            return None
+    calibration_kind = str(value.get("calibrationEvidenceKind") or "")
+    if calibration_kind not in {"", "explicit_max", "heuristic"}:
+        calibration_kind = ""
+    normalized.update({
+        "calibrationCapTokens": calibration_cap,
+        "calibrationEvidenceKind": calibration_kind,
+        "calibrationExpiresAt": str(value.get("calibrationExpiresAt") or "")[:64],
+        "calibrationApplied": bool(value.get("calibrationApplied")),
+    })
     if isinstance(source_run, dict):
         normalized["sourceAgentRunId"] = str(source_run.get("id") or "")[:128]
         normalized["sourceRunCreatedAt"] = str(source_run.get("created_at") or "")[:64]
@@ -2101,6 +2546,10 @@ def _session_context_resolution_from_run(run):
         "compressionTriggerTokens": run.get("compression_trigger_tokens"),
         "budgetClamped": run.get("budget_clamped"),
         "budgetAboveEstimate": run.get("budget_above_estimate"),
+        "calibrationCapTokens": run.get("calibration_cap_tokens"),
+        "calibrationEvidenceKind": run.get("calibration_evidence_kind"),
+        "calibrationExpiresAt": run.get("calibration_expires_at"),
+        "calibrationApplied": run.get("calibration_applied"),
     }, source_run=run)
 
 
@@ -2327,9 +2776,27 @@ def _agent_run_from_record(record):
         "compression_trigger_tokens": max(0, int(record.get("compressionTriggerTokens") or 0)),
         "budget_clamped": bool(record.get("budgetClamped")),
         "budget_above_estimate": bool(record.get("budgetAboveEstimate")),
+        "calibration_cap_tokens": _normalize_optional_calibration_cap(
+            record.get("calibrationCapTokens")
+        ),
+        "calibration_evidence_kind": str(
+            record.get("calibrationEvidenceKind") or ""
+        ),
+        "calibration_expires_at": str(record.get("calibrationExpiresAt") or ""),
+        "calibration_applied": bool(record.get("calibrationApplied")),
         "context_recovery_round": max(
             0,
             int(record.get("contextRecoveryRound") or 0),
+        ),
+        "context_failure_attribution": (
+            context_calibration.normalize_context_failure_attribution(
+                record.get("contextFailureAttribution")
+            )
+        ),
+        "pending_context_calibration": (
+            _normalize_pending_context_calibration(
+                record.get("pendingContextCalibration")
+            )
         ),
         "request": request_options,
         "messages": list(record.get("messages") or []),
@@ -4586,7 +5053,7 @@ def _agent_compaction_payload(run, plan):
     return payload
 
 
-def _run_agent_auto_compaction(run, reason, before_estimate=0):
+def _run_agent_auto_compaction(run, reason, before_estimate=0, *, keys_override=None):
     plan = _agent_compaction_plan(run.get("messages") or [])
     if not plan:
         return {"status": "skipped", "reason": "no_shrinkable_history"}
@@ -4606,11 +5073,12 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0):
         run["session_id"],
         _agent_compaction_payload(run, plan),
         run["base_url"],
-        list(run["keys"]),
+        list(keys_override) if keys_override is not None else list(run["keys"]),
     )
     with run["condition"]:
         run["active_runtime_id"] = compaction_run["id"]
     snapshot = _agent_wait_for_model(run, compaction_run)
+    _adopt_runtime_context_failure(run, compaction_run)
     with run["condition"]:
         run["active_runtime_id"] = ""
     if run["cancel_event"].is_set() or snapshot["status"] == "cancelled":
@@ -4996,6 +5464,11 @@ def _agent_run_worker(run):
     try:
         while run["status"] not in _AGENT_RUN_TERMINAL:
             if run["cancel_event"].is_set():
+                pending = _normalize_pending_context_calibration(
+                    run.get("pending_context_calibration")
+                )
+                if pending:
+                    _agent_rollback_context_calibration(run, pending)
                 _finish_agent_run(run, "cancelled")
                 return
 
@@ -5033,6 +5506,61 @@ def _agent_run_worker(run):
                 return
 
             round_number = len(run["rounds"]) + 1
+            attempt_keys = list(run["keys"])
+            pending_calibration = _normalize_pending_context_calibration(
+                run.get("pending_context_calibration")
+            )
+            if pending_calibration and pending_calibration["round"] == round_number:
+                failed_key = _agent_matching_context_key(
+                    run, pending_calibration["scope"]["keyFingerprint"],
+                )
+                if not failed_key:
+                    _agent_wait_for_context_calibration_key(run)
+                    return
+                if pending_calibration["phase"] == "pending_compaction":
+                    if _agent_pending_compaction_completed(run, pending_calibration):
+                        pending_calibration = _agent_set_context_calibration_phase(
+                            run, pending_calibration, "retry_pending",
+                        )
+                    else:
+                        recovery_payload, _ = _agent_model_payload(run)
+                        compacted = _run_agent_auto_compaction(
+                            run,
+                            "context_window_exceeded",
+                            _agent_estimate_request_tokens(recovery_payload),
+                            keys_override=[failed_key],
+                        )
+                        if compacted.get("status") == "cancelled":
+                            _agent_rollback_context_calibration(run, pending_calibration)
+                            _finish_agent_run(run, "cancelled")
+                            return
+                        if compacted.get("status") != "completed":
+                            _agent_rollback_context_calibration(run, pending_calibration)
+                            _finish_agent_run(
+                                run,
+                                "failed",
+                                compacted.get("error")
+                                or "Context calibration compaction failed",
+                                error_code=(
+                                    compacted.get("errorCode")
+                                    or "context_calibration_compaction_failed"
+                                ),
+                            )
+                            return
+                        _agent_set_context_calibration_phase(
+                            run, pending_calibration, "retry_pending",
+                        )
+                        continue
+                pending_calibration = _normalize_pending_context_calibration(
+                    run.get("pending_context_calibration")
+                )
+                if pending_calibration and pending_calibration["phase"] in {
+                    "retry_pending", "retrying",
+                }:
+                    pending_calibration = _agent_set_context_calibration_phase(
+                        run, pending_calibration, "retrying",
+                    )
+                    attempt_keys = [failed_key]
             payload, force_final_round = _agent_model_payload(run)
             estimated_tokens = _agent_estimate_request_tokens(payload)
             if (
@@ -5055,7 +5583,7 @@ def _agent_run_worker(run):
                     estimated_tokens = _agent_estimate_request_tokens(payload)
 
             model_run = _create_model_runtime_run(
-                run["session_id"], payload, run["base_url"], list(run["keys"]),
+                run["session_id"], payload, run["base_url"], attempt_keys,
             )
             with run["condition"]:
                 run["active_runtime_id"] = model_run["id"]
@@ -5064,30 +5592,32 @@ def _agent_run_worker(run):
                 "runtimeRunId": model_run["id"],
             })
             model_snapshot = _agent_wait_for_model(run, model_run)
+            _adopt_runtime_context_failure(run, model_run)
             with run["condition"]:
                 run["active_runtime_id"] = ""
+            retry_pending = _normalize_pending_context_calibration(
+                run.get("pending_context_calibration")
+            )
+            retry_inflight = bool(
+                retry_pending
+                and retry_pending["round"] == round_number
+                and retry_pending["phase"] == "retrying"
+            )
             if run["cancel_event"].is_set() or model_snapshot["status"] == "cancelled":
+                if retry_inflight:
+                    _agent_rollback_context_calibration(run, retry_pending)
                 _finish_agent_run(run, "cancelled")
                 return
             if model_snapshot["status"] != "completed":
+                if retry_inflight:
+                    _agent_rollback_context_calibration(run, retry_pending)
                 error_code = model_snapshot.get("errorCode") or ""
                 if (
                     error_code == "context_window_exceeded"
                     and int(run.get("context_recovery_round") or 0) != round_number
                 ):
-                    with run["condition"]:
-                        run["context_recovery_round"] = round_number
-                        run["updated_at"] = now_iso()
-                    _persist_agent_run(run)
-                    compacted = _run_agent_auto_compaction(
-                        run,
-                        "context_window_exceeded",
-                        estimated_tokens,
-                    )
-                    if compacted.get("status") == "cancelled":
-                        _finish_agent_run(run, "cancelled")
-                        return
-                    if compacted.get("status") == "completed":
+                    prepared = _agent_prepare_context_calibration(run, round_number)
+                    if prepared:
                         continue
                 if model_snapshot.get("transient") and _handoff_agent_goal_run(
                     run,
@@ -5103,6 +5633,19 @@ def _agent_run_worker(run):
                     error_code=error_code,
                 )
                 return
+
+            if retry_inflight:
+                try:
+                    _agent_commit_context_calibration(run, retry_pending)
+                except context_calibration.CalibrationStorageUnavailable:
+                    _agent_rollback_context_calibration(run, retry_pending)
+                    _finish_agent_run(
+                        run,
+                        "failed",
+                        "Context calibration storage is unavailable",
+                        error_code="calibration_storage_unavailable",
+                    )
+                    return
 
             model_result = model_snapshot["result"]
             tool_calls = _normalize_agent_tool_calls(run, model_result.get("toolCalls"), round_number)
@@ -5232,6 +5775,14 @@ def _agent_run_worker(run):
                 return
             continue
     except Exception as exc:
+        pending = _normalize_pending_context_calibration(
+            run.get("pending_context_calibration")
+        )
+        if pending:
+            try:
+                _agent_rollback_context_calibration(run, pending)
+            except Exception:
+                pass
         _finish_agent_run(run, "failed", str(exc), error_code="internal_error")
     finally:
         with run["condition"]:
@@ -5291,16 +5842,19 @@ def _create_agent_run(
     request_options = _agent_request_options(payload)
     if not str(request_options.get("model") or "").strip():
         raise ValueError("payload.model is required")
-    context_resolution = (
-        dict(inherited_context)
-        if isinstance(inherited_context, dict)
-        else context_window.resolve(
-            request_options.get("model"),
-            base_url,
-            budget=context_budget_tokens,
-            legacy_hint=context_limit,
-            max_tokens=request_options.get("max_tokens") or 4096,
-        )
+    inherited_resolution = (
+        dict(inherited_context) if isinstance(inherited_context, dict) else None
+    )
+    stored_calibration = None if inherited_resolution else _agent_primary_calibration(
+        request_options.get("model"), base_url, keys,
+    )
+    context_resolution = inherited_resolution or context_window.resolve(
+        request_options.get("model"),
+        base_url,
+        budget=context_budget_tokens,
+        legacy_hint=context_limit,
+        max_tokens=_agent_requested_max_tokens(request_options),
+        calibration=stored_calibration,
     )
     if context_resolution.get("inputBudgetInsufficient"):
         raise ValueError(
@@ -5356,7 +5910,7 @@ def _create_agent_run(
         existing = _get_agent_run(run_id)
         if existing:
             return existing
-    timestamp = now_iso()
+    timestamp = _agent_created_at_iso()
     run = {
         "id": run_id,
         "session_id": str(session_id or ""),
@@ -5388,7 +5942,17 @@ def _create_agent_run(
         "compression_trigger_tokens": context_resolution["compressionTriggerTokens"],
         "budget_clamped": context_resolution["budgetClamped"],
         "budget_above_estimate": context_resolution["budgetAboveEstimate"],
+        "calibration_cap_tokens": context_resolution.get("calibrationCapTokens"),
+        "calibration_evidence_kind": str(
+            context_resolution.get("calibrationEvidenceKind") or ""
+        ),
+        "calibration_expires_at": str(
+            context_resolution.get("calibrationExpiresAt") or ""
+        ),
+        "calibration_applied": bool(context_resolution.get("calibrationApplied")),
         "context_recovery_round": 0,
+        "context_failure_attribution": None,
+        "pending_context_calibration": None,
         "request": request_options,
         "messages": _json_clone(messages),
         "tools": tools,

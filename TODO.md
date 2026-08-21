@@ -155,8 +155,8 @@ _上次更新：2026-08-21_
 ### CODE-012 · 模型上下文上限事实源
 
 - **类型 / 优先级 / 风险**：能力与配置 / P1 / STRICT
-- **下一动作**：按 [`docs/context-window-budget-development-guide.md`](docs/context-window-budget-development-guide.md) 对剩余 connection-specific verified override 与阶段 D 向下校准另行决策/调研：先明确连接级已验证覆盖的可信来源、配置权限、冲突合并、删除与回退，再定义只接受可验证 context-window 错误的校准证据、原子最小值合并、TTL、复核提醒与显式重置；未经新审批不实施。
-- **完成定义**：连接级覆盖有唯一可信入口、权限和回退，同模型多连接冲突可解释；校准只会有证据地向下收紧，多并发取最小值，损坏/过期/重置/旧 Run 恢复 fail-closed，模糊错误不会学习或自动提高上限。
+- **下一动作**：按 [`docs/context-window-budget-development-guide.md`](docs/context-window-budget-development-guide.md) 对尚未实现的 connection-specific verified override 另行决策/调研：明确可信配置入口、权限、同 scope 冲突合并、删除与回退；同时决定现有自动校准记录的用户可见检查和显式重置入口。D-lite 自动向下校准已经完成，未经新审批不扩展为人工提高或强制覆盖。
+- **完成定义**：连接级覆盖有唯一可信入口、权限和可解释的冲突/删除回退；用户可在不暴露 Key、指纹、原始错误或内部路径的前提下检查校准来源/有效期并显式重置，删除、过期或重置后安全回到 metadata → official → family/unknown 能力链。
 
 ### CODE-029 · 启用自动模式的风险确认弹窗
 

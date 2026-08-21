@@ -88,10 +88,17 @@ class _AgentUpstream(BaseHTTPRequestHandler):
             return
         if isinstance(scripted_frames, dict) and scripted_frames.get("http_error"):
             status = int(scripted_frames.get("http_error") or 400)
+            error_payload = {
+                "message": str(scripted_frames.get("message") or "upstream error"),
+            }
+            for field in (
+                "code", "type", "max_context_tokens", "maximum_context_tokens",
+                "context_window", "context_length",
+            ):
+                if field in scripted_frames:
+                    error_payload[field] = scripted_frames[field]
             body = json.dumps({
-                "error": {
-                    "message": str(scripted_frames.get("message") or "upstream error"),
-                },
+                "error": error_payload,
             }).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -925,6 +932,13 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertNotIn(facts["upstreamMessage"], json.dumps(runtime_snapshot, ensure_ascii=False))
 
     def test_agent_context_limit_and_multilingual_request_estimate(self):
+        self.assertEqual(
+            server_mod._agent_requested_max_tokens({
+                "max_tokens": 1024,
+                "max_completion_tokens": 16000,
+            }),
+            16000,
+        )
         self.assertEqual(server_mod._agent_model_context_limit("gpt-5.6"), 1_000_000)
         self.assertEqual(server_mod._agent_model_context_limit("claude-4.5"), 200_000)
         self.assertEqual(server_mod._agent_model_context_limit("unknown-model"), 128_000)
@@ -1136,6 +1150,10 @@ class TestDurableAgentRuntime(unittest.TestCase):
         )
         self.assertEqual(parent["context_limit"], 400000)
         self.assertTrue(parent["budget_above_estimate"])
+        parent["calibration_cap_tokens"] = 400000
+        parent["calibration_evidence_kind"] = "heuristic"
+        parent["calibration_expires_at"] = "2030-01-08T00:00:00Z"
+        parent["calibration_applied"] = True
 
         server_mod.context_window.normalize_catalog(self.base_url, [{
             "id": "custom-model",
@@ -1159,8 +1177,88 @@ class TestDurableAgentRuntime(unittest.TestCase):
             "context_limit", "context_window_tokens", "context_budget_tokens",
             "context_window_source", "context_window_hard", "available_input_tokens",
             "compression_trigger_tokens", "budget_clamped", "budget_above_estimate",
+            "calibration_cap_tokens", "calibration_evidence_kind",
+            "calibration_expires_at", "calibration_applied",
         ):
             self.assertEqual(child[field], parent[field])
+
+    def test_same_second_newer_calibrated_run_wins_session_and_stale_client_merge(self):
+        session_id = "same-second-calibration-session"
+        session_file = server_mod.session_path(session_id)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        server_mod.write_json(session_file, {
+            "id": session_id,
+            "title": "Same second calibration",
+            "stats": {},
+        })
+        with server_mod._agent_created_at_lock:
+            previous_created_microsecond = server_mod._agent_last_created_microsecond
+            server_mod._agent_last_created_microsecond = 0
+        try:
+            with mock.patch.object(server_mod.time, "time_ns", return_value=1_787_287_200_000_000_000):
+                first = server_mod._create_agent_run(
+                    session_id,
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "first"}],
+                    },
+                    self.base_url,
+                    [],
+                    run_kind="foreground",
+                    start_worker=False,
+                )
+                second = server_mod._create_agent_run(
+                    session_id,
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "second"}],
+                    },
+                    self.base_url,
+                    [],
+                    run_kind="foreground",
+                    start_worker=False,
+                )
+        finally:
+            with server_mod._agent_created_at_lock:
+                server_mod._agent_last_created_microsecond = max(
+                    server_mod._agent_last_created_microsecond,
+                    previous_created_microsecond,
+                )
+        self.assertLess(first["created_at"], second["created_at"])
+        self.assertNotEqual(first["created_at"], second["created_at"])
+
+        first_fact = {
+            **first,
+            "id": "z-first-run",
+            "status": "completed",
+        }
+        second_fact = {
+            **second,
+            "id": "a-second-run",
+            "status": "completed",
+            "context_limit": 64_000,
+            "available_input_tokens": 53_504,
+            "compression_trigger_tokens": 53_504,
+            "calibration_cap_tokens": 64_000,
+            "calibration_evidence_kind": "explicit_max",
+            "calibration_expires_at": "2030-02-01T00:00:00Z",
+            "calibration_applied": True,
+        }
+        self.assertTrue(server_mod._persist_agent_session_context_resolution(first_fact))
+        self.assertTrue(server_mod._persist_agent_session_context_resolution(second_fact))
+        authoritative = server_mod.read_json(session_file, {})["stats"]["contextResolution"]
+        self.assertEqual(authoritative["sourceAgentRunId"], "a-second-run")
+        self.assertEqual(authoritative["contextLimit"], 64_000)
+        self.assertTrue(authoritative["calibrationApplied"])
+
+        stale_client = server_mod._session_context_resolution_from_run(first_fact)
+        stale_client.pop("sourceAgentRunId", None)
+        stale_client.pop("sourceRunCreatedAt", None)
+        merged = server_mod._merge_session_stats(
+            {"contextResolution": authoritative},
+            {"contextResolution": stale_client},
+        )
+        self.assertEqual(merged["contextResolution"], authoritative)
 
     def test_completed_foreground_context_persists_idempotently_and_monotonically(self):
         session_id = "context-resolution-session"
@@ -1221,11 +1319,18 @@ class TestDurableAgentRuntime(unittest.TestCase):
             "context_budget_tokens": 200000,
             "available_input_tokens": 185904,
             "compression_trigger_tokens": 180000,
+            "calibration_cap_tokens": 200000,
+            "calibration_evidence_kind": "explicit_max",
+            "calibration_expires_at": "2030-02-01T00:00:00Z",
+            "calibration_applied": True,
         }
         self.assertTrue(server_mod._persist_agent_session_context_resolution(newer))
         newest = server_mod.read_json(session_file, {})["stats"]["contextResolution"]
         self.assertEqual(newest["sourceAgentRunId"], "newer-context-run")
         self.assertEqual(newest["contextLimit"], 200000)
+        self.assertEqual(newest["calibrationCapTokens"], 200000)
+        self.assertEqual(newest["calibrationEvidenceKind"], "explicit_max")
+        self.assertTrue(newest["calibrationApplied"])
         merged = server_mod._merge_session_stats(
             {"input": 1, "contextResolution": newest},
             {"input": 2},
@@ -1870,7 +1975,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
                 "tools": [server_mod._SERVER_TOOL_DEFINITIONS["read_file"]],
             },
             self.base_url,
-            ["agent-secret-key"],
+            ["agent-secret-key", "agent-secondary-key"],
             allowed_tools=["read_file"],
             context_limit=8192,
             start_worker=False,
@@ -1977,11 +2082,39 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(snapshot["usage"]["total_tokens"], 13)
         self.assertEqual(run["context_recovery_round"], 1)
         self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(
+            _AgentUpstream.authorizations,
+            ["Bearer agent-secret-key"] * 3,
+        )
         self.assertEqual(len(snapshot["compactions"]), 1)
         self.assertEqual(
             snapshot["compactions"][0]["reason"],
             "context_window_exceeded",
         )
+        attribution = run["context_failure_attribution"]
+        self.assertEqual(attribution["upstreamStatus"], 400)
+        self.assertEqual(attribution["evidenceKind"], "heuristic")
+        self.assertIsNone(attribution["explicitMaximumTokens"])
+        self.assertEqual(
+            attribution["keyFingerprint"],
+            server_mod.context_calibration.key_fingerprint("agent-secret-key"),
+        )
+        self.assertNotIn("contextFailureAttribution", snapshot)
+        record = server_mod._agent_run_record(run)
+        self.assertEqual(record["contextFailureAttribution"], attribution)
+        self.assertNotIn("agent-secret-key", json.dumps(record, ensure_ascii=False))
+        restored = server_mod._agent_run_from_record(record)
+        self.assertEqual(restored["context_failure_attribution"], attribution)
+        self.assertEqual(snapshot["contextLimit"], 64_000)
+        self.assertEqual(snapshot["calibrationCapTokens"], 64_000)
+        self.assertEqual(snapshot["calibrationEvidenceKind"], "heuristic")
+        self.assertTrue(snapshot["calibrationApplied"])
+        self.assertFalse(run.get("pending_context_calibration"))
+        stored = server_mod._context_calibration_store().resolve(
+            attribution["scopeId"]
+        )
+        self.assertEqual(stored["capTokens"], 64_000)
+        self.assertEqual(stored["evidenceKind"], "heuristic")
 
     def test_agent_context_recovery_is_bounded_to_one_attempt_per_round(self):
         context_error = {
@@ -2021,6 +2154,227 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(snapshot["errorCode"], "context_window_exceeded")
         self.assertEqual(_AgentUpstream.calls, 3)
         self.assertEqual(len(snapshot["compactions"]), 1)
+        self.assertEqual(snapshot["contextLimit"], 128_000)
+        self.assertIsNone(snapshot["calibrationCapTokens"])
+        self.assertFalse(snapshot["calibrationApplied"])
+        self.assertFalse(run.get("pending_context_calibration"))
+        self.assertFalse((self.data_dir / "context-calibrations.json").exists())
+
+    def test_explicit_context_calibration_commits_before_accepting_model_result(self):
+        context_error = {
+            "http_error": 400,
+            "code": "context_length_exceeded",
+            "max_context_tokens": 200_000,
+            "message": (
+                "maximum context length is 200000 tokens; "
+                "requested 420000 tokens"
+            ),
+        }
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                context_error,
+                [{"choices": [{
+                    "delta": {"content": "Explicit recovery summary."},
+                    "finish_reason": "stop",
+                }]}],
+                [{"choices": [{
+                    "delta": {"content": "explicit recovery complete"},
+                    "finish_reason": "stop",
+                }]}],
+            ]
+        run = server_mod._create_agent_run(
+            "session-explicit-calibration",
+            {
+                "model": "gpt-5.6",
+                "messages": [
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["explicit-key-a", "explicit-key-b"],
+            context_limit=1_000_000,
+        )
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["contextLimit"], 200_000)
+        self.assertEqual(snapshot["calibrationCapTokens"], 200_000)
+        self.assertEqual(snapshot["calibrationEvidenceKind"], "explicit_max")
+        self.assertTrue(snapshot["calibrationApplied"])
+        self.assertTrue(snapshot["calibrationExpiresAt"])
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(_AgentUpstream.authorizations, ["Bearer explicit-key-a"] * 3)
+
+        same_scope = server_mod._create_agent_run(
+            "session-explicit-next",
+            {
+                "model": "gpt-5.6",
+                "messages": [{"role": "user", "content": "next task"}],
+            },
+            self.base_url,
+            ["explicit-key-a", "explicit-key-b"],
+            start_worker=False,
+        )
+        other_key = server_mod._create_agent_run(
+            "session-explicit-other-key",
+            {
+                "model": "gpt-5.6",
+                "messages": [{"role": "user", "content": "other key task"}],
+            },
+            self.base_url,
+            ["explicit-key-b"],
+            start_worker=False,
+        )
+        self.assertEqual(same_scope["context_limit"], 200_000)
+        self.assertTrue(same_scope["calibration_applied"])
+        self.assertEqual(other_key["context_limit"], 1_050_000)
+        self.assertFalse(other_key["calibration_applied"])
+
+    def test_calibration_store_failure_discards_tool_result_and_executes_nothing(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                {
+                    "http_error": 400,
+                    "code": "context_length_exceeded",
+                    "max_context_tokens": 64_000,
+                    "message": "maximum context length is 64000 tokens",
+                },
+                [{"choices": [{
+                    "delta": {"content": "Store failure recovery summary."},
+                    "finish_reason": "stop",
+                }]}],
+                [{"choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "store-failure-read",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path":"README.md"}',
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }]}],
+            ]
+        with mock.patch.object(
+            server_mod.context_calibration.ContextCalibrationStore,
+            "record_success",
+            side_effect=server_mod.context_calibration.CalibrationStorageUnavailable(
+                "storage_unavailable"
+            ),
+        ):
+            run = server_mod._create_agent_run(
+                "session-calibration-store-failure",
+                {
+                    "model": "gpt-5.6",
+                    "messages": [
+                        {"role": "user", "content": "old task"},
+                        {"role": "assistant", "content": "old result"},
+                        {"role": "user", "content": "current task"},
+                    ],
+                },
+                self.base_url,
+                ["store-failure-key", "unused-key"],
+                allowed_tools=["read_file"],
+                context_limit=400_000,
+            )
+            self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "calibration_storage_unavailable")
+        self.assertEqual(snapshot["toolExecutions"], [])
+        self.assertEqual(snapshot["round"], 0)
+        self.assertEqual(_AgentUpstream.authorizations, ["Bearer store-failure-key"] * 3)
+        self.assertFalse((self.data_dir / "context-calibrations.json").exists())
+
+    def test_pending_recovery_requires_the_same_key_after_credentials_restore(self):
+        run = server_mod._create_agent_run(
+            "session-pending-calibration-key",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["pending-key-a"],
+            start_worker=False,
+        )
+        scope = server_mod.context_calibration.calibration_scope(
+            self.base_url, "pending-key-a", "test-model",
+        )
+        run["context_failure_attribution"] = (
+            server_mod.context_calibration.context_failure_attribution(
+                scope,
+                400,
+                server_mod.context_calibration.classify_context_failure(
+                    400,
+                    code="context_length_exceeded",
+                    message="context length exceeded",
+                ),
+            )
+        )
+        pending = server_mod._agent_prepare_context_calibration(run, 1)
+        self.assertIsNotNone(pending)
+        record = server_mod._agent_run_record(run)
+        run = server_mod._agent_run_from_record(record)
+        self.assertEqual(run["status"], "waiting_credentials")
+        self.assertEqual(run["pending_context_calibration"], pending)
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs[run["id"]] = run
+
+        server_mod._resume_agent_run(run, ["pending-key-b"], self.base_url)
+        self._wait_status(run, "waiting_credentials")
+        self.assertEqual(_AgentUpstream.calls, 0)
+        self.assertIsNotNone(run["pending_context_calibration"])
+        self.assertEqual(run["context_limit"], 64_000)
+
+    def test_cancelled_pending_calibration_rolls_back_without_store_write(self):
+        run = server_mod._create_agent_run(
+            "session-cancelled-calibration",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["cancel-calibration-key"],
+            start_worker=False,
+        )
+        scope = server_mod.context_calibration.calibration_scope(
+            self.base_url, "cancel-calibration-key", "test-model",
+        )
+        run["context_failure_attribution"] = (
+            server_mod.context_calibration.context_failure_attribution(
+                scope,
+                400,
+                server_mod.context_calibration.classify_context_failure(
+                    400,
+                    code="context_length_exceeded",
+                    message="context length exceeded",
+                ),
+            )
+        )
+        self.assertIsNotNone(server_mod._agent_prepare_context_calibration(run, 1))
+        self.assertEqual(run["context_limit"], 64_000)
+        run["cancel_event"].set()
+        server_mod._start_agent_worker(run)
+        self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "cancelled")
+        self.assertEqual(snapshot["contextLimit"], 128_000)
+        self.assertFalse(snapshot["calibrationApplied"])
+        self.assertFalse(run.get("pending_context_calibration"))
+        self.assertFalse((self.data_dir / "context-calibrations.json").exists())
+        self.assertEqual(_AgentUpstream.calls, 0)
 
     def test_client_request_id_reuses_same_agent_run_after_memory_reset(self):
         payload = {

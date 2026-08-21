@@ -31,6 +31,9 @@ AUTO_COMPACTION_SEED_FINAL = "H4_AUTO_COMPACTION_SEED_FINAL"
 AUTO_COMPACTION_USER = "H4_AUTO_COMPACTION_USER"
 AUTO_COMPACTION_CHECKPOINT = "H4_CONTEXT_CHECKPOINT_INTERNAL"
 AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL"
+CONTEXT_CALIBRATION_USER = "H4_CONTEXT_CALIBRATION_USER"
+CONTEXT_CALIBRATION_FINAL = "H4_CONTEXT_CALIBRATION_FINAL"
+CONTEXT_CALIBRATION_UNUSED_KEY = "h4-context-calibration-unused-key"
 TOOL_USER = "H4_TOOL_USER"
 TOOL_STAGE = "H4_TOOL_STAGE"
 TOOL_FINAL = "H4_TOOL_FINAL"
@@ -548,6 +551,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         return "context-compaction-final", False
     if AUTO_COMPACTION_SEED in joined_user_text:
         return "context-compaction-seed", False
+    if CONTEXT_CALIBRATION_USER in joined_user_text:
+        return "context-calibration", False
     if (
         "goal_agent_continuation_v1" in joined_user_text
         and "H4_GOAL_V2_CONTINUATION" in joined_user_text
@@ -1584,6 +1589,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "stream": True,
             "hasToolResult": has_tool_result,
         }
+        if scenario == "context-calibration":
+            chat_metric["usedContextCalibrationUnusedKey"] = (
+                self.headers.get("Authorization", "")
+                == f"Bearer {CONTEXT_CALIBRATION_UNUSED_KEY}"
+            )
         if scenario == "invalid-tool-final":
             chat_metric["invalidReceipt"] = _invalid_tool_receipt_projection(payload)
         if scenario == "parse-error-tool-final":
@@ -1704,6 +1714,23 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 _edit_authorization_conflict_receipt_projection(payload)
             )
         METRICS.append("chatRequests", chat_metric)
+        if scenario == "context-calibration":
+            calibration_attempts = sum(
+                1 for item in METRICS.snapshot()["chatRequests"]
+                if item.get("scenario") == "context-calibration"
+            )
+            if calibration_attempts == 1:
+                self._send_json({
+                    "error": {
+                        "message": (
+                            "maximum context length is 64000 tokens; "
+                            "requested 90000 tokens; request id 20260821"
+                        ),
+                        "code": "context_length_exceeded",
+                        "max_context_tokens": 64000,
+                    },
+                }, 400)
+                return
         if scenario == "parallel-model-failure":
             self._send_json({"error": {"message": PARALLEL_FAILURE_ERROR}}, 502)
             return
@@ -2388,6 +2415,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "context-compaction": AUTO_COMPACTION_CHECKPOINT,
                 "context-compaction-seed": AUTO_COMPACTION_SEED_FINAL,
                 "context-compaction-final": AUTO_COMPACTION_FINAL,
+                "context-calibration": CONTEXT_CALIBRATION_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,

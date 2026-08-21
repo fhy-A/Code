@@ -151,6 +151,16 @@ function normalizeFrozenContextResolution(value) {
   const source = ["metadata", "official", "stale_official", "family", "unknown"].includes(value.contextWindowSource)
     ? value.contextWindowSource
     : "unknown";
+  const calibrationCap = value.calibrationCapTokens == null
+    ? null
+    : Number(value.calibrationCapTokens);
+  if (
+    calibrationCap != null
+    && (!Number.isInteger(calibrationCap) || calibrationCap < 1024 || calibrationCap > 2000000)
+  ) return null;
+  const calibrationKind = ["explicit_max", "heuristic"].includes(value.calibrationEvidenceKind)
+    ? value.calibrationEvidenceKind
+    : "";
   return {
     contextLimit,
     contextWindowTokens,
@@ -161,6 +171,10 @@ function normalizeFrozenContextResolution(value) {
     compressionTriggerTokens: Math.max(0, Number(value.compressionTriggerTokens || 0)),
     budgetClamped: Boolean(value.budgetClamped),
     budgetAboveEstimate: Boolean(value.budgetAboveEstimate),
+    calibrationCapTokens: calibrationCap,
+    calibrationEvidenceKind: calibrationKind,
+    calibrationExpiresAt: String(value.calibrationExpiresAt || ""),
+    calibrationApplied: Boolean(value.calibrationApplied),
   };
 }
 
@@ -7538,14 +7552,15 @@ function followUpMessageText(message) {
 
 async function submitSessionSteer(ctx, userMessage, options = {}) {
   const dispatch = userMessage?.meta?.steerDispatch;
-  if (!ctx?.agentRunId || !dispatch?.clientRequestId) return null;
-  const response = await agentRuntime.steerAgentRun(ctx.agentRunId, {
+  const targetAgentRunId = String(dispatch?.agentRunId || ctx?.agentRunId || "");
+  if (!targetAgentRunId || !dispatch?.clientRequestId) return null;
+  const response = await agentRuntime.steerAgentRun(targetAgentRunId, {
     message: { role: "user", content: userMessage.content },
     clientRequestId: dispatch.clientRequestId,
     signal: ctx.run?.abortController?.signal,
   });
   dispatch.status = "accepted";
-  dispatch.agentRunId = ctx.agentRunId;
+  dispatch.agentRunId = targetAgentRunId;
   dispatch.steerId = String(response?.result?.steerId || dispatch.steerId || "");
   dispatch.acceptedAt = Date.now();
   await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats, undefined, {
@@ -8559,8 +8574,29 @@ function observeAgentProjectionSnapshot(ctx, snapshot, referenceTime = Date.now(
       compressionTriggerTokens: Number(snapshot.compressionTriggerTokens || 0),
       budgetClamped: Boolean(snapshot.budgetClamped),
       budgetAboveEstimate: Boolean(snapshot.budgetAboveEstimate),
+      calibrationCapTokens: snapshot.calibrationCapTokens == null
+        ? null
+        : Number(snapshot.calibrationCapTokens),
+      calibrationEvidenceKind: String(snapshot.calibrationEvidenceKind || ""),
+      calibrationExpiresAt: String(snapshot.calibrationExpiresAt || ""),
+      calibrationApplied: Boolean(snapshot.calibrationApplied),
     };
     rememberFrozenSessionContextResolution(ctx.sessionId, frozen);
+  }
+  const calibrationCap = Number(snapshot?.calibrationCapTokens || 0);
+  if (snapshot?.calibrationApplied && calibrationCap >= 1024) {
+    const runId = String(snapshot.agentRunId || ctx.agentRunId || "");
+    const noticeKey = `code-context-calibration-notice:${runId}:${calibrationCap}`;
+    let alreadyShown = false;
+    try {
+      alreadyShown = sessionStorage.getItem(noticeKey) === "1";
+      if (!alreadyShown) sessionStorage.setItem(noticeKey, "1");
+    } catch (_) { /* private mode may disable sessionStorage */ }
+    if (!alreadyShown) {
+      showToast(t("contextCalibrationAdjusted", {
+        value: formatCompact(calibrationCap),
+      }), "warning");
+    }
   }
   const shadow = ensureAgentProjectionShadow(ctx, referenceTime);
   if (!shadow) return;

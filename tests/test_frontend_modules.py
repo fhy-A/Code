@@ -3023,6 +3023,10 @@ const stats = new Map([
     contextBudgetTokens: 400000,
     contextWindowSource: "unknown",
     budgetAboveEstimate: true,
+    calibrationCapTokens: 200000,
+    calibrationEvidenceKind: "explicit_max",
+    calibrationExpiresAt: "2030-02-01T00:00:00Z",
+    calibrationApplied: true,
   }}}}],
   ["session-official", {{contextResolution: {{
     contextLimit: 400000,
@@ -3064,12 +3068,19 @@ process.stdout.write(JSON.stringify(globalThis.__contextResult));
         data = json.loads(completed.stdout)
         self.assertEqual(data["restored"]["contextLimit"], 400000)
         self.assertEqual(data["restored"]["contextWindowSource"], "unknown")
+        self.assertEqual(data["restored"]["calibrationCapTokens"], 200000)
+        self.assertEqual(data["restored"]["calibrationEvidenceKind"], "explicit_max")
+        self.assertTrue(data["restored"]["calibrationApplied"])
         self.assertEqual(data["official"]["contextWindowSource"], "official")
         self.assertEqual(data["stale"]["contextWindowSource"], "stale_official")
         self.assertIsNone(data["missing"])
         self.assertEqual(data["remembered"]["contextLimit"], 200000)
         self.assertEqual(data["persistedAfterRemember"]["contextLimit"], 400000)
         self.assertNotIn("stats.contextResolution =", APP_SOURCE)
+        self.assertIn("contextCalibrationAdjusted", I18N_SOURCE)
+        self.assertIn("code-context-calibration-notice:", APP_SOURCE)
+        self.assertIn('sessionStorage.getItem(noticeKey) === "1"', APP_SOURCE)
+        self.assertIn("calibrationCapTokens: snapshot.calibrationCapTokens", APP_SOURCE)
 
         for function_name in (
             "getModelContextLimit",
@@ -3418,6 +3429,64 @@ eval(source);
             "clientRequestId": "steer-client-1",
         })
         self.assertEqual(data["result"]["result"]["status"], "pending")
+
+    def test_followup_steer_freezes_target_run_across_session_save_cleanup(self):
+        helper_start = APP_SOURCE.index("async function submitSessionSteer(")
+        helper_end = APP_SOURCE.index("async function steerSessionMessage(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+let capturedRunId = "";
+let saveCount = 0;
+const agentRuntime = {{
+  async steerAgentRun(agentRunId) {{
+    capturedRunId = String(agentRunId);
+    return {{result: {{steerId: "steer-1"}}}};
+  }},
+}};
+const renderSessionMessages = () => {{}};
+const messageScrollController = null;
+let ctx = {{
+  agentRunId: "run-at-click",
+  sessionId: "session-1",
+  messages: [],
+  stats: {{}},
+  run: {{abortController: new AbortController()}},
+}};
+const userMessage = {{
+  meta: {{steerDispatch: {{
+    agentRunId: "run-at-click",
+    clientRequestId: "followup-1",
+    status: "submitting",
+  }}}},
+  content: "next task",
+}};
+ctx.messages.push(userMessage);
+// Reproduce bundle cleanup during steerSessionMessage's pre-submit save.
+ctx.agentRunId = "";
+const saveSessionState = async () => {{
+  saveCount += 1;
+}};
+eval({json.dumps(helper_source)});
+(async () => {{
+  const result = await submitSessionSteer(ctx, userMessage, {{createReadingAnchor: false}});
+  process.stdout.write(JSON.stringify({{
+    capturedRunId,
+    saveCount,
+    result,
+    dispatch: userMessage.meta.steerDispatch,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, check=True,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["capturedRunId"], "run-at-click")
+        self.assertEqual(data["saveCount"], 1)
+        self.assertEqual(data["dispatch"]["agentRunId"], "run-at-click")
+        self.assertEqual(data["dispatch"]["status"], "accepted")
+        self.assertEqual(data["dispatch"]["steerId"], "steer-1")
 
     def test_read_only_permission_is_user_visible(self):
         self.assertIn('data-value="read"', INDEX_SOURCE)

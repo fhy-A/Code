@@ -11,6 +11,9 @@ const AUTO_COMPACTION_SEED_FINAL = "H4_AUTO_COMPACTION_SEED_FINAL";
 const AUTO_COMPACTION_USER = "H4_AUTO_COMPACTION_USER";
 const AUTO_COMPACTION_CHECKPOINT = "H4_CONTEXT_CHECKPOINT_INTERNAL";
 const AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL";
+const CONTEXT_CALIBRATION_USER = "H4_CONTEXT_CALIBRATION_USER";
+const CONTEXT_CALIBRATION_FINAL = "H4_CONTEXT_CALIBRATION_FINAL";
+const CONTEXT_CALIBRATION_UNUSED_KEY = "h4-context-calibration-unused-key";
 const STREAM_USER = "H4_STREAM_REFRESH_USER";
 const STREAM_ONE = "H4_STREAM_ONE";
 const STREAM_TWO = "H4_STREAM_TWO";
@@ -17247,6 +17250,123 @@ test("bundle context budget freezes in AgentRun and survives reload", async ({ h
 
 test("direct classic context budget matches bundle and survives reload", async ({ h4 }) => {
   await exerciseContextBudgetSnapshot(h4, "classic");
+});
+
+async function exerciseContextCalibrationRecovery(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await restoreGoalH4Connection(h4);
+  await page.evaluate(({ secondaryKey }) => {
+    const current = JSON.parse(localStorage.getItem("code-key-config") || "[]");
+    localStorage.setItem("code-key-config", JSON.stringify([
+      current[0],
+      {
+        name: "H4 unused calibration fallback",
+        key: secondaryKey,
+        enabled: true,
+        source: "manual",
+      },
+    ].filter(Boolean)));
+  }, { secondaryKey: CONTEXT_CALIBRATION_UNUSED_KEY });
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).not.toHaveClass(/hidden/);
+  await page.locator("#settingsRefreshModels").click();
+  await expect(page.locator("#settingsModelList")).toContainText(MODEL_ID);
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", MODEL_ID);
+
+  await h4.submit("H4_PLAIN_USER");
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_PLAIN_FINAL",
+  })).toHaveCount(1);
+  const metricsBefore = await h4.metrics();
+
+  await h4.submit(CONTEXT_CALIBRATION_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONTEXT_CALIBRATION_FINAL,
+  })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const snapshots = await readObservedAgentSnapshots(h4, page);
+  const calibrated = snapshots.find((snapshot) => snapshot.calibrationApplied === true);
+  expect(calibrated).toMatchObject({
+    status: "completed",
+    runKind: "foreground",
+    contextLimit: 64000,
+    contextWindowTokens: 128000,
+    contextWindowSource: "unknown",
+    calibrationCapTokens: 64000,
+    calibrationEvidenceKind: "explicit_max",
+    calibrationApplied: true,
+  });
+  expect(calibrated.calibrationExpiresAt).toMatch(/Z$/);
+  expect(calibrated.round).toBe(1);
+  expect(calibrated.compactions).toHaveLength(1);
+  expect(calibrated.compactions[0].reason).toBe("context_window_exceeded");
+
+  const metricsAfter = await h4.metrics();
+  const recoveryRequests = metricsAfter.chatRequests.slice(metricsBefore.chatRequests.length);
+  expect(recoveryRequests.map((item) => item.scenario)).toEqual([
+    "context-calibration",
+    "context-compaction",
+    "context-calibration",
+  ]);
+  expect(recoveryRequests.every((item) => !item.usedContextCalibrationUnusedKey)).toBe(true);
+  const notice = page.locator("#toastContainer .toast.warning").filter({
+    hasText: "smaller actual window",
+  });
+  await expect(notice).toHaveCount(1);
+  expect(await page.evaluate(({ runId }) => (
+    sessionStorage.getItem(`code-context-calibration-notice:${runId}:64000`)
+  ), { runId: calibrated.agentRunId })).toBe("1");
+
+  const sessionId = await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const persisted = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(persisted.status).toBe(200);
+  expect(persisted.body?.stats?.contextResolution).toMatchObject({
+    contextLimit: 64000,
+    contextWindowTokens: 128000,
+    calibrationCapTokens: 64000,
+    calibrationEvidenceKind: "explicit_max",
+    calibrationApplied: true,
+  });
+  expect(persisted.body.stats.contextResolution.sourceRunCreatedAt).toMatch(
+    /\.\d{6}$/,
+  );
+
+  await h4.reloadRuntime(runtime);
+  await page.locator("#usageStrip").click();
+  await expect(page.locator("#tokenContext")).toHaveText(/^\d+% · 64k$/);
+  await expect(page.locator("#toastContainer .toast.warning").filter({
+    hasText: "smaller actual window",
+  })).toHaveCount(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-context-calibration-recovery`, {
+    runtime,
+    agentRunId: idHash(calibrated.agentRunId),
+    sessionId: idHash(sessionId),
+    contextLimit: calibrated.contextLimit,
+    evidenceKind: calibrated.calibrationEvidenceKind,
+    recoveryRequests: recoveryRequests.length,
+    unusedKeyRequests: recoveryRequests.filter(
+      (item) => item.usedContextCalibrationUnusedKey,
+    ).length,
+    persistedAfterReload: true,
+  });
+}
+
+test("bundle context calibration retries the failing key once and persists", async ({ h4 }) => {
+  await exerciseContextCalibrationRecovery(h4, "bundle");
+});
+
+test("direct classic context calibration matches bundle and survives reload", async ({ h4 }) => {
+  await exerciseContextCalibrationRecovery(h4, "classic");
 });
 
 async function exerciseOfficialCatalogSnapshot(h4, runtime) {

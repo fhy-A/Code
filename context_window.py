@@ -387,7 +387,15 @@ def normalize_catalog(base_url, items):
     return output
 
 
-def resolve(model, base_url, *, budget=None, legacy_hint=None, max_tokens=4096):
+def resolve(
+    model,
+    base_url,
+    *,
+    budget=None,
+    legacy_hint=None,
+    max_tokens=4096,
+    calibration=None,
+):
     model_id = canonical_model_id(model)
     cid = connection_id(base_url)
     with _catalog_lock:
@@ -440,6 +448,25 @@ def resolve(model, base_url, *, budget=None, legacy_hint=None, max_tokens=4096):
         if not MIN_TOKENS <= legacy_hint <= MAX_TOKENS:
             raise ValueError("contextLimit is out of range")
         final_limit = min(final_limit, legacy_hint)
+    calibration_cap = None
+    calibration_kind = ""
+    calibration_expires_at = ""
+    if isinstance(calibration, dict) and calibration.get("capTokens") is not None:
+        raw_calibration_cap = calibration.get("capTokens")
+        if isinstance(raw_calibration_cap, bool) or not isinstance(raw_calibration_cap, int):
+            raise ValueError("calibration capTokens must be an integer")
+        if not MIN_TOKENS <= raw_calibration_cap <= MAX_TOKENS:
+            raise ValueError("calibration capTokens is out of range")
+        calibration_cap = raw_calibration_cap
+        calibration_kind = str(calibration.get("evidenceKind") or "")
+        if calibration_kind not in {"explicit_max", "heuristic"}:
+            raise ValueError("calibration evidenceKind is invalid")
+        calibration_expires_at = str(calibration.get("expiresAt") or "")
+    calibration_applied = bool(
+        calibration_cap is not None and final_limit > calibration_cap
+    )
+    if calibration_applied:
+        final_limit = calibration_cap
     if isinstance(max_tokens, bool):
         raise ValueError("max_tokens must be a non-negative integer")
     try:
@@ -465,4 +492,8 @@ def resolve(model, base_url, *, budget=None, legacy_hint=None, max_tokens=4096):
         "inputBudgetInsufficient": raw_available < 1024,
         "budgetClamped": clamped,
         "budgetAboveEstimate": attempted,
+        "calibrationCapTokens": calibration_cap,
+        "calibrationEvidenceKind": calibration_kind,
+        "calibrationExpiresAt": calibration_expires_at,
+        "calibrationApplied": calibration_applied,
     }

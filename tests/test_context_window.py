@@ -8,6 +8,39 @@ import context_window
 
 
 class ContextWindowResolverTest(unittest.TestCase):
+    def test_key_scoped_calibration_caps_final_limit_without_relabeling_capability(self):
+        resolved = context_window.resolve(
+            "gpt-5.6",
+            "https://gateway.example/v1",
+            budget=1_000_000,
+            max_tokens=16_000,
+            calibration={
+                "capTokens": 200_000,
+                "evidenceKind": "explicit_max",
+                "expiresAt": "2030-02-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(resolved["contextWindowTokens"], 1_050_000)
+        self.assertEqual(resolved["contextWindowSource"], "official")
+        self.assertFalse(resolved["contextWindowHard"])
+        self.assertEqual(resolved["contextLimit"], 200_000)
+        self.assertEqual(resolved["calibrationCapTokens"], 200_000)
+        self.assertEqual(resolved["calibrationEvidenceKind"], "explicit_max")
+        self.assertTrue(resolved["calibrationApplied"])
+        self.assertEqual(resolved["availableInputTokens"], 174_000)
+
+        lower_budget = context_window.resolve(
+            "gpt-5.6",
+            "https://gateway.example/v1",
+            budget=128_000,
+            calibration={
+                "capTokens": 200_000,
+                "evidenceKind": "heuristic",
+                "expiresAt": "2030-01-08T00:00:00Z",
+            },
+        )
+        self.assertEqual(lower_budget["contextLimit"], 128_000)
+        self.assertFalse(lower_budget["calibrationApplied"])
     def setUp(self):
         context_window._catalog.clear()
 

@@ -99,6 +99,43 @@ class _StreamingUpstream(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        authorization = self.headers.get("Authorization", "")
+        if (
+            user_content == "key scoped context error"
+            and authorization == "Bearer context-primary-key"
+        ):
+            body = json.dumps({
+                "error": {
+                    "message": (
+                        "credential context-primary-key: maximum context length is 128000 tokens; "
+                        "requested 150000 tokens; request id 20260821"
+                    ),
+                    "code": "context_length_exceeded",
+                    "max_context_tokens": 128000,
+                },
+            }).encode("utf-8")
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if (
+            user_content == "key scoped non-context error"
+            and authorization == "Bearer fallback-primary-key"
+        ):
+            body = json.dumps({
+                "error": {
+                    "message": "Upstream service temporarily unavailable",
+                    "code": "upstream_error",
+                },
+            }).encode("utf-8")
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if user_content == "deny model":
             body = json.dumps({
                 "error": {
@@ -476,6 +513,67 @@ class TestModelRuntime(unittest.TestCase):
         self.assertEqual(snapshot["errorCode"], "")
         self.assertEqual(snapshot["events"][0]["seq"], 1)
         self.assertNotIn(facts["upstreamMessage"], json.dumps(snapshot, ensure_ascii=False))
+
+    def test_strict_context_error_stops_on_actual_key_and_keeps_attribution_private(self):
+        run = server_mod._create_model_runtime_run(
+            "context-key-scope",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "key scoped context error"}],
+            },
+            self.base_url,
+            ["context-primary-key", "context-secondary-key"],
+        )
+        self._wait_for_terminal(run)
+        snapshot = server_mod._runtime_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "context_window_exceeded")
+        self.assertEqual(
+            snapshot["error"],
+            "The upstream rejected the request because it exceeded the model context window",
+        )
+        self.assertEqual(_StreamingUpstream.calls, 1)
+        self.assertEqual(
+            _StreamingUpstream.authorizations,
+            ["Bearer context-primary-key"],
+        )
+        attribution = server_mod._runtime_context_failure_attribution(run)
+        self.assertEqual(attribution["upstreamStatus"], 400)
+        self.assertEqual(attribution["evidenceKind"], "explicit_max")
+        self.assertEqual(attribution["explicitMaximumTokens"], 128000)
+        self.assertEqual(
+            attribution["keyFingerprint"],
+            server_mod.context_calibration.key_fingerprint("context-primary-key"),
+        )
+        public_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("context-primary-key", public_json)
+        self.assertNotIn("context-secondary-key", public_json)
+        self.assertNotIn(attribution["keyFingerprint"], public_json)
+        self.assertNotIn("20260821", public_json)
+        self.assertNotIn("requested 150000", public_json)
+
+    def test_non_context_failure_still_falls_back_to_second_key(self):
+        run = server_mod._create_model_runtime_run(
+            "non-context-key-scope",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "key scoped non-context error"}],
+            },
+            self.base_url,
+            ["fallback-primary-key", "fallback-secondary-key"],
+        )
+        self._wait_for_terminal(run)
+        snapshot = server_mod._runtime_snapshot(run, 0)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "hello")
+        self.assertEqual(_StreamingUpstream.calls, 2)
+        self.assertEqual(_StreamingUpstream.authorizations, [
+            "Bearer fallback-primary-key",
+            "Bearer fallback-secondary-key",
+        ])
+        self.assertIsNone(server_mod._runtime_context_failure_attribution(run))
 
     def test_first_response_timeout_ignores_keepalive_and_usage_only_events(self):
         for user_content in ("keepalive only", "usage only"):
