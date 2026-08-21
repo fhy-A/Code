@@ -202,7 +202,7 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn("await saveSessionState", steer)
         self.assertIn("await submitSessionSteer(ctx, userMessage)", steer)
         self.assertIn("existingMessage: userMessage", steer)
-        self.assertIn("agentRuntime.steerAgentRun(ctx.agentRunId", APP_SOURCE)
+        self.assertIn("agentRuntime.steerAgentRun(targetAgentRunId", APP_SOURCE)
 
     def test_unacknowledged_steer_is_idempotently_resumed(self):
         resume_start = APP_SOURCE.index("async function resumePendingSessionSteers")

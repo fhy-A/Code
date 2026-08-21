@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,14 @@ def _create_run(
         client_request_id=client_request_id,
         run_kind=run_kind,
     )
+
+
+def _model_runtime_stub(run_id: str) -> dict:
+    return {
+        "id": run_id,
+        "condition": threading.Condition(threading.RLock()),
+        "context_failure_attribution": None,
+    }
 
 
 def _tool_names(run) -> set[str]:
@@ -484,7 +493,7 @@ def test_foreground_worker_runs_autonomous_goal_sequence_and_simple_run_stays_go
 
     def create_model_run(session_id, payload, base_url, keys):
         model_payloads.append(payload)
-        return {"id": f"model-{len(model_payloads)}"}
+        return _model_runtime_stub(f"model-{len(model_payloads)}")
 
     def wait_for_model(_run, _model_run):
         result = next(model_results)
@@ -582,7 +591,8 @@ def test_legacy_ready_goal_worker_can_use_compatibility_completion(
         server_mod,
         "_create_model_runtime_run",
         lambda _session_id, payload, _base_url, _keys: (
-            model_payloads.append(payload) or {"id": f"model-{len(model_payloads)}"}
+            model_payloads.append(payload)
+            or _model_runtime_stub(f"model-{len(model_payloads)}")
         ),
     )
     monkeypatch.setattr(
@@ -726,7 +736,7 @@ def test_prepared_goal_operation_is_restart_safe_and_exactly_once(isolated_serve
     assert first["revision"] == 2
 
     record = server_mod._agent_run_record(run)
-    assert "runKind" not in record
+    assert record["runKind"] == "foreground"
     assert "originMessageId" not in record
     assert "goalOperationsEnabled" not in record
     rebuilt = server_mod._agent_run_from_record(record)
@@ -1098,7 +1108,8 @@ def test_worker_crosses_round_40_with_read_tool_then_soft_hands_off(
         server_mod,
         "_create_model_runtime_run",
         lambda _session_id, payload, _base_url, _keys: (
-            model_payloads.append(payload) or {"id": "boundary-model-40"}
+            model_payloads.append(payload)
+            or _model_runtime_stub("boundary-model-40")
         ),
     )
     monkeypatch.setattr(
@@ -1171,7 +1182,9 @@ def test_goal_round_50_hard_fallback_preserves_public_tool_process_when_gated(
     monkeypatch.setattr(
         server_mod,
         "_create_model_runtime_run",
-        lambda _session_id, _payload, _base_url, _keys: {"id": "boundary-model-50"},
+        lambda _session_id, _payload, _base_url, _keys: _model_runtime_stub(
+            "boundary-model-50"
+        ),
     )
     monkeypatch.setattr(
         server_mod,

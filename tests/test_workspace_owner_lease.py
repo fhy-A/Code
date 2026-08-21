@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -79,7 +80,7 @@ class OwnerLeaseCliTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def run_cli(self, action, *args, repo=None, json_output=True):
+    def run_cli(self, action, *args, repo=None, json_output=True, env=None):
         command = [
             sys.executable,
             str(SCRIPT),
@@ -98,6 +99,7 @@ class OwnerLeaseCliTest(unittest.TestCase):
             errors="replace",
             check=False,
             timeout=30,
+            env=env,
         )
 
     def json_result(self, result):
@@ -279,7 +281,14 @@ class OwnerLeaseCliTest(unittest.TestCase):
 
         not_repo = Path(self.temporary.name) / "不是仓库"
         not_repo.mkdir()
-        environment = self.run_cli("status", repo=not_repo)
+        environment = self.run_cli(
+            "status",
+            repo=not_repo,
+            env={
+                **os.environ,
+                "GIT_CEILING_DIRECTORIES": str(Path(self.temporary.name).resolve()),
+            },
+        )
         self.assertEqual(environment.returncode, owner_lease.EXIT_ENVIRONMENT)
         self.assertEqual(self.json_result(environment)["status"], "environment_error")
 

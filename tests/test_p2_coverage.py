@@ -526,8 +526,11 @@ class TestCompactSummaryMarker(unittest.TestCase):
 
     def test_context_limit_handles_hyphenated_claude_versions(self):
         self.assertIn("function getModelContextLimit(model)", self.compaction_source)
-        self.assertIn("const claudeVersion = normalized.match", self.compaction_source)
-        self.assertIn("major === 4 && minor >= 6", self.compaction_source)
+        self.assertIn(
+            "return getModelContextResolution(model).contextLimit;",
+            self.compaction_source,
+        )
+        self.assertNotIn("claudeVersion", self.compaction_source)
 
 
 class TestBranchFlowMarker(unittest.TestCase):

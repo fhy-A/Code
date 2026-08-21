@@ -9,6 +9,7 @@ from unittest import mock
 
 import release
 import release_state
+import verification
 
 
 def git(cwd, *args):
@@ -231,6 +232,16 @@ class TestPrepareAtomicFailure(unittest.TestCase):
         self.assertEqual(credential["publication"]["lastCompleted"], "prepared")
         self.assertIsNone(credential["publication"]["startedAt"])
         self.assertNotIn("h4", credential["verification"]["checkIds"])
+        pytest_manifest = next(
+            item
+            for item in verification.get_release_definition_manifest()["checks"]
+            if item["id"] == "pytest_full"
+        )
+        self.assertEqual(pytest_manifest["timeout"], 360)
+        self.assertEqual(
+            credential["verification"]["definitionSha256"],
+            release.get_release_definition_fingerprint(),
+        )
         self.assertTrue(all(not Path(item["path"]).is_absolute() for item in credential["releaseFiles"]))
 
 

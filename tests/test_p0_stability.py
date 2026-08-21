@@ -180,7 +180,7 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
             "run.modelResponseStarted = false",
             "markModelResponseStarted(run, sessionId)",
             "function projectAgentModelRecovery(ctx, event)",
-            "function projectAgentContextCompaction(ctx, event, status)",
+            "function projectAgentContextCompaction(ctx, event, status, runtimeRunId = \"\")",
             'eventType === "model_recovery"',
             'eventType === "context_compaction_started"',
             'eventType === "context_compaction_completed"',
@@ -233,7 +233,8 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn('runState?.phase === "model"', APP_SOURCE)
         self.assertIn("Boolean(runState?.runtimeRunId)", APP_SOURCE)
         self.assertIn("if (hasRuntimeRun || hasServerAgent) return cleaned", APP_SOURCE)
-        self.assertIn("ctx._reuseRuntimeAssistant = Boolean(ctx.runtimeRunId)", APP_SOURCE)
+        self.assertIn("ctx._reuseRuntimeAssistant = Boolean(", APP_SOURCE)
+        self.assertIn("ctx.runtimeRunId", APP_SOURCE)
         self.assertIn("Before repeating any write, command, network request", APP_SOURCE)
         self.assertIn('meta: { _system: true, kind: "run-recovery" }', APP_SOURCE)
 
@@ -283,7 +284,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         refresh_source = APP_SOURCE[refresh_start:refresh_end]
         self.assertIn("if (successCount === 0)", refresh_source)
         self.assertIn('"modelCatalogRefreshFailedCached"', refresh_source)
-        self.assertIn('writeModelCatalogCache(models, baseUrl)', refresh_source)
+        self.assertIn('writeModelCatalogCache(models, baseUrl, contextEntries)', refresh_source)
         self.assertIn('if (savedModel && models.includes(savedModel))', refresh_source)
         self.assertIn('setSelectedModel("");', refresh_source)
         self.assertIn('localStorage.removeItem("code-model");', refresh_source)

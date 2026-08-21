@@ -3922,6 +3922,9 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(data["ready"]["replacements"], [])
 
     def test_frontend_bundle_build_is_deterministic_and_guarded(self):
+        def combined_output(process):
+            return (process.stdout or "") + (process.stderr or "")
+
         self.assertEqual(PACKAGE_JSON["devDependencies"]["esbuild"], "0.28.1")
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('"verify:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
@@ -3962,7 +3965,7 @@ process.stdout.write(JSON.stringify({{
             first = Path(temp_dir) / "first"
             second = Path(temp_dir) / "second"
             bundles = []
-            previews = []
+            normalized_previews = []
             fallbacks = []
             source_fingerprints = []
             for output_dir in (first, second):
@@ -3976,10 +3979,12 @@ process.stdout.write(JSON.stringify({{
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=60,
                     check=False,
                 )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0, combined_output(result))
                 bundle = output_dir / "code.bundle.js"
                 source_map = output_dir / "code.bundle.js.map"
                 metadata = output_dir / "code.bundle.meta.json"
@@ -3994,7 +3999,6 @@ process.stdout.write(JSON.stringify({{
                 self.assertTrue(fallback.is_file())
                 bundles.append(bundle.read_bytes())
                 preview_source = preview.read_text(encoding="utf-8")
-                previews.append(preview_source)
                 fallback_source = fallback.read_text(encoding="utf-8")
                 fallbacks.append(fallback_source)
                 state_data = json.loads(state.read_text(encoding="utf-8"))
@@ -4003,16 +4007,46 @@ process.stdout.write(JSON.stringify({{
                 self.assertIn('data-frontend-runtime="bundle"', preview_source)
                 self.assertIn('href="/styles.css"', preview_source)
                 self.assertIn('href="/code-icon.ico', preview_source)
-                self.assertIn('bundleScript.src = "./code.bundle.js";', preview_source)
-                self.assertIn('new URL("./index.classic.html"', preview_source)
+                resolved_output_dir = output_dir.resolve()
+                resolved_root = ROOT.resolve()
+                if resolved_output_dir.is_relative_to(resolved_root):
+                    relative_output_dir = resolved_output_dir.relative_to(resolved_root).as_posix()
+                    expected_bundle_url = f"/{relative_output_dir}/code.bundle.js"
+                else:
+                    expected_bundle_url = "./code.bundle.js"
+                bundle_assignment = f'bundleScript.src = "{expected_bundle_url}";'
+                fallback_assignment = (
+                    'const fallback = new URL("./index.classic.html", window.location.href);'
+                )
+                replacement_count = preview_source.count(bundle_assignment)
+                self.assertEqual(replacement_count, 1)
+                self.assertEqual(preview_source.count(fallback_assignment), 1)
                 self.assertNotRegex(
                     preview_source,
                     r'<script src="\./(?:src/[^\"]+|agent-runtime\.js|app\.js)"></script>',
                 )
                 self.assertLess(
                     preview_source.index('id="importModal"'),
-                    preview_source.index('bundleScript.src = "./code.bundle.js";'),
+                    preview_source.index(fallback_assignment),
                 )
+                self.assertLess(
+                    preview_source.index(fallback_assignment),
+                    preview_source.index(bundle_assignment),
+                )
+                normalized_bundle_assignment = (
+                    'bundleScript.src = "__DETERMINISTIC_BUNDLE_URL__";'
+                )
+                normalized_preview = preview_source.replace(
+                    bundle_assignment,
+                    normalized_bundle_assignment,
+                    1,
+                )
+                self.assertEqual(
+                    normalized_preview.count(normalized_bundle_assignment),
+                    replacement_count,
+                )
+                self.assertNotIn(bundle_assignment, normalized_preview)
+                normalized_previews.append(normalized_preview)
                 self.assertIn("https://cdn.jsdelivr.net/npm/katex", preview_source)
                 self.assertIn("https://cdn.jsdelivr.net/npm/marked", preview_source)
                 self.assertIn('data-frontend-runtime="classic-fallback"', fallback_source)
@@ -4058,13 +4092,15 @@ process.stdout.write(JSON.stringify({{
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=30,
                     check=False,
                 )
                 self.assertEqual(
                     freshness.returncode,
                     0,
-                    freshness.stdout + freshness.stderr,
+                    combined_output(freshness),
                 )
 
                 syntax = subprocess.run(
@@ -4072,10 +4108,12 @@ process.stdout.write(JSON.stringify({{
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=30,
                     check=False,
                 )
-                self.assertEqual(syntax.returncode, 0, syntax.stdout + syntax.stderr)
+                self.assertEqual(syntax.returncode, 0, combined_output(syntax))
 
                 inputs = json.loads(metadata.read_text(encoding="utf-8"))["inputs"]
                 for expected in (
@@ -4088,7 +4126,7 @@ process.stdout.write(JSON.stringify({{
                     self.assertIn(expected, inputs)
 
             self.assertEqual(bundles[0], bundles[1])
-            self.assertEqual(previews[0], previews[1])
+            self.assertEqual(normalized_previews[0], normalized_previews[1])
             self.assertEqual(fallbacks[0], fallbacks[1])
             self.assertEqual(source_fingerprints[0], source_fingerprints[1])
 
@@ -4100,11 +4138,13 @@ process.stdout.write(JSON.stringify({{
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 check=False,
             )
             self.assertNotEqual(tampered.returncode, 0)
-            self.assertIn("Frontend build output hash mismatch", tampered.stdout + tampered.stderr)
+            self.assertIn("Frontend build output hash mismatch", combined_output(tampered))
             first_bundle.write_bytes(original_bundle)
 
             first_state = first / "code.bundle.state.json"
@@ -4117,11 +4157,13 @@ process.stdout.write(JSON.stringify({{
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 check=False,
             )
             self.assertNotEqual(stale.returncode, 0)
-            self.assertIn("source fingerprint changed", stale.stdout + stale.stderr)
+            self.assertIn("source fingerprint changed", combined_output(stale))
             first_state.write_text(original_state, encoding="utf-8")
 
             first_fallback = first / "index.classic.html"
@@ -4131,11 +4173,13 @@ process.stdout.write(JSON.stringify({{
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 check=False,
             )
             self.assertNotEqual(missing.returncode, 0)
-            self.assertIn("Frontend build output is missing", missing.stdout + missing.stderr)
+            self.assertIn("Frontend build output is missing", combined_output(missing))
 
     def test_namespace_defines_supported_buckets(self):
         source = (ROOT / "src/core/namespace.js").read_text(encoding="utf-8")

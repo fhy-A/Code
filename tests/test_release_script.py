@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 import release
+import verification
 
 
 class TestReleaseNotesAutomation(unittest.TestCase):
@@ -214,6 +215,31 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
     @staticmethod
     def _expected_npm_executable():
         return "npm.cmd" if release.os.name == "nt" else "npm"
+
+    def test_pytest_full_uses_shared_360_second_definition(self):
+        spec = release.CHECKS["pytest_full"]
+        self.assertEqual(spec.timeout, 360)
+        manifest_entry = next(
+            item
+            for item in verification.get_release_definition_manifest()["checks"]
+            if item["id"] == "pytest_full"
+        )
+        self.assertEqual(manifest_entry["command"], spec.command)
+        self.assertEqual(manifest_entry["timeout"], 360)
+
+        with mock.patch.object(
+            release,
+            "run",
+            return_value=(0, "1356 passed", ""),
+        ) as run_command, mock.patch.object(release, "ok") as mark_ok:
+            release.run_tests()
+
+        run_command.assert_called_once_with(
+            list(spec.command),
+            description="pytest tests -q",
+            timeout=360,
+        )
+        mark_ok.assert_called_once_with("全量测试通过")
 
     def test_replay_gate_uses_exact_command_and_timeout_then_continues(self):
         with mock.patch.object(

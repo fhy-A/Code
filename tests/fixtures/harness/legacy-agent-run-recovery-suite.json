@@ -7,10 +7,14 @@
     "productionEvidence": "agent-run-loader-snapshot-persistence-v1"
   },
   "persistedV4Fields": [
-    "version", "id", "sessionId", "cwd", "workspaceRoots", "clientRequestId",
+    "version", "id", "sessionId", "cwd", "workspaceRoots", "clientRequestId", "runKind",
     "parentAgentRunId", "parentToolCallId", "agentDepth", "status", "resumeStatus",
     "permissionProfile", "error", "errorCode", "nonActionCount", "forceFinalRound",
-    "forceFinalReason", "baseUrl", "contextLimit", "contextRecoveryRound", "request",
+    "forceFinalReason", "baseUrl", "contextLimit", "contextWindowTokens",
+    "contextBudgetTokens", "contextWindowSource", "contextWindowHard",
+    "availableInputTokens", "compressionTriggerTokens", "budgetClamped",
+    "budgetAboveEstimate", "calibrationCapTokens", "calibrationEvidenceKind",
+    "calibrationExpiresAt", "calibrationApplied", "contextRecoveryRound", "request",
     "messages", "tools", "toolBudgets", "rounds", "compactions", "pendingToolCalls",
     "pendingInput", "pendingAuthorization", "pendingSteers", "steerReceipts",
     "toolExecutions", "usage", "result", "events", "nextSeq", "maxRounds",
@@ -23,9 +27,13 @@
       "sourceCanonicalSha256": "a2bed1af692366f4af3f21f1b41bba7f09cccac4456da57e93e193a0c5345598",
       "sourceRecordVersion": 1,
       "missingFields": [
-        "cwd", "workspaceRoots", "clientRequestId", "parentAgentRunId", "parentToolCallId",
+        "cwd", "workspaceRoots", "clientRequestId", "runKind", "parentAgentRunId", "parentToolCallId",
         "agentDepth", "permissionProfile", "errorCode", "nonActionCount", "forceFinalRound",
-        "forceFinalReason", "contextLimit", "contextRecoveryRound", "toolBudgets",
+        "forceFinalReason", "contextLimit", "contextWindowTokens", "contextBudgetTokens",
+        "contextWindowSource", "contextWindowHard", "availableInputTokens",
+        "compressionTriggerTokens", "budgetClamped", "budgetAboveEstimate",
+        "calibrationCapTokens", "calibrationEvidenceKind", "calibrationExpiresAt",
+        "calibrationApplied", "contextRecoveryRound", "toolBudgets",
         "compactions", "pendingInput", "pendingAuthorization", "pendingSteers", "steerReceipts"
       ],
       "expected": {
@@ -77,8 +85,12 @@
       "sourceCanonicalSha256": "890db5b3840b5bd2ffb2d0f4ac5f1cc0611865debf981a87fa29f3a32fd8cc66",
       "sourceRecordVersion": 2,
       "missingFields": [
-        "clientRequestId", "parentAgentRunId", "parentToolCallId", "agentDepth",
+        "clientRequestId", "runKind", "parentAgentRunId", "parentToolCallId", "agentDepth",
         "nonActionCount", "forceFinalRound", "forceFinalReason", "contextLimit",
+        "contextWindowTokens", "contextBudgetTokens", "contextWindowSource",
+        "contextWindowHard", "availableInputTokens", "compressionTriggerTokens",
+        "budgetClamped", "budgetAboveEstimate", "calibrationCapTokens",
+        "calibrationEvidenceKind", "calibrationExpiresAt", "calibrationApplied",
         "contextRecoveryRound", "compactions", "pendingSteers", "steerReceipts"
       ],
       "expected": {
@@ -130,8 +142,12 @@
       "sourceCanonicalSha256": "f5e0279652b4aea71abf2f1447a87578b7201caff3519bba43f70bc77df7470a",
       "sourceRecordVersion": 3,
       "missingFields": [
-        "parentAgentRunId", "parentToolCallId", "agentDepth", "nonActionCount",
-        "forceFinalRound", "forceFinalReason", "pendingSteers", "steerReceipts"
+        "runKind", "parentAgentRunId", "parentToolCallId", "agentDepth", "nonActionCount",
+        "forceFinalRound", "forceFinalReason", "contextWindowTokens",
+        "contextBudgetTokens", "contextWindowSource", "contextWindowHard",
+        "availableInputTokens", "compressionTriggerTokens", "budgetClamped",
+        "budgetAboveEstimate", "calibrationCapTokens", "calibrationEvidenceKind",
+        "calibrationExpiresAt", "calibrationApplied", "pendingSteers", "steerReceipts"
       ],
       "expected": {
         "loader": {"fields": {
@@ -182,8 +198,12 @@
       "sourceCanonicalSha256": "96d60cdcebb6d49668e869d9b854bba67c53fc1ae0b3c551218b11554ffe13a0",
       "sourceRecordVersion": 4,
       "missingFields": [
-        "parentAgentRunId", "parentToolCallId", "agentDepth", "nonActionCount",
-        "forceFinalRound", "forceFinalReason"
+        "runKind", "parentAgentRunId", "parentToolCallId", "agentDepth", "nonActionCount",
+        "forceFinalRound", "forceFinalReason", "contextWindowTokens",
+        "contextBudgetTokens", "contextWindowSource", "contextWindowHard",
+        "availableInputTokens", "compressionTriggerTokens", "budgetClamped",
+        "budgetAboveEstimate", "calibrationCapTokens", "calibrationEvidenceKind",
+        "calibrationExpiresAt", "calibrationApplied"
       ],
       "expected": {
         "loader": {"fields": {

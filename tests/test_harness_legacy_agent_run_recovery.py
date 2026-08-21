@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "harness"
 SCHEMA_PATH = FIXTURE_DIR / "legacy-agent-run-recovery-suite.schema.json"
 MANIFEST_PATH = FIXTURE_DIR / "legacy-agent-run-recovery-suite.json"
-EXPECTED_MANIFEST_HASH = "9acdf241c211ccff9528f30a17ad03ce7ddeae16c263f5de4494fdd61c6bddeb"
+EXPECTED_MANIFEST_HASH = "5b6a55273e0fc390dba2f704a2c6e547be99cdb66ad9c831c439ec9206ed1b49"
 EXPECTED_SOURCE_HASHES = {
     "agent-run-v1": "a2bed1af692366f4af3f21f1b41bba7f09cccac4456da57e93e193a0c5345598",
     "agent-run-v2": "890db5b3840b5bd2ffb2d0f4ac5f1cc0611865debf981a87fa29f3a32fd8cc66",
@@ -26,24 +26,41 @@ EXPECTED_SOURCE_HASHES = {
 }
 EXPECTED_MISSING_FIELDS = {
     "agent-run-v1": [
-        "cwd", "workspaceRoots", "clientRequestId", "parentAgentRunId",
+        "cwd", "workspaceRoots", "clientRequestId", "runKind", "parentAgentRunId",
         "parentToolCallId", "agentDepth", "permissionProfile", "errorCode",
         "nonActionCount", "forceFinalRound", "forceFinalReason", "contextLimit",
+        "contextWindowTokens", "contextBudgetTokens", "contextWindowSource",
+        "contextWindowHard", "availableInputTokens", "compressionTriggerTokens",
+        "budgetClamped", "budgetAboveEstimate", "calibrationCapTokens",
+        "calibrationEvidenceKind", "calibrationExpiresAt", "calibrationApplied",
         "contextRecoveryRound", "toolBudgets", "compactions", "pendingInput",
         "pendingAuthorization", "pendingSteers", "steerReceipts",
     ],
     "agent-run-v2": [
-        "clientRequestId", "parentAgentRunId", "parentToolCallId", "agentDepth",
+        "clientRequestId", "runKind", "parentAgentRunId", "parentToolCallId", "agentDepth",
         "nonActionCount", "forceFinalRound", "forceFinalReason", "contextLimit",
+        "contextWindowTokens", "contextBudgetTokens", "contextWindowSource",
+        "contextWindowHard", "availableInputTokens", "compressionTriggerTokens",
+        "budgetClamped", "budgetAboveEstimate", "calibrationCapTokens",
+        "calibrationEvidenceKind", "calibrationExpiresAt", "calibrationApplied",
         "contextRecoveryRound", "compactions", "pendingSteers", "steerReceipts",
     ],
     "agent-run-v3": [
-        "parentAgentRunId", "parentToolCallId", "agentDepth", "nonActionCount",
-        "forceFinalRound", "forceFinalReason", "pendingSteers", "steerReceipts",
+        "runKind", "parentAgentRunId", "parentToolCallId", "agentDepth",
+        "nonActionCount", "forceFinalRound", "forceFinalReason",
+        "contextWindowTokens", "contextBudgetTokens", "contextWindowSource",
+        "contextWindowHard", "availableInputTokens", "compressionTriggerTokens",
+        "budgetClamped", "budgetAboveEstimate", "calibrationCapTokens",
+        "calibrationEvidenceKind", "calibrationExpiresAt", "calibrationApplied",
+        "pendingSteers", "steerReceipts",
     ],
     "agent-run-v4": [
-        "parentAgentRunId", "parentToolCallId", "agentDepth", "nonActionCount",
-        "forceFinalRound", "forceFinalReason",
+        "runKind", "parentAgentRunId", "parentToolCallId", "agentDepth",
+        "nonActionCount", "forceFinalRound", "forceFinalReason",
+        "contextWindowTokens", "contextBudgetTokens", "contextWindowSource",
+        "contextWindowHard", "availableInputTokens", "compressionTriggerTokens",
+        "budgetClamped", "budgetAboveEstimate", "calibrationCapTokens",
+        "calibrationEvidenceKind", "calibrationExpiresAt", "calibrationApplied",
     ],
 }
 
@@ -416,7 +433,7 @@ class LegacyAgentRunRecoveryContractTests(unittest.TestCase):
     def test_explicit_missing_fields_hashes_and_three_layers_match_production(self):
         self.assertEqual(
             [len(case["missingFields"]) for case in self.manifest["cases"]],
-            [19, 12, 8, 6],
+            [32, 25, 21, 19],
         )
         for index, case in enumerate(self.manifest["cases"]):
             with self.subTest(case=case["name"]):

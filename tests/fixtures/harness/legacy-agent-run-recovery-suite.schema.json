@@ -20,8 +20,8 @@
     },
     "persistedV4Fields": {
       "type": "array",
-      "minItems": 39,
-      "maxItems": 39,
+      "minItems": 52,
+      "maxItems": 52,
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
     },
@@ -44,8 +44,8 @@
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "missingFields": {
       "type": "array",
-      "minItems": 6,
-      "maxItems": 19,
+      "minItems": 19,
+      "maxItems": 32,
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
     },

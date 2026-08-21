@@ -30,10 +30,10 @@
     {"id": "operation-lock-render-throws"}
   ],
   "expected": {
-    "sourceFixtureSha256": "b68ef1a2570cde8862ba3ea1ee32d17ae4b786239ec633bc367166ab15a8ec1b",
+    "sourceFixtureSha256": "8e83c375bad21e7b93595ab126e314c5bf3cba83617f246ec0625e1f1ca87653",
     "slice": {
-      "sha256": "6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5",
-      "characterLength": 20676
+      "sha256": "f67cf2d90ed12cc5bc4b7632424ec7890756b625f91fb39a83a0fde549329acc",
+      "characterLength": 21221
     },
     "scenarioHashes": {
       "compact-throws": "fa7c4df69f0316f7db6c0cd5b5ca3a0974e6cd25245f3127d12fe8da864a460c",
@@ -56,7 +56,7 @@
       "failed-marker-persistence-retry-succeeds": "3194aa8dbec010a2a68cf6b3b44d0adc004b575d84389087cb3b7e5606240310",
       "operation-lock-render-throws": "baeac1f61f1ccf257897a8ae3d1a07ba959f7d43af94a3bad9d331c8fc8ced0d"
     },
-    "suiteHash": "7517c0ae71899c417a074e40759e92a74df273b7f32df061572de37d27ceaa6b",
+    "suiteHash": "1be1a917cc47002b67c4866a1a7901604b0a9d2f4aa24751c6a54b9b6776907b",
     "mutationFirstDifferencePaths": {
       "caseOrder": "$.cases[0].id",
       "errorCode": "$.results.compact-throws.marker.errorCode",
