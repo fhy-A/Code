@@ -11,6 +11,16 @@
   const modelCapabilities = new Map();
   let selectedContextBudget = null;
 
+  function capabilityPriority(capability) {
+    if (capability?.contextWindowHard) return 100;
+    return {
+      official: 40,
+      stale_official: 39,
+      family: 20,
+      unknown: 10,
+    }[String(capability?.contextWindowSource || "")] || 0;
+  }
+
   function isCompactSummaryMessage(message) {
     return message?.meta?.kind === "compact-summary";
   }
@@ -35,23 +45,30 @@
       const tokens = Number(entry?.contextWindowTokens);
       if (!id || !Number.isInteger(tokens) || tokens < 1024 || tokens > 2000000) continue;
       const previous = modelCapabilities.get(id.toLowerCase());
-      const source = ["metadata", "family", "unknown"].includes(entry.contextWindowSource)
+      const source = ["metadata", "official", "stale_official", "family", "unknown"].includes(entry.contextWindowSource)
         ? entry.contextWindowSource
         : "unknown";
       let normalized = {
         contextWindowTokens: tokens,
         contextWindowSource: source,
         contextWindowHard: Boolean(entry.contextWindowHard),
+        maxOutputTokens: entry.maxOutputTokens != null
+          && Number.isInteger(Number(entry.maxOutputTokens))
+          && Number(entry.maxOutputTokens) >= 1024
+          && Number(entry.maxOutputTokens) <= 2000000
+          ? Number(entry.maxOutputTokens)
+          : null,
+        officialProvider: String(entry.officialProvider || ""),
+        officialCatalogRevision: String(entry.officialCatalogRevision || ""),
       };
-      if (previous && previous.contextWindowTokens < tokens) {
-        normalized = previous;
-      } else if (
-        previous
-        && previous.contextWindowTokens === tokens
-        && previous.contextWindowHard
-      ) {
-        normalized.contextWindowHard = true;
-        normalized.contextWindowSource = "metadata";
+      if (previous) {
+        const previousPriority = capabilityPriority(previous);
+        const normalizedPriority = capabilityPriority(normalized);
+        if (previousPriority !== normalizedPriority) {
+          normalized = normalizedPriority > previousPriority ? normalized : previous;
+        } else if (previous.contextWindowTokens <= normalized.contextWindowTokens) {
+          normalized = previous;
+        }
       }
       modelCapabilities.set(id.toLowerCase(), normalized);
     }

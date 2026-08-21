@@ -2765,12 +2765,12 @@ compaction.setModelContextCatalog([
   {{id:"claude-4.5-sonnet",contextWindowTokens:200000}},
   {{id:"claude_4.6_opus",contextWindowTokens:1000000}},
   {{id:"claude-5.0-sonnet",contextWindowTokens:1000000}},
-  {{id:"gpt-4.1",contextWindowTokens:1000000}},
-  {{id:"gpt-5.2-codex",contextWindowTokens:1000000}},
-  {{id:"gpt-5.1-codex",contextWindowTokens:128000}},
+  {{id:"gpt-4.1",contextWindowTokens:1047576,contextWindowSource:"official"}},
+  {{id:"gpt-5.2-codex",contextWindowTokens:400000,contextWindowSource:"official"}},
+  {{id:"gpt-5.1-codex",contextWindowTokens:400000,contextWindowSource:"official"}},
   {{id:"deepseek-v4",contextWindowTokens:1000000}},
   {{id:"deepseek-v3",contextWindowTokens:128000}},
-  {{id:"gemini-2.5-pro",contextWindowTokens:1000000}},
+  {{id:"gemini-2.5-pro",contextWindowTokens:1048576,contextWindowSource:"official"}},
 ]);
 const messages = [
   {{role: "user", content: "old"}},
@@ -2824,12 +2824,12 @@ process.stdout.write(JSON.stringify({{
             "claude-4.5-sonnet": 200000,
             "claude_4.6_opus": 1000000,
             "claude-5.0-sonnet": 1000000,
-            "gpt-4.1": 1000000,
-            "gpt-5.2-codex": 1000000,
-            "gpt-5.1-codex": 128000,
+            "gpt-4.1": 1047576,
+            "gpt-5.2-codex": 400000,
+            "gpt-5.1-codex": 400000,
             "deepseek-v4": 1000000,
             "deepseek-v3": 128000,
-            "gemini-2.5-pro": 1000000,
+            "gemini-2.5-pro": 1048576,
             "unknown": 128000,
         })
 
@@ -2848,12 +2848,16 @@ c.setModelContextCatalog([
   {{id:"mixed-estimated",contextWindowTokens:128000,contextWindowSource:"unknown",contextWindowHard:false}},
   {{id:"mixed-hard",contextWindowTokens:200000,contextWindowSource:"metadata",contextWindowHard:true}},
   {{id:"mixed-hard",contextWindowTokens:1000000,contextWindowSource:"family",contextWindowHard:false}},
+  {{id:"official-model",contextWindowTokens:400000,contextWindowSource:"official",contextWindowHard:false,maxOutputTokens:128000}},
+  {{id:"stale-model",contextWindowTokens:500000,contextWindowSource:"stale_official",contextWindowHard:false}},
 ]);
 const mixedEstimated = c.getModelContextResolution("mixed-estimated", 16000);
 const mixedHard = c.getModelContextResolution("mixed-hard", 16000);
+const official = c.getModelContextResolution("official-model", 200000);
+const stale = c.getModelContextResolution("stale-model", 16000);
 c.setContextBudgetTokens(4096);
 const insufficient = c.getModelContextResolution("unknown-model", 2048);
-process.stdout.write(JSON.stringify({{hard, estimated, mixedEstimated, mixedHard, insufficient}}));
+process.stdout.write(JSON.stringify({{hard, estimated, mixedEstimated, mixedHard, official, stale, insufficient}}));
 """
         completed = subprocess.run(
             ["node", "-e", script], cwd=ROOT, check=True,
@@ -2866,9 +2870,15 @@ process.stdout.write(JSON.stringify({{hard, estimated, mixedEstimated, mixedHard
         self.assertTrue(data["estimated"]["budgetAboveEstimate"])
         self.assertEqual(data["estimated"]["contextWindowSource"], "unknown")
         self.assertEqual(data["mixedEstimated"]["contextLimit"], 400000)
-        self.assertFalse(data["mixedEstimated"]["contextWindowHard"])
+        self.assertTrue(data["mixedEstimated"]["contextWindowHard"])
         self.assertEqual(data["mixedHard"]["contextLimit"], 200000)
         self.assertTrue(data["mixedHard"]["contextWindowHard"])
+        self.assertEqual(data["official"]["contextWindowSource"], "official")
+        self.assertEqual(data["official"]["contextLimit"], 400000)
+        self.assertEqual(data["official"]["maxOutputTokens"], 128000)
+        self.assertFalse(data["official"]["contextWindowHard"])
+        self.assertFalse(data["official"]["budgetClamped"])
+        self.assertEqual(data["stale"]["contextWindowSource"], "stale_official")
         self.assertTrue(data["insufficient"]["inputBudgetInsufficient"])
         helper_start = APP_SOURCE.index("function parseContextBudgetInput(")
         helper_end = APP_SOURCE.index("function renderContextBudgetStatus(", helper_start)
@@ -3006,18 +3016,34 @@ process.stdout.write(JSON.stringify(globalThis.__invalidFallback));
         helper_end = APP_SOURCE.index("const {\n  classifyModelRequestFailure", helper_start)
         helper_source = APP_SOURCE[helper_start:helper_end]
         script = f"""
-const stats = new Map([["session-new", {{contextResolution: {{
-  contextLimit: 400000,
-  contextWindowTokens: 128000,
-  contextBudgetTokens: 400000,
-  contextWindowSource: "unknown",
-  budgetAboveEstimate: true,
-}}}}]]);
+const stats = new Map([
+  ["session-new", {{contextResolution: {{
+    contextLimit: 400000,
+    contextWindowTokens: 128000,
+    contextBudgetTokens: 400000,
+    contextWindowSource: "unknown",
+    budgetAboveEstimate: true,
+  }}}}],
+  ["session-official", {{contextResolution: {{
+    contextLimit: 400000,
+    contextWindowTokens: 400000,
+    contextBudgetTokens: null,
+    contextWindowSource: "official",
+  }}}}],
+  ["session-stale", {{contextResolution: {{
+    contextLimit: 500000,
+    contextWindowTokens: 500000,
+    contextBudgetTokens: null,
+    contextWindowSource: "stale_official",
+  }}}}],
+]);
 const getSessionStats = (sessionId) => stats.get(sessionId) || {{}};
 const setSessionStats = (sessionId, value) => stats.set(sessionId, value);
 eval({json.dumps(helper_source + '''
 globalThis.__contextResult = {
   restored: getFrozenSessionContextResolution("session-new"),
+  official: getFrozenSessionContextResolution("session-official"),
+  stale: getFrozenSessionContextResolution("session-stale"),
   missing: getFrozenSessionContextResolution("session-old"),
   remembered: rememberFrozenSessionContextResolution("session-new", {
     contextLimit: 200000,
@@ -3038,6 +3064,8 @@ process.stdout.write(JSON.stringify(globalThis.__contextResult));
         data = json.loads(completed.stdout)
         self.assertEqual(data["restored"]["contextLimit"], 400000)
         self.assertEqual(data["restored"]["contextWindowSource"], "unknown")
+        self.assertEqual(data["official"]["contextWindowSource"], "official")
+        self.assertEqual(data["stale"]["contextWindowSource"], "stale_official")
         self.assertIsNone(data["missing"])
         self.assertEqual(data["remembered"]["contextLimit"], 200000)
         self.assertEqual(data["persistedAfterRemember"]["contextLimit"], 400000)
@@ -8739,13 +8767,24 @@ const escapeHtml = (value) => String(value);
 const showToast = (...args) => toasts.push(args);
 const getSelectedModel = () => selectedModel;
 const setSelectedModel = (value) => {{ selectedModel = value; }};
-const getApiKeys = () => ["sk-one"];
+const getApiKeys = () => ["sk-one", "sk-two"];
 const setModelContextCatalog = (entries) => {{ state.contextEntries = entries; }};
+let fetchCalls = 0;
 async function fetch() {{
   if (fetchMode === "failure") throw new Error("offline");
+  fetchCalls += 1;
   const data = fetchMode === "empty"
     ? []
-    : [{{id: "models/gpt-b"}}, {{id: "gpt-a"}}, {{id: "imagen-3"}}];
+    : fetchCalls === 1
+      ? [
+          {{id: "models/gpt-b", contextWindowTokens: 500000, contextWindowSource: "stale_official", contextWindowHard: false, maxOutputTokens: 128000, officialProvider: "xai", officialCatalogRevision: "test"}},
+          {{id: "gpt-a", contextWindowTokens: 400000, contextWindowSource: "official", contextWindowHard: false}},
+          {{id: "imagen-3"}},
+        ]
+      : [
+          {{id: "models/gpt-b", contextWindowTokens: 1000000, contextWindowSource: "family", contextWindowHard: false}},
+          {{id: "gpt-a", contextWindowTokens: 1000000, contextWindowSource: "metadata", contextWindowHard: true}},
+        ];
   return {{ok: true, json: async () => ({{data}})}};
 }}
 eval({json.dumps(catalog_source)});
@@ -8818,6 +8857,27 @@ eval({json.dumps(catalog_source)});
         self.assertEqual(
             [entry["id"] for entry in data["cacheAfterSuccess"]["entries"]],
             ["gpt-a", "gpt-b"],
+        )
+        self.assertEqual(
+            data["cacheAfterSuccess"]["entries"][0]["contextWindowSource"],
+            "metadata",
+        )
+        self.assertEqual(
+            data["cacheAfterSuccess"]["entries"][0]["contextWindowTokens"],
+            1000000,
+        )
+        self.assertTrue(data["cacheAfterSuccess"]["entries"][0]["contextWindowHard"])
+        self.assertEqual(
+            data["cacheAfterSuccess"]["entries"][1]["contextWindowSource"],
+            "stale_official",
+        )
+        self.assertEqual(
+            data["cacheAfterSuccess"]["entries"][1]["contextWindowTokens"],
+            500000,
+        )
+        self.assertEqual(
+            data["cacheAfterSuccess"]["entries"][1]["maxOutputTokens"],
+            128000,
         )
         self.assertNotIn("key", data["cacheAfterSuccess"])
         self.assertFalse(data["cacheContainsSecret"])

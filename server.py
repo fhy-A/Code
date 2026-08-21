@@ -2071,7 +2071,7 @@ def _normalize_session_context_resolution(value, *, source_run=None):
         if budget is None:
             return None
     source = str(value.get("contextWindowSource") or "unknown")
-    if source not in {"metadata", "family", "unknown"}:
+    if source not in {"metadata", "official", "stale_official", "family", "unknown"}:
         source = "unknown"
     normalized = {
         "contextLimit": context_limit,

@@ -148,7 +148,7 @@ function normalizeFrozenContextResolution(value) {
   if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 1024 || contextWindowTokens > 2000000) return null;
   const budget = value.contextBudgetTokens == null ? null : Number(value.contextBudgetTokens);
   if (budget != null && (!Number.isInteger(budget) || budget < 1024 || budget > 2000000)) return null;
-  const source = ["metadata", "family", "unknown"].includes(value.contextWindowSource)
+  const source = ["metadata", "official", "stale_official", "family", "unknown"].includes(value.contextWindowSource)
     ? value.contextWindowSource
     : "unknown";
   return {
@@ -4734,6 +4734,28 @@ function markModelCatalogStale(config) {
   renderModelCatalog(state.modelCatalogModels, "modelCatalogNeedsRefresh", state.modelCatalogModels.length ? "cache" : "empty");
 }
 
+function modelContextEntryPriority(entry) {
+  if (entry?.contextWindowHard) return 100;
+  return {
+    official: 40,
+    stale_official: 39,
+    family: 20,
+    unknown: 10,
+  }[String(entry?.contextWindowSource || "")] || 0;
+}
+
+function mergeModelContextEntry(previous, candidate) {
+  if (!previous) return candidate;
+  const previousPriority = modelContextEntryPriority(previous);
+  const candidatePriority = modelContextEntryPriority(candidate);
+  if (previousPriority !== candidatePriority) {
+    return candidatePriority > previousPriority ? candidate : previous;
+  }
+  return previous.contextWindowTokens <= candidate.contextWindowTokens
+    ? previous
+    : candidate;
+}
+
 async function refreshModels() {
 
   const keys = getApiKeys();
@@ -4792,23 +4814,21 @@ async function refreshModels() {
               let candidate = {
                 id: cleanId,
                 contextWindowTokens: tokens,
-                contextWindowSource: ["metadata", "family", "unknown"].includes(item.contextWindowSource)
+                contextWindowSource: ["metadata", "official", "stale_official", "family", "unknown"].includes(item.contextWindowSource)
                   ? item.contextWindowSource
                   : "unknown",
                 contextWindowHard: Boolean(item.contextWindowHard),
+                maxOutputTokens: item.maxOutputTokens != null
+                  && Number.isInteger(Number(item.maxOutputTokens))
+                  && Number(item.maxOutputTokens) >= 1024
+                  && Number(item.maxOutputTokens) <= 2000000
+                  ? Number(item.maxOutputTokens)
+                  : null,
+                officialProvider: String(item.officialProvider || ""),
+                officialCatalogRevision: String(item.officialCatalogRevision || ""),
                 metadataStatus: item.metadataStatus || "missing",
               };
-              if (previous && previous.contextWindowTokens < tokens) {
-                candidate = previous;
-              } else if (
-                previous
-                && previous.contextWindowTokens === tokens
-                && previous.contextWindowHard
-              ) {
-                candidate.contextWindowSource = "metadata";
-                candidate.contextWindowHard = true;
-              }
-              modelContextEntries.set(cleanId, candidate);
+              modelContextEntries.set(cleanId, mergeModelContextEntry(previous, candidate));
             }
 
             if (!modelKeyMap[cleanId]) modelKeyMap[cleanId] = key;

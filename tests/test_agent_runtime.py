@@ -1065,6 +1065,46 @@ class TestDurableAgentRuntime(unittest.TestCase):
         ):
             self.assertEqual(restored[field], run[field])
 
+        official = server_mod._create_agent_run(
+            "official-context-session",
+            {
+                "model": "gpt-5.4-mini",
+                "max_tokens": 200000,
+                "messages": [{"role": "user", "content": "official estimate"}],
+            },
+            self.base_url,
+            [],
+            context_limit=1000000,
+            context_budget_tokens=1000000,
+            start_worker=False,
+        )
+        self.assertEqual(official["context_limit"], 1000000)
+        self.assertEqual(official["context_window_tokens"], 400000)
+        self.assertEqual(official["context_window_source"], "official")
+        self.assertFalse(official["context_window_hard"])
+        self.assertTrue(official["budget_above_estimate"])
+        official_record = server_mod._agent_run_record(official)
+        official_restored = server_mod._agent_run_from_record(official_record)
+        self.assertEqual(official_restored["context_window_source"], "official")
+        self.assertEqual(official_restored["context_window_tokens"], 400000)
+
+        self.assertEqual(
+            server_mod._normalize_session_context_resolution({
+                "contextLimit": 400000,
+                "contextWindowTokens": 400000,
+                "contextWindowSource": "official",
+            })["contextWindowSource"],
+            "official",
+        )
+        self.assertEqual(
+            server_mod._normalize_session_context_resolution({
+                "contextLimit": 400000,
+                "contextWindowTokens": 400000,
+                "contextWindowSource": "stale_official",
+            })["contextWindowSource"],
+            "stale_official",
+        )
+
         with self.assertRaisesRegex(ValueError, "leave at least 1024 input tokens"):
             server_mod._create_agent_run(
                 "small-context-session",

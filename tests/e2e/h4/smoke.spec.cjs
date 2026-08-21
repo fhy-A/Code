@@ -15651,7 +15651,9 @@ const test = base.test.extend({
           userId: "7",
           username: "h4-user",
         }));
-        localStorage.setItem("code-model", modelId);
+        if (localStorage.getItem("code-model") === null) {
+          localStorage.setItem("code-model", modelId);
+        }
         localStorage.setItem("code-permission-profile", "read");
         localStorage.setItem("code-lang", "en");
         document.addEventListener("DOMContentLoaded", () => {
@@ -16790,13 +16792,14 @@ function countModelRounds(snapshot) {
   return snapshot.events.filter((event) => event.type === "model_completed").length;
 }
 
-async function restoreGoalH4Connection(h4) {
+async function restoreGoalH4Connection(h4, expectedModel = MODEL_ID) {
   const { page } = h4;
-  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", MODEL_ID);
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", expectedModel);
   await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
     element.value = fakeUrl;
   }, h4.host.ready.fakeUrl);
   await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", expectedModel);
   expect(await page.locator("#baseUrl").evaluate((element) => element.value)).toBe(
     h4.host.ready.fakeUrl,
   );
@@ -17244,6 +17247,139 @@ test("bundle context budget freezes in AgentRun and survives reload", async ({ h
 
 test("direct classic context budget matches bundle and survives reload", async ({ h4 }) => {
   await exerciseContextBudgetSnapshot(h4, "classic");
+});
+
+async function exerciseOfficialCatalogSnapshot(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  let catalogRequests = 0;
+  await page.route("**/proxy/models", async (route) => {
+    catalogRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: [{
+          id: "gpt-5.4-mini",
+          contextWindowTokens: 400000,
+          contextWindowSource: "official",
+          contextWindowHard: false,
+          maxOutputTokens: 128000,
+          officialProvider: "openai",
+          officialCatalogRevision: "2026-08-21.c1",
+          metadataStatus: "missing",
+        }],
+      }),
+    });
+  });
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).not.toHaveClass(/hidden/);
+  const settingsRefresh = page.locator("#settingsRefreshModels");
+  await expect(settingsRefresh).toBeVisible();
+  await expect(settingsRefresh).toBeEnabled();
+  await settingsRefresh.click();
+  await expect(page.locator("#settingsModelList")).toContainText("gpt-5.4-mini");
+  await expect(page.locator("#settingsModelCount")).toHaveText("1");
+  expect(catalogRequests).toBeGreaterThanOrEqual(1);
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#settingsPage")).toHaveClass(/hidden/);
+  await expect(page.locator("#modelPillDropdown [data-model='gpt-5.4-mini']")).toHaveCount(1);
+  await page.locator("#modelPillBtn").click();
+  await page.locator("#modelPillDropdown [data-model='gpt-5.4-mini']").click();
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", "gpt-5.4-mini");
+  await expect(page.locator("#contextBudget")).toHaveValue("");
+  await restoreGoalH4Connection(h4, "gpt-5.4-mini");
+
+  await h4.submit("H4_PLAIN_USER");
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: "H4_PLAIN_FINAL" })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const snapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(snapshot.status).toBe(200);
+  expect(snapshot.body).toMatchObject({
+    model: "gpt-5.4-mini",
+    contextLimit: 400000,
+    contextWindowTokens: 400000,
+    contextBudgetTokens: null,
+    contextWindowSource: "official",
+    contextWindowHard: false,
+    budgetClamped: false,
+    budgetAboveEstimate: false,
+  });
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const catalogRequestsBeforeReload = catalogRequests;
+  const clientStateBeforeReload = await page.evaluate(() => {
+    const cache = JSON.parse(localStorage.getItem("code-model-catalog-cache-v1") || "null");
+    return {
+      selectedModel: localStorage.getItem("code-model"),
+      cachedModels: Array.isArray(cache?.models) ? cache.models : [],
+    };
+  });
+  expect(clientStateBeforeReload).toEqual({
+    selectedModel: "gpt-5.4-mini",
+    cachedModels: ["gpt-5.4-mini"],
+  });
+  await h4.reloadRuntime(runtime);
+  await expect.poll(() => catalogRequests).toBeGreaterThan(catalogRequestsBeforeReload);
+  let clientStateAfterReload = null;
+  await expect.poll(async () => {
+    clientStateAfterReload = await page.evaluate(() => {
+      const cache = JSON.parse(localStorage.getItem("code-model-catalog-cache-v1") || "null");
+      return {
+        selectedModel: localStorage.getItem("code-model"),
+        cachedModels: Array.isArray(cache?.models) ? cache.models : [],
+      };
+    });
+    return clientStateAfterReload;
+  }).toEqual(clientStateBeforeReload);
+  await expect(page.locator("#modelPillDropdown [data-model='gpt-5.4-mini']")).toHaveCount(1);
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", "gpt-5.4-mini");
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: "H4_PLAIN_FINAL" })).toHaveCount(1);
+  let persisted = null;
+  await expect.poll(async () => {
+    persisted = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return persisted.body?.stats?.contextResolution?.contextWindowSource || "";
+  }).toBe("official");
+  expect(persisted.body.stats.contextResolution).toMatchObject({
+    contextLimit: 400000,
+    contextWindowTokens: 400000,
+    contextBudgetTokens: null,
+    contextWindowSource: "official",
+    contextWindowHard: false,
+  });
+  expect(catalogRequests).toBeGreaterThanOrEqual(2);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-official-context-catalog`, {
+    runtime,
+    model: "gpt-5.4-mini",
+    contextLimit: snapshot.body.contextLimit,
+    source: snapshot.body.contextWindowSource,
+    hard: snapshot.body.contextWindowHard,
+    catalogRequests,
+    catalogRequestsBeforeReload,
+    savedModelBeforeReload: clientStateBeforeReload.selectedModel,
+    savedModelAfterReload: clientStateAfterReload.selectedModel,
+    runtimeOfficialNetworkRequests: 0,
+    persistedAfterReload: true,
+  });
+}
+
+test("bundle official catalog freezes soft estimate without runtime network", async ({ h4 }) => {
+  await exerciseOfficialCatalogSnapshot(h4, "bundle");
+});
+
+test("direct classic official catalog matches bundle and survives reload", async ({ h4 }) => {
+  await exerciseOfficialCatalogSnapshot(h4, "classic");
 });
 
 async function exerciseAutoCompactionInternalProjection(h4, runtime) {
