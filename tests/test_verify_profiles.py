@@ -229,7 +229,7 @@ class TestSharedReleaseDefinition(unittest.TestCase):
         self.assertEqual(verification.CHECKS["frontend_build"].timeout, 120)
         self.assertEqual(verification.CHECKS["frontend_freshness"].timeout, 120)
         self.assertEqual(verification.CHECKS["frontend_bundle_syntax"].timeout, 120)
-        self.assertEqual(verification.CHECKS["pytest_full"].timeout, 180)
+        self.assertEqual(verification.CHECKS["pytest_full"].timeout, 360)
         self.assertEqual(verification.CHECKS["harness_replay"].timeout, 30)
         for check_id in ("git_diff_check", *verification.SYNTAX_CHECK_IDS):
             self.assertEqual(verification.CHECKS[check_id].timeout, 300)
