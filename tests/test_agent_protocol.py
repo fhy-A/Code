@@ -19,6 +19,10 @@ def _field_value(field):
         "maxAttempts",
         "maxRounds",
         "contextLimit",
+        "contextWindowTokens",
+        "contextBudgetTokens",
+        "availableInputTokens",
+        "compressionTriggerTokens",
         "estimatedTokensBefore",
         "estimatedTokensAfter",
         "threshold",
@@ -33,7 +37,10 @@ def _field_value(field):
         return []
     if field in {"usage", "result"}:
         return {}
-    if field in {"replayed", "forcedFinal", "legacyPendingInput"}:
+    if field in {
+        "replayed", "forcedFinal", "legacyPendingInput",
+        "contextWindowHard", "budgetClamped", "budgetAboveEstimate",
+    }:
         return False
     return f"fixture-{field}"
 
@@ -115,6 +122,31 @@ class TestAgentEventContract(unittest.TestCase):
             "unknown_payload_fields",
             {item["code"] for item in adapted["diagnostics"]},
         )
+
+    def test_created_context_fields_are_optional_v1_payload(self):
+        legacy = _strict_event("created")
+        normalized_legacy = agent_protocol.normalize_agent_event(
+            legacy,
+            strict=True,
+        )
+        self.assertEqual(normalized_legacy["diagnostics"], [])
+
+        current = _strict_event("created")
+        current["data"].update({
+            "contextLimit": 400000,
+            "contextWindowTokens": 128000,
+            "contextBudgetTokens": 400000,
+            "contextWindowSource": "unknown",
+            "contextWindowHard": False,
+            "availableInputTokens": 375904,
+            "compressionTriggerTokens": 360000,
+            "budgetClamped": False,
+            "budgetAboveEstimate": True,
+        })
+        normalized = agent_protocol.normalize_agent_event(current, strict=True)
+        self.assertEqual(normalized["sourceProtocolVersion"], 1)
+        self.assertEqual(normalized["diagnostics"], [])
+        self.assertEqual(normalized["event"]["data"], current["data"])
 
     def test_future_protocol_uses_stable_envelope_only_in_compatibility_mode(self):
         raw = _strict_event("completed")

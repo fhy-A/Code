@@ -23,6 +23,7 @@ import time
 import webbrowser
 
 import agent_protocol
+import context_window
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
 from goal_v2_protocol import GoalV2ProtocolError, require_identifier
 from goal_v2_store import (
@@ -994,26 +995,8 @@ def _agent_request_options(payload):
 
 
 def _agent_model_context_limit(model):
-    """Mirror the frontend model-family defaults for restored and older clients."""
-    normalized = str(model or "").lower().replace("_", "-")
-    claude_version = re.search(r"claude.*?(\d+)[.-](\d+)", normalized)
-    if claude_version:
-        major = int(claude_version.group(1))
-        minor = int(claude_version.group(2))
-        return 1_000_000 if major >= 5 or (major == 4 and minor >= 6) else 200_000
-    if re.search(r"claude|opus|sonnet|haiku", normalized):
-        return 200_000
-    if re.search(r"gpt-4\.1|gpt-5[.-][2-9]", normalized):
-        return 1_000_000
-    if re.search(r"gpt|o1|o3|o4|openai", normalized):
-        return 128_000
-    if re.search(r"deepseek.*v4", normalized):
-        return 1_000_000
-    if "deepseek" in normalized:
-        return 128_000
-    if "gemini" in normalized:
-        return 1_000_000
-    return 128_000
+    """Compatibility fallback for restored records from older clients."""
+    return context_window.family_limit(model)
 
 
 def _normalize_agent_context_limit(value, model, *, strict=False):
@@ -1033,6 +1016,38 @@ def _normalize_agent_context_limit(value, model, *, strict=False):
             )
         return _agent_model_context_limit(model)
     return limit
+
+
+def _agent_frozen_context_resolution(run):
+    """Copy an internal parent Run snapshot without consulting mutable catalog state."""
+    context_limit = _normalize_agent_context_limit(
+        run.get("context_limit"),
+        (run.get("request") or {}).get("model"),
+        strict=True,
+    )
+    context_window_tokens = _normalize_agent_context_limit(
+        run.get("context_window_tokens") or context_limit,
+        (run.get("request") or {}).get("model"),
+        strict=True,
+    )
+    max_output = max(0, int((run.get("request") or {}).get("max_tokens") or 4096))
+    safety = max(4096, int(context_limit * 0.05))
+    available = max(1024, context_limit - max_output - safety)
+    return {
+        "contextLimit": context_limit,
+        "contextWindowTokens": context_window_tokens,
+        "contextBudgetTokens": run.get("context_budget_tokens"),
+        "contextWindowSource": str(run.get("context_window_source") or "family"),
+        "contextWindowHard": bool(run.get("context_window_hard")),
+        "availableInputTokens": int(run.get("available_input_tokens") or available),
+        "compressionTriggerTokens": int(
+            run.get("compression_trigger_tokens")
+            or min(int(context_limit * 0.90), available)
+        ),
+        "budgetClamped": bool(run.get("budget_clamped")),
+        "budgetAboveEstimate": bool(run.get("budget_above_estimate")),
+        "inputBudgetInsufficient": False,
+    }
 
 
 def _agent_estimate_text_tokens(value):
@@ -1078,10 +1093,9 @@ def _agent_auto_compact_threshold(context_limit):
     return max(1, int(int(context_limit) * _AGENT_AUTO_COMPACT_RATIO))
 
 
-def _agent_should_auto_compact(payload, context_limit):
-    return _agent_estimate_request_tokens(payload) >= _agent_auto_compact_threshold(
-        context_limit,
-    )
+def _agent_should_auto_compact(payload, context_limit, compression_trigger=None):
+    threshold = int(compression_trigger or _agent_auto_compact_threshold(context_limit))
+    return _agent_estimate_request_tokens(payload) >= max(1, threshold)
 
 
 def _agent_message_content_text(message):
@@ -1384,6 +1398,7 @@ def _agent_run_record(run):
         "cwd": run.get("cwd", ""),
         "workspaceRoots": list(run.get("workspace_roots") or []),
         "clientRequestId": run.get("client_request_id", ""),
+        "runKind": run.get("run_kind", "internal"),
         "parentAgentRunId": run.get("parent_agent_run_id", ""),
         "parentToolCallId": run.get("parent_tool_call_id", ""),
         "agentDepth": int(run.get("agent_depth") or 0),
@@ -1397,6 +1412,14 @@ def _agent_run_record(run):
         "forceFinalReason": str(run.get("force_final_reason") or ""),
         "baseUrl": run.get("base_url", ""),
         "contextLimit": int(run.get("context_limit") or 0),
+        "contextWindowTokens": int(run.get("context_window_tokens") or run.get("context_limit") or 0),
+        "contextBudgetTokens": run.get("context_budget_tokens"),
+        "contextWindowSource": str(run.get("context_window_source") or "family"),
+        "contextWindowHard": bool(run.get("context_window_hard")),
+        "availableInputTokens": int(run.get("available_input_tokens") or 0),
+        "compressionTriggerTokens": int(run.get("compression_trigger_tokens") or 0),
+        "budgetClamped": bool(run.get("budget_clamped")),
+        "budgetAboveEstimate": bool(run.get("budget_above_estimate")),
         "contextRecoveryRound": int(run.get("context_recovery_round") or 0),
         "request": _json_clone(run.get("request") or {}),
         "messages": _json_clone(run.get("messages") or []),
@@ -1529,6 +1552,14 @@ def _agent_snapshot(run, cursor=0):
             "forceFinalRound": bool(run.get("force_final_round")),
             "model": str((run.get("request") or {}).get("model") or ""),
             "contextLimit": int(run.get("context_limit") or 0),
+            "contextWindowTokens": int(run.get("context_window_tokens") or run.get("context_limit") or 0),
+            "contextBudgetTokens": run.get("context_budget_tokens"),
+            "contextWindowSource": str(run.get("context_window_source") or "family"),
+            "contextWindowHard": bool(run.get("context_window_hard")),
+            "availableInputTokens": int(run.get("available_input_tokens") or 0),
+            "compressionTriggerTokens": int(run.get("compression_trigger_tokens") or 0),
+            "budgetClamped": bool(run.get("budget_clamped")),
+            "budgetAboveEstimate": bool(run.get("budget_above_estimate")),
             "round": len(run.get("rounds") or []),
             "maxRounds": run["max_rounds"],
             "allowedTools": tools,
@@ -2000,6 +2031,144 @@ def _finish_agent_run_locked(run, status, error_message="", error_code=""):
     return True
 
 
+def _normalize_session_context_resolution(value, *, source_run=None):
+    if not isinstance(value, dict):
+        return None
+
+    def bounded_integer(field, *, fallback=None):
+        raw = value.get(field, fallback)
+        if isinstance(raw, bool):
+            return None
+        try:
+            normalized = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if not context_window.MIN_TOKENS <= normalized <= context_window.MAX_TOKENS:
+            return None
+        return normalized
+
+    def nonnegative_integer(field):
+        raw = value.get(field)
+        if isinstance(raw, bool):
+            return 0
+        try:
+            return min(context_window.MAX_TOKENS, max(0, int(raw or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    context_limit = bounded_integer("contextLimit")
+    if context_limit is None:
+        return None
+    context_window_tokens = bounded_integer(
+        "contextWindowTokens",
+        fallback=context_limit,
+    )
+    if context_window_tokens is None:
+        return None
+    budget = value.get("contextBudgetTokens")
+    if budget is not None:
+        budget = bounded_integer("contextBudgetTokens")
+        if budget is None:
+            return None
+    source = str(value.get("contextWindowSource") or "unknown")
+    if source not in {"metadata", "family", "unknown"}:
+        source = "unknown"
+    normalized = {
+        "contextLimit": context_limit,
+        "contextWindowTokens": context_window_tokens,
+        "contextBudgetTokens": budget,
+        "contextWindowSource": source,
+        "contextWindowHard": bool(value.get("contextWindowHard")),
+        "availableInputTokens": nonnegative_integer("availableInputTokens"),
+        "compressionTriggerTokens": nonnegative_integer("compressionTriggerTokens"),
+        "budgetClamped": bool(value.get("budgetClamped")),
+        "budgetAboveEstimate": bool(value.get("budgetAboveEstimate")),
+    }
+    if isinstance(source_run, dict):
+        normalized["sourceAgentRunId"] = str(source_run.get("id") or "")[:128]
+        normalized["sourceRunCreatedAt"] = str(source_run.get("created_at") or "")[:64]
+    return normalized
+
+
+def _session_context_resolution_from_run(run):
+    return _normalize_session_context_resolution({
+        "contextLimit": run.get("context_limit"),
+        "contextWindowTokens": run.get("context_window_tokens"),
+        "contextBudgetTokens": run.get("context_budget_tokens"),
+        "contextWindowSource": run.get("context_window_source"),
+        "contextWindowHard": run.get("context_window_hard"),
+        "availableInputTokens": run.get("available_input_tokens"),
+        "compressionTriggerTokens": run.get("compression_trigger_tokens"),
+        "budgetClamped": run.get("budget_clamped"),
+        "budgetAboveEstimate": run.get("budget_above_estimate"),
+    }, source_run=run)
+
+
+def _session_context_resolution_order(value):
+    if not isinstance(value, dict):
+        return None
+    created_at = str(value.get("sourceRunCreatedAt") or "")
+    run_id = str(value.get("sourceAgentRunId") or "")
+    if not created_at or not run_id:
+        return None
+    return created_at, run_id
+
+
+def _merge_session_stats(existing, incoming):
+    previous = dict(existing) if isinstance(existing, dict) else {}
+    if not isinstance(incoming, dict):
+        return previous
+    merged = dict(incoming)
+    previous_resolution = _normalize_session_context_resolution(
+        previous.get("contextResolution")
+    )
+    if previous_resolution:
+        for field in ("sourceAgentRunId", "sourceRunCreatedAt"):
+            if field in previous.get("contextResolution", {}):
+                previous_resolution[field] = str(
+                    previous["contextResolution"].get(field) or ""
+                )
+    incoming_resolution = _normalize_session_context_resolution(
+        incoming.get("contextResolution")
+    )
+    if previous_resolution and _session_context_resolution_order(previous_resolution):
+        merged["contextResolution"] = previous_resolution
+    elif incoming_resolution:
+        merged["contextResolution"] = incoming_resolution
+    elif previous_resolution:
+        merged["contextResolution"] = previous_resolution
+    else:
+        merged.pop("contextResolution", None)
+    return merged
+
+
+def _persist_agent_session_context_resolution(run):
+    if run.get("status") != "completed" or run.get("run_kind") != "foreground":
+        return False
+    resolution = _session_context_resolution_from_run(run)
+    if not resolution:
+        return False
+    path = session_path(run.get("session_id"))
+    with _json_write_lock:
+        if not path.exists():
+            return False
+        session = read_json(path, {})
+        if str(session.get("id") or "") != str(run.get("session_id") or ""):
+            return False
+        stats = dict(session.get("stats") or {})
+        previous = stats.get("contextResolution")
+        previous_order = _session_context_resolution_order(previous)
+        next_order = _session_context_resolution_order(resolution)
+        if previous_order and next_order and previous_order > next_order:
+            return False
+        if previous == resolution:
+            return False
+        stats["contextResolution"] = resolution
+        session["stats"] = stats
+        write_json(path, session)
+    return True
+
+
 def _finish_agent_run(run, status, error_message="", error_code=""):
     with run["condition"]:
         finished = _finish_agent_run_locked(
@@ -2008,6 +2177,7 @@ def _finish_agent_run(run, status, error_message="", error_code=""):
     if not finished:
         return False
     _persist_agent_run(run)
+    _persist_agent_session_context_resolution(run)
     # Terminal state must be durable before waiters are released. Otherwise a
     # fast reload can observe the in-memory terminal status and read the older
     # on-disk snapshot before error/recovery metadata has been written.
@@ -2071,9 +2241,12 @@ def _agent_run_from_record(record):
         or continuation_origin
         or ""
     )
-    run_kind = "child" if parent_agent_run_id or agent_depth > 0 else (
+    inferred_run_kind = "child" if parent_agent_run_id or agent_depth > 0 else (
         "foreground" if origin_message_id else "internal"
     )
+    run_kind = _normalize_agent_run_kind(record.get("runKind") or inferred_run_kind)
+    if parent_agent_run_id or agent_depth > 0:
+        run_kind = "child"
     goal_operations_enabled = bool(origin_message_id)
     pending_authorization = (
         _json_clone(record.get("pendingAuthorization"))
@@ -2143,6 +2316,17 @@ def _agent_run_from_record(record):
             record.get("contextLimit"),
             request_options.get("model"),
         ),
+        "context_window_tokens": _normalize_agent_context_limit(
+            record.get("contextWindowTokens") or record.get("contextLimit"),
+            request_options.get("model"),
+        ),
+        "context_budget_tokens": record.get("contextBudgetTokens"),
+        "context_window_source": str(record.get("contextWindowSource") or "family"),
+        "context_window_hard": bool(record.get("contextWindowHard")),
+        "available_input_tokens": max(0, int(record.get("availableInputTokens") or 0)),
+        "compression_trigger_tokens": max(0, int(record.get("compressionTriggerTokens") or 0)),
+        "budget_clamped": bool(record.get("budgetClamped")),
+        "budget_above_estimate": bool(record.get("budgetAboveEstimate")),
         "context_recovery_round": max(
             0,
             int(record.get("contextRecoveryRound") or 0),
@@ -3430,7 +3614,7 @@ def _ensure_agent_delegation_child(run, call, execution):
             start_worker=False,
             cwd=run.get("cwd") or "",
             workspace_roots=list(run.get("workspace_roots") or []),
-            context_limit=run.get("context_limit"),
+            inherited_context=_agent_frozen_context_resolution(run),
         )
         execution["childAgentRunId"] = child["id"]
         execution["prompt"] = prompt
@@ -4414,7 +4598,7 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0):
         "reason": str(reason or "threshold"),
         "estimatedTokensBefore": int(before_estimate or 0),
         "contextLimit": int(run.get("context_limit") or 0),
-        "threshold": _agent_auto_compact_threshold(run.get("context_limit") or 1),
+        "threshold": int(run.get("compression_trigger_tokens") or _agent_auto_compact_threshold(run.get("context_limit") or 1)),
         "compactedMessageCount": len(plan["compactedMessages"]),
         "retainedMessageCount": len(plan["retainedMessages"]),
     })
@@ -4759,7 +4943,7 @@ def _handoff_agent_goal_run(
         tool_budgets=run.get("tool_budgets") or [],
         cwd=run.get("cwd") or "",
         workspace_roots=run.get("workspace_roots") or [],
-        context_limit=run.get("context_limit"),
+        inherited_context=_agent_frozen_context_resolution(run),
         run_kind="foreground",
         continuation=next_meta,
     )
@@ -4854,7 +5038,9 @@ def _agent_run_worker(run):
             if (
                 not force_final_round
                 and int(run.get("context_recovery_round") or 0) != round_number
-                and _agent_should_auto_compact(payload, run["context_limit"])
+                and _agent_should_auto_compact(
+                    payload, run["context_limit"], run.get("compression_trigger_tokens"),
+                )
             ):
                 compacted = _run_agent_auto_compaction(
                     run,
@@ -5085,6 +5271,8 @@ def _create_agent_run(
     cwd="",
     workspace_roots=None,
     context_limit=None,
+    context_budget_tokens=None,
+    inherited_context=None,
     run_kind="internal",
     continuation=None,
 ):
@@ -5103,11 +5291,23 @@ def _create_agent_run(
     request_options = _agent_request_options(payload)
     if not str(request_options.get("model") or "").strip():
         raise ValueError("payload.model is required")
-    normalized_context_limit = _normalize_agent_context_limit(
-        context_limit,
-        request_options.get("model"),
-        strict=context_limit is not None and context_limit != "",
+    context_resolution = (
+        dict(inherited_context)
+        if isinstance(inherited_context, dict)
+        else context_window.resolve(
+            request_options.get("model"),
+            base_url,
+            budget=context_budget_tokens,
+            legacy_hint=context_limit,
+            max_tokens=request_options.get("max_tokens") or 4096,
+        )
     )
+    if context_resolution.get("inputBudgetInsufficient"):
+        raise ValueError(
+            "context budget must leave at least 1024 input tokens after max_tokens "
+            "and the safety margin"
+        )
+    normalized_context_limit = context_resolution["contextLimit"]
     client_request_id = _agent_client_request_id(client_request_id)
     normalized_run_kind = _normalize_agent_run_kind(
         "child" if parent_run_id or int(agent_depth or 0) > 0 else run_kind
@@ -5180,6 +5380,14 @@ def _create_agent_run(
         "force_final_reason": "",
         "base_url": _agent_base_url(base_url),
         "context_limit": normalized_context_limit,
+        "context_window_tokens": context_resolution["contextWindowTokens"],
+        "context_budget_tokens": context_resolution["contextBudgetTokens"],
+        "context_window_source": context_resolution["contextWindowSource"],
+        "context_window_hard": context_resolution["contextWindowHard"],
+        "available_input_tokens": context_resolution["availableInputTokens"],
+        "compression_trigger_tokens": context_resolution["compressionTriggerTokens"],
+        "budget_clamped": context_resolution["budgetClamped"],
+        "budget_above_estimate": context_resolution["budgetAboveEstimate"],
         "context_recovery_round": 0,
         "request": request_options,
         "messages": _json_clone(messages),
@@ -5225,6 +5433,14 @@ def _create_agent_run(
             ],
             "maxRounds": rounds_limit,
             "contextLimit": normalized_context_limit,
+            "contextWindowTokens": context_resolution["contextWindowTokens"],
+            "contextBudgetTokens": context_resolution["contextBudgetTokens"],
+            "contextWindowSource": context_resolution["contextWindowSource"],
+            "contextWindowHard": context_resolution["contextWindowHard"],
+            "availableInputTokens": context_resolution["availableInputTokens"],
+            "compressionTriggerTokens": context_resolution["compressionTriggerTokens"],
+            "budgetClamped": context_resolution["budgetClamped"],
+            "budgetAboveEstimate": context_resolution["budgetAboveEstimate"],
             "permissionProfile": permission_profile,
             "toolBudgets": _json_clone(normalized_tool_budgets),
             "cwd": resolved_cwd,
@@ -12954,6 +13170,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     tool_budgets=body.get("toolBudgets"),
                     cwd=body.get("cwd") or "",
                     context_limit=body.get("contextLimit"),
+                    context_budget_tokens=body.get("contextBudgetTokens"),
                     run_kind=body.get("runKind") or "internal",
                 )
                 self.send_json({
@@ -13652,7 +13869,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             "title": body.get("title") or "新会话",
             "createdAt": now_iso(),
             "updatedAt": now_iso(),
-            "stats": body.get("stats") or {},
+            "stats": _merge_session_stats({}, body.get("stats") or {}),
             "lastUsage": body.get("lastUsage"),
             "runState": body.get("runState") or {},
             "messageCount": len(messages),
@@ -13696,7 +13913,14 @@ class CodeHandler(BaseHTTPRequestHandler):
             else:
                 session = {"id": safe_session_id(session_id), "createdAt": now_iso()}
             session["title"] = body.get("title") or session.get("title") or "未命名会话"
-            session["stats"] = body.get("stats") or session.get("stats") or {}
+            incoming_stats = body.get("stats")
+            if isinstance(incoming_stats, dict) and incoming_stats:
+                session["stats"] = _merge_session_stats(
+                    session.get("stats"),
+                    incoming_stats,
+                )
+            else:
+                session["stats"] = session.get("stats") or {}
             if "lastUsage" in body:
                 session["lastUsage"] = body.get("lastUsage")
             if "runState" in body:
@@ -14442,6 +14666,17 @@ class CodeHandler(BaseHTTPRequestHandler):
                     return
 
                 data = resp.read()
+                if upstream_path.endswith("/models"):
+                    try:
+                        catalog = json.loads(data.decode("utf-8"))
+                        if isinstance(catalog, dict) and isinstance(catalog.get("data"), list):
+                            catalog["data"] = context_window.normalize_catalog(
+                                base_url, catalog["data"],
+                            )
+                            data = json.dumps(catalog, ensure_ascii=False).encode("utf-8")
+                    except (UnicodeError, json.JSONDecodeError, ValueError):
+                        # Models remain usable when optional metadata is absent or invalid.
+                        pass
                 self.send_response(resp.status)
                 self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
                 self.send_header("Content-Length", str(len(data)))

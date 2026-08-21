@@ -26,6 +26,11 @@ from urllib import parse
 MODEL_ID = "h4-e2e-model"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
+AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
+AUTO_COMPACTION_SEED_FINAL = "H4_AUTO_COMPACTION_SEED_FINAL"
+AUTO_COMPACTION_USER = "H4_AUTO_COMPACTION_USER"
+AUTO_COMPACTION_CHECKPOINT = "H4_CONTEXT_CHECKPOINT_INTERNAL"
+AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL"
 TOOL_USER = "H4_TOOL_USER"
 TOOL_STAGE = "H4_TOOL_STAGE"
 TOOL_FINAL = "H4_TOOL_FINAL"
@@ -275,6 +280,7 @@ REFRESH_GATE_NAMES = (
     "before-tool-terminal",
     "before-second-tool-execute",
     "goal-final-after-first-delta",
+    "context-compaction-after-first-delta",
 )
 
 
@@ -531,6 +537,17 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         }:
             has_tool_result = True
     joined_user_text = "\n".join(user_texts)
+    if any(
+        isinstance(message, dict)
+        and message.get("role") == "system"
+        and "creating a context checkpoint" in _message_text(message).lower()
+        for message in messages
+    ):
+        return "context-compaction", False
+    if AUTO_COMPACTION_USER in joined_user_text:
+        return "context-compaction-final", False
+    if AUTO_COMPACTION_SEED in joined_user_text:
+        return "context-compaction-seed", False
     if (
         "goal_agent_continuation_v1" in joined_user_text
         and "H4_GOAL_V2_CONTINUATION" in joined_user_text
@@ -2368,6 +2385,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             final_text = {
                 "plain-text": PLAIN_FINAL,
                 "classic-text": CLASSIC_FINAL,
+                "context-compaction": AUTO_COMPACTION_CHECKPOINT,
+                "context-compaction-seed": AUTO_COMPACTION_SEED_FINAL,
+                "context-compaction-final": AUTO_COMPACTION_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,
@@ -2432,6 +2452,34 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         frame_index == 0
                         and not REFRESH_GATES.reach_and_wait(
                             "goal-final-after-first-delta"
+                        )
+                    ):
+                        return
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
+
+        if scenario == "context-compaction":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for frame_index, frame in enumerate(frames):
+                try:
+                    self.wfile.write(
+                        f"data: {json.dumps(frame, separators=(',', ':'))}\n\n".encode("utf-8")
+                    )
+                    self.wfile.flush()
+                    if (
+                        frame_index == 0
+                        and not REFRESH_GATES.reach_and_wait(
+                            "context-compaction-after-first-delta"
                         )
                     ):
                         return

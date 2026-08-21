@@ -292,7 +292,7 @@
           <button id="refreshModelsBtn" class="mini-btn" type="button" data-i18n="refreshBtn">刷新</button>
         </div>
         <div id="modelListBox" class="model-list-display"></div>
-        <div class="grid-two">
+        <div class="context-settings-primary">
           <label class="field">
             <span data-i18n="temperature">温度</span>
             <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2" />
@@ -309,6 +309,11 @@
             </select>
           </label>
         </div>
+        <label class="field context-budget-field">
+          <span data-i18n="contextBudget">上下文预算</span>
+          <input id="contextBudget" type="text" inputmode="text" autocomplete="off" data-i18n="contextBudgetPlaceholder" />
+          <small id="contextBudgetStatus" class="field-hint" hidden></small>
+        </label>
         <label class="checkline">
           <input id="rememberKey" type="checkbox" />
           <span data-i18n="rememberCredentials">本机记住 API Key 和 Base URL</span>

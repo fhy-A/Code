@@ -130,9 +130,51 @@ const {
   RECENT_CONTEXT_ROUND_COUNT,
   buildManualCompactionPlan,
   createCompactSummaryMessage,
+  CONTEXT_BUDGET_KEY,
+  getContextBudgetTokens,
   getModelContextLimit,
+  getModelContextResolution,
   getModelContextMessages,
+  setContextBudgetTokens,
+  setModelContextCatalog,
 } = window.Code.agent.compaction;
+const frozenContextResolutionBySession = new Map();
+
+function normalizeFrozenContextResolution(value) {
+  if (!value || typeof value !== "object") return null;
+  const contextLimit = Number(value.contextLimit);
+  if (!Number.isInteger(contextLimit) || contextLimit < 1024 || contextLimit > 2000000) return null;
+  const contextWindowTokens = Number(value.contextWindowTokens || contextLimit);
+  if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 1024 || contextWindowTokens > 2000000) return null;
+  const budget = value.contextBudgetTokens == null ? null : Number(value.contextBudgetTokens);
+  if (budget != null && (!Number.isInteger(budget) || budget < 1024 || budget > 2000000)) return null;
+  const source = ["metadata", "family", "unknown"].includes(value.contextWindowSource)
+    ? value.contextWindowSource
+    : "unknown";
+  return {
+    contextLimit,
+    contextWindowTokens,
+    contextBudgetTokens: budget,
+    contextWindowSource: source,
+    contextWindowHard: Boolean(value.contextWindowHard),
+    availableInputTokens: Math.max(0, Number(value.availableInputTokens || 0)),
+    compressionTriggerTokens: Math.max(0, Number(value.compressionTriggerTokens || 0)),
+    budgetClamped: Boolean(value.budgetClamped),
+    budgetAboveEstimate: Boolean(value.budgetAboveEstimate),
+  };
+}
+
+function getFrozenSessionContextResolution(sessionId) {
+  return frozenContextResolutionBySession.get(sessionId)
+    || normalizeFrozenContextResolution(getSessionStats(sessionId)?.contextResolution);
+}
+
+function rememberFrozenSessionContextResolution(sessionId, value) {
+  const normalized = normalizeFrozenContextResolution(value);
+  if (!sessionId || !normalized) return null;
+  frozenContextResolutionBySession.set(sessionId, normalized);
+  return normalized;
+}
 const {
   classifyModelRequestFailure,
   createSseDataReader,
@@ -604,6 +646,7 @@ function buildRunContext(sessionId, options = {}) {
     model,
     temperature: Number(options.temperature ?? els.temperature.value ?? 0.2),
     maxTokens: Number(options.maxTokens || getEffectiveMaxTokens(model)),
+    contextResolution: options.contextResolution || null,
     toolPreset,
     permissionProfile,
     executionOwner: executionOwnerForPermissionProfile(permissionProfile),
@@ -655,6 +698,8 @@ const els = {
   temperature: document.getElementById("temperature"),
 
   maxTokens: document.getElementById("maxTokens"),
+  contextBudget: document.getElementById("contextBudget"),
+  contextBudgetStatus: document.getElementById("contextBudgetStatus"),
 
   thinkingPillBtn: document.getElementById("thinkingPillBtn"),
 
@@ -1021,6 +1066,8 @@ const panelsFeature = createPanelsFeature({
     isDetachedFromMainContext,
   ),
   getContextLimit: getModelContextLimit,
+  getContextResolution: (model) => getFrozenSessionContextResolution(state.sessionId)
+    || getModelContextResolution(model, getEffectiveMaxTokens(model)),
   getSelectedModel,
   getMessageText: getMsgText,
   getSystemPrompt,
@@ -1178,6 +1225,7 @@ const settingsFeature = createSettingsFeature({
   setLang,
   refreshModels,
   saveLocalSettings,
+  updateContextBudgetStatus,
   saveSystemPrompt,
   renderMemoryPanel,
   renderSkillsInSettings,
@@ -4556,7 +4604,7 @@ function insertPromptText(text) {
 
 
 const MODEL_CATALOG_CACHE_KEY = "code-model-catalog-cache-v1";
-const MODEL_CATALOG_CACHE_VERSION = 1;
+const MODEL_CATALOG_CACHE_VERSION = 2;
 
 function normalizeModelCatalogModels(models) {
   return [...new Set((Array.isArray(models) ? models : [])
@@ -4568,17 +4616,20 @@ function normalizeModelCatalogModels(models) {
 function readModelCatalogCache(baseUrl) {
   try {
     const cached = JSON.parse(localStorage.getItem(MODEL_CATALOG_CACHE_KEY) || "null");
-    if (cached?.version !== MODEL_CATALOG_CACHE_VERSION) return null;
+    if (![1, MODEL_CATALOG_CACHE_VERSION].includes(cached?.version)) return null;
     if (String(cached.baseUrl || "") !== String(baseUrl || "")) return null;
     const models = normalizeModelCatalogModels(cached.models);
     if (!models.length) return null;
-    return { models, savedAt: Number(cached.savedAt || 0) };
+    const entries = cached.version === 2 && Array.isArray(cached.entries)
+      ? cached.entries
+      : models.map((id) => ({ id }));
+    return { models, entries, savedAt: Number(cached.savedAt || 0) };
   } catch (_) {
     return null;
   }
 }
 
-function writeModelCatalogCache(models, baseUrl) {
+function writeModelCatalogCache(models, baseUrl, entries = []) {
   const normalized = normalizeModelCatalogModels(models);
   try {
     if (!normalized.length) {
@@ -4589,6 +4640,7 @@ function writeModelCatalogCache(models, baseUrl) {
       version: MODEL_CATALOG_CACHE_VERSION,
       baseUrl: String(baseUrl || ""),
       models: normalized,
+      entries: Array.isArray(entries) ? entries : [],
       savedAt: Date.now(),
     }));
   } catch (_) {
@@ -4665,6 +4717,7 @@ function restoreCachedModelCatalog() {
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
   const cached = readModelCatalogCache(baseUrl);
   if (!cached) return [];
+  setModelContextCatalog(cached.entries);
   return renderModelCatalog(cached.models, "detectingModels", "cache");
 }
 
@@ -4703,6 +4756,7 @@ async function refreshModels() {
   const allModels = new Set();
   const modelKeyMap = {};
   const modelKeysMap = {};
+  const modelContextEntries = new Map();
   let successCount = 0;
 
 
@@ -4732,6 +4786,30 @@ async function refreshModels() {
             if (skipPattern.test(cleanId)) continue;
 
             allModels.add(cleanId);
+            const tokens = Number(item.contextWindowTokens);
+            if (Number.isInteger(tokens) && tokens >= 1024 && tokens <= 2000000) {
+              const previous = modelContextEntries.get(cleanId);
+              let candidate = {
+                id: cleanId,
+                contextWindowTokens: tokens,
+                contextWindowSource: ["metadata", "family", "unknown"].includes(item.contextWindowSource)
+                  ? item.contextWindowSource
+                  : "unknown",
+                contextWindowHard: Boolean(item.contextWindowHard),
+                metadataStatus: item.metadataStatus || "missing",
+              };
+              if (previous && previous.contextWindowTokens < tokens) {
+                candidate = previous;
+              } else if (
+                previous
+                && previous.contextWindowTokens === tokens
+                && previous.contextWindowHard
+              ) {
+                candidate.contextWindowSource = "metadata";
+                candidate.contextWindowHard = true;
+              }
+              modelContextEntries.set(cleanId, candidate);
+            }
 
             if (!modelKeyMap[cleanId]) modelKeyMap[cleanId] = key;
             if (!modelKeysMap[cleanId]) modelKeysMap[cleanId] = [];
@@ -4772,9 +4850,11 @@ async function refreshModels() {
   try {
 
     const models = [...allModels].sort((a, b) => a.localeCompare(b));
+    const contextEntries = models.map((id) => modelContextEntries.get(id) || { id });
 
     renderModelCatalog(models, "", "live");
-    writeModelCatalogCache(models, baseUrl);
+    setModelContextCatalog(contextEntries);
+    writeModelCatalogCache(models, baseUrl, contextEntries);
     state.modelKeyMap = modelKeyMap;
     state.modelKeysMap = modelKeysMap;
 
@@ -6033,7 +6113,16 @@ function buildRecoveredRunContext(session, runState) {
   ctx.runtimeRunId = String(runState.runtimeRunId || "");
   ctx.agentRunId = String(runState.agentRunId || "");
   ctx.agentEventCursor = Number(runState.agentEventCursor || 0);
-  ctx._reuseRuntimeAssistant = Boolean(ctx.runtimeRunId);
+  const internalCompactionRuntimeRunId = String(
+    runState.internalCompactionRuntimeRunId || "",
+  );
+  if (internalCompactionRuntimeRunId) {
+    markInternalCompactionRuntime(ctx, internalCompactionRuntimeRunId);
+  }
+  ctx._reuseRuntimeAssistant = Boolean(
+    ctx.runtimeRunId
+    && !internalCompactionRuntimeIds(ctx).has(ctx.runtimeRunId)
+  );
   ctx.run.runtimeRunId = ctx.runtimeRunId;
   ctx.run.agentRunId = ctx.agentRunId;
   ctx.run.agentEventCursor = ctx.agentEventCursor;
@@ -7310,6 +7399,10 @@ function queuedMessageCheckpoint(item) {
     thinkingLevel: String(item.thinkingLevel || "auto"),
     temperature: Number(item.temperature ?? 0.2),
     maxTokens: Number(item.maxTokens || 0),
+    contextLimit: Number(item.contextLimit || 0),
+    contextWindowTokens: Number(item.contextWindowTokens || 0),
+    contextBudgetTokens: item.contextBudgetTokens == null ? null : Number(item.contextBudgetTokens),
+    inputBudgetInsufficient: Boolean(item.inputBudgetInsufficient),
     queuedAt: Number(item.queuedAt || Date.now()),
   };
 }
@@ -7361,6 +7454,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
   const thinkingLevel = getThinkingLevel();
   const temperature = Number(els.temperature.value || 0.2);
   const maxTokens = getEffectiveMaxTokens(model);
+  const contextResolution = getModelContextResolution(model, maxTokens);
   const imageRefs = existingMessage
     ? (Array.isArray(existingMessage._images) ? existingMessage._images : [])
     : await uploadImagesForStorage(images || []);
@@ -7384,6 +7478,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
     thinkingLevel,
     temperature,
     maxTokens,
+    ...contextResolution,
     queuedAt,
   });
   const userMessage = existingMessage || {
@@ -7593,6 +7688,12 @@ async function runQueuedSessionMessage(sessionId, item) {
       thinkingLevel: item.thinkingLevel,
       temperature: item.temperature,
       maxTokens: item.maxTokens,
+      contextResolution: {
+        contextLimit: item.contextLimit,
+        contextWindowTokens: item.contextWindowTokens,
+        contextBudgetTokens: item.contextBudgetTokens,
+        inputBudgetInsufficient: Boolean(item.inputBudgetInsufficient),
+      },
     });
     ok = true;
   } catch (error) {
@@ -7710,7 +7811,19 @@ function syncBackgroundJobCheckpoint(job) {
   if (["completed", "failed"].includes(job.status)) {
     removeBackgroundRunCheckpoint(job.sessionId, job.id);
   } else {
-    setBackgroundRunCheckpoint(job.sessionId, buildBackgroundJobCheckpoint(job, Date.now()));
+    setBackgroundRunCheckpoint(job.sessionId, {
+      ...buildBackgroundJobCheckpoint(job, Date.now()),
+      contextLimit: Number(job.contextLimit || 0),
+      contextWindowTokens: Number(job.contextWindowTokens || 0),
+      contextBudgetTokens: job.contextBudgetTokens == null ? null : Number(job.contextBudgetTokens),
+      contextWindowSource: String(job.contextWindowSource || "unknown"),
+      contextWindowHard: Boolean(job.contextWindowHard),
+      availableInputTokens: Number(job.availableInputTokens || 0),
+      compressionTriggerTokens: Number(job.compressionTriggerTokens || 0),
+      budgetClamped: Boolean(job.budgetClamped),
+      budgetAboveEstimate: Boolean(job.budgetAboveEstimate),
+      inputBudgetInsufficient: Boolean(job.inputBudgetInsufficient),
+    });
   }
 }
 
@@ -7876,6 +7989,7 @@ async function runBackgroundSubAgentJob(job) {
   }, remainingMs);
   try {
     if (remainingMs <= 0) throw new DOMException("Aborted", "AbortError");
+    if (job.inputBudgetInsufficient) throw new Error(t("contextBudgetInsufficient"));
     const created = await agentRuntime.createAgentRun({
       sessionId: job.sessionId,
       clientRequestId: job.clientRequestId || job.id,
@@ -7887,7 +8001,9 @@ async function runBackgroundSubAgentJob(job) {
       permissionProfile: job.permissionProfile,
       runKind: "background",
       cwd: subCtx.cwd || "",
-      contextLimit: getModelContextLimit(job.model || getSelectedModel()),
+      contextLimit: Number(job.contextLimit || getModelContextLimit(job.model || getSelectedModel())),
+      contextWindowTokens: Number(job.contextWindowTokens || 0) || undefined,
+      contextBudgetTokens: job.contextBudgetTokens,
       signal: subCtx.run.abortController.signal,
     });
     job.agentRunId = String(created.agentRunId || "");
@@ -8068,6 +8184,10 @@ async function dispatchBackgroundSubAgent(sessionId, userText, images = []) {
     thinkingLevel: parentCtx.thinkingLevel || getThinkingLevel(),
     temperature: Number(parentCtx.temperature ?? els.temperature.value ?? 0.2),
     maxTokens: Number(parentCtx.maxTokens || getEffectiveMaxTokens(parentCtx.model || getSelectedModel())),
+    ...getModelContextResolution(
+      parentCtx.model || getSelectedModel(),
+      Number(parentCtx.maxTokens || getEffectiveMaxTokens(parentCtx.model || getSelectedModel())),
+    ),
     cwd: parentCtx.cwd || "",
     primaryRoot: parentCtx.primaryRoot || parentCtx.cwd || "",
     rootPaths: Array.isArray(parentCtx.rootPaths) ? [...parentCtx.rootPaths] : [],
@@ -8408,6 +8528,20 @@ function archiveAgentProjectionShadow(ctx) {
 }
 
 function observeAgentProjectionSnapshot(ctx, snapshot, referenceTime = Date.now()) {
+  if (!ctx.isDetachedBackground && Number(snapshot?.contextLimit) > 0) {
+    const frozen = {
+      contextLimit: Number(snapshot.contextLimit),
+      contextWindowTokens: Number(snapshot.contextWindowTokens || snapshot.contextLimit),
+      contextBudgetTokens: snapshot.contextBudgetTokens ?? null,
+      contextWindowSource: String(snapshot.contextWindowSource || "family"),
+      contextWindowHard: Boolean(snapshot.contextWindowHard),
+      availableInputTokens: Number(snapshot.availableInputTokens || 0),
+      compressionTriggerTokens: Number(snapshot.compressionTriggerTokens || 0),
+      budgetClamped: Boolean(snapshot.budgetClamped),
+      budgetAboveEstimate: Boolean(snapshot.budgetAboveEstimate),
+    };
+    rememberFrozenSessionContextResolution(ctx.sessionId, frozen);
+  }
   const shadow = ensureAgentProjectionShadow(ctx, referenceTime);
   if (!shadow) return;
   agentRunProjectionShadow.observeProjectionSnapshot(
@@ -8498,6 +8632,60 @@ function snapshotHasPendingModelStarted(snapshot, cursor = 0, runtimeRunId = "")
   ));
 }
 
+function internalCompactionRuntimeIds(ctx) {
+  if (!(ctx?._internalCompactionRuntimeRunIds instanceof Set)) {
+    ctx._internalCompactionRuntimeRunIds = new Set();
+  }
+  return ctx._internalCompactionRuntimeRunIds;
+}
+
+function removeInternalCompactionRuntimeProjection(ctx, runtimeRunId) {
+  const target = String(runtimeRunId || "");
+  if (!target || !Array.isArray(ctx?.messages)) return 0;
+  let removed = 0;
+  for (let index = ctx.messages.length - 1; index >= 0; index -= 1) {
+    const message = ctx.messages[index];
+    if (
+      message?.role === "assistant"
+      && message.meta?.kind !== "auto-context-compaction"
+      && String(message.meta?.agentRuntimeRunId || "") === target
+    ) {
+      ctx.messages.splice(index, 1);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function markInternalCompactionRuntime(ctx, runtimeRunId) {
+  const target = String(runtimeRunId || "");
+  if (!target) return "";
+  internalCompactionRuntimeIds(ctx).add(target);
+  removeInternalCompactionRuntimeProjection(ctx, target);
+  return target;
+}
+
+function clearInternalCompactionRuntime(ctx, runtimeRunId) {
+  const target = String(runtimeRunId || "");
+  if (!target) return;
+  removeInternalCompactionRuntimeProjection(ctx, target);
+  internalCompactionRuntimeIds(ctx).delete(target);
+}
+
+function snapshotActiveCompactionRuntimeId(snapshot) {
+  const activeCompactions = new Set();
+  for (const event of Array.isArray(snapshot?.events) ? snapshot.events : []) {
+    const type = String(event?.type || "");
+    const compactionId = String(event?.data?.compactionId || "");
+    if (!compactionId) continue;
+    if (type === "context_compaction_started") activeCompactions.add(compactionId);
+    else if (["context_compaction_completed", "context_compaction_failed"].includes(type)) {
+      activeCompactions.delete(compactionId);
+    }
+  }
+  return activeCompactions.size > 0 ? String(snapshot?.activeRuntimeRunId || "") : "";
+}
+
 function releaseAttachedImagePreview(image) {
   const previewUrl = String(image?._previewUrl || "");
   if (previewUrl && typeof URL?.revokeObjectURL === "function") {
@@ -8537,6 +8725,10 @@ function rebindRecoveredRuntimeAssistant(ctx, runtimeRunId) {
 async function attachAgentRuntimeProjection(ctx, event, options = {}) {
   const runtimeRunId = String(event?.data?.runtimeRunId || "");
   if (!runtimeRunId) return;
+  if (internalCompactionRuntimeIds(ctx).has(runtimeRunId)) {
+    removeInternalCompactionRuntimeProjection(ctx, runtimeRunId);
+    return;
+  }
   const recoveredAttachment = options.recovered === true;
 
   let assistant = recoveredAttachment
@@ -8678,6 +8870,16 @@ async function recoverActiveAgentRuntimeProjection(ctx, snapshot) {
   if (!activeRuntimeRunId) {
     return { status: "no-active-runtime", runtimeRunId: "" };
   }
+  const compactionRuntimeRunId = snapshotActiveCompactionRuntimeId(snapshot);
+  if (compactionRuntimeRunId) {
+    markInternalCompactionRuntime(ctx, compactionRuntimeRunId);
+  }
+  if (internalCompactionRuntimeIds(ctx).has(activeRuntimeRunId)) {
+    removeInternalCompactionRuntimeProjection(ctx, activeRuntimeRunId);
+    ctx.runtimeRunId = "";
+    ctx.run.runtimeRunId = "";
+    return { status: "internal-context-compaction", runtimeRunId: activeRuntimeRunId };
+  }
   ctx.runtimeRunId = activeRuntimeRunId;
   ctx.run.runtimeRunId = activeRuntimeRunId;
   if (snapshotHasPendingModelStarted(
@@ -8764,10 +8966,18 @@ function findAgentCompactionProjection(ctx, compactionId) {
   ));
 }
 
-function projectAgentContextCompaction(ctx, event, status) {
+function projectAgentContextCompaction(ctx, event, status, runtimeRunId = "") {
   const data = event?.data || {};
   const compactionId = String(data.compactionId || "");
   if (!compactionId) return;
+  const internalRuntimeRunId = String(
+    data.runtimeRunId
+    || runtimeRunId
+    || [...internalCompactionRuntimeIds(ctx)].at(-1)
+    || "",
+  );
+  if (status === "running") markInternalCompactionRuntime(ctx, internalRuntimeRunId);
+  else clearInternalCompactionRuntime(ctx, internalRuntimeRunId);
   let projection = findAgentCompactionProjection(ctx, compactionId);
   if (!projection) {
     projection = {
@@ -8784,6 +8994,8 @@ function projectAgentContextCompaction(ctx, event, status) {
     ...(projection.meta || {}),
     ...agentEventMeta(ctx, event),
     kind: "auto-context-compaction",
+    skipExport: true,
+    internalRuntimeRunId,
     compactionId,
     status,
     reason: String(data.reason || projection.meta?.reason || "threshold"),
@@ -8970,7 +9182,7 @@ function projectAgentToolCompleted(ctx, event) {
   });
 }
 
-async function projectAgentEvent(ctx, event) {
+async function projectAgentEvent(ctx, event, snapshot = null) {
   const eventType = String(event?.type || "");
   const internalToolEvent = (
     isInternalGoalToolName(event?.data?.name)
@@ -8995,17 +9207,20 @@ async function projectAgentEvent(ctx, event) {
   const projectionObserved = internalToolEvent
     ? false
     : beginAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
+  const compactionRuntimeRunId = eventType === "context_compaction_started"
+    ? snapshotActiveCompactionRuntimeId(snapshot)
+    : String(event?.data?.runtimeRunId || [...internalCompactionRuntimeIds(ctx)].at(-1) || "");
   if (eventType === "model_started") await projectAgentModelStarted(ctx, projectionEvent);
   else if (eventType === "model_completed") projectAgentModelCompleted(ctx, projectionEvent);
   else if (eventType === "model_recovery") projectAgentModelRecovery(ctx, projectionEvent);
   else if (eventType === "tool_started") projectAgentToolStarted(ctx, projectionEvent);
   else if (eventType === "tool_completed") projectAgentToolCompleted(ctx, projectionEvent);
   else if (eventType === "context_compaction_started") {
-    projectAgentContextCompaction(ctx, event, "running");
+    projectAgentContextCompaction(ctx, event, "running", compactionRuntimeRunId);
   } else if (eventType === "context_compaction_completed") {
-    projectAgentContextCompaction(ctx, event, "completed");
+    projectAgentContextCompaction(ctx, event, "completed", compactionRuntimeRunId);
   } else if (eventType === "context_compaction_failed") {
-    projectAgentContextCompaction(ctx, event, "failed");
+    projectAgentContextCompaction(ctx, event, "failed", compactionRuntimeRunId);
   }
 
   if (projectionObserved) completeAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
@@ -9018,9 +9233,15 @@ async function projectAgentEvent(ctx, event) {
     || eventType.startsWith("authorization_")
     ? "tools"
     : "model";
+  const compactionCheckpoint = eventType === "context_compaction_started"
+    ? { internalCompactionRuntimeRunId: compactionRuntimeRunId }
+    : (["context_compaction_completed", "context_compaction_failed"].includes(eventType)
+      ? { internalCompactionRuntimeRunId: "" }
+      : {});
   await persistRunCheckpoint(ctx, "running", phase, {
     agentEventCursor: ctx.agentEventCursor,
     runtimeRunId: ctx.runtimeRunId || "",
+    ...compactionCheckpoint,
   });
   if (internalToolEvent && eventType === "tool_completed") {
     await goalFeature?.refresh(ctx.sessionId, { quiet: true });
@@ -9269,6 +9490,13 @@ async function runServerAgentLoop(ctx) {
   const keys = getFallbackKeys(ctx.model || getSelectedModel());
   if (!ctx.agentRunId) {
     const prepared = await buildModelRequestPayload(ctx, true, serverTools);
+    const contextResolution = ctx.contextResolution || getModelContextResolution(
+      ctx.model || getSelectedModel(),
+      ctx.maxTokens || getEffectiveMaxTokens(ctx.model || getSelectedModel()),
+    );
+    if (contextResolution.inputBudgetInsufficient) {
+      throw new Error(t("contextBudgetInsufficient"));
+    }
     const created = await agentRuntime.createAgentRun({
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
@@ -9281,7 +9509,9 @@ async function runServerAgentLoop(ctx) {
       permissionProfile: ctx.permissionProfile || "read",
       runKind: "foreground",
       cwd: ctx.cwd || "",
-      contextLimit: getModelContextLimit(ctx.model || getSelectedModel()),
+      contextLimit: contextResolution.contextLimit,
+      contextWindowTokens: contextResolution.contextWindowTokens,
+      contextBudgetTokens: contextResolution.contextBudgetTokens,
       signal: ctx.run.abortController.signal,
     });
     ctx.agentRunId = String(created.agentRunId || "");
@@ -9320,7 +9550,7 @@ async function runServerAgentLoop(ctx) {
       agentRunId: ctx.agentRunId,
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
-      onEvent: (event) => projectAgentEvent(ctx, event),
+      onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot),
       onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot),
       onReconnect({ attempt, nextRetryAt, error }) {
         ctx.run.recovery = {
@@ -10545,6 +10775,7 @@ function setSelectedModel(modelId) {
     opt.classList.toggle("selected", opt.dataset.model === modelId);
 
   });
+  if (els.contextBudgetStatus) updateContextBudgetStatus();
 
 }
 
@@ -10602,7 +10833,170 @@ function setPermLevel(value) {
 
 
 
-function saveLocalSettings() {
+function parseContextBudgetInput(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.toLowerCase() === "auto") return { valid: true, tokens: null };
+  const match = raw.match(/^(\d+)\s*([km])?$/i);
+  if (!match) return { valid: false, tokens: null };
+  const multiplier = match[2]?.toLowerCase() === "m"
+    ? 1_000_000
+    : (match[2] ? 1_000 : 1);
+  const tokens = Number(match[1]) * multiplier;
+  if (!Number.isSafeInteger(tokens)) return { valid: false, tokens: null };
+  return { valid: true, tokens };
+}
+
+function formatContextBudgetInput(tokens) {
+  if (tokens == null) return "";
+  const value = Number(tokens);
+  if (value % 1_000_000 === 0) return `${value / 1_000_000}m`;
+  if (value % 1_000 === 0) return `${value / 1_000}k`;
+  return String(value);
+}
+
+function minimumContextBudgetForMaxTokens(maxTokens) {
+  const output = Math.max(0, Math.trunc(Number(maxTokens) || 0));
+  const feasible = (limit) => (
+    limit - output - Math.max(4096, Math.floor(limit * 0.05)) >= 1024
+  );
+  if (!feasible(2_000_000)) return null;
+  let low = 1024;
+  let high = 2_000_000;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (feasible(middle)) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
+function resolveContextBudgetInput(value, options = {}) {
+  const raw = String(value ?? "").trim();
+  const parsed = parseContextBudgetInput(raw);
+  if (!parsed.valid) {
+    return {
+      valid: false,
+      tokens: null,
+      storageValue: null,
+      displayValue: "",
+      statusKey: "contextBudgetInvalidFormat",
+      statusParams: {},
+      tone: "error",
+      insufficient: false,
+      adjusted: false,
+      aboveEstimate: false,
+    };
+  }
+  const capability = Math.max(1024, Math.min(
+    2_000_000,
+    Math.trunc(Number(options.contextWindowTokens) || 128000),
+  ));
+  const hard = options.contextWindowHard === true;
+  const minimum = minimumContextBudgetForMaxTokens(options.maxTokens);
+  let tokens = parsed.valid ? parsed.tokens : null;
+  let adjusted = !parsed.valid;
+
+  if (tokens != null) {
+    const bounded = Math.max(1024, Math.min(2_000_000, tokens));
+    adjusted ||= bounded !== tokens;
+    tokens = bounded;
+    if (hard && tokens > capability) {
+      tokens = capability;
+      adjusted = true;
+    }
+  }
+
+  const effective = tokens == null ? capability : tokens;
+  const insufficient = minimum == null || effective < minimum && (
+    tokens == null || hard && capability < minimum
+  );
+  if (!insufficient && tokens != null && tokens < minimum) {
+    tokens = minimum;
+    adjusted = true;
+  }
+
+  const displayValue = formatContextBudgetInput(tokens);
+  if (
+    options.reportFormatAdjustment === true
+    && parsed.valid
+    && raw
+    && raw.toLowerCase() !== displayValue
+  ) adjusted = true;
+  const aboveEstimate = tokens != null && !hard && tokens > capability;
+  return {
+    valid: true,
+    tokens,
+    storageValue: tokens == null ? "auto" : String(tokens),
+    displayValue,
+    statusKey: insufficient
+      ? "contextBudgetInsufficient"
+      : (adjusted
+        ? "contextBudgetAdjusted"
+        : (aboveEstimate ? "contextBudgetEstimateWarning" : "")),
+    statusParams: adjusted
+      ? { value: displayValue || options.autoLabel || "Auto" }
+      : {},
+    tone: insufficient ? "error" : (adjusted || aboveEstimate ? "warning" : ""),
+    insufficient,
+    adjusted,
+    aboveEstimate,
+  };
+}
+
+function renderContextBudgetStatus(result) {
+  const text = result.statusKey ? t(result.statusKey, result.statusParams) : "";
+  for (const element of [
+    els.contextBudgetStatus,
+    document.getElementById("settingsContextBudgetStatus"),
+  ]) {
+    if (!element) continue;
+    element.textContent = text;
+    element.hidden = !text;
+    if (result.tone) element.dataset.tone = result.tone;
+    else delete element.dataset.tone;
+  }
+}
+
+function normalizeContextBudgetSetting({ reportFormatAdjustment = false } = {}) {
+  const model = getSelectedModel();
+  const maxTokens = getEffectiveMaxTokens(model);
+  const capability = getModelContextResolution(model, maxTokens);
+  const result = resolveContextBudgetInput(els.contextBudget.value, {
+    contextWindowTokens: capability.contextWindowTokens,
+    contextWindowHard: capability.contextWindowHard,
+    maxTokens,
+    reportFormatAdjustment,
+    autoLabel: t("auto"),
+  });
+  if (!result.valid) {
+    const storedValue = localStorage.getItem(CONTEXT_BUDGET_KEY) || "auto";
+    let fallback = resolveContextBudgetInput(storedValue, {
+      contextWindowTokens: capability.contextWindowTokens,
+      contextWindowHard: capability.contextWindowHard,
+      maxTokens,
+      autoLabel: t("auto"),
+    });
+    if (!fallback.valid) {
+      fallback = resolveContextBudgetInput("", {
+        contextWindowTokens: capability.contextWindowTokens,
+        contextWindowHard: capability.contextWindowHard,
+        maxTokens,
+        autoLabel: t("auto"),
+      });
+    }
+    els.contextBudget.value = fallback.displayValue;
+    setContextBudgetTokens(fallback.tokens == null ? "auto" : fallback.tokens);
+    renderContextBudgetStatus(result);
+    return { ...fallback, valid: false, statusKey: result.statusKey, tone: result.tone };
+  }
+  els.contextBudget.value = result.displayValue;
+  localStorage.setItem(CONTEXT_BUDGET_KEY, result.storageValue);
+  setContextBudgetTokens(result.tokens == null ? "auto" : result.tokens);
+  renderContextBudgetStatus(result);
+  return result;
+}
+
+function saveLocalSettings(options = {}) {
   els.baseUrl.value = WORKBAR_URL;
   localStorage.removeItem("code-base-url");
   localStorage.removeItem("code-platform-url");
@@ -10612,6 +11006,9 @@ function saveLocalSettings() {
   localStorage.setItem("code-temperature", els.temperature.value);
 
   localStorage.setItem("code-max-tokens", els.maxTokens.value);
+  normalizeContextBudgetSetting({
+    reportFormatAdjustment: options.contextBudgetReportAdjustment === true,
+  });
 
   localStorage.setItem("code-thinking", getThinkingLevel());
 
@@ -11024,9 +11421,18 @@ document.addEventListener("click", (e) => {
 
 
 
-els.temperature.addEventListener("change", saveLocalSettings);
+els.temperature.addEventListener("change", () => saveLocalSettings());
 
-els.maxTokens.addEventListener("change", saveLocalSettings);
+els.maxTokens.addEventListener("change", () => {
+  saveLocalSettings();
+});
+els.contextBudget.addEventListener("change", () => {
+  saveLocalSettings({ contextBudgetReportAdjustment: true });
+});
+
+function updateContextBudgetStatus() {
+  return normalizeContextBudgetSetting();
+}
 
 
 
@@ -12383,6 +12789,9 @@ async function init() {
   const savedMax = localStorage.getItem("code-max-tokens") || "auto";
 
   els.maxTokens.value = savedMax;
+  const savedContextBudget = localStorage.getItem(CONTEXT_BUDGET_KEY) || "auto";
+  els.contextBudget.value = savedContextBudget === "auto" ? "" : savedContextBudget;
+  normalizeContextBudgetSetting();
 
   setThinkingLevel(localStorage.getItem("code-thinking") || "auto");
 

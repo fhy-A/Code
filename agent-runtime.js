@@ -249,6 +249,8 @@
     runKind = "internal",
     cwd = "",
     contextLimit,
+    contextWindowTokens,
+    contextBudgetTokens,
     signal,
   }) {
     return apiJson("/api/agent/runs", {
@@ -267,6 +269,8 @@
         runKind,
         cwd,
         contextLimit,
+        contextWindowTokens,
+        contextBudgetTokens,
       }),
       signal,
     });

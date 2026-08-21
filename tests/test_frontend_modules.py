@@ -377,6 +377,9 @@ function agentEventMeta(ctx, event, type) {{
         self.assertIn("const streamPromise = _callModelOnceAttempt", attachment_source)
 
     def test_runtime_assistant_is_revived_only_for_authoritative_active_owner(self):
+        internal_start = APP_SOURCE.index("function internalCompactionRuntimeIds")
+        internal_end = APP_SOURCE.index("function releaseAttachedImagePreview", internal_start)
+        internal_source = APP_SOURCE[internal_start:internal_end]
         attachment_start = APP_SOURCE.index("function rebindRecoveredRuntimeAssistant")
         attachment_end = APP_SOURCE.index("async function projectAgentModelStarted", attachment_start)
         attachment_source = APP_SOURCE[attachment_start:attachment_end]
@@ -401,6 +404,7 @@ function persistRunCheckpoint() {{ return Promise.resolve(); }}
 async function _callModelOnceAttempt(index, nativeTools, ctx) {{
   streamCalls.push({{index, nativeTools, agentRunId: ctx.agentRunId, runtimeRunId: ctx.runtimeRunId}});
 }}
+{internal_source}
 {attachment_source}
 function makeContext(activeRuntimeRunId) {{
   const assistant = {{
@@ -1736,7 +1740,7 @@ eval(source);
             "await buildModelRequestPayload(ctx, true, serverTools)",
             "await agentRuntime.createAgentRun",
             "await persistRunCheckpoint(ctx, \"running\", \"model\"",
-            "onEvent: (event) => projectAgentEvent(ctx, event)",
+            "onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot)",
             "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
             "ctx.run.recovery = {",
             "ctx.run.agentEventCursor = ctx.agentEventCursor",
@@ -1804,7 +1808,10 @@ eval(source);
             background,
         )
         self.assertIn("archiveAgentProjectionShadow(subCtx)", background)
-        self.assertIn("onEvent: (event) => projectAgentEvent(ctx, event)", foreground)
+        self.assertIn(
+            "onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot)",
+            foreground,
+        )
         self.assertIn(
             "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
             foreground,
@@ -2754,6 +2761,17 @@ global.window = {{}};
 eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
 eval({json.dumps(COMPACTION_SOURCE)});
 const compaction = window.Code.agent.compaction;
+compaction.setModelContextCatalog([
+  {{id:"claude-4.5-sonnet",contextWindowTokens:200000}},
+  {{id:"claude_4.6_opus",contextWindowTokens:1000000}},
+  {{id:"claude-5.0-sonnet",contextWindowTokens:1000000}},
+  {{id:"gpt-4.1",contextWindowTokens:1000000}},
+  {{id:"gpt-5.2-codex",contextWindowTokens:1000000}},
+  {{id:"gpt-5.1-codex",contextWindowTokens:128000}},
+  {{id:"deepseek-v4",contextWindowTokens:1000000}},
+  {{id:"deepseek-v3",contextWindowTokens:128000}},
+  {{id:"gemini-2.5-pro",contextWindowTokens:1000000}},
+]);
 const messages = [
   {{role: "user", content: "old"}},
   {{role: "assistant", content: "summary-1", meta: {{kind: "compact-summary"}}}},
@@ -2814,6 +2832,216 @@ process.stdout.write(JSON.stringify({{
             "gemini-2.5-pro": 1000000,
             "unknown": 128000,
         })
+
+    def test_context_budget_single_input_normalization_and_safety(self):
+        script = f"""
+global.window = {{}};
+eval({json.dumps((ROOT / "src" / "core" / "namespace.js").read_text(encoding="utf-8"))});
+eval({json.dumps(COMPACTION_SOURCE)});
+const c = window.Code.agent.compaction;
+c.setModelContextCatalog([{{id:"hard-model",contextWindowTokens:200000,contextWindowSource:"metadata",contextWindowHard:true}}]);
+c.setContextBudgetTokens(400000);
+const hard = c.getModelContextResolution("hard-model", 16000);
+const estimated = c.getModelContextResolution("unknown-model", 16000);
+c.setModelContextCatalog([
+  {{id:"mixed-estimated",contextWindowTokens:1000000,contextWindowSource:"metadata",contextWindowHard:true}},
+  {{id:"mixed-estimated",contextWindowTokens:128000,contextWindowSource:"unknown",contextWindowHard:false}},
+  {{id:"mixed-hard",contextWindowTokens:200000,contextWindowSource:"metadata",contextWindowHard:true}},
+  {{id:"mixed-hard",contextWindowTokens:1000000,contextWindowSource:"family",contextWindowHard:false}},
+]);
+const mixedEstimated = c.getModelContextResolution("mixed-estimated", 16000);
+const mixedHard = c.getModelContextResolution("mixed-hard", 16000);
+c.setContextBudgetTokens(4096);
+const insufficient = c.getModelContextResolution("unknown-model", 2048);
+process.stdout.write(JSON.stringify({{hard, estimated, mixedEstimated, mixedHard, insufficient}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, check=True,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["hard"]["contextLimit"], 200000)
+        self.assertTrue(data["hard"]["budgetClamped"])
+        self.assertEqual(data["estimated"]["contextLimit"], 400000)
+        self.assertTrue(data["estimated"]["budgetAboveEstimate"])
+        self.assertEqual(data["estimated"]["contextWindowSource"], "unknown")
+        self.assertEqual(data["mixedEstimated"]["contextLimit"], 400000)
+        self.assertFalse(data["mixedEstimated"]["contextWindowHard"])
+        self.assertEqual(data["mixedHard"]["contextLimit"], 200000)
+        self.assertTrue(data["mixedHard"]["contextWindowHard"])
+        self.assertTrue(data["insufficient"]["inputBudgetInsufficient"])
+        helper_start = APP_SOURCE.index("function parseContextBudgetInput(")
+        helper_end = APP_SOURCE.index("function renderContextBudgetStatus(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        parser_script = f"""
+eval({json.dumps(helper_source)});
+const cases = {{
+  blank: resolveContextBudgetInput("", {{contextWindowTokens:128000,maxTokens:4096}}),
+  legacyAuto: resolveContextBudgetInput("auto", {{contextWindowTokens:128000,maxTokens:4096}}),
+  legacyNumber: resolveContextBudgetInput("400000", {{contextWindowTokens:128000,maxTokens:4096}}),
+  suffixK: resolveContextBudgetInput("128K", {{contextWindowTokens:128000,maxTokens:4096,reportFormatAdjustment:true}}),
+  suffixM: resolveContextBudgetInput("1m", {{contextWindowTokens:128000,maxTokens:4096}}),
+  low: resolveContextBudgetInput("1", {{contextWindowTokens:128000,maxTokens:4096}}),
+  high: resolveContextBudgetInput("3M", {{contextWindowTokens:128000,maxTokens:4096}}),
+  hard: resolveContextBudgetInput("400k", {{contextWindowTokens:200000,contextWindowHard:true,maxTokens:4096}}),
+  estimated: resolveContextBudgetInput("400k", {{contextWindowTokens:128000,maxTokens:4096}}),
+  impossible: resolveContextBudgetInput("", {{contextWindowTokens:4096,contextWindowHard:true,maxTokens:16384}}),
+  invalid: resolveContextBudgetInput("12.5k", {{contextWindowTokens:128000,maxTokens:4096,autoLabel:"Auto"}}),
+  negative: resolveContextBudgetInput("-1", {{contextWindowTokens:128000,maxTokens:4096}}),
+  unit: resolveContextBudgetInput("12g", {{contextWindowTokens:128000,maxTokens:4096}}),
+  text: resolveContextBudgetInput("hello", {{contextWindowTokens:128000,maxTokens:4096}}),
+  oldBinary: resolveContextBudgetInput("65536", {{contextWindowTokens:128000,maxTokens:4096}}),
+}};
+process.stdout.write(JSON.stringify(cases));
+"""
+        parser_completed = subprocess.run(
+            ["node", "-e", parser_script], cwd=ROOT, check=True,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        cases = json.loads(parser_completed.stdout)
+        self.assertEqual(cases["blank"]["storageValue"], "auto")
+        self.assertEqual(cases["blank"]["displayValue"], "")
+        self.assertEqual(cases["legacyAuto"]["storageValue"], "auto")
+        self.assertEqual(cases["legacyNumber"]["displayValue"], "400k")
+        self.assertEqual(cases["legacyNumber"]["storageValue"], "400000")
+        self.assertEqual(cases["suffixK"]["tokens"], 128000)
+        self.assertEqual(cases["suffixM"]["tokens"], 1000000)
+        self.assertEqual(cases["low"]["tokens"], 9216)
+        self.assertEqual(cases["high"]["tokens"], 2000000)
+        self.assertEqual(cases["hard"]["tokens"], 200000)
+        self.assertEqual(cases["hard"]["statusKey"], "contextBudgetAdjusted")
+        self.assertTrue(cases["estimated"]["aboveEstimate"])
+        self.assertEqual(cases["estimated"]["statusKey"], "contextBudgetEstimateWarning")
+        self.assertTrue(cases["impossible"]["insufficient"])
+        for invalid in ("invalid", "negative", "unit", "text"):
+            self.assertFalse(cases[invalid]["valid"])
+            self.assertIsNone(cases[invalid]["storageValue"])
+            self.assertEqual(cases[invalid]["statusKey"], "contextBudgetInvalidFormat")
+        self.assertEqual(cases["oldBinary"]["displayValue"], "65536")
+        wrapper_end = APP_SOURCE.index("function saveLocalSettings(", helper_start)
+        wrapper_source = APP_SOURCE[helper_start:wrapper_end]
+        wrapper_script = f"""
+const CONTEXT_BUDGET_KEY = "code-context-budget";
+const values = new Map([[CONTEXT_BUDGET_KEY, "400000"]]);
+const writes = [];
+const localStorage = {{
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => {{ values.set(key, String(value)); writes.push([key, String(value)]); }},
+}};
+const els = {{contextBudget: {{value: "12g"}}, contextBudgetStatus: {{textContent:"", hidden:true, dataset:{{}}}}}};
+const document = {{getElementById: () => null}};
+const getSelectedModel = () => "unknown-model";
+const getEffectiveMaxTokens = () => 4096;
+const getModelContextResolution = () => ({{contextWindowTokens:128000,contextWindowHard:false}});
+let selectedBudget = null;
+const setContextBudgetTokens = (value) => {{ selectedBudget = value; }};
+const t = (key) => key === "contextBudgetInvalidFormat" ? "Invalid format" : key;
+eval({json.dumps(wrapper_source + '''
+const numericResult = normalizeContextBudgetSetting({reportFormatAdjustment:true});
+globalThis.__invalidFallback = {
+  numeric: {
+    result: numericResult,
+    value: els.contextBudget.value,
+    stored: values.get(CONTEXT_BUDGET_KEY),
+    writes: [...writes],
+    selectedBudget,
+    status: {...els.contextBudgetStatus, dataset: {...els.contextBudgetStatus.dataset}},
+  },
+};
+values.set(CONTEXT_BUDGET_KEY, "auto");
+writes.length = 0;
+els.contextBudget.value = "-7";
+selectedBudget = null;
+const autoResult = normalizeContextBudgetSetting({reportFormatAdjustment:true});
+globalThis.__invalidFallback.auto = {
+  result: autoResult,
+  value: els.contextBudget.value,
+  stored: values.get(CONTEXT_BUDGET_KEY),
+  writes: [...writes],
+  selectedBudget,
+};
+''')});
+process.stdout.write(JSON.stringify(globalThis.__invalidFallback));
+"""
+        wrapper_completed = subprocess.run(
+            ["node", "-e", wrapper_script], cwd=ROOT, check=True,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        fallback = json.loads(wrapper_completed.stdout)
+        self.assertFalse(fallback["numeric"]["result"]["valid"])
+        self.assertEqual(fallback["numeric"]["value"], "400k")
+        self.assertEqual(fallback["numeric"]["stored"], "400000")
+        self.assertEqual(fallback["numeric"]["writes"], [])
+        self.assertEqual(fallback["numeric"]["selectedBudget"], 400000)
+        self.assertEqual(fallback["numeric"]["status"]["textContent"], "Invalid format")
+        self.assertFalse(fallback["numeric"]["status"]["hidden"])
+        self.assertFalse(fallback["auto"]["result"]["valid"])
+        self.assertEqual(fallback["auto"]["value"], "")
+        self.assertEqual(fallback["auto"]["stored"], "auto")
+        self.assertEqual(fallback["auto"]["writes"], [])
+        self.assertEqual(fallback["auto"]["selectedBudget"], "auto")
+        self.assertIn('id="contextBudget" type="text"', INDEX_SOURCE)
+        self.assertNotIn('id="contextBudgetCustom"', INDEX_SOURCE)
+        self.assertIn("context-settings-primary", INDEX_SOURCE)
+        self.assertIn("context-budget-field", INDEX_SOURCE)
+        self.assertIn("@media (max-width: 560px)", STYLE_SOURCE)
+        self.assertIn("settingsMaxTokens.value = els.maxTokens.value", SETTINGS_SOURCE)
+        self.assertIn('localStorage.setItem("code-max-tokens", els.maxTokens.value)', APP_SOURCE)
+        self.assertIn('const savedMax = localStorage.getItem("code-max-tokens") || "auto"', APP_SOURCE)
+        self.assertIn("els.maxTokens.value = savedMax", APP_SOURCE)
+        self.assertIn('temperature: "温度", maxTokens: "最大输出"', I18N_SOURCE)
+        self.assertIn('temperature: "Temperature", maxTokens: "Max Tokens"', I18N_SOURCE)
+        self.assertIn("contextBudgetPlaceholder", I18N_SOURCE)
+        self.assertIn("contextBudgetInvalidFormat", I18N_SOURCE)
+        self.assertIn("contextBudgetEstimateWarning", I18N_SOURCE)
+        self.assertIn("contextBudgetInsufficient", I18N_SOURCE)
+        self.assertIn("rememberFrozenSessionContextResolution(ctx.sessionId, frozen)", APP_SOURCE)
+        self.assertIn("getSessionStats(sessionId)?.contextResolution", APP_SOURCE)
+        self.assertIn("if (!ctx.isDetachedBackground && Number(snapshot?.contextLimit) > 0)", APP_SOURCE)
+        self.assertIn("inputBudgetInsufficient: Boolean(item.inputBudgetInsufficient)", APP_SOURCE)
+        self.assertIn("contextWindowTokens: Number(job.contextWindowTokens || 0)", APP_SOURCE)
+
+    def test_session_context_resolution_restores_but_frontend_does_not_persist_it(self):
+        helper_start = APP_SOURCE.index("const frozenContextResolutionBySession = new Map();")
+        helper_end = APP_SOURCE.index("const {\n  classifyModelRequestFailure", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const stats = new Map([["session-new", {{contextResolution: {{
+  contextLimit: 400000,
+  contextWindowTokens: 128000,
+  contextBudgetTokens: 400000,
+  contextWindowSource: "unknown",
+  budgetAboveEstimate: true,
+}}}}]]);
+const getSessionStats = (sessionId) => stats.get(sessionId) || {{}};
+const setSessionStats = (sessionId, value) => stats.set(sessionId, value);
+eval({json.dumps(helper_source + '''
+globalThis.__contextResult = {
+  restored: getFrozenSessionContextResolution("session-new"),
+  missing: getFrozenSessionContextResolution("session-old"),
+  remembered: rememberFrozenSessionContextResolution("session-new", {
+    contextLimit: 200000,
+    contextWindowTokens: 200000,
+    contextBudgetTokens: 200000,
+    contextWindowSource: "metadata",
+    contextWindowHard: true,
+  }),
+  persistedAfterRemember: getSessionStats("session-new").contextResolution,
+};
+''')});
+process.stdout.write(JSON.stringify(globalThis.__contextResult));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, check=True,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["restored"]["contextLimit"], 400000)
+        self.assertEqual(data["restored"]["contextWindowSource"], "unknown")
+        self.assertIsNone(data["missing"])
+        self.assertEqual(data["remembered"]["contextLimit"], 200000)
+        self.assertEqual(data["persistedAfterRemember"]["contextLimit"], 400000)
+        self.assertNotIn("stats.contextResolution =", APP_SOURCE)
 
         for function_name in (
             "getModelContextLimit",
@@ -8512,6 +8740,7 @@ const showToast = (...args) => toasts.push(args);
 const getSelectedModel = () => selectedModel;
 const setSelectedModel = (value) => {{ selectedModel = value; }};
 const getApiKeys = () => ["sk-one"];
+const setModelContextCatalog = (entries) => {{ state.contextEntries = entries; }};
 async function fetch() {{
   if (fetchMode === "failure") throw new Error("offline");
   const data = fetchMode === "empty"
@@ -8584,7 +8813,12 @@ eval({json.dumps(catalog_source)});
         self.assertEqual(data["duringStatus"], "detectingModels")
         self.assertEqual(data["first"], {"ok": True, "models": ["gpt-a", "gpt-b"]})
         self.assertEqual(data["firstMapKey"], "sk-one")
+        self.assertEqual(data["cacheAfterSuccess"]["version"], 2)
         self.assertEqual(data["cacheAfterSuccess"]["models"], ["gpt-a", "gpt-b"])
+        self.assertEqual(
+            [entry["id"] for entry in data["cacheAfterSuccess"]["entries"]],
+            ["gpt-a", "gpt-b"],
+        )
         self.assertNotIn("key", data["cacheAfterSuccess"])
         self.assertFalse(data["cacheContainsSecret"])
         self.assertEqual(data["restored"], ["gpt-a", "gpt-b"])
@@ -8603,7 +8837,7 @@ eval({json.dumps(catalog_source)});
         self.assertEqual(data["disabledKeyStatus"], "enterApiKey")
 
     def test_key_persistence_is_isolated_from_general_settings_and_syncs_across_tabs(self):
-        save_start = APP_SOURCE.index("function saveLocalSettings()")
+        save_start = APP_SOURCE.index("function saveLocalSettings(")
         save_end = APP_SOURCE.index("function handleUiSlashCommand(", save_start)
         general_save = APP_SOURCE[save_start:save_end]
         self.assertNotIn("saveKeyConfig", general_save)
@@ -11252,6 +11486,7 @@ let usageStats = {input: 120, output: 30, cache: 10, cacheWrite: 5};
 const messages = [
   {role: "user", content: "one"},
   {role: "assistant", content: "two"},
+  {role: "assistant", content: "", meta: {kind: "auto-context-compaction", skipExport: true}},
   {role: "tool-call", content: "three"},
   {role: "tool-result", content: "four", streaming: true},
 ];
@@ -11377,8 +11612,8 @@ process.stdout.write(JSON.stringify({
             "tokenCacheWrite": "5n",
             "cacheWriteHidden": False,
             "cacheWriteHiddenWhenMissing": True,
-            "tokenContext": "60%（600c / 1000c）",
-            "usageTitle": "ctx 600c/1000c",
+            "tokenContext": "60% · 1000c",
+            "usageTitle": "viewSessionInfo",
             "ringStroke": "var(--muted)",
         })
         self.assertEqual(data["systemPromptReadsWithLastUsage"], 0)
@@ -12844,6 +13079,54 @@ process.stdout.write(JSON.stringify({
             "autoCompactContextFailed",
         ):
             self.assertIn(key, I18N_SOURCE)
+        helper_start = APP_SOURCE.index("function internalCompactionRuntimeIds")
+        helper_end = APP_SOURCE.index("function releaseAttachedImagePreview", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+eval({json.dumps(helper_source)});
+const ctx = {{messages: [
+  {{role:"user",content:"task"}},
+  {{role:"assistant",content:"CONTEXT CHECKPOINT",streaming:false,meta:{{agentRuntimeRunId:"runtime-compact"}}}},
+  {{role:"assistant",content:"",meta:{{kind:"auto-context-compaction",compactionId:"compact-1"}}}},
+  {{role:"assistant",content:"PUBLIC FINAL",meta:{{agentRuntimeRunId:"runtime-final"}}}},
+]}};
+const detected = snapshotActiveCompactionRuntimeId({{
+  activeRuntimeRunId:"runtime-compact",
+  events:[{{type:"context_compaction_started",data:{{compactionId:"compact-1"}}}}],
+}});
+const closedBatch = snapshotActiveCompactionRuntimeId({{
+  activeRuntimeRunId:"runtime-final",
+  events:[
+    {{type:"context_compaction_started",data:{{compactionId:"compact-1"}}}},
+    {{type:"context_compaction_completed",data:{{compactionId:"compact-1",runtimeRunId:"runtime-compact"}}}},
+  ],
+}});
+const marked = markInternalCompactionRuntime(ctx, detected);
+const afterMark = ctx.messages.map((message) => ({{content:message.content,kind:message.meta?.kind||""}}));
+const active = internalCompactionRuntimeIds(ctx).has("runtime-compact");
+clearInternalCompactionRuntime(ctx, "runtime-compact");
+process.stdout.write(JSON.stringify({{detected,closedBatch,marked,afterMark,active,cleared:internalCompactionRuntimeIds(ctx).size}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, check=True,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["detected"], "runtime-compact")
+        self.assertEqual(data["closedBatch"], "")
+        self.assertEqual(data["marked"], "runtime-compact")
+        self.assertTrue(data["active"])
+        self.assertEqual(data["cleared"], 0)
+        self.assertNotIn("CONTEXT CHECKPOINT", [item["content"] for item in data["afterMark"]])
+        self.assertIn("PUBLIC FINAL", [item["content"] for item in data["afterMark"]])
+        self.assertIn("auto-context-compaction", [item["kind"] for item in data["afterMark"]])
+        self.assertIn("skipExport: true", APP_SOURCE)
+        self.assertIn("internalCompactionRuntimeRunId", APP_SOURCE)
+        self.assertIn("snapshotActiveCompactionRuntimeId(snapshot)", APP_SOURCE)
+        self.assertIn("removeInternalCompactionRuntimeProjection(ctx, runtimeRunId)", APP_SOURCE)
+        export_start = APP_SOURCE.index("function exportMarkdown()")
+        export_end = APP_SOURCE.index("let sidebarDragState", export_start)
+        self.assertIn("!msg?.meta?.skipExport", APP_SOURCE[export_start:export_end])
 
     def test_tool_round_finalization_is_atomic(self):
         helper_start = APP_SOURCE.index("function finalizeStreamingAssistantMessage")

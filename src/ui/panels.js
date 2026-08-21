@@ -5,7 +5,9 @@
   if (!Code?.ui) throw new Error("Code namespace must load before panels UI");
 
   function countSessionMessages(messages = []) {
-    const visible = Array.isArray(messages) ? messages.filter(Boolean) : [];
+    const visible = Array.isArray(messages) ? messages.filter((message) => (
+      Boolean(message) && message.meta?.kind !== "auto-context-compaction"
+    )) : [];
     const counts = {
       user: visible.filter((msg) => msg.role === "user").length,
       assistant: visible.filter((msg) => msg.role === "assistant").length,
@@ -76,7 +78,9 @@
     }
 
     const getContextLimit = options.getContextLimit || (() => 128000);
-    const ctxLimit = getContextLimit(options.model || "");
+    const getContextResolution = options.getContextResolution || null;
+    const resolution = options.getContextResolution?.(options.model || "") || null;
+    const ctxLimit = Number(resolution?.contextLimit || getContextLimit(options.model || ""));
     const contextPct = Math.min(100, (contextTokens / ctxLimit) * 100);
     const cacheHit =
       cacheReported && Number(input) > 0
@@ -93,6 +97,11 @@
       cacheWriteReported,
       contextTokens,
       ctxLimit,
+      contextWindowTokens: Number(resolution?.contextWindowTokens || ctxLimit),
+      contextBudgetTokens: resolution?.contextBudgetTokens ?? null,
+      contextWindowSource: String(resolution?.contextWindowSource || "unknown"),
+      budgetClamped: Boolean(resolution?.budgetClamped),
+      budgetAboveEstimate: Boolean(resolution?.budgetAboveEstimate),
       contextPct,
     };
   }
@@ -110,6 +119,7 @@
     const getSessionLastUsage = options.getSessionLastUsage || (() => null);
     const getContextMessages = options.getContextMessages || ((messages) => messages);
     const getContextLimit = options.getContextLimit || (() => 128000);
+    const getContextResolution = options.getContextResolution || null;
     const getSelectedModel = options.getSelectedModel || (() => "");
     const getMessageText = options.getMessageText || ((msg) => String(msg?.content || ""));
     const getSystemPrompt = options.getSystemPrompt || (() => "");
@@ -142,6 +152,7 @@
         getSystemPrompt,
         model: modelOverride || getSelectedModel() || "",
         getContextLimit,
+        getContextResolution,
       });
     }
 
@@ -166,10 +177,10 @@
           : `${(hit * 100).toFixed(0)}%`;
         elements.statCacheHit.title = t("statCacheHitTitle");
       }
-      elements.statContext.textContent = `${stats.contextPct.toFixed(0)}%`;
-      elements.usageStrip.title = t("usageStripTitle")
-        .replace("{current}", formatCompact(stats.contextTokens || 0))
-        .replace("{limit}", formatCompact(stats.ctxLimit || 200000));
+      const contextPercent = `${stats.contextPct.toFixed(0)}%`;
+      const contextSummary = `${contextPercent} · ${formatCompact(stats.ctxLimit || 128000)}`;
+      elements.statContext.textContent = contextPercent;
+      elements.usageStrip.title = t("viewSessionInfo");
 
       const ring = elements.ctxRingFill;
       if (ring) {
@@ -227,7 +238,7 @@
         elements.tokenCacheWrite.textContent = formatNumber(stats.cacheWrite);
       }
       elements.tokenTotal.textContent = formatNumber((stats.input || 0) + (stats.output || 0));
-      elements.tokenContext.textContent = `${stats.contextPct.toFixed(0)}%（${formatCompact(stats.contextTokens || 0)} / ${formatCompact(stats.ctxLimit || 200000)}）`;
+      elements.tokenContext.textContent = contextSummary;
       return stats;
     }
 

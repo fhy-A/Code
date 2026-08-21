@@ -1,6 +1,6 @@
 # workbar / Code 执行清单
 
-_上次更新：2026-08-20_
+_上次更新：2026-08-21_
 
 本文件是整个 workbar 项目唯一的产品级未完成事项清单；完成事实与可复核证据统一进入 [`docs/development-log/README.md`](docs/development-log/README.md) 及其日期日志。
 
@@ -111,12 +111,6 @@ _上次更新：2026-08-20_
 
 ## 可直接启动
 
-### CODE-012 · 模型上下文上限事实源
-
-- **类型 / 优先级 / 风险**：能力与配置 / P1 / STRICT
-- **下一动作**：按 [`docs/context-window-budget-development-guide.md`](docs/context-window-budget-development-guide.md) 启动阶段 A+B：统一服务端 resolver 与 metadata/cache v1→v2，再实现用户上下文预算 UI、AgentRun 冻结和三值展示；专家覆盖 C 与向下校准 D 必须另行审批，不得混入首阶段。
-- **完成定义**：128K/200K/1M、自定义别名、同模型不同渠道、缺失/错误元数据和旧 AgentRun 恢复通过；前端百分比、服务端阈值与持久化一致，新增字段可选并可回退现状。
-
 ### CODE-013 · 登录后新手指引
 
 - **类型 / 优先级 / 风险**：产品引导 / P1 / STANDARD
@@ -157,6 +151,12 @@ _上次更新：2026-08-20_
 - **depends-on**：[`WB-003`](#wb-003--渠道正式准入与持续评估)
 
 ## 待决策/调研
+
+### CODE-012 · 模型上下文上限事实源
+
+- **类型 / 优先级 / 风险**：能力与配置 / P1 / STRICT
+- **下一动作**：按 [`docs/context-window-budget-development-guide.md`](docs/context-window-budget-development-guide.md) 对剩余阶段 C/D 另行决策与调研：先明确官方能力目录/专家显式覆盖的可信来源、配置权限、冲突合并和删除回退，再定义只接受可验证 context-window 错误的向下校准证据、持久化、TTL、复核提醒与显式重置；未经新审批不实施。
+- **完成定义**：官方能力与专家覆盖有唯一可信入口、权限和回退，代表性 128K/200K/1M/2M、别名及同模型多连接冲突可解释；校准只会有证据地向下收紧，多并发取最小值，损坏/过期/重置/旧 Run 恢复 fail-closed，模糊错误不会学习或自动提高上限。
 
 ### CODE-029 · 启用自动模式的风险确认弹窗
 

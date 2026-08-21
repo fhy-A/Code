@@ -53,6 +53,7 @@
     const setLang = options.setLang || (() => {});
     const refreshModels = options.refreshModels || (async () => {});
     const saveLocalSettings = options.saveLocalSettings || (() => {});
+    const updateContextBudgetStatus = options.updateContextBudgetStatus || (() => {});
     const saveSystemPrompt = options.saveSystemPrompt || (() => {});
     const renderMemoryPanel = options.renderMemoryPanel || (() => {});
     const renderSkillsInSettings = options.renderSkillsInSettings || (() => {});
@@ -516,10 +517,11 @@
         </div>
         <div class="model-list-header"><div class="model-list-title"><span data-i18n="availableModels">${t("availableModels")}</span><span id="settingsModelCount" class="model-count-badge">${modelCount}</span></div><button id="settingsRefreshModels" class="model-refresh-btn" type="button" title="${t("detectAvailableModels")}" data-i18n-title="detectAvailableModels" aria-label="${t("detectAvailableModels")}"><svg width="15" height="15" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7a6 6 0 0111.1-3.5M13 7a6 6 0 01-11.1 3.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M12 1v3H9M2 13v-3h3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
         <div id="settingsModelList" class="model-list-display">${initialModels}</div>
-        <div class="grid-two">
+        <div class="context-settings-primary">
           <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
           <label class="field"><span data-i18n="maxTokens">${t("maxTokens")}</span><select id="settingsMaxTokens">${els.maxTokens.innerHTML}</select></label>
-        </div>`;
+        </div>
+        <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>`;
 
       byId("settingsConnectPlatform")?.addEventListener("click", () => {
         if (!getPlatformAuth()) {
@@ -533,10 +535,21 @@
         els.temperature.value = event.currentTarget.value;
         saveLocalSettings();
       });
-      byId("settingsMaxTokens")?.addEventListener("change", (event) => {
+      const settingsMaxTokens = byId("settingsMaxTokens");
+      if (settingsMaxTokens) settingsMaxTokens.value = els.maxTokens.value;
+      settingsMaxTokens?.addEventListener("change", (event) => {
         els.maxTokens.value = event.currentTarget.value;
         saveLocalSettings();
+        event.currentTarget.value = els.maxTokens.value;
       });
+      const settingsContextBudget = byId("settingsContextBudget");
+      if (settingsContextBudget) settingsContextBudget.value = els.contextBudget.value;
+      byId("settingsContextBudget")?.addEventListener("change", (event) => {
+        els.contextBudget.value = event.currentTarget.value;
+        saveLocalSettings({ contextBudgetReportAdjustment: true });
+        event.currentTarget.value = els.contextBudget.value;
+      });
+      updateContextBudgetStatus();
 
       const keyList = byId("settingsKeyList");
       bindKeyEditorEvents(keyList);

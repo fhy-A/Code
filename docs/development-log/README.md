@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-21 | `CODE-012` 模型上下文上限事实源 A+B 完成：服务端统一 resolver、可信 metadata/cache v1→v2、用户上下文预算与 Max Tokens、AgentRun 冻结/继承、Session 原子持久化及 Agent v1 可选字段闭合；自动压缩 checkpoint 保持内部并在 live/刷新中不投影，顶部仅百分比、展开显示冻结窗口。用户最终人工 PASS；前端非构建 `207/207`、Agent 压缩 `3/3`、replay `17/124/25/25/4` 通过。C 官方能力/专家覆盖与 D 向下校准仍在 `CODE-012` 待决策/调研 | [查看](2026/2026-08-21.md) |
 | 2026-08-20 | `CODE-012` 模型上下文能力与用户预算详细开发指导完成（未实施）：拆分硬能力、Code估算、用户预算、输出预留/安全余量与最终冻结值；确定服务端唯一 resolver、metadata/cache v2、normalized baseUrl+model、多 Key最小合并、旧 Run继承、只向下校准和设置页预算预设。首阶段限定 A+B，专家覆盖/校准后置；CODE-012 仍在 TODO | [查看指导](../context-window-budget-development-guide.md) · [查看日志](2026/2026-08-20.md) |
 | 2026-08-20 | `CODE-033` 复杂 Goal 用户补充后跨 AgentRun 续接验收完成：bundle/direct classic 真实 H4 覆盖 waiting_user 前后 reload、切 Session、普通消息唯一 successor、同 Session/Goal/revision/步骤/权限、单轮 usage 与成功工具不重放，并以 bundle 上游 502 证明失败保持门禁后可安全恢复。用户终端 `3 passed (33.7s)`；Session/Goal control/前端投影/AgentRun 定向 `21+12+7+5 passed`，replay `17/124/25/25/4`、frontend freshness/语法/diff 通过；仅测试与事实文档，无生产协议变化 | [查看](2026/2026-08-20.md) |
 | 2026-08-20 | `CODE-034` 跨运行时 owner lease 完成：新增 Codex/DSH 共用的 tracked Python CLI，以 worktree Git-dir 内 OS 文件锁 + 原子状态实现唯一写者；schema 绑定 runtime、审批/开发身份、stage、HEAD、relay/lease ID 与 TTL，过期只允许审计 HEAD/cached 后显式 reclaim，损坏/中断 fail-closed，history 有界且 Git status 零污染。专用 unittest `12 passed`、`verify.py quick` 六项 PASS；四份协作规则统一引用 canonical 协议，TODO 游标推进至 `CODE-034`，未启动 `CODE-033` | [查看](2026/2026-08-20.md) |

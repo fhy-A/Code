@@ -6,6 +6,11 @@ const { FIXTURE_CONTENT, startIsolatedHost } = require("./isolated-host.cjs");
 
 const { expect } = base;
 const MODEL_ID = "h4-e2e-model";
+const AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED";
+const AUTO_COMPACTION_SEED_FINAL = "H4_AUTO_COMPACTION_SEED_FINAL";
+const AUTO_COMPACTION_USER = "H4_AUTO_COMPACTION_USER";
+const AUTO_COMPACTION_CHECKPOINT = "H4_CONTEXT_CHECKPOINT_INTERNAL";
+const AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL";
 const STREAM_USER = "H4_STREAM_REFRESH_USER";
 const STREAM_ONE = "H4_STREAM_ONE";
 const STREAM_TWO = "H4_STREAM_TWO";
@@ -17148,6 +17153,204 @@ test("bundle failed Goal supplement stays gated and recovers without replay", as
     successfulTools: metricsRecovered.toolExecutions.length,
     replayedTools: 0,
   });
+});
+
+async function exerciseContextBudgetSnapshot(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).not.toHaveClass(/hidden/);
+  await page.locator("#settingsMaxTokens").selectOption("8192");
+  await expect(page.locator("#maxTokens")).toHaveValue("8192");
+  expect(await page.evaluate(() => localStorage.getItem("code-max-tokens"))).toBe("8192");
+  await page.locator("#closeSettingsPage").click();
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsMaxTokens")).toHaveValue("8192");
+  await page.locator("#closeSettingsPage").click();
+  await page.locator("#contextBudget").evaluate((element) => {
+    element.value = "400000";
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator("#contextBudget")).toHaveValue("400k");
+  await expect(page.locator("#contextBudgetStatus")).toContainText("Adjusted to 400k");
+  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("400000");
+  await page.locator("#contextBudget").evaluate((element) => {
+    element.value = "12g";
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator("#contextBudget")).toHaveValue("400k");
+  await expect(page.locator("#contextBudgetStatus")).toContainText("Invalid format");
+  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("400000");
+
+  await restoreGoalH4Connection(h4);
+  await h4.submit("H4_PLAIN_USER");
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: "H4_PLAIN_FINAL" })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  const snapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(snapshot.status).toBe(200);
+  expect(snapshot.body).toMatchObject({
+    contextLimit: 400000,
+    contextWindowTokens: 128000,
+    contextBudgetTokens: 400000,
+    contextWindowSource: "unknown",
+    contextWindowHard: false,
+    availableInputTokens: 371808,
+    compressionTriggerTokens: 360000,
+    budgetClamped: false,
+    budgetAboveEstimate: true,
+  });
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#maxTokens")).toHaveValue("8192");
+  expect(await page.evaluate(() => localStorage.getItem("code-max-tokens"))).toBe("8192");
+  await page.locator("#usageStrip").click();
+  await expect(page.locator("#statContext")).toHaveText(/^\d+%$/);
+  await expect(page.locator("#tokenContext")).toHaveText(/^\d+% · 400k$/);
+  const persisted = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(persisted.status).toBe(200);
+  expect(persisted.body?.stats?.contextResolution).toMatchObject({
+    contextLimit: 400000,
+    contextWindowTokens: 128000,
+    contextBudgetTokens: 400000,
+    contextWindowSource: "unknown",
+    budgetAboveEstimate: true,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-context-budget-snapshot`, {
+    runtime,
+    agentRunId: idHash(agentRunId),
+    sessionId: idHash(sessionId),
+    contextLimit: snapshot.body.contextLimit,
+    capability: snapshot.body.contextWindowTokens,
+    source: snapshot.body.contextWindowSource,
+    persistedAfterReload: true,
+  });
+}
+
+test("bundle context budget freezes in AgentRun and survives reload", async ({ h4 }) => {
+  await exerciseContextBudgetSnapshot(h4, "bundle");
+});
+
+test("direct classic context budget matches bundle and survives reload", async ({ h4 }) => {
+  await exerciseContextBudgetSnapshot(h4, "classic");
+});
+
+async function exerciseAutoCompactionInternalProjection(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await page.locator("#maxTokens").evaluate((element) => {
+    element.value = "1024";
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.locator("#contextBudget").evaluate((element) => {
+    element.value = "8192";
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await restoreGoalH4Connection(h4);
+
+  const seedText = AUTO_COMPACTION_SEED + " " + "x".repeat(24000);
+  await page.locator("#prompt").fill(seedText);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user").filter({ hasText: AUTO_COMPACTION_SEED })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: AUTO_COMPACTION_SEED_FINAL })).toHaveCount(1);
+
+  await page.locator("#prompt").fill(AUTO_COMPACTION_USER);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user").filter({ hasText: AUTO_COMPACTION_USER })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+  await h4.waitGate("context-compaction-after-first-delta");
+  await expect(page.locator("#messages")).not.toContainText(AUTO_COMPACTION_CHECKPOINT);
+  await expect(page.locator("[data-context-compaction]")).toHaveCount(1);
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#messages")).not.toContainText(AUTO_COMPACTION_CHECKPOINT);
+  await expect(page.locator("[data-context-compaction]")).toHaveCount(1);
+  await h4.releaseGate("context-compaction-after-first-delta");
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: AUTO_COMPACTION_FINAL })).toHaveCount(1);
+  await expect(page.locator("#messages")).not.toContainText(AUTO_COMPACTION_CHECKPOINT);
+  await expect(page.locator("[data-context-compaction]")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant")).toHaveCount(2);
+
+  const snapshots = await readObservedAgentSnapshots(h4, page);
+  const compactedRun = snapshots.find((snapshot) => (
+    Array.isArray(snapshot.compactions) && snapshot.compactions.length === 1
+  ));
+  expect(compactedRun).toBeTruthy();
+  expect(compactedRun.compactions[0].summary).toContain(AUTO_COMPACTION_CHECKPOINT);
+  expect(compactedRun.result?.content).toBe(AUTO_COMPACTION_FINAL);
+
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  let persisted = null;
+  await expect.poll(async () => {
+    persisted = await fetchProductionJson(page, "/api/sessions/" + encodeURIComponent(sessionId));
+    const messages = persisted.body?.messages || [];
+    return {
+      status: persisted.status,
+      leakedCheckpoints: messages.filter((message) => (
+        message?.role === "assistant"
+        && String(message.content || "").includes(AUTO_COMPACTION_CHECKPOINT)
+      )).length,
+      statusRows: messages.filter((message) => (
+        message?.meta?.kind === "auto-context-compaction"
+      )).length,
+    };
+  }).toEqual({ status: 200, leakedCheckpoints: 0, statusRows: 1 });
+  expect((persisted.body.messages || []).filter((message) => (
+    message?.role === "assistant"
+    && String(message.content || "").includes(AUTO_COMPACTION_CHECKPOINT)
+  ))).toEqual([]);
+  const statusMessage = (persisted.body.messages || []).find((message) => (
+    message?.meta?.kind === "auto-context-compaction"
+  ));
+  expect(statusMessage?.meta?.skipExport).toBe(true);
+
+  await page.locator("#usageStrip").click();
+  await expect(page.locator("#msgAssistant")).toHaveText("2");
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: AUTO_COMPACTION_FINAL }).locator(".response-info")).toHaveCount(1);
+
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#messages")).not.toContainText(AUTO_COMPACTION_CHECKPOINT);
+  await expect(page.locator("[data-context-compaction]")).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({ hasText: AUTO_COMPACTION_FINAL })).toHaveCount(1);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests.map((request) => request.scenario)).toEqual([
+    "context-compaction-seed",
+    "context-compaction",
+    "context-compaction-final",
+  ]);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(runtime + "-auto-compaction-internal-projection", {
+    runtime,
+    chatRequests: metrics.chatRequests.length,
+    compactions: compactedRun.compactions.length,
+    checkpointProjected: false,
+    statusRows: 1,
+    finalAnswers: 2,
+    reloadPreserved: true,
+  });
+}
+
+test("bundle auto compaction projection stays internal across reload", async ({ h4 }) => {
+  await exerciseAutoCompactionInternalProjection(h4, "bundle");
+});
+
+test("direct classic auto compaction projection matches bundle", async ({ h4 }) => {
+  await exerciseAutoCompactionInternalProjection(h4, "classic");
 });
 
 test("default bundle completes first plain-text send", async ({ h4 }) => {

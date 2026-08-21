@@ -6,6 +6,10 @@
 
   const RECENT_CONTEXT_ROUND_COUNT = 3;
   const MIN_COMPACTION_API_MESSAGES = 6;
+  const UNKNOWN_CONTEXT_LIMIT = 128000;
+  const CONTEXT_BUDGET_KEY = "code-context-budget";
+  const modelCapabilities = new Map();
+  let selectedContextBudget = null;
 
   function isCompactSummaryMessage(message) {
     return message?.meta?.kind === "compact-summary";
@@ -24,22 +28,74 @@
     return latestSummaryIndex >= 0 ? visible.slice(latestSummaryIndex) : visible;
   }
 
-  function getModelContextLimit(model) {
-    const normalized = String(model || "").toLowerCase().replace(/_/g, "-");
-    const claudeVersion = normalized.match(/claude.*?(\d+)[.-](\d+)/);
-    if (claudeVersion) {
-      const major = Number(claudeVersion[1]);
-      const minor = Number(claudeVersion[2]);
-      if (major >= 5 || (major === 4 && minor >= 6)) return 1000000;
-      return 200000;
+  function setModelContextCatalog(entries) {
+    modelCapabilities.clear();
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const id = String(entry?.id || "").trim().replace(/^models\//, "");
+      const tokens = Number(entry?.contextWindowTokens);
+      if (!id || !Number.isInteger(tokens) || tokens < 1024 || tokens > 2000000) continue;
+      const previous = modelCapabilities.get(id.toLowerCase());
+      const source = ["metadata", "family", "unknown"].includes(entry.contextWindowSource)
+        ? entry.contextWindowSource
+        : "unknown";
+      let normalized = {
+        contextWindowTokens: tokens,
+        contextWindowSource: source,
+        contextWindowHard: Boolean(entry.contextWindowHard),
+      };
+      if (previous && previous.contextWindowTokens < tokens) {
+        normalized = previous;
+      } else if (
+        previous
+        && previous.contextWindowTokens === tokens
+        && previous.contextWindowHard
+      ) {
+        normalized.contextWindowHard = true;
+        normalized.contextWindowSource = "metadata";
+      }
+      modelCapabilities.set(id.toLowerCase(), normalized);
     }
-    if (/claude|opus|sonnet|haiku/i.test(normalized)) return 200000;
-    if (/gpt-4\.1|gpt-5[.-][2-9]/i.test(normalized)) return 1000000;
-    if (/gpt|o1|o3|o4|openai/i.test(normalized)) return 128000;
-    if (/deepseek.*v4/i.test(normalized)) return 1000000;
-    if (/deepseek/i.test(normalized)) return 128000;
-    if (/gemini/i.test(normalized)) return 1000000;
-    return 128000;
+  }
+
+  function setContextBudgetTokens(value) {
+    const tokens = Number(value);
+    selectedContextBudget = value == null || value === "auto"
+      ? null
+      : (Number.isInteger(tokens) && tokens >= 1024 && tokens <= 2000000 ? tokens : null);
+    return selectedContextBudget;
+  }
+
+  function getContextBudgetTokens() { return selectedContextBudget; }
+
+  function getModelContextResolution(model, maxTokens = 4096) {
+    const capability = modelCapabilities.get(String(model || "").toLowerCase()) || {
+      contextWindowTokens: UNKNOWN_CONTEXT_LIMIT,
+      contextWindowSource: "unknown",
+      contextWindowHard: false,
+    };
+    const budget = getContextBudgetTokens();
+    let contextLimit = budget == null ? capability.contextWindowTokens : budget;
+    const budgetClamped = capability.contextWindowHard && contextLimit > capability.contextWindowTokens;
+    const budgetAboveEstimate = !capability.contextWindowHard && contextLimit > capability.contextWindowTokens;
+    if (budgetClamped) contextLimit = capability.contextWindowTokens;
+    const safetyMarginTokens = Math.max(4096, Math.floor(contextLimit * 0.05));
+    const rawAvailableInputTokens = contextLimit - Number(maxTokens || 0) - safetyMarginTokens;
+    const availableInputTokens = Math.max(1024, rawAvailableInputTokens);
+    return {
+      ...capability,
+      contextBudgetTokens: budget,
+      contextLimit,
+      safetyMarginTokens,
+      availableInputTokens,
+      compressionTriggerTokens: Math.min(Math.floor(contextLimit * 0.9), availableInputTokens),
+      inputBudgetInsufficient: rawAvailableInputTokens < 1024,
+      budgetClamped,
+      budgetAboveEstimate,
+    };
+  }
+
+  function getModelContextLimit(model) {
+    return getModelContextResolution(model).contextLimit;
   }
 
   function serverKeepCount(messageCount) {
@@ -200,9 +256,14 @@
     RECENT_CONTEXT_ROUND_COUNT,
     buildManualCompactionPlan,
     createCompactSummaryMessage,
+    CONTEXT_BUDGET_KEY,
+    getContextBudgetTokens,
     getModelContextLimit,
+    getModelContextResolution,
     getModelContextMessages,
     isCompactSummaryMessage,
     serverKeepCount,
+    setContextBudgetTokens,
+    setModelContextCatalog,
   });
 })(window);

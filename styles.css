@@ -3175,6 +3175,18 @@ input:focus, select:focus, textarea:focus {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.context-settings-primary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.context-budget-field { width: 100%; }
+.field-hint { color:var(--muted); line-height:1.35; margin-top:4px; }
+.field-hint[data-tone="warning"] { color:var(--yellow); }
+.field-hint[data-tone="error"] { color:var(--red); }
+@media (max-width: 560px) {
+  .context-settings-primary { grid-template-columns:minmax(0,1fr); }
+}
 
 .checkline {
   display: flex;

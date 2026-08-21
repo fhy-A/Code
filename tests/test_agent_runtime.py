@@ -574,6 +574,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         }), encoding="utf-8")
         self.patchers = [
             mock.patch.object(server_mod, "DATA_DIR", self.data_dir),
+            mock.patch.object(server_mod, "SESSIONS_DIR", self.data_dir / "sessions"),
             mock.patch.object(server_mod, "CONFIG_PATH", self.config_path),
             mock.patch.object(server_mod, "FILE_BACKUP_DIR", self.data_dir / "file-backups"),
             mock.patch.object(server_mod, "SKILLS_DIR", self.data_dir / "skills"),
@@ -585,6 +586,8 @@ class TestDurableAgentRuntime(unittest.TestCase):
             server_mod._agent_runs.clear()
         with server_mod._model_runtime_lock:
             server_mod._model_runtime_runs.clear()
+        with server_mod.context_window._catalog_lock:
+            server_mod.context_window._catalog.clear()
         _AgentUpstream.calls = 0
         _AgentUpstream.payloads = []
         _AgentUpstream.authorizations = []
@@ -1015,7 +1018,12 @@ class TestDurableAgentRuntime(unittest.TestCase):
         )
         record = server_mod._agent_run_record(run)
         record["version"] = 2
-        record.pop("contextLimit")
+        for field in (
+            "contextLimit", "contextWindowTokens", "contextBudgetTokens",
+            "contextWindowSource", "contextWindowHard", "availableInputTokens",
+            "compressionTriggerTokens", "budgetClamped", "budgetAboveEstimate",
+        ):
+            record.pop(field, None)
         record.pop("contextRecoveryRound")
         record.pop("compactions")
 
@@ -1024,6 +1032,182 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(restored["context_limit"], 1_000_000)
         self.assertEqual(restored["context_recovery_round"], 0)
         self.assertEqual(restored["compactions"], [])
+
+    def test_server_context_resolution_is_authoritative_and_rejects_no_input_room(self):
+        server_mod.context_window.normalize_catalog(self.base_url, [{
+            "id": "hard-model",
+            "contextWindowTokens": 200000,
+        }])
+        run = server_mod._create_agent_run(
+            "hard-context-session",
+            {
+                "model": "hard-model",
+                "max_tokens": 16000,
+                "messages": [{"role": "user", "content": "hard limit"}],
+            },
+            self.base_url,
+            [],
+            context_limit=1000000,
+            context_budget_tokens=1000000,
+            start_worker=False,
+        )
+        self.assertEqual(run["context_limit"], 200000)
+        self.assertEqual(run["context_window_tokens"], 200000)
+        self.assertEqual(run["context_window_source"], "metadata")
+        self.assertTrue(run["context_window_hard"])
+        self.assertTrue(run["budget_clamped"])
+        self.assertEqual(run["available_input_tokens"], 174000)
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        for field in (
+            "context_limit", "context_window_tokens", "context_budget_tokens",
+            "context_window_source", "context_window_hard", "available_input_tokens",
+            "compression_trigger_tokens", "budget_clamped", "budget_above_estimate",
+        ):
+            self.assertEqual(restored[field], run[field])
+
+        with self.assertRaisesRegex(ValueError, "leave at least 1024 input tokens"):
+            server_mod._create_agent_run(
+                "small-context-session",
+                {
+                    "model": "unknown-model",
+                    "max_tokens": 2048,
+                    "messages": [{"role": "user", "content": "too small"}],
+                },
+                self.base_url,
+                [],
+                context_limit=4096,
+                context_budget_tokens=4096,
+                start_worker=False,
+            )
+
+    def test_internal_child_snapshot_strictly_inherits_parent_context(self):
+        parent = server_mod._create_agent_run(
+            "inherited-context-session",
+            {
+                "model": "custom-model",
+                "max_tokens": 16000,
+                "messages": [{"role": "user", "content": "parent"}],
+            },
+            self.base_url,
+            [],
+            context_limit=400000,
+            context_budget_tokens=400000,
+            start_worker=False,
+        )
+        self.assertEqual(parent["context_limit"], 400000)
+        self.assertTrue(parent["budget_above_estimate"])
+
+        server_mod.context_window.normalize_catalog(self.base_url, [{
+            "id": "custom-model",
+            "contextWindowTokens": 128000,
+        }])
+        child = server_mod._create_agent_run(
+            "inherited-context-session",
+            {
+                "model": "custom-model",
+                "max_tokens": 16000,
+                "messages": [{"role": "user", "content": "child"}],
+            },
+            self.base_url,
+            [],
+            parent_run_id=parent["id"],
+            agent_depth=1,
+            inherited_context=server_mod._agent_frozen_context_resolution(parent),
+            start_worker=False,
+        )
+        for field in (
+            "context_limit", "context_window_tokens", "context_budget_tokens",
+            "context_window_source", "context_window_hard", "available_input_tokens",
+            "compression_trigger_tokens", "budget_clamped", "budget_above_estimate",
+        ):
+            self.assertEqual(child[field], parent[field])
+
+    def test_completed_foreground_context_persists_idempotently_and_monotonically(self):
+        session_id = "context-resolution-session"
+        session_file = server_mod.session_path(session_id)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        server_mod.write_json(session_file, {
+            "id": session_id,
+            "title": "Context resolution",
+            "stats": {"input": 1},
+        })
+        run = server_mod._create_agent_run(
+            session_id,
+            {
+                "model": "custom-model",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": "persist context"}],
+            },
+            self.base_url,
+            [],
+            context_limit=400000,
+            context_budget_tokens=400000,
+            run_kind="foreground",
+            start_worker=False,
+        )
+        self.assertTrue(server_mod._finish_agent_run(run, "completed"))
+        saved = server_mod.read_json(session_file, {})
+        resolution = saved["stats"]["contextResolution"]
+        self.assertEqual(resolution["contextLimit"], 400000)
+        self.assertEqual(resolution["contextWindowTokens"], 128000)
+        self.assertEqual(resolution["contextBudgetTokens"], 400000)
+        self.assertEqual(resolution["contextWindowSource"], "unknown")
+        self.assertTrue(resolution["budgetAboveEstimate"])
+        self.assertEqual(resolution["sourceAgentRunId"], run["id"])
+        self.assertEqual(resolution["sourceRunCreatedAt"], run["created_at"])
+        record = server_mod._agent_run_record(run)
+        self.assertEqual(record["runKind"], "foreground")
+        self.assertEqual(server_mod._agent_run_from_record(record)["run_kind"], "foreground")
+
+        self.assertFalse(server_mod._persist_agent_session_context_resolution(run))
+        older = {
+            **run,
+            "id": "older-context-run",
+            "created_at": "2000-01-01T00:00:00+00:00",
+            "context_limit": 64000,
+            "context_budget_tokens": 64000,
+        }
+        self.assertFalse(server_mod._persist_agent_session_context_resolution(older))
+        self.assertEqual(
+            server_mod.read_json(session_file, {})["stats"]["contextResolution"],
+            resolution,
+        )
+
+        newer = {
+            **run,
+            "id": "newer-context-run",
+            "created_at": "9999-01-01T00:00:00+00:00",
+            "context_limit": 200000,
+            "context_budget_tokens": 200000,
+            "available_input_tokens": 185904,
+            "compression_trigger_tokens": 180000,
+        }
+        self.assertTrue(server_mod._persist_agent_session_context_resolution(newer))
+        newest = server_mod.read_json(session_file, {})["stats"]["contextResolution"]
+        self.assertEqual(newest["sourceAgentRunId"], "newer-context-run")
+        self.assertEqual(newest["contextLimit"], 200000)
+        merged = server_mod._merge_session_stats(
+            {"input": 1, "contextResolution": newest},
+            {"input": 2},
+        )
+        self.assertEqual(merged["input"], 2)
+        self.assertEqual(merged["contextResolution"], newest)
+        self.assertNotIn(
+            "contextResolution",
+            server_mod._merge_session_stats({"input": 1}, {"input": 2}),
+        )
+        untrusted = server_mod._merge_session_stats({}, {
+            "contextResolution": {
+                **newest,
+                "sourceAgentRunId": "forged-run",
+                "sourceRunCreatedAt": "9999-12-31T23:59:59+00:00",
+            },
+        })["contextResolution"]
+        self.assertNotIn("sourceAgentRunId", untrusted)
+        self.assertNotIn("sourceRunCreatedAt", untrusted)
+
+        child = {**newer, "id": "child-context-run", "run_kind": "child"}
+        self.assertFalse(server_mod._persist_agent_session_context_resolution(child))
 
     def test_agent_protocol_shadow_flag_defaults_and_override(self):
         self.assertTrue(server_mod._resolve_agent_protocol_shadow_enabled(
@@ -1636,6 +1820,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
             "session-auto-compact",
             {
                 "model": "test-model",
+                "max_tokens": 1024,
                 "messages": [
                     {"role": "system", "content": "system rules"},
                     {"role": "user", "content": "older investigation"},
@@ -1647,11 +1832,15 @@ class TestDurableAgentRuntime(unittest.TestCase):
             self.base_url,
             ["agent-secret-key"],
             allowed_tools=["read_file"],
-            context_limit=2048,
+            context_limit=8192,
             start_worker=False,
         )
         initial_payload, _ = server_mod._agent_model_payload(run)
-        self.assertFalse(server_mod._agent_should_auto_compact(initial_payload, 2048))
+        self.assertFalse(server_mod._agent_should_auto_compact(
+            initial_payload,
+            run["context_limit"],
+            run["compression_trigger_tokens"],
+        ))
 
         server_mod._start_agent_worker(run)
         self._wait_terminal(run)
