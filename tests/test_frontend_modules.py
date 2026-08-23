@@ -3817,7 +3817,8 @@ process.stdout.write(JSON.stringify({
         ]
 
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
-        self.assertEqual(len(classic_scripts), 37)
+        self.assertEqual(len(classic_scripts), 38)
+        self.assertIn("./src/features/image-overlay.js", classic_scripts)
         self.assertLess(
             classic_scripts.index("./src/agent/system-prompt.js"),
             classic_scripts.index("./app.js"),
@@ -7509,6 +7510,76 @@ const feature = createFilesFeature({
         self.assertTrue(data["autoFocus"])
         self.assertTrue(data["ctrlGoUp"])
         self.assertTrue(data["listCtrlGoUp"])
+
+
+    def test_image_overlay_gallery_model_and_app_integration(self):
+        # 执行级：纯导航模型（首尾禁用策略、索引、空数组/越界降级）
+        script = r"""
+global.window = {Code: {features: {}}};
+require('./src/features/image-overlay.js');
+const {createImageOverlayModel, normalizeSources} = window.Code.features.imageOverlay;
+const out = {};
+const m = createImageOverlayModel(['a.png', 'b.png', 'c.png'], 0);
+out.count = m.count;
+out.startCurrent = m.current();
+out.canPrevStart = m.canPrev();
+out.next1 = m.next();
+out.indexAfterNext = m.index;
+out.next2 = m.next();
+out.canNextEnd = m.canNext();
+out.nextAtEnd = m.next();
+out.currentAtEnd = m.current();
+out.prev = m.prev();
+out.clampedStart = createImageOverlayModel(['x', 'y'], 99).index;
+out.negStart = createImageOverlayModel(['x', 'y'], -3).index;
+out.emptyCount = createImageOverlayModel([], 0).count;
+out.emptyCurrent = createImageOverlayModel([], 0).current();
+out.singleCount = createImageOverlayModel(['only.png'], 0).count;
+out.filtered = normalizeSources(['a', '', null, 'b', 0]).length;
+process.stdout.write(JSON.stringify(out));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["count"], 3)
+        self.assertEqual(data["startCurrent"], "a.png")
+        self.assertFalse(data["canPrevStart"])
+        self.assertEqual(data["next1"], "b.png")
+        self.assertEqual(data["indexAfterNext"], 1)
+        self.assertEqual(data["next2"], "c.png")
+        self.assertFalse(data["canNextEnd"])
+        self.assertEqual(data["nextAtEnd"], "c.png")
+        self.assertEqual(data["currentAtEnd"], "c.png")
+        self.assertEqual(data["prev"], "b.png")
+        self.assertEqual(data["clampedStart"], 1)
+        self.assertEqual(data["negStart"], 0)
+        self.assertEqual(data["emptyCount"], 0)
+        self.assertEqual(data["emptyCurrent"], "")
+        self.assertEqual(data["singleCount"], 1)
+        self.assertEqual(data["filtered"], 2)
+        # 源码级：app.js 多图渲染与键盘/点击绑定
+        self.assertIn("overlay-prev", APP_SOURCE)
+        self.assertIn("overlay-next", APP_SOURCE)
+        self.assertIn("overlay-index", APP_SOURCE)
+        self.assertIn('event.key === "ArrowLeft"', APP_SOURCE)
+        self.assertIn('event.key === "ArrowRight"', APP_SOURCE)
+        self.assertIn("createModel(options?.sources, options?.index)", APP_SOURCE)
+        self.assertIn("data-composer-image-preview data-index=", APP_SOURCE)
+        self.assertIn("state.attachedImages.map((img) => imagePreviewSource(img)).filter(Boolean)", APP_SOURCE)
+        self.assertIn("parseInt(image.dataset.index, 10)", APP_SOURCE)
+        self.assertIn("prevImage", I18N_SOURCE)
+        self.assertIn("nextImage", I18N_SOURCE)
+        self.assertIn('imagePreviewTitle: "查看原图"', I18N_SOURCE)
+        self.assertIn('imagePreviewTitle: "View original"', I18N_SOURCE)
+        self.assertIn('t("imagePreviewTitle")', APP_SOURCE)
+        self.assertNotIn('title="Image preview"', APP_SOURCE)
+        self.assertIn("overlay-nav-btn", STYLE_SOURCE)
 
     def test_image_attachment_mime_facts_cover_input_matrix(self):
         script = r"""

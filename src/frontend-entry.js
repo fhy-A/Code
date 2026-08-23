@@ -23,6 +23,7 @@ import "./features/goal.js";
 import "./features/preview.js";
 import "./features/files.js";
 import "./features/image-attachments.js";
+import "./features/image-overlay.js";
 import "./features/session-import.js";
 import "./agent/system-prompt.js";
 import "./agent/model-request.js";

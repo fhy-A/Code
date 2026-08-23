@@ -6234,6 +6234,10 @@ body.theme-dark .syn-fn { color: #61afef; }
   overflow: auto;
   backdrop-filter: blur(4px);
 }
+.overlay-nav-btn{flex:none;width:44px;height:44px;border-radius:22px;border:0;background:rgba(255,255,255,.14);color:#fff;font-size:26px;line-height:1;cursor:pointer;margin:0 12px;display:inline-flex;align-items:center;justify-content:center}
+.overlay-nav-btn:hover:not(:disabled){background:rgba(255,255,255,.26)}
+.overlay-nav-btn:disabled{opacity:.35;cursor:default}
+.overlay-index{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,.55);border-radius:999px;padding:2px 12px;font-size:13px;line-height:20px}
 
 .sr-only {
   position: absolute;

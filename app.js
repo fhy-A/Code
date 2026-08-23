@@ -2452,16 +2452,46 @@ function isDetachedFromMainContext(msg) {
   return msg.meta?.kind === "background-subagent-notify";
 }
 
-function showImageOverlay(src) {
+function showImageOverlay(src, options) {
   const old = document.getElementById("imageOverlay");
   if (old) old.remove();
   const overlay = document.createElement("div");
   overlay.id = "imageOverlay";
   overlay.className = "modal-overlay";
   overlay.style.cursor = "zoom-out";
-  overlay.innerHTML = `<img src="${escapeHtml(src)}" style="max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.5)" />`;
-  overlay.addEventListener("click", () => overlay.remove());
-  document.addEventListener("keydown", function esc(e) { if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", esc); } });
+  // Multi-image gallery mode (composer attachments): navigation via arrow
+  // buttons and keyboard Left/Right, with a current-index label. Falls back
+  // to the plain single-image overlay when the model module is unavailable
+  // or fewer than two sources are given.
+  const createModel = window.Code?.features?.imageOverlay?.createImageOverlayModel;
+  const model = typeof createModel === "function" ? createModel(options?.sources, options?.index) : null;
+  const multi = Boolean(model && model.count > 1);
+  function render() {
+    const current = multi ? model.current() : src;
+    overlay.innerHTML = (multi ? `<button class="overlay-nav-btn overlay-prev" type="button" title="${t("prevImage")}" aria-label="${t("prevImage")}" ${model.canPrev() ? "" : "disabled"}>&#8249;</button>` : "")
+      + `<img src="${escapeHtml(current)}" alt="" style="max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.5)" />`
+      + (multi ? `<button class="overlay-nav-btn overlay-next" type="button" title="${t("nextImage")}" aria-label="${t("nextImage")}" ${model.canNext() ? "" : "disabled"}>&#8250;</button>` : "")
+      + (multi ? `<span class="overlay-index">${model.index + 1}/${model.count}</span>` : "");
+  }
+  render();
+  overlay.addEventListener("click", (event) => {
+    const prevBtn = event.target.closest?.(".overlay-prev");
+    const nextBtn = event.target.closest?.(".overlay-next");
+    if (prevBtn && model?.canPrev()) { model.prev(); render(); return; }
+    if (nextBtn && model?.canNext()) { model.next(); render(); return; }
+    if (event.target === overlay) overlay.remove();
+  });
+  function onKey(event) {
+    if (event.key === "Escape") {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+    } else if (multi && event.key === "ArrowLeft" && model.canPrev()) {
+      model.prev(); render();
+    } else if (multi && event.key === "ArrowRight" && model.canNext()) {
+      model.next(); render();
+    }
+  }
+  document.addEventListener("keydown", onKey);
   document.body.appendChild(overlay);
 }
 
@@ -5296,7 +5326,7 @@ function renderImageThumbs() {
   container.innerHTML = state.attachedImages.map((img, i) => {
     const previewSrc = imagePreviewSource(img);
     const preview = previewSrc
-      ? `<img src="${escapeHtml(previewSrc)}" alt="${escapeHtml(img.name)}" data-composer-image-preview title="Image preview" style="cursor:pointer" />`
+      ? `<img src="${escapeHtml(previewSrc)}" alt="${escapeHtml(img.name)}" data-composer-image-preview data-index="${i}" title="${t("imagePreviewTitle")}" style="cursor:pointer" />`
       : "";
     const fallback = `<div${previewSrc ? " hidden" : ""} data-composer-image-fallback-wrap>${imageAttachmentCard(img.name, "composer")}</div>`;
     return `
@@ -5319,7 +5349,15 @@ function renderImageThumbs() {
   });
 
   container.querySelectorAll("[data-composer-image-preview]").forEach((image) => {
-    image.addEventListener("click", () => showImageOverlay(image.currentSrc || image.src || ""));
+    image.addEventListener("click", () => {
+      // Gallery mode: collect every current attachment source so deletion is
+      // reflected on the next open (the array is re-read on each click).
+      const sources = state.attachedImages.map((img) => imagePreviewSource(img)).filter(Boolean);
+      showImageOverlay(image.currentSrc || image.src || "", {
+        sources,
+        index: parseInt(image.dataset.index, 10) || 0,
+      });
+    });
     image.addEventListener("error", () => {
       image.hidden = true;
       const fallback = image.closest(".img-thumb")?.querySelector("[data-composer-image-fallback-wrap]");
