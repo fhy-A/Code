@@ -361,7 +361,15 @@
       }, 3000);
     }
 
-    async function loadFile(path, mtime) {
+    function scrollPreviewToLine(line) {
+      const target = els.filePreview.querySelector(`.code-line[data-line="${line}"]`);
+      if (!target) return;
+      els.filePreview.querySelector(".code-line.active-line")?.classList.remove("active-line");
+      target.classList.add("active-line");
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+
+    async function loadFile(path, mtime, options = {}) {
       void mtime;
       const data = await apiJson(`/api/file?path=${encodeURIComponent(path)}`);
       const previousPath = state.previewPath;
@@ -408,6 +416,20 @@
       }
 
       state.previewContent = data.content || "";
+      // Oversized text files open externally instead of an internal preview
+      // (routing matrix 5: over the preview character/line limits).
+      if (state.previewContent && (
+        state.previewContent.length > 350000
+        || state.previewContent.split("\n").length > 8000
+      )) {
+        try {
+          await apiJson("/api/open-file", {
+            method: "POST",
+            body: JSON.stringify({ path: state.previewPath }),
+          });
+        } catch (_) { /* keep the preview pane untouched */ }
+        return;
+      }
       if (state.previewContent) {
         if (ext === "md" || ext === "markdown" || ext === "mdown") {
           state.previewKind = "markdown";
@@ -427,6 +449,9 @@
         renderNotice(t("emptyFile"), t("noTextContent"));
       }
       els.copyPreview.disabled = false;
+      if (options.line && Number.isInteger(options.line) && options.line > 0) {
+        scrollPreviewToLine(options.line);
+      }
       startAutoRefresh();
     }
 

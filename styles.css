@@ -2072,6 +2072,48 @@ input:focus, select:focus, textarea:focus {
   margin-top: 0;
 }
 .msg-img:hover { opacity: .85; }
+/* Inline preview card for clickable image paths (answer-render B). */
+.path-image-card{display:inline-flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 10px 4px 4px;vertical-align:middle;cursor:pointer}
+.path-image-card img.path-image-thumb{width:48px;height:48px;object-fit:cover;border-radius:4px;cursor:zoom-in}
+.path-image-name{font-size:12px;line-height:18px;color:var(--accent);text-decoration:underline}
+.path-file-card{display:inline-flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px 10px 3px 6px;vertical-align:middle;cursor:pointer}
+.path-file-icon{font-size:14px;line-height:1}
+.path-file-name{font-size:12px;line-height:18px;color:var(--accent);text-decoration:underline}
+/* Admonition blocks (answer-render 1) */
+.admonition{border:1px solid var(--line);border-left-width:4px;border-radius:8px;margin:8px 0;padding:10px 14px}
+.admonition-title{font-weight:600;font-size:13px;line-height:20px;margin-bottom:4px}
+.admonition-body{font-size:13px;line-height:20px}
+.admonition-note{border-left-color:#3b82f6}.admonition-note .admonition-title{color:#3b82f6}
+.admonition-tip{border-left-color:#22c55e}.admonition-tip .admonition-title{color:#22c55e}
+.admonition-important{border-left-color:#8b5cf6}.admonition-important .admonition-title{color:#8b5cf6}
+.admonition-warning{border-left-color:#f59e0b}.admonition-warning .admonition-title{color:#f59e0b}
+.admonition-caution{border-left-color:#ef4444}.admonition-caution .admonition-title{color:#ef4444}
+/* Wide tables (answer-render 2) */
+.table-wrap{overflow-x:auto;max-width:100%;margin:8px 0}
+.table-wrap table{border-collapse:collapse;min-width:max-content;font-size:13px;line-height:20px}
+.table-wrap th,.table-wrap td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+.table-wrap thead th{font-weight:700;background:var(--panel)}
+/* External link icon (answer-render 5) */
+a.ext-link .link-ext-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-right:5px;vertical-align:-3px;line-height:0;color:var(--muted);flex:none}
+a.ext-link .link-ext-icon svg{display:block}
+/* Favicon gets a fixed near-white backing tile so dark/transparent brand
+   icons stay readable on both application themes; no brightness/contrast
+   filters. Theme signal: html[data-theme-mode] only, for the tile border. */
+.ext-favicon{width:16px;height:16px;border-radius:5px;padding:1px;border:1px solid var(--line);background:color-mix(in srgb,#fff 88%,var(--line));box-sizing:border-box;animation:sb-favicon-in .18s ease}
+@keyframes sb-favicon-in{from{opacity:0}to{opacity:1}}
+html[data-theme-mode="light"] .ext-favicon{border-color:color-mix(in srgb,var(--line) 55%,transparent)}
+/* Local file-card icons: single-color SVG (currentColor) that follows the
+   active theme; thumbnails keep a theme border for contrast. */
+.path-image-thumb{background:var(--panel);outline:1px solid var(--line)}
+.path-file-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:none;color:var(--muted);vertical-align:-2px;line-height:0}
+html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,var(--line) 80%,transparent)}
+/* Inline image loading skeleton + fallback (answer-render 7) */
+.msg-inline-img-slot{display:inline-block;vertical-align:middle;min-width:120px;min-height:90px;border-radius:8px;background:linear-gradient(100deg,var(--panel) 40%,color-mix(in srgb,var(--line) 60%,var(--panel)) 50%,var(--panel) 60%);background-size:200% 100%;animation:sb-img-shimmer 1.2s linear infinite}
+.msg-inline-img-slot[data-loaded]{background:none;min-width:0;min-height:0;animation:none}
+@keyframes sb-img-shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+.msg-inline-img-slot img{display:block;max-width:100%;max-height:260px;border-radius:8px}
+.msg-img-fallback{font-size:12px;color:var(--accent);text-decoration:underline}
+.sb-path-tooltip{position:fixed;z-index:1200;max-width:min(560px,90vw);padding:6px 10px;border-radius:6px;background:rgba(20,20,24,.92);color:#fff;font-size:12px;line-height:18px;word-break:break-all;pointer-events:none;box-shadow:0 1px 4px rgba(0,0,0,.12),0 2px 8px rgba(0,0,0,.08)}
 .message-image-preview-shell { display: inline-flex; max-width: 100%; }
 .message-image-attachment-card { width: 160px; height: 120px; }
 .bubble-img { padding: 4px !important; background: transparent !important; }

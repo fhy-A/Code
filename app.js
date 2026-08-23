@@ -1380,6 +1380,9 @@ const defaultSystemPrompt = `
 - 思考聚焦需求拆解和方案推演，不写”用户问了xxx””这是简单问题”等元描述
 - 模糊指令先确认范围；信息够就动手，不反复推理
 
+## 回答格式
+提及文件或图片路径时用行内代码包裹（如 \`src/ui/markdown.js\`）；URL 用完整 https:// 或标准 [文本](url) 链接；提醒用 GitHub 警告语法 >[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]；表格、代码块、列表用标准 Markdown。引用文件或图片路径前若不确定其存在，先 glob_files 或 list_files 确认，禁止编造不存在的路径。
+
 ## 运行环境
 Windows + PowerShell。创建目录用 mkdir 或 python os.makedirs。
 
@@ -1947,6 +1950,8 @@ function bindCopyButtons() {
 
   document.querySelectorAll(".copy-code").forEach((btn) => {
 
+    btn.textContent = t("copy");
+
     btn.addEventListener("click", async () => {
 
       const target = document.getElementById(btn.dataset.codeId);
@@ -1961,11 +1966,11 @@ function bindCopyButtons() {
 
       const ok = await copyText(text);
 
-      btn.textContent = ok ? "copied" : "failed";
+      btn.textContent = ok ? t("copied") : t("copyFailed");
 
       setTimeout(() => {
 
-        btn.textContent = "copy";
+        btn.textContent = t("copy");
 
       }, 1200);
 
@@ -2038,18 +2043,303 @@ function bindCopyButtons() {
 
 
 
+// External links show the target site's favicon inside the inline link glyph
+// slot (answer-render R014): DuckDuckGo ip3 → Google s2 → host favicon.ico;
+// a per-host in-memory cache avoids re-fetching on re-renders, and when every
+// source fails the default glyph stays (no blank gap, no placeholder arrow).
+const _faviconCache = new Map();
+function bindExtLinkFavicons() {
+  document.querySelectorAll("a.ext-link .link-ext-icon").forEach((slot) => {
+    if (slot.dataset.bound) return;
+    slot.dataset.bound = "1";
+    const link = slot.closest("a.ext-link");
+    const href = link?.getAttribute("href") || "";
+    let host = "";
+    try { host = new URL(href).hostname; } catch (_) { /* keep empty */ }
+    if (!host) return;
+    const cached = _faviconCache.get(host);
+    if (cached?.failed) return; // negative cache: keep the glyph
+    const markdownApi = window.Code?.ui?.markdown;
+    const hosts = markdownApi?.faviconHostCandidates?.(host) || [host];
+    const sources = cached?.url
+      ? [cached.url]
+      : hosts.flatMap((candidate) => [
+          `https://api.faviconkit.com/${encodeURIComponent(candidate)}/64`,
+          `https://www.google.com/s2/favicons?domain=${encodeURIComponent(candidate)}&sz=64`,
+          `https://icons.duckduckgo.com/ip3/${encodeURIComponent(candidate)}.ico`,
+          `https://${candidate}/favicon.ico`,
+        ]);
+    let attempt = 0;
+    const loadNext = () => {
+      if (attempt >= sources.length) {
+        _faviconCache.set(host, { failed: true });
+        return; // keep the default glyph, never blank
+      }
+      const img = document.createElement("img");
+      img.className = "ext-favicon";
+      img.alt = "";
+      img.addEventListener("load", () => {
+        // Some favicon services answer with a 1x1 placeholder; treat it as a
+        // miss and keep walking the chain instead of showing a blurry tile.
+        if (img.naturalWidth <= 1 || img.naturalHeight <= 1) {
+          attempt += 1;
+          loadNext();
+          return;
+        }
+        _faviconCache.set(host, { url: img.src });
+        slot.replaceChildren(img);
+      }, { once: true });
+      img.addEventListener("error", () => { attempt += 1; loadNext(); }, { once: true });
+      img.src = sources[attempt];
+    };
+    loadNext();
+  });
+}
+
+// Right-click menus for links in final answers (answer-render R009).
+function bindLinkContextMenus() {
+  const menuApi = window.Code?.features?.linkContextMenu;
+  if (!menuApi?.showLinkContextMenu) return;
+  const showPathMenu = (event, path) => {
+    event.preventDefault();
+    const projectRoot = (els.projectRoot?.value || "").replace(/[\\/\\]+$/, "");
+    const markdownApi = window.Code?.ui?.markdown;
+    const kind = markdownApi?.classifyLocalPath?.(path) || "text";
+    const outOfRoot = isOutOfRootPath(path, projectRoot);
+    const previewable = !outOfRoot && kind !== "binary";
+    const filename = String(path || "").split(/[\\/]/).pop() || "";
+    let fp = path;
+    if (!markdownApi?.isAbsolutePath?.(path)) { fp = projectRoot + "/" + fp; }
+    menuApi.showLinkContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      kind: "path",
+      pathOptions: { kind, path: fp, filename, previewable },
+      t: (key) => t(key) || key,
+      copyText: (text) => { if (text) copyText(text).then((ok) => { if (ok) showToast(t("pathCopied"), "warning"); }).catch(() => showToast(t("copyFailed"), "error")); },
+      callbacks: {
+        open: () => openReferencedPath(path, projectRoot),
+        system: () => apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => showToast(t("openFailed"), "error")),
+        reveal: () => apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp, reveal: true }) }).catch(() => showToast(t("openFailed"), "error")),
+      },
+    });
+  };
+  const showLinkMenu = (event, url) => {
+    event.preventDefault();
+    menuApi.showLinkContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      kind: "link",
+      linkOptions: { url },
+      t: (key) => t(key) || key,
+      copyText: (text) => { if (text) copyText(text).then((ok) => { if (ok) showToast(t("pathCopied"), "warning"); }).catch(() => showToast(t("copyFailed"), "error")); },
+      callbacks: {
+        openTab: (url) => { if (/^https?:\/\//i.test(url)) window.open(url, "_blank"); },
+      },
+    });
+  };
+  document.querySelectorAll(".clickable-path").forEach((el) => {
+    el.addEventListener("contextmenu", (event) => showPathMenu(event, el.dataset.path || ""));
+  });
+  document.querySelectorAll(".path-file-card, .path-image-card").forEach((el) => {
+    el.addEventListener("contextmenu", (event) => showPathMenu(event, el.title || el.getAttribute("data-path") || ""));
+  });
+  document.querySelectorAll("a.ext-link").forEach((el) => {
+    el.addEventListener("contextmenu", (event) => showLinkMenu(event, el.getAttribute("href") || ""));
+  });
+}
+
+// Custom hover tooltip: shows the complete stored text (full path / URL)
+// because the native title attribute truncates long values.
+function bindTooltips() {
+  let tip = null;
+  let tipTimer = null;
+  const hide = () => {
+    if (tipTimer !== null) { window.clearTimeout(tipTimer); tipTimer = null; }
+    if (tip) { tip.remove(); tip = null; }
+  };
+  const show = (el, text) => {
+    hide();
+    if (!text) return;
+    tip = document.createElement("div");
+    tip.className = "sb-path-tooltip";
+    tip.textContent = text;
+    document.body.appendChild(tip);
+    const rect = el.getBoundingClientRect();
+    const tipRect = tip.getBoundingClientRect();
+    let left = rect.left + rect.width / 2 - tipRect.width / 2;
+    let top = rect.bottom + 8;
+    if (left < 8) left = 8;
+    if (left + tipRect.width > window.innerWidth - 8) left = window.innerWidth - tipRect.width - 8;
+    if (top + tipRect.height > window.innerHeight - 8) top = rect.top - tipRect.height - 8;
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  };
+  const tooltipTextFor = (el) => {
+    if (!el) return "";
+    const explicit = el.getAttribute("data-tooltip");
+    if (explicit) return explicit;
+    if (el.tagName === "A" && el.classList.contains("ext-link")) {
+      return el.getAttribute("href") || "";
+    }
+    return "";
+  };
+  document.addEventListener("mouseover", (e) => {
+    const target = e.target instanceof Element ? e.target.closest("[data-tooltip], a.ext-link") : null;
+    if (!target) { hide(); return; }
+    const text = tooltipTextFor(target);
+    if (!text) { hide(); return; }
+    if (tipTimer !== null) window.clearTimeout(tipTimer);
+    tipTimer = window.setTimeout(() => show(target, text), 180);
+  });
+  document.addEventListener("mouseout", (e) => {
+    const target = e.target instanceof Element ? e.target.closest("[data-tooltip], a.ext-link") : null;
+    if (target) hide();
+  });
+  document.addEventListener("click", hide);
+}
+
+// Admonition titles come from i18n (the markdown renderer only emits the type).
+function bindAdmonitions() {
+  document.querySelectorAll(".admonition-title[data-admonition]").forEach((el) => {
+    const key = "admonition" + String(el.dataset.admonition || "").replace(/^./, (c) => c.toUpperCase());
+    const label = t(key) || key;
+    if (el.textContent !== label) el.textContent = label;
+  });
+}
+
+// Inline images degrade to a file link on load failure (no blank flash).
+function bindMessageImages() {
+  document.querySelectorAll(".msg-inline-img-slot").forEach((slot) => {
+    if (slot.dataset.bound) return;
+    slot.dataset.bound = "1";
+    const img = slot.querySelector("img");
+    if (!img) return;
+    img.addEventListener("load", () => slot.setAttribute("data-loaded", ""), { once: true });
+    img.addEventListener("error", () => {
+      const src = slot.dataset.imgSrc || img.src || "";
+      const name = slot.dataset.imgName || "file";
+      const link = document.createElement("a");
+      link.className = "msg-img-fallback";
+      link.href = src;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = name;
+      slot.replaceWith(link);
+    }, { once: true });
+  });
+}
+
 function bindClickablePaths() {
   document.querySelectorAll(".clickable-path").forEach((el) => {
+    const p = el.dataset.path;
+    if (!p) return;
+    // A: short display alias (project-relative / file name outside the root);
+    // the full path stays available on hover via a custom tooltip (native
+    // title truncates long paths, so it is kept only as an accessibility
+    // fallback while the custom overlay shows the complete text).
+    const projectRoot = (els.projectRoot?.value || "").replace(/[\\/\\]+$/, "");
+    const markdownApi = window.Code?.ui?.markdown;
+    const isAbsolute = markdownApi?.isAbsolutePath ? markdownApi.isAbsolutePath(p) : /^[A-Za-z]:[\\/\\]/.test(p);
+    if (markdownApi?.pathAlias) {
+      const alias = markdownApi.pathAlias(p, projectRoot);
+      if (alias !== el.textContent) el.textContent = alias;
+    }
+    el.setAttribute("data-tooltip", p);
+    maybeRenderFileCard(el, p, projectRoot);
     el.addEventListener("click", (e) => {
       e.stopPropagation();
-      const p = el.dataset.path;
-      if (!p) return;
-      if (/^https?:\/\//i.test(p)) { window.open(p, "_blank"); return; }
-      let fp = p;
-      if (!/^[A-Za-z]:[\\/\\]/.test(fp)) { fp = (els.projectRoot?.value || "").replace(/[\\/\\]+$/, "") + "/" + fp; }
-      loadFile(fp).catch(() => {});
+      const line = el.dataset.line ? Number(el.dataset.line) : undefined;
+      openReferencedPath(p, projectRoot, line);
     });
   });
+}
+
+// Preview-vs-external routing matrix (answer-render R008):
+// URL → new tab; image/derived/text → internal preview (with line jump);
+// binary (exe/zip/pdf/docx/media...) → external system open via /api/open-file;
+// out-of-root or unreachable → keep the text alias, never open.
+function openReferencedPath(p, projectRoot, line) {
+  if (/^https?:\/\//i.test(p)) { window.open(p, "_blank"); return; }
+  const markdownApi = window.Code?.ui?.markdown;
+  let fp = p;
+  if (!markdownApi?.isAbsolutePath?.(p)) { fp = projectRoot + "/" + fp; }
+  if (isOutOfRootPath(p, projectRoot)) return;
+  const kind = markdownApi?.classifyLocalPath?.(p) || "text";
+  if (kind === "binary") {
+    apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
+    return;
+  }
+  loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
+}
+
+// B: inline thumbnail preview card for image paths inside the project root.
+// The preview loads asynchronously (Image probe); on failure or out-of-root
+// paths the element keeps its plain text alias (no placeholder flash).
+function isOutOfRootPath(p, projectRoot) {
+  const isAbsolute = /^[A-Za-z]:[\\/\\]/.test(p) || p.startsWith("/") || p.startsWith("\\");
+  if (!isAbsolute) return false;
+  const rootNorm = projectRoot.replace(/\\/g, "/").toLowerCase();
+  const pNorm = p.replace(/\\/g, "/").toLowerCase();
+  return Boolean(rootNorm) && !pNorm.startsWith(rootNorm + "/");
+}
+
+function maybeRenderFileCard(el, p, projectRoot) {
+  const markdownApi = window.Code?.ui?.markdown;
+  if (!markdownApi?.isImagePath) return;
+  if (isOutOfRootPath(p, projectRoot)) return; // out of root: keep text alias
+  const apiUrl = `/api/file?path=${encodeURIComponent(p)}&raw=1`;
+  if (!markdownApi.isImagePath(p)) {
+    // Non-image file card: type icon + file name; click opens the file.
+    const card = document.createElement("span");
+    card.className = "path-file-card";
+    card.title = p;
+    const icon = document.createElement("span");
+    icon.className = "path-file-icon";
+    icon.setAttribute("aria-hidden", "true");
+    const fileKind = markdownApi?.classifyLocalPath?.(p) || "text";
+    const FILE_ICON_SVG = {
+      binary: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M2 3l1-1h10l1 1v10l-1 1H3l-1-1V3zm1 1v8h10V4H3zm2 2h6v1H5V6zm0 2h4v1H5V8z\"/></svg>",
+      derived: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M4 2.5v11l9-5.5-9-5.5z\"/></svg>",
+      text: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M3 1.5h6l4 4V14a.5.5 0 0 1-.5.5h-9A.5.5 0 0 1 3 14V1.5z\"/><path d=\"M9 1.5V5.5H13\"/></svg>",
+    };
+    icon.innerHTML = FILE_ICON_SVG[fileKind] || FILE_ICON_SVG.text;
+    const name = document.createElement("span");
+    name.className = "path-file-name";
+    name.textContent = el.textContent || "";
+    card.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openReferencedPath(p, projectRoot);
+    });
+    card.append(icon, name);
+    el.replaceWith(card);
+    return;
+  }
+  const probe = new Image();
+  probe.onload = () => {
+    const card = document.createElement("span");
+    card.className = "path-image-card";
+    card.title = p;
+    const img = document.createElement("img");
+    img.className = "path-image-thumb";
+    img.src = apiUrl;
+    img.alt = el.textContent || "";
+    img.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showImageOverlay(apiUrl);
+    });
+    const name = document.createElement("span");
+    name.className = "path-image-name";
+    name.textContent = el.textContent || "";
+    name.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openReferencedPath(p, projectRoot);
+    });
+    card.append(img, name);
+    el.replaceWith(card);
+  };
+  probe.onerror = () => { /* degrade: keep the text alias */ };
+  probe.src = apiUrl;
 }
 
 // ── Compact tool card labels ──
@@ -3175,8 +3465,13 @@ function renderMessages() {
   syncActiveRunBanner(state.sessionId);
 
   bindCopyButtons();
+  bindAdmonitions();
+  bindExtLinkFavicons();
+  bindTooltips();
+  bindMessageImages();
   bindMessageActions();
   bindClickablePaths();
+  bindLinkContextMenus();
   updateStatsPanel();
   renderTimeline();
   longTextDisplayController?.syncUserMessages(state.sessionId);

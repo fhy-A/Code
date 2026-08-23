@@ -4,6 +4,161 @@
   const Code = global.Code;
   if (!Code?.ui) throw new Error("Code namespace must load before markdown UI");
 
+  const LANG_LABELS = Object.freeze({
+    js: "JavaScript", javascript: "JavaScript", jsx: "JSX", ts: "TypeScript", typescript: "TypeScript",
+    tsx: "TSX", py: "Python", python: "Python", html: "HTML", css: "CSS", json: "JSON",
+    md: "Markdown", markdown: "Markdown", sh: "Shell", bash: "Bash", zsh: "Zsh",
+    yaml: "YAML", yml: "YAML", sql: "SQL", java: "Java", c: "C", cpp: "C++", "c++": "C++",
+    go: "Go", rs: "Rust", rust: "Rust", rb: "Ruby", php: "PHP", swift: "Swift",
+    kt: "Kotlin", kotlin: "Kotlin", dockerfile: "Dockerfile", toml: "TOML", ini: "INI",
+    diff: "Diff", text: "text", plaintext: "text",
+  });
+
+  function langLabel(lang) {
+    const key = String(lang || "").toLowerCase();
+    return LANG_LABELS[key] || key || "text";
+  }
+
+  const ADMONITION_TYPES = Object.freeze(["note", "tip", "important", "warning", "caution"]);
+
+  function slugify(text) {
+    const slug = String(text || "")
+      .toLowerCase().trim()
+      .replace(/[^\w\u4e00-\u9fa5]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .replace(/-{2,}/g, "-");
+    return slug || "section";
+  }
+
+  const IMAGE_PATH_EXTENSIONS = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
+
+  // Common compound public suffixes that must not be split when deriving the
+  // registrable-domain fallback chain for favicon lookups (R016).
+  const COMPOUND_SUFFIXES = Object.freeze(new Set([
+    "com.cn", "org.cn", "net.cn", "gov.cn", "edu.cn", "co.uk", "org.uk",
+    "com.hk", "com.tw", "com.au", "com.br", "com.mx", "co.jp", "co.za",
+  ]));
+
+  /**
+   * Favicon host fallback chain: exact host first, then strip leading www.
+   * and drop leftmost labels until the registrable domain (last two parts, or
+   * three parts when the last two form a compound public suffix) is reached.
+   * chat.deepseek.com → [chat.deepseek.com, deepseek.com];
+   * www.doubao.com → [www.doubao.com, doubao.com];
+   * b.baidu.com.cn → [b.baidu.com.cn, baidu.com.cn] (com.cn never split).
+   */
+  function faviconHostCandidates(host) {
+    const h = String(host || "").toLowerCase().trim().replace(/^\.+|\.+$/g, "");
+    if (!h) return [];
+    const out = [h];
+    let current = h;
+    if (current.startsWith("www.")) {
+      current = current.slice(4);
+      if (current && !out.includes(current)) out.push(current);
+    }
+    const parts = current.split(".");
+    while (parts.length > 2) {
+      parts.shift();
+      const candidate = parts.join(".");
+      if (candidate && !out.includes(candidate)) out.push(candidate);
+      if (parts.length === 3 && COMPOUND_SUFFIXES.has(parts.slice(1).join("."))) {
+        break; // registrable domain reached (protected compound suffix)
+      }
+    }
+    return out;
+  }
+
+  function isClickablePath(value) {
+    const path = String(value || "").trim();
+    return /\.\w{1,8}$/.test(path) || /^[\/\\]|[A-Za-z]:[\/\\]/.test(path);
+  }
+
+  const PREVIEW_IMAGE_EXT = Object.freeze(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"]);
+  const PREVIEW_DERIVED_EXT = Object.freeze(["tif", "tiff"]);
+  const BINARY_EXT = Object.freeze([
+    "exe", "dll", "so", "zip", "rar", "7z", "gz", "tar", "pdf",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "mp3", "mp4", "wav", "avi", "mkv", "mov", "webm", "flac",
+    "iso", "msi", "apk", "jar", "class",
+  ]);
+
+  /**
+   * Preview-vs-external routing category for a local path (answer-render R008):
+   * image → internal image preview; derived → internal derived preview;
+   * binary → external system open; text (default) → internal code/text preview.
+   */
+  function classifyLocalPath(path) {
+    const ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (PREVIEW_IMAGE_EXT.includes(ext)) return "image";
+    if (PREVIEW_DERIVED_EXT.includes(ext)) return "derived";
+    if (BINARY_EXT.includes(ext)) return "binary";
+    return "text";
+  }
+
+  /**
+   * Parse a code/file reference with an optional line suffix:
+   * `path (line 91)`, `path (91)`, `path（91）`, `path:123`. Returns
+   * { path, line } or null when the text is not a recognizable reference.
+   */
+  function parseLineRef(value) {
+    const s = String(value || "").trim();
+    if (!s) return null;
+    let path = s;
+    let line = null;
+    const paren = s.match(/^(.+?)[\s]*[（(](?:line\s*)?(\d+)[)）]$/i);
+    if (paren) {
+      path = paren[1].trim();
+      line = Number(paren[2]);
+    } else {
+      const colon = s.match(/^(.+?):(\d+)$/);
+      if (colon && /[.\\/]/.test(colon[1])) {
+        path = colon[1].trim();
+        line = Number(colon[2]);
+      }
+    }
+    if (!line || !isClickablePath(path)) return null;
+    return { path, line };
+  }
+
+  function isImagePath(path) {
+    return IMAGE_PATH_EXTENSIONS.test(String(path || ""));
+  }
+
+  /**
+   * Recognise every absolute-path shape used on Windows:
+   * drive letters (C:\\...), forward-slash drive variants (/C:/...),
+   * backslash drive variants (\\C:\\...) and UNC shares (//server/share).
+   * Everything else (relative paths, plain names) is project-scoped.
+   */
+  function isAbsolutePath(path) {
+    // Any leading slash/backslash is treated as absolute (drive letters,
+    // /C:/... variants, UNC shares and POSIX-style paths); bare relative
+    // paths never start with a separator.
+    const p = String(path || "").trim();
+    return /^[A-Za-z]:[\\/]/.test(p) || /^[\\/]/.test(p);
+  }
+
+  /**
+   * Short display alias for a clickable local path (A):
+   * - project-scoped relative path: shown as-is (already an alias);
+   * - absolute path inside the project root: shown relative to the root;
+   * - absolute path outside the project root: shown as the file name.
+   */
+  function pathAlias(path, projectRoot) {
+    const p = String(path || "").trim();
+    if (!p) return p;
+    if (!isAbsolutePath(p)) return p;
+    const root = String(projectRoot || "").replace(/[\\/]+$/, "").replace(/\\/g, "/");
+    let normalized = p.replace(/\\/g, "/");
+    // Normalize the forward-slash drive variant (/C:/... → C:/...) before
+    // comparing against the project root.
+    if (/^\/[A-Za-z]:/.test(normalized)) normalized = normalized.slice(1);
+    if (root && normalized.toLowerCase().startsWith(root.toLowerCase() + "/")) {
+      return normalized.slice(root.length + 1);
+    }
+    return p.split(/[\\/]/).pop() || p;
+  }
+
   const SYNTAX_PATTERNS = Object.freeze({
     json: [],
     javascript: [
@@ -131,10 +286,6 @@
 
     const renderer = new markedRef.Renderer();
 
-    function isClickablePath(value) {
-      const path = String(value || "").trim();
-      return /\.\w{1,8}$/.test(path) || /^[\/\\]|[A-Za-z]:[\/\\]/.test(path);
-    }
 
     function renderInlineTokens(context, token) {
       if (context?.parser?.parseInline && Array.isArray(token.tokens)) {
@@ -143,33 +294,111 @@
       return escapeHtml(token.text || "");
     }
 
+    function parseInlineSafe(parser, tokens) {
+      if (parser?.parseInline && Array.isArray(tokens)) return parser.parseInline(tokens);
+      return escapeHtml((tokens || []).map((t) => t?.text ?? "").join(""));
+    }
+
+    function parseBlocksSafe(parser, tokens) {
+      if (parser?.parse && Array.isArray(tokens)) return parser.parse(tokens);
+      return escapeHtml((tokens || []).map((t) => t?.text ?? "").join("\n"));
+    }
+
+    const headingIds = new Map();
+
+    renderer.blockquote = function renderBlockquote(token) {
+      const raw = String(token.text || "");
+      const m = raw.match(/^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(?:\n|$)/i);
+      if (m && Array.isArray(token.tokens)) {
+        const type = m[1].toLowerCase();
+        // marked usually folds the whole quote into a single paragraph token;
+        // strip the marker line from the first token instead of slicing it off.
+        const rest = token.tokens.map((t, i) => {
+          if (i !== 0) return t;
+          const inner = Array.isArray(t.tokens) ? [...t.tokens] : null;
+          if (!inner) return t;
+          for (let k = 0; k < inner.length; k += 1) {
+            if (typeof inner[k].text === "string" && inner[k].text.includes("[!")) {
+              const nl = inner[k].text.indexOf("\n");
+              inner[k] = nl >= 0 ? { ...inner[k], text: inner[k].text.slice(nl + 1) } : { ...inner[k], text: "" };
+              break;
+            }
+          }
+          const filtered = inner.filter((tk) => tk.text !== "");
+          return filtered.length ? { ...t, tokens: filtered } : { ...t, tokens: filtered, text: "" };
+        }).filter((t) => !(t.text === "" && (!Array.isArray(t.tokens) || t.tokens.length === 0)));
+        const body = parseBlocksSafe(this.parser, rest);
+        // Title is filled by app.js from i18n (data-admonition attribute).
+        return `<div class="admonition admonition-${type}"><div class="admonition-title" data-admonition="${type}"></div><div class="admonition-body">${body}</div></div>`;
+      }
+      return `<blockquote>${parseBlocksSafe(this.parser, token.tokens)}</blockquote>`;
+    };
+
+    renderer.heading = function renderHeading(token) {
+      const level = token.depth;
+      const text = parseInlineSafe(this.parser, token.tokens);
+      const base = slugify(token.text);
+      const seen = (headingIds.get(base) || 0) + 1;
+      headingIds.set(base, seen);
+      const id = seen > 1 ? `${base}-${seen}` : base;
+      return `<h${level} id="${escapeHtml(id)}">${text}</h${level}>`;
+    };
+
+    renderer.table = function renderTable(token) {
+      const header = token.header.map((cell) => `<th>${parseInlineSafe(this.parser, cell.tokens)}</th>`).join("");
+      const body = token.rows.map((row) => `<tr>${row.map((cell) => `<td>${parseInlineSafe(this.parser, cell.tokens)}</td>`).join("")}</tr>`).join("");
+      return `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
+    };
+
     renderer.codespan = function renderCodeSpan({ text }) {
       const source = String(text || "");
       const escaped = escapeHtml(source);
+      const ref = parseLineRef(source);
+      if (ref) {
+        return `<code class="clickable-path" data-path="${escapeHtml(ref.path)}" data-line="${ref.line}" title="Click to open">${escaped}</code>`;
+      }
       if (!isClickablePath(source)) return `<code>${escaped}</code>`;
       return `<code class="clickable-path" data-path="${escapeHtml(source.trim())}" title="Click to open">${escaped}</code>`;
     };
 
     renderer.link = function renderLink(token) {
       const href = escapeHtml(String(token.href || ""));
-      const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
-      return `<a href="${href}"${title} target="_blank" rel="noopener">${renderInlineTokens(this, token)}</a>`;
+      let title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+      let inner = renderInlineTokens(this, token);
+      // C: bare URL (link text equals the URL) shows the domain alias. The
+      // full URL is shown by the custom sb-path-tooltip instead of the native
+      // title (which duplicated it); an explicit markdown title ([text](url
+      // "title")) is still kept because the author wrote it.
+      const rawHref = String(token.href || "");
+      const rawText = String(token.text || "");
+      if (rawText === rawHref && /^https?:\/\//i.test(rawHref)) {
+        try {
+          const host = new URL(rawHref).hostname;
+          if (host) inner = escapeHtml(host);
+        } catch (_) { /* keep the original text */ }
+      }
+      // The icon slot ships with an inline link glyph so no blank gap ever
+      // shows; bindExtLinkFavicons replaces it with the site favicon on load
+      // or keeps it when every source fails.
+      return `<a class="ext-link" href="${href}"${title} target="_blank" rel="noopener"><span class="link-ext-icon" data-favicon="" aria-hidden="true"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c2 1.8 3 3.9 3 6.5s-1 4.7-3 6.5c-2-1.8-3-3.9-3-6.5s1-4.7 3-6.5z"/></svg></span>${inner}</a>`;
     };
 
     renderer.image = function renderImage(token) {
       const source = String(token.href || "");
       const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
       const alt = escapeHtml(token.text || "");
+      let src;
       if (/^(https?:|data:|\/api\/)/i.test(source)) {
-        return `<img src="${escapeHtml(source)}" alt="${alt}"${title}>`;
+        src = source;
+      } else {
+        const imagePath = source.replace(/\\/g, "/").replace(/^\.?\/?/, "");
+        const extension = (imagePath.split(".").pop() || "").toLowerCase();
+        if (!/^(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(extension)) {
+          return `<img src="${escapeHtml(source)}" alt="${alt}"${title}>`;
+        }
+        src = `/api/file?path=${encodeURIComponent(imagePath)}&raw=1`;
       }
-      const imagePath = source.replace(/\\/g, "/").replace(/^\.?\/?/, "");
-      const extension = (imagePath.split(".").pop() || "").toLowerCase();
-      if (!/^(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(extension)) {
-        return `<img src="${escapeHtml(source)}" alt="${alt}"${title}>`;
-      }
-      const apiUrl = `/api/file?path=${encodeURIComponent(imagePath)}&raw=1`;
-      return `<img src="${apiUrl}" alt="${alt}"${title} loading="lazy" class="msg-inline-img" data-message-image-preview>`;
+      return `<span class="msg-inline-img-slot" data-img-src="${escapeHtml(src)}" data-img-name="${escapeHtml(source.split("/").pop() || alt)}"><img src="${escapeHtml(src)}" alt="${alt}"${title} loading="lazy" class="msg-inline-img" data-message-image-preview></span>`;
     };
 
     renderer.code = function renderCodeBlock({ text, lang }) {
@@ -181,11 +410,15 @@
       const lines = text.split("\n");
       const lineHtml = lines.map((line, index) => {
         const source = line || " ";
+        const ref = parseLineRef(source);
         const highlighted = patterns ? highlightSyntax(source, lang) : escapeHtml(source);
+        if (ref) {
+          return `<span class="line-no">${index + 1}</span><code class="line-code"><code class="clickable-path code-ref" data-path="${escapeHtml(ref.path)}" data-line="${ref.line}" title="Click to open">${highlighted}</code></code>`;
+        }
         return `<span class="line-no">${index + 1}</span><code class="line-code">${highlighted}</code>`;
       }).join("");
       const codeId = `cb-${random().toString(36).slice(2, 10)}`;
-      return `<div class="code-block"><div class="code-head"><span>${escapeHtml(lang || "text")}</span><button class="copy-code" type="button" data-code-id="${codeId}">copy</button></div><pre class="code-lines" id="${codeId}">${lineHtml}</pre></div>`;
+      return `<div class="code-block"><div class="code-head"><span class="lang-label">${escapeHtml(langLabel(lang))}</span><button class="copy-code" type="button" data-code-id="${codeId}">copy</button></div><pre class="code-lines" id="${codeId}">${lineHtml}</pre></div>`;
     };
     markedRef.setOptions({ renderer, breaks: true, gfm: true });
 
@@ -325,5 +558,11 @@
     SYNTAX_PATTERNS,
     createMarkdownFeature,
     resolveSyntaxPatterns,
+    pathAlias,
+    isImagePath,
+    isAbsolutePath,
+    parseLineRef,
+    classifyLocalPath,
+    faviconHostCandidates,
   });
 })(window);

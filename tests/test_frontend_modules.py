@@ -3817,8 +3817,9 @@ process.stdout.write(JSON.stringify({
         ]
 
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
-        self.assertEqual(len(classic_scripts), 38)
+        self.assertEqual(len(classic_scripts), 39)
         self.assertIn("./src/features/image-overlay.js", classic_scripts)
+        self.assertIn("./src/features/link-context-menu.js", classic_scripts)
         self.assertLess(
             classic_scripts.index("./src/agent/system-prompt.js"),
             classic_scripts.index("./app.js"),
@@ -7512,6 +7513,366 @@ const feature = createFilesFeature({
         self.assertTrue(data["listCtrlGoUp"])
 
 
+
+    def test_answer_render_path_alias_bare_url_and_image_preview(self):
+        # 执行级：pathAlias 规则 + 裸 URL 域名别名（marked 用最小 mock）
+        script = r"""
+global.window = {Code: {ui: {}}, katex: undefined};
+require('./src/core/namespace.js');
+require('./src/ui/markdown.js');
+require('./src/features/link-context-menu.js');
+const md = window.Code.ui.markdown;
+const out = {};
+out.relStays = md.pathAlias('src/a.js', 'C:/demo');
+out.insideRoot = md.pathAlias('C:\\demo\\src\\deep\\b.ts', 'C:\\demo');
+out.insideRootSlash = md.pathAlias('C:/demo/x.png', 'C:/demo');
+out.outsideRoot = md.pathAlias('C:\\Users\\Admin\\Desktop\\photo.jpg', 'C:\\demo');
+out.unixAbs = md.pathAlias('/Users/me/a.txt', 'C:/demo');
+out.empty = md.pathAlias('', 'C:/demo');
+out.absDrive = md.isAbsolutePath('C:/Users/a.txt');
+out.absFwd = md.isAbsolutePath('/C:/Users/a.txt');
+out.absUnc = md.isAbsolutePath('//server/share/a.txt');
+out.absPosix = md.isAbsolutePath('/Users/me/a.txt');
+out.notAbs = md.isAbsolutePath('src/a.js');
+out.aliasFwdDrive = md.pathAlias('/C:/demo/src/a.js', 'C:/demo');
+out.aliasFwdOutside = md.pathAlias('/C:/Users/x/photo.jpg', 'C:/demo');
+out.aliasUncOutside = md.pathAlias('//server/share/x.png', 'C:/demo');
+out.refParenLine = md.parseLineRef('run.go (line 91)');
+out.refParen = md.parseLineRef('run.go(91)');
+out.refFullParen = md.parseLineRef('run.go（91）');
+out.refColon = md.parseLineRef('server.py:123');
+out.refColonSlash = md.parseLineRef('a/b/c.txt:12');
+out.refNone = md.parseLineRef('src/a.js');
+out.refNotPath = md.parseLineRef('time:10');
+out.refBad = md.parseLineRef('x(abc)');
+out.clsImage = md.classifyLocalPath('a.png');
+out.clsDerived = md.classifyLocalPath('x.tif');
+out.clsText = md.classifyLocalPath('server.py');
+out.clsTextMd = md.classifyLocalPath('doc.md');
+out.clsBinaryZip = md.classifyLocalPath('a.zip');
+out.clsBinaryPdf = md.classifyLocalPath('b.pdf');
+out.clsBinaryExe = md.classifyLocalPath('c.exe');
+out.clsBinaryMedia = md.classifyLocalPath('d.mp4');
+out.clsUnknown = md.classifyLocalPath('noext');
+out.candDeepseek = md.faviconHostCandidates('chat.deepseek.com').join(',');
+out.candAliyun = md.faviconHostCandidates('chat.aliyun.com').join(',');
+out.candDoubao = md.faviconHostCandidates('www.doubao.com').join(',');
+out.candWww = md.faviconHostCandidates('www.github.com').join(',');
+out.candCompound = md.faviconHostCandidates('b.baidu.com.cn').join(',');
+out.candMulti = md.faviconHostCandidates('a.b.deepseek.com').join(',');
+out.candBare = md.faviconHostCandidates('deepseek.com').join(',');
+out.candEmpty = md.faviconHostCandidates('').length;
+
+
+
+out.isImg = md.isImagePath('a.PNG');
+out.isImgJpeg = md.isImagePath('x.jpeg');
+out.notImg = md.isImagePath('a.txt');
+out.notImgNoExt = md.isImagePath('src/deep');
+// marked 最小 mock：解析常用语法走各 renderer
+const holder = {};
+const markedMock = {
+  Renderer: function () {},
+  setOptions: (opts) => { holder.renderer = opts.renderer; },
+  parse: (src) => {
+    const r = holder.renderer;
+    let out = String(src);
+    out = out.replace(/^(#{1,6})\s+(.+)$/gm, (m, hashes, text) =>
+      r.heading({ depth: hashes.length, text, tokens: [{ type: 'text', text }] }));
+    out = out.replace(/^>\s*\[!(\w+)\]\s*\n((?:^>.*\n?)*)/gm, (m, type, rest) => {
+      const bodyText = rest.replace(/^>\s?/gm, '').trim();
+      const bodyTokens = [{ type: 'paragraph', text: bodyText, tokens: [{ type: 'text', text: bodyText }] }];
+      return r.blockquote({ text: '[!' + type + ']', tokens: [{ type: 'paragraph', text: '[!' + type + ']' }, ...bodyTokens] });
+    });
+    out = out.replace(/^>(.*)(?:\n|$)/gm, (m, content) => r.blockquote({ text: content.trim(), tokens: [{ type: 'paragraph', text: content.trim(), tokens: [{ type: 'text', text: content.trim() }] }] }));
+    out = out.replace(/^\|(.+)\|\n\|[-| :]+\|\n((?:\|.+\|\n?)*)$/gm, (m, headerRow, bodyRows) => {
+      const cells = (row) => { const parts = row.split('|').map((c) => c.trim()); if (parts[0] === '') parts.shift(); if (parts.length && parts[parts.length - 1] === '') parts.pop(); return parts.map((c) => ({ tokens: [{ type: 'text', text: c }] })); };
+      return r.table({ header: cells(headerRow), rows: bodyRows.trim().split('\n').map(cells) });
+    });
+    out = out.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, text) => r.code({ text, lang }));
+    out = out.replace(/`([^`]+)`/g, (m, text) => r.codespan({ text }));
+    out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, href) => r.image({ href, text: alt, title: null }));
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, hrefAndTitle) => {
+      const tm = hrefAndTitle.match(/^(\S+)\s+["'](.+?)["']$/);
+      return r.link({ href: tm ? tm[1] : hrefAndTitle, text, tokens: [{ type: 'text', text }], title: tm ? tm[2] : null });
+    });
+    return out;
+  },
+};
+const feature = md.createMarkdownFeature({ marked: markedMock, escapeHtml: (v) => String(v), random: () => 'x' });
+const bare = feature.renderMarkdownLite('[https://wallhaven.cc/x](https://wallhaven.cc/x)');
+out.bareLink = bare.includes('>wallhaven.cc<') && bare.includes('href="https://wallhaven.cc/x"');
+out.bareNoNativeTitle = !bare.includes('title="https://wallhaven.cc/x"');
+const titled = feature.renderMarkdownLite('[site](https://example.com/a "作者标题")');
+out.explicitTitleKept = titled.includes('title="作者标题"');
+out.bareExt = bare.includes('class="ext-link"') && bare.includes('link-ext-icon') && bare.includes('data-favicon') && !bare.includes('↗');
+const labeled = feature.renderMarkdownLite('[wallhaven 主页](https://wallhaven.cc/x)');
+out.labeledStays = labeled.includes('>wallhaven 主页<');
+const rel = feature.renderMarkdownLite('[src/a.js](src/a.js)');
+out.relLinkTextStays = rel.includes('>src/a.js<');
+// 1-7 格式化点
+const admonition = feature.renderMarkdownLite('> [!WARNING]\n> 内容很重要');
+out.admonitionWarning = admonition.includes('admonition-warning') && admonition.includes('data-admonition="warning"') && admonition.includes('内容很重要');
+const quote = feature.renderMarkdownLite('> 普通引用');
+out.plainQuote = quote.includes('<blockquote>') && !quote.includes('admonition');
+const table = feature.renderMarkdownLite('| 名称 | 值 |\n|---|---|\n| a | 1 |');
+out.tableWrap = table.includes('table-wrap') && table.includes('<th>名称</th>') && table.includes('<td>1</td>');
+const codeBlock = feature.renderMarkdownLite('```js\nconst x = 1;\n```');
+out.langLabelJs = codeBlock.includes('lang-label') && codeBlock.includes('JavaScript');
+const extLink = feature.renderMarkdownLite('[site](https://example.com/a)');
+out.extIcon = extLink.includes('class="ext-link"') && extLink.includes('link-ext-icon') && extLink.includes('data-favicon') && !extLink.includes('↗') && extLink.includes('<svg');
+out.glyphInline = extLink.includes('link-ext-icon" data-favicon="" aria-hidden="true"><svg');
+out.extLeft = extLink.indexOf('link-ext-icon') < extLink.indexOf('>site<');
+const heading = feature.renderMarkdownLite('## 我的标题');
+out.headingAnchor = heading.includes('<h2 id="我的标题">');
+const headingDup = feature.renderMarkdownLite('## A\n## A');
+out.headingDup = headingDup.includes('id="a-2"');
+const imgInline = feature.renderMarkdownLite('![alt](/api/file?path=x.png)');
+out.imgSlot = imgInline.includes('msg-inline-img-slot') && imgInline.includes('data-img-src=') && imgInline.includes('data-message-image-preview');
+const refHtml = feature.renderMarkdownLite('`server.py:123`');
+const codeRef = feature.renderMarkdownLite('```js\n// see server.py:123\nconst x = 1;\n```');
+out.refRendered = refHtml.includes('data-line="123"') && refHtml.includes('data-path="server.py"');
+out.codeBlockRef = codeRef.includes('data-line="123"') && codeRef.includes('clickable-path code-ref');
+// R009 菜单模块执行级
+const lcm = window.Code.features.linkContextMenu;
+const menuLog = [];
+const fakeDoc = {
+  querySelectorAll: () => [],
+  createElement: () => ({ style: {}, innerHTML: '', querySelectorAll: () => [], addEventListener: () => {}, appendChild: () => {}, remove: () => {} }),
+  body: { appendChild: () => {} },
+  addEventListener: () => {},
+  removeEventListener: () => {},
+};
+window.document = fakeDoc;
+const menuT = (k) => ({ openInPreview: '打开', openDefaultApp: '用默认程序打开', revealInFolder: '在文件夹中显示', copyPath: '复制路径', copyFileName: '复制文件名', openInNewTab: '在新标签页打开', copyLink: '复制链接' })[k] || k;
+const created = [];
+fakeDoc.createElement = () => { const el = { style: {}, innerHTML: '', querySelectorAll: () => [], addEventListener: () => {}, appendChild: () => {}, remove: () => { created.push('removed'); } }; created.push(el); return el; };
+const menuCalls = [];
+lcm.showLinkContextMenu({
+  x: 10, y: 10, kind: 'path',
+  pathOptions: { kind: 'text', path: 'C:/p/a.py', filename: 'a.py', previewable: true },
+  t: menuT, copyText: (v) => menuCalls.push('copy:' + v),
+  callbacks: { open: () => menuCalls.push('open'), system: () => menuCalls.push('system'), reveal: () => menuCalls.push('reveal') },
+});
+const pathMenu = created[created.length - 1];
+out.menuPathHtml = pathMenu.innerHTML.includes('a.py') && pathMenu.innerHTML.includes('data-action="open"') && pathMenu.innerHTML.includes('data-action="system"') && pathMenu.innerHTML.includes('data-action="reveal"') && pathMenu.innerHTML.includes('data-action="copy-path"') && pathMenu.innerHTML.includes('data-action="copy-name"');
+created.length = 0; menuCalls.length = 0;
+lcm.showLinkContextMenu({
+  x: 10, y: 10, kind: 'path',
+  pathOptions: { kind: 'binary', path: 'C:/p/b.zip', filename: 'b.zip', previewable: false },
+  t: menuT, copyText: (v) => menuCalls.push('copy:' + v),
+  callbacks: { open: () => menuCalls.push('open'), system: () => menuCalls.push('system'), reveal: () => menuCalls.push('reveal') },
+});
+const binMenu = created[created.length - 1];
+out.menuBinaryHtml = binMenu.innerHTML.includes('data-action="system"') && binMenu.innerHTML.includes('data-action="copy-path"') && binMenu.innerHTML.includes('data-action="copy-name"') && !binMenu.innerHTML.includes('data-action="open"') && !binMenu.innerHTML.includes('data-action="reveal"');
+created.length = 0; menuCalls.length = 0;
+lcm.showLinkContextMenu({
+  x: 10, y: 10, kind: 'link',
+  linkOptions: { url: 'https://example.com/a' },
+  t: menuT, copyText: (v) => menuCalls.push('copy:' + v),
+  callbacks: { openTab: (u) => menuCalls.push('tab:' + u) },
+});
+const linkMenu = created[created.length - 1];
+out.menuLinkHtml = linkMenu.innerHTML.includes('data-action="open-tab"') && linkMenu.innerHTML.includes('data-action="copy-link"');
+
+
+
+
+process.stdout.write(JSON.stringify(out));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["relStays"], "src/a.js")
+        self.assertEqual(data["insideRoot"], "src/deep/b.ts")
+        self.assertEqual(data["insideRootSlash"], "x.png")
+        self.assertEqual(data["outsideRoot"], "photo.jpg")
+        self.assertEqual(data["unixAbs"], "a.txt")
+        self.assertEqual(data["empty"], "")
+        self.assertTrue(data["absDrive"])
+        self.assertTrue(data["absFwd"])
+        self.assertTrue(data["absUnc"])
+        self.assertTrue(data["absPosix"])
+        self.assertFalse(data["notAbs"])
+        self.assertEqual(data["aliasFwdDrive"], "src/a.js")
+        self.assertEqual(data["aliasFwdOutside"], "photo.jpg")
+        self.assertEqual(data["aliasUncOutside"], "x.png")
+        self.assertEqual(data["refParenLine"], {"path": "run.go", "line": 91})
+        self.assertEqual(data["refParen"], {"path": "run.go", "line": 91})
+        self.assertEqual(data["refFullParen"], {"path": "run.go", "line": 91})
+        self.assertEqual(data["refColon"], {"path": "server.py", "line": 123})
+        self.assertEqual(data["refColonSlash"], {"path": "a/b/c.txt", "line": 12})
+        self.assertIsNone(data["refNone"])
+        self.assertIsNone(data["refNotPath"])
+        self.assertIsNone(data["refBad"])
+        self.assertEqual(data["clsImage"], "image")
+        self.assertEqual(data["clsDerived"], "derived")
+        self.assertEqual(data["clsText"], "text")
+        self.assertEqual(data["clsTextMd"], "text")
+        self.assertEqual(data["clsBinaryZip"], "binary")
+        self.assertEqual(data["clsBinaryPdf"], "binary")
+        self.assertEqual(data["clsBinaryExe"], "binary")
+        self.assertEqual(data["clsBinaryMedia"], "binary")
+        self.assertEqual(data["clsUnknown"], "text")
+        self.assertEqual(data["candDeepseek"], "chat.deepseek.com,deepseek.com")
+        self.assertEqual(data["candAliyun"], "chat.aliyun.com,aliyun.com")
+        self.assertEqual(data["candDoubao"], "www.doubao.com,doubao.com")
+        self.assertEqual(data["candWww"], "www.github.com,github.com")
+        self.assertEqual(data["candCompound"], "b.baidu.com.cn,baidu.com.cn")
+        self.assertEqual(data["candMulti"], "a.b.deepseek.com,b.deepseek.com,deepseek.com")
+        self.assertEqual(data["candBare"], "deepseek.com")
+        self.assertEqual(data["candEmpty"], 0)
+        # R016 源码级
+        self.assertIn('faviconHostCandidates', MARKDOWN_SOURCE)
+        self.assertIn('hosts.flatMap', APP_SOURCE)
+        self.assertIn('COMPOUND_SUFFIXES', MARKDOWN_SOURCE)
+        self.assertIn('com.cn', MARKDOWN_SOURCE)
+
+        # R008 源码级：矩阵路由
+        self.assertIn('openReferencedPath', APP_SOURCE)
+        self.assertIn('classifyLocalPath', APP_SOURCE)
+        self.assertIn('kind === "binary"', APP_SOURCE)
+        self.assertIn('/api/open-file', APP_SOURCE)
+        self.assertIn('350000', PREVIEW_SOURCE)
+        self.assertIn('8000', PREVIEW_SOURCE)
+
+        self.assertTrue(data["refRendered"])
+        self.assertTrue(data["codeBlockRef"])
+        self.assertTrue(data["menuPathHtml"])
+        self.assertTrue(data["menuBinaryHtml"])
+        self.assertTrue(data["menuLinkHtml"])
+        # R009 源码级
+        self.assertIn('bindLinkContextMenus', APP_SOURCE)
+        self.assertIn('link-context-menu.js', FRONTEND_ENTRY_SOURCE)
+        self.assertIn('showLinkContextMenu', LINK_MENU_SOURCE) if 'LINK_MENU_SOURCE' in dir() else None
+        self.assertIn('openInNewTab', I18N_SOURCE)
+        self.assertIn('copyFileName', I18N_SOURCE)
+
+        # R005/R007 源码级
+        self.assertIn('scrollPreviewToLine', PREVIEW_SOURCE)
+        self.assertIn('options.line', PREVIEW_SOURCE)
+        self.assertIn('parseLineRef', MARKDOWN_SOURCE)
+        self.assertIn('loadFile(fp, undefined, line && line > 0 ? { line } : {})', APP_SOURCE)
+        self.assertIn('sb-path-tooltip', STYLE_SOURCE)
+
+        self.assertTrue(data["isImg"])
+        self.assertTrue(data["isImgJpeg"])
+        self.assertFalse(data["notImg"])
+        self.assertFalse(data["notImgNoExt"])
+        self.assertTrue(data["bareLink"])
+        self.assertTrue(data["bareNoNativeTitle"])
+        self.assertTrue(data["explicitTitleKept"])
+        # R015 源码级
+        self.assertNotIn('if (!token.title) title = ` title="', MARKDOWN_SOURCE)
+        self.assertIn('custom sb-path-tooltip', MARKDOWN_SOURCE)
+
+        self.assertTrue(data["bareExt"])
+        self.assertTrue(data["labeledStays"])
+        self.assertTrue(data["relLinkTextStays"])
+        self.assertTrue(data["admonitionWarning"])
+        self.assertTrue(data["plainQuote"])
+        self.assertTrue(data["tableWrap"])
+        self.assertTrue(data["langLabelJs"])
+        self.assertTrue(data["extIcon"])
+        self.assertTrue(data["extLeft"])
+        self.assertTrue(data["glyphInline"])
+        # R014 源码级
+        self.assertIn('icons.duckduckgo.com/ip3/', APP_SOURCE)
+        self.assertIn('www.google.com/s2/favicons', APP_SOURCE)
+        self.assertIn('api.faviconkit.com/', APP_SOURCE)
+        seg_start = APP_SOURCE.index('api.faviconkit.com/')
+        seg = APP_SOURCE[seg_start:seg_start + 900]
+        self.assertLess(seg.index('api.faviconkit.com/'), seg.index('www.google.com/s2/favicons'))
+        self.assertLess(seg.index('www.google.com/s2/favicons'), seg.index('icons.duckduckgo.com/ip3/'))
+        self.assertLess(seg.index('icons.duckduckgo.com/ip3/'), seg.index('/favicon.ico'))
+        self.assertIn('naturalWidth <= 1', APP_SOURCE)
+
+        self.assertIn('_faviconCache', APP_SOURCE)
+        self.assertIn('{ failed: true }', APP_SOURCE)
+        self.assertNotIn('slot.hidden = true', APP_SOURCE)
+        self.assertIn('width:20px;height:20px', STYLE_SOURCE)
+        self.assertIn('width:16px;height:16px;border-radius:5px', STYLE_SOURCE)
+        self.assertIn('sb-favicon-in', STYLE_SOURCE)
+        self.assertIn('#fff 88%', STYLE_SOURCE)
+        self.assertNotIn('filter:brightness', STYLE_SOURCE)
+
+        # R010 源码级：favicon 左置 / 无箭头残留 / 防编造 / 主题 / 阴影
+        self.assertIn('</span>${inner}</a>', MARKDOWN_SOURCE)
+        self.assertNotIn('↗', MARKDOWN_SOURCE)
+        self.assertIn('禁止编造不存在的路径', APP_SOURCE)
+        self.assertIn('html[data-theme-mode="dark"]', STYLE_SOURCE)
+        self.assertIn('html[data-theme-mode="light"]', STYLE_SOURCE)
+        self.assertIn('#fff 88%', STYLE_SOURCE)
+        self.assertIn('border-radius:4px', STYLE_SOURCE)
+        self.assertIn('border:1px solid var(--line)', STYLE_SOURCE)
+        self.assertNotIn('.ext-favicon{filter:', STYLE_SOURCE)
+        self.assertNotIn('brightness(1.25)', STYLE_SOURCE)
+        self.assertNotIn('background:color-mix(in srgb,var(--panel-3)', STYLE_SOURCE)
+
+        self.assertNotIn('prefers-color-scheme', STYLE_SOURCE)
+        self.assertIn('#fff 88%', STYLE_SOURCE)
+        self.assertIn('FILE_ICON_SVG', APP_SOURCE)
+        self.assertIn('classifyLocalPath?.(p)', APP_SOURCE)
+        self.assertIn('icon.innerHTML = FILE_ICON_SVG', APP_SOURCE)
+        self.assertNotIn('icon.textContent = "📄"', APP_SOURCE)
+        self.assertIn('--muted', STYLE_SOURCE)
+
+        self.assertIn('box-shadow:0 1px 4px rgba(0,0,0,.12)', STYLE_SOURCE)
+        self.assertIn('data-loaded', APP_SOURCE)
+        self.assertIn('[data-loaded]{background:none;min-width:0;min-height:0;animation:none}', STYLE_SOURCE)
+
+
+        self.assertTrue(data["headingAnchor"])
+        self.assertTrue(data["headingDup"])
+        self.assertTrue(data["imgSlot"])
+        # 源码级：1-7 在 markdown.js / app.js / styles / i18n
+        self.assertIn('data-admonition="', MARKDOWN_SOURCE)
+        self.assertIn('admonition-title', MARKDOWN_SOURCE)
+        self.assertIn('table-wrap', MARKDOWN_SOURCE)
+        self.assertIn('langLabel(lang)', MARKDOWN_SOURCE)
+        self.assertIn('link-ext-icon', MARKDOWN_SOURCE)
+        self.assertIn('data-favicon', MARKDOWN_SOURCE)
+        self.assertNotIn('↗', MARKDOWN_SOURCE)
+        self.assertIn('bindExtLinkFavicons', APP_SOURCE)
+        self.assertIn('icons.duckduckgo.com/ip3/', APP_SOURCE)
+        self.assertIn('favicon.ico', APP_SOURCE)
+        self.assertIn('.ext-favicon', STYLE_SOURCE)
+
+        self.assertIn('slugify(token.text)', MARKDOWN_SOURCE)
+        self.assertIn('msg-inline-img-slot', MARKDOWN_SOURCE)
+        self.assertIn('bindAdmonitions', APP_SOURCE)
+        self.assertIn('bindMessageImages', APP_SOURCE)
+        self.assertIn('msg-img-fallback', APP_SOURCE)
+        self.assertIn('path-file-card', APP_SOURCE)
+        self.assertIn('isOutOfRootPath', APP_SOURCE)
+        self.assertIn('copyFailed', I18N_SOURCE)
+        self.assertIn('admonitionWarning: "警告"', I18N_SOURCE)
+        self.assertIn('admonitionCaution: "Caution"', I18N_SOURCE)
+        self.assertIn('.admonition-warning', STYLE_SOURCE)
+        self.assertIn('.table-wrap', STYLE_SOURCE)
+        self.assertIn('sb-img-shimmer', STYLE_SOURCE)
+        self.assertIn('## 回答格式', APP_SOURCE)
+        self.assertIn('提及文件或图片路径时用行内代码包裹', APP_SOURCE)
+        self.assertIn('[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]', APP_SOURCE)
+        self.assertIn('标准 Markdown。', APP_SOURCE)
+
+
+        # 源码级：app.js 别名/预览绑定 + markdown 域名逻辑
+        self.assertIn("markdownApi.pathAlias(p, projectRoot)", APP_SOURCE)
+        self.assertIn("maybeRenderFileCard(el, p, projectRoot)", APP_SOURCE)
+        self.assertIn("return; // out of root", APP_SOURCE)
+        self.assertIn("path-image-card", APP_SOURCE)
+        self.assertIn("path-image-thumb", APP_SOURCE)
+        self.assertIn("probe.onerror = () => { /* degrade: keep the text alias */ }", APP_SOURCE)
+        self.assertIn("pathAlias,", MARKDOWN_SOURCE)
+        self.assertIn("isImagePath,", MARKDOWN_SOURCE)
+
     def test_image_overlay_gallery_model_and_app_integration(self):
         # 执行级：纯导航模型（首尾禁用策略、索引、空数组/越界降级）
         script = r"""
@@ -9465,8 +9826,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn('class="clickable-path"', data["pathCode"])
         self.assertEqual(data["plainCode"], "<code>value</code>")
         self.assertIn('target="_blank" rel="noopener"', data["link"])
-        self.assertIn('/api/file?path=assets%2Fdemo.png&raw=1', data["localImage"])
+        self.assertIn('/api/file?path=assets%2Fdemo.png&amp;raw=1', data["localImage"])
         self.assertIn('class="msg-inline-img"', data["localImage"])
+        self.assertIn('class="msg-inline-img-slot"', data["localImage"])
         self.assertIn('src="https://example.test/demo.png"', data["remoteImage"])
         self.assertIn("Heading\n===", data["parsedSource"])
         self.assertIn("\n---\n", data["parsedSource"])
