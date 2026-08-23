@@ -129,6 +129,14 @@ def _plan() -> list[dict]:
     ]
 
 
+def test_goal_revise_plan_uses_provider_portable_non_empty_object_schema():
+    parameters = server_mod._SERVER_TOOL_DEFINITIONS["goal_revise_plan"]["function"]["parameters"]
+
+    assert parameters["type"] == "object"
+    assert parameters["minProperties"] == 1
+    assert "anyOf" not in parameters
+
+
 def _active_goal_run(
     client_request_id: str = "foreground-continuation-root",
     *,
