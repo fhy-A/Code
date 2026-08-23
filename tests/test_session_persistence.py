@@ -150,6 +150,410 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertIn("abc123def456", str(p))
 
 
+class TestSessionIndexConversationTime(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.sessions_dir = Path(self.temp_dir.name) / "sessions"
+        self.patch_sessions = mock.patch.object(
+            server,
+            "SESSIONS_DIR",
+            self.sessions_dir,
+        )
+        self.patch_location = mock.patch.object(
+            server,
+            "_session_location",
+            return_value=(None, ""),
+        )
+        self.patch_sessions.start()
+        self.patch_location.start()
+        self.addCleanup(self.patch_sessions.stop)
+        self.addCleanup(self.patch_location.stop)
+
+    @staticmethod
+    def make_handler(body=None):
+        handler = object.__new__(server.CodeHandler)
+        handler.read_body_json = mock.Mock(return_value=body or {})
+        handler.send_json = mock.Mock()
+        return handler
+
+    def write_flat_session(self, meta, messages=None):
+        sid = meta["id"]
+        server.write_json(self.sessions_dir / f"{sid}.json", meta)
+        server.write_jsonl(
+            self.sessions_dir / f"{sid}.jsonl",
+            messages or [],
+        )
+
+    def write_raw_index(self, entries):
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        server._session_index_path().write_text(
+            "".join(
+                json.dumps(entry, ensure_ascii=False) + "\n"
+                for entry in entries
+            ),
+            encoding="utf-8",
+        )
+
+    def test_get_sessions_backfills_missing_time_once_and_sorts_stably(self):
+        self.write_flat_session({
+            "id": "legacy01",
+            "title": "Legacy",
+            "createdAt": "2026-08-20T08:00:00Z",
+            "updatedAt": "2026-08-23T15:00:00Z",
+            "lastMessageTime": "2026-08-20T10:00:00Z",
+            "messageCount": 2,
+        })
+        self.write_flat_session({
+            "id": "protected02",
+            "title": "Protected",
+            "createdAt": "2026-08-20T08:00:00Z",
+            "updatedAt": "2026-08-20T11:00:00Z",
+            "lastMessageTime": "2026-08-20T09:00:00Z",
+            "messageCount": 2,
+        })
+        self.write_flat_session({
+            "id": "tiealpha",
+            "title": "Tie alpha",
+            "createdAt": "2026-08-20T08:00:00Z",
+            "updatedAt": "2026-08-20T12:00:00Z",
+            "messageCount": 1,
+        })
+        self.write_flat_session({
+            "id": "tiebeta0",
+            "title": "Tie beta",
+            "createdAt": "2026-08-20T08:00:00Z",
+            "updatedAt": "2026-08-20T12:00:00Z",
+            "messageCount": 1,
+        })
+        self.write_flat_session({
+            "id": "invalid03",
+            "title": "Invalid timestamp",
+            "createdAt": "2026-08-20T07:00:00Z",
+            "updatedAt": "2026-08-20T09:00:00Z",
+            "lastMessageTime": "2026-08-20T08:00:00Z",
+            "messageCount": 1,
+        })
+        base_entry = {
+            "messageCount": 1,
+            "source": "code",
+            "sourceBadgeVisible": False,
+        }
+        self.write_raw_index([
+            {
+                **base_entry,
+                "id": "legacy01",
+                "title": "Legacy",
+                "updatedAt": "2026-08-23T15:00:00Z",
+            },
+            {
+                **base_entry,
+                "id": "protected02",
+                "title": "Protected",
+                "updatedAt": "2026-08-20T11:00:00Z",
+                "lastMessageTime": "2026-08-20T13:00:00Z",
+            },
+            {
+                **base_entry,
+                "id": "tiealpha",
+                "title": "Tie alpha",
+                "updatedAt": "2026-08-20T12:00:00Z",
+                "lastMessageTime": "2026-08-20T12:00:00Z",
+            },
+            {
+                **base_entry,
+                "id": "tiebeta0",
+                "title": "Tie beta",
+                "updatedAt": "2026-08-20T12:00:00Z",
+                "lastMessageTime": "2026-08-20T12:00:00Z",
+            },
+            {
+                **base_entry,
+                "id": "invalid03",
+                "title": "Invalid timestamp",
+                "updatedAt": "2026-08-20T09:00:00Z",
+                "lastMessageTime": "not-a-time",
+            },
+        ])
+
+        with mock.patch.object(server, "read_json", wraps=server.read_json) as read_meta:
+            first = self.make_handler()
+            server.CodeHandler.get_sessions(first)
+            first_data = first.send_json.call_args.args[0]["data"]
+            first_reads = read_meta.call_count
+
+            second = self.make_handler()
+            server.CodeHandler.get_sessions(second)
+            second_data = second.send_json.call_args.args[0]["data"]
+
+        self.assertEqual(first_reads, 1)
+        self.assertEqual(read_meta.call_count, first_reads)
+        self.assertEqual(
+            [item["id"] for item in first_data],
+            ["protected02", "tiealpha", "tiebeta0", "legacy01", "invalid03"],
+        )
+        self.assertEqual(second_data, first_data)
+        response = {item["id"]: item for item in first_data}
+        self.assertEqual(response["legacy01"]["lastMessageTime"], "2026-08-20T10:00:00Z")
+        self.assertEqual(response["protected02"]["lastMessageTime"], "2026-08-20T13:00:00Z")
+        self.assertEqual(response["invalid03"]["lastMessageTime"], "2026-08-20T09:00:00Z")
+        index = server._read_session_index()
+        self.assertEqual(index["legacy01"]["lastMessageTime"], "2026-08-20T10:00:00Z")
+        self.assertEqual(index["protected02"]["lastMessageTime"], "2026-08-20T13:00:00Z")
+        self.assertEqual(index["invalid03"]["lastMessageTime"], "not-a-time")
+
+    def test_legacy_shanghai_timestamps_round_trip_as_canonical_utc(self):
+        shanghai = server.dt.timezone(server.dt.timedelta(hours=8))
+        with mock.patch.object(server, "_session_local_timezone", return_value=shanghai):
+            record = server._session_api_record({
+                "id": "timezone01",
+                "createdAt": "2026-08-22T13:37:00",
+                "updatedAt": "2026-08-22T13:37:00+08:00",
+                "lastMessageTime": "2026-08-22T05:37:00Z",
+                "messageCount": 1,
+            })
+            self.assertEqual(record["createdAt"], "2026-08-22T05:37:00Z")
+            self.assertEqual(record["updatedAt"], "2026-08-22T05:37:00Z")
+            self.assertEqual(record["lastMessageTime"], "2026-08-22T05:37:00Z")
+            self.assertEqual(
+                server._last_msg_time([{
+                    "role": "user",
+                    "content": "legacy local",
+                    "_time": "2026-08-22T13:37:00",
+                }]),
+                "2026-08-22T05:37:00Z",
+            )
+
+            self.write_flat_session({
+                "id": "timezone01",
+                "title": "Timezone",
+                "createdAt": "2026-08-22T13:37:00",
+                "updatedAt": "2026-08-22T13:37:00",
+                "lastMessageTime": "2026-08-22T13:37:00",
+                "messageCount": 1,
+            })
+            self.write_raw_index([{
+                "id": "timezone01",
+                "title": "Timezone",
+                "updatedAt": "2026-08-22T13:37:00",
+                "lastMessageTime": "2026-08-22T13:37:00",
+                "messageCount": 1,
+                "source": "code",
+                "sourceBadgeVisible": False,
+            }])
+            first = self.make_handler()
+            second = self.make_handler()
+            server.CodeHandler.get_sessions(first)
+            server.CodeHandler.get_sessions(second)
+
+        first_record = first.send_json.call_args.args[0]["data"][0]
+        second_record = second.send_json.call_args.args[0]["data"][0]
+        self.assertEqual(first_record, second_record)
+        self.assertEqual(first_record["lastMessageTime"], "2026-08-22T05:37:00Z")
+        self.assertEqual(first_record["updatedAt"], "2026-08-22T05:37:00Z")
+        self.assertEqual(
+            server._read_session_index()["timezone01"]["lastMessageTime"],
+            "2026-08-22T13:37:00",
+        )
+
+    def test_message_writes_advance_time_while_metadata_writes_preserve_it(self):
+        first_time = "2026-08-20T10:00:00Z"
+        next_time = "2026-08-20T11:00:00Z"
+        create = self.make_handler({
+            "title": "Conversation time",
+            "messages": [{
+                "role": "user",
+                "content": "first",
+                "_time": first_time,
+            }],
+        })
+        server.CodeHandler.create_session(create)
+        created = create.send_json.call_args.args[0]
+        session_id = created["id"]
+        self.assertRegex(created["createdAt"], r"Z$")
+        self.assertRegex(created["updatedAt"], r"Z$")
+        persisted_created = server.read_json(server.session_path(session_id), {})["createdAt"]
+        self.assertRegex(persisted_created, r"(?:Z|[+-]\d{2}:\d{2})$")
+        self.assertEqual(
+            server._read_session_index()[session_id]["lastMessageTime"],
+            first_time,
+        )
+
+        metadata_only = self.make_handler({"title": "Renamed only"})
+        server.CodeHandler.save_session(metadata_only, session_id)
+        after_metadata = server._read_session_index()[session_id]
+        self.assertEqual(after_metadata["title"], "Renamed only")
+        self.assertEqual(after_metadata["lastMessageTime"], first_time)
+
+        append = self.make_handler({
+            "messages": [{
+                "role": "assistant",
+                "content": "continued",
+                "_time": next_time,
+            }],
+        })
+        server.CodeHandler.append_messages(append, session_id)
+        self.assertEqual(
+            server._read_session_index()[session_id]["lastMessageTime"],
+            next_time,
+        )
+
+        internals = self.make_handler({
+            "messages": [
+                {
+                    "role": "tool-result",
+                    "content": "internal tool result",
+                    "_time": "2026-08-20T11:30:00Z",
+                },
+                {
+                    "role": "assistant",
+                    "content": "internal checkpoint",
+                    "_time": "2026-08-20T11:31:00Z",
+                    "meta": {"kind": "auto-context-compaction"},
+                },
+            ],
+        })
+        server.CodeHandler.append_messages(internals, session_id)
+        self.assertEqual(
+            server._read_session_index()[session_id]["lastMessageTime"],
+            next_time,
+        )
+
+        server._write_session_index_entry(
+            session_id,
+            "Metadata-only index update",
+            "2026-08-23T15:00:00Z",
+            2,
+        )
+        self.assertEqual(
+            server._read_session_index()[session_id]["lastMessageTime"],
+            next_time,
+        )
+
+        branch = self.make_handler({"title": "Conversation branch"})
+        server.CodeHandler.branch_session(branch, session_id)
+        child = branch.send_json.call_args.args[0]
+        index = server._read_session_index()
+        self.assertEqual(index[session_id]["lastMessageTime"], next_time)
+        self.assertEqual(index[child["id"]]["lastMessageTime"], next_time)
+
+    def test_empty_session_and_import_use_deterministic_source_times(self):
+        empty_handler = self.make_handler({"title": "Empty", "messages": []})
+        server.CodeHandler.create_session(empty_handler)
+        empty = empty_handler.send_json.call_args.args[0]
+        empty_index = server._read_session_index()[empty["id"]]
+        self.assertEqual(empty_index["lastMessageTime"], "")
+
+        listed = self.make_handler()
+        server.CodeHandler.get_sessions(listed)
+        listed_empty = next(
+            item
+            for item in listed.send_json.call_args.args[0]["data"]
+            if item["id"] == empty["id"]
+        )
+        self.assertEqual(listed_empty["lastMessageTime"], empty["updatedAt"])
+
+        source = Path(self.temp_dir.name) / "foreign.jsonl"
+        source.write_text('{"source":"foreign"}\n', encoding="utf-8")
+        imported = server._persist_import_snapshot(
+            source="codex",
+            source_path=source,
+            source_info=server._import_source_state(source, include_hash=True),
+            source_session_id="foreign-session",
+            requested_session_id="imported01",
+            force_requested_id=True,
+            title="Imported",
+            created_at="2026-08-19T08:00:00",
+            messages=[
+                {"role": "system", "content": "boundary"},
+                {"role": "user", "content": "first", "_time": "2026-08-19T09:00:00Z"},
+                {"role": "assistant", "content": "last", "_time": "2026-08-19T10:00:00Z"},
+            ],
+            stats={},
+            last_usage={},
+            resolved_project_id=None,
+            resolved_cwd="",
+        )
+        self.assertEqual(imported["lastMessageTime"], "2026-08-19T10:00:00Z")
+        self.assertEqual(
+            server._read_session_index()["imported01"]["lastMessageTime"],
+            "2026-08-19T10:00:00Z",
+        )
+
+    def test_lazy_backfill_and_concurrent_append_share_one_index_lock(self):
+        self.write_flat_session({
+            "id": "legacy04",
+            "title": "Legacy",
+            "createdAt": "2026-08-20T08:00:00Z",
+            "updatedAt": "2026-08-20T10:00:00Z",
+            "lastMessageTime": "2026-08-20T09:00:00Z",
+            "messageCount": 1,
+        })
+        self.write_raw_index([{
+            "id": "legacy04",
+            "title": "Legacy",
+            "updatedAt": "2026-08-20T10:00:00Z",
+            "messageCount": 1,
+            "source": "code",
+            "sourceBadgeVisible": False,
+        }])
+        reader_entered = threading.Event()
+        release_reader = threading.Event()
+        writer_started = threading.Event()
+        writer_done = threading.Event()
+        errors = []
+        original_read_json = server.read_json
+
+        def blocked_read_json(path, default=None):
+            if Path(path).name == "legacy04.json":
+                reader_entered.set()
+                if not release_reader.wait(timeout=5):
+                    raise TimeoutError("test reader gate timed out")
+            return original_read_json(path, default)
+
+        handler = self.make_handler()
+
+        def reader():
+            try:
+                server.CodeHandler.get_sessions(handler)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        def writer():
+            try:
+                writer_started.set()
+                server._write_session_index_entry(
+                    "newwrite05",
+                    "Concurrent writer",
+                    "2026-08-20T11:00:00Z",
+                    1,
+                    last_message_time="2026-08-20T11:00:00Z",
+                )
+                writer_done.set()
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        with mock.patch.object(server, "read_json", side_effect=blocked_read_json):
+            read_thread = threading.Thread(target=reader)
+            write_thread = threading.Thread(target=writer)
+            read_thread.start()
+            self.assertTrue(reader_entered.wait(timeout=5))
+            write_thread.start()
+            self.assertTrue(writer_started.wait(timeout=5))
+            self.assertFalse(writer_done.is_set())
+            release_reader.set()
+            read_thread.join(timeout=5)
+            write_thread.join(timeout=5)
+
+        self.assertFalse(read_thread.is_alive())
+        self.assertFalse(write_thread.is_alive())
+        self.assertEqual(errors, [])
+        index = server._read_session_index()
+        self.assertEqual(set(index), {"legacy04", "newwrite05"})
+        self.assertEqual(index["legacy04"]["lastMessageTime"], "2026-08-20T09:00:00Z")
+        self.assertEqual(index["newwrite05"]["lastMessageTime"], "2026-08-20T11:00:00Z")
+
+
 class TestGoalSessionLifecycle(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

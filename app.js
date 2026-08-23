@@ -3781,12 +3781,24 @@ function projectForCurrentRoot() {
   return projectForRoot(els.projectRoot?.value);
 }
 
+function sessionConversationSortTime(session) {
+  for (const value of [session?.lastMessageTime, session?.updatedAt]) {
+    const timestamp = String(value || "").trim();
+    if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(timestamp)) continue;
+    const parsed = Date.parse(timestamp);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
 function orderProjectSessions(sessions, pinnedIds = []) {
   const pinned = new Set(pinnedIds);
   return (sessions || []).slice().sort((left, right) => {
     const pinDiff = Number(pinned.has(right.id)) - Number(pinned.has(left.id));
     if (pinDiff) return pinDiff;
-    return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+    const timeDiff = sessionConversationSortTime(right) - sessionConversationSortTime(left);
+    if (timeDiff) return timeDiff;
+    return String(left.id || "").localeCompare(String(right.id || ""));
   });
 }
 
@@ -4527,6 +4539,22 @@ function syncTrustedGoalMessageMetadata(localMessages, savedMessages) {
   return changed;
 }
 
+function syncPersistedSessionActivity(sessionId, savedSession, options = {}) {
+  if (options.persistMessages !== true) return false;
+  const authoritative = String(savedSession?.lastMessageTime || "").trim();
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(authoritative)) return false;
+  if (!Number.isFinite(Date.parse(authoritative))) return false;
+  const summary = state.sessions.find((session) => session.id === sessionId);
+  if (!summary || summary.lastMessageTime === authoritative) return false;
+  summary.lastMessageTime = authoritative;
+  if (sessionId === state.sessionId) {
+    state.sessionUpdated = authoritative;
+    updateStatsPanel();
+  }
+  renderSessions();
+  return true;
+}
+
 async function saveSessionState(sessionId, messages, stats, title, options = {}) {
 
   if (!sessionId) return;
@@ -4559,6 +4587,7 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
   });
 
   if (local) local.messageCount = (messages || []).length;
+  syncPersistedSessionActivity(sessionId, savedSession, options);
 
 }
 

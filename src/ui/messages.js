@@ -1271,6 +1271,12 @@
         : `${date.getFullYear()}-${month}-${day} ${hh}:${mm}`;
     }
 
+    function renderUserMessageTime(isoString) {
+      const time = formatMessageTime(isoString);
+      if (!time) return "";
+      return `<time class="msg-time user-message-time" datetime="${escapeHtml(String(isoString))}">${escapeHtml(time)}</time>`;
+    }
+
     function renderUsageParts(usage) {
       const normalized = normalizeResponseUsage(usage);
       if (!normalized) return [];
@@ -1382,7 +1388,7 @@
         ? (msg.content.find((item) => item.type === "text")?.text || "")
         : getMessageText(msg);
       const images = msg._images || [];
-      const time = formatMessageTime(msg._time);
+      const time = renderUserMessageTime(msg._time);
       const dispatchId = msg.meta?.backgroundDispatch?.id;
       const queueItemId = msg.meta?.queuedDispatch?.id;
       const dispatchAttr = [
@@ -1429,14 +1435,14 @@
         const imageGroup = `<div class="bubble bubble-img msg-image-group">${imageItems}</div>`;
         const textBubble = renderUserTextProjection(text, index);
         const batchMeta = text
-          ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time} ${renderCopyButton(text)}</div>`
+          ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${renderCopyButton(text)}</div>`
           : (goalMarker || dispatchStatus)
             ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}</div>`
             : "";
         return `<article class="msg user msg-image-batch${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
       }
       const textArticle = text
-        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${goalMarker}${dispatchStatus}${time} ${renderCopyButton(text)}</div></div></article>`
+        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${renderCopyButton(text)}</div></div></article>`
         : "";
       return textArticle;
     }

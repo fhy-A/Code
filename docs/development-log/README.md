@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-23 | `CODE-037` 历史会话最后对话时间排序完成：可选 `lastMessageTime`、旧索引锁内惰性回填、导入/分支兼容、naive 本地时间到 UTC 的 API 边界归一、续聊后权威时间即时重排及刷新/首次切换防抖闭合；用户 bundle/direct classic H4 `2 passed (6.7s)`，排序、活跃时间与短消息时间戳单行显示人工 PASS | [查看](2026/2026-08-23.md) |
 | 2026-08-23 | 最终回答渲染与交互（answer-render R001-R017）：markdown 扩展（admonition/表格滚动/锚点/语言标签/行号引用）、路径别名+自定义 tooltip+点击定位行+右键菜单、预览路由矩阵（binary/超限外部打开）、外链 favicon 左置+glyph 兜底+多源+父域回退+缓存+近白底衬+主题适配、悬浮去重、系统提示防编造；211 passed、本地提交（未 push） | [查看](2026/2026-08-23.md) |
 | 2026-08-23 | 输入框图片大图左右切换（image-overlay-nav R001-R003）：多图箭头/键盘 ←→/索引/边界禁用/删除联动/单图降级；缩略图提示 i18n；根因=新模块未入构建入口（frontend-entry 37→38）；210 passed、用户 PASS | [查看](2026/2026-08-23.md) |
 | 2026-08-22 | Gemini-GCP Goal 工具 schema 兼容修复：`goal_revise_plan` 从 GCP 不接受的同层 `anyOf` 改为普通对象 `minProperties: 1`，Goal v2 服务端语义保持不变；定向 `46 passed`、AgentRuntime/Goal `136 passed + 60 subtests`、编译与 diff 检查通过，用户重启后真实 Gemini-GCP 请求准确读取并返回 TODO 首个 P0 标题。多分组 Key 首个认领导致的错误 Token 路由另记 `CODE-035` | [查看](2026/2026-08-22.md) |

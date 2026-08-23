@@ -2826,6 +2826,21 @@ async function fetchProductionJson(page, pathName) {
   }, pathName);
 }
 
+async function sendProductionJson(page, pathName, method, body) {
+  return page.evaluate(async ({ target, requestMethod, requestBody }) => {
+    const response = await fetch(target, {
+      method: requestMethod,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody || {}),
+    });
+    let responseBody = null;
+    try {
+      responseBody = await response.json();
+    } catch {}
+    return { status: response.status, body: responseBody };
+  }, { target: pathName, requestMethod: method, requestBody: body });
+}
+
 function describeLoopbackRequest(request) {
   const url = new URL(request.url());
   const method = request.method();
@@ -23045,6 +23060,216 @@ async function exerciseRefreshThenCancel(h4, { runtime, evidenceLabel }) {
   }
 }
 
+async function exerciseSessionLastMessageOrder(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+
+  const createSession = async (title, lastMessageTime) => {
+    const response = await sendProductionJson(page, "/api/sessions", "POST", {
+      title,
+      messages: [{
+        role: "user",
+        content: `${title} message`,
+        _time: lastMessageTime,
+      }],
+    });
+    expect(response.status).toBe(201);
+    expect(response.body.lastMessageTime).toBe(lastMessageTime);
+    return response.body;
+  };
+  const older = await createSession("H4 session order older", "2026-08-20T09:00:00Z");
+  const middle = await createSession("H4 session order middle", "2026-08-20T10:00:00Z");
+  const newer = await createSession("H4 session order newer", "2026-08-20T11:00:00Z");
+
+  const metadataOnly = await sendProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(older.id)}`,
+    "PUT",
+    { title: "H4 session order older renamed" },
+  );
+  expect(metadataOnly.status).toBe(200);
+  expect(metadataOnly.body.lastMessageTime).toBe("2026-08-20T09:00:00Z");
+  const branch = await sendProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(middle.id)}/branch`,
+    "POST",
+    { title: "H4 session order branch" },
+  );
+  expect(branch.status).toBe(201);
+  expect(branch.body.lastMessageTime).toBe("2026-08-20T10:00:00Z");
+
+  const tied = [middle.id, branch.body.id].sort((left, right) => left.localeCompare(right));
+  let expectedOrder = [newer.id, ...tied, older.id];
+  const defaultVisibleOrder = expectedOrder.slice(0, 3);
+  const allowedBlockedStaticPaths = [
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+  ];
+  const assertSameExplicitIsoInstant = (actual, expected) => {
+    const actualText = String(actual || "").trim();
+    const expectedText = String(expected || "").trim();
+    expect(actualText).toMatch(/(?:Z|[+-]\d{2}:\d{2})$/i);
+    expect(expectedText).toMatch(/(?:Z|[+-]\d{2}:\d{2})$/i);
+    const actualEpoch = Date.parse(actualText);
+    const expectedEpoch = Date.parse(expectedText);
+    expect(Number.isFinite(actualEpoch)).toBe(true);
+    expect(Number.isFinite(expectedEpoch)).toBe(true);
+    expect(actualEpoch).toBe(expectedEpoch);
+  };
+  const readApiProjection = async () => {
+    const response = await fetchProductionJson(page, "/api/sessions");
+    expect(response.status).toBe(200);
+    const selected = response.body.data.filter((item) => expectedOrder.includes(item.id));
+    return {
+      order: selected.map((item) => item.id),
+      times: Object.fromEntries(selected.map((item) => [item.id, item.lastMessageTime])),
+    };
+  };
+  const readDomOrder = () => page.locator(
+    "#sessionList button.session-main[data-session-id]",
+  ).evaluateAll((elements, ids) => elements
+    .map((element) => element.getAttribute("data-session-id"))
+    .filter((id) => ids.includes(id)), expectedOrder);
+  const sessionToggle = page.locator(
+    "#sessionList .unassigned-project .project-sessions-toggle",
+  );
+  const assertExpandedOrder = async () => {
+    await expect(sessionToggle).toHaveText("Show less");
+    await expect.poll(readDomOrder).toEqual(expectedOrder);
+  };
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await expect.poll(readDomOrder).toEqual(defaultVisibleOrder);
+  await expect(sessionToggle).toBeVisible();
+  await expect(sessionToggle).toHaveText("Show all");
+  const beforeSwitch = await readApiProjection();
+  expect(beforeSwitch.order).toEqual(expectedOrder);
+  expect(beforeSwitch.times).toEqual({
+    [newer.id]: "2026-08-20T11:00:00Z",
+    [tied[0]]: "2026-08-20T10:00:00Z",
+    [tied[1]]: "2026-08-20T10:00:00Z",
+    [older.id]: "2026-08-20T09:00:00Z",
+  });
+  await sessionToggle.click();
+  await assertExpandedOrder();
+
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${older.id}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${older.id}"]`,
+  )).toHaveCount(1);
+  await assertExpandedOrder();
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await assertExpandedOrder();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${older.id}"]`,
+  )).toHaveCount(1);
+  const afterRefresh = await readApiProjection();
+  expect(afterRefresh).toEqual(beforeSwitch);
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${newer.id}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${newer.id}"]`,
+  )).toHaveCount(1);
+  await assertExpandedOrder();
+
+  const continuedLocalTime = "2026-08-24T13:37:00";
+  const continuedUtcTime = new Date(continuedLocalTime).toISOString();
+  const continuation = await sendProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(older.id)}`,
+    "PUT",
+    {
+      title: "H4 session order older renamed",
+      messages: [
+        {
+          role: "user",
+          content: "H4 session order older message",
+          _time: "2026-08-20T09:00:00Z",
+        },
+        {
+          role: "user",
+          content: "H4 session order continued message",
+          _time: continuedLocalTime,
+        },
+      ],
+    },
+  );
+  expect(continuation.status).toBe(200);
+  assertSameExplicitIsoInstant(continuation.body.lastMessageTime, continuedUtcTime);
+  expect(continuation.body.createdAt).toMatch(/Z$/);
+  expect(continuation.body.updatedAt).toMatch(/Z$/);
+  expectedOrder = [older.id, newer.id, ...tied];
+  const afterContinuation = await readApiProjection();
+  expect(afterContinuation.order).toEqual(expectedOrder);
+  assertSameExplicitIsoInstant(afterContinuation.times[older.id], continuedUtcTime);
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await assertExpandedOrder();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${newer.id}"]`,
+  )).toHaveCount(1);
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${older.id}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${older.id}"]`,
+  )).toHaveCount(1);
+  await expect(page.locator("#sessionUpdated")).toHaveText("2026-08-24 13:37");
+  await assertExpandedOrder();
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  const blockedStaticRequests = h4.blockedRequests.map((request) => ({
+    method: String(request?.method || ""),
+    path: String(request?.path || ""),
+    reason: String(request?.reason || ""),
+  }));
+  for (const request of blockedStaticRequests) {
+    expect(request.method).toBe("GET");
+    expect(request.reason).toBe("non-loopback");
+    expect(allowedBlockedStaticPaths).toContain(request.path);
+  }
+  const blockedStaticPaths = [...new Set(
+    blockedStaticRequests.map((request) => request.path),
+  )].sort();
+  expect(blockedStaticPaths).toEqual([...allowedBlockedStaticPaths].sort());
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-session-last-message-order`, {
+    order: expectedOrder.map(idHash),
+    defaultVisibleOrder: defaultVisibleOrder.map(idHash),
+    expandedByUser: true,
+    times: Object.values(beforeSwitch.times),
+    metadataOnlyPreserved: metadataOnly.body.lastMessageTime,
+    branchInherited: branch.body.lastMessageTime,
+    refreshStable: true,
+    continuation: {
+      authoritativeTime: continuation.body.lastMessageTime,
+      apiOrder: afterContinuation.order.map(idHash),
+      displayTime: "2026-08-24 13:37",
+    },
+    switchTargets: [idHash(older.id), idHash(newer.id), idHash(older.id)],
+    modelRequests: metrics.chatRequests.length,
+    toolExecutions: metrics.toolExecutions.length,
+    blockedStaticResources: {
+      count: blockedStaticRequests.length,
+      paths: blockedStaticPaths,
+      method: "GET",
+      reason: "non-loopback",
+    },
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -23093,4 +23318,12 @@ test("bundle detached parallel edit authorization survives main completion and f
 
 test("direct classic detached parallel edit authorization survives main completion and full reload", async ({ h4 }) => {
   await exerciseDetachedParallelEditAuthorizationLifecycle(h4, "classic");
+});
+
+test("bundle session last message order survives switching and refresh", async ({ h4 }) => {
+  await exerciseSessionLastMessageOrder(h4, "bundle");
+});
+
+test("direct classic session last message order survives switching and refresh", async ({ h4 }) => {
+  await exerciseSessionLastMessageOrder(h4, "classic");
 });

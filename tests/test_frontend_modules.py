@@ -1,6 +1,7 @@
 """Regression guards for the transitional frontend module split."""
 
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -900,6 +901,90 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn("const previous = saveChains[sessionId] || Promise.resolve();", persistence_source)
         self.assertIn("saveChains[sessionId] = savePromise;", persistence_source)
+
+    def test_successful_message_persistence_syncs_authoritative_activity_once(self):
+        sync_start = APP_SOURCE.index("function syncPersistedSessionActivity(")
+        sync_end = APP_SOURCE.index("async function saveSessionState(", sync_start)
+        sync_source = APP_SOURCE[sync_start:sync_end]
+        save_end = APP_SOURCE.index("async function saveCurrentSession()", sync_end)
+        save_source = APP_SOURCE[sync_end:save_end]
+        self.assertLess(
+            save_source.index("const savedSession = await persistSessionPayload"),
+            save_source.index("syncPersistedSessionActivity(sessionId, savedSession, options)"),
+        )
+        self.assertNotIn("refreshSessions", save_source)
+        script = f"""
+const state = {{
+  sessionId: "active",
+  sessionUpdated: "2026-08-23T01:00:00Z",
+  sessions: [
+    {{id: "active", lastMessageTime: "2026-08-23T01:00:00Z"}},
+    {{id: "background", lastMessageTime: "2026-08-23T02:00:00Z"}},
+  ],
+}};
+let renders = 0;
+let panelUpdates = 0;
+function renderSessions() {{ renders += 1; }}
+function updateStatsPanel() {{ panelUpdates += 1; }}
+{sync_source}
+const activeChanged = syncPersistedSessionActivity(
+  "active",
+  {{lastMessageTime: "2026-08-23T03:00:00Z"}},
+  {{persistMessages: true}},
+);
+const repeated = syncPersistedSessionActivity(
+  "active",
+  {{lastMessageTime: "2026-08-23T03:00:00Z"}},
+  {{persistMessages: true}},
+);
+const metadataOnly = syncPersistedSessionActivity(
+  "active",
+  {{lastMessageTime: "2026-08-23T04:00:00Z"}},
+  {{persistMessages: false}},
+);
+const invalid = syncPersistedSessionActivity(
+  "active",
+  {{lastMessageTime: "2026-08-23T05:00:00"}},
+  {{persistMessages: true}},
+);
+const backgroundChanged = syncPersistedSessionActivity(
+  "background",
+  {{lastMessageTime: "2026-08-23T06:00:00+00:00"}},
+  {{persistMessages: true}},
+);
+process.stdout.write(JSON.stringify({{
+  activeChanged,
+  repeated,
+  metadataOnly,
+  invalid,
+  backgroundChanged,
+  renders,
+  panelUpdates,
+  sessionUpdated: state.sessionUpdated,
+  sessions: state.sessions,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["activeChanged"])
+        self.assertFalse(data["repeated"])
+        self.assertFalse(data["metadataOnly"])
+        self.assertFalse(data["invalid"])
+        self.assertTrue(data["backgroundChanged"])
+        self.assertEqual(data["renders"], 2)
+        self.assertEqual(data["panelUpdates"], 1)
+        self.assertEqual(data["sessionUpdated"], "2026-08-23T03:00:00Z")
+        self.assertEqual(data["sessions"], [
+            {"id": "active", "lastMessageTime": "2026-08-23T03:00:00Z"},
+            {"id": "background", "lastMessageTime": "2026-08-23T06:00:00+00:00"},
+        ])
 
     def test_manual_compaction_operation_locks_cover_preparation_and_release_in_finally(self):
         compact_start = APP_SOURCE.index("async function compactConversation()")
@@ -6155,7 +6240,10 @@ const startup = window.Code.features.sessions.createSessionStartup({
         recovery_start = SESSIONS_SOURCE.index("function startRecovery()", restore_start)
         startup_end = SESSIONS_SOURCE.index("features.sessions = Object.freeze", recovery_start)
         self.assertIn('storage.getItem("code-foreground-view")', SESSIONS_SOURCE[restore_start:recovery_start])
-        self.assertIn("await navigation.loadSession(lastId);", SESSIONS_SOURCE[restore_start:recovery_start])
+        self.assertIn(
+            "await navigation.loadSession(lastId, { userInitiated: false });",
+            SESSIONS_SOURCE[restore_start:recovery_start],
+        )
         self.assertIn(
             ".then(() => recovery.resumePersistedQueuedMessages())",
             SESSIONS_SOURCE[recovery_start:startup_end],
@@ -6163,6 +6251,182 @@ const startup = window.Code.features.sessions.createSessionStartup({
         self.assertIn(
             "const background = recovery.resumePersistedBackgroundRuns()",
             SESSIONS_SOURCE[recovery_start:startup_end],
+        )
+
+    def test_internal_restore_does_not_consume_user_switch_debounce(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+
+let now = 1_000;
+Date.now = () => now;
+const values = new Map([
+  ["code-foreground-view", "session"],
+  ["code-last-session", "alpha"],
+]);
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+const records = Object.fromEntries(["alpha", "beta", "gamma"].map((id) => [id, {
+  id,
+  title: id.toUpperCase(),
+  messages: [],
+  stats: {input: 0, output: 0, cache: 0},
+  runState: {},
+  lastUsage: null,
+}]));
+const state = {
+  sessionId: null,
+  sessions: Object.values(records).map((record) => ({...record})),
+  projectsMap: {},
+  pendingProjectId: null,
+  messages: [],
+  stats: {},
+  pendingEdits: {},
+  _sessionMsgs: {},
+  _sessionStats: {},
+  _sessionLastUsage: {},
+  _sessionRunStates: {},
+  _foregroundNavigationSeq: 0,
+  _sessionLoadSeq: 0,
+  branchPanelOpen: false,
+  _keepBranchOpen: false,
+};
+const getCalls = [];
+const data = {
+  createSession: async () => records.alpha,
+  getSession: async (sessionId) => {
+    getCalls.push(sessionId);
+    return {...records[sessionId]};
+  },
+};
+const stateAccessors = {
+  getSessionRunState: (sessionId) => state._sessionRunStates[sessionId] || {},
+  setSessionRunState: (sessionId, value) => { state._sessionRunStates[sessionId] = value || {}; },
+  setSessionMessages: (sessionId, value) => { state._sessionMsgs[sessionId] = value; },
+  setSessionStats: (sessionId, value) => { state._sessionStats[sessionId] = value; },
+  setSessionLastUsage: (sessionId, value) => { state._sessionLastUsage[sessionId] = value; },
+};
+const project = {
+  getCurrentProject: () => null,
+  getById: () => null,
+  getPrimaryPath: () => "",
+  getCurrentRoot: () => "",
+  pathsEqual: () => true,
+  saveRoot: async () => {},
+};
+const view = {
+  cacheActiveSessionState: () => {},
+  resetRenderCache: () => {},
+  renderMessages: () => {},
+  renderSessions: () => {},
+  updateGroupBadge: () => {},
+  updateStatsPanel: () => {},
+  updateSendButtonState: () => {},
+  syncActiveStreamingState: () => {},
+  scheduleMessagesScrollToBottom: () => {},
+  refreshSessions: async () => {},
+  showToast: () => {},
+};
+const navigation = window.Code.features.sessions.createSessionNavigation({
+  state,
+  elements: {
+    sessionTitle: {value: ""},
+    branchPanel: {classList: {remove: () => {}}},
+    toggleBranches: {classList: {remove: () => {}}},
+  },
+  storage,
+  data,
+  stateAccessors,
+  project,
+  branch: {
+    syncMetadata: (summaries, session) => summaries.find((item) => item.id === session.id),
+  },
+  recovery: {
+    restoreUserInputRequest: () => {},
+    restoreAuthorizationRequest: () => {},
+  },
+  view,
+  t: () => "Untitled",
+});
+const startup = window.Code.features.sessions.createSessionStartup({
+  state,
+  storage,
+  navigation,
+  recovery: {
+    resumePersistedRuns: async () => {},
+    resumePersistedQueuedMessages: async () => {},
+    resumePersistedBackgroundRuns: async () => {},
+  },
+});
+
+(async () => {
+  await startup.restoreForegroundSession();
+  const afterRestore = {
+    sessionId: state.sessionId,
+    lastSwitchTime: state._lastSwitchTime || null,
+    getCalls: getCalls.slice(),
+  };
+
+  await navigation.loadSession("beta");
+  const afterImmediateUserSwitch = {
+    sessionId: state.sessionId,
+    lastSwitchTime: state._lastSwitchTime,
+    getCalls: getCalls.slice(),
+  };
+
+  await navigation.loadSession("gamma");
+  const afterRapidUserSwitch = {
+    sessionId: state.sessionId,
+    getCalls: getCalls.slice(),
+  };
+
+  now = 1_300;
+  await navigation.loadSession("gamma");
+  const afterDebounceWindow = {
+    sessionId: state.sessionId,
+    lastSwitchTime: state._lastSwitchTime,
+    getCalls: getCalls.slice(),
+  };
+
+  process.stdout.write(JSON.stringify({
+    afterRestore,
+    afterImmediateUserSwitch,
+    afterRapidUserSwitch,
+    afterDebounceWindow,
+  }));
+})();
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["afterRestore"],
+            {"sessionId": "alpha", "lastSwitchTime": None, "getCalls": ["alpha"]},
+        )
+        self.assertEqual(
+            result["afterImmediateUserSwitch"],
+            {"sessionId": "beta", "lastSwitchTime": 1000, "getCalls": ["alpha", "beta"]},
+        )
+        self.assertEqual(
+            result["afterRapidUserSwitch"],
+            {"sessionId": "beta", "getCalls": ["alpha", "beta"]},
+        )
+        self.assertEqual(
+            result["afterDebounceWindow"],
+            {
+                "sessionId": "gamma",
+                "lastSwitchTime": 1300,
+                "getCalls": ["alpha", "beta", "gamma"],
+            },
         )
 
     def test_branches_feature_preserves_tree_creation_and_switching(self):
@@ -12047,6 +12311,7 @@ require("./src/ui/panels.js");
 const {
   calculateSessionStats,
   createPanelsFeature,
+  formatSessionTimestamp,
   formatSessionSource,
   resolveSessionFilePath,
 } = window.Code.ui.panels;
@@ -12183,6 +12448,8 @@ process.stdout.write(JSON.stringify({
   codexSource: formatSessionSource({source: "codex"}, (key) => `t:${key}`),
   codeSource: formatSessionSource({}, (key) => `t:${key}`),
   registeredDocumentClick: Boolean(documentListeners.click),
+  shanghaiAware: formatSessionTimestamp("2026-08-22T05:37:00Z"),
+  legacyNaive: formatSessionTimestamp("2026-08-22T13:37:00"),
 }));
 """
         completed = subprocess.run(
@@ -12191,6 +12458,7 @@ process.stdout.write(JSON.stringify({
             capture_output=True,
             text=True,
             encoding="utf-8",
+            env={**os.environ, "TZ": "Asia/Shanghai"},
             check=True,
         )
         data = json.loads(completed.stdout)
@@ -12206,8 +12474,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["fields"], {
             "statInput": "120c",
             "statContext": "60%",
-            "sessionCreated": "2026-07-19 10:11",
-            "sessionUpdated": "2026-07-19 12:13",
+            "sessionCreated": "2026-07-19 18:11",
+            "sessionUpdated": "2026-07-19 20:13",
             "sessionSource": "sessionSourceClaude",
             "sessionSourceKey": "sessionSourceClaude",
             "sessionFile": "C:/data/session-1.jsonl",
@@ -12235,6 +12503,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["codexSource"], "t:sessionSourceCodex")
         self.assertEqual(data["codeSource"], "t:sessionSourceCode")
         self.assertTrue(data["registeredDocumentClick"])
+        self.assertEqual(data["shanghaiAware"], "2026-08-22 13:37")
+        self.assertEqual(data["legacyNaive"], "2026-08-22 13:37")
 
 
     def test_cache_hit_rate_normalization_and_rendering(self):
@@ -12777,6 +13047,87 @@ process.stdout.write(JSON.stringify({
         modern_message_end = STYLE_SOURCE.index("}", modern_message_start)
         modern_message_rule = STYLE_SOURCE[modern_message_start:modern_message_end]
         self.assertIn("margin-bottom: var(--message-stack-gap)", modern_message_rule)
+
+    def test_user_message_time_is_an_escaped_nonshrinking_element(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+const NativeDate = Date;
+global.Date = class extends NativeDate {
+  constructor(...args) {
+    super(...(args.length ? args : ["2026-08-23T13:00:00+08:00"]));
+  }
+  static now() { return new NativeDate("2026-08-23T13:00:00+08:00").getTime(); }
+};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+const feature = createMessagesFeature({
+  escapeHtml,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  t: (key) => key === "yesterday" ? "<昨天>" : key,
+  getMessageText: (message) => String(message?.content || ""),
+  getBackgroundJob: (id) => id === "job-1" ? {status: "running"} : null,
+  getMessages: () => [],
+  getSessionId: () => "session-time",
+  getSelectedModel: () => "model-1",
+  renderAssistantContent: (value) => `<answer>${escapeHtml(value)}</answer>`,
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+  getToolActionLabel: (action) => action,
+});
+const html = feature.projectMessages([{
+  id: "message-1",
+  role: "user",
+  content: "你好",
+  _time: "2026-08-22T12:56:00+08:00",
+  meta: {
+    backgroundDispatch: {id: "job-1"},
+    goalOrigin: {
+      confirmed: true,
+      messageId: "message-1",
+      goalId: "goal-1",
+      sourceKind: "explicit",
+    },
+  },
+}], {hasActiveRun: false});
+process.stdout.write(html);
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={**os.environ, "TZ": "Asia/Shanghai"},
+            check=True,
+        )
+        html = completed.stdout
+        time_markup = (
+            '<time class="msg-time user-message-time" '
+            'datetime="2026-08-22T12:56:00+08:00">&lt;昨天&gt; 12:56</time>'
+        )
+        self.assertIn(time_markup, html)
+        self.assertEqual(html.count('class="msg-time user-message-time"'), 1)
+        self.assertLess(html.index("goal-message-marker"), html.index("background-dispatch-status"))
+        self.assertLess(html.index("background-dispatch-status"), html.index(time_markup))
+        self.assertLess(html.index(time_markup), html.index("msg-copy-btn"))
+        self.assertIn(
+            'time ? `<span class="msg-time">${time}</span>` : ""',
+            MESSAGES_SOURCE,
+        )
+
+        time_start = STYLE_SOURCE.index(".user-message-time {")
+        time_end = STYLE_SOURCE.index("}", time_start)
+        time_rule = STYLE_SOURCE[time_start:time_end]
+        self.assertIn("display: inline-flex", time_rule)
+        self.assertIn("flex: 0 0 auto", time_rule)
+        self.assertIn("white-space: nowrap", time_rule)
 
     def test_same_run_steer_stays_inside_one_execution_trace_without_merging_tool_stages(self):
         script = r"""
@@ -15310,6 +15661,33 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(data["limited"], ["s4", "s1", "s2", "s5"])
         self.assertEqual(data["hiddenCount"], 1)
         self.assertEqual(data["expanded"], ["s4", "s1", "s2", "s3", "s5"])
+
+    def test_project_session_order_uses_conversation_time_after_pins(self):
+        helper_start = APP_SOURCE.index("const PROJECT_SESSION_PREVIEW_LIMIT")
+        helper_end = APP_SOURCE.index("async function refreshProjects", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+{helper_source}
+const sessions = [
+  {{ id: "pinned-old", updatedAt: "2026-08-23T15:00:00Z", lastMessageTime: "2026-08-20T10:00:00Z" }},
+  {{ id: "tie-alpha", updatedAt: "2026-08-20T11:00:00Z", lastMessageTime: "2026-08-20T13:00:00Z" }},
+  {{ id: "tie-beta", updatedAt: "2026-08-20T09:00:00Z", lastMessageTime: "2026-08-20T13:00:00Z" }},
+  {{ id: "fallback", updatedAt: "2026-08-20T12:00:00Z", lastMessageTime: "invalid" }},
+  {{ id: "naive", updatedAt: "2026-08-20T12:30:00Z", lastMessageTime: "2026-08-24T13:00:00" }},
+];
+process.stdout.write(JSON.stringify(orderProjectSessions(sessions, ["pinned-old"]).map((item) => item.id)));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            ["pinned-old", "tie-alpha", "tie-beta", "naive", "fallback"],
+        )
 
     def test_pinned_projects_sort_before_unpinned_projects(self):
         helper_start = APP_SOURCE.index("const PROJECT_SESSION_PREVIEW_LIMIT")

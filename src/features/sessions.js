@@ -193,12 +193,15 @@
       return session;
     }
 
-    async function loadSession(sessionId) {
+    async function loadSession(sessionId, options = {}) {
       if (!sessionId) return;
 
-      const now = Date.now();
-      if (state._lastSwitchTime && now - state._lastSwitchTime < 300) return;
-      state._lastSwitchTime = now;
+      const userInitiated = options?.userInitiated !== false;
+      if (userInitiated) {
+        const now = Date.now();
+        if (state._lastSwitchTime && now - state._lastSwitchTime < 300) return;
+        state._lastSwitchTime = now;
+      }
 
       const foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
       state._foregroundNavigationSeq = foregroundNavigationSeq;
@@ -322,7 +325,7 @@
         && lastId
         && state.sessions.some((session) => session.id === lastId)
       ) {
-        await navigation.loadSession(lastId);
+        await navigation.loadSession(lastId, { userInitiated: false });
         return lastId;
       }
       if (foregroundView === "welcome" || !lastId) {

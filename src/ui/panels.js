@@ -27,7 +27,16 @@
   }
 
   function formatSessionTimestamp(value) {
-    return String(value || "").slice(0, 16).replace("T", " ") || "-";
+    const raw = String(value || "").trim();
+    if (!raw) return "-";
+    if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(raw)) {
+      return raw.slice(0, 16).replace("T", " ") || "-";
+    }
+    const parsed = new Date(raw);
+    if (!Number.isFinite(parsed.getTime())) return "-";
+    const pad = (part) => String(part).padStart(2, "0");
+    return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`
+      + ` ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`;
   }
 
   function sessionSourceI18nKey(session = {}) {

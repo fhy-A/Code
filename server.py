@@ -6785,6 +6785,16 @@ def now_iso():
     return dt.datetime.now().replace(microsecond=0).isoformat()
 
 
+def _session_now_iso():
+    """Return a timezone-aware wall-clock timestamp for session persistence."""
+    return dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def _session_local_timezone():
+    """Resolve the local offset used by legacy session timestamps without one."""
+    return dt.datetime.now().astimezone().tzinfo or dt.timezone.utc
+
+
 # ── Prompt injection scanner ──
 _INJECTION_PATTERNS = [
     # Instruction override
@@ -7705,8 +7715,60 @@ def _session_api_record(session):
     record["source"] = source
     record["sourceBadgeVisible"] = source_badge_visible
     record["group"] = _legacy_group_for_source(source)
+    for key in ("createdAt", "updatedAt", "lastMessageTime"):
+        if key in record:
+            record[key] = _normalized_session_timestamp(record.get(key))
     record.pop("project", None)
     return record
+
+
+_SESSION_INDEX_LAST_MESSAGE_UNSET = object()
+
+
+def _normalized_session_timestamp(value):
+    """Return a canonical UTC ISO timestamp, localizing legacy naive values."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_session_local_timezone())
+    canonical = parsed.astimezone(dt.timezone.utc).isoformat()
+    return canonical.replace("+00:00", "Z")
+
+
+def _session_effective_last_message_time(session):
+    """Resolve the additive conversation timestamp without changing updatedAt."""
+    record = session if isinstance(session, dict) else {}
+    for key in ("lastMessageTime", "updatedAt", "createdAt"):
+        value = _normalized_session_timestamp(record.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _session_timestamp_sort_value(value):
+    raw = _normalized_session_timestamp(value)
+    if not raw:
+        return float("-inf")
+    try:
+        return dt.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except (OSError, OverflowError, ValueError):
+        return float("-inf")
+
+
+def _sort_sessions_by_last_message(records):
+    """Sort newest conversation first with a stable session-id tie break."""
+    records.sort(key=lambda item: str(item.get("id") or ""))
+    records.sort(
+        key=lambda item: _session_timestamp_sort_value(
+            _session_effective_last_message_time(item)
+        ),
+        reverse=True,
+    )
 
 
 def _read_session_index():
@@ -7743,9 +7805,10 @@ def _write_session_index_entry(
     cwd="",
     source="code",
     source_badge_visible=False,
+    last_message_time=_SESSION_INDEX_LAST_MESSAGE_UNSET,
 ):
     """Upsert an entry in session_index.jsonl (append-only, newest wins)."""
-    entry = json.dumps({
+    entry = {
         "id": session_id,
         "title": title,
         "updatedAt": updated_at,
@@ -7756,12 +7819,20 @@ def _write_session_index_entry(
         "cwd": _normalize_local_path(cwd),
         "source": _normalize_session_source(source),
         "sourceBadgeVisible": bool(source_badge_visible),
-    }, ensure_ascii=False)
+    }
     ipath = _session_index_path()
     ipath.parent.mkdir(parents=True, exist_ok=True)
     with _json_write_lock:
+        if last_message_time is _SESSION_INDEX_LAST_MESSAGE_UNSET:
+            current = _read_session_index().get(session_id)
+            if isinstance(current, dict) and "lastMessageTime" in current:
+                entry["lastMessageTime"] = current.get("lastMessageTime")
+        else:
+            entry["lastMessageTime"] = _normalized_session_timestamp(
+                last_message_time
+            )
         with open(ipath, "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def _remove_session_index_entry(session_id):
@@ -7769,7 +7840,7 @@ def _remove_session_index_entry(session_id):
     index = _read_session_index()
     index.pop(session_id, None)
     entries = list(index.values())
-    entries.sort(key=lambda e: e.get("updatedAt", ""), reverse=True)
+    _sort_sessions_by_last_message(entries)
     payload = "\n".join(
         json.dumps(e, ensure_ascii=False) for e in entries
     ) + ("\n" if entries else "")
@@ -7795,6 +7866,7 @@ def _rebuild_index_if_needed():
                     "id": sid,
                     "title": meta.get("title", ""),
                     "updatedAt": meta.get("updatedAt", ""),
+                    "lastMessageTime": _session_effective_last_message_time(meta),
                     "messageCount": meta.get("messageCount", 0),
                     "_parentId": meta.get("_parentId"),
                     "_branchDepth": meta.get("_branchDepth", 0),
@@ -7808,7 +7880,7 @@ def _rebuild_index_if_needed():
         except Exception:
             pass
     if entries:
-        entries.sort(key=lambda e: e.get("updatedAt", ""), reverse=True)
+        _sort_sessions_by_last_message(entries)
         payload = "\n".join(
             json.dumps(e, ensure_ascii=False) for e in entries
         ) + "\n"
@@ -7859,6 +7931,7 @@ def _migrate_sessions_to_hierarchy():
                 cwd=meta.get("cwd"),
                 source=_normalize_session_source(meta.get("source"), meta.get("group")),
                 source_badge_visible=_source_badge_visible(meta),
+                last_message_time=_session_effective_last_message_time(meta),
             )
             migrated += 1
         except Exception:
@@ -7932,6 +8005,10 @@ def _migrate_codex_project_sessions_support():
             "id": sid,
             "title": meta.get("title", ""),
             "updatedAt": meta.get("updatedAt", ""),
+            "lastMessageTime": (
+                _session_effective_last_message_time(meta)
+                or _session_effective_last_message_time(index_entry)
+            ),
             "messageCount": meta.get("messageCount", 0),
             "_parentId": meta.get("_parentId"),
             "_branchDepth": meta.get("_branchDepth", 0),
@@ -7940,7 +8017,7 @@ def _migrate_codex_project_sessions_support():
             "source": source,
         })
 
-    entries.sort(key=lambda entry: entry.get("updatedAt", ""), reverse=True)
+    _sort_sessions_by_last_message(entries)
     payload = "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries)
     if payload:
         payload += "\n"
@@ -8053,13 +8130,20 @@ def read_last_jsonl_line(path):
 
 
 def _last_msg_time(messages):
-    """Extract the _time from the last message in a list, or ''."""
+    """Extract the last user-visible conversation time, excluding internals."""
     if not messages:
         return ""
     for msg in reversed(messages):
+        if str(msg.get("role") or "") not in {"user", "assistant"}:
+            continue
+        if str((msg.get("meta") or {}).get("kind") or "") in {
+            "auto-context-compaction",
+            "compact-summary",
+        }:
+            continue
         t = msg.get("_time") or (msg.get("meta") or {}).get("_time")
         if t:
-            return t
+            return _normalized_session_timestamp(t)
     return ""
 
 
@@ -9215,9 +9299,7 @@ def session_summary(session):
         return None  # corrupted session, skip
     sid = session["id"]
     message_count = session.get("messageCount", 0)
-    last_time = session.get("lastMessageTime") or ""
-    if not last_time:
-        last_time = session.get("updatedAt") or session.get("createdAt") or ""
+    last_time = _session_effective_last_message_time(session)
     return _session_api_record({
         "id": sid,
         "title": session.get("title") or "未命名会话",
@@ -10158,20 +10240,25 @@ def _persist_import_snapshot(
             else resolved_cwd
         )
     )
-    imported_at = now_iso()
+    imported_at = _session_now_iso()
+    imported_last_message_time = (
+        _last_msg_time(messages)
+        or _normalized_session_timestamp(target_existing.get("lastMessageTime"))
+        or _normalized_session_timestamp(created_at)
+    )
     meta = {
         **target_existing,
         "id": target_id,
         "title": preserved_title,
         "createdAt": target_existing.get("createdAt") or (
-            imported_at[:19] if action == "snapshot-created" else created_at
+            imported_at if action == "snapshot-created" else created_at
         ),
-        "updatedAt": imported_at[:19],
+        "updatedAt": imported_at,
         "stats": stats,
         "lastUsage": last_usage,
         "runState": {},
         "messageCount": len(messages) - 1,
-        "lastMessageTime": imported_at[:19],
+        "lastMessageTime": imported_last_message_time,
         "projectId": project_id,
         "cwd": cwd,
         "source": source,
@@ -10190,6 +10277,7 @@ def _persist_import_snapshot(
         cwd=cwd,
         source=source,
         source_badge_visible=_source_badge_visible(meta),
+        last_message_time=meta["lastMessageTime"],
     )
     return _import_result_record(meta, action, root_session_id)
 
@@ -10773,6 +10861,7 @@ def append_index(
     cwd="",
     source="code",
     source_badge_visible=False,
+    last_message_time=_SESSION_INDEX_LAST_MESSAGE_UNSET,
 ):
     """Append a session entry to the sessions index."""
     _write_session_index_entry(
@@ -10784,6 +10873,7 @@ def append_index(
         cwd=cwd,
         source=source,
         source_badge_visible=source_badge_visible,
+        last_message_time=last_message_time,
     )
 
 
@@ -14272,7 +14362,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             entry.pop("project", None)
             entry.pop("group", None)
         entries = list(index.values())
-        entries.sort(key=lambda e: e.get("updatedAt", ""), reverse=True)
+        _sort_sessions_by_last_message(entries)
         payload = "\n".join(
             json.dumps(e, ensure_ascii=False) for e in entries
         ) + ("\n" if entries else "")
@@ -14319,56 +14409,69 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "projectId": project_id, "cwd": cwd})
 
     def get_sessions(self):
-        index = _read_session_index()
-        meta_paths = _session_meta_path_snapshot()
         sessions = []
         orphans = []
         index_dirty = False
-        for sid, entry in index.items():
-            meta_path = meta_paths.get(str(sid))
-            if meta_path is not None and meta_path.exists():
-                source = _normalize_session_source(
-                    entry.get("source"),
-                    entry.get("group"),
-                )
-                source_badge_visible = entry.get("sourceBadgeVisible")
-                if not isinstance(source_badge_visible, bool):
-                    source_badge_visible = (
-                        _source_badge_visible(read_json(meta_path, {}))
-                        if source in {"codex", "claude-code"}
-                        else False
+        # Read, backfill and rewrite under one lock so a concurrent append
+        # cannot be lost.  Only entries missing the additive field read meta;
+        # once rewritten, later GETs stay index-only.
+        with _json_write_lock:
+            index = _read_session_index()
+            meta_paths = _session_meta_path_snapshot()
+            for sid, entry in index.items():
+                meta_path = meta_paths.get(str(sid))
+                if meta_path is not None and meta_path.exists():
+                    meta = None
+                    if "lastMessageTime" not in entry:
+                        meta = read_json(meta_path, {})
+                        entry["lastMessageTime"] = (
+                            _session_effective_last_message_time(meta)
+                            or _normalized_session_timestamp(entry.get("updatedAt"))
+                        )
+                        index_dirty = True
+                    source = _normalize_session_source(
+                        entry.get("source"),
+                        entry.get("group"),
                     )
-                    entry["sourceBadgeVisible"] = source_badge_visible
-                    index_dirty = True
-                sessions.append(_session_api_record({
-                    "id": sid,
-                    "title": entry.get("title", ""),
-                    "createdAt": "",
-                    "updatedAt": entry.get("updatedAt", ""),
-                    "lastMessageTime": entry.get("updatedAt", ""),
-                    "messageCount": entry.get("messageCount", 0),
-                    "_parentId": entry.get("_parentId"),
-                    "_branchDepth": entry.get("_branchDepth", 0),
-                    "_branches": [],
-                    "_branchMsgCount": None,
-                    "runState": {},
-                    "projectId": entry.get("projectId") or entry.get("project"),
-                    "cwd": entry.get("cwd"),
-                    "source": source,
-                    "sourceBadgeVisible": source_badge_visible,
-                }))
-            else:
-                orphans.append(sid)
-        # Purge orphan entries and persist the one-time source badge projection.
-        if orphans or index_dirty:
-            for sid in orphans:
-                index.pop(sid, None)
-            entries = list(index.values())
-            entries.sort(key=lambda e: e.get("updatedAt", ""), reverse=True)
-            payload = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + ("\n" if entries else "")
-            with _json_write_lock:
+                    source_badge_visible = entry.get("sourceBadgeVisible")
+                    if not isinstance(source_badge_visible, bool):
+                        if source in {"codex", "claude-code"}:
+                            meta = meta if meta is not None else read_json(meta_path, {})
+                            source_badge_visible = _source_badge_visible(meta)
+                        else:
+                            source_badge_visible = False
+                        entry["sourceBadgeVisible"] = source_badge_visible
+                        index_dirty = True
+                    sessions.append(_session_api_record({
+                        "id": sid,
+                        "title": entry.get("title", ""),
+                        "createdAt": "",
+                        "updatedAt": entry.get("updatedAt", ""),
+                        "lastMessageTime": _session_effective_last_message_time(entry),
+                        "messageCount": entry.get("messageCount", 0),
+                        "_parentId": entry.get("_parentId"),
+                        "_branchDepth": entry.get("_branchDepth", 0),
+                        "_branches": [],
+                        "_branchMsgCount": None,
+                        "runState": {},
+                        "projectId": entry.get("projectId") or entry.get("project"),
+                        "cwd": entry.get("cwd"),
+                        "source": source,
+                        "sourceBadgeVisible": source_badge_visible,
+                    }))
+                else:
+                    orphans.append(sid)
+            # Purge orphan entries and persist one-time additive projections.
+            if orphans or index_dirty:
+                for sid in orphans:
+                    index.pop(sid, None)
+                entries = list(index.values())
+                _sort_sessions_by_last_message(entries)
+                payload = "\n".join(
+                    json.dumps(e, ensure_ascii=False) for e in entries
+                ) + ("\n" if entries else "")
                 _session_index_path().write_text(payload, encoding="utf-8")
-        sessions.sort(key=lambda item: item.get("updatedAt") or "", reverse=True)
+        _sort_sessions_by_last_message(sessions)
         self.send_json({"data": sessions})
 
     def get_session(self, session_id):
@@ -14428,11 +14531,12 @@ class CodeHandler(BaseHTTPRequestHandler):
             use_config_fallback=True,
         )
         source = _normalize_session_source(body.get("source"), body.get("group"))
+        session_now = _session_now_iso()
         meta = {
             "id": session_id,
             "title": body.get("title") or "新会话",
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
+            "createdAt": session_now,
+            "updatedAt": session_now,
             "stats": _merge_session_stats({}, body.get("stats") or {}),
             "lastUsage": body.get("lastUsage"),
             "runState": body.get("runState") or {},
@@ -14459,6 +14563,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             cwd=cwd,
             source=source,
             source_badge_visible=_source_badge_visible(meta),
+            last_message_time=meta["lastMessageTime"],
         )
         meta["_filePath"] = str(session_path(session_id).resolve())
         meta["_messageFilePath"] = str(messages_path(session_id).resolve())
@@ -14473,9 +14578,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 session = read_json(path, {})
                 if not session.get("id"):
                     session["id"] = safe_session_id(session_id)
-                    session["createdAt"] = session.get("createdAt") or now_iso()
+                    session["createdAt"] = session.get("createdAt") or _session_now_iso()
             else:
-                session = {"id": safe_session_id(session_id), "createdAt": now_iso()}
+                session = {"id": safe_session_id(session_id), "createdAt": _session_now_iso()}
             session["title"] = body.get("title") or session.get("title") or "未命名会话"
             incoming_stats = body.get("stats")
             if isinstance(incoming_stats, dict) and incoming_stats:
@@ -14522,7 +14627,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     session.get("group"),
                 )
             session.pop("group", None)
-            session["updatedAt"] = now_iso()
+            session["updatedAt"] = _session_now_iso()
             # Messages → JSONL (full overwrite for Phase 1)
             messages = body.get("messages")
             if messages is not None:
@@ -14548,6 +14653,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                 cwd=session.get("cwd"),
                 source=session.get("source"),
                 source_badge_visible=_source_badge_visible(session),
+                last_message_time=session.get(
+                    "lastMessageTime",
+                    _SESSION_INDEX_LAST_MESSAGE_UNSET,
+                ),
             )
         session["_filePath"] = str(path.resolve())
         session["_messageFilePath"] = str(messages_path(session_id).resolve())
@@ -14642,11 +14751,12 @@ class CodeHandler(BaseHTTPRequestHandler):
         parent["cwd"] = parent_cwd
         parent["source"] = parent_source
         parent.pop("group", None)
+        session_now = _session_now_iso()
         child_meta = {
             "id": child_id,
             "title": child_title,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
+            "createdAt": session_now,
+            "updatedAt": session_now,
             "stats": parent.get("stats") or {},
             "lastUsage": parent.get("lastUsage"),
             "lastMessageTime": parent.get("lastMessageTime") or "",
@@ -14683,11 +14793,12 @@ class CodeHandler(BaseHTTPRequestHandler):
             cwd=parent_cwd,
             source=parent_source,
             source_badge_visible=_source_badge_visible(child_meta),
+            last_message_time=child_meta["lastMessageTime"],
         )
         _write_session_index_entry(
             parent_id,
             parent.get("title", ""),
-            now_iso(),
+            _session_now_iso(),
             parent.get("messageCount", 0),
             parent.get("_parentId"),
             parent.get("_branchDepth", 0),
@@ -14695,6 +14806,10 @@ class CodeHandler(BaseHTTPRequestHandler):
             cwd=parent_cwd,
             source=parent_source,
             source_badge_visible=_source_badge_visible(parent),
+            last_message_time=parent.get(
+                "lastMessageTime",
+                _SESSION_INDEX_LAST_MESSAGE_UNSET,
+            ),
         )
         child_meta["_filePath"] = str(session_path(child_id).resolve())
         child_meta["_messageFilePath"] = str(messages_path(child_id).resolve())
@@ -14716,7 +14831,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             meta = read_json(meta_path, {})
             total = meta.get("messageCount", 0) + len(new_msgs)
             meta["messageCount"] = total
-            meta["updatedAt"] = now_iso()
+            meta["updatedAt"] = _session_now_iso()
             meta["lastMessageTime"] = _last_msg_time(new_msgs) or meta.get("lastMessageTime", "")
             meta["projectId"], meta["cwd"] = _session_location(
                 meta.get("projectId"),
@@ -14744,6 +14859,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                 cwd=meta.get("cwd"),
                 source=meta.get("source"),
                 source_badge_visible=_source_badge_visible(meta),
+                last_message_time=meta.get(
+                    "lastMessageTime",
+                    _SESSION_INDEX_LAST_MESSAGE_UNSET,
+                ),
             )
         self.send_json({"ok": True, "appended": len(new_msgs)})
 

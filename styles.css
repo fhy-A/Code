@@ -2247,6 +2247,7 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
   transition: box-shadow .2s ease;
 }
 .msg-time { font-size: 11px; color: var(--muted); }
+.user-message-time { display: inline-flex; flex: 0 0 auto; white-space: nowrap; }
 .msg-copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; flex: 0 0 26px; transition: color .15s, background .15s, border-color .15s, opacity .15s; }
 .msg-copy-btn svg { display: block; width: 14px; height: 14px; }
 .msg.user .msg-copy-btn { opacity: 1; }
