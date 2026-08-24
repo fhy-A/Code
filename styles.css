@@ -367,14 +367,6 @@ input:focus, select:focus, textarea:focus {
   font-size: 12px;
 }
 
-.session-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-left: auto;
-  background: var(--accent);
-}
-.session-dot.unread { background: #22c55e; box-shadow: 0 0 5px #22c55e; }
-.session-dot.streaming { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); animation: dot-pulse 1.2s ease-in-out infinite; }
-@keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-
 .session-more-wrap {
   position: absolute;
   right: 4px;
@@ -4175,7 +4167,80 @@ body.theme-dark .syn-fn { color: #61afef; }
 
 .session-title-text {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
+}
+
+.session-main .session-status-slot {
+  width: 46px;
+  flex: 0 0 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: 5px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.session-status-indicator {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.session-status-slot.is-running .session-status-indicator {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--accent);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: session-status-spin 1.4s linear infinite;
+}
+
+.session-status-slot.is-unread .session-status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.session-status-slot.is-waiting-user-input .session-status-indicator,
+.session-status-slot.is-waiting-authorization .session-status-indicator {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 13px;
+  color: var(--panel);
+  background: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.session-status-slot.is-waiting-user-input .session-status-indicator::before {
+  content: "?";
+}
+
+.session-status-slot.is-waiting-authorization .session-status-indicator::before {
+  content: "!";
+}
+
+@keyframes session-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-status-slot.is-running .session-status-indicator {
+    animation: none;
+    border-color: var(--accent);
+    opacity: .72;
+  }
 }
 
 .session-pin-badge {

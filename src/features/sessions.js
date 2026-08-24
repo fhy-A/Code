@@ -28,6 +28,115 @@
     return pendingEdits;
   }
 
+  function sessionActivityTime(session = {}) {
+    for (const value of [session.lastMessageTime, session.updatedAt, session.createdAt]) {
+      const timestamp = String(value || "").trim();
+      if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(timestamp)) continue;
+      const parsed = Date.parse(timestamp);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  }
+
+  function sessionRelativeTimeParts(session = {}, now = Date.now()) {
+    const activityTime = sessionActivityTime(session);
+    if (!Number.isFinite(activityTime)) return null;
+    const elapsed = Math.max(0, Number(now) - activityTime);
+    if (elapsed < 60_000) return Object.freeze({ unit: "now", count: 0 });
+    if (elapsed < 3_600_000) {
+      return Object.freeze({ unit: "minute", count: Math.floor(elapsed / 60_000) });
+    }
+    if (elapsed < 86_400_000) {
+      return Object.freeze({ unit: "hour", count: Math.floor(elapsed / 3_600_000) });
+    }
+    return Object.freeze({ unit: "day", count: Math.floor(elapsed / 86_400_000) });
+  }
+
+  function formatSessionRelativeTime(session, translate, now = Date.now()) {
+    const parts = sessionRelativeTimeParts(session, now);
+    if (!parts || typeof translate !== "function") return "";
+    const key = {
+      now: "sessionRelativeNow",
+      minute: "sessionRelativeMinutes",
+      hour: "sessionRelativeHours",
+      day: "sessionRelativeDays",
+    }[parts.unit];
+    return translate(key, { count: parts.count });
+  }
+
+  function resolveSessionStatus(session, options = {}) {
+    if (options.active !== true && options.waitingUserInput === true) {
+      return Object.freeze({
+        kind: "waiting-user-input",
+        text: "",
+        label: String(options.waitingUserInputLabel || ""),
+      });
+    }
+    if (options.active !== true && options.waitingAuthorization === true) {
+      return Object.freeze({
+        kind: "waiting-authorization",
+        text: "",
+        label: String(options.waitingAuthorizationLabel || ""),
+      });
+    }
+    if (options.streaming === true) {
+      return Object.freeze({ kind: "running", text: "", label: String(options.runningLabel || "") });
+    }
+    if (session?._unread === true) {
+      return Object.freeze({ kind: "unread", text: "", label: String(options.unreadLabel || "") });
+    }
+    const text = formatSessionRelativeTime(session, options.translate, options.now);
+    return Object.freeze({ kind: "idle", text, label: text });
+  }
+
+  function createSessionStatusTicker(options = {}) {
+    const getRoot = options.getRoot || (() => null);
+    const getSessions = options.getSessions || (() => []);
+    const translate = options.translate || (() => "");
+    const now = options.now || (() => Date.now());
+    const schedule = options.setInterval || global.setInterval?.bind(global);
+    const cancel = options.clearInterval || global.clearInterval?.bind(global);
+    let timerId = null;
+
+    function refresh() {
+      const root = getRoot();
+      if (!root?.querySelectorAll) return 0;
+      const sessions = new Map((getSessions() || [])
+        .filter((session) => session?.id)
+        .map((session) => [String(session.id), session]));
+      let changes = 0;
+      for (const slot of root.querySelectorAll(
+        '.session-status-slot[data-session-status="idle"][data-session-id]',
+      )) {
+        const session = sessions.get(String(slot.dataset?.sessionId || ""));
+        if (!session) continue;
+        const text = formatSessionRelativeTime(session, translate, now());
+        if (slot.textContent !== text) {
+          slot.textContent = text;
+          changes += 1;
+        }
+        if (text) slot.setAttribute?.("aria-label", text);
+        else slot.removeAttribute?.("aria-label");
+      }
+      return changes;
+    }
+
+    function start() {
+      if (timerId !== null || typeof schedule !== "function") return timerId;
+      timerId = schedule(refresh, 60_000);
+      return timerId;
+    }
+
+    function stop() {
+      if (timerId === null) return false;
+      if (typeof cancel === "function") cancel(timerId);
+      timerId = null;
+      return true;
+    }
+
+    return Object.freeze({ refresh, start, stop });
+  }
+
   function createSessionsFeature({ requestJson }) {
     if (typeof requestJson !== "function") {
       throw new TypeError("Sessions feature requires a requestJson function");
@@ -230,9 +339,16 @@
       const loadSeq = (state._sessionLoadSeq || 0) + 1;
       state._sessionLoadSeq = loadSeq;
       const previousSessionId = state.sessionId;
+      const transitionToken = view.beginSessionTransition?.(sessionId) ?? null;
       view.cacheActiveSessionState();
 
-      const session = await data.getSession(sessionId);
+      let session;
+      try {
+        session = await data.getSession(sessionId);
+      } catch (error) {
+        view.cancelSessionTransition?.(previousSessionId, transitionToken);
+        throw error;
+      }
       if (
         loadSeq !== state._sessionLoadSeq
         || foregroundNavigationSeq !== state._foregroundNavigationSeq
@@ -356,6 +472,11 @@
   features.sessions = Object.freeze({
     normalizeSessionMessages,
     collectPendingEdits,
+    sessionActivityTime,
+    sessionRelativeTimeParts,
+    formatSessionRelativeTime,
+    resolveSessionStatus,
+    createSessionStatusTicker,
     createSessionsFeature,
     createSessionNavigation,
     createSessionStartup,

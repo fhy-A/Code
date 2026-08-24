@@ -214,6 +214,11 @@ const EDIT_AUTHORIZATION_INITIAL_SHA256 = "f12af1cc9275e5511341e977ac8ad5b13050b
 const EDIT_AUTHORIZATION_TARGET_SHA256 = "26ed22af144d40ac7a02a4a6087bbfa8bcb2024782e90fdac3ed6cb2abbbf3ef";
 const EDIT_AUTHORIZATION_THIRD_PARTY_SHA256 = "3ca2970e23df18316faba0c55fde5881e36d215d02499ee36e3e257113ebe931";
 const EDIT_AUTHORIZATION_STAGE = "H4_EDIT_AUTHORIZATION_STAGE";
+const EDIT_AUTHORIZATION_PATH_IDENTITY = Object.freeze({
+  toolSelector: ".tool-edit-target[data-path]",
+  fileCardSelector: ".path-file-card[title]",
+  selector: ".tool-edit-target[data-path], .path-file-card[title]",
+});
 const EDIT_AUTHORIZATION_CONTRACT = Object.freeze({
   toolCallId: EDIT_AUTHORIZATION_TOOL_CALL_ID,
   path: EDIT_AUTHORIZATION_PATH,
@@ -6680,6 +6685,14 @@ async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
   expect(metricsAtWaiting.unsafeToolRequests).toBe(0);
   expect(metricsAtWaiting.production.agentRuns).toHaveLength(1);
   expect(metricsAtWaiting.production.runtimeRuns).toHaveLength(1);
+  const inactiveStatusSessionResponse = await sendProductionJson(
+    page,
+    "/api/sessions",
+    "POST",
+    { title: "H4 questionnaire inactive status target" },
+  );
+  expect(inactiveStatusSessionResponse.status).toBe(201);
+  const inactiveStatusSessionId = inactiveStatusSessionResponse.body.id;
   const waitingReloadBoundary = h4.requestBoundary();
   await h4.reloadRuntime(runtime);
   await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
@@ -6690,6 +6703,39 @@ async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
   expect(restoredWaitingDom).toEqual(waitingDom);
   await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
   await expect(page.locator("#stopBtn")).toBeDisabled();
+  const statusSlotFor = (targetSessionId) => page.locator(
+    `#sessionList button.session-main[data-session-id="${targetSessionId}"] .session-status-slot`,
+  );
+  await expect(statusSlotFor(sessionId)).not.toHaveAttribute(
+    "data-session-status",
+    "waiting-user-input",
+  );
+  await page.waitForTimeout(350);
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${inactiveStatusSessionId}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${inactiveStatusSessionId}"]`,
+  )).toHaveCount(1);
+  await expect(statusSlotFor(sessionId)).toHaveAttribute(
+    "data-session-status",
+    "waiting-user-input",
+  );
+  await expect(statusSlotFor(sessionId)).toHaveAttribute("title", "Waiting for answer");
+  await expect(page.locator("#userInputPanel")).toBeHidden();
+  await page.waitForTimeout(350);
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${sessionId}"]`,
+  )).toHaveCount(1);
+  await expect(statusSlotFor(sessionId)).not.toHaveAttribute(
+    "data-session-status",
+    "waiting-user-input",
+  );
+  await expect(page.locator("#userInputPanel")).toBeVisible();
+  await restoreGoalH4Connection(h4);
   const waitingAgentAfterReload = await fetchProductionJson(
     page,
     `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
@@ -9947,8 +9993,96 @@ async function restoreEditAuthorizationTestConfig(h4) {
     .toBe("accept");
 }
 
+async function editSuggestionPathProjection(page, path) {
+  return page.locator("#messages article.msg.assistant.edit-suggestion").evaluateAll(
+    (nodes, facts) => {
+      const entries = nodes.map((node, index) => {
+        const carriers = [...node.querySelectorAll(facts.identity.selector)];
+        const carrier = carriers.length === 1 ? carriers[0] : null;
+        const toolTarget = carrier?.matches(facts.identity.toolSelector);
+        const fileCard = carrier?.matches(facts.identity.fileCardSelector);
+        const resolvedPath = toolTarget
+          ? String(carrier.dataset.path || "")
+          : (fileCard ? String(carrier.getAttribute("title") || "") : "");
+        return {
+          index,
+          carrierCount: carriers.length,
+          targetKind: toolTarget ? "tool-edit-target" : (fileCard ? "path-file-card" : ""),
+          path: resolvedPath,
+          visible: Boolean(node.getClientRects().length),
+        };
+      });
+      return {
+        total: entries.length,
+        matches: entries.filter((entry) => (
+          entry.carrierCount === 1 && entry.path === facts.path
+        )),
+      };
+    },
+    { path, identity: EDIT_AUTHORIZATION_PATH_IDENTITY },
+  );
+}
+
+async function exactEditSuggestionForPath(page, path) {
+  const projection = await editSuggestionPathProjection(page, path);
+  expect(projection.matches).toHaveLength(1);
+  const match = projection.matches[0];
+  expect(match.carrierCount).toBe(1);
+  expect(["tool-edit-target", "path-file-card"]).toContain(match.targetKind);
+  return {
+    suggestion: page.locator("#messages article.msg.assistant.edit-suggestion").nth(match.index),
+    match,
+    projection,
+  };
+}
+
+async function waitForEditAuthorizationWaitingProjection(h4, branch) {
+  const { page } = h4;
+  const startedAt = Date.now();
+  let ready = false;
+  let projection = null;
+  try {
+    await expect.poll(async () => {
+      projection = await editSuggestionPathProjection(page, EDIT_AUTHORIZATION_CONTRACT.path);
+      const match = projection.matches[0] || null;
+      return {
+        count: projection.matches.length,
+        visible: projection.matches.length === 1 && Boolean(match?.visible),
+      };
+    }).toEqual({ count: 1, visible: true });
+    ready = true;
+  } finally {
+    const panelState = await page.evaluate(() => {
+      const panel = document.querySelector("#authorizationPanel");
+      return {
+        panelVisible: Boolean(panel && !panel.classList.contains("hidden")),
+        authorizationRows: panel?.querySelectorAll(".authorization-row").length || 0,
+      };
+    }).catch(() => ({
+      panelVisible: false,
+      authorizationRows: 0,
+    }));
+    const match = projection?.matches?.[0] || null;
+    const state = {
+      ...panelState,
+      editSuggestions: projection?.matches?.length || 0,
+      pathMatches: projection?.matches?.length === 1,
+      targetKind: match?.targetKind || "",
+    };
+    h4.diagnosticSteps.push({
+      step: "edit-authorization-waiting-projection-fence",
+      decision: branch.decision,
+      ready,
+      elapsedMs: Date.now() - startedAt,
+      ...state,
+      observedProjection: projection,
+    });
+  }
+}
+
 async function editAuthorizationDomProjection(h4, phase, branch) {
   const waiting = phase === "waiting";
+  if (waiting) await waitForEditAuthorizationWaitingProjection(h4, branch);
   const expected = {
     permission: { pill: "accept", stored: "accept" },
     panel: waiting ? {
@@ -10016,6 +10150,7 @@ async function editAuthorizationDomProjection(h4, phase, branch) {
       stageMarker: EDIT_AUTHORIZATION_CONTRACT.stageMarker,
       finalMarker: branch.finalMarker,
       path: EDIT_AUTHORIZATION_CONTRACT.path,
+      pathIdentity: EDIT_AUTHORIZATION_PATH_IDENTITY,
     },
     sample: (facts) => {
       const panel = document.querySelector("#authorizationPanel");
@@ -10032,8 +10167,20 @@ async function editAuthorizationDomProjection(h4, phase, branch) {
       const processStage = processStages[0] || null;
       const item = process?.querySelector("details.tool-process-item") || null;
       const details = item ? [...item.querySelectorAll(".tool-process-detail pre")] : [];
+      const suggestionPath = (node) => {
+        const carriers = [...(node?.querySelectorAll(facts.pathIdentity.selector) || [])];
+        if (carriers.length !== 1) return "";
+        const carrier = carriers[0];
+        if (carrier.matches(facts.pathIdentity.toolSelector)) {
+          return String(carrier.dataset.path || "");
+        }
+        if (carrier.matches(facts.pathIdentity.fileCardSelector)) {
+          return String(carrier.getAttribute("title") || "");
+        }
+        return "";
+      };
       const suggestions = [...root.querySelectorAll("article.msg.assistant.edit-suggestion")]
-        .filter((node) => node.querySelector(".tool-edit-target")?.dataset.path === facts.path);
+        .filter((node) => suggestionPath(node) === facts.path);
       const suggestion = suggestions[0] || null;
       const status = suggestion?.querySelector(".tool-edit-status") || null;
       const finals = [...root.querySelectorAll("article.msg.assistant")]
@@ -10088,7 +10235,7 @@ async function editAuthorizationDomProjection(h4, phase, branch) {
           resultDetails: details.length > 1 ? 1 : 0,
         },
         edit: {
-          pathMatches: suggestion?.querySelector(".tool-edit-target")?.dataset.path === facts.path,
+          pathMatches: suggestionPath(suggestion) === facts.path,
           review: Boolean(status?.classList.contains("is-review")),
           applied: Boolean(status?.classList.contains("is-applied")),
           rejected: Boolean(status?.classList.contains("is-rejected")),
@@ -10102,9 +10249,10 @@ async function editAuthorizationDomProjection(h4, phase, branch) {
 }
 
 async function expectEditDiffDisclosure(h4, expanded) {
-  const suggestion = h4.page.locator("article.msg.assistant.edit-suggestion")
-    .filter({ has: h4.page.locator(".tool-edit-target", { hasText: EDIT_AUTHORIZATION_CONTRACT.path }) });
-  await expect(suggestion).toHaveCount(1);
+  const { suggestion } = await exactEditSuggestionForPath(
+    h4.page,
+    EDIT_AUTHORIZATION_CONTRACT.path,
+  );
   const toggle = suggestion.locator(".edit-diff-toggle");
   await expect(toggle).toHaveCount(1);
   await expect(toggle).toHaveAttribute("aria-expanded", String(expanded));
@@ -10113,7 +10261,7 @@ async function expectEditDiffDisclosure(h4, expanded) {
   const body = suggestion.locator(`#${contentId}`);
   await expect(body).toHaveCount(1);
   expect(await body.evaluate((element) => element.hidden)).toBe(!expanded);
-  await expect(suggestion.locator(".tool-edit-target")).toHaveCount(1);
+  await expect(suggestion.locator(EDIT_AUTHORIZATION_PATH_IDENTITY.selector)).toHaveCount(1);
   await expect(suggestion.locator(".diff-stat-add")).toHaveText("+1");
   await expect(suggestion.locator(".diff-stat-remove")).toHaveText("−1");
   await expect(suggestion.locator(".tool-edit-status")).toHaveCount(1);
@@ -10185,8 +10333,10 @@ async function expectAuthorizationViewRevealsEdit(h4, started, options = {}) {
   const revealMetricsBefore = await h4.metrics();
   await viewButton.click();
   await expectEditDiffDisclosure(h4, true);
-  const suggestion = page.locator("article.msg.assistant.edit-suggestion")
-    .filter({ has: page.locator(".tool-edit-target", { hasText: EDIT_AUTHORIZATION_CONTRACT.path }) });
+  const { suggestion } = await exactEditSuggestionForPath(
+    page,
+    EDIT_AUTHORIZATION_CONTRACT.path,
+  );
   await expect(suggestion).toHaveClass(/is-authorization-view-target/);
   await expect.poll(() => suggestion.evaluate((element) => {
     const targetRect = element.getBoundingClientRect();
@@ -10553,11 +10703,52 @@ async function reloadWaitingEditAuthorizationLifecycle(h4, started) {
     waitingDom,
     metricsAtWaiting,
   } = started;
+  const inactiveStatusSessionResponse = await sendProductionJson(
+    page,
+    "/api/sessions",
+    "POST",
+    { title: "H4 authorization inactive status target" },
+  );
+  expect(inactiveStatusSessionResponse.status).toBe(201);
+  const inactiveStatusSessionId = inactiveStatusSessionResponse.body.id;
   const waitingReloadBoundary = h4.requestBoundary();
   await h4.reloadRuntime(runtime);
   await restoreEditAuthorizationTestConfig(h4);
   const restoredWaitingDom = await editAuthorizationDomProjection(h4, "waiting", branch);
   expect(restoredWaitingDom).toEqual(waitingDom);
+  const statusSlotFor = (targetSessionId) => page.locator(
+    `#sessionList button.session-main[data-session-id="${targetSessionId}"] .session-status-slot`,
+  );
+  await expect(statusSlotFor(sessionId)).not.toHaveAttribute(
+    "data-session-status",
+    "waiting-authorization",
+  );
+  await page.waitForTimeout(350);
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${inactiveStatusSessionId}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${inactiveStatusSessionId}"]`,
+  )).toHaveCount(1);
+  await expect(statusSlotFor(sessionId)).toHaveAttribute(
+    "data-session-status",
+    "waiting-authorization",
+  );
+  await expect(statusSlotFor(sessionId)).toHaveAttribute("title", "Waiting for confirmation");
+  await expect(page.locator("#authorizationPanel")).toBeHidden();
+  await page.waitForTimeout(350);
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${sessionId}"]`,
+  )).toHaveCount(1);
+  await expect(statusSlotFor(sessionId)).not.toHaveAttribute(
+    "data-session-status",
+    "waiting-authorization",
+  );
+  await expect(page.locator("#authorizationPanel")).toBeVisible();
+  await restoreEditAuthorizationTestConfig(h4);
   const permissionRestored = await page.locator("#permPillBtn").getAttribute("data-value")
     === "accept";
   expect(permissionRestored).toBe(true);
@@ -11552,6 +11743,7 @@ async function editAuthorizationConflictDomProjection(h4, projection, label) {
     sourceFacts: {
       path: EDIT_AUTHORIZATION_CONTRACT.path,
       finalMarker: EDIT_AUTHORIZATION_CONFLICT_CONTRACT.finalMarker,
+      pathIdentity: EDIT_AUTHORIZATION_PATH_IDENTITY,
     },
     sample: (facts) => {
       const root = document.querySelector("#messages");
@@ -11560,17 +11752,29 @@ async function editAuthorizationConflictDomProjection(h4, projection, label) {
       ) || null;
       const item = stage?.querySelector("details.tool-process-item") || null;
       const details = item ? [...item.querySelectorAll(".tool-process-detail pre")] : [];
+      const suggestionPath = (node) => {
+        const carriers = [...(node?.querySelectorAll(facts.pathIdentity.selector) || [])];
+        if (carriers.length !== 1) return "";
+        const carrier = carriers[0];
+        if (carrier.matches(facts.pathIdentity.toolSelector)) {
+          return String(carrier.dataset.path || "");
+        }
+        if (carrier.matches(facts.pathIdentity.fileCardSelector)) {
+          return String(carrier.getAttribute("title") || "");
+        }
+        return "";
+      };
       const suggestion = [...(root?.querySelectorAll(
         "article.msg.assistant.edit-suggestion",
       ) || [])].find((node) => (
-        node.querySelector(".tool-edit-target")?.dataset.path === facts.path
+        suggestionPath(node) === facts.path
       )) || null;
       const status = suggestion?.querySelector(".tool-edit-status") || null;
       const finals = [...(root?.querySelectorAll("article.msg.assistant") || [])]
         .filter((node) => node.textContent.includes(facts.finalMarker));
       return {
         action: String(stage?.dataset.currentAction || ""),
-        pathMatches: suggestion?.querySelector(".tool-edit-target")?.dataset.path === facts.path,
+        pathMatches: suggestionPath(suggestion) === facts.path,
         stageFailed: Boolean(stage?.classList.contains("failed")),
         itemFailed: Boolean(item?.classList.contains("failed")),
         resultDetails: details.length > 1 ? 1 : 0,
@@ -13115,8 +13319,20 @@ async function detachedParallelAuthorizationDomProjection(h4, phase) {
       )];
       const readProcess = readStages[0]?.closest("article.tool-process") || null;
       const editProcess = editStages[0]?.closest("article.tool-process") || null;
+      const suggestionPath = (node) => {
+        const carriers = [...(node?.querySelectorAll(facts.pathIdentity.selector) || [])];
+        if (carriers.length !== 1) return "";
+        const carrier = carriers[0];
+        if (carrier.matches(facts.pathIdentity.toolSelector)) {
+          return String(carrier.dataset.path || "");
+        }
+        if (carrier.matches(facts.pathIdentity.fileCardSelector)) {
+          return String(carrier.getAttribute("title") || "");
+        }
+        return "";
+      };
       const suggestions = [...root.querySelectorAll("article.msg.assistant.edit-suggestion")]
-        .filter((node) => node.querySelector(".tool-edit-target")?.dataset.path === facts.editPath);
+        .filter((node) => suggestionPath(node) === facts.editPath);
       const suggestion = suggestions[0] || null;
       const editStatus = suggestion?.querySelector(".tool-edit-status") || null;
       const row = panel?.querySelector(".authorization-row") || null;
@@ -13219,6 +13435,7 @@ async function detachedParallelAuthorizationDomProjection(h4, phase) {
       followupUser: PARALLEL_FAILURE_FOLLOWUP_USER,
       followupFinal: PARALLEL_FAILURE_FOLLOWUP_FINAL,
       editPath: EDIT_AUTHORIZATION_CONTRACT.path,
+      pathIdentity: EDIT_AUTHORIZATION_PATH_IDENTITY,
     });
     assertedProjection = {
       permission: projection.permission,
@@ -16916,6 +17133,14 @@ async function exerciseGoalV2UserGateCompletion(h4, runtime) {
   await page.locator("#goalProgressSummary").press("Escape");
   await expect(gatedDetails).toBeHidden();
 
+  const goalIsolationTargetResponse = await sendProductionJson(
+    page,
+    "/api/sessions",
+    "POST",
+    { title: "H4 Goal projection isolation target" },
+  );
+  expect(goalIsolationTargetResponse.status).toBe(201);
+  const goalIsolationTargetId = goalIsolationTargetResponse.body.id;
   const waitingReloadBoundary = h4.requestBoundary();
   await h4.reloadRuntime(runtime);
   await restoreGoalH4Connection(h4);
@@ -16929,6 +17154,67 @@ async function exerciseGoalV2UserGateCompletion(h4, runtime) {
     revision: 8,
     goal: { goalId, currentStepId: "h4-goal-step-3", gate: { type: "waiting_user" } },
   });
+
+  let observeTargetSessionRequest;
+  let observeTargetGoalRequest;
+  let releaseTargetSessionRequest;
+  let releaseTargetGoalRequest;
+  const targetSessionObserved = new Promise((resolve) => { observeTargetSessionRequest = resolve; });
+  const targetGoalObserved = new Promise((resolve) => { observeTargetGoalRequest = resolve; });
+  const targetSessionGate = new Promise((resolve) => { releaseTargetSessionRequest = resolve; });
+  const targetGoalGate = new Promise((resolve) => { releaseTargetGoalRequest = resolve; });
+  const targetSessionPath = `/api/sessions/${encodeURIComponent(goalIsolationTargetId)}`;
+  const targetGoalPath = `${targetSessionPath}/goal-v2`;
+  const isolateGoalTransitionRoute = async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === targetSessionPath) {
+      observeTargetSessionRequest();
+      await targetSessionGate;
+    } else if (request.method() === "GET" && url.pathname === targetGoalPath) {
+      observeTargetGoalRequest();
+      await targetGoalGate;
+    }
+    await route.fallback();
+  };
+  await page.route("**/*", isolateGoalTransitionRoute);
+  let goalIsolationVerified = false;
+  try {
+    await page.waitForTimeout(350);
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${goalIsolationTargetId}"]`,
+    ).click();
+    await targetSessionObserved;
+    await expect(page.locator("#goalProgress")).toBeHidden();
+    await expect(page.locator(
+      `#sessionList .session-row.active[data-session-id="${sessionId}"]`,
+    )).toHaveCount(1);
+
+    releaseTargetSessionRequest();
+    await expect(page.locator(
+      `#sessionList .session-row.active[data-session-id="${goalIsolationTargetId}"]`,
+    )).toHaveCount(1);
+    await targetGoalObserved;
+    await expect(page.locator("#goalProgress")).toBeHidden();
+    releaseTargetGoalRequest();
+    await expect(page.locator("#goalProgress")).toBeHidden();
+
+    await page.waitForTimeout(350);
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+    ).click();
+    await expect(page.locator(
+      `#sessionList .session-row.active[data-session-id="${sessionId}"]`,
+    )).toHaveCount(1);
+    await expect(page.locator("#goalProgress")).toBeVisible();
+    await expect(page.locator("#goalProgressCount")).toHaveText("3/3");
+    goalIsolationVerified = true;
+  } finally {
+    releaseTargetSessionRequest();
+    releaseTargetGoalRequest();
+    await page.unroute("**/*", isolateGoalTransitionRoute);
+  }
+  await restoreGoalH4Connection(h4);
 
   await page.locator("#newChat").click();
   await expect(page.locator("#goalProgress")).toBeHidden();
@@ -17033,6 +17319,7 @@ async function exerciseGoalV2UserGateCompletion(h4, runtime) {
     modelRequests: metricsAfter.chatRequests.length,
     successfulTools: metricsAfter.toolExecutions.length,
     usageFooters: 2,
+    goalIsolationVerified,
     dialogs,
   });
 }
@@ -23270,6 +23557,125 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
   });
 }
 
+async function exerciseSessionStatusSlot(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+
+  const activityTime = new Date(Date.now() - 150_000).toISOString();
+  const createSession = async (title) => {
+    const response = await sendProductionJson(page, "/api/sessions", "POST", {
+      title,
+      messages: [{ role: "user", content: `${title} seed`, _time: activityTime }],
+    });
+    expect(response.status).toBe(201);
+    return response.body;
+  };
+  const runningSession = await createSession("H4 session status running");
+  const idleSession = await createSession("H4 session status idle");
+  const slotFor = (sessionId) => page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"] .session-status-slot`,
+  );
+  const allowedBlockedStaticPaths = [
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+  ];
+  // Session navigation intentionally debounces genuine user switches for
+  // 300 ms. Keep both directions as trusted clicks beyond that boundary.
+  const waitForSessionSwitchDebounce = () => page.waitForTimeout(350);
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await restoreGoalH4Connection(h4);
+  await expect(slotFor(runningSession.id)).toHaveAttribute("data-session-status", "idle");
+  await expect(slotFor(runningSession.id)).toHaveText(/^[1-9]\d*m$/);
+  const idleRelativeTime = await slotFor(runningSession.id).textContent();
+  await expect(slotFor(idleSession.id)).toHaveAttribute("data-session-status", "idle");
+  await page.locator(
+    `#sessionList button.session-main[data-session-id="${runningSession.id}"]`,
+  ).click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${runningSession.id}"]`,
+  )).toHaveCount(1);
+
+  await h4.submitGated(STREAM_USER);
+  try {
+    await h4.waitGate("before-first-delta");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("data-session-status", "running");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("title", "Model running");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("aria-label", "Model running");
+    const runningIndicator = slotFor(runningSession.id).locator(".session-status-indicator");
+    await expect(runningIndicator).toHaveCount(1);
+
+    await waitForSessionSwitchDebounce();
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${idleSession.id}"]`,
+    ).click();
+    await expect(page.locator(
+      `#sessionList .session-row.active[data-session-id="${idleSession.id}"]`,
+    )).toHaveCount(1);
+    await expect(slotFor(runningSession.id)).toHaveAttribute("data-session-status", "running");
+    await expect(slotFor(idleSession.id)).toHaveAttribute("data-session-status", "idle");
+    const runningIndicatorHandle = await runningIndicator.elementHandle();
+    expect(runningIndicatorHandle).toBeTruthy();
+
+    await h4.releaseGate("before-first-delta");
+    await h4.waitGate("after-second-delta");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("data-session-status", "running");
+    expect(await runningIndicator.evaluate(
+      (current, original) => current === original,
+      runningIndicatorHandle,
+    )).toBe(true);
+    await runningIndicatorHandle.dispose();
+    await h4.releaseGate("after-second-delta");
+    await h4.waitGate("before-terminal");
+    await h4.releaseGate("before-terminal");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("data-session-status", "unread");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("title", "New message");
+    await expect(slotFor(runningSession.id)).toHaveAttribute("aria-label", "New message");
+
+    await waitForSessionSwitchDebounce();
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${runningSession.id}"]`,
+    ).click();
+    await expect(page.locator(
+      `#sessionList .session-row.active[data-session-id="${runningSession.id}"]`,
+    )).toHaveCount(1);
+    await expect(slotFor(runningSession.id)).toHaveAttribute("data-session-status", "idle");
+    await expect(slotFor(runningSession.id)).toHaveText("now");
+
+    const metrics = await h4.metrics();
+    expect(metrics.chatRequests).toHaveLength(1);
+    expect(metrics.toolExecutions).toEqual([]);
+    expect(metrics.unsafeToolRequests).toBe(0);
+    const blockedStaticRequests = h4.blockedRequests.map((request) => ({
+      method: String(request?.method || ""),
+      path: String(request?.path || ""),
+      reason: String(request?.reason || ""),
+    }));
+    for (const request of blockedStaticRequests) {
+      expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
+      expect(allowedBlockedStaticPaths).toContain(request.path);
+    }
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence(`${runtime}-session-status-slot`, {
+      idleRelativeTime,
+      activeRunningVisible: true,
+      inactiveRunningVisible: true,
+      runningIndicatorStableAcrossDeltas: true,
+      terminalUnreadVisible: true,
+      seenReturnsIdle: true,
+      modelRequests: metrics.chatRequests.length,
+      toolExecutions: metrics.toolExecutions.length,
+      sessionIds: [idHash(runningSession.id), idHash(idleSession.id)],
+    });
+  } finally {
+    await h4.releaseAllRefreshGates();
+  }
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -23326,4 +23732,12 @@ test("bundle session last message order survives switching and refresh", async (
 
 test("direct classic session last message order survives switching and refresh", async ({ h4 }) => {
   await exerciseSessionLastMessageOrder(h4, "classic");
+});
+
+test("bundle session status slot shows idle running and unread states", async ({ h4 }) => {
+  await exerciseSessionStatusSlot(h4, "bundle");
+});
+
+test("direct classic session status slot shows idle running and unread states", async ({ h4 }) => {
+  await exerciseSessionStatusSlot(h4, "classic");
 });

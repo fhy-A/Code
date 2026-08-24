@@ -46,6 +46,7 @@ INDEX_SOURCE = (ROOT / "index.html").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 FRONTEND_ENTRY_SOURCE = (ROOT / "src" / "frontend-entry.js").read_text(encoding="utf-8")
 FRONTEND_BUILD_SOURCE = (ROOT / "scripts" / "build-frontend.mjs").read_text(encoding="utf-8")
+H4_SMOKE_SOURCE = (ROOT / "tests" / "e2e" / "h4" / "smoke.spec.cjs").read_text(encoding="utf-8")
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 CURRENT_SPEC_SOURCE = (ROOT / f"Code-v{CURRENT_VERSION}.spec").read_text(encoding="utf-8")
@@ -1243,6 +1244,124 @@ process.stdout.write(JSON.stringify(groups));
             2,
         )
         self.assertNotIn('goalProgressCount: "{completed}/{total}"', I18N_SOURCE)
+
+    def test_goal_projection_is_hidden_during_session_transition_and_restored_on_failure(self):
+        script = f"""
+const window = {{Code: {{features: {{}}}}}};
+global.window = window;
+eval({json.dumps(GOAL_SOURCE)});
+
+function node() {{
+  return {{
+    hidden: true,
+    textContent: "",
+    innerHTML: "",
+    className: "",
+    dataset: {{}},
+    attributes: {{}},
+    classList: {{toggle() {{}}, add() {{}}, remove() {{}}}},
+    setAttribute(name, value) {{ this.attributes[name] = String(value); }},
+    addEventListener() {{}},
+    removeEventListener() {{}},
+    contains() {{ return false; }},
+    matches() {{ return false; }},
+    focus() {{}},
+  }};
+}}
+const elements = {{
+  goalProgress: node(),
+  goalProgressSummary: node(),
+  goalProgressObjective: node(),
+  goalProgressPhase: node(),
+  goalProgressCount: node(),
+  goalProgressDetails: node(),
+}};
+const documentRef = {{
+  activeElement: null,
+  addEventListener() {{}},
+  removeEventListener() {{}},
+}};
+const pending = [];
+const apiJson = (url) => new Promise((resolve, reject) => pending.push({{url, resolve, reject}}));
+const projection = (objective) => ({{
+  data: {{
+    exists: true,
+    health: "healthy",
+    revision: 1,
+    goal: {{goalId: objective, lifecycle: "active", sourceKind: "model", objective, steps: []}},
+  }},
+}});
+const feature = window.Code.features.goal.createGoalFeature({{
+  apiJson,
+  t: (key) => key,
+  getSessionId: () => "",
+  getMessages: () => [],
+  elements,
+  document: documentRef,
+}});
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+(async () => {{
+  feature.setSession("source");
+  pending.shift().resolve(projection("source goal"));
+  await flush();
+  const initiallyVisible = !elements.goalProgress.hidden && elements.goalProgressObjective.textContent === "source goal";
+
+  const lateRefresh = feature.refresh("source");
+  const lateRequest = pending.shift();
+  const token = feature.beginSessionTransition("target");
+  const hiddenImmediately = elements.goalProgress.hidden
+    && elements.goalProgressObjective.textContent === ""
+    && feature.getCached() === null;
+  lateRequest.resolve(projection("late source goal"));
+  await lateRefresh;
+  feature.setSession("source");
+  const lateSourceDiscarded = elements.goalProgress.hidden && pending.length === 0;
+
+  feature.setSession("target");
+  const targetRequest = pending.shift();
+  const hiddenUntilTargetGoal = elements.goalProgress.hidden;
+  targetRequest.resolve(projection("target goal"));
+  await flush();
+  const targetVisible = !elements.goalProgress.hidden && elements.goalProgressObjective.textContent === "target goal";
+
+  const failedToken = feature.beginSessionTransition("failed");
+  const wrongTokenRejected = feature.cancelSessionTransition("target", token) === false
+    && elements.goalProgress.hidden;
+  const restored = feature.cancelSessionTransition("target", failedToken) === true
+    && !elements.goalProgress.hidden
+    && elements.goalProgressObjective.textContent === "target goal";
+  process.stdout.write(JSON.stringify({{
+    initiallyVisible,
+    hiddenImmediately,
+    lateSourceDiscarded,
+    hiddenUntilTargetGoal,
+    targetVisible,
+    wrongTokenRejected,
+    restored,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "initiallyVisible": True,
+                "hiddenImmediately": True,
+                "lateSourceDiscarded": True,
+                "hiddenUntilTargetGoal": True,
+                "targetVisible": True,
+                "wrongTokenRejected": True,
+                "restored": True,
+            },
+        )
 
     def test_goal_create_reuses_the_same_waiting_draft_without_a_second_write(self):
         script = r"""
@@ -3421,6 +3540,50 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn("action: authorizationAction", APP_SOURCE)
         self.assertIn("pendingAuthorization.path || pendingAuthorization.command", APP_SOURCE)
+
+    def test_server_authorization_edit_target_identity_survives_file_card_enhancement(self):
+        render_start = DIFF_SOURCE.index("function renderEditSuggestionProjection(")
+        render_end = DIFF_SOURCE.index("return Object.freeze({", render_start)
+        render_source = DIFF_SOURCE[render_start:render_end]
+        card_start = APP_SOURCE.index("function maybeRenderFileCard(")
+        card_end = APP_SOURCE.index("function _toolActionLabel(", card_start)
+        card_source = APP_SOURCE[card_start:card_end]
+
+        self.assertIn(
+            'class="tool-edit-target clickable-path" type="button" data-path="${escapeHtml(target)}"',
+            render_source,
+        )
+        self.assertIn('card.className = "path-file-card";', card_source)
+        self.assertIn("card.title = p;", card_source)
+        self.assertIn('name.textContent = el.textContent || "";', card_source)
+        self.assertIn("el.replaceWith(card);", card_source)
+        self.assertLess(card_source.index("card.title = p;"), card_source.index("el.replaceWith(card);"))
+
+        self.assertIn(
+            'const EDIT_AUTHORIZATION_PATH_IDENTITY = Object.freeze({',
+            H4_SMOKE_SOURCE,
+        )
+        self.assertIn(
+            'selector: ".tool-edit-target[data-path], .path-file-card[title]",',
+            H4_SMOKE_SOURCE,
+        )
+        self.assertIn(
+            "projection = await editSuggestionPathProjection(page, "
+            "EDIT_AUTHORIZATION_CONTRACT.path);",
+            H4_SMOKE_SOURCE,
+        )
+        self.assertIn(
+            "pathMatches: suggestionPath(suggestion) === facts.path,",
+            H4_SMOKE_SOURCE,
+        )
+        self.assertGreaterEqual(
+            H4_SMOKE_SOURCE.count("await exactEditSuggestionForPath("),
+            2,
+        )
+        self.assertNotIn('querySelector(".tool-edit-target', H4_SMOKE_SOURCE)
+        self.assertNotIn('locator(".tool-edit-target', H4_SMOKE_SOURCE)
+        self.assertEqual(H4_SMOKE_SOURCE.count(".tool-edit-target"), 2)
+        self.assertEqual(H4_SMOKE_SOURCE.count(".path-file-card"), 2)
 
     def test_server_agent_uses_profile_tools_and_projects_all_authorized_actions(self):
         for expected in (
@@ -5832,7 +5995,7 @@ const sessions = createSessionsFeature({requestJson});
             SESSIONS_SOURCE[navigation_start:],
         )
         self.assertIn(
-            "const session = await data.getSession(sessionId);",
+            "session = await data.getSession(sessionId);",
             SESSIONS_SOURCE[navigation_start:],
         )
         self.assertIn(
@@ -6116,6 +6279,124 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         self.assertIn(["user-input", "beta", "question-beta"], result["events"])
         self.assertIn(["authorization", "beta", "authorization-beta"], result["events"])
         self.assertIn(["scroll", "beta"], result["events"])
+
+    def test_session_navigation_only_isolates_goal_for_an_accepted_switch_and_restores_on_failure(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+
+const state = {
+  sessionId: "source",
+  sessions: [{id: "source", title: "Source"}, {id: "target", title: "Target"}],
+  messages: [], stats: {}, pendingEdits: {}, pendingProjectId: null,
+  _sessionMsgs: {source: []}, _sessionStats: {}, _sessionLastUsage: {},
+  _sessionRunStates: {}, _foregroundNavigationSeq: 0, _sessionLoadSeq: 0,
+  branchPanelOpen: false, _keepBranchOpen: false,
+};
+const elements = {
+  sessionTitle: {value: "Source"},
+  branchPanel: {classList: {remove() {}}},
+  toggleBranches: {classList: {remove() {}}},
+};
+const storage = {setItem() {}, removeItem() {}};
+const stateAccessors = {
+  getSessionRunState: (id) => state._sessionRunStates[id] || {},
+  setSessionRunState: (id, value) => { state._sessionRunStates[id] = {...(value || {})}; },
+  setSessionMessages: (id, value) => { state._sessionMsgs[id] = value; },
+  setSessionStats: (id, value) => { state._sessionStats[id] = value; },
+  setSessionLastUsage() {},
+};
+const requests = [];
+const data = {
+  createSession: async () => ({}),
+  getSession: (id) => new Promise((resolve, reject) => requests.push({id, resolve, reject})),
+};
+const project = {
+  getCurrentProject: () => null, getById: () => null, getPrimaryPath: () => "",
+  getCurrentRoot: () => "", pathsEqual: () => true, saveRoot: async () => {},
+};
+const branch = {
+  syncMetadata: (summaries, session) => {
+    const found = summaries.find((item) => item.id === session.id);
+    if (found) Object.assign(found, session);
+    return found || null;
+  },
+};
+const events = [];
+let transitionCount = 0;
+const view = {
+  beginSessionTransition(id) {
+    const token = `transition-${++transitionCount}`;
+    events.push(["begin", id, token]);
+    return token;
+  },
+  cancelSessionTransition(id, token) { events.push(["cancel", id, token]); return true; },
+  cacheActiveSessionState() { events.push(["cache", state.sessionId]); },
+  resetRenderCache() {}, renderMessages() { events.push(["render", state.sessionId]); },
+  renderSessions() {}, updateGroupBadge() {}, updateStatsPanel() {}, updateSendButtonState() {},
+  syncActiveStreamingState() {}, scheduleMessagesScrollToBottom() {}, refreshSessions: async () => {},
+  showToast() {},
+};
+const navigation = window.Code.features.sessions.createSessionNavigation({
+  state, elements, storage, data, stateAccessors, project, branch,
+  recovery: {restoreUserInputRequest() {}, restoreAuthorizationRequest() {}},
+  view, t: () => "Untitled",
+});
+
+(async () => {
+  state._lastSwitchTime = Date.now();
+  await navigation.loadSession("target");
+  const debounced = {events: events.slice(), requests: requests.length};
+
+  state._lastSwitchTime = 0;
+  await navigation.loadSession("source");
+  const sameSession = {events: events.slice(), requests: requests.length};
+
+  state._lastSwitchTime = 0;
+  const failedLoad = navigation.loadSession("target").catch((error) => error.message);
+  const acceptedBeforeRead = events.slice();
+  requests.shift().reject(new Error("target unavailable"));
+  const failure = await failedLoad;
+
+  const successfulLoad = navigation.loadSession("target", {userInitiated: false});
+  requests.shift().resolve({
+    id: "target", title: "Target", messages: [], stats: {}, runState: {},
+    createdAt: "2026-08-24T00:00:00Z", updatedAt: "2026-08-24T00:00:01Z",
+  });
+  await successfulLoad;
+
+  process.stdout.write(JSON.stringify({
+    debounced,
+    sameSession,
+    acceptedBeforeRead,
+    failure,
+    finalSessionId: state.sessionId,
+    events,
+  }));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["debounced"], {"events": [], "requests": 0})
+        self.assertEqual(result["sameSession"]["requests"], 0)
+        self.assertFalse(any(event[0] == "begin" for event in result["sameSession"]["events"]))
+        self.assertEqual(
+            result["acceptedBeforeRead"][-2:],
+            [["begin", "target", "transition-1"], ["cache", "source"]],
+        )
+        self.assertEqual(result["failure"], "target unavailable")
+        self.assertIn(["cancel", "source", "transition-1"], result["events"])
+        self.assertEqual(result["finalSessionId"], "target")
+        self.assertIn(["begin", "target", "transition-2"], result["events"])
+        self.assertIn(["render", "target"], result["events"])
 
     def test_session_startup_restores_foreground_and_orders_recovery(self):
         self.assertIn("createSessionStartup,", APP_SOURCE)
@@ -15464,6 +15745,498 @@ const {createImportBatchRunner} = window.Code.features.sessionImport;
         self.assertIn("await loadImportSessions(true);", open_source)
         self.assertIn("_importSessions = _importCache[_importSource] || [];", bind_source)
         self.assertIn("loadImportSessions(true);", bind_source)
+
+
+class TestSessionStatusSlot(unittest.TestCase):
+    def test_background_streaming_messages_refresh_only_the_existing_status_slot(self):
+        projection_start = APP_SOURCE.index("function markSessionUnread(")
+        projection_end = APP_SOURCE.index("const PERSISTED_ACTIVE_RUN_STATUSES", projection_start)
+        projection_source = APP_SOURCE[projection_start:projection_end]
+        script = r"""
+const background = {id: "background", _unread: false, _seenCount: 0};
+const active = {id: "active", _unread: false, _seenCount: 0};
+const state = {
+  sessionId: "active",
+  sessions: [active, background],
+  branchPanelOpen: false,
+};
+let backgroundStreaming = true;
+const counts = {statusRefresh: 0, fullSessions: 0, activeMessages: 0, branches: 0};
+const getSessionMessages = (sessionId) => (
+  sessionId === "background" ? [{}, {}] : [{}, {}, {}]
+);
+const isSessionStreaming = (sessionId) => sessionId === "background" && backgroundStreaming;
+const refreshSessionStatusSlot = (sessionId) => {
+  if (sessionId === "background") counts.statusRefresh += 1;
+};
+const renderSessions = () => { counts.fullSessions += 1; };
+const renderMessages = () => { counts.activeMessages += 1; };
+const renderBranchTree = () => { counts.branches += 1; };
+eval(__PROJECTION_SOURCE__);
+
+renderSessionMessages("background");
+const streaming = {
+  unread: background._unread,
+  seenCount: background._seenCount,
+  ...counts,
+};
+
+backgroundStreaming = false;
+renderSessionMessages("background");
+const terminal = {
+  unread: background._unread,
+  seenCount: background._seenCount,
+  ...counts,
+};
+
+renderSessionMessages("active");
+const foreground = {
+  activeSeenCount: active._seenCount,
+  ...counts,
+};
+process.stdout.write(JSON.stringify({streaming, terminal, foreground}));
+""".replace("__PROJECTION_SOURCE__", json.dumps(projection_source))
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["streaming"],
+            {
+                "unread": True,
+                "seenCount": 2,
+                "statusRefresh": 1,
+                "fullSessions": 0,
+                "activeMessages": 0,
+                "branches": 0,
+            },
+        )
+        self.assertEqual(
+            data["terminal"],
+            {
+                "unread": True,
+                "seenCount": 2,
+                "statusRefresh": 1,
+                "fullSessions": 1,
+                "activeMessages": 0,
+                "branches": 0,
+            },
+        )
+        self.assertEqual(
+            data["foreground"],
+            {
+                "activeSeenCount": 3,
+                "statusRefresh": 1,
+                "fullSessions": 1,
+                "activeMessages": 1,
+                "branches": 0,
+            },
+        )
+
+    def test_same_status_kind_patches_slot_and_indicator_in_place(self):
+        status_start = APP_SOURCE.index("function resolveSessionStatusSlot(")
+        status_end = APP_SOURCE.index("const sessionStatusTicker", status_start)
+        status_source = APP_SOURCE[status_start:status_end]
+        script = f"""
+const state = {{sessionId: "session-1", sessions: [{{id: "session-1"}}]}};
+let nextStatus = {{kind: "running", text: "", label: "running-one"}};
+let slots = [];
+const els = {{sessionList: {{querySelectorAll() {{ return slots; }}}}}};
+const getSessionRunState = () => ({{}});
+const getUserInputRequest = () => null;
+const pendingAuthorizations = () => [];
+const isSessionStreaming = () => nextStatus.kind === "running";
+const t = (key) => key;
+const resolveSessionStatus = () => ({{...nextStatus}});
+const escapeHtml = (value) => String(value);
+function makeIndicator() {{
+  return {{attrs: {{}}, setAttribute(name, value) {{ this.attrs[name] = value; }}}};
+}}
+function makeSlot(kind, indicator = null) {{
+  return {{
+    dataset: {{sessionId: "session-1", sessionStatus: kind}},
+    attrs: {{}},
+    indicator,
+    replacementCount: 0,
+    replacementHtml: "",
+    _text: kind === "idle" ? "old" : "",
+    querySelector(selector) {{
+      return selector === ":scope > .session-status-indicator" ? this.indicator : null;
+    }},
+    setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+    removeAttribute(name) {{ delete this.attrs[name]; }},
+    get textContent() {{ return this._text; }},
+    set textContent(value) {{ this._text = String(value); }},
+    set outerHTML(value) {{ this.replacementCount += 1; this.replacementHtml = String(value); }},
+  }};
+}}
+eval({json.dumps(status_source)});
+
+const runningIndicator = makeIndicator();
+const runningSlot = makeSlot("running", runningIndicator);
+slots = [runningSlot];
+const firstRunningRefresh = refreshSessionStatusSlot("session-1");
+nextStatus = {{kind: "running", text: "", label: "running-two"}};
+const secondRunningRefresh = refreshSessionStatusSlot("session-1");
+const runningProjection = {{
+  firstRunningRefresh,
+  secondRunningRefresh,
+  sameSlot: slots[0] === runningSlot,
+  sameIndicator: runningSlot.indicator === runningIndicator,
+  replacements: runningSlot.replacementCount,
+  role: runningSlot.attrs.role,
+  title: runningSlot.attrs.title,
+  ariaLabel: runningSlot.attrs["aria-label"],
+  indicatorAriaHidden: runningIndicator.attrs["aria-hidden"],
+}};
+
+nextStatus = {{kind: "unread", text: "", label: "new-message"}};
+const transitioned = refreshSessionStatusSlot("session-1");
+const transitionProjection = {{
+  transitioned,
+  replacements: runningSlot.replacementCount,
+  unreadMarkup: runningSlot.replacementHtml.includes('data-session-status="unread"'),
+  indicatorMarkup: runningSlot.replacementHtml.includes('class="session-status-indicator"'),
+}};
+
+const idleSlot = makeSlot("idle");
+slots = [idleSlot];
+nextStatus = {{kind: "idle", text: "1m", label: "1m"}};
+const firstIdleRefresh = refreshSessionStatusSlot("session-1");
+nextStatus = {{kind: "idle", text: "2m", label: "2m"}};
+const secondIdleRefresh = refreshSessionStatusSlot("session-1");
+const idleProjection = {{
+  firstIdleRefresh,
+  secondIdleRefresh,
+  sameSlot: slots[0] === idleSlot,
+  replacements: idleSlot.replacementCount,
+  text: idleSlot.textContent,
+  ariaLabel: idleSlot.attrs["aria-label"],
+  rolePresent: Object.hasOwn(idleSlot.attrs, "role"),
+  titlePresent: Object.hasOwn(idleSlot.attrs, "title"),
+}};
+process.stdout.write(JSON.stringify({{runningProjection, transitionProjection, idleProjection}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["runningProjection"],
+            {
+                "firstRunningRefresh": True,
+                "secondRunningRefresh": True,
+                "sameSlot": True,
+                "sameIndicator": True,
+                "replacements": 0,
+                "role": "img",
+                "title": "running-two",
+                "ariaLabel": "running-two",
+                "indicatorAriaHidden": "true",
+            },
+        )
+        self.assertEqual(
+            data["transitionProjection"],
+            {
+                "transitioned": True,
+                "replacements": 1,
+                "unreadMarkup": True,
+                "indicatorMarkup": True,
+            },
+        )
+        self.assertEqual(
+            data["idleProjection"],
+            {
+                "firstIdleRefresh": True,
+                "secondIdleRefresh": True,
+                "sameSlot": True,
+                "replacements": 0,
+                "text": "2m",
+                "ariaLabel": "2m",
+                "rolePresent": False,
+                "titlePresent": False,
+            },
+        )
+
+    def test_relative_time_boundaries_fallbacks_and_status_priority(self):
+        script = f"""
+const window = {{Code: {{features: {{}}}}}};
+global.window = window;
+eval({json.dumps(SESSIONS_SOURCE)});
+const sessions = window.Code.features.sessions;
+const now = Date.parse("2026-08-24T12:00:00Z");
+const translate = (language) => (key, params = {{}}) => {{
+  if (key === "sessionRelativeNow") return language === "zh" ? "刚刚" : "now";
+  const unit = {{
+    sessionRelativeMinutes: language === "zh" ? "分钟" : "m",
+    sessionRelativeHours: language === "zh" ? "小时" : "h",
+    sessionRelativeDays: language === "zh" ? "天" : "d",
+  }}[key];
+  return `${{params.count}}${{unit}}`;
+}};
+const zh = translate("zh");
+const en = translate("en");
+const sample = (value, formatter = zh) => sessions.formatSessionRelativeTime(
+  value,
+  formatter,
+  now,
+);
+process.stdout.write(JSON.stringify({{
+  zh: [
+    sample({{lastMessageTime: "2026-08-24T12:00:00Z"}}),
+    sample({{lastMessageTime: "2026-08-24T12:05:00Z"}}),
+    sample({{lastMessageTime: "2026-08-24T11:59:01Z"}}),
+    sample({{lastMessageTime: "2026-08-24T11:59:00Z"}}),
+    sample({{lastMessageTime: "2026-08-24T11:00:01Z"}}),
+    sample({{lastMessageTime: "2026-08-24T11:00:00Z"}}),
+    sample({{lastMessageTime: "2026-08-23T13:00:00Z"}}),
+    sample({{lastMessageTime: "2026-08-23T12:00:00Z"}}),
+  ],
+  en: sample({{lastMessageTime: "2026-08-24T10:00:00Z"}}, en),
+  fallback: sample({{
+    lastMessageTime: "invalid",
+    updatedAt: "2026-08-24T11:58:00Z",
+    createdAt: "2026-08-20T00:00:00Z",
+  }}),
+  awareFallback: sample({{
+    lastMessageTime: "2026-08-24T11:00:00",
+    updatedAt: "invalid",
+    createdAt: "2026-08-24T11:57:00+00:00",
+  }}),
+  missing: sample({{}}),
+  running: sessions.resolveSessionStatus(
+    {{_unread: true}},
+    {{streaming: true, runningLabel: "running", unreadLabel: "unread", translate: zh, now}},
+  ),
+  unread: sessions.resolveSessionStatus(
+    {{_unread: true, lastMessageTime: "2026-08-24T11:00:00Z"}},
+    {{streaming: false, runningLabel: "running", unreadLabel: "unread", translate: zh, now}},
+  ),
+  idle: sessions.resolveSessionStatus(
+    {{lastMessageTime: "2026-08-24T11:00:00Z"}},
+    {{streaming: false, runningLabel: "running", unreadLabel: "unread", translate: zh, now}},
+  ),
+  inactiveQuestion: sessions.resolveSessionStatus(
+    {{_unread: true}},
+    {{active: false, waitingUserInput: true, waitingAuthorization: true, streaming: true,
+      waitingUserInputLabel: "answer", waitingAuthorizationLabel: "confirm",
+      runningLabel: "running", unreadLabel: "unread", translate: zh, now}},
+  ),
+  inactiveAuthorization: sessions.resolveSessionStatus(
+    {{_unread: true}},
+    {{active: false, waitingAuthorization: true, streaming: true,
+      waitingAuthorizationLabel: "confirm", runningLabel: "running",
+      unreadLabel: "unread", translate: zh, now}},
+  ),
+  activeWaitingRunning: sessions.resolveSessionStatus(
+    {{_unread: true}},
+    {{active: true, waitingUserInput: true, waitingAuthorization: true, streaming: true,
+      waitingUserInputLabel: "answer", waitingAuthorizationLabel: "confirm",
+      runningLabel: "running", unreadLabel: "unread", translate: zh, now}},
+  ),
+  activeWaitingUnread: sessions.resolveSessionStatus(
+    {{_unread: true}},
+    {{active: true, waitingUserInput: true, waitingAuthorization: true, streaming: false,
+      waitingUserInputLabel: "answer", waitingAuthorizationLabel: "confirm",
+      runningLabel: "running", unreadLabel: "unread", translate: zh, now}},
+  ),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["zh"],
+            ["刚刚", "刚刚", "刚刚", "1分钟", "59分钟", "1小时", "23小时", "1天"],
+        )
+        self.assertEqual(data["en"], "2h")
+        self.assertEqual(data["fallback"], "2分钟")
+        self.assertEqual(data["awareFallback"], "3分钟")
+        self.assertEqual(data["missing"], "")
+        self.assertEqual(data["running"], {"kind": "running", "text": "", "label": "running"})
+        self.assertEqual(data["unread"], {"kind": "unread", "text": "", "label": "unread"})
+        self.assertEqual(data["idle"], {"kind": "idle", "text": "1小时", "label": "1小时"})
+        self.assertEqual(
+            data["inactiveQuestion"],
+            {"kind": "waiting-user-input", "text": "", "label": "answer"},
+        )
+        self.assertEqual(
+            data["inactiveAuthorization"],
+            {"kind": "waiting-authorization", "text": "", "label": "confirm"},
+        )
+        self.assertEqual(
+            data["activeWaitingRunning"],
+            {"kind": "running", "text": "", "label": "running"},
+        )
+        self.assertEqual(
+            data["activeWaitingUnread"],
+            {"kind": "unread", "text": "", "label": "unread"},
+        )
+
+    def test_ticker_updates_only_idle_slots_once_per_minute_without_reordering(self):
+        script = f"""
+const window = {{Code: {{features: {{}}}}}};
+global.window = window;
+eval({json.dumps(SESSIONS_SOURCE)});
+const sessionsFeature = window.Code.features.sessions;
+let now = Date.parse("2026-08-24T12:00:59Z");
+const sessionItems = [
+  {{id: "older", lastMessageTime: "2026-08-24T11:59:59Z"}},
+  {{id: "newer", lastMessageTime: "2026-08-24T12:00:30Z"}},
+];
+const idleSlot = {{
+  dataset: {{sessionId: "older", sessionStatus: "idle"}},
+  textContent: "1m",
+  attrs: {{}},
+  setAttribute(name, value) {{ this.attrs[name] = value; }},
+  removeAttribute(name) {{ delete this.attrs[name]; }},
+}};
+const runningSlot = {{
+  dataset: {{sessionId: "newer", sessionStatus: "running"}},
+  textContent: "RUNNING",
+}};
+const selectors = [];
+const root = {{
+  querySelectorAll(selector) {{
+    selectors.push(selector);
+    return selector.includes('data-session-status="idle"') ? [idleSlot] : [idleSlot, runningSlot];
+  }},
+}};
+let scheduled = 0;
+let cancelled = 0;
+let intervalMs = 0;
+let callback = null;
+const ticker = sessionsFeature.createSessionStatusTicker({{
+  getRoot: () => root,
+  getSessions: () => sessionItems,
+  translate: (key, params = {{}}) => key === "sessionRelativeNow" ? "now" : `${{params.count}}m`,
+  now: () => now,
+  setInterval(fn, ms) {{ scheduled += 1; callback = fn; intervalMs = ms; return 17; }},
+  clearInterval(id) {{ if (id === 17) cancelled += 1; }},
+}});
+const beforeOrder = sessionItems.map((item) => item.id);
+const firstTimer = ticker.start();
+const secondTimer = ticker.start();
+now += 60_000;
+const changes = callback();
+const firstStop = ticker.stop();
+const secondStop = ticker.stop();
+process.stdout.write(JSON.stringify({{
+  beforeOrder,
+  afterOrder: sessionItems.map((item) => item.id),
+  firstTimer,
+  secondTimer,
+  scheduled,
+  cancelled,
+  intervalMs,
+  changes,
+  idleText: idleSlot.textContent,
+  idleAria: idleSlot.attrs["aria-label"],
+  runningText: runningSlot.textContent,
+  selectors,
+  firstStop,
+  secondStop,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["beforeOrder"], ["older", "newer"])
+        self.assertEqual(data["afterOrder"], ["older", "newer"])
+        self.assertEqual(data["firstTimer"], 17)
+        self.assertEqual(data["secondTimer"], 17)
+        self.assertEqual(data["scheduled"], 1)
+        self.assertEqual(data["cancelled"], 1)
+        self.assertEqual(data["intervalMs"], 60_000)
+        self.assertEqual(data["changes"], 1)
+        self.assertEqual(data["idleText"], "2m")
+        self.assertEqual(data["idleAria"], "2m")
+        self.assertEqual(data["runningText"], "RUNNING")
+        self.assertEqual(len(data["selectors"]), 1)
+        self.assertIn('data-session-status="idle"', data["selectors"][0])
+        self.assertTrue(data["firstStop"])
+        self.assertFalse(data["secondStop"])
+
+    def test_markup_i18n_and_css_keep_one_fixed_accessible_status_slot(self):
+        render_start = APP_SOURCE.index("function renderSessionStatusSlot(")
+        render_end = APP_SOURCE.index("function renderProjectSessionRow(", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        row_end = APP_SOURCE.index("function renderProjectSection(", render_end)
+        row_source = APP_SOURCE[render_end:row_end]
+        ticker_start = SESSIONS_SOURCE.index("function createSessionStatusTicker(")
+        ticker_end = SESSIONS_SOURCE.index("function createSessionsFeature(", ticker_start)
+        ticker_source = SESSIONS_SOURCE[ticker_start:ticker_end]
+        running_start = STYLE_SOURCE.index(
+            ".session-status-slot.is-running .session-status-indicator {"
+        )
+        running_end = STYLE_SOURCE.index("}", running_start)
+        running_source = STYLE_SOURCE[running_start:running_end]
+
+        self.assertIn('data-session-status="idle"', render_source)
+        self.assertIn('role="img" title="', render_source)
+        self.assertIn('aria-label="', render_source)
+        self.assertIn("renderSessionStatusSlot(session)", row_source)
+        self.assertNotIn("if (!active)", row_source)
+        self.assertNotIn("renderSessions", ticker_source)
+        self.assertNotIn("fetch(", ticker_source)
+        self.assertNotIn("apiJson", ticker_source)
+        for running_contract in (
+            "width: 11px;",
+            "height: 11px;",
+            "border: 2px solid var(--accent);",
+            "border-right-color: transparent;",
+            "animation: session-status-spin 1.4s linear infinite;",
+        ):
+            self.assertIn(running_contract, running_source)
+        self.assertNotIn("session-status-spin .8s", running_source)
+        for key in (
+            "sessionRelativeNow",
+            "sessionRelativeMinutes",
+            "sessionRelativeHours",
+            "sessionRelativeDays",
+            "sessionWaitingAnswer",
+            "sessionWaitingConfirmation",
+        ):
+            self.assertEqual(I18N_SOURCE.count(key + ":"), 2)
+        for css_contract in (
+            ".session-main .session-status-slot",
+            "flex: 0 0 46px;",
+            "white-space: nowrap;",
+            ".session-status-slot.is-running .session-status-indicator",
+            ".session-status-slot.is-unread .session-status-indicator",
+            ".session-status-slot.is-waiting-user-input .session-status-indicator",
+            ".session-status-slot.is-waiting-authorization .session-status-indicator",
+            'content: "?";',
+            'content: "!";',
+            "background: var(--accent);",
+            "@keyframes session-status-spin",
+            "@media (prefers-reduced-motion: reduce)",
+            "animation: none;",
+        ):
+            self.assertIn(css_contract, STYLE_SOURCE)
+        self.assertIn("position: absolute;", STYLE_SOURCE[STYLE_SOURCE.index(".session-more-wrap"):])
 
 
 class TestSidebarProjectArchitecture(unittest.TestCase):

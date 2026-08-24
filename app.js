@@ -46,9 +46,11 @@ const {
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
 const {
+  createSessionStatusTicker,
   createSessionNavigation,
   createSessionStartup,
   createSessionsFeature,
+  resolveSessionStatus,
 } = window.Code.features.sessions;
 const { createBranchesFeature } = window.Code.features.branches;
 const {
@@ -462,7 +464,8 @@ function renderSessionMessages(sessionId) {
   if (state.branchPanelOpen && typeof renderBranchTree === "function") renderBranchTree();
   } else {
     markSessionUnread(sessionId);
-    renderSessions();
+    if (isSessionStreaming(sessionId)) refreshSessionStatusSlot(sessionId);
+    else renderSessions();
   }
 }
 
@@ -1127,7 +1130,11 @@ const sessionNavigation = createSessionNavigation({
     restoreAuthorizationRequest,
   },
   view: {
+    beginSessionTransition: (sessionId) => goalFeature?.beginSessionTransition(sessionId) ?? null,
     cacheActiveSessionState,
+    cancelSessionTransition: (sessionId, token) => (
+      goalFeature?.cancelSessionTransition(sessionId, token) ?? false
+    ),
     resetRenderCache,
     renderMessages,
     renderSessions,
@@ -3333,6 +3340,7 @@ function renderMessages() {
   longTextDisplayController?.setSession(state.sessionId);
   renderUserInputPanel();
   renderAuthorizationPanel();
+  refreshSessionStatusSlot(state.sessionId);
 
   // Ensure state.messages reflects current session (syncs ctx.messages changes)
   const curMsgs = getSessionMessages(state.sessionId);
@@ -3874,6 +3882,79 @@ function renderPinIcon() {
     '</svg>';
 }
 
+function resolveSessionStatusSlot(session) {
+  const active = session.id === state.sessionId;
+  const runState = getSessionRunState(session.id) || session.runState || {};
+  const userInputRequest = getUserInputRequest(session.id) || runState.userInputRequest;
+  const authorizationRequest = pendingAuthorizations(session.id)[0] || runState.authorizationRequest;
+  return resolveSessionStatus(session, {
+    active,
+    waitingUserInput: userInputRequest?.status === "pending",
+    waitingAuthorization: authorizationRequest?.status === "pending",
+    streaming: isSessionStreaming(session.id),
+    waitingUserInputLabel: t("sessionWaitingAnswer"),
+    waitingAuthorizationLabel: t("sessionWaitingConfirmation"),
+    runningLabel: t("modelRunning"),
+    unreadLabel: t("unreadMessage"),
+    translate: t,
+    now: Date.now(),
+  });
+}
+
+function renderSessionStatusSlot(session, status = resolveSessionStatusSlot(session)) {
+  const sessionId = escapeHtml(session.id);
+  if (status.kind === "idle") {
+    const aria = status.text ? ' aria-label="' + escapeHtml(status.text) + '"' : "";
+    return '<span class="session-status-slot is-idle" data-session-status="idle" data-session-id="' +
+      sessionId + '"' + aria + '>' + escapeHtml(status.text) + '</span>';
+  }
+  return '<span class="session-status-slot is-' + status.kind + '" data-session-status="' +
+    status.kind + '" data-session-id="' + sessionId + '" role="img" title="' +
+    escapeHtml(status.label) + '" aria-label="' + escapeHtml(status.label) + '">' +
+    '<span class="session-status-indicator" aria-hidden="true"></span></span>';
+}
+
+function patchSessionStatusSlot(slot, session, status) {
+  if (slot.dataset.sessionStatus !== status.kind) return false;
+  slot.dataset.sessionId = session.id;
+  if (status.kind === "idle") {
+    slot.textContent = status.text;
+    slot.removeAttribute("role");
+    slot.removeAttribute("title");
+    if (status.text) slot.setAttribute("aria-label", status.text);
+    else slot.removeAttribute("aria-label");
+    return true;
+  }
+  const indicator = slot.querySelector(":scope > .session-status-indicator");
+  if (!indicator) return false;
+  slot.setAttribute("role", "img");
+  slot.setAttribute("title", status.label);
+  slot.setAttribute("aria-label", status.label);
+  indicator.setAttribute("aria-hidden", "true");
+  return true;
+}
+
+function refreshSessionStatusSlot(sessionId) {
+  if (!sessionId || !els.sessionList?.querySelectorAll) return false;
+  const session = state.sessions.find((item) => item.id === sessionId);
+  if (!session) return false;
+  const slot = Array.from(els.sessionList.querySelectorAll(
+    ".session-status-slot[data-session-id]",
+  )).find((item) => item.dataset.sessionId === sessionId);
+  if (!slot) return false;
+  const status = resolveSessionStatusSlot(session);
+  if (!patchSessionStatusSlot(slot, session, status)) {
+    slot.outerHTML = renderSessionStatusSlot(session, status);
+  }
+  return true;
+}
+
+const sessionStatusTicker = createSessionStatusTicker({
+  getRoot: () => els.sessionList,
+  getSessions: () => state.sessions,
+  translate: t,
+});
+
 function renderProjectSessionRow(session, pinnedIds) {
   const title = session.title || t("untitledSession");
   const active = session.id === state.sessionId;
@@ -3885,15 +3966,6 @@ function renderProjectSessionRow(session, pinnedIds) {
       '" aria-label="' + t("sessionNameAria") + '" /></div>';
   }
 
-  let dotHtml = "";
-  if (!active) {
-    if (isSessionStreaming(session.id)) {
-      dotHtml = '<span class="session-dot streaming" title="' + t("modelRunning") + '"></span>';
-    } else if (session._unread) {
-      dotHtml = '<span class="session-dot unread" title="' + t("unreadMessage") + '"></span>';
-    }
-  }
-
   const pinBadge = pinnedIds.includes(session.id)
     ? '<span class="session-pin-badge" title="' + t("pinnedLabel") + '">' +
       renderPinIcon() + '</span>'
@@ -3903,7 +3975,7 @@ function renderProjectSessionRow(session, pinnedIds) {
     '<button class="session-main" type="button" data-session-id="' +
     escapeHtml(session.id) + '">' +
     pinBadge + '<span class="session-title-text">' + escapeHtml(title) + '</span>' +
-    renderSessionSourceBadge(session) + dotHtml + '</button>' +
+    renderSessionSourceBadge(session) + renderSessionStatusSlot(session) + '</button>' +
     '<div class="session-more-wrap"><button class="session-more-btn" type="button" title="' +
     t("more") + '" data-session-id="' + escapeHtml(session.id) + '">&#8942;</button></div></div>';
 }
@@ -6260,6 +6332,7 @@ async function finishServerAgentAuthorizationRequest(item, approved) {
       console.error("Failed to persist server authorization result:", error);
     });
   }
+  refreshSessionStatusSlot(item.sessionId);
   if (item.sessionId === state.sessionId) {
     clearPermissionNotify();
     renderMessages();
@@ -6704,6 +6777,7 @@ async function requestUserInput(tool, ctx = null) {
     userInputRequest: serializeUserInputRequest(request),
     updatedAt: new Date().toISOString(),
   });
+  refreshSessionStatusSlot(request.sessionId);
   await saveSessionState(request.sessionId, getSessionMessages(request.sessionId), getSessionStats(request.sessionId))
     .catch((error) => console.error("Failed to persist questionnaire result:", error));
   if (request.sessionId === state.sessionId) renderMessages();
@@ -6722,6 +6796,7 @@ async function requestUserInput(tool, ctx = null) {
         delete state.userInputRequests[request.sessionId];
         const resolver = state._userInputResolvers.get(request.id);
         state._userInputResolvers.delete(request.id);
+        refreshSessionStatusSlot(request.sessionId);
         if (request.sessionId === state.sessionId) renderMessages();
         if (resolver) resolver(buildUserInputResult(request));
         return;
@@ -6764,6 +6839,7 @@ async function finishServerAgentUserInputRequest(request) {
     updatedAt: new Date().toISOString(),
   };
   setSessionRunState(request.sessionId, nextState);
+  refreshSessionStatusSlot(request.sessionId);
   await saveSessionState(
     request.sessionId,
     getSessionMessages(request.sessionId),
@@ -6803,6 +6879,7 @@ async function finishUserInputRequest(request) {
     userInputRequest: null,
     updatedAt: new Date().toISOString(),
   });
+  refreshSessionStatusSlot(request.sessionId);
   await saveSessionState(request.sessionId, getSessionMessages(request.sessionId), getSessionStats(request.sessionId));
   const resolver = state._userInputResolvers.get(request.id);
   state._userInputResolvers.delete(request.id);
@@ -9820,6 +9897,7 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
       markServerAuthorizationProjection(request, { applied: false, aborted: true }, false);
       state.authorizationRequests = state.authorizationRequests.filter((item) => item !== request);
       request.resolve?.(false);
+      refreshSessionStatusSlot(request.sessionId);
       if (request.sessionId === state.sessionId) renderMessages();
     };
     if (signal.aborted) {
@@ -9859,6 +9937,7 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
     });
   }
   state.authorizationPanelCollapsed = false;
+  refreshSessionStatusSlot(ctx.sessionId);
   if (ctx.sessionId === state.sessionId) renderAuthorizationPanel();
   if (isUserAway()) notifyPermissionNeeded(
     authorizationAction,
@@ -13265,6 +13344,7 @@ async function init() {
   void checkForUpdates({ silent: true });
 
   await refreshSessions();
+  sessionStatusTicker.start();
   await loadProjectContext();
   setTimeout(preloadImportSessions, 3000);  // background: preload Codex + Claude Code session lists
 
@@ -13297,6 +13377,7 @@ async function init() {
 
   // Flush unpersisted messages on page close (best-effort via sendBeacon)
   window.addEventListener("beforeunload", () => {
+    sessionStatusTicker.stop();
     persistedTiffPreviewCache.dispose();
     const sid = state.sessionId;
     if (!sid) return;

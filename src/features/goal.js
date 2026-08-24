@@ -54,6 +54,8 @@
     let currentSessionId = "";
     let cached = null;
     let requestSequence = 0;
+    let transitionSequence = 0;
+    let sessionTransition = null;
     let destroyed = false;
     let detailsPinned = false;
     let listenersBound = false;
@@ -281,6 +283,7 @@
 
     async function refresh(sessionId = getSessionId(), { quiet = false } = {}) {
       const normalized = String(sessionId || "");
+      if (sessionTransition) return null;
       const sequence = ++requestSequence;
       if (!normalized) {
         currentSessionId = "";
@@ -306,6 +309,16 @@
 
     function setSession(sessionId) {
       const normalized = String(sessionId || "");
+      if (sessionTransition) {
+        if (normalized === sessionTransition.targetSessionId) {
+          sessionTransition = null;
+        } else if (normalized === currentSessionId) {
+          render(null);
+          return;
+        } else {
+          sessionTransition = null;
+        }
+      }
       if (normalized === currentSessionId) {
         render(cached);
         return;
@@ -316,6 +329,37 @@
       dismissDetails();
       render(null);
       if (normalized) void refresh(normalized, { quiet: true });
+    }
+
+    function beginSessionTransition(sessionId) {
+      const normalized = String(sessionId || "");
+      if (!normalized || normalized === currentSessionId) return null;
+      const token = ++transitionSequence;
+      sessionTransition = {
+        token,
+        targetSessionId: normalized,
+        sourceSessionId: currentSessionId,
+        sourceProjection: cached,
+      };
+      requestSequence += 1;
+      cached = null;
+      dismissDetails();
+      render(null);
+      return token;
+    }
+
+    function cancelSessionTransition(sessionId, token) {
+      if (!sessionTransition || token !== sessionTransition.token) return false;
+      const sourceSessionId = sessionTransition.sourceSessionId || String(sessionId || "");
+      const sourceProjection = sessionTransition.sourceProjection;
+      sessionTransition = null;
+      requestSequence += 1;
+      currentSessionId = sourceSessionId;
+      cached = sourceProjection || null;
+      dismissDetails();
+      render(cached);
+      if (currentSessionId && !cached) void refresh(currentSessionId, { quiet: true });
+      return true;
     }
 
     async function prepareExplicitGoal(input = {}) {
@@ -358,6 +402,7 @@
     function destroy() {
       destroyed = true;
       requestSequence += 1;
+      sessionTransition = null;
       currentSessionId = "";
       cached = null;
       dismissDetails();
@@ -367,6 +412,8 @@
 
     return Object.freeze({
       classifyGoalInput,
+      beginSessionTransition,
+      cancelSessionTransition,
       destroy,
       getCached: () => cached,
       handleOrdinary: () => false,
