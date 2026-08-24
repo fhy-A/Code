@@ -205,6 +205,186 @@
     return Array.isArray(patterns) ? patterns : null;
   }
 
+  function createTokenFactory(source, label) {
+    let prefix = `\uE000CODE_${label}_`;
+    while (source.includes(prefix)) prefix += "_";
+    return (index) => `${prefix}${index}\uE001`;
+  }
+
+  function protectCodeRegions(value) {
+    const original = String(value || "");
+    const regions = [];
+    const tokenFor = createTokenFactory(original, "REGION");
+    const protect = (match) => {
+      const token = tokenFor(regions.length);
+      regions.push({ token, value: match });
+      return token;
+    };
+    // Fenced blocks are removed before inline spans so later projections can
+    // never reinterpret URLs, math delimiters, or backticks inside code.
+    const lines = original.split("\n");
+    const projectedLines = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const opening = lines[index].match(/^[ \t]{0,3}(`{3,}|~{3,})[^\n]*$/);
+      if (!opening) {
+        projectedLines.push(lines[index]);
+        continue;
+      }
+      const fenceChar = opening[1][0];
+      const fenceLength = opening[1].length;
+      const block = [lines[index]];
+      while (index + 1 < lines.length) {
+        index += 1;
+        block.push(lines[index]);
+        const closing = lines[index].match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
+        if (closing && closing[1][0] === fenceChar && closing[1].length >= fenceLength) break;
+      }
+      projectedLines.push(protect(block.join("\n")));
+    }
+    let source = projectedLines.join("\n");
+    source = source.replace(/(`+)([\s\S]*?)\1/g, protect);
+    return {
+      source,
+      restore(projected) {
+        let restored = projected;
+        regions.forEach((region) => {
+          restored = restored.split(region.token).join(region.value);
+        });
+        return restored;
+      },
+    };
+  }
+
+  function explicitMarkdownLinkEnd(source, start) {
+    let labelStart = start;
+    if (source[start] === "!" && source[start + 1] === "[") labelStart += 1;
+    if (source[labelStart] !== "[") return -1;
+
+    let bracketDepth = 0;
+    for (let index = labelStart; index < source.length; index += 1) {
+      const char = source[index];
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === "[") bracketDepth += 1;
+      else if (char === "]") {
+        bracketDepth -= 1;
+        if (bracketDepth !== 0) continue;
+        let cursor = index + 1;
+        while (source[cursor] === " " || source[cursor] === "\t") cursor += 1;
+        if (source[cursor] !== "(") return -1;
+        let parenDepth = 1;
+        for (cursor += 1; cursor < source.length; cursor += 1) {
+          const destinationChar = source[cursor];
+          if (destinationChar === "\\") {
+            cursor += 1;
+            continue;
+          }
+          if (destinationChar === "(") parenDepth += 1;
+          else if (destinationChar === ")") {
+            parenDepth -= 1;
+            if (parenDepth === 0) return cursor + 1;
+          }
+        }
+        return -1;
+      }
+    }
+    return -1;
+  }
+
+  function isUnicodePunctuationBoundary(char) {
+    return Boolean(char) && /^\p{P}$/u.test(char);
+  }
+
+  function trimBareUrlTail(candidate) {
+    let url = candidate;
+    let tail = "";
+    while (/[.,;:!]$/.test(url)) {
+      tail = url.slice(-1) + tail;
+      url = url.slice(0, -1);
+    }
+    const pairs = [["(", ")"], ["[", "]"], ["{", "}"]];
+    for (const [opening, closing] of pairs) {
+      while (url.endsWith(closing)) {
+        const opens = [...url].filter((char) => char === opening).length;
+        const closes = [...url].filter((char) => char === closing).length;
+        if (closes <= opens) break;
+        tail = closing + tail;
+        url = url.slice(0, -1);
+      }
+    }
+    return { url, tail };
+  }
+
+  /**
+   * marked's bare-URL tokenizer accepts Unicode letters as part of an href, so
+   * `https://a.test。下一项` becomes one encoded link. Project only ordinary
+   * Markdown text whose ASCII HTTP(S) URL is immediately followed by explicit
+   * Unicode punctuation into a standard angle autolink. Unicode letters stay
+   * under marked's existing behavior so legitimate `/中文` and `/한글` paths
+   * are never truncated. Code, explicit links, images, existing angle
+   * autolinks, and raw HTML are copied byte-for-byte.
+   */
+  function projectCjkBareUrlBoundaries(value) {
+    const original = String(value || "");
+    if (!original || !/https?:\/\//i.test(original)) return original;
+    const protectedCode = protectCodeRegions(original);
+    const source = protectedCode.source;
+    let projected = "";
+    let index = 0;
+
+    while (index < source.length) {
+      if (source[index] === "[" || (source[index] === "!" && source[index + 1] === "[")) {
+        const explicitEnd = explicitMarkdownLinkEnd(source, index);
+        if (explicitEnd > index) {
+          projected += source.slice(index, explicitEnd);
+          index = explicitEnd;
+          continue;
+        }
+      }
+      if (source[index] === "<") {
+        const angleEnd = source.indexOf(">", index + 1);
+        if (angleEnd >= 0) {
+          projected += source.slice(index, angleEnd + 1);
+          index = angleEnd + 1;
+          continue;
+        }
+      }
+
+      const rest = source.slice(index);
+      const prefix = rest.match(/^https?:\/\//i)?.[0] || "";
+      const previous = index > 0 ? source[index - 1] : "";
+      if (prefix && !/[A-Za-z0-9_]/.test(previous)) {
+        let end = index + prefix.length;
+        while (end < source.length) {
+          const char = source[end];
+          const code = char.codePointAt(0);
+          if (code <= 0x20 || code >= 0x7f || char === "<" || char === ">" || char === "`") break;
+          end += char.length;
+        }
+        if (end > index + prefix.length && isUnicodePunctuationBoundary(source[end])) {
+          const { url, tail } = trimBareUrlTail(source.slice(index, end));
+          const UrlCtor = global.URL || globalThis.URL;
+          let valid = false;
+          try {
+            const parsed = new UrlCtor(url);
+            valid = /^https?:$/i.test(parsed.protocol) && Boolean(parsed.hostname);
+          } catch (_) { /* keep marked's original behavior */ }
+          if (valid) {
+            projected += `<${url}>${tail}`;
+            index = end;
+            continue;
+          }
+        }
+      }
+
+      projected += source[index];
+      index += 1;
+    }
+    return protectedCode.restore(projected);
+  }
+
   function createMarkdownFeature(options = {}) {
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
     const renderDiff = options.renderDiff || ((text) => escapeHtml(text));
@@ -422,56 +602,6 @@
     };
     markedRef.setOptions({ renderer, breaks: true, gfm: true });
 
-    function createTokenFactory(source, label) {
-      let prefix = `\uE000CODE_${label}_`;
-      while (source.includes(prefix)) prefix += "_";
-      return (index) => `${prefix}${index}\uE001`;
-    }
-
-    function protectCodeRegions(value) {
-      const original = String(value || "");
-      const regions = [];
-      const tokenFor = createTokenFactory(original, "REGION");
-      const protect = (match) => {
-        const token = tokenFor(regions.length);
-        regions.push({ token, value: match });
-        return token;
-      };
-      // Fenced blocks are removed before inline spans so math delimiters and
-      // backticks inside a block can never be reinterpreted.
-      const lines = original.split("\n");
-      const projectedLines = [];
-      for (let index = 0; index < lines.length; index += 1) {
-        const opening = lines[index].match(/^[ \t]{0,3}(`{3,}|~{3,})[^\n]*$/);
-        if (!opening) {
-          projectedLines.push(lines[index]);
-          continue;
-        }
-        const fenceChar = opening[1][0];
-        const fenceLength = opening[1].length;
-        const block = [lines[index]];
-        while (index + 1 < lines.length) {
-          index += 1;
-          block.push(lines[index]);
-          const closing = lines[index].match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
-          if (closing && closing[1][0] === fenceChar && closing[1].length >= fenceLength) break;
-        }
-        projectedLines.push(protect(block.join("\n")));
-      }
-      let source = projectedLines.join("\n");
-      source = source.replace(/(`+)([\s\S]*?)\1/g, protect);
-      return {
-        source,
-        restore(projected) {
-          let restored = projected;
-          regions.forEach((region) => {
-            restored = restored.split(region.token).join(region.value);
-          });
-          return restored;
-        },
-      };
-    }
-
     function projectMath(value) {
       const source = String(value || "");
       if (!source || typeof global.katex === "undefined") {
@@ -517,9 +647,12 @@
     function renderMarkdownLite(text) {
       if (!text) return "";
       // Keep source semantics intact. Math is tokenized outside code, standard
-      // Markdown is parsed once, and trusted KaTeX HTML is restored last.
+      // Markdown is parsed once, and trusted KaTeX HTML is restored last. The
+      // CJK projection only supplies a boundary that marked's URL tokenizer
+      // otherwise lacks; it does not alter explicit Markdown or code regions.
       const math = projectMath(String(text));
-      return math.restore(markedRef.parse(math.source));
+      const bounded = projectCjkBareUrlBoundaries(math.source);
+      return math.restore(markedRef.parse(bounded));
     }
 
     function setupMathCopyHandler(messagesEl) {
@@ -564,5 +697,6 @@
     parseLineRef,
     classifyLocalPath,
     faviconHostCandidates,
+    projectCjkBareUrlBoundaries,
   });
 })(window);

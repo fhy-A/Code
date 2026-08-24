@@ -15870,9 +15870,27 @@ const test = base.test.extend({
           },
           parse(source) {
             const text = String(source ?? "");
+            const renderer = markedOptions.renderer;
+            const inlineContext = {
+              parser: {
+                parseInline(tokens) {
+                  return (tokens || []).map((token) => String(token?.text || "")).join("");
+                },
+              },
+            };
+            const inline = text.replace(/<(https?:\/\/[^<>\s]+)>/gi, (_raw, href) => (
+              typeof renderer?.link === "function"
+                ? renderer.link.call(inlineContext, {
+                    href,
+                    text: href,
+                    title: null,
+                    tokens: [{ type: "text", text: href }],
+                  })
+                : _raw
+            ));
             return markedOptions.renderer?.paragraph
-              ? markedOptions.renderer.paragraph({ text, tokens: [{ text }] })
-              : text;
+              ? markedOptions.renderer.paragraph({ text: inline, tokens: [{ text: inline }] })
+              : inline;
           },
         };
         localStorage.setItem("code-key-config", JSON.stringify([{
@@ -23676,6 +23694,136 @@ async function exerciseSessionStatusSlot(h4, runtime) {
   }
 }
 
+async function exerciseCjkBareUrlBoundaries(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+
+  const source = "推荐 https://yuanbao.tencent.com）（再看 https://xinghuo.xfyun.cn、最后 https://mistral.ai。";
+  const expectedHrefs = [
+    "https://yuanbao.tencent.com",
+    "https://xinghuo.xfyun.cn",
+    "https://mistral.ai",
+  ];
+  const created = await sendProductionJson(page, "/api/sessions", "POST", {
+    title: `H4 CJK bare URL ${runtime}`,
+    messages: [
+      { role: "user", content: "H4 CJK bare URL seed", _time: "2026-08-24T02:00:00Z" },
+      { role: "assistant", content: source, _time: "2026-08-24T02:00:01Z" },
+    ],
+  });
+  expect(created.status).toBe(201);
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  const activeSession = page.locator(
+    `#sessionList .session-row.active[data-session-id="${created.body.id}"]`,
+  );
+  if (await activeSession.count() === 0) {
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${created.body.id}"]`,
+    ).click();
+  }
+  await expect(activeSession).toHaveCount(1);
+
+  const assistant = page.locator("#messages article.msg.assistant").filter({
+    hasText: "yuanbao.tencent.com",
+  });
+  await expect(assistant).toHaveCount(1);
+  const links = assistant.locator("a.ext-link");
+  await expect(links).toHaveCount(3);
+  expect(await links.evaluateAll((elements) => elements.map((element) => ({
+    href: element.getAttribute("href"),
+    text: element.textContent?.trim(),
+    target: element.getAttribute("target"),
+    rel: element.getAttribute("rel"),
+  })))).toEqual(expectedHrefs.map((href) => ({
+    href,
+    text: new URL(href).hostname,
+    target: "_blank",
+    rel: "noopener",
+  })));
+  await expect(assistant).toContainText(
+    "推荐 yuanbao.tencent.com）（再看 xinghuo.xfyun.cn、最后 mistral.ai。",
+  );
+  expect((await links.evaluateAll((elements) => elements.map(
+    (element) => element.getAttribute("href") || "",
+  ))).some((href) => /%EF%BC|%E3%80|xn--/i.test(href))).toBe(false);
+
+  await page.evaluate(() => {
+    window.__h4CopiedExternalLinks = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText(value) {
+          window.__h4CopiedExternalLinks.push(String(value));
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+  for (let index = 0; index < expectedHrefs.length; index += 1) {
+    const link = links.nth(index);
+    const href = expectedHrefs[index];
+    await link.hover();
+    await expect(page.locator(".sb-path-tooltip")).toHaveText(href);
+    await link.click({ button: "right" });
+    const copyLink = page.locator('.file-ctx-menu [data-action="copy-link"]');
+    await expect(copyLink).toBeVisible();
+    await copyLink.click();
+    await expect.poll(() => page.evaluate(() => window.__h4CopiedExternalLinks)).toEqual(
+      expectedHrefs.slice(0, index + 1),
+    );
+  }
+
+  const finalObservedFaviconCandidates = [
+    "/ip3/tencent.com.ico",
+    "/ip3/xfyun.cn.ico",
+    "/ip3/mistral.ai.ico",
+  ];
+  await expect.poll(() => {
+    const paths = new Set(h4.blockedRequests.map((request) => request.path));
+    return finalObservedFaviconCandidates.every((path) => paths.has(path));
+  }).toBe(true);
+  const allowedBlockedPaths = new Set([
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+    "/yuanbao.tencent.com/64",
+    "/xinghuo.xfyun.cn/64",
+    "/mistral.ai/64",
+    "/tencent.com/64",
+    "/xfyun.cn/64",
+    "/s2/favicons",
+    "/ip3/yuanbao.tencent.com.ico",
+    "/ip3/xinghuo.xfyun.cn.ico",
+    "/ip3/mistral.ai.ico",
+    "/ip3/tencent.com.ico",
+    "/ip3/xfyun.cn.ico",
+    "/favicon.ico",
+  ]);
+  for (const request of h4.blockedRequests) {
+    expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
+    expect(allowedBlockedPaths.has(request.path)).toBe(true);
+  }
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-cjk-bare-url-boundary`, {
+    sessionId: idHash(created.body.id),
+    hrefs: expectedHrefs,
+    punctuationPreserved: true,
+    tooltipTargets: expectedHrefs,
+    copiedContextMenuTargets: expectedHrefs,
+    modelRequests: metrics.chatRequests.length,
+    toolExecutions: metrics.toolExecutions.length,
+    blockedRequests: h4.blockedRequests.length,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -23740,4 +23888,12 @@ test("bundle session status slot shows idle running and unread states", async ({
 
 test("direct classic session status slot shows idle running and unread states", async ({ h4 }) => {
   await exerciseSessionStatusSlot(h4, "classic");
+});
+
+test("bundle CJK bare URL boundaries preserve independent external links", async ({ h4 }) => {
+  await exerciseCjkBareUrlBoundaries(h4, "bundle");
+});
+
+test("direct classic CJK bare URL boundaries preserve independent external links", async ({ h4 }) => {
+  await exerciseCjkBareUrlBoundaries(h4, "classic");
 });

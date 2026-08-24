@@ -10390,6 +10390,116 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(data["breaks"])
         self.assertTrue(data["gfm"])
 
+    def test_markdown_cjk_bare_url_boundaries_preserve_markdown_regions(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/markdown.js");
+const markdown = window.Code.ui.markdown;
+const project = markdown.projectCjkBareUrlBoundaries;
+const original = "推荐 https://yuanbao.tencent.com）（再看 https://xinghuo.xfyun.cn、最后 https://mistral.ai。";
+const query = "查询 https://example.com/a?q=hello&lang=zh#part，编码 https://example.com/%E4%B8%AD%E6%96%87。";
+const consecutive = "https://a.example、https://b.example；https://c.example：https://d.example！https://e.example…";
+const explicit = "[说明 https://label.example。](https://target.example/中文?q=1)";
+const image = "![图 https://alt.example。](https://images.example/中文.png)";
+const angle = "<https://angle.example/中文>";
+const inlineCode = "`https://code.example。`";
+const fencedCode = "```text\nhttps://fence.example。\n```";
+const rawHtml = '<a href="https://html.example/中文">链接</a>';
+const plainAscii = "https://ascii.example/a?q=hello#part next";
+const unicodeHanPath = "https://example.com/中文";
+const unicodeHangulPath = "https://example.com/한글";
+const unicodeKanaPath = "https://example.com/かな";
+const unpunctuatedHanText = "https://example.com后续正文";
+
+let configured = null;
+class Renderer {}
+const marked = {
+  Renderer,
+  setOptions(options) { configured = options; },
+  parse(source) {
+    return String(source).replace(/<(https?:\/\/[^<>\s]+)>/gi, (_raw, href) => configured.renderer.link.call({
+      parser: {parseInline: (tokens) => tokens.map((token) => token.text).join("")},
+    }, {href, text: href, tokens: [{type: "text", text: href}], title: null}));
+  },
+};
+const feature = markdown.createMarkdownFeature({
+  marked,
+  escapeHtml: (value) => String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll('<', "&lt;")
+    .replaceAll('>', "&gt;")
+    .replaceAll('"', "&quot;"),
+});
+const rendered = feature.renderMarkdownLite(original);
+process.stdout.write(JSON.stringify({
+  original: project(original),
+  query: project(query),
+  consecutive: project(consecutive),
+  explicit: project(explicit),
+  image: project(image),
+  angle: project(angle),
+  inlineCode: project(inlineCode),
+  fencedCode: project(fencedCode),
+  rawHtml: project(rawHtml),
+  plainAscii: project(plainAscii),
+  unicodeHanPath: project(unicodeHanPath),
+  unicodeHangulPath: project(unicodeHangulPath),
+  unicodeKanaPath: project(unicodeKanaPath),
+  unpunctuatedHanText: project(unpunctuatedHanText),
+  rendered,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["original"],
+            "推荐 <https://yuanbao.tencent.com>）（再看 "
+            "<https://xinghuo.xfyun.cn>、最后 <https://mistral.ai>。",
+        )
+        self.assertEqual(
+            data["query"],
+            "查询 <https://example.com/a?q=hello&lang=zh#part>，编码 "
+            "<https://example.com/%E4%B8%AD%E6%96%87>。",
+        )
+        self.assertEqual(
+            data["consecutive"],
+            "<https://a.example>、<https://b.example>；"
+            "<https://c.example>：<https://d.example>！<https://e.example>…",
+        )
+        self.assertEqual(
+            data["explicit"],
+            "[说明 https://label.example。](https://target.example/中文?q=1)",
+        )
+        self.assertEqual(
+            data["image"],
+            "![图 https://alt.example。](https://images.example/中文.png)",
+        )
+        self.assertEqual(data["angle"], "<https://angle.example/中文>")
+        self.assertEqual(data["inlineCode"], "`https://code.example。`")
+        self.assertEqual(data["fencedCode"], "```text\nhttps://fence.example。\n```")
+        self.assertEqual(data["rawHtml"], '<a href="https://html.example/中文">链接</a>')
+        self.assertEqual(data["plainAscii"], "https://ascii.example/a?q=hello#part next")
+        self.assertEqual(data["unicodeHanPath"], "https://example.com/中文")
+        self.assertEqual(data["unicodeHangulPath"], "https://example.com/한글")
+        self.assertEqual(data["unicodeKanaPath"], "https://example.com/かな")
+        self.assertEqual(data["unpunctuatedHanText"], "https://example.com后续正文")
+        self.assertEqual(data["rendered"].count('class="ext-link"'), 3)
+        for href in (
+            "https://yuanbao.tencent.com",
+            "https://xinghuo.xfyun.cn",
+            "https://mistral.ai",
+        ):
+            self.assertIn(f'href="{href}"', data["rendered"])
+        self.assertIn('target="_blank" rel="noopener"', data["rendered"])
+        self.assertNotIn("%EF%BC", data["rendered"])
+
     def test_diff_ui_owns_normalization_stats_rendering_and_edit_cards(self):
         self.assertIn("Code.ui.diff = Object.freeze", DIFF_SOURCE)
         script = r"""

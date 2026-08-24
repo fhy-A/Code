@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-24 | `CODE-036` 第一阶段中文标点相邻裸链接解析完成：在 `marked` 前仅为紧邻 Unicode 标点的 HTTP(S) 裸 URL 建立标准 autolink 边界，代码、显式链接/图片、query/fragment、百分号编码和合法 `/中文`、`/한글`、`/かな` 路径保持；用户 fresh bundle 上 bundle/direct classic H4 `2 passed` 并确认双入口人工 PASS。整项仍保留，下一阶段为 favicon 安全同源解析/代理 | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-038` 会话列表相对时间与状态槽、Goal 会话切换隔离完成：固定右侧槽按 inactive 等待回答/确认、运行、未读、空闲时间投影现有事实，active 交互由既有面板唯一接管；分钟 ticker 不重排，切换期间旧 Goal 零跨会话帧。运行环调整为 1.4 秒并以同 kind 原地 patch、后台 streaming 局部刷新保持跨增量 DOM 身份。前端模块 `222/222 passed`，用户 fresh bundle 上 bundle/direct classic H4 `2 passed`，双入口视觉与交互人工 PASS | [查看](2026/2026-08-24.md) |
 | 2026-08-23 | `CODE-037` 历史会话最后对话时间排序完成：可选 `lastMessageTime`、旧索引锁内惰性回填、导入/分支兼容、naive 本地时间到 UTC 的 API 边界归一、续聊后权威时间即时重排及刷新/首次切换防抖闭合；用户 bundle/direct classic H4 `2 passed (6.7s)`，排序、活跃时间与短消息时间戳单行显示人工 PASS | [查看](2026/2026-08-23.md) |
 | 2026-08-23 | 最终回答渲染与交互（answer-render R001-R017）：markdown 扩展（admonition/表格滚动/锚点/语言标签/行号引用）、路径别名+自定义 tooltip+点击定位行+右键菜单、预览路由矩阵（binary/超限外部打开）、外链 favicon 左置+glyph 兜底+多源+父域回退+缓存+近白底衬+主题适配、悬浮去重、系统提示防编造；211 passed、本地提交（未 push） | [查看](2026/2026-08-23.md) |
