@@ -2203,6 +2203,34 @@ function bindAdmonitions() {
   });
 }
 
+let _structuredTableFrame = 0;
+let _structuredTableResizeBound = false;
+function syncStructuredMarkdownTables() {
+  document.querySelectorAll(".table-wrap").forEach((wrap) => {
+    const scroll = wrap.querySelector(":scope > .table-scroll");
+    if (!scroll) return;
+    const overflowing = scroll.scrollWidth > scroll.clientWidth + 1;
+    wrap.dataset.overflow = overflowing ? "true" : "false";
+    scroll.tabIndex = overflowing ? 0 : -1;
+  });
+}
+
+function scheduleStructuredMarkdownTables() {
+  if (_structuredTableFrame) return;
+  _structuredTableFrame = window.requestAnimationFrame(() => {
+    _structuredTableFrame = 0;
+    syncStructuredMarkdownTables();
+  });
+}
+
+function bindStructuredMarkdownTables() {
+  syncStructuredMarkdownTables();
+  scheduleStructuredMarkdownTables();
+  if (_structuredTableResizeBound) return;
+  _structuredTableResizeBound = true;
+  window.addEventListener("resize", scheduleStructuredMarkdownTables, { passive: true });
+}
+
 // Inline images degrade to a file link on load failure (no blank flash).
 function bindMessageImages() {
   document.querySelectorAll(".msg-inline-img-slot").forEach((slot) => {
@@ -3462,6 +3490,7 @@ function renderMessages() {
 
   bindCopyButtons();
   bindAdmonitions();
+  bindStructuredMarkdownTables();
   bindExtLinkFavicons();
   bindTooltips();
   bindMessageImages();

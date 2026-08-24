@@ -10468,6 +10468,231 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(data["breaks"])
         self.assertTrue(data["gfm"])
 
+    def test_structured_markdown_preserves_task_list_and_table_semantics(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+class Renderer {}
+let configured = null;
+const marked = {
+  Renderer,
+  setOptions(options) { configured = options; },
+  parse: () => "",
+};
+require("./src/ui/markdown.js");
+const feature = window.Code.ui.markdown.createMarkdownFeature({
+  marked,
+  escapeHtml: (value) => String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;"),
+});
+const renderer = feature.renderer;
+const parser = {
+  parseInline(tokens) {
+    return (tokens || []).map((token) => {
+      if (token.type === "checkbox") return renderer.checkbox.call(renderer, token);
+      return String(token.text || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }).join("");
+  },
+  parse(tokens) {
+    return (tokens || []).map((token) => {
+      if (token.type === "checkbox") return renderer.checkbox.call(renderer, token);
+      if (token.type === "list") return renderer.list.call(renderer, token);
+      if (token.type === "paragraph" || token.type === "text") {
+        return parser.parseInline(token.tokens || [token]);
+      }
+      return "";
+    }).join("");
+  },
+};
+renderer.parser = parser;
+const taskList = renderer.list.call(renderer, {
+  ordered: false,
+  start: "",
+  items: [
+    {
+      task: true,
+      checked: true,
+      tokens: [
+        {type: "checkbox", checked: true},
+        {type: "text", text: "已完成", tokens: [{type: "text", text: "已完成"}]},
+      ],
+    },
+    {
+      task: true,
+      checked: false,
+      tokens: [
+        {
+          type: "paragraph",
+          text: "待处理长文本",
+          tokens: [
+            {type: "checkbox", checked: false},
+            {type: "text", text: "待处理长文本"},
+          ],
+        },
+        {
+          type: "list",
+          ordered: true,
+          start: 3,
+          items: [{task: false, tokens: [{type: "text", text: "嵌套项目", tokens: [{type: "text", text: "嵌套项目"}]}]}],
+        },
+      ],
+    },
+  ],
+});
+const ordinaryList = renderer.list.call(renderer, {
+  ordered: true,
+  start: 4,
+  items: [{task: false, tokens: [{type: "text", text: "普通项目", tokens: [{type: "text", text: "普通项目"}]}]}],
+});
+const table = renderer.table.call(renderer, {
+  header: [
+    {align: "left", tokens: [{type: "text", text: "左 & 列"}]},
+    {align: "center", tokens: [{type: "text", text: "中列"}]},
+    {align: "right", tokens: [{type: "text", text: "右列"}]},
+  ],
+  rows: [[
+    {align: "left", tokens: [{type: "text", text: "A < B"}]},
+    {align: "center", tokens: [{type: "text", text: "中"}]},
+    {align: "right", tokens: [{type: "text", text: "42"}]},
+  ]],
+});
+process.stdout.write(JSON.stringify({
+  taskList,
+  ordinaryList,
+  table,
+  gfm: configured.gfm,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        task_list = data["taskList"]
+        self.assertIn('class="md-list md-list-unordered task-list"', task_list)
+        self.assertEqual(task_list.count('class="task-list-item"'), 2)
+        self.assertEqual(task_list.count('class="task-list-checkbox"'), 2)
+        self.assertEqual(task_list.count('type="checkbox" disabled checked'), 1)
+        self.assertEqual(task_list.count('type="checkbox" disabled aria-labelledby='), 1)
+        self.assertIn('data-task-state="checked"', task_list)
+        self.assertIn('data-task-state="unchecked"', task_list)
+        self.assertIn('aria-labelledby="md-task-content-1"', task_list)
+        self.assertIn('aria-labelledby="md-task-content-2"', task_list)
+        self.assertIn('class="md-list md-list-ordered" start="3"', task_list)
+        self.assertEqual(task_list.count("已完成"), 1)
+        self.assertEqual(task_list.count("待处理长文本"), 1)
+        self.assertIn('class="md-list md-list-ordered" start="4"', data["ordinaryList"])
+        self.assertNotIn("task-list-item", data["ordinaryList"])
+        self.assertIn('align="left" data-align="left" class="md-align-left"', data["table"])
+        self.assertIn('align="center" data-align="center" class="md-align-center"', data["table"])
+        self.assertIn('align="right" data-align="right" class="md-align-right"', data["table"])
+        self.assertIn("左 &amp; 列", data["table"])
+        self.assertIn("A &lt; B", data["table"])
+        self.assertIn('class="table-scroll" tabindex="-1"', data["table"])
+        self.assertIn('class="table-overflow-hint" aria-hidden="true">↔', data["table"])
+        self.assertTrue(data["gfm"])
+
+        self.assertIn(".md-list .md-list", STYLE_SOURCE)
+        self.assertIn("pointer-events:none", STYLE_SOURCE)
+        self.assertIn('.table-wrap[data-overflow="true"] .table-overflow-hint', STYLE_SOURCE)
+        self.assertIn("overscroll-behavior-inline:contain", STYLE_SOURCE)
+        self.assertIn("th.md-align-center", STYLE_SOURCE)
+        self.assertIn("td.md-align-right", STYLE_SOURCE)
+
+    def test_structured_table_binding_only_focuses_real_overflow(self):
+        start = APP_SOURCE.index("let _structuredTableFrame = 0;")
+        end = APP_SOURCE.index("// Inline images degrade", start)
+        source = APP_SOURCE[start:end]
+        script = f"""
+const source = {json.dumps(source)};
+const narrowScroll = {{scrollWidth: 240, clientWidth: 240, tabIndex: 99}};
+const wideScroll = {{scrollWidth: 640, clientWidth: 320, tabIndex: 99}};
+const narrowWrap = {{dataset: {{}}, querySelector: () => narrowScroll}};
+const wideWrap = {{dataset: {{}}, querySelector: () => wideScroll}};
+let resizeBindings = 0;
+let frames = 0;
+global.document = {{querySelectorAll: (selector) => selector === ".table-wrap" ? [narrowWrap, wideWrap] : []}};
+global.window = {{
+  requestAnimationFrame(callback) {{ frames += 1; callback(); return frames; }},
+  addEventListener(type) {{ if (type === "resize") resizeBindings += 1; }},
+}};
+eval(source);
+bindStructuredMarkdownTables();
+bindStructuredMarkdownTables();
+process.stdout.write(JSON.stringify({{
+  narrowOverflow: narrowWrap.dataset.overflow,
+  narrowTabIndex: narrowScroll.tabIndex,
+  wideOverflow: wideWrap.dataset.overflow,
+  wideTabIndex: wideScroll.tabIndex,
+  resizeBindings,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["narrowOverflow"], "false")
+        self.assertEqual(data["narrowTabIndex"], -1)
+        self.assertEqual(data["wideOverflow"], "true")
+        self.assertEqual(data["wideTabIndex"], 0)
+        self.assertEqual(data["resizeBindings"], 1)
+
+    def test_plain_file_cards_are_lightweight_without_changing_image_cards(self):
+        file_card = re.search(r"\.path-file-card\{([^}]+)\}", STYLE_SOURCE)
+        image_card = re.search(r"\.path-image-card\{([^}]+)\}", STYLE_SOURCE)
+        self.assertIsNotNone(file_card)
+        self.assertIsNotNone(image_card)
+        file_style = file_card.group(1)
+        image_style = image_card.group(1)
+
+        for expected in (
+            "display:inline-flex",
+            "align-items:center",
+            "gap:4px",
+            "background:transparent",
+            "border:0",
+            "border-radius:0",
+            "padding:0 1px 0 0",
+            "vertical-align:baseline",
+            "cursor:pointer",
+        ):
+            self.assertIn(expected, file_style)
+        for removed in (
+            "background:var(--panel)",
+            "border:1px solid var(--line)",
+            "border-radius:8px",
+            "padding:3px 10px 3px 6px",
+        ):
+            self.assertNotIn(removed, file_style)
+
+        for preserved in (
+            "background:var(--panel)",
+            "border:1px solid var(--line)",
+            "border-radius:8px",
+            "padding:4px 10px 4px 4px",
+            "vertical-align:middle",
+        ):
+            self.assertIn(preserved, image_style)
+        self.assertIn('card.className = "path-file-card";', APP_SOURCE)
+        self.assertIn('card.className = "path-image-card";', APP_SOURCE)
+        self.assertIn("card.addEventListener(\"click\"", APP_SOURCE)
+        self.assertIn("openReferencedPath(p, projectRoot);", APP_SOURCE)
+        self.assertIn("showLinkContextMenu", APP_SOURCE)
+
     def test_markdown_cjk_bare_url_boundaries_preserve_markdown_regions(self):
         script = r"""
 global.window = {Code: {ui: {}}};

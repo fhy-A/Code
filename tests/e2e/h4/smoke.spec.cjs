@@ -15871,6 +15871,103 @@ const test = base.test.extend({
           parse(source) {
             const text = String(source ?? "");
             const renderer = markedOptions.renderer;
+            // CODE-039 uses the exact Marked 17.0.5 token contract here so
+            // H4 stays fully offline while exercising the production
+            // renderer and browser layout. Real Marked parsing is covered by
+            // the normal browser/manual gate; this fixture does not parse or
+            // rewrite arbitrary Markdown.
+            if (text.startsWith("### 结构化验收\n")) {
+              const textToken = (value) => ({ type: "text", text: value, tokens: [{ type: "text", text: value }] });
+              const nestedUnordered = {
+                type: "list",
+                ordered: false,
+                start: "",
+                items: [{ task: false, tokens: [textToken("二级无序子项与 inline-code")] }],
+              };
+              const nestedOrdered = {
+                type: "list",
+                ordered: true,
+                start: 1,
+                items: [{
+                  task: false,
+                  tokens: [textToken("一级有序子项"), nestedUnordered],
+                }],
+              };
+              const listToken = {
+                type: "list",
+                ordered: false,
+                start: "",
+                items: [
+                  {
+                    task: true,
+                    checked: true,
+                    tokens: [
+                      { type: "checkbox", checked: true },
+                      textToken("已完成任务，保留 强调"),
+                    ],
+                  },
+                  {
+                    task: true,
+                    checked: false,
+                    tokens: [
+                      { type: "checkbox", checked: false },
+                      textToken("未完成任务包含一段足够长的说明，用来验证窄屏换行后正文仍与复选框对齐"),
+                      nestedOrdered,
+                    ],
+                  },
+                  { task: false, tokens: [textToken("普通列表项不应获得任务状态")] },
+                ],
+              };
+              const columns = [
+                ["左对齐", "left", "A | B"],
+                ["居中", "center", "中间值"],
+                ["右对齐", "right", "42"],
+                ["VeryLongColumnAlpha", null, "alpha-alpha-alpha-alpha-alpha"],
+                ["VeryLongColumnBeta", null, "beta-beta-beta-beta-beta"],
+                ["VeryLongColumnGamma", null, "gamma-gamma-gamma-gamma"],
+                ["VeryLongColumnDelta", null, "delta-delta-delta-delta"],
+                ["VeryLongColumnEpsilon", null, "epsilon-epsilon-epsilon"],
+              ];
+              const tableToken = {
+                type: "table",
+                align: columns.map((column) => column[1]),
+                header: columns.map((column) => ({
+                  text: column[0],
+                  tokens: [{ type: "text", text: column[0] }],
+                  header: true,
+                  align: column[1],
+                })),
+                rows: [columns.map((column) => ({
+                  text: column[2],
+                  tokens: [{ type: "text", text: column[2] }],
+                  header: false,
+                  align: column[1],
+                }))],
+              };
+              const fixtureParser = {
+                parseInline(tokens) {
+                  return (tokens || []).map((token) => String(token?.text || "")).join("");
+                },
+                parse(tokens) {
+                  return (tokens || []).map((token) => {
+                    if (token?.type === "checkbox") return renderer.checkbox.call(renderer, token);
+                    if (token?.type === "list") return renderer.list.call(renderer, token);
+                    return this.parseInline(token?.tokens || [token]);
+                  }).join("");
+                },
+              };
+              renderer.parser = fixtureParser;
+              return [
+                renderer.heading.call(renderer, {
+                  depth: 3,
+                  text: "结构化验收",
+                  tokens: [{ type: "text", text: "结构化验收" }],
+                }),
+                renderer.list.call(renderer, listToken),
+                `<p>普通文件：${renderer.codespan.call(renderer, { text: "package.json" })} 与 ${renderer.codespan.call(renderer, { text: "README.md" })}</p>`,
+                renderer.table.call(renderer, tableToken),
+              ].join("");
+            }
             const inlineContext = {
               parser: {
                 parseInline(tokens) {
@@ -23865,6 +23962,202 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
   });
 }
 
+async function exerciseStructuredRichText(h4, runtime) {
+  const { page } = h4;
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+
+  const source = [
+    "### 结构化验收",
+    "",
+    "- [x] 已完成任务，保留 **强调**",
+    "- [ ] 未完成任务包含一段足够长的说明，用来验证窄屏换行后正文仍与复选框对齐",
+    "  1. 一级有序子项",
+    "     - 二级无序子项与 `inline-code`",
+    "- 普通列表项不应获得任务状态",
+    "",
+    "普通文件：`package.json` 与 `README.md`",
+    "",
+    "| 左对齐 | 居中 | 右对齐 | VeryLongColumnAlpha | VeryLongColumnBeta | VeryLongColumnGamma | VeryLongColumnDelta | VeryLongColumnEpsilon |",
+    "| :--- | :---: | ---: | --- | --- | --- | --- | --- |",
+    "| A \\| B | 中间值 | 42 | alpha-alpha-alpha-alpha-alpha | beta-beta-beta-beta-beta | gamma-gamma-gamma-gamma | delta-delta-delta-delta | epsilon-epsilon-epsilon |",
+  ].join("\n");
+  const created = await sendProductionJson(page, "/api/sessions", "POST", {
+    title: `H4 structured rich text ${runtime}`,
+    messages: [
+      { role: "user", content: "H4 structured rich text seed", _time: "2026-08-24T04:00:00Z" },
+      { role: "assistant", content: source, _time: "2026-08-24T04:00:01Z" },
+    ],
+  });
+  expect(created.status).toBe(201);
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  const activeSession = page.locator(
+    `#sessionList .session-row.active[data-session-id="${created.body.id}"]`,
+  );
+  if (await activeSession.count() === 0) {
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${created.body.id}"]`,
+    ).click();
+  }
+  await expect(activeSession).toHaveCount(1);
+
+  const assistant = page.locator("#messages article.msg.assistant").filter({
+    hasText: "结构化验收",
+  });
+  await expect(assistant).toHaveCount(1);
+  const taskItems = assistant.locator("li.task-list-item");
+  const checkboxes = taskItems.locator('input.task-list-checkbox[type="checkbox"]');
+  await expect(taskItems).toHaveCount(2);
+  await expect(checkboxes).toHaveCount(2);
+  expect(await checkboxes.evaluateAll((elements) => elements.map((element) => ({
+    checked: element.checked,
+    disabled: element.disabled,
+    labelledBy: element.getAttribute("aria-labelledby"),
+    labelledText: element.getAttribute("aria-labelledby")
+      ? document.getElementById(element.getAttribute("aria-labelledby"))?.textContent?.trim()
+      : "",
+  })))).toEqual([
+    expect.objectContaining({
+      checked: true,
+      disabled: true,
+      labelledBy: expect.stringMatching(/^md-task-content-\d+$/),
+      labelledText: expect.stringContaining("已完成任务"),
+    }),
+    expect.objectContaining({
+      checked: false,
+      disabled: true,
+      labelledBy: expect.stringMatching(/^md-task-content-\d+$/),
+      labelledText: expect.stringContaining("未完成任务"),
+    }),
+  ]);
+  expect(await checkboxes.evaluateAll((elements) => elements.map((element) => {
+    element.click();
+    return element.checked;
+  }))).toEqual([true, false]);
+  await expect(taskItems.nth(1).locator("ol.md-list-ordered > li > ul.md-list-unordered")).toHaveCount(1);
+  await expect(assistant.locator("li:not(.task-list-item)").filter({
+    hasText: "普通列表项不应获得任务状态",
+  })).toHaveCount(1);
+
+  const fileCards = assistant.locator('[class~="path-file-card"]');
+  await expect(fileCards).toHaveCount(2);
+  expect(await fileCards.evaluateAll((cards) => cards.map((card) => {
+    const style = getComputedStyle(card);
+    return {
+      name: card.querySelector(".path-file-name")?.textContent?.trim(),
+      title: card.getAttribute("title"),
+      icon: card.querySelectorAll(".path-file-icon svg").length,
+      backgroundColor: style.backgroundColor,
+      borderWidth: style.borderWidth,
+      borderRadius: style.borderRadius,
+      padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+      verticalAlign: style.verticalAlign,
+    };
+  }))).toEqual([
+    {
+      name: "package.json",
+      title: "package.json",
+      icon: 1,
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      borderWidth: "0px",
+      borderRadius: "0px",
+      padding: ["0px", "1px", "0px", "0px"],
+      verticalAlign: "baseline",
+    },
+    {
+      name: "README.md",
+      title: "README.md",
+      icon: 1,
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      borderWidth: "0px",
+      borderRadius: "0px",
+      padding: ["0px", "1px", "0px", "0px"],
+      verticalAlign: "baseline",
+    },
+  ]);
+
+  const table = assistant.locator(".table-wrap table");
+  const tableWrap = assistant.locator(".table-wrap");
+  const tableScroll = assistant.locator(".table-scroll");
+  await expect(table).toHaveCount(1);
+  await expect(table.locator("thead th")).toHaveCount(8);
+  await expect(table.locator('thead th[data-align="left"]')).toHaveText("左对齐");
+  await expect(table.locator('thead th[data-align="center"]')).toHaveText("居中");
+  await expect(table.locator('thead th[data-align="right"]')).toHaveText("右对齐");
+  await expect(table.locator('tbody td[data-align="left"]')).toHaveText("A | B");
+  expect(await table.locator("thead th").evaluateAll((cells) => cells.slice(0, 3).map(
+    (cell) => getComputedStyle(cell).textAlign,
+  ))).toEqual(["left", "center", "right"]);
+  await expect(tableWrap).toHaveAttribute("data-overflow", "true");
+  await expect(tableScroll).toHaveAttribute("tabindex", "0");
+  await expect(tableWrap.locator(".table-overflow-hint")).toBeVisible();
+  const desktopLayout = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    pageWidth: document.documentElement.scrollWidth,
+    tableOverflow: document.querySelector(".table-scroll")?.scrollWidth
+      > document.querySelector(".table-scroll")?.clientWidth,
+  }));
+  expect(desktopLayout.pageWidth).toBeLessThanOrEqual(desktopLayout.viewport + 1);
+  expect(desktopLayout.tableOverflow).toBe(true);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(tableWrap).toHaveAttribute("data-overflow", "true");
+  const mobileLayout = await page.evaluate(() => {
+    const wrap = document.querySelector(".table-wrap");
+    const scroll = wrap?.querySelector(":scope > .table-scroll");
+    const hint = wrap?.querySelector(":scope > .table-overflow-hint");
+    const scrollRect = scroll?.getBoundingClientRect();
+    const hintRect = hint?.getBoundingClientRect();
+    return {
+      viewport: window.innerWidth,
+      pageWidth: document.documentElement.scrollWidth,
+      scrollWidth: scroll?.scrollWidth || 0,
+      clientWidth: scroll?.clientWidth || 0,
+      hintBelowTable: Boolean(scrollRect && hintRect && hintRect.top >= scrollRect.bottom - 1),
+      hintDisplay: hint ? getComputedStyle(hint).display : "none",
+    };
+  });
+  expect(mobileLayout.pageWidth).toBeLessThanOrEqual(mobileLayout.viewport + 1);
+  expect(mobileLayout.scrollWidth).toBeGreaterThan(mobileLayout.clientWidth);
+  expect(mobileLayout.hintBelowTable).toBe(true);
+  expect(mobileLayout.hintDisplay).toBe("flex");
+
+  const allowedBlockedPaths = new Set([
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+  ]);
+  for (const request of h4.blockedRequests) {
+    expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
+    expect(allowedBlockedPaths.has(request.path)).toBe(true);
+  }
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-structured-rich-text`, {
+    sessionId: idHash(created.body.id),
+    taskItems: 2,
+    taskStates: ["checked", "unchecked"],
+    taskControlsReadOnly: true,
+    nestedListDepth: 2,
+    lightweightFileCards: ["package.json", "README.md"],
+    tableAlignments: ["left", "center", "right"],
+    desktopPageOverflow: false,
+    mobilePageOverflow: false,
+    tableOwnsHorizontalOverflow: true,
+    overflowHintOutsideTableViewport: true,
+    modelRequests: metrics.chatRequests.length,
+    toolExecutions: metrics.toolExecutions.length,
+    blockedRequests: h4.blockedRequests.length,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -23937,4 +24230,12 @@ test("bundle CJK bare URL boundaries preserve independent external links", async
 
 test("direct classic CJK bare URL boundaries preserve independent external links", async ({ h4 }) => {
   await exerciseCjkBareUrlBoundaries(h4, "classic");
+});
+
+test("bundle structured rich text preserves tasks nested lists and table alignment", async ({ h4 }) => {
+  await exerciseStructuredRichText(h4, "bundle");
+});
+
+test("direct classic structured rich text preserves tasks nested lists and table alignment", async ({ h4 }) => {
+  await exerciseStructuredRichText(h4, "classic");
 });

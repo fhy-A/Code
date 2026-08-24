@@ -524,10 +524,58 @@
       return `<h${level} id="${escapeHtml(id)}">${text}</h${level}>`;
     };
 
+    let taskItemSequence = 0;
+
+    function withoutTaskCheckbox(tokens) {
+      const body = Array.isArray(tokens) ? [...tokens] : [];
+      if (body[0]?.type === "checkbox") {
+        body.shift();
+        return body;
+      }
+      if (Array.isArray(body[0]?.tokens) && body[0].tokens[0]?.type === "checkbox") {
+        body[0] = { ...body[0], tokens: body[0].tokens.slice(1) };
+      }
+      return body;
+    }
+
+    renderer.list = function renderList(token) {
+      const ordered = Boolean(token.ordered);
+      const type = ordered ? "ol" : "ul";
+      const start = Number(token.start);
+      const startAttr = ordered && Number.isInteger(start) && start !== 1
+        ? ` start="${start}"`
+        : "";
+      const hasTasks = token.items.some((item) => item.task);
+      const className = `md-list md-list-${ordered ? "ordered" : "unordered"}${hasTasks ? " task-list" : ""}`;
+      const body = token.items.map((item) => this.listitem(item)).join("");
+      return `<${type} class="${className}"${startAttr}>\n${body}</${type}>\n`;
+    };
+
+    renderer.listitem = function renderListItem(token) {
+      if (!token.task) return `<li>${parseBlocksSafe(this.parser, token.tokens)}</li>\n`;
+      taskItemSequence += 1;
+      const contentId = `md-task-content-${taskItemSequence}`;
+      const checked = Boolean(token.checked);
+      const checkbox = `<input class="task-list-checkbox" type="checkbox" disabled${checked ? " checked" : ""} aria-labelledby="${contentId}">`;
+      const content = parseBlocksSafe(this.parser, withoutTaskCheckbox(token.tokens));
+      return `<li class="task-list-item" data-task-state="${checked ? "checked" : "unchecked"}">${checkbox}<div class="task-list-content" id="${contentId}">${content}</div></li>\n`;
+    };
+
+    renderer.checkbox = function renderCheckbox(token) {
+      return `<input class="task-list-checkbox" type="checkbox" disabled${token.checked ? " checked" : ""}>`;
+    };
+
+    function tableCellAttributes(cell) {
+      const align = ["left", "center", "right"].includes(cell?.align) ? cell.align : "";
+      return align
+        ? ` align="${align}" data-align="${align}" class="md-align-${align}"`
+        : "";
+    }
+
     renderer.table = function renderTable(token) {
-      const header = token.header.map((cell) => `<th>${parseInlineSafe(this.parser, cell.tokens)}</th>`).join("");
-      const body = token.rows.map((row) => `<tr>${row.map((cell) => `<td>${parseInlineSafe(this.parser, cell.tokens)}</td>`).join("")}</tr>`).join("");
-      return `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
+      const header = token.header.map((cell) => `<th${tableCellAttributes(cell)}>${parseInlineSafe(this.parser, cell.tokens)}</th>`).join("");
+      const body = token.rows.map((row) => `<tr>${row.map((cell) => `<td${tableCellAttributes(cell)}>${parseInlineSafe(this.parser, cell.tokens)}</td>`).join("")}</tr>`).join("");
+      return `<div class="table-wrap" data-overflow="false"><div class="table-scroll" tabindex="-1"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div><span class="table-overflow-hint" aria-hidden="true">↔</span></div>`;
     };
 
     renderer.codespan = function renderCodeSpan({ text }) {
