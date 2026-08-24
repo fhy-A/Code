@@ -479,7 +479,10 @@ class TestDispatcherLimits(unittest.TestCase):
 
     def test_welcome_refresh_only_changes_foreground_navigation(self):
         navigation_start = self.sessions_source.index("function createSessionNavigation(")
-        load_start = self.sessions_source.index('async function loadSession(sessionId)', navigation_start)
+        load_start = self.sessions_source.index(
+            'async function loadSession(sessionId, options = {})',
+            navigation_start,
+        )
         load_end = self.sessions_source.index('return Object.freeze({', load_start)
         load_block = self.sessions_source[load_start:load_end]
         self.assertIn('foregroundNavigationSeq !== state._foregroundNavigationSeq', load_block)
@@ -495,7 +498,10 @@ class TestDispatcherLimits(unittest.TestCase):
         recovery_coordination = self.sessions_source[recovery_coordination_start:]
         self.assertIn('storage.getItem("code-foreground-view")', foreground_block)
         self.assertIn('foregroundView !== "welcome"', foreground_block)
-        self.assertIn("await navigation.loadSession(lastId);", foreground_block)
+        self.assertIn(
+            "await navigation.loadSession(lastId, { userInitiated: false });",
+            foreground_block,
+        )
         self.assertNotIn("navigation.loadSession(", recovery_coordination)
 
         init_start = self.source.index('async function init()')

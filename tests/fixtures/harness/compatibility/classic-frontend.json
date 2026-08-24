@@ -27,6 +27,8 @@
     "./features/preview.js",
     "./features/files.js",
     "./features/image-attachments.js",
+    "./features/image-overlay.js",
+    "./features/link-context-menu.js",
     "./features/session-import.js",
     "./agent/system-prompt.js",
     "./agent/model-request.js",

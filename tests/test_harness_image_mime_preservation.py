@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "harness"
 SCHEMA_PATH = FIXTURE_DIR / "image-mime-preservation-evidence.schema.json"
 FIXTURE_PATH = FIXTURE_DIR / "image-mime-preservation-evidence.json"
-EXPECTED_FIXTURE_SHA256 = "8f3cdd6354987a977df545f5db1209e5f869924b01d8884c9e1b33784c5afad3"
+EXPECTED_FIXTURE_SHA256 = "ede83446444c12ec5d31705bc75ce48745db7b45cf0edc3dc97a6135bceea00c"
 PNG_SIGNATURE = bytes.fromhex("89504e470d0a1a0a")
 
 EXPECTED_PROFILE = {

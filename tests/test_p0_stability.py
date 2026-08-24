@@ -212,7 +212,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertIn("writeScrollTop(maxScrollTop())", MESSAGES_SOURCE)
 
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
-        load_start = SESSIONS_SOURCE.index("async function loadSession(sessionId)", navigation_start)
+        load_start = SESSIONS_SOURCE.index(
+            "async function loadSession(sessionId, options = {})",
+            navigation_start,
+        )
         load_end = SESSIONS_SOURCE.index("return Object.freeze({", load_start)
         load_session = SESSIONS_SOURCE[load_start:load_end]
         self.assertEqual(load_session.count("scheduleMessagesScrollToBottom("), 2)
