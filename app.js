@@ -104,6 +104,7 @@ const {
   normalizeToolCallList,
 } = window.Code.agent.tools;
 const {
+  createAutoPermissionRiskGate,
   executionOwnerForPermissionProfile,
   filterPendingAuthorizations,
   getAllowedToolNamesForProfile,
@@ -881,6 +882,14 @@ const els = {
   cancelApplyEditX: document.getElementById("cancelApplyEditX"),
 
   confirmApplyEdit: document.getElementById("confirmApplyEdit"),
+
+  autoPermissionConfirmModal: document.getElementById("autoPermissionConfirmModal"),
+
+  closeAutoPermissionConfirm: document.getElementById("closeAutoPermissionConfirm"),
+
+  cancelAutoPermissionConfirm: document.getElementById("cancelAutoPermissionConfirm"),
+
+  confirmAutoPermission: document.getElementById("confirmAutoPermission"),
 
   permPillBtn: document.getElementById("permPillBtn"),
 
@@ -11345,6 +11354,143 @@ function setPermLevel(value) {
 
 }
 
+function applyCommittedPermissionProfile(value) {
+  setPermLevel(value);
+  state.permissionProfile = value;
+  updateModePromptPreview();
+}
+
+function showAutoPermissionRiskConfirm({ reason = "selection" } = {}) {
+  const modal = els.autoPermissionConfirmModal;
+  const closeButton = els.closeAutoPermissionConfirm;
+  const cancelButton = els.cancelAutoPermissionConfirm;
+  const confirmButton = els.confirmAutoPermission;
+  if (!modal || !closeButton || !cancelButton || !confirmButton) return Promise.resolve(false);
+
+  const previousFocus = els.permPillDropdown?.contains(document.activeElement)
+    ? els.permPillBtn
+    : document.activeElement;
+  modal.dataset.reason = reason;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let initialFocusTimer = 0;
+    const focusable = [closeButton, cancelButton, confirmButton];
+    const cssTimeToMs = (value) => {
+      const time = String(value || "").trim().toLowerCase();
+      const parsed = Number.parseFloat(time);
+      if (!Number.isFinite(parsed)) return 0;
+      return time.endsWith("ms") ? parsed : (time.endsWith("s") ? parsed * 1000 : 0);
+    };
+    const transitionBudgetMs = () => {
+      const style = getComputedStyle(modal);
+      const durations = String(style.transitionDuration || "0s").split(",").map(cssTimeToMs);
+      const delays = String(style.transitionDelay || "0s").split(",").map(cssTimeToMs);
+      const count = Math.max(durations.length, delays.length);
+      let longest = 0;
+      for (let index = 0; index < count; index += 1) {
+        longest = Math.max(
+          longest,
+          durations[index % durations.length] + delays[index % delays.length],
+        );
+      }
+      return Math.min(1000, Math.max(0, longest));
+    };
+    const focusDefaultIfVisible = () => {
+      if (settled || modal.classList.contains("hidden")) return false;
+      const style = getComputedStyle(modal);
+      if (style.display === "none" || style.visibility !== "visible") return false;
+      cancelButton.focus({ preventScroll: true });
+      return document.activeElement === cancelButton;
+    };
+    const onInitialFocusTransition = (event) => {
+      if (event.target !== modal || !["opacity", "visibility"].includes(event.propertyName)) return;
+      if (focusDefaultIfVisible()) clearInitialFocusScheduling();
+    };
+    const clearInitialFocusScheduling = () => {
+      modal.removeEventListener("transitionend", onInitialFocusTransition);
+      modal.removeEventListener("transitioncancel", onInitialFocusTransition);
+      if (initialFocusTimer) {
+        clearTimeout(initialFocusTimer);
+        initialFocusTimer = 0;
+      }
+    };
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      clearInitialFocusScheduling();
+      closeButton.removeEventListener("click", cancel);
+      cancelButton.removeEventListener("click", cancel);
+      confirmButton.removeEventListener("click", approve);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+      delete modal.dataset.reason;
+      if (previousFocus?.isConnected && typeof previousFocus.focus === "function") {
+        previousFocus.focus();
+      }
+      resolve(confirmed);
+    };
+    const cancel = () => finish(false);
+    const approve = () => finish(true);
+    const onBackdrop = (event) => {
+      if (event.target === modal) cancel();
+    };
+    const onFocusIn = (event) => {
+      if (settled || modal.contains(event.target)) return;
+      cancelButton.focus({ preventScroll: true });
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        cancel();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const currentIndex = focusable.indexOf(document.activeElement);
+      const nextIndex = event.shiftKey
+        ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+        : (currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1);
+      event.preventDefault();
+      event.stopPropagation();
+      focusable[nextIndex].focus();
+    };
+
+    closeButton.addEventListener("click", cancel);
+    cancelButton.addEventListener("click", cancel);
+    confirmButton.addEventListener("click", approve);
+    modal.addEventListener("click", onBackdrop);
+    modal.addEventListener("transitionend", onInitialFocusTransition);
+    modal.addEventListener("transitioncancel", onInitialFocusTransition);
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    if (focusDefaultIfVisible()) {
+      clearInitialFocusScheduling();
+    } else {
+      initialFocusTimer = setTimeout(() => {
+        initialFocusTimer = 0;
+        if (!settled && focusDefaultIfVisible()) clearInitialFocusScheduling();
+      }, transitionBudgetMs() + 32);
+    }
+  });
+}
+
+const autoPermissionGate = createAutoPermissionRiskGate({
+  storage: localStorage,
+  getProfile: () => getPermLevel() || state.permissionProfile || "accept",
+  onProfileCommitted: applyCommittedPermissionProfile,
+  requestConfirmation: showAutoPermissionRiskConfirm,
+  onStorageError: () => showToast(t("autoPermissionSaveFailed"), "warning"),
+});
+
+let permissionSelectionPending = false;
+let autoPermissionDispatchConfirmationPending = false;
+
 
 
 function parseContextBudgetInput(value) {
@@ -12277,23 +12423,23 @@ els.permPillBtn.addEventListener("click", (e) => {
 
 
 
-els.permPillDropdown.addEventListener("click", (e) => {
+els.permPillDropdown.addEventListener("click", async (e) => {
 
   const opt = e.target.closest(".model-pill-option");
 
   if (!opt) return;
 
   const val = opt.dataset.value;
-
-  setPermLevel(val);
-
-  state.permissionProfile = val;
-
-  localStorage.setItem("code-permission-profile", val);
-
   els.permPillWrap.classList.remove("open");
-
   els.permPillDropdown.classList.add("hidden");
+
+  if (permissionSelectionPending) return;
+  permissionSelectionPending = true;
+  try {
+    await autoPermissionGate.requestProfileTransition(val);
+  } finally {
+    permissionSelectionPending = false;
+  }
 
 });
 
@@ -12321,8 +12467,6 @@ els.chatForm.addEventListener("submit", async (event) => {
 
   event.preventDefault();
 
-  const followUpBehaviorOverride = consumeFollowUpBehaviorOverride();
-
   await waitForPendingImageAttachments();
   await resolveAtImages();
 
@@ -12347,6 +12491,23 @@ els.chatForm.addEventListener("submit", async (event) => {
     updateSendButtonState();
     return;
   }
+
+  if (autoPermissionGate.requiresDispatchConfirmation()) {
+    if (autoPermissionDispatchConfirmationPending) return;
+    autoPermissionDispatchConfirmationPending = true;
+    let confirmed = false;
+    try {
+      confirmed = await autoPermissionGate.ensureDispatchConfirmed();
+    } finally {
+      autoPermissionDispatchConfirmationPending = false;
+    }
+    if (!confirmed) {
+      updateSendButtonState();
+      return;
+    }
+  }
+
+  const followUpBehaviorOverride = consumeFollowUpBehaviorOverride();
 
   if (isSessionStreaming(state.sessionId)) {
     const sessionId = state.sessionId;
@@ -13316,6 +13477,7 @@ async function init() {
   state.permissionProfile = savedPerm;
 
   setPermLevel(savedPerm);
+  autoPermissionGate.reconcileInactiveAcknowledgement();
 
   els.systemPromptText.value = localStorage.getItem("code-system-prompt") || defaultSystemPrompt;
 

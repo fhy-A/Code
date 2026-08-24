@@ -6,6 +6,9 @@ const { FIXTURE_CONTENT, startIsolatedHost } = require("./isolated-host.cjs");
 
 const { expect } = base;
 const MODEL_ID = "h4-e2e-model";
+const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
+const AUTO_PERMISSION_ACK_VERSION = "v1";
+const AUTO_PERMISSION_REFRESH_USER = "H4_AUTO_PERMISSION_REFRESH_USER";
 const AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED";
 const AUTO_COMPACTION_SEED_FINAL = "H4_AUTO_COMPACTION_SEED_FINAL";
 const AUTO_COMPACTION_USER = "H4_AUTO_COMPACTION_USER";
@@ -16009,7 +16012,9 @@ const test = base.test.extend({
         if (localStorage.getItem("code-model") === null) {
           localStorage.setItem("code-model", modelId);
         }
-        localStorage.setItem("code-permission-profile", "read");
+        if (sessionStorage.getItem("h4-preserve-permission-profile") !== "1") {
+          localStorage.setItem("code-permission-profile", "read");
+        }
         localStorage.setItem("code-lang", "en");
         document.addEventListener("DOMContentLoaded", () => {
           let lastSignature = "";
@@ -17158,6 +17163,29 @@ async function restoreGoalH4Connection(h4, expectedModel = MODEL_ID) {
   expect(await page.locator("#baseUrl").evaluate((element) => element.value)).toBe(
     h4.host.ready.fakeUrl,
   );
+  const keyProjection = await page.evaluate((syntheticKey) => {
+    let keys = [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem("code-key-config") || "[]");
+      if (Array.isArray(parsed)) keys = parsed;
+    } catch {}
+    const enabledKeys = keys.filter((entry) => entry?.enabled !== false);
+    return {
+      configuredCount: keys.length,
+      enabledCount: enabledKeys.length,
+      keysExactSynthetic: enabledKeys.length === 1 && enabledKeys[0]?.key === syntheticKey,
+    };
+  }, h4.host.syntheticKey);
+  expect(keyProjection).toEqual({
+    configuredCount: 1,
+    enabledCount: 1,
+    keysExactSynthetic: true,
+  });
+  return {
+    modelMatches: true,
+    baseUrlMatchesFake: true,
+    keysExactSynthetic: keyProjection.keysExactSynthetic,
+  };
 }
 
 async function exerciseGoalV2UserGateCompletion(h4, runtime) {
@@ -24373,6 +24401,453 @@ async function exerciseExplorerRouteContract(h4, runtime) {
   });
 }
 
+async function exerciseAutoPermissionRiskGate(h4, runtime) {
+  const { page } = h4;
+  const waitForAgentRunCreate = () => page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/agent/runs";
+  });
+  const agentRunConnectionProjection = (request) => {
+    let body = null;
+    try {
+      body = request.postDataJSON();
+    } catch {}
+    return {
+      baseUrlMatchesFake: String(body?.baseUrl || "") === h4.host.ready.fakeUrl,
+      keysExactSynthetic: Array.isArray(body?.keys)
+        && body.keys.length === 1
+        && body.keys[0] === h4.host.syntheticKey,
+    };
+  };
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await page.bringToFront();
+  await expect.poll(
+    () => page.evaluate(() => document.hasFocus()),
+    { message: `${runtime} page must be foreground-focused before modal focus assertions` },
+  ).toBe(true);
+
+  const permissionPill = page.locator("#permPillBtn");
+  const modal = page.locator("#autoPermissionConfirmModal");
+  const cancelPermissionConfirm = page.locator("#cancelAutoPermissionConfirm");
+  const prompt = page.locator("#prompt");
+  const expectDefaultModalFocus = async () => {
+    try {
+      await expect(cancelPermissionConfirm).toBeFocused();
+    } catch (error) {
+      const activeElement = await page.evaluate(() => {
+        const active = document.activeElement;
+        const modalElement = document.querySelector("#autoPermissionConfirmModal");
+        return {
+          tagName: active?.tagName || "",
+          id: active?.id || "",
+          className: typeof active?.className === "string" ? active.className : "",
+          role: active?.getAttribute?.("role") || "",
+          insideModal: Boolean(active && modalElement?.contains(active)),
+          documentHasFocus: document.hasFocus(),
+          visibilityState: document.visibilityState,
+        };
+      });
+      h4.evidence(`${runtime}-auto-permission-focus-failure`, { activeElement });
+      error.message += `\nActive element at focus timeout: ${JSON.stringify(activeElement)}`;
+      throw error;
+    }
+  };
+  const selectPermission = async (value) => {
+    await permissionPill.click();
+    const option = page.locator(`#permPillDropdown .model-pill-option[data-value="${value}"]`);
+    await expect(option).toBeVisible();
+    await option.click();
+  };
+  const storedPermission = () => page.evaluate((ackKey) => ({
+    profile: localStorage.getItem("code-permission-profile"),
+    ack: localStorage.getItem(ackKey),
+  }), AUTO_PERMISSION_ACK_KEY);
+
+  return {
+    page,
+    permissionPill,
+    modal,
+    prompt,
+    expectDefaultModalFocus,
+    selectPermission,
+    storedPermission,
+    waitForAgentRunCreate,
+    agentRunConnectionProjection,
+  };
+}
+
+function expectAutoPermissionNetworkIsolation(h4) {
+  const allowedBlockedPaths = new Set([
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+  ]);
+  for (const request of h4.blockedRequests) {
+    expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
+    expect(allowedBlockedPaths.has(request.path)).toBe(true);
+  }
+}
+
+async function exerciseAutoPermissionSelectionGate(h4, runtime) {
+  const {
+    page,
+    permissionPill,
+    modal,
+    prompt,
+    expectDefaultModalFocus,
+    selectPermission,
+    storedPermission,
+  } = await exerciseAutoPermissionRiskGate(h4, runtime);
+  const selectionBoundary = h4.requestBoundary();
+
+  await expect(permissionPill).toHaveAttribute("data-value", "read");
+  await prompt.fill("H4_AUTO_PERMISSION_CANCEL_DRAFT");
+  await selectPermission("bypass");
+  await expect(modal).toBeVisible();
+  await expect(modal).toHaveAttribute("aria-hidden", "false");
+  await expect(modal).toHaveAttribute("data-reason", "selection");
+  await expect(modal.locator("#autoPermissionRiskTitle")).toHaveText("Enable Auto mode?");
+  await expect(modal.locator(".auto-permission-warning-icon")).toHaveCount(1);
+  const capabilityRows = modal.locator(".auto-permission-capability");
+  await expect(capabilityRows).toHaveCount(3);
+  await expect(capabilityRows.locator('[data-i18n="autoPermissionFilesTitle"]')).toHaveText("Files and edits");
+  await expect(capabilityRows.locator('[data-i18n="autoPermissionCommandsTitle"]')).toHaveText("Commands and tools");
+  await expect(capabilityRows.locator('[data-i18n="autoPermissionNetworkTitle"]')).toHaveText("Network access");
+  await expect(modal.locator(".auto-permission-risk-limits")).toContainText("Server-enforced safety limits still apply");
+  await expect(modal.locator('[data-i18n="autoPermissionRiskRepeat"]')).toHaveCount(0);
+  await expectDefaultModalFocus();
+  await page.keyboard.press("Escape");
+  await expect(modal).toBeHidden();
+  await expect(permissionPill).toHaveAttribute("data-value", "read");
+  await expect(prompt).toHaveValue("H4_AUTO_PERMISSION_CANCEL_DRAFT");
+  expect(await storedPermission()).toEqual({ profile: "read", ack: null });
+
+  await selectPermission("bypass");
+  await expect(modal).toBeVisible();
+  await page.locator("#confirmAutoPermission").click();
+  await expect(permissionPill).toHaveAttribute("data-value", "bypass");
+  expect(await storedPermission()).toEqual({
+    profile: "bypass",
+    ack: AUTO_PERMISSION_ACK_VERSION,
+  });
+
+  await selectPermission("accept");
+  await expect(permissionPill).toHaveAttribute("data-value", "accept");
+  expect(await storedPermission()).toEqual({ profile: "accept", ack: null });
+  await selectPermission("bypass");
+  await expect(modal).toBeVisible();
+  await modal.click({ position: { x: 4, y: 4 } });
+  await expect(modal).toBeHidden();
+  await expect(permissionPill).toHaveAttribute("data-value", "accept");
+  expect(await storedPermission()).toEqual({ profile: "accept", ack: null });
+  await expect(prompt).toHaveValue("H4_AUTO_PERMISSION_CANCEL_DRAFT");
+
+  const selectionRequests = h4.requestSummarySince(selectionBoundary);
+  expect(Object.keys(selectionRequests).filter((key) => key.startsWith("POST "))).toEqual([]);
+  const selectionMetrics = await h4.metrics();
+  expect(selectionMetrics.chatRequests).toEqual([]);
+  expect(selectionMetrics.toolExecutions).toEqual([]);
+  expect(selectionMetrics.production.agentRuns).toEqual([]);
+  expect(selectionMetrics.production.runtimeRuns).toEqual([]);
+  expect(selectionMetrics.unsafeToolRequests).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  expectAutoPermissionNetworkIsolation(h4);
+  h4.evidence(`${runtime}-auto-permission-selection-gate`, {
+    defaultFocus: true,
+    escapePreservedDraft: true,
+    backdropPreservedProfile: true,
+    confirmationPersisted: true,
+    switchingAwayInvalidated: true,
+    structuredWarningCopy: true,
+    postRequests: 0,
+    agentRuns: 0,
+    modelRequests: 0,
+  });
+}
+
+async function exerciseAutoPermissionLegacyDispatchGate(h4, runtime) {
+  const {
+    page,
+    permissionPill,
+    modal,
+    prompt,
+    storedPermission,
+    waitForAgentRunCreate,
+    agentRunConnectionProjection,
+  } = await exerciseAutoPermissionRiskGate(h4, runtime);
+  const reloadConnectionSnapshots = [];
+
+  await page.evaluate((ackKey) => {
+    localStorage.setItem("code-permission-profile", "bypass");
+    localStorage.removeItem(ackKey);
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+  }, AUTO_PERMISSION_ACK_KEY);
+  await h4.reloadRuntime(runtime);
+  reloadConnectionSnapshots.push(await restoreGoalH4Connection(h4));
+  await expect(permissionPill).toHaveAttribute("data-value", "bypass");
+  expect(await storedPermission()).toEqual({ profile: "bypass", ack: null });
+
+  const queryBoundary = h4.requestBoundary();
+  await prompt.fill("/goal status");
+  await page.locator("#sendBtn").click();
+  await expect(modal).toBeHidden();
+  await expect(prompt).toHaveValue("");
+  await expect(page.locator("#messages article.msg.user")).toHaveCount(0);
+  expect(await storedPermission()).toEqual({ profile: "bypass", ack: null });
+  const queryRequests = h4.requestSummarySince(queryBoundary);
+  expect(Object.keys(queryRequests).filter((key) => key.startsWith("POST "))).toEqual([]);
+
+  await prompt.fill(GOAL_V2_EXPLICIT_USER);
+  const cancellationBoundary = h4.requestBoundary();
+  await page.evaluate(() => {
+    document.querySelector("#chatForm")?.requestSubmit();
+    document.querySelector("#chatForm")?.requestSubmit();
+  });
+  await expect(modal).toBeVisible();
+  await expect(modal).toHaveAttribute("data-reason", "legacy-dispatch");
+  await expect(prompt).toHaveValue(GOAL_V2_EXPLICIT_USER);
+  await expect(page.locator("#messages article.msg.user")).toHaveCount(0);
+  const pendingRequests = h4.requestSummarySince(cancellationBoundary);
+  expect(Object.keys(pendingRequests).filter((key) => key.startsWith("POST "))).toEqual([]);
+  await page.locator("#cancelAutoPermissionConfirm").click();
+  await expect(modal).toBeHidden();
+  await expect(permissionPill).toHaveAttribute("data-value", "accept");
+  await expect(prompt).toHaveValue(GOAL_V2_EXPLICIT_USER);
+  expect(await storedPermission()).toEqual({ profile: "accept", ack: null });
+  expect((await h4.metrics()).chatRequests).toEqual([]);
+
+  await page.evaluate((ackKey) => {
+    localStorage.setItem("code-permission-profile", "bypass");
+    localStorage.removeItem(ackKey);
+  }, AUTO_PERMISSION_ACK_KEY);
+  await h4.reloadRuntime(runtime);
+  reloadConnectionSnapshots.push(await restoreGoalH4Connection(h4));
+  await expect(permissionPill).toHaveAttribute("data-value", "bypass");
+  await prompt.fill(GOAL_V2_EXPLICIT_USER);
+  const confirmationBoundary = h4.requestBoundary();
+  await page.evaluate(() => {
+    document.querySelector("#chatForm")?.requestSubmit();
+    document.querySelector("#chatForm")?.requestSubmit();
+  });
+  await expect(modal).toBeVisible();
+  const confirmationAgentRunRequestPromise = waitForAgentRunCreate();
+  await page.locator("#confirmAutoPermission").click();
+  const confirmationAgentRunRequest = await confirmationAgentRunRequestPromise;
+  const confirmationAgentRunConnection = agentRunConnectionProjection(
+    confirmationAgentRunRequest,
+  );
+  expect(confirmationAgentRunConnection).toEqual({
+    baseUrlMatchesFake: true,
+    keysExactSynthetic: true,
+  });
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: GOAL_V2_EXPLICIT_USER,
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+  const activeSessionId = await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id");
+  expect(activeSessionId).toBeTruthy();
+  await expect.poll(() => {
+    const summary = h4.requestSummarySince(confirmationBoundary);
+    return {
+      sessions: summary["POST /api/sessions"] || 0,
+      agentRuns: summary["POST /api/agent/runs"] || 0,
+      goalControl: summary[`POST /api/sessions/${activeSessionId}/goal-v2/control`] || 0,
+    };
+  }).toEqual({ sessions: 1, agentRuns: 1, goalControl: 1 });
+  const preModelRequests = h4.requestSummarySince(confirmationBoundary);
+  expect(preModelRequests["POST /api/sessions"]).toBe(1);
+  expect(preModelRequests["POST /api/agent/runs"]).toBe(1);
+  expect(preModelRequests[
+    `POST /api/sessions/${activeSessionId}/goal-v2/control`
+  ]).toBe(1);
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_EXPLICIT_FINAL,
+  })).toHaveCount(1);
+  await expect.poll(async () => (await h4.metrics()).production.agentRuns.map((run) => run.status))
+    .toEqual(["completed"]);
+  expect(await storedPermission()).toEqual({
+    profile: "bypass",
+    ack: AUTO_PERMISSION_ACK_VERSION,
+  });
+  const confirmedRequests = h4.requestSummarySince(confirmationBoundary);
+  expect(confirmedRequests["POST /api/sessions"]).toBe(1);
+  expect(confirmedRequests["POST /api/agent/runs"]).toBe(1);
+  const goalProjection = await page.evaluate(async (sessionId) => {
+    const [session, goal] = await Promise.all([
+      fetch(`/api/sessions/${encodeURIComponent(sessionId)}`).then((response) => response.json()),
+      fetch(`/api/sessions/${encodeURIComponent(sessionId)}/goal-v2`).then((response) => response.json()),
+    ]);
+    return {
+      originCount: (session.messages || []).filter((message) => (
+        message?.meta?.goalOrigin?.confirmed === true
+      )).length,
+      objective: String(goal?.data?.goal?.objective || ""),
+      sourceKind: String(goal?.data?.goal?.sourceKind || ""),
+    };
+  }, activeSessionId);
+  expect(goalProjection).toEqual({
+    originCount: 1,
+    objective: "H4_GOAL_V2_EXPLICIT",
+    sourceKind: "explicit",
+  });
+
+  const legacyMetrics = await h4.metrics();
+  expect(legacyMetrics.chatRequests.map((request) => request.scenario)).toEqual([
+    "goal-v2-explicit-call-1",
+    "goal-v2-explicit-call-2",
+    "goal-v2-explicit-call-3",
+    "goal-v2-explicit-call-4",
+    "goal-v2-explicit-final",
+  ]);
+  expect(legacyMetrics.toolExecutions).toEqual([]);
+  expect(legacyMetrics.unsafeToolRequests).toBe(0);
+  expect(legacyMetrics.production.agentRuns.map((run) => run.status)).toEqual(["completed"]);
+  const legacyAgentResponse = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(h4.controlIds().agentRunIds[0])}?cursor=0&wait=0`,
+  );
+  expect(legacyAgentResponse.status).toBe(200);
+  expect(legacyAgentResponse.body.permissionProfile).toBe("bypass");
+  const legacyConnectionsRestored = reloadConnectionSnapshots.length === 2
+    && reloadConnectionSnapshots.every((snapshot) => (
+      snapshot.modelMatches
+      && snapshot.baseUrlMatchesFake
+      && snapshot.keysExactSynthetic
+    ));
+  expect(legacyConnectionsRestored).toBe(true);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-auto-permission-legacy-dispatch-gate`, {
+    localGoalQueryPrompted: false,
+    cancelPostRequests: Object.keys(pendingRequests).filter((key) => key.startsWith("POST ")).length,
+    cancelModelRequests: 0,
+    duplicateSubmitCreatedOneRun: confirmedRequests["POST /api/agent/runs"] === 1,
+    sessionCreateCount: confirmedRequests["POST /api/sessions"],
+    goalControlCount: confirmedRequests[`POST /api/sessions/${activeSessionId}/goal-v2/control`],
+    explicitGoalOriginCount: goalProjection.originCount,
+    sourceKind: goalProjection.sourceKind,
+    reloadConnectionRestored: legacyConnectionsRestored,
+    agentRunBaseUrlMatchesFake: confirmationAgentRunConnection.baseUrlMatchesFake,
+    agentRunKeysExactSynthetic: confirmationAgentRunConnection.keysExactSynthetic,
+    agentRunStatus: legacyMetrics.production.agentRuns[0].status,
+  });
+}
+
+async function exerciseAutoPermissionReloadPersistence(h4, runtime) {
+  const {
+    page,
+    permissionPill,
+    modal,
+    prompt,
+    selectPermission,
+    storedPermission,
+    waitForAgentRunCreate,
+    agentRunConnectionProjection,
+  } = await exerciseAutoPermissionRiskGate(h4, runtime);
+  const reloadConnectionSnapshots = [];
+
+  await expect(permissionPill).toHaveAttribute("data-value", "read");
+  await selectPermission("bypass");
+  await expect(modal).toBeVisible();
+  await page.locator("#confirmAutoPermission").click();
+  await expect(permissionPill).toHaveAttribute("data-value", "bypass");
+  expect(await storedPermission()).toEqual({
+    profile: "bypass",
+    ack: AUTO_PERMISSION_ACK_VERSION,
+  });
+  expect((await h4.metrics()).production.agentRuns).toEqual([]);
+  await page.evaluate(() => {
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+  });
+
+  await h4.reloadRuntime(runtime);
+  reloadConnectionSnapshots.push(await restoreGoalH4Connection(h4));
+  await expect(permissionPill).toHaveAttribute("data-value", "bypass");
+  await expect(modal).toBeHidden();
+  expect(await storedPermission()).toEqual({
+    profile: "bypass",
+    ack: AUTO_PERMISSION_ACK_VERSION,
+  });
+  const refreshAgentRunBoundary = h4.requestBoundary();
+  await prompt.fill(AUTO_PERMISSION_REFRESH_USER);
+  const refreshAgentRunRequestPromise = waitForAgentRunCreate();
+  await page.locator("#sendBtn").click();
+  const refreshAgentRunRequest = await refreshAgentRunRequestPromise;
+  const refreshAgentRunConnection = agentRunConnectionProjection(refreshAgentRunRequest);
+  expect(refreshAgentRunConnection).toEqual({
+    baseUrlMatchesFake: true,
+    keysExactSynthetic: true,
+  });
+  await expect(modal).toBeHidden();
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: AUTO_PERMISSION_REFRESH_USER,
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']")).toBeVisible();
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_PLAIN_FINAL",
+  })).toHaveCount(1);
+  await expect.poll(async () => (await h4.metrics()).production.agentRuns.map((run) => run.status))
+    .toEqual(["completed"]);
+  await expect.poll(() => {
+    const summary = h4.requestSummarySince(refreshAgentRunBoundary);
+    return {
+      sessions: summary["POST /api/sessions"] || 0,
+      agentRuns: summary["POST /api/agent/runs"] || 0,
+    };
+  }).toEqual({ sessions: 1, agentRuns: 1 });
+  const refreshAgentRunRequests = h4.requestSummarySince(refreshAgentRunBoundary);
+  expect(refreshAgentRunRequests["POST /api/sessions"]).toBe(1);
+  expect(refreshAgentRunRequests["POST /api/agent/runs"]).toBe(1);
+
+  expectAutoPermissionNetworkIsolation(h4);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests.map((request) => request.scenario)).toEqual(["plain-text"]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(metrics.production.agentRuns).toHaveLength(1);
+  const agentPermissionProfiles = [];
+  for (const agentRunId of h4.controlIds().agentRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    agentPermissionProfiles.push(String(response.body?.permissionProfile || ""));
+  }
+  expect(agentPermissionProfiles).toEqual(["bypass"]);
+  expect(h4.pageErrors).toEqual([]);
+  const reloadConnectionRestored = reloadConnectionSnapshots.length === 1
+    && reloadConnectionSnapshots.every((snapshot) => (
+      snapshot.modelMatches
+      && snapshot.baseUrlMatchesFake
+      && snapshot.keysExactSynthetic
+    ));
+  const agentRunBaseUrlMatchesFake = refreshAgentRunConnection.baseUrlMatchesFake;
+  const agentRunKeysExactSynthetic = refreshAgentRunConnection.keysExactSynthetic;
+  expect(reloadConnectionRestored).toBe(true);
+  expect(agentRunBaseUrlMatchesFake).toBe(true);
+  expect(agentRunKeysExactSynthetic).toBe(true);
+  h4.evidence(`${runtime}-auto-permission-reload-persistence`, {
+    acknowledgementSurvivedReload: true,
+    modalRepeatedAfterReload: false,
+    sessionCreateCount: refreshAgentRunRequests["POST /api/sessions"],
+    agentRunCreateCount: refreshAgentRunRequests["POST /api/agent/runs"],
+    reloadConnectionRestored,
+    agentRunBaseUrlMatchesFake,
+    agentRunKeysExactSynthetic,
+    permissionProfiles: agentPermissionProfiles,
+    modelScenarios: metrics.chatRequests.map((request) => request.scenario),
+    agentRunStatus: metrics.production.agentRuns[0].status,
+    toolExecutions: metrics.toolExecutions.length,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -24469,4 +24944,28 @@ test("bundle Explorer route contract separates file reveal folder open and defau
 
 test("direct classic Explorer route contract separates file reveal folder open and default app", async ({ h4 }) => {
   await exerciseExplorerRouteContract(h4, "classic");
+});
+
+test("bundle Auto permission selection confirmation is cancel-safe", async ({ h4 }) => {
+  await exerciseAutoPermissionSelectionGate(h4, "bundle");
+});
+
+test("direct classic Auto permission selection confirmation is cancel-safe", async ({ h4 }) => {
+  await exerciseAutoPermissionSelectionGate(h4, "classic");
+});
+
+test("bundle Auto permission legacy dispatch is gated exactly once", async ({ h4 }) => {
+  await exerciseAutoPermissionLegacyDispatchGate(h4, "bundle");
+});
+
+test("direct classic Auto permission legacy dispatch is gated exactly once", async ({ h4 }) => {
+  await exerciseAutoPermissionLegacyDispatchGate(h4, "classic");
+});
+
+test("bundle Auto permission acknowledgement survives reload without an active Goal", async ({ h4 }) => {
+  await exerciseAutoPermissionReloadPersistence(h4, "bundle");
+});
+
+test("direct classic Auto permission acknowledgement survives reload without an active Goal", async ({ h4 }) => {
+  await exerciseAutoPermissionReloadPersistence(h4, "classic");
 });

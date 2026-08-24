@@ -3166,6 +3166,124 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
   font-size: 13px;
 }
 
+.auto-permission-risk-card {
+  width: min(640px, calc(100vw - 36px));
+  padding: 20px;
+}
+
+.auto-permission-risk-card > header {
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.auto-permission-risk-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.auto-permission-warning-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--yellow) 40%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--yellow) 12%, var(--panel-3));
+  color: var(--yellow);
+}
+
+.auto-permission-warning-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.auto-permission-risk-lead {
+  color: color-mix(in srgb, var(--text) 88%, var(--muted));
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.auto-permission-capabilities {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--panel) 76%, var(--panel-3));
+}
+
+.auto-permission-capability {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+}
+
+.auto-permission-capability + .auto-permission-capability {
+  border-top: 1px solid var(--line);
+}
+
+.auto-permission-capability-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-3));
+  color: var(--accent);
+}
+
+.auto-permission-capability-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.auto-permission-capability-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  line-height: 1.45;
+}
+
+.auto-permission-capability-copy strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.auto-permission-capability-copy > span {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.auto-permission-risk-limits {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--yellow) 8%, var(--panel-3));
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.auto-permission-risk-limits svg {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--yellow);
+}
+
+.danger-btn.auto-permission-enable-btn {
+  border-color: color-mix(in srgb, var(--yellow) 42%, var(--line));
+  background: color-mix(in srgb, var(--yellow) 14%, var(--panel));
+  color: color-mix(in srgb, var(--yellow) 86%, var(--text));
+}
+
 .confirm-actions {
   display: flex;
   justify-content: flex-end;
@@ -3235,6 +3353,27 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
 .field-hint[data-tone="error"] { color:var(--red); }
 @media (max-width: 560px) {
   .context-settings-primary { grid-template-columns:minmax(0,1fr); }
+  .auto-permission-risk-card {
+    width: calc(100vw - 20px);
+    padding: 14px;
+  }
+  .auto-permission-risk-card > header { margin-bottom: 12px; }
+  .auto-permission-risk-heading { gap: 8px; }
+  .auto-permission-warning-icon {
+    width: 30px;
+    height: 30px;
+    flex-basis: 30px;
+  }
+  .auto-permission-risk-card h2 { font-size: 18px; }
+  .auto-permission-capability { padding: 10px; }
+  .auto-permission-risk-card .confirm-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .auto-permission-risk-card .confirm-actions button {
+    width: 100%;
+    padding-inline: 8px;
+  }
 }
 
 .checkline {

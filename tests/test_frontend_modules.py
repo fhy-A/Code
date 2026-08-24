@@ -5069,6 +5069,620 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("function executionOwnerForPermissionProfile", APP_SOURCE)
         self.assertNotIn("function getAllowedToolNamesForProfile", APP_SOURCE)
 
+    def test_auto_permission_risk_gate_is_versioned_cancel_safe_and_coalesces_confirmation(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/permissions.js");
+
+const permissions = window.Code.agent.permissions;
+class Storage {
+  constructor(values = {}) { this.values = new Map(Object.entries(values)); }
+  getItem(key) { return this.values.has(key) ? this.values.get(key) : null; }
+  setItem(key, value) { this.values.set(key, String(value)); }
+  removeItem(key) { this.values.delete(key); }
+}
+
+(async () => {
+  const storage = new Storage({"code-permission-profile": "accept"});
+  let profile = "accept";
+  const decisions = [false, true, true];
+  const reasons = [];
+  const committed = [];
+  const gate = permissions.createAutoPermissionRiskGate({
+    storage,
+    getProfile: () => profile,
+    onProfileCommitted: (value) => { profile = value; committed.push(value); },
+    requestConfirmation: async ({reason}) => { reasons.push(reason); return decisions.shift(); },
+  });
+
+  const selectionCancelled = await gate.requestProfileTransition("bypass");
+  const afterCancel = {
+    profile,
+    stored: storage.getItem("code-permission-profile"),
+    ack: storage.getItem(permissions.AUTO_PERMISSION_ACK_KEY),
+  };
+  const selectionConfirmed = await gate.requestProfileTransition("bypass");
+  const afterConfirm = {
+    profile,
+    stored: storage.getItem("code-permission-profile"),
+    ack: storage.getItem(permissions.AUTO_PERMISSION_ACK_KEY),
+    acknowledged: gate.isAutoAcknowledged(),
+  };
+  const switchedAway = await gate.requestProfileTransition("plan");
+  const afterSwitchAway = {
+    profile,
+    ack: storage.getItem(permissions.AUTO_PERMISSION_ACK_KEY),
+  };
+  const reentered = await gate.requestProfileTransition("bypass");
+
+  const legacyStorage = new Storage({"code-permission-profile": "bypass"});
+  let legacyProfile = "bypass";
+  let legacyResolve;
+  let legacyConfirmations = 0;
+  const legacyGate = permissions.createAutoPermissionRiskGate({
+    storage: legacyStorage,
+    getProfile: () => legacyProfile,
+    onProfileCommitted: (value) => { legacyProfile = value; },
+    requestConfirmation: () => {
+      legacyConfirmations += 1;
+      return new Promise((resolve) => { legacyResolve = resolve; });
+    },
+  });
+  const firstPending = legacyGate.ensureDispatchConfirmed();
+  const secondPending = legacyGate.ensureDispatchConfirmed();
+  await Promise.resolve();
+  legacyResolve(true);
+  const legacyResults = await Promise.all([firstPending, secondPending]);
+
+  const cancelStorage = new Storage({"code-permission-profile": "bypass"});
+  let cancelProfile = "bypass";
+  const cancelGate = permissions.createAutoPermissionRiskGate({
+    storage: cancelStorage,
+    getProfile: () => cancelProfile,
+    onProfileCommitted: (value) => { cancelProfile = value; },
+    requestConfirmation: async () => false,
+  });
+  const legacyCancelled = await cancelGate.ensureDispatchConfirmed();
+
+  process.stdout.write(JSON.stringify({
+    constants: {
+      key: permissions.AUTO_PERMISSION_ACK_KEY,
+      version: permissions.AUTO_PERMISSION_ACK_VERSION,
+    },
+    selectionCancelled,
+    afterCancel,
+    selectionConfirmed,
+    afterConfirm,
+    switchedAway,
+    afterSwitchAway,
+    reentered,
+    reasons,
+    committed,
+    legacy: {
+      neededBefore: true,
+      results: legacyResults,
+      confirmations: legacyConfirmations,
+      profile: legacyProfile,
+      ack: legacyStorage.getItem(permissions.AUTO_PERMISSION_ACK_KEY),
+      neededAfter: legacyGate.requiresDispatchConfirmation(),
+    },
+    legacyCancel: {
+      result: legacyCancelled,
+      profile: cancelProfile,
+      stored: cancelStorage.getItem("code-permission-profile"),
+      ack: cancelStorage.getItem(permissions.AUTO_PERMISSION_ACK_KEY),
+    },
+  }));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["constants"], {"key": "code-auto-permission-risk-ack", "version": "v1"})
+        self.assertFalse(data["selectionCancelled"])
+        self.assertEqual(data["afterCancel"], {"profile": "accept", "stored": "accept", "ack": None})
+        self.assertTrue(data["selectionConfirmed"])
+        self.assertEqual(
+            data["afterConfirm"],
+            {"profile": "bypass", "stored": "bypass", "ack": "v1", "acknowledged": True},
+        )
+        self.assertTrue(data["switchedAway"])
+        self.assertEqual(data["afterSwitchAway"], {"profile": "plan", "ack": None})
+        self.assertTrue(data["reentered"])
+        self.assertEqual(data["reasons"], ["selection", "selection", "selection"])
+        self.assertEqual(data["committed"], ["bypass", "plan", "bypass"])
+        self.assertEqual(
+            data["legacy"],
+            {
+                "neededBefore": True,
+                "results": [True, True],
+                "confirmations": 1,
+                "profile": "bypass",
+                "ack": "v1",
+                "neededAfter": False,
+            },
+        )
+        self.assertEqual(
+            data["legacyCancel"],
+            {"result": False, "profile": "accept", "stored": "accept", "ack": None},
+        )
+
+    def test_auto_permission_dialog_gates_dispatch_before_side_effects_and_is_accessible(self):
+        self.assertIn('id="autoPermissionConfirmModal"', INDEX_SOURCE)
+        self.assertIn('role="alertdialog"', INDEX_SOURCE)
+        self.assertIn('aria-labelledby="autoPermissionRiskTitle"', INDEX_SOURCE)
+        self.assertIn('aria-describedby="autoPermissionRiskDescription"', INDEX_SOURCE)
+        self.assertIn('id="cancelAutoPermissionConfirm"', INDEX_SOURCE)
+        self.assertIn('id="confirmAutoPermission"', INDEX_SOURCE)
+        self.assertIn(".auto-permission-risk-card {", STYLE_SOURCE)
+        self.assertIn(".auto-permission-risk-heading {", STYLE_SOURCE)
+        self.assertIn(".auto-permission-capabilities {", STYLE_SOURCE)
+        self.assertIn(".auto-permission-capability + .auto-permission-capability {", STYLE_SOURCE)
+        self.assertIn(".auto-permission-risk-limits {", STYLE_SOURCE)
+        self.assertIn(".danger-btn.auto-permission-enable-btn {", STYLE_SOURCE)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", STYLE_SOURCE)
+        self.assertEqual(INDEX_SOURCE.count('class="auto-permission-capability"'), 3)
+        self.assertEqual(INDEX_SOURCE.count('class="auto-permission-capability-icon"'), 3)
+        self.assertIn('class="auto-permission-warning-icon" aria-hidden="true"', INDEX_SOURCE)
+        self.assertNotIn("auto-permission-risk-list", INDEX_SOURCE)
+        self.assertNotIn("auto-permission-risk-repeat", INDEX_SOURCE)
+
+        selection_start = APP_SOURCE.index('els.permPillDropdown.addEventListener("click"')
+        selection_end = APP_SOURCE.index('document.addEventListener("click"', selection_start)
+        selection_source = APP_SOURCE[selection_start:selection_end]
+        self.assertIn("await autoPermissionGate.requestProfileTransition(val);", selection_source)
+        self.assertNotIn('localStorage.setItem("code-permission-profile", val)', selection_source)
+        self.assertNotIn("setPermLevel(val)", selection_source)
+
+        submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
+        submit_end = APP_SOURCE.index('els.newChat.addEventListener("click"', submit_start)
+        submit_source = APP_SOURCE[submit_start:submit_end]
+        local_command_index = submit_source.index("handleUiSlashCommand(text)")
+        gate_index = submit_source.index("autoPermissionGate.requiresDispatchConfirmation()")
+        clear_index = submit_source.index('els.prompt.value = "";', gate_index)
+        self.assertLess(local_command_index, gate_index)
+        self.assertLess(gate_index, clear_index)
+        for side_effect in (
+            "dispatchBackgroundSubAgent(sessionId, taskText, imgs)",
+            "dispatch(sessionId, taskText, imgs)",
+            "await sendMessage(text, {",
+        ):
+            self.assertLess(gate_index, submit_source.index(side_effect))
+        self.assertIn("if (autoPermissionDispatchConfirmationPending) return;", submit_source)
+        self.assertIn("confirmed = await autoPermissionGate.ensureDispatchConfirmed();", submit_source)
+        self.assertLess(gate_index, submit_source.index("consumeFollowUpBehaviorOverride()"))
+
+        dialog_start = APP_SOURCE.index("function showAutoPermissionRiskConfirm(")
+        dialog_end = APP_SOURCE.index("const autoPermissionGate =", dialog_start)
+        dialog_source = APP_SOURCE[dialog_start:dialog_end]
+        self.assertIn('document.addEventListener("keydown", onKeyDown, true);', dialog_source)
+        self.assertIn('document.addEventListener("focusin", onFocusIn, true);', dialog_source)
+        self.assertIn('document.removeEventListener("focusin", onFocusIn, true);', dialog_source)
+        self.assertIn("settled || modal.contains(event.target)", dialog_source)
+        self.assertIn('event.key === "Escape"', dialog_source)
+        self.assertIn('event.key !== "Tab"', dialog_source)
+        self.assertIn("const focusDefaultIfVisible = () => {", dialog_source)
+        self.assertIn('style.visibility !== "visible"', dialog_source)
+        self.assertIn('modal.addEventListener("transitionend", onInitialFocusTransition);', dialog_source)
+        self.assertIn('modal.addEventListener("transitioncancel", onInitialFocusTransition);', dialog_source)
+        self.assertIn('event.target !== modal || !["opacity", "visibility"].includes(event.propertyName)', dialog_source)
+        self.assertIn("initialFocusTimer = setTimeout(() => {", dialog_source)
+        self.assertIn("clearTimeout(initialFocusTimer);", dialog_source)
+        self.assertIn("transitionBudgetMs() + 32", dialog_source)
+        self.assertIn("cancelButton.focus({ preventScroll: true });", dialog_source)
+        transition_listener_index = dialog_source.index(
+            'modal.addEventListener("transitionend", onInitialFocusTransition);'
+        )
+        show_index = dialog_source.index('modal.classList.remove("hidden");')
+        focus_attempt_index = dialog_source.index("if (focusDefaultIfVisible())", show_index)
+        fallback_index = dialog_source.index("initialFocusTimer = setTimeout", focus_attempt_index)
+        self.assertLess(transition_listener_index, show_index)
+        self.assertLess(show_index, focus_attempt_index)
+        self.assertLess(focus_attempt_index, fallback_index)
+        finish_index = dialog_source.index("const finish = (confirmed) => {")
+        finish_cleanup_index = dialog_source.index("clearInitialFocusScheduling();", finish_index)
+        focus_restore_index = dialog_source.index("previousFocus.focus();", finish_index)
+        self.assertLess(finish_cleanup_index, focus_restore_index)
+        self.assertNotIn("requestAnimationFrame", dialog_source)
+        self.assertNotIn("queueMicrotask", dialog_source)
+        self.assertNotIn('event.key === "Enter"', dialog_source)
+        self.assertIn("await expect(cancelPermissionConfirm).toBeFocused();", H4_SMOKE_SOURCE)
+        self.assertIn("Active element at focus timeout:", H4_SMOKE_SOURCE)
+        auto_h4_start = H4_SMOKE_SOURCE.index("async function exerciseAutoPermissionRiskGate(")
+        auto_h4_end = H4_SMOKE_SOURCE.index('\ntest("', auto_h4_start)
+        auto_h4_source = H4_SMOKE_SOURCE[auto_h4_start:auto_h4_end]
+        bring_to_front_index = auto_h4_source.index("await page.bringToFront();")
+        page_focus_index = auto_h4_source.index("document.hasFocus()")
+        first_selection_index = auto_h4_source.index('await selectPermission("bypass");')
+        self.assertLess(bring_to_front_index, page_focus_index)
+        self.assertLess(page_focus_index, first_selection_index)
+        self.assertIn("documentHasFocus: document.hasFocus()", auto_h4_source)
+
+        for key in (
+            "autoPermissionRiskTitle",
+            "autoPermissionRiskLead",
+            "autoPermissionFilesTitle",
+            "autoPermissionFilesDescription",
+            "autoPermissionCommandsTitle",
+            "autoPermissionCommandsDescription",
+            "autoPermissionNetworkTitle",
+            "autoPermissionNetworkDescription",
+            "autoPermissionRiskLimits",
+            "autoPermissionKeepCurrent",
+            "autoPermissionEnable",
+            "autoPermissionSaveFailed",
+        ):
+            self.assertIn(f'{key}: "', I18N_SOURCE)
+        for removed_key in ("autoPermissionRiskDifference", "autoPermissionRiskRepeat"):
+            self.assertNotIn(removed_key, INDEX_SOURCE)
+            self.assertNotIn(removed_key, I18N_SOURCE)
+
+        fallback_copy = (
+            "Code 将不再逐项等待您的确认，自动执行当前任务允许的文件、命令和工具操作。仅在您信任当前任务和工作区时启用。",
+            "读取、创建、修改或删除项目文件",
+            "运行命令、使用 Skills，并启动子任务",
+            "获取网页内容或调用已启用的联网能力",
+            "服务端安全限制仍然有效：越界路径、危险或系统级命令、破坏性 Git、工具预算和参数校验仍会被拦截。",
+        )
+        for copy in fallback_copy:
+            self.assertIn(copy, INDEX_SOURCE)
+
+        translated_copy = (
+            'autoPermissionRiskTitle: "Enable Auto mode?"',
+            'autoPermissionRiskLead: "Code will stop asking for approval for each action and automatically perform file, command, and tool operations allowed for the current task. Enable it only when you trust the current task and workspace."',
+            'autoPermissionFilesTitle: "Files and edits"',
+            'autoPermissionFilesDescription: "Read, create, modify, or delete project files"',
+            'autoPermissionCommandsTitle: "Commands and tools"',
+            'autoPermissionCommandsDescription: "Run commands, use Skills, and start subtasks"',
+            'autoPermissionNetworkTitle: "Network access"',
+            'autoPermissionNetworkDescription: "Fetch web content or use enabled network capabilities"',
+            'autoPermissionRiskLimits: "Server-enforced safety limits still apply: out-of-scope paths, dangerous or system-level commands, destructive Git operations, tool budgets, and argument validation remain blocked."',
+            'autoPermissionKeepCurrent: "Cancel"',
+            'autoPermissionEnable: "Enable Auto mode"',
+        )
+        for copy in translated_copy:
+            self.assertIn(copy, I18N_SOURCE)
+        self.assertNotIn("完全访问权限", INDEX_SOURCE)
+        self.assertNotIn("Full access", I18N_SOURCE)
+
+    def test_auto_permission_dialog_initial_focus_is_deferred_and_cancel_safe(self):
+        dialog_start = APP_SOURCE.index("function showAutoPermissionRiskConfirm(")
+        dialog_end = APP_SOURCE.index("const autoPermissionGate =", dialog_start)
+        dialog_source = APP_SOURCE[dialog_start:dialog_end].strip()
+        script = f"""
+const showAutoPermissionRiskConfirm = eval("(" + {json.dumps(dialog_source)} + ")");
+
+function fakeElement(name) {{
+  const listeners = new Map();
+  return {{
+    name,
+    isConnected: true,
+    dataset: {{}},
+    attributes: new Map(),
+    focusCalls: [],
+    computedVisibility: "visible",
+    transitionDuration: "0s",
+    transitionDelay: "0s",
+    classList: {{
+      values: new Set(["hidden"]),
+      add(value) {{ this.values.add(value); }},
+      remove(value) {{ this.values.delete(value); }},
+      contains(value) {{ return this.values.has(value); }},
+    }},
+    addEventListener(type, listener) {{ listeners.set(type, listener); }},
+    removeEventListener(type, listener) {{
+      if (listeners.get(type) === listener) listeners.delete(type);
+    }},
+    dispatch(type, event = {{}}) {{ listeners.get(type)?.({{ target: this, ...event }}); }},
+    listenerCount(type) {{ return listeners.has(type) ? 1 : 0; }},
+    setAttribute(key, value) {{ this.attributes.set(key, value); }},
+    contains() {{ return false; }},
+    focus(options) {{
+      this.focusCalls.push(options || null);
+      document.activeElement = this;
+      document.dispatch("focusin", {{ target: this }});
+    }},
+  }};
+}}
+
+const documentListeners = new Map();
+let focusinAdds = 0;
+const previousFocus = fakeElement("previous");
+const document = {{
+  activeElement: previousFocus,
+  addEventListener(type, listener) {{
+    if (!documentListeners.has(type)) documentListeners.set(type, new Set());
+    documentListeners.get(type).add(listener);
+    if (type === "focusin") focusinAdds += 1;
+  }},
+  removeEventListener(type, listener) {{
+    documentListeners.get(type)?.delete(listener);
+  }},
+  dispatch(type, event) {{
+    for (const listener of [...(documentListeners.get(type) || [])]) listener(event);
+  }},
+  listenerCount(type) {{ return documentListeners.get(type)?.size || 0; }},
+}};
+const modal = fakeElement("modal");
+const closeButton = fakeElement("close");
+const cancelButton = fakeElement("cancel");
+const confirmButton = fakeElement("confirm");
+const outsideButton = fakeElement("outside");
+modal.contains = (node) => [modal, closeButton, cancelButton, confirmButton].includes(node);
+const els = {{
+  autoPermissionConfirmModal: modal,
+  closeAutoPermissionConfirm: closeButton,
+  cancelAutoPermissionConfirm: cancelButton,
+  confirmAutoPermission: confirmButton,
+  permPillDropdown: fakeElement("dropdown"),
+  permPillBtn: fakeElement("pill"),
+}};
+
+function getComputedStyle(element) {{
+  return {{
+    display: "grid",
+    visibility: element.computedVisibility,
+    transitionDuration: element.transitionDuration,
+    transitionDelay: element.transitionDelay,
+  }};
+}}
+
+let nextTimerId = 0;
+const timers = new Map();
+const cancelledTimers = [];
+function setTimeout(callback, delay) {{
+  const id = ++nextTimerId;
+  timers.set(id, {{ callback, delay }});
+  return id;
+}}
+function clearTimeout(id) {{
+  cancelledTimers.push(id);
+  timers.delete(id);
+}}
+
+(async () => {{
+  modal.computedVisibility = "visible";
+  modal.transitionDuration = "0s";
+  let immediateSettled = false;
+  const immediatePromise = showAutoPermissionRiskConfirm({{ reason: "selection" }});
+  immediatePromise.then(() => {{ immediateSettled = true; }});
+  await Promise.resolve();
+  const immediateState = {{
+    active: document.activeElement.name,
+    settled: immediateSettled,
+    scheduledTimers: nextTimerId,
+    pendingTimers: timers.size,
+    focusinListeners: document.listenerCount("focusin"),
+    transitionListeners: modal.listenerCount("transitionend"),
+  }};
+  cancelButton.dispatch("click");
+  const immediateResult = await immediatePromise;
+
+  cancelButton.focusCalls = [];
+  modal.computedVisibility = "hidden";
+  modal.transitionDuration = "0.2s, 0.2s";
+  modal.transitionDelay = "0s";
+  const transitionPromise = showAutoPermissionRiskConfirm({{ reason: "selection" }});
+  const beforeTransition = {{
+    active: document.activeElement.name,
+    pendingTimer: timers.has(1),
+    timerDelay: timers.get(1)?.delay,
+    cancelFocusCalls: [...cancelButton.focusCalls],
+    focusinListeners: document.listenerCount("focusin"),
+    transitionListeners: modal.listenerCount("transitionend"),
+  }};
+  modal.computedVisibility = "visible";
+  modal.dispatch("transitionend", {{ propertyName: "visibility" }});
+  outsideButton.focus();
+  const afterTransition = {{
+    active: document.activeElement.name,
+    cancelFocusCalls: [...cancelButton.focusCalls],
+    timerCancelled: cancelledTimers.includes(1),
+    transitionListeners: modal.listenerCount("transitionend"),
+  }};
+  document.dispatch("keydown", {{
+    key: "Escape",
+    preventDefault() {{}},
+    stopPropagation() {{}},
+  }});
+  const transitionResult = await transitionPromise;
+
+  cancelButton.focusCalls = [];
+  modal.computedVisibility = "hidden";
+  const fallbackPromise = showAutoPermissionRiskConfirm({{ reason: "legacy-dispatch" }});
+  const beforeFallback = {{
+    active: document.activeElement.name,
+    pendingTimer: timers.has(2),
+    timerDelay: timers.get(2)?.delay,
+    focusinListeners: document.listenerCount("focusin"),
+  }};
+  modal.computedVisibility = "visible";
+  const fallbackCallback = timers.get(2).callback;
+  timers.delete(2);
+  fallbackCallback();
+  const afterFallback = {{
+    cancelFocusCalls: [...cancelButton.focusCalls],
+    active: document.activeElement.name,
+    transitionListeners: modal.listenerCount("transitionend"),
+  }};
+  document.dispatch("keydown", {{
+    key: "Escape",
+    preventDefault() {{}},
+    stopPropagation() {{}},
+  }});
+  const fallbackResult = await fallbackPromise;
+
+  cancelButton.focusCalls = [];
+  modal.computedVisibility = "hidden";
+  const cancelledPromise = showAutoPermissionRiskConfirm({{ reason: "selection" }});
+  const cancelledCallback = timers.get(3).callback;
+  cancelButton.dispatch("click");
+  const cancelledResult = await cancelledPromise;
+  modal.computedVisibility = "visible";
+  modal.dispatch("transitionend", {{ propertyName: "visibility" }});
+  cancelledCallback();
+  const afterEarlyCancel = {{
+    result: cancelledResult,
+    cancelledTimers: [...cancelledTimers],
+    cancelFocusCalls: [...cancelButton.focusCalls],
+    active: document.activeElement.name,
+    focusinListeners: document.listenerCount("focusin"),
+    transitionListeners: modal.listenerCount("transitionend"),
+  }};
+
+  process.stdout.write(JSON.stringify({{
+    immediateState,
+    immediateResult,
+    beforeTransition,
+    afterTransition,
+    transitionResult,
+    beforeFallback,
+    afterFallback,
+    fallbackResult,
+    afterEarlyCancel,
+    previousFocusCalls: previousFocus.focusCalls.length,
+    active: document.activeElement.name,
+    focusinAdds,
+    focusinListenersAfterFinish: document.listenerCount("focusin"),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["immediateState"],
+            {
+                "active": "cancel",
+                "settled": False,
+                "scheduledTimers": 0,
+                "pendingTimers": 0,
+                "focusinListeners": 1,
+                "transitionListeners": 0,
+            },
+        )
+        self.assertFalse(data["immediateResult"])
+        self.assertEqual(
+            data["beforeTransition"],
+            {
+                "active": "previous",
+                "pendingTimer": True,
+                "timerDelay": 232,
+                "cancelFocusCalls": [],
+                "focusinListeners": 1,
+                "transitionListeners": 1,
+            },
+        )
+        self.assertEqual(
+            data["afterTransition"],
+            {
+                "active": "cancel",
+                "cancelFocusCalls": [
+                    {"preventScroll": True},
+                    {"preventScroll": True},
+                ],
+                "timerCancelled": True,
+                "transitionListeners": 0,
+            },
+        )
+        self.assertFalse(data["transitionResult"])
+        self.assertEqual(
+            data["beforeFallback"],
+            {
+                "active": "previous",
+                "pendingTimer": True,
+                "timerDelay": 232,
+                "focusinListeners": 1,
+            },
+        )
+        self.assertEqual(
+            data["afterFallback"],
+            {
+                "cancelFocusCalls": [{"preventScroll": True}],
+                "active": "cancel",
+                "transitionListeners": 0,
+            },
+        )
+        self.assertFalse(data["fallbackResult"])
+        self.assertEqual(
+            data["afterEarlyCancel"],
+            {
+                "result": False,
+                "cancelledTimers": [1, 3],
+                "cancelFocusCalls": [],
+                "active": "previous",
+                "focusinListeners": 0,
+                "transitionListeners": 0,
+            },
+        )
+        self.assertEqual(data["previousFocusCalls"], 4)
+        self.assertEqual(data["active"], "previous")
+        self.assertEqual(data["focusinAdds"], 4)
+        self.assertEqual(data["focusinListenersAfterFinish"], 0)
+
+    def test_auto_permission_goal_create_is_gated_while_goal_status_stays_local(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/goal.js");
+const classify = window.Code.features.goal.classifyGoalInput;
+process.stdout.write(JSON.stringify({
+  query: classify("/goal status"),
+  localizedQuery: classify("/goal 状态"),
+  create: classify("/goal implement the next step"),
+  ordinary: classify("please continue"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "query": {"kind": "query"},
+                "localizedQuery": {"kind": "query"},
+                "create": {"kind": "create", "objective": "implement the next step"},
+                "ordinary": None,
+            },
+        )
+        self.assertIn('if (!action || action.kind === "create") return false;', GOAL_SOURCE)
+
+        submit_start = APP_SOURCE.index('els.chatForm.addEventListener("submit"')
+        submit_end = APP_SOURCE.index('els.newChat.addEventListener("click"', submit_start)
+        submit_source = APP_SOURCE[submit_start:submit_end]
+        local_goal_index = submit_source.index("handleUiSlashCommand(text)")
+        gate_index = submit_source.index("autoPermissionGate.requiresDispatchConfirmation()")
+        send_index = submit_source.index("await sendMessage(text, {")
+        self.assertLess(local_goal_index, gate_index)
+        self.assertLess(gate_index, send_index)
+
+        send_start = APP_SOURCE.index("async function sendMessage(")
+        send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
+        send_source = APP_SOURCE[send_start:send_end]
+        classify_index = send_source.index("goalFeature?.classifyGoalInput(userText)")
+        prepare_index = send_source.index("await goalFeature.prepareExplicitGoal({")
+        run_index = send_source.index("if (!claimActiveRunContext(ctx))")
+        self.assertLess(classify_index, prepare_index)
+        self.assertLess(prepare_index, run_index)
+
     def test_agent_permissions_transform_authorization_data_without_side_effects(self):
         script = r"""
 global.window = {};
@@ -5139,7 +5753,7 @@ process.stdout.write(JSON.stringify({
                 "read": "权限策略：只读分析。只能列出、读取和搜索项目文件；遇到无法从上下文或文件中确认的关键决策时可以向用户提问。不能写入、删除、运行命令、访问网络或启动子 Agent。",
                 "plan": "权限策略：计划模式。可读取、搜索、生成修改方案，但不能运行命令或直接写入文件。",
                 "accept": "权限策略：接受编辑模式。可执行命令和写入文件，但操作前需用户确认。",
-                "bypass": "权限策略：自动模式。所有操作自动执行，无需确认。",
+                "bypass": "权限策略：自动模式。当前允许的操作会自动执行，不再逐项请求授权；危险命令、越界路径、破坏性 Git、系统级操作及其他服务端安全限制仍然生效。",
             },
         )
         self.assertIsNone(data["unknownInstruction"])

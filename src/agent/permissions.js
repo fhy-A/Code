@@ -8,8 +8,13 @@
     read: "权限策略：只读分析。只能列出、读取和搜索项目文件；遇到无法从上下文或文件中确认的关键决策时可以向用户提问。不能写入、删除、运行命令、访问网络或启动子 Agent。",
     plan: "权限策略：计划模式。可读取、搜索、生成修改方案，但不能运行命令或直接写入文件。",
     accept: "权限策略：接受编辑模式。可执行命令和写入文件，但操作前需用户确认。",
-    bypass: "权限策略：自动模式。所有操作自动执行，无需确认。",
+    bypass: "权限策略：自动模式。当前允许的操作会自动执行，不再逐项请求授权；危险命令、越界路径、破坏性 Git、系统级操作及其他服务端安全限制仍然生效。",
   });
+
+  const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
+  const AUTO_PERMISSION_ACK_VERSION = "v1";
+  const PERMISSION_PROFILE_KEY = "code-permission-profile";
+  const PERMISSION_PROFILES = Object.freeze(["read", "plan", "accept", "bypass"]);
 
   const TOOL_POLICY = Object.freeze({
     read: Object.freeze([
@@ -87,6 +92,119 @@
     return PERMISSION_INSTRUCTIONS[permissionProfile];
   }
 
+  function createAutoPermissionRiskGate(options = {}) {
+    const storage = options.storage || global.localStorage;
+    const getProfile = typeof options.getProfile === "function"
+      ? options.getProfile
+      : () => storage?.getItem?.(PERMISSION_PROFILE_KEY) || "accept";
+    const onProfileCommitted = typeof options.onProfileCommitted === "function"
+      ? options.onProfileCommitted
+      : () => {};
+    const requestConfirmation = typeof options.requestConfirmation === "function"
+      ? options.requestConfirmation
+      : async () => false;
+    const onStorageError = typeof options.onStorageError === "function"
+      ? options.onStorageError
+      : () => {};
+    let pendingConfirmation = null;
+
+    const profile = () => {
+      const value = String(getProfile() || "accept");
+      return PERMISSION_PROFILES.includes(value) ? value : "accept";
+    };
+    const storedAcknowledgement = () => String(
+      storage?.getItem?.(AUTO_PERMISSION_ACK_KEY) || "",
+    );
+
+    function isAutoAcknowledged() {
+      return profile() === "bypass"
+        && storedAcknowledgement() === AUTO_PERMISSION_ACK_VERSION;
+    }
+
+    function requiresDispatchConfirmation() {
+      return profile() === "bypass" && !isAutoAcknowledged();
+    }
+
+    function restoreStorageValue(key, value) {
+      if (value == null) storage?.removeItem?.(key);
+      else storage?.setItem?.(key, value);
+    }
+
+    function commitProfile(nextProfile, { acknowledged = false } = {}) {
+      const normalized = String(nextProfile || "");
+      if (!PERMISSION_PROFILES.includes(normalized)) return false;
+      if (normalized === "bypass" && acknowledged !== true) return false;
+
+      const previousProfile = storage?.getItem?.(PERMISSION_PROFILE_KEY) ?? null;
+      const previousAcknowledgement = storage?.getItem?.(AUTO_PERMISSION_ACK_KEY) ?? null;
+      try {
+        if (normalized === "bypass") {
+          storage?.setItem?.(AUTO_PERMISSION_ACK_KEY, AUTO_PERMISSION_ACK_VERSION);
+          storage?.setItem?.(PERMISSION_PROFILE_KEY, normalized);
+        } else {
+          storage?.setItem?.(PERMISSION_PROFILE_KEY, normalized);
+          storage?.removeItem?.(AUTO_PERMISSION_ACK_KEY);
+        }
+      } catch (error) {
+        try {
+          restoreStorageValue(PERMISSION_PROFILE_KEY, previousProfile);
+          restoreStorageValue(AUTO_PERMISSION_ACK_KEY, previousAcknowledgement);
+        } catch (_) {}
+        onStorageError(error);
+        return false;
+      }
+      onProfileCommitted(normalized);
+      return true;
+    }
+
+    function confirm(reason) {
+      if (pendingConfirmation) return pendingConfirmation;
+      pendingConfirmation = Promise.resolve()
+        .then(() => requestConfirmation({ reason }))
+        .then(Boolean)
+        .catch(() => false)
+        .finally(() => {
+          pendingConfirmation = null;
+        });
+      return pendingConfirmation;
+    }
+
+    async function requestProfileTransition(nextProfile) {
+      const normalized = String(nextProfile || "");
+      if (!PERMISSION_PROFILES.includes(normalized)) return false;
+      if (normalized !== "bypass") return commitProfile(normalized);
+      if (isAutoAcknowledged()) return true;
+      if (!await confirm("selection")) return false;
+      return commitProfile("bypass", { acknowledged: true });
+    }
+
+    async function ensureDispatchConfirmed() {
+      if (!requiresDispatchConfirmation()) return true;
+      if (await confirm("legacy-dispatch")) {
+        return commitProfile("bypass", { acknowledged: true });
+      }
+      commitProfile("accept");
+      return false;
+    }
+
+    function reconcileInactiveAcknowledgement() {
+      if (profile() === "bypass" || !storedAcknowledgement()) return;
+      try {
+        storage?.removeItem?.(AUTO_PERMISSION_ACK_KEY);
+      } catch (error) {
+        onStorageError(error);
+      }
+    }
+
+    return Object.freeze({
+      ensureDispatchConfirmed,
+      isAutoAcknowledged,
+      reconcileInactiveAcknowledgement,
+      requestProfileTransition,
+      requiresDispatchConfirmation,
+    });
+  }
+
   function serializeAuthorizationRequest(request) {
     if (!request) return null;
     const {
@@ -115,6 +233,9 @@
   }
 
   agent.permissions = Object.freeze({
+    AUTO_PERMISSION_ACK_KEY,
+    AUTO_PERMISSION_ACK_VERSION,
+    createAutoPermissionRiskGate,
     executionOwnerForPermissionProfile,
     filterPendingAuthorizations,
     getAllowedToolNamesForProfile,

@@ -211,7 +211,7 @@
                     <button class="model-pill-option" type="button" data-value="read" data-i18n="permRead" title="仅分析项目，不修改任何内容" data-i18n-title="permReadTip">只读分析</button>
                     <button class="model-pill-option" type="button" data-value="plan" data-i18n="permPlan" title="仅规划，不执行写操作" data-i18n-title="permPlanTip">计划</button>
                     <button class="model-pill-option" type="button" data-value="accept" data-i18n="permAccept" title="可读写文件，编辑需用户确认" data-i18n-title="permAcceptTip">接受编辑</button>
-                    <button class="model-pill-option" type="button" data-value="bypass" data-i18n="permBypass" title="自动执行所有操作，无需确认" data-i18n-title="permBypassTip">自动</button>
+                    <button class="model-pill-option" type="button" data-value="bypass" data-i18n="permBypass" title="自动执行当前允许的操作，不再逐项授权；服务端安全限制仍然有效" data-i18n-title="permBypassTip">自动</button>
                   </div>
                 </div>
               </div>
@@ -512,6 +512,74 @@
         <footer class="confirm-actions">
           <button id="cancelApplyEdit" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
           <button id="confirmApplyEdit" class="danger-btn" type="button" data-i18n="confirmWrite">确认写入</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="settings-modal hidden" id="autoPermissionConfirmModal" aria-hidden="true">
+      <div class="modal-card confirm-card auto-permission-risk-card" role="alertdialog" aria-modal="true"
+        aria-labelledby="autoPermissionRiskTitle" aria-describedby="autoPermissionRiskDescription">
+        <header>
+          <div class="auto-permission-risk-heading">
+            <span class="auto-permission-warning-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10.3 3.4 2.2 17.5A2.3 2.3 0 0 0 4.2 21h15.6a2.3 2.3 0 0 0 2-3.5L13.7 3.4a2 2 0 0 0-3.4 0Z"/>
+                <path d="M12 8v5"/><path d="M12 17h.01"/>
+              </svg>
+            </span>
+            <h2 id="autoPermissionRiskTitle" data-i18n="autoPermissionRiskTitle">启用自动模式？</h2>
+          </div>
+          <button id="closeAutoPermissionConfirm" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">×</button>
+        </header>
+        <div class="confirm-body" id="autoPermissionRiskDescription">
+          <p class="auto-permission-risk-lead" data-i18n="autoPermissionRiskLead">Code 将不再逐项等待您的确认，自动执行当前任务允许的文件、命令和工具操作。仅在您信任当前任务和工作区时启用。</p>
+          <div class="auto-permission-capabilities" role="list">
+            <div class="auto-permission-capability" role="listitem">
+              <span class="auto-permission-capability-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 19.5V5.8A1.8 1.8 0 0 1 5.8 4h7.7L20 10.5v9A1.5 1.5 0 0 1 18.5 21h-13A1.5 1.5 0 0 1 4 19.5Z"/>
+                  <path d="M13 4v7h7M8 15h8M8 18h5"/>
+                </svg>
+              </span>
+              <span class="auto-permission-capability-copy">
+                <strong data-i18n="autoPermissionFilesTitle">文件与编辑</strong>
+                <span data-i18n="autoPermissionFilesDescription">读取、创建、修改或删除项目文件</span>
+              </span>
+            </div>
+            <div class="auto-permission-capability" role="listitem">
+              <span class="auto-permission-capability-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="16" rx="2"/>
+                  <path d="m7 9 3 3-3 3M13 15h4"/>
+                </svg>
+              </span>
+              <span class="auto-permission-capability-copy">
+                <strong data-i18n="autoPermissionCommandsTitle">命令与工具</strong>
+                <span data-i18n="autoPermissionCommandsDescription">运行命令、使用 Skills，并启动子任务</span>
+              </span>
+            </div>
+            <div class="auto-permission-capability" role="listitem">
+              <span class="auto-permission-capability-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/>
+                </svg>
+              </span>
+              <span class="auto-permission-capability-copy">
+                <strong data-i18n="autoPermissionNetworkTitle">网络访问</strong>
+                <span data-i18n="autoPermissionNetworkDescription">获取网页内容或调用已启用的联网能力</span>
+              </span>
+            </div>
+          </div>
+          <div class="auto-permission-risk-limits">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3 4.5 6v5.4c0 4.6 3 8.2 7.5 9.6 4.5-1.4 7.5-5 7.5-9.6V6L12 3Z"/><path d="m9 12 2 2 4-4"/>
+            </svg>
+            <p data-i18n="autoPermissionRiskLimits">服务端安全限制仍然有效：越界路径、危险或系统级命令、破坏性 Git、工具预算和参数校验仍会被拦截。</p>
+          </div>
+        </div>
+        <footer class="confirm-actions">
+          <button id="cancelAutoPermissionConfirm" class="ghost-btn" type="button" data-i18n="autoPermissionKeepCurrent">取消</button>
+          <button id="confirmAutoPermission" class="danger-btn auto-permission-enable-btn" type="button" data-i18n="autoPermissionEnable">启用自动模式</button>
         </footer>
       </div>
     </div>
