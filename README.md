@@ -12,7 +12,7 @@
 <p align="center">让 AI 真正进入你的项目，而不是停在对话框里。</p>
 
 <p align="center">
-  <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.6.4-2563EB" alt="Version 0.5.30"></a>
+  <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.6.5-2563EB" alt="Version 0.5.30"></a>
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Windows">
   <img src="https://img.shields.io/badge/python-3.12+-3776AB" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/tests-842%20passed-16A34A" alt="842 tests passed">
@@ -73,7 +73,7 @@ Code 当前聚焦三个目标：
 
 ### Windows 单文件版
 
-1. 从 [GitHub Releases](https://github.com/fhy-A/Code/releases/latest) 下载 `Code-v0.6.4.exe`。
+1. 从 [GitHub Releases](https://github.com/fhy-A/Code/releases/latest) 下载 `Code-v0.6.5.exe`。
 2. 双击运行。Code 会常驻系统托盘，并打开 `http://127.0.0.1:3010/`。
 3. 按页面提示登录 workbar；Code 会同步账号下的 API Key 并刷新可用模型。
 4. 选择一个项目目录，在输入框中直接描述任务。模型服务地址固定为 `https://workbar.ai`。
