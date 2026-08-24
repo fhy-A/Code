@@ -15968,6 +15968,11 @@ const test = base.test.extend({
                 renderer.table.call(renderer, tableToken),
               ].join("");
             }
+            if (text === "H4 large text preview `large-preview.txt`") {
+              return `<p>H4 large text preview ${renderer.codespan.call(renderer, {
+                text: "large-preview.txt",
+              })}</p>`;
+            }
             const inlineContext = {
               parser: {
                 parseInline(tokens) {
@@ -24158,6 +24163,122 @@ async function exerciseStructuredRichText(h4, runtime) {
   });
 }
 
+async function exerciseLargeTextPreview(h4, runtime) {
+  const { page } = h4;
+  const largePath = "large-preview.txt";
+  const prefix = [
+    "H4_LARGE_PREVIEW_START",
+    ...Array.from({ length: 8200 }, (_, index) => `H4 line ${index + 1}`),
+  ].join("\n");
+  const content = `${prefix}\n${"x".repeat(1_100_000)}\nH4_LARGE_PREVIEW_END`;
+  expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(1024 * 1024);
+  await fs.writeFile(path.join(h4.host.projectDir, largePath), content, "utf8");
+
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+
+  const treeFile = page.locator(`#fileTree .file-item.file[data-path="${largePath}"]`);
+  await expect(treeFile).toBeVisible();
+  await treeFile.click({ button: "right" });
+  const explicitSystemOpen = page.locator('.file-ctx-menu [data-action="open"]');
+  await expect(explicitSystemOpen).toBeVisible();
+  await expect(explicitSystemOpen).toHaveText(/Open with default app|用默认程序打开/);
+  await page.locator("#prompt").click();
+  await expect(page.locator(".file-ctx-menu")).toHaveCount(0);
+
+  const assertInternalPreview = async (source) => {
+    await expect(page.locator("#previewTitle")).toHaveText(largePath);
+    await expect(page.locator("#previewMeta")).toContainText("Content truncated");
+    await expect(page.locator("#filePreview.code-preview")).toContainText("H4_LARGE_PREVIEW_START");
+    await expect(page.locator("#filePreview.code-preview")).not.toContainText("H4_LARGE_PREVIEW_END");
+    const projection = await page.locator("#filePreview.code-preview").evaluate((element) => ({
+      lineCount: element.querySelectorAll(":scope > .code-line").length,
+      hasStart: element.textContent.includes("H4_LARGE_PREVIEW_START"),
+      hasEnd: element.textContent.includes("H4_LARGE_PREVIEW_END"),
+    }));
+    expect(projection.lineCount).toBeGreaterThan(8000);
+    expect(projection).toMatchObject({ hasStart: true, hasEnd: false });
+    h4.diagnosticSteps.push({ step: "large-text-internal-preview", runtime, source, ...projection });
+    return projection;
+  };
+
+  await treeFile.click();
+  const treeProjection = await assertInternalPreview("file-tree");
+  expect(h4.loopbackRequests.filter(
+    (request) => request.method === "POST" && request.path === "/api/open-file",
+  )).toEqual([]);
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  const restoredProjection = await assertInternalPreview("reload-restore");
+
+  const created = await sendProductionJson(page, "/api/sessions", "POST", {
+    title: `H4 large text preview ${runtime}`,
+    messages: [
+      { role: "user", content: "H4 large text preview seed", _time: "2026-08-24T05:10:00Z" },
+      { role: "assistant", content: "H4 large text preview `large-preview.txt`", _time: "2026-08-24T05:10:01Z" },
+    ],
+  });
+  expect(created.status).toBe(201);
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  const activeSession = page.locator(
+    `#sessionList .session-row.active[data-session-id="${created.body.id}"]`,
+  );
+  if (await activeSession.count() === 0) {
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${created.body.id}"]`,
+    ).click();
+  }
+  await expect(activeSession).toHaveCount(1);
+  const answerFile = page.locator(
+    `#messages article.msg.assistant [class~="path-file-card"][title="${largePath}"]`,
+  );
+  await expect(answerFile).toHaveCount(1);
+  await answerFile.click();
+  const answerProjection = await assertInternalPreview("answer-link");
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  const answerReloadProjection = await assertInternalPreview("answer-link-reload");
+  expect(h4.loopbackRequests.filter(
+    (request) => request.method === "POST" && request.path === "/api/open-file",
+  )).toEqual([]);
+
+  const allowedBlockedPaths = new Set([
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+  ]);
+  for (const request of h4.blockedRequests) {
+    expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
+    expect(allowedBlockedPaths.has(request.path)).toBe(true);
+  }
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-large-text-preview`, {
+    sessionId: idHash(created.body.id),
+    fullBytes: Buffer.byteLength(content, "utf8"),
+    sources: ["file-tree", "answer-link"],
+    lineCounts: [
+      treeProjection.lineCount,
+      restoredProjection.lineCount,
+      answerProjection.lineCount,
+      answerReloadProjection.lineCount,
+    ],
+    truncatedMarkerVisible: true,
+    implicitSystemOpenRequests: 0,
+    explicitSystemOpenMenuPresent: true,
+    modelRequests: metrics.chatRequests.length,
+    toolExecutions: metrics.toolExecutions.length,
+    blockedRequests: h4.blockedRequests.length,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -24238,4 +24359,12 @@ test("bundle structured rich text preserves tasks nested lists and table alignme
 
 test("direct classic structured rich text preserves tasks nested lists and table alignment", async ({ h4 }) => {
   await exerciseStructuredRichText(h4, "classic");
+});
+
+test("bundle large text preview stays internal from file tree and answer link", async ({ h4 }) => {
+  await exerciseLargeTextPreview(h4, "bundle");
+});
+
+test("direct classic large text preview stays internal from file tree and answer link", async ({ h4 }) => {
+  await exerciseLargeTextPreview(h4, "classic");
 });

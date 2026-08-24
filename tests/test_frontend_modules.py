@@ -13323,6 +13323,136 @@ process.stdout.write(JSON.stringify({
             "/api/file?path=folder%2Fa%20b.pdf&raw=1&v=version%201",
         )
 
+    def test_large_text_preview_stays_internal_without_system_open(self):
+        self.assertNotIn('/api/open-file', PREVIEW_SOURCE)
+        script = """
+global.window = {
+  Code: {features: {}},
+  innerWidth: 1280,
+  setInterval,
+  clearInterval,
+  addEventListener: () => {},
+};
+require("./src/features/preview.js");
+const {createPreviewFeature} = window.Code.features.preview;
+const requests = [];
+const responses = [
+  {
+    ok: true,
+    path: "large-characters.txt",
+    name: "large-characters.txt",
+    content: `H4_CHAR_START\\n${"x".repeat(350001)}`,
+    size: 1200000,
+    truncated: true,
+    binary: false,
+    updatedAt: "2026-08-24T05:00:00Z",
+  },
+  {
+    ok: true,
+    path: "large-lines.txt",
+    name: "large-lines.txt",
+    content: Array.from({length: 8001}, (_, index) => `line-${index}`).join("\\n"),
+    size: 1200000,
+    truncated: true,
+    binary: false,
+    updatedAt: "2026-08-24T05:00:01Z",
+  },
+];
+const classes = new Set();
+const filePreview = {
+  className: "",
+  innerHTML: "",
+  onclick: null,
+  querySelector: () => null,
+};
+const elements = {
+  workbench: {classList: {
+    add: (name) => classes.add(name),
+    contains: (name) => classes.has(name),
+  }},
+  previewTitle: {textContent: ""},
+  previewMeta: {textContent: ""},
+  previewLanguage: {textContent: ""},
+  refreshPreview: {disabled: true},
+  copyPreview: {disabled: true},
+  previewModeActions: {replaceChildren: () => {}, appendChild: () => {}},
+  filePreview,
+};
+const storage = [];
+const feature = createPreviewFeature({
+  state: {previewWidth: 420},
+  elements,
+  apiJson: async (url, options = {}) => {
+    requests.push({url, method: options.method || "GET"});
+    if (!url.startsWith("/api/file?path=")) throw new Error(`unexpected request: ${url}`);
+    return responses.shift();
+  },
+  renderMarkdown: (value) => value,
+  resolveSyntaxPatterns: () => null,
+  document: {
+    querySelectorAll: () => [],
+    documentElement: {style: {setProperty: () => {}}},
+  },
+  storage: {
+    setItem: (...args) => storage.push(args),
+    removeItem: () => {},
+  },
+  t: (key) => key === "fmtTruncatedContent" ? "TRUNCATED" : key,
+  escapeHtml: (value) => String(value ?? ""),
+  languageFromPath: () => "text",
+  formatSize: (value) => `${value} B`,
+});
+(async () => {
+  await feature.loadFile("large-characters.txt");
+  const characters = {
+    className: filePreview.className,
+    startVisible: filePreview.innerHTML.includes("H4_CHAR_START"),
+    truncatedMeta: elements.previewMeta.textContent.includes("TRUNCATED"),
+    copyEnabled: elements.copyPreview.disabled === false,
+  };
+  await feature.loadFile("large-lines.txt");
+  const lines = {
+    className: filePreview.className,
+    count: (filePreview.innerHTML.match(/class="code-line"/g) || []).length,
+    truncatedMeta: elements.previewMeta.textContent.includes("TRUNCATED"),
+    copyEnabled: elements.copyPreview.disabled === false,
+  };
+  feature.stopAutoRefresh();
+  process.stdout.write(JSON.stringify({characters, lines, requests, storage}));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["characters"],
+            {
+                "className": "file-preview code-preview",
+                "startVisible": True,
+                "truncatedMeta": True,
+                "copyEnabled": True,
+            },
+        )
+        self.assertEqual(data["lines"]["className"], "file-preview code-preview")
+        self.assertEqual(data["lines"]["count"], 8001)
+        self.assertTrue(data["lines"]["truncatedMeta"])
+        self.assertTrue(data["lines"]["copyEnabled"])
+        self.assertEqual(
+            data["requests"],
+            [
+                {"url": "/api/file?path=large-characters.txt", "method": "GET"},
+                {"url": "/api/file?path=large-lines.txt", "method": "GET"},
+            ],
+        )
+        self.assertIn(["code-preview-open", "1"], data["storage"])
+        self.assertIn(["code-preview-path", "large-lines.txt"], data["storage"])
+
     def test_sidebar_resizers_coalesce_layout_updates_and_defer_persistence(self):
         script = """
 const frames = [];

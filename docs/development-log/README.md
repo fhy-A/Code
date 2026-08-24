@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-24 | `CODE-040` 大型文本内部截断预览回归修复完成：文件树与最终回答链接统一继续走右侧 `loadFile`，沿用服务端前 1 MiB 与 `truncated` 状态，350000 字符/8000 行仅关闭高亮；隐式 `/api/open-file` 已移除，显式默认程序打开及图片/PDF/二进制/行号边界保持。用户 bundle/direct classic H4 `2 passed`，并确认文件树、回答链接和显式系统打开三项人工验收均正常 | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-039` 最终回答结构化富文本可读性优化完成：任务清单以禁用 checkbox 保留只读语义，嵌套列表层级/换行统一，GFM 表格左中右对齐及宽表自身滚动/非遮挡提示闭合；普通本地文件改为无框图标+文件名，图片卡保持。前端模块 `227 passed`，用户 bundle/direct classic H4 `2 passed`，双入口、明暗主题与约 390px 窄屏人工 PASS | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-036` 两阶段完成：先在 `marked` 前为紧邻 Unicode 标点的 HTTP(S) 裸 URL 建立有界 autolink，保留代码、显式链接/图片、query/fragment、百分号编码与 Unicode 路径；再将 favicon 改为同源安全代理，只访问经全量公网 DNS 校验并固定连接地址的目标 `/favicon.ico`、固定 provider 和父域候选，不解析 HTML。三次重定向、逐跳 HTTPS 降级拒绝、总 deadline、256 KiB/MIME/magic、128 项 LRU/正负 TTL/同 host 合并及地球图标降级闭合；最终安全测试 `13/13`、server `224/224`、同范围回归 `443 passed`，用户 fresh bundle H4 `2 passed` 并确认 Code Dev/direct classic 扩展网站矩阵与链接交互人工 PASS | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-038` 会话列表相对时间与状态槽、Goal 会话切换隔离完成：固定右侧槽按 inactive 等待回答/确认、运行、未读、空闲时间投影现有事实，active 交互由既有面板唯一接管；分钟 ticker 不重排，切换期间旧 Goal 零跨会话帧。运行环调整为 1.4 秒并以同 kind 原地 patch、后台 streaming 局部刷新保持跨增量 DOM 身份。前端模块 `222/222 passed`，用户 fresh bundle 上 bundle/direct classic H4 `2 passed`，双入口视觉与交互人工 PASS | [查看](2026/2026-08-24.md) |

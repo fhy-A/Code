@@ -416,20 +416,6 @@
       }
 
       state.previewContent = data.content || "";
-      // Oversized text files open externally instead of an internal preview
-      // (routing matrix 5: over the preview character/line limits).
-      if (state.previewContent && (
-        state.previewContent.length > 350000
-        || state.previewContent.split("\n").length > 8000
-      )) {
-        try {
-          await apiJson("/api/open-file", {
-            method: "POST",
-            body: JSON.stringify({ path: state.previewPath }),
-          });
-        } catch (_) { /* keep the preview pane untouched */ }
-        return;
-      }
       if (state.previewContent) {
         if (ext === "md" || ext === "markdown" || ext === "mdown") {
           state.previewKind = "markdown";
