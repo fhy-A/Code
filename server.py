@@ -1,19 +1,24 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import http.client
 from pathlib import Path
 from urllib import error, parse, request
 import base64
 import codecs
+from collections import OrderedDict
 from contextlib import contextmanager
 import ctypes
 import datetime as dt
 import difflib
 import hashlib
+import ipaddress
 import io
 import json
 import mimetypes
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import uuid
@@ -152,6 +157,478 @@ MODEL_INPUT_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/webp"})
 MODEL_INPUT_CONVERTIBLE_FORMATS = frozenset({"BMP", "GIF", "ICO", "TIFF"})
 MODEL_INPUT_IMAGE_MAX_PIXELS = 25_000_000
 MODEL_INPUT_IMAGE_MAX_DIMENSION = 2048
+
+_FAVICON_ALLOWED_SCHEMES = frozenset({"http", "https"})
+_FAVICON_COMPOUND_SUFFIXES = frozenset({
+    "com.cn", "org.cn", "net.cn", "gov.cn", "edu.cn", "co.uk", "org.uk",
+    "com.hk", "com.tw", "com.au", "com.br", "com.mx", "co.jp", "co.za",
+})
+_FAVICON_PROVIDER_HOSTS = frozenset({
+    "api.faviconkit.com", "www.google.com", "icons.duckduckgo.com",
+})
+_FAVICON_ALLOWED_MIMES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp", "image/x-icon",
+    "image/vnd.microsoft.icon", "image/bmp", "image/avif",
+})
+_FAVICON_MAX_BYTES = 256 * 1024
+_FAVICON_MAX_REDIRECTS = 3
+_FAVICON_FETCH_DEADLINE_SECONDS = 6.0
+_FAVICON_SOCKET_TIMEOUT_SECONDS = 2.5
+_FAVICON_CONCURRENCY_WAIT_SECONDS = 0.25
+_FAVICON_CACHE_CAPACITY = 128
+_FAVICON_POSITIVE_TTL_SECONDS = 6 * 60 * 60
+_FAVICON_NEGATIVE_TTL_SECONDS = 5 * 60
+_FAVICON_MAX_CONCURRENT_FETCHES = 6
+
+
+class _FaviconProxyError(RuntimeError):
+    """Internal fail-closed favicon lookup error (never exposed verbatim)."""
+
+
+def _normalize_favicon_host(raw_host):
+    """Return a canonical IDNA host, rejecting URL-like and local inputs."""
+    host = str(raw_host or "").strip()
+    if not host or len(host) > 253:
+        raise ValueError("invalid favicon host")
+    if any(ch in host for ch in "@/\\?#:[]") or any(ord(ch) < 33 for ch in host):
+        raise ValueError("invalid favicon host")
+    host = host.rstrip(".")
+    if not host or host.startswith("."):
+        raise ValueError("invalid favicon host")
+    try:
+        canonical = host.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("invalid favicon host") from exc
+    if len(canonical) > 253:
+        raise ValueError("invalid favicon host")
+    labels = canonical.split(".")
+    if len(labels) < 2 or canonical == "localhost" or canonical.endswith(".local"):
+        raise ValueError("invalid favicon host")
+    label_pattern = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+    if any(not label_pattern.fullmatch(label) for label in labels):
+        raise ValueError("invalid favicon host")
+    try:
+        ipaddress.ip_address(canonical)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("IP literal favicon hosts are not allowed")
+    return canonical
+
+
+def _favicon_host_candidates(canonical_host):
+    """Keep the established exact-host then registrable-parent fallback chain."""
+    host = _normalize_favicon_host(canonical_host)
+    result = [host]
+    current = host
+    if current.startswith("www."):
+        current = current[4:]
+        if current not in result:
+            result.append(current)
+    labels = current.split(".")
+    registrable_label_count = 3 if ".".join(labels[-2:]) in _FAVICON_COMPOUND_SUFFIXES else 2
+    while len(labels) > registrable_label_count:
+        labels.pop(0)
+        candidate = ".".join(labels)
+        if candidate not in result:
+            result.append(candidate)
+    return tuple(result)
+
+
+def _favicon_candidate_urls(scheme, canonical_host):
+    scheme = str(scheme or "").lower()
+    if scheme not in _FAVICON_ALLOWED_SCHEMES:
+        raise ValueError("invalid favicon scheme")
+    urls = []
+    for candidate in _favicon_host_candidates(canonical_host):
+        quoted = parse.quote(candidate, safe="")
+        urls.extend((
+            f"{scheme}://{candidate}/favicon.ico",
+            f"https://api.faviconkit.com/{quoted}/64",
+            f"https://www.google.com/s2/favicons?domain={quoted}&sz=64",
+            f"https://icons.duckduckgo.com/ip3/{quoted}.ico",
+        ))
+    return tuple(urls)
+
+
+def _public_favicon_addresses(host, port, resolver=socket.getaddrinfo):
+    """Resolve once and reject the complete answer if any address is non-public."""
+    try:
+        records = resolver(
+            host,
+            port,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
+        )
+    except (OSError, socket.gaierror) as exc:
+        raise _FaviconProxyError("favicon DNS lookup failed") from exc
+    validated = []
+    seen = set()
+    for family, socktype, proto, canonname, sockaddr in records or ():
+        if (
+            family not in {socket.AF_INET, socket.AF_INET6}
+            or socktype not in {0, socket.SOCK_STREAM}
+            or proto not in {0, socket.IPPROTO_TCP}
+            or not sockaddr
+            or len(sockaddr) < 2
+            or int(sockaddr[1]) != int(port)
+        ):
+            raise _FaviconProxyError("favicon DNS returned an unsupported address")
+        raw_ip = str(sockaddr[0]).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw_ip)
+        except ValueError as exc:
+            raise _FaviconProxyError("favicon DNS returned an invalid address") from exc
+        if (
+            not address.is_global
+            or address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            raise _FaviconProxyError("favicon DNS returned a non-public address")
+        key = (family, address.compressed, int(sockaddr[1]))
+        if key in seen:
+            continue
+        seen.add(key)
+        validated.append((family, socktype or socket.SOCK_STREAM, proto or socket.IPPROTO_TCP, canonname, sockaddr))
+    if not validated:
+        raise _FaviconProxyError("favicon DNS returned no public address")
+    return tuple(validated)
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTP connection whose TCP peer is one of the prevalidated DNS answers."""
+
+    def __init__(
+        self,
+        host,
+        port,
+        addresses,
+        *,
+        timeout,
+        use_tls,
+        socket_factory=socket.socket,
+        tls_context_factory=ssl.create_default_context,
+    ):
+        super().__init__(host, port=port, timeout=timeout)
+        self._addresses = tuple(addresses)
+        self._use_tls = bool(use_tls)
+        self._socket_factory = socket_factory
+        self._tls_context_factory = tls_context_factory
+
+    def connect(self):
+        last_error = None
+        for family, socktype, proto, _canonname, sockaddr in self._addresses:
+            raw_socket = None
+            try:
+                raw_socket = self._socket_factory(family, socktype, proto)
+                raw_socket.settimeout(self.timeout)
+                raw_socket.connect(sockaddr)
+                peer_ip = ipaddress.ip_address(str(raw_socket.getpeername()[0]).split("%", 1)[0])
+                expected_ip = ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0])
+                if peer_ip != expected_ip:
+                    raise _FaviconProxyError("favicon connection peer changed")
+                if self._use_tls:
+                    context = self._tls_context_factory()
+                    raw_socket = context.wrap_socket(raw_socket, server_hostname=self.host)
+                self.sock = raw_socket
+                return
+            except Exception as exc:
+                last_error = exc
+                if raw_socket is not None:
+                    try:
+                        raw_socket.close()
+                    except OSError:
+                        pass
+        raise _FaviconProxyError("favicon connection failed") from last_error
+
+
+def _default_favicon_connection_factory(*, scheme, host, port, addresses, timeout):
+    return _PinnedHTTPConnection(
+        host,
+        port,
+        addresses,
+        timeout=timeout,
+        use_tls=scheme == "https",
+    )
+
+
+def _favicon_magic_mime(data):
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"\x00\x00\x01\x00"):
+        return "image/x-icon"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in {b"avif", b"avis"}:
+        return "image/avif"
+    raise _FaviconProxyError("favicon response is not a supported raster image")
+
+
+def _validated_favicon_asset(data, content_type):
+    if not data or len(data) > _FAVICON_MAX_BYTES:
+        raise _FaviconProxyError("favicon response size is invalid")
+    declared = str(content_type or "").split(";", 1)[0].strip().lower()
+    if declared not in _FAVICON_ALLOWED_MIMES:
+        raise _FaviconProxyError("favicon response MIME is not allowed")
+    detected = _favicon_magic_mime(data)
+    icon_mimes = {"image/x-icon", "image/vnd.microsoft.icon"}
+    if declared != detected and not (declared in icon_mimes or detected in icon_mimes):
+        raise _FaviconProxyError("favicon response MIME does not match its bytes")
+    return bytes(data), detected
+
+
+class _FaviconHttpClient:
+    """Small redirect-aware client that never performs an unpinned DNS connect."""
+
+    def __init__(self, *, resolver=socket.getaddrinfo, connection_factory=None, clock=time.monotonic):
+        self._resolver = resolver
+        self._connection_factory = connection_factory or _default_favicon_connection_factory
+        self._clock = clock
+
+    def _parsed_url(self, url):
+        if not isinstance(url, str) or not url or any(ord(ch) < 32 for ch in url):
+            raise _FaviconProxyError("invalid favicon URL")
+        try:
+            parsed_url = parse.urlsplit(url)
+            port = parsed_url.port
+        except ValueError as exc:
+            raise _FaviconProxyError("invalid favicon URL") from exc
+        scheme = parsed_url.scheme.lower()
+        if scheme not in _FAVICON_ALLOWED_SCHEMES or not parsed_url.hostname:
+            raise _FaviconProxyError("invalid favicon URL")
+        if parsed_url.username is not None or parsed_url.password is not None:
+            raise _FaviconProxyError("credentialed favicon URLs are not allowed")
+        try:
+            host = _normalize_favicon_host(parsed_url.hostname)
+        except ValueError as exc:
+            raise _FaviconProxyError("invalid favicon URL host") from exc
+        default_port = 443 if scheme == "https" else 80
+        if port not in {None, default_port}:
+            raise _FaviconProxyError("non-default favicon ports are not allowed")
+        path = parsed_url.path or "/"
+        if not path.startswith("/") or "\\" in path:
+            raise _FaviconProxyError("invalid favicon URL path")
+        target = parse.urlunsplit(("", "", path, parsed_url.query, ""))
+        normalized = parse.urlunsplit((scheme, host, path, parsed_url.query, ""))
+        return scheme, host, default_port, target, normalized
+
+    def _tighten_socket_timeout(self, connection, deadline, response=None):
+        remaining = float(deadline) - self._clock()
+        if remaining <= 0:
+            raise _FaviconProxyError("favicon request deadline exceeded")
+        active_socket = getattr(connection, "sock", None)
+        if active_socket is None and response is not None:
+            response_file = getattr(response, "fp", None)
+            raw_stream = getattr(response_file, "raw", None)
+            active_socket = getattr(raw_stream, "_sock", None)
+        if active_socket is None:
+            raise _FaviconProxyError("favicon connection is unavailable")
+        try:
+            active_socket.settimeout(min(_FAVICON_SOCKET_TIMEOUT_SECONDS, remaining))
+        except OSError as exc:
+            raise _FaviconProxyError("favicon connection timeout update failed") from exc
+        return remaining
+
+    def fetch(self, url, *, deadline):
+        current_url = url
+        previous_scheme = None
+        visited = set()
+        for redirect_count in range(_FAVICON_MAX_REDIRECTS + 1):
+            scheme, host, port, target, normalized = self._parsed_url(current_url)
+            if previous_scheme == "https" and scheme != "https":
+                raise _FaviconProxyError("favicon HTTPS downgrade is not allowed")
+            previous_scheme = scheme
+            if normalized in visited:
+                raise _FaviconProxyError("favicon redirect loop")
+            visited.add(normalized)
+            remaining = float(deadline) - self._clock()
+            if remaining <= 0:
+                raise _FaviconProxyError("favicon request deadline exceeded")
+            addresses = _public_favicon_addresses(host, port, self._resolver)
+            remaining = float(deadline) - self._clock()
+            if remaining <= 0:
+                raise _FaviconProxyError("favicon request deadline exceeded")
+            timeout = min(_FAVICON_SOCKET_TIMEOUT_SECONDS, remaining)
+            connection = self._connection_factory(
+                scheme=scheme,
+                host=host,
+                port=port,
+                addresses=addresses,
+                timeout=timeout,
+            )
+            response = None
+            try:
+                connection.putrequest("GET", target, skip_host=True, skip_accept_encoding=True)
+                connection.putheader("Host", host)
+                connection.putheader("Accept", "image/avif,image/webp,image/png,image/jpeg,image/x-icon,image/vnd.microsoft.icon")
+                connection.putheader("User-Agent", "Code-Favicon-Proxy/1")
+                connection.putheader("Connection", "close")
+                connection.endheaders()
+                self._tighten_socket_timeout(connection, deadline)
+                response = connection.getresponse()
+                status = int(response.status)
+                if status in {301, 302, 303, 307, 308}:
+                    location = response.getheader("Location")
+                    if not location or redirect_count >= _FAVICON_MAX_REDIRECTS:
+                        raise _FaviconProxyError("favicon redirect limit exceeded")
+                    current_url = parse.urljoin(normalized, location)
+                    continue
+                if status < 200 or status >= 300:
+                    raise _FaviconProxyError("favicon upstream did not return an image")
+                declared_length = None
+                raw_length = response.getheader("Content-Length")
+                if raw_length is not None:
+                    try:
+                        declared_length = int(raw_length)
+                    except (TypeError, ValueError) as exc:
+                        raise _FaviconProxyError("favicon response length is invalid") from exc
+                    if declared_length < 1 or declared_length > _FAVICON_MAX_BYTES:
+                        raise _FaviconProxyError("favicon response is too large")
+                chunks = []
+                total = 0
+                while declared_length is None or total < declared_length:
+                    self._tighten_socket_timeout(connection, deadline, response)
+                    read_size = min(64 * 1024, _FAVICON_MAX_BYTES + 1 - total)
+                    if declared_length is not None:
+                        read_size = min(read_size, declared_length - total)
+                    chunk = response.read(read_size)
+                    if not chunk:
+                        if declared_length is not None:
+                            raise _FaviconProxyError("favicon response ended before Content-Length")
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > _FAVICON_MAX_BYTES:
+                        raise _FaviconProxyError("favicon response is too large")
+                    if declared_length is not None and total > declared_length:
+                        raise _FaviconProxyError("favicon response exceeded Content-Length")
+                    is_closed = getattr(response, "isclosed", None)
+                    if declared_length is None and callable(is_closed) and is_closed():
+                        break
+                if declared_length is not None and total != declared_length:
+                    raise _FaviconProxyError("favicon response length did not match Content-Length")
+                return _validated_favicon_asset(b"".join(chunks), response.getheader("Content-Type"))
+            except (OSError, TimeoutError, http.client.HTTPException) as exc:
+                raise _FaviconProxyError("favicon network request failed") from exc
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except OSError:
+                        pass
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+        raise _FaviconProxyError("favicon redirect limit exceeded")
+
+
+class _FaviconProxy:
+    """Bounded memory cache and same-key request coalescing around the safe client."""
+
+    def __init__(
+        self,
+        *,
+        http_client=None,
+        clock=time.monotonic,
+        cache_capacity=_FAVICON_CACHE_CAPACITY,
+        positive_ttl=_FAVICON_POSITIVE_TTL_SECONDS,
+        negative_ttl=_FAVICON_NEGATIVE_TTL_SECONDS,
+        semaphore=None,
+    ):
+        self._http_client = http_client or _FaviconHttpClient(clock=clock)
+        self._clock = clock
+        self._cache_capacity = max(1, int(cache_capacity))
+        self._positive_ttl = max(1.0, float(positive_ttl))
+        self._negative_ttl = max(1.0, float(negative_ttl))
+        self._semaphore = semaphore or threading.BoundedSemaphore(_FAVICON_MAX_CONCURRENT_FETCHES)
+        self._lock = threading.RLock()
+        self._cache = OrderedDict()
+        self._inflight = {}
+
+    def _cached(self, key, now):
+        cached = self._cache.get(key)
+        if cached is None:
+            return False, None
+        expires_at, asset = cached
+        if expires_at <= now:
+            self._cache.pop(key, None)
+            return False, None
+        self._cache.move_to_end(key)
+        return True, asset
+
+    def _store(self, key, asset, now):
+        ttl = self._positive_ttl if asset is not None else self._negative_ttl
+        self._cache[key] = (now + ttl, asset)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_capacity:
+            self._cache.popitem(last=False)
+
+    def get(self, scheme, raw_host):
+        normalized_scheme = str(scheme or "").strip().lower()
+        if normalized_scheme not in _FAVICON_ALLOWED_SCHEMES:
+            raise ValueError("invalid favicon scheme")
+        host = _normalize_favicon_host(raw_host)
+        key = (normalized_scheme, host)
+        now = self._clock()
+        with self._lock:
+            found, asset = self._cached(key, now)
+            if found:
+                return asset
+            event = self._inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                self._inflight[key] = event
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            event.wait(timeout=_FAVICON_FETCH_DEADLINE_SECONDS + 1.0)
+            with self._lock:
+                found, asset = self._cached(key, self._clock())
+                return asset if found else None
+
+        asset = None
+        should_cache = False
+        try:
+            deadline = self._clock() + _FAVICON_FETCH_DEADLINE_SECONDS
+            remaining = max(0.0, deadline - self._clock())
+            if self._semaphore.acquire(timeout=min(_FAVICON_CONCURRENCY_WAIT_SECONDS, remaining)):
+                try:
+                    for url in _favicon_candidate_urls(normalized_scheme, host):
+                        if self._clock() >= deadline:
+                            break
+                        try:
+                            asset = self._http_client.fetch(url, deadline=deadline)
+                        except _FaviconProxyError:
+                            continue
+                        if asset is not None:
+                            break
+                finally:
+                    self._semaphore.release()
+                should_cache = True
+        finally:
+            with self._lock:
+                if should_cache:
+                    self._store(key, asset, self._clock())
+                self._inflight.pop(key, None)
+                event.set()
+        return asset
+
+
+_favicon_proxy = _FaviconProxy()
+
 _json_write_lock = threading.RLock()
 _edit_apply_lock = threading.RLock()
 _model_runtime_runs = {}
@@ -13540,6 +14017,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route == "/api/ping":
                 self.send_json({"pong": True})
                 return
+            if route == "/api/favicon":
+                self.get_favicon(query)
+                return
             if route.startswith("/api/runtime/runs/"):
                 run_id = route.rsplit("/", 1)[-1]
                 run = _get_model_runtime_run(run_id)
@@ -14130,6 +14610,36 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def get_favicon(self, query):
+        schemes = query.get("scheme") or []
+        hosts = query.get("host") or []
+        if set(query) != {"scheme", "host"} or len(schemes) != 1 or len(hosts) != 1:
+            self.send_json({"error": "invalid favicon request"}, 400)
+            return
+        try:
+            asset = _favicon_proxy.get(schemes[0], hosts[0])
+        except ValueError:
+            self.send_json({"error": "invalid favicon request"}, 400)
+            return
+        except Exception:
+            self.send_json({"error": "favicon unavailable"}, 502)
+            return
+        if asset is None:
+            self.send_response(404)
+            self.send_header("Cache-Control", f"public, max-age={_FAVICON_NEGATIVE_TTL_SECONDS}")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        payload, content_type = asset
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", f"public, max-age={_FAVICON_POSITIVE_TTL_SECONDS}")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

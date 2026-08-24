@@ -23751,6 +23751,27 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     (element) => element.getAttribute("href") || "",
   ))).some((href) => /%EF%BC|%E3%80|xn--/i.test(href))).toBe(false);
 
+  const assertFaviconProjection = async () => {
+    await expect(links.nth(0).locator("img.ext-favicon")).toHaveCount(1);
+    await expect(links.nth(1).locator("img.ext-favicon")).toHaveCount(0);
+    await expect(links.nth(1).locator(".link-ext-icon > svg")).toHaveCount(1);
+    await expect(links.nth(2).locator("img.ext-favicon")).toHaveCount(1);
+    const imageSources = await links.locator("img.ext-favicon").evaluateAll((images) => images.map((image) => {
+      const url = new URL(image.src);
+      return {
+        sameOrigin: url.origin === window.location.origin,
+        path: url.pathname,
+        scheme: url.searchParams.get("scheme"),
+        host: url.searchParams.get("host"),
+      };
+    }));
+    expect(imageSources).toEqual([
+      { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "yuanbao.tencent.com" },
+      { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "mistral.ai" },
+    ]);
+  };
+  await assertFaviconProjection();
+
   await page.evaluate(() => {
     window.__h4CopiedExternalLinks = [];
     Object.defineProperty(navigator, "clipboard", {
@@ -23777,31 +23798,47 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     );
   }
 
-  const finalObservedFaviconCandidates = [
-    "/ip3/tencent.com.ico",
-    "/ip3/xfyun.cn.ico",
-    "/ip3/mistral.ai.ico",
-  ];
-  await expect.poll(() => {
-    const paths = new Set(h4.blockedRequests.map((request) => request.path));
-    return finalObservedFaviconCandidates.every((path) => paths.has(path));
-  }).toBe(true);
+  const faviconMetricsBeforeReload = await h4.metrics();
+  expect(faviconMetricsBeforeReload.faviconFetches).toHaveLength(10);
+  expect(faviconMetricsBeforeReload.faviconFetches.every(
+    (request) => request.scheme === "https" && request.deadlinePresent === true,
+  )).toBe(true);
+  expect(faviconMetricsBeforeReload.faviconFetches.filter(
+    (request) => request.host === "yuanbao.tencent.com" && request.path === "/favicon.ico",
+  )).toHaveLength(1);
+  expect(faviconMetricsBeforeReload.faviconFetches.filter(
+    (request) => request.host === "mistral.ai" && request.path === "/favicon.ico",
+  )).toHaveLength(1);
+  expect(new Set(faviconMetricsBeforeReload.faviconFetches.map((request) => request.host))).toEqual(
+    new Set([
+      "yuanbao.tencent.com",
+      "xinghuo.xfyun.cn",
+      "xfyun.cn",
+      "mistral.ai",
+      "api.faviconkit.com",
+      "www.google.com",
+      "icons.duckduckgo.com",
+    ]),
+  );
+
+  await h4.reloadRuntime(runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  const reloadedActiveSession = page.locator(
+    `#sessionList .session-row.active[data-session-id="${created.body.id}"]`,
+  );
+  if (await reloadedActiveSession.count() === 0) {
+    await page.locator(
+      `#sessionList button.session-main[data-session-id="${created.body.id}"]`,
+    ).click();
+  }
+  await expect(reloadedActiveSession).toHaveCount(1);
+  await assertFaviconProjection();
+  expect((await h4.metrics()).faviconFetches).toEqual(faviconMetricsBeforeReload.faviconFetches);
+
   const allowedBlockedPaths = new Set([
     "/npm/katex@0.16.11/dist/katex.min.css",
     "/npm/katex@0.16.11/dist/katex.min.js",
     "/npm/marked/marked.min.js",
-    "/yuanbao.tencent.com/64",
-    "/xinghuo.xfyun.cn/64",
-    "/mistral.ai/64",
-    "/tencent.com/64",
-    "/xfyun.cn/64",
-    "/s2/favicons",
-    "/ip3/yuanbao.tencent.com.ico",
-    "/ip3/xinghuo.xfyun.cn.ico",
-    "/ip3/mistral.ai.ico",
-    "/ip3/tencent.com.ico",
-    "/ip3/xfyun.cn.ico",
-    "/favicon.ico",
   ]);
   for (const request of h4.blockedRequests) {
     expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
@@ -23818,6 +23855,10 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     punctuationPreserved: true,
     tooltipTargets: expectedHrefs,
     copiedContextMenuTargets: expectedHrefs,
+    sameOriginFaviconProxy: true,
+    faviconSuccesses: 2,
+    faviconFallbacks: 1,
+    faviconFetchesBeforeAndAfterReload: faviconMetricsBeforeReload.faviconFetches.length,
     modelRequests: metrics.chatRequests.length,
     toolExecutions: metrics.toolExecutions.length,
     blockedRequests: h4.blockedRequests.length,

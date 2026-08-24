@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -19,6 +20,658 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server
 import launcher
+
+
+class _FaviconResponse:
+    def __init__(self, status, *, headers=None, body=b""):
+        self.status = status
+        self._headers = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+        self._body = bytes(body)
+        self._offset = 0
+        self.read_calls = 0
+        self.closed = False
+
+    def getheader(self, name):
+        return self._headers.get(str(name).lower())
+
+    def read(self, size=-1):
+        self.read_calls += 1
+        if size is None or size < 0:
+            size = len(self._body) - self._offset
+        start = self._offset
+        self._offset = min(len(self._body), start + size)
+        return self._body[start:self._offset]
+
+    def close(self):
+        self.closed = True
+
+
+class _FaviconConnection:
+    def __init__(self, response):
+        self.response = response
+        self.method = None
+        self.target = None
+        self.headers = []
+        self.closed = False
+        self.sock = mock.Mock()
+        self.sock.settimeout = mock.Mock()
+
+    def putrequest(self, method, target, **kwargs):
+        self.method = method
+        self.target = target
+        self.request_options = kwargs
+
+    def putheader(self, name, value):
+        self.headers.append((name, value))
+
+    def endheaders(self):
+        return None
+
+    def getresponse(self):
+        return self.response
+
+    def close(self):
+        self.closed = True
+
+
+class TestFaviconProxySecurity(unittest.TestCase):
+    PNG = b"\x89PNG\r\n\x1a\n" + b"safe-raster-payload"
+    PUBLIC_V4 = "93.184.216.34"
+    PUBLIC_V6 = "2606:2800:220:1:248:1893:25c8:1946"
+
+    @staticmethod
+    def _record(ip, port=443):
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        sockaddr = (ip, port, 0, 0) if family == socket.AF_INET6 else (ip, port)
+        return (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)
+
+    def test_host_idna_and_candidate_validation(self):
+        self.assertEqual(server._normalize_favicon_host("WWW.Example.COM."), "www.example.com")
+        self.assertEqual(server._normalize_favicon_host("例子.测试"), "xn--fsqu00a.xn--0zwm56d")
+        self.assertEqual(
+            server._favicon_host_candidates("a.b.deepseek.com"),
+            ("a.b.deepseek.com", "b.deepseek.com", "deepseek.com"),
+        )
+        self.assertEqual(
+            server._favicon_host_candidates("b.baidu.com.cn"),
+            ("b.baidu.com.cn", "baidu.com.cn"),
+        )
+        self.assertEqual(server._favicon_host_candidates("a.co.uk"), ("a.co.uk",))
+        self.assertEqual(
+            server._favicon_host_candidates("www.a.co.uk"),
+            ("www.a.co.uk", "a.co.uk"),
+        )
+        urls = server._favicon_candidate_urls("https", "www.example.com")
+        self.assertEqual(urls[0], "https://www.example.com/favicon.ico")
+        self.assertEqual(
+            {server.parse.urlsplit(url).hostname for url in urls if "favicon.ico" not in url},
+            set(server._FAVICON_PROVIDER_HOSTS),
+        )
+        for invalid in (
+            "", "localhost", "printer", "example.local", "127.0.0.1",
+            "[::1]", "example.com:443", "user@example.com", "example.com/path",
+            "example.com?x=1", ".example.com", "bad_label.example",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                server._normalize_favicon_host(invalid)
+
+    def test_dns_requires_every_answer_to_be_public(self):
+        public = [self._record(self.PUBLIC_V4), self._record(self.PUBLIC_V6)]
+        self.assertEqual(
+            len(server._public_favicon_addresses("example.com", 443, lambda *_args: public)),
+            2,
+        )
+        blocked = (
+            "127.0.0.1", "10.0.0.1", "169.254.1.1", "224.0.0.1",
+            "0.0.0.0", "192.0.2.1", "::1", "fe80::1", "ff02::1",
+        )
+        for ip in blocked:
+            with self.subTest(ip=ip), self.assertRaises(server._FaviconProxyError):
+                server._public_favicon_addresses(
+                    "example.com", 443, lambda *_args, value=ip: [self._record(value)],
+                )
+        with self.assertRaises(server._FaviconProxyError):
+            server._public_favicon_addresses(
+                "example.com",
+                443,
+                lambda *_args: [self._record(self.PUBLIC_V4), self._record("10.0.0.1")],
+            )
+        wrong_transport = (
+            socket.AF_INET,
+            socket.SOCK_DGRAM,
+            socket.IPPROTO_UDP,
+            "",
+            (self.PUBLIC_V4, 443),
+        )
+        with self.assertRaises(server._FaviconProxyError):
+            server._public_favicon_addresses("example.com", 443, lambda *_args: [wrong_transport])
+        with self.assertRaises(server._FaviconProxyError):
+            server._public_favicon_addresses(
+                "example.com", 443, lambda *_args: [self._record(self.PUBLIC_V4, 80)],
+            )
+
+    def test_pinned_connection_uses_validated_sockaddr_and_tls_hostname(self):
+        calls = {"connect": [], "tls": []}
+
+        class FakeSocket:
+            def __init__(self, *_args):
+                self.peer = None
+
+            def settimeout(self, timeout):
+                calls["timeout"] = timeout
+
+            def connect(self, sockaddr):
+                self.peer = sockaddr
+                calls["connect"].append(sockaddr)
+
+            def getpeername(self):
+                return self.peer
+
+            def close(self):
+                calls["closed"] = calls.get("closed", 0) + 1
+
+        class FakeContext:
+            def wrap_socket(self, sock, *, server_hostname):
+                calls["tls"].append(server_hostname)
+                return sock
+
+        addresses = (self._record(self.PUBLIC_V4),)
+        connection = server._PinnedHTTPConnection(
+            "example.com",
+            443,
+            addresses,
+            timeout=1.25,
+            use_tls=True,
+            socket_factory=FakeSocket,
+            tls_context_factory=FakeContext,
+        )
+        connection.connect()
+        self.assertEqual(calls["connect"], [(self.PUBLIC_V4, 443)])
+        self.assertEqual(calls["tls"], ["example.com"])
+        self.assertEqual(calls["timeout"], 1.25)
+
+        class ChangedPeerSocket(FakeSocket):
+            def getpeername(self):
+                return ("142.250.72.36", 443)
+
+        changed_peer = server._PinnedHTTPConnection(
+            "example.com",
+            443,
+            addresses,
+            timeout=1.25,
+            use_tls=True,
+            socket_factory=ChangedPeerSocket,
+            tls_context_factory=FakeContext,
+        )
+        with self.assertRaisesRegex(server._FaviconProxyError, "connection failed"):
+            changed_peer.connect()
+
+    def _client(self, responses, *, resolver=None):
+        connections = []
+        queue = list(responses)
+
+        def connection_factory(**kwargs):
+            connection = _FaviconConnection(queue.pop(0))
+            connection.factory_kwargs = kwargs
+            connections.append(connection)
+            return connection
+
+        public_resolver = resolver or (
+            lambda _host, port, *_args: [self._record(self.PUBLIC_V4, port)]
+        )
+        return server._FaviconHttpClient(
+            resolver=public_resolver,
+            connection_factory=connection_factory,
+            clock=lambda: 10.0,
+        ), connections
+
+    def test_client_revalidates_redirects_and_sends_no_sensitive_headers(self):
+        responses = [
+            _FaviconResponse(302, headers={"Location": "https://cdn.example.net/icon.png"}),
+            _FaviconResponse(200, headers={
+                "Content-Type": "image/png",
+                "Content-Length": str(len(self.PNG)),
+            }, body=self.PNG),
+        ]
+        client, connections = self._client(responses)
+        asset = client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        self.assertEqual(asset, (self.PNG, "image/png"))
+        self.assertEqual([item.factory_kwargs["host"] for item in connections], [
+            "example.com", "cdn.example.net",
+        ])
+        self.assertEqual(connections[0].target, "/favicon.ico")
+        self.assertEqual(connections[1].target, "/icon.png")
+        headers = {name.lower(): value for name, value in connections[0].headers}
+        self.assertEqual(headers["host"], "example.com")
+        self.assertFalse({"authorization", "cookie", "referer"} & set(headers))
+        self.assertTrue(all(item.closed and item.response.closed for item in connections))
+
+        downgrade_client, _ = self._client([
+            _FaviconResponse(302, headers={"Location": "http://example.com/icon.png"}),
+        ])
+        with self.assertRaisesRegex(server._FaviconProxyError, "downgrade"):
+            downgrade_client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        upgraded_then_downgraded, _ = self._client([
+            _FaviconResponse(302, headers={"Location": "https://cdn.example.net/icon.png"}),
+            _FaviconResponse(302, headers={"Location": "http://cdn.example.net/icon.png"}),
+        ])
+        with self.assertRaisesRegex(server._FaviconProxyError, "downgrade"):
+            upgraded_then_downgraded.fetch("http://example.com/favicon.ico", deadline=20.0)
+
+        loop_client, _ = self._client([
+            _FaviconResponse(302, headers={"Location": "/favicon.ico"}),
+        ])
+        with self.assertRaisesRegex(server._FaviconProxyError, "loop"):
+            loop_client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        redirect_limit_client, _ = self._client([
+            _FaviconResponse(302, headers={"Location": f"https://cdn{index}.example.net/icon.png"})
+            for index in range(server._FAVICON_MAX_REDIRECTS + 1)
+        ])
+        with self.assertRaisesRegex(server._FaviconProxyError, "limit"):
+            redirect_limit_client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        for unsafe_url in (
+            "https://user:secret@example.com/favicon.ico",
+            "https://example.com:8443/favicon.ico",
+            "https://127.0.0.1/favicon.ico",
+        ):
+            unsafe_client, _ = self._client([])
+            with self.subTest(url=unsafe_url), self.assertRaises(server._FaviconProxyError):
+                unsafe_client.fetch(unsafe_url, deadline=20.0)
+
+    def test_redirect_private_mixed_dns_and_response_validation_fail_closed(self):
+        def resolver(host, port, *_args):
+            if host == "private.example.com":
+                return [self._record("10.0.0.8", port)]
+            if host == "mixed.example.com":
+                return [self._record(self.PUBLIC_V4, port), self._record("192.168.1.8", port)]
+            return [self._record(self.PUBLIC_V4, port)]
+
+        for redirect_host in ("private.example.com", "mixed.example.com"):
+            client, connections = self._client([
+                _FaviconResponse(302, headers={"Location": f"https://{redirect_host}/icon.png"}),
+            ], resolver=resolver)
+            with self.subTest(host=redirect_host), self.assertRaises(server._FaviconProxyError):
+                client.fetch("https://example.com/favicon.ico", deadline=20.0)
+            self.assertEqual(len(connections), 1)
+
+        bad_responses = (
+            _FaviconResponse(200, headers={"Content-Type": "text/html"}, body=b"<html>no</html>"),
+            _FaviconResponse(200, headers={"Content-Type": "image/svg+xml"}, body=b"<svg></svg>"),
+            _FaviconResponse(200, headers={"Content-Type": "image/png"}, body=b"not-png"),
+            _FaviconResponse(200, headers={
+                "Content-Type": "image/png",
+                "Content-Length": str(server._FAVICON_MAX_BYTES + 1),
+            }, body=b""),
+        )
+        for response in bad_responses:
+            client, _ = self._client([response])
+            with self.assertRaises(server._FaviconProxyError):
+                client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        with self.assertRaises(server._FaviconProxyError):
+            server._validated_favicon_asset(
+                self.PNG + b"x" * server._FAVICON_MAX_BYTES,
+                "image/png",
+            )
+
+        timeout_client, timeout_connections = self._client([
+            _FaviconResponse(200, headers={"Content-Type": "image/png"}, body=self.PNG),
+        ])
+        original_factory = timeout_client._connection_factory
+
+        def timeout_factory(**kwargs):
+            connection = original_factory(**kwargs)
+            connection.endheaders = mock.Mock(side_effect=TimeoutError("timed out"))
+            return connection
+
+        timeout_client._connection_factory = timeout_factory
+        with self.assertRaisesRegex(server._FaviconProxyError, "network"):
+            timeout_client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        self.assertEqual(len(timeout_connections), 1)
+
+    def test_slow_multichunk_response_cannot_exceed_total_deadline(self):
+        clock = [0.0]
+
+        class SlowResponse(_FaviconResponse):
+            def __init__(self):
+                super().__init__(200, headers={"Content-Type": "image/png"})
+                payload = TestFaviconProxySecurity.PNG
+                self.chunks = [payload[:8], payload[8:16], payload[16:]]
+                self.connection = None
+
+            def read(self, _size=-1):
+                if not self.chunks:
+                    return b""
+                allowed = self.connection.sock.settimeout.call_args.args[0]
+                delay = 0.4
+                if allowed < delay:
+                    clock[0] += allowed
+                    raise TimeoutError("chunk exceeded remaining deadline")
+                clock[0] += delay
+                return self.chunks.pop(0)
+
+        response = SlowResponse()
+        connections = []
+
+        def connection_factory(**_kwargs):
+            connection = _FaviconConnection(response)
+            response.connection = connection
+            connections.append(connection)
+            return connection
+
+        client = server._FaviconHttpClient(
+            resolver=lambda _host, port, *_args: [self._record(self.PUBLIC_V4, port)],
+            connection_factory=connection_factory,
+            clock=lambda: clock[0],
+        )
+        with self.assertRaisesRegex(server._FaviconProxyError, "network"):
+            client.fetch("https://example.com/favicon.ico", deadline=1.0)
+        self.assertEqual(len(connections), 1)
+        observed = [call.args[0] for call in connections[0].sock.settimeout.call_args_list]
+        self.assertEqual(len(observed), 4)  # headers, then each attempted body chunk
+        self.assertAlmostEqual(observed[0], 1.0)
+        self.assertAlmostEqual(observed[1], 1.0)
+        self.assertAlmostEqual(observed[2], 0.6)
+        self.assertAlmostEqual(observed[3], 0.2)
+        self.assertAlmostEqual(clock[0], 1.0)
+
+        detached_socket = mock.Mock()
+        detached_socket.settimeout = mock.Mock()
+        detached_connection = mock.Mock(sock=None)
+        detached_response = mock.Mock()
+        detached_response.fp.raw._sock = detached_socket
+        remaining = client._tighten_socket_timeout(
+            detached_connection,
+            deadline=clock[0] + 0.5,
+            response=detached_response,
+        )
+        self.assertAlmostEqual(remaining, 0.5)
+        detached_socket.settimeout.assert_called_once_with(0.5)
+
+    def test_connection_close_exact_content_length_succeeds_once_and_is_positive_cached(self):
+        response = _FaviconResponse(200, headers={
+            "Content-Type": "image/png",
+            "Content-Length": str(len(self.PNG)),
+            "Connection": "close",
+        }, body=self.PNG)
+        connections = []
+
+        def connection_factory(**_kwargs):
+            connection = _FaviconConnection(response)
+            response_socket = connection.sock
+
+            def getresponse():
+                connection.sock = None
+                response.fp = mock.Mock()
+                response.fp.raw._sock = response_socket
+                return response
+
+            connection.getresponse = getresponse
+            connections.append((connection, response_socket))
+            return connection
+
+        client = server._FaviconHttpClient(
+            resolver=lambda _host, port, *_args: [self._record(self.PUBLIC_V4, port)],
+            connection_factory=connection_factory,
+        )
+        proxy = server._FaviconProxy(http_client=client)
+        expected = (self.PNG, "image/png")
+        self.assertEqual(proxy.get("https", "example.com"), expected)
+        self.assertEqual(proxy.get("https", "example.com"), expected)
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(response.read_calls, 1)
+        self.assertEqual(connections[0][1].settimeout.call_count, 2)  # headers + exact body
+        cached = proxy._cache[("https", "example.com")]
+        self.assertEqual(cached[1], expected)
+
+    def test_content_length_early_eof_is_rejected(self):
+        response = _FaviconResponse(200, headers={
+            "Content-Type": "image/png",
+            "Content-Length": str(len(self.PNG) + 5),
+            "Connection": "close",
+        }, body=self.PNG)
+        client, connections = self._client([response])
+        with self.assertRaisesRegex(server._FaviconProxyError, "before Content-Length"):
+            client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        self.assertEqual(response.read_calls, 2)
+        self.assertEqual(connections[0].sock.settimeout.call_count, 3)  # headers + body + EOF
+
+    def test_chunked_multiblock_response_tightens_each_real_read_and_accepts_closed_frame(self):
+        payload = self.PNG
+
+        class ChunkedResponse(_FaviconResponse):
+            def __init__(self):
+                super().__init__(200, headers={"Content-Type": "image/png"})
+                self.chunks = [payload[:8], payload[8:]]
+                self.protocol_closed = False
+
+            def read(self, _size=-1):
+                self.read_calls += 1
+                chunk = self.chunks.pop(0)
+                if not self.chunks:
+                    self.protocol_closed = True
+                    self.fp = None
+                return chunk
+
+            def isclosed(self):
+                return self.protocol_closed
+
+        response = ChunkedResponse()
+        client, connections = self._client([response])
+        self.assertEqual(
+            client.fetch("https://example.com/favicon.ico", deadline=20.0),
+            (self.PNG, "image/png"),
+        )
+        self.assertEqual(response.read_calls, 2)
+        self.assertEqual(connections[0].sock.settimeout.call_count, 3)  # headers + two chunks
+
+    def test_handler_returns_binary_success_and_non_leaking_failures(self):
+        class Output:
+            def __init__(self):
+                self.data = bytearray()
+
+            def write(self, value):
+                self.data.extend(value)
+
+        class Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = []
+                self.json = None
+                self.wfile = Output()
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, name, value):
+                self.headers.append((name, str(value)))
+
+            def end_headers(self):
+                return None
+
+            def send_json(self, payload, status=200):
+                self.json = payload
+                self.status = status
+
+        proxy = mock.Mock()
+        proxy.get.return_value = (self.PNG, "image/png")
+        handler = Handler()
+        with mock.patch.object(server, "_favicon_proxy", proxy):
+            server.CodeHandler.get_favicon(
+                handler,
+                {"scheme": ["https"], "host": ["example.com"]},
+            )
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(bytes(handler.wfile.data), self.PNG)
+        self.assertIn(("Content-Type", "image/png"), handler.headers)
+        self.assertIn(("X-Content-Type-Options", "nosniff"), handler.headers)
+        proxy.get.assert_called_once_with("https", "example.com")
+
+        proxy.get.return_value = None
+        missing = Handler()
+        with mock.patch.object(server, "_favicon_proxy", proxy):
+            server.CodeHandler.get_favicon(
+                missing,
+                {"scheme": ["https"], "host": ["missing.example.com"]},
+            )
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(bytes(missing.wfile.data), b"")
+
+        invalid = Handler()
+        server.CodeHandler.get_favicon(invalid, {"scheme": ["https", "http"], "host": ["example.com"]})
+        self.assertEqual(invalid.status, 400)
+        self.assertEqual(invalid.json, {"error": "invalid favicon request"})
+        extra = Handler()
+        server.CodeHandler.get_favicon(
+            extra,
+            {"scheme": ["https"], "host": ["example.com"], "url": ["https://internal/"]},
+        )
+        self.assertEqual(extra.status, 400)
+
+        unexpected = Handler()
+        proxy.get.side_effect = RuntimeError("SECRET_INTERNAL_UPSTREAM_DETAIL")
+        with mock.patch.object(server, "_favicon_proxy", proxy):
+            server.CodeHandler.get_favicon(
+                unexpected,
+                {"scheme": ["https"], "host": ["example.com"]},
+            )
+        self.assertEqual(unexpected.status, 502)
+        self.assertEqual(unexpected.json, {"error": "favicon unavailable"})
+        self.assertNotIn("SECRET_INTERNAL_UPSTREAM_DETAIL", json.dumps(unexpected.json))
+
+    def test_cache_ttl_lru_and_same_host_requests_are_coalesced(self):
+        clock_value = [100.0]
+
+        class CountingClient:
+            def __init__(self):
+                self.calls = []
+                self.release = threading.Event()
+                self.entered = threading.Event()
+
+            def fetch(self, url, *, deadline):
+                self.calls.append(url)
+                self.entered.set()
+                self.release.wait(timeout=2)
+                return (TestFaviconProxySecurity.PNG, "image/png")
+
+        client = CountingClient()
+        proxy = server._FaviconProxy(
+            http_client=client,
+            clock=lambda: clock_value[0],
+            cache_capacity=2,
+            positive_ttl=10,
+            negative_ttl=3,
+        )
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(proxy.get("https", "example.com")))
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        self.assertTrue(client.entered.wait(timeout=1))
+        client.release.set()
+        for thread in threads:
+            thread.join(timeout=2)
+        self.assertEqual(results, [(self.PNG, "image/png"), (self.PNG, "image/png")])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(proxy.get("https", "example.com"), (self.PNG, "image/png"))
+        self.assertEqual(len(client.calls), 1)
+
+        proxy.get("https", "second.example.com")
+        proxy.get("https", "example.com")
+        proxy.get("https", "third.example.com")
+        proxy.get("https", "second.example.com")
+        self.assertEqual(len(client.calls), 4)  # second was the LRU eviction
+        clock_value[0] += 11
+        proxy.get("https", "example.com")
+        self.assertEqual(len(client.calls), 5)
+
+    def test_negative_cache_and_distinct_host_concurrency_are_bounded(self):
+        clock_value = [50.0]
+
+        class MissingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch(self, _url, *, deadline):
+                self.calls += 1
+                raise server._FaviconProxyError("missing")
+
+        missing = MissingClient()
+        proxy = server._FaviconProxy(
+            http_client=missing,
+            clock=lambda: clock_value[0],
+            negative_ttl=4,
+        )
+        self.assertIsNone(proxy.get("https", "missing.example.com"))
+        calls_after_first = missing.calls
+        self.assertIsNone(proxy.get("https", "missing.example.com"))
+        self.assertEqual(missing.calls, calls_after_first)
+        clock_value[0] += 5
+        self.assertIsNone(proxy.get("https", "missing.example.com"))
+        self.assertGreater(missing.calls, calls_after_first)
+
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        class SlowClient:
+            def fetch(self, _url, *, deadline):
+                nonlocal active, maximum
+                with lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                return (TestFaviconProxySecurity.PNG, "image/png")
+
+        bounded = server._FaviconProxy(
+            http_client=SlowClient(),
+            semaphore=threading.BoundedSemaphore(1),
+        )
+        workers = [
+            threading.Thread(target=bounded.get, args=("https", f"host{index}.example.com"))
+            for index in range(3)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=2)
+        self.assertEqual(maximum, 1)
+
+    def test_capacity_rejection_is_transient_and_does_not_create_negative_cache(self):
+        class SequenceSemaphore:
+            def __init__(self):
+                self.results = [False, True]
+                self.releases = 0
+
+            def acquire(self, *, timeout):
+                self.last_timeout = timeout
+                return self.results.pop(0)
+
+            def release(self):
+                self.releases += 1
+
+        class SuccessClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch(self, _url, *, deadline):
+                self.calls += 1
+                return TestFaviconProxySecurity.PNG, "image/png"
+
+        semaphore = SequenceSemaphore()
+        client = SuccessClient()
+        proxy = server._FaviconProxy(http_client=client, semaphore=semaphore)
+        key = ("https", "capacity.example.com")
+        self.assertIsNone(proxy.get(*key))
+        self.assertNotIn(key, proxy._cache)
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(proxy.get(*key), (self.PNG, "image/png"))
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(semaphore.releases, 1)
+        self.assertIn(key, proxy._cache)
 
 
 class TestSkillDependencyOperations(unittest.TestCase):

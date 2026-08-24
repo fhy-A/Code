@@ -2050,10 +2050,9 @@ function bindCopyButtons() {
 
 
 
-// External links show the target site's favicon inside the inline link glyph
-// slot (answer-render R014): DuckDuckGo ip3 → Google s2 → host favicon.ico;
-// a per-host in-memory cache avoids re-fetching on re-renders, and when every
-// source fails the default glyph stays (no blank gap, no placeholder arrow).
+// External links load favicons only through the same-origin, SSRF-hardened
+// server resolver. A per-origin in-memory cache avoids duplicate DOM loads on
+// re-renders; failures keep the default glyph (never a blank gap).
 const _faviconCache = new Map();
 function bindExtLinkFavicons() {
   document.querySelectorAll("a.ext-link .link-ext-icon").forEach((slot) => {
@@ -2062,44 +2061,33 @@ function bindExtLinkFavicons() {
     const link = slot.closest("a.ext-link");
     const href = link?.getAttribute("href") || "";
     let host = "";
-    try { host = new URL(href).hostname; } catch (_) { /* keep empty */ }
-    if (!host) return;
-    const cached = _faviconCache.get(host);
+    let scheme = "";
+    try {
+      const parsed = new URL(href);
+      host = parsed.hostname;
+      scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+    } catch (_) { /* keep empty */ }
+    if (!host || (scheme !== "http" && scheme !== "https")) return;
+    const cacheKey = `${scheme}://${host}`;
+    const cached = _faviconCache.get(cacheKey);
     if (cached?.failed) return; // negative cache: keep the glyph
-    const markdownApi = window.Code?.ui?.markdown;
-    const hosts = markdownApi?.faviconHostCandidates?.(host) || [host];
-    const sources = cached?.url
-      ? [cached.url]
-      : hosts.flatMap((candidate) => [
-          `https://api.faviconkit.com/${encodeURIComponent(candidate)}/64`,
-          `https://www.google.com/s2/favicons?domain=${encodeURIComponent(candidate)}&sz=64`,
-          `https://icons.duckduckgo.com/ip3/${encodeURIComponent(candidate)}.ico`,
-          `https://${candidate}/favicon.ico`,
-        ]);
-    let attempt = 0;
-    const loadNext = () => {
-      if (attempt >= sources.length) {
-        _faviconCache.set(host, { failed: true });
-        return; // keep the default glyph, never blank
+    const source = cached?.url || `/api/favicon?scheme=${encodeURIComponent(scheme)}&host=${encodeURIComponent(host)}`;
+    const img = document.createElement("img");
+    img.className = "ext-favicon";
+    img.alt = "";
+    img.decoding = "async";
+    img.addEventListener("load", () => {
+      if (img.naturalWidth <= 1 || img.naturalHeight <= 1) {
+        _faviconCache.set(cacheKey, { failed: true });
+        return;
       }
-      const img = document.createElement("img");
-      img.className = "ext-favicon";
-      img.alt = "";
-      img.addEventListener("load", () => {
-        // Some favicon services answer with a 1x1 placeholder; treat it as a
-        // miss and keep walking the chain instead of showing a blurry tile.
-        if (img.naturalWidth <= 1 || img.naturalHeight <= 1) {
-          attempt += 1;
-          loadNext();
-          return;
-        }
-        _faviconCache.set(host, { url: img.src });
-        slot.replaceChildren(img);
-      }, { once: true });
-      img.addEventListener("error", () => { attempt += 1; loadNext(); }, { once: true });
-      img.src = sources[attempt];
-    };
-    loadNext();
+      _faviconCache.set(cacheKey, { url: source });
+      slot.replaceChildren(img);
+    }, { once: true });
+    img.addEventListener("error", () => {
+      _faviconCache.set(cacheKey, { failed: true });
+    }, { once: true });
+    img.src = source;
   });
 }
 

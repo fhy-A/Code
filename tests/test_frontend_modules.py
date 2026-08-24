@@ -8275,7 +8275,6 @@ process.stdout.write(JSON.stringify(out));
         self.assertEqual(data["candEmpty"], 0)
         # R016 源码级
         self.assertIn('faviconHostCandidates', MARKDOWN_SOURCE)
-        self.assertIn('hosts.flatMap', APP_SOURCE)
         self.assertIn('COMPOUND_SUFFIXES', MARKDOWN_SOURCE)
         self.assertIn('com.cn', MARKDOWN_SOURCE)
 
@@ -8327,15 +8326,11 @@ process.stdout.write(JSON.stringify(out));
         self.assertTrue(data["extIcon"])
         self.assertTrue(data["extLeft"])
         self.assertTrue(data["glyphInline"])
-        # R014 源码级
-        self.assertIn('icons.duckduckgo.com/ip3/', APP_SOURCE)
-        self.assertIn('www.google.com/s2/favicons', APP_SOURCE)
-        self.assertIn('api.faviconkit.com/', APP_SOURCE)
-        seg_start = APP_SOURCE.index('api.faviconkit.com/')
-        seg = APP_SOURCE[seg_start:seg_start + 900]
-        self.assertLess(seg.index('api.faviconkit.com/'), seg.index('www.google.com/s2/favicons'))
-        self.assertLess(seg.index('www.google.com/s2/favicons'), seg.index('icons.duckduckgo.com/ip3/'))
-        self.assertLess(seg.index('icons.duckduckgo.com/ip3/'), seg.index('/favicon.ico'))
+        # R014 / CODE-036 phase 2: only the same-origin proxy reaches favicon sources.
+        self.assertIn('/api/favicon?scheme=${encodeURIComponent(scheme)}&host=${encodeURIComponent(host)}', APP_SOURCE)
+        self.assertNotIn('icons.duckduckgo.com/ip3/', APP_SOURCE)
+        self.assertNotIn('www.google.com/s2/favicons', APP_SOURCE)
+        self.assertNotIn('api.faviconkit.com/', APP_SOURCE)
         self.assertIn('naturalWidth <= 1', APP_SOURCE)
 
         self.assertIn('_faviconCache', APP_SOURCE)
@@ -8385,8 +8380,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('data-favicon', MARKDOWN_SOURCE)
         self.assertNotIn('↗', MARKDOWN_SOURCE)
         self.assertIn('bindExtLinkFavicons', APP_SOURCE)
-        self.assertIn('icons.duckduckgo.com/ip3/', APP_SOURCE)
-        self.assertIn('favicon.ico', APP_SOURCE)
+        self.assertIn('/api/favicon?', APP_SOURCE)
         self.assertIn('.ext-favicon', STYLE_SOURCE)
 
         self.assertIn('slugify(token.text)', MARKDOWN_SOURCE)
@@ -8417,6 +8411,90 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn("probe.onerror = () => { /* degrade: keep the text alias */ }", APP_SOURCE)
         self.assertIn("pathAlias,", MARKDOWN_SOURCE)
         self.assertIn("isImagePath,", MARKDOWN_SOURCE)
+
+    def test_external_favicon_binding_uses_same_origin_and_keeps_glyph_on_failure(self):
+        start = APP_SOURCE.index("const _faviconCache = new Map();")
+        end = APP_SOURCE.index("// Right-click menus for links in final answers", start)
+        source = APP_SOURCE[start:end] + "\nglobalThis.__bindFavicons = bindExtLinkFavicons;"
+        script = f"""
+const vm = require("vm");
+const source = {json.dumps(source)};
+const created = [];
+let activeSlots = [];
+function slotFor(href) {{
+  return {{
+    dataset: {{}},
+    children: [{{kind: "glyph"}}],
+    closest(selector) {{
+      if (selector !== "a.ext-link") throw new Error("unexpected selector");
+      return {{getAttribute(name) {{ return name === "href" ? href : null; }}}};
+    }},
+    replaceChildren(node) {{ this.children = [node]; }},
+  }};
+}}
+const document = {{
+  querySelectorAll(selector) {{
+    if (selector !== "a.ext-link .link-ext-icon") throw new Error("unexpected query");
+    return activeSlots;
+  }},
+  createElement(tag) {{
+    if (tag !== "img") throw new Error("unexpected element");
+    const handlers = {{}};
+    const image = {{
+      naturalWidth: 16,
+      naturalHeight: 16,
+      addEventListener(type, handler) {{ handlers[type] = handler; }},
+      get handlers() {{ return handlers; }},
+      set src(value) {{ this._src = String(value); created.push(this); }},
+      get src() {{ return this._src; }},
+    }};
+    return image;
+  }},
+}};
+const sandbox = {{document, URL, encodeURIComponent, window: {{Code: {{ui: {{}}}}}}}};
+vm.runInNewContext(source, sandbox);
+
+const successSlot = slotFor("https://例子.测试/path?q=1");
+activeSlots = [successSlot];
+sandbox.__bindFavicons();
+const successImage = created.at(-1);
+successImage.handlers.load();
+
+const failureSlot = slotFor("http://missing.example/path");
+activeSlots = [failureSlot];
+sandbox.__bindFavicons();
+const failureImage = created.at(-1);
+failureImage.handlers.error();
+const createdBeforeNegativeCache = created.length;
+const repeatedFailureSlot = slotFor("http://missing.example/other");
+activeSlots = [repeatedFailureSlot];
+sandbox.__bindFavicons();
+
+process.stdout.write(JSON.stringify({{
+  successSrc: successImage.src,
+  successReplaced: successSlot.children[0] === successImage,
+  failureKeptGlyph: failureSlot.children[0].kind === "glyph",
+  negativeCacheSkipped: created.length === createdBeforeNegativeCache,
+  repeatedFailureKeptGlyph: repeatedFailureSlot.children[0].kind === "glyph",
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["successSrc"],
+            "/api/favicon?scheme=https&host=xn--fsqu00a.xn--0zwm56d",
+        )
+        self.assertTrue(data["successReplaced"])
+        self.assertTrue(data["failureKeptGlyph"])
+        self.assertTrue(data["negativeCacheSkipped"])
+        self.assertTrue(data["repeatedFailureKeptGlyph"])
 
     def test_image_overlay_gallery_model_and_app_integration(self):
         # 执行级：纯导航模型（首尾禁用策略、索引、空数组/越界降级）

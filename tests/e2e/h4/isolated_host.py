@@ -34,6 +34,9 @@ AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL"
 CONTEXT_CALIBRATION_USER = "H4_CONTEXT_CALIBRATION_USER"
 CONTEXT_CALIBRATION_FINAL = "H4_CONTEXT_CALIBRATION_FINAL"
 CONTEXT_CALIBRATION_UNUSED_KEY = "h4-context-calibration-unused-key"
+FAVICON_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNUqPjwn4GBgYEJRIAwACXYAoumRkB8AAAAAElFTkSuQmCC"
+)
 TOOL_USER = "H4_TOOL_USER"
 TOOL_STAGE = "H4_TOOL_STAGE"
 TOOL_FINAL = "H4_TOOL_FINAL"
@@ -292,6 +295,7 @@ class MetricState:
         self._lock = threading.RLock()
         self._data = {
             "fakeRequests": [],
+            "faviconFetches": [],
             "chatRequests": [],
             "toolExecutions": [],
             "productionToolDelegations": 0,
@@ -2794,6 +2798,33 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(repo_root))
     import server as code_server
+
+    class H4FaviconHttpClient:
+        """No-network transport under the production candidate/cache/endpoint layers."""
+
+        def fetch(self, url: str, *, deadline: float):
+            parsed_url = parse.urlsplit(url)
+            METRICS.append("faviconFetches", {
+                "scheme": parsed_url.scheme,
+                "host": parsed_url.hostname,
+                "path": parsed_url.path,
+                "query": parsed_url.query,
+                "deadlinePresent": deadline > 0,
+            })
+            if (
+                parsed_url.scheme == "https"
+                and parsed_url.hostname in {"yuanbao.tencent.com", "mistral.ai"}
+                and parsed_url.path == "/favicon.ico"
+                and not parsed_url.query
+            ):
+                return FAVICON_PNG, "image/png"
+            raise code_server._FaviconProxyError("H4 deterministic favicon miss")
+
+    code_server._favicon_proxy = code_server._FaviconProxy(
+        http_client=H4FaviconHttpClient(),
+        positive_ttl=3600,
+        negative_ttl=3600,
+    )
 
     class H4CodeHandler(code_server.CodeHandler):
         def log_message(self, _format: str, *_args) -> None:
