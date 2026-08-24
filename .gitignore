@@ -4,6 +4,9 @@ data/session-archive/
 data/agent-runs/
 data/attachments/
 data/file-backups/
+data/goal-workflows/
+data/goals-v2/
+data/goals/
 data/config.json
 data/runtime/
 data/projects.json
