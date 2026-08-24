@@ -30,6 +30,7 @@ import webbrowser
 import agent_protocol
 import context_calibration
 import context_window
+import windows_explorer
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
 from goal_v2_protocol import GoalV2ProtocolError, require_identifier
 from goal_v2_store import (
@@ -11821,6 +11822,57 @@ def to_project_relative(root, target):
     return str(target.relative_to(root)).replace("\\", "/")
 
 
+def perform_open_file_action(
+    body,
+    *,
+    platform_name=None,
+    explorer_open=None,
+    startfile=None,
+    popen=None,
+):
+    """Execute one explicit file/folder action within resolve_project_path scope."""
+    raw_path = str((body or {}).get("path") or "").strip()
+    if not raw_path:
+        raise ValueError("Missing path")
+    root, target = resolve_project_path(raw_path)
+    platform_name = os.name if platform_name is None else str(platform_name)
+    explorer_open = explorer_open or windows_explorer.open_path_in_explorer
+    popen = popen or subprocess.Popen
+
+    if body.get("terminal"):
+        if not target.exists() or not target.is_dir():
+            raise ValueError("Terminal target must be an existing directory")
+        popen(
+            [
+                "powershell",
+                "-NoExit",
+                "-Command",
+                "Set-Location -LiteralPath $args[0]",
+                str(target),
+            ],
+            cwd=str(target),
+        )
+        return {"ok": True, "action": "terminal", "degraded": False}
+
+    reveal = bool(body.get("reveal"))
+    explorer = bool(body.get("explorer"))
+    use_explorer = reveal or explorer or (platform_name == "nt" and target.is_dir())
+    if use_explorer and platform_name == "nt":
+        return explorer_open(target, select_file=reveal, allowed_root=root)
+
+    if startfile is None:
+        startfile = getattr(os, "startfile", None)
+    if not callable(startfile):
+        raise RuntimeError("System path opening is unavailable")
+    fallback_target = target.parent if reveal else target
+    startfile(str(fallback_target))
+    return {
+        "ok": True,
+        "action": "reveal" if reveal else "default",
+        "degraded": False,
+    }
+
+
 def sanitize_filename(name):
     name = Path(str(name or "attachment")).name.strip()
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
@@ -15986,23 +16038,8 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def _handle_open_file(self):
         body = self.read_body_json()
-        path = (body.get("path") or "").strip()
-        if not path:
-            self.send_json({"error": "Missing path"}, 400)
-            return
-        import os as _os, subprocess as _sp
-        clean = path.replace("\\", "/").lstrip("/")
-        config = load_config()
-        project_root = Path(config.get("projectRoot") or config.get("userHome") or "").expanduser().resolve()
-        full = (project_root / clean).resolve()
         try:
-            if body.get("terminal"):
-                _sp.Popen(["powershell", "-NoExit", "-Command", f"Set-Location '{full}'"], cwd=str(full))
-            elif body.get("reveal"):
-                _os.startfile(str(full.parent))
-            else:
-                _os.startfile(str(full))
-            self.send_json({"ok": True})
+            self.send_json(perform_open_file_action(body))
         except Exception as e:
             self.send_json({"error": str(e)}, 400)
 

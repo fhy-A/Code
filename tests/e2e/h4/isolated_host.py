@@ -296,6 +296,8 @@ class MetricState:
         self._data = {
             "fakeRequests": [],
             "faviconFetches": [],
+            "explorerRequests": [],
+            "defaultOpenRequests": [],
             "chatRequests": [],
             "toolExecutions": [],
             "productionToolDelegations": 0,
@@ -2838,6 +2840,48 @@ def main() -> int:
         "projectRoot": str(project_dir),
         "newApiBaseUrl": fake_url,
     })
+
+    def h4_project_relative(target) -> str:
+        resolved = Path(target).resolve()
+        if resolved != project_dir and project_dir not in resolved.parents:
+            raise RuntimeError("H4 external open target escaped the project root")
+        return str(resolved.relative_to(project_dir)).replace("\\", "/") or "."
+
+    def h4_open_path_in_explorer(target, *, select_file, allowed_root):
+        resolved_root = Path(allowed_root).resolve()
+        if resolved_root != project_dir:
+            raise RuntimeError("H4 Explorer allowed root changed")
+        relative = h4_project_relative(target)
+        target_path = Path(target).resolve()
+        METRICS.append("explorerRequests", {
+            "path": relative,
+            "selectFile": bool(select_file),
+            "targetExists": target_path.exists(),
+            "targetKind": (
+                "file" if target_path.is_file()
+                else "directory" if target_path.is_dir()
+                else "missing"
+            ),
+        })
+        degraded = not bool(select_file)
+        return {
+            "ok": True,
+            "action": "select_file" if select_file else "open_folder",
+            "selected": bool(select_file and target_path.is_file()),
+            "degraded": degraded,
+            "degradedReasons": ["foreground_not_granted"] if degraded else [],
+            "foreground": "not_foreground" if degraded else "foreground",
+            "restored": False,
+            "topmostPulse": False,
+        }
+
+    def h4_startfile(target):
+        METRICS.append("defaultOpenRequests", {
+            "path": h4_project_relative(target),
+        })
+
+    code_server.windows_explorer.open_path_in_explorer = h4_open_path_in_explorer
+    code_server.os.startfile = h4_startfile
 
     original_execute_registered_tool = code_server.execute_registered_tool
     original_execute_apply_edit_proposal = code_server.execute_apply_edit_proposal

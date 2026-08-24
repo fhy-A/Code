@@ -182,6 +182,23 @@
     return { compact, full };
   }
 
+  async function requestOpenFile(apiJson, showToast, t, body) {
+    try {
+      const data = await apiJson("/api/open-file", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!data || data.ok !== true || typeof data.degraded !== "boolean") {
+        throw new Error("Invalid open-file response");
+      }
+      if (data.degraded === true) showToast?.(t("openDegraded"), "warning");
+      return data;
+    } catch (_) {
+      showToast?.(t("openFailed"), "error");
+      return null;
+    }
+  }
+
   function createFilesFeature(options = {}) {
     const state = options.state;
     const elements = options.elements;
@@ -194,7 +211,6 @@
     const saveProjectRoot = options.saveProjectRoot;
     const documentRoot = options.documentRoot || global.document;
     const storage = options.storage || global.localStorage;
-    const fetchImpl = options.fetch || ((...args) => global.fetch(...args));
 
     if (!state || !elements || !t || !escapeHtml || !apiJson) {
       throw new Error("Files feature requires state, elements, t, escapeHtml, and apiJson");
@@ -290,12 +306,9 @@
           } else {
             const body = { path };
             if (action === "reveal") body.reveal = true;
+            if (action === "explore") body.explorer = true;
             if (action === "terminal") body.terminal = true;
-            fetchImpl("/api/open-file", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            }).catch(() => showToast?.(t("openFailed"), "error"));
+            void requestOpenFile(apiJson, showToast, t, body);
           }
           menu.remove();
         });
@@ -980,6 +993,7 @@
     SILENT_FILE_REFRESH_DELAY_MS,
     normalizeFileTreeIdentity,
     createSilentFileTreeRefreshController,
+    requestOpenFile,
     createFilesFeature,
   });
 })(window);

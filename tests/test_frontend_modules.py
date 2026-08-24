@@ -7598,6 +7598,95 @@ const feature = createFilesFeature({
         self.assertIn("scheduleSilentRefresh: silentRefresh.schedule", FILES_SOURCE)
         self.assertIn("silentRefresh.invalidate();", FILES_SOURCE)
 
+    def test_file_context_menu_distinguishes_explorer_from_default_open(self):
+        self.assertIn('if (action === "reveal") body.reveal = true;', FILES_SOURCE)
+        self.assertIn('if (action === "explore") body.explorer = true;', FILES_SOURCE)
+        self.assertIn('if (action === "terminal") body.terminal = true;', FILES_SOURCE)
+        self.assertIn('void requestOpenFile(apiJson, showToast, t, body);', FILES_SOURCE)
+        self.assertNotIn('fetchImpl("/api/open-file"', FILES_SOURCE)
+        self.assertIn('apiJson("/api/open-file"', APP_SOURCE)
+        self.assertIn('body: JSON.stringify({ path: fp, reveal: true })', APP_SOURCE)
+        self.assertNotIn('body: JSON.stringify({ path: fp, explorer: true })', APP_SOURCE)
+
+    def test_file_context_open_response_is_silent_on_success_and_sanitizes_failures(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require('./src/features/files.js');
+const {requestOpenFile} = window.Code.features.files;
+const calls = [];
+const toasts = [];
+const t = (key) => `translated:${key}`;
+const showToast = (message, kind) => toasts.push([message, kind]);
+const responder = (result, error) => async (url, options) => {
+  calls.push([url, options.method, JSON.parse(options.body)]);
+  if (error) throw error;
+  return result;
+};
+(async () => {
+  const success = await requestOpenFile(
+    responder({ok: true, degraded: false}), showToast, t, {path: 'ok.txt', reveal: true},
+  );
+  const afterSuccess = toasts.slice();
+  const degraded = await requestOpenFile(
+    responder({ok: true, degraded: true, degradedReasons: ['foreground_not_granted']}),
+    showToast, t, {path: 'folder', explorer: true},
+  );
+  const httpFailure = await requestOpenFile(
+    responder(null, new Error('HTTP 400: sensitive server detail')),
+    showToast, t, {path: 'bad.txt'},
+  );
+  const networkFailure = await requestOpenFile(
+    responder(null, new Error('network contains internal endpoint')),
+    showToast, t, {path: 'offline.txt'},
+  );
+  const invalidJsonProjection = await requestOpenFile(
+    responder({}), showToast, t, {path: 'invalid.txt'},
+  );
+  const incompleteSuccess = await requestOpenFile(
+    responder({ok: true}), showToast, t, {path: 'incomplete.txt'},
+  );
+  process.stdout.write(JSON.stringify({
+    success, afterSuccess, degraded, httpFailure, networkFailure,
+    invalidJsonProjection, incompleteSuccess, calls, toasts,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["success"], {"ok": True, "degraded": False})
+        self.assertEqual(data["afterSuccess"], [])
+        self.assertTrue(data["degraded"]["degraded"])
+        self.assertIsNone(data["httpFailure"])
+        self.assertIsNone(data["networkFailure"])
+        self.assertIsNone(data["invalidJsonProjection"])
+        self.assertIsNone(data["incompleteSuccess"])
+        self.assertEqual(data["toasts"], [
+            ["translated:openDegraded", "warning"],
+            ["translated:openFailed", "error"],
+            ["translated:openFailed", "error"],
+            ["translated:openFailed", "error"],
+            ["translated:openFailed", "error"],
+        ])
+        self.assertEqual(data["calls"][0], [
+            "/api/open-file", "POST", {"path": "ok.txt", "reveal": True},
+        ])
+        self.assertNotIn("sensitive", json.dumps(data["toasts"]))
+        self.assertNotIn("internal endpoint", json.dumps(data["toasts"]))
+        self.assertIn('openDegraded: "已打开位置，但未能完成选择或置前"', I18N_SOURCE)
+        self.assertIn(
+            'openDegraded: "Location opened, but selection or foreground activation was not completed"',
+            I18N_SOURCE,
+        )
+        self.assertIn("successfulOpenSilent: true", H4_SMOKE_SOURCE)
+        self.assertIn("degradedWarningVisible: true", H4_SMOKE_SOURCE)
+
 
     def test_file_tree_recursive_search_and_keyboard_navigation(self):
         self.assertIn('runStreamingSearch', FILES_SOURCE)

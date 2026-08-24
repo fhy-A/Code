@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-24 | `CODE-041` Windows 文件显示与 Explorer 前台激活完成：文件使用 Shell 原生父目录精确选择，目录打开精确位置；仅按路径识别唯一 HWND，支持最小化恢复、普通前台激活和必撤销的临时 topmost 降级，Unicode 枚举固定 UTF-8。专项 `22/22`、Explorer+server `246/246`、P2/i18n `56/56` 通过；用户 bundle/direct classic H4 `2 passed (5.1s)`，并确认多窗口/多标签、遮挡/最小化、中文空格路径、目录、不存在目标与默认程序实机验收通过 | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-040` 大型文本内部截断预览回归修复完成：文件树与最终回答链接统一继续走右侧 `loadFile`，沿用服务端前 1 MiB 与 `truncated` 状态，350000 字符/8000 行仅关闭高亮；隐式 `/api/open-file` 已移除，显式默认程序打开及图片/PDF/二进制/行号边界保持。用户 bundle/direct classic H4 `2 passed`，并确认文件树、回答链接和显式系统打开三项人工验收均正常 | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-039` 最终回答结构化富文本可读性优化完成：任务清单以禁用 checkbox 保留只读语义，嵌套列表层级/换行统一，GFM 表格左中右对齐及宽表自身滚动/非遮挡提示闭合；普通本地文件改为无框图标+文件名，图片卡保持。前端模块 `227 passed`，用户 bundle/direct classic H4 `2 passed`，双入口、明暗主题与约 390px 窄屏人工 PASS | [查看](2026/2026-08-24.md) |
 | 2026-08-24 | `CODE-036` 两阶段完成：先在 `marked` 前为紧邻 Unicode 标点的 HTTP(S) 裸 URL 建立有界 autolink，保留代码、显式链接/图片、query/fragment、百分号编码与 Unicode 路径；再将 favicon 改为同源安全代理，只访问经全量公网 DNS 校验并固定连接地址的目标 `/favicon.ico`、固定 provider 和父域候选，不解析 HTML。三次重定向、逐跳 HTTPS 降级拒绝、总 deadline、256 KiB/MIME/magic、128 项 LRU/正负 TTL/同 host 合并及地球图标降级闭合；最终安全测试 `13/13`、server `224/224`、同范围回归 `443 passed`，用户 fresh bundle H4 `2 passed` 并确认 Code Dev/direct classic 扩展网站矩阵与链接交互人工 PASS | [查看](2026/2026-08-24.md) |

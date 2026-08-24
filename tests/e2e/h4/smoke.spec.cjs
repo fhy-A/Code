@@ -24279,6 +24279,100 @@ async function exerciseLargeTextPreview(h4, runtime) {
   });
 }
 
+async function exerciseExplorerRouteContract(h4, runtime) {
+  const { page } = h4;
+  const folderPath = "H4 中文 folder";
+  await fs.mkdir(path.join(h4.host.projectDir, folderPath), { recursive: false });
+
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+
+  const invokeContextAction = async (item, action, expectedCount) => {
+    await item.click({ button: "right" });
+    const button = page.locator(`.file-ctx-menu [data-action="${action}"]`);
+    await expect(button).toBeVisible();
+    const responsePromise = page.waitForResponse((response) => {
+      const request = response.request();
+      return new URL(response.url()).pathname === "/api/open-file"
+        && request.method() === "POST";
+    });
+    await button.click();
+    const response = await responsePromise;
+    expect(response.status()).toBe(200);
+    const payload = await response.json();
+    await expect.poll(async () => {
+      const metrics = await h4.metrics();
+      return metrics.explorerRequests.length + metrics.defaultOpenRequests.length;
+    }).toBe(expectedCount);
+    await expect(page.locator(".file-ctx-menu")).toHaveCount(0);
+    return payload;
+  };
+
+  const fileItem = page.locator('#fileTree .file-item.file[data-path="fixture.txt"]');
+  const folderItem = page.locator(
+    `#fileTree .file-item.dir[data-path="${folderPath}"]`,
+  );
+  await expect(fileItem).toBeVisible();
+  await expect(folderItem).toBeVisible();
+
+  const defaultResult = await invokeContextAction(fileItem, "open", 1);
+  expect(defaultResult).toMatchObject({ ok: true, degraded: false });
+  await expect(page.locator("#toastContainer .toast.warning, #toastContainer .toast.error")).toHaveCount(0);
+  const revealResult = await invokeContextAction(fileItem, "reveal", 2);
+  expect(revealResult).toMatchObject({ ok: true, degraded: false });
+  await expect(page.locator("#toastContainer .toast.warning, #toastContainer .toast.error")).toHaveCount(0);
+  const folderResult = await invokeContextAction(folderItem, "explore", 3);
+  expect(folderResult).toMatchObject({ ok: true, degraded: true });
+  const degradedNotice = page.locator("#toastContainer .toast.warning").filter({
+    hasText: /未能完成选择或置前|selection or foreground activation was not completed/,
+  });
+  await expect(degradedNotice).toHaveCount(1);
+  await expect(page.locator("#toastContainer .toast.error")).toHaveCount(0);
+
+  const allowedBlockedPaths = new Set([
+    "/npm/katex@0.16.11/dist/katex.min.css",
+    "/npm/katex@0.16.11/dist/katex.min.js",
+    "/npm/marked/marked.min.js",
+  ]);
+  for (const request of h4.blockedRequests) {
+    expect(request).toMatchObject({ method: "GET", reason: "non-loopback" });
+    expect(allowedBlockedPaths.has(request.path)).toBe(true);
+  }
+  const metrics = await h4.metrics();
+  expect(metrics.defaultOpenRequests).toEqual([{ path: "fixture.txt" }]);
+  expect(metrics.explorerRequests).toEqual([
+    {
+      path: "fixture.txt",
+      selectFile: true,
+      targetExists: true,
+      targetKind: "file",
+    },
+    {
+      path: folderPath,
+      selectFile: false,
+      targetExists: true,
+      targetKind: "directory",
+    },
+  ]);
+  expect(metrics.chatRequests).toEqual([]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-explorer-route-contract`, {
+    explorerRequests: metrics.explorerRequests,
+    defaultOpenRequests: metrics.defaultOpenRequests,
+    externalShellStubbed: true,
+    defaultProgramSeparated: true,
+    fileRevealSelectIntent: true,
+    directoryExplorerIntent: true,
+    successfulOpenSilent: true,
+    degradedWarningVisible: true,
+    modelRequests: metrics.chatRequests.length,
+    toolExecutions: metrics.toolExecutions.length,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -24367,4 +24461,12 @@ test("bundle large text preview stays internal from file tree and answer link", 
 
 test("direct classic large text preview stays internal from file tree and answer link", async ({ h4 }) => {
   await exerciseLargeTextPreview(h4, "classic");
+});
+
+test("bundle Explorer route contract separates file reveal folder open and default app", async ({ h4 }) => {
+  await exerciseExplorerRouteContract(h4, "bundle");
+});
+
+test("direct classic Explorer route contract separates file reveal folder open and default app", async ({ h4 }) => {
+  await exerciseExplorerRouteContract(h4, "classic");
 });
