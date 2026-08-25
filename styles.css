@@ -9306,41 +9306,80 @@ body.theme-dark .chat-pane.empty-chat .composer {
   color: var(--accent);
 }
 
-.onboarding-complete {
-  display: flex;
-  min-height: 62px;
-  align-items: center;
-  gap: 11px;
-  padding: 10px 14px;
-  border: 1px solid color-mix(in srgb, var(--green) 38%, var(--line));
-  border-radius: 13px;
-  background: color-mix(in srgb, var(--green-bg) 64%, var(--panel-3));
-  color: var(--text);
-  box-shadow: 0 12px 32px rgba(20, 28, 40, .10);
-  animation: onboardingCompleteIn .28s ease-out both;
-}
-.onboarding-complete-mark {
+.onboarding-tasks.is-celebrating {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
   display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  padding: 24px;
+  place-items: center;
+  pointer-events: none;
+}
+
+.onboarding-celebration {
+  display: grid;
+  max-width: min(420px, 100%);
+  place-items: center;
+  gap: 12px;
+  color: var(--text);
+  text-align: center;
+  pointer-events: none;
+  animation: onboardingCelebrationIn .34s ease-out both;
+}
+
+.onboarding-celebration-halo {
+  position: relative;
+  display: grid;
+  width: 82px;
+  height: 82px;
   place-items: center;
   border-radius: 999px;
-  background: var(--green);
-  color: var(--panel-3);
-  font-weight: 850;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.onboarding-complete > span:last-child { display: grid; gap: 2px; }
-.onboarding-complete strong { font-size: 13px; }
-.onboarding-complete small { color: var(--muted); font-size: 11.5px; }
+.onboarding-celebration-halo::before,
+.onboarding-celebration-halo::after {
+  position: absolute;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: inherit;
+  content: "";
+  inset: 0;
+  animation: onboardingCelebrationHalo 1.2s ease-out both;
+}
+.onboarding-celebration-halo::after { animation-delay: .18s; }
+.onboarding-complete-mark {
+  display: grid;
+  z-index: 1;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--panel-3);
+  box-shadow: 0 12px 30px color-mix(in srgb, var(--accent) 25%, transparent);
+  font-size: 24px;
+  font-weight: 800;
+}
+.onboarding-celebration-copy { display: grid; gap: 4px; }
+.onboarding-celebration strong { font-size: 18px; }
+.onboarding-celebration small { color: var(--muted); font-size: 13px; }
 
 .onboarding-settings-card { display: grid; gap: 12px; }
 .onboarding-settings-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .onboarding-settings-card button { justify-self: start; }
 
-@keyframes onboardingCompleteIn {
-  from { opacity: 0; transform: translateY(7px) scale(.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+@keyframes onboardingCelebrationIn {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes onboardingCelebrationHalo {
+  from { opacity: .72; transform: scale(.62); }
+  to { opacity: 0; transform: scale(1.42); }
+}
+
+@keyframes onboardingCelebrationFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @media (max-width: 640px) {
@@ -9364,5 +9403,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .onboarding-complete { animation: none; }
+  .onboarding-celebration { animation: onboardingCelebrationFade .18s ease-out both; }
+  .onboarding-celebration-halo::before,
+  .onboarding-celebration-halo::after { animation: none; opacity: .22; }
 }

@@ -677,6 +677,16 @@ class AgentRunConflictError(ValueError):
     """Raised when an AgentRun cannot accept a state-dependent request."""
 
 
+class AgentRunInputConflictError(AgentRunConflictError):
+    """Expose stable questionnaire rejection facts without parsing messages."""
+
+    def __init__(self, code, status, pending_request_id=""):
+        super().__init__("Agent run cannot accept questionnaire input")
+        self.code = str(code or "agent_run_input_inactive")
+        self.agent_run_status = str(status or "")
+        self.pending_request_id = str(pending_request_id or "")
+
+
 def _agent_created_at_iso():
     """Return a process-monotonic local timestamp for Run ordering."""
     global _agent_last_created_microsecond
@@ -3937,13 +3947,28 @@ def _normalize_agent_input_result(pending_input, answers):
     }
 
 
-def _submit_agent_input(run, answers):
+def _submit_agent_input(run, answers, request_id=""):
     with run["condition"]:
         if run["status"] != "waiting_user_input":
-            raise ValueError(f"Agent run is not waiting for user input: {run['status']}")
+            raise AgentRunInputConflictError(
+                "agent_run_input_inactive",
+                run["status"],
+                (run.get("pending_input") or {}).get("requestId"),
+            )
         pending_input = _json_clone(run.get("pending_input"))
     if not isinstance(pending_input, dict):
-        raise ValueError("Agent run has no pending user input")
+        raise AgentRunInputConflictError(
+            "agent_run_input_missing",
+            run["status"],
+        )
+    expected_request_id = str(request_id or "")
+    pending_request_id = str(pending_input.get("requestId") or "")
+    if expected_request_id and expected_request_id != pending_request_id:
+        raise AgentRunInputConflictError(
+            "agent_run_input_mismatch",
+            run["status"],
+            pending_request_id,
+        )
 
     # Compatibility for v0.5.29 runs that paused after reasoning-only output.
     # New runs recover automatically inside the worker, but an already durable
@@ -3974,8 +3999,19 @@ def _submit_agent_input(run, answers):
     call_id = str(pending_input.get("toolCallId") or "")
 
     with run["condition"]:
-        if run["status"] != "waiting_user_input" or str((run.get("pending_input") or {}).get("requestId") or "") != result["requestId"]:
-            raise ValueError("Agent user-input request changed before submission")
+        current_request_id = str((run.get("pending_input") or {}).get("requestId") or "")
+        if run["status"] != "waiting_user_input":
+            raise AgentRunInputConflictError(
+                "agent_run_input_inactive",
+                run["status"],
+                current_request_id,
+            )
+        if current_request_id != result["requestId"]:
+            raise AgentRunInputConflictError(
+                "agent_run_input_mismatch",
+                run["status"],
+                current_request_id,
+            )
         execution = run.get("tool_executions", {}).get(call_id)
         if not isinstance(execution, dict):
             raise ValueError("Agent user-input tool execution is missing")
@@ -14408,12 +14444,34 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route.startswith("/api/agent/runs/") and route.endswith("/input"):
                 run_id = route.rsplit("/", 2)[-2]
+                body = self.read_body_json()
                 run = _get_agent_run(run_id)
                 if not run:
-                    self.send_json({"error": "Agent run not found"}, 404)
+                    self.send_json({
+                        "error": "Agent run cannot accept questionnaire input",
+                        "errorCode": "agent_run_not_found",
+                        "agentRunId": run_id,
+                        "agentRunStatus": "not_found",
+                        "pendingInputRequestId": "",
+                        "retryable": False,
+                    }, 404)
                     return
-                body = self.read_body_json()
-                result = _submit_agent_input(run, body.get("answers"))
+                try:
+                    result = _submit_agent_input(
+                        run,
+                        body.get("answers"),
+                        request_id=body.get("requestId") or "",
+                    )
+                except AgentRunInputConflictError as exc:
+                    self.send_json({
+                        "error": "Agent run cannot accept questionnaire input",
+                        "errorCode": exc.code,
+                        "agentRunId": run["id"],
+                        "agentRunStatus": exc.agent_run_status,
+                        "pendingInputRequestId": exc.pending_request_id,
+                        "retryable": False,
+                    }, 409)
+                    return
                 self.send_json({
                     "agentRunId": run["id"],
                     "status": run["status"],

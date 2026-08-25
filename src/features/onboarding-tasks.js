@@ -189,7 +189,12 @@
     const onError = options.onError || (() => {});
     const completionDurationMs = Number.isFinite(Number(options.completionDurationMs))
       ? Number(options.completionDurationMs)
-      : 1800;
+      : 2400;
+    const inlineParent = root?.parentElement || null;
+    const inlineNextSibling = root?.nextSibling || null;
+    const celebrationHost = options.celebrationHost
+      || inlineParent?.closest?.(".chat-pane")
+      || null;
     const machine = createOnboardingStateMachine({
       storage: options.storage || global.localStorage,
       storageKey: options.storageKey || ONBOARDING_STORAGE_KEY,
@@ -221,6 +226,20 @@
       global.requestAnimationFrame?.(() => onLayoutChange());
     }
 
+    function mountInlineRoot() {
+      if (!root || !inlineParent || root.parentElement === inlineParent) return;
+      if (inlineNextSibling?.parentElement === inlineParent) {
+        inlineParent.insertBefore(root, inlineNextSibling);
+      } else {
+        inlineParent.appendChild(root);
+      }
+    }
+
+    function mountCelebrationRoot() {
+      if (!root || !celebrationHost || root.parentElement === celebrationHost) return;
+      celebrationHost.appendChild(root);
+    }
+
     function renderExamples() {
       if (!firstTaskReady || machine.currentTaskId() !== "first-task") return "";
       const buttons = FIRST_TASK_EXAMPLE_KEYS.map((key, index) => (
@@ -240,6 +259,7 @@
       const showTasks = welcomeVisible && !defaultExempt && !state.completed;
       const visible = celebrating || showTasks;
       root.classList.toggle("hidden", !visible);
+      root.classList.toggle("is-celebrating", celebrating);
       root.dataset.onboardingState = celebrating
         ? "complete"
         : showTasks
@@ -255,9 +275,9 @@
         return;
       }
       if (celebrating) {
-        root.innerHTML = `<div class="onboarding-complete" role="status" data-onboarding-complete>
-          <span class="onboarding-complete-mark" aria-hidden="true">✓</span>
-          <span><strong>${escapeHtml(t("onboardingCompleteTitle"))}</strong><small>${escapeHtml(t("onboardingCompleteDescription"))}</small></span>
+        root.innerHTML = `<div class="onboarding-celebration" role="status" aria-live="polite" data-onboarding-complete>
+          <span class="onboarding-celebration-halo" aria-hidden="true"><span class="onboarding-complete-mark">✓</span></span>
+          <span class="onboarding-celebration-copy"><strong>${escapeHtml(t("onboardingCompleteTitle"))}</strong><small>${escapeHtml(t("onboardingCompleteDescription"))}</small></span>
         </div>`;
         notifyLayoutChange();
         return;
@@ -296,6 +316,7 @@
     }
 
     function celebrateCompletion() {
+      mountCelebrationRoot();
       celebrating = true;
       firstTaskReady = false;
       render();
@@ -304,6 +325,7 @@
         completionTimer = null;
         celebrating = false;
         render();
+        mountInlineRoot();
       }, Math.max(0, completionDurationMs));
     }
 
@@ -366,6 +388,10 @@
     }
 
     function initialize({ hasExistingSessions = false, isWelcomeVisible = false } = {}) {
+      if (completionTimer != null) global.clearTimeout(completionTimer);
+      completionTimer = null;
+      celebrating = false;
+      mountInlineRoot();
       machine.initialize({ hasExistingSessions });
       initialized = true;
       welcomeVisible = Boolean(isWelcomeVisible);
@@ -396,6 +422,7 @@
       firstTaskReady = false;
       if (completionTimer != null) global.clearTimeout(completionTimer);
       completionTimer = null;
+      mountInlineRoot();
       initialized = true;
       render();
       return true;

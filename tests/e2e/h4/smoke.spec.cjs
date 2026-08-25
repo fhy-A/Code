@@ -128,6 +128,14 @@ const MIXED_QUESTIONNAIRE_TITLE = "H4_MIXED_QUESTIONNAIRE_TITLE";
 const MIXED_QUESTIONNAIRE_REASON = "H4_MIXED_QUESTIONNAIRE_REASON";
 const MIXED_QUESTIONNAIRE_OTHER = "H4_MIXED_MULTIPLE_OTHER";
 const MIXED_QUESTIONNAIRE_TEXT = "H4_MIXED_TEXT_ANSWER";
+const TERMINAL_QUESTIONNAIRE_USER = "H4_TERMINAL_QUESTIONNAIRE_USER";
+const TERMINAL_QUESTIONNAIRE_FINAL = "H4_TERMINAL_QUESTIONNAIRE_FINAL";
+const TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID = "h4-terminal-questionnaire-call-1";
+const TERMINAL_QUESTIONNAIRE_REQUEST_ID = `user-input-${TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID}`;
+const TERMINAL_QUESTIONNAIRE_FIRST_ID = "h4-terminal-questionnaire-first";
+const TERMINAL_QUESTIONNAIRE_SECOND_ID = "h4-terminal-questionnaire-second";
+const TERMINAL_QUESTIONNAIRE_FIRST_ANSWER = "你帮我找";
+const TERMINAL_QUESTIONNAIRE_SECOND_ANSWER = "https://example.com/source";
 const MIXED_QUESTIONNAIRE_CONTRACT = Object.freeze({
   userMarker: MIXED_QUESTIONNAIRE_USER,
   finalMarker: MIXED_QUESTIONNAIRE_FINAL,
@@ -9082,6 +9090,266 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
     progressReload: progressReloadRequests,
     terminalReload: terminalReloadRequests,
     hashes,
+  });
+}
+
+async function beginTerminalQuestionnaireLifecycle(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await h4.proveNonLoopbackBlocked();
+  const boundary = h4.requestBoundary();
+  await page.locator("#prompt").fill(TERMINAL_QUESTIONNAIRE_USER);
+  await page.locator("#sendBtn").click();
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+  let waiting = null;
+  await expect.poll(async () => {
+    waiting = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return {
+      status: waiting.body?.status,
+      requestId: waiting.body?.pendingInput?.requestId,
+      questionIds: (waiting.body?.pendingInput?.questions || []).map((item) => item.id),
+    };
+  }).toEqual({
+    status: "waiting_user_input",
+    requestId: TERMINAL_QUESTIONNAIRE_REQUEST_ID,
+    questionIds: [TERMINAL_QUESTIONNAIRE_FIRST_ID, TERMINAL_QUESTIONNAIRE_SECOND_ID],
+  });
+  const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(sessionButton).toHaveCount(1);
+  const sessionId = await sessionButton.getAttribute("data-session-id");
+  await expect(page.locator(
+    `#userInputPanel [data-question-id="${TERMINAL_QUESTIONNAIRE_FIRST_ID}"]`,
+  )).toBeVisible();
+  return {page, boundary, agentRunId, sessionId};
+}
+
+async function answerTerminalQuestionnaireText(page, questionId, answer) {
+  const question = page.locator(`#userInputPanel [data-question-id="${questionId}"]`);
+  await expect(question).toBeVisible();
+  await question.locator("[data-user-input-text]").fill(answer);
+  await question.locator('[data-user-input-action="confirm"]').click();
+}
+
+async function exerciseTerminalQuestionnaireHealthy(h4, runtime) {
+  const started = await beginTerminalQuestionnaireLifecycle(h4, runtime);
+  const { page, boundary, agentRunId, sessionId } = started;
+  await answerTerminalQuestionnaireText(
+    page,
+    TERMINAL_QUESTIONNAIRE_FIRST_ID,
+    TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
+  );
+  await expect(page.locator(
+    `#userInputPanel [data-question-id="${TERMINAL_QUESTIONNAIRE_SECOND_ID}"]`,
+  )).toBeVisible();
+  expect(h4.requestSummarySince(boundary)["POST /api/agent/runs/[id]/input"] || 0).toBe(0);
+  const inputRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST"
+      && url.pathname === `/api/agent/runs/${agentRunId}/input`;
+  });
+  await answerTerminalQuestionnaireText(
+    page,
+    TERMINAL_QUESTIONNAIRE_SECOND_ID,
+    TERMINAL_QUESTIONNAIRE_SECOND_ANSWER,
+  );
+  const inputRequest = await inputRequestPromise;
+  await expect(page.locator("#userInputPanel")).toBeHidden();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: TERMINAL_QUESTIONNAIRE_FINAL,
+  })).toHaveCount(1);
+
+  expect(inputRequest.method()).toBe("POST");
+  expect(new URL(inputRequest.url()).pathname)
+    .toBe(`/api/agent/runs/${agentRunId}/input`);
+  const inputBody = inputRequest.postDataJSON();
+  expect(inputBody.requestId).toBe(TERMINAL_QUESTIONNAIRE_REQUEST_ID);
+  expect(inputBody.answers.map((answer) => ({id: answer.id, text: answer.text}))).toEqual([
+    {id: TERMINAL_QUESTIONNAIRE_FIRST_ID, text: TERMINAL_QUESTIONNAIRE_FIRST_ANSWER},
+    {id: TERMINAL_QUESTIONNAIRE_SECOND_ID, text: TERMINAL_QUESTIONNAIRE_SECOND_ANSWER},
+  ]);
+  expect(h4.requestSummarySince(boundary)["POST /api/agent/runs/[id]/input"] || 0).toBe(1);
+  const completed = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(completed.status).toBe(200);
+  expect(completed.body.status).toBe("completed");
+  expect(completed.body.result?.content).toBe(TERMINAL_QUESTIONNAIRE_FINAL);
+  const session = await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(sessionId)}`);
+  expect(session.status).toBe(200);
+  expect(session.body.runState?.userInputRequest).toBeFalsy();
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-terminal-questionnaire-healthy`, {
+    questionCount: 2,
+    textAnswerAccepted: inputBody.answers[0].text === TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
+    requestIdMatched: inputBody.requestId === TERMINAL_QUESTIONNAIRE_REQUEST_ID,
+    inputPostCount: 1,
+    agentStatus: completed.body.status,
+  });
+}
+
+async function exerciseTerminalQuestionnaireStaleReload(h4, runtime) {
+  const started = await beginTerminalQuestionnaireLifecycle(h4, runtime);
+  const { page, boundary, agentRunId, sessionId } = started;
+  await answerTerminalQuestionnaireText(
+    page,
+    TERMINAL_QUESTIONNAIRE_FIRST_ID,
+    TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
+  );
+  await expect(page.locator(
+    `#userInputPanel [data-question-id="${TERMINAL_QUESTIONNAIRE_SECOND_ID}"]`,
+  )).toBeVisible();
+
+  const cancelled = await page.evaluate(async (target) => {
+    const response = await fetch(target, {method: "DELETE"});
+    return {status: response.status, body: await response.json()};
+  }, `/api/agent/runs/${encodeURIComponent(agentRunId)}`);
+  expect(cancelled.status).toBe(200);
+  expect(cancelled.body.status).toBe("cancelled");
+  const cancelledBeforeReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(cancelledBeforeReload.status).toBe(200);
+  expect(cancelledBeforeReload.body.status).toBe("cancelled");
+  const eventProjection = (snapshot) => (snapshot?.events || []).map((event) => ({
+    seq: Number(event?.seq || 0),
+    type: String(event?.type || ""),
+    toolCallId: String(event?.data?.toolCallId || ""),
+    name: String(event?.data?.name || ""),
+    outcome: String(event?.data?.outcome || ""),
+    resultCancelled: event?.data?.result?.cancelled === true,
+  }));
+  const executionProjection = (snapshot) => (snapshot?.toolExecutions || []).map(
+    (execution) => ({
+      toolCallId: String(execution?.toolCallId || ""),
+      name: String(execution?.name || ""),
+      status: String(execution?.status || ""),
+      outcome: String(execution?.outcome || ""),
+      resultCancelled: execution?.result?.cancelled === true,
+    }),
+  );
+  const cancelledEventsBeforeReload = eventProjection(cancelledBeforeReload.body);
+  const cancelledExecutionsBeforeReload = executionProjection(cancelledBeforeReload.body);
+  const cancellationClosures = cancelledBeforeReload.body.events.filter(
+    (event) => event.type === "tool_completed",
+  );
+  expect(cancellationClosures).toHaveLength(1);
+  expect(cancellationClosures[0].data).toMatchObject({
+    toolCallId: TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
+    name: "request_user_input",
+    result: {cancelled: true},
+  });
+  expect(cancelledBeforeReload.body.events.map((event) => event.type))
+    .not.toContain("user_input_submitted");
+  expect(cancelledBeforeReload.body.toolExecutions).toHaveLength(1);
+  expect(cancelledBeforeReload.body.toolExecutions[0]).toMatchObject({
+    toolCallId: TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
+    name: "request_user_input",
+    status: "cancelled",
+    result: {cancelled: true},
+  });
+  const sessionBeforeReload = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(sessionBeforeReload.status).toBe(200);
+  const reloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#userInputPanel")).toBeHidden();
+  await expect(page.locator("#toastContainer .toast.warning").filter({
+    hasText: /任务已结束，此问卷已失效|This task has ended, so the questionnaire is no longer valid/,
+  })).toHaveCount(1);
+  await restoreGoalH4Connection(h4);
+
+  let session = null;
+  await expect.poll(async () => {
+    session = await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(sessionId)}`);
+    return {
+      status: session.status,
+      runStatus: String(session.body?.runState?.status || ""),
+      hasQuestionnaire: Boolean(session.body?.runState?.userInputRequest),
+    };
+  }).toEqual({status: 200, runStatus: "paused", hasQuestionnaire: false});
+  const cancelledAgent = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(cancelledAgent.body.status).toBe("cancelled");
+  expect(eventProjection(cancelledAgent.body)).toEqual(cancelledEventsBeforeReload);
+  expect(executionProjection(cancelledAgent.body)).toEqual(cancelledExecutionsBeforeReload);
+  expect(session.body.messages).toEqual(sessionBeforeReload.body.messages);
+  expect(cancelledAgent.body.events.map((event) => event.type)).not.toContain("user_input_submitted");
+  expect(cancelledAgent.body.events.filter((event) => event.type === "tool_completed"))
+    .toHaveLength(1);
+  expect(cancelledAgent.body.toolExecutions[0]).toMatchObject({
+    status: "cancelled",
+    result: {cancelled: true},
+  });
+  expect(await page.locator("body").innerText()).not.toContain("Agent run is not waiting for user input");
+
+  const staleSummary = h4.requestSummarySince(boundary);
+  expect(staleSummary["POST /api/agent/runs/[id]/input"] || 0).toBe(0);
+  expect(staleSummary["POST /api/agent/runs/[id]/resume"] || 0).toBe(0);
+  expect(Object.entries(staleSummary).filter(([key]) => key.startsWith("POST /api/tools/"))).toEqual([]);
+  const reloadSummary = h4.requestSummarySince(reloadBoundary);
+  expect(reloadSummary["POST /api/agent/runs"] || 0).toBe(0);
+  expect(reloadSummary["POST /api/agent/runs/[id]/input"] || 0).toBe(0);
+  expect(reloadSummary["POST /api/agent/runs/[id]/resume"] || 0).toBe(0);
+  const metricsBeforeNextTask = await h4.metrics();
+  expect(metricsBeforeNextTask.chatRequests).toHaveLength(1);
+  expect(metricsBeforeNextTask.chatRequests[0]).toMatchObject({
+    scenario: "terminal-questionnaire-call",
+    hasToolResult: false,
+  });
+  expect(metricsBeforeNextTask.chatRequests.some((request) => request.hasToolResult)).toBe(false);
+  expect(metricsBeforeNextTask.toolExecutions).toEqual([]);
+
+  await page.locator("#prompt").fill("H4_PLAIN_USER");
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.assistant").filter({hasText: "H4_PLAIN_FINAL"}))
+    .toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const agentRunIds = h4.controlIds().agentRunIds;
+  expect(new Set(agentRunIds).size).toBe(2);
+  expect(agentRunIds).toContain(agentRunId);
+  const laterAgentRunId = agentRunIds.find((candidate) => candidate !== agentRunId);
+  expect(laterAgentRunId).toBeTruthy();
+  const cancelledAgentRunHash = idHash(agentRunId);
+  const laterAgentRunHash = idHash(laterAgentRunId);
+  await expect.poll(async () => {
+    const agentRuns = (await h4.metrics()).production.agentRuns;
+    const statusByIdentity = Object.fromEntries(
+      agentRuns.map((run) => [run.agentRunId, run.status]),
+    );
+    return {
+      runCount: agentRuns.length,
+      cancelled: statusByIdentity[cancelledAgentRunHash] || "",
+      later: statusByIdentity[laterAgentRunHash] || "",
+    };
+  }).toEqual({runCount: 2, cancelled: "cancelled", later: "completed"});
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-terminal-questionnaire-stale-reload`, {
+    cancelledStatus: cancelledAgent.body.status,
+    questionnaireCleared: !session.body.runState?.userInputRequest,
+    sessionStatus: session.body.runState?.status,
+    inputPosts: staleSummary["POST /api/agent/runs/[id]/input"] || 0,
+    resumePosts: staleSummary["POST /api/agent/runs/[id]/resume"] || 0,
+    cancellationClosures: cancellationClosures.length,
+    reloadEventDelta: eventProjection(cancelledAgent.body).length
+      - cancelledEventsBeforeReload.length,
+    reloadExecutionDelta: executionProjection(cancelledAgent.body).length
+      - cancelledExecutionsBeforeReload.length,
+    upstreamToolResultsBeforeNextTask: metricsBeforeNextTask.chatRequests
+      .filter((request) => request.hasToolResult).length,
+    cancelledAgentRun: cancelledAgentRunHash,
+    laterAgentRun: laterAgentRunHash,
+    laterTaskCompleted: true,
   });
 }
 
@@ -18139,6 +18407,22 @@ test("direct classic mixed questionnaire preserves progress across reload and su
   await exerciseMixedQuestionnaireProgressLifecycle(h4, "classic");
 });
 
+test("bundle terminal questionnaire accepts two text answers and continues once", async ({ h4 }) => {
+  await exerciseTerminalQuestionnaireHealthy(h4, "bundle");
+});
+
+test("direct classic terminal questionnaire accepts two text answers and continues once", async ({ h4 }) => {
+  await exerciseTerminalQuestionnaireHealthy(h4, "classic");
+});
+
+test("bundle terminal questionnaire clears cancelled stale input after reload", async ({ h4 }) => {
+  await exerciseTerminalQuestionnaireStaleReload(h4, "bundle");
+});
+
+test("direct classic terminal questionnaire clears cancelled stale input after reload", async ({ h4 }) => {
+  await exerciseTerminalQuestionnaireStaleReload(h4, "classic");
+});
+
 test("bundle edit authorization approve survives reload and applies exactly once", async ({ h4 }) => {
   await exerciseEditAuthorizationLifecycle(h4, "bundle", "approved");
 });
@@ -24975,19 +25259,22 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
   const examples = onboarding.locator(".onboarding-example");
   await expect(examples).toHaveCount(3);
   expect(await examples.allTextContents()).toEqual([
-    "Introduce the current project structure and identify the main entry files",
-    "Check the current project for obvious problems. Analyze only and do not modify files",
-    "Make a small change to the current project and explain the verification results afterward",
+    "Please introduce what Code can do and recommend a few tasks that are good for a first try.",
+    "First ask what content and web address I want to organize, then access the web to read it and summarize the key conclusions and sources.",
+    "Use a questionnaire to understand the small HTML project I want to make, then create a Goal and generate and verify a single-file HTML page that I can open directly.",
   ]);
   await expect(onboarding.locator(".onboarding-examples")).toHaveAttribute("role", "group");
   const exampleBoundary = h4.requestBoundary();
   await examples.nth(0).click();
   await expect(page.locator("#prompt")).toHaveValue(
-    "Introduce the current project structure and identify the main entry files",
+    "Please introduce what Code can do and recommend a few tasks that are good for a first try.",
   );
   expect(Object.keys(h4.requestSummarySince(exampleBoundary)).filter((key) => key.startsWith("POST "))).toEqual([]);
   expect((await storedState()).completedTaskIds).toEqual(["workbar", "key"]);
+  const customFillBoundary = h4.requestBoundary();
   await page.locator("#prompt").fill(ONBOARDING_FIRST_TASK_USER);
+  expect(Object.keys(h4.requestSummarySince(customFillBoundary)).filter((key) => key.startsWith("POST "))).toEqual([]);
+  expect((await storedState()).completedTaskIds).toEqual(["workbar", "key"]);
   const agentRunRequestPromise = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return request.method() === "POST" && url.pathname === "/api/agent/runs";
@@ -24999,7 +25286,41 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
   expect(agentRunBody?.keys).toEqual([h4.host.syntheticKey]);
   await expect(onboarding).toHaveAttribute("data-onboarding-state", "complete");
   await expect(onboarding.locator("[data-onboarding-complete]")).toHaveCount(1);
+  await expect(onboarding.locator("[data-onboarding-complete]")).toContainText("You're ready to use Code");
+  await expect(onboarding.locator("[data-onboarding-complete]")).toContainText("You've completed all getting-started tasks");
   await expect(onboarding.locator(".onboarding-card")).toHaveCount(0);
+  const completionLayout = await page.evaluate(() => {
+    const chatPane = document.querySelector(".chat-pane");
+    const onboardingRoot = document.querySelector("#onboardingTasks");
+    const celebration = onboardingRoot?.querySelector("[data-onboarding-complete]");
+    const composer = document.querySelector("#chatForm");
+    const chatRect = chatPane?.getBoundingClientRect();
+    const celebrationRect = celebration?.getBoundingClientRect();
+    const composerRect = composer?.getBoundingClientRect();
+    const rootStyle = onboardingRoot ? getComputedStyle(onboardingRoot) : null;
+    return {
+      rootParentIsChatPane: onboardingRoot?.parentElement === chatPane,
+      rootPosition: rootStyle?.position || "",
+      rootPointerEvents: rootStyle?.pointerEvents || "",
+      centeredX: chatRect && celebrationRect
+        ? Math.abs((chatRect.left + chatRect.width / 2) - (celebrationRect.left + celebrationRect.width / 2))
+        : null,
+      centeredY: chatRect && celebrationRect
+        ? Math.abs((chatRect.top + chatRect.height / 2) - (celebrationRect.top + celebrationRect.height / 2))
+        : null,
+      composerRect: composerRect ? {
+        x: composerRect.x,
+        y: composerRect.y,
+        width: composerRect.width,
+        height: composerRect.height,
+      } : null,
+    };
+  });
+  expect(completionLayout.rootParentIsChatPane).toBe(true);
+  expect(completionLayout.rootPosition).toBe("absolute");
+  expect(completionLayout.rootPointerEvents).toBe("none");
+  expect(completionLayout.centeredX).toBeLessThanOrEqual(1);
+  expect(completionLayout.centeredY).toBeLessThanOrEqual(1);
   await expect(page.locator("#messages article.msg.user").filter({
     hasText: ONBOARDING_FIRST_TASK_USER,
   })).toHaveCount(1);
@@ -25008,6 +25329,11 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
     hasText: "H4_PLAIN_FINAL",
   })).toHaveCount(1);
   await expect(onboarding).toHaveAttribute("data-onboarding-state", "hidden");
+  const composerAfterCelebration = await page.locator("#chatForm").boundingBox();
+  expect(composerAfterCelebration).not.toBeNull();
+  for (const key of ["x", "y", "width", "height"]) {
+    expect(Math.abs(composerAfterCelebration[key] - completionLayout.composerRect[key])).toBeLessThanOrEqual(0.5);
+  }
 
   const completedState = await storedState();
   expect(Object.keys(completedState).sort()).toEqual([
@@ -25060,6 +25386,7 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
     firstTaskCompletedAfterAgentRunCreate: true,
     directChatHiddenUntilNewWelcome: true,
     completionPlayedOnce: true,
+    completionLayout,
     settingsReopenReset: true,
     desktopLayout,
     narrowLayout,

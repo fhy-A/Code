@@ -1636,6 +1636,24 @@ const failedWriteIntent = failing.beginIntent("workbar");
 const failedWriteResult = failing.resolveIntent(failedWriteIntent, true);
 const failedWriteState = failing.snapshot();
 
+const firstTaskStorage = new MemoryStorage({{
+  "code-onboarding-tasks-v1": JSON.stringify({{
+    version: 2,
+    completedTaskIds: ["workbar", "key"],
+    completed: false,
+  }}),
+}});
+const firstTask = createOnboardingStateMachine({{storage: firstTaskStorage, nonceFactory: () => "first"}});
+firstTask.initialize({{hasExistingSessions: false}});
+const fillOnlyState = firstTask.snapshot();
+const cancelledFirstTaskIntent = firstTask.beginIntent("first-task");
+const cancelResult = firstTask.cancelIntent(cancelledFirstTaskIntent);
+const afterCancelState = firstTask.snapshot();
+const failedDispatchIntent = firstTask.beginIntent("first-task");
+const failedDispatchClaim = firstTask.claimIntent("first-task");
+const failedDispatchResult = firstTask.resolveIntent(failedDispatchIntent, false);
+const afterFailedDispatchState = firstTask.snapshot();
+
 process.stdout.write(JSON.stringify({{
   initial,
   passive,
@@ -1663,6 +1681,13 @@ process.stdout.write(JSON.stringify({{
   failedWriteResult,
   failedWriteState,
   storageErrors,
+  fillOnlyState,
+  cancelResult,
+  afterCancelState,
+  failedDispatchClaim,
+  failedDispatchIntent,
+  failedDispatchResult,
+  afterFailedDispatchState,
 }}));
 """
         completed = subprocess.run(
@@ -1720,6 +1745,186 @@ process.stdout.write(JSON.stringify({{
         self.assertFalse(result["failedWriteResult"])
         self.assertEqual(result["failedWriteState"], fresh)
         self.assertGreaterEqual(result["storageErrors"], 2)
+        first_task_pending = {**fresh, "completedTaskIds": ["workbar", "key"]}
+        self.assertEqual(result["fillOnlyState"], first_task_pending)
+        self.assertTrue(result["cancelResult"])
+        self.assertEqual(result["afterCancelState"], first_task_pending)
+        self.assertEqual(result["failedDispatchClaim"], result["failedDispatchIntent"])
+        self.assertFalse(result["failedDispatchResult"])
+        self.assertEqual(result["afterFailedDispatchState"], first_task_pending)
+
+    def test_onboarding_completion_is_one_shot_and_out_of_composer_flow(self):
+        script = f"""
+global.window = {{Code: {{features: {{}}}}}};
+eval({json.dumps(ONBOARDING_TASKS_SOURCE)});
+const {{createOnboardingTasksFeature}} = window.Code.features.onboardingTasks;
+
+function makeClassList() {{
+  const values = new Set();
+  return {{
+    toggle(name, force) {{
+      const enabled = force === undefined ? !values.has(name) : Boolean(force);
+      if (enabled) values.add(name); else values.delete(name);
+      return enabled;
+    }},
+    contains(name) {{ return values.has(name); }},
+  }};
+}}
+function attach(parent, child, before = null) {{
+  if (child.parentElement) {{
+    const index = child.parentElement.children.indexOf(child);
+    if (index >= 0) child.parentElement.children.splice(index, 1);
+  }}
+  const targetIndex = before ? parent.children.indexOf(before) : -1;
+  if (targetIndex >= 0) parent.children.splice(targetIndex, 0, child);
+  else parent.children.push(child);
+  child.parentElement = parent;
+}}
+function makeTree() {{
+  const host = {{name: "chatPane", children: [], appendChild(child) {{ attach(this, child); }}}};
+  const stack = {{
+    name: "composerStack",
+    children: [],
+    parentElement: host,
+    appendChild(child) {{ attach(this, child); }},
+    insertBefore(child, before) {{ attach(this, child, before); }},
+    closest(selector) {{ return selector === ".chat-pane" ? host : null; }},
+  }};
+  host.children.push(stack);
+  const listeners = {{}};
+  const root = {{
+    parentElement: stack,
+    nextSibling: null,
+    classList: makeClassList(),
+    dataset: {{}},
+    innerHTML: "",
+    addEventListener(type, callback) {{ listeners[type] = callback; }},
+  }};
+  stack.children.push(root);
+  return {{host, stack, root, listeners}};
+}}
+class MemoryStorage {{
+  constructor(value) {{ this.value = value; }}
+  getItem() {{ return this.value; }}
+  setItem(key, value) {{ this.value = String(value); }}
+}}
+const firstTaskRaw = JSON.stringify({{
+  version: 2,
+  completedTaskIds: ["workbar", "key"],
+  completed: false,
+}});
+let scheduled = null;
+let scheduleCount = 0;
+window.setTimeout = (callback, delay) => {{ scheduled = {{callback, delay}}; scheduleCount += 1; return scheduleCount; }};
+window.clearTimeout = () => {{ scheduled = null; }};
+window.requestAnimationFrame = () => 0;
+const tree = makeTree();
+const feature = createOnboardingTasksFeature({{
+  root: tree.root,
+  storage: new MemoryStorage(firstTaskRaw),
+  t: (key) => ({{
+    onboardingCompleteTitle: "您已准备好使用 Code",
+    onboardingCompleteDescription: "新手任务已全部完成",
+  }}[key] || key),
+  actions: {{"first-task": async () => ({{pending: true, ready: true}})}},
+}});
+feature.bind();
+feature.initialize({{hasExistingSessions: false, isWelcomeVisible: true}});
+tree.listeners.click({{target: {{closest(selector) {{
+  if (selector === "[data-onboarding-example]") return null;
+  if (selector === "[data-onboarding-task-action]") return {{dataset: {{onboardingTaskAction: "first-task"}}}};
+  return null;
+}}}}}});
+
+setImmediate(() => {{
+  const intentId = feature.claimFirstTaskIntent();
+  const completed = feature.completeIntent(intentId);
+  const live = {{
+    completed,
+    parentIsHost: tree.root.parentElement === tree.host,
+    stackChildren: tree.stack.children.length,
+    celebrating: tree.root.classList.contains("is-celebrating"),
+    hidden: tree.root.classList.contains("hidden"),
+    copyVisible: tree.root.innerHTML.includes("您已准备好使用 Code")
+      && tree.root.innerHTML.includes("新手任务已全部完成"),
+    roleStatus: tree.root.innerHTML.includes('role="status"'),
+    delay: scheduled?.delay,
+    scheduleCount,
+  }};
+  scheduled.callback();
+  const afterTimer = {{
+    parentIsInline: tree.root.parentElement === tree.stack,
+    celebrating: tree.root.classList.contains("is-celebrating"),
+    hidden: tree.root.classList.contains("hidden"),
+    completionPresent: tree.root.innerHTML.includes("data-onboarding-complete"),
+  }};
+  feature.initialize({{hasExistingSessions: false, isWelcomeVisible: true}});
+  const afterReload = {{
+    scheduleCount,
+    celebrating: tree.root.classList.contains("is-celebrating"),
+    hidden: tree.root.classList.contains("hidden"),
+    completionPresent: tree.root.innerHTML.includes("data-onboarding-complete"),
+  }};
+  const migratedTree = makeTree();
+  const migratedFeature = createOnboardingTasksFeature({{
+    root: migratedTree.root,
+    storage: new MemoryStorage(JSON.stringify({{
+      version: 1,
+      completedTaskIds: ["workbar", "key", "model", "first-task"],
+      completed: true,
+      collapsed: false,
+    }})),
+  }});
+  migratedFeature.initialize({{hasExistingSessions: false, isWelcomeVisible: true}});
+  const afterMigration = {{
+    scheduleCount,
+    parentIsInline: migratedTree.root.parentElement === migratedTree.stack,
+    celebrating: migratedTree.root.classList.contains("is-celebrating"),
+    hidden: migratedTree.root.classList.contains("hidden"),
+    completionPresent: migratedTree.root.innerHTML.includes("data-onboarding-complete"),
+  }};
+  process.stdout.write(JSON.stringify({{live, afterTimer, afterReload, afterMigration}}));
+}});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["live"], {
+            "completed": True,
+            "parentIsHost": True,
+            "stackChildren": 0,
+            "celebrating": True,
+            "hidden": False,
+            "copyVisible": True,
+            "roleStatus": True,
+            "delay": 2400,
+            "scheduleCount": 1,
+        })
+        self.assertEqual(result["afterTimer"], {
+            "parentIsInline": True,
+            "celebrating": False,
+            "hidden": True,
+            "completionPresent": False,
+        })
+        self.assertEqual(result["afterReload"], {
+            "scheduleCount": 1,
+            "celebrating": False,
+            "hidden": True,
+            "completionPresent": False,
+        })
+        self.assertEqual(result["afterMigration"], {
+            "scheduleCount": 1,
+            "parentIsInline": True,
+            "celebrating": False,
+            "hidden": True,
+            "completionPresent": False,
+        })
 
     def test_onboarding_actions_use_explicit_real_success_boundaries(self):
         self.assertIn("isWelcomeVisible: state.messages.length === 0 && !state.sessionId", APP_SOURCE)
@@ -1748,6 +1953,9 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("beginNewConversation(projectIdForNewConversation())", APP_SOURCE)
         self.assertIn('data-onboarding-example="${index}"', ONBOARDING_TASKS_SOURCE)
         self.assertIn('els.prompt.dispatchEvent(new Event("input", { bubbles: true }))', APP_SOURCE)
+        self.assertIn('permissionProfile: getStoredValue("code-permission-profile") || "accept"', STATE_SOURCE)
+        self.assertIn('setThinkingLevel(localStorage.getItem("code-thinking") || "auto")', APP_SOURCE)
+        self.assertIn('const savedPerm = localStorage.getItem("code-permission-profile") || "accept"', APP_SOURCE)
 
         for key in (
             "onboardingTitle",
@@ -1762,6 +1970,19 @@ process.stdout.write(JSON.stringify({{
             "onboardingSettingsAction",
         ):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+        for copy in (
+            "请介绍 Code 能做什么，并推荐几个适合第一次尝试的任务。",
+            "请先询问我想整理的内容和网页地址，再联网读取并整理关键结论与来源。",
+            "请通过问卷了解我想制作的 HTML 小项目，再创建 Goal，生成并验证一个可直接打开的单文件 HTML。",
+            "您已准备好使用 Code",
+            "新手任务已全部完成",
+            "Please introduce what Code can do and recommend a few tasks that are good for a first try.",
+            "First ask what content and web address I want to organize, then access the web to read it and summarize the key conclusions and sources.",
+            "Use a questionnaire to understand the small HTML project I want to make, then create a Goal and generate and verify a single-file HTML page that I can open directly.",
+            "You're ready to use Code",
+            "You've completed all getting-started tasks",
+        ):
+            self.assertIn(copy, I18N_SOURCE)
         self.assertIn("const composerRoot = els.composerStack || els.chatForm", APP_SOURCE)
         self.assertIn("composerResizeObserver.observe(composerRoot)", APP_SOURCE)
         self.assertIn(".chat-pane.empty-chat .composer-stack {", STYLE_SOURCE)
@@ -1781,8 +2002,19 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("box-shadow: none;", STYLE_SOURCE)
         self.assertNotIn(".onboarding-restore", STYLE_SOURCE)
         self.assertNotIn(".onboarding-later", STYLE_SOURCE)
+        self.assertIn("const celebrationHost = options.celebrationHost", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("mountCelebrationRoot();", ONBOARDING_TASKS_SOURCE)
+        self.assertIn('root.classList.toggle("is-celebrating", celebrating)', ONBOARDING_TASKS_SOURCE)
+        self.assertIn("pointer-events: none;", STYLE_SOURCE)
+        self.assertIn("@keyframes onboardingCelebrationHalo", STYLE_SOURCE)
         self.assertIn("@media (prefers-reduced-motion: reduce)", STYLE_SOURCE)
-        self.assertIn(".onboarding-complete { animation: none; }", STYLE_SOURCE)
+        self.assertIn(".onboarding-celebration { animation: onboardingCelebrationFade .18s ease-out both; }", STYLE_SOURCE)
+        celebration_start = STYLE_SOURCE.index("@keyframes onboardingCelebrationIn {")
+        celebration_end = STYLE_SOURCE.index("@keyframes onboardingCelebrationHalo", celebration_start)
+        celebration_keyframes = STYLE_SOURCE[celebration_start:celebration_end]
+        self.assertIn("transform: scale(.96);", celebration_keyframes)
+        self.assertIn("transform: scale(1);", celebration_keyframes)
+        self.assertNotIn("translate", celebration_keyframes)
 
     def test_composer_controls_do_not_implicitly_submit_prompt(self):
         form_start = INDEX_SOURCE.index('<form id="chatForm"')
@@ -1815,6 +2047,71 @@ process.stdout.write(JSON.stringify({{
         self.assertNotIn("global." + "AgentRuntime", RUNTIME_SOURCE)
         self.assertNotIn("window." + "AgentRuntime", APP_SOURCE)
         self.assertIn("const agentRuntime = window.Code.agent.runtime;", APP_SOURCE)
+
+    def test_agent_runtime_questionnaire_error_contract_is_machine_readable(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const requests = [];
+global.fetch = async (url, options = {{}}) => {{
+  requests.push({{url, body: JSON.parse(options.body || "{{}}")}});
+  if (requests.length === 1) return {{
+    ok: false,
+    status: 409,
+    async json() {{ return {{
+      error: "opaque server message",
+      errorCode: "agent_run_input_inactive",
+      agentRunId: "run-1",
+      agentRunStatus: "cancelled",
+      pendingInputRequestId: "request-1",
+      retryable: false,
+    }}; }},
+  }};
+  return {{ok: true, status: 200, async json() {{ return {{ok: true}}; }}}};
+}};
+eval({json.dumps(RUNTIME_SOURCE)});
+(async () => {{
+  let rejected = null;
+  try {{
+    await window.Code.agent.runtime.submitAgentInput("run-1", {{
+      requestId: "request-1",
+      answers: [{{id: "url", status: "resolved", text: "你帮我找"}}],
+    }});
+  }} catch (error) {{
+    rejected = {{
+      httpStatus: error.status,
+      errorCode: error.errorCode,
+      agentRunId: error.agentRunId,
+      agentRunStatus: error.agentRunStatus,
+      pendingInputRequestId: error.pendingInputRequestId,
+      retryable: error.retryable,
+    }};
+  }}
+  await window.Code.agent.runtime.submitAgentInput("run-1", {{answers: []}});
+  process.stdout.write(JSON.stringify({{requests, rejected}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["requests"][0]["body"], {
+            "answers": [{"id": "url", "status": "resolved", "text": "你帮我找"}],
+            "requestId": "request-1",
+        })
+        self.assertEqual(data["requests"][1]["body"], {"answers": []})
+        self.assertEqual(data["rejected"], {
+            "httpStatus": 409,
+            "errorCode": "agent_run_input_inactive",
+            "agentRunId": "run-1",
+            "agentRunStatus": "cancelled",
+            "pendingInputRequestId": "request-1",
+            "retryable": False,
+        })
 
     def test_agent_runtime_registers_only_inside_code_namespace(self):
         script = f"""
@@ -2514,6 +2811,9 @@ process.stdout.write(JSON.stringify({
         for expected in (
             "function getUserInputRequest(",
             "function restoreUserInputRequest(",
+            "function classifyAgentUserInputState(",
+            "async function invalidateServerUserInputRequest(",
+            "async function reconcilePersistedUserInputRequest(",
             "if (current?.id === savedRequest.id) return current;",
             "const restored = JSON.parse(JSON.stringify(savedRequest));",
             "async function requestUserInput(",
@@ -2534,7 +2834,50 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(APP_SOURCE.count("requestUserInput("), 2)
         self.assertIn("await requestServerAgentInput(ctx, snapshot.pendingInput)", APP_SOURCE)
         self.assertIn("_agentRunId: ctx.agentRunId", APP_SOURCE)
-        self.assertIn("restoreUserInputRequest(session.id, session.runState?.userInputRequest)", APP_SOURCE)
+        self.assertIn("await reconcilePersistedUserInputRequest(", APP_SOURCE)
+        self.assertIn("requestId: request.id", APP_SOURCE)
+        self.assertNotIn("Agent run is not waiting for user input", APP_SOURCE)
+
+        navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
+        navigation_end = SESSIONS_SOURCE.index("function createSessionStartup(", navigation_start)
+        navigation_source = SESSIONS_SOURCE[navigation_start:navigation_end]
+        set_run_state = navigation_source.index(
+            "setSessionRunState(session.id, session.runState || getSessionRunState(session.id));"
+        )
+        reconcile_request = navigation_source.index(
+            "await recovery.reconcilePersistedUserInputRequest("
+        )
+        restore_authorization = navigation_source.index(
+            "recovery.restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);"
+        )
+        render_messages = navigation_source.index("view.renderMessages();", restore_authorization)
+        self.assertLess(set_run_state, reconcile_request)
+        self.assertLess(reconcile_request, restore_authorization)
+        self.assertLess(restore_authorization, render_messages)
+        navigation_wiring_start = APP_SOURCE.index("const sessionNavigation = createSessionNavigation({")
+        navigation_wiring_end = APP_SOURCE.index("const {", navigation_wiring_start)
+        self.assertIn(
+            "reconcilePersistedUserInputRequest,",
+            APP_SOURCE[navigation_wiring_start:navigation_wiring_end],
+        )
+
+        terminal_start = source.index("function terminalQuestionnaireRunState(")
+        invalidate_start = source.index("async function invalidateServerUserInputRequest(")
+        invalidate_end = source.index("async function reconcilePersistedUserInputRequest(", invalidate_start)
+        terminal_source = source[terminal_start:invalidate_start]
+        invalidate_source = source[invalidate_start:invalidate_end]
+        self.assertIn("userInputRequest: null", terminal_source)
+        self.assertIn("{ persistMessages: false }", invalidate_source)
+        self.assertNotIn("appendUserInputSummary", invalidate_source)
+        self.assertNotIn("resumePersistedSessionRun", invalidate_source)
+        self.assertNotIn('role: "tool-result"', invalidate_source)
+
+        for key in (
+            "questionnaireRunEnded",
+            "questionnaireStatusUnavailable",
+            "questionnaireRetry",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
 
         for forbidden in (
             "state.",
@@ -2547,6 +2890,80 @@ process.stdout.write(JSON.stringify({
             "resumePersistedSessionRun",
         ):
             self.assertNotIn(forbidden, QUESTIONNAIRE_SOURCE)
+
+    def test_questionnaire_reconciliation_is_authoritative_and_retryable(self):
+        start = APP_SOURCE.index("const AUTHORITATIVE_AGENT_INPUT_ERROR_CODES")
+        end = APP_SOURCE.index("function buildUserInputResult(", start)
+        source = APP_SOURCE[start:end]
+        script = f"""
+{source}
+const request = {{id: "request-1", agentRunId: "run-1"}};
+const retryRequest = {{...request}};
+setUserInputReconcileRetry(retryRequest, true);
+process.stdout.write(JSON.stringify({{
+  matched: classifyAgentUserInputState(request, {{
+    status: "waiting_user_input",
+    pendingInput: {{requestId: "request-1"}},
+  }}),
+  completed: classifyAgentUserInputState(request, {{status: "completed"}}),
+  cancelled: classifyAgentUserInputState(request, {{status: "cancelled"}}),
+  mismatched: classifyAgentUserInputState(request, {{
+    status: "waiting_user_input",
+    pendingInput: {{requestId: "request-2"}},
+  }}),
+  notFound: classifyAgentUserInputState(request, null, {{status: 404}}),
+  transient: classifyAgentUserInputState(request, null, {{status: 503}}),
+  invalidSnapshot: classifyAgentUserInputState(request, {{}}),
+  inactive: classifyAgentUserInputState(request, null, {{
+    status: 409,
+    errorCode: "agent_run_input_inactive",
+    agentRunStatus: "failed",
+  }}),
+  retrySerialized: JSON.stringify(retryRequest),
+  completedState: terminalQuestionnaireRunState({{
+    status: "waiting-user-input",
+    userInputRequest: {{id: "request-1"}},
+    backgroundRuns: [{{id: "background-1"}}],
+  }}, "completed"),
+  cancelledState: terminalQuestionnaireRunState({{
+    status: "waiting-user-input",
+    userInputRequest: {{id: "request-1"}},
+    agentRunId: "run-1",
+  }}, "cancelled"),
+  failedState: terminalQuestionnaireRunState({{
+    status: "waiting-user-input",
+    userInputRequest: {{id: "request-1"}},
+  }}, "failed"),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["matched"]["action"], "keep")
+        self.assertEqual(data["completed"], {
+            "action": "clear", "status": "completed", "reason": "terminal", "pendingRequestId": "",
+        })
+        self.assertEqual(data["cancelled"]["action"], "clear")
+        self.assertEqual(data["mismatched"], {
+            "action": "clear", "status": "waiting_user_input", "reason": "request_mismatch",
+            "pendingRequestId": "request-2",
+        })
+        self.assertEqual(data["notFound"]["action"], "clear")
+        self.assertEqual(data["transient"]["action"], "retry")
+        self.assertEqual(data["invalidSnapshot"]["action"], "retry")
+        self.assertEqual(data["inactive"]["status"], "failed")
+        self.assertNotIn("_reconcileRetry", data["retrySerialized"])
+        self.assertEqual(data["completedState"], {"backgroundRuns": [{"id": "background-1"}]})
+        self.assertEqual(data["cancelledState"]["status"], "paused")
+        self.assertIsNone(data["cancelledState"]["userInputRequest"])
+        self.assertEqual(data["failedState"]["status"], "failed")
+        self.assertIsNone(data["failedState"]["userInputRequest"])
 
     def test_subagent_context_and_background_prompt_are_pure_module_behaviors(self):
         script = f"""
@@ -4053,6 +4470,11 @@ eval({json.dumps(helper_source)});
         self.assertIsNotNone(delegation_match)
         security_layer = security_match.group(1).strip()
         delegation_rules = delegation_match.group(1)
+        self.assertIn("通过 workbar 连接模型服务。", security_layer)
+        self.assertIn("解释模型连接方式时，统一称为 workbar", security_layer)
+        self.assertIn("不展开、猜测或披露其底层网关实现", security_layer)
+        self.assertNotIn("API 中转站", security_layer)
+        self.assertNotIn("New API", security_layer)
         script = r"""
 const crypto = require("crypto");
 global.window = {};
@@ -4202,11 +4624,11 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["definitions"][-1]["name"], "permission")
         self.assertEqual(
             data["normalizedLegacyHash"],
-            "fe75a6a05aab162277a879ac0be027d6cecfe867b1f15d6f819b07bff9226e0b",
+            "496090a3e5625836c49adb16de4bedde935ddcdfe77a6dfa03c2e40e12377d46",
         )
         self.assertEqual(
             data["newHash"],
-            "120cb9f8de208a9f2848b1d0f7564c73bbdce739aa2285f2d53049ffecb45d9e",
+            "740ee2b019b3a641963b0d0311a9f0500d233c1d7a458e53d08f542e71b824f5",
         )
         self.assertEqual(data["environment"]["timeZone"], "Asia/Shanghai UTC+08:00")
         self.assertIn("（Asia/Shanghai UTC+08:00）", data["environment"]["instruction"])
@@ -7035,7 +7457,16 @@ const view = {
   showToast: (message, kind) => events.push(["toast", message, kind]),
 };
 const recovery = {
-  restoreUserInputRequest: (sessionId, request) => events.push(["user-input", sessionId, request?.id || ""]),
+  reconcilePersistedUserInputRequest: async (sessionId, request) => {
+    events.push(["user-input-start", sessionId, request?.id || ""]);
+    await Promise.resolve();
+    stateAccessors.setSessionRunState(sessionId, {
+      ...stateAccessors.getSessionRunState(sessionId),
+      status: "paused",
+      userInputRequest: null,
+    });
+    events.push(["user-input-finish", sessionId, stateAccessors.getSessionRunState(sessionId).status]);
+  },
   restoreAuthorizationRequest: (sessionId, request) => events.push(["authorization", sessionId, request?.id || ""]),
 };
 const branch = {
@@ -7094,6 +7525,7 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
     stats: state.stats,
     lastUsage: state.lastUsage,
     branchPanelOpen: state.branchPanelOpen,
+    runState: state._sessionRunStates.beta,
     foregroundView: values.get("code-foreground-view"),
     lastSession: values.get("code-last-session"),
   };
@@ -7136,6 +7568,14 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         self.assertEqual(result["afterLoad"]["stats"], {"input": 7, "output": 8, "cache": 9, "cost": 1})
         self.assertEqual(result["afterLoad"]["lastUsage"], {"total_tokens": 24})
         self.assertFalse(result["afterLoad"]["branchPanelOpen"])
+        self.assertEqual(
+            result["afterLoad"]["runState"],
+            {
+                "status": "paused",
+                "userInputRequest": None,
+                "authorizationRequest": {"id": "authorization-beta", "status": "pending"},
+            },
+        )
         self.assertEqual(result["afterLoad"]["foregroundView"], "session")
         self.assertEqual(result["afterLoad"]["lastSession"], "beta")
         self.assertEqual(
@@ -7154,9 +7594,22 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         )
         self.assertIn(["create", {"title": "Created", "projectId": "p2", "cwd": "C:/Two"}], result["events"])
         self.assertIn(["get", "beta"], result["events"])
-        self.assertIn(["user-input", "beta", "question-beta"], result["events"])
+        self.assertIn(["user-input-start", "beta", "question-beta"], result["events"])
+        self.assertIn(["user-input-finish", "beta", "paused"], result["events"])
         self.assertIn(["authorization", "beta", "authorization-beta"], result["events"])
         self.assertIn(["scroll", "beta"], result["events"])
+        self.assertLess(
+            result["events"].index(["user-input-start", "beta", "question-beta"]),
+            result["events"].index(["user-input-finish", "beta", "paused"]),
+        )
+        self.assertLess(
+            result["events"].index(["user-input-finish", "beta", "paused"]),
+            result["events"].index(["authorization", "beta", "authorization-beta"]),
+        )
+        self.assertLess(
+            result["events"].index(["authorization", "beta", "authorization-beta"]),
+            result["events"].index(["render-messages", "beta"]),
+        )
 
     def test_session_navigation_only_isolates_goal_for_an_accepted_switch_and_restores_on_failure(self):
         script = r"""
@@ -7218,7 +7671,7 @@ const view = {
 };
 const navigation = window.Code.features.sessions.createSessionNavigation({
   state, elements, storage, data, stateAccessors, project, branch,
-  recovery: {restoreUserInputRequest() {}, restoreAuthorizationRequest() {}},
+  recovery: {reconcilePersistedUserInputRequest: async () => {}, restoreAuthorizationRequest() {}},
   view, t: () => "Untitled",
 });
 
@@ -7505,7 +7958,7 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
     syncMetadata: (summaries, session) => summaries.find((item) => item.id === session.id),
   },
   recovery: {
-    restoreUserInputRequest: () => {},
+    reconcilePersistedUserInputRequest: async () => {},
     restoreAuthorizationRequest: () => {},
   },
   view,

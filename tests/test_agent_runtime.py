@@ -156,7 +156,12 @@ class _AgentUpstream(BaseHTTPRequestHandler):
             for message in messages
         )
         asks_user = any(
-            message.get("role") == "user" and message.get("content") == "ask for target"
+            message.get("role") == "user"
+            and message.get("content") in {"ask for target", "ask for URL"}
+            for message in messages
+        )
+        asks_user_for_text = any(
+            message.get("role") == "user" and message.get("content") == "ask for URL"
             for message in messages
         )
         proposes_edit = any(
@@ -467,7 +472,13 @@ class _AgentUpstream(BaseHTTPRequestHandler):
             arguments = {
                 "title": "Choose a target",
                 "reason": "The target cannot be inferred from the project.",
-                "questions": [{
+                "questions": ([{
+                    "id": "url",
+                    "prompt": "Which URL should be analyzed?",
+                    "type": "text",
+                    "required": True,
+                    "allowOther": False,
+                }] if asks_user_for_text else [{
                     "id": "target",
                     "prompt": "Which target should be analyzed?",
                     "type": "single",
@@ -477,7 +488,7 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                         {"value": "api", "label": "API", "description": "Analyze the API."},
                         {"value": "ui", "label": "UI", "description": "Analyze the UI."},
                     ],
-                }],
+                }]),
             }
             frames = [{
                 "choices": [{
@@ -4374,6 +4385,37 @@ class TestDurableAgentRuntime(unittest.TestCase):
         ):
             self.assertIn(expected, event_types)
 
+    def test_agent_text_question_accepts_nonempty_text_without_prompt_parsing(self):
+        run = server_mod._create_agent_run(
+            "question-text-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "ask for URL"}],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["request_user_input"]],
+            },
+            self.base_url,
+            ["question-text-key"],
+            allowed_tools=["request_user_input"],
+        )
+        self._wait_status(run, "waiting_user_input")
+        self._wait_worker_idle(run)
+
+        pending = server_mod._agent_snapshot(run, 0)["pendingInput"]
+        self.assertEqual(pending["questions"][0]["prompt"], "Which URL should be analyzed?")
+        result = server_mod._submit_agent_input(
+            run,
+            [{
+                "id": "url",
+                "status": "resolved",
+                "text": "你帮我找",
+            }],
+            request_id=pending["requestId"],
+        )
+        self.assertEqual(result["answers"][0]["text"], "你帮我找")
+        self.assertEqual(result["answers"][0]["answer"], "你帮我找")
+        self.assertEqual(run["status"], "waiting_credentials")
+        server_mod._cancel_agent_run(run["id"])
+
     def test_active_agent_steer_is_durable_idempotent_and_consumed_once(self):
         with _AgentUpstream.scripted_lock:
             _AgentUpstream.scripted_rounds = [
@@ -5056,6 +5098,98 @@ class TestDurableAgentRuntime(unittest.TestCase):
                     break
             self.assertEqual(snapshot.get("status"), "completed")
             self.assertEqual(snapshot.get("result", {}).get("content"), "questionnaire task complete")
+        finally:
+            http_server.shutdown()
+            http_server.server_close()
+            thread.join(timeout=2)
+
+    def test_http_questionnaire_rejection_is_structured_and_has_no_side_effects(self):
+        server_mod.ThreadingHTTPServer.daemon_threads = True
+        http_server = server_mod.ThreadingHTTPServer(
+            ("127.0.0.1", 0), server_mod.CodeHandler,
+        )
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{http_server.server_address[1]}"
+        try:
+            created = requests.post(
+                base + "/api/agent/runs",
+                json={
+                    "sessionId": "http-question-terminal",
+                    "payload": {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "ask for target"}],
+                        "tools": [server_mod._SERVER_TOOL_DEFINITIONS["request_user_input"]],
+                    },
+                    "allowedTools": ["request_user_input"],
+                    "baseUrl": self.base_url,
+                    "keys": ["http-question-terminal-key"],
+                },
+                timeout=5,
+            )
+            self.assertEqual(created.status_code, 201)
+            run_id = created.json()["agentRunId"]
+            deadline = time.time() + 5
+            snapshot = {}
+            while time.time() < deadline:
+                snapshot = requests.get(
+                    f"{base}/api/agent/runs/{run_id}?cursor=0&wait=1",
+                    timeout=3,
+                ).json()
+                if snapshot.get("status") == "waiting_user_input":
+                    break
+            self.assertEqual(snapshot.get("status"), "waiting_user_input")
+            request_id = snapshot["pendingInput"]["requestId"]
+            answers = [{"id": "target", "status": "resolved", "values": ["ui"]}]
+
+            before_mismatch = server_mod._agent_snapshot(
+                server_mod._get_agent_run(run_id), 0,
+            )
+            mismatch = requests.post(
+                f"{base}/api/agent/runs/{run_id}/input",
+                json={"requestId": "stale-request", "answers": answers},
+                timeout=3,
+            )
+            self.assertEqual(mismatch.status_code, 409)
+            self.assertEqual(mismatch.json()["errorCode"], "agent_run_input_mismatch")
+            self.assertEqual(mismatch.json()["agentRunStatus"], "waiting_user_input")
+            self.assertEqual(mismatch.json()["pendingInputRequestId"], request_id)
+            self.assertEqual(
+                server_mod._agent_snapshot(server_mod._get_agent_run(run_id), 0),
+                before_mismatch,
+            )
+
+            cancelled = requests.delete(f"{base}/api/agent/runs/{run_id}", timeout=3)
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.json()["status"], "cancelled")
+            run_path = server_mod._agent_run_path(run_id)
+            before_rejected = run_path.read_bytes()
+            terminal_snapshot = server_mod._agent_snapshot(
+                server_mod._get_agent_run(run_id), 0,
+            )
+            rejected = requests.post(
+                f"{base}/api/agent/runs/{run_id}/input",
+                json={"requestId": request_id, "answers": answers},
+                timeout=3,
+            )
+            self.assertEqual(rejected.status_code, 409)
+            self.assertEqual(rejected.json()["errorCode"], "agent_run_input_inactive")
+            self.assertEqual(rejected.json()["agentRunStatus"], "cancelled")
+            self.assertFalse(rejected.json()["retryable"])
+            self.assertEqual(run_path.read_bytes(), before_rejected)
+            self.assertEqual(
+                server_mod._agent_snapshot(server_mod._get_agent_run(run_id), 0),
+                terminal_snapshot,
+            )
+
+            missing = requests.post(
+                f"{base}/api/agent/runs/missing-questionnaire/input",
+                json={"requestId": request_id, "answers": answers},
+                timeout=3,
+            )
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.json()["errorCode"], "agent_run_not_found")
+            self.assertEqual(missing.json()["agentRunStatus"], "not_found")
         finally:
             http_server.shutdown()
             http_server.server_close()

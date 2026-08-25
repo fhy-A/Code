@@ -93,6 +93,8 @@ QUEUE_QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER_QUEUE"
 QUEUE_QUESTIONNAIRE_FINAL = QUESTIONNAIRE_FINAL
 MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER"
 MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL"
+TERMINAL_QUESTIONNAIRE_USER = "H4_TERMINAL_QUESTIONNAIRE_USER"
+TERMINAL_QUESTIONNAIRE_FINAL = "H4_TERMINAL_QUESTIONNAIRE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 GOAL_V2_EXPLICIT_USER = "/goal H4_GOAL_V2_EXPLICIT"
@@ -230,6 +232,11 @@ MIXED_QUESTIONNAIRE_OTHER = "H4_MIXED_MULTIPLE_OTHER"
 MIXED_QUESTIONNAIRE_TEXT_ID = "h4-mixed-text"
 MIXED_QUESTIONNAIRE_TEXT_PROMPT = "H4_MIXED_TEXT_PROMPT"
 MIXED_QUESTIONNAIRE_TEXT_ANSWER = "H4_MIXED_TEXT_ANSWER"
+TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID = "h4-terminal-questionnaire-call-1"
+TERMINAL_QUESTIONNAIRE_TITLE = "H4_TERMINAL_QUESTIONNAIRE_TITLE"
+TERMINAL_QUESTIONNAIRE_REASON = "H4_TERMINAL_QUESTIONNAIRE_REASON"
+TERMINAL_QUESTIONNAIRE_FIRST_ID = "h4-terminal-questionnaire-first"
+TERMINAL_QUESTIONNAIRE_SECOND_ID = "h4-terminal-questionnaire-second"
 EDIT_AUTHORIZATION_APPROVE_USER = "H4_EDIT_AUTHORIZATION_APPROVE_USER"
 EDIT_AUTHORIZATION_REJECT_USER = "H4_EDIT_AUTHORIZATION_REJECT_USER"
 EDIT_AUTHORIZATION_CONFLICT_USER = "H4_EDIT_AUTHORIZATION_CONFLICT_USER"
@@ -542,6 +549,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             *MULTI_TOOL_CALL_IDS,
             QUESTIONNAIRE_TOOL_CALL_ID,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
+            TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
             PROPOSE_EDIT_TOOL_CALL_ID,
         }:
             has_tool_result = True
@@ -624,6 +632,11 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             MIXED_QUESTIONNAIRE_USER,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
             "mixed-questionnaire",
+        ),
+        (
+            TERMINAL_QUESTIONNAIRE_USER,
+            TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
+            "terminal-questionnaire",
         ),
         (QUESTIONNAIRE_USER, QUESTIONNAIRE_TOOL_CALL_ID, "questionnaire"),
     ):
@@ -944,6 +957,27 @@ def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
                 {
                     "id": MIXED_QUESTIONNAIRE_TEXT_ID,
                     "prompt": MIXED_QUESTIONNAIRE_TEXT_PROMPT,
+                    "type": "text",
+                    "required": True,
+                    "allowOther": False,
+                },
+            ],
+        }
+    if scenario == "terminal-questionnaire-call":
+        return TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID, {
+            "title": TERMINAL_QUESTIONNAIRE_TITLE,
+            "reason": TERMINAL_QUESTIONNAIRE_REASON,
+            "questions": [
+                {
+                    "id": TERMINAL_QUESTIONNAIRE_FIRST_ID,
+                    "prompt": "What should Code find?",
+                    "type": "text",
+                    "required": True,
+                    "allowOther": False,
+                },
+                {
+                    "id": TERMINAL_QUESTIONNAIRE_SECOND_ID,
+                    "prompt": "Which URL should Code use?",
                     "type": "text",
                     "required": True,
                     "allowOther": False,
@@ -1785,7 +1819,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
                 "executor-range-call", "missing-file-call", "questionnaire-call",
-                "mixed-questionnaire-call", "queue-questionnaire-call",
+                "mixed-questionnaire-call", "terminal-questionnaire-call",
+                "queue-questionnaire-call",
                 "edit-authorization-approve-call",
                 "edit-authorization-reject-call", "edit-authorization-conflict-call",
             )
@@ -1902,6 +1937,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         if scenario in (
             "questionnaire-call", "mixed-questionnaire-call",
+            "terminal-questionnaire-call",
             "queue-questionnaire-call",
         ):
             questionnaire_tool_call_id, questionnaire_arguments = (
@@ -2431,6 +2467,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "queue-questionnaire-final": QUEUE_QUESTIONNAIRE_FINAL,
                 "queue-questionnaire-promoted": TIMING_QUEUE_FINAL,
                 "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
+                "terminal-questionnaire-final": TERMINAL_QUESTIONNAIRE_FINAL,
                 "edit-authorization-approve-final": EDIT_AUTHORIZATION_APPROVE_FINAL,
                 "edit-authorization-reject-final": EDIT_AUTHORIZATION_REJECT_FINAL,
                 "edit-authorization-conflict-final": EDIT_AUTHORIZATION_CONFLICT_FINAL,

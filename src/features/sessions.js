@@ -377,7 +377,14 @@
       state.messages = cached || normalizeSessionMessages(session.messages || []);
       setSessionMessages(session.id, state.messages);
       setSessionRunState(session.id, session.runState || getSessionRunState(session.id));
-      recovery.restoreUserInputRequest(session.id, session.runState?.userInputRequest);
+      await recovery.reconcilePersistedUserInputRequest(
+        session.id,
+        session.runState?.userInputRequest,
+      );
+      if (
+        loadSeq !== state._sessionLoadSeq
+        || foregroundNavigationSeq !== state._foregroundNavigationSeq
+      ) return;
       recovery.restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
       if (loaded) loaded._seenCount = state.messages.length;
 

@@ -44,6 +44,17 @@
     if (!response.ok) {
       const error = new Error(data?.error || `HTTP ${response.status}`);
       error.status = response.status;
+      for (const field of [
+        "errorCode",
+        "agentRunId",
+        "agentRunStatus",
+        "pendingInputRequestId",
+        "retryable",
+      ]) {
+        if (data && Object.prototype.hasOwnProperty.call(data, field)) {
+          error[field] = data[field];
+        }
+      }
       throw error;
     }
     return data || {};
@@ -292,11 +303,11 @@
     });
   }
 
-  async function submitAgentInput(agentRunId, { answers = [], signal } = {}) {
+  async function submitAgentInput(agentRunId, { answers = [], requestId = "", signal } = {}) {
     return apiJson(`/api/agent/runs/${encodeURIComponent(agentRunId)}/input`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answers }),
+      body: JSON.stringify({ answers, ...(requestId ? { requestId } : {}) }),
       signal,
     });
   }

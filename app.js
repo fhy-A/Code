@@ -1144,7 +1144,7 @@ const sessionNavigation = createSessionNavigation({
     syncMetadata: syncSessionBranchMetadata,
   },
   recovery: {
-    restoreUserInputRequest,
+    reconcilePersistedUserInputRequest,
     restoreAuthorizationRequest,
   },
   view: {
@@ -1661,9 +1661,10 @@ function detectLanguage(input) {
 
 // Hardcoded security layer — never user-editable
 const SYSTEM_SECURITY_LAYER = `
-你是 Code，一个本地运行的 AI 编程助手。你运行在用户自己电脑上的 Web 服务中（127.0.0.1:3010），通过用户配置的 API 中转站连接模型服务。
+你是 Code，一个本地运行的 AI 编程助手。你运行在用户自己电脑上的 Web 服务中（127.0.0.1:3010），通过 workbar 连接模型服务。
 
 当用户问"你是谁"或类似问题时，直接说你是 Code，不要提 Claude 或其他底层模型名。
+当解释模型连接方式时，统一称为 workbar，不展开、猜测或披露其底层网关实现。
 
 ## 思考规范
 思考聚焦需求拆解、方案对比、代码推演。不写"用户问了xxx""这是简单问题""不需要工具""我来回答"等元描述——直接进入分析。
@@ -4596,7 +4597,11 @@ async function refreshSessions() {
       if (session?.id) {
         if (!isSessionStreaming(session.id)) {
           setSessionRunState(session.id, session.runState || {});
-          restoreUserInputRequest(session.id, session.runState?.userInputRequest);
+          await reconcilePersistedUserInputRequest(
+            session.id,
+            session.runState?.userInputRequest,
+            { notify: session.id === state.sessionId },
+          );
           restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
         } else {
           session.runState = { ...getSessionRunState(session.id) };
@@ -6838,6 +6843,153 @@ function restoreUserInputRequest(sessionId, savedRequest) {
   return restored;
 }
 
+const AUTHORITATIVE_AGENT_INPUT_ERROR_CODES = new Set([
+  "agent_run_not_found",
+  "agent_run_input_inactive",
+  "agent_run_input_missing",
+  "agent_run_input_mismatch",
+]);
+const AUTHORITATIVE_AGENT_INPUT_TERMINAL_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "not_found",
+]);
+const AUTHORITATIVE_AGENT_INPUT_STATUSES = new Set([
+  "model",
+  "tools",
+  "waiting_credentials",
+  "waiting_user_input",
+  "waiting_authorization",
+  ...AUTHORITATIVE_AGENT_INPUT_TERMINAL_STATUSES,
+]);
+
+function classifyAgentUserInputState(request, snapshot = null, error = null) {
+  if (!request?.agentRunId) return { action: "keep", status: "", reason: "local" };
+  const errorCode = String(error?.errorCode || "");
+  const errorStatus = String(error?.agentRunStatus || "");
+  if (error) {
+    if (Number(error?.status) === 404 || AUTHORITATIVE_AGENT_INPUT_ERROR_CODES.has(errorCode)) {
+      return {
+        action: "clear",
+        status: errorStatus || (Number(error?.status) === 404 ? "not_found" : ""),
+        reason: errorCode || "agent_run_not_found",
+        pendingRequestId: String(error?.pendingInputRequestId || ""),
+      };
+    }
+    return { action: "retry", status: "", reason: "lookup_failed" };
+  }
+  const status = String(snapshot?.status || "");
+  const pendingRequestId = String(snapshot?.pendingInput?.requestId || "");
+  if (!AUTHORITATIVE_AGENT_INPUT_STATUSES.has(status)) {
+    return { action: "retry", status: "", reason: "invalid_snapshot" };
+  }
+  if (status === "waiting_user_input" && pendingRequestId === String(request.id || "")) {
+    return { action: "keep", status, reason: "matched", pendingRequestId };
+  }
+  return {
+    action: "clear",
+    status,
+    reason: AUTHORITATIVE_AGENT_INPUT_TERMINAL_STATUSES.has(status)
+      ? "terminal"
+      : "request_mismatch",
+    pendingRequestId,
+  };
+}
+
+function setUserInputReconcileRetry(request, enabled) {
+  if (!request) return;
+  Object.defineProperty(request, "_reconcileRetry", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: Boolean(enabled),
+  });
+}
+
+function terminalQuestionnaireRunState(previous, agentRunStatus) {
+  const backgroundRuns = Array.isArray(previous?.backgroundRuns)
+    ? previous.backgroundRuns.map((item) => ({ ...item }))
+    : [];
+  const queuedMessages = Array.isArray(previous?.queuedMessages)
+    ? previous.queuedMessages.map((item) => ({ ...item }))
+    : [];
+  if (agentRunStatus === "completed") {
+    return {
+      ...(backgroundRuns.length ? { backgroundRuns } : {}),
+      ...(queuedMessages.length ? { queuedMessages } : {}),
+    };
+  }
+  return {
+    ...(previous || {}),
+    status: agentRunStatus === "failed" ? "failed" : "paused",
+    phase: "model",
+    runtimeRunId: "",
+    userInputRequest: null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function invalidateServerUserInputRequest(request, evidence = {}, options = {}) {
+  if (!request || request.status === "invalidated") return false;
+  request.status = "invalidated";
+  if (request.abortSignal && request.abortHandler) {
+    request.abortSignal.removeEventListener("abort", request.abortHandler);
+  }
+  delete state.userInputRequests[request.sessionId];
+  const resolver = state._userInputResolvers.get(request.id);
+  state._userInputResolvers.delete(request.id);
+  const nextState = terminalQuestionnaireRunState(
+    getSessionRunState(request.sessionId),
+    String(evidence.status || ""),
+  );
+  setSessionRunState(request.sessionId, nextState);
+  refreshSessionStatusSlot(request.sessionId);
+  if (request.sessionId === state.sessionId) {
+    renderMessages();
+    if (options.notify !== false) showToast(t("questionnaireRunEnded"), "warning");
+  }
+  if (resolver) {
+    resolver({
+      ok: false,
+      action: "request_user_input",
+      errorCode: String(evidence.reason || "agent_run_input_inactive"),
+    });
+  }
+  await saveSessionState(
+    request.sessionId,
+    getSessionMessages(request.sessionId),
+    getSessionStats(request.sessionId),
+    undefined,
+    { persistMessages: false },
+  ).catch((error) => console.error("Failed to persist questionnaire invalidation:", error));
+  return true;
+}
+
+async function reconcilePersistedUserInputRequest(sessionId, savedRequest, options = {}) {
+  const request = restoreUserInputRequest(sessionId, savedRequest);
+  if (!request?.agentRunId) return request;
+  setUserInputReconcileRetry(request, true);
+  if (!agentRuntime?.getAgentRun) {
+    if (request.sessionId === state.sessionId) renderUserInputPanel();
+    return request;
+  }
+  let classification;
+  try {
+    const snapshot = await agentRuntime.getAgentRun(request.agentRunId);
+    classification = classifyAgentUserInputState(request, snapshot);
+  } catch (error) {
+    classification = classifyAgentUserInputState(request, null, error);
+  }
+  if (classification.action === "clear") {
+    await invalidateServerUserInputRequest(request, classification, options);
+    return null;
+  }
+  setUserInputReconcileRetry(request, classification.action === "retry");
+  if (request.sessionId === state.sessionId) renderUserInputPanel();
+  return request;
+}
+
 function buildUserInputResult(request) {
   return buildUserInputResultData(request, t("questionCanceled"));
 }
@@ -6895,17 +7047,14 @@ async function requestUserInput(tool, ctx = null) {
     const signal = ctx?.run?.abortController?.signal;
     if (!signal) return;
     const abortHandler = () => {
-      request.questions.filter((question) => question.status === "pending").forEach((question) => { question.status = "canceled"; });
       if (request.agentRunId) {
-        request.status = "aborted";
-        delete state.userInputRequests[request.sessionId];
-        const resolver = state._userInputResolvers.get(request.id);
-        state._userInputResolvers.delete(request.id);
-        refreshSessionStatusSlot(request.sessionId);
-        if (request.sessionId === state.sessionId) renderMessages();
-        if (resolver) resolver(buildUserInputResult(request));
+        invalidateServerUserInputRequest(request, {
+          status: "cancelled",
+          reason: "agent_run_input_inactive",
+        }).catch((error) => console.error("Failed to clear cancelled questionnaire:", error));
         return;
       }
+      request.questions.filter((question) => question.status === "pending").forEach((question) => { question.status = "canceled"; });
       finishUserInputRequest(request).catch(() => resolve(buildUserInputResult(request)));
     };
     request.abortSignal = signal;
@@ -6921,10 +7070,16 @@ async function finishServerAgentUserInputRequest(request) {
     if (!agentRuntime?.submitAgentInput) throw new Error("Server Agent input runtime is unavailable");
     await agentRuntime.submitAgentInput(request.agentRunId, {
       answers: result.answers,
+      requestId: request.id,
       signal: request.abortSignal,
     });
   } catch (error) {
     request._finishing = false;
+    const classification = classifyAgentUserInputState(request, null, error);
+    if (classification.action === "clear") {
+      await invalidateServerUserInputRequest(request, classification);
+      return false;
+    }
     throw error;
   }
 
@@ -6958,12 +7113,13 @@ async function finishServerAgentUserInputRequest(request) {
   }
   if (resolver) {
     resolver(result);
-    return;
+    return true;
   }
 
   const summary = state.sessions.find((session) => session.id === request.sessionId) || { id: request.sessionId };
   summary.runState = nextState;
   resumePersistedSessionRun(summary).catch((error) => console.error("Failed to resume server questionnaire run:", error));
+  return true;
 }
 
 async function finishUserInputRequest(request) {
@@ -7068,6 +7224,14 @@ function renderUserInputPanel() {
     panel.innerHTML = "";
     return;
   }
+  if (request._reconcileRetry) {
+    panel.innerHTML = `<div class="user-input-card user-input-reconcile" role="status">
+      <p>${escapeHtml(t("questionnaireStatusUnavailable"))}</p>
+      <button type="button" class="user-input-confirm" data-user-input-retry>${escapeHtml(t("questionnaireRetry"))}</button>
+    </div>`;
+    panel.classList.remove("hidden");
+    return;
+  }
   const done = request.questions.filter((question) => question.status !== "pending").length;
   const total = request.questions.length;
   const firstPending = request.questions.find((q) => q.status === "pending");
@@ -7133,8 +7297,14 @@ async function resolveUserInputQuestion(questionId, action) {
   }
   if (request.questions.every((item) => item.status !== "pending")) {
     renderUserInputPanel();
-    await finishUserInputRequest(request);
-    return true;
+    try {
+      const finished = await finishUserInputRequest(request);
+      return finished !== false;
+    } catch (error) {
+      question.status = "pending";
+      renderUserInputPanel();
+      throw error;
+    }
   }
   await persistUserInputProgress(request);
   renderUserInputPanel();
@@ -7147,6 +7317,18 @@ function bindUserInputPanel() {
   // Prevent interaction with the questionnaire from triggering the composer's focus highlight
   panel.addEventListener("mousedown", (e) => { e.stopPropagation(); });
   panel.addEventListener("click", (event) => {
+    const retryButton = event.target.closest("[data-user-input-retry]");
+    if (retryButton) {
+      const request = getUserInputRequest(state.sessionId);
+      if (!request) return;
+      retryButton.disabled = true;
+      reconcilePersistedUserInputRequest(request.sessionId, request)
+        .catch((error) => console.error("Failed to reconcile questionnaire:", error))
+        .finally(() => {
+          if (retryButton.isConnected) retryButton.disabled = false;
+        });
+      return;
+    }
     const button = event.target.closest("[data-user-input-action]");
     if (!button) return;
     const questionElement = button.closest("[data-question-id]");
@@ -7155,7 +7337,11 @@ function bindUserInputPanel() {
     resolveUserInputQuestion(questionElement.dataset.questionId, button.dataset.userInputAction)
       .catch((error) => {
         console.error("Failed to resolve questionnaire question:", error);
-        showToast(error.message || t("saveFailed"));
+        const request = getUserInputRequest(state.sessionId);
+        showToast(
+          request?.agentRunId ? t("questionnaireStatusUnavailable") : (error.message || t("saveFailed")),
+          request?.agentRunId ? "warning" : undefined,
+        );
       })
       .finally(() => {
         if (button.isConnected) button.disabled = false;
