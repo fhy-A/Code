@@ -15,6 +15,7 @@
             value: String(option?.value || `option_${optionIndex + 1}`),
             label: String(option?.label || option?.value || `${optionIndex + 1}`),
             description: String(option?.description || ""),
+            recommended: option?.recommended === true,
           }));
         return {
           id: String(question?.id || `question_${index + 1}`),

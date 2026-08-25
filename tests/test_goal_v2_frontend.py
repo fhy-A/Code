@@ -176,7 +176,8 @@ def test_compact_composer_projection_replaces_the_large_planner_board():
     assert 'goalStep_pending: "未开始"' in I18N_SOURCE
     assert 'goalStep_in_progress: "进行中"' in I18N_SOURCE
     assert 'goalStep_completed: "已完成"' in I18N_SOURCE
-    assert 'goal.lifecycle !== "completed"' in GOAL_SOURCE
+    assert 'const TERMINAL_LIFECYCLES = new Set(["completed", "cancelled"]);' in GOAL_SOURCE
+    assert '!TERMINAL_LIFECYCLES.has(String(goal.lifecycle || ""))' in GOAL_SOURCE
     assert '"goal_complete"' in APP_SOURCE
     assert '"goal_complete"' in MESSAGES_SOURCE
     assert "完成最后一个步骤会在同一次 goal_complete_step 回执中直接完成 Goal" in APP_SOURCE

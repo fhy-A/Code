@@ -22,6 +22,7 @@
     "./features/sessions.js",
     "./features/branches.js",
     "./features/settings.js",
+    "./features/onboarding-tasks.js",
     "./features/skills-memory.js",
     "./features/goal.js",
     "./features/preview.js",

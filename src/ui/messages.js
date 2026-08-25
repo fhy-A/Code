@@ -16,6 +16,7 @@
     "goal_clear_gate",
     "goal_ready_for_acceptance",
     "goal_complete",
+    "goal_cancel",
   ]);
 
   function projectedToolName(value) {
@@ -47,6 +48,16 @@
       || global.cancelAnimationFrame?.bind(global)
       || global.clearTimeout?.bind(global)
       || (() => {});
+    const setTimer = options.setTimeout
+      || global.setTimeout?.bind(global)
+      || ((callback) => { callback(); return null; });
+    const clearTimer = options.clearTimeout
+      || global.clearTimeout?.bind(global)
+      || (() => {});
+    const userScrollIntentLeaseMs = Math.max(
+      80,
+      Number(options.userScrollIntentLeaseMs ?? 280),
+    );
     const ResizeObserverClass = options.ResizeObserver || global.ResizeObserver;
     const getLabel = options.getLabel || ((key) => key);
     const isCompactViewport = options.isCompactViewport
@@ -78,12 +89,55 @@
     let resizeObserver = null;
     let connected = false;
     let preservedScrollTop = Number(container?.scrollTop || 0);
-    let awaitingUserScroll = false;
+    let userScrollIntentActive = false;
+    let userScrollIntentDirection = 0;
+    let userScrollIntentEpoch = 0;
+    let userScrollIntentTimer = null;
     let touchStartY = null;
+    let scrollbarIntent = false;
     let readingAnchor = null;
     let lastObservedScrollTop = Number(container?.scrollTop || 0);
     let programmaticScrollTarget = null;
     const passiveListenerOptions = { passive: true };
+
+    function hasUserScrollOwnership() {
+      return userScrollIntentActive || touchStartY != null || scrollbarIntent;
+    }
+
+    function recordUserScrollPosition() {
+      const current = Number(container?.scrollTop || 0);
+      preservedScrollTop = current;
+      lastObservedScrollTop = current;
+      return current;
+    }
+
+    function clearUserScrollIntent() {
+      userScrollIntentEpoch += 1;
+      userScrollIntentActive = false;
+      userScrollIntentDirection = 0;
+      if (userScrollIntentTimer != null) clearTimer(userScrollIntentTimer);
+      userScrollIntentTimer = null;
+    }
+
+    function renewUserScrollIntent(direction = 0) {
+      const nextDirection = Math.sign(Number(direction || 0));
+      if (nextDirection) userScrollIntentDirection = nextDirection;
+      userScrollIntentActive = true;
+      const epoch = ++userScrollIntentEpoch;
+      if (userScrollIntentTimer != null) clearTimer(userScrollIntentTimer);
+      userScrollIntentTimer = setTimer(() => {
+        if (epoch !== userScrollIntentEpoch) return;
+        userScrollIntentTimer = null;
+        userScrollIntentActive = false;
+        userScrollIntentDirection = 0;
+        recordUserScrollPosition();
+        if (following && !hasUserScrollOwnership()) scheduleFollow();
+        reconcile();
+      }, userScrollIntentLeaseMs);
+      cancelScheduledFrame();
+      programmaticScrollTarget = null;
+      return epoch;
+    }
 
     function maxScrollTop() {
       if (!container) return 0;
@@ -160,7 +214,7 @@
     }
 
     function captureAnchorLayoutAdjustment() {
-      if (!readingAnchor || awaitingUserScroll || !container) return;
+      if (!readingAnchor || hasUserScrollOwnership() || !container) return;
       const currentScrollTop = Number(container.scrollTop || 0);
       if (Math.abs(currentScrollTop - lastObservedScrollTop) <= bottomTolerance) return;
       programmaticScrollTarget = Number(readingAnchor.targetScrollTop || currentScrollTop);
@@ -181,7 +235,7 @@
       };
       following = true;
       visible = false;
-      awaitingUserScroll = false;
+      clearUserScrollIntent();
       if (!reconcileReadingAnchor(true)) {
         scheduleFollow();
         return false;
@@ -207,18 +261,23 @@
     function releaseReadingAnchorForDownwardIntent() {
       if (!readingAnchor || following) return false;
       clearReadingAnchor();
-      awaitingUserScroll = false;
       programmaticScrollTarget = null;
-      preservedScrollTop = Number(container?.scrollTop || 0);
-      lastObservedScrollTop = preservedScrollTop;
+      recordUserScrollPosition();
       const distance = distanceToBottom();
       if (distance <= bottomTolerance) {
         following = true;
-        scheduleFollow();
+        if (!hasUserScrollOwnership()) scheduleFollow();
       } else {
         following = false;
       }
       reconcile();
+      return true;
+    }
+
+    function beginDownwardUserScroll() {
+      renewUserScrollIntent(1);
+      if (!readingAnchor && distanceToBottom() <= bottomTolerance) return false;
+      releaseReadingAnchorForDownwardIntent();
       return true;
     }
 
@@ -244,13 +303,15 @@
     }
 
     function relinquishFollowingForUpwardIntent() {
-      if (maxScrollTop() <= bottomTolerance || (!following && !readingAnchor)) return false;
+      if (maxScrollTop() <= bottomTolerance) return false;
+      renewUserScrollIntent(-1);
+      if (!following && !readingAnchor) {
+        recordUserScrollPosition();
+        reconcile();
+        return true;
+      }
       if (following) following = false;
-      awaitingUserScroll = true;
-      cancelScheduledFrame();
-      programmaticScrollTarget = null;
-      preservedScrollTop = Number(container?.scrollTop || 0);
-      lastObservedScrollTop = preservedScrollTop;
+      recordUserScrollPosition();
       reconcile();
       return true;
     }
@@ -260,7 +321,7 @@
       const deltaY = Number(event?.deltaY || 0);
       if (event?.ctrlKey || Math.abs(deltaY) <= Math.abs(deltaX)) return;
       if (deltaY < 0) relinquishFollowingForUpwardIntent();
-      else if (deltaY > 0) releaseReadingAnchorForDownwardIntent();
+      else if (deltaY > 0) beginDownwardUserScroll();
     }
 
     function clearTouchIntent() {
@@ -275,6 +336,7 @@
       }
       const clientY = Number(touches[0]?.clientY);
       touchStartY = Number.isFinite(clientY) ? clientY : null;
+      if (touchStartY != null) renewUserScrollIntent(0);
     }
 
     function onTouchMove(event) {
@@ -293,9 +355,42 @@
       if (!Number.isFinite(clientY)) return;
       const delta = clientY - touchStartY;
       if (delta > bottomTolerance) relinquishFollowingForUpwardIntent();
-      else if (delta < -bottomTolerance) releaseReadingAnchorForDownwardIntent();
+      else if (delta < -bottomTolerance) beginDownwardUserScroll();
       else return;
-      clearTouchIntent();
+      touchStartY = clientY;
+    }
+
+    function isEditableScrollTarget(target) {
+      const tagName = String(target?.tagName || "").toLowerCase();
+      return tagName === "input" || tagName === "textarea" || target?.isContentEditable === true;
+    }
+
+    function onKeyDownIntent(event) {
+      if (event?.altKey || event?.ctrlKey || event?.metaKey || isEditableScrollTarget(event?.target)) return;
+      const key = String(event?.key || "");
+      if (["ArrowUp", "PageUp", "Home"].includes(key)) {
+        relinquishFollowingForUpwardIntent();
+      } else if (["ArrowDown", "PageDown", "End"].includes(key)) {
+        beginDownwardUserScroll();
+      }
+    }
+
+    function onPointerDownIntent(event) {
+      if (Number(event?.button ?? 0) !== 0 || event?.target !== container) return;
+      const rect = container?.getBoundingClientRect?.();
+      const clientX = Number(event?.clientX);
+      if (!rect || !Number.isFinite(clientX) || maxScrollTop() <= bottomTolerance) return;
+      const nativeGutter = Math.max(
+        0,
+        Number(container?.offsetWidth || rect.width || 0) - Number(container?.clientWidth || 0),
+      );
+      const intentWidth = Math.max(12, nativeGutter);
+      scrollbarIntent = clientX >= Number(rect.right || 0) - intentWidth;
+      if (scrollbarIntent) renewUserScrollIntent(0);
+    }
+
+    function clearPointerIntent() {
+      scrollbarIntent = false;
     }
 
     function reconcile() {
@@ -309,10 +404,10 @@
     }
 
     function scheduleFollow() {
-      if (!container || !following || frameId != null) return;
+      if (!container || !following || hasUserScrollOwnership() || frameId != null) return;
       frameId = requestFrame(() => {
         frameId = null;
-        if (!following) return;
+        if (!following || hasUserScrollOwnership()) return;
         if (readingAnchor) reconcileReadingAnchor(false);
         const target = readingAnchor?.remainingReserve > 0
           ? Number(readingAnchor.targetScrollTop || 0)
@@ -330,11 +425,12 @@
       visible = false;
       suppressed = false;
       running = false;
-      awaitingUserScroll = false;
+      clearUserScrollIntent();
       preservedScrollTop = Number(container?.scrollTop || 0);
       lastObservedScrollTop = preservedScrollTop;
       programmaticScrollTarget = null;
       clearTouchIntent();
+      clearPointerIntent();
       updateButton();
     }
 
@@ -367,40 +463,83 @@
       }
       programmaticScrollTarget = null;
       const delta = currentScrollTop - lastObservedScrollTop;
-      const userScrollWasAwaited = awaitingUserScroll;
-      awaitingUserScroll = false;
+      const scrollbarUpwardIntent = scrollbarIntent && delta < -bottomTolerance;
+      const scrollbarDownwardIntent = scrollbarIntent && delta > bottomTolerance;
+      if (hasUserScrollOwnership() && Math.abs(delta) > bottomTolerance) {
+        renewUserScrollIntent(delta < 0 ? -1 : 1);
+      }
+      const userOwnsScroll = hasUserScrollOwnership();
+      if (scrollbarUpwardIntent) {
+        following = false;
+        cancelScheduledFrame();
+      }
       if (
         readingAnchor
         && !hadProgrammaticScrollTarget
+        && userOwnsScroll
         && delta < -bottomTolerance
       ) {
         following = false;
         cancelScheduledFrame();
         consumeAnchorReserveForUpwardScroll(-delta);
-      } else if (readingAnchor && !following && delta > bottomTolerance) {
+      } else if (
+        readingAnchor
+        && !following
+        && scrollbarDownwardIntent
+      ) {
         releaseReadingAnchorForDownwardIntent();
+        return;
+      }
+      if (userOwnsScroll) {
+        const distance = distanceToBottom();
+        recordUserScrollPosition();
+        if (distance <= bottomTolerance) {
+          following = true;
+        } else if (userScrollIntentDirection < 0 || !following) {
+          following = false;
+          cancelScheduledFrame();
+        }
+        reconcile();
+        return;
+      }
+      if (
+        !following
+        && !hadProgrammaticScrollTarget
+      ) {
+        // Preserve an intentional reading position when browser anchoring or
+        // a late layout change emits a scroll event without user input.
+        writeScrollTop(Math.min(preservedScrollTop, maxScrollTop()));
+        reconcile();
+        return;
       }
       const distance = distanceToBottom();
       preservedScrollTop = Number(container?.scrollTop || 0);
       lastObservedScrollTop = preservedScrollTop;
       if (distance <= bottomTolerance) {
+        if (following) scheduleFollow();
+      } else {
+        // DOM patches and late layout (images, tables, ResizeObserver) can
+        // move scrollTop without user input. Keep following and settle back to
+        // the newest content on the next coalesced frame.
         following = true;
         scheduleFollow();
-      } else {
-        following = false;
-        cancelScheduledFrame();
       }
       reconcile();
     }
 
     function onContentChanged(ownerSessionId = sessionId) {
       ensureSession(ownerSessionId);
+      if (hasUserScrollOwnership()) {
+        recordUserScrollPosition();
+        reconcile();
+        return;
+      }
       if (readingAnchor) {
         reconcileReadingAnchor(false);
         captureAnchorLayoutAdjustment();
       }
       if (following) scheduleFollow();
-      else if (awaitingUserScroll || readingAnchor) reconcile();
+      else if (readingAnchor) reconcile();
       else {
         writeScrollTop(Math.min(preservedScrollTop, maxScrollTop()));
         reconcile();
@@ -409,12 +548,17 @@
 
     function onViewportChanged(ownerSessionId = sessionId) {
       if (String(ownerSessionId || "") !== sessionId) return;
+      if (hasUserScrollOwnership()) {
+        recordUserScrollPosition();
+        reconcile();
+        return;
+      }
       if (readingAnchor) {
         reconcileReadingAnchor(false);
         captureAnchorLayoutAdjustment();
       }
       if (following) scheduleFollow();
-      else if (awaitingUserScroll || readingAnchor) reconcile();
+      else if (readingAnchor) reconcile();
       else {
         writeScrollTop(Math.min(preservedScrollTop, maxScrollTop()));
         reconcile();
@@ -424,8 +568,8 @@
     function forceToLatest(nextSessionId = sessionId) {
       ensureSession(nextSessionId);
       clearReadingAnchor();
+      clearUserScrollIntent();
       following = true;
-      awaitingUserScroll = false;
       visible = false;
       updateButton();
       if (container) {
@@ -465,6 +609,10 @@
       container.addEventListener("touchmove", onTouchMove, passiveListenerOptions);
       container.addEventListener("touchend", clearTouchIntent, passiveListenerOptions);
       container.addEventListener("touchcancel", clearTouchIntent, passiveListenerOptions);
+      container.addEventListener("keydown", onKeyDownIntent);
+      container.addEventListener("pointerdown", onPointerDownIntent, passiveListenerOptions);
+      container.addEventListener("pointerup", clearPointerIntent, passiveListenerOptions);
+      container.addEventListener("pointercancel", clearPointerIntent, passiveListenerOptions);
       button?.addEventListener?.("click", jumpToLatest);
       if (typeof ResizeObserverClass === "function") {
         resizeObserver = new ResizeObserverClass(() => onViewportChanged(sessionId));
@@ -476,19 +624,24 @@
     }
 
     function disconnect() {
-      awaitingUserScroll = false;
+      clearUserScrollIntent();
       clearReadingAnchor();
       if (!connected) return;
       connected = false;
       cancelScheduledFrame();
       programmaticScrollTarget = null;
       clearTouchIntent();
+      clearPointerIntent();
       container?.removeEventListener?.("scroll", onUserScroll, passiveListenerOptions);
       container?.removeEventListener?.("wheel", onWheelIntent, passiveListenerOptions);
       container?.removeEventListener?.("touchstart", onTouchStart, passiveListenerOptions);
       container?.removeEventListener?.("touchmove", onTouchMove, passiveListenerOptions);
       container?.removeEventListener?.("touchend", clearTouchIntent, passiveListenerOptions);
       container?.removeEventListener?.("touchcancel", clearTouchIntent, passiveListenerOptions);
+      container?.removeEventListener?.("keydown", onKeyDownIntent);
+      container?.removeEventListener?.("pointerdown", onPointerDownIntent, passiveListenerOptions);
+      container?.removeEventListener?.("pointerup", clearPointerIntent, passiveListenerOptions);
+      container?.removeEventListener?.("pointercancel", clearPointerIntent, passiveListenerOptions);
       button?.removeEventListener?.("click", jumpToLatest);
       resizeObserver?.disconnect?.();
       resizeObserver = null;
@@ -501,7 +654,9 @@
         visible,
         suppressed,
         running,
-        awaitingUserScroll,
+        userScrollIntentActive: hasUserScrollOwnership(),
+        userScrollIntentDirection,
+        userScrollIntentEpoch,
         readingAnchor: readingAnchor ? Object.freeze({ ...readingAnchor }) : null,
         framePending: frameId != null,
         distance: distanceToBottom(),

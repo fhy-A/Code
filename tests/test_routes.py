@@ -326,7 +326,19 @@ class TestFileTools(TestServerFixture):
                 "id": "target",
                 "prompt": "Choose a target",
                 "type": "single",
-                "options": [{"value": "src", "label": "Source"}],
+                "allowOther": True,
+                "options": [
+                    {
+                        "value": "src", "label": "Source",
+                        "description": "Recommended for source inspection.",
+                        "recommended": True,
+                    },
+                    {
+                        "value": "tests", "label": "Tests",
+                        "description": "Use for test inspection.",
+                        "recommended": False,
+                    },
+                ],
             }],
         }
         self.assertEqual(
@@ -340,7 +352,19 @@ class TestFileTools(TestServerFixture):
                 "id": "target",
                 "prompt": "Choose a target",
                 "type": "unsupported",
-                "options": [{"value": "src"}],
+                "allowOther": True,
+                "options": [
+                    {
+                        "value": "src",
+                        "description": "Recommended for source inspection.",
+                        "recommended": True,
+                    },
+                    {
+                        "value": "tests", "label": "Tests",
+                        "description": "Use for test inspection.",
+                        "recommended": False,
+                    },
+                ],
             }],
         }
         errors = server_mod._registered_tool_argument_errors(

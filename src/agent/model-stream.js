@@ -202,8 +202,17 @@
 
   function isModelAccessDenied(status = 0, code = "", message = "") {
     const text = `${code || ""} ${message || ""}`.toLowerCase();
-    return String(code || "") === "model_access_denied"
-      || /no access to model|not authorized to access model|unauthorized model|无权访问模型|无权访问任何模型/.test(text);
+    const messageText = String(message || "").toLowerCase();
+    const explicitlyUnavailableRoute = (
+      /\bmodel\b/.test(messageText)
+      && /\b(?:no|without)\s+(?:an?\s+)?available\s+(?:channels?|routes?)\b/.test(messageText)
+    ) || (
+      /模型/.test(messageText)
+      && /(?:无|没有)(?:任何)?可用(?:渠道|通道|路由)/.test(messageText)
+    );
+    return String(code || "").toLowerCase() === "model_access_denied"
+      || /no access to model|not authorized to access model|unauthorized model|无权访问模型|无权访问任何模型/.test(text)
+      || explicitlyUnavailableRoute;
   }
 
   function classifyModelRequestFailure(status = 0, code = "", message = "") {

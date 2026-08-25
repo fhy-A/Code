@@ -274,7 +274,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertGreater(background_pos, runs_pos)
 
     def test_init_restores_saved_model_before_platform_sync_and_validates_availability(self):
-        cache_restore = "const cachedModelCatalog = hasEnabledKey ? restoreCachedModelCatalog() : [];"
+        cache_restore = "const cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];"
         restore = 'setSelectedModel(localStorage.getItem("code-model") || "");'
         cache_pos = APP_SOURCE.index(cache_restore)
         restore_pos = APP_SOURCE.index(restore)
@@ -287,15 +287,30 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         refresh_source = APP_SOURCE[refresh_start:refresh_end]
         self.assertIn("if (successCount === 0)", refresh_source)
         self.assertIn('"modelCatalogRefreshFailedCached"', refresh_source)
-        self.assertIn('writeModelCatalogCache(models, baseUrl, contextEntries)', refresh_source)
+        self.assertIn(
+            'writeModelCatalogCache(models, baseUrl, contextEntries, modelKeysMap, keys)',
+            refresh_source,
+        )
         self.assertIn('if (savedModel && models.includes(savedModel))', refresh_source)
         self.assertIn('setSelectedModel("");', refresh_source)
         self.assertIn('localStorage.removeItem("code-model");', refresh_source)
 
-        best_key_start = APP_SOURCE.index("function getBestKey(model)")
-        best_key_end = APP_SOURCE.index("function getFallbackKeys(model)", best_key_start)
-        best_key_source = APP_SOURCE[best_key_start:best_key_end]
-        self.assertIn("mappedKey && keys.includes(mappedKey)", best_key_source)
+        trusted_key_start = APP_SOURCE.index("function getTrustedModelKeys(model)")
+        trusted_key_end = APP_SOURCE.index(
+            "async function refreshModelCatalogForDispatch()", trusted_key_start
+        )
+        trusted_key_source = APP_SOURCE[trusted_key_start:trusted_key_end]
+        self.assertIn('state.modelCatalogRouteBaseUrl || ""', trusted_key_source)
+        self.assertIn("state.modelKeysMap?.[model]", trusted_key_source)
+        self.assertIn("filter((key) => keys.includes(key))", trusted_key_source)
+
+        fallback_start = APP_SOURCE.index("async function getFallbackKeys(model)")
+        fallback_end = APP_SOURCE.index("function getApiKeys()", fallback_start)
+        fallback_source = APP_SOURCE[fallback_start:fallback_end]
+        self.assertIn("let authorizedKeys = getTrustedModelKeys(normalizedModel)", fallback_source)
+        self.assertIn("await refreshModelCatalogForDispatch()", fallback_source)
+        self.assertIn('error.code = "trusted_model_keys_unavailable"', fallback_source)
+        self.assertNotIn("getBestKey(model)", fallback_source)
 
     def test_server_agent_checkpoint_survives_reload(self):
         for expected in (

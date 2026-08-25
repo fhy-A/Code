@@ -158,7 +158,13 @@ class TestRunningMessageQueue(unittest.TestCase):
         pump = APP_SOURCE[pump_start:pump_end]
         self.assertIn('.find((candidate) => candidate.status === "pending")', pump)
         self.assertIn("state._queuedMessagePumps.has(sessionId)", pump)
-        self.assertIn("if (!item.model || !getBestKey(item.model)) return false", pump)
+        self.assertIn("if (!item.model) return false", pump)
+        self.assertIn("await getFallbackKeys(item.model)", pump)
+        self.assertIn("catch (_) {\n    return false;\n  }", pump)
+        self.assertLess(
+            pump.index("await getFallbackKeys(item.model)"),
+            pump.index("state._queuedMessagePumps.add(sessionId)"),
+        )
         self.assertIn("queueMicrotask", pump)
 
     def test_first_message_queue_pump_uses_session_created_by_send(self):

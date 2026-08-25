@@ -1357,6 +1357,7 @@ function clearPlatformLocalData() {
   els.baseUrl.value = WORKBAR_URL;
   state.modelKeyMap = {};
   state.modelKeysMap = {};
+  state.modelCatalogRouteBaseUrl = "";
   clearModelCatalogCache();
   renderModelCatalog([], "enterApiKey", "empty");
   setSelectedModel("");
@@ -1595,32 +1596,40 @@ function authHeaders(model) {
 
 
 function getBestKey(model) {
-
-  const keys = getApiKeys();
-
-  const mappedKey = model ? state.modelKeyMap[model] : "";
-  if (mappedKey && keys.includes(mappedKey)) return mappedKey;
-
-  return keys[0] || "";
-
+  return getTrustedModelKeys(model)[0] || "";
 }
 
-
-
-function getFallbackKeys(model) {
-
+function getTrustedModelKeys(model) {
+  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
+  if (String(state.modelCatalogRouteBaseUrl || "") !== baseUrl) return [];
   const keys = getApiKeys();
   const authorizedKeys = Array.isArray(state.modelKeysMap?.[model])
     ? state.modelKeysMap[model].filter((key) => keys.includes(key))
     : [];
+  return [...new Set(authorizedKeys)];
+}
+
+async function refreshModelCatalogForDispatch() {
+  if (!state._modelRouteRefreshPromise) {
+    state._modelRouteRefreshPromise = Promise.resolve()
+      .then(() => refreshModels())
+      .finally(() => { state._modelRouteRefreshPromise = null; });
+  }
+  return state._modelRouteRefreshPromise;
+}
+
+async function getFallbackKeys(model) {
+  const normalizedModel = String(model || "").trim();
+  let authorizedKeys = getTrustedModelKeys(normalizedModel);
   if (authorizedKeys.length > 0) return authorizedKeys;
 
-  const best = getBestKey(model);
+  await refreshModelCatalogForDispatch().catch(() => null);
+  authorizedKeys = getTrustedModelKeys(normalizedModel);
+  if (authorizedKeys.length > 0) return authorizedKeys;
 
-  const fallbacks = keys.filter((k) => k !== best);
-
-  return [best, ...fallbacks];
-
+  const error = new Error(`${t("modelCatalogNeedsRefresh")} ${t("modelCatalogRefreshFailed")}`);
+  error.code = "trusted_model_keys_unavailable";
+  throw error;
 }
 
 
@@ -1688,6 +1697,8 @@ const GOAL_AUTONOMOUS_AGENT_INSTRUCTION = `
 - 完成步骤必须为每项验收条件提供有界证据；完成最后一个步骤会在同一次 goal_complete_step 回执中直接完成 Goal，不要再调用通用待验收或第二个完成操作。
 - 调用 Goal 内部操作的工具轮，公开文字只写正在执行的进展、证据发现或简短阶段小结；尤其在调用最后一个 goal_complete_step 时，不要同时输出面向用户的完整最终总结。成功回执后的既有无工具终态轮才是唯一完整答复，必须独立重述最终结论、验收结果和必要边界，不能只说“见上方总结”。
 - 需要用户判断且会影响后续调整的验收，必须属于仍在进行中的具体步骤：先保留该步骤为 in_progress 并记录 waiting_user gate；用户通过后清除 gate、补足 user 证据再完成步骤，用户要求调整时修订计划继续，不能提前完成最后一步。
+- 用户明确且无歧义地要求停止、放弃或取消当前 Goal 时，必须直接调用 goal_cancel 并提供简短原因；不得重复问卷、虚构 gate、声称工具不可用，或把 Goal 留在 draft。只有取消意图确有歧义时才可最多确认一次，确认后必须调用 goal_cancel。
+- goal_cancel 只终结 Goal 元数据，不取消当前 Session 或 AgentRun 传输；停止当前输出也不会隐式取消 Goal。
 - 只有持久化成功回执显示 Goal 已 completed 后才能宣称目标完成；goal_complete_step 失败时必须明确说明 Goal 尚未完成。旧记录若已处于 ready_for_acceptance，只能使用当前提供的兼容完成操作处理。
 `.trim();
 
@@ -1701,6 +1712,7 @@ const INTERNAL_GOAL_TOOL_NAMES = new Set([
   "goal_clear_gate",
   "goal_ready_for_acceptance",
   "goal_complete",
+  "goal_cancel",
 ]);
 
 function isInternalGoalToolName(name) {
@@ -4982,8 +4994,9 @@ function makeSessionTitle(text = "") {
 async function generateSessionTitle(userText) {
 
   const model = getSelectedModel();
-
-  const key = getBestKey(model);
+  const key = model
+    ? (await getFallbackKeys(model).catch(() => []))[0]
+    : "";
 
   if (!model || !key) return;
 
@@ -5154,7 +5167,40 @@ function insertPromptText(text) {
 
 
 const MODEL_CATALOG_CACHE_KEY = "code-model-catalog-cache-v1";
-const MODEL_CATALOG_CACHE_VERSION = 2;
+const MODEL_CATALOG_CACHE_VERSION = 3;
+const MODEL_CATALOG_ROUTE_VERSION = 1;
+const MODEL_CATALOG_ROUTE_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function modelCatalogDigest(value) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("Secure model catalog identity is unavailable");
+  const bytes = new TextEncoder().encode(String(value || ""));
+  const digest = await subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function buildModelCatalogKeyIndex(keys, baseUrl) {
+  const uniqueKeys = [...new Set((Array.isArray(keys) ? keys : [])
+    .map((key) => String(key || "").trim())
+    .filter(Boolean))];
+  const entries = await Promise.all(uniqueKeys.map(async (key) => ({
+    key,
+    identity: await modelCatalogDigest(
+      `model-catalog-key-v${MODEL_CATALOG_ROUTE_VERSION}\0${String(baseUrl || "")}\0${key}`,
+    ),
+  })));
+  const identities = entries.map((entry) => entry.identity).sort();
+  return {
+    entries,
+    byIdentity: new Map(entries.map((entry) => [entry.identity, entry.key])),
+    byKey: new Map(entries.map((entry) => [entry.key, entry.identity])),
+    fingerprint: await modelCatalogDigest(
+      `model-catalog-key-set-v${MODEL_CATALOG_ROUTE_VERSION}\0${identities.join("\n")}`,
+    ),
+  };
+}
 
 function normalizeModelCatalogModels(models) {
   return [...new Set((Array.isArray(models) ? models : [])
@@ -5166,31 +5212,68 @@ function normalizeModelCatalogModels(models) {
 function readModelCatalogCache(baseUrl) {
   try {
     const cached = JSON.parse(localStorage.getItem(MODEL_CATALOG_CACHE_KEY) || "null");
-    if (![1, MODEL_CATALOG_CACHE_VERSION].includes(cached?.version)) return null;
+    if (![1, 2, MODEL_CATALOG_CACHE_VERSION].includes(cached?.version)) return null;
     if (String(cached.baseUrl || "") !== String(baseUrl || "")) return null;
     const models = normalizeModelCatalogModels(cached.models);
     if (!models.length) return null;
-    const entries = cached.version === 2 && Array.isArray(cached.entries)
+    const entries = cached.version >= 2 && Array.isArray(cached.entries)
       ? cached.entries
       : models.map((id) => ({ id }));
-    return { models, entries, savedAt: Number(cached.savedAt || 0) };
+    return {
+      version: Number(cached.version || 0),
+      models,
+      entries,
+      routes: cached.version === MODEL_CATALOG_CACHE_VERSION && Array.isArray(cached.routes)
+        ? cached.routes
+        : [],
+      routeVersion: cached.version === MODEL_CATALOG_CACHE_VERSION
+        ? Number(cached.routeVersion || 0)
+        : 0,
+      keySetFingerprint: cached.version === MODEL_CATALOG_CACHE_VERSION
+        ? String(cached.keySetFingerprint || "")
+        : "",
+      routeSavedAt: cached.version === MODEL_CATALOG_CACHE_VERSION
+        ? Number(cached.routeSavedAt || 0)
+        : 0,
+      savedAt: Number(cached.savedAt || 0),
+    };
   } catch (_) {
     return null;
   }
 }
 
-function writeModelCatalogCache(models, baseUrl, entries = []) {
+async function writeModelCatalogCache(models, baseUrl, entries = [], modelKeysMap = {}, keys = getApiKeys()) {
   const normalized = normalizeModelCatalogModels(models);
+  if (!normalized.length) {
+    try { localStorage.removeItem(MODEL_CATALOG_CACHE_KEY); } catch (_) {}
+    return;
+  }
+  let keySetFingerprint = "";
+  let routes = [];
+  let routeSavedAt = 0;
   try {
-    if (!normalized.length) {
-      localStorage.removeItem(MODEL_CATALOG_CACHE_KEY);
-      return;
-    }
+    const keyIndex = await buildModelCatalogKeyIndex(keys, baseUrl);
+    routes = normalized.map((model) => ({
+      model,
+      keyIdentities: [...new Set((Array.isArray(modelKeysMap?.[model]) ? modelKeysMap[model] : [])
+        .map((key) => keyIndex.byKey.get(key))
+        .filter(Boolean))],
+    })).filter((route) => route.keyIdentities.length > 0);
+    keySetFingerprint = keyIndex.fingerprint;
+    routeSavedAt = Date.now();
+  } catch (_) {
+    // Live routing remains in memory, but no unverified route is persisted.
+  }
+  try {
     localStorage.setItem(MODEL_CATALOG_CACHE_KEY, JSON.stringify({
       version: MODEL_CATALOG_CACHE_VERSION,
       baseUrl: String(baseUrl || ""),
       models: normalized,
       entries: Array.isArray(entries) ? entries : [],
+      routeVersion: MODEL_CATALOG_ROUTE_VERSION,
+      keySetFingerprint,
+      routes,
+      routeSavedAt,
       savedAt: Date.now(),
     }));
   } catch (_) {
@@ -5200,6 +5283,39 @@ function writeModelCatalogCache(models, baseUrl, entries = []) {
 
 function clearModelCatalogCache() {
   try { localStorage.removeItem(MODEL_CATALOG_CACHE_KEY); } catch (_) {}
+}
+
+function invalidateCachedModelCatalogRoutes(baseUrl, model = "") {
+  try {
+    const cached = JSON.parse(localStorage.getItem(MODEL_CATALOG_CACHE_KEY) || "null");
+    if (cached?.version !== MODEL_CATALOG_CACHE_VERSION) return;
+    if (String(cached.baseUrl || "") !== String(baseUrl || "")) return;
+    const normalizedModel = String(model || "").trim();
+    cached.routes = normalizedModel
+      ? (Array.isArray(cached.routes) ? cached.routes : []).filter(
+          (route) => String(route?.model || "") !== normalizedModel,
+        )
+      : [];
+    if (!normalizedModel) cached.keySetFingerprint = "";
+    cached.routeSavedAt = 0;
+    localStorage.setItem(MODEL_CATALOG_CACHE_KEY, JSON.stringify(cached));
+  } catch (_) {}
+}
+
+function invalidateModelCatalogRoute(model) {
+  const normalizedModel = String(model || "").trim();
+  if (normalizedModel) {
+    delete state.modelKeyMap[normalizedModel];
+    delete state.modelKeysMap[normalizedModel];
+  } else {
+    state.modelKeyMap = {};
+    state.modelKeysMap = {};
+    state.modelCatalogRouteBaseUrl = "";
+  }
+  invalidateCachedModelCatalogRoutes(
+    els.baseUrl.value.trim() || "http://localhost:3000",
+    normalizedModel,
+  );
 }
 
 function groupModelCatalog(models) {
@@ -5263,10 +5379,41 @@ function renderModelCatalog(models, statusKey = "", source = "live") {
   return normalized;
 }
 
-function restoreCachedModelCatalog() {
+async function restoreCachedModelCatalog() {
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
   const cached = readModelCatalogCache(baseUrl);
   if (!cached) return [];
+  state.modelKeyMap = {};
+  state.modelKeysMap = {};
+  state.modelCatalogRouteBaseUrl = "";
+  const routeFresh = cached.version === MODEL_CATALOG_CACHE_VERSION
+    && cached.routeVersion === MODEL_CATALOG_ROUTE_VERSION
+    && cached.routeSavedAt > 0
+    && Date.now() - cached.routeSavedAt <= MODEL_CATALOG_ROUTE_TTL_MS;
+  if (routeFresh && cached.keySetFingerprint && cached.routes.length > 0) {
+    try {
+      const keyIndex = await buildModelCatalogKeyIndex(getApiKeys(), baseUrl);
+      if (keyIndex.fingerprint === cached.keySetFingerprint) {
+        for (const route of cached.routes) {
+          const model = String(route?.model || "").trim();
+          if (!model || !cached.models.includes(model)) continue;
+          const mapped = [...new Set((Array.isArray(route?.keyIdentities) ? route.keyIdentities : [])
+            .map((identity) => keyIndex.byIdentity.get(String(identity || "")))
+            .filter(Boolean))];
+          if (!mapped.length) continue;
+          state.modelKeysMap[model] = mapped;
+          state.modelKeyMap[model] = mapped[0];
+        }
+        if (Object.keys(state.modelKeysMap).length > 0) {
+          state.modelCatalogRouteBaseUrl = baseUrl;
+        }
+      }
+    } catch (_) {
+      state.modelKeyMap = {};
+      state.modelKeysMap = {};
+      state.modelCatalogRouteBaseUrl = "";
+    }
+  }
   setModelContextCatalog(cached.entries);
   return renderModelCatalog(cached.models, "detectingModels", "cache");
 }
@@ -5274,6 +5421,10 @@ function restoreCachedModelCatalog() {
 function markModelCatalogStale(config) {
   state.modelKeyMap = {};
   state.modelKeysMap = {};
+  state.modelCatalogRouteBaseUrl = "";
+  invalidateCachedModelCatalogRoutes(
+    els.baseUrl.value.trim() || "http://localhost:3000",
+  );
   const entries = Array.isArray(config) ? config : loadKeyConfig();
   const hasEnabledKey = entries.some((entry) => entry?.enabled !== false && String(entry?.key || "").trim());
   if (!hasEnabledKey) {
@@ -5314,6 +5465,7 @@ async function refreshModels() {
   if (keys.length === 0) {
     state.modelKeyMap = {};
     state.modelKeysMap = {};
+    state.modelCatalogRouteBaseUrl = "";
     clearModelCatalogCache();
     renderModelCatalog([], "enterApiKey", "empty");
     showToast(t("enterApiKey"), "warning");
@@ -5321,8 +5473,6 @@ async function refreshModels() {
   }
 
   const previousModels = [...state.modelCatalogModels];
-  state.modelKeyMap = {};
-  state.modelKeysMap = {};
   renderModelCatalog(previousModels, "detectingModels", previousModels.length ? "cache" : "empty");
   els.refreshModelsBtn.disabled = true;
   const allModels = new Set();
@@ -5406,6 +5556,9 @@ async function refreshModels() {
   }
 
   if (allModels.size === 0) {
+    state.modelKeyMap = {};
+    state.modelKeysMap = {};
+    state.modelCatalogRouteBaseUrl = "";
     clearModelCatalogCache();
     renderModelCatalog([], "noModelsFound", "live");
     setSelectedModel("");
@@ -5424,9 +5577,10 @@ async function refreshModels() {
 
     renderModelCatalog(models, "", "live");
     setModelContextCatalog(contextEntries);
-    writeModelCatalogCache(models, baseUrl, contextEntries);
     state.modelKeyMap = modelKeyMap;
     state.modelKeysMap = modelKeysMap;
+    state.modelCatalogRouteBaseUrl = baseUrl;
+    await writeModelCatalogCache(models, baseUrl, contextEntries, modelKeysMap, keys);
 
 
 
@@ -7194,7 +7348,7 @@ function renderUserInputQuestion(question, index) {
       const checked = (question.selected || []).includes(option.value);
       return `<label class="user-input-option">
         <input type="${inputType}" name="user-input-${escapeHtml(question.id)}" value="${escapeHtml(option.value)}" ${checked ? "checked" : ""} ${resolved ? "disabled" : ""}>
-        <span><b>${escapeHtml(option.label)}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span>
+        <span><b>${escapeHtml(option.label)}${option.recommended === true ? `<em class="user-input-recommended">${escapeHtml(t("questionnaireRecommended"))}</em>` : ""}</b>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span>
       </label>`;
     }).join("")}</div>`;
   }
@@ -7256,6 +7410,18 @@ function getUserInputQuestionElement(questionId) {
     .find((element) => element.dataset.questionId === questionId) || null;
 }
 
+function userInputEnterAction(target) {
+  const actionButton = target?.closest?.("[data-user-input-action]");
+  if (actionButton) return String(actionButton.dataset.userInputAction || "");
+  if (target?.matches?.([
+    "[data-user-input-text]",
+    "[data-user-input-other]",
+    'input[type="radio"]',
+    'input[type="checkbox"]',
+  ].join(", "))) return "confirm";
+  return "";
+}
+
 async function persistUserInputProgress(request) {
   const previous = getSessionRunState(request.sessionId);
   setSessionRunState(request.sessionId, {
@@ -7314,8 +7480,42 @@ async function resolveUserInputQuestion(questionId, action) {
 function bindUserInputPanel() {
   const panel = els.userInputPanel;
   if (!panel) return;
+  const runQuestionAction = (questionElement, action, trigger = null) => {
+    if (!questionElement || !action || trigger?.disabled) return;
+    if (trigger) trigger.disabled = true;
+    resolveUserInputQuestion(questionElement.dataset.questionId, action)
+      .catch((error) => {
+        console.error("Failed to resolve questionnaire question:", error);
+        const request = getUserInputRequest(state.sessionId);
+        showToast(
+          request?.agentRunId ? t("questionnaireStatusUnavailable") : (error.message || t("saveFailed")),
+          request?.agentRunId ? "warning" : undefined,
+        );
+      })
+      .finally(() => {
+        if (trigger?.isConnected) trigger.disabled = false;
+      });
+  };
   // Prevent interaction with the questionnaire from triggering the composer's focus highlight
   panel.addEventListener("mousedown", (e) => { e.stopPropagation(); });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const retryButton = event.target.closest("[data-user-input-retry]");
+    const questionElement = event.target.closest("[data-question-id]");
+    if (!retryButton && !questionElement) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;
+    if (retryButton) {
+      retryButton.click();
+      return;
+    }
+    const action = userInputEnterAction(event.target);
+    if (!action) return;
+    const trigger = event.target.closest("[data-user-input-action]")
+      || questionElement.querySelector('[data-user-input-action="confirm"]');
+    runQuestionAction(questionElement, action, trigger);
+  });
   panel.addEventListener("click", (event) => {
     const retryButton = event.target.closest("[data-user-input-retry]");
     if (retryButton) {
@@ -7333,19 +7533,7 @@ function bindUserInputPanel() {
     if (!button) return;
     const questionElement = button.closest("[data-question-id]");
     if (!questionElement) return;
-    button.disabled = true;
-    resolveUserInputQuestion(questionElement.dataset.questionId, button.dataset.userInputAction)
-      .catch((error) => {
-        console.error("Failed to resolve questionnaire question:", error);
-        const request = getUserInputRequest(state.sessionId);
-        showToast(
-          request?.agentRunId ? t("questionnaireStatusUnavailable") : (error.message || t("saveFailed")),
-          request?.agentRunId ? "warning" : undefined,
-        );
-      })
-      .finally(() => {
-        if (button.isConnected) button.disabled = false;
-      });
+    runQuestionAction(questionElement, button.dataset.userInputAction, button);
   });
 }
 
@@ -7526,7 +7714,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
   }
 
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-  const fallbackKeys = getFallbackKeys(model);
+  const fallbackKeys = await getFallbackKeys(model);
   const totalKeys = fallbackKeys.length;
   let res;
   let lastError = "";
@@ -7646,6 +7834,9 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
     }
 
     const failure = classifyModelRequestFailure(res?.status, errCode, errText);
+    if (failure.code === "model_access_denied") {
+      invalidateModelCatalogRoute(model);
+    }
     throw createModelRequestError(errText, {
       status: res?.status,
       code: failure.code,
@@ -8209,7 +8400,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
   const existingMessage = options.existingMessage || null;
   const model = String(existingMessage?._model || getSelectedModel());
   if (!model) throw new Error(t("selectModelFirst"));
-  if (!getBestKey(model)) throw new Error(t("configureKeyFirst"));
+  await getFallbackKeys(model);
 
   const queuedAt = Date.now();
   const id = `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
@@ -8493,7 +8684,12 @@ async function pumpQueuedSessionMessages(sessionId) {
   if (!item) return false;
   // Startup can restore sessions before workbar keys are available. Leave the
   // item pending instead of consuming it as a failed request.
-  if (!item.model || !getBestKey(item.model)) return false;
+  if (!item.model) return false;
+  try {
+    await getFallbackKeys(item.model);
+  } catch (_) {
+    return false;
+  }
 
   // A stopped or failed foreground run is terminal once a later queued message
   // starts. Retain only detached background work and the FIFO queue so timing
@@ -8742,7 +8938,7 @@ async function runBackgroundSubAgentJob(job) {
   subCtx.tools = serverTools;
   const prepared = await buildModelRequestPayload(subCtx, true, serverTools);
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-  const keys = getFallbackKeys(job.model || getSelectedModel());
+  const keys = await getFallbackKeys(job.model || getSelectedModel());
 
   let timedOut = false;
   let lastUsage = { input: 0, output: 0, cache: 0 };
@@ -10275,7 +10471,7 @@ async function runServerAgentLoop(ctx) {
   if (ctx.sessionId === state.sessionId) state.abortController = ctx.run.abortController;
 
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-  const keys = getFallbackKeys(ctx.model || getSelectedModel());
+  const keys = await getFallbackKeys(ctx.model || getSelectedModel());
   if (!ctx.agentRunId) {
     const prepared = await buildModelRequestPayload(ctx, true, serverTools);
     const contextResolution = ctx.contextResolution || getModelContextResolution(
@@ -10442,7 +10638,12 @@ async function runServerAgentLoop(ctx) {
     }
     const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`);
     err.status = snapshot.status;
-    err.errorCode = snapshot.errorCode || "";
+    const failure = classifyModelRequestFailure(
+      0,
+      snapshot.errorCode || "",
+      snapshot.error || "",
+    );
+    err.errorCode = failure.code || snapshot.errorCode || "";
     const preservePublicProcess = Boolean(
       snapshot.goalOperationsEnabled
       && ["agent_round_limit", "goal_run_hard_limit"].includes(err.errorCode)
@@ -10454,6 +10655,7 @@ async function runServerAgentLoop(ctx) {
     }
     err.preservePublicProcess = preservePublicProcess;
     if (err.errorCode === "model_access_denied") {
+      invalidateModelCatalogRoute(ctx.model || getSelectedModel());
       await refreshModels().catch((refreshError) => {
         console.warn("Failed to refresh models after authorization changed:", refreshError);
       });
@@ -10503,8 +10705,9 @@ async function compactConversation() {
 
 
   const model = getSelectedModel();
-
-  const key = getBestKey(model);
+  const key = model
+    ? (await getFallbackKeys(model).catch(() => []))[0]
+    : "";
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
 
   if (!key || !model) { showToast(t("compactSetupRequired"), "warning"); return; }
@@ -11192,9 +11395,7 @@ async function sendMessage(userText, options = {}) {
 
   if (!model) throw new Error(t("selectModelFirst"));
 
-  const key = getBestKey(model);
-
-  if (!key) throw new Error(t("configureKeyFirst"));
+  await getFallbackKeys(model);
 
   const submittedAt = Date.now();
 
@@ -12745,6 +12946,13 @@ els.chatForm.addEventListener("submit", async (event) => {
 
   event.preventDefault();
 
+  // Questionnaire inputs live inside chatForm. An implicit form submit must
+  // never reach the running-message path (which treats an empty send as stop).
+  if (
+    els.userInputPanel?.contains(document.activeElement)
+    && getUserInputRequest(state.sessionId)?.status === "pending"
+  ) return;
+
   await waitForPendingImageAttachments();
   await resolveAtImages();
 
@@ -13768,7 +13976,7 @@ async function init() {
 
   applyI18n(); // run early, before async ops, to prevent flicker
   const hasEnabledKey = storedKeyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim());
-  const cachedModelCatalog = hasEnabledKey ? restoreCachedModelCatalog() : [];
+  const cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];
   if (!cachedModelCatalog.length) renderModelCatalog([], hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
   // Restore the persisted model before platform sync can save other settings.
   // Availability is validated only after refreshModels receives a real list.

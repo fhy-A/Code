@@ -8,6 +8,7 @@
     "/goal", "/goal status", "/goal 状态", "goal status", "goal 状态", "查看 goal 状态",
   ]);
   const STEP_STATUSES = new Set(["pending", "in_progress", "completed"]);
+  const TERMINAL_LIFECYCLES = new Set(["completed", "cancelled"]);
 
   function classifyGoalInput(input) {
     const text = String(input || "").trim();
@@ -215,7 +216,7 @@
         currentSessionId
         && data?.exists
         && goal
-        && goal.lifecycle !== "completed"
+        && !TERMINAL_LIFECYCLES.has(String(goal.lifecycle || ""))
       );
       root.classList.toggle("hidden", !visible);
       root.hidden = !visible;

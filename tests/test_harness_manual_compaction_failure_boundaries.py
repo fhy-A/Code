@@ -350,7 +350,7 @@ const context = vm.createContext({
   els,
   encodeURIComponent,
   formatCompact: (value) => String(value),
-  getBestKey: () => "SECRET_D3_KEY",
+  getFallbackKeys: async () => ["SECRET_D3_KEY"],
   getModelContextMessages: compaction.getModelContextMessages,
   getMsgText: (message) => Array.isArray(message?.content)
     ? String(message.content.find((part) => part?.type === "text")?.text || "")

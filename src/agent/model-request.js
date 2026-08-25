@@ -144,8 +144,6 @@
         (Array.isArray(message.meta?.toolCalls) ? message.meta.toolCalls : []).forEach((call) => {
           rememberCall(call?.id, message.meta?.agentRunId);
         });
-      } else if (message?.role === "tool-call") {
-        rememberCall(message.meta?.toolCallId, message.meta?.agentRunId);
       } else if (message?.role === "tool-result") {
         pendingCalls.delete(String(message.meta?.toolCallId || ""));
       }
@@ -167,13 +165,8 @@
 
       const mapped = mapMessageForApi(message, includeNativeTools);
       if (!mapped) {
-        if (
-          message.role === "tool-call"
-          && message.meta?.toolCallId
-          && !message.meta?.skipApi
-        ) {
-          pendingToolCallIds.add(message.meta.toolCallId);
-        }
+        // Visual tool-call rows never establish API protocol state. Only the
+        // originating assistant.meta.toolCalls declaration can do that.
         continue;
       }
 

@@ -6,6 +6,12 @@ const { FIXTURE_CONTENT, startIsolatedHost } = require("./isolated-host.cjs");
 
 const { expect } = base;
 const MODEL_ID = "h4-e2e-model";
+const TRUSTED_ROUTE_MODEL_ID = "h4-deepseek-trusted-route-model";
+const TRUSTED_ROUTE_SECONDARY_KEY = "h4-synthetic-route-credential";
+const TRUSTED_ROUTE_USER = "H4_TRUSTED_MODEL_ROUTE_USER";
+const TRUSTED_ROUTE_FINAL = "H4_TRUSTED_MODEL_ROUTE_FINAL";
+const TOOL_PROTOCOL_CONTINUE_USER = "H4_TOOL_PROTOCOL_CONTINUE_USER";
+const TOOL_PROTOCOL_FINAL = "H4_TOOL_PROTOCOL_FINAL";
 const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
 const AUTO_PERMISSION_ACK_VERSION = "v1";
 const AUTO_PERMISSION_REFRESH_USER = "H4_AUTO_PERMISSION_REFRESH_USER";
@@ -29,6 +35,10 @@ const TOOL_DETAILS_STAGE = "H4_TOOL_DETAILS_STAGE";
 const TOOL_DETAILS_FINAL = "H4_TOOL_DETAILS_FINAL";
 const GOAL_V2_EXPLICIT_USER = "/goal H4_GOAL_V2_EXPLICIT";
 const GOAL_V2_EXPLICIT_FINAL = "H4_GOAL_V2_EXPLICIT_FINAL";
+const GOAL_V2_CANCEL_DRAFT_USER = "/goal H4_GOAL_V2_CANCEL_DRAFT";
+const GOAL_V2_CANCEL_DRAFT_FINAL = "H4_GOAL_V2_CANCEL_DRAFT_FINAL";
+const GOAL_V2_CANCEL_USER = "H4_GOAL_V2_CANCEL_CURRENT_GOAL";
+const GOAL_V2_CANCEL_FINAL = "H4_GOAL_V2_CANCEL_FINAL";
 const GOAL_V2_PUBLIC_COMMENTARY = "H4_GOAL_V2_PUBLIC_PROCESS_COMMENTARY";
 const GOAL_V2_PRIVATE_REASONING = "H4_GOAL_V2_PRIVATE_REASONING_MUST_NOT_PROJECT";
 const GOAL_V2_AUTONOMOUS_USER = "H4_GOAL_V2_AUTONOMOUS";
@@ -112,13 +122,26 @@ const QUESTIONNAIRE_TITLE = "H4_QUESTIONNAIRE_TITLE";
 const QUESTIONNAIRE_REASON = "H4_QUESTIONNAIRE_REASON";
 const QUESTIONNAIRE_QUESTION_ID = "h4-questionnaire-choice";
 const QUESTIONNAIRE_PROMPT = "H4_QUESTIONNAIRE_PROMPT";
+const LEGACY_QUESTIONNAIRE_USER = "H4_LEGACY_QUESTIONNAIRE_USER";
+const LEGACY_QUESTIONNAIRE_FINAL = "H4_LEGACY_QUESTIONNAIRE_FINAL";
+const LEGACY_QUESTIONNAIRE_TOOL_CALL_ID = "h4-legacy-questionnaire-call-1";
+const LEGACY_QUESTIONNAIRE_REQUEST_ID = `user-input-${LEGACY_QUESTIONNAIRE_TOOL_CALL_ID}`;
+const LEGACY_QUESTIONNAIRE_TITLE = "H4_LEGACY_QUESTIONNAIRE_TITLE";
+const LEGACY_QUESTIONNAIRE_REASON = "H4_LEGACY_QUESTIONNAIRE_REASON";
+const LEGACY_QUESTIONNAIRE_QUESTION_ID = "h4-legacy-questionnaire-text";
+const LEGACY_QUESTIONNAIRE_PROMPT = "H4_LEGACY_QUESTIONNAIRE_PROMPT";
+const LEGACY_QUESTIONNAIRE_ANSWER = "H4_LEGACY_QUESTIONNAIRE_ANSWER";
 const QUESTIONNAIRE_OPTION_A = Object.freeze({
   value: "h4-option-a",
   label: "H4_QUESTIONNAIRE_OPTION_A",
+  description: "H4_QUESTIONNAIRE_OPTION_A_DESCRIPTION",
+  recommended: true,
 });
 const QUESTIONNAIRE_OPTION_B = Object.freeze({
   value: "h4-option-b",
   label: "H4_QUESTIONNAIRE_OPTION_B",
+  description: "H4_QUESTIONNAIRE_OPTION_B_DESCRIPTION",
+  recommended: false,
 });
 const MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER";
 const MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL";
@@ -149,17 +172,19 @@ const MIXED_QUESTIONNAIRE_CONTRACT = Object.freeze({
       prompt: "H4_MIXED_SINGLE_PROMPT",
       type: "single",
       required: true,
-      allowOther: false,
+      allowOther: true,
       options: [
         {
           value: "h4-mixed-single-a",
           label: "H4_MIXED_SINGLE_OPTION_A",
           description: "H4_MIXED_SINGLE_OPTION_A_DESCRIPTION",
+          recommended: true,
         },
         {
           value: "h4-mixed-single-b",
           label: "H4_MIXED_SINGLE_OPTION_B",
           description: "H4_MIXED_SINGLE_OPTION_B_DESCRIPTION",
+          recommended: false,
         },
       ],
       answer: {
@@ -180,16 +205,19 @@ const MIXED_QUESTIONNAIRE_CONTRACT = Object.freeze({
           value: "h4-mixed-multiple-a",
           label: "H4_MIXED_MULTIPLE_OPTION_A",
           description: "H4_MIXED_MULTIPLE_OPTION_A_DESCRIPTION",
+          recommended: true,
         },
         {
           value: "h4-mixed-multiple-b",
           label: "H4_MIXED_MULTIPLE_OPTION_B",
           description: "H4_MIXED_MULTIPLE_OPTION_B_DESCRIPTION",
+          recommended: false,
         },
         {
           value: "h4-mixed-multiple-c",
           label: "H4_MIXED_MULTIPLE_OPTION_C",
           description: "H4_MIXED_MULTIPLE_OPTION_C_DESCRIPTION",
+          recommended: false,
         },
       ],
       answer: {
@@ -206,14 +234,27 @@ const MIXED_QUESTIONNAIRE_CONTRACT = Object.freeze({
     {
       id: "h4-mixed-text",
       prompt: "H4_MIXED_TEXT_PROMPT",
-      type: "text",
+      type: "single",
       required: true,
-      allowOther: false,
-      options: [],
+      allowOther: true,
+      options: [
+        {
+          value: "h4-mixed-text-a",
+          label: "H4_MIXED_TEXT_OPTION_A",
+          description: "H4_MIXED_TEXT_OPTION_A_DESCRIPTION",
+          recommended: true,
+        },
+        {
+          value: "h4-mixed-text-b",
+          label: "H4_MIXED_TEXT_OPTION_B",
+          description: "H4_MIXED_TEXT_OPTION_B_DESCRIPTION",
+          recommended: false,
+        },
+      ],
       answer: {
         values: [],
-        text: MIXED_QUESTIONNAIRE_TEXT,
-        other: "",
+        text: "",
+        other: MIXED_QUESTIONNAIRE_TEXT,
         markers: [MIXED_QUESTIONNAIRE_TEXT],
       },
     },
@@ -486,26 +527,26 @@ const H4_SYNC_1_SEMANTIC_HASHES = Object.freeze({
   refreshLifecycle: "4f728a8ceb1d29f8c888e828cd1b27d21fbdb1508e030fa29a5aa3ffd4ba281f",
 });
 const H4_8A_SEMANTIC_HASHES = Object.freeze({
-  waitingEventProjection: "6f07ddb587ba352d15f3b9d8608d3b89c475f3f3217ec713304b31b0e5a6da41",
-  waitingSnapshot: "722b86175ddd43f7306b459d5f6410a0a7c8a8f3ad5b8075cfb6dd2bc8506c3b",
-  inputSubmissionProjection: "1bc729f0df83ed708bbf5f1c397a6aaef4d73788d50ccfb7e45473859cd1bc27",
-  runtimeProjection: "c828f32c0eef8d43d9464fce985d82603cc6817b9f1ce948be2fd343e8c4652c",
+  waitingEventProjection: "8bbcdf6b3035eb780101f4e3e38c40ac746a638407066b2ecdc5c20919ced179",
+  waitingSnapshot: "8dee44a004354ece3cff365ac3dff38483a919d98cf935e9340d9f2fe543d6d5",
+  inputSubmissionProjection: "312b1ba4248cac5a0d9970478abfb65f3f8542f00c8042478411ba42387ef84c",
+  runtimeProjection: "62a77166bc81477ba47685dcbedc2a8ead3bb873209c231c6e17a87c15b94889",
   sessionRoleContent: "ba570ba870a189929e69069ec42c83747102a292b8118a153900185c27686bf0",
-  sessionInputMeta: "30fbb18d20b9db9ab076b932eb1fa9fc11aeaf11f61249f7248db17380234559",
+  sessionInputMeta: "b5774d4bd29ff0640f8cf4d802edec239e7b8a8fdef719b4cb533fa17bc7146f",
   waitingDom: "f0586513d93fe803d143b3929fd4e56c13fa317de5dcd9dd6ce1d4f1fe351dad",
   terminalDom: "37c2441c6730d71c5b4af6e34798778c004c163686bb5fcee31179cf1fd69f8b",
   refreshLifecycle: "fe57c8d69de127f1cfd2b85d1bfb78878aaede36c381a19e2a1a616bba080629",
 });
 const H4_8B_SEMANTIC_HASHES = Object.freeze({
-  waitingEventProjection: "0e66c7254f24708cf2f09c10ab2cc456a49954a0d691a9aaf61ce12d67d3184f",
-  progressSnapshot: "372e17ded267937f8f1ca30c683cf7ce8b548af976c4979f617af8fa04d006aa",
-  progressDom: "d635937b610a1e098910ed3ddb43c2f6ab734e349401d9336e812588b59a85e6",
-  inputSubmissionProjection: "5082f9c4a6eded92d612adae0334717b94619f295eaaabf86708e4c9f0b68eb4",
-  runtimeProjection: "7f4f58396717deb173b18dd703f2ff76557455cd4aee661cd71c3c4bc5aa1b31",
+  waitingEventProjection: "dc24f5774c446b92886aa68df23ec7a470504f0dc3a2e038ca50b8ceb0313037",
+  progressSnapshot: "7cd0e946bedfef2fdbb260983ad626f1338fe579e23db6d27053ee7e3932bfea",
+  progressDom: "4776c26e9a149439095ee51f39510cf829679f96f006c2a6165b31d7b9e1b88b",
+  inputSubmissionProjection: "a7f45bf1c6fade00f3b06d7516cbfea9fd5638d94002aa20b8a7f03be29b253d",
+  runtimeProjection: "899024fc978d681003d1542ce10328deed51cb3297bd02c7bb0cad17e86da675",
   sessionRoleContent: "ba570ba870a189929e69069ec42c83747102a292b8118a153900185c27686bf0",
-  sessionInputMeta: "89823e3f8e29025bd03d50d33bd063f70ca68d6558a7f465ca5b83dd5591b820",
-  terminalDom: "bcd0070502f78af981739b6116e93adbaa2d5f3c5f542f6d827de3c3eac7b7c1",
-  refreshLifecycle: "12189043590d29b528a2beaac58e4f1c49f66d0d0a1e4ff2889c3dd7b69f612f",
+  sessionInputMeta: "34275142831991f081a628b519a9446ce748e198b3f36379510b2d40d70b4573",
+  terminalDom: "829d12bbc56af4d92a08f09b8e23dc075856cbd598ac246c5647363b8f37d95e",
+  refreshLifecycle: "c99bc2c6d4b2cf37dab0f4d27416d294c51ca4095df87d570b827accc9777952",
 });
 const H4_8C_SEMANTIC_HASHES = Object.freeze({
   approved: Object.freeze({
@@ -558,15 +599,15 @@ const H4_8E_SEMANTIC_HASH_KEYS = Object.freeze([
   "refreshLifecycle",
 ]);
 const H4_8E_SEMANTIC_HASHES = Object.freeze({
-  waitingEventProjection: "6f07ddb587ba352d15f3b9d8608d3b89c475f3f3217ec713304b31b0e5a6da41",
-  waitingQuestionnaireSnapshot: "722b86175ddd43f7306b459d5f6410a0a7c8a8f3ad5b8075cfb6dd2bc8506c3b",
+  waitingEventProjection: "8bbcdf6b3035eb780101f4e3e38c40ac746a638407066b2ecdc5c20919ced179",
+  waitingQuestionnaireSnapshot: "8dee44a004354ece3cff365ac3dff38483a919d98cf935e9340d9f2fe543d6d5",
   queueSubmissionProjection: "8fa3b6d9e440913edceefca2c9e1855e7b7be51341fb68faffe7fef9d0269556",
   waitingQueueSession: "225ef8c09bb0f7b09463209501568d754d2cd4a795bba060a7e667d2b8c01eeb",
   waitingDom: "499509b21abbc0a3f6805561df5918183df04267737159089aa56aee7010bff6",
   waitingRefreshLifecycle: "d114d05ecf65efe64f8c21b589dfde91e0f6dafd7c44616fa83eaeeb11076cd8",
-  inputSubmissionProjection: "53765f8c4d304eeeb2db40c7d74404d1db3f8838450d862660a28cfa243b434b",
+  inputSubmissionProjection: "2b5fde41ea6b0f79db3244822c7b218a81bb2ef3aac0faea781c16a72761fbd6",
   queuePromotionProjection: "513394446016e85f76718ef0c65945b3f24a47867e39e04232f3968d4a18446a",
-  runtimeProjection: "f7f333b2b0573c96ee9b2a489019f32d7724c5273a5963896884378e1a9eb7ba",
+  runtimeProjection: "029e82501395f832524d1d89223dcc77bc09e697eb56b8e5fda2b1305b9b2f6d",
   sessionRoleContent: "e9a93e5e49bde42f63d3047001afa5f79c78373f1365378367311022d15f71ec",
   terminalDom: "d2dc405690fcf7c80ad84ffaca0496aba43b40e2ebd528971a462a82ba9da90d",
   refreshLifecycle: "1583ae3f119ccbc86c8ec055d7d486a7c3a607cfd79fd9728ecadd8907cf55e0",
@@ -5484,6 +5525,7 @@ function questionnaireArgumentsProjection(value) {
         labelMatches: [QUESTIONNAIRE_OPTION_A.label, QUESTIONNAIRE_OPTION_B.label]
           .includes(String(option?.label || "")),
         descriptionPresent: Boolean(String(option?.description || "").trim()),
+        recommended: option?.recommended === true,
       })),
     },
   };
@@ -6590,17 +6632,19 @@ async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
           promptMatches: true,
           type: "single",
           required: true,
-          allowOther: false,
+          allowOther: true,
           options: [
             {
               value: QUESTIONNAIRE_OPTION_A.value,
               labelMatches: true,
               descriptionPresent: true,
+              recommended: true,
             },
             {
               value: QUESTIONNAIRE_OPTION_B.value,
               labelMatches: true,
               descriptionPresent: true,
+              recommended: false,
             },
           ],
         },
@@ -7068,6 +7112,261 @@ async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
   });
 }
 
+async function exerciseLegacyPersistedQuestionnaireLifecycle(h4, runtime) {
+  const seededResponse = await h4.host.command("seed-legacy-questionnaire");
+  expect(seededResponse.ok).toBe(true);
+  const seeded = seededResponse.legacyQuestionnaire;
+  expect(seeded).toMatchObject({
+    requestId: LEGACY_QUESTIONNAIRE_REQUEST_ID,
+    toolCallId: LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+  });
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await h4.proveNonLoopbackBlocked();
+
+  const seededSession = page.locator(
+    `#sessionList button.session-main[data-session-id="${seeded.sessionId}"]`,
+  );
+  await expect(seededSession).toHaveCount(1);
+  await seededSession.click();
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(activeSession).toHaveAttribute("data-session-id", seeded.sessionId);
+  const question = page.locator(
+    `#userInputPanel [data-question-id="${LEGACY_QUESTIONNAIRE_QUESTION_ID}"]`,
+  );
+  const textInput = question.locator("[data-user-input-text]");
+  await expect(question).toHaveCount(1);
+  await expect(question).toContainText(LEGACY_QUESTIONNAIRE_PROMPT);
+  await expect(textInput).toHaveCount(1);
+  await expect(question.locator('input[type="radio"], input[type="checkbox"]')).toHaveCount(0);
+  await expect(question.locator("[data-user-input-other]")).toHaveCount(0);
+  await expect(question.locator(".user-input-recommended")).toHaveCount(0);
+  await expect(page.locator("#userInputPanel")).toContainText(LEGACY_QUESTIONNAIRE_REASON);
+
+  let waitingSession = null;
+  let waitingAgent = null;
+  await expect.poll(async () => {
+    [waitingSession, waitingAgent] = await Promise.all([
+      fetchProductionJson(page, `/api/sessions/${encodeURIComponent(seeded.sessionId)}`),
+      fetchProductionJson(
+        page,
+        `/api/agent/runs/${encodeURIComponent(seeded.agentRunId)}?cursor=0&wait=0`,
+      ),
+    ]);
+    return {
+      sessionStatus: waitingSession.status,
+      runStatus: waitingSession.body?.runState?.status,
+      requestId: waitingSession.body?.runState?.userInputRequest?.id,
+      agentStatus: waitingAgent.body?.status,
+      pendingRequestId: waitingAgent.body?.pendingInput?.requestId,
+    };
+  }).toEqual({
+    sessionStatus: 200,
+    runStatus: "waiting-user-input",
+    requestId: LEGACY_QUESTIONNAIRE_REQUEST_ID,
+    agentStatus: "waiting_user_input",
+    pendingRequestId: LEGACY_QUESTIONNAIRE_REQUEST_ID,
+  });
+  expect(waitingSession.body.runState.userInputRequest).toMatchObject({
+    title: LEGACY_QUESTIONNAIRE_TITLE,
+    reason: LEGACY_QUESTIONNAIRE_REASON,
+    questions: [{ prompt: LEGACY_QUESTIONNAIRE_PROMPT }],
+  });
+  expect(waitingAgent.body.pendingInput).toMatchObject({
+    title: LEGACY_QUESTIONNAIRE_TITLE,
+    reason: LEGACY_QUESTIONNAIRE_REASON,
+    questions: [{ prompt: LEGACY_QUESTIONNAIRE_PROMPT }],
+  });
+  const persistedQuestion = waitingSession.body.runState.userInputRequest.questions[0];
+  const pendingQuestion = waitingAgent.body.pendingInput.questions[0];
+  for (const legacyQuestion of [persistedQuestion, pendingQuestion]) {
+    expect(legacyQuestion).toMatchObject({
+      id: LEGACY_QUESTIONNAIRE_QUESTION_ID,
+      prompt: LEGACY_QUESTIONNAIRE_PROMPT,
+      type: "text",
+      required: true,
+      allowOther: false,
+      options: [],
+    });
+    expect(JSON.stringify(legacyQuestion)).not.toContain("recommended");
+  }
+  expect(waitingAgent.body.toolExecutions).toHaveLength(1);
+  expect(waitingAgent.body.toolExecutions[0]).toMatchObject({
+    toolCallId: LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+    name: "request_user_input",
+    status: "waiting_user_input",
+  });
+
+  const lifecycleBoundary = h4.requestBoundary();
+  const lifecycleMetricsBefore = await h4.metrics();
+  expect(lifecycleMetricsBefore.chatRequests).toEqual([]);
+  expect(lifecycleMetricsBefore.production.agentRuns).toHaveLength(1);
+  expect(lifecycleMetricsBefore.production.runtimeRuns).toHaveLength(0);
+
+  await h4.reloadRuntime(runtime);
+  const connectionRestored = await restoreGoalH4Connection(h4);
+  await expect(activeSession).toHaveAttribute("data-session-id", seeded.sessionId);
+  await expect(question).toHaveCount(1);
+  await expect(textInput).toHaveValue("");
+  await expect(question.locator('input[type="radio"], input[type="checkbox"]')).toHaveCount(0);
+  await expect(question.locator("[data-user-input-other]")).toHaveCount(0);
+  await expect(question.locator(".user-input-recommended")).toHaveCount(0);
+  await h4.host.releaseModel();
+
+  const inputRequestPromise = page.waitForRequest((request) => {
+    const requestUrl = new URL(request.url());
+    return request.method() === "POST"
+      && requestUrl.pathname
+        === `/api/agent/runs/${encodeURIComponent(seeded.agentRunId)}/input`;
+  });
+  await textInput.fill(LEGACY_QUESTIONNAIRE_ANSWER);
+  await textInput.press("Enter");
+  const inputRequest = await inputRequestPromise;
+  const inputBody = inputRequest.postDataJSON();
+  expect(inputBody).toEqual({
+    requestId: LEGACY_QUESTIONNAIRE_REQUEST_ID,
+    answers: [{
+      id: LEGACY_QUESTIONNAIRE_QUESTION_ID,
+      prompt: LEGACY_QUESTIONNAIRE_PROMPT,
+      type: "text",
+      status: "resolved",
+      text: LEGACY_QUESTIONNAIRE_ANSWER,
+      other: "",
+      answer: LEGACY_QUESTIONNAIRE_ANSWER,
+    }],
+  });
+
+  const final = page.locator("#messages article.msg.assistant")
+    .filter({ hasText: LEGACY_QUESTIONNAIRE_FINAL });
+  await expect(final).toHaveCount(1);
+  let completedAgent = null;
+  let terminalSession = null;
+  await expect.poll(async () => {
+    [completedAgent, terminalSession] = await Promise.all([
+      fetchProductionJson(
+        page,
+        `/api/agent/runs/${encodeURIComponent(seeded.agentRunId)}?cursor=0&wait=0`,
+      ),
+      fetchProductionJson(page, `/api/sessions/${encodeURIComponent(seeded.sessionId)}`),
+    ]);
+    return {
+      agentStatus: completedAgent.body?.status,
+      pendingInput: completedAgent.body?.pendingInput ?? null,
+      sessionRunStateKeys: Object.keys(terminalSession.body?.runState || {}).sort(),
+      finalCount: (terminalSession.body?.messages || []).filter((message) => (
+        message?.role === "assistant"
+        && String(message?.content || "").includes(LEGACY_QUESTIONNAIRE_FINAL)
+      )).length,
+    };
+  }).toEqual({
+    agentStatus: "completed",
+    pendingInput: null,
+    sessionRunStateKeys: [],
+    finalCount: 1,
+  });
+  const eventTypes = completedAgent.body.events.map((event) => event.type);
+  expect(eventTypes.filter((type) => type === "user_input_submitted")).toHaveLength(1);
+  expect(eventTypes.filter((type) => type === "tool_completed")).toHaveLength(1);
+  expect(completedAgent.body.toolExecutions).toHaveLength(1);
+  expect(completedAgent.body.toolExecutions[0]).toMatchObject({
+    toolCallId: LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+    name: "request_user_input",
+    status: "completed",
+    outcome: "succeeded",
+    result: {
+      requestId: LEGACY_QUESTIONNAIRE_REQUEST_ID,
+      answers: [{
+        id: LEGACY_QUESTIONNAIRE_QUESTION_ID,
+        type: "text",
+        status: "resolved",
+        values: null,
+        text: LEGACY_QUESTIONNAIRE_ANSWER,
+        other: "",
+        answer: LEGACY_QUESTIONNAIRE_ANSWER,
+      }],
+    },
+  });
+
+  const metricsAtTerminal = await h4.metrics();
+  expect(metricsAtTerminal.chatRequests).toEqual([{
+    scenario: "legacy-questionnaire-final",
+    stream: true,
+    hasToolResult: true,
+  }]);
+  expect(metricsAtTerminal.toolExecutions).toEqual([]);
+  expect(metricsAtTerminal.productionToolDelegations).toBe(0);
+  expect(metricsAtTerminal.unsafeToolRequests).toBe(0);
+  expect(metricsAtTerminal.production.agentRuns).toHaveLength(1);
+  expect(metricsAtTerminal.production.agentRuns[0]).toMatchObject({
+    status: "completed",
+  });
+  expect(metricsAtTerminal.production.agentRuns[0].agentRunId)
+    .toBe(idHash(seeded.agentRunId));
+  expect(metricsAtTerminal.production.runtimeRuns).toHaveLength(1);
+  const lifecycleRequests = questionnaireRequestProjection(
+    h4,
+    lifecycleBoundary,
+    lifecycleMetricsBefore,
+    metricsAtTerminal,
+  );
+  expect(lifecycleRequests).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 1,
+    resumePost: 1,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 1,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+
+  const terminalBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#userInputPanel:not(.hidden)")).toHaveCount(0);
+  await expect(final).toHaveCount(1);
+  const metricsAfterReload = await h4.metrics();
+  expect(metricsAfterReload.chatRequests).toEqual(metricsAtTerminal.chatRequests);
+  expect(metricsAfterReload.production.agentRuns).toEqual(metricsAtTerminal.production.agentRuns);
+  expect(questionnaireRequestProjection(
+    h4,
+    terminalBoundary,
+    metricsAtTerminal,
+    metricsAfterReload,
+  )).toEqual({
+    agentRunPost: 0,
+    runtimePost: 0,
+    agentDelete: 0,
+    inputPost: 0,
+    resumePost: 0,
+    browserProxyChatPost: 0,
+    browserToolPost: 0,
+    upstreamChatDelta: 0,
+    productionDelegationDelta: 0,
+    productionToolExecutionDelta: 0,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-legacy-persisted-questionnaire`, {
+    runtime,
+    legacyDefinition: {
+      type: persistedQuestion.type,
+      allowOther: persistedQuestion.allowOther,
+      optionCount: persistedQuestion.options.length,
+      recommendedAbsent: !JSON.stringify(persistedQuestion).includes("recommended"),
+    },
+    connectionRestored,
+    exactlyOnce: {
+      inputPost: lifecycleRequests.inputPost,
+      resumePost: lifecycleRequests.resumePost,
+      upstreamChat: metricsAtTerminal.chatRequests.length,
+      agentRuns: metricsAtTerminal.production.agentRuns.length,
+    },
+    refreshStable: true,
+  });
+}
+
 async function exerciseQuestionnaireQueueRefreshLifecycle(h4, runtime) {
   expect(Object.keys(H4_8E_SEMANTIC_HASHES)).toEqual(H4_8E_SEMANTIC_HASH_KEYS);
   const configuredHashes = Object.values(H4_8E_SEMANTIC_HASHES);
@@ -7093,7 +7392,7 @@ async function exerciseQuestionnaireQueueRefreshLifecycle(h4, runtime) {
           promptMatches: true,
           type: "single",
           required: true,
-          allowOther: false,
+          allowOther: true,
         },
       });
       expect(projection.question.options).toHaveLength(2);
@@ -7799,6 +8098,8 @@ function mixedQuestionnaireQuestionDefinitionProjection(question, expected) {
         labelMatches: String(option?.label || "") === String(expectedOption.label || ""),
         descriptionMatches: String(option?.description || "")
           === String(expectedOption.description || ""),
+        recommendedMatches: (option?.recommended === true)
+          === (expectedOption.recommended === true),
       };
     }),
   };
@@ -8169,6 +8470,7 @@ function expectMixedQuestionnaireDefinition(projection) {
         valueMatches: true,
         labelMatches: true,
         descriptionMatches: true,
+        recommendedMatches: true,
       })),
     })),
   });
@@ -8359,6 +8661,7 @@ async function mixedQuestionnaireDomProjection(h4, phase, currentIndex = -1) {
       },
       confirm: { count: 1, disabled: false },
       cancel: { count: 1, disabled: false },
+      recommended: { count: 1, reasonVisible: true },
     },
     messages: {
       initialUser: 1,
@@ -8386,6 +8689,7 @@ async function mixedQuestionnaireDomProjection(h4, phase, currentIndex = -1) {
       other: { count: 0, value: "", disabled: false },
       confirm: { count: 0, disabled: false },
       cancel: { count: 0, disabled: false },
+      recommended: { count: 0, reasonVisible: false },
     },
     messages: {
       initialUser: 1,
@@ -8437,6 +8741,8 @@ async function mixedQuestionnaireDomProjection(h4, phase, currentIndex = -1) {
       const otherInput = currentQuestion?.querySelector("[data-user-input-other]") || null;
       const confirm = currentQuestion?.querySelector('[data-user-input-action="confirm"]') || null;
       const cancel = currentQuestion?.querySelector('[data-user-input-action="cancel"]') || null;
+      const recommended = currentQuestion?.querySelector(".user-input-recommended") || null;
+      const recommendedReason = recommended?.closest("span")?.querySelector("small") || null;
       const users = [...root.querySelectorAll("article.msg.user")]
         .filter((node) => node.textContent.includes(facts.userMarker));
       const processStages = [...root.querySelectorAll(
@@ -8516,6 +8822,10 @@ async function mixedQuestionnaireDomProjection(h4, phase, currentIndex = -1) {
           },
           confirm: { count: confirm ? 1 : 0, disabled: confirm?.disabled === true },
           cancel: { count: cancel ? 1 : 0, disabled: cancel?.disabled === true },
+          recommended: {
+            count: currentQuestion?.querySelectorAll(".user-input-recommended").length || 0,
+            reasonVisible: Boolean(String(recommendedReason?.textContent || "").trim()),
+          },
         },
         messages: {
           initialUser: users.length,
@@ -8537,17 +8847,19 @@ async function mixedQuestionnaireDomProjection(h4, phase, currentIndex = -1) {
   });
 }
 
-async function answerMixedQuestionnaireQuestion(page, questionIndex) {
+async function answerMixedQuestionnaireQuestion(page, questionIndex, options = {}) {
   const question = MIXED_QUESTIONNAIRE_CONTRACT.questions[questionIndex];
   const root = page.locator(
     '#userInputPanel [data-question-id="' + question.id + '"]',
   );
   await expect(root).toHaveCount(1);
+  let enterTarget = null;
   if (question.type === "text") {
     const input = root.locator("[data-user-input-text]");
     await expect(input).toHaveCount(1);
     await input.fill(question.answer.text);
     await expect(input).toHaveValue(question.answer.text);
+    enterTarget = input;
   } else {
     const inputType = question.type === "multiple" ? "checkbox" : "radio";
     for (const value of question.answer.values) {
@@ -8557,18 +8869,21 @@ async function answerMixedQuestionnaireQuestion(page, questionIndex) {
       await expect(option).toHaveCount(1);
       await option.check();
       await expect(option).toBeChecked();
+      if (options.enterOnOption === true) enterTarget = option;
     }
     if (question.allowOther) {
       const other = root.locator("[data-user-input-other]");
       await expect(other).toHaveCount(1);
       await other.fill(question.answer.other);
       await expect(other).toHaveValue(question.answer.other);
+      if (options.enterOnOption !== true) enterTarget = other;
     }
   }
   const confirm = root.locator('[data-user-input-action="confirm"]');
   await expect(confirm).toHaveCount(1);
   await expect(confirm).toBeEnabled();
-  await confirm.click();
+  expect(enterTarget).toBeTruthy();
+  await enterTarget.press("Enter");
 }
 
 async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
@@ -8689,7 +9004,7 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
   };
 
   const q1Boundary = h4.requestBoundary();
-  await answerMixedQuestionnaireQuestion(page, 0);
+  await answerMixedQuestionnaireQuestion(page, 0, { enterOnOption: true });
   const q2Dom = await mixedQuestionnaireDomProjection(h4, "q2", 1);
   const q1Session = await waitForProgressSession(["resolved", "pending", "pending"]);
   const q1Agent = await fetchWaitingAgent();
@@ -8714,7 +9029,7 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
   expectMixedQuestionnaireActionTargets(q1ActionTargets, 0, 0);
 
   const q2Boundary = h4.requestBoundary();
-  await answerMixedQuestionnaireQuestion(page, 1);
+  await answerMixedQuestionnaireQuestion(page, 1, { enterOnOption: true });
   const q3Dom = await mixedQuestionnaireDomProjection(h4, "q3", 2);
   const q2Session = await waitForProgressSession(["resolved", "resolved", "pending"]);
   const q2Agent = await fetchWaitingAgent();
@@ -8811,7 +9126,7 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
       expectMixedQuestionnaireResult(event.result, [
         { values: "array", text: "null" },
         { values: "array", text: "null" },
-        { values: "null", text: "string" },
+        { values: "array", text: "null" },
       ]);
     }
   });
@@ -8829,7 +9144,7 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
   expectMixedQuestionnaireResult(terminalExecution[0].result, [
     { values: "array", text: "null" },
     { values: "array", text: "null" },
-    { values: "null", text: "string" },
+    { values: "array", text: "null" },
   ]);
 
   const runtimeProjection = runtimeSnapshots.map((snapshot, index) => ({
@@ -8904,7 +9219,7 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
   expectMixedQuestionnaireResult(sessionInputMeta[1].result, [
     { values: "array", text: "absent" },
     { values: "array", text: "absent" },
-    { values: "absent", text: "string" },
+    { values: "array", text: "absent" },
   ]);
   expect(sessionInputMeta[2]).toMatchObject({
     toolCallMatches: true,
@@ -8918,7 +9233,7 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
   expectMixedQuestionnaireResult(sessionInputMeta[2].result, [
     { values: "array", text: "null" },
     { values: "array", text: "null" },
-    { values: "null", text: "string" },
+    { values: "array", text: "null" },
   ]);
 
   expect(metricsAtTerminal.chatRequests).toEqual([
@@ -8948,10 +9263,10 @@ async function exerciseMixedQuestionnaireProgressLifecycle(h4, runtime) {
         multipleSelectionsMatch: true,
         multipleOtherMatches: true,
         multipleAnswerMarkersMatch: true,
-        textValuesAbsent: true,
-        textMatches: true,
-        textAnswerMatches: true,
-        textOtherEmpty: true,
+        customValueCount: 0,
+        customTextAbsent: true,
+        customOtherMatches: true,
+        customAnswerMatches: true,
         summaryMarkersMatch: true,
       },
     },
@@ -9128,17 +9443,17 @@ async function beginTerminalQuestionnaireLifecycle(h4, runtime) {
   return {page, boundary, agentRunId, sessionId};
 }
 
-async function answerTerminalQuestionnaireText(page, questionId, answer) {
+async function answerTerminalQuestionnaireCustom(page, questionId, answer) {
   const question = page.locator(`#userInputPanel [data-question-id="${questionId}"]`);
   await expect(question).toBeVisible();
-  await question.locator("[data-user-input-text]").fill(answer);
+  await question.locator("[data-user-input-other]").fill(answer);
   await question.locator('[data-user-input-action="confirm"]').click();
 }
 
 async function exerciseTerminalQuestionnaireHealthy(h4, runtime) {
   const started = await beginTerminalQuestionnaireLifecycle(h4, runtime);
   const { page, boundary, agentRunId, sessionId } = started;
-  await answerTerminalQuestionnaireText(
+  await answerTerminalQuestionnaireCustom(
     page,
     TERMINAL_QUESTIONNAIRE_FIRST_ID,
     TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
@@ -9152,7 +9467,7 @@ async function exerciseTerminalQuestionnaireHealthy(h4, runtime) {
     return request.method() === "POST"
       && url.pathname === `/api/agent/runs/${agentRunId}/input`;
   });
-  await answerTerminalQuestionnaireText(
+  await answerTerminalQuestionnaireCustom(
     page,
     TERMINAL_QUESTIONNAIRE_SECOND_ID,
     TERMINAL_QUESTIONNAIRE_SECOND_ANSWER,
@@ -9168,9 +9483,13 @@ async function exerciseTerminalQuestionnaireHealthy(h4, runtime) {
     .toBe(`/api/agent/runs/${agentRunId}/input`);
   const inputBody = inputRequest.postDataJSON();
   expect(inputBody.requestId).toBe(TERMINAL_QUESTIONNAIRE_REQUEST_ID);
-  expect(inputBody.answers.map((answer) => ({id: answer.id, text: answer.text}))).toEqual([
-    {id: TERMINAL_QUESTIONNAIRE_FIRST_ID, text: TERMINAL_QUESTIONNAIRE_FIRST_ANSWER},
-    {id: TERMINAL_QUESTIONNAIRE_SECOND_ID, text: TERMINAL_QUESTIONNAIRE_SECOND_ANSWER},
+  expect(inputBody.answers.map((answer) => ({
+    id: answer.id,
+    values: answer.values,
+    other: answer.other,
+  }))).toEqual([
+    {id: TERMINAL_QUESTIONNAIRE_FIRST_ID, values: [], other: TERMINAL_QUESTIONNAIRE_FIRST_ANSWER},
+    {id: TERMINAL_QUESTIONNAIRE_SECOND_ID, values: [], other: TERMINAL_QUESTIONNAIRE_SECOND_ANSWER},
   ]);
   expect(h4.requestSummarySince(boundary)["POST /api/agent/runs/[id]/input"] || 0).toBe(1);
   const completed = await fetchProductionJson(
@@ -9186,7 +9505,7 @@ async function exerciseTerminalQuestionnaireHealthy(h4, runtime) {
   expect(h4.pageErrors).toEqual([]);
   h4.evidence(`${runtime}-terminal-questionnaire-healthy`, {
     questionCount: 2,
-    textAnswerAccepted: inputBody.answers[0].text === TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
+    customAnswerAccepted: inputBody.answers[0].other === TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
     requestIdMatched: inputBody.requestId === TERMINAL_QUESTIONNAIRE_REQUEST_ID,
     inputPostCount: 1,
     agentStatus: completed.body.status,
@@ -9196,7 +9515,7 @@ async function exerciseTerminalQuestionnaireHealthy(h4, runtime) {
 async function exerciseTerminalQuestionnaireStaleReload(h4, runtime) {
   const started = await beginTerminalQuestionnaireLifecycle(h4, runtime);
   const { page, boundary, agentRunId, sessionId } = started;
-  await answerTerminalQuestionnaireText(
+  await answerTerminalQuestionnaireCustom(
     page,
     TERMINAL_QUESTIONNAIRE_FIRST_ID,
     TERMINAL_QUESTIONNAIRE_FIRST_ANSWER,
@@ -16268,12 +16587,14 @@ const test = base.test.extend({
               : inline;
           },
         };
-        localStorage.setItem("code-key-config", JSON.stringify([{
-          name: "H4 synthetic",
-          key: syntheticKey,
-          enabled: true,
-          source: "manual",
-        }]));
+        if (sessionStorage.getItem("h4-preserve-key-config") !== "1") {
+          localStorage.setItem("code-key-config", JSON.stringify([{
+            name: "H4 synthetic",
+            key: syntheticKey,
+            enabled: true,
+            source: "manual",
+          }]));
+        }
         localStorage.setItem("code-platform-auth", JSON.stringify({
           token: platformToken,
           userId: "7",
@@ -16888,6 +17209,159 @@ test("bundle explicit Goal uses ordinary AgentRun and compact v2 projection", as
 
 test("direct classic explicit Goal matches bundle v2 semantics", async ({ h4 }) => {
   await exerciseGoalV2Projection(h4, "classic");
+});
+
+async function exerciseGoalV2ModelCancellation(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  const requestBoundary = h4.requestBoundary();
+
+  await h4.submit(GOAL_V2_CANCEL_DRAFT_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_CANCEL_DRAFT_FINAL,
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  const sessionId = await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+  const readGoal = () => page.evaluate(async (currentSessionId) => (
+    fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/goal-v2`)
+      .then((response) => response.json())
+      .then((value) => value.data)
+  ), sessionId);
+  await expect.poll(readGoal).toMatchObject({
+    revision: 1,
+    goal: {
+      lifecycle: "draft",
+      sourceKind: "explicit",
+      objective: "H4_GOAL_V2_CANCEL_DRAFT",
+      steps: [],
+    },
+  });
+  await expect(page.locator("#goalProgress")).toBeVisible();
+  await expect(page.locator("#goalProgressCount")).toHaveText("0/0");
+
+  await h4.submit(GOAL_V2_CANCEL_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: GOAL_V2_CANCEL_FINAL,
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#userInputPanel")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+
+  const agentRunIds = [...h4.controlIds().agentRunIds];
+  expect(agentRunIds).toHaveLength(2);
+  const agentSnapshots = [];
+  for (const agentRunId of agentRunIds) {
+    const response = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    expect(response.status).toBe(200);
+    agentSnapshots.push(response.body);
+  }
+  const [draftRun, cancellationRun] = agentSnapshots;
+  expect(draftRun.status).toBe("completed");
+  expect(draftRun.toolExecutions).toEqual([]);
+  expect(cancellationRun.status).toBe("completed");
+  // Internal Goal operations are intentionally absent from the public
+  // AgentRun projection. Cancellation identity comes from the Goal sidecar
+  // below, while these empty arrays prove no public file/edit/command tool ran.
+  expect(cancellationRun.toolExecutions).toEqual([]);
+  for (const snapshot of agentSnapshots) {
+    const eventTypes = snapshot.events.map((event) => event.type);
+    expect(eventTypes).not.toContain("user_input_required");
+    expect(eventTypes).not.toContain("user_input_submitted");
+  }
+
+  const cancelled = await readGoal();
+  expect(cancelled).toMatchObject({
+    revision: 2,
+    goal: {
+      lifecycle: "cancelled",
+      sourceKind: "explicit",
+      objective: "H4_GOAL_V2_CANCEL_DRAFT",
+    },
+  });
+  expect(cancelled.goal.steps).toEqual([]);
+  const metricsAfterCancel = await h4.metrics();
+  const cancelRequests = metricsAfterCancel.chatRequests.filter((entry) => (
+    ["goal-v2-cancel-call", "goal-v2-cancel-final"].includes(entry.scenario)
+  ));
+  expect(cancelRequests).toHaveLength(2);
+  expect(cancelRequests.map((entry) => entry.goalCancelContract)).toEqual([
+    expect.objectContaining({toolPresent: true, directInstructionPresent: true}),
+    expect.objectContaining({toolPresent: true, directInstructionPresent: true}),
+  ]);
+  const goalEventProjection = metricsAfterCancel.production.goalEvents.find((entry) => (
+    entry.sessionId === idHash(sessionId)
+  ));
+  expect(goalEventProjection).toEqual(expect.objectContaining({
+    revision: 2,
+    eventTypes: ["goal_created", "goal_cancelled"],
+  }));
+  const goalCancelledEventCount = goalEventProjection.eventTypes.filter((type) => (
+    type === "goal_cancelled"
+  )).length;
+  expect(goalCancelledEventCount).toBe(1);
+  expect(metricsAfterCancel.productionToolDelegations).toBe(0);
+  expect(metricsAfterCancel.productionEditProposalDelegations).toBe(0);
+  expect(metricsAfterCancel.productionEditApplyDelegations).toBe(0);
+  expect(metricsAfterCancel.productionEditWrites).toBe(0);
+  const requestsAfterCancel = h4.loopbackRequests.slice(requestBoundary);
+  expect(requestsAfterCancel.filter((entry) => (
+    entry.method === "DELETE" && /^\/api\/agent\/runs\//.test(entry.path)
+  ))).toHaveLength(0);
+  expect(requestsAfterCancel.filter((entry) => (
+    entry.method === "POST"
+    && (/\/api\/agent\/runs\/[^/]+\/(?:input|resume)$/.test(entry.path)
+      || entry.path.startsWith("/api/tools/"))
+  ))).toHaveLength(0);
+
+  await h4.submit("H4_PLAIN_USER");
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_PLAIN_FINAL",
+  })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(3);
+  const laterRunId = h4.controlIds().agentRunIds.find((id) => !agentRunIds.includes(id));
+  expect(laterRunId).toBeTruthy();
+  const laterRun = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(laterRunId)}?cursor=0&wait=0`,
+  );
+  expect(laterRun).toMatchObject({status: 200, body: {status: "completed"}});
+
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#goalProgress")).toBeHidden();
+  await expect(page.locator("#messages .goal-message-marker")).toHaveCount(1);
+  expect(await readGoal()).toMatchObject({
+    revision: 2,
+    goal: {lifecycle: "cancelled"},
+  });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-goal-v2-model-cancel`, {
+    runtime,
+    sessionId,
+    lifecycle: "cancelled",
+    revision: 2,
+    goalEventTypes: goalEventProjection.eventTypes,
+    publicInternalToolProjectionCount: cancellationRun.toolExecutions.length,
+    goalCancelledEventCount,
+    questionnaireCalls: 0,
+    transportDeletes: 0,
+    laterTaskCompleted: laterRun.body.status === "completed",
+  });
+}
+
+test("bundle Goal cancel directly terminates a draft Goal and keeps the Session usable", async ({ h4 }) => {
+  await exerciseGoalV2ModelCancellation(h4, "bundle");
+});
+
+test("direct classic Goal cancel matches the bundle terminal lifecycle", async ({ h4 }) => {
+  await exerciseGoalV2ModelCancellation(h4, "classic");
 });
 
 test("bundle ordinary AgentRun can autonomously create the same Goal v2 projection", async ({ h4 }) => {
@@ -18391,6 +18865,14 @@ test("direct classic questionnaire survives reload, submits once, and resumes sa
   await exerciseQuestionnaireRefreshLifecycle(h4, "classic");
 });
 
+test("bundle legacy persisted questionnaire restores and submits exactly once", async ({ h4 }) => {
+  await exerciseLegacyPersistedQuestionnaireLifecycle(h4, "bundle");
+});
+
+test("direct classic legacy persisted questionnaire restores and submits exactly once", async ({ h4 }) => {
+  await exerciseLegacyPersistedQuestionnaireLifecycle(h4, "classic");
+});
+
 test("bundle questionnaire queue survives waiting reload and promotes after main completion", async ({ h4 }) => {
   await exerciseQuestionnaireQueueRefreshLifecycle(h4, "bundle");
 });
@@ -18407,11 +18889,11 @@ test("direct classic mixed questionnaire preserves progress across reload and su
   await exerciseMixedQuestionnaireProgressLifecycle(h4, "classic");
 });
 
-test("bundle terminal questionnaire accepts two text answers and continues once", async ({ h4 }) => {
+test("bundle terminal questionnaire accepts two custom answers and continues once", async ({ h4 }) => {
   await exerciseTerminalQuestionnaireHealthy(h4, "bundle");
 });
 
-test("direct classic terminal questionnaire accepts two text answers and continues once", async ({ h4 }) => {
+test("direct classic terminal questionnaire accepts two custom answers and continues once", async ({ h4 }) => {
   await exerciseTerminalQuestionnaireHealthy(h4, "classic");
 });
 
@@ -23616,6 +24098,141 @@ async function exerciseRefreshBeforeFirst(h4, { runtime, evidenceLabel }) {
   }
 }
 
+async function exerciseStreamingFollowIntent(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await h4.submitGated();
+  try {
+    await h4.waitGate("before-first-delta");
+    await page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })
+      .evaluate((element) => {
+        const messages = element.closest("#messages");
+        element.style.minHeight = `${Number(messages?.clientHeight || 0) + 720}px`;
+      });
+    const maxScrollTop = () => page.locator("#messages").evaluate((element) => (
+      Math.max(0, element.scrollHeight - element.clientHeight)
+    ));
+    await expect.poll(maxScrollTop).toBeGreaterThan(120);
+    const initialOverflow = await maxScrollTop();
+    expect(initialOverflow).toBeGreaterThan(120);
+    await page.locator("#messages").evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await h4.releaseGate("before-first-delta");
+    await h4.waitGate("after-second-delta");
+    await expect(page.locator("#messages article.msg.assistant").filter({
+      hasText: `${STREAM_ONE} ${STREAM_TWO}`,
+    })).toHaveCount(1);
+
+    const bottomDistance = () => page.locator("#messages").evaluate((element) => (
+      Math.max(0, element.scrollHeight - element.clientHeight - element.scrollTop)
+    ));
+    await page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })
+      .evaluate((element) => {
+        const messages = element.closest("#messages");
+        element.style.minHeight = `${Number(messages?.clientHeight || 0) + 720}px`;
+      });
+    await expect.poll(maxScrollTop).toBeGreaterThan(120);
+    const rebuiltOverflow = await maxScrollTop();
+    expect(rebuiltOverflow).toBeGreaterThan(120);
+    await expect.poll(bottomDistance).toBeLessThanOrEqual(2);
+
+    const domOnlyMoved = await page.locator("#messages").evaluate((element) => {
+      const maximum = Math.max(0, element.scrollHeight - element.clientHeight);
+      element.scrollTop = Math.max(0, maximum - 160);
+      return maximum - element.scrollTop;
+    });
+    expect(domOnlyMoved).toBeGreaterThan(120);
+    await page.locator("#messages").evaluate((element) => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(bottomDistance).toBeLessThanOrEqual(2);
+    await expect(page.locator("#scrollToBottomBtn.visible")).toHaveCount(0);
+
+    await page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })
+      .evaluate((element) => {
+        element.style.minHeight = `${element.getBoundingClientRect().height + 200}px`;
+      });
+    await expect.poll(bottomDistance).toBeLessThanOrEqual(2);
+
+    await page.locator("#messages").hover();
+    const wheelDistances = [];
+    const wheelUpFrom = async (minimum) => {
+      await page.mouse.wheel(0, -180);
+      await expect.poll(bottomDistance).toBeGreaterThan(minimum);
+      const distance = await bottomDistance();
+      wheelDistances.push(distance);
+      return distance;
+    };
+    let activeDistance = await wheelUpFrom(20);
+    await page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })
+      .evaluate((element) => {
+        element.style.minHeight = `${element.getBoundingClientRect().height + 80}px`;
+      });
+    await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+    await expect.poll(bottomDistance).toBeGreaterThanOrEqual(activeDistance);
+    activeDistance = await wheelUpFrom(await bottomDistance());
+
+    await h4.releaseGate("after-second-delta");
+    await h4.waitGate("before-terminal");
+    await expect(page.locator("#messages article.msg.assistant").filter({
+      hasText: STREAM_THREE,
+    })).toHaveCount(1);
+    await expect.poll(bottomDistance).toBeGreaterThanOrEqual(activeDistance);
+    activeDistance = await wheelUpFrom(await bottomDistance());
+    await expect.poll(bottomDistance).toBeGreaterThanOrEqual(160);
+    await expect(page.locator("#scrollToBottomBtn.visible")).toHaveCount(1);
+    const readingTopBeforeActiveLayout = await page.locator("#messages")
+      .evaluate((element) => element.scrollTop);
+    await page.locator("#messages article.msg.user").filter({ hasText: STREAM_USER })
+      .evaluate((element) => {
+        element.style.minHeight = `${element.getBoundingClientRect().height + 200}px`;
+      });
+    await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+    await expect.poll(bottomDistance).toBeGreaterThanOrEqual(activeDistance);
+    const readingTopAfterActiveLayout = await page.locator("#messages")
+      .evaluate((element) => element.scrollTop);
+    expect(wheelDistances.every((distance, index) => (
+      index === 0 || distance > wheelDistances[index - 1]
+    ))).toBe(true);
+
+    await page.locator("#scrollToBottomBtn").click();
+    await expect.poll(bottomDistance).toBeLessThanOrEqual(2);
+    await expect(page.locator("#scrollToBottomBtn.visible")).toHaveCount(0);
+    await h4.releaseGate("before-terminal");
+    await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+    const metrics = await h4.metrics();
+    expect(metrics.chatRequests).toHaveLength(1);
+    expect(metrics.toolExecutions).toEqual([]);
+    expect(metrics.unsafeToolRequests).toBe(0);
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence(`${runtime}-stream-follow-intent`, {
+      initialOverflow,
+      rebuiltOverflow,
+      domOnlyMoved,
+      domOnlyFollowed: true,
+      lateLayoutFollowed: true,
+      wheelReleasedFollowing: true,
+      wheelDistances,
+      activeSequenceMonotonic: wheelDistances.every((distance, index) => (
+        index === 0 || distance > wheelDistances[index - 1]
+      )),
+      activeReadingPositionOwned: true,
+      readingTop: {
+        beforeActiveLayout: readingTopBeforeActiveLayout,
+        afterActiveLayout: readingTopAfterActiveLayout,
+      },
+      returnToLatestRestored: true,
+      chatRequests: metrics.chatRequests.length,
+      toolExecutions: metrics.toolExecutions.length,
+    });
+  } finally {
+    await h4.releaseAllRefreshGates();
+  }
+}
+
 async function exerciseRefreshAfterTwo(h4, { runtime, evidenceLabel }) {
   const { page } = h4;
   await h4.open(runtime);
@@ -25396,6 +26013,290 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
   });
 }
 
+async function pinH4BaseUrlAcrossReloads(page, fakeUrl) {
+  await page.addInitScript((isolatedBaseUrl) => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    if (!descriptor?.get || !descriptor?.set) return;
+    Object.defineProperty(HTMLInputElement.prototype, "value", {
+      configurable: descriptor.configurable,
+      enumerable: descriptor.enumerable,
+      get() {
+        return descriptor.get.call(this);
+      },
+      set(value) {
+        descriptor.set.call(
+          this,
+          this.id === "baseUrl" ? isolatedBaseUrl : value,
+        );
+      },
+    });
+  }, fakeUrl);
+}
+
+async function verifyTrustedRouteSettingsReady(page) {
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const refreshButton = page.locator("#settingsRefreshModels");
+  await expect(refreshButton).toHaveCount(1);
+  await expect(refreshButton).toBeVisible();
+  await expect(refreshButton).toBeEnabled();
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#settingsPage")).toBeHidden();
+}
+
+async function exerciseTrustedModelRoutePersistence(h4, runtime) {
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await page.evaluate(({ primaryKey, secondaryKey }) => {
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+    localStorage.setItem("code-key-config", JSON.stringify([
+      { name: "H4 primary group", key: primaryKey, enabled: true, source: "manual" },
+      { name: "H4 trusted route group", key: secondaryKey, enabled: true, source: "manual" },
+    ]));
+  }, {
+    primaryKey: h4.host.syntheticKey,
+    secondaryKey: TRUSTED_ROUTE_SECONDARY_KEY,
+  });
+
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const refreshButton = page.locator("#settingsRefreshModels");
+  await expect(refreshButton).toBeEnabled();
+  await refreshButton.click();
+  await expect(page.locator("#settingsModelList")).toContainText(TRUSTED_ROUTE_MODEL_ID);
+  await expect(refreshButton).toBeEnabled();
+  await page.locator("#closeSettingsPage").click();
+  await page.locator("#modelPillBtn").click();
+  await page.locator(`#modelPillDropdown [data-model="${TRUSTED_ROUTE_MODEL_ID}"]`).click();
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute(
+    "data-model",
+    TRUSTED_ROUTE_MODEL_ID,
+  );
+
+  const trustedCache = await page.evaluate(({ primaryKey, secondaryKey, model }) => {
+    const raw = localStorage.getItem("code-model-catalog-cache-v1") || "";
+    const cache = JSON.parse(raw || "null");
+    const route = (Array.isArray(cache?.routes) ? cache.routes : [])
+      .find((entry) => entry?.model === model);
+    return {
+      version: Number(cache?.version || 0),
+      routeVersion: Number(cache?.routeVersion || 0),
+      keySetFingerprintLength: String(cache?.keySetFingerprint || "").length,
+      routeIdentityLengths: (route?.keyIdentities || []).map((value) => String(value).length),
+      containsSyntheticKey: raw.includes(primaryKey) || raw.includes(secondaryKey),
+    };
+  }, {
+    primaryKey: h4.host.syntheticKey,
+    secondaryKey: TRUSTED_ROUTE_SECONDARY_KEY,
+    model: TRUSTED_ROUTE_MODEL_ID,
+  });
+  expect(trustedCache).toEqual({
+    version: 3,
+    routeVersion: 1,
+    keySetFingerprintLength: 64,
+    routeIdentityLengths: [64],
+    containsSyntheticKey: false,
+  });
+
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  const outage = await h4.host.command(
+    "set-model-route-catalog-outage",
+    { enabled: true },
+  );
+  expect(outage).toMatchObject({ ok: true, modelRoute: { catalogOutage: true } });
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute(
+    "data-model",
+    TRUSTED_ROUTE_MODEL_ID,
+  );
+  await verifyTrustedRouteSettingsReady(page);
+  const reloadIsolation = await page.evaluate((facts) => {
+    const keyConfigRaw = localStorage.getItem("code-key-config") || "[]";
+    const cacheRaw = localStorage.getItem("code-model-catalog-cache-v1") || "";
+    let keyConfig = [];
+    let cache = null;
+    try { keyConfig = JSON.parse(keyConfigRaw); } catch {}
+    try { cache = JSON.parse(cacheRaw); } catch {}
+    const enabledKeys = (Array.isArray(keyConfig) ? keyConfig : [])
+      .filter((entry) => entry?.enabled !== false)
+      .map((entry) => String(entry?.key || ""))
+      .sort();
+    const expectedKeys = [facts.primaryKey, facts.secondaryKey].sort();
+    const route = (Array.isArray(cache?.routes) ? cache.routes : [])
+      .find((entry) => entry?.model === facts.model);
+    return {
+      baseUrlMatchesFake: document.querySelector("#baseUrl")?.value === facts.fakeUrl,
+      keysExactSyntheticPair: JSON.stringify(enabledKeys) === JSON.stringify(expectedKeys),
+      cacheVersion: Number(cache?.version || 0),
+      cacheBaseUrlMatchesFake: String(cache?.baseUrl || "") === facts.fakeUrl,
+      trustedRouteIdentityCount: Array.isArray(route?.keyIdentities)
+        ? route.keyIdentities.length
+        : 0,
+      cacheContainsCredential: cacheRaw.includes(facts.primaryKey)
+        || cacheRaw.includes(facts.secondaryKey),
+    };
+  }, {
+    fakeUrl: h4.host.ready.fakeUrl,
+    primaryKey: h4.host.syntheticKey,
+    secondaryKey: TRUSTED_ROUTE_SECONDARY_KEY,
+    model: TRUSTED_ROUTE_MODEL_ID,
+  });
+  expect(reloadIsolation).toEqual({
+    baseUrlMatchesFake: true,
+    keysExactSyntheticPair: true,
+    cacheVersion: 3,
+    cacheBaseUrlMatchesFake: true,
+    trustedRouteIdentityCount: 1,
+    cacheContainsCredential: false,
+  });
+
+  const trustedRunRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/agent/runs";
+  });
+  await h4.submit(TRUSTED_ROUTE_USER);
+  const trustedRequestBody = (await trustedRunRequest).postDataJSON();
+  expect(trustedRequestBody).toMatchObject({
+    payload: { model: TRUSTED_ROUTE_MODEL_ID },
+    baseUrl: h4.host.ready.fakeUrl,
+    keys: [TRUSTED_ROUTE_SECONDARY_KEY],
+  });
+  expect(Object.prototype.hasOwnProperty.call(trustedRequestBody, "model")).toBe(false);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: TRUSTED_ROUTE_FINAL,
+  })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const trustedMetrics = await h4.metrics();
+  expect(trustedMetrics.chatRequests).toHaveLength(1);
+  expect(trustedMetrics.chatRequests[0]).toMatchObject({
+    scenario: "trusted-model-route",
+    trustedRoute: {
+      keyGroup: "trusted-route",
+      modelMatches: true,
+      authorized: true,
+    },
+  });
+  expect(trustedMetrics.production.agentRuns).toHaveLength(1);
+  expect(trustedMetrics.production.agentRuns[0].status).toBe("completed");
+
+  await page.evaluate((unknownModel) => {
+    localStorage.setItem("code-model", unknownModel);
+    localStorage.setItem("code-model-catalog-cache-v1", JSON.stringify({
+      version: 2,
+      baseUrl: document.querySelector("#baseUrl")?.value || "",
+      models: [unknownModel],
+      entries: [{ id: unknownModel }],
+      savedAt: Date.now(),
+    }));
+  }, "h4-unknown-route-model");
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute(
+    "data-model",
+    "h4-unknown-route-model",
+  );
+  await verifyTrustedRouteSettingsReady(page);
+  const routeRequestCountBeforeUnknown = (await h4.metrics()).modelRouteRequests.length;
+  const agentRunCountBeforeUnknown = h4.controlIds().agentRunIds.length;
+  const unknownDispatchBoundary = h4.requestBoundary();
+  await page.locator("#prompt").fill("H4_UNKNOWN_MODEL_ROUTE_USER");
+  await page.locator("#sendBtn").click();
+  await expect.poll(async () => (
+    (await h4.metrics()).modelRouteRequests.length - routeRequestCountBeforeUnknown
+  )).toBe(2);
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: "H4_UNKNOWN_MODEL_ROUTE_USER",
+  })).toHaveCount(0);
+  expect(h4.controlIds().agentRunIds).toHaveLength(agentRunCountBeforeUnknown);
+  expect(
+    h4.requestSummarySince(unknownDispatchBoundary)["POST /api/agent/runs"] || 0,
+  ).toBe(0);
+  const terminalMetrics = await h4.metrics();
+  expect(terminalMetrics.chatRequests).toHaveLength(1);
+  expect(terminalMetrics.production.agentRuns).toHaveLength(1);
+  const unknownRefreshRequests = terminalMetrics.modelRouteRequests.slice(
+    routeRequestCountBeforeUnknown,
+  );
+  expect(unknownRefreshRequests).toEqual([
+    { kind: "catalog", keyGroup: "primary", catalogOutage: true },
+    { kind: "catalog", keyGroup: "trusted-route", catalogOutage: true },
+  ]);
+  expect(terminalMetrics.toolExecutions).toEqual([]);
+  expect(terminalMetrics.unsafeToolRequests).toBe(0);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-trusted-model-route`, {
+    runtime,
+    cacheVersion: trustedCache.version,
+    cacheContainsCredential: trustedCache.containsSyntheticKey,
+    reloadIsolation,
+    reloadUsedTrustedRoute: true,
+    trustedChatKeyGroup: trustedMetrics.chatRequests[0].trustedRoute.keyGroup,
+    unknownRefreshKeyGroups: unknownRefreshRequests.map((request) => request.keyGroup),
+    unknownDispatchBlockedBeforeAgentRun: true,
+  });
+}
+
+async function exerciseHistoricToolMessageProtocol(h4, runtime) {
+  const seededResponse = await h4.host.command("seed-tool-protocol-history");
+  expect(seededResponse).toMatchObject({
+    ok: true,
+    toolProtocolHistory: { toolCallId: "h4-history-tool-call" },
+  });
+  const seeded = seededResponse.toolProtocolHistory;
+  const { page } = h4;
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  const sessionButton = page.locator(
+    `#sessionList button.session-main[data-session-id="${seeded.sessionId}"]`,
+  );
+  await expect(sessionButton).toHaveCount(1);
+  await sessionButton.click();
+  await expect(page.locator(
+    `#sessionList .session-row.active button.session-main[data-session-id="${seeded.sessionId}"]`,
+  )).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: "H4_TOOL_PROTOCOL_STEER",
+  })).toHaveCount(1);
+
+  await h4.submit(TOOL_PROTOCOL_CONTINUE_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: TOOL_PROTOCOL_FINAL,
+  })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toHaveLength(1);
+  expect(metrics.chatRequests[0]).toMatchObject({
+    scenario: "tool-protocol-history",
+    toolProtocol: {
+      assistantCallCount: 1,
+      toolResultCount: 1,
+      steerCount: 1,
+      pairedOrder: true,
+      orphanToolCount: 0,
+    },
+  });
+  expect(metrics.production.agentRuns).toHaveLength(1);
+  expect(metrics.production.agentRuns[0].status).toBe("completed");
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-tool-message-protocol`, {
+    runtime,
+    sessionId: idHash(seeded.sessionId),
+    assistantCallCount: metrics.chatRequests[0].toolProtocol.assistantCallCount,
+    toolResultCount: metrics.chatRequests[0].toolProtocol.toolResultCount,
+    steerPreserved: metrics.chatRequests[0].toolProtocol.steerCount === 1,
+    orphanToolCount: metrics.chatRequests[0].toolProtocol.orphanToolCount,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -25417,6 +26318,10 @@ test("bundle refresh then cancel preserves partial body and pauses once", async 
   });
 });
 
+test("bundle stream following ignores DOM layout and yields to real upward intent", async ({ h4 }) => {
+  await exerciseStreamingFollowIntent(h4, "bundle");
+});
+
 test("classic-refresh-before-first-delta", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "classic",
@@ -25436,6 +26341,10 @@ test("classic-refresh-then-cancel", async ({ h4 }) => {
     runtime: "classic",
     evidenceLabel: "classic-refresh-then-cancel",
   });
+});
+
+test("direct classic stream following ignores DOM layout and yields to real upward intent", async ({ h4 }) => {
+  await exerciseStreamingFollowIntent(h4, "classic");
 });
 
 test("bundle detached parallel edit authorization survives main completion and full reload", async ({ h4 }) => {
@@ -25524,4 +26433,20 @@ test("bundle explicit onboarding tasks require guided real actions", async ({ h4
 
 test("direct classic explicit onboarding tasks require guided real actions", async ({ h4 }) => {
   await exerciseExplicitOnboardingTasks(h4, "classic");
+});
+
+test("bundle trusted model route survives restart and blocks unknown mapping", async ({ h4 }) => {
+  await exerciseTrustedModelRoutePersistence(h4, "bundle");
+});
+
+test("direct classic trusted model route survives restart and blocks unknown mapping", async ({ h4 }) => {
+  await exerciseTrustedModelRoutePersistence(h4, "classic");
+});
+
+test("bundle tool message protocol pairs historic steer history", async ({ h4 }) => {
+  await exerciseHistoricToolMessageProtocol(h4, "bundle");
+});
+
+test("direct classic tool message protocol pairs historic steer history", async ({ h4 }) => {
+  await exerciseHistoricToolMessageProtocol(h4, "classic");
 });

@@ -22,8 +22,8 @@ SCHEMA_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.schema.j
 FIXTURE_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.json"
 APP_PATH = ROOT / "app.js"
 
-EXPECTED_FIXTURE_SHA256 = "2886a7ef34d1a60f93c6ce1006de1be1d3a0e3b6f05e1f0a34ff98d5b818e252"
-EXPECTED_SLICE_SHA256 = "f67cf2d90ed12cc5bc4b7632424ec7890756b625f91fb39a83a0fde549329acc"
+EXPECTED_FIXTURE_SHA256 = "b940417c33e68e40ba404d4b6e57fe4bc366386ff0106d0dc13358ba8a48f4bf"
+EXPECTED_SLICE_SHA256 = "f5e00ec0dff387461cc71a4841ca4c37b45a0240979782ff1f933538c39ec156"
 EXPECTED_PROFILE = {
     "id": "h3-2d2-manual-compaction-visible-history",
     "version": 1,
@@ -243,7 +243,7 @@ const context = vm.createContext({
   els,
   encodeURIComponent,
   formatCompact: (value) => String(value),
-  getBestKey: () => "synthetic-test-credential",
+  getFallbackKeys: async () => ["synthetic-test-credential"],
   getSessionLastUsage: stateAccessors.getSessionLastUsage,
   getSessionMessages: stateAccessors.getSessionMessages,
   getSessionRunState: stateAccessors.getSessionRunState,

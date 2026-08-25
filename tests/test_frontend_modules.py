@@ -167,7 +167,11 @@ const translations = {{
 }};
 function t(key) {{ return translations[key] || key; }}
 function getSelectedModel() {{ return selectedModel; }}
-function getBestKey(model) {{ keyLookups.push(model); return selectedKey; }}
+async function getFallbackKeys(model) {{
+  keyLookups.push(model);
+  if (selectedKey) return [selectedKey];
+  throw new Error("trusted-route-required");
+}}
 eval({json.dumps(queue_source)});
 eval({json.dumps(send_source)});
 async function errorMessage(callback) {{
@@ -202,8 +206,8 @@ async function errorMessage(callback) {{
         self.assertEqual(json.loads(completed.stdout), {
             "queueNoModel": "select-model-first",
             "sendNoModel": "select-model-first",
-            "queueNoKey": "configure-key-first",
-            "sendNoKey": "configure-key-first",
+            "queueNoKey": "trusted-route-required",
+            "sendNoKey": "trusted-route-required",
             "lookupsBeforeModel": 0,
             "keyLookups": ["gpt-test", "gpt-test"],
         })
@@ -1044,7 +1048,7 @@ process.stdout.write(JSON.stringify({{
             MODEL_REQUEST_SOURCE,
         )
         self.assertIn(
-            "&& !message.meta?.skipApi",
+            "Visual tool-call rows never establish API protocol state",
             MODEL_REQUEST_SOURCE,
         )
         compact_start = APP_SOURCE.index("async function compactConversation()")
@@ -1245,6 +1249,87 @@ process.stdout.write(JSON.stringify(groups));
             2,
         )
         self.assertNotIn('goalProgressCount: "{completed}/{total}"', I18N_SOURCE)
+        self.assertIn('"goal_cancel",', APP_SOURCE)
+        self.assertIn('"goal_cancel",', MESSAGES_SOURCE)
+        self.assertIn('const TERMINAL_LIFECYCLES = new Set(["completed", "cancelled"]);', GOAL_SOURCE)
+        self.assertIn('!TERMINAL_LIFECYCLES.has(String(goal.lifecycle || ""))', GOAL_SOURCE)
+        self.assertIn("必须直接调用 goal_cancel 并提供简短原因", APP_SOURCE)
+        self.assertIn("不得重复问卷、虚构 gate、声称工具不可用", APP_SOURCE)
+        self.assertIn("取消意图确有歧义时才可最多确认一次", APP_SOURCE)
+        self.assertIn("停止当前输出也不会隐式取消 Goal", APP_SOURCE)
+
+    def test_goal_terminal_projection_hides_completed_and_cancelled_but_keeps_origin(self):
+        script = f"""
+const window = {{Code: {{features: {{}}}}}};
+global.window = window;
+eval({json.dumps(GOAL_SOURCE)});
+function node() {{
+  return {{
+    hidden: true, textContent: "", innerHTML: "", className: "", dataset: {{}}, attributes: {{}},
+    classList: {{toggle() {{}}, add() {{}}, remove() {{}}}},
+    setAttribute(name, value) {{ this.attributes[name] = String(value); }},
+    addEventListener() {{}}, removeEventListener() {{}}, contains() {{ return false; }},
+    matches() {{ return false; }}, focus() {{}},
+  }};
+}}
+const elements = {{
+  goalProgress: node(), goalProgressSummary: node(), goalProgressObjective: node(),
+  goalProgressPhase: node(), goalProgressCount: node(), goalProgressDetails: node(),
+}};
+const messages = [{{id: "origin-1", role: "user", content: "durable task", meta: {{}}}}];
+let renderCount = 0;
+const pending = [];
+const feature = window.Code.features.goal.createGoalFeature({{
+  apiJson: () => new Promise((resolve) => pending.push(resolve)),
+  t: (key) => key,
+  getMessages: () => messages,
+  renderMessages: () => {{ renderCount += 1; }},
+  elements,
+  document: {{activeElement: null, addEventListener() {{}}, removeEventListener() {{}}}},
+}});
+const projection = (lifecycle, revision) => ({{data: {{
+  exists: true,
+  health: "healthy",
+  revision,
+  goal: {{
+    goalId: "goal-1", lifecycle, sourceKind: "explicit", originMessageId: "origin-1",
+    clientRequestId: "client-1", objective: "durable task", steps: [],
+  }},
+}}}});
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {{
+  feature.setSession("session-1");
+  pending.shift()(projection("active", 1));
+  await flush();
+  const activeVisible = !elements.goalProgress.hidden;
+  const markerAfterActive = messages[0].meta.goalOrigin;
+  const completedRefresh = feature.refresh("session-1");
+  pending.shift()(projection("completed", 2));
+  await completedRefresh;
+  const completedHidden = elements.goalProgress.hidden;
+  const cancelledRefresh = feature.refresh("session-1");
+  pending.shift()(projection("cancelled", 3));
+  await cancelledRefresh;
+  process.stdout.write(JSON.stringify({{
+    activeVisible,
+    completedHidden,
+    cancelledHidden: elements.goalProgress.hidden,
+    originConfirmed: markerAfterActive.confirmed === true && messages[0].meta.goalOrigin.goalId === "goal-1",
+    renderCount,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "activeVisible": True,
+            "completedHidden": True,
+            "cancelledHidden": True,
+            "originConfirmed": True,
+            "renderCount": 3,
+        })
 
     def test_goal_projection_is_hidden_during_session_transition_and_restored_on_failure(self):
         script = f"""
@@ -2467,6 +2552,39 @@ eval(source);
         self.assertIn('agentRunId: String(tool._agentRunId || "")', APP_SOURCE)
         self.assertIn("userInputRequest: serializeUserInputRequest(request)", APP_SOURCE)
 
+    def test_model_route_invalidation_uses_one_shared_failure_classifier(self):
+        browser_start = APP_SOURCE.index("async function _callModelOnceAttempt(")
+        browser_end = APP_SOURCE.index("function _safeMd", browser_start)
+        browser_source = APP_SOURCE[browser_start:browser_end]
+        browser_classify = browser_source.index("const failure = classifyModelRequestFailure(")
+        browser_invalidate = browser_source.index("invalidateModelCatalogRoute(model)")
+        self.assertLess(browser_classify, browser_invalidate)
+
+        server_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        server_end = APP_SOURCE.index("async function executeRunContext(ctx)", server_start)
+        server_source = APP_SOURCE[server_start:server_end]
+        server_classify = server_source.index("const failure = classifyModelRequestFailure(")
+        server_error_code = server_source.index(
+            'err.errorCode = failure.code || snapshot.errorCode || ""',
+        )
+        server_invalidate = server_source.index(
+            "invalidateModelCatalogRoute(ctx.model || getSelectedModel())",
+        )
+        self.assertLess(server_classify, server_error_code)
+        self.assertLess(server_error_code, server_invalidate)
+        self.assertNotIn(
+            'if (snapshot.errorCode === "model_access_denied")',
+            server_source,
+        )
+
+        classifier_start = MODEL_STREAM_SOURCE.index("function isModelAccessDenied(")
+        classifier_end = MODEL_STREAM_SOURCE.index(
+            "function shouldRetryWithoutNativeTools(", classifier_start,
+        )
+        classifier_source = MODEL_STREAM_SOURCE[classifier_start:classifier_end]
+        self.assertIn("explicitlyUnavailableRoute", classifier_source)
+        self.assertNotIn("distributor", classifier_source)
+
     def test_server_agent_loop_state_matrix_and_side_effects_stay_in_app(self):
         loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
         loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
@@ -2509,7 +2627,8 @@ eval(source);
             "ctx.run.agentEventCursor = ctx.agentEventCursor",
             "clearObservedAgentRun(ctx)",
             "err.status = snapshot.status",
-            "err.errorCode = snapshot.errorCode || \"\"",
+            "const failure = classifyModelRequestFailure(",
+            "err.errorCode = failure.code || snapshot.errorCode || \"\"",
             'if (err.errorCode === "model_access_denied")',
             "await refreshModels()",
         ):
@@ -2607,7 +2726,7 @@ const source = [
     allowOther: 1,
     options: [
       {},
-      {value: "api"},
+      {value: "api", recommended: true},
       {label: "Second"},
       {value: "four"},
       {value: "five"},
@@ -2663,9 +2782,9 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(first["allowOther"])
         self.assertEqual(len(first["options"]), 8)
         self.assertEqual(first["options"][:3], [
-            {"value": "option_1", "label": "1", "description": ""},
-            {"value": "api", "label": "api", "description": ""},
-            {"value": "option_3", "label": "Second", "description": ""},
+            {"value": "option_1", "label": "1", "description": "", "recommended": False},
+            {"value": "api", "label": "api", "description": "", "recommended": True},
+            {"value": "option_3", "label": "Second", "description": "", "recommended": False},
         ])
         self.assertEqual(first["status"], "pending")
         self.assertEqual(first["selected"], [])
@@ -2876,8 +2995,91 @@ process.stdout.write(JSON.stringify({
             "questionnaireRunEnded",
             "questionnaireStatusUnavailable",
             "questionnaireRetry",
+            "questionnaireRecommended",
         ):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+
+        self.assertIn('class="user-input-recommended"', source)
+        self.assertIn('panel.addEventListener("keydown", (event) => {', source)
+        for expected in (
+            "function userInputEnterAction(target)",
+            '"[data-user-input-text]"',
+            '"[data-user-input-other]"',
+            "'input[type=\"radio\"]'",
+            "'input[type=\"checkbox\"]'",
+            'event.target.closest("[data-user-input-action]")',
+            'event.target.closest("[data-user-input-retry]")',
+            "event.preventDefault();",
+            "event.stopPropagation();",
+            "runQuestionAction(questionElement, action, trigger);",
+        ):
+            self.assertIn(expected, source)
+        keydown_source = source[
+            source.index('panel.addEventListener("keydown", (event) => {'):
+            source.index('panel.addEventListener("click", (event) => {')
+        ]
+        self.assertLess(
+            keydown_source.index("event.preventDefault();"),
+            keydown_source.index("runQuestionAction(questionElement, action, trigger);"),
+        )
+        self.assertNotIn("cancelAgentRun", keydown_source)
+        self.assertNotIn("requestSubmit", keydown_source)
+        self.assertNotIn("chatForm", keydown_source)
+        enter_action_source = source[
+            source.index("function userInputEnterAction(target)"):
+            source.index("async function persistUserInputProgress(")
+        ]
+        script = f"""
+{enter_action_source}
+function target(kind) {{
+  const action = kind === "confirm-button" ? "confirm"
+    : kind === "cancel-button" ? "cancel" : "";
+  return {{
+    dataset: {{userInputAction: action}},
+    closest(selector) {{
+      return selector === "[data-user-input-action]" && action ? this : null;
+    }},
+    matches(selector) {{
+      const selectors = {{
+        text: "[data-user-input-text]",
+        other: "[data-user-input-other]",
+        radio: 'input[type="radio"]',
+        checkbox: 'input[type="checkbox"]',
+      }};
+      return selector.split(", ").includes(selectors[kind]);
+    }},
+  }};
+}}
+process.stdout.write(JSON.stringify(Object.fromEntries([
+  "text", "other", "radio", "checkbox", "confirm-button", "cancel-button", "plain",
+].map((kind) => [kind, userInputEnterAction(target(kind))]))));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "text": "confirm",
+            "other": "confirm",
+            "radio": "confirm",
+            "checkbox": "confirm",
+            "confirm-button": "confirm",
+            "cancel-button": "cancel",
+            "plain": "",
+        })
+        submit_source = APP_SOURCE[
+            APP_SOURCE.index('els.chatForm.addEventListener("submit", async (event) => {'):
+            APP_SOURCE.index("const followUpBehaviorOverride", APP_SOURCE.index(
+                'els.chatForm.addEventListener("submit", async (event) => {'
+            ))
+        ]
+        self.assertIn("els.userInputPanel?.contains(document.activeElement)", submit_source)
+        self.assertIn('getUserInputRequest(state.sessionId)?.status === "pending"', submit_source)
+        self.assertIn(".user-input-recommended {", STYLE_SOURCE)
 
         for forbidden in (
             "state.",
@@ -5310,11 +5512,44 @@ const messages = [
 const before = JSON.stringify(messages);
 const canonical = request.canonicalizeSteerToolResultOrder(messages);
 const nativeMessages = request.buildModelRequestMessages(messages, true);
+const lateVisualMessages = [
+  {role: "user", content: "original"},
+  {role: "assistant", content: "checking", meta: {
+    agentRunId: "run-late",
+    toolCalls: [{id: "call-late", type: "function", function: {
+      name: "read_file",
+      arguments: '{"path":"README.md"}',
+    }}],
+  }},
+  {role: "user", content: "steer while tool runs", meta: {steerDispatch: {
+    agentRunId: "run-late",
+    status: "accepted",
+  }}},
+  {role: "tool-call", content: "visible projection", meta: {
+    agentRunId: "run-late",
+    toolCallId: "call-late",
+  }},
+  {role: "tool-result", content: "README result", meta: {
+    agentRunId: "run-late",
+    toolCallId: "call-late",
+  }},
+];
+const lateVisualCanonical = request.canonicalizeSteerToolResultOrder(lateVisualMessages);
+const lateVisualNative = request.buildModelRequestMessages(lateVisualMessages, true);
+const orphanVisualNative = request.buildModelRequestMessages([
+  {role: "user", content: "old history"},
+  {role: "tool-call", content: "visual only", meta: {toolCallId: "orphan-call"}},
+  {role: "tool-result", content: "historic result", meta: {toolCallId: "orphan-call"}},
+  {role: "user", content: "continue"},
+], true);
 process.stdout.write(JSON.stringify({
   inputUnchanged: JSON.stringify(messages) === before,
   canonicalRoles: canonical.map((message) => message.role),
   canonicalContent: canonical.map((message) => message.content || ""),
   nativeMessages,
+  lateVisualCanonicalRoles: lateVisualCanonical.map((message) => message.role),
+  lateVisualNative,
+  orphanVisualNative,
 }));
 """
         completed = subprocess.run(
@@ -5347,6 +5582,36 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["nativeMessages"][3]["content"], "steer")
         self.assertEqual(data["nativeMessages"][5]["tool_call_id"], "call-2")
         self.assertEqual(data["nativeMessages"][6]["content"], "second steer")
+        self.assertEqual(
+            data["lateVisualCanonicalRoles"],
+            ["user", "assistant", "tool-result", "user", "tool-call"],
+        )
+        self.assertEqual(
+            [message["role"] for message in data["lateVisualNative"]],
+            ["user", "assistant", "tool", "user"],
+        )
+        self.assertEqual(
+            data["lateVisualNative"][1]["tool_calls"][0]["id"],
+            "call-late",
+        )
+        self.assertEqual(data["lateVisualNative"][2], {
+            "role": "tool",
+            "tool_call_id": "call-late",
+            "content": "README result",
+        })
+        self.assertEqual(data["lateVisualNative"][3]["content"], "steer while tool runs")
+        self.assertEqual(data["orphanVisualNative"], [
+            {"role": "user", "content": "old history"},
+            {"role": "user", "content": "[Tool result]\nhistoric result"},
+            {"role": "user", "content": "continue"},
+        ])
+        self.assertNotIn(
+            'message?.role === "tool-call"',
+            MODEL_REQUEST_SOURCE[
+                MODEL_REQUEST_SOURCE.index("function canonicalizeSteerToolResultOrder"):
+                MODEL_REQUEST_SOURCE.index("function assembleModelRequestPayload")
+            ],
+        )
 
     def test_model_request_assembles_payload_fields_and_reasoning_controls(self):
         script = r"""
@@ -6572,6 +6837,26 @@ const result = {
   accessDenied: protocol.classifyModelRequestFailure(
     403, "", "Not authorized to access model",
   ),
+  unavailableRouteZh: protocol.classifyModelRequestFailure(
+    503,
+    "upstream_error",
+    "分组 default 下模型 deepseek-v4 无可用渠道（distributor）",
+  ),
+  unavailableChannelEn: protocol.classifyModelRequestFailure(
+    503, "upstream_error", "No available channel for model deepseek-v4",
+  ),
+  unavailableRouteEn: protocol.classifyModelRequestFailure(
+    502, "", "No available routes under this group for model gpt-test",
+  ),
+  ordinaryDistributor: protocol.classifyModelRequestFailure(
+    503, "upstream_error", "distributor upstream service failed",
+  ),
+  unavailableWithoutModel: protocol.classifyModelRequestFailure(
+    503, "upstream_error", "no available channel in the current region",
+  ),
+  rateLimitedModel: protocol.classifyModelRequestFailure(
+    429, "rate_limit_exceeded", "model request rate limited",
+  ),
   transient: protocol.classifyModelRequestFailure(503, "", "upstream failed"),
   permanent: protocol.classifyModelRequestFailure(400, "bad_request", "invalid"),
   requestError: {
@@ -6654,6 +6939,25 @@ process.stdout.write(JSON.stringify(result));
         self.assertEqual(
             data["accessDenied"],
             {"code": "model_access_denied", "transient": False},
+        )
+        for key in (
+            "unavailableRouteZh", "unavailableChannelEn", "unavailableRouteEn",
+        ):
+            self.assertEqual(
+                data[key],
+                {"code": "model_access_denied", "transient": False},
+            )
+        self.assertEqual(
+            data["ordinaryDistributor"],
+            {"code": "upstream_error", "transient": True},
+        )
+        self.assertEqual(
+            data["unavailableWithoutModel"],
+            {"code": "upstream_error", "transient": True},
+        )
+        self.assertEqual(
+            data["rateLimitedModel"],
+            {"code": "rate_limit_exceeded", "transient": True},
         )
         self.assertEqual(data["transient"], {"code": "", "transient": True})
         self.assertEqual(
@@ -11324,6 +11628,10 @@ const values = new Map([
     savedAt: 1,
   }})],
 ]);
+Object.defineProperty(globalThis, "crypto", {{
+  value: require("node:crypto").webcrypto,
+  configurable: true,
+}});
 const localStorage = {{
   getItem: (key) => values.has(key) ? values.get(key) : null,
   setItem: (key, value) => values.set(key, String(value)),
@@ -11387,7 +11695,10 @@ eval({json.dumps(catalog_source)});
   selectedModel = "gpt-b";
   values.set("code-model", "gpt-b");
   state.modelCatalogModels = [];
-  const restored = restoreCachedModelCatalog();
+  state.modelKeyMap = {{}};
+  state.modelKeysMap = {{}};
+  const restored = await restoreCachedModelCatalog();
+  const restoredMapKey = state.modelKeyMap["gpt-a"];
   const restoreStatus = state.modelCatalogStatusKey;
 
   fetchMode = "failure";
@@ -11409,8 +11720,10 @@ eval({json.dumps(catalog_source)});
     duringStatus,
     first,
     firstMapKey,
+    restoredMapKey,
     cacheAfterSuccess,
-    cacheContainsSecret: cacheTextAfterSuccess.includes("sk-one"),
+    cacheContainsSecret: cacheTextAfterSuccess.includes("sk-one")
+      || cacheTextAfterSuccess.includes("sk-two"),
     restored,
     restoreStatus,
     failed,
@@ -11440,7 +11753,8 @@ eval({json.dumps(catalog_source)});
         self.assertEqual(data["duringStatus"], "detectingModels")
         self.assertEqual(data["first"], {"ok": True, "models": ["gpt-a", "gpt-b"]})
         self.assertEqual(data["firstMapKey"], "sk-one")
-        self.assertEqual(data["cacheAfterSuccess"]["version"], 2)
+        self.assertEqual(data["restoredMapKey"], "sk-one")
+        self.assertEqual(data["cacheAfterSuccess"]["version"], 3)
         self.assertEqual(data["cacheAfterSuccess"]["models"], ["gpt-a", "gpt-b"])
         self.assertEqual(
             [entry["id"] for entry in data["cacheAfterSuccess"]["entries"]],
@@ -11468,6 +11782,18 @@ eval({json.dumps(catalog_source)});
             128000,
         )
         self.assertNotIn("key", data["cacheAfterSuccess"])
+        self.assertEqual(data["cacheAfterSuccess"]["routeVersion"], 1)
+        self.assertEqual(len(data["cacheAfterSuccess"]["keySetFingerprint"]), 64)
+        self.assertGreater(data["cacheAfterSuccess"]["routeSavedAt"], 0)
+        self.assertEqual(
+            [route["model"] for route in data["cacheAfterSuccess"]["routes"]],
+            ["gpt-a", "gpt-b"],
+        )
+        self.assertTrue(all(
+            len(identity) == 64
+            for route in data["cacheAfterSuccess"]["routes"]
+            for identity in route["keyIdentities"]
+        ))
         self.assertFalse(data["cacheContainsSecret"])
         self.assertEqual(data["restored"], ["gpt-a", "gpt-b"])
         self.assertEqual(data["restoreStatus"], "detectingModels")
@@ -11483,6 +11809,182 @@ eval({json.dumps(catalog_source)});
         self.assertEqual(data["settingsCount"], "0")
         self.assertEqual(data["enabledKeyStatus"], "modelCatalogNeedsRefresh")
         self.assertEqual(data["disabledKeyStatus"], "enterApiKey")
+
+    def test_model_key_routes_restore_by_fingerprint_and_fail_closed_without_mapping(self):
+        key_start = APP_SOURCE.index("function getBestKey(model)")
+        key_end = APP_SOURCE.index("function detectLanguage(", key_start)
+        catalog_start = APP_SOURCE.index('const MODEL_CATALOG_CACHE_KEY =')
+        catalog_end = APP_SOURCE.index("function appendSystemError", catalog_start)
+        routing_source = APP_SOURCE[key_start:key_end] + APP_SOURCE[catalog_start:catalog_end]
+        script = f"""
+Object.defineProperty(globalThis, "crypto", {{
+  value: require("node:crypto").webcrypto,
+  configurable: true,
+}});
+const keyA = "synthetic-route-key-a";
+const keyB = "synthetic-route-key-b";
+const modelA = "deepseek-route-model";
+const modelB = "gpt-route-model";
+const values = new Map();
+const localStorage = {{
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+}};
+let keyConfig = [
+  {{key: keyA, enabled: true}},
+  {{key: keyB, enabled: true}},
+];
+const loadKeyConfig = () => keyConfig.map((entry) => ({{...entry}}));
+const state = {{
+  modelKeyMap: {{}}, modelKeysMap: {{}}, modelCatalogModels: [],
+  modelCatalogStatusKey: "", modelCatalogSource: "", _modelRouteRefreshPromise: null,
+}};
+const els = {{
+  baseUrl: {{value: "https://workbar.ai"}},
+  modelPillDropdown: {{innerHTML: ""}}, modelListBox: {{innerHTML: ""}},
+  refreshModelsBtn: {{disabled: false}},
+}};
+const document = {{getElementById: () => null}};
+const t = (key) => key;
+const escapeHtml = (value) => String(value);
+const showToast = () => {{}};
+let selectedModel = modelA;
+const getSelectedModel = () => selectedModel;
+const setSelectedModel = (value) => {{ selectedModel = value; }};
+const setModelContextCatalog = () => {{}};
+let fetchMode = "live";
+let fetchCalls = 0;
+const requestedPaths = [];
+async function fetch(url, options = {{}}) {{
+  requestedPaths.push(String(url));
+  fetchCalls += 1;
+  if (fetchMode === "failure") throw new Error("offline");
+  const authorization = String(options.headers?.Authorization || "");
+  const key = authorization.replace(/^Bearer\\s+/, "");
+  const models = key === keyA ? [modelA] : key === keyB ? [modelB] : [];
+  return {{ok: true, json: async () => ({{data: models.map((id) => ({{id}}))}})}};
+}}
+eval({json.dumps(routing_source)});
+
+(async () => {{
+  const live = await refreshModels();
+  const liveRouteA = await getFallbackKeys(modelA);
+  const liveRouteB = await getFallbackKeys(modelB);
+  const cacheAfterLive = values.get("code-model-catalog-cache-v1");
+
+  state.modelKeyMap = {{}};
+  state.modelKeysMap = {{}};
+  fetchMode = "failure";
+  const beforeRestoreDispatch = fetchCalls;
+  const restoredModels = await restoreCachedModelCatalog();
+  const restoredRouteA = await getFallbackKeys(modelA);
+  const restoreFetchDelta = fetchCalls - beforeRestoreDispatch;
+
+  els.baseUrl.value = "https://other-workbar.example";
+  const beforeBaseChangedDispatch = fetchCalls;
+  let baseChangedError = "";
+  try {{ await getFallbackKeys(modelA); }} catch (error) {{ baseChangedError = error.code || error.message; }}
+  const baseChangedFetchDelta = fetchCalls - beforeBaseChangedDispatch;
+  els.baseUrl.value = "https://workbar.ai";
+
+  keyConfig = [{{key: keyB, enabled: true}}];
+  markModelCatalogStale(keyConfig);
+  fetchMode = "live";
+  const beforeChangedDispatch = fetchCalls;
+  let changedError = "";
+  try {{ await getFallbackKeys(modelA); }} catch (error) {{ changedError = error.code || error.message; }}
+  const changedFetchDelta = fetchCalls - beforeChangedDispatch;
+  const changedRouteMissing = !state.modelKeysMap[modelA];
+
+  values.set("code-model-catalog-cache-v1", JSON.stringify({{
+    version: 2, baseUrl: "https://workbar.ai", models: [modelA], entries: [{{id: modelA}}], savedAt: 1,
+  }}));
+  keyConfig = [{{key: keyA, enabled: true}}];
+  state.modelKeyMap = {{}};
+  state.modelKeysMap = {{}};
+  state.modelCatalogModels = [];
+  await restoreCachedModelCatalog();
+  fetchMode = "failure";
+  const beforeLegacyDispatch = fetchCalls;
+  let legacyError = "";
+  try {{ await getFallbackKeys(modelA); }} catch (error) {{ legacyError = error.code || error.message; }}
+  const legacyFetchDelta = fetchCalls - beforeLegacyDispatch;
+
+  fetchMode = "live";
+  await refreshModels();
+  const expiredCache = JSON.parse(values.get("code-model-catalog-cache-v1"));
+  expiredCache.routeSavedAt = Date.now() - (24 * 60 * 60 * 1000) - 1;
+  values.set("code-model-catalog-cache-v1", JSON.stringify(expiredCache));
+  state.modelKeyMap = {{}};
+  state.modelKeysMap = {{}};
+  await restoreCachedModelCatalog();
+  fetchMode = "failure";
+  const beforeExpiredDispatch = fetchCalls;
+  let expiredError = "";
+  try {{ await getFallbackKeys(modelA); }} catch (error) {{ expiredError = error.code || error.message; }}
+  const expiredFetchDelta = fetchCalls - beforeExpiredDispatch;
+
+  state.modelKeyMap = {{}};
+  state.modelKeysMap = {{}};
+  const beforeCoalesced = fetchCalls;
+  const coalesced = await Promise.allSettled([
+    getFallbackKeys("unknown-route-model"),
+    getFallbackKeys("unknown-route-model"),
+  ]);
+  const coalescedFetchDelta = fetchCalls - beforeCoalesced;
+
+  process.stdout.write(JSON.stringify({{
+    live,
+    liveRouteCorrect: liveRouteA.length === 1 && liveRouteA[0] === keyA
+      && liveRouteB.length === 1 && liveRouteB[0] === keyB,
+    cacheContainsSecret: cacheAfterLive.includes(keyA) || cacheAfterLive.includes(keyB),
+    restoredModels,
+    restoredRouteCorrect: restoredRouteA.length === 1 && restoredRouteA[0] === keyA,
+    restoreFetchDelta,
+    baseChangedError,
+    baseChangedFetchDelta,
+    changedError,
+    changedFetchDelta,
+    changedRouteMissing,
+    legacyError,
+    legacyFetchDelta,
+    expiredError,
+    expiredFetchDelta,
+    coalescedRejected: coalesced.every((entry) => entry.status === "rejected"),
+    coalescedFetchDelta,
+    modelsOnly: requestedPaths.every((path) => path === "/proxy/models"),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["live"], {
+            "ok": True,
+            "models": ["deepseek-route-model", "gpt-route-model"],
+        })
+        self.assertTrue(data["liveRouteCorrect"])
+        self.assertFalse(data["cacheContainsSecret"])
+        self.assertEqual(data["restoredModels"], [
+            "deepseek-route-model", "gpt-route-model",
+        ])
+        self.assertTrue(data["restoredRouteCorrect"])
+        self.assertEqual(data["restoreFetchDelta"], 0)
+        self.assertEqual(data["baseChangedError"], "trusted_model_keys_unavailable")
+        self.assertEqual(data["baseChangedFetchDelta"], 2)
+        self.assertEqual(data["changedError"], "trusted_model_keys_unavailable")
+        self.assertEqual(data["changedFetchDelta"], 1)
+        self.assertTrue(data["changedRouteMissing"])
+        self.assertEqual(data["legacyError"], "trusted_model_keys_unavailable")
+        self.assertEqual(data["legacyFetchDelta"], 1)
+        self.assertEqual(data["expiredError"], "trusted_model_keys_unavailable")
+        self.assertEqual(data["expiredFetchDelta"], 1)
+        self.assertTrue(data["coalescedRejected"])
+        self.assertEqual(data["coalescedFetchDelta"], 1)
+        self.assertTrue(data["modelsOnly"])
 
     def test_key_persistence_is_isolated_from_general_settings_and_syncs_across_tabs(self):
         save_start = APP_SOURCE.index("function saveLocalSettings(")
@@ -17126,8 +17628,26 @@ process.stdout.write(JSON.stringify({{
 
     def test_agent_snapshot_includes_error_code_propagation(self):
         """Agent failure throws error with errorCode attached."""
-        self.assertIn("err.errorCode = snapshot.errorCode", APP_SOURCE)
-        self.assertIn('err.status = snapshot.status', APP_SOURCE)
+        failure_start = APP_SOURCE.index(
+            "const err = new Error(snapshot.error || `Server Agent ${snapshot.status}`);"
+        )
+        failure_end = APP_SOURCE.index(
+            "const preservePublicProcess", failure_start
+        )
+        failure_source = APP_SOURCE[failure_start:failure_end]
+        self.assertIn("err.status = snapshot.status", failure_source)
+        self.assertIn(
+            """const failure = classifyModelRequestFailure(
+      0,
+      snapshot.errorCode || "",
+      snapshot.error || "",
+    );""",
+            failure_source,
+        )
+        self.assertIn(
+            'err.errorCode = failure.code || snapshot.errorCode || "";',
+            failure_source,
+        )
 
     def test_agent_catch_block_uses_format_agent_error(self):
         """The catch block uses _formatAgentError instead of hardcoded text."""
@@ -18915,12 +19435,27 @@ function flushFrames() {
   frames.clear();
   callbacks.forEach((callback) => callback());
 }
+const intentTimers = new Map();
+let nextIntentTimer = 1;
+function setIntentTimer(callback) {
+  const id = nextIntentTimer++;
+  intentTimers.set(id, callback);
+  return id;
+}
+function clearIntentTimer(id) { intentTimers.delete(id); }
+function expireIntent() {
+  const callbacks = [...intentTimers.values()];
+  intentTimers.clear();
+  callbacks.forEach((callback) => callback());
+}
 const controller = Code.ui.messages.createMessageScrollController({
   container,
   content,
   button,
   requestAnimationFrame: requestFrame,
   cancelAnimationFrame: cancelFrame,
+  setTimeout: setIntentTimer,
+  clearTimeout: clearIntentTimer,
   ResizeObserver: null,
   isCompactViewport: () => false,
   findAnchorElement: (index) => index === 4 ? { offsetTop: 500 } : null,
@@ -18951,6 +19486,7 @@ controller.onContentChanged("s1");
 const afterShrink = controller.snapshot();
 const reserveAfterShrink = reserve;
 
+expireIntent();
 realHeight += 220;
 controller.onContentChanged("s1");
 flushFrames();
@@ -19173,15 +19709,16 @@ process.stdout.write(JSON.stringify({
         self.assertIsNone(data["afterJump"]["readingAnchor"])
         self.assertEqual(data["realBottomAfterJump"], 260)
         self.assertIsNotNone(data["beforeDirectDown"]["readingAnchor"])
-        self.assertFalse(data["beforeDirectDown"]["following"])
-        self.assertEqual(data["beforeDirectDown"]["readingAnchor"]["userConsumedReserve"], 20)
-        self.assertIsNone(data["afterDirectDown"]["readingAnchor"])
+        self.assertTrue(data["beforeDirectDown"]["following"])
+        self.assertEqual(data["beforeDirectDown"]["readingAnchor"]["userConsumedReserve"], 0)
+        self.assertIsNotNone(data["afterDirectDown"]["readingAnchor"])
+        self.assertTrue(data["afterDirectDown"]["following"])
         self.assertIsNone(data["afterForce"]["readingAnchor"])
         self.assertIsNone(data["afterSession"]["readingAnchor"])
         self.assertTrue(data["compactBegan"])
         self.assertEqual(data["compact"]["readingAnchor"]["targetScrollTop"], 480)
         self.assertFalse(data["layoutAfterIntent"]["following"])
-        self.assertTrue(data["layoutAfterIntent"]["awaitingUserScroll"])
+        self.assertTrue(data["layoutAfterIntent"]["userScrollIntentActive"])
         self.assertLess(data["layoutAfterUp"]["readingAnchor"]["remainingReserve"], 268)
         consumed_after_up = data["layoutAfterUp"]["readingAnchor"]["userConsumedReserve"]
         self.assertGreater(consumed_after_up, 0)
@@ -19193,13 +19730,13 @@ process.stdout.write(JSON.stringify({
             data["layoutAfterProgrammaticShift"]["readingAnchor"]["userConsumedReserve"],
             consumed_after_up,
         )
-        self.assertEqual(
+        self.assertLess(
             data["layoutAfterUserUp"]["readingAnchor"]["remainingReserve"],
-            data["layoutAfterProgrammaticShift"]["readingAnchor"]["remainingReserve"] - 10,
+            data["layoutAfterProgrammaticShift"]["readingAnchor"]["remainingReserve"],
         )
-        self.assertEqual(
+        self.assertGreater(
             data["layoutAfterUserUp"]["readingAnchor"]["userConsumedReserve"],
-            consumed_after_up + 10,
+            consumed_after_up,
         )
         self.assertEqual(data["visibilityInitial"]["realContentDistance"], 0)
         self.assertFalse(data["visibilityInitial"]["visible"])
@@ -19215,9 +19752,316 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["visibilityAt159"]["realContentDistance"], 159)
         self.assertFalse(data["visibilityAt159"]["visible"])
         self.assertEqual(data["visibilityAt160"]["realContentDistance"], 160)
-        self.assertTrue(data["visibilityAt160"]["visible"])
+        self.assertFalse(data["visibilityAt160"]["visible"])
         self.assertEqual(data["visibilityReturned"]["realContentDistance"], 0)
         self.assertFalse(data["visibilityReturned"]["visible"])
+
+    def test_scroll_controller_requires_real_upward_intent_to_stop_following(self):
+        script = r"""
+global.window = global;
+global.Code = { ui: {} };
+global.getSelection = () => ({ isCollapsed: true });
+require("./src/ui/messages.js");
+
+function eventTarget(extra = {}) {
+  const listeners = new Map();
+  return Object.assign({
+    classList: { toggle() {} },
+    dataset: {},
+    attributes: {},
+    tabIndex: -1,
+    addEventListener(type, callback, options) { listeners.set(type, { callback, options }); },
+    removeEventListener(type, callback) {
+      if (listeners.get(type)?.callback === callback) listeners.delete(type);
+    },
+    emit(type, event = {}) { listeners.get(type)?.callback({ target: this, ...event }); },
+    listenerCount(type) { return listeners.has(type) ? 1 : 0; },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+  }, extra);
+}
+
+let rawTop = 600;
+let scrollHeight = 1000;
+const container = eventTarget({
+  clientHeight: 400,
+  clientWidth: 480,
+  offsetWidth: 500,
+  getBoundingClientRect() { return { left: 0, right: 500, width: 500 }; },
+});
+Object.defineProperties(container, {
+  scrollTop: {
+    get() { return rawTop; },
+    set(value) { rawTop = Number(value); },
+  },
+  scrollHeight: { get() { return scrollHeight; } },
+});
+const button = eventTarget();
+const frames = new Map();
+let nextFrame = 1;
+let resizeCallback = null;
+class FakeResizeObserver {
+  constructor(callback) { resizeCallback = callback; }
+  observe() {}
+  disconnect() {}
+}
+const controller = Code.ui.messages.createMessageScrollController({
+  container,
+  content: {},
+  button,
+  requestAnimationFrame(callback) {
+    const id = nextFrame++;
+    frames.set(id, callback);
+    return id;
+  },
+  cancelAnimationFrame(id) { frames.delete(id); },
+  ResizeObserver: FakeResizeObserver,
+});
+function flushFrames() {
+  const callbacks = [...frames.values()];
+  frames.clear();
+  callbacks.forEach((callback) => callback());
+}
+
+controller.setSession("s1");
+controller.connect();
+controller.onContentChanged("s1");
+flushFrames();
+
+rawTop = 520;
+container.emit("scroll");
+const domOnly = controller.snapshot();
+flushFrames();
+const domOnlySettled = { snapshot: controller.snapshot(), top: rawTop };
+
+scrollHeight = 1200;
+controller.onContentChanged("s1");
+flushFrames();
+const streamPatch = { snapshot: controller.snapshot(), top: rawTop };
+scrollHeight = 1300;
+resizeCallback();
+flushFrames();
+const lateLayout = { snapshot: controller.snapshot(), top: rawTop };
+
+container.emit("wheel", { deltaX: 0, deltaY: -48, ctrlKey: false });
+rawTop = 850;
+container.emit("scroll");
+const wheelReading = controller.snapshot();
+scrollHeight = 1400;
+controller.onContentChanged("s1");
+const readingPreserved = { snapshot: controller.snapshot(), top: rawTop };
+
+button.emit("click");
+flushFrames();
+const returned = { snapshot: controller.snapshot(), top: rawTop };
+container.emit("keydown", { key: "PageUp", tagName: "DIV" });
+rawTop -= 100;
+container.emit("scroll");
+const keyboardReading = controller.snapshot();
+const keyboardTop = rawTop;
+container.emit("keydown", { key: "PageDown", tagName: "DIV" });
+rawTop += 30;
+container.emit("scroll");
+const keyboardDown = { snapshot: controller.snapshot(), top: rawTop };
+
+controller.forceToLatest("s1");
+flushFrames();
+container.emit("pointerdown", { button: 0, clientX: 495 });
+rawTop -= 50;
+container.emit("scroll");
+const scrollbarReading = controller.snapshot();
+container.emit("pointerup", { button: 0, clientX: 495 });
+
+controller.setSession("s2");
+const sessionReset = controller.snapshot();
+container.emit("keydown", { key: "ArrowUp", target: { tagName: "INPUT" } });
+const editableIgnored = controller.snapshot();
+controller.disconnect();
+const listeners = [
+  "scroll", "wheel", "touchstart", "touchmove", "touchend", "touchcancel",
+  "keydown", "pointerdown", "pointerup", "pointercancel",
+].reduce((sum, type) => sum + container.listenerCount(type), 0) + button.listenerCount("click");
+
+process.stdout.write(JSON.stringify({
+  domOnly,
+  domOnlySettled,
+  streamPatch,
+  lateLayout,
+  wheelReading,
+  readingPreserved,
+  returned,
+  keyboardReading,
+  keyboardDown,
+  keyboardTop,
+  scrollbarReading,
+  sessionReset,
+  editableIgnored,
+  listeners,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["domOnly"]["following"])
+        self.assertTrue(data["domOnly"]["framePending"])
+        self.assertTrue(data["domOnlySettled"]["snapshot"]["following"])
+        self.assertEqual(data["domOnlySettled"]["top"], 600)
+        self.assertTrue(data["streamPatch"]["snapshot"]["following"])
+        self.assertEqual(data["streamPatch"]["top"], 800)
+        self.assertTrue(data["lateLayout"]["snapshot"]["following"])
+        self.assertEqual(data["lateLayout"]["top"], 900)
+        self.assertFalse(data["wheelReading"]["following"])
+        self.assertFalse(data["readingPreserved"]["snapshot"]["following"])
+        self.assertEqual(data["readingPreserved"]["top"], 850)
+        self.assertTrue(data["returned"]["snapshot"]["following"])
+        self.assertEqual(data["returned"]["top"], 1000)
+        self.assertFalse(data["keyboardReading"]["following"])
+        self.assertFalse(data["keyboardDown"]["snapshot"]["following"])
+        self.assertEqual(data["keyboardDown"]["top"], data["keyboardTop"] + 30)
+        self.assertFalse(data["scrollbarReading"]["following"])
+        self.assertTrue(data["sessionReset"]["following"])
+        self.assertTrue(data["editableIgnored"]["following"])
+        self.assertEqual(data["listeners"], 0)
+
+    def test_scroll_controller_renews_user_ownership_across_inertial_input(self):
+        script = r"""
+global.window = global;
+global.Code = { ui: {} };
+global.getSelection = () => ({ isCollapsed: true });
+require("./src/ui/messages.js");
+
+function target(extra = {}) {
+  const listeners = new Map();
+  return Object.assign({
+    classList: { toggle() {} }, dataset: {}, attributes: {}, tabIndex: -1,
+    addEventListener(type, callback) { listeners.set(type, callback); },
+    removeEventListener(type, callback) {
+      if (listeners.get(type) === callback) listeners.delete(type);
+    },
+    emit(type, event = {}) { listeners.get(type)?.({ target: this, ...event }); },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+  }, extra);
+}
+
+let rawTop = 600;
+let scrollHeight = 1000;
+const writes = [];
+const container = target({
+  clientHeight: 400, clientWidth: 480, offsetWidth: 500,
+  getBoundingClientRect() { return { left: 0, right: 500, width: 500 }; },
+});
+Object.defineProperties(container, {
+  scrollTop: {
+    get() { return rawTop; },
+    set(value) { rawTop = Number(value); writes.push(rawTop); },
+  },
+  scrollHeight: { get() { return scrollHeight; } },
+});
+const button = target();
+const frames = new Map();
+let nextFrame = 1;
+const timers = new Map();
+let nextTimer = 1;
+let resize = null;
+class FakeResizeObserver {
+  constructor(callback) { resize = callback; }
+  observe() {}
+  disconnect() {}
+}
+const controller = Code.ui.messages.createMessageScrollController({
+  container, content: {}, button,
+  requestAnimationFrame(callback) { const id = nextFrame++; frames.set(id, callback); return id; },
+  cancelAnimationFrame(id) { frames.delete(id); },
+  setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
+  clearTimeout(id) { timers.delete(id); },
+  ResizeObserver: FakeResizeObserver,
+});
+const flushFrames = () => {
+  const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach((callback) => callback());
+};
+const expireOwnership = () => {
+  const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach((callback) => callback());
+};
+const browserScroll = (top) => { rawTop = top; container.emit("scroll"); };
+const growDuringInput = () => { scrollHeight += 40; controller.onContentChanged("s1"); resize(); };
+const returnLatest = () => { button.emit("click"); flushFrames(); writes.length = 0; };
+
+controller.setSession("s1");
+controller.connect();
+controller.onContentChanged("s1");
+flushFrames();
+writes.length = 0;
+
+container.emit("wheel", { deltaX: 0, deltaY: -120, ctrlKey: false });
+const wheelEpochOne = controller.snapshot().userScrollIntentEpoch;
+browserScroll(520);
+growDuringInput();
+const wheelFirst = { top: rawTop, writes: [...writes], snapshot: controller.snapshot() };
+container.emit("wheel", { deltaX: 0, deltaY: -120, ctrlKey: false });
+const wheelEpochTwo = controller.snapshot().userScrollIntentEpoch;
+browserScroll(430);
+growDuringInput();
+const wheelSecond = { top: rawTop, writes: [...writes], snapshot: controller.snapshot() };
+expireOwnership();
+const wheelExpired = controller.snapshot();
+writes.length = 0;
+growDuringInput();
+const wheelIdle = { top: rawTop, writes: [...writes], snapshot: controller.snapshot() };
+
+returnLatest();
+container.emit("touchstart", { touches: [{ clientY: 100 }] });
+container.emit("touchmove", { touches: [{ clientY: 140 }] });
+browserScroll(rawTop - 50);
+growDuringInput();
+container.emit("touchend", { touches: [] });
+const touch = { top: rawTop, writes: [...writes], snapshot: controller.snapshot() };
+
+returnLatest();
+container.emit("keydown", { key: "PageUp" });
+browserScroll(rawTop - 60);
+growDuringInput();
+const keyboard = { top: rawTop, writes: [...writes], snapshot: controller.snapshot() };
+
+returnLatest();
+container.emit("pointerdown", { button: 0, clientX: 495 });
+browserScroll(rawTop - 70);
+growDuringInput();
+container.emit("pointerup", { button: 0, clientX: 495 });
+const scrollbar = { top: rawTop, writes: [...writes], snapshot: controller.snapshot() };
+
+process.stdout.write(JSON.stringify({
+  keyboard, scrollbar, touch, wheelEpochOne, wheelEpochTwo,
+  wheelExpired, wheelFirst, wheelIdle, wheelSecond,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertGreater(data["wheelEpochTwo"], data["wheelEpochOne"])
+        self.assertEqual(data["wheelFirst"]["top"], 520)
+        self.assertEqual(data["wheelSecond"]["top"], 430)
+        self.assertEqual(data["wheelFirst"]["writes"], [])
+        self.assertEqual(data["wheelSecond"]["writes"], [])
+        self.assertTrue(data["wheelSecond"]["snapshot"]["userScrollIntentActive"])
+        self.assertFalse(data["wheelSecond"]["snapshot"]["following"])
+        self.assertFalse(data["wheelExpired"]["userScrollIntentActive"])
+        self.assertEqual(data["wheelIdle"]["top"], 430)
+        self.assertEqual(data["wheelIdle"]["writes"], [430, 430])
+        for name in ("touch", "keyboard", "scrollbar"):
+            self.assertEqual(data[name]["writes"], [], name)
+            self.assertTrue(data[name]["snapshot"]["userScrollIntentActive"], name)
+            self.assertFalse(data[name]["snapshot"]["following"], name)
 
     def test_reading_anchor_wiring_and_css_contract(self):
         controller_start = MESSAGES_SOURCE.index("function createMessageScrollController(options = {})")
@@ -19233,7 +20077,7 @@ process.stdout.write(JSON.stringify({
             "Math.min(currentReserve, requiredReserve)",
             "content?.style?.setProperty?.(\"--message-reading-anchor-space\", next)",
             "if (deltaY < 0) relinquishFollowingForUpwardIntent()",
-            "else if (deltaY > 0) releaseReadingAnchorForDownwardIntent()",
+            "else if (deltaY > 0) beginDownwardUserScroll()",
         ):
             self.assertIn(expected, controller_source)
         anchor_start = controller_source.index("function reconcileReadingAnchor(initialize = false)")
@@ -19336,6 +20180,19 @@ const flushFrames = () => {
   frames.clear();
   callbacks.forEach((callback) => callback());
 };
+let nextIntentTimer = 1;
+const intentTimers = new Map();
+const setIntentTimer = (callback) => {
+  const id = nextIntentTimer++;
+  intentTimers.set(id, callback);
+  return id;
+};
+const clearIntentTimer = (id) => intentTimers.delete(id);
+const flushIntentTimers = () => {
+  const callbacks = [...intentTimers.values()];
+  intentTimers.clear();
+  callbacks.forEach((callback) => callback());
+};
 
 const resizeObservers = [];
 class FakeResizeObserver {
@@ -19357,13 +20214,18 @@ const controller = Code.ui.messages.createMessageScrollController({
   focusTarget,
   requestAnimationFrame: requestFrame,
   cancelAnimationFrame: cancelFrame,
+  setTimeout: setIntentTimer,
+  clearTimeout: clearIntentTimer,
   ResizeObserver: FakeResizeObserver,
   getLabel: (key) => `label:${key}`,
 });
 
 controller.setSession("s1");
 controller.connect();
-const passiveIntentListeners = ["wheel", "touchstart", "touchmove", "touchend", "touchcancel"]
+const passiveIntentListeners = [
+  "wheel", "touchstart", "touchmove", "touchend", "touchcancel",
+  "pointerdown", "pointerup", "pointercancel",
+]
   .every((type) => container.listenerOptions(type)?.passive === true);
 controller.onContentChanged("s1");
 const pendingBeforeWheel = controller.snapshot();
@@ -19381,12 +20243,16 @@ controller.onContentChanged("s1");
 const afterSmallGrowth = controller.snapshot();
 const afterSmallGrowthTop = container.scrollTop;
 const afterSmallGrowthFrames = frames.size;
+flushIntentTimers();
+container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
 container.scrollTop = 550;
 container.emit("scroll");
 const revealed = controller.snapshot();
+container.emit("wheel", { deltaX: 0, deltaY: 24, ctrlKey: false });
 container.scrollTop = 700;
 container.emit("scroll");
 const visibleNearBottom = controller.snapshot();
+container.emit("wheel", { deltaX: 0, deltaY: -24, ctrlKey: false });
 container.scrollTop = 550;
 container.emit("scroll");
 container.scrollHeight = 1200;
@@ -19406,6 +20272,7 @@ const restoredVisible = button.classList.contains("visible");
 
 container.scrollTop = 799;
 container.emit("scroll");
+flushIntentTimers();
 flushFrames();
 container.scrollHeight = 1400;
 controller.onContentChanged("s1");
@@ -19437,6 +20304,7 @@ flushFrames();
 controller.onContentChanged("s2");
 const pendingBeforeIgnoredInputs = controller.snapshot();
 container.emit("wheel", { deltaX: 0, deltaY: 20, ctrlKey: false });
+flushIntentTimers();
 const afterDownwardWheel = controller.snapshot();
 container.emit("wheel", { deltaX: 30, deltaY: -20, ctrlKey: false });
 const afterHorizontalWheel = controller.snapshot();
@@ -19446,15 +20314,18 @@ container.emit("click");
 const afterOrdinaryClick = controller.snapshot();
 container.emit("touchstart", { touches: [{ clientY: 100 }] });
 container.emit("touchend", { touches: [] });
+flushIntentTimers();
 const afterTouchTap = controller.snapshot();
 container.emit("touchstart", { touches: [{ clientY: 100 }] });
 container.emit("touchmove", { touches: [{ clientY: 102 }] });
 container.emit("touchend", { touches: [] });
+flushIntentTimers();
 const afterTouchJitter = controller.snapshot();
 expandedSelection = true;
 container.emit("touchstart", { touches: [{ clientY: 100 }] });
 container.emit("touchmove", { touches: [{ clientY: 112 }] });
 expandedSelection = false;
+flushIntentTimers();
 const afterSelectionMove = controller.snapshot();
 
 container.emit("touchstart", { touches: [{ clientY: 100 }] });
@@ -19471,6 +20342,7 @@ controller.disconnect();
 const afterDisconnect = controller.snapshot();
 const listenersAfterDisconnect = [
   "scroll", "wheel", "touchstart", "touchmove", "touchend", "touchcancel",
+  "keydown", "pointerdown", "pointerup", "pointercancel",
 ].reduce((total, type) => total + container.listenerCount(type), 0)
   + button.listenerCount("click");
 
@@ -19532,12 +20404,12 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(data["pendingBeforeWheel"]["following"])
         self.assertTrue(data["pendingBeforeWheel"]["framePending"])
         self.assertFalse(data["wheelIntent"]["following"])
-        self.assertTrue(data["wheelIntent"]["awaitingUserScroll"])
+        self.assertTrue(data["wheelIntent"]["userScrollIntentActive"])
         self.assertFalse(data["wheelIntent"]["framePending"])
         self.assertEqual(data["wheelIntentTop"], 600)
         self.assertEqual(data["wheelTopAfterFlush"], 600)
         self.assertFalse(data["handedOff"]["following"])
-        self.assertFalse(data["handedOff"]["awaitingUserScroll"])
+        self.assertTrue(data["handedOff"]["userScrollIntentActive"])
         self.assertFalse(data["handedOff"]["visible"])
         self.assertEqual(data["handedOff"]["distance"], 24)
         self.assertEqual(data["smallAwayFrames"], 0)
@@ -19582,16 +20454,16 @@ process.stdout.write(JSON.stringify({
             "afterSelectionMove",
         ):
             self.assertTrue(data[key]["following"], key)
-            self.assertFalse(data[key]["awaitingUserScroll"], key)
+            self.assertFalse(data[key]["userScrollIntentActive"], key)
             self.assertTrue(data[key]["framePending"], key)
         self.assertFalse(data["touchIntent"]["following"])
-        self.assertTrue(data["touchIntent"]["awaitingUserScroll"])
+        self.assertTrue(data["touchIntent"]["userScrollIntentActive"])
         self.assertFalse(data["touchIntent"]["framePending"])
         self.assertEqual(data["touchIntentTop"], 1200)
         self.assertEqual(data["touchTopAfterFlush"], 1200)
-        self.assertTrue(data["touchAfterGrowth"]["awaitingUserScroll"])
+        self.assertTrue(data["touchAfterGrowth"]["userScrollIntentActive"])
         self.assertEqual(data["touchTopAfterGrowth"], 1200)
-        self.assertFalse(data["afterDisconnect"]["awaitingUserScroll"])
+        self.assertFalse(data["afterDisconnect"]["userScrollIntentActive"])
         self.assertEqual(data["listenersAfterDisconnect"], 0)
 
     def test_scroll_controller_guards_short_overflow_until_real_scroll(self):
@@ -19835,20 +20707,20 @@ process.stdout.write(JSON.stringify({
             self.assertTrue(scenario["pending"]["following"], label)
             self.assertTrue(scenario["pending"]["framePending"], label)
             self.assertFalse(scenario["afterIntent"]["following"], label)
-            self.assertTrue(scenario["afterIntent"]["awaitingUserScroll"], label)
+            self.assertTrue(scenario["afterIntent"]["userScrollIntentActive"], label)
             self.assertFalse(scenario["afterIntent"]["framePending"], label)
             self.assertEqual(scenario["framesAfterIntent"], 0, label)
             if scenario["intent"] == "touch":
-                self.assertTrue(scenario["afterTouchEnd"]["awaitingUserScroll"], label)
-                self.assertTrue(scenario["afterTouchCancel"]["awaitingUserScroll"], label)
-            self.assertTrue(scenario["beforeRealScroll"]["awaitingUserScroll"], label)
+                self.assertTrue(scenario["afterTouchEnd"]["userScrollIntentActive"], label)
+                self.assertTrue(scenario["afterTouchCancel"]["userScrollIntentActive"], label)
+            self.assertTrue(scenario["beforeRealScroll"]["userScrollIntentActive"], label)
             self.assertEqual(scenario["writesBeforeRealScroll"], [], label)
             self.assertEqual(scenario["topBeforeRealScroll"], scenario["intendedTop"], label)
-            self.assertFalse(scenario["afterRealScroll"]["awaitingUserScroll"], label)
+            self.assertTrue(scenario["afterRealScroll"]["userScrollIntentActive"], label)
             self.assertFalse(scenario["afterRealScroll"]["following"], label)
             self.assertEqual(scenario["capturedTop"], scenario["intendedTop"], label)
             self.assertEqual(scenario["topAfterLaterChanges"], scenario["intendedTop"], label)
-            self.assertFalse(scenario["afterLaterChanges"]["awaitingUserScroll"], label)
+            self.assertTrue(scenario["afterLaterChanges"]["userScrollIntentActive"], label)
             self.assertEqual(
                 scenario["afterRealScroll"]["visible"],
                 scenario["overflow"] >= 600,
@@ -19858,15 +20730,23 @@ process.stdout.write(JSON.stringify({
         for scenario in data["insufficient"]:
             label = f'{scenario["intent"]}:{scenario["overflow"]}'
             self.assertTrue(scenario["snapshot"]["following"], label)
-            self.assertFalse(scenario["snapshot"]["awaitingUserScroll"], label)
-            self.assertTrue(scenario["snapshot"]["framePending"], label)
+            self.assertEqual(
+                scenario["snapshot"]["userScrollIntentActive"],
+                scenario["intent"] == "touch",
+                label,
+            )
+            self.assertEqual(
+                scenario["snapshot"]["framePending"],
+                scenario["intent"] != "touch",
+                label,
+            )
 
         tolerance = {item["distance"]: item["snapshot"] for item in data["tolerance"]}
         self.assertTrue(tolerance[1]["following"])
         self.assertTrue(tolerance[2]["following"])
-        self.assertFalse(tolerance[3]["following"])
+        self.assertTrue(tolerance[3]["following"])
         for snapshot in tolerance.values():
-            self.assertFalse(snapshot["awaitingUserScroll"])
+            self.assertFalse(snapshot["userScrollIntentActive"])
 
         cleanup = data["cleanup"]
         for key in (
@@ -19874,13 +20754,13 @@ process.stdout.write(JSON.stringify({
             "awaitingBeforeSession",
             "awaitingBeforeDisconnect",
         ):
-            self.assertTrue(cleanup[key]["awaitingUserScroll"], key)
+            self.assertTrue(cleanup[key]["userScrollIntentActive"], key)
         for key in ("afterClick", "afterSession", "afterDisconnect"):
-            self.assertFalse(cleanup[key]["awaitingUserScroll"], key)
+            self.assertFalse(cleanup[key]["userScrollIntentActive"], key)
         self.assertTrue(cleanup["afterClick"]["following"])
         self.assertTrue(cleanup["afterSession"]["following"])
-        self.assertFalse(cleanup["directScroll"]["following"])
-        self.assertFalse(cleanup["directScroll"]["awaitingUserScroll"])
+        self.assertTrue(cleanup["directScroll"]["following"])
+        self.assertFalse(cleanup["directScroll"]["userScrollIntentActive"])
         self.assertEqual(cleanup["directScrollTopAfterChanges"], 500)
 
     def test_scroll_to_latest_dom_theme_accessibility_and_app_wiring(self):
@@ -19974,13 +20854,19 @@ process.stdout.write(JSON.stringify({
         controller_source = MESSAGES_SOURCE[controller_start:controller_end]
         for expected in (
             "function relinquishFollowingForUpwardIntent()",
-            "let awaitingUserScroll = false",
+            "let userScrollIntentActive = false",
+            "function renewUserScrollIntent(direction = 0)",
+            "function hasUserScrollOwnership()",
             "maxScrollTop() <= bottomTolerance",
             'container.addEventListener("wheel", onWheelIntent, passiveListenerOptions)',
             'container.addEventListener("touchstart", onTouchStart, passiveListenerOptions)',
             'container.addEventListener("touchmove", onTouchMove, passiveListenerOptions)',
+            'container.addEventListener("keydown", onKeyDownIntent)',
+            'container.addEventListener("pointerdown", onPointerDownIntent, passiveListenerOptions)',
             'container?.removeEventListener?.("wheel", onWheelIntent, passiveListenerOptions)',
             'container?.removeEventListener?.("touchmove", onTouchMove, passiveListenerOptions)',
+            'container?.removeEventListener?.("keydown", onKeyDownIntent)',
+            'container?.removeEventListener?.("pointerdown", onPointerDownIntent, passiveListenerOptions)',
         ):
             self.assertIn(expected, controller_source)
         self.assertNotIn("preventDefault", controller_source)

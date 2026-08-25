@@ -475,18 +475,40 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                 "questions": ([{
                     "id": "url",
                     "prompt": "Which URL should be analyzed?",
-                    "type": "text",
+                    "type": "single",
                     "required": True,
-                    "allowOther": False,
+                    "allowOther": True,
+                    "options": [
+                        {
+                            "value": "discover",
+                            "label": "Find a source",
+                            "description": "Recommended because no URL was supplied.",
+                            "recommended": True,
+                        },
+                        {
+                            "value": "provided",
+                            "label": "Use a supplied URL",
+                            "description": "Choose this when the exact source is known.",
+                            "recommended": False,
+                        },
+                    ],
                 }] if asks_user_for_text else [{
                     "id": "target",
                     "prompt": "Which target should be analyzed?",
                     "type": "single",
                     "required": True,
-                    "allowOther": False,
+                    "allowOther": True,
                     "options": [
-                        {"value": "api", "label": "API", "description": "Analyze the API."},
-                        {"value": "ui", "label": "UI", "description": "Analyze the UI."},
+                        {
+                            "value": "api", "label": "API",
+                            "description": "Recommended because the request concerns the API.",
+                            "recommended": True,
+                        },
+                        {
+                            "value": "ui", "label": "UI",
+                            "description": "Choose this for the interface.",
+                            "recommended": False,
+                        },
                     ],
                 }]),
             }
@@ -4385,36 +4407,394 @@ class TestDurableAgentRuntime(unittest.TestCase):
         ):
             self.assertIn(expected, event_types)
 
-    def test_agent_text_question_accepts_nonempty_text_without_prompt_parsing(self):
+    def test_goal_cancel_tool_is_internal_bounded_and_persists_terminal_identity(self):
+        session_id = "session-agent-goal-cancel-draft"
+        client_request_id = "foreground-goal-cancel-draft"
+        message_id = "message-goal-cancel-draft"
+        server_mod.write_json(server_mod.session_path(session_id), {
+            "id": session_id,
+            "title": "Cancel draft Goal",
+            "createdAt": server_mod.now_iso(),
+            "updatedAt": server_mod.now_iso(),
+            "messageCount": 1,
+        })
+        server_mod.write_jsonl(server_mod.messages_path(session_id), [{
+            "id": message_id,
+            "role": "user",
+            "content": "Create a durable draft Goal",
+            "meta": {"goalOrigin": {
+                "messageId": message_id,
+                "clientRequestId": client_request_id,
+            }},
+        }])
         run = server_mod._create_agent_run(
-            "question-text-session",
+            session_id,
             {
                 "model": "test-model",
-                "messages": [{"role": "user", "content": "ask for URL"}],
-                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["request_user_input"]],
+                "messages": [{"role": "user", "content": "Cancel the current Goal"}],
             },
             self.base_url,
-            ["question-text-key"],
-            allowed_tools=["request_user_input"],
+            [],
+            allowed_tools=[],
+            permission_profile="read",
+            start_worker=False,
+            client_request_id=client_request_id,
+            run_kind="foreground",
         )
-        self._wait_status(run, "waiting_user_input")
-        self._wait_worker_idle(run)
 
-        pending = server_mod._agent_snapshot(run, 0)["pendingInput"]
-        self.assertEqual(pending["questions"][0]["prompt"], "Which URL should be analyzed?")
-        result = server_mod._submit_agent_input(
-            run,
+        tool_names = {
+            str((definition.get("function") or {}).get("name") or "")
+            for definition in run["tools"]
+        }
+        self.assertIn("goal_cancel", tool_names)
+        self.assertIn("goal_cancel", server_mod._AGENT_GOAL_DEFAULT_TOOL_NAMES)
+        definition = server_mod._SERVER_TOOL_DEFINITIONS["goal_cancel"]["function"]
+        self.assertEqual(definition["parameters"]["required"], ["reason"])
+        self.assertEqual(definition["parameters"]["properties"]["reason"]["maxLength"], 2000)
+        self.assertTrue(server_mod._agent_tool_spec("goal_cancel")["internal"])
+
+        def call(name, arguments, call_id):
+            normalized = server_mod._normalize_agent_tool_calls(run, [{
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }], len(run.get("rounds") or []) + 1)
+            run["pending_tool_calls"] = normalized
+            run["status"] = "tools"
+            self.assertTrue(server_mod._execute_agent_pending_tools(run))
+            return run["tool_executions"][call_id]
+
+        created = call(
+            "goal_create", {"objective": "A cancellable draft Goal"}, "goal-create-draft",
+        )["result"]
+        self.assertEqual(created["goal"]["lifecycle"], "draft")
+        cancelled_execution = call(
+            "goal_cancel", {"reason": "  User explicitly abandoned this Goal.  "},
+            "goal-cancel-draft",
+        )
+        cancelled = cancelled_execution["result"]
+        self.assertEqual(cancelled["action"], "goal_cancel")
+        self.assertEqual(cancelled["goal"]["lifecycle"], "cancelled")
+        self.assertEqual(cancelled["goal"]["ownerRunId"], run["id"])
+
+        runtime = server_mod.goal_v2_runtime()
+        persisted = server_mod.GoalV2Runtime(self.data_dir).read(session_id).state
+        self.assertEqual(persisted.goal["lifecycle"], "cancelled")
+        events = server_mod.read_jsonl(runtime.service.events_path(session_id))
+        terminal = events[-1]
+        self.assertEqual(terminal["type"], "goal_cancelled")
+        self.assertEqual(terminal["actor"], "foreground-agent")
+        self.assertEqual(terminal["payload"]["sourceRunId"], run["id"])
+        self.assertEqual(terminal["payload"]["reason"], "User explicitly abandoned this Goal.")
+
+        prepared = cancelled_execution["goalOperation"]
+        replay = runtime.cancel_goal(
+            session_id,
+            persisted.goal["goalId"],
+            reason=prepared["arguments"]["reason"],
+            source_run_id=run["id"],
+            expected_revision=prepared["expectedRevision"],
+            idempotency_key=prepared["idempotencyKey"],
+        )
+        self.assertTrue(replay["accepted"])
+        self.assertTrue(replay["noOp"])
+        self.assertEqual(replay["revision"], persisted.revision)
+        late_plan = [{
+            "id": f"late-{index}",
+            "description": f"Forbidden late stage {index}",
+            "acceptanceCriteria": [{
+                "id": f"late-criterion-{index}",
+                "kind": "machine",
+                "description": "Must never be appended after cancellation",
+            }],
+        } for index in range(1, 4)]
+        with self.assertRaises(server_mod.GoalV2ConflictError):
+            runtime.set_plan(
+                session_id,
+                persisted.goal["goalId"],
+                late_plan,
+                source_run_id=run["id"],
+                expected_revision=persisted.revision,
+                idempotency_key="late-plan-after-cancel",
+            )
+        with self.assertRaises(server_mod.GoalV2ConflictError):
+            runtime.start_step(
+                session_id,
+                persisted.goal["goalId"],
+                "late-1",
+                source_run_id=run["id"],
+                expected_revision=persisted.revision,
+                idempotency_key="late-step-after-cancel",
+            )
+
+    def test_goal_cancel_rejects_empty_reason_and_cancels_active_gated_goal(self):
+        session_id = "session-agent-goal-cancel-active"
+        client_request_id = "foreground-goal-cancel-active"
+        message_id = "message-goal-cancel-active"
+        server_mod.write_json(server_mod.session_path(session_id), {
+            "id": session_id,
+            "title": "Cancel gated Goal",
+            "createdAt": server_mod.now_iso(),
+            "updatedAt": server_mod.now_iso(),
+            "messageCount": 1,
+        })
+        server_mod.write_jsonl(server_mod.messages_path(session_id), [{
+            "id": message_id,
+            "role": "user",
+            "content": "Create an active Goal",
+            "meta": {"goalOrigin": {
+                "messageId": message_id,
+                "clientRequestId": client_request_id,
+            }},
+        }])
+        run = server_mod._create_agent_run(
+            session_id,
+            {"model": "test-model", "messages": [{"role": "user", "content": "cancel"}]},
+            self.base_url,
+            [],
+            allowed_tools=[],
+            permission_profile="read",
+            start_worker=False,
+            client_request_id=client_request_id,
+            run_kind="foreground",
+        )
+
+        def call(name, arguments, call_id):
+            normalized = server_mod._normalize_agent_tool_calls(run, [{
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }], len(run.get("rounds") or []) + 1)
+            run["pending_tool_calls"] = normalized
+            run["status"] = "tools"
+            self.assertTrue(server_mod._execute_agent_pending_tools(run))
+            return run["tool_executions"][call_id]
+
+        call("goal_create", {"objective": "Active gated Goal"}, "active-create")
+        plan = [{
+            "id": f"step-{index}",
+            "description": f"Stage {index}",
+            "acceptanceCriteria": [{
+                "id": f"criterion-{index}",
+                "kind": "machine",
+                "description": f"Stage {index} verified",
+            }],
+        } for index in range(1, 4)]
+        runtime = server_mod.goal_v2_runtime()
+        created_state = runtime.read(session_id).state
+        planned = runtime.set_plan(
+            session_id,
+            created_state.goal["goalId"],
+            plan,
+            source_run_id=run["id"],
+            expected_revision=created_state.revision,
+            idempotency_key="active-plan",
+        )
+        started = runtime.start_step(
+            session_id,
+            planned["goal"]["goalId"],
+            "step-1",
+            source_run_id=run["id"],
+            expected_revision=planned["revision"],
+            idempotency_key="active-start",
+        )
+        gated = runtime.raise_gate(
+            session_id,
+            started["goal"]["goalId"],
+            "waiting_user",
+            "Waiting for a decision",
+            source_run_id=run["id"],
+            expected_revision=started["revision"],
+            idempotency_key="active-gate",
+        )
+        self.assertEqual(gated["goal"]["lifecycle"], "active")
+        self.assertEqual(gated["goal"]["gate"]["type"], "waiting_user")
+        failed = call("goal_cancel", {"reason": "   "}, "active-cancel-empty")
+        self.assertEqual(failed["status"], "completed")
+        self.assertFalse(failed["result"]["ok"])
+        self.assertIn("requires a reason", failed["result"]["error"])
+        self.assertEqual(
+            server_mod.goal_v2_runtime().read(session_id).state.goal["lifecycle"],
+            "active",
+        )
+        cancelled = call(
+            "goal_cancel", {"reason": "User confirmed cancellation"}, "active-cancel",
+        )["result"]
+        self.assertEqual(cancelled["goal"]["lifecycle"], "cancelled")
+        self.assertEqual(cancelled["goal"]["gate"]["type"], "waiting_user")
+
+    def test_legacy_text_question_accepts_nonempty_text_without_prompt_parsing(self):
+        pending = {
+            "requestId": "legacy-text-request",
+            "title": "Legacy question",
+            "questions": [{
+                "id": "url",
+                "prompt": "Which URL should be analyzed?",
+                "type": "text",
+                "required": True,
+                "allowOther": False,
+                "options": [],
+            }],
+        }
+        result = server_mod._normalize_agent_input_result(
+            pending,
             [{
                 "id": "url",
                 "status": "resolved",
                 "text": "你帮我找",
             }],
-            request_id=pending["requestId"],
         )
         self.assertEqual(result["answers"][0]["text"], "你帮我找")
         self.assertEqual(result["answers"][0]["answer"], "你帮我找")
-        self.assertEqual(run["status"], "waiting_credentials")
-        server_mod._cancel_agent_run(run["id"])
+
+    def test_new_questionnaire_format_requires_custom_input_and_one_recommendation(self):
+        definition = server_mod._SERVER_TOOL_DEFINITIONS["request_user_input"]["function"]
+        question_schema = definition["parameters"]["properties"]["questions"]["items"]
+        self.assertEqual(question_schema["properties"]["type"]["enum"], ["single", "multiple"])
+        self.assertEqual(question_schema["properties"]["options"]["minItems"], 2)
+        self.assertEqual(question_schema["properties"]["options"]["maxItems"], 3)
+        self.assertIn("allowOther", question_schema["required"])
+        self.assertIn("recommended", question_schema["properties"]["options"]["items"]["required"])
+
+        valid = {
+            "id": "valid-call",
+            "arguments": {
+                "questions": [{
+                    "id": "target",
+                    "prompt": "Choose a target",
+                    "type": "single",
+                    "allowOther": True,
+                    "options": [
+                        {
+                            "value": "api", "label": "API",
+                            "description": "Recommended for this request.",
+                            "recommended": True,
+                        },
+                        {
+                            "value": "ui", "label": "UI",
+                            "description": "Use for interface work.",
+                            "recommended": False,
+                        },
+                    ],
+                }],
+            },
+        }
+        normalized = server_mod._normalize_agent_input_request(valid)
+        self.assertTrue(normalized["questions"][0]["allowOther"])
+        self.assertEqual(
+            [item["recommended"] for item in normalized["questions"][0]["options"]],
+            [True, False],
+        )
+
+        invalid_cases = {
+            "text type": {"type": "text"},
+            "custom input disabled": {"allowOther": False},
+            "one choice": {"options": [valid["arguments"]["questions"][0]["options"][0]]},
+            "no recommendation": {"options": [
+                {**item, "recommended": False}
+                for item in valid["arguments"]["questions"][0]["options"]
+            ]},
+            "two recommendations": {"options": [
+                {**item, "recommended": True}
+                for item in valid["arguments"]["questions"][0]["options"]
+            ]},
+            "empty recommendation reason": {"options": [
+                {**valid["arguments"]["questions"][0]["options"][0], "description": ""},
+                valid["arguments"]["questions"][0]["options"][1],
+            ]},
+        }
+        for label, delta in invalid_cases.items():
+            with self.subTest(label=label):
+                question = {**valid["arguments"]["questions"][0], **delta}
+                with self.assertRaises(ValueError):
+                    server_mod._normalize_agent_input_request({
+                        "id": "invalid-call", "arguments": {"questions": [question]},
+                    })
+
+    def test_invalid_new_questionnaire_is_repairable_in_the_same_agent_run(self):
+        def tool_round(call_id, arguments):
+            return [{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "request_user_input",
+                            "arguments": json.dumps(arguments),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }]
+
+        valid_question = {
+            "id": "target",
+            "prompt": "Choose a target",
+            "type": "single",
+            "required": True,
+            "allowOther": True,
+            "options": [
+                {
+                    "value": "api", "label": "API",
+                    "description": "Recommended for the current request.",
+                    "recommended": True,
+                },
+                {
+                    "value": "ui", "label": "UI",
+                    "description": "Use for interface work.",
+                    "recommended": False,
+                },
+            ],
+        }
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                tool_round("invalid-questionnaire", {
+                    "questions": [{
+                        "id": "target",
+                        "prompt": "Choose a target",
+                        "type": "text",
+                        "allowOther": False,
+                    }],
+                }),
+                tool_round("repaired-questionnaire", {"questions": [valid_question]}),
+                [{"choices": [{
+                    "delta": {"content": "repaired questionnaire complete"},
+                    "finish_reason": "stop",
+                }]}],
+            ]
+
+        run = server_mod._create_agent_run(
+            "questionnaire-format-repair",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "ask after repairing format"}],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["request_user_input"]],
+            },
+            self.base_url,
+            ["questionnaire-repair-key"],
+            allowed_tools=["request_user_input"],
+            max_rounds=4,
+        )
+        self._wait_status(run, "waiting_user_input")
+        self._wait_worker_idle(run)
+        waiting = server_mod._agent_snapshot(run, 0)
+        executions = {item["toolCallId"]: item for item in waiting["toolExecutions"]}
+        self.assertFalse(executions["invalid-questionnaire"]["result"]["ok"])
+        self.assertEqual(executions["invalid-questionnaire"]["status"], "completed")
+        self.assertEqual(executions["repaired-questionnaire"]["status"], "waiting_user_input")
+        self.assertEqual(waiting["status"], "waiting_user_input")
+
+        server_mod._submit_agent_input(run, [{
+            "id": "target",
+            "status": "resolved",
+            "values": [],
+            "other": "custom target",
+        }])
+        server_mod._resume_agent_run(run, ["questionnaire-repair-resume-key"])
+        self._wait_terminal(run)
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["result"]["content"], "repaired questionnaire complete")
 
     def test_active_agent_steer_is_durable_idempotent_and_consumed_once(self):
         with _AgentUpstream.scripted_lock:

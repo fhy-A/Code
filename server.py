@@ -3806,48 +3806,56 @@ def _normalize_agent_input_request(call):
         if question_id in question_ids:
             raise ValueError(f"duplicate question id: {question_id}")
         question_ids.add(question_id)
-        question_type = str(source.get("type") or "single").strip()
-        if question_type not in {"single", "multiple", "text"}:
+        question_type = str(source.get("type") or "").strip()
+        if question_type not in {"single", "multiple"}:
             raise ValueError(f"questions[{index}].type is invalid")
+        if source.get("allowOther") is not True:
+            raise ValueError(f"questions[{index}].allowOther must be true")
 
         options = []
         option_values = set()
-        if question_type != "text":
-            source_options = source.get("options")
-            if not isinstance(source_options, list) or not 1 <= len(source_options) <= 8:
-                raise ValueError(f"questions[{index}].options requires 1 to 8 choices")
-            for option_index, source_option in enumerate(source_options):
-                if not isinstance(source_option, dict):
-                    raise ValueError(f"questions[{index}].options[{option_index}] must be an object")
-                value = _agent_input_text(
-                    source_option.get("value"),
-                    f"questions[{index}].options[{option_index}].value",
-                    120,
+        source_options = source.get("options")
+        if not isinstance(source_options, list) or not 2 <= len(source_options) <= 3:
+            raise ValueError(f"questions[{index}].options requires 2 to 3 choices")
+        recommended_count = 0
+        for option_index, source_option in enumerate(source_options):
+            if not isinstance(source_option, dict):
+                raise ValueError(f"questions[{index}].options[{option_index}] must be an object")
+            value = _agent_input_text(
+                source_option.get("value"),
+                f"questions[{index}].options[{option_index}].value",
+                120,
+                True,
+            )
+            if value in option_values:
+                raise ValueError(f"duplicate option value in {question_id}: {value}")
+            option_values.add(value)
+            recommended = source_option.get("recommended") is True
+            recommended_count += int(recommended)
+            options.append({
+                "value": value,
+                "label": _agent_input_text(
+                    source_option.get("label"),
+                    f"questions[{index}].options[{option_index}].label",
+                    160,
                     True,
-                )
-                if value in option_values:
-                    raise ValueError(f"duplicate option value in {question_id}: {value}")
-                option_values.add(value)
-                options.append({
-                    "value": value,
-                    "label": _agent_input_text(
-                        source_option.get("label"),
-                        f"questions[{index}].options[{option_index}].label",
-                        160,
-                        True,
-                    ),
-                    "description": _agent_input_text(
-                        source_option.get("description"),
-                        f"questions[{index}].options[{option_index}].description",
-                        300,
-                    ),
-                })
+                ),
+                "description": _agent_input_text(
+                    source_option.get("description"),
+                    f"questions[{index}].options[{option_index}].description",
+                    300,
+                    recommended,
+                ),
+                "recommended": recommended,
+            })
+        if recommended_count != 1:
+            raise ValueError(f"questions[{index}].options requires exactly one recommended choice")
         questions.append({
             "id": question_id,
             "prompt": _agent_input_text(source.get("prompt"), f"questions[{index}].prompt", 500, True),
             "type": question_type,
             "required": source.get("required") is not False,
-            "allowOther": bool(source.get("allowOther")),
+            "allowOther": True,
             "options": options,
         })
 
@@ -4871,6 +4879,14 @@ def _agent_goal_prepare_operation(run, call, execution):
     arguments = call.get("arguments")
     if not isinstance(arguments, dict):
         raise GoalV2ProtocolError("Goal tool arguments must be an object")
+    arguments = _json_clone(arguments)
+    if name == "goal_cancel":
+        reason = str(arguments.get("reason") or "").strip()
+        if not reason:
+            raise GoalV2ProtocolError("Goal cancellation requires a reason")
+        if len(reason) > 2000:
+            raise GoalV2ProtocolError("Goal cancellation reason exceeds 2000 characters")
+        arguments["reason"] = reason
     read_result = goal_v2_runtime().read(context.session_id)
     if not read_result.writable:
         raise GoalV2CorruptionError(
@@ -4979,6 +4995,12 @@ def _execute_agent_goal_operation(run, call, execution):
         result = runtime.complete_goal(
             session_id, goal_id,
             summary=arguments.get("summary"),
+            source_run_id=context.owner_run_id, **common,
+        )
+    elif name == "goal_cancel":
+        result = runtime.cancel_goal(
+            session_id, goal_id,
+            reason=arguments.get("reason"),
             source_run_id=context.owner_run_id, **common,
         )
     else:
@@ -7444,6 +7466,7 @@ _AGENT_GOAL_TOOL_NAMES = frozenset({
     "goal_clear_gate",
     "goal_ready_for_acceptance",
     "goal_complete",
+    "goal_cancel",
 })
 _AGENT_GOAL_DEFAULT_TOOL_NAMES = _AGENT_GOAL_TOOL_NAMES - {
     "goal_ready_for_acceptance",
@@ -12637,7 +12660,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "request_user_input",
-            "description": "Ask the user for a critical decision that cannot be safely inferred or discovered. Ask one question by default and continue the original task after the answer.",
+            "description": "Ask the user for a critical decision that cannot be safely inferred or discovered. Ask one question by default. Every question must offer 2-3 choices, allow a custom answer, and mark exactly one recommended choice whose description explains the recommendation. Continue the original task after the answer.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -12652,25 +12675,27 @@ _SERVER_TOOL_DEFINITIONS = {
                             "properties": {
                                 "id": {"type": "string"},
                                 "prompt": {"type": "string"},
-                                "type": {"type": "string", "enum": ["single", "multiple", "text"]},
+                                "type": {"type": "string", "enum": ["single", "multiple"]},
                                 "required": {"type": "boolean"},
                                 "allowOther": {"type": "boolean"},
                                 "options": {
                                     "type": "array",
-                                    "maxItems": 8,
+                                    "minItems": 2,
+                                    "maxItems": 3,
                                     "items": {
                                         "type": "object",
                                         "properties": {
                                             "value": {"type": "string"},
                                             "label": {"type": "string"},
-                                            "description": {"type": "string"},
+                                            "description": {"type": "string", "minLength": 1},
+                                            "recommended": {"type": "boolean"},
                                         },
-                                        "required": ["value", "label"],
+                                        "required": ["value", "label", "recommended"],
                                         "additionalProperties": False,
                                     },
                                 },
                             },
-                            "required": ["id", "prompt", "type"],
+                            "required": ["id", "prompt", "type", "allowOther", "options"],
                             "additionalProperties": False,
                         },
                     },
@@ -13111,6 +13136,26 @@ _SERVER_TOOL_DEFINITIONS = {
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},
                 "required": ["summary"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "goal_cancel": {
+        "type": "function",
+        "function": {
+            "name": "goal_cancel",
+            "description": "Cancel the current nonterminal Goal when the user explicitly asks to stop, abandon, or cancel it. This records terminal Goal metadata only; it does not cancel the Session or AgentRun transport. For unambiguous intent call it directly without a redundant questionnaire or gate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000,
+                        "description": "Concise user-grounded reason for cancelling the current Goal.",
+                    },
+                },
+                "required": ["reason"],
                 "additionalProperties": False,
             },
         },

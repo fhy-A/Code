@@ -21,9 +21,19 @@ import sys
 import threading
 import time
 from urllib import parse
+import uuid
 
 
 MODEL_ID = "h4-e2e-model"
+TRUSTED_ROUTE_MODEL_ID = "h4-deepseek-trusted-route-model"
+TRUSTED_ROUTE_USER = "H4_TRUSTED_MODEL_ROUTE_USER"
+TRUSTED_ROUTE_FINAL = "H4_TRUSTED_MODEL_ROUTE_FINAL"
+TRUSTED_ROUTE_PRIMARY_KEY = "h4-synthetic-credential"
+TRUSTED_ROUTE_SECONDARY_KEY = "h4-synthetic-route-credential"
+TOOL_PROTOCOL_HISTORY_USER = "H4_TOOL_PROTOCOL_HISTORY_USER"
+TOOL_PROTOCOL_CONTINUE_USER = "H4_TOOL_PROTOCOL_CONTINUE_USER"
+TOOL_PROTOCOL_FINAL = "H4_TOOL_PROTOCOL_FINAL"
+TOOL_PROTOCOL_CALL_ID = "h4-history-tool-call"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
 AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
@@ -99,6 +109,11 @@ CLASSIC_USER = "H4_CLASSIC_USER"
 CLASSIC_FINAL = "H4_CLASSIC_FINAL"
 GOAL_V2_EXPLICIT_USER = "/goal H4_GOAL_V2_EXPLICIT"
 GOAL_V2_EXPLICIT_FINAL = "H4_GOAL_V2_EXPLICIT_FINAL"
+GOAL_V2_CANCEL_DRAFT_USER = "/goal H4_GOAL_V2_CANCEL_DRAFT"
+GOAL_V2_CANCEL_DRAFT_FINAL = "H4_GOAL_V2_CANCEL_DRAFT_FINAL"
+GOAL_V2_CANCEL_USER = "H4_GOAL_V2_CANCEL_CURRENT_GOAL"
+GOAL_V2_CANCEL_FINAL = "H4_GOAL_V2_CANCEL_FINAL"
+GOAL_V2_CANCEL_CALL_ID = "h4-goal-v2-cancel-1"
 GOAL_V2_PUBLIC_COMMENTARY = "H4_GOAL_V2_PUBLIC_PROCESS_COMMENTARY"
 GOAL_V2_PRIVATE_REASONING = "H4_GOAL_V2_PRIVATE_REASONING_MUST_NOT_PROJECT"
 GOAL_V2_AUTONOMOUS_USER = "H4_GOAL_V2_AUTONOMOUS"
@@ -179,16 +194,26 @@ QUESTIONNAIRE_TITLE = "H4_QUESTIONNAIRE_TITLE"
 QUESTIONNAIRE_REASON = "H4_QUESTIONNAIRE_REASON"
 QUESTIONNAIRE_QUESTION_ID = "h4-questionnaire-choice"
 QUESTIONNAIRE_PROMPT = "H4_QUESTIONNAIRE_PROMPT"
+LEGACY_QUESTIONNAIRE_USER = "H4_LEGACY_QUESTIONNAIRE_USER"
+LEGACY_QUESTIONNAIRE_FINAL = "H4_LEGACY_QUESTIONNAIRE_FINAL"
+LEGACY_QUESTIONNAIRE_TOOL_CALL_ID = "h4-legacy-questionnaire-call-1"
+LEGACY_QUESTIONNAIRE_REQUEST_ID = f"user-input-{LEGACY_QUESTIONNAIRE_TOOL_CALL_ID}"
+LEGACY_QUESTIONNAIRE_TITLE = "H4_LEGACY_QUESTIONNAIRE_TITLE"
+LEGACY_QUESTIONNAIRE_REASON = "H4_LEGACY_QUESTIONNAIRE_REASON"
+LEGACY_QUESTIONNAIRE_QUESTION_ID = "h4-legacy-questionnaire-text"
+LEGACY_QUESTIONNAIRE_PROMPT = "H4_LEGACY_QUESTIONNAIRE_PROMPT"
 QUESTIONNAIRE_OPTIONS = (
     {
         "value": "h4-option-a",
         "label": "H4_QUESTIONNAIRE_OPTION_A",
         "description": "H4_QUESTIONNAIRE_OPTION_A_DESCRIPTION",
+        "recommended": True,
     },
     {
         "value": "h4-option-b",
         "label": "H4_QUESTIONNAIRE_OPTION_B",
         "description": "H4_QUESTIONNAIRE_OPTION_B_DESCRIPTION",
+        "recommended": False,
     },
 )
 QUESTIONNAIRE_SELECTED_OPTION = QUESTIONNAIRE_OPTIONS[1]
@@ -202,11 +227,13 @@ MIXED_QUESTIONNAIRE_SINGLE_OPTIONS = (
         "value": "h4-mixed-single-a",
         "label": "H4_MIXED_SINGLE_OPTION_A",
         "description": "H4_MIXED_SINGLE_OPTION_A_DESCRIPTION",
+        "recommended": True,
     },
     {
         "value": "h4-mixed-single-b",
         "label": "H4_MIXED_SINGLE_OPTION_B",
         "description": "H4_MIXED_SINGLE_OPTION_B_DESCRIPTION",
+        "recommended": False,
     },
 )
 MIXED_QUESTIONNAIRE_MULTIPLE_ID = "h4-mixed-multiple"
@@ -216,22 +243,53 @@ MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS = (
         "value": "h4-mixed-multiple-a",
         "label": "H4_MIXED_MULTIPLE_OPTION_A",
         "description": "H4_MIXED_MULTIPLE_OPTION_A_DESCRIPTION",
+        "recommended": True,
     },
     {
         "value": "h4-mixed-multiple-b",
         "label": "H4_MIXED_MULTIPLE_OPTION_B",
         "description": "H4_MIXED_MULTIPLE_OPTION_B_DESCRIPTION",
+        "recommended": False,
     },
     {
         "value": "h4-mixed-multiple-c",
         "label": "H4_MIXED_MULTIPLE_OPTION_C",
         "description": "H4_MIXED_MULTIPLE_OPTION_C_DESCRIPTION",
+        "recommended": False,
     },
 )
 MIXED_QUESTIONNAIRE_OTHER = "H4_MIXED_MULTIPLE_OTHER"
 MIXED_QUESTIONNAIRE_TEXT_ID = "h4-mixed-text"
 MIXED_QUESTIONNAIRE_TEXT_PROMPT = "H4_MIXED_TEXT_PROMPT"
 MIXED_QUESTIONNAIRE_TEXT_ANSWER = "H4_MIXED_TEXT_ANSWER"
+MIXED_QUESTIONNAIRE_TEXT_OPTIONS = (
+    {
+        "value": "h4-mixed-text-a",
+        "label": "H4_MIXED_TEXT_OPTION_A",
+        "description": "H4_MIXED_TEXT_OPTION_A_DESCRIPTION",
+        "recommended": True,
+    },
+    {
+        "value": "h4-mixed-text-b",
+        "label": "H4_MIXED_TEXT_OPTION_B",
+        "description": "H4_MIXED_TEXT_OPTION_B_DESCRIPTION",
+        "recommended": False,
+    },
+)
+TERMINAL_QUESTIONNAIRE_OPTIONS = (
+    {
+        "value": "h4-terminal-suggested",
+        "label": "H4_TERMINAL_SUGGESTED",
+        "description": "H4_TERMINAL_RECOMMENDATION_REASON",
+        "recommended": True,
+    },
+    {
+        "value": "h4-terminal-alternative",
+        "label": "H4_TERMINAL_ALTERNATIVE",
+        "description": "H4_TERMINAL_ALTERNATIVE_REASON",
+        "recommended": False,
+    },
+)
 TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID = "h4-terminal-questionnaire-call-1"
 TERMINAL_QUESTIONNAIRE_TITLE = "H4_TERMINAL_QUESTIONNAIRE_TITLE"
 TERMINAL_QUESTIONNAIRE_REASON = "H4_TERMINAL_QUESTIONNAIRE_REASON"
@@ -328,6 +386,7 @@ class MetricState:
             "unsafeToolRequests": 0,
             "modelGateWaits": 0,
             "modelCatalogGateTimeline": [],
+            "modelRouteRequests": [],
             "refreshGateTimeline": [],
         }
 
@@ -346,6 +405,24 @@ class MetricState:
 
 METRICS = MetricState()
 MODEL_GATE = threading.Event()
+
+
+class ModelRouteFixtureState:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._catalog_outage = False
+
+    def set_catalog_outage(self, enabled: bool) -> dict:
+        with self._lock:
+            self._catalog_outage = bool(enabled)
+            return {"catalogOutage": self._catalog_outage}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"catalogOutage": self._catalog_outage}
+
+
+MODEL_ROUTE_FIXTURE = ModelRouteFixtureState()
 
 
 class ModelCatalogGateState:
@@ -548,12 +625,17 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             *SUCCESS_RESET_TOOL_CALL_IDS,
             *MULTI_TOOL_CALL_IDS,
             QUESTIONNAIRE_TOOL_CALL_ID,
+            LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
             TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
             PROPOSE_EDIT_TOOL_CALL_ID,
         }:
             has_tool_result = True
     joined_user_text = "\n".join(user_texts)
+    if TRUSTED_ROUTE_USER in joined_user_text:
+        return "trusted-model-route", has_tool_result
+    if TOOL_PROTOCOL_CONTINUE_USER in joined_user_text:
+        return "tool-protocol-history", has_tool_result
     if any(
         isinstance(message, dict)
         and message.get("role") == "system"
@@ -597,6 +679,19 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         return f"goal-v2-hard-limit-call-{len(completed) + 1}", bool(completed)
     if GOAL_V2_GATE_FAILURE_USER in user_text:
         return "goal-v2-gate-supplement-failure", False
+    if GOAL_V2_CANCEL_USER in user_text:
+        cancelled = any(
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") == GOAL_V2_CANCEL_CALL_ID
+            for message in messages
+        )
+        return (
+            "goal-v2-cancel-final" if cancelled else "goal-v2-cancel-call",
+            cancelled,
+        )
+    if GOAL_V2_CANCEL_DRAFT_USER in user_text:
+        return "goal-v2-cancel-draft-final", False
     for marker, prefix, call_ids in (
         (GOAL_V2_EXPLICIT_USER, "goal-v2-explicit", GOAL_V2_EXPLICIT_CALL_IDS),
         (GOAL_V2_AUTONOMOUS_COMPLETE_USER, "goal-v2-autonomous-complete", GOAL_V2_AUTONOMOUS_COMPLETE_CALL_IDS),
@@ -628,6 +723,11 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             return "queue-questionnaire-promoted", has_tool_result
         return queue_questionnaire_scenario
     for questionnaire_contract in (
+        (
+            LEGACY_QUESTIONNAIRE_USER,
+            LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+            "legacy-questionnaire",
+        ),
         (
             MIXED_QUESTIONNAIRE_USER,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
@@ -929,7 +1029,7 @@ def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
                 "prompt": QUESTIONNAIRE_PROMPT,
                 "type": "single",
                 "required": True,
-                "allowOther": False,
+                "allowOther": True,
                 "options": list(QUESTIONNAIRE_OPTIONS),
             }],
         }
@@ -943,7 +1043,7 @@ def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
                     "prompt": MIXED_QUESTIONNAIRE_SINGLE_PROMPT,
                     "type": "single",
                     "required": True,
-                    "allowOther": False,
+                    "allowOther": True,
                     "options": list(MIXED_QUESTIONNAIRE_SINGLE_OPTIONS),
                 },
                 {
@@ -957,9 +1057,10 @@ def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
                 {
                     "id": MIXED_QUESTIONNAIRE_TEXT_ID,
                     "prompt": MIXED_QUESTIONNAIRE_TEXT_PROMPT,
-                    "type": "text",
+                    "type": "single",
                     "required": True,
-                    "allowOther": False,
+                    "allowOther": True,
+                    "options": list(MIXED_QUESTIONNAIRE_TEXT_OPTIONS),
                 },
             ],
         }
@@ -971,16 +1072,18 @@ def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
                 {
                     "id": TERMINAL_QUESTIONNAIRE_FIRST_ID,
                     "prompt": "What should Code find?",
-                    "type": "text",
+                    "type": "single",
                     "required": True,
-                    "allowOther": False,
+                    "allowOther": True,
+                    "options": list(TERMINAL_QUESTIONNAIRE_OPTIONS),
                 },
                 {
                     "id": TERMINAL_QUESTIONNAIRE_SECOND_ID,
                     "prompt": "Which URL should Code use?",
-                    "type": "text",
+                    "type": "single",
                     "required": True,
-                    "allowOther": False,
+                    "allowOther": True,
+                    "options": list(TERMINAL_QUESTIONNAIRE_OPTIONS),
                 },
             ],
         }
@@ -1117,6 +1220,11 @@ def _mixed_questionnaire_receipt_projection(payload: dict) -> dict:
         if isinstance(multiple.get("values"), list)
         else []
     )
+    custom_values = (
+        text_answer.get("values")
+        if isinstance(text_answer.get("values"), list)
+        else []
+    )
     multiple_answer_markers = (
         MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS[0]["label"],
         MIXED_QUESTIONNAIRE_MULTIPLE_OPTIONS[2]["label"],
@@ -1160,7 +1268,7 @@ def _mixed_questionnaire_receipt_projection(payload: dict) -> dict:
         "typesMatch": [
             str(answer_by_id.get(question_id, {}).get("type") or "")
             for question_id in expected_ids
-        ] == ["single", "multiple", "text"],
+        ] == ["single", "multiple", "single"],
         "promptsMatch": [
             str(answer_by_id.get(question_id, {}).get("prompt") or "")
             for question_id in expected_ids
@@ -1185,12 +1293,12 @@ def _mixed_questionnaire_receipt_projection(payload: dict) -> dict:
         "multipleAnswerMarkersMatch": _markers_once_in_order(
             multiple.get("answer"), multiple_answer_markers,
         ),
-        "textValuesAbsent": text_answer.get("values") is None,
-        "textMatches": str(text_answer.get("text") or "")
+        "customValueCount": len(custom_values),
+        "customTextAbsent": text_answer.get("text") is None,
+        "customOtherMatches": str(text_answer.get("other") or "")
         == MIXED_QUESTIONNAIRE_TEXT_ANSWER,
-        "textAnswerMatches": str(text_answer.get("answer") or "")
+        "customAnswerMatches": str(text_answer.get("answer") or "")
         == MIXED_QUESTIONNAIRE_TEXT_ANSWER,
-        "textOtherEmpty": not str(text_answer.get("other") or ""),
         "summaryMarkersMatch": _markers_once_in_order(
             result.get("summary"), summary_markers,
         ),
@@ -1536,6 +1644,17 @@ def _sse_payload(frames: list[dict]) -> bytes:
     return "".join(lines).encode("utf-8")
 
 
+def _synthetic_key_group(authorization: str) -> str:
+    value = str(authorization or "")
+    if value == f"Bearer {TRUSTED_ROUTE_PRIMARY_KEY}":
+        return "primary"
+    if value == f"Bearer {TRUSTED_ROUTE_SECONDARY_KEY}":
+        return "trusted-route"
+    if value == f"Bearer {CONTEXT_CALIBRATION_UNUSED_KEY}":
+        return "calibration-fallback"
+    return "unknown"
+
+
 class FakeUpstreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1575,7 +1694,25 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             if not MODEL_CATALOG_GATE.reach_and_wait():
                 self._send_json({"error": "model catalog gate timeout"}, 504)
                 return
-            self._send_json({"object": "list", "data": [{"id": MODEL_ID, "object": "model"}]})
+            key_group = _synthetic_key_group(self.headers.get("Authorization", ""))
+            route_state = MODEL_ROUTE_FIXTURE.snapshot()
+            METRICS.append("modelRouteRequests", {
+                "kind": "catalog",
+                "keyGroup": key_group,
+                "catalogOutage": route_state["catalogOutage"],
+            })
+            if route_state["catalogOutage"]:
+                self._send_json({"error": "synthetic catalog unavailable"}, 503)
+                return
+            models = {
+                "primary": [MODEL_ID],
+                "trusted-route": [TRUSTED_ROUTE_MODEL_ID],
+                "calibration-fallback": [MODEL_ID],
+            }.get(key_group, [])
+            self._send_json({
+                "object": "list",
+                "data": [{"id": model, "object": "model"} for model in models],
+            })
             return
         if route == "/api/token/":
             self._record("platform-sync")
@@ -1629,6 +1766,57 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "stream": True,
             "hasToolResult": has_tool_result,
         }
+        if scenario == "trusted-model-route":
+            key_group = _synthetic_key_group(self.headers.get("Authorization", ""))
+            chat_metric["trustedRoute"] = {
+                "keyGroup": key_group,
+                "modelMatches": payload.get("model") == TRUSTED_ROUTE_MODEL_ID,
+                "authorized": key_group == "trusted-route",
+            }
+            METRICS.append("modelRouteRequests", {
+                "kind": "chat",
+                "keyGroup": key_group,
+                "modelMatches": payload.get("model") == TRUSTED_ROUTE_MODEL_ID,
+            })
+        if scenario == "tool-protocol-history":
+            projected_messages = [
+                message for message in (payload.get("messages") or [])
+                if isinstance(message, dict)
+            ]
+            assistant_indexes = [
+                index for index, message in enumerate(projected_messages)
+                if message.get("role") == "assistant"
+                and any(
+                    str(call.get("id") or "") == TOOL_PROTOCOL_CALL_ID
+                    for call in (message.get("tool_calls") or [])
+                    if isinstance(call, dict)
+                )
+            ]
+            tool_indexes = [
+                index for index, message in enumerate(projected_messages)
+                if message.get("role") == "tool"
+                and str(message.get("tool_call_id") or "") == TOOL_PROTOCOL_CALL_ID
+            ]
+            steer_indexes = [
+                index for index, message in enumerate(projected_messages)
+                if message.get("role") == "user"
+                and "H4_TOOL_PROTOCOL_STEER" in _message_text(message)
+            ]
+            chat_metric["toolProtocol"] = {
+                "assistantCallCount": len(assistant_indexes),
+                "toolResultCount": len(tool_indexes),
+                "steerCount": len(steer_indexes),
+                "pairedOrder": bool(
+                    len(assistant_indexes) == 1
+                    and len(tool_indexes) == 1
+                    and len(steer_indexes) == 1
+                    and assistant_indexes[0] < tool_indexes[0] < steer_indexes[0]
+                ),
+                "orphanToolCount": sum(
+                    1 for index in tool_indexes
+                    if not any(assistant_index < index for assistant_index in assistant_indexes)
+                ),
+            }
         if scenario == "context-calibration":
             chat_metric["usedContextCalibrationUnusedKey"] = (
                 self.headers.get("Authorization", "")
@@ -1705,6 +1893,23 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     in str(message.get("content") or "")
                     and "Do not say that the summary is above"
                     in str(message.get("content") or "")
+                    for message in (payload.get("messages") or [])
+                ),
+            }
+        if scenario in {"goal-v2-cancel-call", "goal-v2-cancel-final"}:
+            tool_names = {
+                str((item.get("function") or {}).get("name") or "")
+                for item in (payload.get("tools") or [])
+                if isinstance(item, dict)
+            }
+            chat_metric["goalCancelContract"] = {
+                "toolPresent": "goal_cancel" in tool_names,
+                "questionnairePresent": "request_user_input" in tool_names,
+                "directInstructionPresent": any(
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and "goal_cancel" in _message_text(message)
+                    and "不得重复问卷" in _message_text(message)
                     for message in (payload.get("messages") or [])
                 ),
             }
@@ -1983,7 +2188,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 or scenario.startswith("goal-v2-gate-complete-call-") \
                 or scenario.startswith("goal-v2-continuation-root-call-") \
                 or scenario.startswith("goal-v2-continuation-next-call-") \
-                or scenario.startswith("goal-v2-hard-limit-call-"):
+                or scenario.startswith("goal-v2-hard-limit-call-") \
+                or scenario == "goal-v2-cancel-call":
             stage_text = {
                 "tool-call": TOOL_STAGE,
                 "tool-detail-call": TOOL_DETAILS_STAGE,
@@ -2172,6 +2378,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }]
                 if call_number == 1:
                     stage_text = SUCCESS_RESET_STAGE
+            elif scenario == "goal-v2-cancel-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": GOAL_V2_CANCEL_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "goal_cancel",
+                        "arguments": json.dumps({
+                            "reason": "The user explicitly cancelled the current Goal",
+                        }, separators=(",", ":")),
+                    },
+                }]
             elif scenario.startswith("goal-v2-"):
                 call_number = int(scenario.rsplit("-", 1)[-1])
                 autonomous_complete = scenario.startswith("goal-v2-autonomous-complete-")
@@ -2453,6 +2671,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         else:
             final_text = {
                 "plain-text": PLAIN_FINAL,
+                "trusted-model-route": TRUSTED_ROUTE_FINAL,
+                "tool-protocol-history": TOOL_PROTOCOL_FINAL,
                 "classic-text": CLASSIC_FINAL,
                 "context-compaction": AUTO_COMPACTION_CHECKPOINT,
                 "context-compaction-seed": AUTO_COMPACTION_SEED_FINAL,
@@ -2464,6 +2684,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "timing-queue": TIMING_QUEUE_FINAL,
                 "parallel-failure-followup": PARALLEL_FAILURE_FOLLOWUP_FINAL,
                 "questionnaire-final": QUESTIONNAIRE_FINAL,
+                "legacy-questionnaire-final": LEGACY_QUESTIONNAIRE_FINAL,
                 "queue-questionnaire-final": QUEUE_QUESTIONNAIRE_FINAL,
                 "queue-questionnaire-promoted": TIMING_QUEUE_FINAL,
                 "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
@@ -2473,6 +2694,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "edit-authorization-conflict-final": EDIT_AUTHORIZATION_CONFLICT_FINAL,
                 "tool-final": TOOL_FINAL,
                 "goal-v2-explicit-final": GOAL_V2_EXPLICIT_FINAL,
+                "goal-v2-cancel-draft-final": GOAL_V2_CANCEL_DRAFT_FINAL,
+                "goal-v2-cancel-final": GOAL_V2_CANCEL_FINAL,
                 "goal-v2-autonomous-final": GOAL_V2_AUTONOMOUS_FINAL,
                 "goal-v2-autonomous-complete-final": GOAL_V2_AUTONOMOUS_COMPLETE_FINAL,
                 "goal-v2-accept-setup-final": GOAL_V2_ACCEPT_SETUP_FINAL,
@@ -2652,9 +2875,25 @@ def _production_snapshot(code_server) -> dict:
                 "hasSecondChunk": STREAM_TWO.strip() in str(result.get("content") or ""),
                 "hasThirdChunk": STREAM_THREE in str(result.get("content") or ""),
             })
+    goal_events = []
+    goal_root = code_server.goal_v2_runtime().service.root
+    for path in sorted(goal_root.glob("*.jsonl")) if goal_root.exists() else []:
+        try:
+            events = code_server.read_jsonl(path)
+        except (OSError, ValueError):
+            continue
+        if not events:
+            continue
+        goal_events.append({
+            "sessionId": _safe_id(events[0].get("sessionId")),
+            "goalId": _safe_id(events[0].get("goalId")),
+            "revision": int(events[-1].get("revision") or 0),
+            "eventTypes": [str(event.get("type") or "") for event in events],
+        })
     return {
         "agentRuns": sorted(agent_runs, key=lambda item: item["agentRunId"]),
         "runtimeRuns": sorted(runtime_runs, key=lambda item: item["runtimeRunId"]),
+        "goalEvents": sorted(goal_events, key=lambda item: item["sessionId"]),
     }
 
 
@@ -2877,6 +3116,256 @@ def main() -> int:
         "projectRoot": str(project_dir),
         "newApiBaseUrl": fake_url,
     })
+
+    def seed_legacy_questionnaire() -> dict:
+        """Persist a pre-v2 text questionnaire without invoking current tool validation."""
+        timestamp = code_server._session_now_iso()
+        session_id = uuid.uuid4().hex[:16]
+        legacy_question = {
+            "id": LEGACY_QUESTIONNAIRE_QUESTION_ID,
+            "prompt": LEGACY_QUESTIONNAIRE_PROMPT,
+            "type": "text",
+            "required": True,
+            "allowOther": False,
+            "options": [],
+        }
+        tool_arguments = {
+            "title": LEGACY_QUESTIONNAIRE_TITLE,
+            "reason": LEGACY_QUESTIONNAIRE_REASON,
+            "questions": [legacy_question],
+        }
+        encoded_arguments = json.dumps(
+            tool_arguments,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        tool_call = {
+            "id": LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+            "type": "function",
+            "function": {
+                "name": "request_user_input",
+                "arguments": encoded_arguments,
+            },
+        }
+        run = code_server._create_agent_run(
+            session_id,
+            {
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": LEGACY_QUESTIONNAIRE_USER}],
+                "stream": True,
+            },
+            fake_url,
+            [],
+            allowed_tools=["request_user_input"],
+            permission_profile="read",
+            cwd=str(project_dir),
+            workspace_roots=[str(project_dir)],
+            run_kind="foreground",
+            start_worker=False,
+        )
+        pending_input = {
+            "requestId": LEGACY_QUESTIONNAIRE_REQUEST_ID,
+            "toolCallId": LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+            "title": LEGACY_QUESTIONNAIRE_TITLE,
+            "reason": LEGACY_QUESTIONNAIRE_REASON,
+            "questions": [legacy_question],
+            "createdAt": timestamp,
+        }
+        with run["condition"]:
+            run["messages"].append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [tool_call],
+            })
+            run["pending_tool_calls"] = [tool_call]
+            run["pending_input"] = pending_input
+            run["tool_executions"][LEGACY_QUESTIONNAIRE_TOOL_CALL_ID] = {
+                "name": "request_user_input",
+                "arguments": encoded_arguments,
+                "argumentAliases": [],
+                "fingerprint": "h4-legacy-questionnaire",
+                "status": "waiting_user_input",
+                "outcome": "",
+                "result": None,
+                "error": "",
+                "startedAt": timestamp,
+                "completedAt": "",
+            }
+            code_server._append_agent_event_locked(run, "tool_started", {
+                "toolCallId": LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+                "name": "request_user_input",
+                "arguments": encoded_arguments,
+                "argumentAliases": [],
+            })
+            code_server._append_agent_event_locked(run, "user_input_required", pending_input)
+            run["status"] = "waiting_user_input"
+            run["resume_status"] = ""
+            run["keys"] = []
+            run["updated_at"] = timestamp
+            cursor = run["next_seq"] - 1
+        code_server._persist_agent_run(run)
+
+        saved_question = {
+            **legacy_question,
+            "status": "pending",
+            "selected": [],
+            "text": "",
+            "other": "",
+            "answer": None,
+        }
+        saved_request = {
+            "id": LEGACY_QUESTIONNAIRE_REQUEST_ID,
+            "sessionId": session_id,
+            "toolCallId": LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+            "agentRunId": run["id"],
+            "title": LEGACY_QUESTIONNAIRE_TITLE,
+            "reason": LEGACY_QUESTIONNAIRE_REASON,
+            "questions": [saved_question],
+            "status": "pending",
+            "createdAt": timestamp,
+        }
+        messages = [{
+            "role": "user",
+            "content": LEGACY_QUESTIONNAIRE_USER,
+            "_time": timestamp,
+        }]
+        meta = {
+            "id": session_id,
+            "title": "H4 legacy persisted questionnaire",
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+            "stats": code_server._merge_session_stats({}, {}),
+            "lastUsage": None,
+            "runState": {
+                "status": "waiting-user-input",
+                "phase": "tools",
+                "executionOwner": "server-agent",
+                "agentRunId": run["id"],
+                "runtimeRunId": "",
+                "agentEventCursor": cursor,
+                "modelRound": 1,
+                "model": MODEL_ID,
+                "permissionProfile": "read",
+                "startedAt": timestamp,
+                "updatedAt": timestamp,
+                "userInputRequest": saved_request,
+            },
+            "messageCount": len(messages),
+            "lastMessageTime": timestamp,
+            "projectId": None,
+            "cwd": str(project_dir),
+            "source": "code",
+        }
+        code_server.write_json(code_server.session_path(session_id), meta)
+        code_server.write_jsonl(code_server.messages_path(session_id), messages)
+        code_server._write_session_index_entry(
+            session_id,
+            meta["title"],
+            timestamp,
+            len(messages),
+            project_id=None,
+            cwd=str(project_dir),
+            source="code",
+            last_message_time=timestamp,
+        )
+        return {
+            "sessionId": session_id,
+            "agentRunId": run["id"],
+            "requestId": LEGACY_QUESTIONNAIRE_REQUEST_ID,
+            "toolCallId": LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
+            "cursor": cursor,
+        }
+
+    def seed_tool_protocol_history() -> dict:
+        """Persist the historic assistant/steer/visual-call/result ordering."""
+        timestamp = code_server._session_now_iso()
+        session_id = uuid.uuid4().hex[:16]
+        history_run_id = "h4-tool-protocol-history-run"
+        tool_call = {
+            "id": TOOL_PROTOCOL_CALL_ID,
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": json.dumps(
+                    {"path": READ_PATH}, separators=(",", ":"),
+                ),
+            },
+        }
+        messages = [
+            {
+                "role": "user",
+                "content": TOOL_PROTOCOL_HISTORY_USER,
+                "_time": timestamp,
+            },
+            {
+                "role": "assistant",
+                "content": "H4_TOOL_PROTOCOL_ASSISTANT_CALL",
+                "meta": {
+                    "agentRunId": history_run_id,
+                    "toolCalls": [tool_call],
+                },
+                "_time": timestamp,
+            },
+            {
+                "role": "user",
+                "content": "H4_TOOL_PROTOCOL_STEER",
+                "meta": {
+                    "steerDispatch": {
+                        "agentRunId": history_run_id,
+                        "status": "accepted",
+                    },
+                },
+                "_time": timestamp,
+            },
+            {
+                "role": "tool-call",
+                "content": "read_file",
+                "meta": {
+                    "agentRunId": history_run_id,
+                    "toolCallId": TOOL_PROTOCOL_CALL_ID,
+                    "action": "read_file",
+                    "tool": {"action": "read_file", "path": READ_PATH},
+                },
+                "_time": timestamp,
+            },
+            {
+                "role": "tool-result",
+                "content": FIXTURE_CONTENT.strip(),
+                "meta": {
+                    "agentRunId": history_run_id,
+                    "toolCallId": TOOL_PROTOCOL_CALL_ID,
+                    "action": "read_file",
+                },
+                "_time": timestamp,
+            },
+        ]
+        meta = {
+            "id": session_id,
+            "title": "H4 historic paired tool protocol",
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+            "stats": code_server._merge_session_stats({}, {}),
+            "lastUsage": None,
+            "runState": {},
+            "messageCount": len(messages),
+            "lastMessageTime": timestamp,
+            "projectId": None,
+            "cwd": str(project_dir),
+            "source": "code",
+        }
+        code_server.write_json(code_server.session_path(session_id), meta)
+        code_server.write_jsonl(code_server.messages_path(session_id), messages)
+        code_server._write_session_index_entry(
+            session_id,
+            meta["title"],
+            timestamp,
+            len(messages),
+            project_id=None,
+            cwd=str(project_dir),
+            source="code",
+            last_message_time=timestamp,
+        )
+        return {"sessionId": session_id, "toolCallId": TOOL_PROTOCOL_CALL_ID}
 
     def h4_project_relative(target) -> str:
         resolved = Path(target).resolve()
@@ -3863,6 +4352,35 @@ def main() -> int:
                     "id": request_id,
                     "ok": True,
                     "contract": probe_tool_boundary(),
+                })
+                continue
+            if operation == "seed-legacy-questionnaire":
+                legacy_questionnaire = seed_legacy_questionnaire()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "legacyQuestionnaire": legacy_questionnaire,
+                })
+                continue
+            if operation == "seed-tool-protocol-history":
+                seeded_history = seed_tool_protocol_history()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "toolProtocolHistory": seeded_history,
+                })
+                continue
+            if operation == "set-model-route-catalog-outage":
+                route_state = MODEL_ROUTE_FIXTURE.set_catalog_outage(
+                    bool(command.get("enabled")),
+                )
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "modelRoute": route_state,
                 })
                 continue
             if operation == PROPOSE_EDIT_THIRD_PARTY_TRANSITION_COMMAND:
