@@ -21,6 +21,7 @@ API_CLIENT_SOURCE = (ROOT / "src" / "services" / "api-client.js").read_text(enco
 PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
 SESSIONS_SOURCE = (ROOT / "src" / "features" / "sessions.js").read_text(encoding="utf-8")
 SETTINGS_SOURCE = (ROOT / "src" / "features" / "settings.js").read_text(encoding="utf-8")
+ONBOARDING_TASKS_SOURCE = (ROOT / "src" / "features" / "onboarding-tasks.js").read_text(encoding="utf-8")
 DIFF_SOURCE = (ROOT / "src" / "ui" / "diff.js").read_text(encoding="utf-8")
 MARKDOWN_SOURCE = (ROOT / "src" / "ui" / "markdown.js").read_text(encoding="utf-8")
 MESSAGES_SOURCE = (ROOT / "src" / "ui" / "messages.js").read_text(encoding="utf-8")
@@ -1429,7 +1430,7 @@ const feature = createGoalControlFeature({
         self.assertTrue(
             any("goalDraftAlreadyExists" in item["message"] for item in data["toasts"])
         )
-        self.assertIn("if (state.messages.length === 0 && !state.sessionId)", APP_SOURCE)
+        self.assertIn("const isBlankWelcome = state.messages.length === 0 && !state.sessionId", APP_SOURCE)
 
     def test_settings_shell_is_responsive_and_navigation_is_grouped(self):
         for key in (
@@ -1511,7 +1512,7 @@ const feature = createGoalControlFeature({
         self.assertIn('t("connectWorkbarDescSecondary")', SETTINGS_SOURCE)
         self.assertIn(".platform-auth-description span { display: block; }", STYLE_SOURCE)
 
-    def test_legacy_onboarding_is_removed_from_startup(self):
+    def test_explicit_onboarding_tasks_replace_the_removed_legacy_overlay(self):
         self.assertNotIn('id="onboardingOverlay"', INDEX_SOURCE)
         self.assertNotIn(".onboarding-overlay", STYLE_SOURCE)
         self.assertNotIn("function shouldShowOnboarding(", SETTINGS_SOURCE)
@@ -1521,6 +1522,267 @@ const feature = createGoalControlFeature({
         self.assertNotRegex(I18N_SOURCE, r"\bobo(?:Welcome|Feat|Start|Step)")
         self.assertIn('localStorage.removeItem("code-onboarding")', APP_SOURCE)
         self.assertIn('localStorage.removeItem("agent-lite-onboarding")', APP_SOURCE)
+        self.assertIn('const ONBOARDING_STORAGE_KEY = "code-onboarding-tasks-v1"', ONBOARDING_TASKS_SOURCE)
+        self.assertNotIn('"code-onboarding"', ONBOARDING_TASKS_SOURCE)
+        self.assertNotIn('"agent-lite-onboarding"', ONBOARDING_TASKS_SOURCE)
+        self.assertIn('id="composerStack"', INDEX_SOURCE)
+        self.assertIn('id="onboardingTasks"', INDEX_SOURCE)
+        self.assertIn('data-panel="onboarding"', INDEX_SOURCE)
+        self.assertIn('import "./features/onboarding-tasks.js";', FRONTEND_ENTRY_SOURCE)
+
+        stack_start = INDEX_SOURCE.index('<div id="composerStack"')
+        tool_preset_start = INDEX_SOURCE.index('<select id="toolPreset"', stack_start)
+        stack_source = INDEX_SOURCE[stack_start:tool_preset_start]
+        form_start = stack_source.index('<form id="chatForm"')
+        form_end = stack_source.index("</form>", form_start) + len("</form>")
+        form_source = stack_source[form_start:form_end]
+        self.assertEqual(form_source.count("<div"), form_source.count("</div>"))
+        self.assertRegex(
+            stack_source,
+            r'(?s)<form id="chatForm".*?</form>\s*'
+            r'<section id="onboardingTasks"[^>]*></section>\s*</div>\s*$',
+        )
+
+    def test_onboarding_state_is_ordered_minimal_and_fail_closed(self):
+        script = f"""
+global.window = {{Code: {{features: {{}}}}}};
+eval({json.dumps(ONBOARDING_TASKS_SOURCE)});
+const {{createOnboardingStateMachine}} = window.Code.features.onboardingTasks;
+
+class MemoryStorage {{
+  constructor(initial = {{}}) {{ this.values = new Map(Object.entries(initial)); this.writes = 0; }}
+  getItem(key) {{ return this.values.has(key) ? this.values.get(key) : null; }}
+  setItem(key, value) {{ this.writes += 1; this.values.set(key, String(value)); }}
+}}
+function finish(machine, taskId, success = true, claim = true) {{
+  const intentId = machine.beginIntent(taskId);
+  if (!intentId) return {{intentId, result: false}};
+  if (claim && machine.claimIntent(taskId) !== intentId) throw new Error(`claim failed for ${{taskId}}`);
+  return {{intentId, result: machine.resolveIntent(intentId, success)}};
+}}
+
+function migrateLegacy(completedTaskIds, completed = false, collapsed = false) {{
+  const storage = new MemoryStorage({{
+    "code-onboarding-tasks-v1": JSON.stringify({{
+      version: 1,
+      completedTaskIds,
+      collapsed,
+      completed,
+    }}),
+  }});
+  const machine = createOnboardingStateMachine({{storage}});
+  return {{
+    state: machine.initialize({{hasExistingSessions: false}}),
+    stored: JSON.parse(storage.getItem("code-onboarding-tasks-v1")),
+  }};
+}}
+
+const storage = new MemoryStorage();
+const machine = createOnboardingStateMachine({{storage, nonceFactory: (() => {{ let n = 0; return () => `n-${{++n}}`; }})()}});
+const initial = machine.initialize({{hasExistingSessions: false}});
+const passive = machine.snapshot();
+const outOfOrder = machine.beginIntent("key");
+const failed = finish(machine, "workbar", false);
+const afterFailure = machine.snapshot();
+const workbar = finish(machine, "workbar");
+const afterWorkbar = machine.snapshot();
+const unclaimedKey = machine.beginIntent("key");
+const serializedWhilePending = storage.getItem("code-onboarding-tasks-v1");
+
+const restored = createOnboardingStateMachine({{storage, nonceFactory: () => "restored"}});
+const restoredState = restored.initialize({{hasExistingSessions: false}});
+const restoredPending = restored.pendingIntent();
+for (const taskId of ["key", "first-task"]) {{
+  const result = finish(restored, taskId);
+  if (!result.result) throw new Error(`completion failed for ${{taskId}}`);
+}}
+const completeState = restored.snapshot();
+const completedRaw = storage.getItem("code-onboarding-tasks-v1");
+const completedKeys = Object.keys(JSON.parse(completedRaw)).sort();
+restored.reopen();
+const resetAfterReopen = restored.snapshot();
+
+const migratedLegacy = [
+  migrateLegacy([]),
+  migrateLegacy(["workbar"]),
+  migrateLegacy(["workbar", "key"], false, true),
+  migrateLegacy(["workbar", "key", "model"]),
+  migrateLegacy(["workbar", "key", "model", "first-task"], true),
+];
+
+const oldStorage = new MemoryStorage();
+const oldUser = createOnboardingStateMachine({{storage: oldStorage}});
+const oldUserState = oldUser.initialize({{hasExistingSessions: true}});
+const oldUserDefaultExempt = oldUser.isDefaultExempt();
+const oldUserStored = oldStorage.getItem("code-onboarding-tasks-v1");
+oldUser.reopen();
+const oldUserReopened = oldUser.snapshot();
+const oldUserReopenedStored = oldStorage.getItem("code-onboarding-tasks-v1");
+
+const corruptStorage = new MemoryStorage({{"code-onboarding-tasks-v1": "{{broken"}});
+const corrupt = createOnboardingStateMachine({{storage: corruptStorage}});
+const corruptState = corrupt.initialize({{hasExistingSessions: false}});
+const unknownStorage = new MemoryStorage({{
+  "code-onboarding-tasks-v1": JSON.stringify({{version: 99, completedTaskIds: ["workbar", "key", "first-task"], completed: true}}),
+}});
+const unknown = createOnboardingStateMachine({{storage: unknownStorage}});
+const unknownState = unknown.initialize({{hasExistingSessions: false}});
+
+let storageErrors = 0;
+const failingStorage = {{getItem() {{ return null; }}, setItem() {{ throw new Error("denied"); }}}};
+const failing = createOnboardingStateMachine({{storage: failingStorage, onStorageError: () => storageErrors++}});
+failing.initialize({{hasExistingSessions: false}});
+const failedWriteIntent = failing.beginIntent("workbar");
+const failedWriteResult = failing.resolveIntent(failedWriteIntent, true);
+const failedWriteState = failing.snapshot();
+
+process.stdout.write(JSON.stringify({{
+  initial,
+  passive,
+  outOfOrder,
+  failed,
+  afterFailure,
+  workbar,
+  afterWorkbar,
+  unclaimedKey: Boolean(unclaimedKey),
+  serializedWhilePending,
+  restoredState,
+  restoredPending,
+  completeState,
+  completedKeys,
+  completedRaw,
+  resetAfterReopen,
+  migratedLegacy,
+  oldUserState,
+  oldUserDefaultExempt,
+  oldUserStored,
+  oldUserReopened,
+  oldUserReopenedStored,
+  corruptState,
+  unknownState,
+  failedWriteResult,
+  failedWriteState,
+  storageErrors,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        fresh = {
+            "version": 2,
+            "completedTaskIds": [],
+            "completed": False,
+        }
+        self.assertEqual(result["initial"], fresh)
+        self.assertEqual(result["passive"], fresh)
+        self.assertIsNone(result["outOfOrder"])
+        self.assertFalse(result["failed"]["result"])
+        self.assertEqual(result["afterFailure"], fresh)
+        self.assertTrue(result["workbar"]["result"])
+        self.assertEqual(result["afterWorkbar"]["completedTaskIds"], ["workbar"])
+        self.assertTrue(result["unclaimedKey"])
+        serialized_pending = json.loads(result["serializedWhilePending"])
+        self.assertEqual(
+            sorted(serialized_pending),
+            ["completed", "completedTaskIds", "version"],
+        )
+        self.assertEqual(serialized_pending["completedTaskIds"], ["workbar"])
+        self.assertEqual(result["restoredState"]["completedTaskIds"], ["workbar"])
+        self.assertIsNone(result["restoredPending"])
+        self.assertEqual(result["completeState"]["completedTaskIds"], ["workbar", "key", "first-task"])
+        self.assertTrue(result["completeState"]["completed"])
+        self.assertEqual(result["completedKeys"], ["completed", "completedTaskIds", "version"])
+        self.assertNotRegex(result["completedRaw"], r"(?i)(api.?key|token|account|message|secret)")
+        self.assertEqual(result["resetAfterReopen"], fresh)
+        self.assertEqual(result["migratedLegacy"], [
+            {"state": fresh, "stored": fresh},
+            {"state": {**fresh, "completedTaskIds": ["workbar"]}, "stored": {**fresh, "completedTaskIds": ["workbar"]}},
+            {"state": {**fresh, "completedTaskIds": ["workbar", "key"]}, "stored": {**fresh, "completedTaskIds": ["workbar", "key"]}},
+            {"state": {**fresh, "completedTaskIds": ["workbar", "key"]}, "stored": {**fresh, "completedTaskIds": ["workbar", "key"]}},
+            {
+                "state": {"version": 2, "completedTaskIds": ["workbar", "key", "first-task"], "completed": True},
+                "stored": {"version": 2, "completedTaskIds": ["workbar", "key", "first-task"], "completed": True},
+            },
+        ])
+        self.assertFalse(result["oldUserState"]["completed"])
+        self.assertTrue(result["oldUserDefaultExempt"])
+        self.assertIsNone(result["oldUserStored"])
+        self.assertEqual(result["oldUserReopened"], fresh)
+        self.assertIsNotNone(result["oldUserReopenedStored"])
+        self.assertEqual(result["corruptState"], fresh)
+        self.assertEqual(result["unknownState"], fresh)
+        self.assertFalse(result["failedWriteResult"])
+        self.assertEqual(result["failedWriteState"], fresh)
+        self.assertGreaterEqual(result["storageErrors"], 2)
+
+    def test_onboarding_actions_use_explicit_real_success_boundaries(self):
+        self.assertIn("isWelcomeVisible: state.messages.length === 0 && !state.sessionId", APP_SOURCE)
+        self.assertIn("onboardingTasksFeature?.setWelcomeVisible(isBlankWelcome)", APP_SOURCE)
+        self.assertIn('verifyPlatformConnection({ updateGate: true })', APP_SOURCE)
+        self.assertIn('onboardingTasksFeature?.isPending("key")', APP_SOURCE)
+        self.assertIn('onboardingTasksFeature?.confirmFirstTaskModel()', APP_SOURCE)
+        self.assertIn('onboardingTasksFeature?.claimFirstTaskIntent()', APP_SOURCE)
+        self.assertIn("onAgentRunCreated({ agentRunId: ctx.agentRunId, sessionId: ctx.sessionId })", APP_SOURCE)
+        self.assertLess(
+            APP_SOURCE.index('ctx.agentRunId = String(created.agentRunId || "")'),
+            APP_SOURCE.index("onAgentRunCreated({ agentRunId: ctx.agentRunId, sessionId: ctx.sessionId })"),
+        )
+        self.assertIn("if (!result?.ok || !Array.isArray(result.models) || result.models.length === 0) return false", APP_SOURCE)
+        self.assertIn("const currentTaskId = machine.currentTaskId()", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("if (normalized !== currentTaskId()) return null", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("const showTasks = welcomeVisible && !defaultExempt && !state.completed", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("if (pending && !pending.claimed)", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("intent = null", ONBOARDING_TASKS_SOURCE)
+        self.assertNotIn("pendingIntent:", ONBOARDING_TASKS_SOURCE.split("function persist(candidate)", 1)[0])
+        self.assertNotIn("setCollapsed", ONBOARDING_TASKS_SOURCE)
+        self.assertNotIn("onboardingLater", ONBOARDING_TASKS_SOURCE)
+        self.assertNotIn("onboardingRestore", ONBOARDING_TASKS_SOURCE)
+        self.assertIn('fetchFn("/api/code/auth/validate"', SETTINGS_SOURCE)
+        self.assertIn("verifyPlatformConnection,", SETTINGS_SOURCE)
+        self.assertIn("beginNewConversation(projectIdForNewConversation())", APP_SOURCE)
+        self.assertIn('data-onboarding-example="${index}"', ONBOARDING_TASKS_SOURCE)
+        self.assertIn('els.prompt.dispatchEvent(new Event("input", { bubbles: true }))', APP_SOURCE)
+
+        for key in (
+            "onboardingTitle",
+            "onboardingWorkbarTitle",
+            "onboardingKeyTitle",
+            "onboardingFirstTaskTitle",
+            "onboardingExamplesTitle",
+            "onboardingExampleProjectStructure",
+            "onboardingExampleAnalyzeProblems",
+            "onboardingExampleSmallChange",
+            "onboardingCompleteTitle",
+            "onboardingSettingsAction",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+        self.assertIn("const composerRoot = els.composerStack || els.chatForm", APP_SOURCE)
+        self.assertIn("composerResizeObserver.observe(composerRoot)", APP_SOURCE)
+        self.assertIn(".chat-pane.empty-chat .composer-stack {", STYLE_SOURCE)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", STYLE_SOURCE)
+        shrink_rule = re.search(
+            r"\.composer-stack > \.composer,\s*"
+            r"\.composer-stack > \.onboarding-tasks\s*\{([^}]*)\}",
+            STYLE_SOURCE,
+        )
+        self.assertIsNotNone(shrink_rule)
+        self.assertIn("box-sizing: border-box;", shrink_rule.group(1))
+        self.assertIn("min-width: 0;", shrink_rule.group(1))
+        self.assertIn("max-width: 100%;", shrink_rule.group(1))
+        self.assertIn(".composer-stack > .onboarding-tasks { width: 100%; }", STYLE_SOURCE)
+        self.assertIn("width: var(--conversation-content-width);", STYLE_SOURCE)
+        self.assertIn(".onboarding-example-list", STYLE_SOURCE)
+        self.assertIn("box-shadow: none;", STYLE_SOURCE)
+        self.assertNotIn(".onboarding-restore", STYLE_SOURCE)
+        self.assertNotIn(".onboarding-later", STYLE_SOURCE)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", STYLE_SOURCE)
+        self.assertIn(".onboarding-complete { animation: none; }", STYLE_SOURCE)
 
     def test_composer_controls_do_not_implicitly_submit_prompt(self):
         form_start = INDEX_SOURCE.index('<form id="chatForm"')
@@ -4033,6 +4295,7 @@ process.stdout.write(JSON.stringify({
             "src/ui/run-view-model.js",
             "src/ui/panels.js",
             "src/features/settings.js",
+            "src/features/onboarding-tasks.js",
             "src/features/preview.js",
             "src/features/files.js",
             "src/features/image-attachments.js",
@@ -4065,7 +4328,8 @@ process.stdout.write(JSON.stringify({
         ]
 
         self.assertEqual(len(classic_scripts), len(set(classic_scripts)))
-        self.assertEqual(len(classic_scripts), 39)
+        self.assertEqual(len(classic_scripts), 40)
+        self.assertIn("./src/features/onboarding-tasks.js", classic_scripts)
         self.assertIn("./src/features/image-overlay.js", classic_scripts)
         self.assertIn("./src/features/link-context-menu.js", classic_scripts)
         self.assertLess(
@@ -4179,7 +4443,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('"build:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('"verify:frontend"', (ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertIn('entryPoints: ["src/frontend-entry.js"]', FRONTEND_BUILD_SOURCE)
-        self.assertIn("Expected 37 frontend entry imports", FRONTEND_BUILD_SOURCE)
+        self.assertIn("Expected 40 frontend entry imports", FRONTEND_BUILD_SOURCE)
         self.assertIn('format: "iife"', FRONTEND_BUILD_SOURCE)
         self.assertIn('treeShaking: false', FRONTEND_BUILD_SOURCE)
         self.assertIn('const statePath = path.join(outputDir, "code.bundle.state.json")', FRONTEND_BUILD_SOURCE)
@@ -16303,7 +16567,7 @@ process.stdout.write(JSON.stringify({{
         self.assertLess(render.index("parkActiveRunBanner();\n  const projectedMessageList"), replace_index)
         mounted_index = render.index("mountActiveRunBanner();", replace_index)
         self.assertLess(mounted_index, render.index("syncActiveRunBanner(state.sessionId);", mounted_index))
-        empty_session_guard = "if (state.messages.length === 0 && !state.sessionId)"
+        empty_session_guard = "if (isBlankWelcome)"
         self.assertIn(empty_session_guard, render)
         self.assertNotIn(
             "syncActiveRunBanner(state.sessionId);",

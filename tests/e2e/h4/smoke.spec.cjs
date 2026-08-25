@@ -9,6 +9,8 @@ const MODEL_ID = "h4-e2e-model";
 const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
 const AUTO_PERMISSION_ACK_VERSION = "v1";
 const AUTO_PERMISSION_REFRESH_USER = "H4_AUTO_PERMISSION_REFRESH_USER";
+const ONBOARDING_DIRECT_CHAT_USER = "H4_ONBOARDING_DIRECT_CHAT_USER";
+const ONBOARDING_FIRST_TASK_USER = "H4_ONBOARDING_FIRST_TASK_USER";
 const AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED";
 const AUTO_COMPACTION_SEED_FINAL = "H4_AUTO_COMPACTION_SEED_FINAL";
 const AUTO_COMPACTION_USER = "H4_AUTO_COMPACTION_USER";
@@ -24848,6 +24850,225 @@ async function exerciseAutoPermissionReloadPersistence(h4, runtime) {
   });
 }
 
+async function exerciseExplicitOnboardingTasks(h4, runtime) {
+  const { page } = h4;
+  const startupBoundary = h4.requestBoundary();
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  if (runtime === "classic") await assertDirectClassicEntry(page);
+  await page.bringToFront();
+
+  const onboarding = page.locator("#onboardingTasks");
+  const currentTask = () => onboarding.locator(".onboarding-task.is-current");
+  const storedState = () => page.evaluate(() => {
+    const raw = localStorage.getItem("code-onboarding-tasks-v1");
+    return raw ? JSON.parse(raw) : null;
+  });
+  const readOnboardingLayout = () => page.evaluate(() => {
+    const stack = document.querySelector("#composerStack");
+    const form = document.querySelector("#chatForm");
+    const onboarding = document.querySelector("#onboardingTasks");
+    const toolPreset = document.querySelector("#toolPreset");
+    const stopButton = document.querySelector("#stopBtn");
+    const formRect = form?.getBoundingClientRect();
+    const onboardingRect = onboarding?.getBoundingClientRect();
+    const stackStyle = stack ? getComputedStyle(stack) : null;
+    const configuredGap = Number.parseFloat(stackStyle?.rowGap || stackStyle?.gap || "0");
+    const actualGap = formRect && onboardingRect ? onboardingRect.top - formRect.bottom : null;
+    return {
+      childIds: Array.from(stack?.children || []).map((child) => child.id),
+      formIsDirectChild: form?.parentElement === stack,
+      onboardingIsDirectChild: onboarding?.parentElement === stack,
+      toolPresetOutsideStack: toolPreset?.parentElement !== stack,
+      stopButtonOutsideStack: stopButton?.parentElement !== stack,
+      xDelta: formRect && onboardingRect ? Math.abs(formRect.x - onboardingRect.x) : null,
+      widthDelta: formRect && onboardingRect ? Math.abs(formRect.width - onboardingRect.width) : null,
+      configuredGap,
+      actualGap,
+      overlaps: formRect && onboardingRect ? onboardingRect.top < formRect.bottom : null,
+      viewportOverflow: onboardingRect
+        ? onboardingRect.left < -0.5 || onboardingRect.right > window.innerWidth + 0.5
+        : null,
+    };
+  });
+  const expectOnboardingLayout = (layout) => {
+    expect(layout.childIds).toEqual(["chatForm", "onboardingTasks"]);
+    expect(layout.formIsDirectChild).toBe(true);
+    expect(layout.onboardingIsDirectChild).toBe(true);
+    expect(layout.toolPresetOutsideStack).toBe(true);
+    expect(layout.stopButtonOutsideStack).toBe(true);
+    expect(layout.xDelta).toBeLessThanOrEqual(0.5);
+    expect(layout.widthDelta).toBeLessThanOrEqual(0.5);
+    expect(layout.configuredGap).toBeGreaterThan(0);
+    expect(Math.abs(layout.actualGap - layout.configuredGap)).toBeLessThanOrEqual(1);
+    expect(layout.overlaps).toBe(false);
+    expect(layout.viewportOverflow).toBe(false);
+  };
+  const initialMetrics = await h4.metrics();
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "active");
+  await expect(onboarding.locator(".onboarding-task")).toHaveCount(3);
+  await expect(currentTask()).toHaveAttribute("data-onboarding-task", "workbar");
+  await expect(onboarding.locator(".onboarding-task.is-future")).toHaveCount(2);
+  await expect(onboarding.locator("[data-onboarding-command]")).toHaveCount(0);
+  expect(await storedState()).toEqual({
+    version: 2,
+    completedTaskIds: [],
+    completed: false,
+  });
+  expect(initialMetrics.production.agentRuns).toEqual([]);
+  expect(initialMetrics.chatRequests).toEqual([]);
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const desktopLayout = await readOnboardingLayout();
+  expectOnboardingLayout(desktopLayout);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const narrowLayout = await readOnboardingLayout();
+  expectOnboardingLayout(narrowLayout);
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  await expect.poll(() => (
+    h4.requestSummarySince(startupBoundary)["GET /proxy/models"] || 0
+  )).toBeGreaterThanOrEqual(1);
+
+  const directAgentRunRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/agent/runs";
+  });
+  await page.locator("#prompt").fill(ONBOARDING_DIRECT_CHAT_USER);
+  await page.locator("#sendBtn").click();
+  await directAgentRunRequestPromise;
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: ONBOARDING_DIRECT_CHAT_USER,
+  })).toHaveCount(1);
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_PLAIN_FINAL",
+  })).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "waiting-welcome");
+  await expect(onboarding).toBeHidden();
+  await expect(onboarding.locator(".onboarding-card")).toHaveCount(0);
+  expect(await storedState()).toEqual({
+    version: 2,
+    completedTaskIds: [],
+    completed: false,
+  });
+
+  await page.locator("#newChat").click();
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "active");
+  await expect(currentTask()).toHaveAttribute("data-onboarding-task", "workbar");
+
+  const workbarBoundary = h4.requestBoundary();
+  await currentTask().locator(".onboarding-task-action").click();
+  await expect(currentTask()).toHaveAttribute("data-onboarding-task", "key");
+  expect(h4.requestSummarySince(workbarBoundary)["POST /api/code/auth/validate"]).toBe(1);
+  expect((await storedState()).completedTaskIds).toEqual(["workbar"]);
+
+  const keyBoundary = h4.requestBoundary();
+  await currentTask().locator(".onboarding-task-action").click();
+  await expect(currentTask()).toHaveAttribute("data-onboarding-task", "first-task");
+  expect(h4.requestSummarySince(keyBoundary)["GET /proxy/models"]).toBe(1);
+  expect((await storedState()).completedTaskIds).toEqual(["workbar", "key"]);
+
+  await currentTask().locator(".onboarding-task-action").click();
+  await expect(page.locator("#prompt")).toBeFocused();
+  const examples = onboarding.locator(".onboarding-example");
+  await expect(examples).toHaveCount(3);
+  expect(await examples.allTextContents()).toEqual([
+    "Introduce the current project structure and identify the main entry files",
+    "Check the current project for obvious problems. Analyze only and do not modify files",
+    "Make a small change to the current project and explain the verification results afterward",
+  ]);
+  await expect(onboarding.locator(".onboarding-examples")).toHaveAttribute("role", "group");
+  const exampleBoundary = h4.requestBoundary();
+  await examples.nth(0).click();
+  await expect(page.locator("#prompt")).toHaveValue(
+    "Introduce the current project structure and identify the main entry files",
+  );
+  expect(Object.keys(h4.requestSummarySince(exampleBoundary)).filter((key) => key.startsWith("POST "))).toEqual([]);
+  expect((await storedState()).completedTaskIds).toEqual(["workbar", "key"]);
+  await page.locator("#prompt").fill(ONBOARDING_FIRST_TASK_USER);
+  const agentRunRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/agent/runs";
+  });
+  await page.locator("#sendBtn").click();
+  const agentRunRequest = await agentRunRequestPromise;
+  const agentRunBody = agentRunRequest.postDataJSON();
+  expect(String(agentRunBody?.baseUrl || "")).toBe(h4.host.ready.fakeUrl);
+  expect(agentRunBody?.keys).toEqual([h4.host.syntheticKey]);
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "complete");
+  await expect(onboarding.locator("[data-onboarding-complete]")).toHaveCount(1);
+  await expect(onboarding.locator(".onboarding-card")).toHaveCount(0);
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: ONBOARDING_FIRST_TASK_USER,
+  })).toHaveCount(1);
+  await h4.host.releaseModel();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4_PLAIN_FINAL",
+  })).toHaveCount(1);
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "hidden");
+
+  const completedState = await storedState();
+  expect(Object.keys(completedState).sort()).toEqual([
+    "completed",
+    "completedTaskIds",
+    "version",
+  ]);
+  expect(completedState).toEqual({
+    version: 2,
+    completedTaskIds: ["workbar", "key", "first-task"],
+    completed: true,
+  });
+  const persistedText = JSON.stringify(completedState);
+  expect(persistedText).not.toMatch(/api.?key|token|account|message|secret/i);
+
+  await h4.reloadRuntime(runtime);
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "hidden");
+  await expect(onboarding.locator("[data-onboarding-complete]")).toHaveCount(0);
+  expect(await storedState()).toEqual(completedState);
+
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  await page.locator('#settingsNav [data-panel="onboarding"]').click();
+  await page.locator("#settingsReopenOnboarding").click();
+  await expect(page.locator("#settingsPage")).toBeHidden();
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "active");
+  await expect(currentTask()).toHaveAttribute("data-onboarding-task", "workbar");
+  await expect(page.locator("#messages article.msg")).toHaveCount(0);
+  expect(await storedState()).toEqual({
+    version: 2,
+    completedTaskIds: [],
+    completed: false,
+  });
+
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests.map((request) => request.scenario)).toEqual(["plain-text", "plain-text"]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.unsafeToolRequests).toBe(0);
+  expect(metrics.production.agentRuns).toHaveLength(2);
+  expect(metrics.production.agentRuns.map((run) => run.status)).toEqual(["completed", "completed"]);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-explicit-onboarding-tasks`, {
+    passiveStartupProgress: 0,
+    directChatProgress: 0,
+    workbarVerified: true,
+    keyConfirmedWithCatalog: true,
+    modelExplicitlyConfirmed: true,
+    examplesFilledWithoutDispatch: true,
+    firstTaskCompletedAfterAgentRunCreate: true,
+    directChatHiddenUntilNewWelcome: true,
+    completionPlayedOnce: true,
+    settingsReopenReset: true,
+    desktopLayout,
+    narrowLayout,
+    storedKeys: Object.keys(completedState).sort(),
+    modelRequests: metrics.chatRequests.length,
+    toolExecutions: metrics.toolExecutions.length,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -24968,4 +25189,12 @@ test("bundle Auto permission acknowledgement survives reload without an active G
 
 test("direct classic Auto permission acknowledgement survives reload without an active Goal", async ({ h4 }) => {
   await exerciseAutoPermissionReloadPersistence(h4, "classic");
+});
+
+test("bundle explicit onboarding tasks require guided real actions", async ({ h4 }) => {
+  await exerciseExplicitOnboardingTasks(h4, "bundle");
+});
+
+test("direct classic explicit onboarding tasks require guided real actions", async ({ h4 }) => {
+  await exerciseExplicitOnboardingTasks(h4, "classic");
 });

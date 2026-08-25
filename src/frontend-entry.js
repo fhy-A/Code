@@ -18,6 +18,7 @@ import "./ui/panels.js";
 import "./features/sessions.js";
 import "./features/branches.js";
 import "./features/settings.js";
+import "./features/onboarding-tasks.js";
 import "./features/skills-memory.js";
 import "./features/goal.js";
 import "./features/preview.js";

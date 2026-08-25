@@ -61,6 +61,7 @@
     const getDefaultSystemPrompt = options.getDefaultSystemPrompt || (() => "");
     const onPlatformLogout = options.onPlatformLogout || (() => {});
     const onKeyConfigChanged = options.onKeyConfigChanged || (() => {});
+    const onReopenOnboarding = options.onReopenOnboarding || (() => false);
     const trashIcon = options.trashIcon || (() => "");
     const documentRef = options.document || global.document;
     const storage = options.storage || global.localStorage;
@@ -364,6 +365,44 @@
       byId("platformAuthGate")?.remove();
     }
 
+    async function verifyPlatformConnection({ updateGate = true } = {}) {
+      const auth = getPlatformAuth();
+      if (!auth?.token || !auth?.userId) {
+        clearPlatformAuth();
+        if (updateGate) showPlatformAuthGate("missing");
+        return { ok: false, reason: "missing" };
+      }
+      if (updateGate) showPlatformAuthGate("validating");
+      try {
+        const response = await fetchFn("/api/code/auth/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: auth.token, userId: auth.userId }),
+        });
+        if (response.status === 401 || response.status === 403) {
+          clearPlatformAuth();
+          if (updateGate) showPlatformAuthGate("expired");
+          return { ok: false, reason: "expired" };
+        }
+        if (!response.ok) {
+          if (updateGate) showPlatformAuthGate("unavailable");
+          return { ok: false, reason: "unavailable" };
+        }
+        const data = await response.json();
+        if (!data.valid) {
+          clearPlatformAuth();
+          if (updateGate) showPlatformAuthGate("expired");
+          return { ok: false, reason: "expired" };
+        }
+        savePlatformAuth(mergePlatformAccount(auth, data.account));
+        if (updateGate) hidePlatformAuthGate();
+        return { ok: true, account: data.account || null };
+      } catch {
+        if (updateGate) showPlatformAuthGate("unavailable");
+        return { ok: false, reason: "unavailable" };
+      }
+    }
+
     async function initializePlatformAuth() {
       const callbackHandled = await checkCodeCallback();
       const auth = getPlatformAuth();
@@ -376,35 +415,7 @@
         hidePlatformAuthGate();
         return true;
       }
-      showPlatformAuthGate("validating");
-      try {
-        const response = await fetchFn("/api/code/auth/validate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: auth.token, userId: auth.userId }),
-        });
-        if (response.status === 401 || response.status === 403) {
-          clearPlatformAuth();
-          showPlatformAuthGate("expired");
-          return false;
-        }
-        if (!response.ok) {
-          showPlatformAuthGate("unavailable");
-          return false;
-        }
-        const data = await response.json();
-        if (!data.valid) {
-          clearPlatformAuth();
-          showPlatformAuthGate("expired");
-          return false;
-        }
-        savePlatformAuth(mergePlatformAccount(auth, data.account));
-        hidePlatformAuthGate();
-        return true;
-      } catch {
-        showPlatformAuthGate("unavailable");
-        return false;
-      }
+      return (await verifyPlatformConnection({ updateGate: true })).ok;
     }
 
     const themeEngine = Code.core?.theme;
@@ -603,6 +614,20 @@
           saveFollowUpBehavior(button.dataset.followUpBehavior, storage);
           renderEditorPanel(container);
         });
+      });
+    }
+
+    function renderOnboardingPanel(container) {
+      container.innerHTML = `<h3 class="settings-section-title" data-i18n="onboardingSettingsTitle">${t("onboardingSettingsTitle")}</h3>
+        <div class="settings-lite-page">
+          <section class="settings-lite-card onboarding-settings-card">
+            <p data-i18n="onboardingSettingsHint">${t("onboardingSettingsHint")}</p>
+            <button id="settingsReopenOnboarding" class="mini-btn primary-btn" type="button" data-i18n="onboardingSettingsAction">${t("onboardingSettingsAction")}</button>
+          </section>
+        </div>`;
+      byId("settingsReopenOnboarding")?.addEventListener("click", () => {
+        if (!onReopenOnboarding()) return;
+        byId("settingsPage")?.classList.add("hidden");
       });
     }
 
@@ -1247,6 +1272,7 @@
         case "skills": renderSkillsInSettings(detail); break;
         case "system": renderSystemPanel(detail); break;
         case "editor": renderEditorPanel(detail); break;
+        case "onboarding": renderOnboardingPanel(detail); break;
         case "theme": renderThemePanel(detail); break;
         case "update": renderUpdatePanel(detail); break;
         default: return;
@@ -1279,6 +1305,9 @@
           break;
         case "editor":
           renderEditorPanel(detail);
+          break;
+        case "onboarding":
+          renderOnboardingPanel(detail);
           break;
         case "models": {
           const refreshButton = byId("settingsRefreshModels");
@@ -1407,6 +1436,7 @@
       syncPlatformKeysSilently,
       switchSettingsPanel,
       updateThemeButtons,
+      verifyPlatformConnection,
     });
   }
 

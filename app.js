@@ -58,6 +58,7 @@ const {
   loadFollowUpBehavior,
   oppositeFollowUpBehavior,
 } = window.Code.features.settings;
+const { createOnboardingTasksFeature } = window.Code.features.onboardingTasks;
 const {
   applySkillTaskPolicy,
   createSkillsMemoryFeature,
@@ -86,6 +87,7 @@ const agentRuntime = window.Code.agent.runtime;
 const agentRunReducer = window.Code.agent.runReducer;
 const agentRunProjectionShadow = window.Code.agent.runProjectionShadow;
 let goalFeature = null;
+let onboardingTasksFeature = null;
 const {
   createSystemPromptSnapshot: createSystemPromptSnapshotData,
   formatSystemPromptEnvironment,
@@ -316,6 +318,7 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (typeof updateProjectContextIndicator === "function") updateProjectContextIndicator();
     if (typeof updateMemoryContextIndicator === "function") updateMemoryContextIndicator();
     if (typeof updateSendButtonState === "function") updateSendButtonState();
+    onboardingTasksFeature?.refreshLanguage();
     if (typeof renderImportList === "function" && document.getElementById("importModal")?.style.display !== "none") {
       renderImportList();
       if (typeof renderImportBatchState === "function") renderImportBatchState();
@@ -612,21 +615,23 @@ function syncActiveStreamingState() {
 let composerResizeObserver = null;
 
 function syncComposerSafeArea() {
-  if (!els.chatPane || !els.chatForm) return;
-  const composerHeight = Math.ceil(els.chatForm.getBoundingClientRect().height);
+  const composerRoot = els.composerStack || els.chatForm;
+  if (!els.chatPane || !composerRoot) return;
+  const composerHeight = Math.ceil(composerRoot.getBoundingClientRect().height);
   if (!composerHeight) return;
-  // Composer bottom: 24px, keep a 4px gap above so the last message
-  // never slides underneath the composer edge.
+  // The composer stack includes the optional onboarding card. Keep the last
+  // message above the complete stack rather than measuring the form alone.
   els.chatPane.style.setProperty("--composer-safe-bottom", `${composerHeight + 28}px`);
   messageScrollController?.onViewportChanged(state.sessionId);
 }
 
 function setupComposerSafeArea() {
-  if (!els.chatForm || composerResizeObserver) return;
+  const composerRoot = els.composerStack || els.chatForm;
+  if (!composerRoot || composerResizeObserver) return;
   syncComposerSafeArea();
   if (typeof ResizeObserver === "function") {
     composerResizeObserver = new ResizeObserver(syncComposerSafeArea);
-    composerResizeObserver.observe(els.chatForm);
+    composerResizeObserver.observe(composerRoot);
   }
   window.addEventListener("resize", syncComposerSafeArea);
 }
@@ -742,6 +747,10 @@ const els = {
   composerInputToggle: document.getElementById("composerInputToggle"),
 
   chatForm: document.getElementById("chatForm"),
+
+  composerStack: document.getElementById("composerStack"),
+
+  onboardingTasks: document.getElementById("onboardingTasks"),
 
   goalProgress: document.getElementById("goalProgress"),
 
@@ -1262,7 +1271,15 @@ const settingsFeature = createSettingsFeature({
   refreshSkillsMemorySettingsLanguage,
   getDefaultSystemPrompt: () => defaultSystemPrompt,
   onPlatformLogout: clearPlatformLocalData,
-  onKeyConfigChanged: markModelCatalogStale,
+  onKeyConfigChanged: (config) => {
+    markModelCatalogStale(config);
+    void resolvePendingOnboardingKey(config);
+  },
+  onReopenOnboarding: () => {
+    if (onboardingTasksFeature?.reopen() !== true) return false;
+    beginNewConversation(projectIdForNewConversation());
+    return true;
+  },
   trashIcon,
 });
 const {
@@ -1270,8 +1287,67 @@ const {
   checkForUpdates,
   initializePlatformAuth,
   syncPlatformKeysSilently,
+  verifyPlatformConnection,
 } = settingsFeature;
 settingsFeature.bind();
+
+function hasEnabledOnboardingKey(config = loadKeyConfig()) {
+  return (Array.isArray(config) ? config : []).some((entry) => (
+    entry?.enabled !== false && String(entry?.key || "").trim()
+  ));
+}
+
+async function resolvePendingOnboardingKey(config = loadKeyConfig()) {
+  if (!onboardingTasksFeature?.isPending("key") || !hasEnabledOnboardingKey(config)) return false;
+  const result = await refreshModels();
+  if (!result?.ok || !Array.isArray(result.models) || result.models.length === 0) return false;
+  return onboardingTasksFeature.completePending("key");
+}
+
+onboardingTasksFeature = createOnboardingTasksFeature({
+  root: els.onboardingTasks,
+  t,
+  escapeHtml,
+  storage: localStorage,
+  hasEnabledKey: () => hasEnabledOnboardingKey(),
+  getSelectedModel,
+  onExampleSelected: (example) => {
+    els.prompt.value = String(example || "");
+    els.prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    els.prompt.focus({ preventScroll: true });
+  },
+  onFirstTaskReady: () => els.prompt?.focus({ preventScroll: true }),
+  onLayoutChange: syncComposerSafeArea,
+  onError: (reason) => {
+    const key = reason === "storage" ? "onboardingStorageFailed" : "onboardingActionFailed";
+    showToast(t(key), "warning");
+  },
+  actions: {
+    workbar: async () => {
+      const result = await verifyPlatformConnection({ updateGate: true });
+      if (!result?.ok) showToast(t("onboardingWorkbarFailed"), "warning");
+      return { success: result?.ok === true };
+    },
+    key: async () => {
+      if (!hasEnabledOnboardingKey()) {
+        settingsFeature.openSettingsPage("models");
+        return { pending: true };
+      }
+      const result = await refreshModels();
+      const success = result?.ok === true && Array.isArray(result.models) && result.models.length > 0;
+      if (!success) showToast(t("onboardingKeyUnavailable"), "warning");
+      return { success };
+    },
+    "first-task": async () => {
+      if (!getSelectedModel()) {
+        els.modelPillBtn?.click();
+        return { pending: true };
+      }
+      return { pending: true, ready: true };
+    },
+  },
+});
+onboardingTasksFeature.bind();
 
 function clearPlatformLocalData() {
   saveKeyConfig([]);
@@ -3372,7 +3448,10 @@ function renderMessages() {
   if (curMsgs && curMsgs !== state.messages) state.messages = curMsgs;
   pruneStaleStreamingNodes(state.sessionId);
 
-  if (state.messages.length === 0 && !state.sessionId) {
+  const isBlankWelcome = state.messages.length === 0 && !state.sessionId;
+  onboardingTasksFeature?.setWelcomeVisible(isBlankWelcome);
+
+  if (isBlankWelcome) {
 
     els.chatPane.classList.add("empty-chat");
 
@@ -10039,6 +10118,15 @@ async function runServerAgentLoop(ctx) {
     });
     ctx.agentRunId = String(created.agentRunId || "");
     if (!ctx.agentRunId) throw new Error("Server Agent did not return an agentRunId");
+    const onAgentRunCreated = ctx.onAgentRunCreated;
+    ctx.onAgentRunCreated = null;
+    if (typeof onAgentRunCreated === "function") {
+      try {
+        onAgentRunCreated({ agentRunId: ctx.agentRunId, sessionId: ctx.sessionId });
+      } catch (error) {
+        console.warn("Onboarding AgentRun callback failed:", error);
+      }
+    }
     ctx.run.agentRunId = ctx.agentRunId;
     ctx.agentEventCursor = 0;
     ctx.run.agentEventCursor = 0;
@@ -10951,6 +11039,9 @@ async function sendMessage(userText, options = {}) {
   }
   const run = ensureSessionRun(sessionId);
   const ctx = buildRunContext(sessionId, options);
+  ctx.onAgentRunCreated = typeof options.onAgentRunCreated === "function"
+    ? options.onAgentRunCreated
+    : null;
   if (!ctx.clientRequestId) ctx.clientRequestId = `foreground-${sessionId}-${submittedAt}`;
   ctx.taskUsage = { input: 0, output: 0, cache: 0 };
   // Make the active context accessible for background sub-agent dispatch
@@ -12062,6 +12153,7 @@ els.modelPillDropdown.addEventListener("click", (e) => {
   saveLocalSettings();
 
   updateStatsPanel();
+  if (getSelectedModel()) onboardingTasksFeature?.confirmFirstTaskModel();
 
 });
 
@@ -12538,6 +12630,8 @@ els.chatForm.addEventListener("submit", async (event) => {
 
   if (parallelTask !== null) text = parallelTask;
 
+  const onboardingIntentId = onboardingTasksFeature?.claimFirstTaskIntent() || "";
+
   els.prompt.value = "";
 
   els.prompt.rows = 2;
@@ -12557,6 +12651,9 @@ els.chatForm.addEventListener("submit", async (event) => {
       onSessionResolved: (sessionId) => {
         submittedSessionId = sessionId;
       },
+      onAgentRunCreated: onboardingIntentId
+        ? () => onboardingTasksFeature?.completeIntent(onboardingIntentId)
+        : null,
     });
 
   } catch (err) {
@@ -12593,6 +12690,8 @@ els.chatForm.addEventListener("submit", async (event) => {
     }
 
   } finally {
+
+    if (onboardingIntentId) onboardingTasksFeature?.cancelIntent(onboardingIntentId);
 
     scheduleDeferredSessionRefresh(state._deferredSessionRefreshId);
 
@@ -13529,6 +13628,10 @@ async function init() {
 
   // Foreground restoration is independent from persisted task recovery.
   await sessionStartup.restoreForegroundSession();
+  onboardingTasksFeature.initialize({
+    hasExistingSessions: state.sessions.length > 0,
+    isWelcomeVisible: state.messages.length === 0 && !state.sessionId,
+  });
 
   const platformSync = await platformSyncPromise;
   if (platformSync?.authExpired) {
