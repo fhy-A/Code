@@ -84,6 +84,10 @@
       userText: String(source.userText || ""),
       taskPrompt: String(source.taskPrompt || source.userText || ""),
       model: String(source.model || ""),
+      routeRef: String(source.routeRef || source.parentCtx?.routeRef || ""),
+      catalogRevision: Math.max(0, Number(
+        source.catalogRevision || source.parentCtx?.catalogRevision || 0,
+      )),
       permissionProfile: String(source.permissionProfile || "read"),
       toolPreset: String(source.toolPreset || "default"),
       thinkingLevel: String(source.thinkingLevel || "auto"),

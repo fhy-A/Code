@@ -59,7 +59,15 @@ class TestRunningMessageQueue(unittest.TestCase):
 
     def test_pending_queue_messages_are_detached_from_model_context(self):
         self.assertIn("meta: {", APP_SOURCE)
-        self.assertIn("queuedDispatch: { id, status: \"pending\", queuedAt }", APP_SOURCE)
+        enqueue_start = APP_SOURCE.index("async function enqueueSessionMessage(")
+        enqueue_end = APP_SOURCE.index("async function cancelQueuedSessionMessage", enqueue_start)
+        enqueue = APP_SOURCE[enqueue_start:enqueue_end]
+        self.assertIn("queuedDispatch: {", enqueue)
+        self.assertIn("id,", enqueue)
+        self.assertIn('status: "pending"', enqueue)
+        self.assertIn("queuedAt,", enqueue)
+        self.assertIn("routeRef: dispatchRoute.routeRef", enqueue)
+        self.assertIn("catalogRevision: dispatchRoute.catalogRevision", enqueue)
         self.assertIn("detachedFromMain: true", APP_SOURCE)
         self.assertIn(".filter((message) => !shouldDetach(message))", COMPACTION_SOURCE)
         self.assertIn(
@@ -89,10 +97,10 @@ class TestRunningMessageQueue(unittest.TestCase):
             """await saveSessionState(
       ctx.sessionId,
       msgs,
-      ctx.stats || getSessionStats(ctx.sessionId),
+      getSessionStats(ctx.sessionId),
       sessionTitle || "Untitled",
       { persistMessages: true },
-    )""",
+    ).catch(() => null)""",
             clear,
         )
 
@@ -159,10 +167,13 @@ class TestRunningMessageQueue(unittest.TestCase):
         self.assertIn('.find((candidate) => candidate.status === "pending")', pump)
         self.assertIn("state._queuedMessagePumps.has(sessionId)", pump)
         self.assertIn("if (!item.model) return false", pump)
-        self.assertIn("await getFallbackKeys(item.model)", pump)
-        self.assertIn("catch (_) {\n    return false;\n  }", pump)
+        self.assertIn("await getModelDispatchCredentials(item.model, {", pump)
+        self.assertIn("routeRef: item.routeRef", pump)
+        self.assertIn("catalogRevision: item.catalogRevision", pump)
+        self.assertIn('status: "waiting_route_selection"', pump)
+        self.assertIn('failureCode: "route_not_found"', pump)
         self.assertLess(
-            pump.index("await getFallbackKeys(item.model)"),
+            pump.index("await getModelDispatchCredentials(item.model, {"),
             pump.index("state._queuedMessagePumps.add(sessionId)"),
         )
         self.assertIn("queueMicrotask", pump)

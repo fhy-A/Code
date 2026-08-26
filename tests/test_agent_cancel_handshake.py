@@ -243,21 +243,22 @@ process.stdout.write(JSON.stringify({ messages, assistant }));
         self.assertNotIn("_usageScope", result["assistant"]["meta"])
         self.assertEqual(result["assistant"]["_responseTime"], "15s")
 
-    def test_abort_finalizes_pause_before_streaming_timer_is_cleared(self):
+    def test_abort_uses_shared_terminal_publication_and_still_finalizes_pause(self):
         send_start = APP_SOURCE.index("async function sendMessage(userText")
         send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
         send_source = APP_SOURCE[send_start:send_end]
         abort_start = send_source.index("if (loopError) {")
+        publish_position = send_source.index("publishTerminalRunOwnership(ctx);")
         pause_position = send_source.index("if (isAbort) finalizePausedRun(ctx);", abort_start)
-        stop_position = send_source.index("setStreaming(false, sessionId)", pause_position)
-        self.assertLess(pause_position, stop_position)
+        self.assertLess(publish_position, abort_start)
+        self.assertLess(abort_start, pause_position)
 
         continue_start = APP_SOURCE.index("async function continueAgentRun()")
         continue_end = APP_SOURCE.index("async function renameSession", continue_start)
         continue_source = APP_SOURCE[continue_start:continue_end]
         self.assertLess(
             continue_source.index("finalizePausedRun(ctx);"),
-            continue_source.index("setStreaming(false, sessionId)"),
+            continue_source.index("publishTerminalRunOwnership(ctx);"),
         )
 
     def test_cancelled_child_runtime_keeps_partial_projection_for_pause_finalizer(self):

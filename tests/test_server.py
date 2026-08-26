@@ -5,6 +5,7 @@ Run: python -m unittest tests.test_server -v
 """
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -3331,6 +3332,587 @@ class TestCodexImport(unittest.TestCase):
         # Unknown source
         with self.assertRaises(ValueError):
             server.list_importable_sessions("unknown-source")
+
+
+class TestSessionRevisionCas(unittest.TestCase):
+    class Handler:
+        def __init__(self, body=None):
+            self.body = body or {}
+            self.responses = []
+
+        def read_body_json(self):
+            return self.body
+
+        def send_json(self, payload, status=200):
+            self.responses.append((status, payload))
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.temp_dir.name) / "data"
+        self.sessions_dir = self.data_dir / "sessions"
+        self.sessions_dir.mkdir(parents=True)
+        self.config_path = self.data_dir / "config.json"
+        self.config_path.write_text(json.dumps({"projectRoot": ""}), encoding="utf-8")
+        self.patchers = [
+            mock.patch.object(server, "DATA_DIR", self.data_dir),
+            mock.patch.object(server, "SESSIONS_DIR", self.sessions_dir),
+            mock.patch.object(server, "CONFIG_PATH", self.config_path),
+            mock.patch.object(server, "PROJECTS_PATH", self.data_dir / "projects.json"),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temp_dir.cleanup()
+
+    def create_session(self, body=None):
+        handler = self.Handler(body or {"title": "Revision test"})
+        server.CodeHandler.create_session(handler)
+        status, payload = handler.responses[-1]
+        self.assertEqual(status, 201)
+        return payload
+
+    def save_session(self, session_id, body):
+        handler = self.Handler(body)
+        server.CodeHandler.save_session(handler, session_id)
+        self.assertTrue(handler.responses)
+        return handler.responses[-1]
+
+    def get_session(self, session_id):
+        handler = self.Handler()
+        server.CodeHandler.get_session(handler, session_id)
+        self.assertTrue(handler.responses)
+        return handler.responses[-1]
+
+    def test_revision_roundtrip_success_stale_rejection_and_metadata_compatibility(self):
+        created = self.create_session()
+        session_id = created["id"]
+        self.assertEqual(created["revision"], 0)
+
+        status, saved = self.save_session(session_id, {
+            "title": "First messages",
+            "expectedRevision": 0,
+            "messages": [{"role": "user", "content": "first"}],
+            "runState": {"status": "running"},
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["revision"], 1)
+        self.assertEqual(self.get_session(session_id)[1]["revision"], 1)
+
+        meta_before = server.session_path(session_id).read_bytes()
+        messages_before = server.messages_path(session_id).read_bytes()
+        status, conflict = self.save_session(session_id, {
+            "title": "Must not persist",
+            "expectedRevision": 0,
+            "messages": [{"role": "assistant", "content": "stale"}],
+            "runState": {"status": "failed"},
+        })
+        self.assertEqual(status, 409)
+        self.assertEqual(conflict, {
+            "error": "Session revision conflict",
+            "errorCode": "session_revision_conflict",
+            "expectedRevision": 0,
+            "currentRevision": 1,
+        })
+        self.assertEqual(server.session_path(session_id).read_bytes(), meta_before)
+        self.assertEqual(server.messages_path(session_id).read_bytes(), messages_before)
+
+        status, metadata = self.save_session(session_id, {
+            "title": "Metadata rename",
+            "runState": {"status": "completed"},
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(metadata["revision"], 1)
+        self.assertEqual(metadata["title"], "Metadata rename")
+        self.assertEqual(metadata["messages"], [{"role": "user", "content": "first"}])
+
+    def test_legacy_zero_upgrade_missing_expected_and_rollback_switch(self):
+        created = self.create_session({
+            "title": "Legacy",
+            "messages": [{"role": "user", "content": "created history"}],
+        })
+        session_id = created["id"]
+        self.assertEqual(created["revision"], 0)
+        legacy_meta = server.read_json(server.session_path(session_id), {})
+        legacy_meta.pop("revision", None)
+        server.write_json(server.session_path(session_id), legacy_meta)
+        self.assertNotIn("revision", server.read_json(server.session_path(session_id), {}))
+        self.assertEqual(self.get_session(session_id)[1]["revision"], 0)
+
+        status, upgraded = self.save_session(session_id, {
+            "messages": [{"role": "user", "content": "legacy upgrade"}],
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(upgraded["revision"], 1)
+
+        status, rejected = self.save_session(session_id, {
+            "messages": [{"role": "user", "content": "second legacy write"}],
+        })
+        self.assertEqual(status, 409)
+        self.assertEqual(rejected["errorCode"], "session_revision_conflict")
+        self.assertIsNone(rejected["expectedRevision"])
+        self.assertEqual(rejected["currentRevision"], 1)
+
+        with mock.patch.object(server, "_SESSION_REVISION_CAS_ENABLED", False):
+            status, rolled_back = self.save_session(session_id, {
+                "messages": [{"role": "user", "content": "rollback write"}],
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(rolled_back["revision"], 2)
+
+    def test_two_concurrent_expected_revisions_allow_only_one_message_write(self):
+        created = self.create_session()
+        session_id = created["id"]
+        barrier = threading.Barrier(3)
+        results = []
+        result_lock = threading.Lock()
+
+        def writer(label):
+            handler = self.Handler({
+                "expectedRevision": 0,
+                "messages": [{"role": "user", "content": label}],
+            })
+            barrier.wait()
+            server.CodeHandler.save_session(handler, session_id)
+            with result_lock:
+                results.append(handler.responses[-1])
+
+        threads = [threading.Thread(target=writer, args=(label,)) for label in ("one", "two")]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sorted(status for status, _payload in results), [200, 409])
+        terminal = self.get_session(session_id)[1]
+        self.assertEqual(terminal["revision"], 1)
+        self.assertIn(terminal["messages"][0]["content"], {"one", "two"})
+
+    def test_invalid_expected_revision_is_rejected_without_mutation(self):
+        created = self.create_session()
+        session_id = created["id"]
+        meta_before = server.session_path(session_id).read_bytes()
+        messages_before = server.messages_path(session_id).read_bytes()
+        status, invalid = self.save_session(session_id, {
+            "expectedRevision": "0",
+            "messages": [{"role": "user", "content": "invalid"}],
+        })
+        self.assertEqual(status, 400)
+        self.assertEqual(invalid["errorCode"], "session_revision_invalid")
+        self.assertEqual(server.session_path(session_id).read_bytes(), meta_before)
+        self.assertEqual(server.messages_path(session_id).read_bytes(), messages_before)
+
+    def test_revision_feature_switch_parser_defaults_fail_closed(self):
+        self.assertTrue(server._resolve_session_revision_cas_enabled({}))
+        self.assertTrue(server._resolve_session_revision_cas_enabled({
+            "CODE_SESSION_REVISION_CAS": "on",
+        }))
+        self.assertFalse(server._resolve_session_revision_cas_enabled({
+            "CODE_SESSION_REVISION_CAS": "off",
+        }))
+        self.assertTrue(server._resolve_session_revision_cas_enabled({
+            "CODE_SESSION_REVISION_CAS": "unexpected",
+        }))
+
+
+class TestConnectionCentricRouteApi(unittest.TestCase):
+    @staticmethod
+    def handler(path, body):
+        handler = object.__new__(server.CodeHandler)
+        handler.path = path
+        handler.read_body_json = mock.Mock(return_value=body)
+        handler.send_json = mock.Mock()
+        return handler
+
+    @staticmethod
+    def resolved():
+        return type("Resolved", (), {
+            "key": "sk-synthetic-runtime-only",
+            "base_url": "https://synthetic.invalid",
+            "catalog_revision": 7,
+        })()
+
+    def test_agent_run_route_ref_resolves_exact_connection_without_public_key(self):
+        handler = self.handler("/api/agent/runs", {
+            "sessionId": "session-route",
+            "clientRequestId": "request-route",
+            "payload": {"model": "shared-model", "messages": [{"role": "user", "content": "hi"}]},
+            "routeRef": "mr1_opaque",
+            "catalogRevision": 7,
+            "allowedTools": [],
+        })
+        run = {"id": "agent-route", "status": "running", "client_request_id": "request-route"}
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server._model_route_registry, "resolve", return_value=self.resolved()) as resolve, \
+             mock.patch.object(server, "_create_agent_run", return_value=run) as create:
+            server.CodeHandler.do_POST(handler)
+
+        resolve.assert_called_once_with("mr1_opaque", 7, "shared-model")
+        args = create.call_args.args
+        kwargs = create.call_args.kwargs
+        self.assertEqual(args[2], "https://synthetic.invalid")
+        self.assertEqual(args[3], ["sk-synthetic-runtime-only"])
+        self.assertEqual(kwargs["route_ref"], "mr1_opaque")
+        self.assertEqual(kwargs["catalog_revision"], 7)
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 201)
+        self.assertNotIn("key", json.dumps(payload).lower())
+        self.assertNotIn("baseurl", json.dumps(payload).lower())
+
+    def test_runtime_route_ref_uses_same_mutual_exclusion_and_resolution(self):
+        handler = self.handler("/api/runtime/runs", {
+            "sessionId": "session-route",
+            "payload": {"model": "shared-model", "messages": [{"role": "user", "content": "hi"}]},
+            "routeRef": "mr1_opaque",
+            "catalogRevision": 7,
+        })
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server._model_route_registry, "resolve", return_value=self.resolved()) as resolve, \
+             mock.patch.object(
+                 server,
+                 "_create_model_runtime_run",
+                 return_value={"id": "runtime-route", "status": "running"},
+             ) as create:
+            server.CodeHandler.do_POST(handler)
+
+        resolve.assert_called_once_with("mr1_opaque", 7, "shared-model")
+        self.assertEqual(create.call_args.args[2], "https://synthetic.invalid")
+        self.assertEqual(create.call_args.args[3], ["sk-synthetic-runtime-only"])
+        self.assertEqual(create.call_args.kwargs, {
+            "route_ref": "mr1_opaque",
+            "catalog_revision": 7,
+        })
+
+        rejected = self.handler("/api/runtime/runs", {
+            "payload": {"model": "shared-model", "messages": [{"role": "user", "content": "hi"}]},
+            "routeRef": "mr1_opaque",
+            "catalogRevision": 7,
+            "keys": ["sk-must-not-mix"],
+        })
+        server.CodeHandler.do_POST(rejected)
+        payload, status = rejected.send_json.call_args.args
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["errorCode"], "route_model_mismatch")
+
+    def test_routing_v2_rejects_legacy_credentials_for_new_runs_but_flag_off_allows_rollback(self):
+        agent_payload = {
+            "sessionId": "session-route",
+            "payload": {"model": "shared-model", "messages": [{"role": "user", "content": "hi"}]},
+            "keys": ["sk-synthetic-legacy"],
+            "allowedTools": [],
+        }
+        rejected = self.handler("/api/agent/runs", agent_payload)
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server, "_create_agent_run") as create:
+            server.CodeHandler.do_POST(rejected)
+        payload, status = rejected.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "route_not_found")
+        create.assert_not_called()
+
+        accepted = self.handler("/api/agent/runs", agent_payload)
+        legacy_run = {"id": "legacy-run", "status": "running", "client_request_id": ""}
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", False), \
+             mock.patch.object(server, "_create_agent_run", return_value=legacy_run) as create:
+            server.CodeHandler.do_POST(accepted)
+        self.assertEqual(accepted.send_json.call_args.args[1], 201)
+        self.assertEqual(create.call_args.args[3], ["sk-synthetic-legacy"])
+
+        runtime_rejected = self.handler("/api/runtime/runs", {
+            "sessionId": "session-route",
+            "payload": {"model": "shared-model", "messages": [{"role": "user", "content": "hi"}]},
+            "keys": ["sk-synthetic-legacy"],
+        })
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server, "_create_model_runtime_run") as create_runtime:
+            server.CodeHandler.do_POST(runtime_rejected)
+        payload, status = runtime_rejected.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "route_not_found")
+        create_runtime.assert_not_called()
+
+        proxy_rejected = object.__new__(server.CodeHandler)
+        proxy_rejected.headers = {"Content-Length": "0"}
+        proxy_rejected.rfile = io.BytesIO(b"")
+        proxy_rejected.send_json = mock.Mock()
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True):
+            server.CodeHandler.proxy(proxy_rejected, "POST", "/v1/chat/completions")
+        payload, status = proxy_rejected.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "route_not_found")
+
+        compact_rejected = object.__new__(server.CodeHandler)
+        compact_rejected.headers = {}
+        compact_rejected.read_body_json = mock.Mock(return_value={
+            "model": "shared-model",
+            "messages": [{"role": "user", "content": str(index)} for index in range(6)],
+        })
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             self.assertRaises(server.ModelRouteError) as captured:
+            server.CodeHandler.compact(compact_rejected)
+        self.assertEqual(captured.exception.code, "route_not_found")
+
+    def test_existing_legacy_agent_run_can_resume_but_routed_run_requires_route_ref(self):
+        legacy_run = {"id": "legacy-run", "request": {"model": "shared-model"}, "route_ref": ""}
+        legacy = self.handler("/api/agent/runs/legacy-run/resume", {
+            "keys": ["sk-synthetic-legacy"],
+            "baseUrl": "https://synthetic.invalid",
+        })
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server, "_get_agent_run", return_value=legacy_run), \
+             mock.patch.object(server, "_resume_agent_run") as resume:
+            server.CodeHandler.do_POST(legacy)
+        resume.assert_called_once()
+
+        routed_run = {"id": "routed-run", "request": {"model": "shared-model"}, "route_ref": "mr1_opaque"}
+        rejected = self.handler("/api/agent/runs/routed-run/resume", {
+            "keys": ["sk-synthetic-legacy"],
+        })
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server, "_get_agent_run", return_value=routed_run), \
+             mock.patch.object(server, "_resume_agent_run") as resume:
+            server.CodeHandler.do_POST(rejected)
+        payload, status = rejected.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "route_not_found")
+        resume.assert_not_called()
+
+    def test_routed_agent_run_persists_only_non_secret_route_identity(self):
+        routed = {
+            "id": "a" * 32,
+            "session_id": "session-route",
+            "status": "waiting_credentials",
+            "route_ref": "mr1_opaque",
+            "catalog_revision": 7,
+            "base_url": "https://must-not-persist.invalid",
+            "keys": ["sk-must-not-persist"],
+            "request": {"model": "shared-model"},
+        }
+        record = server._agent_run_record(routed)
+        self.assertEqual(record["routeRef"], "mr1_opaque")
+        self.assertEqual(record["catalogRevision"], 7)
+        self.assertEqual(record["request"]["model"], "shared-model")
+        self.assertNotIn("baseUrl", record)
+        self.assertNotIn("keys", record)
+        self.assertNotIn("must-not-persist", json.dumps(record))
+
+        legacy_record = {**record, "baseUrl": "https://legacy-read-only.invalid"}
+        legacy_record.pop("routeRef", None)
+        legacy_record.pop("catalogRevision", None)
+        loaded = server._agent_run_from_record(legacy_record)
+        self.assertEqual(loaded["base_url"], "https://legacy-read-only.invalid")
+        rewritten = server._agent_run_record(loaded)
+        self.assertNotIn("baseUrl", rewritten)
+        self.assertNotIn("keys", rewritten)
+
+    def test_connection_backend_collection_is_injectable_without_public_schema_changes(self):
+        observed = {}
+
+        def collect_custom(body, context):
+            observed.update({
+                "bodyKeys": sorted(body),
+                "contextKeys": sorted(context),
+            })
+            return [{
+                "connectionId": "custom_connection_1",
+                "source": "custom-openai",
+                "group": "internal-only",
+                "label": "Future backend",
+                "baseUrl": context["baseUrl"],
+                "key": "sk-synthetic-runtime-only",
+                "enabled": True,
+            }]
+
+        connections = server._model_route_connections(
+            {"baseUrl": "https://synthetic.invalid", "future": True},
+            backends=(("custom-openai", collect_custom),),
+        )
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(connections[0]["source"], "custom-openai")
+        self.assertEqual(observed, {
+            "bodyKeys": ["baseUrl", "future"],
+            "contextKeys": ["baseUrl", "claimedKeys"],
+        })
+
+    def test_connection_backend_failures_are_isolated_and_sanitized(self):
+        claimed_before_success = []
+
+        def successful_backend(_body, context):
+            claimed_before_success.append(set(context["claimedKeys"]))
+            return [{
+                "connectionId": "custom_connection_1",
+                "source": "custom-openai",
+                "group": "internal-only",
+                "label": "Healthy connection",
+                "baseUrl": context["baseUrl"],
+                "key": "sk-synthetic-runtime-only",
+                "enabled": True,
+            }]
+
+        def failing_backend(_body, context):
+            context["claimedKeys"].add("sk-synthetic-must-rollback")
+            raise server._WorkbarSyncFailure("tokens", "transport")
+
+        for backends in (
+            (("failing", failing_backend), ("healthy", successful_backend)),
+            (("healthy", successful_backend), ("failing", failing_backend)),
+        ):
+            with self.subTest(order=[backend_id for backend_id, _collector in backends]):
+                collection = server._model_route_connections(
+                    {"baseUrl": "https://synthetic.invalid"},
+                    backends=backends,
+                    include_failures=True,
+                )
+                self.assertEqual(len(collection["connections"]), 1)
+                self.assertEqual(
+                    collection["connections"][0]["connectionId"],
+                    "custom_connection_1",
+                )
+                self.assertNotIn("sk-synthetic-must-rollback", claimed_before_success[-1])
+                self.assertEqual(collection["failures"], [{
+                    "connectionId": "",
+                    "code": "route_catalog_unavailable",
+                }])
+                serialized = json.dumps(collection["failures"])
+                self.assertNotIn("workbar", serialized.lower())
+                self.assertNotIn("transport", serialized.lower())
+                self.assertNotIn("synthetic", serialized.lower())
+
+        def auth_failure(_body, _context):
+            raise server.error.HTTPError(
+                "https://synthetic.invalid", 401, "secret upstream detail", None, None,
+            )
+
+        auth_collection = server._model_route_connections(
+            {"baseUrl": "https://synthetic.invalid"},
+            backends=(("auth", auth_failure),),
+            include_failures=True,
+        )
+        self.assertEqual(auth_collection["connections"], [])
+        self.assertEqual(auth_collection["failures"], [{
+            "connectionId": "",
+            "code": "route_credentials_unavailable",
+        }])
+
+    def test_real_workbar_and_manual_collectors_isolate_failures_both_directions(self):
+        body = {
+            "baseUrl": "https://synthetic.invalid",
+            "platformAuth": {"token": "synthetic-auth", "userId": "7"},
+            "manualConnections": [{
+                "connectionId": "manual_11111111-1111-4111-8111-111111111111",
+                "label": "Manual healthy",
+                "key": "sk-synthetic-manual",
+                "enabled": True,
+            }],
+        }
+        with mock.patch.object(
+            server,
+            "_fetch_workbar_tokens_and_keys",
+            side_effect=server._WorkbarSyncFailure("tokens", "transport"),
+        ):
+            manual_survives = server._model_route_connections(
+                body,
+                include_failures=True,
+            )
+        self.assertEqual(
+            [item["source"] for item in manual_survives["connections"]],
+            ["manual"],
+        )
+        self.assertEqual(manual_survives["failures"], [{
+            "connectionId": "",
+            "code": "route_catalog_unavailable",
+        }])
+
+        invalid_manual = {
+            **body,
+            "manualConnections": [{
+                "connectionId": "invalid",
+                "label": "Manual invalid",
+                "key": "sk-synthetic-manual",
+                "enabled": True,
+            }],
+        }
+        with mock.patch.object(
+            server,
+            "_fetch_workbar_tokens_and_keys",
+            return_value=([{
+                "id": 42,
+                "name": "workbar healthy",
+                "group": "default",
+                "status": 1,
+                "model_limits_enabled": False,
+            }], {"42": "sk-synthetic-workbar"}),
+        ):
+            workbar_survives = server._model_route_connections(
+                invalid_manual,
+                include_failures=True,
+            )
+        self.assertEqual(
+            [item["source"] for item in workbar_survives["connections"]],
+            ["workbar"],
+        )
+        self.assertEqual(workbar_survives["failures"], [{
+            "connectionId": "",
+            "code": "route_catalog_unavailable",
+        }])
+
+    def test_model_route_refresh_partial_backend_failure_returns_healthy_catalog(self):
+        handler = self.handler("/api/model-routes/refresh", {})
+        collection = {
+            "connections": [{"connectionId": "manual_healthy"}],
+            "failures": [{"connectionId": "", "code": "route_catalog_unavailable"}],
+            "claimedKeys": set(),
+        }
+        refreshed = {
+            "ok": True,
+            "catalogRevision": 8,
+            "routes": [{"routeRef": "mr1_opaque"}],
+            "failedConnections": 0,
+            "failures": [],
+        }
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server, "_model_route_connections", return_value=collection), \
+             mock.patch.object(server._model_route_registry, "refresh", return_value=refreshed) as refresh:
+            server.CodeHandler.do_POST(handler)
+
+        refresh.assert_called_once()
+        payload = handler.send_json.call_args.args[0]
+        self.assertEqual(handler.send_json.call_args.kwargs, {})
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["failedConnections"], 1)
+        self.assertEqual(payload["failures"], [{
+            "connectionId": "",
+            "code": "route_catalog_unavailable",
+        }])
+        self.assertNotIn("workbar", json.dumps(payload).lower())
+
+    def test_model_route_refresh_all_backend_failures_remains_fail_closed(self):
+        cases = (
+            ([{"connectionId": "", "code": "route_catalog_unavailable"}], "route_catalog_unavailable"),
+            ([{"connectionId": "", "code": "route_credentials_unavailable"}], "route_credentials_unavailable"),
+            ([], "route_catalog_unavailable"),
+        )
+        for failures, expected_code in cases:
+            with self.subTest(failures=failures):
+                handler = self.handler("/api/model-routes/refresh", {})
+                collection = {
+                    "connections": [],
+                    "failures": failures,
+                }
+                with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+                     mock.patch.object(server, "_model_route_connections", return_value=collection), \
+                     mock.patch.object(server._model_route_registry, "refresh") as refresh:
+                    server.CodeHandler.do_POST(handler)
+
+                refresh.assert_not_called()
+                payload, status = handler.send_json.call_args.args
+                self.assertEqual(status, 503)
+                self.assertEqual(payload["errorCode"], expected_code)
+                self.assertTrue(payload["retryable"])
+                self.assertNotIn("workbar", json.dumps(payload).lower())
 
 
 if __name__ == "__main__":

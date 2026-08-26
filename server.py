@@ -30,6 +30,7 @@ import webbrowser
 import agent_protocol
 import context_calibration
 import context_window
+from model_route_registry import ModelRouteError, ModelRouteRegistry
 import windows_explorer
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
 from goal_v2_protocol import GoalV2ProtocolError, require_identifier
@@ -84,6 +85,7 @@ MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_INDEX_PATH = MEMORY_DIR / "MEMORY.md"
 SKILLS_DIR = DATA_DIR / "skills"
 CONFIG_PATH = DATA_DIR / "config.json"
+MODEL_ROUTE_CATALOG_PATH = DATA_DIR / "model-route-registry.json"
 NEW_API_BASE_URL = os.environ.get("NEW_API_BASE_URL", "").rstrip("/")
 WORKBAR_URL = "https://workbar.ai"
 PORT, INSTANCE_MODE = _resolve_instance_settings()
@@ -134,11 +136,37 @@ def _resolve_agent_projection_shadow_enabled(environ=None, *, instance_mode=None
     return mode == "dev"
 
 
+def _resolve_session_revision_cas_enabled(environ=None):
+    """Keep full-message Session writes conditional unless explicitly rolled back."""
+    source = os.environ if environ is None else environ
+    raw = source.get("CODE_SESSION_REVISION_CAS")
+    if raw is None or str(raw).strip() == "":
+        return True
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _resolve_model_route_registry_enabled(environ=None):
+    """Keep Route Registry v1 on by default with an explicit local rollback."""
+    source = os.environ if environ is None else environ
+    raw = source.get("CODE_ROUTING_V2")
+    if raw is None or str(raw).strip() == "":
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
 _AGENT_PROTOCOL_SHADOW_ENABLED = _resolve_agent_protocol_shadow_enabled()
 _AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT = 64
 _AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT = 256
 _AGENT_EVENT_PROTOCOL_V1_ENABLED = _resolve_agent_event_protocol_v1_enabled()
 _AGENT_PROJECTION_SHADOW_ENABLED = _resolve_agent_projection_shadow_enabled()
+_SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
+_MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
+_model_route_registry = ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 _active_downloads = {}   # downloadId -> {progress, done, error, path, total}
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -1228,7 +1256,15 @@ def _model_runtime_worker(run):
         run["upstream_response"] = None
 
 
-def _create_model_runtime_run(session_id, payload, base_url, keys):
+def _create_model_runtime_run(
+    session_id,
+    payload,
+    base_url,
+    keys,
+    *,
+    route_ref="",
+    catalog_revision=0,
+):
     _cleanup_runtime_runs()
     run_id = uuid.uuid4().hex
     run = {
@@ -1237,6 +1273,8 @@ def _create_model_runtime_run(session_id, payload, base_url, keys):
         "payload": dict(payload or {}),
         "base_url": str(base_url or ""),
         "keys": [str(key) for key in (keys or []) if str(key)],
+        "route_ref": str(route_ref or ""),
+        "catalog_revision": max(0, int(catalog_revision or 0)),
         "status": "running",
         "error": "",
         "error_code": "",
@@ -2299,7 +2337,7 @@ def _agent_run_record(run):
         run.get("pending_context_calibration")
     )
     return {
-        "version": 4,
+        "version": 5,
         "id": run["id"],
         "sessionId": run["session_id"],
         "cwd": run.get("cwd", ""),
@@ -2317,7 +2355,10 @@ def _agent_run_record(run):
         "nonActionCount": int(run.get("non_action_count") or 0),
         "forceFinalRound": bool(run.get("force_final_round")),
         "forceFinalReason": str(run.get("force_final_reason") or ""),
-        "baseUrl": run.get("base_url", ""),
+        **({"routeRef": run.get("route_ref", "")}
+           if run.get("route_ref") else {}),
+        **({"catalogRevision": int(run.get("catalog_revision") or 0)}
+           if run.get("route_ref") else {}),
         "contextLimit": int(run.get("context_limit") or 0),
         "contextWindowTokens": int(run.get("context_window_tokens") or run.get("context_limit") or 0),
         "contextBudgetTokens": run.get("context_budget_tokens"),
@@ -2466,6 +2507,8 @@ def _agent_snapshot(run, cursor=0):
             "nonActionCount": int(run.get("non_action_count") or 0),
             "forceFinalRound": bool(run.get("force_final_round")),
             "model": str((run.get("request") or {}).get("model") or ""),
+            "routeRef": str(run.get("route_ref") or ""),
+            "catalogRevision": int(run.get("catalog_revision") or 0),
             "contextLimit": int(run.get("context_limit") or 0),
             "contextWindowTokens": int(run.get("context_window_tokens") or run.get("context_limit") or 0),
             "contextBudgetTokens": run.get("context_budget_tokens"),
@@ -3249,6 +3292,8 @@ def _agent_run_from_record(record):
         "force_final_round": bool(record.get("forceFinalRound")),
         "force_final_reason": str(record.get("forceFinalReason") or ""),
         "base_url": _agent_base_url(record.get("baseUrl") or ""),
+        "route_ref": str(record.get("routeRef") or ""),
+        "catalog_revision": max(0, int(record.get("catalogRevision") or 0)),
         "context_limit": _normalize_agent_context_limit(
             record.get("contextLimit"),
             request_options.get("model"),
@@ -4604,6 +4649,8 @@ def _ensure_agent_delegation_child(run, call, execution):
             cwd=run.get("cwd") or "",
             workspace_roots=list(run.get("workspace_roots") or []),
             inherited_context=_agent_frozen_context_resolution(run),
+            route_ref=run.get("route_ref") or "",
+            catalog_revision=run.get("catalog_revision") or 0,
         )
         execution["childAgentRunId"] = child["id"]
         execution["prompt"] = prompt
@@ -5950,6 +5997,8 @@ def _handoff_agent_goal_run(
         inherited_context=_agent_frozen_context_resolution(run),
         run_kind="foreground",
         continuation=next_meta,
+        route_ref=run.get("route_ref") or "",
+        catalog_revision=run.get("catalog_revision") or 0,
     )
     existing_meta = successor.get("continuation") or {}
     if str(existing_meta.get("parentRunId") or "") != parent_id:
@@ -6362,6 +6411,8 @@ def _create_agent_run(
     inherited_context=None,
     run_kind="internal",
     continuation=None,
+    route_ref="",
+    catalog_revision=0,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -6469,6 +6520,8 @@ def _create_agent_run(
         "force_final_round": False,
         "force_final_reason": "",
         "base_url": _agent_base_url(base_url),
+        "route_ref": str(route_ref or ""),
+        "catalog_revision": max(0, int(catalog_revision or 0)),
         "context_limit": normalized_context_limit,
         "context_window_tokens": context_resolution["contextWindowTokens"],
         "context_budget_tokens": context_resolution["contextBudgetTokens"],
@@ -6556,7 +6609,14 @@ def _create_agent_run(
     return run
 
 
-def _resume_agent_run(run, keys, base_url=""):
+def _resume_agent_run(
+    run,
+    keys,
+    base_url="",
+    *,
+    route_ref="",
+    catalog_revision=0,
+):
     if not isinstance(keys, list):
         raise ValueError("keys must be an array")
     with run["condition"]:
@@ -6574,6 +6634,9 @@ def _resume_agent_run(run, keys, base_url=""):
         run["keys"] = [str(key) for key in keys if str(key)]
         if base_url:
             run["base_url"] = _agent_base_url(base_url)
+        if route_ref:
+            run["route_ref"] = str(route_ref)
+            run["catalog_revision"] = max(0, int(catalog_revision or 0))
         run["cancel_event"].clear()
         run["updated_at"] = now_iso()
     try:
@@ -8238,9 +8301,19 @@ def _import_session_location(cwd=None, project_id=None):
     return (project.get("id") if project else None), resolved_cwd
 
 
-def _session_api_record(session):
+def _session_revision(session):
+    """Read the additive Session revision without rewriting legacy metadata."""
+    value = (session or {}).get("revision") if isinstance(session, dict) else 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _session_api_record(session, *, include_revision=True):
     """Expose canonical session fields plus a temporary legacy group alias."""
     record = dict(session or {})
+    if include_revision:
+        record["revision"] = _session_revision(record)
     source = _normalize_session_source(record.get("source"), record.get("group"))
     source_badge_visible = record.get("sourceBadgeVisible")
     if not isinstance(source_badge_visible, bool):
@@ -14127,6 +14200,254 @@ def _read_workbar_sync_json(upstream, *, stage, page=None, batch=None):
     return payload
 
 
+def _fetch_workbar_tokens_and_keys(token, user_id):
+    """Return workbar token metadata and runtime-only keys.
+
+    Callers must never serialize the returned key mapping into the model route
+    catalog or diagnostics.
+    """
+    headers = {
+        "Authorization": str(token or "").strip(),
+        "New-Api-User": str(user_id or "").strip(),
+        "Content-Type": "application/json",
+    }
+    tokens = []
+    page = 0
+    while True:
+        upstream = request.Request(
+            WORKBAR_URL + f"/api/token/?p={page}&size=100",
+            headers=headers,
+        )
+        payload = _read_workbar_sync_json(
+            upstream, stage="list_tokens", page=page,
+        )
+        page_data = payload.get("data") or {}
+        if not isinstance(page_data, dict):
+            raise _WorkbarSyncFailure("list_tokens", "invalid_response", page=page)
+        page_tokens = page_data.get("items") or []
+        if (
+            not isinstance(page_tokens, list)
+            or any(not isinstance(item, dict) for item in page_tokens)
+        ):
+            raise _WorkbarSyncFailure("list_tokens", "invalid_response", page=page)
+        tokens.extend(page_tokens)
+        try:
+            total = int(page_data.get("total") or 0)
+        except (TypeError, ValueError) as exc:
+            raise _WorkbarSyncFailure(
+                "list_tokens", "invalid_response", page=page,
+            ) from exc
+        if len(page_tokens) < 100 or (total and len(tokens) >= total):
+            break
+        page += 1
+
+    ids = [item.get("id") for item in tokens if item.get("id")]
+    full_keys = {}
+    for offset in range(0, len(ids), 100):
+        batch = offset // 100 + 1
+        upstream = request.Request(
+            WORKBAR_URL + "/api/token/batch/keys",
+            headers=headers,
+            data=json.dumps({"ids": ids[offset:offset + 100]}).encode(),
+            method="POST",
+        )
+        payload = _read_workbar_sync_json(
+            upstream, stage="read_keys", batch=batch,
+        )
+        key_data = payload.get("data") or {}
+        if not isinstance(key_data, dict):
+            raise _WorkbarSyncFailure("read_keys", "invalid_response", batch=batch)
+        upstream_keys = key_data.get("keys") or {}
+        if not isinstance(upstream_keys, dict):
+            raise _WorkbarSyncFailure("read_keys", "invalid_response", batch=batch)
+        for key_id, value in upstream_keys.items():
+            value = str(value or "").strip()
+            if not value or "***" in value:
+                continue
+            full_keys[str(key_id)] = (
+                "sk-" + value[3:] if value.lower().startswith("sk-") else "sk-" + value
+            )
+    return tokens, full_keys
+
+
+def _route_model_limits(value):
+    if isinstance(value, list):
+        source = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = [item.strip() for item in text.split(",")]
+        source = parsed if isinstance(parsed, list) else []
+    else:
+        source = []
+    return list(dict.fromkeys(
+        str(item or "").strip().removeprefix("models/")
+        for item in source
+        if str(item or "").strip()
+    ))[:1000]
+
+
+def _route_connection_id(value, *, manual=False):
+    normalized = str(value or "").strip()
+    if len(normalized) > 160 or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,160}", normalized):
+        raise ModelRouteError(
+            "route_not_found",
+            "The model connection identity is invalid.",
+        )
+    if manual and not normalized.startswith("manual_"):
+        raise ModelRouteError(
+            "route_not_found",
+            "The manual model connection identity is invalid.",
+        )
+    return normalized
+
+
+def _workbar_model_route_connections(body, context):
+    connections = []
+    platform_auth = body.get("platformAuth")
+    if isinstance(platform_auth, dict):
+        token = str(platform_auth.get("token") or "").strip()
+        user_id = str(platform_auth.get("userId") or "").strip()
+        if token and user_id:
+            tokens, full_keys = _fetch_workbar_tokens_and_keys(token, user_id)
+            for token_entry in tokens:
+                token_id = str(token_entry.get("id") or "").strip()
+                if not token_id:
+                    continue
+                key = str(full_keys.get(token_id) or "").strip()
+                if key:
+                    context["claimedKeys"].add(key)
+                connections.append({
+                    "connectionId": _model_route_registry.workbar_connection_id(
+                        context["baseUrl"], user_id, token_id,
+                    ),
+                    "source": "workbar",
+                    "group": str(token_entry.get("group") or "default").strip() or "default",
+                    "label": str(token_entry.get("name") or "").strip()[:160],
+                    "baseUrl": context["baseUrl"],
+                    "key": key,
+                    "enabled": token_entry.get("status") is None or int(token_entry.get("status") or 0) == 1,
+                    "modelLimitsEnabled": bool(token_entry.get("model_limits_enabled")),
+                    "modelLimits": _route_model_limits(token_entry.get("model_limits")),
+                })
+    return connections
+
+
+def _manual_model_route_connections(body, context):
+    connections = []
+    manual_connections = body.get("manualConnections") or []
+    if not isinstance(manual_connections, list):
+        raise ModelRouteError(
+            "route_catalog_unavailable",
+            "manualConnections must be an array.",
+        )
+    for entry in manual_connections[:200]:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "").strip()
+        if not key or key in context["claimedKeys"]:
+            continue
+        context["claimedKeys"].add(key)
+        connections.append({
+            "connectionId": _route_connection_id(entry.get("connectionId"), manual=True),
+            "source": "manual",
+            "group": str(entry.get("group") or "manual").strip()[:120] or "manual",
+            "label": str(entry.get("label") or "").strip()[:160],
+            "baseUrl": context["baseUrl"],
+            "key": key,
+            "enabled": entry.get("enabled") is not False,
+            "modelLimitsEnabled": False,
+            "modelLimits": [],
+        })
+    return connections
+
+
+# Connection backends translate existing local configuration into one common,
+# runtime-only connection contract. Future adapters can join this tuple without
+# changing route identity or the public catalog; authentication and UI remain
+# backend-owned and are intentionally outside Route Registry v1.
+_MODEL_ROUTE_CONNECTION_BACKENDS = (
+    ("workbar", _workbar_model_route_connections),
+    ("manual", _manual_model_route_connections),
+)
+
+
+def _model_route_backend_failure(exc):
+    code = "route_catalog_unavailable"
+    if isinstance(exc, error.HTTPError) and exc.code in {401, 403}:
+        code = "route_credentials_unavailable"
+    elif isinstance(exc, ModelRouteError) and exc.code == "route_credentials_unavailable":
+        code = "route_credentials_unavailable"
+    return {
+        "connectionId": "",
+        "code": code,
+    }
+
+
+def _model_route_connections(body, backends=None, *, include_failures=False):
+    body = dict(body or {})
+    context = {
+        "baseUrl": _agent_base_url(body.get("baseUrl") or WORKBAR_URL),
+        "claimedKeys": set(),
+    }
+    connections = []
+    failures = []
+    for _backend_id, collect_connections in (
+        backends or _MODEL_ROUTE_CONNECTION_BACKENDS
+    ):
+        backend_context = {
+            **context,
+            "claimedKeys": set(context["claimedKeys"]),
+        }
+        try:
+            collected = collect_connections(body, backend_context) or []
+            if not isinstance(collected, list):
+                raise TypeError("model route backend must return a list")
+        except Exception as exc:
+            failures.append(_model_route_backend_failure(exc))
+            continue
+        context["claimedKeys"] = backend_context["claimedKeys"]
+        connections.extend(item for item in collected if isinstance(item, dict))
+    if include_failures:
+        return {
+            "connections": connections,
+            "failures": failures,
+        }
+    return connections
+
+
+def _fetch_models_for_route_connection(connection):
+    base_url = _agent_base_url(connection.get("baseUrl") or "")
+    key = str(connection.get("key") or "").strip()
+    if not key:
+        raise ValueError("route credentials unavailable")
+    upstream = request.Request(
+        base_url.rstrip("/") + "/v1/models",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        timeout_seconds = max(0.1, min(12.0, float(connection.get("timeoutSeconds") or 12)))
+        with request.urlopen(upstream, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (error.HTTPError, error.URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("route catalog request failed") from exc
+    models = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        raise ValueError("route catalog response invalid")
+    return [
+        str(item.get("id") or "").strip()
+        for item in models
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
+
+
 class CodeHandler(BaseHTTPRequestHandler):
     server_version = "Code/0.4"
     protocol_version = "HTTP/1.1"
@@ -14183,6 +14504,20 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/config":
                 self.send_json(load_config())
+                return
+            if route == "/api/model-routes":
+                if not _MODEL_ROUTE_REGISTRY_ENABLED:
+                    self.send_json({
+                        "version": 1,
+                        "routingV2": False,
+                        "catalogRevision": 0,
+                        "routes": [],
+                    })
+                    return
+                self.send_json({
+                    **_model_route_registry.snapshot(),
+                    "routingV2": True,
+                })
                 return
             if route == "/api/project-context":
                 self.send_json(load_project_context((query.get("path") or [""])[0]))
@@ -14419,16 +14754,45 @@ class CodeHandler(BaseHTTPRequestHandler):
                 body = self.read_body_json()
                 payload = body.get("payload")
                 keys = body.get("keys")
+                route_ref = str(body.get("routeRef") or "").strip()
+                catalog_revision = body.get("catalogRevision")
                 if not isinstance(payload, dict):
                     self.send_json({"error": "payload must be an object"}, 400)
                     return
                 if keys is not None and not isinstance(keys, list):
                     self.send_json({"error": "keys must be an array"}, 400)
                     return
+                if route_ref and keys:
+                    self.send_json({
+                        "error": "routeRef and keys are mutually exclusive",
+                        "errorCode": "route_model_mismatch",
+                        "retryable": False,
+                    }, 400)
+                    return
+                if _MODEL_ROUTE_REGISTRY_ENABLED and not route_ref:
+                    self.send_json(ModelRouteError(
+                        "route_not_found",
+                        "A model route must be selected before creating an AgentRun.",
+                    ).public_payload(), 409)
+                    return
+                resolved_route = None
+                if route_ref:
+                    if not _MODEL_ROUTE_REGISTRY_ENABLED:
+                        raise ModelRouteError(
+                            "route_catalog_unavailable",
+                            "Model Route Registry v1 is disabled.",
+                            retryable=True,
+                        )
+                    resolved_route = _model_route_registry.resolve(
+                        route_ref,
+                        catalog_revision,
+                        payload.get("model"),
+                    )
+                    keys = [resolved_route.key]
                 run = _create_agent_run(
                     body.get("sessionId"),
                     payload,
-                    body.get("baseUrl"),
+                    resolved_route.base_url if resolved_route else body.get("baseUrl"),
                     keys or [],
                     body.get("allowedTools"),
                     body.get("maxRounds"),
@@ -14439,6 +14803,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                     context_limit=body.get("contextLimit"),
                     context_budget_tokens=body.get("contextBudgetTokens"),
                     run_kind=body.get("runKind") or "internal",
+                    route_ref=route_ref,
+                    catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
                 )
                 self.send_json({
                     "agentRunId": run["id"],
@@ -14454,10 +14820,39 @@ class CodeHandler(BaseHTTPRequestHandler):
                     return
                 body = self.read_body_json()
                 keys = body.get("keys")
+                route_ref = str(body.get("routeRef") or "").strip()
+                catalog_revision = body.get("catalogRevision")
                 if keys is not None and not isinstance(keys, list):
                     self.send_json({"error": "keys must be an array"}, 400)
                     return
-                _resume_agent_run(run, keys or [], body.get("baseUrl") or "")
+                if route_ref and keys:
+                    self.send_json({
+                        "error": "routeRef and keys are mutually exclusive",
+                        "errorCode": "route_model_mismatch",
+                        "retryable": False,
+                    }, 400)
+                    return
+                if _MODEL_ROUTE_REGISTRY_ENABLED and run.get("route_ref") and not route_ref:
+                    self.send_json(ModelRouteError(
+                        "route_not_found",
+                        "The existing AgentRun requires its selected model route.",
+                    ).public_payload(), 409)
+                    return
+                resolved_route = None
+                if route_ref:
+                    resolved_route = _model_route_registry.resolve(
+                        route_ref,
+                        catalog_revision,
+                        (run.get("request") or {}).get("model"),
+                    )
+                    keys = [resolved_route.key]
+                _resume_agent_run(
+                    run,
+                    keys or [],
+                    resolved_route.base_url if resolved_route else body.get("baseUrl") or "",
+                    route_ref=route_ref,
+                    catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
+                )
                 self.send_json({"agentRunId": run["id"], "status": run["status"]})
                 return
             if route.startswith("/api/agent/runs/") and route.endswith("/steer"):
@@ -14545,17 +14940,48 @@ class CodeHandler(BaseHTTPRequestHandler):
                 body = self.read_body_json()
                 payload = body.get("payload")
                 keys = body.get("keys")
+                route_ref = str(body.get("routeRef") or "").strip()
+                catalog_revision = body.get("catalogRevision")
                 if not isinstance(payload, dict):
                     self.send_json({"error": "payload must be an object"}, 400)
                     return
                 if keys is not None and not isinstance(keys, list):
                     self.send_json({"error": "keys must be an array"}, 400)
                     return
+                if route_ref and keys:
+                    self.send_json({
+                        "error": "routeRef and keys are mutually exclusive",
+                        "errorCode": "route_model_mismatch",
+                        "retryable": False,
+                    }, 400)
+                    return
+                if _MODEL_ROUTE_REGISTRY_ENABLED and not route_ref:
+                    self.send_json(ModelRouteError(
+                        "route_not_found",
+                        "A model route must be selected before creating a model Runtime.",
+                    ).public_payload(), 409)
+                    return
+                resolved_route = None
+                if route_ref:
+                    if not _MODEL_ROUTE_REGISTRY_ENABLED:
+                        raise ModelRouteError(
+                            "route_catalog_unavailable",
+                            "Model Route Registry v1 is disabled.",
+                            retryable=True,
+                        )
+                    resolved_route = _model_route_registry.resolve(
+                        route_ref,
+                        catalog_revision,
+                        payload.get("model"),
+                    )
+                    keys = [resolved_route.key]
                 run = _create_model_runtime_run(
                     body.get("sessionId"),
                     payload,
-                    body.get("baseUrl"),
+                    resolved_route.base_url if resolved_route else body.get("baseUrl"),
                     keys or [],
+                    route_ref=route_ref,
+                    catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
                 )
                 self.send_json({"runId": run["id"], "status": run["status"]}, 201)
                 return
@@ -14677,9 +15103,18 @@ class CodeHandler(BaseHTTPRequestHandler):
             if self.path == "/api/code/sync-keys":
                 self._handle_sync_keys()
                 return
+            if self.path == "/api/model-routes/refresh":
+                self._handle_model_routes_refresh()
+                return
             if self.path == "/api/code/auth/validate":
                 self._handle_validate_code_auth()
                 return
+        except ModelRouteError as exc:
+            status = 503 if exc.code in {
+                "route_catalog_unavailable", "route_credentials_unavailable",
+            } else 409
+            self.send_json(exc.public_payload(), status)
+            return
         except Exception as exc:
             self.send_json({"error": str(exc)}, 400)
             return
@@ -15123,7 +15558,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                         "cwd": entry.get("cwd"),
                         "source": source,
                         "sourceBadgeVisible": source_badge_visible,
-                    }))
+                    }, include_revision=False))
                 else:
                     orphans.append(sid)
             # Purge orphan entries and persist one-time additive projections.
@@ -15202,6 +15637,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             "title": body.get("title") or "新会话",
             "createdAt": session_now,
             "updatedAt": session_now,
+            "revision": 0,
             "stats": _merge_session_stats({}, body.get("stats") or {}),
             "lastUsage": body.get("lastUsage"),
             "runState": body.get("runState") or {},
@@ -15246,6 +15682,34 @@ class CodeHandler(BaseHTTPRequestHandler):
                     session["createdAt"] = session.get("createdAt") or _session_now_iso()
             else:
                 session = {"id": safe_session_id(session_id), "createdAt": _session_now_iso()}
+            messages = body.get("messages")
+            message_bearing = messages is not None
+            current_revision = _session_revision(session)
+            if message_bearing and _SESSION_REVISION_CAS_ENABLED:
+                expected_present = "expectedRevision" in body
+                expected_revision = body.get("expectedRevision")
+                if expected_present and (
+                    isinstance(expected_revision, bool)
+                    or not isinstance(expected_revision, int)
+                    or expected_revision < 0
+                ):
+                    self.send_json({
+                        "error": "expectedRevision must be a non-negative integer",
+                        "errorCode": "session_revision_invalid",
+                        "currentRevision": current_revision,
+                    }, 400)
+                    return
+                legacy_upgrade = not expected_present and current_revision == 0
+                if not legacy_upgrade and (
+                    not expected_present or expected_revision != current_revision
+                ):
+                    self.send_json({
+                        "error": "Session revision conflict",
+                        "errorCode": "session_revision_conflict",
+                        "expectedRevision": expected_revision if expected_present else None,
+                        "currentRevision": current_revision,
+                    }, 409)
+                    return
             session["title"] = body.get("title") or session.get("title") or "未命名会话"
             incoming_stats = body.get("stats")
             if isinstance(incoming_stats, dict) and incoming_stats:
@@ -15294,7 +15758,6 @@ class CodeHandler(BaseHTTPRequestHandler):
             session.pop("group", None)
             session["updatedAt"] = _session_now_iso()
             # Messages → JSONL (full overwrite for Phase 1)
-            messages = body.get("messages")
             if messages is not None:
                 existing_messages = read_jsonl(messages_path(session_id))
                 messages = _merge_goal_v2_message_metadata(
@@ -15306,6 +15769,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 session["messageCount"] = len(messages)
                 session["lastMessageTime"] = _last_msg_time(messages)
                 _refresh_import_divergence(session, messages)
+                session["revision"] = current_revision + 1
             write_json(path, session)
             _write_session_index_entry(
                 session_id,
@@ -15865,6 +16329,35 @@ class CodeHandler(BaseHTTPRequestHandler):
         messages = body.get("messages") or []
         model = (body.get("model") or "").strip()
         api_key = self.headers.get("Authorization", "")
+        route_ref = str(self.headers.get("X-Model-Route-Ref", "") or "").strip()
+        route_revision = str(self.headers.get("X-Model-Route-Revision", "") or "").strip()
+
+        if route_ref and api_key:
+            raise ModelRouteError(
+                "route_model_mismatch",
+                "routeRef and Authorization are mutually exclusive.",
+            )
+        if _MODEL_ROUTE_REGISTRY_ENABLED and not route_ref:
+            raise ModelRouteError(
+                "route_not_found",
+                "A model route must be selected before compacting a conversation.",
+            )
+        resolved_route = None
+        if route_ref:
+            try:
+                catalog_revision = int(route_revision)
+            except (TypeError, ValueError) as exc:
+                raise ModelRouteError(
+                    "route_stale",
+                    "The selected model route revision is invalid.",
+                    retryable=True,
+                ) from exc
+            resolved_route = _model_route_registry.resolve(
+                route_ref,
+                catalog_revision,
+                model,
+            )
+            api_key = f"Bearer {resolved_route.key}"
 
         if not model:
             raise ValueError("缺少模型名称")
@@ -15917,7 +16410,8 @@ class CodeHandler(BaseHTTPRequestHandler):
         if api_key:
             headers["Authorization"] = api_key
         base_url = _normalize_runtime_base_url(
-            self.headers.get("X-Base-URL", "") or NEW_API_BASE_URL
+            resolved_route.base_url if resolved_route
+            else self.headers.get("X-Base-URL", "") or NEW_API_BASE_URL
         )
 
         try:
@@ -15950,6 +16444,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     break
                 body += chunk
         is_stream = False
+        parsed_body = None
         if body:
             try:
                 parsed_body = json.loads(body.decode("utf-8"))
@@ -15961,6 +16456,46 @@ class CodeHandler(BaseHTTPRequestHandler):
                 is_stream = False
         api_key = self.headers.get("Authorization", "")
         base_url = self.headers.get("X-Base-URL", "") or NEW_API_BASE_URL
+        route_ref = str(self.headers.get("X-Model-Route-Ref", "") or "").strip()
+        if _MODEL_ROUTE_REGISTRY_ENABLED and not route_ref:
+            self.send_json(ModelRouteError(
+                "route_not_found",
+                "A model route must be selected before sending a model request.",
+            ).public_payload(), 409)
+            return
+        if route_ref:
+            if api_key:
+                self.send_json({
+                    "error": "routeRef and Authorization are mutually exclusive",
+                    "errorCode": "route_model_mismatch",
+                    "retryable": False,
+                }, 400)
+                return
+            try:
+                route_revision = int(str(
+                    self.headers.get("X-Model-Route-Revision", "") or ""
+                ).strip())
+                model_id = str((parsed_body or {}).get("model") or "").strip()
+                resolved_route = _model_route_registry.resolve(
+                    route_ref,
+                    route_revision,
+                    model_id,
+                )
+            except ModelRouteError as exc:
+                status = 503 if exc.code in {
+                    "route_catalog_unavailable", "route_credentials_unavailable",
+                } else 409
+                self.send_json(exc.public_payload(), status)
+                return
+            except (TypeError, ValueError):
+                self.send_json(ModelRouteError(
+                    "route_stale",
+                    "The selected model route revision is invalid.",
+                    retryable=True,
+                ).public_payload(), 409)
+                return
+            api_key = f"Bearer {resolved_route.key}"
+            base_url = resolved_route.base_url
         # Avoid double /v1 prefix when user's base URL already includes it
         # e.g. https://api.example.com/v1 + /v1/models → /models (not /v1/v1/models)
         if base_url.rstrip("/").endswith("/v1") and upstream_path.startswith("/v1"):
@@ -16202,72 +16737,8 @@ class CodeHandler(BaseHTTPRequestHandler):
         if not token or not user_id:
             self.send_json({"error": "Missing token or userId"}, 400)
             return
-        headers = {"Authorization": token, "New-Api-User": user_id, "Content-Type": "application/json"}
         try:
-            tokens = []
-            page = 0
-            while True:
-                req1 = request.Request(
-                    WORKBAR_URL + f"/api/token/?p={page}&size=100",
-                    headers=headers,
-                )
-                data1 = _read_workbar_sync_json(
-                    req1, stage="list_tokens", page=page,
-                )
-                page_data = data1.get("data") or {}
-                if not isinstance(page_data, dict):
-                    raise _WorkbarSyncFailure(
-                        "list_tokens", "invalid_response", page=page,
-                    )
-                page_tokens = page_data.get("items") or []
-                if (
-                    not isinstance(page_tokens, list)
-                    or any(not isinstance(item, dict) for item in page_tokens)
-                ):
-                    raise _WorkbarSyncFailure(
-                        "list_tokens", "invalid_response", page=page,
-                    )
-                tokens.extend(page_tokens)
-                try:
-                    total = int(page_data.get("total") or 0)
-                except (TypeError, ValueError) as exc:
-                    raise _WorkbarSyncFailure(
-                        "list_tokens", "invalid_response", page=page,
-                    ) from exc
-                if len(page_tokens) < 100 or (total and len(tokens) >= total):
-                    break
-                page += 1
-            if not tokens:
-                self.send_json({"tokens": [], "keys": {}})
-                return
-            ids = [t.get("id") for t in tokens if t.get("id")]
-            full_keys = {}
-            for offset in range(0, len(ids), 100):
-                batch = offset // 100 + 1
-                req2 = request.Request(
-                    WORKBAR_URL + "/api/token/batch/keys",
-                    headers=headers,
-                    data=json.dumps({"ids": ids[offset:offset + 100]}).encode(),
-                    method="POST",
-                )
-                data2 = _read_workbar_sync_json(
-                    req2, stage="read_keys", batch=batch,
-                )
-                key_data = data2.get("data") or {}
-                if not isinstance(key_data, dict):
-                    raise _WorkbarSyncFailure(
-                        "read_keys", "invalid_response", batch=batch,
-                    )
-                upstream_keys = key_data.get("keys") or {}
-                if not isinstance(upstream_keys, dict):
-                    raise _WorkbarSyncFailure(
-                        "read_keys", "invalid_response", batch=batch,
-                    )
-                for key_id, value in upstream_keys.items():
-                    value = str(value or "").strip()
-                    if not value or "***" in value:
-                        continue
-                    full_keys[str(key_id)] = "sk-" + value[3:] if value.lower().startswith("sk-") else "sk-" + value
+            tokens, full_keys = _fetch_workbar_tokens_and_keys(token, user_id)
             self.send_json({"tokens": tokens, "keys": full_keys})
         except error.HTTPError as exc:
             status = 401 if exc.code in {401, 403} else 502
@@ -16275,6 +16746,71 @@ class CodeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": message}, status)
         except _WorkbarSyncFailure as exc:
             self.send_json(exc.public_payload(), 502)
+
+    def _handle_model_routes_refresh(self):
+        if not _MODEL_ROUTE_REGISTRY_ENABLED:
+            raise ModelRouteError(
+                "route_catalog_unavailable",
+                "Model Route Registry v1 is disabled.",
+                retryable=True,
+            )
+        body = self.read_body_json()
+        collection = _model_route_connections(body, include_failures=True)
+        connections = collection["connections"]
+        backend_failures = collection["failures"]
+        if not connections:
+            failure_codes = {item.get("code") for item in backend_failures}
+            failure_code = (
+                "route_credentials_unavailable"
+                if failure_codes == {"route_credentials_unavailable"}
+                else "route_catalog_unavailable"
+            )
+            message = (
+                "No model route credentials are available."
+                if failure_code == "route_credentials_unavailable"
+                else "No model route connections are available."
+            )
+            raise ModelRouteError(failure_code, message, retryable=True)
+        refresh_deadline = time.monotonic() + 30.0
+
+        def fetch_route_models(connection):
+            remaining = refresh_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("model route catalog refresh budget exhausted")
+            return _fetch_models_for_route_connection({
+                **connection,
+                "timeoutSeconds": min(12.0, remaining),
+            })
+
+        result = _model_route_registry.refresh(connections, fetch_route_models)
+        result = {
+            **result,
+            "failedConnections": int(result.get("failedConnections") or 0) + len(backend_failures),
+            "failures": [
+                *(result.get("failures") or []),
+                *backend_failures,
+            ],
+        }
+        if not result.get("ok"):
+            payload = {
+                **ModelRouteError(
+                    "route_catalog_unavailable",
+                    "No model route catalog could be refreshed.",
+                    retryable=True,
+                ).public_payload(),
+                "version": 1,
+                "routingV2": True,
+                "catalogRevision": result.get("catalogRevision", 0),
+                "routes": result.get("routes") or [],
+                "failedConnections": result.get("failedConnections", 0),
+                "failures": result.get("failures") or [],
+            }
+            self.send_json(payload, 503)
+            return
+        self.send_json({
+            **result,
+            "routingV2": True,
+        })
 
     def _handle_validate_code_auth(self):
         body = self.read_body_json()

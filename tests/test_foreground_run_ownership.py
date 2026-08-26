@@ -63,11 +63,7 @@ console.log(JSON.stringify(result));
         recovery_end = APP_SOURCE.index("function normalizeUserInputRequest", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
         self.assertIn("if (!claimActiveRunContext(ctx)) return;", recovery)
-        self.assertIn(
-            "if (ownsActiveRunContext(ctx)) setStreaming(false, summary.id);",
-            recovery,
-        )
-        self.assertIn("releaseActiveRunContext(ctx);", recovery)
+        self.assertGreaterEqual(recovery.count("publishTerminalRunOwnership(ctx);"), 2)
         self.assertLess(
             recovery.index("if (!claimActiveRunContext(ctx)) return;"),
             recovery.index("setStreaming(true, summary.id);"),
@@ -89,15 +85,59 @@ console.log(JSON.stringify(result));
         continue_end = APP_SOURCE.index("async function renameSession", continue_start)
         continued = APP_SOURCE[continue_start:continue_end]
         self.assertIn("if (!claimActiveRunContext(ctx)) return;", continued)
-        self.assertIn("if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);", continued)
-        self.assertIn("releaseActiveRunContext(ctx);", continued)
+        self.assertGreaterEqual(continued.count("publishTerminalRunOwnership(ctx);"), 2)
 
         send_start = APP_SOURCE.index("async function sendMessage(userText, options = {})")
         send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
         send = APP_SOURCE[send_start:send_end]
         self.assertIn("if (!claimActiveRunContext(ctx))", send)
-        self.assertIn("if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);", send)
-        self.assertIn("releaseActiveRunContext(ctx);", send)
+        self.assertIn("publishTerminalRunOwnership(ctx);", send)
+
+    def test_terminal_publication_releases_only_the_current_owner(self):
+        identity_start = APP_SOURCE.index("function claimActiveRunContext(ctx)")
+        identity_end = APP_SOURCE.index("function _formatAgentError", identity_start)
+        identity_helpers = APP_SOURCE[identity_start:identity_end]
+        publish_start = APP_SOURCE.index("function publishTerminalRunOwnership(ctx)")
+        publish_end = APP_SOURCE.index("function refreshSessionStatusSlot", publish_start)
+        publish_helper = APP_SOURCE[publish_start:publish_end]
+        script = f"""
+{identity_helpers}
+{publish_helper}
+const calls = [];
+function setStreaming(active, sessionId) {{ calls.push([active, sessionId]); }}
+const run = {{}};
+const owner = {{run, sessionId: "session-owner"}};
+const foreign = {{run, sessionId: "session-foreign"}};
+claimActiveRunContext(owner);
+const foreignPublished = publishTerminalRunOwnership(foreign);
+const ownerBefore = run._activeCtx === owner;
+const ownerPublished = publishTerminalRunOwnership(owner);
+const ownerAfter = run._activeCtx || null;
+const replayPublished = publishTerminalRunOwnership(owner);
+console.log(JSON.stringify({{
+  foreignPublished,
+  ownerBefore,
+  ownerPublished,
+  ownerAfter,
+  replayPublished,
+  calls,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "foreignPublished": False,
+            "ownerBefore": True,
+            "ownerPublished": True,
+            "ownerAfter": None,
+            "replayPublished": False,
+            "calls": [[False, "session-owner"]],
+        })
 
 
 if __name__ == "__main__":

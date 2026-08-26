@@ -23,6 +23,21 @@
     return /^\d+$/.test(userId) ? userId : "";
   }
 
+  function normalizeManualConnectionId(value) {
+    const connectionId = String(value ?? "").trim();
+    return /^manual_[A-Za-z0-9_.:-]{8,152}$/.test(connectionId) ? connectionId : "";
+  }
+
+  function createManualConnectionId() {
+    const randomUUID = global.crypto?.randomUUID?.bind(global.crypto);
+    if (randomUUID) return `manual_${randomUUID()}`;
+    const bytes = new Uint8Array(16);
+    global.crypto?.getRandomValues?.(bytes);
+    const suffix = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+    if (suffix && !/^0+$/.test(suffix)) return `manual_${suffix}`;
+    return `manual_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+  }
+
   function normalizeKeyEntry(entry, defaultSource = "manual") {
     if (!entry || typeof entry !== "object") return null;
     const key = String(entry.key || "").trim();
@@ -35,6 +50,10 @@
     };
     const platformTokenId = normalizePlatformTokenId(entry.platformTokenId);
     if (platformTokenId) normalized.platformTokenId = platformTokenId;
+    const manualConnectionId = normalizeManualConnectionId(entry.connectionId);
+    if (manualConnectionId) {
+      normalized.connectionId = manualConnectionId;
+    }
     return normalized;
   }
 
@@ -53,14 +72,26 @@
   function loadKeyConfig(storage = global.localStorage) {
     try {
       const parsed = JSON.parse(storage?.getItem(KEY_CONFIG_STORAGE_KEY) || "[]");
-      return normalizeKeyConfig(parsed);
+      const normalized = normalizeKeyConfig(parsed);
+      let changed = false;
+      const withConnectionIds = normalized.map((entry) => {
+        if (entry.source === "platform" || entry.connectionId) return entry;
+        changed = true;
+        return { ...entry, connectionId: createManualConnectionId() };
+      });
+      if (changed) storage?.setItem(KEY_CONFIG_STORAGE_KEY, JSON.stringify(withConnectionIds));
+      return withConnectionIds;
     } catch {
       return [];
     }
   }
 
   function saveKeyConfig(config, storage = global.localStorage) {
-    const normalized = normalizeKeyConfig(config);
+    const normalized = normalizeKeyConfig(config).map((entry) => (
+      entry.source !== "platform" && !entry.connectionId
+        ? { ...entry, connectionId: createManualConnectionId() }
+        : entry
+    ));
     storage?.setItem(KEY_CONFIG_STORAGE_KEY, JSON.stringify(normalized));
     LEGACY_KEY_STORAGE_KEYS.forEach((key) => storage?.removeItem?.(key));
     return normalized;
@@ -235,6 +266,7 @@
         source: existing?.source === "platform" ? "platform" : "manual",
       };
       if (existing?.platformTokenId) entry.platformTokenId = existing.platformTokenId;
+      if (existing?.connectionId) entry.connectionId = existing.connectionId;
       entries.push(entry);
     }
     return { entries, duplicates };
@@ -259,6 +291,7 @@
     mergeSyncedKeys,
     migrateLegacyKeyConfig,
     normalizeKeyConfig,
+    normalizeManualConnectionId,
     normalizePlatformTokenId,
     normalizeSyncedKey,
     parseKeyText,

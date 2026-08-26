@@ -28,6 +28,9 @@ MODEL_ID = "h4-e2e-model"
 TRUSTED_ROUTE_MODEL_ID = "h4-deepseek-trusted-route-model"
 TRUSTED_ROUTE_USER = "H4_TRUSTED_MODEL_ROUTE_USER"
 TRUSTED_ROUTE_FINAL = "H4_TRUSTED_MODEL_ROUTE_FINAL"
+CONNECTION_SHARED_MODEL_ID = "h4-shared-connection-model"
+CONNECTION_ROUTE_USER = "H4_CONNECTION_ROUTE_USER"
+CONNECTION_ROUTE_FINAL = "H4_CONNECTION_ROUTE_FINAL"
 TRUSTED_ROUTE_PRIMARY_KEY = "h4-synthetic-credential"
 TRUSTED_ROUTE_SECONDARY_KEY = "h4-synthetic-route-credential"
 TOOL_PROTOCOL_HISTORY_USER = "H4_TOOL_PROTOCOL_HISTORY_USER"
@@ -651,6 +654,8 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     joined_user_text = "\n".join(user_texts)
     if TRUSTED_ROUTE_USER in joined_user_text:
         return "trusted-model-route", has_tool_result
+    if CONNECTION_ROUTE_USER in joined_user_text:
+        return "connection-route", has_tool_result
     if TOOL_PROTOCOL_CONTINUE_USER in joined_user_text:
         return "tool-protocol-history", has_tool_result
     if any(
@@ -1733,8 +1738,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "synthetic catalog unavailable"}, 503)
                 return
             models = {
-                "primary": [MODEL_ID],
-                "trusted-route": [TRUSTED_ROUTE_MODEL_ID],
+                "primary": [MODEL_ID, CONNECTION_SHARED_MODEL_ID],
+                "trusted-route": [TRUSTED_ROUTE_MODEL_ID, CONNECTION_SHARED_MODEL_ID],
                 "calibration-fallback": [MODEL_ID],
             }.get(key_group, [])
             self._send_json({
@@ -1806,6 +1811,13 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "keyGroup": key_group,
                 "modelMatches": payload.get("model") == TRUSTED_ROUTE_MODEL_ID,
             })
+        if scenario == "connection-route":
+            key_group = _synthetic_key_group(self.headers.get("Authorization", ""))
+            chat_metric["connectionRoute"] = {
+                "keyGroup": key_group,
+                "modelMatches": payload.get("model") == CONNECTION_SHARED_MODEL_ID,
+                "authorized": key_group == "trusted-route",
+            }
         if scenario == "tool-protocol-history":
             projected_messages = [
                 message for message in (payload.get("messages") or [])
@@ -2701,6 +2713,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             final_text = {
                 "plain-text": PLAIN_FINAL,
                 "trusted-model-route": TRUSTED_ROUTE_FINAL,
+                "connection-route": CONNECTION_ROUTE_FINAL,
                 "tool-protocol-history": TOOL_PROTOCOL_FINAL,
                 "classic-text": CLASSIC_FINAL,
                 "context-compaction": AUTO_COMPACTION_CHECKPOINT,
@@ -4290,6 +4303,16 @@ def main() -> int:
                 continue
             request_id = command.get("id")
             operation = command.get("command")
+            if operation == "release-model-response":
+                MODEL_GATE.set()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "modelGateReleased": MODEL_GATE.is_set(),
+                    "modelCatalogGate": MODEL_CATALOG_GATE.snapshot(),
+                })
+                continue
             if operation == "release-model":
                 MODEL_GATE.set()
                 REFRESH_GATES.release_all(exclude={"goal-final-after-first-delta"})

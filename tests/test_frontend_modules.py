@@ -172,6 +172,10 @@ async function getFallbackKeys(model) {{
   if (selectedKey) return [selectedKey];
   throw new Error("trusted-route-required");
 }}
+async function getModelDispatchCredentials(model) {{
+  const keys = await getFallbackKeys(model);
+  return {{routeRef: "", catalogRevision: 0, keys, baseUrl: "https://workbar.ai"}};
+}}
 eval({json.dumps(queue_source)});
 eval({json.dumps(send_source)});
 async function errorMessage(callback) {{
@@ -184,12 +188,10 @@ async function errorMessage(callback) {{
   const lookupsBeforeModel = keyLookups.length;
   selectedModel = "gpt-test";
   const queueNoKey = await errorMessage(() => enqueueSessionMessage("session-1", "queued"));
-  const sendNoKey = await errorMessage(() => sendMessage("sent"));
   process.stdout.write(JSON.stringify({{
     queueNoModel,
     sendNoModel,
     queueNoKey,
-    sendNoKey,
     lookupsBeforeModel,
     keyLookups,
   }}));
@@ -207,10 +209,14 @@ async function errorMessage(callback) {{
             "queueNoModel": "select-model-first",
             "sendNoModel": "select-model-first",
             "queueNoKey": "trusted-route-required",
-            "sendNoKey": "trusted-route-required",
             "lookupsBeforeModel": 0,
-            "keyLookups": ["gpt-test", "gpt-test"],
+            "keyLookups": ["gpt-test"],
         })
+        model_guard = send_source.index('if (!model) throw new Error(t("selectModelFirst"))')
+        persisted_pending = send_source.index("persistMessages: true")
+        trusted_route = send_source.index("await getModelDispatchCredentials(model")
+        self.assertLess(model_guard, persisted_pending)
+        self.assertLess(persisted_pending, trusted_route)
         self.assertIn('selectModelFirst: "请先刷新并选择模型"', I18N_SOURCE)
         self.assertIn('selectModelFirst: "Refresh and select a model first"', I18N_SOURCE)
         self.assertIn('configureKeyFirst: "请先在“模型”设置中添加 API Key"', I18N_SOURCE)
@@ -907,6 +913,13 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn("const previous = saveChains[sessionId] || Promise.resolve();", persistence_source)
         self.assertIn("saveChains[sessionId] = savePromise;", persistence_source)
+        self.assertIn("requestPayload.expectedRevision = normalizeSessionRevision", persistence_source)
+        self.assertIn("isSessionRevisionConflict(error)", persistence_source)
+        self.assertIn("onRevisionConflict", persistence_source)
+        self.assertIn("getRevision: getSessionRevision", APP_SOURCE)
+        self.assertIn("onRevisionConflict: resolveSessionRevisionConflict", APP_SOURCE)
+        self.assertIn("applyAuthoritativeSessionSnapshot(sessionId, authoritative)", APP_SOURCE)
+        self.assertIn("expectedRevision: getSessionRevision(sid)", APP_SOURCE)
 
     def test_successful_message_persistence_syncs_authoritative_activity_once(self):
         sync_start = APP_SOURCE.index("function syncPersistedSessionActivity(")
@@ -2643,12 +2656,258 @@ eval(source);
             "const failure = classifyModelRequestFailure(",
             "err.errorCode = failure.code || snapshot.errorCode || \"\"",
             'if (err.errorCode === "model_access_denied")',
-            "await refreshModels()",
+            'await refreshModels({ intent: "route-error" })',
         ):
             self.assertIn(expected, loop_source)
 
         self.assertFalse((ROOT / "src" / "agent" / "agent-loop.js").exists())
         self.assertNotIn("./src/agent/agent-loop.js", INDEX_SOURCE)
+
+    def test_existing_agent_run_replays_completed_events_before_resolving_keys(self):
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+        self.assertLess(
+            loop_source.index("if (!ctx.agentRunId)"),
+            loop_source.index("const dispatch = await resolveRunDispatch()"),
+        )
+        self.assertLess(
+            loop_source.index("let snapshot = await agentRuntime.getAgentRun"),
+            loop_source.index('if (snapshot.status === "waiting_credentials") {'),
+        )
+        script = f"""
+const loopSource = {json.dumps(loop_source)};
+const state = {{sessionId: "session-1", skills: [], disabledSkills: new Set()}};
+const els = {{baseUrl: {{value: "http://isolated.invalid"}}}};
+const MAX_TOOL_ROUNDS = 4;
+const t = (key) => key;
+const getSelectedModel = () => "trusted-model";
+const getAllowedToolNamesForProfile = () => [];
+const applySkillTaskPolicy = (tools) => tools;
+const getSkillToolBudgets = () => [];
+const getNativeTools = () => [];
+const ensureSessionRun = () => ({{abortController: new AbortController()}});
+const claimActiveRunContext = () => true;
+const buildModelRequestPayload = async () => ({{payload: {{model: "trusted-model"}}}});
+const getModelContextResolution = () => ({{
+  inputBudgetInsufficient: false,
+  contextLimit: 1000,
+  contextWindowTokens: 1000,
+  contextBudgetTokens: 800,
+}});
+const getEffectiveMaxTokens = () => 128;
+const persistRunCheckpoint = async () => {{}};
+const settleForegroundDispatchAfterAgentRunCreated = async () => true;
+const resumePendingSessionSteers = async () => {{}};
+const recoverActiveAgentRuntimeProjection = async () => {{}};
+const observeAgentProjectionSnapshot = () => {{}};
+const renderSessionMessages = () => {{}};
+const requestServerAgentInput = async () => {{}};
+const requestServerAgentAuthorization = async () => {{}};
+const attachCompletedAgentUsage = () => {{}};
+const clearObservedAgentRun = () => {{}};
+const classifyModelRequestFailure = () => ({{code: ""}});
+const invalidateModelCatalogRoute = () => {{}};
+const refreshModels = async () => {{}};
+const getAgentUsageGroupId = () => "";
+const archiveAgentProjectionShadow = () => {{}};
+const setSessionMessages = () => {{}};
+const getFallbackKeysState = {{calls: 0, fail: false}};
+const getFallbackKeys = async () => {{
+  getFallbackKeysState.calls += 1;
+  if (getFallbackKeysState.fail) throw new Error("catalog offline");
+  return ["synthetic-key"];
+}};
+const getModelDispatchCredentials = async (model) => ({{
+  routeRef: "",
+  catalogRevision: 0,
+  keys: await getFallbackKeys(model),
+  baseUrl: "http://isolated.invalid",
+}});
+let counters = null;
+let mode = "completed";
+const agentRuntime = {{
+  async createAgentRun() {{
+    counters.creates += 1;
+    return {{agentRunId: "created-agent"}};
+  }},
+  async getAgentRun() {{
+    counters.gets += 1;
+    if (mode === "waiting" && counters.gets === 1) return {{status: "waiting_credentials"}};
+    return {{status: "completed", nextCursor: 1, result: {{}}}};
+  }},
+  async resumeAgentRun(_id, options) {{
+    counters.resumes += 1;
+    counters.resumeKeys = [...options.keys];
+  }},
+  async watchAgentRun(options) {{
+    counters.watches += 1;
+    if (mode === "waiting" && counters.watches === 1) {{
+      return {{status: "waiting_credentials", nextCursor: 0}};
+    }}
+    options.onEvent({{type: "model_completed"}}, {{status: "completed"}});
+    return {{status: "completed", nextCursor: 1, result: {{}}}};
+  }},
+}};
+const projectAgentEvent = (ctx, event) => {{
+  if (event.type === "model_completed") {{
+    ctx.messages.push({{role: "assistant", content: "durable final"}});
+  }}
+}};
+eval(loopSource);
+
+async function scenario(nextMode, existingAgentRunId, failKeys) {{
+  mode = nextMode;
+  counters = {{creates: 0, gets: 0, watches: 0, resumes: 0, resumeKeys: []}};
+  getFallbackKeysState.calls = 0;
+  getFallbackKeysState.fail = failKeys;
+  const ctx = {{
+    sessionId: "session-1",
+    messages: [{{role: "user", content: "task"}}],
+    stats: {{}},
+    model: "trusted-model",
+    toolPreset: "default",
+    permissionProfile: "accept",
+    run: {{abortController: new AbortController()}},
+    agentRunId: existingAgentRunId,
+    agentEventCursor: 0,
+  }};
+  const result = await runServerAgentLoop(ctx);
+  return {{
+    ...counters,
+    keyCalls: getFallbackKeysState.calls,
+    finalCount: ctx.messages.filter((message) => message.content === "durable final").length,
+    result,
+  }};
+}}
+
+(async () => {{
+  const completedOffline = await scenario("completed", "existing-agent", true);
+  const created = await scenario("completed", "", false);
+  const waiting = await scenario("waiting", "existing-agent", false);
+  process.stdout.write(JSON.stringify({{completedOffline, created, waiting}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["completedOffline"]["keyCalls"], 0)
+        self.assertEqual(data["completedOffline"]["creates"], 0)
+        self.assertEqual(data["completedOffline"]["resumes"], 0)
+        self.assertEqual(data["completedOffline"]["finalCount"], 1)
+        self.assertEqual(data["created"]["keyCalls"], 1)
+        self.assertEqual(data["created"]["creates"], 1)
+        self.assertEqual(data["created"]["resumes"], 0)
+        self.assertEqual(data["created"]["finalCount"], 1)
+        self.assertEqual(data["waiting"]["keyCalls"], 1)
+        self.assertEqual(data["waiting"]["creates"], 0)
+        self.assertEqual(data["waiting"]["resumes"], 1)
+        self.assertEqual(data["waiting"]["resumeKeys"], ["synthetic-key"])
+        self.assertEqual(data["waiting"]["finalCount"], 1)
+
+    def test_terminal_idle_publishes_before_checkpoint_and_preserves_next_message(self):
+        tail_start = APP_SOURCE.index("// Publish terminal ownership locally")
+        throw_line = "if (loopError) throw loopError;  // propagate to chatForm handler"
+        tail_end = APP_SOURCE.index(throw_line, tail_start) + len(throw_line)
+        tail_source = APP_SOURCE[tail_start:tail_end]
+        self.assertLess(
+            tail_source.index("publishTerminalRunOwnership(ctx)"),
+            tail_source.index("await clearRunCheckpoint(ctx)"),
+        )
+        self.assertIn("getSessionMessages(sessionId)", tail_source)
+        self.assertIn("getSessionStats(sessionId)", tail_source)
+        script = f"""
+const sessionId = "terminal-session";
+const oldMessages = [
+  {{role: "user", content: "old task"}},
+  {{role: "assistant", content: "old final"}},
+];
+let currentMessages = oldMessages;
+let checkpointRelease;
+let checkpointStartedResolve;
+const checkpointStarted = new Promise((resolve) => {{ checkpointStartedResolve = resolve; }});
+const run = {{isStreaming: true, _activeCtx: null}};
+const ctx = {{sessionId, run, messages: oldMessages, stats: {{input: 1}}}};
+run._activeCtx = ctx;
+let loopError = null;
+let streamingFalseCalls = 0;
+let releaseCalls = 0;
+let terminalSave = null;
+const ownsActiveRunContext = (candidate) => candidate?.run?._activeCtx === candidate;
+const setStreaming = (active) => {{
+  run.isStreaming = active;
+  if (!active) streamingFalseCalls += 1;
+}};
+const releaseActiveRunContext = (candidate) => {{
+  if (!ownsActiveRunContext(candidate)) return false;
+  candidate.run._activeCtx = null;
+  releaseCalls += 1;
+  return true;
+}};
+const publishTerminalRunOwnership = (candidate) => {{
+  if (!ownsActiveRunContext(candidate)) return false;
+  setStreaming(false, candidate.sessionId);
+  return releaseActiveRunContext(candidate);
+}};
+const clearRunCheckpoint = async () => {{
+  checkpointStartedResolve({{
+    streaming: run.isStreaming,
+    activeContext: run._activeCtx ? "present" : "",
+  }});
+  await new Promise((resolve) => {{ checkpointRelease = resolve; }});
+}};
+const persistRunCheckpoint = async () => {{ throw new Error("unexpected error checkpoint"); }};
+const scheduleTerminalFileTreeRefresh = () => {{}};
+const getSessionMessages = () => currentMessages;
+const getSessionStats = () => ({{input: 2}});
+const saveSessionState = async (_id, messages, stats) => {{
+  terminalSave = {{messages: structuredClone(messages), stats: structuredClone(stats)}};
+}};
+const goalFeature = {{refresh: async () => {{}}}};
+const renderSessions = () => {{}};
+const notifyTaskComplete = () => {{}};
+const archiveAgentProjectionShadow = () => {{}};
+
+async function finishTerminal() {{
+{tail_source}
+}}
+
+(async () => {{
+  const finishing = finishTerminal();
+  const beforeCheckpoint = await checkpointStarted;
+  const newContext = {{sessionId, run, messages: null}};
+  currentMessages = [...currentMessages, {{role: "user", content: "next task"}}];
+  newContext.messages = currentMessages;
+  run._activeCtx = newContext;
+  run.isStreaming = true;
+  checkpointRelease();
+  await finishing;
+  process.stdout.write(JSON.stringify({{
+    beforeCheckpoint,
+    streamingFalseCalls,
+    releaseCalls,
+    activeContextIsNew: run._activeCtx === newContext,
+    streamingRemainsNew: run.isStreaming,
+    terminalSavedNextMessage: terminalSave.messages.some((message) => message.content === "next task"),
+    terminalSaveStats: terminalSave.stats,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "beforeCheckpoint": {"streaming": False, "activeContext": ""},
+            "streamingFalseCalls": 1,
+            "releaseCalls": 1,
+            "activeContextIsNew": True,
+            "streamingRemainsNew": True,
+            "terminalSavedNextMessage": True,
+            "terminalSaveStats": {"input": 2},
+        })
 
     def test_goal_continuation_switches_agent_runs_without_exposing_reasoning_or_rolling_back(self):
         loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
@@ -5770,6 +6029,11 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("AbortController", MODEL_REQUEST_SOURCE)
         self.assertIn("agentRuntime.openSseResponse({", runtime_source)
         self.assertIn('fetch("/proxy/chat", {', runtime_source)
+        attempt_end = APP_SOURCE.index("function _safeMd", end)
+        attempt_source = APP_SOURCE[end:attempt_end]
+        self.assertIn("const dispatch = useRuntimeBridge && attachedRuntimeRunId", attempt_source)
+        self.assertIn("await getModelDispatchCredentials(model", attempt_source)
+        self.assertIn("routeRef: dispatch?.routeRef || ctx?.routeRef ||", attempt_source)
 
     def test_agent_tools_normalize_native_calls_without_mutating_inputs(self):
         script = r"""
@@ -6672,10 +6936,14 @@ process.stdout.write(JSON.stringify({
         send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
         send_source = APP_SOURCE[send_start:send_end]
         classify_index = send_source.index("goalFeature?.classifyGoalInput(userText)")
+        claim_index = send_source.index("if (!claimActiveRunContext(ctx))")
+        route_index = send_source.index("await getModelDispatchCredentials(model")
         prepare_index = send_source.index("await goalFeature.prepareExplicitGoal({")
-        run_index = send_source.index("if (!claimActiveRunContext(ctx))")
-        self.assertLess(classify_index, prepare_index)
-        self.assertLess(prepare_index, run_index)
+        agent_loop_index = send_source.index("await executeRunContext(ctx)")
+        self.assertLess(classify_index, claim_index)
+        self.assertLess(claim_index, route_index)
+        self.assertLess(route_index, prepare_index)
+        self.assertLess(prepare_index, agent_loop_index)
 
     def test_agent_permissions_transform_authorization_data_without_side_effects(self):
         script = r"""
@@ -7496,6 +7764,126 @@ setImmediate(async () => {
         )
         self.assertEqual(result["saveChains"], {})
 
+    def test_persistence_module_uses_latest_revision_and_never_retries_conflicts(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+const {createSessionPersistence} = window.Code.services.persistence;
+
+(async () => {
+  let revision = 0;
+  const bodies = [];
+  let releaseFirst;
+  const persistence = createSessionPersistence({
+    requestJson: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      if (bodies.length === 1) {
+        await new Promise((resolve) => { releaseFirst = resolve; });
+      }
+      return {id: "alpha", revision: body.expectedRevision + 1};
+    },
+    saveChains: {},
+    getRevision: () => revision,
+    setRevision: (_sessionId, value) => { revision = value; },
+  });
+  const firstPayload = {messages: [{role: "user", content: "one"}]};
+  const queuedPayload = {messages: [{
+    role: "user",
+    content: "two",
+    meta: {pendingDispatch: {id: "dispatch-two", status: "routing"}},
+  }]};
+  const firstSave = persistence.saveSession("alpha", firstPayload);
+  const queuedSave = persistence.saveSession("alpha", queuedPayload);
+  queuedPayload.messages[0].meta.pendingDispatch.status = "failed";
+  queuedPayload.messages.push({role: "assistant", meta: {kind: "dispatch-error"}});
+  for (let attempt = 0; attempt < 20 && typeof releaseFirst !== "function"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  releaseFirst();
+  await Promise.all([firstSave, queuedSave]);
+
+  let conflictRevision = 0;
+  let conflictRequests = 0;
+  let conflictCallbacks = 0;
+  const conflictPersistence = createSessionPersistence({
+    requestJson: async () => {
+      conflictRequests += 1;
+      const error = new Error("Session revision conflict");
+      error.status = 409;
+      error.data = {
+        errorCode: "session_revision_conflict",
+        expectedRevision: 0,
+        currentRevision: 4,
+      };
+      throw error;
+    },
+    saveChains: {},
+    getRevision: () => conflictRevision,
+    setRevision: (_sessionId, value) => { conflictRevision = value; },
+    onRevisionConflict: async ({payload}) => {
+      conflictCallbacks += 1;
+      return {id: "beta", revision: 4, messages: payload.messages};
+    },
+  });
+  const [resolved, skippedQueued] = await Promise.all([
+    conflictPersistence.saveSession(
+      "beta",
+      {messages: [{role: "user", content: "stale"}]},
+    ),
+    conflictPersistence.saveSession(
+      "beta",
+      {messages: [{role: "user", content: "queued stale"}]},
+    ),
+  ]);
+
+  const metadataBodies = [];
+  const metadataPersistence = createSessionPersistence({
+    requestJson: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      metadataBodies.push(body);
+      return {id: "gamma", revision: 7};
+    },
+    saveChains: {},
+    getRevision: () => 7,
+  });
+  await metadataPersistence.saveSession("gamma", {title: "metadata only"});
+
+  process.stdout.write(JSON.stringify({
+    expectedRevisions: bodies.map((body) => body.expectedRevision),
+    queuedSnapshot: {
+      status: bodies[1].messages[0].meta.pendingDispatch.status,
+      errors: bodies[1].messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+    },
+    revision,
+    conflictRequests,
+    conflictCallbacks,
+    conflictRevision,
+    resolvedRevision: resolved.revision,
+    skippedQueuedRevision: skippedQueued.revision,
+    metadataHasExpectedRevision: Object.prototype.hasOwnProperty.call(
+      metadataBodies[0], "expectedRevision",
+    ),
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "expectedRevisions": [0, 1],
+            "queuedSnapshot": {"status": "routing", "errors": 0},
+            "revision": 2,
+            "conflictRequests": 1,
+            "conflictCallbacks": 1,
+            "conflictRevision": 4,
+            "resolvedRevision": 4,
+            "skippedQueuedRevision": 4,
+            "metadataHasExpectedRevision": False,
+        })
+
     def test_sessions_module_owns_crud_requests_and_loaded_data_normalization(self):
         self.assertTrue((ROOT / "src" / "features" / "sessions.js").is_file())
         script = r"""
@@ -8086,7 +8474,10 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         )
         auth_check = APP_SOURCE.index("if (platformSync?.authExpired)", platform_sync)
         recovery_call = APP_SOURCE.index("sessionStartup.startRecovery();", auth_check)
-        model_refresh = APP_SOURCE.index("await refreshModels();", recovery_call)
+        model_refresh = APP_SOURCE.index(
+            'void refreshModels({ intent: "background" }).catch',
+            recovery_call,
+        )
         self.assertLess(platform_sync, auth_check)
         self.assertLess(auth_check, recovery_call)
         self.assertLess(recovery_call, model_refresh)
@@ -8563,6 +8954,9 @@ require("./src/core/namespace.js");
 require("./src/core/platform.js");
 const platform = window.Code.core.platform;
 const loaded = platform.loadKeyConfig(storage);
+const loadedAgain = platform.loadKeyConfig(storage);
+const legacyConnectionIdStable = loaded[0].connectionId === loadedAgain[0].connectionId;
+const legacyConnectionIdPersisted = JSON.parse(values.get("code-key-config"))[0].connectionId;
 const parsed = platform.parseKeyText([
   "primary: sk-primary",
   "secondary sk-secondary",
@@ -8580,6 +8974,9 @@ const synced = platform.mergeSyncedKeys(loaded, [
 process.stdout.write(JSON.stringify({
   url: platform.WORKBAR_URL,
   loaded,
+  loadedAgain,
+  legacyConnectionIdStable,
+  legacyConnectionIdPersisted,
   parsed,
   saved,
   synced,
@@ -8599,8 +8996,12 @@ process.stdout.write(JSON.stringify({
         data = json.loads(completed.stdout)
         self.assertEqual(data["url"], "https://workbar.ai")
         self.assertEqual(data["loaded"][0]["source"], "manual")
+        self.assertRegex(data["loaded"][0]["connectionId"], r"^manual_")
+        self.assertTrue(data["legacyConnectionIdStable"])
+        self.assertRegex(data["legacyConnectionIdPersisted"], r"^manual_")
         self.assertFalse(data["loaded"][0]["enabled"])
         self.assertEqual(data["loaded"][1]["source"], "platform")
+        self.assertNotIn("connectionId", data["loaded"][1])
         self.assertEqual(data["parsed"]["duplicates"], ["duplicate"])
         self.assertEqual([entry["key"] for entry in data["saved"]], [
             "sk-primary", "sk-secondary", "sk-plain", "sk-remote",
@@ -9268,7 +9669,10 @@ const feature = createFilesFeature({
         self.assertIn("recoveryError ? (recoveryError?.name === \"AbortError\" ? \"cancelled\" : \"failed\") : \"completed\"", APP_SOURCE)
         self.assertIn("loopError ? (loopError?.name === \"AbortError\" ? \"cancelled\" : \"failed\") : \"completed\"", APP_SOURCE)
         terminal_schedule = APP_SOURCE.index("scheduleTerminalFileTreeRefresh(\n    ctx,", APP_SOURCE.index("async function sendMessage"))
-        final_save = APP_SOURCE.index("await saveSessionState(sessionId, ctx.messages, ctx.stats);", terminal_schedule)
+        final_save = APP_SOURCE.index(
+            "await saveSessionState(\n    sessionId,\n    getSessionMessages(sessionId),",
+            terminal_schedule,
+        )
         self.assertLess(terminal_schedule, final_save)
         self.assertNotIn("scheduleTerminalFileTreeRefresh", APP_SOURCE[APP_SOURCE.index("async function enqueueSessionMessage"):APP_SOURCE.index("async function submitSessionSteer")])
         self.assertNotIn("scheduleTerminalFileTreeRefresh", APP_SOURCE[APP_SOURCE.index("async function finishServerAgentUserInputRequest"):APP_SOURCE.index("function renderUserInputQuestion")])
@@ -10218,7 +10622,17 @@ const document = {{
     return image;
   }},
 }};
-const sandbox = {{document, URL, encodeURIComponent, window: {{Code: {{ui: {{}}}}}}}};
+const sandbox = {{
+  document,
+  URL,
+  encodeURIComponent,
+  Date: {{now: () => now}},
+  window: {{
+    Code: {{ui: {{}}}},
+    setTimeout(callback, delay) {{ timers.push({{callback, delay}}); return timers.length; }},
+    clearTimeout() {{}},
+  }},
+}};
 vm.runInNewContext(source, sandbox);
 
 const successSlot = slotFor("https://例子.测试/path?q=1");
@@ -10998,7 +11412,11 @@ const feature = createSettingsFeature({
         data = json.loads(completed.stdout)
         self.assertEqual(data["bodyClasses"], ["theme-dark"])
         self.assertEqual(data["theme"], "dark")
-        self.assertEqual(data["keys"], [{"name": "primary", "key": "sk-1", "enabled": True, "source": "manual"}])
+        self.assertEqual(
+            {key: value for key, value in data["keys"][0].items() if key != "connectionId"},
+            {"name": "primary", "key": "sk-1", "enabled": True, "source": "manual"},
+        )
+        self.assertRegex(data["keys"][0]["connectionId"], r"^manual_")
         self.assertEqual(data["calls"], ["/api/check-update"])
         self.assertEqual(data["first"], data["second"])
         self.assertEqual(data["updateInfo"]["remoteVersion"], "0.6.0")
@@ -11476,6 +11894,8 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertTrue(data["result"]["ok"])
         self.assertEqual(data["result"]["status"], "synced")
         self.assertEqual(data["result"]["imported"], 1)
+        manual_connection_id = config["sk-manual"].pop("connectionId")
+        self.assertRegex(manual_connection_id, r"^manual_")
         self.assertEqual(config["sk-manual"], {
             "name": "manual", "key": "sk-manual", "enabled": False, "source": "manual",
         })
@@ -11494,6 +11914,73 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertEqual(data["settingsSaved"], 1)
         self.assertIn("const platformSyncPromise = syncPlatformKeysSilently();", APP_SOURCE)
         self.assertNotIn("await syncPlatformKeysSilently()", APP_SOURCE)
+
+    def test_settings_connection_identity_refreshes_routes_without_reacting_to_disabled_metadata(self):
+        script = r"""
+const values = new Map([
+  ["code-platform-auth", JSON.stringify({token: "synthetic-auth", userId: "7"})],
+  ["code-key-config", JSON.stringify([
+    {name: "before", key: "synthetic-route-key", enabled: true, source: "platform", platformTokenId: "1"},
+  ])],
+]);
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+const routeChanges = [];
+global.window = {
+  localStorage: storage,
+  URLSearchParams,
+  location: {search: "", reload: () => {}},
+  history: {replaceState: () => {}},
+  matchMedia: () => ({matches: false, addEventListener: () => {}}),
+  addEventListener: () => {},
+  setTimeout,
+  setInterval,
+  clearInterval,
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const feature = window.Code.features.settings.createSettingsFeature({
+  elements: {apiKey: {value: ""}},
+  t: (key) => key,
+  apiJson: async () => ({}),
+  document: {getElementById: () => null, querySelectorAll: () => []},
+  storage,
+  fetch: async () => ({
+    status: 200,
+    ok: true,
+    json: async () => ({
+      tokens: [{id: 1, name: "after", status: 1}],
+      keys: {1: "synthetic-route-key"},
+    }),
+  }),
+  onKeyConfigChanged: (_config, change) => routeChanges.push(change.routingChanged),
+});
+(async () => {
+  const syncResult = await feature.syncPlatformKeysSilently();
+  feature.saveKeyConfig([
+    {name: "metadata-only", key: "synthetic-route-key", enabled: true, source: "manual"},
+  ]);
+  feature.saveKeyConfig([
+    {name: "disabled", key: "synthetic-route-key", enabled: false, source: "manual"},
+  ]);
+  feature.saveKeyConfig([
+    {name: "disabled-renamed", key: "synthetic-route-key", enabled: false, source: "platform"},
+  ]);
+  process.stdout.write(JSON.stringify({syncResult, routeChanges}));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["syncResult"]["ok"])
+        self.assertEqual(data["syncResult"]["status"], "synced")
+        self.assertEqual(data["routeChanges"], [True, True, True, False])
 
     def test_settings_interactive_sync_masks_html_and_copies_colon_formatted_keys(self):
         script = r"""
@@ -11633,14 +12120,17 @@ const feature = window.Code.features.settings.createSettingsFeature({
             'class="toggle-switch key-enable"',
             'class="key-act-btn key-trash"',
             'data-source="${entry.source === "platform" ? "platform" : "manual"}" data-platform-token-id="${escapeHtml(entry.platformTokenId || "")}"',
+            'data-connection-id="${escapeHtml(entry.connectionId || "")}"',
+            "const connectionId = platform.normalizeManualConnectionId(row.dataset.connectionId);",
+            "if (connectionId) entry.connectionId = connectionId;",
             "platform.excludePlatformToken(auth.userId, platformTokenId, storage);",
             'class="key-workbar-btn"',
             't("getFromWorkbar")',
             'id="settingsModelCount"',
             'class="model-refresh-btn"',
             'refreshSettingsModelList',
-            'await refreshModels()',
-            "onKeyConfigChanged(saved)",
+            'await refreshModels({ intent: "explicit" })',
+            "onKeyConfigChanged(saved, { routingChanged })",
             "hasCatalogState",
         ):
             self.assertIn(expected, SETTINGS_SOURCE)
@@ -11657,10 +12147,350 @@ const feature = window.Code.features.settings.createSettingsFeature({
             self.assertIn(expected, STYLE_SOURCE)
         self.assertIn('getFromWorkbar: "从 workbar 获取"', I18N_SOURCE)
 
+    def test_connection_route_catalog_groups_models_and_preserves_exact_route_identity(self):
+        catalog_start = APP_SOURCE.index("function normalizePublicModelRoute(")
+        catalog_end = APP_SOURCE.index("async function restoreModelRoutes()", catalog_start)
+        catalog_source = APP_SOURCE[catalog_start:catalog_end]
+        dispatch_start = APP_SOURCE.index("async function getModelRouteDispatch(")
+        dispatch_end = APP_SOURCE.index("async function getFallbackKeys(", dispatch_start)
+        dispatch_source = APP_SOURCE[dispatch_start:dispatch_end]
+        script = f"""
+const values = new Map([["code-model", "shared-model"]]);
+const MODEL_ROUTE_REF_STORAGE_KEY = "code-model-route-ref";
+const MODEL_ROUTE_REVISION_STORAGE_KEY = "code-model-route-revision";
+const localStorage = {{
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+}};
+const state = {{
+  routingV2: true,
+  modelRoutes: [],
+  modelRouteCatalogRevision: 0,
+  selectedRouteRef: "",
+  selectedRouteCatalogRevision: 0,
+  modelCatalogModels: [],
+}};
+const settingsList = {{innerHTML: ""}};
+const settingsCount = {{textContent: ""}};
+const document = {{
+  getElementById: (id) => id === "settingsModelList" ? settingsList
+    : id === "settingsModelCount" ? settingsCount : null,
+}};
+const els = {{
+  modelPillDropdown: {{innerHTML: ""}},
+  modelListBox: {{innerHTML: ""}},
+}};
+const t = (key) => key;
+const escapeHtml = (value) => String(value);
+const normalizeModelCatalogModels = (models) => [...new Set(models)].sort();
+const modelCatalogStatusTone = () => "info";
+let presentation = null;
+const applySelectedModelPresentation = (model, route) => {{
+  presentation = {{model, routeRef: route?.routeRef || ""}};
+}};
+const getSelectedModel = () => presentation?.model || "";
+let refreshCalls = 0;
+const refreshModels = async () => {{
+  refreshCalls += 1;
+  return state._modelRouteRefreshPromise || {{ok: true}};
+}};
+const refreshModelCatalogForDispatch = refreshModels;
+const resumeDispatchesWaitingForRoute = async () => false;
+eval({json.dumps(catalog_source)});
+eval({json.dumps(dispatch_source)});
+
+(async () => {{
+  applyModelRouteSnapshot({{
+    routingV2: true,
+    catalogRevision: 9,
+    routes: [
+      {{routeRef: "mr1_deepseek", connectionId: "manual_alpha1234", source: "manual", modelId: "shared-model", label: "DeepSeek", enabled: true, credentialsAvailable: true, group: "must-not-render", key: "must-not-render"}},
+      {{routeRef: "mr1_workbar", connectionId: "wc1_beta5678", source: "workbar", modelId: "shared-model", label: "workbar", enabled: true, credentialsAvailable: true, group: "must-not-render"}},
+      {{routeRef: "mr1_unique", connectionId: "wc1_beta5678", source: "workbar", modelId: "unique-model", label: "workbar", enabled: true, credentialsAvailable: true}},
+    ],
+  }});
+  const initialGroups = connectionRouteGroups().map((group) => [group.displayLabel, group.routes.map((route) => route.modelId)]);
+  const duplicateLabels = connectionRouteGroups([
+    {{routeRef: "mr1_same_a", connectionId: "manual_same_alpha", modelId: "model-a", label: "Same", enabled: true}},
+    {{routeRef: "mr1_same_b", connectionId: "manual_same_bravo", modelId: "model-b", label: "Same", enabled: true}},
+  ]).map((group) => group.displayLabel);
+  const initialDropdown = els.modelPillDropdown.innerHTML;
+  const initialSettings = settingsList.innerHTML;
+  setSelectedModelRoute("mr1_workbar", 9);
+  state._modelRouteRefreshPromise = new Promise(() => {{}});
+  const selected = await Promise.race([
+    getModelRouteDispatch("shared-model"),
+    new Promise((resolve) => setTimeout(() => resolve(null), 50)),
+  ]);
+  const healthyRefreshCalls = refreshCalls;
+  state._modelRouteRefreshPromise = null;
+  const explicit = await getModelRouteDispatch("shared-model", {{routeRef: "mr1_deepseek"}});
+  setSelectedModelRoute("", 9);
+  let ambiguousCode = "";
+  try {{ await getModelRouteDispatch("shared-model"); }} catch (error) {{ ambiguousCode = error.code; }}
+  const migrated = await getModelRouteDispatch("unique-model");
+  setSelectedModelRoute("mr1_deepseek", 9);
+  state.modelRoutes = state.modelRoutes.map((route) => route.routeRef === "mr1_deepseek"
+    ? {{...route, enabled: false}}
+    : route);
+  renderConnectionRouteCatalog();
+  const disabledGroupVisible = els.modelPillDropdown.innerHTML.includes("DeepSeek");
+  const selectedRefAfterDisabled = values.get("code-model-route-ref");
+  let disabledPinnedCode = "";
+  try {{ await getModelRouteDispatch("shared-model"); }} catch (error) {{ disabledPinnedCode = error.code; }}
+  state.modelRoutes = state.modelRoutes.filter((route) => route.routeRef !== "mr1_deepseek");
+  renderConnectionRouteCatalog();
+  let removedPinnedCode = "";
+  try {{ await getModelRouteDispatch("shared-model"); }} catch (error) {{ removedPinnedCode = error.code; }}
+  const normalized = normalizePublicModelRoute({{
+    routeRef: "mr1_public",
+    connectionId: "manual_public",
+    source: "custom-openai",
+    modelId: "public-model",
+    label: "Public",
+    group: "internal-only",
+    baseUrl: "secret-internal",
+    key: "secret-internal",
+  }});
+  process.stdout.write(JSON.stringify({{
+    groups: initialGroups,
+    duplicateLabels,
+    dropdown: initialDropdown,
+    settings: initialSettings,
+    selected,
+    healthyRefreshCalls,
+    explicit,
+    ambiguousCode,
+    migrated,
+    disabledPinnedCode,
+    disabledGroupVisible,
+    selectedRefAfterDisabled,
+    removedPinnedCode,
+    normalizedKeys: Object.keys(normalized).sort(),
+    normalizedSource: normalized.source,
+    storageRouteRef: values.get("code-model-route-ref"),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["groups"], [
+            ["DeepSeek", [["shared-model"]][0]],
+            ["workbar", ["shared-model", "unique-model"]],
+        ])
+        self.assertEqual(data["duplicateLabels"], ["Same · _alpha", "Same · _bravo"])
+        self.assertIn('data-connection-id="manual_alpha1234"', data["dropdown"])
+        self.assertIn('data-route-ref="mr1_deepseek"', data["dropdown"])
+        self.assertNotIn("must-not-render", data["dropdown"])
+        self.assertNotIn("must-not-render", data["settings"])
+        self.assertEqual(data["selected"]["routeRef"], "mr1_workbar")
+        self.assertEqual(data["healthyRefreshCalls"], 0)
+        self.assertEqual(data["explicit"]["routeRef"], "mr1_deepseek")
+        self.assertEqual(data["ambiguousCode"], "route_not_found")
+        self.assertEqual(data["migrated"]["routeRef"], "mr1_unique")
+        self.assertEqual(data["disabledPinnedCode"], "route_disabled")
+        self.assertFalse(data["disabledGroupVisible"])
+        self.assertEqual(data["selectedRefAfterDisabled"], "mr1_deepseek")
+        self.assertEqual(data["removedPinnedCode"], "route_not_found")
+        self.assertEqual(data["storageRouteRef"], "mr1_deepseek")
+        self.assertEqual(data["normalizedKeys"], [
+            "connectionId", "credentialsAvailable", "enabled", "label",
+            "modelId", "routeRef", "source",
+        ])
+        self.assertEqual(data["normalizedSource"], "custom-openai")
+
+    def test_model_route_refresh_ownership_queues_one_latest_explicit_snapshot(self):
+        refresh_start = APP_SOURCE.index("async function refreshModelRoutes(")
+        refresh_end = APP_SOURCE.index("function appendSessionSystemError", refresh_start)
+        refresh_source = APP_SOURCE[refresh_start:refresh_end]
+        script = f"""
+const state = {{
+  routingV2: true,
+  modelRoutes: [],
+  modelCatalogModels: [],
+  _modelRouteConfigGeneration: 0,
+  _modelRouteRefreshPromise: null,
+  _modelRouteRefreshActive: null,
+  _modelRouteTrailingRefresh: null,
+}};
+const els = {{refreshModelsBtn: {{disabled: false}}}};
+const t = (key) => key;
+const showToast = () => {{}};
+const renderConnectionRouteCatalog = () => [];
+const getApiKeys = () => [];
+const setSelectedModel = () => {{}};
+const getSelectedModel = () => "";
+const setModelContextCatalog = () => {{}};
+const document = {{getElementById: () => null}};
+const localStorage = {{getItem: () => null, setItem: () => {{}}, removeItem: () => {{}}}};
+let latestPayload = {{snapshot: "enabled"}};
+const routeRefreshPayload = () => structuredClone(latestPayload);
+const pendingRequests = [];
+const applied = [];
+const apiJson = (_url, options) => new Promise((resolve, reject) => {{
+  pendingRequests.push({{
+    body: JSON.parse(options.body),
+    resolve,
+    reject,
+  }});
+}});
+const applyModelRouteSnapshot = (snapshot) => {{
+  applied.push(snapshot.snapshot);
+  state.modelCatalogModels = [snapshot.snapshot];
+  return snapshot.routes || [];
+}};
+async function waitForRequests(count) {{
+  for (let attempt = 0; attempt < 40 && pendingRequests.length < count; attempt += 1) {{
+    await new Promise((resolve) => setImmediate(resolve));
+  }}
+  if (pendingRequests.length < count) throw new Error(`expected ${{count}} requests`);
+}}
+eval({json.dumps(refresh_source)});
+
+(async () => {{
+  const background = refreshModels({{intent: "background"}});
+  await waitForRequests(1);
+  latestPayload = {{snapshot: "disabled"}};
+  state._modelRouteConfigGeneration = 1;
+  const config = refreshModels({{intent: "config"}});
+  const explicitA = refreshModels({{intent: "explicit"}});
+  const explicitB = refreshModels({{intent: "explicit"}});
+  const queuedPromiseShared = config === explicitA && explicitA === explicitB;
+  const backgroundWasNotReused = background !== explicitA;
+  pendingRequests[0].resolve({{ok: true, snapshot: "enabled", routes: [{{routeRef: "old"}}]}});
+  await waitForRequests(2);
+  const oldResult = await background;
+  const staleResultSuppressed = oldResult.reason === "superseded" && applied.length === 0;
+  const trailingBody = pendingRequests[1].body;
+  pendingRequests[1].resolve({{ok: true, snapshot: "disabled", routes: []}});
+  await Promise.all([config, explicitA, explicitB]);
+
+  const afterCompleted = refreshModels({{intent: "explicit"}});
+  await waitForRequests(3);
+  const completedPromiseNotReused = afterCompleted !== explicitA;
+  const duplicateCompleted = refreshModels({{intent: "explicit"}});
+  const activeExplicitCoalesced = afterCompleted === duplicateCompleted;
+  pendingRequests[2].resolve({{ok: true, snapshot: "disabled-again", routes: []}});
+  await Promise.all([afterCompleted, duplicateCompleted]);
+
+  latestPayload = {{snapshot: "generation-1"}};
+  const blocking = refreshModels({{intent: "background"}});
+  await waitForRequests(4);
+  state._modelRouteConfigGeneration = 2;
+  latestPayload = {{snapshot: "generation-2"}};
+  const firstConfig = refreshModels({{intent: "config"}});
+  state._modelRouteConfigGeneration = 3;
+  latestPayload = {{snapshot: "generation-3"}};
+  const latestConfig = refreshModels({{intent: "config"}});
+  pendingRequests[3].resolve({{ok: true, snapshot: "generation-1", routes: []}});
+  await waitForRequests(5);
+  pendingRequests[4].resolve({{ok: true, snapshot: "generation-3", routes: []}});
+  await Promise.all([blocking, firstConfig, latestConfig]);
+
+  process.stdout.write(JSON.stringify({{
+    requestCount: pendingRequests.length,
+    queuedPromiseShared,
+    backgroundWasNotReused,
+    staleResultSuppressed,
+    trailingBody,
+    applied,
+    completedPromiseNotReused,
+    activeExplicitCoalesced,
+    latestGenerationBody: pendingRequests[4].body,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["requestCount"], 5)
+        self.assertTrue(data["queuedPromiseShared"])
+        self.assertTrue(data["backgroundWasNotReused"])
+        self.assertTrue(data["staleResultSuppressed"])
+        self.assertEqual(data["trailingBody"], {"snapshot": "disabled"})
+        self.assertEqual(data["applied"], ["disabled", "disabled-again", "generation-3"])
+        self.assertTrue(data["completedPromiseNotReused"])
+        self.assertTrue(data["activeExplicitCoalesced"])
+        self.assertEqual(data["latestGenerationBody"], {"snapshot": "generation-3"})
+
+    def test_all_model_execution_entry_points_carry_opaque_route_ref(self):
+        checkpoint_start = APP_SOURCE.index("function makeRunCheckpoint(")
+        checkpoint_end = APP_SOURCE.index("async function persistRunCheckpoint(", checkpoint_start)
+        checkpoint_source = APP_SOURCE[checkpoint_start:checkpoint_end]
+        self.assertIn('routeRef: String(extra.routeRef ?? ctx.routeRef ?? previous.routeRef ?? "")', checkpoint_source)
+        self.assertIn("catalogRevision: Math.max(0, Number(", checkpoint_source)
+        self.assertNotIn("baseUrl", checkpoint_source)
+        self.assertNotIn("keys", checkpoint_source)
+        runtime = RUNTIME_SOURCE
+        self.assertGreaterEqual(
+            runtime.count('? { routeRef, catalogRevision }\n          : { baseUrl, keys }'),
+            2,
+        )
+        self.assertIn('? { routeRef, catalogRevision }\n          : { keys, baseUrl }', runtime)
+        for expected in (
+            'routeRef: String(extra.routeRef ?? ctx.routeRef ?? previous.routeRef ?? "")',
+            'ctx.routeRef = String(runState.routeRef || "")',
+            'routeRef: String(item.routeRef || "")',
+            'routeRef: item.routeRef',
+            'routeRef: String(parentCtx.routeRef || "")',
+            'routeRef: dispatch.routeRef',
+            '"X-Model-Route-Ref": dispatch.routeRef',
+            'generateSessionTitle(userText, {',
+            'status: "waiting_route_selection"',
+            'resumeDispatchesWaitingForRoute(route)',
+            'waitingRouteSelection: true',
+        ):
+            self.assertIn(expected, APP_SOURCE)
+        self.assertIn('routeRef: String(source.routeRef || source.parentCtx?.routeRef || "")', SUBAGENTS_SOURCE)
+        self.assertEqual(APP_SOURCE.count("await getFallbackKeys("), 1)
+        public_catalog = APP_SOURCE[
+            APP_SOURCE.index("function normalizePublicModelRoute("):
+            APP_SOURCE.index("async function modelCatalogDigest(")
+        ]
+        self.assertNotIn("routeRef.split", public_catalog)
+        self.assertNotIn("routeRef.match", public_catalog)
+
+    def test_all_foreground_terminal_paths_publish_before_current_projection_persistence(self):
+        clear_source = APP_SOURCE[
+            APP_SOURCE.index("async function clearRunCheckpoint("):
+            APP_SOURCE.index("function resetRenderCache(")
+        ]
+        continue_source = APP_SOURCE[
+            APP_SOURCE.index("async function continueAgentRun("):
+            APP_SOURCE.index("async function renameSession(")
+        ]
+        recovery_source = APP_SOURCE[
+            APP_SOURCE.index("async function resumePersistedSessionRun("):
+            APP_SOURCE.index("function normalizeUserInputRequest(")
+        ]
+        self.assertLess(
+            clear_source.index("publishTerminalRunOwnership(ctx)"),
+            clear_source.index("getSessionMessages(ctx.sessionId)"),
+        )
+        self.assertNotIn("const msgs = ctx.messages", clear_source)
+        self.assertIn("publishTerminalRunOwnership(ctx);", continue_source)
+        self.assertIn("getSessionMessages(sessionId)", continue_source)
+        self.assertIn("publishTerminalRunOwnership(ctx);", recovery_source)
+        self.assertIn("currentProjection: true", recovery_source)
+        self.assertIn("getSessionMessages(summary.id)", recovery_source)
+        self.assertNotIn("saveSessionState(summary.id, ctx.messages", recovery_source)
+
     def test_model_catalog_cache_restores_and_refreshes_atomically(self):
         catalog_start = APP_SOURCE.index('const MODEL_CATALOG_CACHE_KEY =')
+        route_catalog_start = APP_SOURCE.index('const MODEL_ROUTE_REF_STORAGE_KEY', catalog_start)
+        legacy_catalog_start = APP_SOURCE.index("async function modelCatalogDigest(", route_catalog_start)
         catalog_end = APP_SOURCE.index("function appendSystemError", catalog_start)
-        catalog_source = APP_SOURCE[catalog_start:catalog_end]
+        catalog_source = (
+            APP_SOURCE[catalog_start:route_catalog_start]
+            + APP_SOURCE[legacy_catalog_start:catalog_end]
+        )
         script = f"""
 const values = new Map([
   ["code-model", "old-model"],
@@ -11681,6 +12511,7 @@ const localStorage = {{
   removeItem: (key) => values.delete(key),
 }};
 const state = {{
+  routingV2: false,
   modelKeyMap: {{}},
   modelKeysMap: {{}},
   modelCatalogModels: ["old-model"],
@@ -11855,10 +12686,19 @@ eval({json.dumps(catalog_source)});
 
     def test_model_key_routes_restore_by_fingerprint_and_fail_closed_without_mapping(self):
         key_start = APP_SOURCE.index("function getBestKey(model)")
-        key_end = APP_SOURCE.index("function detectLanguage(", key_start)
+        key_middle = APP_SOURCE.index("async function refreshModelCatalogForDispatch", key_start)
+        fallback_start = APP_SOURCE.index("async function getFallbackKeys(", key_middle)
+        key_end = APP_SOURCE.index("function detectLanguage(", fallback_start)
         catalog_start = APP_SOURCE.index('const MODEL_CATALOG_CACHE_KEY =')
+        route_catalog_start = APP_SOURCE.index('const MODEL_ROUTE_REF_STORAGE_KEY', catalog_start)
+        legacy_catalog_start = APP_SOURCE.index("async function modelCatalogDigest(", route_catalog_start)
         catalog_end = APP_SOURCE.index("function appendSystemError", catalog_start)
-        routing_source = APP_SOURCE[key_start:key_end] + APP_SOURCE[catalog_start:catalog_end]
+        routing_source = (
+            APP_SOURCE[key_start:key_middle]
+            + APP_SOURCE[fallback_start:key_end]
+            + APP_SOURCE[catalog_start:route_catalog_start]
+            + APP_SOURCE[legacy_catalog_start:catalog_end]
+        )
         script = f"""
 Object.defineProperty(globalThis, "crypto", {{
   value: require("node:crypto").webcrypto,
@@ -11880,6 +12720,7 @@ let keyConfig = [
 ];
 const loadKeyConfig = () => keyConfig.map((entry) => ({{...entry}}));
 const state = {{
+  routingV2: false,
   modelKeyMap: {{}}, modelKeysMap: {{}}, modelCatalogModels: [],
   modelCatalogStatusKey: "", modelCatalogSource: "", _modelRouteRefreshPromise: null,
 }};
@@ -11908,6 +12749,7 @@ async function fetch(url, options = {{}}) {{
   const models = key === keyA ? [modelA] : key === keyB ? [modelB] : [];
   return {{ok: true, json: async () => ({{data: models.map((id) => ({{id}}))}})}};
 }}
+async function refreshModelCatalogForDispatch() {{ return refreshModels(); }}
 eval({json.dumps(routing_source)});
 
 (async () => {{
@@ -11968,6 +12810,18 @@ eval({json.dumps(routing_source)});
   try {{ await getFallbackKeys(modelA); }} catch (error) {{ expiredError = error.code || error.message; }}
   const expiredFetchDelta = fetchCalls - beforeExpiredDispatch;
 
+  fetchMode = "live";
+  state.modelKeyMap = {{}};
+  state.modelKeysMap = {{}};
+  const beforeSharedRefresh = fetchCalls;
+  const startupRefresh = refreshModels();
+  const manualRefresh = refreshModels();
+  const dispatchRefresh = getFallbackKeys(modelA);
+  const sharedRefreshPromise = startupRefresh === manualRefresh;
+  const sharedRefreshResult = await Promise.all([startupRefresh, manualRefresh, dispatchRefresh]);
+  const sharedRefreshFetchDelta = fetchCalls - beforeSharedRefresh;
+
+  fetchMode = "failure";
   state.modelKeyMap = {{}};
   state.modelKeysMap = {{}};
   const beforeCoalesced = fetchCalls;
@@ -11994,6 +12848,9 @@ eval({json.dumps(routing_source)});
     legacyFetchDelta,
     expiredError,
     expiredFetchDelta,
+    sharedRefreshPromise,
+    sharedRefreshFetchDelta,
+    sharedRefreshDispatchRoute: sharedRefreshResult[2],
     coalescedRejected: coalesced.every((entry) => entry.status === "rejected"),
     coalescedFetchDelta,
     modelsOnly: requestedPaths.every((path) => path === "/proxy/models"),
@@ -12025,9 +12882,159 @@ eval({json.dumps(routing_source)});
         self.assertEqual(data["legacyFetchDelta"], 1)
         self.assertEqual(data["expiredError"], "trusted_model_keys_unavailable")
         self.assertEqual(data["expiredFetchDelta"], 1)
+        self.assertTrue(data["sharedRefreshPromise"])
+        self.assertEqual(data["sharedRefreshFetchDelta"], 1)
+        self.assertEqual(data["sharedRefreshDispatchRoute"], ["synthetic-route-key-a"])
         self.assertTrue(data["coalescedRejected"])
         self.assertEqual(data["coalescedFetchDelta"], 1)
         self.assertTrue(data["modelsOnly"])
+
+    def test_model_catalog_refresh_has_per_key_and_total_deadlines(self):
+        source_start = APP_SOURCE.index("const MODEL_CATALOG_KEY_TIMEOUT_MS")
+        source_end = APP_SOURCE.index("async function performModelCatalogRefresh", source_start)
+        deadline_source = APP_SOURCE[source_start:source_end]
+        script = f"""
+let now = 0;
+Date.now = () => now;
+let nextTimerId = 1;
+const timers = new Map();
+let scheduledDelays = [];
+let clearedTimerIds = [];
+let abortCount = 0;
+let fetchKeys = [];
+let mode = "timeout";
+function setTimeout(callback, delay) {{
+  const id = nextTimerId++;
+  timers.set(id, {{callback, delay}});
+  scheduledDelays.push(delay);
+  return id;
+}}
+function clearTimeout(id) {{
+  clearedTimerIds.push(id);
+  timers.delete(id);
+}}
+class AbortController {{
+  constructor() {{
+    const listeners = [];
+    this.signal = {{
+      aborted: false,
+      addEventListener: (type, callback) => {{
+        if (type === "abort") listeners.push(callback);
+      }},
+      _listeners: listeners,
+    }};
+  }}
+  abort() {{
+    if (this.signal.aborted) return;
+    this.signal.aborted = true;
+    abortCount += 1;
+    for (const callback of this.signal._listeners) callback();
+  }}
+}}
+function fetch(_url, options) {{
+  const key = String(options.headers.Authorization || "").replace(/^Bearer\\s+/, "");
+  fetchKeys.push(key);
+  if (mode === "success") {{
+    return Promise.resolve({{ok: true, json: async () => ({{data: []}})}});
+  }}
+  return new Promise((_resolve, reject) => {{
+    options.signal.addEventListener("abort", () => {{
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    }});
+  }});
+}}
+{deadline_source}
+async function runNextTimer() {{
+  for (let index = 0; index < 20 && timers.size === 0; index += 1) {{
+    await Promise.resolve();
+  }}
+  const next = timers.entries().next().value;
+  if (!next) throw new Error("expected a pending timeout");
+  const [id, timer] = next;
+  timers.delete(id);
+  now += timer.delay;
+  timer.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+}}
+(async () => {{
+  const timeoutResults = [];
+  const timeoutScan = scanModelCatalogKeys(
+    ["key-a", "key-b", "key-c", "key-d"],
+    "https://workbar.ai",
+    async (key) => timeoutResults.push(key),
+  );
+  await runNextTimer();
+  await runNextTimer();
+  await runNextTimer();
+  const timeoutSummary = await timeoutScan;
+  const timedOut = {{
+    timeoutSummary,
+    scheduledDelays: [...scheduledDelays],
+    clearedCount: clearedTimerIds.length,
+    abortCount,
+    fetchKeys: [...fetchKeys],
+    callbackCount: timeoutResults.length,
+    activeTimers: timers.size,
+    elapsed: now,
+  }};
+
+  mode = "success";
+  now = 0;
+  scheduledDelays = [];
+  clearedTimerIds = [];
+  abortCount = 0;
+  fetchKeys = [];
+  const successResults = [];
+  const successSummary = await scanModelCatalogKeys(
+    ["key-a", "key-b"],
+    "https://workbar.ai",
+    async (key) => successResults.push(key),
+  );
+  process.stdout.write(JSON.stringify({{
+    constants: {{
+      perKey: MODEL_CATALOG_KEY_TIMEOUT_MS,
+      total: MODEL_CATALOG_TOTAL_TIMEOUT_MS,
+    }},
+    timedOut,
+    success: {{
+      successSummary,
+      scheduledDelays,
+      clearedCount: clearedTimerIds.length,
+      abortCount,
+      fetchKeys,
+      callbackKeys: successResults,
+      activeTimers: timers.size,
+    }},
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["constants"], {"perKey": 12000, "total": 30000})
+        self.assertEqual(data["timedOut"], {
+            "timeoutSummary": {"attempted": 3, "deadlineReached": True},
+            "scheduledDelays": [12000, 12000, 6000],
+            "clearedCount": 3,
+            "abortCount": 3,
+            "fetchKeys": ["key-a", "key-b", "key-c"],
+            "callbackCount": 0,
+            "activeTimers": 0,
+            "elapsed": 30000,
+        })
+        self.assertEqual(data["success"], {
+            "successSummary": {"attempted": 2, "deadlineReached": False},
+            "scheduledDelays": [12000, 12000],
+            "clearedCount": 2,
+            "abortCount": 0,
+            "fetchKeys": ["key-a", "key-b"],
+            "callbackKeys": ["key-a", "key-b"],
+            "activeTimers": 0,
+        })
 
     def test_key_persistence_is_isolated_from_general_settings_and_syncs_across_tabs(self):
         save_start = APP_SOURCE.index("function saveLocalSettings(")
@@ -17412,7 +18419,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("clearActiveRunTimerCheckpoint(sessionId);", APP_SOURCE)
 
     def test_first_send_projects_user_before_session_creation(self):
-        helper_start = APP_SOURCE.index("function projectOptimisticFirstMessage")
+        helper_start = APP_SOURCE.index("function foregroundDispatchId")
         helper_end = APP_SOURCE.index("async function sendMessage", helper_start)
         helper = APP_SOURCE[helper_start:helper_end]
         self.assertIn("state.messages.push(message);", helper)
@@ -17424,7 +18431,11 @@ process.stdout.write(JSON.stringify({{
         send = APP_SOURCE[send_start:send_end]
         projection_index = send.index("projectOptimisticFirstMessage(")
         create_index = send.index("await createSession(")
+        persist_index = send.index("persistMessages: true")
+        route_index = send.index("await getModelDispatchCredentials(model")
         self.assertLess(projection_index, create_index)
+        self.assertLess(create_index, persist_index)
+        self.assertLess(persist_index, route_index)
         self.assertIn("initialMessages: state.messages", send)
         self.assertIn("deferSidebarRefresh: true", send)
         self.assertIn("reconcileOptimisticFirstMessage(", send)
@@ -17435,7 +18446,7 @@ process.stdout.write(JSON.stringify({{
         )
 
     def test_optimistic_first_message_reuses_one_message_object(self):
-        helper_start = APP_SOURCE.index("function projectOptimisticFirstMessage")
+        helper_start = APP_SOURCE.index("function foregroundDispatchId")
         helper_end = APP_SOURCE.index("async function sendMessage", helper_start)
         helper = APP_SOURCE[helper_start:helper_end]
         script = f"""
@@ -17484,6 +18495,1398 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(data["content"], "hello")
         self.assertEqual(data["images"], ["attachments/image.png"])
         self.assertFalse(data["pending"])
+
+    def test_foreground_dispatch_persists_before_route_and_retries_exactly_once(self):
+        helper_start = APP_SOURCE.index("function foregroundDispatchId")
+        helper_end = APP_SOURCE.index("function getSelectedModel()", helper_start)
+        source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const source = {json.dumps(source)};
+const state = {{
+  sessionId: "session-1",
+  messages: [],
+  attachedImages: [],
+  skills: [],
+  disabledSkills: new Set(),
+}};
+let run = null;
+let renderCount = 0;
+let agentRunCreates = 0;
+let saves = [];
+let routePromise = null;
+let routeReachedResolve = null;
+let routeReached = null;
+const els = {{
+  sessionTitle: {{value: "Existing session"}},
+}};
+const messageScrollController = {{beginReadingAnchor() {{}}}};
+const goalFeature = {{
+  classifyGoalInput: () => null,
+  refresh: async () => {{}},
+}};
+const t = (key) => key;
+const getSelectedModel = () => "trusted-model";
+const getMsgText = (message) => Array.isArray(message?.content)
+  ? String(message.content.find((item) => item?.type === "text")?.text || "")
+  : String(message?.content || "");
+const getSessionMessages = () => state.messages;
+const setSessionMessages = (_sessionId, messages) => {{ state.messages = messages; }};
+const getSessionStats = () => ({{}});
+function ensureSessionRun() {{
+  if (!run) run = {{isStreaming: false, abortController: null, cancelRequested: false}};
+  return run;
+}}
+function buildRunContext(sessionId, options) {{
+  const activeRun = ensureSessionRun();
+  return {{
+    sessionId,
+    run: activeRun,
+    messages: state.messages,
+    stats: {{}},
+    model: options.model || getSelectedModel(),
+    permissionProfile: "accept",
+    clientRequestId: "foreground-session-1-test",
+  }};
+}}
+function resetRenderCache() {{}}
+function renderMessages() {{ renderCount += 1; }}
+function renderSessionMessages() {{ renderCount += 1; }}
+function renderImageThumbs() {{}}
+function clearAttachedImages() {{ state.attachedImages = []; }}
+async function resolveAtImages() {{}}
+async function uploadImagesForStorage() {{ return []; }}
+async function createSession() {{ throw new Error("unexpected session creation"); }}
+function isAutoSessionTitle() {{ return false; }}
+function makeSessionTitle(value) {{ return value; }}
+function generateSessionTitle() {{}}
+function claimActiveRunContext(ctx) {{
+  if (ctx.run._activeCtx && ctx.run._activeCtx !== ctx) return false;
+  ctx.run._activeCtx = ctx;
+  return true;
+}}
+function ownsActiveRunContext(ctx) {{ return ctx.run._activeCtx === ctx; }}
+function releaseActiveRunContext(ctx) {{
+  if (!ownsActiveRunContext(ctx)) return false;
+  ctx.run._activeCtx = null;
+  return true;
+}}
+function publishTerminalRunOwnership(ctx) {{
+  if (!ownsActiveRunContext(ctx)) return false;
+  setStreaming(false, ctx.sessionId);
+  return releaseActiveRunContext(ctx);
+}}
+function setStreaming(active) {{
+  const activeRun = ensureSessionRun();
+  activeRun.isStreaming = active;
+  state.isStreaming = active;
+  if (!active) activeRun.abortController = null;
+}}
+function scheduleDeferredSessionRefresh() {{}}
+function syncActiveRunBanner() {{}}
+async function saveSessionState(_sessionId, messages, _stats, _title, options = {{}}) {{
+  saves.push({{
+    persistMessages: options.persistMessages === true,
+    messageCount: messages.length,
+    dispatchStatus: messages.find((message) => message?.role === "user")?.meta?.pendingDispatch?.status || "",
+  }});
+}}
+async function getModelDispatchCredentials() {{
+  routeReachedResolve();
+  const keys = await routePromise;
+  return {{routeRef: "", catalogRevision: 0, keys, baseUrl: "https://workbar.ai"}};
+}}
+function modelRouteFailureCode() {{ return ""; }}
+function invalidateModelRoute() {{}}
+async function persistRunCheckpoint() {{}}
+async function clearRunCheckpoint() {{}}
+async function executeRunContext() {{ agentRunCreates += 1; }}
+function scheduleTerminalFileTreeRefresh() {{}}
+function renderSessions() {{}}
+function notifyTaskComplete() {{}}
+function archiveAgentProjectionShadow() {{}}
+function hasImageContent() {{ return false; }}
+eval(source);
+
+function prepareRoute() {{
+  routeReached = new Promise((resolve) => {{ routeReachedResolve = resolve; }});
+  let resolveRoute;
+  let rejectRoute;
+  routePromise = new Promise((resolve, reject) => {{ resolveRoute = resolve; rejectRoute = reject; }});
+  return {{resolveRoute, rejectRoute}};
+}}
+function resetScenario() {{
+  state.messages = [];
+  state.attachedImages = [];
+  state.isStreaming = false;
+  run = null;
+  renderCount = 0;
+  agentRunCreates = 0;
+  saves = [];
+}}
+
+(async () => {{
+  resetScenario();
+  const successRoute = prepareRoute();
+  const successPromise = sendMessage("hello");
+  await routeReached;
+  const beforeRelease = {{
+    userMessages: state.messages.filter((message) => message.role === "user").length,
+    dispatchStatus: state.messages[0]?.meta?.pendingDispatch?.status,
+    renderCount,
+    persisted: saves.some((entry) => entry.persistMessages && entry.messageCount === 1),
+    agentRunCreates,
+    streaming: state.isStreaming,
+  }};
+  successRoute.resolveRoute(["synthetic-trusted-key"]);
+  await successPromise;
+  const afterSuccess = {{
+    userMessages: state.messages.filter((message) => message.role === "user").length,
+    pendingCleared: !state.messages[0]?.meta?.pendingDispatch,
+    agentRunCreates,
+    finalPersisted: saves.at(-1)?.persistMessages === true,
+  }};
+
+  resetScenario();
+  const failedRoute = prepareRoute();
+  const failedPromise = sendMessage("retry me").catch((error) => error);
+  await routeReached;
+  const routeError = new Error("route unavailable");
+  routeError.code = "trusted_model_keys_unavailable";
+  failedRoute.rejectRoute(routeError);
+  const failedError = await failedPromise;
+  const failedMessage = state.messages[0];
+  const failedDispatchId = failedMessage.meta.pendingDispatch.id;
+  const failedStatusBeforeRetry = failedMessage.meta.pendingDispatch.status;
+  const failedPersisted = saves.some((entry) => (
+    entry.persistMessages && entry.dispatchStatus === "failed"
+  ));
+  state.messages.push({{
+    role: "assistant",
+    content: "route unavailable",
+    meta: {{kind: "dispatch-error", pendingDispatchId: failedDispatchId}},
+  }});
+  const retryCandidate = findRetryableForegroundDispatch(
+    "session-1", "retry me", "trusted-model",
+  );
+  const retryRoute = prepareRoute();
+  const retryPromise = sendMessage("retry me", {{retryMessage: retryCandidate}});
+  await routeReached;
+  const beforeRetryRelease = {{
+    sameMessage: state.messages[0] === failedMessage,
+    userMessages: state.messages.filter((message) => message.role === "user").length,
+    staleErrors: state.messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+    agentRunCreates,
+  }};
+  retryRoute.resolveRoute(["synthetic-trusted-key"]);
+  await retryPromise;
+  const afterRetry = {{
+    userMessages: state.messages.filter((message) => message.role === "user").length,
+    agentRunCreates,
+    pendingCleared: !failedMessage.meta?.pendingDispatch,
+  }};
+
+  process.stdout.write(JSON.stringify({{
+    beforeRelease,
+    afterSuccess,
+    failure: {{
+      code: failedError.code,
+      userMessages: beforeRetryRelease.userMessages,
+      status: failedStatusBeforeRetry,
+      persisted: failedPersisted,
+      retryCandidateMatched: retryCandidate === failedMessage,
+      noAgentRunBeforeRetry: beforeRetryRelease.agentRunCreates === 0,
+    }},
+    beforeRetryRelease,
+    afterRetry,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["beforeRelease"], {
+            "userMessages": 1,
+            "dispatchStatus": "routing",
+            "renderCount": 2,
+            "persisted": True,
+            "agentRunCreates": 0,
+            "streaming": True,
+        })
+        self.assertEqual(data["afterSuccess"], {
+            "userMessages": 1,
+            "pendingCleared": True,
+            "agentRunCreates": 1,
+            "finalPersisted": True,
+        })
+        self.assertEqual(data["failure"]["code"], "trusted_model_keys_unavailable")
+        self.assertEqual(data["failure"]["status"], "failed")
+        self.assertTrue(data["failure"]["persisted"])
+        self.assertTrue(data["failure"]["retryCandidateMatched"])
+        self.assertTrue(data["failure"]["noAgentRunBeforeRetry"])
+        self.assertTrue(data["beforeRetryRelease"]["sameMessage"])
+        self.assertEqual(data["beforeRetryRelease"]["userMessages"], 1)
+        self.assertEqual(data["beforeRetryRelease"]["staleErrors"], 0)
+        self.assertEqual(data["afterRetry"], {
+            "userMessages": 1,
+            "agentRunCreates": 1,
+            "pendingCleared": True,
+        })
+
+    def test_foreground_dispatch_reload_reconciles_success_without_duplicate_errors(self):
+        reconcile_start = APP_SOURCE.index("function reconcileInterruptedForegroundDispatch")
+        reconcile_end = APP_SOURCE.index("function syncActiveStreamingState", reconcile_start)
+        reconcile_source = APP_SOURCE[reconcile_start:reconcile_end]
+        settle_start = APP_SOURCE.index(
+            "async function settleForegroundDispatchAfterAgentRunCreated",
+        )
+        settle_end = APP_SOURCE.index("async function runServerAgentLoop", settle_start)
+        settle_source = APP_SOURCE[settle_start:settle_end]
+        loop_end = APP_SOURCE.index("while (true)", settle_end)
+        agent_create_source = APP_SOURCE[settle_end:loop_end]
+        created_index = agent_create_source.index(
+            'ctx.agentRunId = String(created.agentRunId || "")',
+        )
+        checkpoint_index = agent_create_source.index(
+            'await persistRunCheckpoint(ctx, "running", "model"',
+        )
+        settle_index = agent_create_source.index(
+            "await settleForegroundDispatchAfterAgentRunCreated(ctx)",
+        )
+        callback_index = agent_create_source.index(
+            "await onAgentRunCreated({ agentRunId: ctx.agentRunId, sessionId: ctx.sessionId })",
+        )
+        self.assertLess(created_index, checkpoint_index)
+        self.assertLess(checkpoint_index, settle_index)
+        self.assertLess(settle_index, callback_index)
+        send_start = APP_SOURCE.index("async function sendMessage(")
+        send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
+        send_source = APP_SOURCE[send_start:send_end]
+        execute_index = send_source.index("await executeRunContext(ctx)")
+        clear_pending_index = send_source.index(
+            "delete foregroundOriginMessage.meta.pendingDispatch",
+            execute_index,
+        )
+        terminal_branch_index = send_source.index("if (loopError)", clear_pending_index)
+        clear_checkpoint_index = send_source.index(
+            "await clearRunCheckpoint(ctx)",
+            terminal_branch_index,
+        )
+        self.assertLess(clear_pending_index, terminal_branch_index)
+        self.assertLess(clear_pending_index, clear_checkpoint_index)
+
+        script = f"""
+const reconcileSource = {json.dumps(reconcile_source)};
+const settleSource = {json.dumps(settle_source)};
+const sessionId = "session-1";
+let messages = [];
+let runState = {{}};
+let saveCount = 0;
+const t = (key) => key;
+const locallyOwnedDispatches = new Set();
+const isForegroundDispatchLocallyOwned = (message) => locallyOwnedDispatches.has(
+  String(message?.meta?.pendingDispatch?.id || ""),
+);
+const getSessionMessages = () => messages;
+const setSessionMessages = (_sessionId, next) => {{ messages = next; }};
+const getSessionRunState = () => runState;
+const getSessionStats = () => ({{}});
+const saveSessionState = async () => {{ saveCount += 1; }};
+const queueMicrotask = (callback) => callback();
+eval(reconcileSource);
+eval(settleSource);
+async function settleMicrotasks() {{
+  await Promise.resolve();
+  await Promise.resolve();
+}}
+async function runScenario(nextMessages, nextRunState = {{}}, run = {{}}) {{
+  messages = structuredClone(nextMessages);
+  runState = structuredClone(nextRunState);
+  saveCount = 0;
+  const first = reconcileInterruptedForegroundDispatch(sessionId, run);
+  await settleMicrotasks();
+  const second = reconcileInterruptedForegroundDispatch(sessionId, run);
+  await settleMicrotasks();
+  return {{
+    first,
+    second,
+    saveCount,
+    userDispatch: messages.find((message) => message.role === "user")?.meta?.pendingDispatch || null,
+    userGoalOrigin: messages.find((message) => message.role === "user")?.meta?.goalOrigin || null,
+    errorIds: messages.filter((message) => message.meta?.kind === "dispatch-error")
+      .map((message) => message.meta.pendingDispatchId),
+  }};
+}}
+(async () => {{
+  messages = [{{
+    role: "user",
+    content: "created request",
+    meta: {{pendingDispatch: {{id: "created-dispatch", status: "ready"}}}},
+  }}];
+  saveCount = 0;
+  const createdContext = {{
+    sessionId,
+    messages,
+    stats: {{}},
+    foregroundOriginMessage: messages[0],
+  }};
+  const settledAtAgentCreate = await settleForegroundDispatchAfterAgentRunCreated(
+    createdContext,
+  );
+  messages.push({{
+    role: "assistant",
+    content: "created final",
+    streaming: true,
+    meta: {{agentEventType: "model_completed"}},
+  }});
+  runState = {{}};
+  const createdReloadChanged = reconcileInterruptedForegroundDispatch(sessionId, {{}});
+  await settleMicrotasks();
+  const agentCreatedBoundary = {{
+    settledAtAgentCreate,
+    createdReloadChanged,
+    saveCount,
+    pending: messages[0].meta?.pendingDispatch || null,
+    errorIds: messages.filter((message) => message.meta?.kind === "dispatch-error")
+      .map((message) => message.meta.pendingDispatchId),
+  }};
+  const successfulReload = await runScenario([
+    {{
+      role: "user",
+      content: "trusted request",
+      meta: {{
+        pendingDispatch: {{id: "success-dispatch", status: "ready"}},
+        goalOrigin: {{messageId: "origin-1"}},
+      }},
+    }},
+    {{role: "assistant", content: "trusted final answer"}},
+  ]);
+  locallyOwnedDispatches.add("local-submit");
+  const localSubmit = await runScenario([{{
+    role: "user",
+    content: "new session submit",
+    meta: {{
+      pendingSessionCreation: true,
+      pendingDispatch: {{id: "local-submit", status: "routing"}},
+    }},
+  }}]);
+  locallyOwnedDispatches.delete("local-submit");
+  const historicalRouting = await runScenario([{{
+    role: "user",
+    content: "historic interrupted submit",
+    meta: {{pendingDispatch: {{id: "local-submit", status: "routing"}}}},
+  }}]);
+  const routingInterrupted = await runScenario([
+    {{
+      role: "user",
+      content: "routing request",
+      meta: {{pendingDispatch: {{id: "routing-dispatch", status: "routing"}}}},
+    }},
+  ]);
+  const readyWithoutRun = await runScenario([
+    {{
+      role: "user",
+      content: "ready request",
+      meta: {{pendingDispatch: {{id: "ready-dispatch", status: "ready"}}}},
+    }},
+  ]);
+  const staleStreamingTerminal = await runScenario([
+    {{
+      role: "user",
+      content: "stale terminal request",
+      meta: {{pendingDispatch: {{id: "stale-terminal", status: "ready"}}}},
+    }},
+    {{
+      role: "assistant",
+      content: "persisted final",
+      streaming: true,
+      meta: {{agentEventType: "model_completed"}},
+    }},
+  ]);
+  const actualHalfStream = await runScenario([
+    {{
+      role: "user",
+      content: "half stream request",
+      meta: {{pendingDispatch: {{id: "half-stream", status: "ready"}}}},
+    }},
+    {{
+      role: "assistant",
+      content: "partial answer",
+      streaming: true,
+      meta: {{agentEventType: "model_started"}},
+    }},
+  ]);
+  const activeCheckpoint = await runScenario([
+    {{
+      role: "user",
+      content: "active request",
+      meta: {{pendingDispatch: {{id: "active-dispatch", status: "ready"}}}},
+    }},
+  ], {{agentRunId: "agent-run-1"}});
+  process.stdout.write(JSON.stringify({{
+    agentCreatedBoundary,
+    successfulReload,
+    localSubmit,
+    historicalRouting,
+    routingInterrupted,
+    readyWithoutRun,
+    staleStreamingTerminal,
+    actualHalfStream,
+    activeCheckpoint,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["agentCreatedBoundary"], {
+            "settledAtAgentCreate": True,
+            "createdReloadChanged": False,
+            "saveCount": 1,
+            "pending": None,
+            "errorIds": [],
+        })
+        self.assertEqual(data["successfulReload"], {
+            "first": True,
+            "second": False,
+            "saveCount": 1,
+            "userDispatch": None,
+            "userGoalOrigin": {"messageId": "origin-1"},
+            "errorIds": [],
+        })
+        self.assertEqual(data["localSubmit"], {
+            "first": False,
+            "second": False,
+            "saveCount": 0,
+            "userDispatch": {
+                "id": "local-submit",
+                "status": "routing",
+            },
+            "userGoalOrigin": None,
+            "errorIds": [],
+        })
+        self.assertEqual(data["historicalRouting"]["userDispatch"]["status"], "failed")
+        self.assertEqual(data["historicalRouting"]["errorIds"], ["local-submit"])
+        self.assertEqual(data["routingInterrupted"]["userDispatch"]["status"], "failed")
+        self.assertEqual(
+            data["routingInterrupted"]["userDispatch"]["reason"],
+            "dispatch_interrupted",
+        )
+        self.assertEqual(data["routingInterrupted"]["errorIds"], ["routing-dispatch"])
+        self.assertEqual(data["routingInterrupted"]["saveCount"], 1)
+        self.assertFalse(data["routingInterrupted"]["second"])
+        self.assertEqual(data["readyWithoutRun"]["userDispatch"]["status"], "failed")
+        self.assertEqual(data["readyWithoutRun"]["errorIds"], ["ready-dispatch"])
+        self.assertEqual(data["staleStreamingTerminal"], {
+            "first": True,
+            "second": False,
+            "saveCount": 1,
+            "userDispatch": None,
+            "userGoalOrigin": None,
+            "errorIds": [],
+        })
+        self.assertEqual(data["actualHalfStream"]["userDispatch"]["status"], "failed")
+        self.assertEqual(data["actualHalfStream"]["errorIds"], ["half-stream"])
+        self.assertEqual(data["activeCheckpoint"], {
+            "first": True,
+            "second": False,
+            "saveCount": 1,
+            "userDispatch": None,
+            "userGoalOrigin": None,
+            "errorIds": [],
+        })
+
+    def test_new_session_optimistic_dispatch_owns_late_startup_recovery(self):
+        helper_start = APP_SOURCE.index("function foregroundDispatchId")
+        helper_end = APP_SOURCE.index("async function sendMessage", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        reconcile_start = APP_SOURCE.index("function reconcileInterruptedForegroundDispatch")
+        reconcile_end = APP_SOURCE.index("async function hydrateForegroundDispatchRecovery", reconcile_start)
+        reconcile_source = APP_SOURCE[reconcile_start:reconcile_end]
+        script = f"""
+const helperSource = {json.dumps(helper_source)};
+const reconcileSource = {json.dumps(reconcile_source)};
+const state = {{sessionId: null, messages: [], _foregroundDispatchOwnerships: new Set()}};
+let messages = state.messages;
+let runState = {{}};
+let saves = 0;
+const t = (key) => key;
+const getMsgText = (message) => String(message?.content || "");
+const getSessionMessages = () => messages;
+const setSessionMessages = (_sessionId, next) => {{ messages = next; state.messages = next; }};
+const getSessionRunState = () => runState;
+const getSessionStats = () => ({{}});
+const saveSessionState = async () => {{ saves += 1; }};
+const queueMicrotask = (callback) => callback();
+function resetRenderCache() {{}}
+function renderMessages() {{}}
+eval(helperSource);
+eval(reconcileSource);
+async function settle() {{ await Promise.resolve(); await Promise.resolve(); }}
+
+(async () => {{
+  const optimistic = projectOptimisticFirstMessage(
+    "first session task",
+    "trusted-model",
+    Date.parse("2026-08-26T08:00:00Z"),
+  );
+  const persistedHistorical = structuredClone(state.messages);
+  delete persistedHistorical[0].meta.pendingSessionCreation;
+  state.sessionId = "new-session";
+  setSessionMessages(state.sessionId, state.messages);
+  const lateRecoveryChanged = reconcileInterruptedForegroundDispatch(state.sessionId, {{}});
+  await settle();
+  const duringCreate = {{
+    changed: lateRecoveryChanged,
+    status: optimistic.meta.pendingDispatch.status,
+    errors: messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+    saves,
+  }};
+
+  reconcileOptimisticFirstMessage(optimistic, optimistic.content, [], "trusted-model");
+  const activeContextChanged = reconcileInterruptedForegroundDispatch(
+    state.sessionId,
+    {{_activeCtx: {{clientRequestId: "active-submit"}}}},
+  );
+  await settle();
+  const afterContextClaim = {{
+    changed: activeContextChanged,
+    owned: isForegroundDispatchLocallyOwned(optimistic),
+    status: optimistic.meta.pendingDispatch.status,
+    errors: messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+    saves,
+  }};
+
+  state._foregroundDispatchOwnerships = new Set();
+  setSessionMessages(state.sessionId, persistedHistorical);
+  const historicChanged = reconcileInterruptedForegroundDispatch(state.sessionId, {{}});
+  await settle();
+  process.stdout.write(JSON.stringify({{
+    duringCreate,
+    afterContextClaim,
+    historic: {{
+      changed: historicChanged,
+      status: messages[0].meta.pendingDispatch.status,
+      errors: messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+      saves,
+    }},
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["duringCreate"], {
+            "changed": False,
+            "status": "routing",
+            "errors": 0,
+            "saves": 0,
+        })
+        self.assertEqual(data["afterContextClaim"], {
+            "changed": False,
+            "owned": False,
+            "status": "routing",
+            "errors": 0,
+            "saves": 0,
+        })
+        self.assertEqual(data["historic"], {
+            "changed": True,
+            "status": "failed",
+            "errors": 1,
+            "saves": 1,
+        })
+
+    def test_foreground_dispatch_waits_for_authoritative_recovery_hydration(self):
+        reconcile_start = APP_SOURCE.index("function reconcileInterruptedForegroundDispatch")
+        reconcile_end = APP_SOURCE.index("async function hydrateForegroundDispatchRecovery", reconcile_start)
+        reconcile_source = APP_SOURCE[reconcile_start:reconcile_end]
+        hydrate_start = reconcile_end
+        hydrate_end = APP_SOURCE.index("function syncActiveStreamingState", hydrate_start)
+        hydrate_source = APP_SOURCE[hydrate_start:hydrate_end]
+        script = f"""
+const reconcileSource = {json.dumps(reconcile_source)};
+const hydrateSource = {json.dumps(hydrate_source)};
+const state = {{sessionId: "session-1", _foregroundRecoveryHydrated: false}};
+let messages = [];
+let runState = {{}};
+let authoritative = null;
+let getError = null;
+let saves = 0;
+const t = (key) => key;
+const clone = (value) => structuredClone(value);
+const getSessionMessages = () => messages;
+const setSessionMessages = (_sessionId, next) => {{ messages = next; }};
+const getSessionRunState = () => runState;
+const getSessionStats = () => ({{}});
+const isForegroundDispatchLocallyOwned = () => false;
+const getSessionRecord = async () => {{
+  if (getError) throw getError;
+  return clone(authoritative);
+}};
+const applyAuthoritativeSessionSnapshot = (_sessionId, session) => {{
+  messages = clone(session.messages || []);
+  runState = clone(session.runState || {{}});
+  return true;
+}};
+const saveSessionState = async () => {{
+  saves += 1;
+  authoritative = {{
+    id: state.sessionId,
+    messages: clone(messages),
+    runState: clone(runState),
+  }};
+}};
+const queueMicrotask = (callback) => callback();
+const ensureSessionRun = () => ({{}});
+function syncActiveStreamingState() {{
+  if (state._foregroundRecoveryHydrated !== false) {{
+    reconcileInterruptedForegroundDispatch(state.sessionId, ensureSessionRun());
+  }}
+}}
+eval(reconcileSource);
+eval(hydrateSource);
+const dispatchState = () => ({{
+  hydrated: state._foregroundRecoveryHydrated,
+  pending: messages.find((message) => message.role === "user")?.meta?.pendingDispatch || null,
+  errors: messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+  finals: messages.filter((message) => (
+    message.role === "assistant" && message.meta?.kind !== "dispatch-error"
+  )).length,
+  saves,
+}});
+const pending = (status, id) => [{{
+  role: "user",
+  content: id,
+  meta: {{pendingDispatch: {{id, status}}}},
+}}];
+(async () => {{
+  messages = pending("ready", "terminal");
+  authoritative = {{
+    id: state.sessionId,
+    messages: [
+      {{role: "user", content: "terminal"}},
+      {{role: "assistant", content: "authoritative final"}},
+    ],
+    runState: {{agentRunId: "agent-terminal", status: "completed"}},
+  }};
+  state._foregroundRecoveryHydrated = false;
+  saves = 0;
+  const terminalResult = await hydrateForegroundDispatchRecovery();
+  await Promise.resolve();
+  const terminal = {{result: terminalResult, ...dispatchState()}};
+
+  messages = pending("ready", "durable");
+  authoritative = {{
+    id: state.sessionId,
+    messages: pending("ready", "durable"),
+    runState: {{agentRunId: "agent-active", status: "running"}},
+  }};
+  state._foregroundRecoveryHydrated = false;
+  saves = 0;
+  const durableResult = await hydrateForegroundDispatchRecovery();
+  await Promise.resolve();
+  const durable = {{result: durableResult, ...dispatchState()}};
+
+  messages = pending("routing", "missing");
+  authoritative = {{
+    id: state.sessionId,
+    messages: pending("routing", "missing"),
+    runState: {{}},
+  }};
+  state._foregroundRecoveryHydrated = false;
+  saves = 0;
+  const missingResult = await hydrateForegroundDispatchRecovery();
+  await Promise.resolve();
+  syncActiveStreamingState();
+  await Promise.resolve();
+  const missing = {{result: missingResult, ...dispatchState()}};
+
+  messages = pending("routing", "transient");
+  authoritative = null;
+  getError = new Error("temporary GET failure");
+  state._foregroundRecoveryHydrated = false;
+  saves = 0;
+  const originalWarn = console.warn;
+  console.warn = () => {{}};
+  const transientResult = await hydrateForegroundDispatchRecovery();
+  console.warn = originalWarn;
+  const transient = {{result: transientResult, ...dispatchState()}};
+
+  process.stdout.write(JSON.stringify({{terminal, durable, missing, transient}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["terminal"], {
+            "result": True,
+            "hydrated": True,
+            "pending": None,
+            "errors": 0,
+            "finals": 1,
+            "saves": 0,
+        })
+        self.assertEqual(data["durable"]["result"], True)
+        self.assertTrue(data["durable"]["hydrated"])
+        self.assertIsNone(data["durable"]["pending"])
+        self.assertEqual(data["durable"]["errors"], 0)
+        self.assertEqual(data["durable"]["saves"], 1)
+        self.assertEqual(data["missing"]["result"], True)
+        self.assertTrue(data["missing"]["hydrated"])
+        self.assertEqual(data["missing"]["pending"]["status"], "failed")
+        self.assertEqual(data["missing"]["errors"], 1)
+        self.assertEqual(data["missing"]["saves"], 1)
+        self.assertEqual(data["transient"]["result"], False)
+        self.assertFalse(data["transient"]["hydrated"])
+        self.assertEqual(data["transient"]["pending"]["status"], "routing")
+        self.assertEqual(data["transient"]["errors"], 0)
+        self.assertEqual(data["transient"]["saves"], 0)
+
+    def test_cross_page_session_writers_reproduce_dispatch_error_pollution(self):
+        helper_start = APP_SOURCE.index("function foregroundDispatchId")
+        helper_end = APP_SOURCE.index("function ensureForegroundGoalOrigin", helper_start)
+        optimistic_source = APP_SOURCE[helper_start:helper_end]
+        reconcile_start = APP_SOURCE.index("function reconcileInterruptedForegroundDispatch")
+        reconcile_end = APP_SOURCE.index("function syncActiveStreamingState", reconcile_start)
+        reconcile_source = APP_SOURCE[reconcile_start:reconcile_end]
+        settle_start = APP_SOURCE.index(
+            "async function settleForegroundDispatchAfterAgentRunCreated",
+        )
+        settle_end = APP_SOURCE.index("async function runServerAgentLoop", settle_start)
+        settle_source = APP_SOURCE[settle_start:settle_end]
+        script = f"""
+global.window = {{}};
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+const {{buildSessionSavePayload, createSessionPersistence}} = window.Code.services.persistence;
+const optimisticSource = {json.dumps(optimistic_source)};
+const reconcileSource = {json.dumps(reconcile_source)};
+const settleSource = {json.dumps(settle_source)};
+const sessionId = "cross-page-session";
+const state = {{sessionId, messages: []}};
+let pageBMessages = [];
+let pageBRunState = {{}};
+const timeline = [];
+const releases = new Map();
+const sourceOrdinals = {{old: 0, fresh: 0}};
+let startSequence = 0;
+let completeSequence = 0;
+let authoritative = {{messages: [], runState: {{}}}};
+const pendingSaves = [];
+const clone = (value) => structuredClone(value);
+const snapshotPayload = (payload) => {{
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const user = messages.find((message) => message?.role === "user");
+  return {{
+    pending: String(user?.meta?.pendingDispatch?.status || ""),
+    dispatchErrors: messages.filter((message) => message?.meta?.kind === "dispatch-error").length,
+    finalAnswers: messages.filter((message) => (
+      message?.role === "assistant" && message?.meta?.kind !== "dispatch-error"
+    )).length,
+    runStateAgentRunId: String(payload?.runState?.agentRunId || ""),
+    roles: messages.map((message) => message?.role || ""),
+  }};
+}};
+const makeRequestJson = (source) => (_url, options) => {{
+  const payload = JSON.parse(options.body);
+  sourceOrdinals[source] += 1;
+  const requestId = `${{source}}-${{sourceOrdinals[source]}}`;
+  const started = ++startSequence;
+  const entry = {{requestId, source, started, completed: 0, ...snapshotPayload(payload)}};
+  timeline.push(entry);
+  return new Promise((resolve) => {{
+    releases.set(requestId, () => {{
+      authoritative = {{messages: clone(payload.messages || []), runState: clone(payload.runState || {{}})}};
+      entry.completed = ++completeSequence;
+      releases.delete(requestId);
+      resolve({{id: sessionId, ...clone(authoritative)}});
+    }});
+  }});
+}};
+const oldChains = {{}};
+const freshChains = {{}};
+const oldPersistence = createSessionPersistence({{
+  requestJson: makeRequestJson("old"),
+  saveChains: oldChains,
+}});
+const freshPersistence = createSessionPersistence({{
+  requestJson: makeRequestJson("fresh"),
+  saveChains: freshChains,
+}});
+const payloadFor = (messages, runState = {{}}) => buildSessionSavePayload({{
+  title: "Cross-page race",
+  stats: {{}},
+  runState,
+  messages,
+  persistMessages: true,
+}});
+const waitForRequest = async (requestId) => {{
+  for (let attempt = 0; attempt < 20 && !releases.has(requestId); attempt += 1) {{
+    await new Promise((resolve) => setImmediate(resolve));
+  }}
+  if (!releases.has(requestId)) throw new Error(`request did not start: ${{requestId}}`);
+}};
+const releaseRequest = async (requestId) => {{
+  await waitForRequest(requestId);
+  releases.get(requestId)();
+  await new Promise((resolve) => setImmediate(resolve));
+}};
+function resetRenderCache() {{}}
+function renderMessages() {{}}
+function setSessionMessages(_sessionId, messages) {{ pageBMessages = messages; }}
+function getSessionMessages() {{ return pageBMessages; }}
+function getSessionRunState() {{ return pageBRunState; }}
+function getSessionStats() {{ return {{}}; }}
+function t(key) {{ return key; }}
+function isForegroundDispatchLocallyOwned() {{ return false; }}
+function saveSessionState(_sessionId, messages, _stats, _title, options = {{}}) {{
+  const promise = freshPersistence.saveSession(
+    sessionId,
+    buildSessionSavePayload({{
+      title: "Cross-page race",
+      stats: {{}},
+      runState: pageBRunState,
+      messages,
+      persistMessages: options.persistMessages === true,
+    }}),
+  );
+  pendingSaves.push(promise);
+  return promise;
+}}
+const queueMicrotask = (callback) => callback();
+eval(optimisticSource);
+eval(reconcileSource);
+eval(settleSource);
+
+(async () => {{
+  const origin = projectOptimisticFirstMessage(
+    "trusted request",
+    "trusted-model",
+    Date.parse("2026-08-26T04:00:00Z"),
+    [],
+    {{pendingSessionCreation: false}},
+  );
+  releaseForegroundDispatchOwnership(origin);
+  origin.meta.pendingDispatch.status = "ready";
+  origin.meta.pendingDispatch.routedAt = Date.parse("2026-08-26T04:00:01Z");
+  const readyMessages = clone(state.messages);
+  const bootstrap = oldPersistence.saveSession(sessionId, payloadFor(readyMessages));
+  await releaseRequest("old-1");
+  await bootstrap;
+
+  const oldTerminalMessages = clone(readyMessages);
+  delete oldTerminalMessages[0].meta.pendingDispatch;
+  oldTerminalMessages.push({{
+    role: "assistant",
+    content: "trusted final answer",
+    meta: {{agentEventType: "model_completed"}},
+  }});
+  const oldTerminalSave = oldPersistence.saveSession(
+    sessionId,
+    payloadFor(oldTerminalMessages, {{agentRunId: "agent-trusted", status: "completed"}}),
+  );
+  await waitForRequest("old-2");
+
+  pageBMessages = clone(readyMessages);
+  pageBRunState = {{}};
+  const reconciled = reconcileInterruptedForegroundDispatch(sessionId, {{}});
+  if (!reconciled) throw new Error("fresh page did not reconcile the ready dispatch");
+  await waitForRequest("fresh-1");
+
+  pageBRunState = {{agentRunId: "agent-trusted", status: "completed"}};
+  const freshOrigin = pageBMessages.find((message) => message?.role === "user");
+  const freshSettlement = settleForegroundDispatchAfterAgentRunCreated({{
+    sessionId,
+    messages: pageBMessages,
+    stats: {{}},
+    foregroundOriginMessage: freshOrigin,
+  }});
+
+  await releaseRequest("old-2");
+  await oldTerminalSave;
+  await releaseRequest("fresh-1");
+  await waitForRequest("fresh-2");
+  await releaseRequest("fresh-2");
+  await freshSettlement;
+  await Promise.all(pendingSaves);
+
+  process.stdout.write(JSON.stringify({{
+    reconciled,
+    timeline,
+    final: snapshotPayload({{messages: authoritative.messages, runState: authoritative.runState}}),
+    oldChains,
+    freshChains,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["reconciled"])
+        self.assertEqual(
+            data["timeline"],
+            [
+                {
+                    "requestId": "old-1",
+                    "source": "old",
+                    "started": 1,
+                    "completed": 1,
+                    "pending": "ready",
+                    "dispatchErrors": 0,
+                    "finalAnswers": 0,
+                    "runStateAgentRunId": "",
+                    "roles": ["user"],
+                },
+                {
+                    "requestId": "old-2",
+                    "source": "old",
+                    "started": 2,
+                    "completed": 2,
+                    "pending": "",
+                    "dispatchErrors": 0,
+                    "finalAnswers": 1,
+                    "runStateAgentRunId": "agent-trusted",
+                    "roles": ["user", "assistant"],
+                },
+                {
+                    "requestId": "fresh-1",
+                    "source": "fresh",
+                    "started": 3,
+                    "completed": 3,
+                    "pending": "failed",
+                    "dispatchErrors": 1,
+                    "finalAnswers": 0,
+                    "runStateAgentRunId": "",
+                    "roles": ["user", "assistant"],
+                },
+                {
+                    "requestId": "fresh-2",
+                    "source": "fresh",
+                    "started": 4,
+                    "completed": 4,
+                    "pending": "",
+                    "dispatchErrors": 1,
+                    "finalAnswers": 0,
+                    "runStateAgentRunId": "agent-trusted",
+                    "roles": ["user", "assistant"],
+                },
+            ],
+        )
+        self.assertEqual(data["final"], {
+            "pending": "",
+            "dispatchErrors": 1,
+            "finalAnswers": 0,
+            "runStateAgentRunId": "agent-trusted",
+            "roles": ["user", "assistant"],
+        })
+        self.assertEqual(data["oldChains"], {})
+        self.assertEqual(data["freshChains"], {})
+
+    def test_session_revision_cas_converges_both_cross_page_completion_orders(self):
+        sync_start = APP_SOURCE.index("function syncActiveStreamingState")
+        sync_end = APP_SOURCE.index("let composerResizeObserver", sync_start)
+        sync_source = APP_SOURCE[sync_start:sync_end]
+        self.assertIn("state._foregroundRecoveryHydrated !== false", sync_source)
+        init_restore = APP_SOURCE.index("await sessionStartup.restoreForegroundSession()")
+        init_gate = APP_SOURCE.rindex(
+            "state._foregroundRecoveryHydrated = false",
+            0,
+            init_restore,
+        )
+        init_recovery = APP_SOURCE.index("const recoveryTasks = sessionStartup.startRecovery()")
+        init_hydration = APP_SOURCE.index(
+            ".then(() => hydrateForegroundDispatchRecovery())",
+            init_recovery,
+        )
+        self.assertLess(init_gate, init_restore)
+        self.assertLess(init_restore, init_recovery)
+        self.assertLess(init_recovery, init_hydration)
+
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+const {buildSessionSavePayload, createSessionPersistence} = window.Code.services.persistence;
+const clone = (value) => structuredClone(value);
+const sessionId = "cross-page-cas";
+const readyMessages = [{
+  role: "user",
+  content: "trusted request",
+  meta: {
+    goalOrigin: {messageId: "origin-1", clientRequestId: "foreground-cross-page"},
+    pendingDispatch: {id: "dispatch-1", status: "ready"},
+  },
+}];
+const terminalMessages = [
+  {
+    role: "user",
+    content: "trusted request",
+    meta: {goalOrigin: {messageId: "origin-1", clientRequestId: "foreground-cross-page"}},
+  },
+  {
+    role: "assistant",
+    content: "trusted final answer",
+    meta: {agentEventType: "model_completed", agentRunId: "agent-trusted"},
+  },
+];
+const errorMessages = [
+  {
+    role: "user",
+    content: "trusted request",
+    meta: {
+      goalOrigin: {messageId: "origin-1", clientRequestId: "foreground-cross-page"},
+      pendingDispatch: {id: "dispatch-1", status: "failed"},
+    },
+  },
+  {
+    role: "assistant",
+    content: "dispatch interrupted",
+    meta: {kind: "dispatch-error", pendingDispatchId: "dispatch-1"},
+  },
+];
+const summarize = (session) => {
+  const messages = session.messages || [];
+  const user = messages.find((message) => message.role === "user");
+  return {
+    revision: session.revision,
+    pending: String(user?.meta?.pendingDispatch?.status || ""),
+    errors: messages.filter((message) => message.meta?.kind === "dispatch-error").length,
+    finals: messages.filter((message) => (
+      message.role === "assistant" && message.meta?.kind !== "dispatch-error"
+    )).length,
+    agentRunId: String(session.runState?.agentRunId || ""),
+  };
+};
+async function scenario(firstWinner) {
+  let authoritative = {revision: 0, messages: clone(readyMessages), runState: {}};
+  const revisions = {old: 0, fresh: 0};
+  const pageMessages = {old: clone(readyMessages), fresh: clone(readyMessages)};
+  const requests = [];
+  const releases = new Map();
+  const conflicts = {old: 0, fresh: 0};
+  const ordinals = {old: 0, fresh: 0};
+  const makeRequest = (source) => (_url, options) => {
+    const payload = JSON.parse(options.body);
+    const requestId = `${source}-${++ordinals[source]}`;
+    const entry = {
+      requestId,
+      source,
+      expectedRevision: payload.expectedRevision,
+      status: 0,
+      payload: summarize({
+        revision: payload.expectedRevision,
+        messages: payload.messages || [],
+        runState: payload.runState || {},
+      }),
+    };
+    requests.push(entry);
+    return new Promise((resolve, reject) => {
+      releases.set(requestId, () => {
+        releases.delete(requestId);
+        if (payload.expectedRevision !== authoritative.revision) {
+          entry.status = 409;
+          const error = new Error("Session revision conflict");
+          error.status = 409;
+          error.data = {
+            errorCode: "session_revision_conflict",
+            expectedRevision: payload.expectedRevision,
+            currentRevision: authoritative.revision,
+          };
+          reject(error);
+          return;
+        }
+        authoritative = {
+          revision: authoritative.revision + 1,
+          messages: clone(payload.messages || []),
+          runState: clone(payload.runState || {}),
+        };
+        entry.status = 200;
+        resolve(clone(authoritative));
+      });
+    });
+  };
+  const makePersistence = (source) => createSessionPersistence({
+    requestJson: makeRequest(source),
+    saveChains: {},
+    getRevision: () => revisions[source],
+    setRevision: (_sessionId, revision) => { revisions[source] = revision; },
+    onRevisionConflict: async () => {
+      conflicts[source] += 1;
+      revisions[source] = authoritative.revision;
+      pageMessages[source] = clone(authoritative.messages);
+      return clone(authoritative);
+    },
+  });
+  const writers = {old: makePersistence("old"), fresh: makePersistence("fresh")};
+  const payload = (messages) => buildSessionSavePayload({
+    title: "CAS",
+    stats: {},
+    runState: {agentRunId: "agent-trusted", status: "completed"},
+    messages,
+    persistMessages: true,
+  });
+  const waitFor = async (requestId) => {
+    for (let index = 0; index < 20 && !releases.has(requestId); index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    if (!releases.has(requestId)) throw new Error(`missing request ${requestId}`);
+  };
+  const release = async (requestId) => {
+    await waitFor(requestId);
+    releases.get(requestId)();
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  let oldSave;
+  let freshSave;
+  let freshQueuedSave = Promise.resolve(null);
+  let errorsBeforeHydration = 0;
+  if (firstWinner === "old") {
+    oldSave = writers.old.saveSession(sessionId, payload(terminalMessages));
+    freshSave = writers.fresh.saveSession(sessionId, payload(errorMessages));
+    const queuedErrorMessages = clone(errorMessages);
+    delete queuedErrorMessages[0].meta.pendingDispatch;
+    freshQueuedSave = writers.fresh.saveSession(sessionId, payload(queuedErrorMessages));
+    await Promise.all([waitFor("old-1"), waitFor("fresh-1")]);
+    await release("old-1");
+    await release("fresh-1");
+  } else {
+    // The fresh page remains read-only until authoritative run hydration has
+    // projected the same terminal answer. It never persists a guessed error.
+    errorsBeforeHydration = pageMessages.fresh.filter(
+      (message) => message.meta?.kind === "dispatch-error",
+    ).length;
+    freshSave = writers.fresh.saveSession(sessionId, payload(terminalMessages));
+    oldSave = writers.old.saveSession(sessionId, payload(terminalMessages));
+    await Promise.all([waitFor("fresh-1"), waitFor("old-1")]);
+    await release("fresh-1");
+    await release("old-1");
+  }
+  await Promise.all([oldSave, freshSave, freshQueuedSave]);
+  return {
+    firstWinner,
+    final: summarize(authoritative),
+    revisions,
+    conflicts,
+    requests: requests.map(({requestId, source, expectedRevision, status, payload}) => ({
+      requestId, source, expectedRevision, status, payload,
+    })),
+    errorsBeforeHydration,
+  };
+}
+(async () => {
+  process.stdout.write(JSON.stringify({
+    oldFirst: await scenario("old"),
+    freshFirst: await scenario("fresh"),
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        expected_final = {
+            "revision": 1,
+            "pending": "",
+            "errors": 0,
+            "finals": 1,
+            "agentRunId": "agent-trusted",
+        }
+        self.assertEqual(data["oldFirst"]["final"], expected_final)
+        self.assertEqual(data["oldFirst"]["conflicts"], {"old": 0, "fresh": 1})
+        self.assertEqual(
+            [(item["source"], item["expectedRevision"], item["status"])
+             for item in data["oldFirst"]["requests"]],
+            [("old", 0, 200), ("fresh", 0, 409)],
+        )
+        self.assertEqual(data["freshFirst"]["final"], expected_final)
+        self.assertEqual(data["freshFirst"]["conflicts"], {"old": 1, "fresh": 0})
+        self.assertEqual(data["freshFirst"]["errorsBeforeHydration"], 0)
+        self.assertEqual(
+            [(item["source"], item["expectedRevision"], item["status"])
+             for item in data["freshFirst"]["requests"]],
+            [("fresh", 0, 200), ("old", 0, 409)],
+        )
+
+    def test_session_revision_conflict_retires_stale_local_projection(self):
+        projection_start = APP_SOURCE.index("const authoritativeSessionSnapshots")
+        projection_end = APP_SOURCE.index("const rawSessionDataFeature", projection_start)
+        projection_source = APP_SOURCE[projection_start:projection_end]
+        save_start = APP_SOURCE.index("async function saveSessionState")
+        save_end = APP_SOURCE.index("async function saveCurrentSession", save_start)
+        save_source = APP_SOURCE[save_start:save_end]
+        script = f"""
+global.window = {{}};
+require("./src/core/namespace.js");
+require("./src/services/persistence.js");
+const {{buildSessionSavePayload}} = window.Code.services.persistence;
+const projectionSource = {json.dumps(projection_source)};
+const saveSource = {json.dumps(save_source)};
+const sessionId = "stale-projection-session";
+const state = {{
+  sessionId,
+  messages: [],
+  sessions: [{{id: sessionId, title: "CAS", messageCount: 0}}],
+  _sessionRevisions: {{[sessionId]: 3}},
+}};
+const els = {{sessionTitle: {{value: "CAS"}}}};
+let currentMessages = [];
+let currentRunState = {{}};
+let currentStats = {{}};
+let currentLastUsage = null;
+const writes = [];
+const clone = (value) => structuredClone(value);
+const authoritative = {{
+  id: sessionId,
+  revision: 4,
+  title: "CAS",
+  messages: [
+    {{role: "user", content: "trusted request"}},
+    {{role: "assistant", content: "trusted final", meta: {{agentEventType: "model_completed"}}}},
+  ],
+  runState: {{agentRunId: "agent-trusted", status: "completed", clientRequestId: "request-trusted"}},
+  stats: {{input: 1, output: 1, cache: 0, cost: 0}},
+  lastUsage: null,
+}};
+Object.defineProperty(authoritative, "_sessionRevisionConflict", {{value: true}});
+function normalizeSessionRevision(value) {{ return Number(value) || 0; }}
+function getSessionRevision(id) {{ return state._sessionRevisions[id] || 0; }}
+function rememberSessionRevision(id, session) {{
+  if (Object.prototype.hasOwnProperty.call(session || {{}}, "revision")) {{
+    state._sessionRevisions[id] = Number(session.revision) || 0;
+  }}
+  return getSessionRevision(id);
+}}
+function getSessionMessages() {{ return currentMessages; }}
+function setSessionMessages(_id, messages) {{ currentMessages = messages; state.messages = messages; }}
+function getSessionRunState() {{ return currentRunState; }}
+function setSessionRunState(_id, runState) {{ currentRunState = {{...(runState || {{}})}}; }}
+function getSessionStats() {{ return currentStats; }}
+function setSessionStats(_id, stats) {{ currentStats = {{...(stats || {{}})}}; }}
+function getSessionLastUsage() {{ return currentLastUsage; }}
+function setSessionLastUsage(_id, usage) {{ currentLastUsage = usage; }}
+function resetRenderCache() {{}}
+function renderSessionMessages() {{}}
+function renderSessions() {{}}
+function updateStatsPanel() {{}}
+function syncTrustedGoalMessageMetadata() {{ return false; }}
+function syncSessionSourceBadgeState() {{}}
+function syncPersistedSessionActivity() {{ return false; }}
+function t(key) {{ return key; }}
+let firstWrite = true;
+async function persistSessionPayload(_id, payload) {{
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  writes.push({{
+    hasMessages: Object.prototype.hasOwnProperty.call(payload, "messages"),
+    pending: String(messages.find((message) => message?.role === "user")?.meta?.pendingDispatch?.status || ""),
+    errors: messages.filter((message) => message?.meta?.kind === "dispatch-error").length,
+    finals: messages.filter((message) => message?.role === "assistant" && message?.meta?.kind !== "dispatch-error").length,
+    runStateStatus: String(payload?.runState?.status || ""),
+  }});
+  if (firstWrite) {{
+    firstWrite = false;
+    applyAuthoritativeSessionSnapshot(sessionId, authoritative);
+    return authoritative;
+  }}
+  return {{...clone(authoritative), revision: 5, messages: clone(payload.messages || authoritative.messages)}};
+}}
+eval(projectionSource);
+eval(saveSource);
+
+(async () => {{
+  const staleMessages = [{{
+    role: "user",
+    content: "trusted request",
+    meta: {{pendingDispatch: {{id: "dispatch-1", status: "failed"}}}},
+  }}, {{
+    role: "assistant",
+    content: "dispatch interrupted",
+    meta: {{kind: "dispatch-error", pendingDispatchId: "dispatch-1"}},
+  }}];
+  currentMessages = staleMessages;
+  state.messages = staleMessages;
+  currentRunState = {{status: "failed"}};
+  await saveSessionState(sessionId, staleMessages, {{}}, undefined, {{persistMessages: true}});
+  const afterConflict = {{
+    sameStaleArrayRebased: staleMessages.length === 2
+      && staleMessages[1]?.content === "trusted final",
+    globalIsSeparateAuthority: currentMessages !== staleMessages
+      && currentMessages[1]?.content === "trusted final",
+    status: currentRunState.status,
+  }};
+
+  // The current page advances the authoritative projection before the losing
+  // caller resumes.  A retired writer must converge to this newer snapshot,
+  // not merely the one that originally exposed its conflict.
+  const freshMessages = clone(currentMessages);
+  freshMessages.push({{role: "user", content: "later task"}});
+  setSessionMessages(sessionId, freshMessages);
+  await saveSessionState(sessionId, freshMessages, {{}}, undefined, {{persistMessages: true}});
+
+  // The losing async caller mutates its captured array and runState, then
+  // performs the metadata-only save that used to republish the stale state.
+  staleMessages.push({{
+    role: "assistant",
+    content: "late fake error",
+    meta: {{kind: "dispatch-error", pendingDispatchId: "dispatch-1"}},
+  }});
+  setSessionMessages(sessionId, staleMessages);
+  setSessionRunState(sessionId, {{status: "failed"}});
+  await saveSessionState(sessionId, staleMessages, {{}}, undefined, {{persistMessages: false}});
+  const afterMetadata = {{
+    writes: writes.length,
+    errors: currentMessages.filter((message) => message?.meta?.kind === "dispatch-error").length,
+    finals: currentMessages.filter((message) => message?.content === "trusted final").length,
+    laterTasks: currentMessages.filter((message) => message?.content === "later task").length,
+    status: currentRunState.status,
+    globalIsRetiredArray: currentMessages === staleMessages,
+  }};
+
+  // A subsequent message-bearing save from the same retired generation is
+  // skipped too; the fresh authoritative save above remains the last write.
+  await saveSessionState(sessionId, staleMessages, {{}}, undefined, {{persistMessages: true}});
+  process.stdout.write(JSON.stringify({{afterConflict, afterMetadata, writes}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["afterConflict"], {
+            "sameStaleArrayRebased": True,
+            "globalIsSeparateAuthority": True,
+            "status": "completed",
+        })
+        self.assertEqual(data["afterMetadata"], {
+            "writes": 2,
+            "errors": 0,
+            "finals": 1,
+            "laterTasks": 1,
+            "status": "completed",
+            "globalIsRetiredArray": False,
+        })
+        self.assertEqual(len(data["writes"]), 2)
+        self.assertEqual(data["writes"][0], {
+            "hasMessages": True,
+            "pending": "failed",
+            "errors": 1,
+            "finals": 0,
+            "runStateStatus": "failed",
+        })
+        self.assertEqual(data["writes"][1]["hasMessages"], True)
+        self.assertEqual(data["writes"][1]["errors"], 0)
+        self.assertEqual(data["writes"][1]["finals"], 1)
 
     def test_deferred_first_send_sidebar_refresh_preserves_active_run(self):
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
@@ -17631,10 +20034,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("errorRecoveryHint", APP_SOURCE)
         self.assertIn("errorRecoveryHint", I18N_SOURCE)
         self.assertIn("loopError._codeErrorRendered = true", APP_SOURCE)
-        self.assertIn(
-            'if (!err?._codeErrorRendered) appendSystemError(errMsg)',
-            APP_SOURCE,
-        )
+        self.assertIn("if (!err?._codeErrorRendered)", APP_SOURCE)
+        self.assertIn("appendSessionSystemError(sessionId, errMsg", APP_SOURCE)
 
     def test_error_recovery_preserves_user_message_on_rollback(self):
         """Rollback restores user message content and keeps it at snapshot-1."""
@@ -17649,7 +20050,10 @@ process.stdout.write(JSON.stringify({{
         codes = ["upstream_error", "model_response_timeout", "config_error",
                  "model_access_denied", "permission_denied",
                  "tool_error", "user_cancelled", "empty_response",
-                 "content_filtered", "internal_error"]
+                 "content_filtered", "internal_error",
+                 "route_catalog_unavailable", "route_not_found", "route_stale",
+                 "route_model_mismatch", "route_disabled",
+                 "route_credentials_unavailable"]
         for code in codes:
             self.assertIn(code + ":", APP_SOURCE.replace(" ", ""),
                          f"Missing error code meta entry: {code}")
@@ -17711,6 +20115,12 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("errSugEmptyResponse", I18N_SOURCE)
         self.assertIn("errLabelContentFiltered", I18N_SOURCE)
         self.assertIn("errSugContentFiltered", I18N_SOURCE)
+        for suffix in (
+            "RouteCatalogUnavailable", "RouteNotFound", "RouteStale",
+            "RouteModelMismatch", "RouteDisabled", "RouteCredentialsUnavailable",
+        ):
+            self.assertIn("errLabel" + suffix, I18N_SOURCE)
+            self.assertIn("errSug" + suffix, I18N_SOURCE)
         self.assertIn("errAgentFailed", I18N_SOURCE)
 
     def test_i18n_keys_have_both_languages(self):

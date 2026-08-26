@@ -67,6 +67,12 @@
       modelCatalogModels: [],
       modelCatalogStatusKey: "",
       modelCatalogSource: "empty",
+      routingV2: true,
+      modelRoutes: [],
+      modelRouteCatalogRevision: 0,
+      selectedRouteRef: getStoredValue("code-model-route-ref") || "",
+      selectedRouteCatalogRevision: Number(getStoredValue("code-model-route-revision") || 0),
+      _modelRouteRefreshPromise: null,
       stats: {
         input: 0,
         output: 0,

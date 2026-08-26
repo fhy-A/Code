@@ -27,6 +27,7 @@ const {
   serializeSessionMessages,
   buildSessionSavePayload,
   createSessionPersistence,
+  normalizeSessionRevision,
 } = window.Code.services.persistence;
 const {
   createDiffFeature,
@@ -240,6 +241,8 @@ function upgradeStaticIcons() {
 }
 
 const state = createAppState(localStorage);
+state._sessionRevisions = state._sessionRevisions || Object.create(null);
+state._foregroundRecoveryHydrated = true;
 const editDiffDisclosureState = createEditDiffDisclosureState();
 let messageScrollController = null;
 let longTextDisplayController = null;
@@ -283,17 +286,157 @@ function messageImagePreviewSource(image = {}) {
   void persistedTiffPreviewCache.ensure(image);
   return "";
 }
+function getSessionRevision(sessionId) {
+  return normalizeSessionRevision(state._sessionRevisions[String(sessionId || "")]);
+}
+
+function rememberSessionRevision(sessionId, session) {
+  const normalizedId = String(sessionId || session?.id || "");
+  if (!normalizedId || !session || !Object.prototype.hasOwnProperty.call(session, "revision")) {
+    return getSessionRevision(normalizedId);
+  }
+  const revision = normalizeSessionRevision(session.revision);
+  state._sessionRevisions[normalizedId] = revision;
+  return revision;
+}
+
+// A revision conflict retires the exact in-memory projection that produced the
+// stale write.  The conflict handler replaces the visible/global projection,
+// but async run contexts may still hold the old messages array and attempt a
+// later metadata or terminal save.  Keep that stale array tied to the server
+// snapshot so it can neither overwrite messages nor republish stale runState.
+const authoritativeSessionSnapshots = new Map();
+const supersededSessionMessageProjections = new WeakMap();
+
+function rememberAuthoritativeSessionSnapshot(sessionId, session) {
+  const normalizedId = String(sessionId || session?.id || "");
+  if (!normalizedId || !session) return null;
+  const existing = authoritativeSessionSnapshots.get(normalizedId);
+  const nextRevision = normalizeSessionRevision(session.revision);
+  const existingRevision = normalizeSessionRevision(existing?.revision);
+  if (!existing || nextRevision >= existingRevision) {
+    authoritativeSessionSnapshots.set(normalizedId, session);
+    return session;
+  }
+  return existing;
+}
+
+function retireSessionMessageProjection(sessionId, messages, authoritative) {
+  if (!Array.isArray(messages) || !authoritative) return false;
+  const authoritativeMessages = (Array.isArray(authoritative.messages)
+    ? authoritative.messages
+    : []).map((message) => ({
+    ...message,
+    _images: message?._images || undefined,
+  }));
+  messages.splice(0, messages.length, ...authoritativeMessages);
+  supersededSessionMessageProjections.set(messages, {
+    sessionId: String(sessionId || ""),
+    authoritative,
+  });
+  return true;
+}
+
+function restoreSupersededSessionProjection(sessionId, messages) {
+  if (!Array.isArray(messages)) return null;
+  const retired = supersededSessionMessageProjections.get(messages);
+  if (!retired || retired.sessionId !== String(sessionId || "")) return null;
+  const authoritative = rememberAuthoritativeSessionSnapshot(
+    sessionId,
+    retired.authoritative,
+  );
+  applyAuthoritativeSessionSnapshot(sessionId, authoritative);
+  return authoritative;
+}
+
+function applyAuthoritativeSessionSnapshot(sessionId, session) {
+  if (!session || String(session.id || "") !== String(sessionId || "")) return false;
+  rememberAuthoritativeSessionSnapshot(sessionId, session);
+  rememberSessionRevision(sessionId, session);
+  const messages = (Array.isArray(session.messages) ? session.messages : []).map((message) => ({
+    ...message,
+    _images: message?._images || undefined,
+  }));
+  setSessionMessages(sessionId, messages);
+  setSessionRunState(sessionId, session.runState || {});
+  setSessionStats(sessionId, session.stats || { input: 0, output: 0, cache: 0, cost: 0 });
+  setSessionLastUsage(sessionId, session.lastUsage || null);
+  const summary = state.sessions.find((candidate) => candidate.id === sessionId);
+  if (summary) {
+    summary.runState = { ...(session.runState || {}) };
+    summary.messageCount = messages.length;
+    summary.updatedAt = session.updatedAt || summary.updatedAt;
+    summary.lastMessageTime = session.lastMessageTime || summary.lastMessageTime;
+  }
+  if (sessionId !== state.sessionId) return true;
+  state.messages = messages;
+  state.stats = getSessionStats(sessionId);
+  state.sessionCreated = session.createdAt || state.sessionCreated;
+  state.sessionUpdated = session.lastMessageTime || session.updatedAt || state.sessionUpdated;
+  state._sessionFilePath = session._filePath || state._sessionFilePath;
+  state._sessionMessageFilePath = session._messageFilePath || state._sessionMessageFilePath;
+  if (session.title && els.sessionTitle) els.sessionTitle.value = session.title;
+  resetRenderCache();
+  renderSessionMessages(sessionId);
+  renderSessions();
+  return true;
+}
+
+const rawSessionDataFeature = createSessionsFeature({ requestJson: apiJson });
+async function getSessionRecord(sessionId) {
+  const session = await rawSessionDataFeature.getSession(sessionId);
+  rememberSessionRevision(sessionId, session);
+  rememberAuthoritativeSessionSnapshot(sessionId, session);
+  return session;
+}
+async function createSessionRecord(payload) {
+  const session = await rawSessionDataFeature.createSession(payload);
+  rememberSessionRevision(session?.id, session);
+  rememberAuthoritativeSessionSnapshot(session?.id, session);
+  return session;
+}
+async function resolveSessionRevisionConflict({ sessionId, error }) {
+  try {
+    const authoritative = await getSessionRecord(sessionId);
+    applyAuthoritativeSessionSnapshot(sessionId, authoritative);
+    Object.defineProperty(authoritative, "_sessionRevisionConflict", {
+      value: true,
+      enumerable: false,
+    });
+    return authoritative;
+  } catch (recoveryError) {
+    error._codeErrorRendered = true;
+    error.sessionRevisionRecoveryError = recoveryError;
+    console.warn("Session revision conflict recovery failed", {
+      code: "session_revision_conflict",
+      sessionId,
+    });
+    throw error;
+  }
+}
 const { saveSession: persistSessionPayload } = createSessionPersistence({
   requestJson: apiJson,
   saveChains: state._sessionSaveChains,
+  getRevision: getSessionRevision,
+  setRevision: (sessionId, revision) => {
+    state._sessionRevisions[String(sessionId || "")] = normalizeSessionRevision(revision);
+  },
+  onRevisionConflict: resolveSessionRevisionConflict,
 });
-const sessionDataFeature = createSessionsFeature({ requestJson: apiJson });
-const {
-  listSessions: listSessionRecords,
+async function updateSessionRecord(sessionId, payload) {
+  const session = await persistSessionPayload(sessionId, payload);
+  rememberAuthoritativeSessionSnapshot(sessionId, session);
+  return session;
+}
+const sessionDataFeature = Object.freeze({
+  listSessions: rawSessionDataFeature.listSessions,
   getSession: getSessionRecord,
+  createSession: createSessionRecord,
   updateSession: updateSessionRecord,
-  deleteSession: deleteSessionRecord,
-} = sessionDataFeature;
+  deleteSession: rawSessionDataFeature.deleteSession,
+});
+const listSessionRecords = sessionDataFeature.listSessions;
+const deleteSessionRecord = sessionDataFeature.deleteSession;
 
 const { t, setLang, applyI18n } = createI18nRuntime({
   getLanguage: () => state.lang,
@@ -341,6 +484,10 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     updatedAt: new Date(checkpointNow).toISOString(),
     elapsedMs: activeRunElapsedMs(timingRun, checkpointNow),
     model: ctx.model || "",
+    routeRef: String(extra.routeRef ?? ctx.routeRef ?? previous.routeRef ?? ""),
+    catalogRevision: Math.max(0, Number(
+      extra.catalogRevision ?? ctx.catalogRevision ?? previous.catalogRevision ?? 0,
+    )),
     temperature: Number(ctx.temperature ?? 0.2),
     maxTokens: Number(ctx.maxTokens || 0),
     toolPreset: ctx.toolPreset || "default",
@@ -379,13 +526,20 @@ async function persistRunCheckpoint(
   if (options.finalizeTimingTarget) {
     finalizeRunTiming(ctx.sessionId, options.finalizeTimingTarget);
   }
-  await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats, undefined, {
+  const messages = options.currentProjection
+    ? getSessionMessages(ctx.sessionId)
+    : ctx.messages;
+  const stats = options.currentProjection
+    ? getSessionStats(ctx.sessionId)
+    : ctx.stats;
+  await saveSessionState(ctx.sessionId, messages, stats, undefined, {
     persistMessages: ctx.executionOwner === "server-agent",
   });
 }
 
 async function clearRunCheckpoint(ctx) {
   if (!ctx?.sessionId || ctx.isSubAgent) return;
+  publishTerminalRunOwnership(ctx);
   // Finalize timing before the completed message is serialized. Both normal
   // runs and reload recovery finish through this shared persistence boundary.
   finalizeRunTiming(ctx.sessionId);
@@ -410,12 +564,12 @@ async function clearRunCheckpoint(ctx) {
     ? els.sessionTitle.value.trim()
     : String(local?.title || "").trim();
   // Write all messages to JSONL in one shot (stream is complete)
-  const msgs = ctx.messages || [];
+  const msgs = getSessionMessages(ctx.sessionId);
   if (msgs.length > 0) {
     await saveSessionState(
       ctx.sessionId,
       msgs,
-      ctx.stats || getSessionStats(ctx.sessionId),
+      getSessionStats(ctx.sessionId),
       sessionTitle || "Untitled",
       { persistMessages: true },
     ).catch(() => null);
@@ -584,6 +738,102 @@ function hydratePersistedRunPresentation(sessionId, run, runState, messages = []
   return true;
 }
 
+function reconcileInterruptedForegroundDispatch(sessionId, run) {
+  if (!sessionId || run?._activeCtx) return false;
+  const runState = getSessionRunState(sessionId);
+  const hasDurableRun = Boolean(String(runState?.agentRunId || runState?.runtimeRunId || ""));
+  if (run?.isStreaming && !hasDurableRun) return false;
+  const messages = getSessionMessages(sessionId);
+  let changed = false;
+  const persistedLength = messages.length;
+  for (let index = 0; index < persistedLength; index += 1) {
+    const message = messages[index];
+    const dispatch = message?.role === "user" ? message.meta?.pendingDispatch : null;
+    if (!dispatch || !["routing", "ready"].includes(String(dispatch.status || ""))) continue;
+    if (isForegroundDispatchLocallyOwned(message)) continue;
+    if (hasDurableRun) {
+      delete message.meta.pendingDispatch;
+      if (Object.keys(message.meta).length === 0) delete message.meta;
+      changed = true;
+      continue;
+    }
+    const hasTerminalAssistant = dispatch.status === "ready"
+      && messages.slice(index + 1, persistedLength).some((candidate) => (
+        candidate?.role === "assistant"
+        && candidate.meta?.kind !== "dispatch-error"
+        && (
+          candidate.meta?.agentEventType === "model_completed"
+          || !candidate.streaming
+        )
+        && String(candidate.content || candidate.thought || "").trim()
+      ));
+    if (hasTerminalAssistant) {
+      delete message.meta.pendingDispatch;
+      if (Object.keys(message.meta).length === 0) delete message.meta;
+      changed = true;
+      continue;
+    }
+    dispatch.status = "failed";
+    dispatch.failedAt = Date.now();
+    dispatch.reason = "dispatch_interrupted";
+    delete message.meta.pendingSessionCreation;
+    const hasError = messages.some((candidate) => (
+      candidate?.role === "assistant"
+      && candidate.meta?.kind === "dispatch-error"
+      && String(candidate.meta?.pendingDispatchId || "") === String(dispatch.id || "")
+    ));
+    if (!hasError) {
+      messages.push({
+        role: "assistant",
+        content: `${t("errorPrefix")}：${t("modelCatalogNeedsRefresh")} ${t("modelCatalogRefreshFailed")}`,
+        meta: { kind: "dispatch-error", pendingDispatchId: String(dispatch.id || "") },
+        _time: new Date().toISOString(),
+      });
+    }
+    changed = true;
+  }
+  if (!changed) return false;
+  setSessionMessages(sessionId, messages);
+  queueMicrotask(() => {
+    saveSessionState(
+      sessionId,
+      messages,
+      getSessionStats(sessionId),
+      undefined,
+      { persistMessages: true },
+    ).catch(() => {});
+  });
+  return true;
+}
+
+async function hydrateForegroundDispatchRecovery() {
+  const sessionId = String(state.sessionId || "");
+  if (!sessionId) {
+    state._foregroundRecoveryHydrated = true;
+    return true;
+  }
+  const hasPendingDispatch = getSessionMessages(sessionId).some((message) => (
+    message?.role === "user"
+    && ["routing", "ready"].includes(String(message.meta?.pendingDispatch?.status || ""))
+  ));
+  if (hasPendingDispatch) {
+    try {
+      const authoritative = await getSessionRecord(sessionId);
+      if (sessionId !== state.sessionId) return false;
+      applyAuthoritativeSessionSnapshot(sessionId, authoritative);
+    } catch (error) {
+      console.warn("Foreground dispatch recovery hydration failed", {
+        code: "session_recovery_unavailable",
+        sessionId,
+      });
+      return false;
+    }
+  }
+  state._foregroundRecoveryHydrated = true;
+  syncActiveStreamingState();
+  return true;
+}
+
 function syncActiveStreamingState() {
   const run = ensureSessionRun(state.sessionId);
   hydratePersistedRunPresentation(
@@ -592,6 +842,9 @@ function syncActiveStreamingState() {
     getSessionRunState(state.sessionId),
     getSessionMessages(state.sessionId),
   );
+  if (state._foregroundRecoveryHydrated !== false) {
+    reconcileInterruptedForegroundDispatch(state.sessionId, run);
+  }
   state.isStreaming = Boolean(run?.isStreaming);
   state.abortController = run?.abortController || null;
   messageScrollController?.setSession(state.sessionId);
@@ -665,8 +918,10 @@ function buildRunContext(sessionId, options = {}) {
     stats: getSessionStats(sessionId),
     responseUsage: { input: 0, output: 0, cache: 0 },
     taskUsage: { input: 0, output: 0, cache: 0 },
-    apiKey: getBestKey(model),
+    apiKey: state.routingV2 === false ? getBestKey(model) : "",
     model,
+    routeRef: String(options.routeRef || ""),
+    catalogRevision: Math.max(0, Number(options.catalogRevision || 0)),
     temperature: Number(options.temperature ?? els.temperature.value ?? 0.2),
     maxTokens: Number(options.maxTokens || getEffectiveMaxTokens(model)),
     contextResolution: options.contextResolution || null,
@@ -1271,8 +1526,12 @@ const settingsFeature = createSettingsFeature({
   refreshSkillsMemorySettingsLanguage,
   getDefaultSystemPrompt: () => defaultSystemPrompt,
   onPlatformLogout: clearPlatformLocalData,
-  onKeyConfigChanged: (config) => {
-    markModelCatalogStale(config);
+  onKeyConfigChanged: (config, change = {}) => {
+    if (change.routingChanged !== false) {
+      state._modelRouteConfigGeneration = modelRouteRefreshGeneration() + 1;
+      markModelCatalogStale(config);
+      void refreshModels({ intent: "config" }).catch(() => {});
+    }
     void resolvePendingOnboardingKey(config);
   },
   trashIcon,
@@ -1280,6 +1539,7 @@ const settingsFeature = createSettingsFeature({
 const {
   applyTheme,
   checkForUpdates,
+  getPlatformAuth,
   initializePlatformAuth,
   syncPlatformKeysSilently,
   verifyPlatformConnection,
@@ -1294,7 +1554,7 @@ function hasEnabledOnboardingKey(config = loadKeyConfig()) {
 
 async function resolvePendingOnboardingKey(config = loadKeyConfig()) {
   if (!onboardingTasksFeature?.isPending("key") || !hasEnabledOnboardingKey(config)) return false;
-  const result = await refreshModels();
+  const result = await refreshModels({ intent: "config" });
   if (!result?.ok || !Array.isArray(result.models) || result.models.length === 0) return false;
   return onboardingTasksFeature.completePending("key");
 }
@@ -1328,7 +1588,7 @@ onboardingTasksFeature = createOnboardingTasksFeature({
         settingsFeature.openSettingsPage("models");
         return { pending: true };
       }
-      const result = await refreshModels();
+      const result = await refreshModels({ intent: "explicit" });
       const success = result?.ok === true && Array.isArray(result.models) && result.models.length > 0;
       if (!success) showToast(t("onboardingKeyUnavailable"), "warning");
       return { success };
@@ -1605,15 +1865,104 @@ function getTrustedModelKeys(model) {
 }
 
 async function refreshModelCatalogForDispatch() {
-  if (!state._modelRouteRefreshPromise) {
-    state._modelRouteRefreshPromise = Promise.resolve()
-      .then(() => refreshModels())
-      .finally(() => { state._modelRouteRefreshPromise = null; });
+  return refreshModels({ intent: "dispatch" });
+}
+
+async function getModelRouteDispatch(model, preferred = {}) {
+  const normalizedModel = String(model || "").trim();
+  if (!normalizedModel) {
+    const error = new Error(t("selectModelFirst"));
+    error.code = "route_model_mismatch";
+    throw error;
   }
-  return state._modelRouteRefreshPromise;
+  if (state.routingV2 === false) return null;
+  const preferredRouteRef = String(preferred.routeRef || "").trim();
+  const pinnedRouteRef = preferredRouteRef || String(state.selectedRouteRef || "").trim();
+  let route = pinnedRouteRef
+    ? state.modelRoutes.find((candidate) => candidate.routeRef === pinnedRouteRef) || null
+    : selectedModelRoute();
+  if (!route || route.modelId !== normalizedModel || !route.enabled || !route.credentialsAvailable) {
+    await refreshModelCatalogForDispatch().catch(() => null);
+    route = pinnedRouteRef
+      ? state.modelRoutes.find((candidate) => candidate.routeRef === pinnedRouteRef) || null
+      : selectedModelRoute();
+  }
+  if (!pinnedRouteRef && (!route || route.modelId !== normalizedModel)) {
+    const uniqueRoute = routeForModel(normalizedModel, { unique: true });
+    if (uniqueRoute) route = setSelectedModelRoute(
+      uniqueRoute.routeRef,
+      state.modelRouteCatalogRevision,
+    );
+  }
+  if (!route || route.modelId !== normalizedModel) {
+    const error = new Error(t("modelRouteSelectionRequired"));
+    error.code = "route_not_found";
+    throw error;
+  }
+  if (!route.enabled) {
+    const error = new Error(t("modelRouteDisabled"));
+    error.code = "route_disabled";
+    throw error;
+  }
+  if (!route.credentialsAvailable) {
+    const error = new Error(t("modelRouteCredentialsUnavailable"));
+    error.code = "route_credentials_unavailable";
+    throw error;
+  }
+  return {
+    routeRef: route.routeRef,
+    catalogRevision: state.modelRouteCatalogRevision,
+    modelId: route.modelId,
+    connectionId: route.connectionId,
+  };
+}
+
+async function getModelDispatchCredentials(model, preferred = {}) {
+  if (state.routingV2 !== false) {
+    const route = await getModelRouteDispatch(model, preferred);
+    return {
+      routeRef: route.routeRef,
+      catalogRevision: route.catalogRevision,
+      keys: undefined,
+      baseUrl: "",
+    };
+  }
+  return {
+    routeRef: "",
+    catalogRevision: 0,
+    keys: await getFallbackKeys(model),
+    baseUrl: els.baseUrl.value.trim() || "http://localhost:3000",
+  };
+}
+
+const MODEL_ROUTE_FAILURE_CODES = new Set([
+  "route_catalog_unavailable",
+  "route_not_found",
+  "route_stale",
+  "route_model_mismatch",
+  "route_disabled",
+  "route_credentials_unavailable",
+]);
+
+function modelRouteFailureCode(error) {
+  const code = String(error?.errorCode || error?.code || "");
+  return MODEL_ROUTE_FAILURE_CODES.has(code) ? code : "";
+}
+
+function invalidateModelRoute(routeRef = state.selectedRouteRef) {
+  const normalizedRef = String(routeRef || "");
+  state.modelRoutes = state.modelRoutes.map((route) => (
+    !normalizedRef || route.routeRef === normalizedRef
+      ? { ...route, credentialsAvailable: false }
+      : route
+  ));
 }
 
 async function getFallbackKeys(model) {
+  if (state.routingV2 !== false) {
+    await getModelRouteDispatch(model);
+    return [];
+  }
   const normalizedModel = String(model || "").trim();
   let authorizedKeys = getTrustedModelKeys(normalizedModel);
   if (authorizedKeys.length > 0) return authorizedKeys;
@@ -2481,6 +2830,12 @@ var _errorCodeMeta = {
   empty_response:     { retry: true },
   content_filtered:   { retry: false },
   internal_error:     { retry: false },
+  route_catalog_unavailable: { retry: true },
+  route_not_found: { retry: false },
+  route_stale: { retry: true },
+  route_model_mismatch: { retry: false },
+  route_disabled: { retry: false },
+  route_credentials_unavailable: { retry: true },
 };
 
 function _errorCodeInfo(code) {
@@ -2577,6 +2932,7 @@ const MODEL_RESPONSE_SLOW_NOTICE_MS = 60000;
 
 function getActiveRunLabel(sessionId = state.sessionId) {
   const run = ensureSessionRun(sessionId);
+  if (run?.modelRoutePending) return t("detectingModels");
   if (run?.hasFirstModelResponseStarted) return t("processedLabel");
   if (run?.modelRecovery && !run.modelResponseStarted) {
     return t("modelRecovery", {
@@ -3703,19 +4059,20 @@ async function continueAgentRun() {
   } catch (err) {
     if (err.name === "AbortError") {
       finalizePausedRun(ctx);
+      publishTerminalRunOwnership(ctx);
       renderSessionMessages(sessionId);
-      await saveSessionState(sessionId, ctx.messages, ctx.stats);
+      await saveSessionState(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId));
     } else {
       ctx.messages = ctx.messages.filter((msg) => !msg.streaming);
       ctx.messages.push({ role: "assistant", content: _formatAgentError(err) });
       setSessionMessages(sessionId, ctx.messages);
+      publishTerminalRunOwnership(ctx);
       renderSessionMessages(sessionId);
-      await saveSessionState(sessionId, ctx.messages, ctx.stats);
+      await saveSessionState(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId));
     }
   } finally {
-    if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);
+    publishTerminalRunOwnership(ctx);
     archiveAgentProjectionShadow(ctx);
-    releaseActiveRunContext(ctx);
     if (completedNormally) void pumpQueuedSessionMessages(sessionId);
   }
 }
@@ -4045,6 +4402,12 @@ function patchSessionStatusSlot(slot, session, status) {
   slot.setAttribute("aria-label", status.label);
   indicator.setAttribute("aria-hidden", "true");
   return true;
+}
+
+function publishTerminalRunOwnership(ctx) {
+  if (!ownsActiveRunContext(ctx)) return false;
+  setStreaming(false, ctx.sessionId);
+  return releaseActiveRunContext(ctx);
 }
 
 function refreshSessionStatusSlot(sessionId) {
@@ -4748,6 +5111,9 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
 
   if (!sessionId) return;
 
+  const supersedingSnapshot = restoreSupersededSessionProjection(sessionId, messages);
+  if (supersedingSnapshot) return supersedingSnapshot;
+
   const local = state.sessions.find((s) => s.id === sessionId);
   const sessionTitle = title
     || (sessionId === state.sessionId ? els.sessionTitle.value.trim() : local?.title)
@@ -4764,6 +5130,11 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
     persistMessages: options.persistMessages === true,
   });
   const savedSession = await persistSessionPayload(sessionId, payload);
+  if (savedSession?._sessionRevisionConflict === true) {
+    retireSessionMessageProjection(sessionId, messages, savedSession);
+    return savedSession;
+  }
+  rememberAuthoritativeSessionSnapshot(sessionId, savedSession);
   if (
     options.persistMessages === true
     && syncTrustedGoalMessageMetadata(messages, savedSession?.messages)
@@ -4986,14 +5357,14 @@ function makeSessionTitle(text = "") {
 
 
 
-async function generateSessionTitle(userText) {
+async function generateSessionTitle(userText, preferred = {}) {
 
-  const model = getSelectedModel();
-  const key = model
-    ? (await getFallbackKeys(model).catch(() => []))[0]
-    : "";
+  const model = String(preferred.model || getSelectedModel());
+  const dispatch = model
+    ? await getModelDispatchCredentials(model, preferred).catch(() => null)
+    : null;
 
-  if (!model || !key) return;
+  if (!model || !dispatch) return;
 
   try {
 
@@ -5016,13 +5387,21 @@ async function generateSessionTitle(userText) {
 
     };
 
-    const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
+    const baseUrl = dispatch.baseUrl || els.baseUrl.value.trim() || "http://localhost:3000";
 
     const res = await fetch("/proxy/chat", {
 
       method: "POST",
 
-      headers: { "Content-Type": "application/json", "X-Base-URL": baseUrl, Authorization: `Bearer ${key}` },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Base-URL": baseUrl,
+        ...(dispatch.keys?.[0] ? { Authorization: `Bearer ${dispatch.keys[0]}` } : {}),
+        ...(dispatch.routeRef ? {
+          "X-Model-Route-Ref": dispatch.routeRef,
+          "X-Model-Route-Revision": String(dispatch.catalogRevision),
+        } : {}),
+      },
 
       body: JSON.stringify(payload),
 
@@ -5165,6 +5544,214 @@ const MODEL_CATALOG_CACHE_KEY = "code-model-catalog-cache-v1";
 const MODEL_CATALOG_CACHE_VERSION = 3;
 const MODEL_CATALOG_ROUTE_VERSION = 1;
 const MODEL_CATALOG_ROUTE_TTL_MS = 24 * 60 * 60 * 1000;
+const MODEL_ROUTE_REF_STORAGE_KEY = "code-model-route-ref";
+const MODEL_ROUTE_REVISION_STORAGE_KEY = "code-model-route-revision";
+
+function normalizePublicModelRoute(route) {
+  if (!route || typeof route !== "object") return null;
+  const routeRef = String(route.routeRef || "").trim();
+  const connectionId = String(route.connectionId || "").trim();
+  const modelId = String(route.modelId || "").trim().replace(/^models\//, "");
+  if (!routeRef || !connectionId || !modelId) return null;
+  return {
+    routeRef,
+    connectionId,
+    modelId,
+    label: String(route.label || "").trim() || t("modelConnectionUnnamed"),
+    source: String(route.source || "manual").trim() || "manual",
+    enabled: route.enabled !== false,
+    credentialsAvailable: route.credentialsAvailable === true,
+  };
+}
+
+function selectedModelRoute() {
+  const routeRef = String(state.selectedRouteRef || "");
+  return state.modelRoutes.find((route) => route.routeRef === routeRef) || null;
+}
+
+function routeForModel(modelId, { unique = false } = {}) {
+  const normalizedModel = String(modelId || "").trim();
+  const matches = state.modelRoutes.filter((route) => (
+    route.enabled !== false && route.modelId === normalizedModel
+  ));
+  return unique ? (matches.length === 1 ? matches[0] : null) : matches[0] || null;
+}
+
+function setSelectedModelRoute(routeRef, catalogRevision = state.modelRouteCatalogRevision) {
+  const normalizedRef = String(routeRef || "").trim();
+  const route = state.modelRoutes.find((candidate) => candidate.routeRef === normalizedRef) || null;
+  state.selectedRouteRef = route?.routeRef || "";
+  state.selectedRouteCatalogRevision = route
+    ? Number(catalogRevision || state.modelRouteCatalogRevision || 0)
+    : 0;
+  try {
+    if (route) {
+      localStorage.setItem(MODEL_ROUTE_REF_STORAGE_KEY, route.routeRef);
+      localStorage.setItem(MODEL_ROUTE_REVISION_STORAGE_KEY, String(state.selectedRouteCatalogRevision));
+      localStorage.setItem("code-model", route.modelId);
+    } else {
+      localStorage.removeItem(MODEL_ROUTE_REF_STORAGE_KEY);
+      localStorage.removeItem(MODEL_ROUTE_REVISION_STORAGE_KEY);
+    }
+  } catch (_) {}
+  applySelectedModelPresentation(route?.modelId || "", route);
+  if (route) queueMicrotask(() => { void resumeDispatchesWaitingForRoute(route); });
+  return route;
+}
+
+function routeRefreshManualConnections() {
+  return loadKeyConfig()
+    .filter((entry) => (
+      entry?.source !== "platform"
+      && String(entry?.key || "").trim()
+      && String(entry?.connectionId || "").trim()
+    ))
+    .map((entry) => ({
+      connectionId: String(entry.connectionId),
+      label: String(entry.name || "").trim() || t("modelConnectionUnnamed"),
+      key: String(entry.key),
+      enabled: entry.enabled !== false,
+    }));
+}
+
+function routeRefreshPayload() {
+  const platformAuth = getPlatformAuth?.();
+  return {
+    baseUrl: els.baseUrl.value.trim() || WORKBAR_URL,
+    ...(platformAuth ? {
+      platformAuth: {
+        token: String(platformAuth.token || ""),
+        userId: String(platformAuth.userId || ""),
+      },
+    } : {}),
+    manualConnections: routeRefreshManualConnections(),
+  };
+}
+
+function connectionRouteGroups(routes = state.modelRoutes) {
+  const groups = new Map();
+  for (const route of routes) {
+    if (!route?.enabled) continue;
+    if (!groups.has(route.connectionId)) {
+      groups.set(route.connectionId, {
+        connectionId: route.connectionId,
+        label: route.label || t("modelConnectionUnnamed"),
+        routes: [],
+      });
+    }
+    groups.get(route.connectionId).routes.push(route);
+  }
+  const labelCounts = new Map();
+  for (const group of groups.values()) {
+    labelCounts.set(group.label, Number(labelCounts.get(group.label) || 0) + 1);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      displayLabel: labelCounts.get(group.label) > 1
+        ? `${group.label} · ${group.connectionId.slice(-6)}`
+        : group.label,
+      routes: group.routes.sort((left, right) => left.modelId.localeCompare(right.modelId)),
+    }))
+    .sort((left, right) => left.displayLabel.localeCompare(right.displayLabel));
+}
+
+function renderConnectionRouteCatalog(statusKey = "", source = "live") {
+  const groups = connectionRouteGroups();
+  const availableRoutes = groups.flatMap((group) => group.routes);
+  state.modelCatalogModels = normalizeModelCatalogModels(
+    availableRoutes.map((route) => route.modelId),
+  );
+  state.modelCatalogStatusKey = statusKey;
+  state.modelCatalogSource = source;
+  els.modelPillDropdown.innerHTML = groups.map((group) => (
+    `<div class="model-pill-optgroup" data-connection-id="${escapeHtml(group.connectionId)}"><div class="model-pill-optgroup-label">${escapeHtml(group.displayLabel)}</div>${group.routes.map((route) => `<button class="model-pill-option" type="button" data-model="${escapeHtml(route.modelId)}" data-route-ref="${escapeHtml(route.routeRef)}"><span>${escapeHtml(route.modelId)}</span></button>`).join("")}</div>`
+  )).join("");
+  const statusHtml = statusKey
+    ? `<div class="model-list-state is-${modelCatalogStatusTone(statusKey)}" role="status" aria-live="polite" data-i18n="${escapeHtml(statusKey)}">${escapeHtml(t(statusKey))}</div>`
+    : "";
+  els.modelListBox.innerHTML = statusHtml + groups.map((group) => (
+    `<div class="model-provider-group" data-connection-id="${escapeHtml(group.connectionId)}"><span class="model-provider-label">${escapeHtml(group.displayLabel)}</span>${group.routes.map((route) => `<span class="model-name-tag">${escapeHtml(route.modelId)}</span>`).join("")}</div>`
+  )).join("");
+  const settingsList = document.getElementById("settingsModelList");
+  if (settingsList) settingsList.innerHTML = els.modelListBox.innerHTML;
+  const settingsCount = document.getElementById("settingsModelCount");
+  if (settingsCount) settingsCount.textContent = String(availableRoutes.length);
+
+  const storedRef = state.selectedRouteRef || localStorage.getItem(MODEL_ROUTE_REF_STORAGE_KEY) || "";
+  const storedRoute = state.modelRoutes.find((route) => route.routeRef === storedRef) || null;
+  const legacyModel = localStorage.getItem("code-model") || getSelectedModel();
+  const migratedRoute = storedRoute || (!storedRef ? routeForModel(legacyModel, { unique: true }) : null);
+  if (migratedRoute) {
+    setSelectedModelRoute(migratedRoute.routeRef, state.modelRouteCatalogRevision);
+  } else if (storedRef) {
+    state.selectedRouteRef = storedRef;
+    state.selectedRouteCatalogRevision = state.modelRouteCatalogRevision;
+    applySelectedModelPresentation(legacyModel, null);
+  } else {
+    setSelectedModelRoute("", state.modelRouteCatalogRevision);
+  }
+  return availableRoutes;
+}
+
+function applyModelRouteSnapshot(snapshot, { statusKey = "", source = "live" } = {}) {
+  state.routingV2 = snapshot?.routingV2 !== false;
+  state.modelRouteCatalogRevision = Math.max(0, Number(snapshot?.catalogRevision || 0));
+  state.modelRoutes = (Array.isArray(snapshot?.routes) ? snapshot.routes : [])
+    .map(normalizePublicModelRoute)
+    .filter(Boolean);
+  if (state.routingV2) return renderConnectionRouteCatalog(statusKey, source);
+  return [];
+}
+
+async function restoreModelRoutes() {
+  const snapshot = await apiJson("/api/model-routes");
+  return applyModelRouteSnapshot(snapshot, {
+    statusKey: snapshot.routes?.length ? "detectingModels" : "",
+    source: "registry",
+  });
+}
+
+async function refreshModelRoutes(payload = routeRefreshPayload(), request = {}) {
+  const previousRoutes = [...state.modelRoutes];
+  if (previousRoutes.length) renderConnectionRouteCatalog("detectingModels", "registry");
+  els.refreshModelsBtn.disabled = true;
+  try {
+    const snapshot = await apiJson("/api/model-routes/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (Number(request.generation ?? modelRouteRefreshGeneration()) !== modelRouteRefreshGeneration()) {
+      return {
+        ok: false,
+        reason: "superseded",
+        models: state.modelCatalogModels,
+        routes: state.modelRoutes,
+      };
+    }
+    const routes = applyModelRouteSnapshot(snapshot, { source: "registry" });
+    if (!routes.length) showToast(t("noModelsFound"), "warning");
+    return { ok: true, models: state.modelCatalogModels, routes: state.modelRoutes };
+  } catch (error) {
+    if (Number(request.generation ?? modelRouteRefreshGeneration()) !== modelRouteRefreshGeneration()) {
+      return {
+        ok: false,
+        reason: "superseded",
+        models: state.modelCatalogModels,
+        routes: state.modelRoutes,
+      };
+    }
+    state.modelRoutes = previousRoutes;
+    renderConnectionRouteCatalog(
+      previousRoutes.length ? "modelCatalogRefreshFailedCached" : "modelCatalogRefreshFailed",
+      previousRoutes.length ? "registry-cache" : "empty",
+    );
+    throw error;
+  } finally {
+    els.refreshModelsBtn.disabled = false;
+  }
+}
 
 async function modelCatalogDigest(value) {
   const subtle = globalThis.crypto?.subtle;
@@ -5414,14 +6001,22 @@ async function restoreCachedModelCatalog() {
 }
 
 function markModelCatalogStale(config) {
+  const entries = Array.isArray(config) ? config : loadKeyConfig();
+  const hasEnabledKey = entries.some((entry) => entry?.enabled !== false && String(entry?.key || "").trim());
+  if (state.routingV2 !== false) {
+    invalidateModelRoute("");
+    renderConnectionRouteCatalog(
+      hasEnabledKey ? "modelCatalogNeedsRefresh" : "enterApiKey",
+      state.modelRoutes.length ? "registry-cache" : "empty",
+    );
+    return;
+  }
   state.modelKeyMap = {};
   state.modelKeysMap = {};
   state.modelCatalogRouteBaseUrl = "";
   invalidateCachedModelCatalogRoutes(
     els.baseUrl.value.trim() || "http://localhost:3000",
   );
-  const entries = Array.isArray(config) ? config : loadKeyConfig();
-  const hasEnabledKey = entries.some((entry) => entry?.enabled !== false && String(entry?.key || "").trim());
   if (!hasEnabledKey) {
     clearModelCatalogCache();
     renderModelCatalog([], "enterApiKey", "empty");
@@ -5452,7 +6047,52 @@ function mergeModelContextEntry(previous, candidate) {
     : candidate;
 }
 
-async function refreshModels() {
+const MODEL_CATALOG_KEY_TIMEOUT_MS = 12 * 1000;
+const MODEL_CATALOG_TOTAL_TIMEOUT_MS = 30 * 1000;
+
+async function fetchModelCatalogForKey(key, baseUrl, timeoutMs) {
+  const controller = new AbortController();
+  let timeoutId = null;
+  const boundedTimeoutMs = Math.max(
+    1,
+    Math.min(MODEL_CATALOG_KEY_TIMEOUT_MS, Number(timeoutMs) || MODEL_CATALOG_KEY_TIMEOUT_MS),
+  );
+  try {
+    const request = fetch("/proxy/models", {
+      headers: { Authorization: `Bearer ${key}`, "X-Base-URL": baseUrl },
+      signal: controller.signal,
+    }).then(async (response) => ({ response, data: await response.json() }));
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        const error = new Error("Model catalog request timed out");
+        error.name = "AbortError";
+        error.code = "model_catalog_timeout";
+        reject(error);
+      }, boundedTimeoutMs);
+    });
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
+async function scanModelCatalogKeys(keys, baseUrl, onResult) {
+  const deadline = Date.now() + MODEL_CATALOG_TOTAL_TIMEOUT_MS;
+  let attempted = 0;
+  for (const key of keys) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    attempted += 1;
+    try {
+      const result = await fetchModelCatalogForKey(key, baseUrl, remainingMs);
+      await onResult(key, result);
+    } catch (_) { /* try next key within the shared deadline */ }
+  }
+  return { attempted, deadlineReached: Date.now() >= deadline };
+}
+
+async function performModelCatalogRefresh() {
 
   const keys = getApiKeys();
   const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
@@ -5478,14 +6118,7 @@ async function refreshModels() {
 
 
 
-  for (const key of keys) {
-
-    try {
-
-      const res = await fetch("/proxy/models", { headers: { Authorization: `Bearer ${key}`, "X-Base-URL": baseUrl } });
-
-      const data = await res.json();
-
+  await scanModelCatalogKeys(keys, baseUrl, async (key, { response: res, data }) => {
       if (res.ok && Array.isArray(data.data)) {
 
         successCount++;
@@ -5535,10 +6168,7 @@ async function refreshModels() {
         }
 
       }
-
-    } catch (_) { /* try next key */ }
-
-  }
+  });
 
   if (successCount === 0) {
     const statusKey = previousModels.length
@@ -5611,14 +6241,116 @@ async function refreshModels() {
 
 }
 
+function modelRouteRefreshGeneration() {
+  return Math.max(0, Number(state._modelRouteConfigGeneration || 0));
+}
+
+function modelRouteRefreshPriority(intent) {
+  return ({ background: 0, dispatch: 1, "route-error": 2, config: 3, explicit: 4 })[
+    String(intent || "background")
+  ] ?? 0;
+}
+
+function modelRouteRefreshRequest(options = {}) {
+  const intent = String(options.intent || "background");
+  return {
+    intent,
+    generation: modelRouteRefreshGeneration(),
+    payload: state.routingV2 !== false ? routeRefreshPayload() : null,
+  };
+}
+
+function sameModelRouteRefresh(left, right) {
+  return Boolean(
+    left && right
+    && left.intent === right.intent
+    && left.generation === right.generation
+  );
+}
+
+function finishModelRouteRefresh(active) {
+  if (state._modelRouteRefreshActive !== active) return;
+  active.settled = true;
+  state._modelRouteRefreshActive = null;
+  state._modelRouteRefreshPromise = null;
+  const trailing = state._modelRouteTrailingRefresh;
+  state._modelRouteTrailingRefresh = null;
+  if (!trailing) return;
+  const next = startModelRouteRefresh(trailing.request);
+  next.then(trailing.resolve, trailing.reject);
+}
+
+function startModelRouteRefresh(request) {
+  const active = { request, promise: null, settled: false };
+  state._modelRouteRefreshActive = active;
+  let operation;
+  try {
+    operation = Promise.resolve(
+      state.routingV2 !== false
+        ? refreshModelRoutes(request.payload, request)
+        : performModelCatalogRefresh(),
+    );
+  } catch (error) {
+    operation = Promise.reject(error);
+  }
+  active.promise = operation;
+  state._modelRouteRefreshPromise = operation;
+  operation.then(
+    () => finishModelRouteRefresh(active),
+    () => finishModelRouteRefresh(active),
+  );
+  return operation;
+}
+
+function queueModelRouteRefresh(request) {
+  const trailing = state._modelRouteTrailingRefresh;
+  if (trailing) {
+    if (sameModelRouteRefresh(trailing.request, request)) return trailing.promise;
+    const newerGeneration = request.generation > trailing.request.generation;
+    const higherPriority = (
+      request.generation === trailing.request.generation
+      && modelRouteRefreshPriority(request.intent) > modelRouteRefreshPriority(trailing.request.intent)
+    );
+    if (newerGeneration || higherPriority) trailing.request = request;
+    return trailing.promise;
+  }
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  state._modelRouteTrailingRefresh = { request, promise, resolve, reject };
+  return promise;
+}
+
+function refreshModels(options = {}) {
+  const request = modelRouteRefreshRequest(options);
+  const active = state._modelRouteRefreshActive;
+  if (!active) return startModelRouteRefresh(request);
+  if (sameModelRouteRefresh(active.request, request)) return active.promise;
+  return queueModelRouteRefresh(request);
+}
 
 
-function appendSystemError(message) {
 
-  state.messages.push({ role: "assistant", content: `${t("errorPrefix")}：${message}` });
+function appendSessionSystemError(sessionId, message, meta = {}) {
+  const targetSessionId = String(sessionId || state.sessionId || "");
+  const messages = getSessionMessages(targetSessionId);
+  const errorMessage = {
+    role: "assistant",
+    content: `${t("errorPrefix")}：${message}`,
+    meta: { ...meta },
+    _time: new Date().toISOString(),
+  };
+  messages.push(errorMessage);
+  setSessionMessages(targetSessionId, messages);
+  renderSessionMessages(targetSessionId);
+  return errorMessage;
+}
 
-  renderMessages();
-
+function appendSystemError(message, meta = {}) {
+  return appendSessionSystemError(state.sessionId, message, meta);
 }
 
 
@@ -5640,6 +6372,7 @@ function setStreaming(active, sessionId = state.sessionId) {
       }
     } else {
       clearActiveRunTimerCheckpoint(sessionId);
+      run.modelRoutePending = false;
       run.abortController = null;
       run.responseStartTime = null;
       run.modelWaitStartedAt = null;
@@ -6820,6 +7553,8 @@ function buildRecoveredRunContext(session, runState) {
   ctx.messages = messages;
   ctx.stats = getSessionStats(sessionId);
   ctx.model = runState.model || ctx.model;
+  ctx.routeRef = String(runState.routeRef || "");
+  ctx.catalogRevision = Math.max(0, Number(runState.catalogRevision || 0));
   ctx.temperature = Number(runState.temperature ?? ctx.temperature ?? 0.2);
   ctx.maxTokens = Number(runState.maxTokens || ctx.maxTokens || getEffectiveMaxTokens(ctx.model));
   ctx.toolPreset = runState.toolPreset || ctx.toolPreset || "default";
@@ -6884,7 +7619,7 @@ async function resumePersistedSessionRun(summary) {
   if (!summary?.id || !["running", "waiting-network", "resuming"].includes(runState.status)) return;
 
   await withSessionRecoveryLock(summary.id, async () => {
-    const session = await apiJson(`/api/sessions/${encodeURIComponent(summary.id)}`);
+    const session = await getSessionRecord(summary.id);
     const latestRunState = session.runState || runState;
     if (!["running", "waiting-network", "resuming"].includes(latestRunState.status)) return;
 
@@ -6935,16 +7670,21 @@ async function resumePersistedSessionRun(summary) {
       recoveryError = error;
       const status = error?.name === "AbortError" ? "paused" : "failed";
       if (status === "paused") finalizePausedRun(ctx);
+      publishTerminalRunOwnership(ctx);
       await persistRunCheckpoint(ctx, status, "model", {
         recoveryCount,
         lastError: error?.message || String(error),
-      }).catch(() => {});
+      }, { currentProjection: true }).catch(() => {});
     } finally {
-      if (ownsActiveRunContext(ctx)) setStreaming(false, summary.id);
+      publishTerminalRunOwnership(ctx);
       archiveAgentProjectionShadow(ctx);
-      releaseActiveRunContext(ctx);
       if (ctx.queueItemId) finishQueuedSessionMessage(summary.id, ctx.queueItemId, !recoveryError);
-      await saveSessionState(summary.id, ctx.messages, ctx.stats, session.title).catch(() => {});
+      await saveSessionState(
+        summary.id,
+        getSessionMessages(summary.id),
+        getSessionStats(summary.id),
+        session.title,
+      ).catch(() => {});
       if (summary.id === state.sessionId) renderSessionMessages(summary.id);
       renderSessions();
       scheduleTerminalFileTreeRefresh(
@@ -7708,9 +8448,23 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
     state.abortController = run.abortController;
   }
 
-  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-  const fallbackKeys = await getFallbackKeys(model);
-  const totalKeys = fallbackKeys.length;
+  const dispatch = useRuntimeBridge && attachedRuntimeRunId
+    ? null
+    : await getModelDispatchCredentials(model, {
+        routeRef: ctx?.routeRef || "",
+        catalogRevision: ctx?.catalogRevision || 0,
+      });
+  if (ctx && dispatch?.routeRef) {
+    ctx.routeRef = dispatch.routeRef;
+    ctx.catalogRevision = dispatch.catalogRevision;
+  }
+  const baseUrl = dispatch?.baseUrl || els.baseUrl.value.trim() || "http://localhost:3000";
+  // Attaching to an already-created local Runtime only polls its durable
+  // events; keys are used exclusively when creating a new Runtime. This keeps
+  // AgentRun recovery available while the model catalog is offline.
+  const fallbackKeys = dispatch?.keys || [];
+  const requestCredentials = dispatch?.routeRef ? [""] : fallbackKeys;
+  const totalKeys = requestCredentials.length;
   let res;
   let lastError = "";
   if (useRuntimeBridge) {
@@ -7720,6 +8474,8 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       payload,
       baseUrl,
       keys: fallbackKeys,
+      routeRef: dispatch?.routeRef || ctx?.routeRef || "",
+      catalogRevision: dispatch?.catalogRevision || ctx?.catalogRevision || 0,
       signal: run.abortController.signal,
       onRunCreated(runtimeRunId) {
         ctx.runtimeRunId = runtimeRunId;
@@ -7763,8 +8519,8 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
   } else {
     const FETCH_TIMEOUT_MS = 180000;  // 3 min safety net for sub-agents
 
-    for (let ki = 0; ki < fallbackKeys.length; ki++) {
-      const key = fallbackKeys[ki];
+    for (let ki = 0; ki < requestCredentials.length; ki++) {
+      const key = requestCredentials[ki];
       const request = createRequestSignal(run.abortController.signal, FETCH_TIMEOUT_MS);
       try {
         res = await fetch("/proxy/chat", {
@@ -7772,7 +8528,11 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
           headers: {
             "Content-Type": "application/json",
             "X-Base-URL": baseUrl,
-            Authorization: `Bearer ${key}`,
+            ...(key ? { Authorization: `Bearer ${key}` } : {}),
+            ...(dispatch?.routeRef ? {
+              "X-Model-Route-Ref": dispatch.routeRef,
+              "X-Model-Route-Revision": String(dispatch.catalogRevision),
+            } : {}),
           },
           body: JSON.stringify(payload),
           signal: request.signal,
@@ -7786,7 +8546,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       }
 
       if (res?.ok) break;
-      if (ki < fallbackKeys.length - 1) {
+      if (ki < requestCredentials.length - 1) {
         const msg = totalKeys > 1
           ? `Request failed (${lastError}); trying API key ${ki + 2}/${totalKeys}...`
           : `Request failed (${lastError}); retrying...`;
@@ -8344,6 +9104,8 @@ function queuedMessageCheckpoint(item) {
     status: String(item.status || "pending"),
     userText: String(item.userText || ""),
     model: String(item.model || ""),
+    routeRef: String(item.routeRef || ""),
+    catalogRevision: Math.max(0, Number(item.catalogRevision || 0)),
     permissionProfile: String(item.permissionProfile || "accept"),
     toolPreset: String(item.toolPreset || "default"),
     thinkingLevel: String(item.thinkingLevel || "auto"),
@@ -8390,12 +9152,69 @@ function updateQueuedMessageItem(sessionId, queueItemId, updates = {}) {
   return queuedMessages.find((item) => item.id === queueItemId) || null;
 }
 
+async function resumeDispatchesWaitingForRoute(route) {
+  if (!route?.routeRef || !route?.modelId) return false;
+  let changed = false;
+  const sessionIds = new Set([
+    ...state.sessions.map((session) => String(session?.id || "")).filter(Boolean),
+    ...Object.keys(state._sessionRuns || {}),
+  ]);
+  for (const sessionId of sessionIds) {
+    let sessionChanged = false;
+    const queuedMessages = getQueuedMessageCheckpoints(sessionId).map((item) => {
+      if (item?.status !== "waiting_route_selection" || item?.model !== route.modelId) return item;
+      sessionChanged = true;
+      const message = findQueuedUserMessage(sessionId, item.id);
+      if (message?.meta?.queuedDispatch) {
+        Object.assign(message.meta.queuedDispatch, {
+          status: "pending",
+          routeRef: route.routeRef,
+          catalogRevision: state.modelRouteCatalogRevision,
+        });
+        delete message.meta.queuedDispatch.failureCode;
+      }
+      return {
+        ...item,
+        status: "pending",
+        routeRef: route.routeRef,
+        catalogRevision: state.modelRouteCatalogRevision,
+        failureCode: "",
+      };
+    });
+    if (!sessionChanged) continue;
+    changed = true;
+    setQueuedMessageCheckpoints(sessionId, queuedMessages);
+    renderSessionMessages(sessionId);
+    void saveSessionState(
+      sessionId,
+      getSessionMessages(sessionId),
+      getSessionStats(sessionId),
+      undefined,
+      { persistMessages: true },
+    ).then(() => pumpQueuedSessionMessages(sessionId)).catch(() => {});
+  }
+  for (const job of state._backgroundDispatcher?.jobs || []) {
+    if (job?.status !== "waiting_route_selection" || job?.model !== route.modelId) continue;
+    changed = true;
+    job.status = "pending";
+    job.routeRef = route.routeRef;
+    job.catalogRevision = state.modelRouteCatalogRevision;
+    job.error = "";
+    syncBackgroundJobCheckpoint(job);
+    void persistBackgroundJob(job).then(() => pumpBackgroundDispatcher()).catch(() => {});
+  }
+  return changed;
+}
+
 async function enqueueSessionMessage(sessionId, userText, images = [], options = {}) {
   if (!sessionId) throw new Error(t("createSessionFirst"));
   const existingMessage = options.existingMessage || null;
   const model = String(existingMessage?._model || getSelectedModel());
   if (!model) throw new Error(t("selectModelFirst"));
-  await getFallbackKeys(model);
+  const dispatchRoute = await getModelDispatchCredentials(model, {
+    routeRef: options.routeRef || existingMessage?.meta?.queuedDispatch?.routeRef || "",
+    catalogRevision: options.catalogRevision || existingMessage?.meta?.queuedDispatch?.catalogRevision || 0,
+  });
 
   const queuedAt = Date.now();
   const id = `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
@@ -8423,6 +9242,8 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
     status: "pending",
     userText,
     model,
+    routeRef: dispatchRoute.routeRef,
+    catalogRevision: dispatchRoute.catalogRevision,
     permissionProfile,
     toolPreset,
     thinkingLevel,
@@ -8443,7 +9264,15 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
   userMessage._model = model;
   userMessage.meta = {
     ...(userMessage.meta || {}),
-    queuedDispatch: { id, status: "pending", queuedAt },
+    queuedDispatch: {
+      id,
+      status: "pending",
+      queuedAt,
+      ...(dispatchRoute.routeRef ? {
+        routeRef: dispatchRoute.routeRef,
+        catalogRevision: dispatchRoute.catalogRevision,
+      } : {}),
+    },
     detachedFromMain: true,
   };
   delete userMessage.meta.steerDispatch;
@@ -8634,6 +9463,8 @@ async function runQueuedSessionMessage(sessionId, item) {
       queueItemId: item.id,
       clientRequestId: item.clientRequestId || item.id,
       model: item.model,
+      routeRef: item.routeRef,
+      catalogRevision: item.catalogRevision,
       permissionProfile: item.permissionProfile,
       toolPreset: item.toolPreset,
       thinkingLevel: item.thinkingLevel,
@@ -8681,8 +9512,24 @@ async function pumpQueuedSessionMessages(sessionId) {
   // item pending instead of consuming it as a failed request.
   if (!item.model) return false;
   try {
-    await getFallbackKeys(item.model);
-  } catch (_) {
+    await getModelDispatchCredentials(item.model, {
+      routeRef: item.routeRef,
+      catalogRevision: item.catalogRevision,
+    });
+  } catch (error) {
+    if (!item.routeRef && modelRouteFailureCode(error) === "route_not_found") {
+      updateQueuedMessageItem(sessionId, item.id, {
+        status: "waiting_route_selection",
+        failureCode: "route_not_found",
+      });
+      await saveSessionState(
+        sessionId,
+        getSessionMessages(sessionId),
+        getSessionStats(sessionId),
+        undefined,
+        { persistMessages: true },
+      ).catch(() => {});
+    }
     return false;
   }
 
@@ -8718,7 +9565,7 @@ async function resumePersistedQueuedMessages() {
   await Promise.allSettled(candidates.map(async (summary) => {
     let session = summary;
     if (!state._sessionMsgs[summary.id]) {
-      session = await apiJson(`/api/sessions/${encodeURIComponent(summary.id)}`);
+      session = await getSessionRecord(summary.id);
       setSessionMessages(summary.id, session.messages || []);
       setSessionStats(summary.id, session.stats || { input: 0, output: 0, cache: 0, cost: 0 });
       setSessionRunState(summary.id, session.runState || summary.runState || {});
@@ -8899,6 +9746,10 @@ function createBackgroundServerContext(job) {
   }
   subCtx.sessionId = job.sessionId;
   subCtx.model = job.model;
+  subCtx.routeRef = String(job.routeRef || parentCtx.routeRef || "");
+  subCtx.catalogRevision = Math.max(0, Number(
+    job.catalogRevision || parentCtx.catalogRevision || 0,
+  ));
   subCtx.temperature = job.temperature;
   subCtx.maxTokens = job.maxTokens;
   subCtx.permissionProfile = job.permissionProfile;
@@ -8932,8 +9783,20 @@ async function runBackgroundSubAgentJob(job) {
   subCtx.allowedToolNames = allowedToolNames;
   subCtx.tools = serverTools;
   const prepared = await buildModelRequestPayload(subCtx, true, serverTools);
-  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-  const keys = await getFallbackKeys(job.model || getSelectedModel());
+  let resolvedDispatch = null;
+  const resolveJobDispatch = async (routeRef = job.routeRef) => {
+    if (!resolvedDispatch || (routeRef && resolvedDispatch.routeRef !== routeRef)) {
+      resolvedDispatch = await getModelDispatchCredentials(
+        job.model || getSelectedModel(),
+        { routeRef, catalogRevision: job.catalogRevision },
+      );
+      job.routeRef = resolvedDispatch.routeRef;
+      job.catalogRevision = resolvedDispatch.catalogRevision;
+      subCtx.routeRef = resolvedDispatch.routeRef;
+      subCtx.catalogRevision = resolvedDispatch.catalogRevision;
+    }
+    return resolvedDispatch;
+  };
 
   let timedOut = false;
   let lastUsage = { input: 0, output: 0, cache: 0 };
@@ -8946,24 +9809,29 @@ async function runBackgroundSubAgentJob(job) {
   try {
     if (remainingMs <= 0) throw new DOMException("Aborted", "AbortError");
     if (job.inputBudgetInsufficient) throw new Error(t("contextBudgetInsufficient"));
-    const created = await agentRuntime.createAgentRun({
-      sessionId: job.sessionId,
-      clientRequestId: job.clientRequestId || job.id,
-      payload: prepared.payload,
-      baseUrl,
-      keys,
-      allowedTools: serverToolNames,
-      maxRounds: MAX_TOOL_ROUNDS,
-      permissionProfile: job.permissionProfile,
-      runKind: "background",
-      cwd: subCtx.cwd || "",
-      contextLimit: Number(job.contextLimit || getModelContextLimit(job.model || getSelectedModel())),
-      contextWindowTokens: Number(job.contextWindowTokens || 0) || undefined,
-      contextBudgetTokens: job.contextBudgetTokens,
-      signal: subCtx.run.abortController.signal,
-    });
-    job.agentRunId = String(created.agentRunId || "");
-    if (!job.agentRunId) throw new Error("Server Agent did not return an agentRunId");
+    if (!job.agentRunId) {
+      const dispatch = await resolveJobDispatch();
+      const created = await agentRuntime.createAgentRun({
+        sessionId: job.sessionId,
+        clientRequestId: job.clientRequestId || job.id,
+        payload: prepared.payload,
+        baseUrl: dispatch.baseUrl,
+        keys: dispatch.keys,
+        routeRef: dispatch.routeRef,
+        catalogRevision: dispatch.catalogRevision,
+        allowedTools: serverToolNames,
+        maxRounds: MAX_TOOL_ROUNDS,
+        permissionProfile: job.permissionProfile,
+        runKind: "background",
+        cwd: subCtx.cwd || "",
+        contextLimit: Number(job.contextLimit || getModelContextLimit(job.model || getSelectedModel())),
+        contextWindowTokens: Number(job.contextWindowTokens || 0) || undefined,
+        contextBudgetTokens: job.contextBudgetTokens,
+        signal: subCtx.run.abortController.signal,
+      });
+      job.agentRunId = String(created.agentRunId || "");
+      if (!job.agentRunId) throw new Error("Server Agent did not return an agentRunId");
+    }
     subCtx.agentRunId = job.agentRunId;
     await persistBackgroundJob(job);
 
@@ -8972,12 +9840,19 @@ async function runBackgroundSubAgentJob(job) {
         cursor: job.cursor || 0,
         signal: subCtx.run.abortController.signal,
       });
+      if (snapshot.routeRef) {
+        job.routeRef = String(snapshot.routeRef);
+        job.catalogRevision = Math.max(0, Number(snapshot.catalogRevision || job.catalogRevision || 0));
+      }
       if (snapshot.status === "waiting_credentials") {
         updateBackgroundJob(job, "waiting-credentials");
         await persistBackgroundJob(job);
+        const dispatch = await resolveJobDispatch(snapshot.routeRef || job.routeRef);
         await agentRuntime.resumeAgentRun(job.agentRunId, {
-          keys,
-          baseUrl,
+          keys: dispatch.keys,
+          baseUrl: dispatch.baseUrl,
+          routeRef: dispatch.routeRef,
+          catalogRevision: dispatch.catalogRevision,
           signal: subCtx.run.abortController.signal,
         });
       }
@@ -9016,6 +9891,18 @@ async function runBackgroundSubAgentJob(job) {
       throw new Error(snapshot.error || `Server Agent ${snapshot.status}`);
     }
   } catch (error) {
+    if (
+      !job.agentRunId
+      && !job.routeRef
+      && modelRouteFailureCode(error) === "route_not_found"
+    ) {
+      return {
+        ok: false,
+        waitingRouteSelection: true,
+        result: t("modelRouteSelectionRequired"),
+        usage: lastUsage,
+      };
+    }
     return {
       ok: false,
       result: error?.name === "AbortError"
@@ -9043,6 +9930,11 @@ function pumpBackgroundDispatcher() {
     persistBackgroundJob(job).catch((error) => console.error("Failed to persist running background task:", error));
     runBackgroundSubAgentJob(job)
       .then(async (sub) => {
+        if (sub.waitingRouteSelection) {
+          updateBackgroundJob(job, "waiting_route_selection", "route_not_found");
+          await persistBackgroundJob(job).catch(() => {});
+          return;
+        }
         const content = String(sub.result || (sub.ok === false ? "后台任务失败" : "后台任务已完成"));
         const existingResult = hasBackgroundResult(getSessionMessages(job.sessionId), job.id);
         if (!existingResult) {
@@ -9135,6 +10027,8 @@ async function dispatchBackgroundSubAgent(sessionId, userText, images = []) {
     parentCtx,
     userMessage,
     model: parentCtx.model || getSelectedModel(),
+    routeRef: String(parentCtx.routeRef || ""),
+    catalogRevision: Math.max(0, Number(parentCtx.catalogRevision || 0)),
     permissionProfile: parentCtx.permissionProfile || "read",
     toolPreset: parentCtx.toolPreset || "default",
     thinkingLevel: parentCtx.thinkingLevel || getThinkingLevel(),
@@ -9179,7 +10073,7 @@ async function restoreBackgroundJobsForSession(summary) {
   let messages = state._sessionMsgs[summary.id];
   let session = null;
   if (!messages) {
-    session = await apiJson(`/api/sessions/${encodeURIComponent(summary.id)}`);
+    session = await getSessionRecord(summary.id);
     messages = state._sessionMsgs[summary.id] || session.messages || [];
     if (!state._sessionMsgs[summary.id]) setSessionMessages(summary.id, messages);
     if (!state._sessionStats[summary.id]) {
@@ -10428,6 +11322,20 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
   return waitForDecision;
 }
 
+async function settleForegroundDispatchAfterAgentRunCreated(ctx) {
+  const foregroundOriginMessage = ctx?.foregroundOriginMessage;
+  if (!foregroundOriginMessage?.meta?.pendingDispatch) return false;
+  delete foregroundOriginMessage.meta.pendingDispatch;
+  if (Object.keys(foregroundOriginMessage.meta).length === 0) {
+    delete foregroundOriginMessage.meta;
+  }
+  setSessionMessages(ctx.sessionId, ctx.messages);
+  await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats, undefined, {
+    persistMessages: true,
+  }).catch(() => {});
+  return true;
+}
+
 async function runServerAgentLoop(ctx) {
   if (!agentRuntime?.createAgentRun || !agentRuntime?.watchAgentRun) {
     throw new Error("Server Agent runtime is unavailable");
@@ -10465,9 +11373,20 @@ async function runServerAgentLoop(ctx) {
   }
   if (ctx.sessionId === state.sessionId) state.abortController = ctx.run.abortController;
 
-  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
-  const keys = await getFallbackKeys(ctx.model || getSelectedModel());
+  let resolvedDispatch = null;
+  const resolveRunDispatch = async (routeRef = ctx.routeRef) => {
+    if (!resolvedDispatch || (routeRef && resolvedDispatch.routeRef !== routeRef)) {
+      resolvedDispatch = await getModelDispatchCredentials(
+        ctx.model || getSelectedModel(),
+        { routeRef, catalogRevision: ctx.catalogRevision },
+      );
+      ctx.routeRef = resolvedDispatch.routeRef;
+      ctx.catalogRevision = resolvedDispatch.catalogRevision;
+    }
+    return resolvedDispatch;
+  };
   if (!ctx.agentRunId) {
+    const dispatch = await resolveRunDispatch();
     const prepared = await buildModelRequestPayload(ctx, true, serverTools);
     const contextResolution = ctx.contextResolution || getModelContextResolution(
       ctx.model || getSelectedModel(),
@@ -10480,8 +11399,10 @@ async function runServerAgentLoop(ctx) {
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
       payload: prepared.payload,
-      baseUrl,
-      keys,
+      baseUrl: dispatch.baseUrl,
+      keys: dispatch.keys,
+      routeRef: dispatch.routeRef,
+      catalogRevision: dispatch.catalogRevision,
       allowedTools: serverToolNames,
       toolBudgets: skillToolBudgets,
       maxRounds: MAX_TOOL_ROUNDS,
@@ -10496,14 +11417,6 @@ async function runServerAgentLoop(ctx) {
     ctx.agentRunId = String(created.agentRunId || "");
     if (!ctx.agentRunId) throw new Error("Server Agent did not return an agentRunId");
     const onAgentRunCreated = ctx.onAgentRunCreated;
-    ctx.onAgentRunCreated = null;
-    if (typeof onAgentRunCreated === "function") {
-      try {
-        onAgentRunCreated({ agentRunId: ctx.agentRunId, sessionId: ctx.sessionId });
-      } catch (error) {
-        console.warn("Onboarding AgentRun callback failed:", error);
-      }
-    }
     ctx.run.agentRunId = ctx.agentRunId;
     ctx.agentEventCursor = 0;
     ctx.run.agentEventCursor = 0;
@@ -10511,7 +11424,18 @@ async function runServerAgentLoop(ctx) {
       executionOwner: "server-agent",
       agentRunId: ctx.agentRunId,
       agentEventCursor: 0,
+      routeRef: ctx.routeRef,
+      catalogRevision: ctx.catalogRevision,
     });
+    await settleForegroundDispatchAfterAgentRunCreated(ctx);
+    ctx.onAgentRunCreated = null;
+    if (typeof onAgentRunCreated === "function") {
+      try {
+        await onAgentRunCreated({ agentRunId: ctx.agentRunId, sessionId: ctx.sessionId });
+      } catch (error) {
+        console.warn("Onboarding AgentRun callback failed:", error);
+      }
+    }
   }
 
   while (true) {
@@ -10520,10 +11444,17 @@ async function runServerAgentLoop(ctx) {
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
     });
+    if (snapshot.routeRef) {
+      ctx.routeRef = String(snapshot.routeRef);
+      ctx.catalogRevision = Math.max(0, Number(snapshot.catalogRevision || ctx.catalogRevision || 0));
+    }
     if (snapshot.status === "waiting_credentials") {
+      const dispatch = await resolveRunDispatch(snapshot.routeRef || ctx.routeRef);
       await agentRuntime.resumeAgentRun(ctx.agentRunId, {
-        keys,
-        baseUrl,
+        keys: dispatch.keys,
+        baseUrl: dispatch.baseUrl,
+        routeRef: dispatch.routeRef,
+        catalogRevision: dispatch.catalogRevision,
         signal: ctx.run.abortController.signal,
       });
     }
@@ -10651,7 +11582,7 @@ async function runServerAgentLoop(ctx) {
     err.preservePublicProcess = preservePublicProcess;
     if (err.errorCode === "model_access_denied") {
       invalidateModelCatalogRoute(ctx.model || getSelectedModel());
-      await refreshModels().catch((refreshError) => {
+      await refreshModels({ intent: "route-error" }).catch((refreshError) => {
         console.warn("Failed to refresh models after authorization changed:", refreshError);
       });
     }
@@ -10700,12 +11631,12 @@ async function compactConversation() {
 
 
   const model = getSelectedModel();
-  const key = model
-    ? (await getFallbackKeys(model).catch(() => []))[0]
-    : "";
-  const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000";
+  const dispatch = model
+    ? await getModelDispatchCredentials(model).catch(() => null)
+    : null;
+  const baseUrl = dispatch?.baseUrl || els.baseUrl.value.trim() || "http://localhost:3000";
 
-  if (!key || !model) { showToast(t("compactSetupRequired"), "warning"); return; }
+  if (!dispatch || !model) { showToast(t("compactSetupRequired"), "warning"); return; }
 
   state._manualCompactionConfirmSessionId = targetSessionId;
 
@@ -10800,7 +11731,14 @@ async function compactConversation() {
 
         method: "POST",
 
-        headers: { Authorization: `Bearer ${key}`, "X-Base-URL": baseUrl },
+        headers: {
+          "X-Base-URL": baseUrl,
+          ...(dispatch.keys?.[0] ? { Authorization: `Bearer ${dispatch.keys[0]}` } : {}),
+          ...(dispatch.routeRef ? {
+            "X-Model-Route-Ref": dispatch.routeRef,
+            "X-Model-Route-Revision": String(dispatch.catalogRevision),
+          } : {}),
+        },
 
         body: JSON.stringify({
 
@@ -11332,7 +12270,64 @@ async function retryManualCompactionPersistence(sessionId, compactionId) {
   }
 }
 
-function projectOptimisticFirstMessage(userText, model, submittedAt, images = []) {
+function foregroundDispatchId(submittedAt = Date.now()) {
+  return `foreground-dispatch-${Number(submittedAt).toString(36)}-${Math.random().toString(16).slice(2)}`;
+}
+
+function foregroundDispatchOwnerships() {
+  if (!(state._foregroundDispatchOwnerships instanceof Set)) {
+    state._foregroundDispatchOwnerships = new Set();
+  }
+  return state._foregroundDispatchOwnerships;
+}
+
+function foregroundDispatchIdentity(message) {
+  return String(message?.meta?.pendingDispatch?.id || "");
+}
+
+function claimForegroundDispatchOwnership(message) {
+  const dispatchId = foregroundDispatchIdentity(message);
+  if (!dispatchId) return "";
+  foregroundDispatchOwnerships().add(dispatchId);
+  return dispatchId;
+}
+
+function releaseForegroundDispatchOwnership(message) {
+  const dispatchId = foregroundDispatchIdentity(message);
+  if (!dispatchId) return false;
+  return foregroundDispatchOwnerships().delete(dispatchId);
+}
+
+function releaseForegroundDispatchOwnershipFromMessages(messages = []) {
+  for (const message of Array.isArray(messages) ? messages : []) {
+    releaseForegroundDispatchOwnership(message);
+  }
+}
+
+function isForegroundDispatchLocallyOwned(message) {
+  const dispatchId = foregroundDispatchIdentity(message);
+  return Boolean(dispatchId && foregroundDispatchOwnerships().has(dispatchId));
+}
+
+function findRetryableForegroundDispatch(sessionId, userText, model) {
+  const messages = getSessionMessages(sessionId);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const dispatch = message.meta?.pendingDispatch;
+    if (
+      dispatch?.status === "failed"
+      && String(message._model || "") === String(model || "")
+      && getMsgText(message).trim() === String(userText || "").trim()
+      && !message._images?.length
+      && !Array.isArray(message.content)
+    ) return message;
+    return null;
+  }
+  return null;
+}
+
+function projectOptimisticFirstMessage(userText, model, submittedAt, images = [], options = {}) {
   const projectedImages = Array.isArray(images) ? images : [];
   const content = projectedImages.length > 0
     ? [
@@ -11343,14 +12338,37 @@ function projectOptimisticFirstMessage(userText, model, submittedAt, images = []
         })),
       ]
     : userText;
-  const message = {
-    role: "user",
-    content,
-    _model: model,
-    _time: new Date(submittedAt).toISOString(),
-    meta: { pendingSessionCreation: true },
+  const existingMessage = options.existingMessage || null;
+  const previousDispatchId = String(existingMessage?.meta?.pendingDispatch?.id || "");
+  const message = existingMessage || { role: "user" };
+  message.content = content;
+  message._model = model;
+  message._time = message._time || new Date(submittedAt).toISOString();
+  message.meta = {
+    ...(message.meta || {}),
+    ...(options.pendingSessionCreation === false ? {} : { pendingSessionCreation: true }),
+    pendingDispatch: {
+      id: previousDispatchId || foregroundDispatchId(submittedAt),
+      status: "routing",
+      submittedAt: Number(submittedAt),
+      attempt: Math.max(0, Number(existingMessage?.meta?.pendingDispatch?.attempt || 0)) + 1,
+    },
   };
-  state.messages.push(message);
+  claimForegroundDispatchOwnership(message);
+  if (options.pendingSessionCreation === false) delete message.meta.pendingSessionCreation;
+  if (existingMessage) {
+    for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+      const candidate = state.messages[index];
+      if (
+        candidate?.role === "assistant"
+        && candidate.meta?.kind === "dispatch-error"
+        && String(candidate.meta?.pendingDispatchId || "") === previousDispatchId
+      ) state.messages.splice(index, 1);
+    }
+  } else {
+    state.messages.push(message);
+  }
+  if (state.sessionId) setSessionMessages(state.sessionId, state.messages);
   resetRenderCache();
   renderMessages();
   return message;
@@ -11382,6 +12400,7 @@ function reconcileOptimisticFirstMessage(message, content, imageRefs, model) {
     delete message.meta.pendingSessionCreation;
     if (Object.keys(message.meta).length === 0) delete message.meta;
   }
+  releaseForegroundDispatchOwnership(message);
 }
 
 async function sendMessage(userText, options = {}) {
@@ -11390,28 +12409,31 @@ async function sendMessage(userText, options = {}) {
 
   if (!model) throw new Error(t("selectModelFirst"));
 
-  await getFallbackKeys(model);
-
   const submittedAt = Date.now();
-
-  const optimisticMessage = !options.sessionId && !state.sessionId && !options.existingMessage
-    ? projectOptimisticFirstMessage(
-        userText,
-        model,
-        submittedAt,
-        state.attachedImages,
-      )
+  const existingMessage = options.existingMessage || null;
+  const retryMessage = !existingMessage ? options.retryMessage || null : null;
+  const createsSession = !options.sessionId && !state.sessionId;
+  const optimisticMessage = !existingMessage
+    ? projectOptimisticFirstMessage(userText, model, submittedAt, state.attachedImages, {
+        existingMessage: retryMessage,
+        pendingSessionCreation: createsSession,
+      })
     : null;
-  if (!options.sessionId && !state.sessionId) {
-    await createSession(
-      userText.slice(0, 24) || t("sessionTitleDefault"),
-      optimisticMessage
-        ? {
-            initialMessages: state.messages,
-            deferSidebarRefresh: true,
-          }
-        : {},
-    );
+  if (createsSession) {
+    try {
+      await createSession(
+        userText.slice(0, 24) || t("sessionTitleDefault"),
+        optimisticMessage
+          ? {
+              initialMessages: state.messages,
+              deferSidebarRefresh: true,
+            }
+          : {},
+      );
+    } catch (error) {
+      releaseForegroundDispatchOwnership(optimisticMessage);
+      throw error;
+    }
   }
 
   const sessionId = String(options.sessionId || state.sessionId || "");
@@ -11434,7 +12456,6 @@ async function sendMessage(userText, options = {}) {
   // Build message content (text + images)
   // Upload images to server so session stores paths, not base64 blobs
 
-  const existingMessage = options.existingMessage || null;
   let images = [];
   let imageRefs = [];
   let messageContent = userText;
@@ -11482,6 +12503,97 @@ async function sendMessage(userText, options = {}) {
     );
   }
 
+  if (!existingMessage && !optimisticMessage) {
+    ctx.messages.push({
+      role: "user",
+      content: messageContent,
+      _images: imageRefs.length > 0 ? imageRefs : undefined,
+      _model: ctx.model || model,
+      _time: new Date(submittedAt).toISOString(),
+    });
+  }
+  const foregroundOriginMessage = existingMessage
+    || optimisticMessage
+    || [...ctx.messages].reverse().find((message) => message?.role === "user");
+  ctx.foregroundOriginMessage = foregroundOriginMessage;
+  const foregroundOriginMessageId = ensureForegroundGoalOrigin(
+    foregroundOriginMessage,
+    ctx.clientRequestId,
+  );
+  ctx.agentUsageGroupId = foregroundOriginMessageId || ctx.clientRequestId;
+  const explicitGoalAction = goalFeature?.classifyGoalInput(userText);
+  const snapshotIndex = ctx.messages.length;
+  const originalUserContent = messageContent;
+  setSessionMessages(sessionId, ctx.messages);
+
+  if (!existingMessage) {
+    clearAttachedImages();
+    renderImageThumbs();
+  }
+
+  renderSessionMessages(sessionId);
+  messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);
+
+  run.taskStartTime = submittedAt;
+  run.taskElapsedBaseMs = null;
+  run.taskElapsedResumedAt = null;
+  run.hasFirstModelResponseStarted = false;
+  run.modelRoutePending = true;
+  ctx.taskStartedAt = submittedAt;
+  if (!claimActiveRunContext(ctx)) {
+    throw new Error("Foreground AgentRun already has an active observer");
+  }
+  if (!run.abortController || run.abortController.signal.aborted) {
+    run.abortController = new AbortController();
+  }
+  run._model = ctx.model || getSelectedModel();
+  setStreaming(true, sessionId);
+  if (createsSession) scheduleDeferredSessionRefresh(sessionId);
+
+  await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, {
+    persistMessages: true,
+  });
+
+  try {
+    if (run.abortController.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const dispatchRoute = await getModelDispatchCredentials(model, {
+      routeRef: options.routeRef || ctx.routeRef || "",
+      catalogRevision: options.catalogRevision || ctx.catalogRevision || 0,
+    });
+    ctx.routeRef = dispatchRoute.routeRef;
+    ctx.catalogRevision = dispatchRoute.catalogRevision;
+    if (run.abortController.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    if (foregroundOriginMessage?.meta?.pendingDispatch) {
+      foregroundOriginMessage.meta.pendingDispatch.status = "ready";
+      foregroundOriginMessage.meta.pendingDispatch.routedAt = Date.now();
+      if (ctx.routeRef) {
+        foregroundOriginMessage.meta.pendingDispatch.routeRef = ctx.routeRef;
+        foregroundOriginMessage.meta.pendingDispatch.catalogRevision = ctx.catalogRevision;
+      }
+    }
+    run.modelRoutePending = false;
+    if (sessionId === state.sessionId) syncActiveRunBanner(sessionId);
+  } catch (error) {
+    const dispatch = foregroundOriginMessage?.meta?.pendingDispatch;
+    if (dispatch) {
+      dispatch.status = "failed";
+      dispatch.failedAt = Date.now();
+      dispatch.reason = error?.name === "AbortError"
+        ? "dispatch_cancelled"
+        : String(error?.code || "trusted_model_keys_unavailable");
+      error.pendingDispatchId = String(dispatch.id || "");
+    }
+    run.modelRoutePending = false;
+    if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);
+    setSessionMessages(sessionId, ctx.messages);
+    renderSessionMessages(sessionId);
+    await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, {
+      persistMessages: true,
+    }).catch(() => {});
+    releaseActiveRunContext(ctx);
+    throw error;
+  }
+
 
 
   // Slash command detection
@@ -11509,8 +12621,12 @@ async function sendMessage(userText, options = {}) {
       setSessionMessages(sessionId, ctx.messages);
       renderSessionMessages(sessionId);
 
+      if (foregroundOriginMessage?.meta) {
+        delete foregroundOriginMessage.meta.pendingDispatch;
+        if (Object.keys(foregroundOriginMessage.meta).length === 0) delete foregroundOriginMessage.meta;
+      }
       setStreaming(false, sessionId);
-      await saveSessionState(sessionId, ctx.messages, ctx.stats);
+      await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, { persistMessages: true });
       releaseActiveRunContext(ctx);
       return;
 
@@ -11518,6 +12634,12 @@ async function sendMessage(userText, options = {}) {
 
     if (cmd === "remember") {
       await extractAndSuggestMemories();
+      if (foregroundOriginMessage?.meta) {
+        delete foregroundOriginMessage.meta.pendingDispatch;
+        if (Object.keys(foregroundOriginMessage.meta).length === 0) delete foregroundOriginMessage.meta;
+      }
+      setStreaming(false, sessionId);
+      await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, { persistMessages: true });
       releaseActiveRunContext(ctx);
       return;
     }
@@ -11543,46 +12665,13 @@ async function sendMessage(userText, options = {}) {
 
     els.sessionTitle.value = makeSessionTitle(userText);
 
-    generateSessionTitle(userText);
+    generateSessionTitle(userText, {
+      model: ctx.model || model,
+      routeRef: ctx.routeRef,
+      catalogRevision: ctx.catalogRevision,
+    });
 
   }
-
-  run.taskStartTime = submittedAt;
-  run.taskElapsedBaseMs = null;
-  run.taskElapsedResumedAt = null;
-  run.hasFirstModelResponseStarted = false;
-  ctx.taskStartedAt = submittedAt;
-  if (!existingMessage && !optimisticMessage) {
-    ctx.messages.push({ role: "user", content: messageContent, _images: imageRefs.length > 0 ? imageRefs : undefined, _model: ctx.model || model, _time: new Date(submittedAt).toISOString() });
-  }
-  const foregroundOriginMessage = existingMessage
-    || optimisticMessage
-    || [...ctx.messages].reverse().find((message) => message?.role === "user");
-  const foregroundOriginMessageId = ensureForegroundGoalOrigin(
-    foregroundOriginMessage,
-    ctx.clientRequestId,
-  );
-  ctx.agentUsageGroupId = foregroundOriginMessageId || ctx.clientRequestId;
-  const explicitGoalAction = goalFeature?.classifyGoalInput(userText);
-  // Snapshot the healthy message count so we can rollback on failure
-  const snapshotIndex = ctx.messages.length;
-  const originalUserContent = messageContent;
-  setSessionMessages(sessionId, ctx.messages);
-
-  if (!existingMessage) {
-    clearAttachedImages();
-    renderImageThumbs();
-  }
-
-  renderSessionMessages(sessionId);
-  messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);
-
-  await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, {
-    // Explicit Goal creation is server-authoritative and binds the immutable
-    // origin to the persisted user message before goal_created is appended.
-    // Ordinary runs retain the established metadata-only pre-run checkpoint.
-    persistMessages: explicitGoalAction?.kind === "create",
-  });
 
   // Explicit /goal and autonomous Goal creation share the same v2 fact layer.
   // The user-owned origin is persisted first; only then may the ordinary
@@ -11597,13 +12686,6 @@ async function sendMessage(userText, options = {}) {
     });
   }
 
-  if (!claimActiveRunContext(ctx)) {
-    throw new Error("Foreground AgentRun already has an active observer");
-  }
-  run._model = ctx.model || getSelectedModel();
-  setStreaming(true, sessionId);
-  if (optimisticMessage) scheduleDeferredSessionRefresh(sessionId);
-
   await persistRunCheckpoint(ctx, "running", "model").catch(() => {});
 
   let loopError = null;
@@ -11611,11 +12693,12 @@ async function sendMessage(userText, options = {}) {
     await executeRunContext(ctx);
   } catch (err) {
     loopError = err;
+    const routeFailureCode = modelRouteFailureCode(err);
 
     // If the request had images and the error suggests the model doesn't
     // support multimodal input, retry automatically with text-only content.
     const lastUser = [...ctx.messages].reverse().find((message) => message?.role === "user");
-    if (hasImageContent(lastUser ? [lastUser] : [])) {
+    if (!routeFailureCode && hasImageContent(lastUser ? [lastUser] : [])) {
       // If the request had images and failed, retry with text-only — unless
       // the error is clearly unrelated to multimodal (rate limit, quota).
       const skipRetry = /rate.?limit|too.*(many|fast|frequent)|429|quota.*exceeded/i.test(err.message || "");
@@ -11657,6 +12740,25 @@ async function sendMessage(userText, options = {}) {
     }
   }
 
+  const terminalRouteFailureCode = modelRouteFailureCode(loopError);
+  if (terminalRouteFailureCode && foregroundOriginMessage?.meta?.pendingDispatch) {
+    const dispatch = foregroundOriginMessage.meta.pendingDispatch;
+    dispatch.status = "failed";
+    dispatch.failedAt = Date.now();
+    dispatch.reason = terminalRouteFailureCode;
+    invalidateModelRoute(ctx.routeRef);
+    loopError.pendingDispatchId = String(dispatch.id || "");
+    releaseForegroundDispatchOwnership(foregroundOriginMessage);
+  } else if (foregroundOriginMessage?.meta) {
+    delete foregroundOriginMessage.meta.pendingDispatch;
+    if (Object.keys(foregroundOriginMessage.meta).length === 0) delete foregroundOriginMessage.meta;
+  }
+
+  // Publish terminal ownership locally before the durable checkpoint becomes
+  // observable. A following submit must never be classified as steer merely
+  // because the completed context is still unwinding its persistence awaits.
+  publishTerminalRunOwnership(ctx);
+
   if (loopError) {
     const isAbort = loopError?.name === "AbortError";
     const status = isAbort ? "paused" : "failed";
@@ -11693,7 +12795,13 @@ async function sendMessage(userText, options = {}) {
         content: loopError?.errorCode
           ? _formatAgentError(loopError)
           : `**${t("errorPrefix")}：${escapeHtml(errMsg)}**\n\n> ${t("errorRecoveryHint")}`,
-        meta: { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
+        meta: terminalRouteFailureCode
+          ? {
+              kind: "dispatch-error",
+              pendingDispatchId: String(loopError?.pendingDispatchId || ""),
+              _model: ctx.model || getSelectedModel(),
+            }
+          : { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
         _time: new Date().toISOString(),
       };
       ctx.messages.push(errorRecoveryAssistant);
@@ -11715,7 +12823,13 @@ async function sendMessage(userText, options = {}) {
         content: loopError?.errorCode
           ? _formatAgentError(loopError)
           : `**${t("errorPrefix")}：${escapeHtml(errMsg)}**\n\n> ${t("errorRecoveryHint")}`,
-        meta: { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
+        meta: terminalRouteFailureCode
+          ? {
+              kind: "dispatch-error",
+              pendingDispatchId: String(loopError?.pendingDispatchId || ""),
+              _model: ctx.model || getSelectedModel(),
+            }
+          : { kind: "error-recovery", _model: ctx.model || getSelectedModel() },
         _time: new Date().toISOString(),
       };
       ctx.messages.push(errorRecoveryAssistant);
@@ -11732,18 +12846,27 @@ async function sendMessage(userText, options = {}) {
     await clearRunCheckpoint(ctx).catch(() => {});
   }
 
-  if (ownsActiveRunContext(ctx)) setStreaming(false, sessionId);
   scheduleTerminalFileTreeRefresh(
     ctx,
     loopError ? (loopError?.name === "AbortError" ? "cancelled" : "failed") : "completed",
   );
-  await saveSessionState(sessionId, ctx.messages, ctx.stats);
+  // A new foreground submit may start while terminal bookkeeping awaits the
+  // checkpoint write. Persist the current projection so the old task cannot
+  // overwrite that newly projected user message with its captured array.
+  await saveSessionState(
+    sessionId,
+    getSessionMessages(sessionId),
+    getSessionStats(sessionId),
+    undefined,
+    {
+    persistMessages: true,
+    },
+  );
   await goalFeature?.refresh(sessionId, { quiet: true });
   renderSessions();
 
   notifyTaskComplete(sessionId);
   archiveAgentProjectionShadow(ctx);
-  releaseActiveRunContext(ctx);
 
   if (loopError) throw loopError;  // propagate to chatForm handler
 }
@@ -11758,9 +12881,10 @@ function getSelectedModel() {
 
 
 
-function setSelectedModel(modelId) {
+function applySelectedModelPresentation(modelId, route = null) {
 
   els.modelPillBtn.dataset.model = modelId;
+  els.modelPillBtn.dataset.routeRef = route?.routeRef || "";
 
   els.modelPillLabel.textContent = modelId || t("selectModel");
 
@@ -11768,7 +12892,10 @@ function setSelectedModel(modelId) {
 
   els.modelPillDropdown.querySelectorAll(".model-pill-option").forEach((opt) => {
 
-    opt.classList.toggle("selected", opt.dataset.model === modelId);
+    opt.classList.toggle(
+      "selected",
+      route ? opt.dataset.routeRef === route.routeRef : opt.dataset.model === modelId,
+    );
 
   });
   if (els.contextBudgetStatus) updateContextBudgetStatus();
@@ -11825,6 +12952,21 @@ function setPermLevel(value) {
 
   });
 
+}
+
+function setSelectedModel(modelId) {
+  const normalizedModel = String(modelId || "").trim();
+  if (state.routingV2 && state.modelRoutes.length) {
+    const current = selectedModelRoute();
+    const route = current?.modelId === normalizedModel
+      ? current
+      : routeForModel(normalizedModel, { unique: true });
+    if (route) return setSelectedModelRoute(route.routeRef, state.modelRouteCatalogRevision);
+    state.selectedRouteRef = "";
+    state.selectedRouteCatalogRevision = 0;
+  }
+  applySelectedModelPresentation(normalizedModel);
+  return null;
 }
 
 function applyCommittedPermissionProfile(value) {
@@ -12526,7 +13668,11 @@ els.modelPillDropdown.addEventListener("click", (e) => {
 
   if (!opt) return;
 
-  setSelectedModel(opt.dataset.model);
+  if (state.routingV2 && opt.dataset.routeRef) {
+    setSelectedModelRoute(opt.dataset.routeRef, state.modelRouteCatalogRevision);
+  } else {
+    setSelectedModel(opt.dataset.model);
+  }
 
   els.modelPillWrap.classList.remove("open");
 
@@ -13034,9 +14180,13 @@ els.chatForm.addEventListener("submit", async (event) => {
   }
 
   let submittedSessionId = state.sessionId;
+  const retryMessage = !hasImages
+    ? findRetryableForegroundDispatch(state.sessionId, text, getSelectedModel())
+    : null;
   try {
 
     await sendMessage(text, {
+      retryMessage,
       onSessionResolved: (sessionId) => {
         submittedSessionId = sessionId;
       },
@@ -13047,9 +14197,10 @@ els.chatForm.addEventListener("submit", async (event) => {
 
   } catch (err) {
 
-    const sessionId = state.sessionId;
+    const sessionId = submittedSessionId || state.sessionId;
     const messages = getSessionMessages(sessionId);
     const stats = getSessionStats(sessionId);
+    releaseForegroundDispatchOwnershipFromMessages(messages);
 
     if (err.name === "AbortError") {
       finalizePausedRun({ sessionId, messages, run: ensureSessionRun(sessionId) });
@@ -13074,7 +14225,19 @@ els.chatForm.addEventListener("submit", async (event) => {
       if (hadImages) {
         errMsg += "\n\n💡 图片已自动移除并重试，但仍失败。请检查 API Key 和模型是否可用。";
       }
-      if (!err?._codeErrorRendered) appendSystemError(errMsg);
+      if (!err?._codeErrorRendered) {
+        appendSessionSystemError(sessionId, errMsg, err?.pendingDispatchId ? {
+          kind: "dispatch-error",
+          pendingDispatchId: String(err.pendingDispatchId),
+        } : {});
+      }
+      await saveSessionState(
+        sessionId,
+        getSessionMessages(sessionId),
+        stats,
+        undefined,
+        { persistMessages: true },
+      ).catch(() => {});
 
     }
 
@@ -13971,8 +15134,16 @@ async function init() {
 
   applyI18n(); // run early, before async ops, to prevent flicker
   const hasEnabledKey = storedKeyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim());
-  const cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];
-  if (!cachedModelCatalog.length) renderModelCatalog([], hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
+  let cachedModelCatalog = [];
+  try {
+    cachedModelCatalog = await restoreModelRoutes();
+  } catch (_) {
+    cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];
+  }
+  if (!cachedModelCatalog.length) {
+    if (state.routingV2) renderConnectionRouteCatalog(hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
+    else renderModelCatalog([], hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
+  }
   // Restore the persisted model before platform sync can save other settings.
   // Availability is validated only after refreshModels receives a real list.
   setSelectedModel(localStorage.getItem("code-model") || "");
@@ -14016,6 +15187,7 @@ async function init() {
   setTimeout(preloadImportSessions, 3000);  // background: preload Codex + Claude Code session lists
 
   // Foreground restoration is independent from persisted task recovery.
+  state._foregroundRecoveryHydrated = false;
   await sessionStartup.restoreForegroundSession();
   onboardingTasksFeature.initialize({
     hasExistingSessions: state.sessions.length > 0,
@@ -14035,9 +15207,16 @@ async function init() {
   // Foreground runs still finish recovery before queued messages pump;
   // background work remains independent and cannot select the foreground
   // conversation.
-  sessionStartup.startRecovery();
+  const recoveryTasks = sessionStartup.startRecovery();
+  void recoveryTasks.foreground
+    .then(() => hydrateForegroundDispatchRecovery())
+    .catch((error) => {
+      console.error("Failed to hydrate foreground dispatch recovery:", error);
+    });
 
-  if (getApiKeys().length > 0 && els.baseUrl.value.trim()) await refreshModels();
+  if (getApiKeys().length > 0 && els.baseUrl.value.trim()) {
+    void refreshModels({ intent: "background" }).catch(() => {});
+  }
 
   // Restore preview pane state after config/session load.
   await previewFeature.restore();
@@ -14066,6 +15245,7 @@ async function init() {
         messages: serialized,
         stats: { ...(state.stats || {}) },
         runState: getSessionRunState(sid),
+        expectedRevision: getSessionRevision(sid),
       });
       navigator.sendBeacon(
         `/api/sessions/${encodeURIComponent(sid)}`,

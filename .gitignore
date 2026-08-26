@@ -13,6 +13,8 @@ data/projects.json
 data/.projects_migrated
 data/.codex_projects_migrated
 data/.codex_project_roots_migrated
+data/model-route-registry.json
+data/model-route-registry.json.tmp
 
 # Python
 __pycache__/

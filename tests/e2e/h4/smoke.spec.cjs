@@ -10,6 +10,9 @@ const TRUSTED_ROUTE_MODEL_ID = "h4-deepseek-trusted-route-model";
 const TRUSTED_ROUTE_SECONDARY_KEY = "h4-synthetic-route-credential";
 const TRUSTED_ROUTE_USER = "H4_TRUSTED_MODEL_ROUTE_USER";
 const TRUSTED_ROUTE_FINAL = "H4_TRUSTED_MODEL_ROUTE_FINAL";
+const CONNECTION_SHARED_MODEL_ID = "h4-shared-connection-model";
+const CONNECTION_ROUTE_USER = "H4_CONNECTION_ROUTE_USER";
+const CONNECTION_ROUTE_FINAL = "H4_CONNECTION_ROUTE_FINAL";
 const TOOL_PROTOCOL_CONTINUE_USER = "H4_TOOL_PROTOCOL_CONTINUE_USER";
 const TOOL_PROTOCOL_FINAL = "H4_TOOL_PROTOCOL_FINAL";
 const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
@@ -280,8 +283,8 @@ const EDIT_AUTHORIZATION_THIRD_PARTY_SHA256 = "3ca2970e23df18316faba0c55fde5881e
 const EDIT_AUTHORIZATION_STAGE = "H4_EDIT_AUTHORIZATION_STAGE";
 const EDIT_AUTHORIZATION_PATH_IDENTITY = Object.freeze({
   toolSelector: ".tool-edit-target[data-path]",
-  fileCardSelector: ".path-file-card[title]",
-  selector: ".tool-edit-target[data-path], .path-file-card[title]",
+  fileCardSelector: ".path-file-card[data-path]",
+  selector: ".tool-edit-target[data-path], .path-file-card[data-path]",
 });
 const EDIT_AUTHORIZATION_CONTRACT = Object.freeze({
   toolCallId: EDIT_AUTHORIZATION_TOOL_CALL_ID,
@@ -16614,6 +16617,8 @@ const test = base.test.extend({
     const consoleEntries = [];
     const pageErrors = [];
     const loopbackRequests = [];
+    const sessionPutTimeline = [];
+    const sessionPutRequests = new WeakMap();
     const blockedRequests = [];
     const diagnosticSteps = [];
     const domTimeline = [];
@@ -16625,6 +16630,61 @@ const test = base.test.extend({
       });
       targetPage.on("pageerror", (error) => {
         pageErrors.push(host.sanitize(error.stack || error.message));
+      });
+      targetPage.on("request", (request) => {
+        let url;
+        try { url = new URL(request.url()); } catch { return; }
+        const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+        if (request.method() !== "PUT" || !sessionMatch) return;
+        let payload = {};
+        try { payload = request.postDataJSON() || {}; } catch {}
+        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        const pending = messages.find((message) => (
+          message?.role === "user" && message?.meta?.pendingDispatch
+        ))?.meta?.pendingDispatch;
+        const entry = {
+          sequence: sessionPutTimeline.length + 1,
+          sessionIdHash: idHash(decodeURIComponent(sessionMatch[1])),
+          hasMessages: Object.prototype.hasOwnProperty.call(payload, "messages"),
+          expectedRevision: Object.prototype.hasOwnProperty.call(payload, "expectedRevision")
+            ? Number(payload.expectedRevision)
+            : null,
+          pendingStatus: String(pending?.status || ""),
+          dispatchErrors: messages.filter((message) => (
+            message?.meta?.kind === "dispatch-error"
+          )).length,
+          finalAnswers: messages.filter((message) => (
+            message?.role === "assistant"
+            && message?.meta?.kind !== "dispatch-error"
+            && String(message?.content || "").trim()
+          )).length,
+          runStateStatus: String(payload?.runState?.status || ""),
+          agentRunIdHash: payload?.runState?.agentRunId
+            ? idHash(payload.runState.agentRunId)
+            : "",
+          clientRequestIdHash: payload?.runState?.clientRequestId
+            ? idHash(payload.runState.clientRequestId)
+            : "",
+          responseStatus: 0,
+          returnedRevision: null,
+          currentRevision: null,
+        };
+        sessionPutTimeline.push(entry);
+        sessionPutRequests.set(request, entry);
+      });
+      targetPage.on("response", async (response) => {
+        const entry = sessionPutRequests.get(response.request());
+        if (!entry) return;
+        entry.responseStatus = response.status();
+        try {
+          const body = await response.json();
+          entry.returnedRevision = Object.prototype.hasOwnProperty.call(body || {}, "revision")
+            ? Number(body.revision)
+            : null;
+          entry.currentRevision = Object.prototype.hasOwnProperty.call(body || {}, "currentRevision")
+            ? Number(body.currentRevision)
+            : null;
+        } catch {}
       });
     };
 
@@ -16874,6 +16934,7 @@ const test = base.test.extend({
         consoleEntries,
         pageErrors,
         loopbackRequests,
+        sessionPutTimeline,
         blockedRequests,
         diagnosticSteps,
         domTimeline,
@@ -16950,6 +17011,19 @@ const test = base.test.extend({
           diagnosticSteps.push({ step: "model-catalog-gate-released", state: gate });
           return gate;
         },
+        async releaseModelResponse() {
+          const response = await host.command("release-model-response");
+          expect(response).toMatchObject({
+            ok: true,
+            modelGateReleased: true,
+            modelCatalogGate: { reached: true, released: false },
+          });
+          diagnosticSteps.push({
+            step: "model-response-gate-released",
+            state: response.modelCatalogGate,
+          });
+          return response;
+        },
         async reloadRuntime(runtime) {
           diagnosticSteps.push({ step: "reload-started", runtime, at: Date.now() });
           await page.reload({ waitUntil: "domcontentloaded" });
@@ -16972,6 +17046,12 @@ const test = base.test.extend({
         },
         requestSummarySince(boundary) {
           return summarizeLoopbackRequests(loopbackRequests.slice(Number(boundary) || 0));
+        },
+        sessionPutBoundary() {
+          return sessionPutTimeline.length;
+        },
+        sessionPutTimelineSince(boundary) {
+          return sessionPutTimeline.slice(Number(boundary) || 0).map((entry) => ({ ...entry }));
         },
         controlIds() {
           return {
@@ -17019,6 +17099,7 @@ const test = base.test.extend({
         await attachTextBestEffort(testInfo, "sanitized-diagnostics", diagnosticsPath, {
           diagnosticSteps,
           loopbackRequests: summarizeLoopbackRequests(loopbackRequests),
+          sessionPutTimeline,
           blockedRequests,
           pageErrors,
           domTimeline,
@@ -25369,7 +25450,7 @@ async function exerciseLargeTextPreview(h4, runtime) {
   }
   await expect(activeSession).toHaveCount(1);
   const answerFile = page.locator(
-    `#messages article.msg.assistant [class~="path-file-card"][title="${largePath}"]`,
+    `#messages article.msg.assistant [class~="path-file-card"][data-path="${largePath}"]`,
   );
   await expect(answerFile).toHaveCount(1);
   await answerFile.click();
@@ -26224,11 +26305,14 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
 
 async function pinH4BaseUrlAcrossReloads(page, fakeUrl) {
   await page.addInitScript((isolatedBaseUrl) => {
+    globalThis.__h4PinnedBaseUrl = isolatedBaseUrl;
+    if (globalThis.__h4PinnedBaseUrlSetterInstalled) return;
     const descriptor = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value",
     );
     if (!descriptor?.get || !descriptor?.set) return;
+    globalThis.__h4PinnedBaseUrlSetterInstalled = true;
     Object.defineProperty(HTMLInputElement.prototype, "value", {
       configurable: descriptor.configurable,
       enumerable: descriptor.enumerable,
@@ -26245,6 +26329,60 @@ async function pinH4BaseUrlAcrossReloads(page, fakeUrl) {
   }, fakeUrl);
 }
 
+function installConnectionRouteRefreshAudit(h4) {
+  if (h4.connectionRouteRefreshAudit) return h4.connectionRouteRefreshAudit;
+  const records = [];
+  const byRequest = new WeakMap();
+  h4.connectionRouteRefreshAudit = records;
+  h4.page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() !== "POST" || url.pathname !== "/api/model-routes/refresh") return;
+    let body = {};
+    try { body = request.postDataJSON() || {}; } catch {}
+    const manualConnections = Array.isArray(body.manualConnections)
+      ? body.manualConnections
+      : [];
+    const record = {
+      sequence: records.length + 1,
+      baseUrlMatchesFake: String(body.baseUrl || "") === h4.host.ready.fakeUrl,
+      manualConnections: manualConnections.length,
+      enabledManualConnections: manualConnections.filter((entry) => entry?.enabled !== false).length,
+      responseStatus: 0,
+      errorCode: "",
+    };
+    records.push(record);
+    byRequest.set(request, record);
+  });
+  h4.page.on("response", async (response) => {
+    const record = byRequest.get(response.request());
+    if (!record) return;
+    record.responseStatus = response.status();
+    try {
+      const body = await response.json();
+      record.errorCode = String(body?.errorCode || "");
+    } catch {}
+  });
+  return records;
+}
+
+async function expectConnectionRouteRefresh(h4, startIndex, expected = {}) {
+  const records = h4.connectionRouteRefreshAudit || [];
+  await expect.poll(() => records.slice(startIndex).find((record) => (
+    record.manualConnections === expected.manualConnections
+    && record.enabledManualConnections === expected.enabledManualConnections
+  ))?.sequence || 0).toBeGreaterThan(0);
+  const record = records.slice(startIndex).find((candidate) => (
+    candidate.manualConnections === expected.manualConnections
+    && candidate.enabledManualConnections === expected.enabledManualConnections
+  ));
+  expect(record.baseUrlMatchesFake).toBe(true);
+  if (expected.responseStatus != null) {
+    await expect.poll(() => record.responseStatus).toBe(expected.responseStatus);
+    expect(record.errorCode).toBe("");
+  }
+  return record;
+}
+
 async function verifyTrustedRouteSettingsReady(page) {
   await page.locator("#settingsMenuBtn").click();
   await expect(page.locator("#settingsPage")).toBeVisible();
@@ -26254,6 +26392,427 @@ async function verifyTrustedRouteSettingsReady(page) {
   await expect(refreshButton).toBeEnabled();
   await page.locator("#closeSettingsPage").click();
   await expect(page.locator("#settingsPage")).toBeHidden();
+}
+
+async function configureConnectionRouteCatalog(h4, runtime) {
+  const { page } = h4;
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  const refreshAudit = installConnectionRouteRefreshAudit(h4);
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  expect(await page.evaluate(() => globalThis.__h4PinnedBaseUrl || ""))
+    .toBe(h4.host.ready.fakeUrl);
+  await page.evaluate(({ primaryKey, secondaryKey }) => {
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+    localStorage.setItem("code-key-config", JSON.stringify([
+      {
+        name: "workbar",
+        key: primaryKey,
+        enabled: true,
+        source: "manual",
+        connectionId: "manual_h4_workbar_connection",
+      },
+      {
+        name: "DeepSeek",
+        key: secondaryKey,
+        enabled: true,
+        source: "manual",
+        connectionId: "manual_h4_deepseek_connection",
+      },
+    ]));
+  }, {
+    primaryKey: h4.host.syntheticKey,
+    secondaryKey: TRUSTED_ROUTE_SECONDARY_KEY,
+  });
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const refresh = page.locator("#settingsRefreshModels");
+  await expect(refresh).toBeEnabled();
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const initialRefreshStart = refreshAudit.length;
+  await refresh.click();
+  const initialRefresh = await expectConnectionRouteRefresh(h4, initialRefreshStart, {
+    manualConnections: 2,
+    enabledManualConnections: 2,
+    responseStatus: 200,
+  });
+  await expect(page.locator("#settingsModelList")).toContainText(CONNECTION_SHARED_MODEL_ID);
+  await expect(page.locator("#settingsModelList .model-provider-label")).toContainText([
+    "DeepSeek", "workbar",
+  ]);
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+
+  await page.locator("#modelPillBtn").click();
+  const deepSeekGroup = page.locator("#modelPillDropdown .model-pill-optgroup").filter({
+    has: page.locator(".model-pill-optgroup-label", { hasText: "DeepSeek" }),
+  });
+  const workbarGroup = page.locator("#modelPillDropdown .model-pill-optgroup").filter({
+    has: page.locator(".model-pill-optgroup-label", { hasText: "workbar" }),
+  });
+  await expect(deepSeekGroup.locator(`[data-model="${CONNECTION_SHARED_MODEL_ID}"]`)).toHaveCount(1);
+  await expect(workbarGroup.locator(`[data-model="${CONNECTION_SHARED_MODEL_ID}"]`)).toHaveCount(1);
+  await deepSeekGroup.locator(`[data-model="${CONNECTION_SHARED_MODEL_ID}"]`).click();
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const selected = await page.evaluate(async (model) => {
+    const routeRef = localStorage.getItem("code-model-route-ref") || "";
+    const revision = Number(localStorage.getItem("code-model-route-revision") || 0);
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const route = (catalog.routes || []).find((candidate) => candidate.routeRef === routeRef);
+    return {
+      routeRef,
+      revision,
+      catalogRevision: Number(catalog.catalogRevision || 0),
+      modelId: String(route?.modelId || ""),
+      label: String(route?.label || ""),
+      routeCountForModel: (catalog.routes || []).filter((candidate) => candidate.modelId === model).length,
+      fields: Object.keys(route || {}).sort(),
+    };
+  }, CONNECTION_SHARED_MODEL_ID);
+  expect(selected).toMatchObject({
+    routeRef: expect.stringMatching(/^mr1_[a-f0-9]{64}$/),
+    modelId: CONNECTION_SHARED_MODEL_ID,
+    label: "DeepSeek",
+    routeCountForModel: 2,
+    fields: [
+      "connectionId", "credentialsAvailable", "enabled", "label",
+      "modelId", "routeRef", "source",
+    ],
+  });
+  expect(selected.revision).toBe(selected.catalogRevision);
+  h4.connectionRouteConfiguredRefresh = initialRefresh;
+  return selected;
+}
+
+async function exerciseConnectionRouteExactBinding(h4, runtime, { reload = false } = {}) {
+  const { page } = h4;
+  const selected = await configureConnectionRouteCatalog(h4, runtime);
+  if (reload) {
+    await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+    await h4.reloadRuntime(runtime);
+    await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+    await expect(page.locator("#modelPillBtn")).toHaveAttribute(
+      "data-model",
+      CONNECTION_SHARED_MODEL_ID,
+    );
+    expect(await page.evaluate(() => localStorage.getItem("code-model-route-ref")))
+      .toBe(selected.routeRef);
+  }
+  const runRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/agent/runs";
+  });
+  await h4.submit(CONNECTION_ROUTE_USER);
+  const body = (await runRequestPromise).postDataJSON();
+  expect(body).toMatchObject({
+    payload: { model: CONNECTION_SHARED_MODEL_ID },
+    routeRef: selected.routeRef,
+    catalogRevision: selected.catalogRevision,
+  });
+  expect(Object.prototype.hasOwnProperty.call(body, "keys")).toBe(false);
+  expect(Object.prototype.hasOwnProperty.call(body, "baseUrl")).toBe(false);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONNECTION_ROUTE_FINAL,
+  })).toHaveCount(1);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toHaveLength(1);
+  expect(metrics.chatRequests[0]).toMatchObject({
+    scenario: "connection-route",
+    connectionRoute: {
+      keyGroup: "trusted-route",
+      modelMatches: true,
+      authorized: true,
+    },
+  });
+  expect(metrics.production.agentRuns).toHaveLength(1);
+  expect(metrics.production.agentRuns[0].status).toBe("completed");
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-connection-route-${reload ? "reload" : "exact"}`, {
+    runtime,
+    reload,
+    duplicateModelRoutes: selected.routeCountForModel,
+    selectedConnection: selected.label,
+    routeRefOpaque: /^mr1_[a-f0-9]{64}$/.test(selected.routeRef),
+    requestContainsKeys: Object.prototype.hasOwnProperty.call(body, "keys"),
+  });
+}
+
+async function exerciseConnectionRouteHealthyDispatchDuringRefresh(h4, runtime) {
+  const { page } = h4;
+  const selected = await configureConnectionRouteCatalog(h4, runtime);
+  const beforeAgentRuns = h4.controlIds().agentRunIds.length;
+  let gateReleased = false;
+  let blockedRefresh = null;
+
+  await h4.armModelCatalogGate();
+  try {
+    await page.locator("#settingsMenuBtn").click();
+    await expect(page.locator("#settingsPage")).toBeVisible();
+    const refresh = page.locator("#settingsRefreshModels");
+    await expect(refresh).toBeEnabled();
+    await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+    const refreshStart = h4.connectionRouteRefreshAudit.length;
+    await refresh.click();
+    expect((await h4.waitModelCatalogGate()).reached).toBe(true);
+    blockedRefresh = await expectConnectionRouteRefresh(h4, refreshStart, {
+      manualConnections: 2,
+      enabledManualConnections: 2,
+    });
+    await page.locator("#closeSettingsPage").click();
+    await expect(page.locator("#settingsPage")).toBeHidden();
+
+    const runRequestPromise = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return request.method() === "POST" && url.pathname === "/api/agent/runs";
+    });
+    const feedbackStarted = Date.now();
+    await page.locator("#prompt").fill(CONNECTION_ROUTE_USER);
+    await page.locator("#sendBtn").click();
+    await expect(page.locator("#messages article.msg.user").filter({
+      hasText: CONNECTION_ROUTE_USER,
+    })).toHaveCount(1, { timeout: 500 });
+    expect(Date.now() - feedbackStarted).toBeLessThan(500);
+
+    const body = (await runRequestPromise).postDataJSON();
+    expect(body).toMatchObject({
+      payload: { model: CONNECTION_SHARED_MODEL_ID },
+      routeRef: selected.routeRef,
+      catalogRevision: selected.catalogRevision,
+    });
+    expect(Object.prototype.hasOwnProperty.call(body, "keys")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(body, "baseUrl")).toBe(false);
+    const responseGate = await h4.releaseModelResponse();
+    expect(responseGate.modelCatalogGate).toMatchObject({
+      reached: true,
+      released: false,
+    });
+    await expect(page.locator("#messages article.msg.assistant").filter({
+      hasText: CONNECTION_ROUTE_FINAL,
+    })).toHaveCount(1);
+    expect(h4.controlIds().agentRunIds).toHaveLength(beforeAgentRuns + 1);
+    const metricsBeforeRefreshRelease = await h4.metrics();
+    expect(metricsBeforeRefreshRelease.chatRequests).toHaveLength(1);
+    expect(metricsBeforeRefreshRelease.production.agentRuns).toHaveLength(1);
+    expect(metricsBeforeRefreshRelease.production.agentRuns[0].status).toBe("completed");
+    expect(metricsBeforeRefreshRelease.modelCatalogGate).toMatchObject({
+      reached: true,
+      released: false,
+    });
+    expect(h4.pageErrors).toEqual([]);
+    h4.evidence(`${runtime}-connection-route-healthy-during-refresh`, {
+      runtime,
+      backgroundRefreshStillBlockedAtFinal: true,
+      optimisticWithin500ms: true,
+      exactSelectedConnection: selected.label,
+      agentRuns: 1,
+      blockedRefreshBaseUrlMatchesFake: blockedRefresh.baseUrlMatchesFake,
+    });
+  } finally {
+    await h4.releaseModelCatalogGate();
+    gateReleased = true;
+  }
+  expect(gateReleased).toBe(true);
+  await expect.poll(() => blockedRefresh?.responseStatus || 0).toBe(200);
+  expect(blockedRefresh.errorCode).toBe("");
+}
+
+async function exerciseConnectionRouteTerminalLifecycle(h4, runtime) {
+  const { page } = h4;
+  await configureConnectionRouteCatalog(h4, runtime);
+  await h4.submit(CONNECTION_ROUTE_USER);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONNECTION_ROUTE_FINAL,
+  })).toHaveCount(1);
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONNECTION_ROUTE_FINAL,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant[data-error-code]")).toHaveCount(0);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toHaveLength(1);
+  expect(metrics.production.agentRuns).toHaveLength(1);
+  expect(metrics.production.agentRuns[0].status).toBe("completed");
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-connection-route-terminal`, {
+    runtime,
+    finalRestored: true,
+    dispatchErrors: 0,
+    agentRuns: 1,
+  });
+}
+
+async function exerciseConnectionRouteFailClosedRetry(h4, runtime) {
+  const { page } = h4;
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  installConnectionRouteRefreshAudit(h4);
+  await h4.open(runtime);
+  await assertFrontendRuntime(page, runtime);
+  await page.evaluate(({ primaryKey, secondaryKey, model }) => {
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+    localStorage.setItem("code-key-config", JSON.stringify([
+      { name: "workbar", key: primaryKey, enabled: true, source: "manual", connectionId: "manual_h4_workbar_connection" },
+      { name: "DeepSeek", key: secondaryKey, enabled: true, source: "manual", connectionId: "manual_h4_deepseek_connection" },
+    ]));
+    localStorage.setItem("code-model", model);
+    localStorage.removeItem("code-model-route-ref");
+    localStorage.removeItem("code-model-route-revision");
+    document.querySelector("#modelPillBtn").dataset.model = model;
+    document.querySelector("#modelPillLabel").textContent = model;
+  }, {
+    primaryKey: h4.host.syntheticKey,
+    secondaryKey: TRUSTED_ROUTE_SECONDARY_KEY,
+    model: CONNECTION_SHARED_MODEL_ID,
+  });
+  await h4.armModelCatalogGate();
+  const beforeAgentRuns = h4.controlIds().agentRunIds.length;
+  const feedbackStarted = Date.now();
+  await page.locator("#prompt").fill(CONNECTION_ROUTE_USER);
+  await page.locator("#sendBtn").click();
+  const pendingUser = page.locator("#messages article.msg.user").filter({ hasText: CONNECTION_ROUTE_USER });
+  await expect(pendingUser).toHaveCount(1, { timeout: 500 });
+  expect(Date.now() - feedbackStarted).toBeLessThan(500);
+  expect((await h4.waitModelCatalogGate()).reached).toBe(true);
+  expect(h4.controlIds().agentRunIds).toHaveLength(beforeAgentRuns);
+  await h4.releaseModelCatalogGate();
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: /存在多个连接|multiple connections/,
+  })).toHaveCount(1);
+  expect(h4.controlIds().agentRunIds).toHaveLength(beforeAgentRuns);
+
+  await page.locator("#modelPillBtn").click();
+  const deepSeekRoute = page.locator("#modelPillDropdown .model-pill-optgroup").filter({
+    has: page.locator(".model-pill-optgroup-label", { hasText: "DeepSeek" }),
+  }).locator(`[data-model="${CONNECTION_SHARED_MODEL_ID}"]`);
+  await deepSeekRoute.click();
+  await h4.submit(CONNECTION_ROUTE_USER);
+  await expect(pendingUser).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONNECTION_ROUTE_FINAL,
+  })).toHaveCount(1);
+  expect(h4.controlIds().agentRunIds).toHaveLength(beforeAgentRuns + 1);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toHaveLength(1);
+  expect(metrics.chatRequests[0].connectionRoute).toMatchObject({
+    keyGroup: "trusted-route",
+    authorized: true,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-connection-route-fail-closed`, {
+    runtime,
+    optimisticWithin500ms: true,
+    ambiguousCreatedAgentRun: false,
+    retryReusedOneUserMessage: true,
+    selectedConnection: "DeepSeek",
+  });
+}
+
+async function exerciseConnectionRouteDisabledNoFallback(h4, runtime) {
+  const { page } = h4;
+  const selected = await configureConnectionRouteCatalog(h4, runtime);
+  const beforeAgentRuns = h4.controlIds().agentRunIds.length;
+  await page.evaluate(() => {
+    const entries = JSON.parse(localStorage.getItem("code-key-config") || "[]");
+    localStorage.setItem("code-key-config", JSON.stringify(entries.map((entry) => (
+      entry?.connectionId === "manual_h4_deepseek_connection"
+        ? { ...entry, enabled: false }
+        : entry
+    ))));
+  });
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const disabledRefreshStart = h4.connectionRouteRefreshAudit.length;
+  await page.locator("#settingsRefreshModels").click();
+  const disabledRefresh = await expectConnectionRouteRefresh(h4, disabledRefreshStart, {
+    manualConnections: 2,
+    enabledManualConnections: 1,
+    responseStatus: 200,
+  });
+  await expect(page.locator("#settingsModelList .model-provider-label").filter({
+    hasText: "DeepSeek",
+  })).toHaveCount(0);
+  await page.locator("#closeSettingsPage").click();
+
+  await page.locator("#prompt").fill(CONNECTION_ROUTE_USER);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: CONNECTION_ROUTE_USER,
+  })).toHaveCount(1, { timeout: 500 });
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: /所选模型连接已停用，请刷新并重新选择。|The selected model connection is disabled\. Refresh and select another connection\./i,
+  })).toHaveCount(1);
+  expect(h4.controlIds().agentRunIds).toHaveLength(beforeAgentRuns);
+  expect((await h4.metrics()).chatRequests).toHaveLength(0);
+  expect(await page.evaluate(() => localStorage.getItem("code-model-route-ref"))).toBe(selected.routeRef);
+  const disabledSessionButton = page.locator(
+    "#sessionList .session-row.active button.session-main",
+  );
+  await expect(disabledSessionButton).toHaveCount(1);
+  const disabledSessionId = await disabledSessionButton.getAttribute("data-session-id");
+  expect(disabledSessionId).toBeTruthy();
+  await expect.poll(async () => {
+    const persisted = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(disabledSessionId)}`,
+    );
+    const userMessage = persisted.body?.messages?.find((message) => (
+      message?.role === "user"
+      && String(message?.content || "") === CONNECTION_ROUTE_USER
+    ));
+    return String(userMessage?.meta?.pendingDispatch?.reason || "");
+  }).toBe("route_disabled");
+
+  await page.evaluate(() => {
+    const entries = JSON.parse(localStorage.getItem("code-key-config") || "[]");
+    localStorage.setItem("code-key-config", JSON.stringify(entries.map((entry) => (
+      entry?.connectionId === "manual_h4_deepseek_connection"
+        ? { ...entry, enabled: true }
+        : entry
+    ))));
+  });
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const enabledRefreshStart = h4.connectionRouteRefreshAudit.length;
+  await page.locator("#settingsRefreshModels").click();
+  const enabledRefresh = await expectConnectionRouteRefresh(h4, enabledRefreshStart, {
+    manualConnections: 2,
+    enabledManualConnections: 2,
+    responseStatus: 200,
+  });
+  await expect(page.locator("#settingsModelList .model-provider-label").filter({
+    hasText: "DeepSeek",
+  })).toHaveCount(1);
+  await page.locator("#closeSettingsPage").click();
+  await h4.submit(CONNECTION_ROUTE_USER);
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: CONNECTION_ROUTE_USER,
+  })).toHaveCount(1);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONNECTION_ROUTE_FINAL,
+  })).toHaveCount(1);
+  expect(h4.controlIds().agentRunIds).toHaveLength(beforeAgentRuns + 1);
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toHaveLength(1);
+  expect(metrics.chatRequests[0].connectionRoute).toMatchObject({
+    keyGroup: "trusted-route",
+    authorized: true,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-connection-route-disabled`, {
+    runtime,
+    disabledCrossConnectionFallback: false,
+    selectedRouteRefStable: true,
+    retryReusedOneUserMessage: true,
+    refreshBaseUrlsMatchFake: [disabledRefresh, enabledRefresh]
+      .every((record) => record.baseUrlMatchesFake),
+  });
 }
 
 async function exerciseTrustedModelRoutePersistence(h4, runtime) {
@@ -26286,29 +26845,50 @@ async function exerciseTrustedModelRoutePersistence(h4, runtime) {
     TRUSTED_ROUTE_MODEL_ID,
   );
 
-  const trustedCache = await page.evaluate(({ primaryKey, secondaryKey, model }) => {
-    const raw = localStorage.getItem("code-model-catalog-cache-v1") || "";
-    const cache = JSON.parse(raw || "null");
-    const route = (Array.isArray(cache?.routes) ? cache.routes : [])
-      .find((entry) => entry?.model === model);
+  const trustedCatalog = await page.evaluate(async ({ primaryKey, secondaryKey, model }) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const serialized = JSON.stringify(catalog);
+    const selectedRouteRef = localStorage.getItem("code-model-route-ref") || "";
+    const selected = (catalog.routes || []).find((route) => route.routeRef === selectedRouteRef);
     return {
-      version: Number(cache?.version || 0),
-      routeVersion: Number(cache?.routeVersion || 0),
-      keySetFingerprintLength: String(cache?.keySetFingerprint || "").length,
-      routeIdentityLengths: (route?.keyIdentities || []).map((value) => String(value).length),
-      containsSyntheticKey: raw.includes(primaryKey) || raw.includes(secondaryKey),
+      status: response.status,
+      version: Number(catalog.version || 0),
+      routingV2: catalog.routingV2 === true,
+      catalogRevision: Number(catalog.catalogRevision || 0),
+      routeCount: Array.isArray(catalog.routes) ? catalog.routes.length : 0,
+      selectedModel: String(selected?.modelId || ""),
+      selectedConnectionLabel: String(selected?.label || ""),
+      selectedRouteRefOpaque: /^mr1_[a-f0-9]{64}$/.test(selectedRouteRef),
+      routeFields: Object.keys(selected || {}).sort(),
+      containsSyntheticKey: serialized.includes(primaryKey) || serialized.includes(secondaryKey),
+      containsGroupOrBaseUrl: Object.prototype.hasOwnProperty.call(selected || {}, "group")
+        || Object.prototype.hasOwnProperty.call(selected || {}, "baseUrl"),
     };
   }, {
     primaryKey: h4.host.syntheticKey,
     secondaryKey: TRUSTED_ROUTE_SECONDARY_KEY,
     model: TRUSTED_ROUTE_MODEL_ID,
   });
-  expect(trustedCache).toEqual({
-    version: 3,
-    routeVersion: 1,
-    keySetFingerprintLength: 64,
-    routeIdentityLengths: [64],
+  expect(trustedCatalog.catalogRevision).toBeGreaterThan(0);
+  expect({
+    ...trustedCatalog,
+    catalogRevision: 1,
+  }).toEqual({
+    status: 200,
+    version: 1,
+    routingV2: true,
+    catalogRevision: 1,
+    routeCount: 2,
+    selectedModel: TRUSTED_ROUTE_MODEL_ID,
+    selectedConnectionLabel: "H4 trusted route group",
+    selectedRouteRefOpaque: true,
+    routeFields: [
+      "connectionId", "credentialsAvailable", "enabled", "label",
+      "modelId", "routeRef", "source",
+    ],
     containsSyntheticKey: false,
+    containsGroupOrBaseUrl: false,
   });
 
   await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
@@ -26324,30 +26904,26 @@ async function exerciseTrustedModelRoutePersistence(h4, runtime) {
     TRUSTED_ROUTE_MODEL_ID,
   );
   await verifyTrustedRouteSettingsReady(page);
-  const reloadIsolation = await page.evaluate((facts) => {
+  const reloadIsolation = await page.evaluate(async (facts) => {
     const keyConfigRaw = localStorage.getItem("code-key-config") || "[]";
-    const cacheRaw = localStorage.getItem("code-model-catalog-cache-v1") || "";
     let keyConfig = [];
-    let cache = null;
     try { keyConfig = JSON.parse(keyConfigRaw); } catch {}
-    try { cache = JSON.parse(cacheRaw); } catch {}
     const enabledKeys = (Array.isArray(keyConfig) ? keyConfig : [])
       .filter((entry) => entry?.enabled !== false)
       .map((entry) => String(entry?.key || ""))
       .sort();
     const expectedKeys = [facts.primaryKey, facts.secondaryKey].sort();
-    const route = (Array.isArray(cache?.routes) ? cache.routes : [])
-      .find((entry) => entry?.model === facts.model);
+    const catalog = await (await fetch("/api/model-routes", { cache: "no-store" })).json();
+    const routeRef = localStorage.getItem("code-model-route-ref") || "";
+    const route = (catalog.routes || []).find((entry) => entry?.routeRef === routeRef);
     return {
       baseUrlMatchesFake: document.querySelector("#baseUrl")?.value === facts.fakeUrl,
       keysExactSyntheticPair: JSON.stringify(enabledKeys) === JSON.stringify(expectedKeys),
-      cacheVersion: Number(cache?.version || 0),
-      cacheBaseUrlMatchesFake: String(cache?.baseUrl || "") === facts.fakeUrl,
-      trustedRouteIdentityCount: Array.isArray(route?.keyIdentities)
-        ? route.keyIdentities.length
-        : 0,
-      cacheContainsCredential: cacheRaw.includes(facts.primaryKey)
-        || cacheRaw.includes(facts.secondaryKey),
+      routeRefStable: /^mr1_[a-f0-9]{64}$/.test(routeRef),
+      routeModelMatches: String(route?.modelId || "") === facts.model,
+      routeConnectionMatches: String(route?.label || "") === "H4 trusted route group",
+      catalogContainsCredential: JSON.stringify(catalog).includes(facts.primaryKey)
+        || JSON.stringify(catalog).includes(facts.secondaryKey),
     };
   }, {
     fakeUrl: h4.host.ready.fakeUrl,
@@ -26358,12 +26934,13 @@ async function exerciseTrustedModelRoutePersistence(h4, runtime) {
   expect(reloadIsolation).toEqual({
     baseUrlMatchesFake: true,
     keysExactSyntheticPair: true,
-    cacheVersion: 3,
-    cacheBaseUrlMatchesFake: true,
-    trustedRouteIdentityCount: 1,
-    cacheContainsCredential: false,
+    routeRefStable: true,
+    routeModelMatches: true,
+    routeConnectionMatches: true,
+    catalogContainsCredential: false,
   });
 
+  const trustedSessionPutBoundary = h4.sessionPutBoundary();
   const trustedRunRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return request.method() === "POST" && url.pathname === "/api/agent/runs";
@@ -26372,9 +26949,11 @@ async function exerciseTrustedModelRoutePersistence(h4, runtime) {
   const trustedRequestBody = (await trustedRunRequest).postDataJSON();
   expect(trustedRequestBody).toMatchObject({
     payload: { model: TRUSTED_ROUTE_MODEL_ID },
-    baseUrl: h4.host.ready.fakeUrl,
-    keys: [TRUSTED_ROUTE_SECONDARY_KEY],
+    routeRef: expect.stringMatching(/^mr1_[a-f0-9]{64}$/),
+    catalogRevision: trustedCatalog.catalogRevision,
   });
+  expect(Object.prototype.hasOwnProperty.call(trustedRequestBody, "keys")).toBe(false);
+  expect(Object.prototype.hasOwnProperty.call(trustedRequestBody, "baseUrl")).toBe(false);
   expect(Object.prototype.hasOwnProperty.call(trustedRequestBody, "model")).toBe(false);
   await expect(page.locator("#messages article.msg.assistant").filter({
     hasText: TRUSTED_ROUTE_FINAL,
@@ -26392,62 +26971,253 @@ async function exerciseTrustedModelRoutePersistence(h4, runtime) {
   });
   expect(trustedMetrics.production.agentRuns).toHaveLength(1);
   expect(trustedMetrics.production.agentRuns[0].status).toBe("completed");
+  await expect.poll(() => {
+    const firstMessageWrite = h4.sessionPutTimelineSince(trustedSessionPutBoundary)
+      .find((entry) => entry.hasMessages);
+    return firstMessageWrite ? {
+      expectedRevision: firstMessageWrite.expectedRevision,
+      pendingStatus: firstMessageWrite.pendingStatus,
+      dispatchErrors: firstMessageWrite.dispatchErrors,
+      finalAnswers: firstMessageWrite.finalAnswers,
+      responseStatus: firstMessageWrite.responseStatus,
+    } : null;
+  }).toEqual({
+    expectedRevision: 0,
+    pendingStatus: "routing",
+    dispatchErrors: 0,
+    finalAnswers: 0,
+    responseStatus: 200,
+  });
+  const trustedFirstSessionPut = h4.sessionPutTimelineSince(trustedSessionPutBoundary)
+    .find((entry) => entry.hasMessages);
 
-  await page.evaluate((unknownModel) => {
-    localStorage.setItem("code-model", unknownModel);
+  await page.evaluate((trustedModel) => {
+    localStorage.setItem("code-model", trustedModel);
     localStorage.setItem("code-model-catalog-cache-v1", JSON.stringify({
       version: 2,
       baseUrl: document.querySelector("#baseUrl")?.value || "",
-      models: [unknownModel],
-      entries: [{ id: unknownModel }],
+      models: [trustedModel],
+      entries: [{ id: trustedModel }],
       savedAt: Date.now(),
     }));
-  }, "h4-unknown-route-model");
+  }, TRUSTED_ROUTE_MODEL_ID);
   await h4.reloadRuntime(runtime);
   await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
   await expect(page.locator("#modelPillBtn")).toHaveAttribute(
     "data-model",
-    "h4-unknown-route-model",
+    TRUSTED_ROUTE_MODEL_ID,
   );
   await verifyTrustedRouteSettingsReady(page);
+  const settledSessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(settledSessionButton).toHaveCount(1);
+  const settledSessionId = await settledSessionButton.getAttribute("data-session-id");
+  expect(settledSessionId).toBeTruthy();
+  await expect.poll(async () => {
+    const response = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(settledSessionId)}`,
+    );
+    const successfulUser = response.body.messages.find((message) => (
+      message?.role === "user" && String(message?.content || "") === TRUSTED_ROUTE_USER
+    ));
+    return {
+      status: response.status,
+      pendingStatus: String(successfulUser?.meta?.pendingDispatch?.status || ""),
+      dispatchErrors: response.body.messages.filter((message) => (
+        message?.meta?.kind === "dispatch-error"
+      )).length,
+      finalAnswers: response.body.messages.filter((message) => (
+        message?.role === "assistant"
+        && String(message?.content || "").includes(TRUSTED_ROUTE_FINAL)
+      )).length,
+    };
+  }).toEqual({status: 200, pendingStatus: "", dispatchErrors: 0, finalAnswers: 1});
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: TRUSTED_ROUTE_FINAL,
+  })).toHaveCount(1);
+  const successfulSession = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(settledSessionId)}`,
+  );
+  const successfulRevision = Number(successfulSession.body.revision || 0);
+  expect(successfulRevision).toBeGreaterThan(0);
+  const unknownPreSubmitUi = await page.evaluate(() => ({
+    stopDisabled: Boolean(document.querySelector("#stopBtn")?.disabled),
+    activeBannerVisible: Boolean(document.querySelector("#activeRunBanner")?.classList.contains("visible")),
+    userMessages: document.querySelectorAll("#messages article.msg.user").length,
+    assistantMessages: document.querySelectorAll("#messages article.msg.assistant").length,
+  }));
+  const unknownPreSubmitClassification = {
+    ui: unknownPreSubmitUi,
+    runStateStatus: String(successfulSession.body?.runState?.status || ""),
+    runStateAgentRunIdHash: successfulSession.body?.runState?.agentRunId
+      ? idHash(successfulSession.body.runState.agentRunId)
+      : "",
+    observedAgentRunCount: h4.controlIds().agentRunIds.length,
+  };
+  expect(unknownPreSubmitClassification).toMatchObject({
+    ui: {stopDisabled: true, activeBannerVisible: false},
+    runStateStatus: "",
+    runStateAgentRunIdHash: "",
+    observedAgentRunCount: 1,
+  });
   const routeRequestCountBeforeUnknown = (await h4.metrics()).modelRouteRequests.length;
   const agentRunCountBeforeUnknown = h4.controlIds().agentRunIds.length;
   const unknownDispatchBoundary = h4.requestBoundary();
+  await h4.armModelCatalogGate();
+  const immediateFeedbackStartedAt = Date.now();
   await page.locator("#prompt").fill("H4_UNKNOWN_MODEL_ROUTE_USER");
   await page.locator("#sendBtn").click();
-  await expect.poll(async () => (
-    (await h4.metrics()).modelRouteRequests.length - routeRequestCountBeforeUnknown
-  )).toBe(2);
-  await expect(page.locator("#messages article.msg.user").filter({
+  const unknownImmediateUi = await page.evaluate(() => ({
+    stopDisabled: Boolean(document.querySelector("#stopBtn")?.disabled),
+    activeBannerVisible: Boolean(document.querySelector("#activeRunBanner")?.classList.contains("visible")),
+    unknownUserMessages: [...document.querySelectorAll("#messages article.msg.user")]
+      .filter((element) => String(element.textContent || "").includes("H4_UNKNOWN_MODEL_ROUTE_USER"))
+      .length,
+  }));
+  h4.diagnosticSteps.push({
+    step: "unknown-submit-classification",
+    runtime,
+    before: unknownPreSubmitClassification,
+    immediate: unknownImmediateUi,
+  });
+  const pendingUser = page.locator("#messages article.msg.user").filter({
     hasText: "H4_UNKNOWN_MODEL_ROUTE_USER",
-  })).toHaveCount(0);
+  });
+  await expect(pendingUser).toHaveCount(1, { timeout: 500 });
+  const immediateFeedbackMs = Date.now() - immediateFeedbackStartedAt;
+  expect(immediateFeedbackMs).toBeLessThan(500);
+  await expect(page.locator("#activeRunBanner.visible .active-run-line[role='status']"))
+    .toBeVisible();
+  const catalogGate = await h4.waitModelCatalogGate();
+  expect(catalogGate).toMatchObject({ armed: true, reached: true, released: false });
   expect(h4.controlIds().agentRunIds).toHaveLength(agentRunCountBeforeUnknown);
   expect(
     h4.requestSummarySince(unknownDispatchBoundary)["POST /api/agent/runs"] || 0,
   ).toBe(0);
-  const terminalMetrics = await h4.metrics();
-  expect(terminalMetrics.chatRequests).toHaveLength(1);
-  expect(terminalMetrics.production.agentRuns).toHaveLength(1);
-  const unknownRefreshRequests = terminalMetrics.modelRouteRequests.slice(
+  const activeSessionButton = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(activeSessionButton).toHaveCount(1);
+  const pendingSessionId = await activeSessionButton.getAttribute("data-session-id");
+  expect(pendingSessionId).toBeTruthy();
+  const pendingSession = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(pendingSessionId)}`,
+  );
+  expect(pendingSession.status).toBe(200);
+  const pendingDispatchUser = pendingSession.body.messages.find((message) => (
+    message?.role === "user"
+    && String(message?.content || "") === "H4_UNKNOWN_MODEL_ROUTE_USER"
+  ));
+  expect(pendingDispatchUser?.meta?.pendingDispatch?.status).toBe("routing");
+  await h4.releaseModelCatalogGate();
+  await expect.poll(async () => (
+    (await h4.metrics()).modelRouteRequests.length - routeRequestCountBeforeUnknown
+  )).toBe(2);
+  await expect(pendingUser).toHaveCount(1);
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  expect(h4.controlIds().agentRunIds).toHaveLength(agentRunCountBeforeUnknown);
+  expect(
+    h4.requestSummarySince(unknownDispatchBoundary)["POST /api/agent/runs"] || 0,
+  ).toBe(0);
+  const failedMetrics = await h4.metrics();
+  const unknownRefreshRequests = failedMetrics.modelRouteRequests.slice(
     routeRequestCountBeforeUnknown,
   );
   expect(unknownRefreshRequests).toEqual([
     { kind: "catalog", keyGroup: "primary", catalogOutage: true },
     { kind: "catalog", keyGroup: "trusted-route", catalogOutage: true },
   ]);
+  const failedSession = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(pendingSessionId)}`,
+  );
+  const failedDispatchUser = failedSession.body.messages.find((message) => (
+    message?.role === "user"
+    && String(message?.content || "") === "H4_UNKNOWN_MODEL_ROUTE_USER"
+  ));
+  expect(failedDispatchUser?.meta?.pendingDispatch).toMatchObject({
+    status: "failed",
+    attempt: 1,
+  });
+  expect(failedSession.body.messages.filter((message) => (
+    message?.meta?.kind === "dispatch-error"
+  ))).toHaveLength(1);
+  const failedRevision = Number(failedSession.body.revision || 0);
+  expect(failedRevision).toBeGreaterThan(successfulRevision);
+
+  const restoredRoute = await h4.host.command(
+    "set-model-route-catalog-outage",
+    { enabled: false },
+  );
+  expect(restoredRoute).toMatchObject({ ok: true, modelRoute: { catalogOutage: false } });
+  await h4.reloadRuntime(runtime);
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: "H4_UNKNOWN_MODEL_ROUTE_USER",
+  })).toHaveCount(1);
+  expect(h4.controlIds().agentRunIds).toHaveLength(agentRunCountBeforeUnknown);
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute(
+    "data-model",
+    TRUSTED_ROUTE_MODEL_ID,
+  );
+
+  await h4.submit("H4_UNKNOWN_MODEL_ROUTE_USER");
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: TRUSTED_ROUTE_FINAL,
+  })).toHaveCount(2);
+  await expect(page.locator("#messages article.msg.user").filter({
+    hasText: "H4_UNKNOWN_MODEL_ROUTE_USER",
+  })).toHaveCount(1);
+  await expect.poll(() => h4.controlIds().agentRunIds.length)
+    .toBe(agentRunCountBeforeUnknown + 1);
+  const terminalMetrics = await h4.metrics();
+  expect(terminalMetrics.chatRequests).toHaveLength(2);
+  expect(terminalMetrics.production.agentRuns).toHaveLength(2);
+  expect(terminalMetrics.production.agentRuns.every((run) => run.status === "completed"))
+    .toBe(true);
+  expect(
+    h4.requestSummarySince(unknownDispatchBoundary)["POST /api/agent/runs"] || 0,
+  ).toBe(1);
+  const retriedSession = await fetchProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(pendingSessionId)}`,
+  );
+  expect(retriedSession.body.messages.filter((message) => (
+    message?.role === "user"
+    && String(message?.content || "") === "H4_UNKNOWN_MODEL_ROUTE_USER"
+  ))).toHaveLength(1);
+  expect(retriedSession.body.messages.some((message) => (
+    message?.meta?.kind === "dispatch-error"
+  ))).toBe(false);
+  const retriedRevision = Number(retriedSession.body.revision || 0);
+  expect(retriedRevision).toBeGreaterThan(failedRevision);
   expect(terminalMetrics.toolExecutions).toEqual([]);
   expect(terminalMetrics.unsafeToolRequests).toBe(0);
   expectAutoPermissionNetworkIsolation(h4);
   expect(h4.pageErrors).toEqual([]);
   h4.evidence(`${runtime}-trusted-model-route`, {
     runtime,
-    cacheVersion: trustedCache.version,
-    cacheContainsCredential: trustedCache.containsSyntheticKey,
+    routeCatalogVersion: trustedCatalog.version,
+    routeCatalogRevision: trustedCatalog.catalogRevision,
+    routeCatalogContainsCredential: trustedCatalog.containsSyntheticKey,
     reloadIsolation,
     reloadUsedTrustedRoute: true,
     trustedChatKeyGroup: trustedMetrics.chatRequests[0].trustedRoute.keyGroup,
     unknownRefreshKeyGroups: unknownRefreshRequests.map((request) => request.keyGroup),
     unknownDispatchBlockedBeforeAgentRun: true,
+    successfulReloadNoDispatchError: true,
+    immediateFeedbackMs,
+    pendingPersistedBeforeRoute: pendingDispatchUser?.meta?.pendingDispatch?.status === "routing",
+    retryReusedOneMessage: true,
+    retryCreatedExactlyOneAgentRun: true,
+    unknownSubmitClassification: {
+      before: unknownPreSubmitClassification,
+      immediate: unknownImmediateUi,
+      persistedPendingStatus: pendingDispatchUser?.meta?.pendingDispatch?.status || "",
+    },
+    sessionRevisionAdvanced: successfulRevision < failedRevision
+      && failedRevision < retriedRevision,
+    firstSessionPut: trustedFirstSessionPut,
+    sessionPutTimeline: h4.sessionPutTimelineSince(trustedSessionPutBoundary),
   });
 }
 
@@ -26644,12 +27414,52 @@ test("direct classic explicit onboarding tasks require guided real actions", asy
   await exerciseExplicitOnboardingTasks(h4, "classic");
 });
 
-test("bundle trusted model route survives restart and blocks unknown mapping", async ({ h4 }) => {
-  await exerciseTrustedModelRoutePersistence(h4, "bundle");
+test("bundle connection route binds duplicate model to the selected connection", async ({ h4 }) => {
+  await exerciseConnectionRouteExactBinding(h4, "bundle");
 });
 
-test("direct classic trusted model route survives restart and blocks unknown mapping", async ({ h4 }) => {
-  await exerciseTrustedModelRoutePersistence(h4, "classic");
+test("direct classic connection route binds duplicate model to the selected connection", async ({ h4 }) => {
+  await exerciseConnectionRouteExactBinding(h4, "classic");
+});
+
+test("bundle connection route selection survives reload", async ({ h4 }) => {
+  await exerciseConnectionRouteExactBinding(h4, "bundle", { reload: true });
+});
+
+test("direct classic connection route selection survives reload", async ({ h4 }) => {
+  await exerciseConnectionRouteExactBinding(h4, "classic", { reload: true });
+});
+
+test("bundle connection route healthy dispatch does not wait for background refresh", async ({ h4 }) => {
+  await exerciseConnectionRouteHealthyDispatchDuringRefresh(h4, "bundle");
+});
+
+test("direct classic connection route healthy dispatch does not wait for background refresh", async ({ h4 }) => {
+  await exerciseConnectionRouteHealthyDispatchDuringRefresh(h4, "classic");
+});
+
+test("bundle connection route terminal lifecycle survives reload", async ({ h4 }) => {
+  await exerciseConnectionRouteTerminalLifecycle(h4, "bundle");
+});
+
+test("direct classic connection route terminal lifecycle survives reload", async ({ h4 }) => {
+  await exerciseConnectionRouteTerminalLifecycle(h4, "classic");
+});
+
+test("bundle connection route is optimistic fail-closed and retryable", async ({ h4 }) => {
+  await exerciseConnectionRouteFailClosedRetry(h4, "bundle");
+});
+
+test("direct classic connection route is optimistic fail-closed and retryable", async ({ h4 }) => {
+  await exerciseConnectionRouteFailClosedRetry(h4, "classic");
+});
+
+test("bundle connection route disabled selection never crosses connections", async ({ h4 }) => {
+  await exerciseConnectionRouteDisabledNoFallback(h4, "bundle");
+});
+
+test("direct classic connection route disabled selection never crosses connections", async ({ h4 }) => {
+  await exerciseConnectionRouteDisabledNoFallback(h4, "classic");
 });
 
 test("bundle tool message protocol pairs historic steer history", async ({ h4 }) => {

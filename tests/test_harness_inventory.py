@@ -84,7 +84,24 @@ class HarnessFactInventoryTests(unittest.TestCase):
                 if isinstance(key, ast.Constant) and key.value == "version":
                     record_version = ast.literal_eval(value)
                     break
-        self.assertEqual(self.inventory["agentRun"]["recordVersion"], record_version)
+        historical_version = self.inventory["agentRun"]["recordVersion"]
+        self.assertEqual(4, historical_version)
+        self.assertEqual(5, record_version)
+        self.assertGreater(record_version, historical_version)
+        loader = next(
+            node for node in self.server_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_agent_run_from_record"
+        )
+        loader_source = ast.get_source_segment(self.server_source, loader)
+        self.assertIn(
+            'record.get("workspaceRoots") if int(record.get("version") or 1) >= 2 else None',
+            loader_source,
+        )
+        self.assertIn('"route_ref": str(record.get("routeRef") or "")', loader_source)
+        self.assertIn(
+            '"catalog_revision": max(0, int(record.get("catalogRevision") or 0))',
+            loader_source,
+        )
 
     def test_named_frontend_consumers_exist(self):
         consumers = {

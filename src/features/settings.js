@@ -66,6 +66,18 @@
     const storage = options.storage || global.localStorage;
     const fetchFn = options.fetch || global.fetch?.bind(global);
     const navigatorRef = options.navigator || global.navigator;
+    const routingConnectionIdentity = (config) => (Array.isArray(config) ? config : [])
+      .filter((entry) => entry?.enabled !== false)
+      .map((entry) => JSON.stringify({
+        connectionId: String(entry?.connectionId || ""),
+        platformTokenId: String(entry?.platformTokenId || ""),
+        source: entry?.source === "platform" ? "platform" : "manual",
+        name: String(entry?.name || "").trim(),
+        key: platform.normalizeSyncedKey(entry?.key),
+      }))
+      .sort()
+      .join("\n");
+    let lastRoutingConnectionIdentity = routingConnectionIdentity(loadKeyConfig(storage));
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
 
@@ -74,7 +86,10 @@
 
     function saveKeyConfig(config) {
       const saved = platform.saveKeyConfig(config, storage);
-      onKeyConfigChanged(saved);
+      const nextRoutingConnectionIdentity = routingConnectionIdentity(saved);
+      const routingChanged = nextRoutingConnectionIdentity !== lastRoutingConnectionIdentity;
+      lastRoutingConnectionIdentity = nextRoutingConnectionIdentity;
+      onKeyConfigChanged(saved, { routingChanged });
       return saved;
     }
 
@@ -121,7 +136,7 @@
       if (!entries.length) entries.push({ name: "", key: "", enabled: true });
       return entries.map((entry, index) => {
         const isNew = newRow && index === entries.length - 1;
-        return `<div class="key-row ${entry.enabled === false && !isNew ? "disabled" : ""}" data-idx="${index}" data-source="${entry.source === "platform" ? "platform" : "manual"}" data-platform-token-id="${escapeHtml(entry.platformTokenId || "")}">
+        return `<div class="key-row ${entry.enabled === false && !isNew ? "disabled" : ""}" data-idx="${index}" data-source="${entry.source === "platform" ? "platform" : "manual"}" data-platform-token-id="${escapeHtml(entry.platformTokenId || "")}" data-connection-id="${escapeHtml(entry.connectionId || "")}">
           <span class="key-drag-handle" title="${t("dragSort")}" data-i18n-title="dragSort" draggable="true">⠿</span>
           <div class="key-main">
             <input class="key-name-input" placeholder="${t("keyNamePlaceholder")}" data-i18n="keyNamePlaceholder" value="${escapeHtml(entry.name)}" data-idx="${index}" />
@@ -140,9 +155,11 @@
         const enabled = row.querySelector(".key-enable input")?.checked !== false;
         const source = row.dataset.source === "platform" ? "platform" : "manual";
         const platformTokenId = platform.normalizePlatformTokenId(row.dataset.platformTokenId);
+        const connectionId = platform.normalizeManualConnectionId(row.dataset.connectionId);
         if (key.trim()) {
           const entry = { name: name.trim(), key: key.trim(), enabled, source };
           if (platformTokenId) entry.platformTokenId = platformTokenId;
+          if (connectionId) entry.connectionId = connectionId;
           entries.push(entry);
         }
       });
@@ -498,7 +515,7 @@
         button.title = t("detectingModels");
       }
       try {
-        await refreshModels();
+        await refreshModels({ intent: "explicit" });
       } finally {
         updateSettingsModelSnapshot();
         if (button) {
@@ -1374,7 +1391,10 @@
         }
         if (event.key !== platform.KEY_CONFIG_STORAGE_KEY) return;
         const config = syncKeyEditorFromStorage();
-        onKeyConfigChanged(config);
+        const nextRoutingConnectionIdentity = routingConnectionIdentity(config);
+        const routingChanged = nextRoutingConnectionIdentity !== lastRoutingConnectionIdentity;
+        lastRoutingConnectionIdentity = nextRoutingConnectionIdentity;
+        onKeyConfigChanged(config, { routingChanged });
       });
       global.addEventListener?.("pageshow", syncKeyEditorFromStorage);
       els.closeSettings?.addEventListener("click", () => showSettings(false));
@@ -1407,6 +1427,7 @@
       checkCodeCallback,
       checkForUpdates,
       closeDropdown,
+      getPlatformAuth,
       loadKeyConfig: () => loadKeyConfig(storage),
       initializePlatformAuth,
       parseKeyLines,

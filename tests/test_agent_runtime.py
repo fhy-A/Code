@@ -3315,7 +3315,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         record = server_mod._agent_run_record(run)
         restored = server_mod._agent_run_from_record(record)
 
-        self.assertEqual(record["version"], 4)
+        self.assertEqual(record["version"], 5)
         self.assertEqual(record["messages"][0], {"role": "system", "content": system_prompt})
         self.assertEqual(restored["messages"][0], record["messages"][0])
         payload, _ = server_mod._agent_model_payload(restored)
@@ -4909,7 +4909,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         persisted = json.loads(
             server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
         )
-        self.assertEqual(persisted["version"], 4)
+        self.assertEqual(persisted["version"], 5)
         self.assertEqual(persisted["pendingSteers"], [])
         self.assertNotIn("steer-secret-key", json.dumps(persisted))
 

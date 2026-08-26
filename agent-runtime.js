@@ -238,11 +238,25 @@
     }
   }
 
-  async function createRun({ sessionId, payload, baseUrl, keys, signal }) {
+  async function createRun({
+    sessionId,
+    payload,
+    baseUrl,
+    keys,
+    routeRef = "",
+    catalogRevision = 0,
+    signal,
+  }) {
     return apiJson("/api/runtime/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, payload, baseUrl, keys }),
+      body: JSON.stringify({
+        sessionId,
+        payload,
+        ...(routeRef
+          ? { routeRef, catalogRevision }
+          : { baseUrl, keys }),
+      }),
       signal,
     });
   }
@@ -253,6 +267,8 @@
     payload,
     baseUrl,
     keys,
+    routeRef = "",
+    catalogRevision = 0,
     allowedTools,
     toolBudgets,
     maxRounds,
@@ -271,8 +287,9 @@
         sessionId,
         clientRequestId,
         payload,
-        baseUrl,
-        keys,
+        ...(routeRef
+          ? { routeRef, catalogRevision }
+          : { baseUrl, keys }),
         allowedTools,
         toolBudgets,
         maxRounds,
@@ -294,11 +311,18 @@
     );
   }
 
-  async function resumeAgentRun(agentRunId, { keys = [], baseUrl = "", signal } = {}) {
+  async function resumeAgentRun(
+    agentRunId,
+    { keys = [], baseUrl = "", routeRef = "", catalogRevision = 0, signal } = {},
+  ) {
     return apiJson(`/api/agent/runs/${encodeURIComponent(agentRunId)}/resume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keys, baseUrl }),
+      body: JSON.stringify({
+        ...(routeRef
+          ? { routeRef, catalogRevision }
+          : { keys, baseUrl }),
+      }),
       signal,
     });
   }
@@ -444,6 +468,8 @@
     payload = {},
     baseUrl = "",
     keys = [],
+    routeRef = "",
+    catalogRevision = 0,
     signal,
     onRunCreated,
     onReconnect,
@@ -501,7 +527,15 @@
       async start(controller) {
         try {
           if (!activeRunId) {
-            const created = await createRun({ sessionId, payload, baseUrl, keys, signal });
+            const created = await createRun({
+              sessionId,
+              payload,
+              baseUrl,
+              keys,
+              routeRef,
+              catalogRevision,
+              signal,
+            });
             activeRunId = String(created.runId || "");
             if (!activeRunId) throw new Error("Runtime did not return a runId");
             streamDiagnostic.runtimeRunId = activeRunId;

@@ -48,11 +48,12 @@ class _ProxyStreamingResponse:
 
 class TestStreamingProxyFrames(unittest.TestCase):
     def _run_proxy(self, response):
-        body = json.dumps({"stream": True}).encode("utf-8")
+        body = json.dumps({"stream": True, "model": "h4-streaming-model"}).encode("utf-8")
         handler = object.__new__(server_mod.CodeHandler)
         handler.headers = {
             "Content-Length": str(len(body)),
-            "X-Base-URL": "http://upstream.test",
+            "X-Model-Route-Ref": "mr1_streaming_test",
+            "X-Model-Route-Revision": "1",
         }
         handler.rfile = io.BytesIO(body)
         handler.wfile = io.BytesIO()
@@ -60,9 +61,22 @@ class TestStreamingProxyFrames(unittest.TestCase):
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
 
-        with mock.patch.object(server_mod.request, "urlopen", return_value=response):
+        resolved_route = mock.Mock(
+            key="synthetic-route-key",
+            base_url="http://upstream.test",
+        )
+        with mock.patch.object(
+            server_mod._model_route_registry,
+            "resolve",
+            return_value=resolved_route,
+        ) as resolve, mock.patch.object(
+            server_mod.request,
+            "urlopen",
+            return_value=response,
+        ):
             handler.proxy("POST", "/v1/chat/completions")
 
+        resolve.assert_called_once_with("mr1_streaming_test", 1, "h4-streaming-model")
         handler.send_response.assert_called_once_with(200)
         return handler.wfile.getvalue()
 
@@ -129,9 +143,9 @@ class TestFrontendNetworkRecovery(unittest.TestCase):
             MODEL_STREAM_SOURCE,
         )
         self.assertNotIn('Retry once if New API transient "no access" error', APP_SOURCE)
-        self.assertIn("state.modelKeysMap[model]", APP_SOURCE)
+        self.assertIn("invalidateModelCatalogRoute(ctx.model || getSelectedModel())", APP_SOURCE)
         self.assertIn('if (err.errorCode === "model_access_denied")', APP_SOURCE)
-        self.assertIn("await refreshModels()", APP_SOURCE)
+        self.assertIn('await refreshModels({ intent: "route-error" })', APP_SOURCE)
         self.assertIn("snapshot.errorCode || `runtime_${snapshot.status}`", RUNTIME_SOURCE)
         self.assertIn("snapshot.transient", RUNTIME_SOURCE)
 
@@ -259,7 +273,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         )
         auth_check_pos = APP_SOURCE.index("if (platformSync?.authExpired)", platform_sync_pos)
         recovery_pos = APP_SOURCE.index("sessionStartup.startRecovery();", auth_check_pos)
-        models_pos = APP_SOURCE.index("await refreshModels();", recovery_pos)
+        models_pos = APP_SOURCE.index(
+            'void refreshModels({ intent: "background" }).catch',
+            recovery_pos,
+        )
         self.assertLess(platform_sync_pos, auth_check_pos)
         self.assertLess(auth_check_pos, recovery_pos)
         self.assertLess(recovery_pos, models_pos)
@@ -274,16 +291,26 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertGreater(background_pos, runs_pos)
 
     def test_init_restores_saved_model_before_platform_sync_and_validates_availability(self):
-        cache_restore = "const cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];"
+        route_restore = "cachedModelCatalog = await restoreModelRoutes();"
+        legacy_restore = "cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];"
         restore = 'setSelectedModel(localStorage.getItem("code-model") || "");'
-        cache_pos = APP_SOURCE.index(cache_restore)
+        route_pos = APP_SOURCE.index(route_restore)
+        legacy_pos = APP_SOURCE.index(legacy_restore, route_pos)
         restore_pos = APP_SOURCE.index(restore)
         sync_pos = APP_SOURCE.index("const platformSyncPromise = syncPlatformKeysSilently();")
-        self.assertLess(cache_pos, restore_pos)
+        self.assertLess(route_pos, legacy_pos)
+        self.assertLess(legacy_pos, restore_pos)
         self.assertLess(restore_pos, sync_pos)
 
-        refresh_start = APP_SOURCE.index("async function refreshModels()")
-        refresh_end = APP_SOURCE.index("function appendSystemError", refresh_start)
+        route_render_start = APP_SOURCE.index("function renderConnectionRouteCatalog(")
+        route_render_end = APP_SOURCE.index("function applyModelRouteSnapshot(", route_render_start)
+        route_render = APP_SOURCE[route_render_start:route_render_end]
+        self.assertIn("const storedRoute = state.modelRoutes.find", route_render)
+        self.assertIn("const migratedRoute = storedRoute", route_render)
+        self.assertIn("setSelectedModelRoute(migratedRoute.routeRef", route_render)
+
+        refresh_start = APP_SOURCE.index("async function performModelCatalogRefresh()")
+        refresh_end = APP_SOURCE.index("function modelRouteRefreshGeneration", refresh_start)
         refresh_source = APP_SOURCE[refresh_start:refresh_end]
         self.assertIn("if (successCount === 0)", refresh_source)
         self.assertIn('"modelCatalogRefreshFailedCached"', refresh_source)
@@ -307,6 +334,8 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         fallback_start = APP_SOURCE.index("async function getFallbackKeys(model)")
         fallback_end = APP_SOURCE.index("function getApiKeys()", fallback_start)
         fallback_source = APP_SOURCE[fallback_start:fallback_end]
+        self.assertIn("if (state.routingV2 !== false)", fallback_source)
+        self.assertIn("await getModelRouteDispatch(model)", fallback_source)
         self.assertIn("let authorizedKeys = getTrustedModelKeys(normalizedModel)", fallback_source)
         self.assertIn("await refreshModelCatalogForDispatch()", fallback_source)
         self.assertIn('error.code = "trusted_model_keys_unavailable"', fallback_source)
@@ -466,10 +495,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
             """await saveSessionState(
       ctx.sessionId,
       msgs,
-      ctx.stats || getSessionStats(ctx.sessionId),
+      getSessionStats(ctx.sessionId),
       sessionTitle || "Untitled",
       { persistMessages: true },
-    )""",
+    ).catch(() => null)""",
             clear_checkpoint,
         )
 
@@ -546,11 +575,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
             failure_source.index("errorRecoveryAssistant = {"),
             failure_source.index("await persistRunCheckpoint(ctx, status"),
         )
-        self.assertLess(
-            failure_source.index("await persistRunCheckpoint(ctx, status"),
-            APP_SOURCE.index("if (ownsActiveRunContext(ctx)) setStreaming(false", failure_start)
-            - failure_start,
+        publish_index = APP_SOURCE.rindex(
+            "publishTerminalRunOwnership(ctx);", 0, failure_start
         )
+        self.assertLess(publish_index, failure_start)
 
     def test_missing_historical_elapsed_does_not_render_fake_zero_seconds(self):
         status_start = MESSAGES_SOURCE.index("function renderCompletedRunStatus")

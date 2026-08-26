@@ -213,10 +213,10 @@ class TestSubAgentFrontend(unittest.TestCase):
             """await saveSessionState(
       ctx.sessionId,
       msgs,
-      ctx.stats || getSessionStats(ctx.sessionId),
+      getSessionStats(ctx.sessionId),
       sessionTitle || "Untitled",
       { persistMessages: true },
-    )""",
+    ).catch(() => null)""",
             clear,
         )
         self.assertIn("async function resumePersistedBackgroundRuns()", self.source)

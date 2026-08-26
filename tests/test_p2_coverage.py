@@ -21,6 +21,9 @@ import server as server_mod
 
 class TestCompactValidation(unittest.TestCase):
 
+    ROUTE_REF = "mr1_" + "a" * 64
+    ROUTE_REVISION = 7
+
     def setUp(self):
         self.handler = object.__new__(server_mod.CodeHandler)
         self.handler.send_json = mock.Mock()
@@ -31,31 +34,50 @@ class TestCompactValidation(unittest.TestCase):
         self._url_patcher.start()
         self.addCleanup(self._url_patcher.stop)
 
+    def _use_routing_v2(self, base_url="https://api.example.com"):
+        self.handler.headers.update({
+            "X-Model-Route-Ref": self.ROUTE_REF,
+            "X-Model-Route-Revision": str(self.ROUTE_REVISION),
+        })
+        resolved = mock.Mock(
+            key="synthetic-route-key",
+            base_url=base_url,
+        )
+        patcher = mock.patch.object(
+            server_mod._model_route_registry,
+            "resolve",
+            return_value=resolved,
+        )
+        resolver = patcher.start()
+        self.addCleanup(patcher.stop)
+        return resolver
+
     def test_rejects_fewer_than_6_messages(self):
+        self._use_routing_v2()
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": "hi"}] * 4,
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         with self.assertRaises(ValueError):
             server_mod.CodeHandler.compact(self.handler)
 
     def test_rejects_missing_model(self):
+        self._use_routing_v2()
         self.handler.read_body_json.return_value = {
             "model": "",
             "messages": [{"role": "user", "content": str(i)} for i in range(10)],
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         with self.assertRaises(ValueError):
             server_mod.CodeHandler.compact(self.handler)
 
-    def test_rejects_missing_api_key(self):
+    def test_rejects_missing_route(self):
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": str(i)} for i in range(10)],
         }
-        with self.assertRaises(ValueError):
+        with self.assertRaises(server_mod.ModelRouteError) as raised:
             server_mod.CodeHandler.compact(self.handler)
+        self.assertEqual(raised.exception.code, "route_not_found")
 
     def _make_urlopen_mock(self, summary="Summary text"):
         """Create a proper mock for request.urlopen that works as context manager."""
@@ -71,11 +93,11 @@ class TestCompactValidation(unittest.TestCase):
 
     def test_keep_count_bounded(self):
         """Verify keep_count formula: max(2, min(6, len//4))."""
+        self._use_routing_v2()
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": str(i)} for i in range(40)],
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
             server_mod.CodeHandler.compact(self.handler)
@@ -86,11 +108,11 @@ class TestCompactValidation(unittest.TestCase):
 
     def test_keep_count_minimum_2(self):
         """With 8 messages, keep_count = max(2, min(6, 2)) = 2."""
+        self._use_routing_v2()
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": str(i)} for i in range(8)],
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
             server_mod.CodeHandler.compact(self.handler)
@@ -99,6 +121,7 @@ class TestCompactValidation(unittest.TestCase):
             self.assertGreaterEqual(data["kept"], 2)
 
     def test_multimodal_content_extracts_text_without_leaking_image_data(self):
+        self._use_routing_v2()
         image_data = "data:image/png;base64,SHOULD_NOT_REACH_COMPACTION_PROMPT"
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
@@ -122,7 +145,6 @@ class TestCompactValidation(unittest.TestCase):
                 ],
             ],
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
 
         with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
@@ -136,15 +158,12 @@ class TestCompactValidation(unittest.TestCase):
         self.assertNotIn("SHOULD_NOT_REACH_COMPACTION_PROMPT", prompt)
         self.assertTrue(self.handler.send_json.call_args[0][0]["ok"])
 
-    def test_uses_request_base_url_and_normalizes_v1_suffix(self):
+    def test_routing_v2_uses_registry_connection_and_normalizes_v1_suffix(self):
+        resolver = self._use_routing_v2("https://gateway.example/v1/")
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": str(i)} for i in range(8)],
         }
-        self.handler.headers.update({
-            "Authorization": "Bearer sk-test",
-            "X-Base-URL": "https://gateway.example/v1/",
-        })
         with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
             server_mod.CodeHandler.compact(self.handler)
@@ -154,15 +173,17 @@ class TestCompactValidation(unittest.TestCase):
             request_object.full_url,
             "https://gateway.example/v1/chat/completions",
         )
+        resolver.assert_called_once_with(self.ROUTE_REF, self.ROUTE_REVISION, "gpt-4")
         self.assertTrue(self.handler.send_json.call_args[0][0]["ok"])
 
-    def test_empty_base_url_falls_back_to_local_gateway(self):
+    def test_legacy_empty_base_url_falls_back_to_local_gateway(self):
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": str(i)} for i in range(8)],
         }
         self.handler.headers["Authorization"] = "Bearer sk-test"
-        with mock.patch.object(server_mod, "NEW_API_BASE_URL", ""), \
+        with mock.patch.object(server_mod, "_MODEL_ROUTE_REGISTRY_ENABLED", False), \
+             mock.patch.object(server_mod, "NEW_API_BASE_URL", ""), \
              mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
             server_mod.CodeHandler.compact(self.handler)
@@ -176,6 +197,7 @@ class TestCompactValidation(unittest.TestCase):
 
     def test_role_labels_applied(self):
         """Verify user/assistant/tool-call/tool-result labels are in the prompt."""
+        self._use_routing_v2()
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [
@@ -189,7 +211,6 @@ class TestCompactValidation(unittest.TestCase):
                 {"role": "assistant", "content": "extra2"},
             ],
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         # Capture the request body sent to the LLM
         with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
@@ -206,12 +227,12 @@ class TestCompactValidation(unittest.TestCase):
 
     def test_content_truncation(self):
         """Long messages should be truncated to 800 chars in the prompt."""
+        self._use_routing_v2()
         long_content = "x" * 2000
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": long_content}] * 10,
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         with mock.patch.object(server_mod.request, "urlopen") as mock_urlopen:
             mock_urlopen.return_value = self._make_urlopen_mock()
             server_mod.CodeHandler.compact(self.handler)
@@ -225,6 +246,7 @@ class TestCompactValidation(unittest.TestCase):
 
     def test_role_labels_applied(self):
         """Verify user/assistant/tool-call/tool-result labels are in the prompt."""
+        self._use_routing_v2()
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
             "messages": [
@@ -238,7 +260,6 @@ class TestCompactValidation(unittest.TestCase):
                 {"role": "assistant", "content": "extra msg 2"},
             ],
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         captured_prompt = []
 
         def capture_request(req, **kwargs):
@@ -265,6 +286,7 @@ class TestCompactValidation(unittest.TestCase):
 
     def test_content_truncation(self):
         """Long messages should be truncated to 800 chars in the prompt."""
+        self._use_routing_v2()
         long_content = "x" * 2000
         self.handler.read_body_json.return_value = {
             "model": "gpt-4",
@@ -272,7 +294,6 @@ class TestCompactValidation(unittest.TestCase):
                 {"role": "user", "content": long_content},
             ] * 10,
         }
-        self.handler.headers["Authorization"] = "Bearer sk-test"
         captured_prompt = []
 
         def capture_request(req, **kwargs):
@@ -453,12 +474,25 @@ class TestCompactSummaryMarker(unittest.TestCase):
         self.assertIn("messages: messagesBeforeCompaction", compact_source)
         self.assertNotIn('showToast(t("compactMarker")', compact_source)
 
-    def test_manual_compaction_passes_current_gateway_base_url(self):
+    def test_manual_compaction_uses_resolved_route_dispatch(self):
         compact_start = self.source.index("async function compactConversation()")
         compact_end = self.source.index("function hideCompactConfirm()", compact_start)
         compact_source = self.source[compact_start:compact_end]
-        self.assertIn('const baseUrl = els.baseUrl.value.trim() || "http://localhost:3000"', compact_source)
+        self.assertIn("await getModelDispatchCredentials(model)", compact_source)
+        self.assertIn(
+            'const baseUrl = dispatch?.baseUrl || els.baseUrl.value.trim() || "http://localhost:3000"',
+            compact_source,
+        )
         self.assertIn('"X-Base-URL": baseUrl', compact_source)
+        self.assertIn('"X-Model-Route-Ref": dispatch.routeRef', compact_source)
+        self.assertIn(
+            '"X-Model-Route-Revision": String(dispatch.catalogRevision)',
+            compact_source,
+        )
+        self.assertIn(
+            "...(dispatch.keys?.[0] ? { Authorization: `Bearer ${dispatch.keys[0]}` } : {})",
+            compact_source,
+        )
 
     def test_manual_compaction_keeps_full_history_and_persists_summary_boundary(self):
         self.assertIn(
