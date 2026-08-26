@@ -1275,11 +1275,6 @@ const settingsFeature = createSettingsFeature({
     markModelCatalogStale(config);
     void resolvePendingOnboardingKey(config);
   },
-  onReopenOnboarding: () => {
-    if (onboardingTasksFeature?.reopen() !== true) return false;
-    beginNewConversation(projectIdForNewConversation());
-    return true;
-  },
   trashIcon,
 });
 const {

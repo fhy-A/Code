@@ -4649,7 +4649,12 @@ class TestDurableAgentRuntime(unittest.TestCase):
 
     def test_new_questionnaire_format_requires_custom_input_and_one_recommendation(self):
         definition = server_mod._SERVER_TOOL_DEFINITIONS["request_user_input"]["function"]
+        questions_schema = definition["parameters"]["properties"]["questions"]
         question_schema = definition["parameters"]["properties"]["questions"]["items"]
+        self.assertEqual(questions_schema["minItems"], 1)
+        self.assertEqual(questions_schema["maxItems"], 5)
+        self.assertIn("normally use no more than three", definition["description"])
+        self.assertIn("four or five only", definition["description"])
         self.assertEqual(question_schema["properties"]["type"]["enum"], ["single", "multiple"])
         self.assertEqual(question_schema["properties"]["options"]["minItems"], 2)
         self.assertEqual(question_schema["properties"]["options"]["maxItems"], 3)
@@ -4685,6 +4690,36 @@ class TestDurableAgentRuntime(unittest.TestCase):
             [item["recommended"] for item in normalized["questions"][0]["options"]],
             [True, False],
         )
+
+        for question_count in (1, 3, 5):
+            with self.subTest(question_count=question_count):
+                questions = [
+                    {
+                        **valid["arguments"]["questions"][0],
+                        "id": f"target-{index}",
+                        "prompt": f"Choose target {index}",
+                    }
+                    for index in range(question_count)
+                ]
+                accepted = server_mod._normalize_agent_input_request({
+                    "id": f"valid-{question_count}",
+                    "arguments": {"questions": questions},
+                })
+                self.assertEqual(len(accepted["questions"]), question_count)
+
+        six_questions = [
+            {
+                **valid["arguments"]["questions"][0],
+                "id": f"too-many-{index}",
+                "prompt": f"Too many {index}",
+            }
+            for index in range(6)
+        ]
+        with self.assertRaisesRegex(ValueError, "requires 1 to 5 questions"):
+            server_mod._normalize_agent_input_request({
+                "id": "six-question-call",
+                "arguments": {"questions": six_questions},
+            })
 
         invalid_cases = {
             "text type": {"type": "text"},

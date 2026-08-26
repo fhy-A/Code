@@ -3794,8 +3794,8 @@ def _normalize_agent_input_request(call):
     if call.get("parseError") or not isinstance(arguments, dict):
         raise ValueError(call.get("parseError") or "tool arguments must be an object")
     source_questions = arguments.get("questions")
-    if not isinstance(source_questions, list) or not 1 <= len(source_questions) <= 3:
-        raise ValueError("request_user_input requires 1 to 3 questions")
+    if not isinstance(source_questions, list) or not 1 <= len(source_questions) <= 5:
+        raise ValueError("request_user_input requires 1 to 5 questions")
 
     questions = []
     question_ids = set()
@@ -12660,7 +12660,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "request_user_input",
-            "description": "Ask the user for a critical decision that cannot be safely inferred or discovered. Ask one question by default. Every question must offer 2-3 choices, allow a custom answer, and mark exactly one recommended choice whose description explains the recommendation. Continue the original task after the answer.",
+            "description": "Ask the user for a critical decision that cannot be safely inferred or discovered. Ask one question by default and normally use no more than three. Use four or five only when the same stage has that many independent, necessary decisions. Every question must offer 2-3 choices, allow a custom answer, and mark exactly one recommended choice whose description explains the recommendation. Continue the original task after the answer.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -12669,7 +12669,7 @@ _SERVER_TOOL_DEFINITIONS = {
                     "questions": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 3,
+                        "maxItems": 5,
                         "items": {
                             "type": "object",
                             "properties": {

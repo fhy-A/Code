@@ -61,7 +61,6 @@
     const getDefaultSystemPrompt = options.getDefaultSystemPrompt || (() => "");
     const onPlatformLogout = options.onPlatformLogout || (() => {});
     const onKeyConfigChanged = options.onKeyConfigChanged || (() => {});
-    const onReopenOnboarding = options.onReopenOnboarding || (() => false);
     const trashIcon = options.trashIcon || (() => "");
     const documentRef = options.document || global.document;
     const storage = options.storage || global.localStorage;
@@ -614,20 +613,6 @@
           saveFollowUpBehavior(button.dataset.followUpBehavior, storage);
           renderEditorPanel(container);
         });
-      });
-    }
-
-    function renderOnboardingPanel(container) {
-      container.innerHTML = `<h3 class="settings-section-title" data-i18n="onboardingSettingsTitle">${t("onboardingSettingsTitle")}</h3>
-        <div class="settings-lite-page">
-          <section class="settings-lite-card onboarding-settings-card">
-            <p data-i18n="onboardingSettingsHint">${t("onboardingSettingsHint")}</p>
-            <button id="settingsReopenOnboarding" class="mini-btn primary-btn" type="button" data-i18n="onboardingSettingsAction">${t("onboardingSettingsAction")}</button>
-          </section>
-        </div>`;
-      byId("settingsReopenOnboarding")?.addEventListener("click", () => {
-        if (!onReopenOnboarding()) return;
-        byId("settingsPage")?.classList.add("hidden");
       });
     }
 
@@ -1272,7 +1257,6 @@
         case "skills": renderSkillsInSettings(detail); break;
         case "system": renderSystemPanel(detail); break;
         case "editor": renderEditorPanel(detail); break;
-        case "onboarding": renderOnboardingPanel(detail); break;
         case "theme": renderThemePanel(detail); break;
         case "update": renderUpdatePanel(detail); break;
         default: return;
@@ -1305,9 +1289,6 @@
           break;
         case "editor":
           renderEditorPanel(detail);
-          break;
-        case "onboarding":
-          renderOnboardingPanel(detail);
           break;
         case "models": {
           const refreshButton = byId("settingsRefreshModels");

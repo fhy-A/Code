@@ -17,7 +17,7 @@ const nativeTools = [
 
       name: "request_user_input",
 
-      description: "Ask the user for a critical decision that cannot be safely inferred from context or discovered with available tools. Use this sparingly: do not ask about ordinary implementation choices, and search or inspect first when the answer is discoverable. Before asking, scan the conversation for previous answers or decisions on this topic — do not re-ask questions that have already been answered. Ask one question by default; use up to three only when they are independent decisions at the same stage. After receiving the answers, continue the original task immediately.",
+      description: "Ask the user for a critical decision that cannot be safely inferred from context or discovered with available tools. Use this sparingly: do not ask about ordinary implementation choices, and search or inspect first when the answer is discoverable. Before asking, scan the conversation for previous answers or decisions on this topic — do not re-ask questions that have already been answered. Ask one question by default and normally use no more than three; use four or five only when the same stage has that many independent, necessary decisions. After receiving the answers, continue the original task immediately.",
 
       parameters: {
 
@@ -35,7 +35,7 @@ const nativeTools = [
 
             minItems: 1,
 
-            maxItems: 3,
+            maxItems: 5,
 
             items: {
 
@@ -47,7 +47,7 @@ const nativeTools = [
 
                 prompt: { type: "string", description: "The decision the user needs to make." },
 
-                type: { type: "string", enum: ["single", "multiple", "text"] },
+                type: { type: "string", enum: ["single", "multiple"] },
 
                 required: { type: "boolean" },
 
@@ -56,6 +56,10 @@ const nativeTools = [
                 options: {
 
                   type: "array",
+
+                  minItems: 2,
+
+                  maxItems: 3,
 
                   items: {
 
@@ -67,11 +71,13 @@ const nativeTools = [
 
                       label: { type: "string" },
 
-                      description: { type: "string" },
+                      description: { type: "string", minLength: 1 },
+
+                      recommended: { type: "boolean" },
 
                     },
 
-                    required: ["value", "label"],
+                    required: ["value", "label", "recommended"],
 
                     additionalProperties: false,
 
@@ -81,7 +87,7 @@ const nativeTools = [
 
               },
 
-              required: ["id", "prompt", "type"],
+              required: ["id", "prompt", "type", "allowOther", "options"],
 
               additionalProperties: false,
 

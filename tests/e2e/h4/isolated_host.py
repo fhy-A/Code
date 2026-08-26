@@ -103,6 +103,8 @@ QUEUE_QUESTIONNAIRE_USER = "H4_QUESTIONNAIRE_USER_QUEUE"
 QUEUE_QUESTIONNAIRE_FINAL = QUESTIONNAIRE_FINAL
 MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER"
 MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL"
+FIVE_QUESTIONNAIRE_USER = "H4_FIVE_QUESTIONNAIRE_USER"
+FIVE_QUESTIONNAIRE_FINAL = "H4_FIVE_QUESTIONNAIRE_FINAL"
 TERMINAL_QUESTIONNAIRE_USER = "H4_TERMINAL_QUESTIONNAIRE_USER"
 TERMINAL_QUESTIONNAIRE_FINAL = "H4_TERMINAL_QUESTIONNAIRE_FINAL"
 CLASSIC_USER = "H4_CLASSIC_USER"
@@ -275,6 +277,20 @@ MIXED_QUESTIONNAIRE_TEXT_OPTIONS = (
         "description": "H4_MIXED_TEXT_OPTION_B_DESCRIPTION",
         "recommended": False,
     },
+)
+FIVE_QUESTIONNAIRE_TOOL_CALL_ID = "h4-five-questionnaire-call-1"
+FIVE_QUESTIONNAIRE_TITLE = "H4_FIVE_QUESTIONNAIRE_TITLE"
+FIVE_QUESTIONNAIRE_REASON = "H4_FIVE_QUESTIONNAIRE_REASON"
+FIVE_QUESTIONNAIRE_QUESTIONS = tuple(
+    {
+        "id": f"h4-five-question-{index}",
+        "prompt": f"H4_FIVE_QUESTIONNAIRE_PROMPT_{index}",
+        "type": "single",
+        "required": True,
+        "allowOther": True,
+        "options": list(QUESTIONNAIRE_OPTIONS),
+    }
+    for index in range(1, 6)
 )
 TERMINAL_QUESTIONNAIRE_OPTIONS = (
     {
@@ -627,6 +643,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             QUESTIONNAIRE_TOOL_CALL_ID,
             LEGACY_QUESTIONNAIRE_TOOL_CALL_ID,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
+            FIVE_QUESTIONNAIRE_TOOL_CALL_ID,
             TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
             PROPOSE_EDIT_TOOL_CALL_ID,
         }:
@@ -732,6 +749,11 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             MIXED_QUESTIONNAIRE_USER,
             MIXED_QUESTIONNAIRE_TOOL_CALL_ID,
             "mixed-questionnaire",
+        ),
+        (
+            FIVE_QUESTIONNAIRE_USER,
+            FIVE_QUESTIONNAIRE_TOOL_CALL_ID,
+            "five-questionnaire",
         ),
         (
             TERMINAL_QUESTIONNAIRE_USER,
@@ -1063,6 +1085,12 @@ def _questionnaire_call_contract(scenario: str) -> tuple[str, dict]:
                     "options": list(MIXED_QUESTIONNAIRE_TEXT_OPTIONS),
                 },
             ],
+        }
+    if scenario == "five-questionnaire-call":
+        return FIVE_QUESTIONNAIRE_TOOL_CALL_ID, {
+            "title": FIVE_QUESTIONNAIRE_TITLE,
+            "reason": FIVE_QUESTIONNAIRE_REASON,
+            "questions": list(FIVE_QUESTIONNAIRE_QUESTIONS),
         }
     if scenario == "terminal-questionnaire-call":
         return TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID, {
@@ -2024,7 +2052,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "stream-refresh", "tool-detail-call", "multi-tool-detail-call",
                 "invalid-tool-call", "parse-error-tool-call", "missing-path-tool-call",
                 "executor-range-call", "missing-file-call", "questionnaire-call",
-                "mixed-questionnaire-call", "terminal-questionnaire-call",
+                "mixed-questionnaire-call", "five-questionnaire-call",
+                "terminal-questionnaire-call",
                 "queue-questionnaire-call",
                 "edit-authorization-approve-call",
                 "edit-authorization-reject-call", "edit-authorization-conflict-call",
@@ -2142,7 +2171,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
 
         if scenario in (
             "questionnaire-call", "mixed-questionnaire-call",
-            "terminal-questionnaire-call",
+            "five-questionnaire-call", "terminal-questionnaire-call",
             "queue-questionnaire-call",
         ):
             questionnaire_tool_call_id, questionnaire_arguments = (
@@ -2688,6 +2717,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "queue-questionnaire-final": QUEUE_QUESTIONNAIRE_FINAL,
                 "queue-questionnaire-promoted": TIMING_QUEUE_FINAL,
                 "mixed-questionnaire-final": MIXED_QUESTIONNAIRE_FINAL,
+                "five-questionnaire-final": FIVE_QUESTIONNAIRE_FINAL,
                 "terminal-questionnaire-final": TERMINAL_QUESTIONNAIRE_FINAL,
                 "edit-authorization-approve-final": EDIT_AUTHORIZATION_APPROVE_FINAL,
                 "edit-authorization-reject-final": EDIT_AUTHORIZATION_REJECT_FINAL,

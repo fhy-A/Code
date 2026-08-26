@@ -143,6 +143,16 @@ const QUESTIONNAIRE_OPTION_B = Object.freeze({
   description: "H4_QUESTIONNAIRE_OPTION_B_DESCRIPTION",
   recommended: false,
 });
+const FIVE_QUESTIONNAIRE_USER = "H4_FIVE_QUESTIONNAIRE_USER";
+const FIVE_QUESTIONNAIRE_FINAL = "H4_FIVE_QUESTIONNAIRE_FINAL";
+const FIVE_QUESTIONNAIRE_TOOL_CALL_ID = "h4-five-questionnaire-call-1";
+const FIVE_QUESTIONNAIRE_REQUEST_ID = `user-input-${FIVE_QUESTIONNAIRE_TOOL_CALL_ID}`;
+const FIVE_QUESTIONNAIRE_TITLE = "H4_FIVE_QUESTIONNAIRE_TITLE";
+const FIVE_QUESTIONNAIRE_REASON = "H4_FIVE_QUESTIONNAIRE_REASON";
+const FIVE_QUESTIONNAIRE_QUESTIONS = Object.freeze(Array.from({ length: 5 }, (_, index) => ({
+  id: `h4-five-question-${index + 1}`,
+  prompt: `H4_FIVE_QUESTIONNAIRE_PROMPT_${index + 1}`,
+})));
 const MIXED_QUESTIONNAIRE_USER = "H4_MIXED_QUESTIONNAIRE_USER";
 const MIXED_QUESTIONNAIRE_FINAL = "H4_MIXED_QUESTIONNAIRE_FINAL";
 const MIXED_QUESTIONNAIRE_TOOL_CALL_ID = "h4-mixed-questionnaire-call-1";
@@ -7109,6 +7119,193 @@ async function exerciseQuestionnaireRefreshLifecycle(h4, runtime) {
     waitingReload: waitingReloadRequests,
     terminalReload: terminalReloadRequests,
     hashes,
+  });
+}
+
+async function exerciseFiveQuestionnaireLifecycle(h4, runtime) {
+  const assertFiveQuestionnaireDefinition = (value) => {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    expect(parsed).toMatchObject({
+      title: FIVE_QUESTIONNAIRE_TITLE,
+      reason: FIVE_QUESTIONNAIRE_REASON,
+    });
+    expect(parsed.questions).toHaveLength(5);
+    expect(parsed.questions.map((question) => question.id))
+      .toEqual(FIVE_QUESTIONNAIRE_QUESTIONS.map((question) => question.id));
+    parsed.questions.forEach((question, index) => {
+      expect(question).toMatchObject({
+        id: FIVE_QUESTIONNAIRE_QUESTIONS[index].id,
+        prompt: FIVE_QUESTIONNAIRE_QUESTIONS[index].prompt,
+        type: "single",
+        required: true,
+        allowOther: true,
+      });
+      expect(question.options).toEqual([QUESTIONNAIRE_OPTION_A, QUESTIONNAIRE_OPTION_B]);
+    });
+  };
+  const started = await beginQuestionnaireLifecycle(h4, runtime, {
+    userMarker: FIVE_QUESTIONNAIRE_USER,
+    toolCallId: FIVE_QUESTIONNAIRE_TOOL_CALL_ID,
+    requestId: FIVE_QUESTIONNAIRE_REQUEST_ID,
+    title: FIVE_QUESTIONNAIRE_TITLE,
+    reason: FIVE_QUESTIONNAIRE_REASON,
+    assertToolArguments: assertFiveQuestionnaireDefinition,
+  });
+  const { page, agentRunId, sessionId, waitingAgent } = started;
+
+  const waitForProgress = async (resolvedCount) => {
+    const statuses = Array.from(
+      { length: 5 },
+      (_, index) => (index < resolvedCount ? "resolved" : "pending"),
+    );
+    let session = null;
+    await expect.poll(async () => {
+      const response = await fetchProductionJson(
+        page,
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+      );
+      session = response.body;
+      return {
+        status: response.status,
+        requestId: session?.runState?.userInputRequest?.id,
+        statuses: (session?.runState?.userInputRequest?.questions || [])
+          .map((question) => question.status),
+      };
+    }).toEqual({
+      status: 200,
+      requestId: FIVE_QUESTIONNAIRE_REQUEST_ID,
+      statuses,
+    });
+    return session;
+  };
+
+  const answerQuestion = async (index) => {
+    const question = FIVE_QUESTIONNAIRE_QUESTIONS[index];
+    const root = page.locator(
+      `#userInputPanel [data-question-id="${question.id}"]`,
+    );
+    await expect(page.locator("#userInputPanel .user-input-progress"))
+      .toHaveText(`${index + 1}/5`);
+    await expect(root).toHaveCount(1);
+    await expect(root).toContainText(question.prompt);
+    await expect(root.locator(".user-input-recommended")).toHaveCount(1);
+    const option = root.locator(
+      `input[type="radio"][value="${QUESTIONNAIRE_OPTION_B.value}"]`,
+    );
+    await option.check();
+    await expect(option).toBeChecked();
+    const confirm = root.locator('[data-user-input-action="confirm"]');
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+  };
+
+  await waitForProgress(0);
+  const metricsAtWaiting = await h4.metrics();
+  expect(metricsAtWaiting.chatRequests).toEqual([{
+    scenario: "five-questionnaire-call",
+    stream: true,
+    hasToolResult: false,
+  }]);
+  for (let index = 0; index < 2; index += 1) {
+    const boundary = h4.requestBoundary();
+    const metricsBefore = await h4.metrics();
+    await answerQuestion(index);
+    await waitForProgress(index + 1);
+    expect(questionnaireRequestProjection(
+      h4,
+      boundary,
+      metricsBefore,
+      await h4.metrics(),
+    )).toMatchObject({ inputPost: 0, resumePost: 0, agentDelete: 0 });
+  }
+
+  const progressReloadBoundary = h4.requestBoundary();
+  const metricsBeforeReload = await h4.metrics();
+  await h4.reloadRuntime(runtime);
+  await restoreGoalH4Connection(h4);
+  await waitForProgress(2);
+  await expect(page.locator("#userInputPanel .user-input-progress")).toHaveText("3/5");
+  const waitingAfterReload = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(waitingAfterReload.status).toBe(200);
+  expect(waitingAfterReload.body.status).toBe("waiting_user_input");
+  expect(waitingAfterReload.body.pendingInput?.requestId).toBe(FIVE_QUESTIONNAIRE_REQUEST_ID);
+  expect((waitingAfterReload.body.events || []).map((event) => event.type))
+    .toEqual((waitingAgent.events || []).map((event) => event.type));
+  expect(questionnaireRequestProjection(
+    h4,
+    progressReloadBoundary,
+    metricsBeforeReload,
+    await h4.metrics(),
+  )).toMatchObject({
+    agentRunPost: 0,
+    inputPost: 0,
+    resumePost: 0,
+    agentDelete: 0,
+    upstreamChatDelta: 0,
+  });
+
+  for (let index = 2; index < 4; index += 1) {
+    const boundary = h4.requestBoundary();
+    const metricsBefore = await h4.metrics();
+    await answerQuestion(index);
+    await waitForProgress(index + 1);
+    expect(questionnaireRequestProjection(
+      h4,
+      boundary,
+      metricsBefore,
+      await h4.metrics(),
+    )).toMatchObject({ inputPost: 0, resumePost: 0, agentDelete: 0 });
+  }
+
+  const submissionBoundary = h4.requestBoundary();
+  const submissionMetricsBefore = await h4.metrics();
+  await answerQuestion(4);
+  const completed = await completeQuestionnaireLifecycle(h4, started, {
+    finalMarker: FIVE_QUESTIONNAIRE_FINAL,
+    toolCallId: FIVE_QUESTIONNAIRE_TOOL_CALL_ID,
+    submissionBoundary,
+    submissionMetricsBefore,
+  });
+  expect(completed.submissionRequests.inputPost).toBe(1);
+  expect(completed.submissionRequests.resumePost).toBe(1);
+  expect(completed.completedAgent.events.filter((event) => event.type === "user_input_submitted"))
+    .toHaveLength(1);
+  const result = completed.completedAgent.toolExecutions[0]?.result;
+  expect(result).toMatchObject({
+    ok: true,
+    action: "request_user_input",
+    requestId: FIVE_QUESTIONNAIRE_REQUEST_ID,
+    title: FIVE_QUESTIONNAIRE_TITLE,
+  });
+  expect(result.answers).toHaveLength(5);
+  expect(result.answers.map((answer) => answer.id))
+    .toEqual(FIVE_QUESTIONNAIRE_QUESTIONS.map((question) => question.id));
+  expect(result.answers.map((answer) => answer.values))
+    .toEqual(FIVE_QUESTIONNAIRE_QUESTIONS.map(() => [QUESTIONNAIRE_OPTION_B.value]));
+  expect(completed.metricsAtTerminal.chatRequests.map((request) => request.scenario))
+    .toEqual(["five-questionnaire-call", "five-questionnaire-final"]);
+
+  const terminalReload = await reloadCompletedQuestionnaireLifecycle(h4, started, completed);
+  expect(terminalReload.terminalReloadRequests).toMatchObject({
+    inputPost: 0,
+    resumePost: 0,
+    agentDelete: 0,
+    upstreamChatDelta: 0,
+  });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-five-question-questionnaire`, {
+    questionCount: result.answers.length,
+    progressRestoredAt: "3/5",
+    inputPosts: completed.totalRequests.inputPost,
+    resumePosts: completed.totalRequests.resumePost,
+    submittedEvents: completed.completedAgent.events
+      .filter((event) => event.type === "user_input_submitted").length,
+    completed: completed.completedAgent.status === "completed",
+    reloadReplayed: terminalReload.terminalReloadRequests.inputPost !== 0
+      || terminalReload.terminalReloadRequests.resumePost !== 0,
   });
 }
 
@@ -18865,6 +19062,14 @@ test("direct classic questionnaire survives reload, submits once, and resumes sa
   await exerciseQuestionnaireRefreshLifecycle(h4, "classic");
 });
 
+test("bundle five-question questionnaire preserves progress and submits once", async ({ h4 }) => {
+  await exerciseFiveQuestionnaireLifecycle(h4, "bundle");
+});
+
+test("direct classic five-question questionnaire preserves progress and submits once", async ({ h4 }) => {
+  await exerciseFiveQuestionnaireLifecycle(h4, "classic");
+});
+
 test("bundle legacy persisted questionnaire restores and submits exactly once", async ({ h4 }) => {
   await exerciseLegacyPersistedQuestionnaireLifecycle(h4, "bundle");
 });
@@ -25753,6 +25958,16 @@ async function exerciseAutoPermissionReloadPersistence(h4, runtime) {
 
 async function exerciseExplicitOnboardingTasks(h4, runtime) {
   const { page } = h4;
+  await page.addInitScript(({ storageKey, markerKey, value }) => {
+    if (!/^https?:$/.test(location.protocol)) return;
+    if (sessionStorage.getItem(markerKey) === "1") return;
+    localStorage.setItem(storageKey, value);
+    sessionStorage.setItem(markerKey, "1");
+  }, {
+    storageKey: "code-onboarding-tasks-v1",
+    markerKey: `h4-onboarding-initialized-${runtime}`,
+    value: JSON.stringify({ version: 2, completedTaskIds: [], completed: false }),
+  });
   const startupBoundary = h4.requestBoundary();
   await h4.open(runtime);
   await assertFrontendRuntime(page, runtime);
@@ -25973,17 +26188,11 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
 
   await page.locator("#settingsMenuBtn").click();
   await expect(page.locator("#settingsPage")).toBeVisible();
-  await page.locator('#settingsNav [data-panel="onboarding"]').click();
-  await page.locator("#settingsReopenOnboarding").click();
-  await expect(page.locator("#settingsPage")).toBeHidden();
-  await expect(onboarding).toHaveAttribute("data-onboarding-state", "active");
-  await expect(currentTask()).toHaveAttribute("data-onboarding-task", "workbar");
-  await expect(page.locator("#messages article.msg")).toHaveCount(0);
-  expect(await storedState()).toEqual({
-    version: 2,
-    completedTaskIds: [],
-    completed: false,
-  });
+  await expect(page.locator('#settingsNav [data-panel="onboarding"]')).toHaveCount(0);
+  await expect(page.locator("#settingsReopenOnboarding")).toHaveCount(0);
+  await expect(page.locator("#settingsDetail")).not.toContainText("Getting started");
+  await expect(onboarding).toHaveAttribute("data-onboarding-state", "hidden");
+  expect(await storedState()).toEqual(completedState);
 
   const metrics = await h4.metrics();
   expect(metrics.chatRequests.map((request) => request.scenario)).toEqual(["plain-text", "plain-text"]);
@@ -26004,7 +26213,7 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
     directChatHiddenUntilNewWelcome: true,
     completionPlayedOnce: true,
     completionLayout,
-    settingsReopenReset: true,
+    settingsOnboardingEntryRemoved: true,
     desktopLayout,
     narrowLayout,
     storedKeys: Object.keys(completedState).sort(),

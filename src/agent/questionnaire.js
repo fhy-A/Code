@@ -6,7 +6,7 @@
 
   function normalizeUserInputQuestions(sourceQuestions) {
     return (Array.isArray(sourceQuestions) ? sourceQuestions : [])
-      .slice(0, 3)
+      .slice(0, 5)
       .map((question, index) => {
         const type = ["single", "multiple", "text"].includes(question?.type) ? question.type : "single";
         const options = type === "text" ? [] : (Array.isArray(question?.options) ? question.options : [])

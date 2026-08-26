@@ -1612,7 +1612,11 @@ const feature = createGoalControlFeature({
         self.assertNotIn('"agent-lite-onboarding"', ONBOARDING_TASKS_SOURCE)
         self.assertIn('id="composerStack"', INDEX_SOURCE)
         self.assertIn('id="onboardingTasks"', INDEX_SOURCE)
-        self.assertIn('data-panel="onboarding"', INDEX_SOURCE)
+        self.assertNotIn('data-panel="onboarding"', INDEX_SOURCE)
+        self.assertNotIn('id="settingsReopenOnboarding"', SETTINGS_SOURCE)
+        self.assertNotIn("renderOnboardingPanel", SETTINGS_SOURCE)
+        self.assertNotIn("onReopenOnboarding", SETTINGS_SOURCE)
+        self.assertNotIn("onReopenOnboarding", APP_SOURCE)
         self.assertIn('import "./features/onboarding-tasks.js";', FRONTEND_ENTRY_SOURCE)
 
         stack_start = INDEX_SOURCE.index('<div id="composerStack"')
@@ -2035,7 +2039,10 @@ setImmediate(() => {{
         self.assertNotIn("onboardingRestore", ONBOARDING_TASKS_SOURCE)
         self.assertIn('fetchFn("/api/code/auth/validate"', SETTINGS_SOURCE)
         self.assertIn("verifyPlatformConnection,", SETTINGS_SOURCE)
-        self.assertIn("beginNewConversation(projectIdForNewConversation())", APP_SOURCE)
+        self.assertNotIn("onReopenOnboarding", APP_SOURCE)
+        self.assertNotIn('data-panel="onboarding"', INDEX_SOURCE)
+        self.assertNotIn("renderOnboardingPanel", SETTINGS_SOURCE)
+        self.assertNotIn('id="settingsReopenOnboarding"', SETTINGS_SOURCE)
         self.assertIn('data-onboarding-example="${index}"', ONBOARDING_TASKS_SOURCE)
         self.assertIn('els.prompt.dispatchEvent(new Event("input", { bubbles: true }))', APP_SOURCE)
         self.assertIn('permissionProfile: getStoredValue("code-permission-profile") || "accept"', STATE_SOURCE)
@@ -2052,9 +2059,15 @@ setImmediate(() => {{
             "onboardingExampleAnalyzeProblems",
             "onboardingExampleSmallChange",
             "onboardingCompleteTitle",
-            "onboardingSettingsAction",
         ):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+        for key in (
+            "onboardingSettingsNav",
+            "onboardingSettingsTitle",
+            "onboardingSettingsHint",
+            "onboardingSettingsAction",
+        ):
+            self.assertNotIn(f"{key}:", I18N_SOURCE)
         for copy in (
             "请介绍 Code 能做什么，并推荐几个适合第一次尝试的任务。",
             "请先询问我想整理的内容和网页地址，再联网读取并整理关键结论与来源。",
@@ -2737,11 +2750,14 @@ const source = [
     ],
   },
   {id: "details", prompt: " Explain ", type: "text", options: [{value: "ignored"}]},
-  {prompt: "   ", type: "text"},
-  {prompt: "sliced out", type: "text"},
+  {id: "scope", prompt: " Scope ", type: "single", options: [{value: "project"}]},
+  {id: "format", prompt: " Format ", type: "multiple", options: [{value: "summary"}]},
+  {id: "notes", prompt: " Notes ", type: "text"},
+  {id: "sixth", prompt: "sliced out", type: "text"},
 ];
 const sourceBefore = JSON.stringify(source);
 const questions = questionnaire.normalizeUserInputQuestions(source);
+const filteredInvalid = questionnaire.normalizeUserInputQuestions([{prompt: "   ", type: "text"}]);
 const request = {
   id: "request-1",
   questions,
@@ -2757,6 +2773,7 @@ process.stdout.write(JSON.stringify({
   frozen: Object.isFrozen(questionnaire),
   sourceUnchanged: JSON.stringify(source) === sourceBefore,
   questions,
+  filteredInvalid,
   serialized,
   requestNestedValue: request.nested.value,
   nullRequest: questionnaire.serializeUserInputRequest(null),
@@ -2773,8 +2790,13 @@ process.stdout.write(JSON.stringify({
         data = json.loads(completed.stdout)
         self.assertTrue(data["frozen"])
         self.assertTrue(data["sourceUnchanged"])
-        self.assertEqual(len(data["questions"]), 2)
-        first, second = data["questions"]
+        self.assertEqual(len(data["questions"]), 5)
+        self.assertEqual(
+            [question["prompt"] for question in data["questions"]],
+            ["Pick a target", "Explain", "Scope", "Format", "Notes"],
+        )
+        self.assertEqual(data["filteredInvalid"], [])
+        first, second, *_ = data["questions"]
         self.assertEqual(first["id"], "question_1")
         self.assertEqual(first["prompt"], "Pick a target")
         self.assertEqual(first["type"], "single")
@@ -5855,8 +5877,17 @@ process.stdout.write(JSON.stringify({
   unchanged: JSON.stringify(definitions) === before,
   selectedNames: selected.map((tool) => tool.function.name),
   selectionIsNewArray: selected !== definitions,
+  questionnaireQuestionLimit:
+    byName.request_user_input.function.parameters.properties.questions.maxItems,
+  questionnaireDescription: byName.request_user_input.function.description,
   questionnaireOptionLimit:
     byName.request_user_input.function.parameters.properties.questions.items.properties.options.maxItems,
+  questionnaireTypes:
+    byName.request_user_input.function.parameters.properties.questions.items.properties.type.enum,
+  questionnaireRequired:
+    byName.request_user_input.function.parameters.properties.questions.items.required,
+  questionnaireOptionRequired:
+    byName.request_user_input.function.parameters.properties.questions.items.properties.options.items.required,
   runCommandProperties: Object.keys(byName.run_command.function.parameters.properties),
   saveMemoryRequired: byName.save_memory.function.parameters.required,
 }));
@@ -5892,12 +5923,24 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "65c3320c6550f0b2391c9d77e84760e8e901881a88a717e6fc0bea74b97373df",
+            "943267db6a843b8931afdaf01ec65bbc6becd17142efb1e55e1f7df9d7e0f9f8",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
         self.assertEqual(data["selectedNames"], ["request_user_input", "read_file"])
-        self.assertIsNone(data.get("questionnaireOptionLimit"))
+        self.assertEqual(data["questionnaireQuestionLimit"], 5)
+        self.assertIn("normally use no more than three", data["questionnaireDescription"])
+        self.assertIn("four or five only", data["questionnaireDescription"])
+        self.assertEqual(data["questionnaireOptionLimit"], 3)
+        self.assertEqual(data["questionnaireTypes"], ["single", "multiple"])
+        self.assertEqual(
+            data["questionnaireRequired"],
+            ["id", "prompt", "type", "allowOther", "options"],
+        )
+        self.assertEqual(
+            data["questionnaireOptionRequired"],
+            ["value", "label", "recommended"],
+        )
         self.assertEqual(data["runCommandProperties"], ["command"])
         self.assertEqual(
             data["saveMemoryRequired"],
