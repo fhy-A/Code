@@ -1274,7 +1274,7 @@ const {
 messagesFeature = createMessagesFeature({
   escapeHtml,
   formatCompact,
-  renderMarkdown: (...args) => markdownFeature.renderMarkdownLite(...args),
+  renderMarkdown: (...args) => renderAnswerMarkdown(...args),
   t,
   getMessageText: getMsgText,
   getBackgroundJob,
@@ -2818,6 +2818,43 @@ function bindStructuredMarkdownTables() {
   window.addEventListener("resize", scheduleStructuredMarkdownTables, { passive: true });
 }
 
+function downgradeOutOfScopeAnswerReferences(root, projectRoot) {
+  const markdownApi = window.Code?.ui?.markdown;
+  if (!root?.querySelectorAll || !markdownApi?.normalizeAbsolutePath) return;
+  root.querySelectorAll(".answer-local-path, .answer-local-image").forEach((element) => {
+    const path = markdownApi.normalizeAbsolutePath(element.getAttribute("data-path") || "");
+    if (!path || !isOutOfRootPath(path, projectRoot)) return;
+    if (element.classList.contains("answer-local-image")) {
+      const code = document.createElement("code");
+      code.textContent = path;
+      element.replaceWith(code);
+      return;
+    }
+    if (element.tagName === "A") {
+      const text = document.createElement("span");
+      text.classList.add("local-link-text");
+      text.textContent = element.textContent || path;
+      element.replaceWith(text);
+      return;
+    }
+    element.classList.remove("clickable-path", "answer-local-path", "local-path-link", "code-ref");
+    ["data-path", "data-line", "data-tooltip", "title", "href", "tabindex", "role"].forEach((name) => {
+      element.removeAttribute(name);
+    });
+  });
+}
+
+function renderAnswerMarkdown(content) {
+  const html = renderMarkdownLite(content);
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  downgradeOutOfScopeAnswerReferences(
+    template.content,
+    (els.projectRoot?.value || "").replace(/[\\/]+$/, ""),
+  );
+  return template.innerHTML;
+}
+
 // Inline images degrade to a file link on load failure (no blank flash).
 function bindMessageImages() {
   document.querySelectorAll(".msg-inline-img-slot").forEach((slot) => {
@@ -3083,13 +3120,13 @@ function renderProcessAssistant(msg) {
 
   if (thought) {
 
-    html += `<details class="thought-inline"><summary>💭 ${escapeHtml(summarizeThought(thought))}</summary><div class="thought-body">${renderMarkdownLite(thought)}</div></details>`;
+    html += `<details class="thought-inline"><summary>💭 ${escapeHtml(summarizeThought(thought))}</summary><div class="thought-body">${renderAnswerMarkdown(thought)}</div></details>`;
 
   }
 
   if (content) {
 
-    html += `<div class="assistant-inline-text">${renderMarkdownLite(content)}</div>`;
+    html += `<div class="assistant-inline-text">${renderAnswerMarkdown(content)}</div>`;
 
   }
 
@@ -3500,7 +3537,7 @@ function patchStreamingAssistantMessage(sessionId, index) {
   const outputNode = article.querySelector('[data-stream-part="answer"]');
 
   if (outputNode) {
-    const nextOutputHtml = visibleContent ? renderMarkdownLite(visibleContent) : "";
+    const nextOutputHtml = visibleContent ? renderAnswerMarkdown(visibleContent) : "";
     if (outputNode.innerHTML !== nextOutputHtml) outputNode.innerHTML = nextOutputHtml;
     outputNode.classList.toggle("is-empty", !visibleContent);
     article.querySelector("[data-stream-role]")?.classList.toggle(
@@ -4170,7 +4207,7 @@ function isProcessMessage(msg) {
 
 
 function renderAssistantContent(content) {
-  return `<div class="bubble">${renderMarkdownLite(content)}</div>`;
+  return `<div class="bubble">${renderAnswerMarkdown(content)}</div>`;
 }
 
 

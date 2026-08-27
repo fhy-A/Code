@@ -16845,17 +16845,23 @@ const test = base.test.extend({
               const renderFixtureLine = (line) => {
                 let output = "";
                 let cursor = 0;
-                const tokenPattern = /`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+                const tokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g;
                 for (const match of line.matchAll(tokenPattern)) {
                   output += line.slice(cursor, match.index);
                   if (match[1] !== undefined) {
-                    output += renderer.codespan.call(renderer, { text: match[1] });
+                    output += renderer.image.call(renderer, {
+                      href: match[2],
+                      text: match[1],
+                      title: null,
+                    });
+                  } else if (match[3] !== undefined) {
+                    output += renderer.codespan.call(renderer, { text: match[3] });
                   } else {
                     output += renderer.link.call(inlineContext, {
-                      href: match[3],
-                      text: match[2],
+                      href: match[5],
+                      text: match[4],
                       title: null,
-                      tokens: [{ type: "text", text: match[2] }],
+                      tokens: [{ type: "text", text: match[4] }],
                     });
                   }
                   cursor = match.index + match[0].length;
@@ -25431,6 +25437,7 @@ async function exerciseLargeTextPreview(h4, runtime) {
   const directoryName = "H4 中文 answer folder";
   const directoryPath = path.resolve(h4.host.projectDir, directoryName).replaceAll("\\", "/");
   const outsidePath = path.resolve(h4.host.projectDir, "..", "H4 outside answer.txt").replaceAll("\\", "/");
+  const outsideImagePath = path.resolve(h4.host.projectDir, "..", "H4 outside answer.png").replaceAll("\\", "/");
   const prefix = [
     "H4_LARGE_PREVIEW_START",
     ...Array.from({ length: 8200 }, (_, index) => `H4 line ${index + 1}`),
@@ -25478,6 +25485,14 @@ async function exerciseLargeTextPreview(h4, runtime) {
   await h4.reloadRuntime(runtime);
   if (runtime === "classic") await assertDirectClassicEntry(page);
   const restoredProjection = await assertInternalPreview("reload-restore");
+  const outsideRequestUrls = [];
+  const recordOutsideRequest = (request) => {
+    const decoded = decodeURIComponent(request.url());
+    if (decoded.includes(outsidePath) || decoded.includes(outsideImagePath)) {
+      outsideRequestUrls.push(decoded);
+    }
+  };
+  page.on("request", recordOutsideRequest);
 
   const created = await sendProductionJson(page, "/api/sessions", "POST", {
     title: `H4 large text preview ${runtime}`,
@@ -25489,7 +25504,9 @@ async function exerciseLargeTextPreview(h4, runtime) {
           `H4 absolute large text \`${absolutePath}:37\``,
           `Absolute directory \`${directoryPath}\``,
           `Legacy relative \`${largePath}\` and \`server.py:123\` and \`output/tmp/\``,
-          `Outside absolute \`${outsidePath}\``,
+          `Outside absolute code \`${outsidePath}\``,
+          `Outside absolute link [outside-link](${outsidePath})`,
+          `Outside absolute image ![outside-image](${outsideImagePath})`,
           "External [example](https://example.com/docs)",
         ].join("\n\n"),
         _time: "2026-08-24T05:10:01Z",
@@ -25525,15 +25542,27 @@ async function exerciseLargeTextPreview(h4, runtime) {
   );
   expect(relativeCodes).toEqual(expect.arrayContaining([largePath, "server.py:123", "output/tmp/"]));
   expect(relativeCodes.filter((value) => [largePath, "server.py:123", "output/tmp/"].includes(value))).toHaveLength(3);
-  await expect(answer.locator(`.clickable-path[data-path="${outsidePath}"]`)).toHaveCount(1);
+  const outsideCode = answer.locator("code:not(.clickable-path)").filter({ hasText: outsidePath });
+  const outsideImageCode = answer.locator("code:not(.clickable-path)").filter({ hasText: outsideImagePath });
+  const outsideLinkText = answer.locator("span.local-link-text").filter({ hasText: "outside-link" });
+  await expect(outsideCode).toHaveCount(1);
+  await expect(outsideImageCode).toHaveCount(1);
+  await expect(outsideLinkText).toHaveCount(1);
+  await expect(outsideLinkText).not.toHaveAttribute("href", /.+/);
+  await expect(outsideLinkText).not.toHaveAttribute("tabindex", /.+/);
+  await expect(answer.locator(`[data-path="${outsidePath}"], [data-path="${outsideImagePath}"]`)).toHaveCount(0);
   await expect(answer.locator('a.ext-link[href="https://example.com/docs"]')).toHaveCount(1);
   await expect(answer.locator('a.ext-link[href="https://example.com/docs"]')).toHaveAttribute("target", "_blank");
   const localOpenCount = () => h4.loopbackRequests.filter((request) => (
     request.path.startsWith("/api/file") || request.path === "/api/open-file"
   )).length;
   const previewRequestsBeforeOutside = localOpenCount();
-  await answer.locator(`.clickable-path[data-path="${outsidePath}"]`).click();
+  await outsideCode.click();
+  await page.keyboard.press("Enter");
+  await outsideCode.click({ button: "right" });
+  await expect(page.locator(".file-ctx-menu")).toHaveCount(0);
   expect(localOpenCount()).toBe(previewRequestsBeforeOutside);
+  expect(outsideRequestUrls).toEqual([]);
   const directoryOpen = page.waitForResponse((response) => {
     const request = response.request();
     return new URL(response.url()).pathname === "/api/open-file"
@@ -25563,6 +25592,8 @@ async function exerciseLargeTextPreview(h4, runtime) {
   const restoredDirectory = restoredAnswer.locator('[class~="path-file-card"]').filter({ hasText: directoryName });
   await expect(restoredDirectory).toHaveAttribute("data-path", directoryPath);
   await expect(restoredDirectory).toHaveAttribute("data-tooltip", directoryPath);
+  await expect(restoredAnswer.locator(`[data-path="${outsidePath}"], [data-path="${outsideImagePath}"]`)).toHaveCount(0);
+  page.off("request", recordOutsideRequest);
   const answerOpenRequests = h4.loopbackRequests.filter(
     (request) => request.method === "POST" && request.path === "/api/open-file",
   );
@@ -25590,7 +25621,8 @@ async function exerciseLargeTextPreview(h4, runtime) {
     absoluteDirectoryIdentity: directoryPath,
     line: 37,
     relativeReferencesClickable: false,
-    outsideAbsoluteOpened: false,
+    outsideAbsoluteInteractiveCount: 0,
+    outsideAbsoluteRequests: outsideRequestUrls.length,
     directoryExplorerRequests: metrics.explorerRequests,
     externalHttpsPreserved: true,
     lineCounts: [

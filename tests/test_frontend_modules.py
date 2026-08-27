@@ -10808,6 +10808,82 @@ const root = "C:/demo root/项目";
             ],
         )
 
+    def test_out_of_scope_answer_references_downgrade_before_binding(self):
+        downgrade_start = APP_SOURCE.index("function downgradeOutOfScopeAnswerReferences(")
+        downgrade_end = APP_SOURCE.index("function renderAnswerMarkdown(", downgrade_start)
+        root_start = APP_SOURCE.index("function isOutOfRootPath(", downgrade_end)
+        root_end = APP_SOURCE.index("function maybeRenderFileCard(", root_start)
+        source = APP_SOURCE[downgrade_start:downgrade_end] + APP_SOURCE[root_start:root_end]
+        script = f"""
+global.window = {{Code: {{ui: {{}}}}}};
+require("./src/core/namespace.js");
+require("./src/ui/markdown.js");
+class FakeElement {{
+  constructor(tagName, path, classes, text) {{
+    this.tagName = tagName.toUpperCase();
+    this.textContent = text;
+    this.attributes = path ? new Map([
+      ["data-path", path], ["data-line", "12"], ["data-tooltip", path],
+      ["title", "open"], ["href", "#"], ["tabindex", "0"], ["role", "link"],
+    ]) : new Map();
+    this.classes = new Set(classes);
+    this.classList = {{
+      contains: (name) => this.classes.has(name),
+      remove: (...names) => names.forEach((name) => this.classes.delete(name)),
+      add: (...names) => names.forEach((name) => this.classes.add(name)),
+    }};
+    this.replacement = null;
+  }}
+  getAttribute(name) {{ return this.attributes.get(name) || ""; }}
+  removeAttribute(name) {{ this.attributes.delete(name); }}
+  replaceWith(element) {{ this.replacement = element; }}
+}}
+global.document = {{createElement: (tagName) => new FakeElement(tagName, "", [], "")}};
+eval({json.dumps(source)});
+const rootPath = "C:/demo/project";
+const outsideCode = new FakeElement("code", "C:/outside/a.js", ["clickable-path", "answer-local-path", "code-ref"], "C:/outside/a.js");
+const outsideLink = new FakeElement("a", "C:/outside/b.js", ["clickable-path", "answer-local-path", "local-path-link"], "outside-label");
+const outsideImage = new FakeElement("span", "C:/outside/image.png", ["answer-local-image"], "outside-image");
+const insideCode = new FakeElement("code", "C:/demo/project/src/a.js", ["clickable-path", "answer-local-path"], "C:/demo/project/src/a.js");
+const root = {{querySelectorAll: () => [outsideCode, outsideLink, outsideImage, insideCode]}};
+downgradeOutOfScopeAnswerReferences(root, rootPath);
+const snapshot = (element) => ({{
+  classes: [...element.classes].sort(),
+  attributes: Object.fromEntries(element.attributes),
+  replacement: element.replacement ? {{
+    tagName: element.replacement.tagName,
+    classes: [...element.replacement.classes].sort(),
+    text: element.replacement.textContent,
+    attributes: Object.fromEntries(element.replacement.attributes),
+  }} : null,
+}});
+process.stdout.write(JSON.stringify({{
+  outsideCode: snapshot(outsideCode),
+  outsideLink: snapshot(outsideLink),
+  outsideImage: snapshot(outsideImage),
+  insideCode: snapshot(insideCode),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertNotIn("clickable-path", data["outsideCode"]["classes"])
+        self.assertNotIn("answer-local-path", data["outsideCode"]["classes"])
+        self.assertNotIn("data-path", data["outsideCode"]["attributes"])
+        self.assertNotIn("href", data["outsideCode"]["attributes"])
+        self.assertEqual(data["outsideLink"]["replacement"], {
+            "tagName": "SPAN", "classes": ["local-link-text"],
+            "text": "outside-label", "attributes": {},
+        })
+        self.assertEqual(data["outsideImage"]["replacement"], {
+            "tagName": "CODE", "classes": [],
+            "text": "C:/outside/image.png", "attributes": {},
+        })
+        self.assertIn("clickable-path", data["insideCode"]["classes"])
+        self.assertEqual(data["insideCode"]["attributes"]["data-path"], "C:/demo/project/src/a.js")
+
     def test_external_favicon_binding_uses_same_origin_and_keeps_glyph_on_failure(self):
         start = APP_SOURCE.index("const _FAVICON_RETRY_DELAY_MS")
         end = APP_SOURCE.index("// Right-click menus for links in final answers", start)
@@ -18276,7 +18352,7 @@ process.stdout.write(JSON.stringify({
             patch.index("const article = els.messages.querySelector"),
         )
         self.assertIn('data-stream-part="answer"', patch)
-        self.assertIn("renderMarkdownLite(visibleContent)", patch)
+        self.assertIn("renderAnswerMarkdown(visibleContent)", patch)
         self.assertIn('streamKind === "pending" || !visibleContent', patch)
         self.assertNotIn("preservedNodes", APP_SOURCE)
         self.assertNotIn("appendChild(preservedNode)", APP_SOURCE)
