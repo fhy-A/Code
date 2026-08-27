@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import threading
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
+import image_runtime
 import server as server_mod
 
 
@@ -70,13 +73,14 @@ def _create_run(
     run_kind: str = "foreground",
     parent_run_id: str = "",
     agent_depth: int = 0,
+    image_route=None,
 ):
     return server_mod._create_agent_run(
         session_id,
         _payload(),
         "http://127.0.0.1:1",
         [],
-        ["list_files", "run_command", "write_file", "task"],
+        ["list_files", "run_command", "write_file", "task", "generate_image"],
         8,
         permission_profile,
         parent_run_id=parent_run_id,
@@ -84,6 +88,7 @@ def _create_run(
         start_worker=False,
         client_request_id=client_request_id,
         run_kind=run_kind,
+        image_route=image_route,
     )
 
 
@@ -146,6 +151,7 @@ def _active_goal_run(
     client_request_id: str = "foreground-continuation-root",
     *,
     session_id: str = SESSION_ID,
+    image_route=None,
 ):
     origin = _origin_message(client_request_id, f"origin-{client_request_id}")
     _persist_session(session_id, [origin])
@@ -153,6 +159,7 @@ def _active_goal_run(
         client_request_id,
         session_id=session_id,
         permission_profile="bypass",
+        image_route=image_route,
     )
     _call(run, "goal_create", {"objective": "Finish a long durable Goal"}, "continuation-create")
     _call(run, "goal_set_plan", {"steps": _plan()}, "continuation-plan")
@@ -1334,3 +1341,79 @@ def test_continuation_does_not_replay_an_identical_successful_side_effect(
     assert not (Path(isolated_server).parent / "project" / "once.txt").exists()
     if execute is not None:
         execute.assert_not_called()
+
+
+def test_goal_successor_protects_successful_image_generation_without_false_positive(
+    isolated_server, monkeypatch,
+):
+    root = Path(isolated_server)
+    registry = image_runtime.ImageRouteRegistry(root / "image-routes.json")
+    catalog = registry.refresh([{
+        "connectionId": "goal-image",
+        "name": "Goal image",
+        "baseUrl": "https://goal-image.invalid/v1",
+        "key": "GOAL_IMAGE_SECRET",
+        "models": [{"id": "goal-image-v1", "supportsEdit": False}],
+    }])
+    route = registry.resolve(
+        catalog["routes"][0]["routeRef"],
+        catalog["catalogRevision"],
+        "goal-image-v1",
+    )
+    buffer = io.BytesIO()
+    Image.new("RGB", (2, 2), (30, 60, 90)).save(buffer, format="PNG")
+    generated = image_runtime.validate_image_bytes(buffer.getvalue())
+
+    class ImageClient:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, resolved, normalized, operation_id, **_kwargs):
+            self.calls.append({
+                "routeRef": resolved.route_ref,
+                "prompt": normalized["prompt"],
+                "operationId": operation_id,
+            })
+            return [generated]
+
+    client = ImageClient()
+    assets = image_runtime.GeneratedAssetRepository(root / "generated-assets")
+    monkeypatch.setattr(server_mod, "_image_route_registry", registry)
+    monkeypatch.setattr(server_mod, "_generated_asset_repository", assets)
+    monkeypatch.setattr(server_mod, "_image_upstream_client", client)
+
+    run = _active_goal_run(
+        "foreground-image-continuation",
+        image_route=route,
+    )
+    arguments = {
+        "prompt": "render durable goal evidence",
+        "size": "auto",
+        "quality": "standard",
+        "count": 1,
+        "outputFormat": "png",
+    }
+    first = _call(run, "generate_image", arguments, "image-original")
+    assert first["ok"] is True
+    assert len(client.calls) == 1
+    fingerprint = run["tool_executions"]["image-original"]["fingerprint"]
+
+    monkeypatch.setattr(server_mod, "_start_agent_worker", lambda _child: None)
+    run["status"] = "model"
+    assert server_mod._handoff_agent_goal_run(run, reason="soft_round_limit") is True
+    successor = server_mod._get_agent_run(run["result"]["continuation"]["agentRunId"])
+    assert fingerprint in successor["continuation"]["protectedEffectFingerprints"]
+    assert successor["image_route"]["routeRef"] == route.route_ref
+
+    repeated = _call(successor, "generate_image", arguments, "image-repeated")
+    assert repeated["notReplayed"] is True
+    assert len(client.calls) == 1
+
+    distinct = _call(
+        successor,
+        "generate_image",
+        {**arguments, "prompt": "render distinct goal evidence"},
+        "image-distinct",
+    )
+    assert distinct["ok"] is True
+    assert len(client.calls) == 2

@@ -31,6 +31,8 @@ class _FakeImageClient:
         self.calls.append({
             "routeRef": route.route_ref,
             "modelId": route.model_id,
+            "baseUrl": route.base_url,
+            "key": route.key,
             "operationId": operation_id,
             "request": dict(normalized_request),
             "reference": reference_image,
@@ -296,6 +298,23 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertNotIn("IMAGE_SECRET_SENTINEL", serialized)
         self.assertNotIn("images.example", serialized)
 
+    def test_paid_output_contract_failure_never_persists_an_asset(self):
+        run = self._run()
+        call = self._queue(run)
+        self.client.generate = mock.Mock(side_effect=image_runtime.ImageRuntimeError(
+            "image_response_format_mismatch",
+            "Generated image format did not match the requested output format.",
+            outcome_unknown=True,
+        ))
+        with mock.patch.object(self.assets, "save_operation", wraps=self.assets.save_operation) as save:
+            self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        save.assert_not_called()
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertEqual(result["errorCode"], "image_response_format_mismatch")
+        self.assertTrue(result["outcomeUnknown"])
+        self.assertTrue(result["notReplayed"])
+        self.assertFalse((self.data / "generated-assets").exists())
+
     def test_accept_approval_and_missing_runtime_credentials_resume_from_prepared(self):
         run = self._run(permission="accept")
         call = self._queue(run)
@@ -312,17 +331,23 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(execution["dispatchState"], "prepared")
         self.assertEqual(len(self.client.calls), 0)
 
-        restarted_registry.refresh([{
+        rebound = restarted_registry.refresh([{
             "connectionId": "image-qa",
             "name": "Image QA",
-            "baseUrl": "https://images.example/v1",
-            "key": "IMAGE_SECRET_SENTINEL",
+            "baseUrl": "https://rotated-images.example/v1",
+            "key": "ROTATED_IMAGE_SECRET_SENTINEL",
             "models": [{"id": "image-model-v1", "supportsEdit": True}],
         }])
+        self.assertEqual(rebound["catalogRevision"], self.route.catalog_revision)
+        self.assertEqual(rebound["routes"][0]["routeRef"], self.route.route_ref)
         with mock.patch.object(server_mod, "_image_route_registry", restarted_registry):
             run["status"] = "tools"
             self.assertTrue(server_mod._execute_agent_pending_tools(run))
         self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.client.calls[0]["key"], "ROTATED_IMAGE_SECRET_SENTINEL")
+        self.assertEqual(
+            self.client.calls[0]["baseUrl"], "https://rotated-images.example/v1",
+        )
         self.assertTrue(execution["result"]["ok"])
 
     def test_restart_marks_dispatched_without_assets_unknown_and_never_calls_upstream(self):

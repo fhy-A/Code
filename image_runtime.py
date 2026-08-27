@@ -63,6 +63,11 @@ ALLOWED_IMAGE_QUALITIES = frozenset({
     "auto", "standard", "hd", "low", "medium", "high",
 })
 ALLOWED_IMAGE_OUTPUT_FORMATS = frozenset({"png", "jpeg", "webp"})
+IMAGE_OUTPUT_FORMAT_MIMES = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
 
 
 class ImageRuntimeError(RuntimeError):
@@ -274,9 +279,9 @@ class ImageRouteRegistry:
         message = "\x00".join([namespace, *[str(part or "") for part in parts]])
         return hmac.new(key, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    def _route_ref(self, connection_id: str, base_url: str, key: str, model_id: str) -> str:
+    def _route_ref(self, connection_id: str, model_id: str) -> str:
         return IMAGE_ROUTE_REF_PREFIX + self._digest(
-            "image-route-ref-v1", connection_id, base_url, key, model_id,
+            "image-route-ref-v1", connection_id, model_id,
         )
 
     def snapshot(self) -> dict:
@@ -354,9 +359,7 @@ class ImageRouteRegistry:
                     continue
                 successful_connections += 1
                 for model in models:
-                    route_ref = self._route_ref(
-                        connection_id, base_url, key, model["modelId"],
-                    )
+                    route_ref = self._route_ref(connection_id, model["modelId"])
                     route = {
                         "routeRef": route_ref,
                         "connectionId": connection_id,
@@ -835,14 +838,19 @@ class ImageUpstreamClient:
             outcome_unknown=status >= 500,
         )
 
-    def _decode_images(self, raw: bytes, expected_count: int, *, deadline: float) -> list[ValidatedImage]:
+    def _decode_images(self, raw: bytes, normalized_request: dict, *, deadline: float) -> list[ValidatedImage]:
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise ImageRuntimeError("image_response_invalid", "Image service returned invalid JSON.") from exc
         items = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(items, list) or len(items) != expected_count:
+        if not isinstance(items, list) or len(items) != normalized_request["count"]:
             raise ImageRuntimeError("image_response_count_invalid", "Image service returned an unexpected image count.")
+        expected_mime = IMAGE_OUTPUT_FORMAT_MIMES[normalized_request["outputFormat"]]
+        expected_size = None
+        if normalized_request["size"] != "auto":
+            width, height = normalized_request["size"].split("x", 1)
+            expected_size = int(width), int(height)
         images = []
         total = 0
         for item in items:
@@ -868,6 +876,16 @@ class ImageUpstreamClient:
                 image = self._downloader.fetch(item["url"], timeout=remaining)
             else:
                 raise ImageRuntimeError("image_response_invalid", "Image service returned no supported image payload.")
+            if image.mime_type != expected_mime:
+                raise ImageRuntimeError(
+                    "image_response_format_mismatch",
+                    "Generated image format did not match the requested output format.",
+                )
+            if expected_size is not None and (image.width, image.height) != expected_size:
+                raise ImageRuntimeError(
+                    "image_response_size_mismatch",
+                    "Generated image dimensions did not match the requested size.",
+                )
             total += image.byte_length
             if total > MAX_IMAGE_TOTAL_BYTES:
                 raise ImageRuntimeError("image_response_too_large", "Generated image set exceeds the total size limit.")
@@ -953,7 +971,7 @@ class ImageUpstreamClient:
         try:
             return self._decode_images(
                 raw,
-                normalized_request["count"],
+                normalized_request,
                 deadline=deadline,
             )
         except ImageRuntimeError as exc:

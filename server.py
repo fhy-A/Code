@@ -6975,7 +6975,10 @@ def _agent_continuation_protected_effects(run):
         name = str(execution.get("name") or "")
         effect = str(_agent_tool_spec(name).get("effect") or "")
         fingerprint = str(execution.get("fingerprint") or "")
-        if effect in {"command", "proposal", "file_mutation", "memory_write", "delegation"} and fingerprint:
+        if effect in {
+            "command", "proposal", "file_mutation", "memory_write", "delegation",
+            "image_generation",
+        } and fingerprint:
             fingerprints.append(fingerprint)
     return list(dict.fromkeys(fingerprints))[-_AGENT_GOAL_PROTECTED_EFFECT_LIMIT:]
 
@@ -7201,6 +7204,7 @@ def _handoff_agent_goal_run(
         continuation=next_meta,
         route_ref=run.get("route_ref") or "",
         catalog_revision=run.get("catalog_revision") or 0,
+        image_route=_agent_image_route_public(run),
     )
     existing_meta = successor.get("continuation") or {}
     if str(existing_meta.get("parentRunId") or "") != parent_id:

@@ -113,13 +113,23 @@ class ImageRouteRegistryTests(unittest.TestCase):
             restarted.resolve(route["routeRef"], rebound["catalogRevision"], "image-model").key,
             self.secret,
         )
-        rotated = restarted.refresh([self.connection(key="ROTATED_SECRET_SENTINEL")])
-        self.assertGreater(rotated["catalogRevision"], rebound["catalogRevision"])
-        self.assertNotEqual(
-            next(item for item in rotated["routes"] if item["modelId"] == "image-model")["routeRef"],
-            route["routeRef"],
+        rotated = restarted.refresh([self.connection(
+            key="ROTATED_SECRET_SENTINEL",
+            baseUrl="https://rotated-provider.invalid/v1",
+        )])
+        rotated_route = next(
+            item for item in rotated["routes"] if item["modelId"] == "image-model"
         )
-        self.assertNotIn("ROTATED_SECRET_SENTINEL", self.path.read_text(encoding="utf-8"))
+        self.assertEqual(rotated["catalogRevision"], rebound["catalogRevision"])
+        self.assertEqual(rotated_route["routeRef"], route["routeRef"])
+        rebound_runtime = restarted.resolve(
+            route["routeRef"], rotated["catalogRevision"], "image-model",
+        )
+        self.assertEqual(rebound_runtime.key, "ROTATED_SECRET_SENTINEL")
+        self.assertEqual(rebound_runtime.base_url, "https://rotated-provider.invalid/v1")
+        durable_after_rotation = self.path.read_text(encoding="utf-8")
+        self.assertNotIn("ROTATED_SECRET_SENTINEL", durable_after_rotation)
+        self.assertNotIn("rotated-provider.invalid", durable_after_rotation)
 
     def test_stale_disabled_missing_and_invalid_connections_fail_closed(self):
         initial = self.registry.refresh([self.connection()])
@@ -216,7 +226,7 @@ class ImageUpstreamClientTests(unittest.TestCase):
             key="SECRET_SENTINEL",
         )
         self.normalized = normalize_generate_request({
-            "prompt": "draw fixture", "count": 1, "size": "512x512",
+            "prompt": "draw fixture", "count": 1, "size": "auto",
             "quality": "standard", "outputFormat": "png",
         })
 
@@ -265,6 +275,65 @@ class ImageUpstreamClientTests(unittest.TestCase):
         self.assertNotIn(b"SECRET_SENTINEL", req.data)
         self.assertEqual(result[0].mime_type, "image/webp")
 
+    def test_generation_and_edit_reject_paid_format_or_size_mismatch(self):
+        png = image_bytes("PNG")
+
+        def returns_png(req, timeout):
+            payload = json.dumps({"data": [{
+                "b64_json": base64.b64encode(png).decode("ascii"),
+            }]}).encode("utf-8")
+            return FakeResponse(payload)
+
+        client = ImageUpstreamClient(urlopen=returns_png)
+        for normalized, code in (
+            ({**self.normalized, "outputFormat": "webp"}, "image_response_format_mismatch"),
+            ({**self.normalized, "size": "512x512"}, "image_response_size_mismatch"),
+        ):
+            with self.subTest(code=code), self.assertRaises(ImageRuntimeError) as captured:
+                client.generate(self.route, normalized, f"operation-{code}")
+            self.assertEqual(captured.exception.code, code)
+            self.assertTrue(captured.exception.outcome_unknown)
+            self.assertTrue(captured.exception.public_payload()["notReplayed"])
+
+        reference = validate_image_bytes(image_bytes("JPEG"))
+        edit_request = {
+            **self.normalized,
+            "reference": {"type": "attachment", "id": "attachments/ref.jpg"},
+            "outputFormat": "webp",
+        }
+        with self.assertRaises(ImageRuntimeError) as captured:
+            client.generate(
+                self.route,
+                edit_request,
+                "operation-edit-format-mismatch",
+                reference_image=reference,
+            )
+        self.assertEqual(captured.exception.code, "image_response_format_mismatch")
+        self.assertTrue(captured.exception.outcome_unknown)
+
+    def test_jpeg_mapping_and_exact_fixed_size_are_accepted(self):
+        cases = [
+            ("JPEG", (4, 3), {**self.normalized, "outputFormat": "jpeg"}, "image/jpeg"),
+            ("PNG", (512, 512), {**self.normalized, "size": "512x512"}, "image/png"),
+        ]
+        for image_format, size, normalized, expected_mime in cases:
+            payload_bytes = image_bytes(image_format, size=size)
+
+            def returns_expected(req, timeout, payload_bytes=payload_bytes):
+                payload = json.dumps({"data": [{
+                    "b64_json": base64.b64encode(payload_bytes).decode("ascii"),
+                }]}).encode("utf-8")
+                return FakeResponse(payload)
+
+            with self.subTest(image_format=image_format, size=size):
+                result = ImageUpstreamClient(urlopen=returns_expected).generate(
+                    self.route,
+                    normalized,
+                    f"operation-{image_format.lower()}-{size[0]}x{size[1]}",
+                )
+            self.assertEqual(result[0].mime_type, expected_mime)
+            self.assertEqual((result[0].width, result[0].height), size)
+
     def test_url_response_is_consumed_server_side_and_errors_are_secret_free(self):
         png = validate_image_bytes(image_bytes("PNG"))
         downloader = mock.Mock()
@@ -280,6 +349,18 @@ class ImageUpstreamClientTests(unittest.TestCase):
         )
         self.assertEqual(result[0].sha256, png.sha256)
         downloader.fetch.assert_called_once()
+
+        for normalized, code in (
+            ({**self.normalized, "outputFormat": "webp"}, "image_response_format_mismatch"),
+            ({**self.normalized, "size": "512x512"}, "image_response_size_mismatch"),
+        ):
+            with self.subTest(url_contract=code), self.assertRaises(ImageRuntimeError) as captured:
+                ImageUpstreamClient(urlopen=urlopen, downloader=downloader).generate(
+                    self.route, normalized, f"operation-url-{code}",
+                )
+            self.assertEqual(captured.exception.code, code)
+            self.assertTrue(captured.exception.outcome_unknown)
+            self.assertTrue(captured.exception.public_payload()["notReplayed"])
 
         def failed(req, timeout):
             raise image_runtime.error.HTTPError(req.full_url, 403, "forbidden SECRET", {}, None)
