@@ -91,7 +91,7 @@ Set-Location Code
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install pystray pillow pytest
+python -m pip install pystray pillow pytest requests PyYAML jsonschema
 
 python server.py
 ```
@@ -183,6 +183,9 @@ Code/
 ## 开发与验证
 
 ```powershell
+# 新开发任务或本机环境变化后，先运行只读环境预检
+python verify.py doctor
+
 # 全量测试
 python -m pytest tests -q
 
@@ -196,6 +199,8 @@ python -m py_compile server.py launcher.py build_exe.py
 # 构建 Windows 单文件程序
 python build_exe.py
 ```
+
+`doctor` 会汇总检查当前 Python 与 H4 实际调用的 `python`、开发测试依赖、Node/npm、esbuild 内存转换、Playwright 及 Chromium 真实启动能力。它不会安装依赖、访问网络或写入 `dist/`；Chromium 仅使用受控临时目录，并在退出前关闭和清理。
 
 ### 界面文案与 i18n
 

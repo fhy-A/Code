@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 import unittest
 from dataclasses import replace
@@ -126,7 +127,260 @@ class TestVerificationProfiles(unittest.TestCase):
     def test_cli_requires_exactly_one_profile(self):
         with mock.patch("builtins.print") as printer:
             self.assertEqual(verify.main([]), 2)
-        printer.assert_called_once_with("Usage: python verify.py quick|ui|runtime|release")
+        printer.assert_called_once_with(
+            "Usage: python verify.py doctor|quick|ui|runtime|release"
+        )
+
+    def test_cli_routes_doctor_outside_the_four_profiles(self):
+        with mock.patch.object(verify, "run_doctor", return_value=0) as doctor:
+            self.assertEqual(verify.main(["doctor"]), 0)
+        doctor.assert_called_once_with()
+        self.assertEqual(
+            tuple(verification.PROFILE_CHECK_IDS),
+            ("quick", "ui", "runtime", "release"),
+        )
+
+
+class TestDevelopmentDoctor(unittest.TestCase):
+    def _which(self, name):
+        return {
+            "python": "C:/h4/python.exe",
+            "node": "C:/node/node.exe",
+            verification.NPM: "C:/node/npm.cmd",
+        }.get(name)
+
+    def _h4_payload(self, executable="C:/current/python.exe", missing=()):
+        return {
+            "executable": executable,
+            "version": "3.12.10",
+            "modules": {
+                import_name: package_name not in missing
+                for import_name, package_name in verification.DOCTOR_PYTHON_MODULES
+            },
+        }
+
+    def _node_payload(self, chromium=None):
+        chromium = chromium or {
+            "id": "chromium_launch",
+            "status": "passed",
+            "reason": "ready",
+            "detail": {
+                "contextClosed": True,
+                "temporaryRootRemoved": True,
+            },
+        }
+        return {
+            "schema": verification.DOCTOR_NODE_SCHEMA,
+            "checks": [
+                {
+                    "id": "esbuild_transform",
+                    "status": "passed",
+                    "reason": "ready",
+                    "detail": {"version": "0.28.1"},
+                },
+                {
+                    "id": "playwright_package",
+                    "status": "passed",
+                    "reason": "ready",
+                    "detail": {"version": "1.62.1"},
+                },
+                chromium,
+            ],
+        }
+
+    def _executor(self, h4_payload=None, node_payload=None, node_returncode=0):
+        h4_payload = h4_payload or self._h4_payload()
+        node_payload = node_payload or self._node_payload()
+
+        def execute(command, _timeout):
+            if command[0] == "python":
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(h4_payload),
+                    stderr="",
+                )
+            if command[-1] == "--version":
+                version = "v24.14.0" if "node.exe" in command[0] else "11.9.0"
+                return subprocess.CompletedProcess(command, 0, stdout=version, stderr="")
+            if command[-1] == str(verification.DOCTOR_NODE_PROBE):
+                return subprocess.CompletedProcess(
+                    command,
+                    node_returncode,
+                    stdout=json.dumps(node_payload),
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected doctor command: {command}")
+
+        return execute
+
+    def test_doctor_aggregates_success_and_preserves_release_definition(self):
+        stream = io.StringIO()
+        before_ids = verification.get_release_check_ids(dry_run=False, skip_tests=False)
+        before_fingerprint = verification.get_release_definition_fingerprint()
+
+        exit_code = verification.run_doctor(
+            executor=self._executor(),
+            which=self._which,
+            module_finder=lambda _name: True,
+            stream=stream,
+            current_executable="C:/current/python.exe",
+            current_version="3.12.10",
+        )
+
+        self.assertEqual(exit_code, 0)
+        output = stream.getvalue()
+        for check_id in (
+            "python_current",
+            "python_current_modules",
+            "python_h4",
+            "python_identity",
+            "python_h4_modules",
+            "node_runtime",
+            "npm_runtime",
+            *verification.DOCTOR_NODE_CHECK_IDS,
+        ):
+            self.assertIn(f"CHECK id={check_id} status=passed", output)
+        self.assertIn("FIRST_FAILURE none", output)
+        self.assertTrue(output.endswith("RESULT doctor status=passed exit=0\n"))
+        self.assertEqual(
+            verification.get_release_check_ids(dry_run=False, skip_tests=False),
+            before_ids,
+        )
+        self.assertEqual(
+            verification.get_release_definition_fingerprint(),
+            before_fingerprint,
+        )
+
+    def test_doctor_reports_all_missing_modules_and_executables(self):
+        stream = io.StringIO()
+        exit_code = verification.run_doctor(
+            executor=lambda command, timeout: self.fail((command, timeout)),
+            which=lambda _name: None,
+            module_finder=lambda name: name not in {"requests", "yaml"},
+            stream=stream,
+            current_executable="C:/current/python.exe",
+            current_version="3.12.10",
+        )
+
+        self.assertEqual(exit_code, 1)
+        output = stream.getvalue()
+        self.assertIn(
+            'CHECK id=python_current_modules status=failed reason=missing '
+            'detail={"missing":["requests","PyYAML"]}',
+            output,
+        )
+        self.assertIn("CHECK id=python_h4 status=failed reason=missing", output)
+        self.assertIn("CHECK id=node_runtime status=failed reason=missing", output)
+        self.assertIn("CHECK id=npm_runtime status=failed reason=missing", output)
+        self.assertIn("CHECK id=esbuild_transform status=failed reason=blocked", output)
+        self.assertIn("RESULT doctor status=failed exit=1", output)
+
+    def test_doctor_reports_interpreter_mismatch_as_non_blocking_warning(self):
+        stream = io.StringIO()
+        exit_code = verification.run_doctor(
+            executor=self._executor(
+                h4_payload=self._h4_payload(executable="D:/other/python.exe")
+            ),
+            which=self._which,
+            module_finder=lambda _name: True,
+            stream=stream,
+            current_executable="C:/current/python.exe",
+            current_version="3.12.10",
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(
+            "CHECK id=python_identity status=warning reason=interpreter_mismatch",
+            stream.getvalue(),
+        )
+
+    def test_doctor_reports_chromium_launch_failure_and_cleanup_state(self):
+        stream = io.StringIO()
+        chromium = {
+            "id": "chromium_launch",
+            "status": "failed",
+            "reason": "launch_failed",
+            "detail": {
+                "code": "EPERM",
+                "contextClosed": True,
+                "temporaryRootRemoved": True,
+            },
+        }
+        exit_code = verification.run_doctor(
+            executor=self._executor(
+                node_payload=self._node_payload(chromium),
+                node_returncode=1,
+            ),
+            which=self._which,
+            module_finder=lambda _name: True,
+            stream=stream,
+            current_executable="C:/current/python.exe",
+        )
+
+        self.assertEqual(exit_code, 1)
+        output = stream.getvalue()
+        self.assertIn(
+            "CHECK id=chromium_launch status=failed reason=launch_failed",
+            output,
+        )
+        self.assertIn('"temporaryRootRemoved":true', output)
+
+    def test_doctor_reports_node_probe_timeout_without_hiding_other_checks(self):
+        stream = io.StringIO()
+        base_executor = self._executor()
+
+        def execute(command, timeout):
+            if command[-1] == str(verification.DOCTOR_NODE_PROBE):
+                raise subprocess.TimeoutExpired(command, timeout)
+            return base_executor(command, timeout)
+
+        exit_code = verification.run_doctor(
+            executor=execute,
+            which=self._which,
+            module_finder=lambda _name: True,
+            stream=stream,
+            current_executable="C:/current/python.exe",
+        )
+
+        self.assertEqual(exit_code, 1)
+        output = stream.getvalue()
+        self.assertIn("CHECK id=node_runtime status=passed", output)
+        for check_id in verification.DOCTOR_NODE_CHECK_IDS:
+            self.assertIn(
+                f"CHECK id={check_id} status=failed reason=timeout",
+                output,
+            )
+
+    def test_doctor_treats_chromium_cleanup_failure_as_blocking(self):
+        stream = io.StringIO()
+        chromium = {
+            "id": "chromium_launch",
+            "status": "failed",
+            "reason": "cleanup_failed",
+            "detail": {
+                "contextClosed": False,
+                "temporaryRootRemoved": False,
+            },
+        }
+        exit_code = verification.run_doctor(
+            executor=self._executor(
+                node_payload=self._node_payload(chromium),
+                node_returncode=1,
+            ),
+            which=self._which,
+            module_finder=lambda _name: True,
+            stream=stream,
+            current_executable="C:/current/python.exe",
+        )
+
+        self.assertEqual(exit_code, 1)
+        output = stream.getvalue()
+        self.assertIn(
+            "CHECK id=chromium_launch status=failed reason=cleanup_failed",
+            output,
+        )
+        self.assertIn('"temporaryRootRemoved":false', output)
 
 
 class TestSharedReleaseDefinition(unittest.TestCase):
