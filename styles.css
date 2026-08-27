@@ -2119,7 +2119,7 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
 @keyframes sb-img-shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .msg-inline-img-slot img{display:block;max-width:100%;max-height:260px;border-radius:8px}
 .msg-img-fallback{font-size:12px;color:var(--accent);text-decoration:underline}
-.sb-path-tooltip{position:fixed;z-index:1200;max-width:min(560px,90vw);padding:6px 10px;border-radius:6px;background:rgba(20,20,24,.92);color:#fff;font-size:12px;line-height:18px;word-break:break-all;pointer-events:none;box-shadow:0 1px 4px rgba(0,0,0,.12),0 2px 8px rgba(0,0,0,.08)}
+.sb-path-tooltip{position:fixed;z-index:1200;max-width:min(560px,90vw);padding:6px 10px;border:0;border-radius:6px;background:rgba(20,20,24,.96);color:#fff;font-size:12px;line-height:18px;word-break:break-all;pointer-events:none;box-shadow:none}
 .message-image-preview-shell { display: inline-flex; max-width: 100%; }
 .message-image-attachment-card { width: 160px; height: 120px; }
 .bubble-img { padding: 4px !important; background: transparent !important; }

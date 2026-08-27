@@ -4716,17 +4716,19 @@ process.stdout.write(JSON.stringify({{
             render_source,
         )
         self.assertIn('card.className = "path-file-card";', card_source)
-        self.assertIn("card.title = p;", card_source)
+        self.assertIn('card.setAttribute("data-path", p);', card_source)
+        self.assertIn('card.setAttribute("data-tooltip", p);', card_source)
+        self.assertNotIn("card.title = p;", card_source)
         self.assertIn('name.textContent = el.textContent || "";', card_source)
         self.assertIn("el.replaceWith(card);", card_source)
-        self.assertLess(card_source.index("card.title = p;"), card_source.index("el.replaceWith(card);"))
+        self.assertLess(card_source.index('card.setAttribute("data-path", p);'), card_source.index("el.replaceWith(card);"))
 
         self.assertIn(
             'const EDIT_AUTHORIZATION_PATH_IDENTITY = Object.freeze({',
             H4_SMOKE_SOURCE,
         )
         self.assertIn(
-            'selector: ".tool-edit-target[data-path], .path-file-card[title]",',
+            'selector: ".tool-edit-target[data-path], .path-file-card[data-path]",',
             H4_SMOKE_SOURCE,
         )
         self.assertIn(
@@ -10505,7 +10507,9 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('naturalWidth <= 1', APP_SOURCE)
 
         self.assertIn('_faviconCache', APP_SOURCE)
-        self.assertIn('{ failed: true }', APP_SOURCE)
+        self.assertIn('_FAVICON_RETRY_DELAY_MS', APP_SOURCE)
+        self.assertIn('_FAVICON_FAILURE_COOLDOWN_MS', APP_SOURCE)
+        self.assertNotIn('{ failed: true }', APP_SOURCE)
         self.assertNotIn('slot.hidden = true', APP_SOURCE)
         self.assertIn('width:20px;height:20px', STYLE_SOURCE)
         self.assertIn('width:16px;height:16px;border-radius:5px', STYLE_SOURCE)
@@ -10534,7 +10538,9 @@ process.stdout.write(JSON.stringify(out));
         self.assertNotIn('icon.textContent = "📄"', APP_SOURCE)
         self.assertIn('--muted', STYLE_SOURCE)
 
-        self.assertIn('box-shadow:0 1px 4px rgba(0,0,0,.12)', STYLE_SOURCE)
+        self.assertIn('.sb-path-tooltip{', STYLE_SOURCE)
+        self.assertIn('border:0', STYLE_SOURCE)
+        self.assertIn('box-shadow:none', STYLE_SOURCE)
         self.assertIn('data-loaded', APP_SOURCE)
         self.assertIn('[data-loaded]{background:none;min-width:0;min-height:0;animation:none}', STYLE_SOURCE)
 
@@ -10584,13 +10590,15 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn("isImagePath,", MARKDOWN_SOURCE)
 
     def test_external_favicon_binding_uses_same_origin_and_keeps_glyph_on_failure(self):
-        start = APP_SOURCE.index("const _faviconCache = new Map();")
+        start = APP_SOURCE.index("const _FAVICON_RETRY_DELAY_MS")
         end = APP_SOURCE.index("// Right-click menus for links in final answers", start)
         source = APP_SOURCE[start:end] + "\nglobalThis.__bindFavicons = bindExtLinkFavicons;"
         script = f"""
 const vm = require("vm");
 const source = {json.dumps(source)};
 const created = [];
+const timers = [];
+let now = 1000;
 let activeSlots = [];
 function slotFor(href) {{
   return {{
@@ -10641,21 +10649,39 @@ sandbox.__bindFavicons();
 const successImage = created.at(-1);
 successImage.handlers.load();
 
+const retrySlot = slotFor("https://retry.example/path");
+activeSlots = [retrySlot];
+sandbox.__bindFavicons();
+created.at(-1).handlers.error();
+const retryDelay = timers.at(-1).delay;
+timers.at(-1).callback();
+const retryImage = created.at(-1);
+retryImage.handlers.load();
+
 const failureSlot = slotFor("http://missing.example/path");
 activeSlots = [failureSlot];
 sandbox.__bindFavicons();
-const failureImage = created.at(-1);
-failureImage.handlers.error();
-const createdBeforeNegativeCache = created.length;
+created.at(-1).handlers.error();
+timers.at(-1).callback();
+created.at(-1).handlers.error();
+const createdBeforeCooldown = created.length;
 const repeatedFailureSlot = slotFor("http://missing.example/other");
 activeSlots = [repeatedFailureSlot];
+sandbox.__bindFavicons();
+const cooldownSkipped = created.length === createdBeforeCooldown;
+now += 30001;
+const afterCooldownSlot = slotFor("http://missing.example/recovered");
+activeSlots = [afterCooldownSlot];
 sandbox.__bindFavicons();
 
 process.stdout.write(JSON.stringify({{
   successSrc: successImage.src,
   successReplaced: successSlot.children[0] === successImage,
+  retryDelay,
+  retryRecovered: retrySlot.children[0] === retryImage,
   failureKeptGlyph: failureSlot.children[0].kind === "glyph",
-  negativeCacheSkipped: created.length === createdBeforeNegativeCache,
+  cooldownSkipped,
+  cooldownExpired: created.length === createdBeforeCooldown + 1,
   repeatedFailureKeptGlyph: repeatedFailureSlot.children[0].kind === "glyph",
 }}));
 """
@@ -10673,9 +10699,231 @@ process.stdout.write(JSON.stringify({{
             "/api/favicon?scheme=https&host=xn--fsqu00a.xn--0zwm56d",
         )
         self.assertTrue(data["successReplaced"])
+        self.assertEqual(data["retryDelay"], 360)
+        self.assertTrue(data["retryRecovered"])
         self.assertTrue(data["failureKeptGlyph"])
-        self.assertTrue(data["negativeCacheSkipped"])
+        self.assertTrue(data["cooldownSkipped"])
+        self.assertTrue(data["cooldownExpired"])
         self.assertTrue(data["repeatedFailureKeptGlyph"])
+
+    def test_external_favicon_queue_is_bounded_fifo_and_stale_consumer_safe(self):
+        start = APP_SOURCE.index("const _FAVICON_RETRY_DELAY_MS")
+        end = APP_SOURCE.index("// Right-click menus for links in final answers", start)
+        source = APP_SOURCE[start:end] + "\nglobalThis.__bindFavicons = bindExtLinkFavicons;"
+        script = f"""
+const vm = require("vm");
+const source = {json.dumps(source)};
+const timers = [];
+const loads = [];
+let activeSlots = [];
+let outstanding = 0;
+let peakOutstanding = 0;
+
+function slotFor(href) {{
+  return {{
+    dataset: {{}},
+    isConnected: true,
+    children: [{{kind: "glyph"}}],
+    closest(selector) {{
+      if (selector !== "a.ext-link") throw new Error("unexpected selector");
+      return {{getAttribute(name) {{ return name === "href" ? href : null; }}}};
+    }},
+    replaceChildren(node) {{ this.children = [node]; }},
+  }};
+}}
+
+const document = {{
+  querySelectorAll(selector) {{
+    if (selector !== "a.ext-link .link-ext-icon") throw new Error("unexpected query");
+    return activeSlots;
+  }},
+  createElement(tag) {{
+    if (tag !== "img") throw new Error("unexpected element");
+    const handlers = {{}};
+    return {{
+      naturalWidth: 16,
+      naturalHeight: 16,
+      addEventListener(type, handler) {{ handlers[type] = handler; }},
+      set src(value) {{
+        this._src = String(value);
+        if (handlers.load || handlers.error) {{
+          outstanding += 1;
+          peakOutstanding = Math.max(peakOutstanding, outstanding);
+          loads.push(this);
+        }}
+      }},
+      get src() {{ return this._src; }},
+      settle(type) {{
+        outstanding -= 1;
+        handlers[type]();
+      }},
+    }};
+  }},
+}};
+const sandbox = {{
+  document,
+  URL,
+  encodeURIComponent,
+  Date: {{now: () => 1000}},
+  window: {{
+    Code: {{ui: {{}}}},
+    setTimeout(callback, delay) {{ timers.push({{callback, delay}}); return timers.length; }},
+    clearTimeout() {{}},
+  }},
+}};
+vm.runInNewContext(source, sandbox);
+
+const hosts = Array.from({{length: 9}}, (_, index) => `fair-${{index + 1}}.example.test`);
+const slots = hosts.map((host) => slotFor(`https://${{host}}/path`));
+activeSlots = slots;
+sandbox.__bindFavicons();
+const initiallyStarted = loads.map((image) => new URL(image.src, "https://local.test").searchParams.get("host"));
+
+loads[0].settle("error");
+const staleSlot = slots[0];
+staleSlot.isConnected = false;
+const replacementSlot = slotFor(`https://${{hosts[0]}}/redraw`);
+activeSlots = [replacementSlot, ...slots.slice(1)];
+sandbox.__bindFavicons();
+const beforeRetryTimer = loads.length;
+timers[0].callback();
+
+// The retry goes to the FIFO tail. Completing the other first-wave requests
+// admits hosts 6-9 before the retried host 1.
+loads[1].settle("load");
+loads[2].settle("load");
+loads[3].settle("load");
+loads[4].settle("load");
+loads[5].settle("load");
+loads[6].settle("load");
+loads[7].settle("load");
+loads[8].settle("load");
+loads[9].settle("load");
+
+process.stdout.write(JSON.stringify({{
+  initiallyStarted,
+  beforeRetryTimer,
+  startedHosts: loads.map((image) => new URL(image.src, "https://local.test").searchParams.get("host")),
+  peakOutstanding,
+  outstanding,
+  staleKeptGlyph: staleSlot.children[0].kind === "glyph",
+  replacementRecovered: replacementSlot.children[0]?.className === "ext-favicon",
+  allHostsRecovered: slots.slice(1).every((slot) => slot.children[0]?.className === "ext-favicon"),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        hosts = [f"fair-{index}.example.test" for index in range(1, 10)]
+        self.assertEqual(data["initiallyStarted"], hosts[:4])
+        self.assertEqual(data["beforeRetryTimer"], 5)
+        self.assertEqual(data["startedHosts"], hosts + [hosts[0]])
+        self.assertLessEqual(data["peakOutstanding"], 4)
+        self.assertEqual(data["outstanding"], 0)
+        self.assertTrue(data["staleKeptGlyph"])
+        self.assertTrue(data["replacementRecovered"])
+        self.assertTrue(data["allHostsRecovered"])
+
+    def test_link_tooltip_binding_is_singleton_and_migrates_native_titles(self):
+        start = APP_SOURCE.index("let _tooltipsBound = false;")
+        end = APP_SOURCE.index("// Admonition titles come from i18n", start)
+        source = APP_SOURCE[start:end] + "\nglobalThis.__bindTooltips = bindTooltips;"
+        script = f"""
+const vm = require("vm");
+const source = {json.dumps(source)};
+const documentListeners = {{}};
+const windowListeners = {{}};
+const timers = [];
+const overlays = [];
+
+class FakeElement {{
+  constructor(kind, attrs) {{ this.kind = kind; this.attrs = new Map(Object.entries(attrs)); }}
+  getAttribute(name) {{ return this.attrs.get(name) || null; }}
+  setAttribute(name, value) {{ this.attrs.set(name, String(value)); }}
+  removeAttribute(name) {{ this.attrs.delete(name); }}
+  matches(selector) {{ return selector === "a.ext-link" && this.kind === "external"; }}
+  closest(selector) {{ return selector === "[data-tooltip]" && this.attrs.has("data-tooltip") ? this : null; }}
+  contains(node) {{ return node === this; }}
+  getBoundingClientRect() {{ return {{left: 20, top: 20, bottom: 40, width: 100, height: 20}}; }}
+}}
+
+const external = new FakeElement("external", {{href: "https://example.com", title: "Explicit link title"}});
+const file = new FakeElement("file", {{"data-path": "README.md", title: "README.md"}});
+const image = new FakeElement("image", {{"data-path": "preview.png", title: "preview.png"}});
+const document = {{
+  body: {{appendChild(node) {{ overlays.push(node); }}}},
+  querySelectorAll(selector) {{
+    if (selector !== "a.ext-link, .path-file-card, .path-image-card") throw new Error("unexpected selector");
+    return [external, file, image];
+  }},
+  addEventListener(type, handler) {{ (documentListeners[type] ||= []).push(handler); }},
+  createElement(tag) {{
+    if (tag !== "div") throw new Error("unexpected element");
+    return {{
+      hidden: true,
+      style: {{}},
+      setAttribute() {{}},
+      getBoundingClientRect() {{ return {{width: 120, height: 24}}; }},
+    }};
+  }},
+}};
+const window = {{
+  innerWidth: 800,
+  innerHeight: 600,
+  setTimeout(callback) {{ timers.push(callback); return timers.length; }},
+  clearTimeout() {{}},
+  addEventListener(type, handler) {{ (windowListeners[type] ||= []).push(handler); }},
+}};
+const sandbox = {{document, window, Element: FakeElement, Node: FakeElement}};
+vm.runInNewContext(source, sandbox);
+sandbox.__bindTooltips();
+sandbox.__bindTooltips();
+
+documentListeners.mouseover[0]({{target: external}});
+timers.shift()();
+documentListeners.mouseover[0]({{target: file}});
+timers.shift()();
+
+process.stdout.write(JSON.stringify({{
+  documentListenerCounts: Object.fromEntries(Object.entries(documentListeners).map(([key, values]) => [key, values.length])),
+  windowListenerCounts: Object.fromEntries(Object.entries(windowListeners).map(([key, values]) => [key, values.length])),
+  overlayCount: overlays.length,
+  overlayText: overlays[0].textContent,
+  tooltips: [external, file, image].map((item) => item.getAttribute("data-tooltip")),
+  nativeTitles: [external, file, image].map((item) => item.getAttribute("title")),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["documentListenerCounts"], {
+            "mouseover": 1,
+            "mouseout": 1,
+            "focusin": 1,
+            "focusout": 1,
+            "click": 1,
+        })
+        self.assertEqual(data["windowListenerCounts"], {"scroll": 1, "resize": 1})
+        self.assertEqual(data["overlayCount"], 1)
+        self.assertEqual(data["overlayText"], "README.md")
+        self.assertEqual(data["tooltips"], ["Explicit link title", "README.md", "preview.png"])
+        self.assertEqual(data["nativeTitles"], [None, None, None])
+        tooltip_style = re.search(r"\.sb-path-tooltip\{([^}]+)\}", STYLE_SOURCE)
+        self.assertIsNotNone(tooltip_style)
+        self.assertIn("border:0", tooltip_style.group(1))
+        self.assertIn("box-shadow:none", tooltip_style.group(1))
 
     def test_image_overlay_gallery_model_and_app_integration(self):
         # 执行级：纯导航模型（首尾禁用策略、索引、空数组/越界降级）
@@ -13661,6 +13909,9 @@ process.stdout.write(JSON.stringify({{
             self.assertIn(preserved, image_style)
         self.assertIn('card.className = "path-file-card";', APP_SOURCE)
         self.assertIn('card.className = "path-image-card";', APP_SOURCE)
+        self.assertGreaterEqual(APP_SOURCE.count('card.setAttribute("data-tooltip", p);'), 2)
+        self.assertGreaterEqual(APP_SOURCE.count('card.setAttribute("data-path", p);'), 2)
+        self.assertNotIn("card.title = p;", APP_SOURCE)
         self.assertIn("card.addEventListener(\"click\"", APP_SOURCE)
         self.assertIn("openReferencedPath(p, projectRoot);", APP_SOURCE)
         self.assertIn("showLinkContextMenu", APP_SOURCE)

@@ -25057,11 +25057,15 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     text: element.textContent?.trim(),
     target: element.getAttribute("target"),
     rel: element.getAttribute("rel"),
+    tooltip: element.getAttribute("data-tooltip"),
+    title: element.getAttribute("title"),
   })))).toEqual(expectedHrefs.map((href) => ({
     href,
     text: new URL(href).hostname,
     target: "_blank",
     rel: "noopener",
+    tooltip: href,
+    title: null,
   })));
   await expect(assistant).toContainText(
     "推荐 yuanbao.tencent.com）（再看 xinghuo.xfyun.cn、最后 mistral.ai。",
@@ -25072,8 +25076,8 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
 
   const assertFaviconProjection = async () => {
     await expect(links.nth(0).locator("img.ext-favicon")).toHaveCount(1);
-    await expect(links.nth(1).locator("img.ext-favicon")).toHaveCount(0);
-    await expect(links.nth(1).locator(".link-ext-icon > svg")).toHaveCount(1);
+    await expect(links.nth(1).locator("img.ext-favicon")).toHaveCount(1);
+    await expect(links.nth(1).locator(".link-ext-icon > svg")).toHaveCount(0);
     await expect(links.nth(2).locator("img.ext-favicon")).toHaveCount(1);
     const imageSources = await links.locator("img.ext-favicon").evaluateAll((images) => images.map((image) => {
       const url = new URL(image.src);
@@ -25086,6 +25090,7 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     }));
     expect(imageSources).toEqual([
       { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "yuanbao.tencent.com" },
+      { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "xinghuo.xfyun.cn" },
       { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "mistral.ai" },
     ]);
   };
@@ -25107,6 +25112,8 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     const link = links.nth(index);
     const href = expectedHrefs[index];
     await link.hover();
+    await expect(page.locator(".sb-path-tooltip")).toHaveCount(1);
+    await expect(page.locator(".sb-path-tooltip")).toBeVisible();
     await expect(page.locator(".sb-path-tooltip")).toHaveText(href);
     await link.click({ button: "right" });
     const copyLink = page.locator('.file-ctx-menu [data-action="copy-link"]');
@@ -25127,7 +25134,27 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
   )).toHaveLength(1);
   expect(faviconMetricsBeforeReload.faviconFetches.filter(
     (request) => request.host === "mistral.ai" && request.path === "/favicon.ico",
-  )).toHaveLength(1);
+  )).toHaveLength(2);
+  expect(faviconMetricsBeforeReload.faviconFetches.filter(
+    (request) => request.host === "mistral.ai" && request.path === "/favicon.ico",
+  ).map((request) => request.attempt)).toEqual([1, 2]);
+  const xingExactDirectIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
+    (request) => request.host === "xinghuo.xfyun.cn" && request.path === "/favicon.ico",
+  );
+  const xingParentDirectIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
+    (request) => request.host === "xfyun.cn" && request.path === "/favicon.ico",
+  );
+  const xingProviderIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
+    (request) => request.host === "api.faviconkit.com" && request.path.includes("xinghuo.xfyun.cn"),
+  );
+  const xingRecoveryIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
+    (request) => request.host === "www.google.com"
+      && request.query.includes("domain=xinghuo.xfyun.cn"),
+  );
+  expect(xingExactDirectIndex).toBeGreaterThanOrEqual(0);
+  expect(xingParentDirectIndex).toBeGreaterThan(xingExactDirectIndex);
+  expect(xingProviderIndex).toBeGreaterThan(xingParentDirectIndex);
+  expect(xingRecoveryIndex).toBeGreaterThan(xingProviderIndex);
   expect(new Set(faviconMetricsBeforeReload.faviconFetches.map((request) => request.host))).toEqual(
     new Set([
       "yuanbao.tencent.com",
@@ -25175,8 +25202,11 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     tooltipTargets: expectedHrefs,
     copiedContextMenuTargets: expectedHrefs,
     sameOriginFaviconProxy: true,
-    faviconSuccesses: 2,
-    faviconFallbacks: 1,
+    faviconSuccesses: 3,
+    faviconFallbacks: 0,
+    transientFaviconRecovered: true,
+    placeholderFaviconRejectedBeforeRecovery: true,
+    singletonTooltip: true,
     faviconFetchesBeforeAndAfterReload: faviconMetricsBeforeReload.faviconFetches.length,
     modelRequests: metrics.chatRequests.length,
     toolExecutions: metrics.toolExecutions.length,
@@ -25272,6 +25302,8 @@ async function exerciseStructuredRichText(h4, runtime) {
     return {
       name: card.querySelector(".path-file-name")?.textContent?.trim(),
       title: card.getAttribute("title"),
+      tooltip: card.getAttribute("data-tooltip"),
+      path: card.getAttribute("data-path"),
       icon: card.querySelectorAll(".path-file-icon svg").length,
       backgroundColor: style.backgroundColor,
       borderWidth: style.borderWidth,
@@ -25282,7 +25314,9 @@ async function exerciseStructuredRichText(h4, runtime) {
   }))).toEqual([
     {
       name: "package.json",
-      title: "package.json",
+      title: null,
+      tooltip: "package.json",
+      path: "package.json",
       icon: 1,
       backgroundColor: "rgba(0, 0, 0, 0)",
       borderWidth: "0px",
@@ -25292,7 +25326,9 @@ async function exerciseStructuredRichText(h4, runtime) {
     },
     {
       name: "README.md",
-      title: "README.md",
+      title: null,
+      tooltip: "README.md",
+      path: "README.md",
       icon: 1,
       backgroundColor: "rgba(0, 0, 0, 0)",
       borderWidth: "0px",
@@ -25301,6 +25337,12 @@ async function exerciseStructuredRichText(h4, runtime) {
       verticalAlign: "baseline",
     },
   ]);
+  for (const expectedPath of ["package.json", "README.md"]) {
+    await fileCards.filter({ hasText: expectedPath }).hover();
+    await expect(page.locator(".sb-path-tooltip")).toHaveCount(1);
+    await expect(page.locator(".sb-path-tooltip")).toBeVisible();
+    await expect(page.locator(".sb-path-tooltip")).toHaveText(expectedPath);
+  }
 
   const table = assistant.locator(".table-wrap table");
   const tableWrap = assistant.locator(".table-wrap");

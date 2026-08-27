@@ -50,6 +50,9 @@ CONTEXT_CALIBRATION_UNUSED_KEY = "h4-context-calibration-unused-key"
 FAVICON_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNUqPjwn4GBgYEJRIAwACXYAoumRkB8AAAAAElFTkSuQmCC"
 )
+FAVICON_PLACEHOLDER_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1sYAAAAASUVORK5CYII="
+)
 TOOL_USER = "H4_TOOL_USER"
 TOOL_STAGE = "H4_TOOL_STAGE"
 TOOL_FINAL = "H4_TOOL_FINAL"
@@ -3123,13 +3126,20 @@ def main() -> int:
     class H4FaviconHttpClient:
         """No-network transport under the production candidate/cache/endpoint layers."""
 
+        def __init__(self):
+            self._attempts = {}
+
         def fetch(self, url: str, *, deadline: float):
             parsed_url = parse.urlsplit(url)
+            request_key = (parsed_url.scheme, parsed_url.hostname, parsed_url.path, parsed_url.query)
+            attempt = self._attempts.get(request_key, 0) + 1
+            self._attempts[request_key] = attempt
             METRICS.append("faviconFetches", {
                 "scheme": parsed_url.scheme,
                 "host": parsed_url.hostname,
                 "path": parsed_url.path,
                 "query": parsed_url.query,
+                "attempt": attempt,
                 "deadlinePresent": deadline > 0,
             })
             if (
@@ -3138,7 +3148,22 @@ def main() -> int:
                 and parsed_url.path == "/favicon.ico"
                 and not parsed_url.query
             ):
-                return FAVICON_PNG, "image/png"
+                if parsed_url.hostname == "mistral.ai" and attempt == 1:
+                    raise code_server._FaviconTransientError("H4 deterministic transient favicon miss")
+                return code_server._validated_favicon_asset(FAVICON_PNG, "image/png")
+            if (
+                parsed_url.hostname == "api.faviconkit.com"
+                and "xinghuo.xfyun.cn" in parsed_url.path
+            ):
+                return code_server._validated_favicon_asset(
+                    FAVICON_PLACEHOLDER_PNG,
+                    "image/png",
+                )
+            if (
+                parsed_url.hostname == "www.google.com"
+                and "domain=xinghuo.xfyun.cn" in parsed_url.query
+            ):
+                return code_server._validated_favicon_asset(FAVICON_PNG, "image/png")
             raise code_server._FaviconProxyError("H4 deterministic favicon miss")
 
     code_server._favicon_proxy = code_server._FaviconProxy(

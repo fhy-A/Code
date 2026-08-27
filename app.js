@@ -2493,9 +2493,118 @@ function bindCopyButtons() {
 
 
 // External links load favicons only through the same-origin, SSRF-hardened
-// server resolver. A per-origin in-memory cache avoids duplicate DOM loads on
-// re-renders; failures keep the default glyph (never a blank gap).
+// server resolver. A per-origin in-memory state coalesces concurrent DOM loads,
+// retries one transient browser failure, and then observes a finite cooldown;
+// the default glyph remains visible until a validated image is ready.
+const _FAVICON_RETRY_DELAY_MS = 360;
+const _FAVICON_FAILURE_COOLDOWN_MS = 30 * 1000;
+// Stay below the server's six-slot admission bound so a large answer cannot
+// make later hosts fail before earlier candidate chains finish. Queue entries
+// are per origin and FIFO; retries rejoin the tail instead of retaining a slot.
+const _FAVICON_CLIENT_MAX_CONCURRENT = 4;
 const _faviconCache = new Map();
+const _faviconLoadQueue = [];
+let _faviconActiveLoads = 0;
+
+function _decorateFaviconImage(img) {
+  img.className = "ext-favicon";
+  img.alt = "";
+  img.decoding = "async";
+  return img;
+}
+
+function _showCachedFavicon(slot, source) {
+  if (!slot || slot.isConnected === false) return;
+  const img = _decorateFaviconImage(document.createElement("img"));
+  img.src = source;
+  slot.replaceChildren(img);
+}
+
+function _connectedFaviconSlots(entry) {
+  return [...entry.slots].filter((slot) => slot && slot.isConnected !== false);
+}
+
+function _drainFaviconLoadQueue() {
+  while (_faviconActiveLoads < _FAVICON_CLIENT_MAX_CONCURRENT && _faviconLoadQueue.length) {
+    const { cacheKey, entry } = _faviconLoadQueue.shift();
+    if (_faviconCache.get(cacheKey) !== entry || entry.status !== "queued") continue;
+    if (_connectedFaviconSlots(entry).length === 0) {
+      _faviconCache.delete(cacheKey);
+      continue;
+    }
+    _faviconActiveLoads += 1;
+    _startFaviconLoad(cacheKey, entry, () => {
+      _faviconActiveLoads = Math.max(0, _faviconActiveLoads - 1);
+      _drainFaviconLoadQueue();
+    });
+  }
+}
+
+function _queueFaviconLoad(cacheKey, entry) {
+  if (_faviconCache.get(cacheKey) !== entry) return;
+  if (entry.status === "queued" || entry.status === "loading") return;
+  entry.status = "queued";
+  _faviconLoadQueue.push({ cacheKey, entry });
+  _drainFaviconLoadQueue();
+}
+
+function _startFaviconLoad(cacheKey, entry, releaseSlot) {
+  entry.status = "loading";
+  entry.timer = null;
+  const img = _decorateFaviconImage(document.createElement("img"));
+  let settled = false;
+  const finishAttempt = () => {
+    if (settled) return false;
+    settled = true;
+    releaseSlot();
+    return true;
+  };
+  const fail = () => {
+    if (settled) return;
+    if (entry.attempts < 1) {
+      entry.attempts += 1;
+      entry.status = "retry-wait";
+      entry.timer = window.setTimeout(() => {
+        entry.timer = null;
+        if (_faviconCache.get(cacheKey) !== entry) return;
+        if (_connectedFaviconSlots(entry).length === 0) {
+          _faviconCache.delete(cacheKey);
+          return;
+        }
+        _queueFaviconLoad(cacheKey, entry);
+      }, _FAVICON_RETRY_DELAY_MS);
+      finishAttempt();
+      return;
+    }
+    entry.status = "cooldown";
+    entry.cooldownUntil = Date.now() + _FAVICON_FAILURE_COOLDOWN_MS;
+    entry.slots.clear();
+    finishAttempt();
+  };
+  img.addEventListener("load", () => {
+    if (settled) return;
+    if (img.naturalWidth <= 1 || img.naturalHeight <= 1) {
+      fail();
+      return;
+    }
+    entry.status = "success";
+    entry.url = entry.source;
+    const slots = _connectedFaviconSlots(entry);
+    entry.slots.clear();
+    slots.forEach((slot, index) => {
+      if (index === 0) slot.replaceChildren(img);
+      else _showCachedFavicon(slot, entry.source);
+    });
+    finishAttempt();
+  }, { once: true });
+  img.addEventListener("error", fail, { once: true });
+  try {
+    img.src = entry.source;
+  } catch (_) {
+    fail();
+  }
+}
+
 function bindExtLinkFavicons() {
   document.querySelectorAll("a.ext-link .link-ext-icon").forEach((slot) => {
     if (slot.dataset.bound) return;
@@ -2511,25 +2620,30 @@ function bindExtLinkFavicons() {
     } catch (_) { /* keep empty */ }
     if (!host || (scheme !== "http" && scheme !== "https")) return;
     const cacheKey = `${scheme}://${host}`;
-    const cached = _faviconCache.get(cacheKey);
-    if (cached?.failed) return; // negative cache: keep the glyph
-    const source = cached?.url || `/api/favicon?scheme=${encodeURIComponent(scheme)}&host=${encodeURIComponent(host)}`;
-    const img = document.createElement("img");
-    img.className = "ext-favicon";
-    img.alt = "";
-    img.decoding = "async";
-    img.addEventListener("load", () => {
-      if (img.naturalWidth <= 1 || img.naturalHeight <= 1) {
-        _faviconCache.set(cacheKey, { failed: true });
-        return;
-      }
-      _faviconCache.set(cacheKey, { url: source });
-      slot.replaceChildren(img);
-    }, { once: true });
-    img.addEventListener("error", () => {
-      _faviconCache.set(cacheKey, { failed: true });
-    }, { once: true });
-    img.src = source;
+    let entry = _faviconCache.get(cacheKey);
+    if (entry?.status === "success") {
+      _showCachedFavicon(slot, entry.url);
+      return;
+    }
+    if (entry?.status === "cooldown" && entry.cooldownUntil > Date.now()) return;
+    if (entry?.status === "cooldown") {
+      _faviconCache.delete(cacheKey);
+      entry = null;
+    }
+    if (entry) {
+      entry.slots.add(slot);
+      return;
+    }
+    entry = {
+      status: "idle",
+      source: `/api/favicon?scheme=${encodeURIComponent(scheme)}&host=${encodeURIComponent(host)}`,
+      attempts: 0,
+      cooldownUntil: 0,
+      timer: null,
+      slots: new Set([slot]),
+    };
+    _faviconCache.set(cacheKey, entry);
+    _queueFaviconLoad(cacheKey, entry);
   });
 }
 
@@ -2579,61 +2693,77 @@ function bindLinkContextMenus() {
     el.addEventListener("contextmenu", (event) => showPathMenu(event, el.dataset.path || ""));
   });
   document.querySelectorAll(".path-file-card, .path-image-card").forEach((el) => {
-    el.addEventListener("contextmenu", (event) => showPathMenu(event, el.title || el.getAttribute("data-path") || ""));
+    el.addEventListener("contextmenu", (event) => showPathMenu(event, el.getAttribute("data-path") || ""));
   });
   document.querySelectorAll("a.ext-link").forEach((el) => {
     el.addEventListener("contextmenu", (event) => showLinkMenu(event, el.getAttribute("href") || ""));
   });
 }
 
-// Custom hover tooltip: shows the complete stored text (full path / URL)
-// because the native title attribute truncates long values.
+// One delegated tooltip overlay serves external links and local file cards.
+// Native title values are migrated into data-tooltip to avoid duplicate UI.
+let _tooltipsBound = false;
+let _tooltipOverlay = null;
+let _tooltipTimer = null;
 function bindTooltips() {
-  let tip = null;
-  let tipTimer = null;
+  document.querySelectorAll("a.ext-link, .path-file-card, .path-image-card").forEach((el) => {
+    const nativeTitle = el.getAttribute("title") || "";
+    const fallback = el.matches("a.ext-link")
+      ? (el.getAttribute("href") || "")
+      : (el.getAttribute("data-path") || "");
+    if (!el.getAttribute("data-tooltip") && (nativeTitle || fallback)) {
+      el.setAttribute("data-tooltip", nativeTitle || fallback);
+    }
+    el.removeAttribute("title");
+  });
+  if (_tooltipsBound) return;
+  _tooltipsBound = true;
+
   const hide = () => {
-    if (tipTimer !== null) { window.clearTimeout(tipTimer); tipTimer = null; }
-    if (tip) { tip.remove(); tip = null; }
+    if (_tooltipTimer !== null) { window.clearTimeout(_tooltipTimer); _tooltipTimer = null; }
+    if (_tooltipOverlay) _tooltipOverlay.hidden = true;
   };
   const show = (el, text) => {
     hide();
     if (!text) return;
-    tip = document.createElement("div");
-    tip.className = "sb-path-tooltip";
-    tip.textContent = text;
-    document.body.appendChild(tip);
+    if (!_tooltipOverlay) {
+      _tooltipOverlay = document.createElement("div");
+      _tooltipOverlay.className = "sb-path-tooltip";
+      _tooltipOverlay.setAttribute("role", "tooltip");
+      document.body.appendChild(_tooltipOverlay);
+    }
+    _tooltipOverlay.textContent = text;
+    _tooltipOverlay.hidden = false;
     const rect = el.getBoundingClientRect();
-    const tipRect = tip.getBoundingClientRect();
+    const tipRect = _tooltipOverlay.getBoundingClientRect();
     let left = rect.left + rect.width / 2 - tipRect.width / 2;
     let top = rect.bottom + 8;
     if (left < 8) left = 8;
     if (left + tipRect.width > window.innerWidth - 8) left = window.innerWidth - tipRect.width - 8;
     if (top + tipRect.height > window.innerHeight - 8) top = rect.top - tipRect.height - 8;
-    tip.style.left = left + "px";
-    tip.style.top = top + "px";
-  };
-  const tooltipTextFor = (el) => {
-    if (!el) return "";
-    const explicit = el.getAttribute("data-tooltip");
-    if (explicit) return explicit;
-    if (el.tagName === "A" && el.classList.contains("ext-link")) {
-      return el.getAttribute("href") || "";
-    }
-    return "";
+    _tooltipOverlay.style.left = left + "px";
+    _tooltipOverlay.style.top = top + "px";
   };
   document.addEventListener("mouseover", (e) => {
-    const target = e.target instanceof Element ? e.target.closest("[data-tooltip], a.ext-link") : null;
+    const target = e.target instanceof Element ? e.target.closest("[data-tooltip]") : null;
     if (!target) { hide(); return; }
-    const text = tooltipTextFor(target);
+    const text = target.getAttribute("data-tooltip") || "";
     if (!text) { hide(); return; }
-    if (tipTimer !== null) window.clearTimeout(tipTimer);
-    tipTimer = window.setTimeout(() => show(target, text), 180);
+    if (_tooltipTimer !== null) window.clearTimeout(_tooltipTimer);
+    _tooltipTimer = window.setTimeout(() => show(target, text), 180);
   });
   document.addEventListener("mouseout", (e) => {
-    const target = e.target instanceof Element ? e.target.closest("[data-tooltip], a.ext-link") : null;
-    if (target) hide();
+    const target = e.target instanceof Element ? e.target.closest("[data-tooltip]") : null;
+    if (target && !(e.relatedTarget instanceof Node && target.contains(e.relatedTarget))) hide();
   });
+  document.addEventListener("focusin", (e) => {
+    const target = e.target instanceof Element ? e.target.closest("[data-tooltip]") : null;
+    if (target) show(target, target.getAttribute("data-tooltip") || "");
+  });
+  document.addEventListener("focusout", hide);
   document.addEventListener("click", hide);
+  window.addEventListener("scroll", hide, { capture: true, passive: true });
+  window.addEventListener("resize", hide, { passive: true });
 }
 
 // Admonition titles come from i18n (the markdown renderer only emits the type).
@@ -2758,7 +2888,8 @@ function maybeRenderFileCard(el, p, projectRoot) {
     // Non-image file card: type icon + file name; click opens the file.
     const card = document.createElement("span");
     card.className = "path-file-card";
-    card.title = p;
+    card.setAttribute("data-path", p);
+    card.setAttribute("data-tooltip", p);
     const icon = document.createElement("span");
     icon.className = "path-file-icon";
     icon.setAttribute("aria-hidden", "true");
@@ -2784,7 +2915,8 @@ function maybeRenderFileCard(el, p, projectRoot) {
   probe.onload = () => {
     const card = document.createElement("span");
     card.className = "path-image-card";
-    card.title = p;
+    card.setAttribute("data-path", p);
+    card.setAttribute("data-tooltip", p);
     const img = document.createElement("img");
     img.className = "path-image-thumb";
     img.src = apiUrl;

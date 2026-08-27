@@ -76,7 +76,12 @@ class _FaviconConnection:
 
 
 class TestFaviconProxySecurity(unittest.TestCase):
-    PNG = b"\x89PNG\r\n\x1a\n" + b"safe-raster-payload"
+    PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNUqPjwn4GBgYEJRIAwACXYAoumRkB8AAAAAElFTkSuQmCC"
+    )
+    PLACEHOLDER_PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1sYAAAAASUVORK5CYII="
+    )
     PUBLIC_V4 = "93.184.216.34"
     PUBLIC_V6 = "2606:2800:220:1:248:1893:25c8:1946"
 
@@ -104,6 +109,16 @@ class TestFaviconProxySecurity(unittest.TestCase):
         )
         urls = server._favicon_candidate_urls("https", "www.example.com")
         self.assertEqual(urls[0], "https://www.example.com/favicon.ico")
+        direct_urls = [url for url in urls if server.parse.urlsplit(url).path == "/favicon.ico"]
+        self.assertEqual(direct_urls, [
+            "https://www.example.com/favicon.ico",
+            "https://example.com/favicon.ico",
+        ])
+        first_provider = min(
+            index for index, url in enumerate(urls)
+            if server.parse.urlsplit(url).hostname in server._FAVICON_PROVIDER_HOSTS
+        )
+        self.assertGreaterEqual(first_provider, len(direct_urls))
         self.assertEqual(
             {server.parse.urlsplit(url).hostname for url in urls if "favicon.ico" not in url},
             set(server._FAVICON_PROVIDER_HOSTS),
@@ -325,9 +340,82 @@ class TestFaviconProxySecurity(unittest.TestCase):
             return connection
 
         timeout_client._connection_factory = timeout_factory
-        with self.assertRaisesRegex(server._FaviconProxyError, "network"):
+        with self.assertRaisesRegex(server._FaviconTransientError, "network"):
             timeout_client.fetch("https://example.com/favicon.ico", deadline=20.0)
         self.assertEqual(len(timeout_connections), 1)
+
+        temporarily_unavailable, _ = self._client([_FaviconResponse(503)])
+        with self.assertRaisesRegex(server._FaviconTransientError, "temporarily"):
+            temporarily_unavailable.fetch("https://example.com/favicon.ico", deadline=20.0)
+        permanently_missing, _ = self._client([_FaviconResponse(404)])
+        with self.assertRaises(server._FaviconProxyError) as missing_error:
+            permanently_missing.fetch("https://example.com/favicon.ico", deadline=20.0)
+        self.assertNotIsInstance(missing_error.exception, server._FaviconTransientError)
+
+    def test_degenerate_raster_dimensions_are_permanently_rejected(self):
+        client, _ = self._client([
+            _FaviconResponse(
+                200,
+                headers={"Content-Type": "image/png"},
+                body=self.PLACEHOLDER_PNG,
+            ),
+        ])
+        with self.assertRaisesRegex(server._FaviconProxyError, "dimensions") as error:
+            client.fetch("https://example.com/favicon.ico", deadline=20.0)
+        self.assertNotIsInstance(error.exception, server._FaviconTransientError)
+
+    def test_degenerate_candidate_continues_to_valid_asset_and_only_valid_asset_is_cached(self):
+        class PlaceholderThenValidClient:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, url, *, deadline):
+                self.calls.append((url, deadline))
+                payload = (
+                    TestFaviconProxySecurity.PLACEHOLDER_PNG
+                    if len(self.calls) == 1
+                    else TestFaviconProxySecurity.PNG
+                )
+                return server._validated_favicon_asset(payload, "image/png")
+
+        client = PlaceholderThenValidClient()
+        proxy = server._FaviconProxy(http_client=client, clock=lambda: 100.0)
+        key = ("https", "example.com")
+        expected = (self.PNG, "image/png")
+        self.assertEqual(proxy.get(*key), expected)
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(proxy._cache[key][1], expected)
+        self.assertEqual(proxy.get(*key), expected)
+        self.assertEqual(len(client.calls), 2)
+
+    def test_all_degenerate_candidates_never_enter_positive_cache(self):
+        class PlaceholderClient:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, url, *, deadline):
+                self.calls.append((url, deadline))
+                return server._validated_favicon_asset(
+                    TestFaviconProxySecurity.PLACEHOLDER_PNG,
+                    "image/png",
+                )
+
+        client = PlaceholderClient()
+        proxy = server._FaviconProxy(
+            http_client=client,
+            clock=lambda: 100.0,
+            positive_ttl=3600,
+            negative_ttl=30,
+        )
+        key = ("https", "missing.example.com")
+        self.assertIsNone(proxy.get(*key))
+        self.assertEqual(
+            len(client.calls),
+            len(server._favicon_candidate_urls(*key)),
+        )
+        self.assertIn(key, proxy._cache)
+        self.assertIsNone(proxy._cache[key][1])
+        self.assertEqual(proxy._cache[key][0], 130.0)
 
     def test_slow_multichunk_response_cannot_exceed_total_deadline(self):
         clock = [0.0]
@@ -364,7 +452,7 @@ class TestFaviconProxySecurity(unittest.TestCase):
             connection_factory=connection_factory,
             clock=lambda: clock[0],
         )
-        with self.assertRaisesRegex(server._FaviconProxyError, "network"):
+        with self.assertRaisesRegex(server._FaviconTransientError, "network"):
             client.fetch("https://example.com/favicon.ico", deadline=1.0)
         self.assertEqual(len(connections), 1)
         observed = [call.args[0] for call in connections[0].sock.settimeout.call_args_list]
@@ -431,7 +519,7 @@ class TestFaviconProxySecurity(unittest.TestCase):
             "Connection": "close",
         }, body=self.PNG)
         client, connections = self._client([response])
-        with self.assertRaisesRegex(server._FaviconProxyError, "before Content-Length"):
+        with self.assertRaisesRegex(server._FaviconTransientError, "before Content-Length"):
             client.fetch("https://example.com/favicon.ico", deadline=20.0)
         self.assertEqual(response.read_calls, 2)
         self.assertEqual(connections[0].sock.settimeout.call_count, 3)  # headers + body + EOF
@@ -516,6 +604,19 @@ class TestFaviconProxySecurity(unittest.TestCase):
             )
         self.assertEqual(missing.status, 404)
         self.assertEqual(bytes(missing.wfile.data), b"")
+        self.assertIn(("Cache-Control", "no-store"), missing.headers)
+
+        proxy.get.side_effect = server._FaviconTransientError("temporary transport detail")
+        transient = Handler()
+        with mock.patch.object(server, "_favicon_proxy", proxy):
+            server.CodeHandler.get_favicon(
+                transient,
+                {"scheme": ["https"], "host": ["temporary.example.com"]},
+            )
+        self.assertEqual(transient.status, 503)
+        self.assertIn(("Cache-Control", "no-store"), transient.headers)
+        self.assertIn(("Retry-After", "1"), transient.headers)
+        self.assertEqual(bytes(transient.wfile.data), b"")
 
         invalid = Handler()
         server.CodeHandler.get_favicon(invalid, {"scheme": ["https", "http"], "host": ["example.com"]})
@@ -641,6 +742,32 @@ class TestFaviconProxySecurity(unittest.TestCase):
             worker.join(timeout=2)
         self.assertEqual(maximum, 1)
 
+    def test_transient_transport_failures_are_not_negative_cached(self):
+        class RecoveringClient:
+            def __init__(self):
+                self.calls = 0
+                self.transient = True
+
+            def fetch(self, _url, *, deadline):
+                self.calls += 1
+                if self.transient:
+                    raise server._FaviconTransientError("temporary network failure")
+                return TestFaviconProxySecurity.PNG, "image/png"
+
+        client = RecoveringClient()
+        proxy = server._FaviconProxy(http_client=client)
+        key = ("https", "temporary.example.com")
+        with self.assertRaises(server._FaviconTransientError):
+            proxy.get(*key)
+        self.assertNotIn(key, proxy._cache)
+        transient_calls = client.calls
+        self.assertGreater(transient_calls, 0)
+
+        client.transient = False
+        self.assertEqual(proxy.get(*key), (self.PNG, "image/png"))
+        self.assertGreater(client.calls, transient_calls)
+        self.assertEqual(proxy._cache[key][1], (self.PNG, "image/png"))
+
     def test_capacity_rejection_is_transient_and_does_not_create_negative_cache(self):
         class SequenceSemaphore:
             def __init__(self):
@@ -666,7 +793,8 @@ class TestFaviconProxySecurity(unittest.TestCase):
         client = SuccessClient()
         proxy = server._FaviconProxy(http_client=client, semaphore=semaphore)
         key = ("https", "capacity.example.com")
-        self.assertIsNone(proxy.get(*key))
+        with self.assertRaises(server._FaviconTransientError):
+            proxy.get(*key)
         self.assertNotIn(key, proxy._cache)
         self.assertEqual(client.calls, 0)
         self.assertEqual(proxy.get(*key), (self.PNG, "image/png"))
