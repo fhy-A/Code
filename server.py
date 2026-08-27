@@ -6363,6 +6363,9 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0, *, keys_override=
     error_code = ""
     for attempt in range(1, 3):
         attempts = attempt
+        summary = ""
+        error_message = ""
+        error_code = ""
         compaction_run = _create_model_runtime_run(
             run["session_id"],
             _agent_compaction_payload(run, plan),

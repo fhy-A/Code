@@ -5730,6 +5730,49 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(restored["messages"], original_messages)
         self.assertEqual(_AgentUpstream.calls, 2)
 
+    def test_empty_compaction_retry_accepts_second_valid_shrinking_summary(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{"choices": [{"delta": {}, "finish_reason": "stop"}]}],
+                [{
+                    "choices": [{
+                        "delta": {"content": "Compact final summary."},
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+        run = server_mod._create_agent_run(
+            "empty-then-valid-compaction-session",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "system rules"},
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["compaction-key"],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        original_messages = json.loads(json.dumps(run["messages"]))
+
+        completed = server_mod._run_agent_auto_compaction(
+            run, "threshold", before_estimate=10000,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["attempts"], 2)
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertNotEqual(run["messages"], original_messages)
+        self.assertEqual(len(run["compactions"]), 1)
+        self.assertIsNone(run["compaction_recovery"])
+        event_types = [event["type"] for event in run["events"]]
+        self.assertEqual(event_types.count("context_compaction_completed"), 1)
+        self.assertEqual(event_types.count("context_compaction_failed"), 0)
+
     def test_nonshrinking_compaction_keeps_original_history_atomically(self):
         with _AgentUpstream.scripted_lock:
             _AgentUpstream.scripted_rounds = [[{
