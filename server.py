@@ -2685,6 +2685,8 @@ def _agent_run_record(run):
         "pendingSteers": _json_clone(run.get("pending_steers") or []),
         "steerReceipts": _json_clone(run.get("steer_receipts") or []),
         "toolExecutions": _json_clone(run.get("tool_executions") or {}),
+        **({"skillEvidence": _agent_skill_evidence_record(run)}
+           if isinstance(run.get("skill_evidence_observer"), dict) else {}),
         "usage": _json_clone(run.get("usage") or {}),
         "result": result,
         "events": events,
@@ -2848,6 +2850,7 @@ def _agent_snapshot(run, cursor=0):
                 if isinstance(item, dict)
             ],
             "toolExecutions": _agent_public_tool_executions(run),
+            "skillEvidence": _agent_skill_evidence_snapshot(run),
             "usage": _json_clone(run.get("usage") or {}),
             "compactions": _json_clone(run.get("compactions") or []),
             "recoveryState": _agent_public_recovery_state(run),
@@ -3677,6 +3680,10 @@ def _agent_run_from_record(record):
         "pending_steers": list(record.get("pendingSteers") or []),
         "steer_receipts": list(record.get("steerReceipts") or []),
         "tool_executions": tool_executions,
+        "skill_evidence_observer": _restore_skill_evidence_observer(
+            record.get("skillEvidence"),
+            list(record.get("tools") or []),
+        ),
         "usage": dict(record.get("usage") or {}),
         "result": dict(record.get("result") or {}),
         "events": events,
@@ -7286,6 +7293,7 @@ def _create_agent_run(
     continuation=None,
     route_ref="",
     catalog_revision=0,
+    active_skill_name="",
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -7351,6 +7359,9 @@ def _create_agent_run(
             if definition:
                 tools.append(definition)
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
+    skill_evidence_observer = _freeze_skill_evidence_observer(
+        active_skill_name, tools,
+    )
     try:
         rounds_limit = int(max_rounds or _AGENT_RUN_DEFAULT_MAX_ROUNDS)
     except (TypeError, ValueError):
@@ -7430,6 +7441,7 @@ def _create_agent_run(
         "pending_steers": [],
         "steer_receipts": [],
         "tool_executions": {},
+        "skill_evidence_observer": skill_evidence_observer,
         "usage": {},
         "result": {},
         "events": [],
@@ -9706,6 +9718,320 @@ def load_project_context(root_path=None):
 # ── Skills ───────────────────────────────────────────
 
 _SKILL_DEPENDENCIES_UNSET = object()
+_SKILL_EVIDENCE_CONTRACT_FILE = "evidence.json"
+_SKILL_EVIDENCE_OBSERVER_VERSION = 1
+_SKILL_EVIDENCE_MAX_CONTRACT_BYTES = 64 * 1024
+_SKILL_EVIDENCE_MAX_REQUIREMENTS = 20
+_SKILL_EVIDENCE_ARTIFACT_TOOLS = frozenset({"write_file"})
+
+
+def _skill_evidence_tool_names(tool_definitions):
+    return {
+        str((definition.get("function") or {}).get("name") or "")
+        for definition in tool_definitions or []
+        if isinstance(definition, dict)
+    }
+
+
+def _normalize_skill_evidence_contract(
+    value, allowed_tool_names, *, require_registered_tools=True,
+):
+    """Validate observer v1 without accepting prose or expanding tool access."""
+    if not isinstance(value, dict) or set(value) != {"schemaVersion", "requirements"}:
+        raise ValueError("invalid evidence contract envelope")
+    schema_version = value.get("schemaVersion")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+    ):
+        raise ValueError("unsupported evidence contract version")
+    requirements = value.get("requirements")
+    if (
+        not isinstance(requirements, list)
+        or not requirements
+        or len(requirements) > _SKILL_EVIDENCE_MAX_REQUIREMENTS
+    ):
+        raise ValueError("invalid evidence requirements")
+    allowed_names = {str(name or "") for name in allowed_tool_names or []}
+    normalized = []
+    seen_ids = set()
+    for source in requirements:
+        if not isinstance(source, dict):
+            raise ValueError("invalid evidence requirement")
+        requirement_type = str(source.get("type") or "")
+        allowed_fields = {"id", "type", "tool", "minCount"}
+        if requirement_type == "artifact":
+            allowed_fields.add("artifactKind")
+        if set(source) != allowed_fields:
+            raise ValueError("invalid evidence requirement fields")
+        requirement_id = str(source.get("id") or "")
+        tool_name = str(source.get("tool") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", requirement_id):
+            raise ValueError("invalid evidence requirement id")
+        if requirement_id in seen_ids:
+            raise ValueError("duplicate evidence requirement id")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", tool_name):
+            raise ValueError("invalid evidence tool name")
+        if tool_name not in allowed_names or (
+            require_registered_tools and not _agent_registry_tool_definition(tool_name)
+        ):
+            raise ValueError("evidence contract exceeds allowed tools")
+        minimum = source.get("minCount")
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or not 1 <= minimum <= 100:
+            raise ValueError("invalid evidence minimum")
+        item = {
+            "id": requirement_id,
+            "type": requirement_type,
+            "tool": tool_name,
+            "minCount": minimum,
+        }
+        if requirement_type == "tool_execution":
+            pass
+        elif requirement_type == "artifact":
+            if source.get("artifactKind") != "file":
+                raise ValueError("unsupported evidence artifact kind")
+            if tool_name not in _SKILL_EVIDENCE_ARTIFACT_TOOLS:
+                raise ValueError("unsupported evidence artifact tool")
+            item["artifactKind"] = "file"
+        else:
+            raise ValueError("unsupported evidence requirement type")
+        seen_ids.add(requirement_id)
+        normalized.append(item)
+    return {"schemaVersion": 1, "requirements": normalized}
+
+
+def _skill_evidence_invalid_observer(code="invalid_contract", active_skill=None):
+    observer = {
+        "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+        "contractState": "invalid",
+        "diagnosticCode": str(code or "invalid_contract"),
+    }
+    if active_skill:
+        observer["activeSkill"] = active_skill
+    return observer
+
+
+def _freeze_skill_evidence_observer(active_skill_name, tool_definitions):
+    """Resolve and freeze one installed Skill from selection intent only."""
+    selected_name = str(active_skill_name or "").strip()
+    if not selected_name:
+        return None
+    if len(selected_name) > 128:
+        return _skill_evidence_invalid_observer("active_skill_invalid")
+    try:
+        skill = read_skill(selected_name)
+    except ValueError:
+        return _skill_evidence_invalid_observer("active_skill_not_found")
+    skill_name = str(skill.get("name") or "")
+    skill_dir_name = str(skill.get("dir") or "")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", skill_name)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", skill_dir_name)
+    ):
+        return _skill_evidence_invalid_observer("active_skill_invalid")
+    skill_dir = (SKILLS_DIR / skill_dir_name).resolve()
+    try:
+        skill_dir.relative_to(SKILLS_DIR.resolve())
+        skill_bytes = (skill_dir / "SKILL.md").read_bytes()
+    except (OSError, ValueError):
+        return _skill_evidence_invalid_observer("active_skill_unreadable")
+    active_skill = {
+        "name": skill_name,
+        "contentHash": "sha256:" + hashlib.sha256(skill_bytes).hexdigest(),
+    }
+    contract_path = skill_dir / _SKILL_EVIDENCE_CONTRACT_FILE
+    if not contract_path.exists():
+        return {
+            "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+            "activeSkill": active_skill,
+            "contractState": "missing",
+            "diagnosticCode": "contract_missing",
+        }
+    try:
+        contract_path = contract_path.resolve()
+        contract_path.relative_to(skill_dir)
+        if not contract_path.is_file():
+            raise ValueError("evidence contract is not a file")
+        if contract_path.stat().st_size > _SKILL_EVIDENCE_MAX_CONTRACT_BYTES:
+            raise ValueError("evidence contract is too large")
+        source = json.loads(contract_path.read_text(encoding="utf-8-sig"))
+        contract = _normalize_skill_evidence_contract(
+            source,
+            _skill_evidence_tool_names(tool_definitions),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _skill_evidence_invalid_observer("invalid_contract", active_skill)
+    return {
+        "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+        "activeSkill": active_skill,
+        "contractState": "valid",
+        "contract": contract,
+    }
+
+
+def _restore_skill_evidence_observer(value, tool_definitions):
+    """Read a frozen observer without consulting the mutable Skill directory."""
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    active_source = value.get("activeSkill")
+    active_skill = None
+    if isinstance(active_source, dict):
+        name = str(active_source.get("name") or "")
+        content_hash = str(active_source.get("contentHash") or "")
+        if (
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
+        ):
+            active_skill = {"name": name, "contentHash": content_hash}
+    state = str(value.get("contractState") or "")
+    if state == "valid" and active_skill:
+        try:
+            contract = _normalize_skill_evidence_contract(
+                value.get("contract"),
+                _skill_evidence_tool_names(tool_definitions),
+                require_registered_tools=False,
+            )
+        except ValueError:
+            return _skill_evidence_invalid_observer("invalid_persisted_contract", active_skill)
+        return {
+            "version": 1,
+            "activeSkill": active_skill,
+            "contractState": "valid",
+            "contract": contract,
+        }
+    if state == "missing" and active_skill:
+        return {
+            "version": 1,
+            "activeSkill": active_skill,
+            "contractState": "missing",
+            "diagnosticCode": "contract_missing",
+        }
+    allowed_diagnostics = {
+        "active_skill_invalid",
+        "active_skill_not_found",
+        "active_skill_unreadable",
+        "invalid_contract",
+        "invalid_persisted_contract",
+    }
+    diagnostic = str(value.get("diagnosticCode") or "invalid_persisted_contract")
+    if diagnostic not in allowed_diagnostics:
+        diagnostic = "invalid_persisted_contract"
+    return _skill_evidence_invalid_observer(diagnostic, active_skill)
+
+
+def _skill_evidence_artifact_satisfied(execution, artifact_kind):
+    if artifact_kind != "file" or not isinstance(execution, dict):
+        return False
+    result = execution.get("result")
+    return bool(
+        isinstance(result, dict)
+        and result.get("ok") is not False
+        and result.get("action") == "write_file"
+        and str(result.get("path") or "").strip()
+    )
+
+
+def _agent_skill_evidence_snapshot(run):
+    """Evaluate frozen evidence from unique authoritative execution records."""
+    observer = run.get("skill_evidence_observer")
+    if not isinstance(observer, dict):
+        return {
+            "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+            "status": "legacy_unverified",
+            "contractState": "legacy",
+        }
+    public = {
+        "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+        "status": "legacy_unverified",
+        "contractState": str(observer.get("contractState") or "invalid"),
+    }
+    if isinstance(observer.get("activeSkill"), dict):
+        public["activeSkill"] = _json_clone(observer["activeSkill"])
+    if observer.get("diagnosticCode"):
+        public["diagnosticCode"] = str(observer["diagnosticCode"])
+    contract = observer.get("contract")
+    if public["contractState"] != "valid" or not isinstance(contract, dict):
+        return public
+
+    executions = run.get("tool_executions") or {}
+    requirement_results = []
+    relevant_completed_ids = set()
+    total_succeeded = 0
+    total_failed = 0
+    for requirement in contract.get("requirements") or []:
+        succeeded_ids = set()
+        failed_ids = set()
+        for call_id, execution in executions.items():
+            if (
+                not isinstance(execution, dict)
+                or execution.get("status") != "completed"
+                or str(execution.get("name") or "") != requirement["tool"]
+            ):
+                continue
+            stable_call_id = str(call_id or "")
+            relevant_completed_ids.add(stable_call_id)
+            outcome = str(execution.get("outcome") or _agent_execution_outcome(
+                execution.get("result")
+            ))
+            if outcome == "failed":
+                failed_ids.add(stable_call_id)
+                continue
+            if outcome != "succeeded":
+                continue
+            if requirement["type"] == "artifact" and not _skill_evidence_artifact_satisfied(
+                execution, requirement.get("artifactKind"),
+            ):
+                continue
+            succeeded_ids.add(stable_call_id)
+        succeeded_count = len(succeeded_ids)
+        failed_count = len(failed_ids)
+        total_succeeded += succeeded_count
+        total_failed += failed_count
+        requirement_results.append({
+            "id": requirement["id"],
+            "type": requirement["type"],
+            "tool": requirement["tool"],
+            **({"artifactKind": requirement["artifactKind"]}
+               if requirement["type"] == "artifact" else {}),
+            "minCount": requirement["minCount"],
+            "succeededCount": succeeded_count,
+            "failedCount": failed_count,
+            "satisfied": succeeded_count >= requirement["minCount"],
+        })
+    all_satisfied = bool(requirement_results) and all(
+        item["satisfied"] for item in requirement_results
+    )
+    terminal = run.get("status") in _AGENT_RUN_TERMINAL
+    if all_satisfied:
+        status = "satisfied"
+    elif terminal and (
+        run.get("status") in {"failed", "cancelled"} or total_failed > 0
+    ):
+        status = "failed"
+    elif terminal and total_succeeded == 0:
+        status = "unsupported_completion"
+    else:
+        status = "partial"
+    public.update({
+        "status": status,
+        "uniqueCompletedExecutions": len(relevant_completed_ids),
+        "requirements": requirement_results,
+    })
+    return public
+
+
+def _agent_skill_evidence_record(run):
+    """Persist the validated frozen contract alongside its current evaluation."""
+    record = _agent_skill_evidence_snapshot(run)
+    observer = run.get("skill_evidence_observer")
+    if (
+        isinstance(observer, dict)
+        and observer.get("contractState") == "valid"
+        and isinstance(observer.get("contract"), dict)
+    ):
+        record["contract"] = _json_clone(observer["contract"])
+    return record
 
 
 def _skill_requirement_for_api(requirement):
@@ -15701,6 +16027,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     run_kind=body.get("runKind") or "internal",
                     route_ref=route_ref,
                     catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
+                    active_skill_name=body.get("activeSkillName") or "",
                 )
                 self.send_json({
                     "agentRunId": run["id"],

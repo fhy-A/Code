@@ -3902,6 +3902,244 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertNotIn("network-skill-key", persisted)
         self.assertNotIn("network-skill-key", json.dumps(snapshot))
 
+    def test_skill_evidence_observer_freezes_contract_and_recovers_exactly_once(self):
+        skill_dir = self.data_dir / "skills" / "runtime-skill"
+        skill_dir.mkdir(parents=True)
+        skill_md = (
+            "---\nname: runtime-skill\ndescription: Runtime evidence test\n"
+            "tools: read_file, write_file\n---\n\nFollow runtime guidance.\n"
+        )
+        (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+        (skill_dir / "evidence.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "requirements": [
+                {
+                    "id": "inspect-input",
+                    "type": "tool_execution",
+                    "tool": "read_file",
+                    "minCount": 1,
+                },
+                {
+                    "id": "write-output",
+                    "type": "artifact",
+                    "tool": "write_file",
+                    "artifactKind": "file",
+                    "minCount": 1,
+                },
+            ],
+        }), encoding="utf-8")
+        run = server_mod._create_agent_run(
+            "skill-evidence-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "perform the skill"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file", "write_file"],
+            permission_profile="bypass",
+            active_skill_name="runtime-skill",
+            start_worker=False,
+        )
+
+        self.assertEqual(server_mod._agent_run_record(run)["version"], 5)
+        initial = server_mod._agent_snapshot(run, 0)["skillEvidence"]
+        self.assertEqual(initial["status"], "partial")
+        self.assertEqual(initial["contractState"], "valid")
+        self.assertEqual(
+            initial["activeSkill"]["contentHash"],
+            "sha256:" + hashlib.sha256((skill_dir / "SKILL.md").read_bytes()).hexdigest(),
+        )
+
+        # Once the run exists, installed Skill mutations cannot alter its
+        # frozen identity, contract, or evaluation.
+        secret = "SECRET-SKILL-MUTATION-SENTINEL"
+        (skill_dir / "SKILL.md").write_text(skill_md + secret, encoding="utf-8")
+        (skill_dir / "evidence.json").write_text(
+            json.dumps({"schemaVersion": 1, "requirements": [], "secret": secret}),
+            encoding="utf-8",
+        )
+        run["tool_executions"]["call-read"] = {
+            "name": "read_file",
+            "status": "completed",
+            "outcome": "succeeded",
+            "result": {"ok": True, "action": "read_file", "path": "README.md"},
+        }
+        run["tool_executions"]["call-write"] = {
+            "name": "write_file",
+            "status": "completed",
+            "outcome": "succeeded",
+            "result": {"ok": True, "action": "write_file", "path": "output.txt"},
+        }
+        # Duplicate completion events are not evidence inputs; authoritative
+        # executions remain keyed exactly once by tool-call ID.
+        run["events"].extend([
+            {"seq": 2, "type": "tool_completed", "data": {"toolCallId": "call-read"}},
+            {"seq": 3, "type": "tool_completed", "data": {"toolCallId": "call-read"}},
+        ])
+        run["next_seq"] = 4
+        server_mod._persist_agent_run(run)
+
+        satisfied = server_mod._agent_snapshot(run, 0)["skillEvidence"]
+        self.assertEqual(satisfied["status"], "satisfied")
+        self.assertEqual(satisfied["uniqueCompletedExecutions"], 2)
+        self.assertEqual(
+            [item["succeededCount"] for item in satisfied["requirements"]],
+            [1, 1],
+        )
+        persisted_text = server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
+        self.assertNotIn(secret, persisted_text)
+
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        recovered = server_mod._agent_snapshot(restored, 0)["skillEvidence"]
+        self.assertEqual(recovered, satisfied)
+        self.assertEqual(restored["status"], "waiting_credentials")
+
+    def test_skill_evidence_observer_classifies_legacy_invalid_partial_failed_and_unsupported(self):
+        skills_root = self.data_dir / "skills"
+
+        def write_skill(name, contract=None):
+            skill_dir = skills_root / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Evidence fixture\n"
+                "tools: read_file, write_file\n---\n\nFixture.\n",
+                encoding="utf-8",
+            )
+            if contract is not None:
+                (skill_dir / "evidence.json").write_text(
+                    json.dumps(contract), encoding="utf-8",
+                )
+
+        def create(name, allowed=None):
+            return server_mod._create_agent_run(
+                f"{name}-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "perform the skill"}],
+                },
+                self.base_url,
+                [],
+                allowed_tools=allowed or ["read_file"],
+                permission_profile="bypass",
+                active_skill_name=name,
+                start_worker=False,
+            )
+
+        write_skill("legacy-skill")
+        legacy = create("legacy-skill")
+        self.assertEqual(
+            server_mod._agent_snapshot(legacy, 0)["skillEvidence"]["status"],
+            "legacy_unverified",
+        )
+        old_run = server_mod._create_agent_run(
+            "old-agent-run-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "legacy AgentRun"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            start_worker=False,
+        )
+        old_record = server_mod._agent_run_record(old_run)
+        old_record.pop("skillEvidence", None)
+        restored_old = server_mod._agent_run_from_record(old_record)
+        self.assertEqual(
+            server_mod._agent_snapshot(restored_old, 0)["skillEvidence"]["status"],
+            "legacy_unverified",
+        )
+
+        write_skill("invalid-skill", {
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "forged-expansion",
+                "type": "tool_execution",
+                "tool": "run_command",
+                "minCount": 1,
+            }],
+        })
+        invalid = create("invalid-skill", ["read_file"])
+        invalid_snapshot = server_mod._agent_snapshot(invalid, 0)["skillEvidence"]
+        self.assertEqual(invalid_snapshot["status"], "legacy_unverified")
+        self.assertEqual(invalid_snapshot["contractState"], "invalid")
+        self.assertEqual(invalid_snapshot["diagnosticCode"], "invalid_contract")
+        with self.assertRaisesRegex(ValueError, "version"):
+            server_mod._normalize_skill_evidence_contract(
+                {"schemaVersion": 1.0, "requirements": [{
+                    "id": "inspect-input",
+                    "type": "tool_execution",
+                    "tool": "read_file",
+                    "minCount": 1,
+                }]},
+                {"read_file"},
+            )
+
+        contract = {
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "inspect-input",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+        }
+        write_skill("unsupported-skill", contract)
+        unsupported = create("unsupported-skill")
+        unsupported["messages"].append({
+            "role": "assistant",
+            "content": "I completed every Skill requirement.",
+        })
+        unsupported["result"] = {"content": "I completed every Skill requirement."}
+        self.assertTrue(server_mod._finish_agent_run(unsupported, "completed"))
+        unsupported_snapshot = server_mod._agent_snapshot(unsupported, 0)
+        self.assertEqual(unsupported_snapshot["status"], "completed")
+        self.assertEqual(
+            unsupported_snapshot["skillEvidence"]["status"],
+            "unsupported_completion",
+        )
+
+        write_skill("failed-skill", contract)
+        failed = create("failed-skill")
+        failed["tool_executions"]["call-read"] = {
+            "name": "read_file",
+            "status": "completed",
+            "outcome": "failed",
+            "result": {"ok": False, "action": "read_file", "error": "fixture failure"},
+        }
+        self.assertTrue(server_mod._finish_agent_run(failed, "completed"))
+        failed_snapshot = server_mod._agent_snapshot(failed, 0)
+        self.assertEqual(failed_snapshot["status"], "completed")
+        self.assertEqual(failed_snapshot["skillEvidence"]["status"], "failed")
+
+        write_skill("partial-skill", {
+            "schemaVersion": 1,
+            "requirements": [
+                contract["requirements"][0],
+                {
+                    "id": "write-output",
+                    "type": "artifact",
+                    "tool": "write_file",
+                    "artifactKind": "file",
+                    "minCount": 1,
+                },
+            ],
+        })
+        partial = create("partial-skill", ["read_file", "write_file"])
+        partial["tool_executions"]["call-read"] = {
+            "name": "read_file",
+            "status": "completed",
+            "outcome": "succeeded",
+            "result": {"ok": True, "action": "read_file", "path": "README.md"},
+        }
+        self.assertTrue(server_mod._finish_agent_run(partial, "completed"))
+        partial_snapshot = server_mod._agent_snapshot(partial, 0)
+        self.assertEqual(partial_snapshot["status"], "completed")
+        self.assertEqual(partial_snapshot["skillEvidence"]["status"], "partial")
+
     def test_accept_command_waits_for_authorization_then_executes_once(self):
         run = server_mod._create_agent_run(
             "command-accept-session",

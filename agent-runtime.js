@@ -264,6 +264,7 @@
   async function createAgentRun({
     sessionId,
     clientRequestId = "",
+    activeSkillName = "",
     payload,
     baseUrl,
     keys,
@@ -285,6 +286,7 @@
       body: JSON.stringify({
         sessionId,
         clientRequestId,
+        activeSkillName,
         payload,
         ...(routeRef
           ? { routeRef, catalogRevision }

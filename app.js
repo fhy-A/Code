@@ -11731,6 +11731,7 @@ async function runServerAgentLoop(ctx) {
     const created = await agentRuntime.createAgentRun({
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
+      activeSkillName: ctx.explicitSkill || "",
       payload: prepared.payload,
       baseUrl: dispatch.baseUrl,
       keys: dispatch.keys,

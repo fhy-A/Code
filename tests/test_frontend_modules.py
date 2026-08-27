@@ -2153,11 +2153,14 @@ setImmediate(() => {{
         ):
             self.assertIn(expected, RUNTIME_SOURCE)
         self.assertIn('clientRequestId = ""', RUNTIME_SOURCE)
+        self.assertIn('activeSkillName = ""', RUNTIME_SOURCE)
+        self.assertIn("activeSkillName,", RUNTIME_SOURCE)
         self.assertIn("clientRequestId,", RUNTIME_SOURCE)
         self.assertIn("agent.runtime = runtime", RUNTIME_SOURCE)
         self.assertNotIn("global." + "AgentRuntime", RUNTIME_SOURCE)
         self.assertNotIn("window." + "AgentRuntime", APP_SOURCE)
         self.assertIn("const agentRuntime = window.Code.agent.runtime;", APP_SOURCE)
+        self.assertIn('activeSkillName: ctx.explicitSkill || ""', APP_SOURCE)
 
     def test_agent_runtime_questionnaire_error_contract_is_machine_readable(self):
         script = f"""
@@ -2545,6 +2548,7 @@ eval(source);
   await window.Code.agent.runtime.createAgentRun({{
     sessionId: "session-1",
     clientRequestId: "background-123",
+    activeSkillName: "runtime-skill",
     payload: {{model: "test-model", messages: [{{role: "user", content: "hi"}}]}},
     keys: [],
     toolBudgets: [{{name: "reading", tools: ["read_file"], limit: 4}}],
@@ -2563,6 +2567,7 @@ eval(source);
         data = json.loads(completed.stdout)
         self.assertEqual(data["url"], "/api/agent/runs")
         self.assertEqual(data["body"]["clientRequestId"], "background-123")
+        self.assertEqual(data["body"]["activeSkillName"], "runtime-skill")
         self.assertEqual(data["body"]["toolBudgets"][0]["limit"], 4)
         self.assertEqual(data["body"]["contextLimit"], 128000)
 
