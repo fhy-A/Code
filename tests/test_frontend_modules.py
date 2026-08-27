@@ -4757,13 +4757,16 @@ process.stdout.write(JSON.stringify({{
             'class="tool-edit-target clickable-path" type="button" data-path="${escapeHtml(target)}"',
             render_source,
         )
-        self.assertIn('card.className = "path-file-card";', card_source)
+        self.assertIn('card.className = "path-file-card answer-local-path";', card_source)
         self.assertIn('card.setAttribute("data-path", p);', card_source)
         self.assertIn('card.setAttribute("data-tooltip", p);', card_source)
+        self.assertIn('card.setAttribute("data-line", String(line));', card_source)
         self.assertNotIn("card.title = p;", card_source)
         self.assertIn('name.textContent = el.textContent || "";', card_source)
         self.assertIn("el.replaceWith(card);", card_source)
         self.assertLess(card_source.index('card.setAttribute("data-path", p);'), card_source.index("el.replaceWith(card);"))
+        self.assertIn("if (isAnswerLocalPath) maybeRenderFileCard(el, p, projectRoot);", APP_SOURCE)
+        self.assertIn("else openToolReferencedPath(p, projectRoot, line);", APP_SOURCE)
 
         self.assertIn(
             'const EDIT_AUTHORIZATION_PATH_IDENTITY = Object.freeze({',
@@ -10335,15 +10338,23 @@ out.absFwd = md.isAbsolutePath('/C:/Users/a.txt');
 out.absUnc = md.isAbsolutePath('//server/share/a.txt');
 out.absPosix = md.isAbsolutePath('/Users/me/a.txt');
 out.notAbs = md.isAbsolutePath('src/a.js');
+out.clickAbs = md.isClickablePath('C:\\demo\\中文 folder\\a file.js');
+out.clickRel = md.isClickablePath('src/a.js');
+out.clickBare = md.isClickablePath('server.py');
+out.normalizedDrive = md.normalizeAbsolutePath('c:\\demo\\src\\..\\中文 folder\\a file.js');
+out.normalizedFwdDrive = md.normalizeAbsolutePath('/C:/demo/./src/a.js');
+out.normalizedUnc = md.normalizeAbsolutePath('\\\\server\\share\\folder\\..\\a.txt');
+out.normalizedRelative = md.normalizeAbsolutePath('output/tmp/a.txt');
 out.aliasFwdDrive = md.pathAlias('/C:/demo/src/a.js', 'C:/demo');
 out.aliasFwdOutside = md.pathAlias('/C:/Users/x/photo.jpg', 'C:/demo');
 out.aliasUncOutside = md.pathAlias('//server/share/x.png', 'C:/demo');
-out.refParenLine = md.parseLineRef('run.go (line 91)');
-out.refParen = md.parseLineRef('run.go(91)');
-out.refFullParen = md.parseLineRef('run.go（91）');
-out.refColon = md.parseLineRef('server.py:123');
-out.refColonSlash = md.parseLineRef('a/b/c.txt:12');
+out.refParenLine = md.parseLineRef('C:\\demo\\run.go (line 91)');
+out.refParen = md.parseLineRef('C:/demo/run.go(91)');
+out.refFullParen = md.parseLineRef('/C:/demo/run.go（91）');
+out.refColon = md.parseLineRef('C:\\demo\\server.py:123');
+out.refColonSlash = md.parseLineRef('C:/demo/a/b/c.txt:12');
 out.refNone = md.parseLineRef('src/a.js');
+out.refRelativeLine = md.parseLineRef('server.py:123');
 out.refNotPath = md.parseLineRef('time:10');
 out.refBad = md.parseLineRef('x(abc)');
 out.clsImage = md.classifyLocalPath('a.png');
@@ -10430,10 +10441,16 @@ const headingDup = feature.renderMarkdownLite('## A\n## A');
 out.headingDup = headingDup.includes('id="a-2"');
 const imgInline = feature.renderMarkdownLite('![alt](/api/file?path=x.png)');
 out.imgSlot = imgInline.includes('msg-inline-img-slot') && imgInline.includes('data-img-src=') && imgInline.includes('data-message-image-preview');
-const refHtml = feature.renderMarkdownLite('`server.py:123`');
-const codeRef = feature.renderMarkdownLite('```js\n// see server.py:123\nconst x = 1;\n```');
-out.refRendered = refHtml.includes('data-line="123"') && refHtml.includes('data-path="server.py"');
-out.codeBlockRef = codeRef.includes('data-line="123"') && codeRef.includes('clickable-path code-ref');
+const refHtml = feature.renderMarkdownLite('`C:\\demo\\server.py:123`');
+const relativeRefHtml = feature.renderMarkdownLite('`server.py:123` and `src/a.js`');
+const codeRef = feature.renderMarkdownLite('```js\nC:\\demo\\server.py:123\nconst x = 1;\n```');
+out.refRendered = refHtml.includes('data-line="123"') && refHtml.includes('data-path="C:/demo/server.py"');
+out.relativeRefPlain = !relativeRefHtml.includes('clickable-path') && !relativeRefHtml.includes('data-path=');
+out.codeBlockRef = codeRef.includes('data-line="123"') && codeRef.includes('clickable-path') && codeRef.includes('answer-local-path') && codeRef.includes('code-ref');
+const absoluteLocalLink = holder.renderer.link({href: 'C:/demo/中文 folder/a file.js', text: 'a file.js', tokens: [{text: 'a file.js'}]});
+const relativeLocalLink = holder.renderer.link({href: 'src/a.js', text: 'src/a.js', tokens: [{text: 'src/a.js'}]});
+out.absoluteLocalLink = absoluteLocalLink.includes('answer-local-path') && absoluteLocalLink.includes('data-path="C:/demo/中文 folder/a file.js"') && !absoluteLocalLink.includes('target="_blank"');
+out.relativeLocalLinkPlain = !relativeLocalLink.includes('<a') && !relativeLocalLink.includes('clickable-path') && !relativeLocalLink.includes('target="_blank"');
 // R009 菜单模块执行级
 const lcm = window.Code.features.linkContextMenu;
 const menuLog = [];
@@ -10501,15 +10518,23 @@ process.stdout.write(JSON.stringify(out));
         self.assertTrue(data["absUnc"])
         self.assertTrue(data["absPosix"])
         self.assertFalse(data["notAbs"])
+        self.assertTrue(data["clickAbs"])
+        self.assertFalse(data["clickRel"])
+        self.assertFalse(data["clickBare"])
+        self.assertEqual(data["normalizedDrive"], "C:/demo/中文 folder/a file.js")
+        self.assertEqual(data["normalizedFwdDrive"], "C:/demo/src/a.js")
+        self.assertEqual(data["normalizedUnc"], "//server/share/a.txt")
+        self.assertEqual(data["normalizedRelative"], "")
         self.assertEqual(data["aliasFwdDrive"], "src/a.js")
         self.assertEqual(data["aliasFwdOutside"], "photo.jpg")
         self.assertEqual(data["aliasUncOutside"], "x.png")
-        self.assertEqual(data["refParenLine"], {"path": "run.go", "line": 91})
-        self.assertEqual(data["refParen"], {"path": "run.go", "line": 91})
-        self.assertEqual(data["refFullParen"], {"path": "run.go", "line": 91})
-        self.assertEqual(data["refColon"], {"path": "server.py", "line": 123})
-        self.assertEqual(data["refColonSlash"], {"path": "a/b/c.txt", "line": 12})
+        self.assertEqual(data["refParenLine"], {"path": "C:/demo/run.go", "line": 91})
+        self.assertEqual(data["refParen"], {"path": "C:/demo/run.go", "line": 91})
+        self.assertEqual(data["refFullParen"], {"path": "C:/demo/run.go", "line": 91})
+        self.assertEqual(data["refColon"], {"path": "C:/demo/server.py", "line": 123})
+        self.assertEqual(data["refColonSlash"], {"path": "C:/demo/a/b/c.txt", "line": 12})
         self.assertIsNone(data["refNone"])
+        self.assertIsNone(data["refRelativeLine"])
         self.assertIsNone(data["refNotPath"])
         self.assertIsNone(data["refBad"])
         self.assertEqual(data["clsImage"], "image")
@@ -10543,7 +10568,10 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('8000', PREVIEW_SOURCE)
 
         self.assertTrue(data["refRendered"])
+        self.assertTrue(data["relativeRefPlain"])
         self.assertTrue(data["codeBlockRef"])
+        self.assertTrue(data["absoluteLocalLink"])
+        self.assertTrue(data["relativeLocalLinkPlain"])
         self.assertTrue(data["menuPathHtml"])
         self.assertTrue(data["menuBinaryHtml"])
         self.assertTrue(data["menuLinkHtml"])
@@ -10558,6 +10586,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('scrollPreviewToLine', PREVIEW_SOURCE)
         self.assertIn('options.line', PREVIEW_SOURCE)
         self.assertIn('parseLineRef', MARKDOWN_SOURCE)
+        self.assertIn('normalizeAbsolutePath', MARKDOWN_SOURCE)
         self.assertIn('loadFile(fp, undefined, line && line > 0 ? { line } : {})', APP_SOURCE)
         self.assertIn('sb-path-tooltip', STYLE_SOURCE)
 
@@ -10657,9 +10686,11 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('.table-wrap', STYLE_SOURCE)
         self.assertIn('sb-img-shimmer', STYLE_SOURCE)
         self.assertIn('## 回答格式', APP_SOURCE)
-        self.assertIn('提及文件或图片路径时用行内代码包裹', APP_SOURCE)
         self.assertIn('[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]', APP_SOURCE)
         self.assertIn('标准 Markdown。', APP_SOURCE)
+        self.assertIn('本地文件、图片或目录', APP_SOURCE)
+        self.assertIn('完整规范化绝对路径', APP_SOURCE)
+        self.assertIn('工具参数仍使用项目相对路径', APP_SOURCE)
 
 
         # 源码级：app.js 别名/预览绑定 + markdown 域名逻辑
@@ -10671,6 +10702,69 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn("probe.onerror = () => { /* degrade: keep the text alias */ }", APP_SOURCE)
         self.assertIn("pathAlias,", MARKDOWN_SOURCE)
         self.assertIn("isImagePath,", MARKDOWN_SOURCE)
+
+    def test_final_answer_path_opening_is_absolute_only_and_keeps_tool_paths_separate(self):
+        menu_start = APP_SOURCE.index("// Right-click menus for links in final answers")
+        menu_end = APP_SOURCE.index("// One delegated tooltip overlay", menu_start)
+        menu_source = APP_SOURCE[menu_start:menu_end]
+        bind_start = APP_SOURCE.index("function bindClickablePaths()")
+        bind_end = APP_SOURCE.index("// ── Compact tool card labels", bind_start)
+        answer_source = APP_SOURCE[bind_start:bind_end]
+
+        self.assertIn("normalizeAbsolutePath", menu_source)
+        self.assertNotIn('projectRoot + "/" + fp', menu_source)
+        self.assertIn("normalizeAbsolutePath", answer_source)
+        self.assertNotIn('projectRoot + "/" + fp', answer_source)
+        self.assertIn('classList.contains("answer-local-path")', answer_source)
+        self.assertIn("openToolReferencedPath", answer_source)
+        self.assertIn("openReferencedPath", answer_source)
+        self.assertIn("if (!fp) return;", answer_source)
+        self.assertIn('loadFile(fp, undefined, line && line > 0 ? { line } : {})', answer_source)
+        self.assertIn('apiJson("/api/open-file"', answer_source)
+
+    def test_final_answer_path_router_rejects_relative_and_outside_targets(self):
+        open_start = APP_SOURCE.index("function openReferencedPath(")
+        open_end = APP_SOURCE.index("// B: inline thumbnail", open_start)
+        root_start = APP_SOURCE.index("function isOutOfRootPath(", open_end)
+        root_end = APP_SOURCE.index("function maybeRenderFileCard(", root_start)
+        source = APP_SOURCE[open_start:open_end] + APP_SOURCE[root_start:root_end]
+        script = f"""
+global.window = {{Code: {{ui: {{}}}}}};
+require("./src/core/namespace.js");
+require("./src/ui/markdown.js");
+const loads = [];
+const opens = [];
+const loadFile = (path, encoding, options) => {{ loads.push({{path, options: options || null}}); return Promise.resolve(); }};
+const apiJson = (path, options) => {{ opens.push({{path, body: JSON.parse(options.body)}}); return Promise.resolve(); }};
+eval({json.dumps(source)});
+const root = "C:/demo root/项目";
+openReferencedPath("src/a.js", root, 12);
+openReferencedPath("server.py", root, 12);
+openReferencedPath("output/tmp/", root);
+openReferencedPath("C:/outside/a.js", root, 9);
+openReferencedPath("C:/demo root/项目/src/../src/中文 file.js", root, 7);
+openReferencedPath("C:/demo root/项目/archive.zip", root);
+openReferencedPath("C:/demo root/项目/folder", root);
+openToolReferencedPath("src/tool.js", root, 3);
+process.stdout.write(JSON.stringify({{loads, opens}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["loads"],
+            [
+                {"path": "C:/demo root/项目/src/中文 file.js", "options": {"line": 7}},
+                {"path": "C:/demo root/项目/folder", "options": {}},
+                {"path": "C:/demo root/项目/src/tool.js", "options": {"line": 3}},
+            ],
+        )
+        self.assertEqual(
+            data["opens"],
+            [{"path": "/api/open-file", "body": {"path": "C:/demo root/项目/archive.zip"}}],
+        )
 
     def test_external_favicon_binding_uses_same_origin_and_keeps_glyph_on_failure(self):
         start = APP_SOURCE.index("const _FAVICON_RETRY_DELAY_MS")
@@ -10942,7 +11036,7 @@ const image = new FakeElement("image", {{"data-path": "preview.png", title: "pre
 const document = {{
   body: {{appendChild(node) {{ overlays.push(node); }}}},
   querySelectorAll(selector) {{
-    if (selector !== "a.ext-link, .path-file-card, .path-image-card") throw new Error("unexpected selector");
+    if (selector !== "a.ext-link, .path-file-card, .path-image-card, .answer-local-path, .answer-local-image") throw new Error("unexpected selector");
     return [external, file, image];
   }},
   addEventListener(type, handler) {{ (documentListeners[type] ||= []).push(handler); }},
@@ -13717,8 +13811,10 @@ process.stdout.write(JSON.stringify({
   diff: feature.renderer.code({text: "+line", lang: "diff"}),
   pathCode: feature.renderer.codespan({text: "C:/work/a.py"}),
   plainCode: feature.renderer.codespan({text: "value"}),
-  link: feature.renderer.link({href: "/docs", text: "docs", tokens: [{text: "docs"}]}),
-  localImage: feature.renderer.image({href: "assets/demo.png", text: "local", title: null}),
+  link: feature.renderer.link({href: "https://example.test/docs", text: "docs", tokens: [{text: "docs"}]}),
+  relativeLink: feature.renderer.link({href: "docs/readme", text: "readme", tokens: [{text: "readme"}]}),
+  localImage: feature.renderer.image({href: "C:/work/assets/demo.png", text: "local", title: null}),
+  relativeImage: feature.renderer.image({href: "assets/demo.png", text: "relative", title: null}),
   remoteImage: feature.renderer.image({href: "https://example.test/demo.png", text: "remote", title: null}),
   rendered: feature.renderMarkdownLite(markdownInput),
   parsedSource,
@@ -13749,12 +13845,15 @@ process.stdout.write(JSON.stringify({
         self.assertIn('class="line-no">1</span>', data["code"])
         self.assertIn('class="ansi-block"', data["terminal"])
         self.assertEqual(data["diff"], "<diff>+line</diff>")
-        self.assertIn('class="clickable-path"', data["pathCode"])
+        self.assertIn('class="clickable-path answer-local-path"', data["pathCode"])
         self.assertEqual(data["plainCode"], "<code>value</code>")
         self.assertIn('target="_blank" rel="noopener"', data["link"])
-        self.assertIn('/api/file?path=assets%2Fdemo.png&amp;raw=1', data["localImage"])
+        self.assertEqual(data["relativeLink"], '<span class="local-link-text">readme</span>')
+        self.assertIn('/api/file?path=C%3A%2Fwork%2Fassets%2Fdemo.png&amp;raw=1', data["localImage"])
+        self.assertIn('data-path="C:/work/assets/demo.png"', data["localImage"])
         self.assertIn('class="msg-inline-img"', data["localImage"])
-        self.assertIn('class="msg-inline-img-slot"', data["localImage"])
+        self.assertIn('class="msg-inline-img-slot answer-local-image"', data["localImage"])
+        self.assertEqual(data["relativeImage"], "<code>assets/demo.png</code>")
         self.assertIn('src="https://example.test/demo.png"', data["remoteImage"])
         self.assertIn("Heading\n===", data["parsedSource"])
         self.assertIn("\n---\n", data["parsedSource"])
@@ -13990,13 +14089,13 @@ process.stdout.write(JSON.stringify({{
             "vertical-align:middle",
         ):
             self.assertIn(preserved, image_style)
-        self.assertIn('card.className = "path-file-card";', APP_SOURCE)
-        self.assertIn('card.className = "path-image-card";', APP_SOURCE)
+        self.assertIn('card.className = "path-file-card answer-local-path";', APP_SOURCE)
+        self.assertIn('card.className = "path-image-card answer-local-path";', APP_SOURCE)
         self.assertGreaterEqual(APP_SOURCE.count('card.setAttribute("data-tooltip", p);'), 2)
         self.assertGreaterEqual(APP_SOURCE.count('card.setAttribute("data-path", p);'), 2)
         self.assertNotIn("card.title = p;", APP_SOURCE)
         self.assertIn("card.addEventListener(\"click\"", APP_SOURCE)
-        self.assertIn("openReferencedPath(p, projectRoot);", APP_SOURCE)
+        self.assertIn("openReferencedPath(p, projectRoot, line);", APP_SOURCE)
         self.assertIn("showLinkContextMenu", APP_SOURCE)
 
     def test_markdown_cjk_bare_url_boundaries_preserve_markdown_regions(self):

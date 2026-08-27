@@ -16834,6 +16834,36 @@ const test = base.test.extend({
                 text: "large-preview.txt",
               })}</p>`;
             }
+            if (text.startsWith("H4 absolute large text `")) {
+              const inlineContext = {
+                parser: {
+                  parseInline(tokens) {
+                    return (tokens || []).map((token) => String(token?.text || "")).join("");
+                  },
+                },
+              };
+              const renderFixtureLine = (line) => {
+                let output = "";
+                let cursor = 0;
+                const tokenPattern = /`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+                for (const match of line.matchAll(tokenPattern)) {
+                  output += line.slice(cursor, match.index);
+                  if (match[1] !== undefined) {
+                    output += renderer.codespan.call(renderer, { text: match[1] });
+                  } else {
+                    output += renderer.link.call(inlineContext, {
+                      href: match[3],
+                      text: match[2],
+                      title: null,
+                      tokens: [{ type: "text", text: match[2] }],
+                    });
+                  }
+                  cursor = match.index + match[0].length;
+                }
+                return `<p>${output}${line.slice(cursor)}</p>`;
+              };
+              return text.split(/\n{2,}/).map(renderFixtureLine).join("");
+            }
             const inlineContext = {
               parser: {
                 parseInline(tokens) {
@@ -25307,53 +25337,13 @@ async function exerciseStructuredRichText(h4, runtime) {
     hasText: "普通列表项不应获得任务状态",
   })).toHaveCount(1);
 
-  const fileCards = assistant.locator('[class~="path-file-card"]');
-  await expect(fileCards).toHaveCount(2);
-  expect(await fileCards.evaluateAll((cards) => cards.map((card) => {
-    const style = getComputedStyle(card);
-    return {
-      name: card.querySelector(".path-file-name")?.textContent?.trim(),
-      title: card.getAttribute("title"),
-      tooltip: card.getAttribute("data-tooltip"),
-      path: card.getAttribute("data-path"),
-      icon: card.querySelectorAll(".path-file-icon svg").length,
-      backgroundColor: style.backgroundColor,
-      borderWidth: style.borderWidth,
-      borderRadius: style.borderRadius,
-      padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
-      verticalAlign: style.verticalAlign,
-    };
-  }))).toEqual([
-    {
-      name: "package.json",
-      title: null,
-      tooltip: "package.json",
-      path: "package.json",
-      icon: 1,
-      backgroundColor: "rgba(0, 0, 0, 0)",
-      borderWidth: "0px",
-      borderRadius: "0px",
-      padding: ["0px", "1px", "0px", "0px"],
-      verticalAlign: "baseline",
-    },
-    {
-      name: "README.md",
-      title: null,
-      tooltip: "README.md",
-      path: "README.md",
-      icon: 1,
-      backgroundColor: "rgba(0, 0, 0, 0)",
-      borderWidth: "0px",
-      borderRadius: "0px",
-      padding: ["0px", "1px", "0px", "0px"],
-      verticalAlign: "baseline",
-    },
-  ]);
+  await expect(assistant.locator('[class~="path-file-card"]')).toHaveCount(0);
+  await expect(assistant.locator(".clickable-path")).toHaveCount(0);
   for (const expectedPath of ["package.json", "README.md"]) {
-    await fileCards.filter({ hasText: expectedPath }).hover();
-    await expect(page.locator(".sb-path-tooltip")).toHaveCount(1);
-    await expect(page.locator(".sb-path-tooltip")).toBeVisible();
-    await expect(page.locator(".sb-path-tooltip")).toHaveText(expectedPath);
+    const relativeCode = assistant.locator("code").filter({ hasText: expectedPath });
+    await expect(relativeCode).toHaveCount(1);
+    await expect(relativeCode).toHaveText(expectedPath);
+    await expect(relativeCode).not.toHaveAttribute("data-path", /.+/);
   }
 
   const table = assistant.locator(".table-wrap table");
@@ -25422,7 +25412,7 @@ async function exerciseStructuredRichText(h4, runtime) {
     taskStates: ["checked", "unchecked"],
     taskControlsReadOnly: true,
     nestedListDepth: 2,
-    lightweightFileCards: ["package.json", "README.md"],
+    relativeLocalReferencesPlain: ["package.json", "README.md"],
     tableAlignments: ["left", "center", "right"],
     desktopPageOverflow: false,
     mobilePageOverflow: false,
@@ -25436,14 +25426,16 @@ async function exerciseStructuredRichText(h4, runtime) {
 
 async function exerciseLargeTextPreview(h4, runtime) {
   const { page } = h4;
-  const largePath = "large-preview.txt";
+  const largePath = "H4 中文 large preview.txt";
+  const absolutePath = path.resolve(h4.host.projectDir, largePath).replaceAll("\\", "/");
+  const outsidePath = path.resolve(h4.host.projectDir, "..", "H4 outside answer.txt").replaceAll("\\", "/");
   const prefix = [
     "H4_LARGE_PREVIEW_START",
     ...Array.from({ length: 8200 }, (_, index) => `H4 line ${index + 1}`),
   ].join("\n");
   const content = `${prefix}\n${"x".repeat(1_100_000)}\nH4_LARGE_PREVIEW_END`;
   expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(1024 * 1024);
-  await fs.writeFile(path.join(h4.host.projectDir, largePath), content, "utf8");
+  await fs.writeFile(absolutePath, content, "utf8");
 
   await h4.open(runtime);
   await assertFrontendRuntime(page, runtime);
@@ -25488,7 +25480,16 @@ async function exerciseLargeTextPreview(h4, runtime) {
     title: `H4 large text preview ${runtime}`,
     messages: [
       { role: "user", content: "H4 large text preview seed", _time: "2026-08-24T05:10:00Z" },
-      { role: "assistant", content: "H4 large text preview `large-preview.txt`", _time: "2026-08-24T05:10:01Z" },
+      {
+        role: "assistant",
+        content: [
+          `H4 absolute large text \`${absolutePath}:37\``,
+          `Legacy relative \`${largePath}\` and \`server.py:123\` and \`output/tmp/\``,
+          `Outside absolute \`${outsidePath}\``,
+          "External [example](https://example.com/docs)",
+        ].join("\n\n"),
+        _time: "2026-08-24T05:10:01Z",
+      },
     ],
   });
   expect(created.status).toBe(201);
@@ -25503,16 +25504,40 @@ async function exerciseLargeTextPreview(h4, runtime) {
     ).click();
   }
   await expect(activeSession).toHaveCount(1);
-  const answerFile = page.locator(
-    `#messages article.msg.assistant [class~="path-file-card"][data-path="${largePath}"]`,
-  );
+  const answer = page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4 absolute large text",
+  });
+  const answerFile = answer.locator('[class~="path-file-card"]').filter({ hasText: largePath });
   await expect(answerFile).toHaveCount(1);
+  await expect(answerFile).toHaveAttribute("data-path", absolutePath);
+  await expect(answerFile).toHaveAttribute("data-tooltip", absolutePath);
+  await expect(answerFile).toHaveAttribute("data-line", "37");
+  const relativeCodes = await answer.locator("code:not(.clickable-path)").evaluateAll(
+    (elements) => elements.map((element) => element.textContent.trim()),
+  );
+  expect(relativeCodes).toEqual(expect.arrayContaining([largePath, "server.py:123", "output/tmp/"]));
+  expect(relativeCodes.filter((value) => [largePath, "server.py:123", "output/tmp/"].includes(value))).toHaveLength(3);
+  await expect(answer.locator(`.clickable-path[data-path="${outsidePath}"]`)).toHaveCount(1);
+  await expect(answer.locator('a.ext-link[href="https://example.com/docs"]')).toHaveCount(1);
+  await expect(answer.locator('a.ext-link[href="https://example.com/docs"]')).toHaveAttribute("target", "_blank");
+  const localOpenCount = () => h4.loopbackRequests.filter((request) => (
+    request.path.startsWith("/api/file") || request.path === "/api/open-file"
+  )).length;
+  const previewRequestsBeforeOutside = localOpenCount();
+  await answer.locator(`.clickable-path[data-path="${outsidePath}"]`).click();
+  expect(localOpenCount()).toBe(previewRequestsBeforeOutside);
   await answerFile.click();
   const answerProjection = await assertInternalPreview("answer-link");
 
   await h4.reloadRuntime(runtime);
   if (runtime === "classic") await assertDirectClassicEntry(page);
   const answerReloadProjection = await assertInternalPreview("answer-link-reload");
+  const restoredAnswer = page.locator("#messages article.msg.assistant").filter({
+    hasText: "H4 absolute large text",
+  });
+  const restoredFile = restoredAnswer.locator('[class~="path-file-card"]').filter({ hasText: largePath });
+  await expect(restoredFile).toHaveAttribute("data-path", absolutePath);
+  await expect(restoredFile).toHaveAttribute("data-line", "37");
   expect(h4.loopbackRequests.filter(
     (request) => request.method === "POST" && request.path === "/api/open-file",
   )).toEqual([]);
@@ -25534,7 +25559,12 @@ async function exerciseLargeTextPreview(h4, runtime) {
   h4.evidence(`${runtime}-large-text-preview`, {
     sessionId: idHash(created.body.id),
     fullBytes: Buffer.byteLength(content, "utf8"),
-    sources: ["file-tree", "answer-link"],
+    sources: ["file-tree", "absolute-answer-link"],
+    absoluteIdentity: absolutePath,
+    line: 37,
+    relativeReferencesClickable: false,
+    outsideAbsoluteOpened: false,
+    externalHttpsPreserved: true,
     lineCounts: [
       treeProjection.lineCount,
       restoredProjection.lineCount,

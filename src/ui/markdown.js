@@ -68,9 +68,49 @@
     return out;
   }
 
+  function normalizePathSegments(parts, minimumDepth = 0) {
+    const normalized = [];
+    for (const part of parts) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (normalized.length <= minimumDepth) return null;
+        normalized.pop();
+        continue;
+      }
+      normalized.push(part);
+    }
+    return normalized;
+  }
+
+  /**
+   * Canonical identity for local references emitted in final answers.
+   * Relative/bare paths are deliberately rejected instead of being resolved
+   * against the current project. Windows drive, /C:/, UNC and POSIX absolute
+   * forms are normalized to forward slashes without touching the filesystem.
+   */
+  function normalizeAbsolutePath(value) {
+    const raw = String(value || "").trim();
+    if (!raw || /[\u0000-\u001f]/.test(raw)) return "";
+    const path = raw.replace(/\\/g, "/");
+    const drive = path.match(/^\/?([A-Za-z]):\/(.*)$/);
+    if (drive) {
+      const parts = normalizePathSegments(drive[2].split("/"));
+      return parts ? `${drive[1].toUpperCase()}:/${parts.join("/")}` : "";
+    }
+    if (path.startsWith("//")) {
+      const parts = normalizePathSegments(path.slice(2).split("/"), 2);
+      if (!parts || parts.length < 2) return "";
+      return `//${parts.join("/")}`;
+    }
+    if (path.startsWith("/")) {
+      const parts = normalizePathSegments(path.slice(1).split("/"));
+      return parts ? `/${parts.join("/")}` : "";
+    }
+    return "";
+  }
+
   function isClickablePath(value) {
-    const path = String(value || "").trim();
-    return /\.\w{1,8}$/.test(path) || /^[\/\\]|[A-Za-z]:[\/\\]/.test(path);
+    return Boolean(normalizeAbsolutePath(value));
   }
 
   const PREVIEW_IMAGE_EXT = Object.freeze(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"]);
@@ -116,8 +156,9 @@
         line = Number(colon[2]);
       }
     }
-    if (!line || !isClickablePath(path)) return null;
-    return { path, line };
+    const normalizedPath = normalizeAbsolutePath(path);
+    if (!line || !normalizedPath) return null;
+    return { path: normalizedPath, line };
   }
 
   function isImagePath(path) {
@@ -131,11 +172,7 @@
    * Everything else (relative paths, plain names) is project-scoped.
    */
   function isAbsolutePath(path) {
-    // Any leading slash/backslash is treated as absolute (drive letters,
-    // /C:/... variants, UNC shares and POSIX-style paths); bare relative
-    // paths never start with a separator.
-    const p = String(path || "").trim();
-    return /^[A-Za-z]:[\\/]/.test(p) || /^[\\/]/.test(p);
+    return Boolean(normalizeAbsolutePath(path));
   }
 
   /**
@@ -147,16 +184,13 @@
   function pathAlias(path, projectRoot) {
     const p = String(path || "").trim();
     if (!p) return p;
-    if (!isAbsolutePath(p)) return p;
-    const root = String(projectRoot || "").replace(/[\\/]+$/, "").replace(/\\/g, "/");
-    let normalized = p.replace(/\\/g, "/");
-    // Normalize the forward-slash drive variant (/C:/... → C:/...) before
-    // comparing against the project root.
-    if (/^\/[A-Za-z]:/.test(normalized)) normalized = normalized.slice(1);
+    const normalized = normalizeAbsolutePath(p);
+    if (!normalized) return p;
+    const root = normalizeAbsolutePath(projectRoot);
     if (root && normalized.toLowerCase().startsWith(root.toLowerCase() + "/")) {
       return normalized.slice(root.length + 1);
     }
-    return p.split(/[\\/]/).pop() || p;
+    return normalized.split("/").pop() || normalized;
   }
 
   const SYNTAX_PATTERNS = Object.freeze({
@@ -583,21 +617,27 @@
       const escaped = escapeHtml(source);
       const ref = parseLineRef(source);
       if (ref) {
-        return `<code class="clickable-path" data-path="${escapeHtml(ref.path)}" data-line="${ref.line}" title="Click to open">${escaped}</code>`;
+        return `<code class="clickable-path answer-local-path" data-path="${escapeHtml(ref.path)}" data-line="${ref.line}" title="Click to open">${escaped}</code>`;
       }
-      if (!isClickablePath(source)) return `<code>${escaped}</code>`;
-      return `<code class="clickable-path" data-path="${escapeHtml(source.trim())}" title="Click to open">${escaped}</code>`;
+      const path = normalizeAbsolutePath(source);
+      if (!path) return `<code>${escaped}</code>`;
+      return `<code class="clickable-path answer-local-path" data-path="${escapeHtml(path)}" title="Click to open">${escaped}</code>`;
     };
 
     renderer.link = function renderLink(token) {
-      const href = escapeHtml(String(token.href || ""));
+      const rawHref = String(token.href || "");
+      const href = escapeHtml(rawHref);
       let title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
       let inner = renderInlineTokens(this, token);
+      if (!/^https?:\/\//i.test(rawHref)) {
+        const localPath = normalizeAbsolutePath(rawHref);
+        if (!localPath) return `<span class="local-link-text">${inner}</span>`;
+        return `<a class="clickable-path answer-local-path local-path-link" href="#" data-path="${escapeHtml(localPath)}"${title}>${inner}</a>`;
+      }
       // C: bare URL (link text equals the URL) shows the domain alias. The
       // full URL is shown by the custom sb-path-tooltip instead of the native
       // title (which duplicated it); an explicit markdown title ([text](url
       // "title")) is still kept because the author wrote it.
-      const rawHref = String(token.href || "");
       const rawText = String(token.text || "");
       if (rawText === rawHref && /^https?:\/\//i.test(rawHref)) {
         try {
@@ -616,17 +656,23 @@
       const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
       const alt = escapeHtml(token.text || "");
       let src;
+      let localPath = "";
       if (/^(https?:|data:|\/api\/)/i.test(source)) {
         src = source;
       } else {
-        const imagePath = source.replace(/\\/g, "/").replace(/^\.?\/?/, "");
-        const extension = (imagePath.split(".").pop() || "").toLowerCase();
+        localPath = normalizeAbsolutePath(source);
+        if (!localPath) return `<code>${escapeHtml(source)}</code>`;
+        const extension = (localPath.split(".").pop() || "").toLowerCase();
         if (!/^(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(extension)) {
-          return `<img src="${escapeHtml(source)}" alt="${alt}"${title}>`;
+          return `<code>${escapeHtml(localPath)}</code>`;
         }
-        src = `/api/file?path=${encodeURIComponent(imagePath)}&raw=1`;
+        src = `/api/file?path=${encodeURIComponent(localPath)}&raw=1`;
       }
-      return `<span class="msg-inline-img-slot" data-img-src="${escapeHtml(src)}" data-img-name="${escapeHtml(source.split("/").pop() || alt)}"><img src="${escapeHtml(src)}" alt="${alt}"${title} loading="lazy" class="msg-inline-img" data-message-image-preview></span>`;
+      const localClass = localPath ? " answer-local-image" : "";
+      const localAttrs = localPath
+        ? ` data-path="${escapeHtml(localPath)}" data-tooltip="${escapeHtml(localPath)}"`
+        : "";
+      return `<span class="msg-inline-img-slot${localClass}"${localAttrs} data-img-src="${escapeHtml(src)}" data-img-name="${escapeHtml((localPath || source).split("/").pop() || alt)}"><img src="${escapeHtml(src)}" alt="${alt}"${title} loading="lazy" class="msg-inline-img" data-message-image-preview></span>`;
     };
 
     renderer.code = function renderCodeBlock({ text, lang }) {
@@ -641,7 +687,7 @@
         const ref = parseLineRef(source);
         const highlighted = patterns ? highlightSyntax(source, lang) : escapeHtml(source);
         if (ref) {
-          return `<span class="line-no">${index + 1}</span><code class="line-code"><code class="clickable-path code-ref" data-path="${escapeHtml(ref.path)}" data-line="${ref.line}" title="Click to open">${highlighted}</code></code>`;
+          return `<span class="line-no">${index + 1}</span><code class="line-code"><code class="clickable-path answer-local-path code-ref" data-path="${escapeHtml(ref.path)}" data-line="${ref.line}" title="Click to open">${highlighted}</code></code>`;
         }
         return `<span class="line-no">${index + 1}</span><code class="line-code">${highlighted}</code>`;
       }).join("");
@@ -742,6 +788,8 @@
     pathAlias,
     isImagePath,
     isAbsolutePath,
+    isClickablePath,
+    normalizeAbsolutePath,
     parseLineRef,
     classifyLocalPath,
     faviconHostCandidates,

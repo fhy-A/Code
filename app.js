@@ -1725,7 +1725,7 @@ const defaultSystemPrompt = `
 - 模糊指令先确认范围；信息够就动手，不反复推理
 
 ## 回答格式
-提及文件或图片路径时用行内代码包裹（如 \`src/ui/markdown.js\`）；URL 用完整 https:// 或标准 [文本](url) 链接；提醒用 GitHub 警告语法 >[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]；表格、代码块、列表用标准 Markdown。引用文件或图片路径前若不确定其存在，先 glob_files 或 list_files 确认，禁止编造不存在的路径。
+引用本地文件、图片或目录时，只有完整规范化绝对路径才可使用 Markdown 链接或行内代码，可在路径后附 \`:行号\`；相对路径、裸文件名和 \`output/tmp/\` 等相对目录只能作为普通文本，禁止按当前工作目录猜测。显示标签可以简写，底层链接目标必须保留完整绝对路径。工具参数仍使用项目相对路径。URL 用完整 https:// 或标准 [文本](url) 链接；提醒用 GitHub 警告语法 >[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]；表格、代码块、列表用标准 Markdown。引用路径前若不确定其存在，先 glob_files 或 list_files 确认，禁止编造不存在的路径。
 
 ## 运行环境
 Windows + PowerShell。创建目录用 mkdir 或 python os.makedirs。
@@ -2144,7 +2144,7 @@ async function buildSystemPromptSnapshot(options = {}) {
     behaviorInstruction,
     environmentInstruction: environment.instruction,
     projectFoldersInstruction,
-    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。回复中可用 ![描述](路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
+    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。最终回答引用本地文件、图片或目录时必须使用完整规范化绝对路径，显示标签可以简写；相对路径和裸文件名不得作为可点击目标，也不得按 cwd 猜测。工具参数仍使用项目相对路径。回复中可用 ![描述](绝对路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
     delegationInstruction,
     responseLanguageInstruction,
     projectContextInstruction,
@@ -2647,16 +2647,15 @@ function bindExtLinkFavicons() {
 function bindLinkContextMenus() {
   const menuApi = window.Code?.features?.linkContextMenu;
   if (!menuApi?.showLinkContextMenu) return;
-  const showPathMenu = (event, path) => {
+  const showPathMenu = (event, path, line) => {
     event.preventDefault();
     const projectRoot = (els.projectRoot?.value || "").replace(/[\\/\\]+$/, "");
     const markdownApi = window.Code?.ui?.markdown;
-    const kind = markdownApi?.classifyLocalPath?.(path) || "text";
-    const outOfRoot = isOutOfRootPath(path, projectRoot);
-    const previewable = !outOfRoot && kind !== "binary";
-    const filename = String(path || "").split(/[\\/]/).pop() || "";
-    let fp = path;
-    if (!markdownApi?.isAbsolutePath?.(path)) { fp = projectRoot + "/" + fp; }
+    const fp = markdownApi?.normalizeAbsolutePath?.(path) || "";
+    if (!fp || isOutOfRootPath(fp, projectRoot)) return;
+    const kind = markdownApi?.classifyLocalPath?.(fp) || "text";
+    const previewable = kind !== "binary";
+    const filename = fp.split("/").pop() || "";
     menuApi.showLinkContextMenu({
       x: event.clientX,
       y: event.clientY,
@@ -2665,11 +2664,20 @@ function bindLinkContextMenus() {
       t: (key) => t(key) || key,
       copyText: (text) => { if (text) copyText(text).then((ok) => { if (ok) showToast(t("pathCopied"), "warning"); }).catch(() => showToast(t("copyFailed"), "error")); },
       callbacks: {
-        open: () => openReferencedPath(path, projectRoot),
+        open: () => openReferencedPath(fp, projectRoot, line),
         system: () => apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => showToast(t("openFailed"), "error")),
         reveal: () => apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp, reveal: true }) }).catch(() => showToast(t("openFailed"), "error")),
       },
     });
+  };
+  const showToolPathMenu = (event, path, line) => {
+    event.preventDefault();
+    const projectRoot = (els.projectRoot?.value || "").replace(/[\/\\]+$/, "");
+    const markdownApi = window.Code?.ui?.markdown;
+    const fp = markdownApi?.normalizeAbsolutePath?.(path)
+      || markdownApi?.normalizeAbsolutePath?.(`${projectRoot}/${String(path || "")}`)
+      || "";
+    if (fp) showPathMenu(event, fp, line);
   };
   const showLinkMenu = (event, url) => {
     event.preventDefault();
@@ -2685,11 +2693,22 @@ function bindLinkContextMenus() {
       },
     });
   };
-  document.querySelectorAll(".clickable-path").forEach((el) => {
-    el.addEventListener("contextmenu", (event) => showPathMenu(event, el.dataset.path || ""));
+  document.querySelectorAll(".answer-local-path, .answer-local-image").forEach((el) => {
+    el.addEventListener("contextmenu", (event) => showPathMenu(
+      event,
+      el.dataset.path || "",
+      el.dataset.line ? Number(el.dataset.line) : undefined,
+    ));
   });
-  document.querySelectorAll(".path-file-card, .path-image-card").forEach((el) => {
-    el.addEventListener("contextmenu", (event) => showPathMenu(event, el.getAttribute("data-path") || ""));
+  document.querySelectorAll(".clickable-path:not(.answer-local-path)").forEach((el) => {
+    el.addEventListener("contextmenu", (event) => showToolPathMenu(
+      event,
+      el.dataset.path || "",
+      el.dataset.line ? Number(el.dataset.line) : undefined,
+    ));
+  });
+  document.querySelectorAll(".path-file-card:not(.answer-local-path), .path-image-card:not(.answer-local-path)").forEach((el) => {
+    el.addEventListener("contextmenu", (event) => showToolPathMenu(event, el.getAttribute("data-path") || ""));
   });
   document.querySelectorAll("a.ext-link").forEach((el) => {
     el.addEventListener("contextmenu", (event) => showLinkMenu(event, el.getAttribute("href") || ""));
@@ -2702,7 +2721,7 @@ let _tooltipsBound = false;
 let _tooltipOverlay = null;
 let _tooltipTimer = null;
 function bindTooltips() {
-  document.querySelectorAll("a.ext-link, .path-file-card, .path-image-card").forEach((el) => {
+  document.querySelectorAll("a.ext-link, .path-file-card, .path-image-card, .answer-local-path, .answer-local-image").forEach((el) => {
     const nativeTitle = el.getAttribute("title") || "";
     const fallback = el.matches("a.ext-link")
       ? (el.getAttribute("href") || "")
@@ -2810,6 +2829,13 @@ function bindMessageImages() {
     img.addEventListener("error", () => {
       const src = slot.dataset.imgSrc || img.src || "";
       const name = slot.dataset.imgName || "file";
+      const localPath = slot.dataset.path || "";
+      if (localPath) {
+        const code = document.createElement("code");
+        code.textContent = localPath;
+        slot.replaceWith(code);
+        return;
+      }
       const link = document.createElement("a");
       link.className = "msg-img-fallback";
       link.href = src;
@@ -2823,25 +2849,31 @@ function bindMessageImages() {
 
 function bindClickablePaths() {
   document.querySelectorAll(".clickable-path").forEach((el) => {
-    const p = el.dataset.path;
-    if (!p) return;
+    const sourcePath = el.dataset.path;
+    if (!sourcePath) return;
     // A: short display alias (project-relative / file name outside the root);
     // the full path stays available on hover via a custom tooltip (native
     // title truncates long paths, so it is kept only as an accessibility
     // fallback while the custom overlay shows the complete text).
     const projectRoot = (els.projectRoot?.value || "").replace(/[\\/\\]+$/, "");
     const markdownApi = window.Code?.ui?.markdown;
-    const isAbsolute = markdownApi?.isAbsolutePath ? markdownApi.isAbsolutePath(p) : /^[A-Za-z]:[\\/\\]/.test(p);
+    const isAnswerLocalPath = el.classList.contains("answer-local-path");
+    const p = isAnswerLocalPath
+      ? (markdownApi?.normalizeAbsolutePath?.(sourcePath) || "")
+      : sourcePath;
+    if (!p) return;
     if (markdownApi?.pathAlias) {
       const alias = markdownApi.pathAlias(p, projectRoot);
       if (alias !== el.textContent) el.textContent = alias;
     }
     el.setAttribute("data-tooltip", p);
-    maybeRenderFileCard(el, p, projectRoot);
+    if (isAnswerLocalPath) maybeRenderFileCard(el, p, projectRoot);
     el.addEventListener("click", (e) => {
+      e.preventDefault();
       e.stopPropagation();
       const line = el.dataset.line ? Number(el.dataset.line) : undefined;
-      openReferencedPath(p, projectRoot, line);
+      if (isAnswerLocalPath) openReferencedPath(p, projectRoot, line);
+      else openToolReferencedPath(p, projectRoot, line);
     });
   });
 }
@@ -2851,12 +2883,11 @@ function bindClickablePaths() {
 // binary (exe/zip/pdf/docx/media...) → external system open via /api/open-file;
 // out-of-root or unreachable → keep the text alias, never open.
 function openReferencedPath(p, projectRoot, line) {
-  if (/^https?:\/\//i.test(p)) { window.open(p, "_blank"); return; }
   const markdownApi = window.Code?.ui?.markdown;
-  let fp = p;
-  if (!markdownApi?.isAbsolutePath?.(p)) { fp = projectRoot + "/" + fp; }
-  if (isOutOfRootPath(p, projectRoot)) return;
-  const kind = markdownApi?.classifyLocalPath?.(p) || "text";
+  const fp = markdownApi?.normalizeAbsolutePath?.(p) || "";
+  if (!fp) return;
+  if (isOutOfRootPath(fp, projectRoot)) return;
+  const kind = markdownApi?.classifyLocalPath?.(fp) || "text";
   if (kind === "binary") {
     apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
     return;
@@ -2864,15 +2895,24 @@ function openReferencedPath(p, projectRoot, line) {
   loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
 }
 
+function openToolReferencedPath(p, projectRoot, line) {
+  const markdownApi = window.Code?.ui?.markdown;
+  const fp = markdownApi?.normalizeAbsolutePath?.(p)
+    || markdownApi?.normalizeAbsolutePath?.(projectRoot + "/" + String(p || ""))
+    || "";
+  if (!fp) return;
+  openReferencedPath(fp, projectRoot, line);
+}
+
 // B: inline thumbnail preview card for image paths inside the project root.
 // The preview loads asynchronously (Image probe); on failure or out-of-root
 // paths the element keeps its plain text alias (no placeholder flash).
 function isOutOfRootPath(p, projectRoot) {
-  const isAbsolute = /^[A-Za-z]:[\\/\\]/.test(p) || p.startsWith("/") || p.startsWith("\\");
-  if (!isAbsolute) return false;
-  const rootNorm = projectRoot.replace(/\\/g, "/").toLowerCase();
-  const pNorm = p.replace(/\\/g, "/").toLowerCase();
-  return Boolean(rootNorm) && !pNorm.startsWith(rootNorm + "/");
+  const markdownApi = window.Code?.ui?.markdown;
+  const rootNorm = (markdownApi?.normalizeAbsolutePath?.(projectRoot) || "").toLowerCase();
+  const pNorm = (markdownApi?.normalizeAbsolutePath?.(p) || "").toLowerCase();
+  if (!rootNorm || !pNorm) return true;
+  return pNorm !== rootNorm && !pNorm.startsWith(rootNorm + "/");
 }
 
 function maybeRenderFileCard(el, p, projectRoot) {
@@ -2883,9 +2923,11 @@ function maybeRenderFileCard(el, p, projectRoot) {
   if (!markdownApi.isImagePath(p)) {
     // Non-image file card: type icon + file name; click opens the file.
     const card = document.createElement("span");
-    card.className = "path-file-card";
+    card.className = "path-file-card answer-local-path";
     card.setAttribute("data-path", p);
     card.setAttribute("data-tooltip", p);
+    const line = el.dataset.line ? Number(el.dataset.line) : undefined;
+    if (line && line > 0) card.setAttribute("data-line", String(line));
     const icon = document.createElement("span");
     icon.className = "path-file-icon";
     icon.setAttribute("aria-hidden", "true");
@@ -2901,7 +2943,7 @@ function maybeRenderFileCard(el, p, projectRoot) {
     name.textContent = el.textContent || "";
     card.addEventListener("click", (e) => {
       e.stopPropagation();
-      openReferencedPath(p, projectRoot);
+      openReferencedPath(p, projectRoot, line);
     });
     card.append(icon, name);
     el.replaceWith(card);
@@ -2910,7 +2952,7 @@ function maybeRenderFileCard(el, p, projectRoot) {
   const probe = new Image();
   probe.onload = () => {
     const card = document.createElement("span");
-    card.className = "path-image-card";
+    card.className = "path-image-card answer-local-path";
     card.setAttribute("data-path", p);
     card.setAttribute("data-tooltip", p);
     const img = document.createElement("img");
