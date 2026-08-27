@@ -1212,6 +1212,7 @@ const els = {
   activeRunBanner: document.getElementById("activeRunBanner"),
 
   authorizationPanel: document.getElementById("authorizationPanel"),
+  skillEvidencePanel: document.getElementById("skillEvidencePanel"),
 
   userInputPanel: document.getElementById("userInputPanel"),
 
@@ -1402,6 +1403,7 @@ const sessionNavigation = createSessionNavigation({
   recovery: {
     reconcilePersistedUserInputRequest,
     restoreAuthorizationRequest,
+    restoreSkillEvidenceRequest,
   },
   view: {
     beginSessionTransition: (sessionId) => goalFeature?.beginSessionTransition(sessionId) ?? null,
@@ -2147,6 +2149,7 @@ async function buildSystemPromptSnapshot(options = {}) {
   }, {
     capturedAt: environment.capturedAt,
     timeZone: environment.timeZone,
+    activeSkillName: explicitSkill || "",
     activeSkillNames,
   });
 }
@@ -2161,6 +2164,7 @@ async function getTaskSystemPrompt(ctx, options = {}) {
     () => buildSystemPromptSnapshot(options),
   );
   ctx.activeSkillNames = [...(snapshot.activeSkillNames || [])];
+  ctx.activeSkillName = String(snapshot.activeSkillName || "");
   return snapshot.prompt;
 }
 
@@ -4025,6 +4029,7 @@ function renderMessages() {
   longTextDisplayController?.setSession(state.sessionId);
   renderUserInputPanel();
   renderAuthorizationPanel();
+  renderSkillEvidencePanel();
   refreshSessionStatusSlot(state.sessionId);
 
   // Ensure state.messages reflects current session (syncs ctx.messages changes)
@@ -4577,13 +4582,33 @@ function resolveSessionStatusSlot(session) {
   const runState = getSessionRunState(session.id) || session.runState || {};
   const userInputRequest = getUserInputRequest(session.id) || runState.userInputRequest;
   const authorizationRequest = pendingAuthorizations(session.id)[0] || runState.authorizationRequest;
+  const skillEvidenceRequest = getSkillEvidenceRequest(session.id) || runState.skillEvidenceRequest;
+  const hasFullInteractionRequest = [
+    userInputRequest,
+    authorizationRequest,
+    skillEvidenceRequest,
+  ].some((request) => request && typeof request === "object");
+  const interactionState = hasFullInteractionRequest
+    ? ""
+    : new Set([
+      "waiting_user_input",
+      "waiting_authorization",
+      "waiting_skill_evidence",
+    ]).has(session.interactionState)
+      ? session.interactionState
+      : "";
   return resolveSessionStatus(session, {
     active,
-    waitingUserInput: userInputRequest?.status === "pending",
-    waitingAuthorization: authorizationRequest?.status === "pending",
+    waitingUserInput: userInputRequest?.status === "pending"
+      || interactionState === "waiting_user_input",
+    waitingAuthorization: authorizationRequest?.status === "pending"
+      || interactionState === "waiting_authorization",
+    waitingSkillEvidence: skillEvidenceRequest?.status === "pending"
+      || interactionState === "waiting_skill_evidence",
     streaming: isSessionStreaming(session.id),
     waitingUserInputLabel: t("sessionWaitingAnswer"),
     waitingAuthorizationLabel: t("sessionWaitingConfirmation"),
+    waitingSkillEvidenceLabel: t("sessionWaitingSkillEvidence"),
     runningLabel: t("modelRunning"),
     unreadLabel: t("unreadMessage"),
     translate: t,
@@ -5193,6 +5218,7 @@ async function refreshSessions() {
             { notify: session.id === state.sessionId },
           );
           restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
+          restoreSkillEvidenceRequest(session.id, session.runState?.skillEvidenceRequest);
         } else {
           session.runState = { ...getSessionRunState(session.id) };
         }
@@ -7965,6 +7991,146 @@ function restoreUserInputRequest(sessionId, savedRequest) {
   return restored;
 }
 
+function skillEvidenceRequestKey(request) {
+  return `${String(request?.agentRunId || "")}:${String(request?.gateId || "")}`;
+}
+
+function serializeSkillEvidenceRequest(request) {
+  if (!request) return null;
+  return {
+    version: 1,
+    sessionId: String(request.sessionId || ""),
+    agentRunId: String(request.agentRunId || ""),
+    gateId: String(request.gateId || ""),
+    activeSkill: request.activeSkill && typeof request.activeSkill === "object"
+      ? { ...request.activeSkill }
+      : {},
+    evidenceStatus: String(request.evidenceStatus || "partial"),
+    missing: Array.isArray(request.missing)
+      ? request.missing.map((item) => ({ ...item }))
+      : [],
+    status: "pending",
+    createdAt: String(request.createdAt || new Date().toISOString()),
+  };
+}
+
+function getSkillEvidenceRequest(sessionId = state.sessionId) {
+  return sessionId ? state.skillEvidenceRequests[sessionId] || null : null;
+}
+
+function restoreSkillEvidenceRequest(sessionId, savedRequest) {
+  if (!sessionId || savedRequest?.status !== "pending" || !savedRequest?.gateId) {
+    if (sessionId) delete state.skillEvidenceRequests[sessionId];
+    return null;
+  }
+  const existing = state.skillEvidenceRequests[sessionId];
+  if (existing?.gateId === savedRequest.gateId) return existing;
+  const restored = JSON.parse(JSON.stringify(savedRequest));
+  restored.sessionId = sessionId;
+  restored.status = "pending";
+  restored._finishing = false;
+  state.skillEvidenceRequests[sessionId] = restored;
+  return restored;
+}
+
+function renderSkillEvidencePanel() {
+  const panel = els.skillEvidencePanel;
+  if (!panel) return;
+  const request = getSkillEvidenceRequest();
+  if (!request || request.status !== "pending") {
+    panel.classList.add("hidden");
+    panel.innerHTML = "";
+    return;
+  }
+  const missing = (request.missing || []).map((item) => (
+    `${String(item.tool || "tool")} ${Number(item.succeededCount || 0)}/${Number(item.minCount || 1)}`
+  )).join(" · ");
+  const disabled = request._finishing ? "disabled" : "";
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <strong>${escapeHtml(t("skillEvidenceTitle"))}</strong>
+    <p>${escapeHtml(t("skillEvidenceBody"))}</p>
+    <p>${escapeHtml(t("skillEvidenceMissing", { items: missing }))}</p>
+    <div class="skill-evidence-actions">
+      <button type="button" data-skill-evidence-action="cancel" ${disabled}>${escapeHtml(t("skillEvidenceCancel"))}</button>
+      <button type="button" data-skill-evidence-action="skip" ${disabled}>${escapeHtml(t("skillEvidenceSkip"))}</button>
+      <button type="button" data-skill-evidence-action="continue" ${disabled}>${escapeHtml(request._finishing ? t("skillEvidenceSubmitting") : t("skillEvidenceContinue"))}</button>
+    </div>`;
+}
+
+async function finishSkillEvidenceRequest(request, action) {
+  if (!request || request.status !== "pending" || request._finishing) return null;
+  if (!agentRuntime?.submitSkillEvidenceAction) {
+    throw new Error("Skill evidence runtime is unavailable");
+  }
+  request._finishing = true;
+  renderSkillEvidencePanel();
+  const actionId = `skill-evidence:${request.gateId}:${action}`;
+  try {
+    const response = await agentRuntime.submitSkillEvidenceAction(request.agentRunId, {
+      gateId: request.gateId,
+      action,
+      actionId,
+    });
+    request.status = "resolved";
+    delete state.skillEvidenceRequests[request.sessionId];
+    const key = skillEvidenceRequestKey(request);
+    const resolver = state._skillEvidenceResolvers.get(key);
+    state._skillEvidenceResolvers.delete(key);
+    const nextState = {
+      ...getSessionRunState(request.sessionId),
+      status: resolver ? "running" : "resuming",
+      phase: action === "continue" ? "model" : "terminal",
+      skillEvidenceRequest: null,
+      updatedAt: new Date().toISOString(),
+    };
+    setSessionRunState(request.sessionId, nextState);
+    await saveSessionState(
+      request.sessionId,
+      getSessionMessages(request.sessionId),
+      getSessionStats(request.sessionId),
+      undefined,
+      { persistMessages: true },
+    ).catch((error) => {
+      console.error("Failed to persist Skill evidence action:", error);
+    });
+    refreshSessionStatusSlot(request.sessionId);
+    if (request.sessionId === state.sessionId) {
+      clearPermissionNotify();
+      renderSkillEvidencePanel();
+    }
+    if (resolver) {
+      resolver(response?.result || {});
+    } else {
+      const summary = state.sessions.find((item) => item.id === request.sessionId)
+        || { id: request.sessionId };
+      summary.runState = nextState;
+      resumePersistedSessionRun(summary).catch((error) => {
+        console.error("Failed to resume Skill evidence run:", error);
+      });
+    }
+    return response?.result || {};
+  } catch (error) {
+    request._finishing = false;
+    renderSkillEvidencePanel();
+    showToast(t("skillEvidenceActionFailed", { error: error?.message || String(error || "") }), "error");
+    throw error;
+  }
+}
+
+function bindSkillEvidencePanel() {
+  const panel = els.skillEvidencePanel;
+  if (!panel) return;
+  panel.addEventListener("mousedown", (event) => event.stopPropagation());
+  panel.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-skill-evidence-action]");
+    if (!button) return;
+    const request = getSkillEvidenceRequest();
+    if (!request) return;
+    finishSkillEvidenceRequest(request, button.dataset.skillEvidenceAction).catch(() => {});
+  });
+}
+
 const AUTHORITATIVE_AGENT_INPUT_ERROR_CODES = new Set([
   "agent_run_not_found",
   "agent_run_input_inactive",
@@ -7984,6 +8150,7 @@ const AUTHORITATIVE_AGENT_INPUT_STATUSES = new Set([
   "waiting_recovery",
   "waiting_user_input",
   "waiting_authorization",
+  "waiting_skill_evidence",
   ...AUTHORITATIVE_AGENT_INPUT_TERMINAL_STATUSES,
 ]);
 
@@ -10557,6 +10724,14 @@ function agentProjectionPending(snapshot, status) {
   if (status === "waiting_recovery") {
     return { kind: "recovery", id: "", toolCallId: "", action: "" };
   }
+  if (status === "waiting_skill_evidence") {
+    return {
+      kind: "skill-evidence",
+      id: String(snapshot?.pendingSkillEvidence?.gateId || ""),
+      toolCallId: "",
+      action: String(snapshot?.pendingSkillEvidence?.evidenceStatus || ""),
+    };
+  }
   return null;
 }
 
@@ -10593,6 +10768,12 @@ function agentProjectionSnapshotFacts(ctx, snapshot, referenceTime) {
         requestId: pending.id,
         toolCallId: pending.toolCallId,
         type: pending.action,
+      },
+    } : {}),
+    ...(pending?.kind === "skill-evidence" ? {
+      pendingSkillEvidence: {
+        gateId: pending.id,
+        evidenceStatus: pending.action,
       },
     } : {}),
     ...(pending?.kind === "credentials" ? { resumeStatus: String(snapshot?.resumeStatus || "") } : {}),
@@ -11660,6 +11841,60 @@ async function settleForegroundDispatchAfterAgentRunCreated(ctx) {
   return true;
 }
 
+async function requestServerAgentSkillEvidence(ctx, pendingSkillEvidence) {
+  if (!pendingSkillEvidence?.gateId || !Array.isArray(pendingSkillEvidence.missing)) {
+    throw new Error("Server Agent is waiting for Skill evidence without a valid gate");
+  }
+  let request = getSkillEvidenceRequest(ctx.sessionId);
+  if (request?.gateId !== pendingSkillEvidence.gateId) {
+    request = {
+      version: 1,
+      sessionId: ctx.sessionId,
+      agentRunId: ctx.agentRunId,
+      gateId: String(pendingSkillEvidence.gateId),
+      activeSkill: pendingSkillEvidence.activeSkill && typeof pendingSkillEvidence.activeSkill === "object"
+        ? { ...pendingSkillEvidence.activeSkill }
+        : {},
+      evidenceStatus: String(pendingSkillEvidence.evidenceStatus || "partial"),
+      missing: pendingSkillEvidence.missing.map((item) => ({ ...item })),
+      status: "pending",
+      createdAt: String(pendingSkillEvidence.createdAt || new Date().toISOString()),
+      _finishing: false,
+    };
+    state.skillEvidenceRequests[ctx.sessionId] = request;
+  } else {
+    request.agentRunId = ctx.agentRunId;
+    request.status = "pending";
+  }
+  const key = skillEvidenceRequestKey(request);
+  const waitForAction = new Promise((resolve) => {
+    state._skillEvidenceResolvers.set(key, resolve);
+  });
+  const nextState = {
+    ...getSessionRunState(ctx.sessionId),
+    status: "waiting-skill-evidence",
+    phase: "waiting_skill_evidence",
+    skillEvidenceRequest: serializeSkillEvidenceRequest(request),
+    updatedAt: new Date().toISOString(),
+  };
+  setSessionRunState(ctx.sessionId, nextState);
+  await saveSessionState(
+    ctx.sessionId,
+    ctx.messages,
+    ctx.stats,
+    undefined,
+    { persistMessages: true },
+  ).catch((error) => {
+    console.error("Failed to persist Skill evidence gate:", error);
+  });
+  refreshSessionStatusSlot(ctx.sessionId);
+  if (ctx.sessionId === state.sessionId) renderSkillEvidencePanel();
+  if (isUserAway()) {
+    _notify(`Code - ${t("skillEvidenceNeedsAttention")}`, t("skillEvidenceBody"));
+  }
+  return waitForAction;
+}
+
 async function runServerAgentLoop(ctx) {
   if (!agentRuntime?.createAgentRun || !agentRuntime?.watchAgentRun) {
     throw new Error("Server Agent runtime is unavailable");
@@ -11726,6 +11961,7 @@ async function runServerAgentLoop(ctx) {
     const created = await agentRuntime.createAgentRun({
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
+      activeSkillName: ctx.activeSkillName || "",
       activeSkillNames: ctx.activeSkillNames || [],
       payload: prepared.payload,
       baseUrl: dispatch.baseUrl,
@@ -11838,6 +12074,10 @@ async function runServerAgentLoop(ctx) {
     }
     if (snapshot.status === "waiting_authorization") {
       await requestServerAgentAuthorization(ctx, snapshot.pendingAuthorization);
+      continue;
+    }
+    if (snapshot.status === "waiting_skill_evidence") {
+      await requestServerAgentSkillEvidence(ctx, snapshot.pendingSkillEvidence);
       continue;
     }
     const continuation = snapshot?.result?.continuation;
@@ -15398,6 +15638,7 @@ async function init() {
   localStorage.removeItem("agent-lite-onboarding");
 
   bindAuthorizationPanel();
+  bindSkillEvidencePanel();
   bindUserInputPanel();
   setupComposerSafeArea();
 

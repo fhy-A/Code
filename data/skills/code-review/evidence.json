@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "requirements": [
+    {
+      "id": "inspect-source",
+      "type": "tool_execution",
+      "tool": "read_file",
+      "minCount": 1
+    }
+  ],
+  "enforcement": {
+    "schemaVersion": 1,
+    "mode": "explicit_only"
+  }
+}

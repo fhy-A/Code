@@ -50,6 +50,11 @@
         "meaning": "A command, edit, file mutation, or child authorization decision is pending."
       },
       {
+        "name": "waiting_skill_evidence",
+        "class": "waiting",
+        "meaning": "An explicit opt-in Skill preserved a candidate answer and is waiting for continue, skip, or cancel."
+      },
+      {
         "name": "completed",
         "class": "terminal",
         "meaning": "The run produced a final result."
@@ -128,6 +133,31 @@
           "runServerAgentLoop",
           "runBackgroundSubAgentJob"
         ]
+      },
+      {
+        "type": "waiting_skill_evidence",
+        "payloadFields": [
+          "gateId",
+          "activeSkill",
+          "evidenceStatus",
+          "missing"
+        ],
+        "producer": "_enter_agent_skill_evidence_gate",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop"
+        ]
+      },
+      {
+        "type": "skill_evidence_action",
+        "payloadFields": [
+          "actionId",
+          "gateId",
+          "action"
+        ],
+        "producer": "_submit_agent_skill_evidence_action",
+        "frontendMode": "durable-only",
+        "frontendConsumers": []
       },
       {
         "type": "model_pending",

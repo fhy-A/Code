@@ -29,6 +29,7 @@ AGENT_RUN_WAITING_STATES = frozenset({
     "waiting_recovery",
     "waiting_user_input",
     "waiting_authorization",
+    "waiting_skill_evidence",
 })
 AGENT_RUN_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 AGENT_RUN_STATES = (
@@ -79,6 +80,19 @@ AGENT_EVENT_SPECS = {
         "round",
         "runtimeRunId",
         required=("resumeStatus", "reason", "errorCode"),
+    ),
+    "waiting_skill_evidence": _event_spec(
+        "gateId",
+        "activeSkill",
+        "evidenceStatus",
+        "missing",
+        required=("gateId", "activeSkill", "evidenceStatus", "missing"),
+    ),
+    "skill_evidence_action": _event_spec(
+        "actionId",
+        "gateId",
+        "action",
+        required=("actionId", "gateId", "action"),
     ),
     "model_pending": _event_spec("round", required=("round",)),
     "model_started": _event_spec(
@@ -233,6 +247,7 @@ AGENT_RUN_TRANSITIONS = {
         "waiting_authorization",
         "waiting_credentials",
         "waiting_recovery",
+        "waiting_skill_evidence",
         "completed",
         "failed",
         "cancelled",
@@ -244,6 +259,7 @@ AGENT_RUN_TRANSITIONS = {
         "waiting_authorization",
         "waiting_credentials",
         "waiting_recovery",
+        "waiting_skill_evidence",
         "completed",
         "failed",
         "cancelled",
@@ -271,6 +287,13 @@ AGENT_RUN_TRANSITIONS = {
     "waiting_authorization": frozenset({
         "waiting_authorization",
         "waiting_credentials",
+        "failed",
+        "cancelled",
+    }),
+    "waiting_skill_evidence": frozenset({
+        "waiting_skill_evidence",
+        "waiting_credentials",
+        "completed",
         "failed",
         "cancelled",
     }),

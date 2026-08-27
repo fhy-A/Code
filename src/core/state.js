@@ -51,6 +51,8 @@
       authorizationRequests: [],
       userInputRequests: {},
       _userInputResolvers: new Map(),
+      skillEvidenceRequests: {},
+      _skillEvidenceResolvers: new Map(),
       authorizationPanelCollapsed: false,
       confirmingEditId: null,
       renamingSessionId: null,

@@ -1,6 +1,6 @@
 # workbar / Code 执行清单
 
-_上次更新：2026-08-27_
+_上次更新：2026-08-28_
 
 本文件是整个 workbar 项目唯一的产品级未完成事项清单；完成事实与可复核证据统一进入 [`docs/development-log/README.md`](docs/development-log/README.md) 及其日期日志。
 
@@ -130,12 +130,6 @@ _上次更新：2026-08-27_
 - **类型 / 优先级 / 风险**：Web 界面视觉优化 / P1 / STANDARD
 - **下一动作**：审计 Code Web UI 在桌面、窄屏、深浅主题及 bundle/direct classic 中的正文、控件、状态提示字号与图标尺度，明确需要调整的层级、复用变量和不应改变的交互边界；范围不扩展到 workbar 用户端网页。
 - **完成定义**：主要页面与关键状态的文字层级清晰、图标辨识度和点击目标一致，窄屏无新增溢出、遮挡或错位，既有交互与可访问语义保持，并通过双入口自动回归及人工视觉验收。
-
-### CODE-014 · Skill 执行证据校验
-
-- **类型 / 优先级 / 风险**：Agent 可靠性 / P1 / STRICT
-- **下一动作**：在另行 STRICT 审批后选择一个低风险代表性 Skill 作为第二阶段试点，把已完成的 observer v1 结论接入可配置的强制校验，明确阻断时机、用户提示、失败恢复和一键回退；批量为真实 Skill 增加合同、改变 AgentRun 终态或扩大工具权限仍不在默认范围。
-- **完成定义**：observer v1 已能从服务端冻结的可选版本化合同与权威 execution/result 判定 `satisfied`、`partial`、`failed`、`unsupported_completion`、`legacy_unverified`，且旧记录兼容、敏感载荷不进入观察字段；第二阶段还需由代表性真实 Skill 证明强制校验不会误阻断、重复副作用或改变既有权限/恢复语义，并形成可回退的正式启用决定。
 
 ### CODE-016 · workbar 用量体验
 

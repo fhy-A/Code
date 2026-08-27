@@ -2145,14 +2145,17 @@ setImmediate(() => {{
             "resumeAgentRun",
             "submitAgentInput",
             "submitAgentAuthorization",
+            "submitSkillEvidenceAction",
             "normalizeAgentEvent",
             "watchAgentRun",
             "cancelAgentRun",
             '"waiting_authorization",',
+            '"waiting_skill_evidence",',
             "await onEvent?.(normalized.event, snapshot",
         ):
             self.assertIn(expected, RUNTIME_SOURCE)
         self.assertIn('clientRequestId = ""', RUNTIME_SOURCE)
+        self.assertIn('activeSkillName = ""', RUNTIME_SOURCE)
         self.assertIn("activeSkillNames = []", RUNTIME_SOURCE)
         self.assertIn("activeSkillNames: Array.isArray(activeSkillNames)", RUNTIME_SOURCE)
         self.assertIn("clientRequestId,", RUNTIME_SOURCE)
@@ -2161,9 +2164,77 @@ setImmediate(() => {{
         self.assertNotIn("window." + "AgentRuntime", APP_SOURCE)
         self.assertIn("const agentRuntime = window.Code.agent.runtime;", APP_SOURCE)
         self.assertIn("activeSkillNames: ctx.activeSkillNames || []", APP_SOURCE)
+        self.assertIn("activeSkillName: ctx.activeSkillName || \"\"", APP_SOURCE)
         self.assertIn("activeSkillNames: subCtx.activeSkillNames || []", APP_SOURCE)
         self.assertIn("ctx.activeSkillNames = [...(snapshot.activeSkillNames || [])]", APP_SOURCE)
         self.assertIn("activeSkillNames: [],", SUBAGENTS_SOURCE)
+
+    def test_agent_runtime_skill_evidence_intent_and_action_bodies_are_exact(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const requests = [];
+global.fetch = async (url, options = {{}}) => {{
+  requests.push({{url, method: options.method, body: JSON.parse(options.body || "{{}}")}});
+  return {{ok: true, status: 200, async json() {{ return {{ok: true, agentRunId: "run-1"}}; }}}};
+}};
+eval({json.dumps(RUNTIME_SOURCE)});
+(async () => {{
+  await window.Code.agent.runtime.createAgentRun({{
+    sessionId: "session-1",
+    clientRequestId: "request-1",
+    activeSkillName: "code-review",
+    activeSkillNames: ["code-review"],
+    payload: {{model: "fixture", messages: [{{role: "user", content: "review"}}]}},
+    baseUrl: "http://fixture.invalid",
+    keys: [],
+    allowedTools: ["read_file"],
+  }});
+  await window.Code.agent.runtime.submitSkillEvidenceAction("run-1", {{
+    gateId: "skill-evidence-0123456789012345678901234567890123456789",
+    action: "continue",
+    actionId: "skill-evidence:gate:continue",
+  }});
+  process.stdout.write(JSON.stringify(requests));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        requests = json.loads(completed.stdout)
+        self.assertEqual(requests[0]["url"], "/api/agent/runs")
+        self.assertEqual(requests[0]["body"]["activeSkillName"], "code-review")
+        self.assertEqual(requests[0]["body"]["activeSkillNames"], ["code-review"])
+        self.assertNotIn("skillEvidenceContract", requests[0]["body"])
+        self.assertEqual(
+            requests[1],
+            {
+                "url": "/api/agent/runs/run-1/skill-evidence",
+                "method": "POST",
+                "body": {
+                    "gateId": "skill-evidence-0123456789012345678901234567890123456789",
+                    "action": "continue",
+                    "actionId": "skill-evidence:gate:continue",
+                },
+            },
+        )
+
+    def test_skill_evidence_gate_ui_is_three_action_i18n_and_persistent(self):
+        self.assertIn('id="skillEvidencePanel"', INDEX_SOURCE)
+        self.assertIn('data-skill-evidence-action="continue"', APP_SOURCE)
+        self.assertIn('data-skill-evidence-action="skip"', APP_SOURCE)
+        self.assertIn('data-skill-evidence-action="cancel"', APP_SOURCE)
+        self.assertIn("serializeSkillEvidenceRequest(request)", APP_SOURCE)
+        self.assertIn("restoreSkillEvidenceRequest(session.id", APP_SOURCE)
+        self.assertIn('snapshot.status === "waiting_skill_evidence"', APP_SOURCE)
+        self.assertIn('status: "waiting-skill-evidence"', APP_SOURCE)
+        self.assertIn('sessionWaitingSkillEvidence: "等待 Skill 证据确认"', I18N_SOURCE)
+        self.assertIn('sessionWaitingSkillEvidence: "Waiting for Skill evidence"', I18N_SOURCE)
+        self.assertIn(".skill-evidence-panel", STYLE_SOURCE)
 
     def test_agent_runtime_questionnaire_error_contract_is_machine_readable(self):
         script = f"""
@@ -3303,14 +3374,22 @@ process.stdout.write(JSON.stringify({
         restore_authorization = navigation_source.index(
             "recovery.restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);"
         )
-        render_messages = navigation_source.index("view.renderMessages();", restore_authorization)
+        restore_skill_evidence = navigation_source.index(
+            "recovery.restoreSkillEvidenceRequest(session.id, session.runState?.skillEvidenceRequest);"
+        )
+        render_messages = navigation_source.index("view.renderMessages();", restore_skill_evidence)
         self.assertLess(set_run_state, reconcile_request)
         self.assertLess(reconcile_request, restore_authorization)
-        self.assertLess(restore_authorization, render_messages)
+        self.assertLess(restore_authorization, restore_skill_evidence)
+        self.assertLess(restore_skill_evidence, render_messages)
         navigation_wiring_start = APP_SOURCE.index("const sessionNavigation = createSessionNavigation({")
         navigation_wiring_end = APP_SOURCE.index("const {", navigation_wiring_start)
         self.assertIn(
             "reconcilePersistedUserInputRequest,",
+            APP_SOURCE[navigation_wiring_start:navigation_wiring_end],
+        )
+        self.assertIn(
+            "restoreSkillEvidenceRequest,",
             APP_SOURCE[navigation_wiring_start:navigation_wiring_end],
         )
 
@@ -3348,9 +3427,10 @@ process.stdout.write(JSON.stringify({
             "runQuestionAction(questionElement, action, trigger);",
         ):
             self.assertIn(expected, source)
+        keydown_start = source.index('panel.addEventListener("keydown", (event) => {')
         keydown_source = source[
-            source.index('panel.addEventListener("keydown", (event) => {'):
-            source.index('panel.addEventListener("click", (event) => {')
+            keydown_start:
+            source.index('panel.addEventListener("click", (event) => {', keydown_start)
         ]
         self.assertLess(
             keydown_source.index("event.preventDefault();"),
@@ -5051,6 +5131,7 @@ const values = {
 };
 const snapshot = prompt.createSystemPromptSnapshot(values, {
   ...environment,
+  activeSkillName: "fixture-skill",
   activeSkillNames: ["fixture-skill"],
 });
 const normalizedLegacy = snapshot.prompt.replace(
@@ -5122,6 +5203,7 @@ process.stdout.write(JSON.stringify({
   definitions: prompt.SYSTEM_PROMPT_SEGMENTS,
   names: snapshot.segmentNames,
   activeSkillNames: snapshot.activeSkillNames,
+  activeSkillName: snapshot.activeSkillName,
   normalizedLegacyHash: hash(normalizedLegacy),
   newHash: hash(snapshot.prompt),
   environment,
@@ -5171,6 +5253,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(data["definitions"][0]["refresh"], "static")
         self.assertEqual(data["activeSkillNames"], ["fixture-skill"])
+        self.assertEqual(data["activeSkillName"], "fixture-skill")
         self.assertEqual(data["definitions"][-1]["name"], "permission")
         self.assertEqual(
             data["normalizedLegacyHash"],
@@ -8265,6 +8348,7 @@ const data = {
         status: "waiting-user-input",
         userInputRequest: {id: "question-beta", status: "pending"},
         authorizationRequest: {id: "authorization-beta", status: "pending"},
+        skillEvidenceRequest: {gateId: "skill-evidence-beta", status: "pending"},
       },
     };
   },
@@ -8311,6 +8395,7 @@ const recovery = {
     events.push(["user-input-finish", sessionId, stateAccessors.getSessionRunState(sessionId).status]);
   },
   restoreAuthorizationRequest: (sessionId, request) => events.push(["authorization", sessionId, request?.id || ""]),
+  restoreSkillEvidenceRequest: (sessionId, request) => events.push(["skill-evidence", sessionId, request?.gateId || ""]),
 };
 const branch = {
   syncMetadata: (summaries, session) => {
@@ -8417,6 +8502,7 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
                 "status": "paused",
                 "userInputRequest": None,
                 "authorizationRequest": {"id": "authorization-beta", "status": "pending"},
+                "skillEvidenceRequest": {"gateId": "skill-evidence-beta", "status": "pending"},
             },
         )
         self.assertEqual(result["afterLoad"]["foregroundView"], "session")
@@ -8440,6 +8526,7 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         self.assertIn(["user-input-start", "beta", "question-beta"], result["events"])
         self.assertIn(["user-input-finish", "beta", "paused"], result["events"])
         self.assertIn(["authorization", "beta", "authorization-beta"], result["events"])
+        self.assertIn(["skill-evidence", "beta", "skill-evidence-beta"], result["events"])
         self.assertIn(["scroll", "beta"], result["events"])
         self.assertLess(
             result["events"].index(["user-input-start", "beta", "question-beta"]),
@@ -8451,6 +8538,10 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         )
         self.assertLess(
             result["events"].index(["authorization", "beta", "authorization-beta"]),
+            result["events"].index(["skill-evidence", "beta", "skill-evidence-beta"]),
+        )
+        self.assertLess(
+            result["events"].index(["skill-evidence", "beta", "skill-evidence-beta"]),
             result["events"].index(["render-messages", "beta"]),
         )
 
@@ -8514,7 +8605,11 @@ const view = {
 };
 const navigation = window.Code.features.sessions.createSessionNavigation({
   state, elements, storage, data, stateAccessors, project, branch,
-  recovery: {reconcilePersistedUserInputRequest: async () => {}, restoreAuthorizationRequest() {}},
+  recovery: {
+    reconcilePersistedUserInputRequest: async () => {},
+    restoreAuthorizationRequest() {},
+    restoreSkillEvidenceRequest() {},
+  },
   view, t: () => "Untitled",
 });
 
@@ -8571,6 +8666,129 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         self.assertEqual(result["finalSessionId"], "target")
         self.assertIn(["begin", "target", "transition-2"], result["events"])
         self.assertIn(["render", "target"], result["events"])
+
+    def test_session_navigation_restores_skill_evidence_without_stale_load_pollution(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+
+const ids = ["source", "slow", "target", "foreground", "clear"];
+const state = {
+  sessionId: "source",
+  sessions: ids.map((id) => ({id, title: id})),
+  messages: [], stats: {}, pendingEdits: {}, pendingProjectId: null,
+  _sessionMsgs: {source: []}, _sessionStats: {}, _sessionLastUsage: {},
+  _sessionRunStates: {}, _foregroundNavigationSeq: 0, _sessionLoadSeq: 0,
+  branchPanelOpen: false, _keepBranchOpen: false,
+};
+const elements = {
+  sessionTitle: {value: "source"},
+  branchPanel: {classList: {remove() {}}},
+  toggleBranches: {classList: {remove() {}}},
+};
+const stateAccessors = {
+  getSessionRunState: (id) => state._sessionRunStates[id] || {},
+  setSessionRunState: (id, value) => { state._sessionRunStates[id] = {...(value || {})}; },
+  setSessionMessages: (id, value) => { state._sessionMsgs[id] = value; },
+  setSessionStats: (id, value) => { state._sessionStats[id] = value; },
+  setSessionLastUsage: (id, value) => { state._sessionLastUsage[id] = value; },
+};
+const requests = new Map();
+const data = {
+  createSession: async () => ({}),
+  getSession: (id) => new Promise((resolve, reject) => requests.set(id, {resolve, reject})),
+};
+const record = (id, request) => ({
+  id, title: id, messages: [], stats: {}, createdAt: "2026-08-28T00:00:00Z",
+  updatedAt: "2026-08-28T00:00:01Z",
+  runState: request ? {status: "waiting-skill-evidence", skillEvidenceRequest: request} : {},
+});
+const project = {
+  getCurrentProject: () => null, getById: () => null, getPrimaryPath: () => "",
+  getCurrentRoot: () => "", pathsEqual: () => true, saveRoot: async () => {},
+};
+const branch = {
+  syncMetadata: (summaries, session) => summaries.find((item) => item.id === session.id) || null,
+};
+const events = [];
+const skillRequests = {clear: {gateId: "stale-clear", status: "pending"}};
+const recovery = {
+  reconcilePersistedUserInputRequest: async () => {},
+  restoreAuthorizationRequest: () => {},
+  restoreSkillEvidenceRequest: (id, request) => {
+    events.push(["skill", id, request?.gateId || ""]);
+    if (request?.status === "pending" && request?.gateId) skillRequests[id] = {...request};
+    else delete skillRequests[id];
+  },
+};
+const view = {
+  cacheActiveSessionState() {}, resetRenderCache() {},
+  renderMessages() { events.push(["render", state.sessionId]); },
+  renderSessions() {}, updateGroupBadge() {}, updateStatsPanel() {},
+  updateSendButtonState() {}, syncActiveStreamingState() {},
+  scheduleMessagesScrollToBottom() {}, refreshSessions: async () => {}, showToast() {},
+};
+const navigation = window.Code.features.sessions.createSessionNavigation({
+  state, elements, storage: {setItem() {}, removeItem() {}}, data, stateAccessors,
+  project, branch, recovery, view, t: () => "Untitled",
+});
+
+(async () => {
+  const slowLoad = navigation.loadSession("slow", {userInitiated: false});
+  const targetLoad = navigation.loadSession("target", {userInitiated: false});
+  requests.get("target").resolve(record("target", {
+    gateId: "skill-evidence-target", status: "pending",
+  }));
+  await targetLoad;
+  requests.get("slow").resolve(record("slow", {
+    gateId: "skill-evidence-slow", status: "pending",
+  }));
+  await slowLoad;
+
+  const foregroundLoad = navigation.loadSession("foreground", {userInitiated: false});
+  navigation.invalidateForegroundSessionNavigation();
+  requests.get("foreground").resolve(record("foreground", {
+    gateId: "skill-evidence-foreground", status: "pending",
+  }));
+  await foregroundLoad;
+
+  const clearLoad = navigation.loadSession("clear", {userInitiated: false});
+  requests.get("clear").resolve(record("clear", null));
+  await clearLoad;
+
+  process.stdout.write(JSON.stringify({events, skillRequests, sessionId: state.sessionId}));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["sessionId"], "clear")
+        self.assertEqual(
+            result["skillRequests"],
+            {"target": {"gateId": "skill-evidence-target", "status": "pending"}},
+        )
+        self.assertIn(["skill", "target", "skill-evidence-target"], result["events"])
+        self.assertIn(["skill", "clear", ""], result["events"])
+        self.assertNotIn(["skill", "slow", "skill-evidence-slow"], result["events"])
+        self.assertNotIn(
+            ["skill", "foreground", "skill-evidence-foreground"],
+            result["events"],
+        )
+        self.assertLess(
+            result["events"].index(["skill", "target", "skill-evidence-target"]),
+            result["events"].index(["render", "target"]),
+        )
+        self.assertLess(
+            result["events"].index(["skill", "clear", ""]),
+            result["events"].index(["render", "clear"]),
+        )
 
     def test_session_startup_restores_foreground_and_orders_recovery(self):
         self.assertIn("createSessionStartup,", APP_SOURCE)
@@ -8806,6 +9024,7 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
   recovery: {
     reconcilePersistedUserInputRequest: async () => {},
     restoreAuthorizationRequest: () => {},
+    restoreSkillEvidenceRequest: () => {},
   },
   view,
   t: () => "Untitled",
@@ -21453,6 +21672,7 @@ const els = {{sessionList: {{querySelectorAll() {{ return slots; }}}}}};
 const getSessionRunState = () => ({{}});
 const getUserInputRequest = () => null;
 const pendingAuthorizations = () => [];
+const getSkillEvidenceRequest = () => null;
 const isSessionStreaming = () => nextStatus.kind === "running";
 const t = (key) => key;
 const resolveSessionStatus = () => ({{...nextStatus}});
@@ -21570,6 +21790,90 @@ process.stdout.write(JSON.stringify({{runningProjection, transitionProjection, i
                 "titlePresent": False,
             },
         )
+
+    def test_session_status_uses_whitelisted_interaction_summary_only_as_fallback(self):
+        status_start = APP_SOURCE.index("function resolveSessionStatusSlot(")
+        status_end = APP_SOURCE.index("function renderSessionStatusSlot(", status_start)
+        status_source = APP_SOURCE[status_start:status_end]
+        script = f"""
+const state = {{sessionId: "active"}};
+const runStates = {{}};
+const userInputs = {{}};
+const authorizations = {{}};
+const skillEvidence = {{}};
+const getSessionRunState = (id) => runStates[id] || {{}};
+const getUserInputRequest = (id) => userInputs[id] || null;
+const pendingAuthorizations = (id) => authorizations[id] ? [authorizations[id]] : [];
+const getSkillEvidenceRequest = (id) => skillEvidence[id] || null;
+const isSessionStreaming = () => false;
+const t = (key) => key;
+const resolveSessionStatus = (_session, options) => ({{
+  waitingUserInput: options.waitingUserInput,
+  waitingAuthorization: options.waitingAuthorization,
+  waitingSkillEvidence: options.waitingSkillEvidence,
+}});
+eval({json.dumps(status_source)});
+const project = (id, interactionState) => resolveSessionStatusSlot({{id, interactionState}});
+
+skillEvidence.fullSkill = {{status: "pending", gateId: "gate"}};
+skillEvidence.resolvedSkill = {{status: "resolved", gateId: "gate"}};
+userInputs.fullUser = {{status: "pending", id: "question"}};
+process.stdout.write(JSON.stringify({{
+  userFallback: project("userFallback", "waiting_user_input"),
+  authorizationFallback: project("authorizationFallback", "waiting_authorization"),
+  skillFallback: project("skillFallback", "waiting_skill_evidence"),
+  invalidFallback: project("invalidFallback", "waiting_credentials"),
+  fullSkillWinsOverAuthorizationSummary: project("fullSkill", "waiting_authorization"),
+  resolvedSkillSuppressesStaleSummary: project("resolvedSkill", "waiting_skill_evidence"),
+  fullUserWinsOverSkillSummary: project("fullUser", "waiting_skill_evidence"),
+  activeSummary: project("active", "waiting_skill_evidence"),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            data["userFallback"],
+            {
+                "waitingUserInput": True,
+                "waitingAuthorization": False,
+                "waitingSkillEvidence": False,
+            },
+        )
+        self.assertEqual(
+            data["authorizationFallback"],
+            {
+                "waitingUserInput": False,
+                "waitingAuthorization": True,
+                "waitingSkillEvidence": False,
+            },
+        )
+        self.assertEqual(
+            data["skillFallback"],
+            {
+                "waitingUserInput": False,
+                "waitingAuthorization": False,
+                "waitingSkillEvidence": True,
+            },
+        )
+        self.assertEqual(
+            data["invalidFallback"],
+            {
+                "waitingUserInput": False,
+                "waitingAuthorization": False,
+                "waitingSkillEvidence": False,
+            },
+        )
+        self.assertEqual(data["fullSkillWinsOverAuthorizationSummary"], data["skillFallback"])
+        self.assertEqual(data["resolvedSkillSuppressesStaleSummary"], data["invalidFallback"])
+        self.assertEqual(data["fullUserWinsOverSkillSummary"], data["userFallback"])
+        self.assertEqual(data["activeSummary"], data["skillFallback"])
 
     def test_relative_time_boundaries_fallbacks_and_status_priority(self):
         script = f"""

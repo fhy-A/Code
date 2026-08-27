@@ -4361,7 +4361,8 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .session-status-slot.is-waiting-user-input .session-status-indicator,
-.session-status-slot.is-waiting-authorization .session-status-indicator {
+.session-status-slot.is-waiting-authorization .session-status-indicator,
+.session-status-slot.is-waiting-skill-evidence .session-status-indicator {
   width: 13px;
   height: 13px;
   border-radius: 50%;
@@ -4382,6 +4383,11 @@ body.theme-dark .syn-fn { color: #61afef; }
 
 .session-status-slot.is-waiting-authorization .session-status-indicator::before {
   content: "!";
+}
+.session-status-slot.is-waiting-skill-evidence .session-status-indicator::before {
+  content: "✓";
+  font-size: 9px;
+  font-weight: 800;
 }
 
 @keyframes session-status-spin {
@@ -5424,6 +5430,36 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 /* ── Native user questionnaire ── */
+.skill-evidence-panel {
+  margin: 0 0 10px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent));
+  color: var(--text);
+}
+.skill-evidence-panel.hidden { display: none; }
+.skill-evidence-panel strong { display: block; font-size: 13px; }
+.skill-evidence-panel p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.skill-evidence-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 11px; }
+.skill-evidence-actions button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.skill-evidence-actions button[data-skill-evidence-action="continue"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.skill-evidence-actions button:disabled { opacity: .5; cursor: default; }
+
 .user-input-panel {
   position: absolute;
   left: 0;

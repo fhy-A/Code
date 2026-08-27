@@ -79,6 +79,13 @@
         label: String(options.waitingAuthorizationLabel || ""),
       });
     }
+    if (options.active !== true && options.waitingSkillEvidence === true) {
+      return Object.freeze({
+        kind: "waiting-skill-evidence",
+        text: "",
+        label: String(options.waitingSkillEvidenceLabel || ""),
+      });
+    }
     if (options.streaming === true) {
       return Object.freeze({ kind: "running", text: "", label: String(options.runningLabel || "") });
     }
@@ -386,6 +393,7 @@
         || foregroundNavigationSeq !== state._foregroundNavigationSeq
       ) return;
       recovery.restoreAuthorizationRequest(session.id, session.runState?.authorizationRequest);
+      recovery.restoreSkillEvidenceRequest(session.id, session.runState?.skillEvidenceRequest);
       if (loaded) loaded._seenCount = state.messages.length;
 
       state.pendingEdits = collectPendingEdits(state.messages);

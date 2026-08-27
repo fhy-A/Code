@@ -4296,6 +4296,322 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(single_snapshot["activeSkills"][0]["name"], "observer-a")
         self.assertEqual(single_snapshot["status"], "satisfied")
 
+    def test_explicit_code_review_enforcement_waits_then_continues_same_run_exactly_once(self):
+        skill_dir = self.data_dir / "skills" / "code-review"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: code-review\ndescription: Enforcement pilot\n"
+            "tools: read_file\n---\n\nReview evidence fixture.\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "evidence.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "inspect-source",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+            "enforcement": {
+                "schemaVersion": 1,
+                "mode": "explicit_only",
+            },
+        }), encoding="utf-8")
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{"choices": [{
+                    "delta": {"content": "candidate without evidence"},
+                    "finish_reason": "stop",
+                }]}],
+                [{"choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "code-review-read-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "README.md"}),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }]}],
+                [{"choices": [{
+                    "delta": {"content": "verified review result"},
+                    "finish_reason": "stop",
+                }]}],
+            ]
+
+        run = server_mod._create_agent_run(
+            "code-review-enforcement-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "review this change"}],
+            },
+            self.base_url,
+            ["pilot-before-restart-key"],
+            allowed_tools=["read_file"],
+            permission_profile="bypass",
+            active_skill_name="code-review",
+            active_skill_names=["code-review"],
+        )
+        self._wait_status(run, "waiting_skill_evidence")
+        self._wait_worker_idle(run)
+        waiting = server_mod._agent_snapshot(run, 0)
+        gate_id = waiting["pendingSkillEvidence"]["gateId"]
+        self.assertEqual(waiting["skillEvidence"]["status"], "partial")
+        self.assertNotIn("candidate without evidence", json.dumps(waiting["pendingSkillEvidence"]))
+        self.assertEqual(_AgentUpstream.calls, 1)
+
+        persisted = server_mod._agent_run_record(run)
+        self.assertEqual(persisted["status"], "waiting_skill_evidence")
+        self.assertEqual(persisted["pendingSkillEvidence"]["gateId"], gate_id)
+        self.assertEqual(
+            persisted["pendingSkillEvidence"]["candidateResult"]["content"],
+            "candidate without evidence",
+        )
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertEqual(restored["id"], run["id"])
+        self.assertEqual(restored["status"], "waiting_skill_evidence")
+        self.assertEqual(
+            server_mod._agent_snapshot(restored, 0)["pendingSkillEvidence"]["gateId"],
+            gate_id,
+        )
+
+        action_id = f"skill-evidence-{gate_id}-continue"
+        first = server_mod._submit_agent_skill_evidence_action(
+            restored, gate_id, "continue", action_id,
+        )
+        second = server_mod._submit_agent_skill_evidence_action(
+            restored, gate_id, "continue", action_id,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(restored["status"], "waiting_credentials")
+        internal_prompts = [
+            message for message in restored["messages"]
+            if message.get("role") == "system"
+            and "Server-owned Skill evidence continuation" in str(message.get("content") or "")
+        ]
+        self.assertEqual(len(internal_prompts), 1)
+        self.assertEqual(
+            sum(message.get("role") == "user" for message in restored["messages"]),
+            1,
+        )
+        self.assertEqual(
+            [event["type"] for event in restored["events"]].count("skill_evidence_action"),
+            1,
+        )
+
+        server_mod._resume_agent_run(
+            restored, ["pilot-after-restart-key"], self.base_url,
+        )
+        self._wait_terminal(restored)
+        final = server_mod._agent_snapshot(restored, 0)
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["result"]["content"], "verified review result")
+        self.assertEqual(final["skillEvidence"]["status"], "satisfied")
+        self.assertIsNone(final["pendingSkillEvidence"])
+        self.assertIsNone(final["skillEvidenceOverride"])
+        executions = [
+            item for item in final["toolExecutions"]
+            if item["name"] == "read_file"
+        ]
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(executions[0]["toolCallId"], "code-review-read-1")
+        self.assertEqual(
+            [event["type"] for event in final["events"]].count("tool_completed"),
+            1,
+        )
+        self.assertEqual(_AgentUpstream.calls, 3)
+        persisted_text = server_mod._agent_run_path(restored["id"]).read_text(encoding="utf-8")
+        self.assertNotIn("pilot-before-restart-key", persisted_text)
+        self.assertNotIn("pilot-after-restart-key", persisted_text)
+
+    def test_code_review_enforcement_skip_and_cancel_are_persistent_idempotent_actions(self):
+        skill_dir = self.data_dir / "skills" / "code-review"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: code-review\ndescription: Enforcement pilot\n"
+            "tools: read_file\n---\n\nReview evidence fixture.\n",
+            encoding="utf-8",
+        )
+        contract = {
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "inspect-source",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+            "enforcement": {"schemaVersion": 1, "mode": "explicit_only"},
+        }
+        (skill_dir / "evidence.json").write_text(
+            json.dumps(contract), encoding="utf-8",
+        )
+
+        def create_waiting(session_id, candidate):
+            with _AgentUpstream.scripted_lock:
+                _AgentUpstream.scripted_rounds.append([{"choices": [{
+                    "delta": {"content": candidate},
+                    "finish_reason": "stop",
+                }]}])
+            created = server_mod._create_agent_run(
+                session_id,
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "review this change"}],
+                },
+                self.base_url,
+                [f"{session_id}-key"],
+                allowed_tools=["read_file"],
+                permission_profile="bypass",
+                active_skill_name="code-review",
+                active_skill_names=["code-review"],
+            )
+            self._wait_status(created, "waiting_skill_evidence")
+            self._wait_worker_idle(created)
+            return created
+
+        skipped = create_waiting("code-review-skip-session", "candidate accepted by override")
+        skip_gate = server_mod._agent_snapshot(skipped, 0)["pendingSkillEvidence"]["gateId"]
+        skip_action_id = f"skill-evidence-{skip_gate}-skip"
+        calls_before_skip = _AgentUpstream.calls
+        first_skip = server_mod._submit_agent_skill_evidence_action(
+            skipped, skip_gate, "skip", skip_action_id,
+        )
+        second_skip = server_mod._submit_agent_skill_evidence_action(
+            skipped, skip_gate, "skip", skip_action_id,
+        )
+        self.assertEqual(first_skip, second_skip)
+        skipped_snapshot = server_mod._agent_snapshot(skipped, 0)
+        self.assertEqual(skipped_snapshot["status"], "completed")
+        self.assertEqual(
+            skipped_snapshot["result"]["content"],
+            "candidate accepted by override",
+        )
+        self.assertEqual(
+            skipped_snapshot["skillEvidence"]["status"],
+            "unsupported_completion",
+        )
+        self.assertEqual(skipped_snapshot["skillEvidenceOverride"]["action"], "skip")
+        self.assertEqual(skipped_snapshot["skillEvidenceOverride"]["actionId"], skip_action_id)
+        self.assertEqual(_AgentUpstream.calls, calls_before_skip)
+        self.assertEqual(
+            [event["type"] for event in skipped_snapshot["events"]].count("skill_evidence_action"),
+            1,
+        )
+
+        cancelled = create_waiting("code-review-cancel-session", "candidate cancelled")
+        cancel_gate = server_mod._agent_snapshot(cancelled, 0)["pendingSkillEvidence"]["gateId"]
+        cancel_action_id = f"skill-evidence-{cancel_gate}-cancel"
+        first_cancel = server_mod._submit_agent_skill_evidence_action(
+            cancelled, cancel_gate, "cancel", cancel_action_id,
+        )
+        second_cancel = server_mod._submit_agent_skill_evidence_action(
+            cancelled, cancel_gate, "cancel", cancel_action_id,
+        )
+        self.assertEqual(first_cancel, second_cancel)
+        cancelled_snapshot = server_mod._agent_snapshot(cancelled, 0)
+        self.assertEqual(cancelled_snapshot["status"], "cancelled")
+        self.assertEqual(cancelled_snapshot["skillEvidence"]["status"], "failed")
+        self.assertEqual(
+            [event["type"] for event in cancelled_snapshot["events"]].count("skill_evidence_action"),
+            1,
+        )
+
+    def test_code_review_enforcement_is_explicit_only_and_existing_waits_keep_exit(self):
+        skills_root = self.data_dir / "skills"
+
+        def write_skill(name, *, enforcement=True):
+            skill_dir = skills_root / name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Enforcement scope fixture\n"
+                "tools: read_file\n---\n\nFixture.\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "schemaVersion": 1,
+                "requirements": [{
+                    "id": "inspect-source",
+                    "type": "tool_execution",
+                    "tool": "read_file",
+                    "minCount": 1,
+                }],
+            }
+            if enforcement:
+                contract["enforcement"] = {
+                    "schemaVersion": 1,
+                    "mode": "explicit_only",
+                }
+            (skill_dir / "evidence.json").write_text(
+                json.dumps(contract), encoding="utf-8",
+            )
+            return skill_dir
+
+        code_review_dir = write_skill("code-review")
+        write_skill("other-skill")
+
+        def create(name, explicit_name):
+            return server_mod._create_agent_run(
+                f"scope-{name}-{explicit_name or 'auto'}",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "scope fixture"}],
+                },
+                self.base_url,
+                [],
+                allowed_tools=["read_file"],
+                active_skill_name=explicit_name,
+                active_skill_names=[name],
+                start_worker=False,
+            )
+
+        explicit_code_review = create("code-review", "code-review")
+        automatic_code_review = create("code-review", "")
+        explicit_other = create("other-skill", "other-skill")
+        self.assertTrue(server_mod._agent_skill_evidence_enforcement_enabled(explicit_code_review))
+        self.assertFalse(server_mod._agent_skill_evidence_enforcement_enabled(automatic_code_review))
+        self.assertFalse(server_mod._agent_skill_evidence_enforcement_enabled(explicit_other))
+
+        pending = server_mod._enter_agent_skill_evidence_gate(
+            explicit_code_review,
+            {
+                "content": "candidate before configuration rollback",
+                "finishReason": "stop",
+                "usage": {},
+            },
+        )
+        self.assertEqual(explicit_code_review["status"], "waiting_skill_evidence")
+
+        # Turning off the installed contract affects only new runs. The frozen
+        # existing wait still has a skip/cancel exit and does not migrate data.
+        write_skill("code-review", enforcement=False)
+        new_observer_only = create("code-review", "code-review")
+        self.assertFalse(server_mod._agent_skill_evidence_enforcement_enabled(new_observer_only))
+        skip_id = f"skill-evidence-{pending['gateId']}-skip"
+        server_mod._submit_agent_skill_evidence_action(
+            explicit_code_review, pending["gateId"], "skip", skip_id,
+        )
+        self.assertEqual(explicit_code_review["status"], "completed")
+        self.assertEqual(
+            server_mod._agent_snapshot(explicit_code_review, 0)["skillEvidenceOverride"]["action"],
+            "skip",
+        )
+
+        # Missing/invalid contracts and old v5 records remain observer-only.
+        (code_review_dir / "evidence.json").unlink()
+        missing = create("code-review", "code-review")
+        self.assertFalse(server_mod._agent_skill_evidence_enforcement_enabled(missing))
+        old_record = server_mod._agent_run_record(new_observer_only)
+        old_record.pop("skillEvidence", None)
+        old_record.pop("pendingSkillEvidence", None)
+        old_record.pop("skillEvidenceOverride", None)
+        old_record.pop("skillEvidenceActions", None)
+        restored_old = server_mod._agent_run_from_record(old_record)
+        self.assertFalse(server_mod._agent_skill_evidence_enforcement_enabled(restored_old))
+
     def test_accept_command_waits_for_authorization_then_executes_once(self):
         run = server_mod._create_agent_run(
             "command-accept-session",

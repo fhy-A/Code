@@ -208,6 +208,73 @@ class TestHealthAndConfig(TestServerFixture):
         self.assertNotIn(secret, persisted)
         self.assertNotIn(secret, json.dumps(snapshot))
 
+    def test_skill_evidence_action_route_is_idempotent_and_never_accepts_contracts(self):
+        skill_dir = self._tmp_data / "skills" / "code-review"
+        skill_dir.mkdir(exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: code-review\ndescription: Route enforcement pilot\n"
+            "tools: read_file\n---\n\nReview fixture.\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "evidence.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "inspect-source",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+            "enforcement": {"schemaVersion": 1, "mode": "explicit_only"},
+        }), encoding="utf-8")
+        secret = "FORGED-ENFORCEMENT-CONTRACT-SENTINEL"
+        with (
+            mock.patch.object(server_mod, "_MODEL_ROUTE_REGISTRY_ENABLED", False),
+            mock.patch.object(server_mod, "_start_agent_worker", return_value=None),
+        ):
+            status, data = _req("POST", "/api/agent/runs", json={
+                "sessionId": "skill-evidence-route-session",
+                "clientRequestId": "skill-evidence-route-request-1",
+                "payload": {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "review route fixture"}],
+                },
+                "baseUrl": "http://127.0.0.1:1",
+                "keys": [],
+                "allowedTools": ["read_file"],
+                "activeSkillName": "code-review",
+                "activeSkillNames": ["code-review"],
+                "skillEvidenceContract": {"secret": secret},
+            })
+        self.assertEqual(status, 201)
+        run = server_mod._get_agent_run(data["agentRunId"])
+        pending = server_mod._enter_agent_skill_evidence_gate(run, {
+            "content": "candidate route result",
+            "finishReason": "stop",
+            "usage": {},
+        })
+        action_id = f"skill-evidence:{pending['gateId']}:skip"
+        body = {
+            "gateId": pending["gateId"],
+            "action": "skip",
+            "actionId": action_id,
+        }
+        first_status, first = _req(
+            "POST", f"/api/agent/runs/{run['id']}/skill-evidence", json=body,
+        )
+        second_status, second = _req(
+            "POST", f"/api/agent/runs/{run['id']}/skill-evidence", json=body,
+        )
+        self.assertEqual((first_status, second_status), (200, 200))
+        self.assertEqual(first["result"], second["result"])
+        self.assertEqual(first["status"], "completed")
+        snapshot_status, snapshot = _req("GET", f"/api/agent/runs/{run['id']}")
+        self.assertEqual(snapshot_status, 200)
+        self.assertEqual(snapshot["result"]["content"], "candidate route result")
+        self.assertEqual(snapshot["skillEvidenceOverride"]["actionId"], action_id)
+        persisted = server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
+        self.assertNotIn(secret, persisted)
+        self.assertEqual(persisted.count('"skill_evidence_action"'), 1)
+
     def test_browser_heartbeat_keeps_projection_shadow_disabled_in_release(self):
         status, data = _req("GET", "/api/browser-heartbeat")
         self.assertEqual(status, 200)

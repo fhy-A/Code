@@ -800,7 +800,7 @@ _AGENT_RUN_TERMINAL = {"completed", "failed", "cancelled"}
 _AGENT_RUN_ACTIVE = {"model", "tools"}
 _AGENT_RUN_WAITING = {
     "waiting_credentials", "waiting_recovery",
-    "waiting_user_input", "waiting_authorization",
+    "waiting_user_input", "waiting_authorization", "waiting_skill_evidence",
 }
 _AGENT_PERMISSION_PROFILES = {"read", "plan", "accept", "bypass"}
 _AGENT_RUN_DEFAULT_MAX_ROUNDS = 12
@@ -2682,6 +2682,18 @@ def _agent_run_record(run):
         "pendingToolCalls": _json_clone(run.get("pending_tool_calls") or []),
         "pendingInput": _json_clone(run.get("pending_input")),
         "pendingAuthorization": _json_clone(run.get("pending_authorization")),
+        **({"pendingSkillEvidence": pending_skill_evidence}
+           if (pending_skill_evidence := _normalize_agent_pending_skill_evidence(
+               run.get("pending_skill_evidence")
+           )) else {}),
+        **({"skillEvidenceOverride": skill_evidence_override}
+           if (skill_evidence_override := _normalize_agent_skill_evidence_override(
+               run.get("skill_evidence_override")
+           )) else {}),
+        **({"skillEvidenceActions": skill_evidence_actions}
+           if (skill_evidence_actions := _normalize_agent_skill_evidence_actions(
+               run.get("skill_evidence_actions")
+           )) else {}),
         "pendingSteers": _json_clone(run.get("pending_steers") or []),
         "steerReceipts": _json_clone(run.get("steer_receipts") or []),
         "toolExecutions": _json_clone(run.get("tool_executions") or {}),
@@ -2840,6 +2852,10 @@ def _agent_snapshot(run, cursor=0):
             "pendingToolCalls": _json_clone(run.get("pending_tool_calls") or []),
             "pendingInput": _json_clone(run.get("pending_input")),
             "pendingAuthorization": _agent_public_pending_authorization(run),
+            "pendingSkillEvidence": _agent_public_pending_skill_evidence(run),
+            "skillEvidenceOverride": _normalize_agent_skill_evidence_override(
+                run.get("skill_evidence_override")
+            ),
             "pendingSteerCount": len(run.get("pending_steers") or []),
             "steerReceipts": [
                 {
@@ -3481,6 +3497,9 @@ def _agent_run_from_record(record):
     compaction_recovery = _normalize_agent_compaction_recovery(
         record.get("compactionRecovery")
     )
+    pending_skill_evidence = _normalize_agent_pending_skill_evidence(
+        record.get("pendingSkillEvidence")
+    )
     if persisted_status in _AGENT_RUN_TERMINAL:
         status = persisted_status
         resume_status = ""
@@ -3514,6 +3533,9 @@ def _agent_run_from_record(record):
         and isinstance(record.get("pendingAuthorization"), dict)
     ):
         status = persisted_status
+        resume_status = ""
+    elif persisted_status == "waiting_skill_evidence" and pending_skill_evidence:
+        status = "waiting_skill_evidence"
         resume_status = ""
     else:
         resume_status = str(record.get("resumeStatus") or persisted_status)
@@ -3680,6 +3702,13 @@ def _agent_run_from_record(record):
         "pending_tool_calls": list(record.get("pendingToolCalls") or []),
         "pending_input": _json_clone(record.get("pendingInput")) if isinstance(record.get("pendingInput"), dict) else None,
         "pending_authorization": pending_authorization,
+        "pending_skill_evidence": pending_skill_evidence,
+        "skill_evidence_override": _normalize_agent_skill_evidence_override(
+            record.get("skillEvidenceOverride")
+        ),
+        "skill_evidence_actions": _normalize_agent_skill_evidence_actions(
+            record.get("skillEvidenceActions")
+        ),
         "pending_steers": list(record.get("pendingSteers") or []),
         "steer_receipts": list(record.get("steerReceipts") or []),
         "tool_executions": tool_executions,
@@ -7181,11 +7210,16 @@ def _agent_run_worker(run):
                     )
                     return
                 run["non_action_count"] = 0
-                run["result"] = {
+                candidate_result = {
                     "content": content,
-                    "reasoning": reasoning,
                     "finishReason": str(model_result.get("finishReason") or ""),
                     "usage": _json_clone(run["usage"]),
+                }
+                if _enter_agent_skill_evidence_gate(run, candidate_result):
+                    return
+                run["result"] = {
+                    **candidate_result,
+                    "reasoning": reasoning,
                 }
                 if _finish_agent_run(run, "completed"):
                     return
@@ -7227,11 +7261,16 @@ def _agent_run_worker(run):
 
             # A substantive final answer also clears prior recovery debt.
             run["non_action_count"] = 0
-            run["result"] = {
+            candidate_result = {
                 "content": content,
-                "reasoning": reasoning,
                 "finishReason": str(model_result.get("finishReason") or ""),
                 "usage": _json_clone(run["usage"]),
+            }
+            if _enter_agent_skill_evidence_gate(run, candidate_result):
+                return
+            run["result"] = {
+                **candidate_result,
+                "reasoning": reasoning,
             }
             if _finish_agent_run(run, "completed"):
                 return
@@ -7443,6 +7482,9 @@ def _create_agent_run(
         "pending_tool_calls": [],
         "pending_input": None,
         "pending_authorization": None,
+        "pending_skill_evidence": None,
+        "skill_evidence_override": None,
+        "skill_evidence_actions": {},
         "pending_steers": [],
         "steer_receipts": [],
         "tool_executions": {},
@@ -9223,6 +9265,35 @@ def _session_revision(session):
     return value
 
 
+_SESSION_INTERACTION_STATES = frozenset({
+    "waiting_user_input",
+    "waiting_authorization",
+    "waiting_skill_evidence",
+})
+
+
+def _normalize_session_interaction_state(value):
+    raw = str(value or "").strip()
+    return raw if raw in _SESSION_INTERACTION_STATES else ""
+
+
+def _session_interaction_state(session):
+    """Project only the pending interaction kind, never request contents."""
+    record = session if isinstance(session, dict) else {}
+    run_state = record.get("runState")
+    if not isinstance(run_state, dict):
+        return ""
+    for request_key, interaction_state in (
+        ("userInputRequest", "waiting_user_input"),
+        ("authorizationRequest", "waiting_authorization"),
+        ("skillEvidenceRequest", "waiting_skill_evidence"),
+    ):
+        request = run_state.get(request_key)
+        if isinstance(request, dict) and request.get("status") == "pending":
+            return interaction_state
+    return ""
+
+
 def _session_api_record(session, *, include_revision=True):
     """Expose canonical session fields plus a temporary legacy group alias."""
     record = dict(session or {})
@@ -9238,6 +9309,12 @@ def _session_api_record(session, *, include_revision=True):
     record["cwd"] = _normalize_local_path(record.get("cwd"))
     record["source"] = source
     record["sourceBadgeVisible"] = source_badge_visible
+    derived_interaction_state = _session_interaction_state(record)
+    record["interactionState"] = (
+        derived_interaction_state
+        if derived_interaction_state
+        else _normalize_session_interaction_state(record.get("interactionState"))
+    )
     record["group"] = _legacy_group_for_source(source)
     for key in ("createdAt", "updatedAt", "lastMessageTime"):
         if key in record:
@@ -9247,6 +9324,7 @@ def _session_api_record(session, *, include_revision=True):
 
 
 _SESSION_INDEX_LAST_MESSAGE_UNSET = object()
+_SESSION_INDEX_INTERACTION_STATE_UNSET = object()
 
 
 def _normalized_session_timestamp(value):
@@ -9330,6 +9408,7 @@ def _write_session_index_entry(
     source="code",
     source_badge_visible=False,
     last_message_time=_SESSION_INDEX_LAST_MESSAGE_UNSET,
+    interaction_state=_SESSION_INDEX_INTERACTION_STATE_UNSET,
 ):
     """Upsert an entry in session_index.jsonl (append-only, newest wins)."""
     entry = {
@@ -9347,13 +9426,29 @@ def _write_session_index_entry(
     ipath = _session_index_path()
     ipath.parent.mkdir(parents=True, exist_ok=True)
     with _json_write_lock:
-        if last_message_time is _SESSION_INDEX_LAST_MESSAGE_UNSET:
+        current = None
+        if (
+            last_message_time is _SESSION_INDEX_LAST_MESSAGE_UNSET
+            or interaction_state is _SESSION_INDEX_INTERACTION_STATE_UNSET
+        ):
             current = _read_session_index().get(session_id)
+        if last_message_time is _SESSION_INDEX_LAST_MESSAGE_UNSET:
             if isinstance(current, dict) and "lastMessageTime" in current:
                 entry["lastMessageTime"] = current.get("lastMessageTime")
         else:
             entry["lastMessageTime"] = _normalized_session_timestamp(
                 last_message_time
+            )
+        if interaction_state is _SESSION_INDEX_INTERACTION_STATE_UNSET:
+            if isinstance(current, dict) and "interactionState" in current:
+                entry["interactionState"] = _normalize_session_interaction_state(
+                    current.get("interactionState")
+                )
+            elif current is None:
+                entry["interactionState"] = ""
+        else:
+            entry["interactionState"] = _normalize_session_interaction_state(
+                interaction_state
             )
         with open(ipath, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -9400,6 +9495,7 @@ def _rebuild_index_if_needed():
                         meta.get("source"),
                         meta.get("group"),
                     ),
+                    "interactionState": _session_interaction_state(meta),
                 })
         except Exception:
             pass
@@ -9539,6 +9635,7 @@ def _migrate_codex_project_sessions_support():
             "projectId": project_id,
             "cwd": cwd,
             "source": source,
+            "interactionState": _session_interaction_state(meta),
         })
 
     _sort_sessions_by_last_message(entries)
@@ -9729,6 +9826,9 @@ _SKILL_EVIDENCE_OBSERVER_VERSION = 1
 _SKILL_EVIDENCE_MAX_CONTRACT_BYTES = 64 * 1024
 _SKILL_EVIDENCE_MAX_REQUIREMENTS = 20
 _SKILL_EVIDENCE_ARTIFACT_TOOLS = frozenset({"write_file"})
+_SKILL_EVIDENCE_ENFORCEMENT_PILOT_SKILLS = frozenset({"code-review"})
+_SKILL_EVIDENCE_ACTIONS = frozenset({"continue", "skip", "cancel"})
+_SKILL_EVIDENCE_MAX_ACTION_RECEIPTS = 32
 
 
 def _skill_evidence_tool_names(tool_definitions):
@@ -9743,7 +9843,9 @@ def _normalize_skill_evidence_contract(
     value, allowed_tool_names, *, require_registered_tools=True,
 ):
     """Validate observer v1 without accepting prose or expanding tool access."""
-    if not isinstance(value, dict) or set(value) != {"schemaVersion", "requirements"}:
+    if not isinstance(value, dict) or not set(value).issubset({
+        "schemaVersion", "requirements", "enforcement",
+    }) or not {"schemaVersion", "requirements"}.issubset(value):
         raise ValueError("invalid evidence contract envelope")
     schema_version = value.get("schemaVersion")
     if (
@@ -9804,7 +9906,26 @@ def _normalize_skill_evidence_contract(
             raise ValueError("unsupported evidence requirement type")
         seen_ids.add(requirement_id)
         normalized.append(item)
-    return {"schemaVersion": 1, "requirements": normalized}
+    contract = {"schemaVersion": 1, "requirements": normalized}
+    if "enforcement" in value:
+        enforcement = value.get("enforcement")
+        if not isinstance(enforcement, dict) or set(enforcement) != {
+            "schemaVersion", "mode",
+        }:
+            raise ValueError("invalid evidence enforcement envelope")
+        enforcement_version = enforcement.get("schemaVersion")
+        if (
+            isinstance(enforcement_version, bool)
+            or not isinstance(enforcement_version, int)
+            or enforcement_version != 1
+            or enforcement.get("mode") != "explicit_only"
+        ):
+            raise ValueError("unsupported evidence enforcement policy")
+        contract["enforcement"] = {
+            "schemaVersion": 1,
+            "mode": "explicit_only",
+        }
+    return contract
 
 
 def _skill_evidence_invalid_observer(code="invalid_contract", active_skill=None):
@@ -9818,7 +9939,9 @@ def _skill_evidence_invalid_observer(code="invalid_contract", active_skill=None)
     return observer
 
 
-def _freeze_skill_evidence_observer(active_skill_name, tool_definitions):
+def _freeze_skill_evidence_observer(
+    active_skill_name, tool_definitions, *, activation_mode="unknown",
+):
     """Resolve and freeze one installed Skill from selection intent only."""
     selected_name = str(active_skill_name or "").strip()
     if not selected_name:
@@ -9871,6 +9994,11 @@ def _freeze_skill_evidence_observer(active_skill_name, tool_definitions):
     return {
         "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
         "activeSkill": active_skill,
+        "activationMode": (
+            activation_mode
+            if activation_mode in {"explicit", "automatic"}
+            else "unknown"
+        ),
         "contractState": "valid",
         "contract": contract,
     }
@@ -9882,13 +10010,15 @@ def _freeze_skill_evidence_observers(
     """Freeze the complete request-level Skill identity set in stable order."""
     if active_skill_names is None:
         legacy = _freeze_skill_evidence_observer(
-            legacy_active_skill_name, tool_definitions,
+            legacy_active_skill_name, tool_definitions, activation_mode="explicit",
         )
         return [legacy] if isinstance(legacy, dict) else []
     if not isinstance(active_skill_names, list) or len(active_skill_names) > 3:
         return [_skill_evidence_invalid_observer("active_skill_set_invalid")]
     observers = []
     seen = set()
+    explicit_name = str(legacy_active_skill_name or "").strip()
+    explicit_single = explicit_name if len(active_skill_names) == 1 else ""
     for source_name in active_skill_names:
         if not isinstance(source_name, str):
             observers.append(_skill_evidence_invalid_observer("active_skill_invalid"))
@@ -9902,7 +10032,13 @@ def _freeze_skill_evidence_observers(
             continue
         seen.add(normalized_name)
         observer = _freeze_skill_evidence_observer(
-            normalized_name, tool_definitions,
+            normalized_name,
+            tool_definitions,
+            activation_mode=(
+                "explicit"
+                if explicit_single and normalized_name == explicit_single
+                else "automatic"
+            ),
         )
         if isinstance(observer, dict):
             observers.append(observer)
@@ -9924,6 +10060,9 @@ def _restore_skill_evidence_observer(value, tool_definitions):
         ):
             active_skill = {"name": name, "contentHash": content_hash}
     state = str(value.get("contractState") or "")
+    activation_mode = str(value.get("activationMode") or "unknown")
+    if activation_mode not in {"explicit", "automatic"}:
+        activation_mode = "unknown"
     if state == "valid" and active_skill:
         try:
             contract = _normalize_skill_evidence_contract(
@@ -9936,6 +10075,7 @@ def _restore_skill_evidence_observer(value, tool_definitions):
         return {
             "version": 1,
             "activeSkill": active_skill,
+            "activationMode": activation_mode,
             "contractState": "valid",
             "contract": contract,
         }
@@ -9943,6 +10083,7 @@ def _restore_skill_evidence_observer(value, tool_definitions):
         return {
             "version": 1,
             "activeSkill": active_skill,
+            "activationMode": activation_mode,
             "contractState": "missing",
             "diagnosticCode": "contract_missing",
         }
@@ -10000,6 +10141,9 @@ def _agent_single_skill_evidence_snapshot(run, observer):
     }
     if isinstance(observer.get("activeSkill"), dict):
         public["activeSkill"] = _json_clone(observer["activeSkill"])
+    activation_mode = str(observer.get("activationMode") or "unknown")
+    if activation_mode in {"explicit", "automatic"}:
+        public["activationMode"] = activation_mode
     if observer.get("diagnosticCode"):
         public["diagnosticCode"] = str(observer["diagnosticCode"])
     contract = observer.get("contract")
@@ -10144,6 +10288,329 @@ def _agent_skill_evidence_record(run):
     if len(persisted_skills) == 1 and "contract" in persisted_skills[0]:
         record["contract"] = _json_clone(persisted_skills[0]["contract"])
     return record
+
+
+def _agent_skill_evidence_enforcement_observer(run):
+    """Return the one frozen observer eligible for the explicit pilot gate."""
+    for observer in _agent_skill_evidence_observers(run):
+        active_skill = observer.get("activeSkill") or {}
+        name = str(active_skill.get("name") or "")
+        contract = observer.get("contract")
+        enforcement = contract.get("enforcement") if isinstance(contract, dict) else None
+        if (
+            name in _SKILL_EVIDENCE_ENFORCEMENT_PILOT_SKILLS
+            and observer.get("activationMode") == "explicit"
+            and observer.get("contractState") == "valid"
+            and isinstance(enforcement, dict)
+            and enforcement.get("schemaVersion") == 1
+            and enforcement.get("mode") == "explicit_only"
+        ):
+            return observer
+    return None
+
+
+def _agent_skill_evidence_enforcement_enabled(run):
+    return isinstance(_agent_skill_evidence_enforcement_observer(run), dict)
+
+
+def _agent_skill_evidence_gap(run, observer=None):
+    observer = observer or _agent_skill_evidence_enforcement_observer(run)
+    if not isinstance(observer, dict):
+        return None
+    snapshot = _agent_single_skill_evidence_snapshot(run, observer)
+    if snapshot.get("status") == "satisfied":
+        return None
+    missing = []
+    for requirement in snapshot.get("requirements") or []:
+        if requirement.get("satisfied"):
+            continue
+        missing.append({
+            "id": str(requirement.get("id") or "")[:64],
+            "tool": str(requirement.get("tool") or "")[:64],
+            "minCount": max(1, int(requirement.get("minCount") or 1)),
+            "succeededCount": max(0, int(requirement.get("succeededCount") or 0)),
+            "failedCount": max(0, int(requirement.get("failedCount") or 0)),
+        })
+    if not missing:
+        return None
+    return {
+        "activeSkill": _json_clone(observer.get("activeSkill") or {}),
+        "status": str(snapshot.get("status") or "partial"),
+        "missing": missing,
+    }
+
+
+def _normalize_agent_skill_candidate_result(value):
+    if not isinstance(value, dict):
+        return None
+    content = value.get("content")
+    if not isinstance(content, str):
+        return None
+    usage = value.get("usage")
+    return {
+        "content": content,
+        "finishReason": str(value.get("finishReason") or "")[:128],
+        "usage": _json_clone(usage) if isinstance(usage, dict) else {},
+    }
+
+
+def _normalize_agent_pending_skill_evidence(value):
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    gate_id = str(value.get("gateId") or "")
+    if not re.fullmatch(r"skill-evidence-[0-9a-f]{40}", gate_id):
+        return None
+    candidate = _normalize_agent_skill_candidate_result(value.get("candidateResult"))
+    if candidate is None:
+        return None
+    active_source = value.get("activeSkill")
+    if not isinstance(active_source, dict):
+        return None
+    name = str(active_source.get("name") or "")
+    content_hash = str(active_source.get("contentHash") or "")
+    if (
+        name not in _SKILL_EVIDENCE_ENFORCEMENT_PILOT_SKILLS
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
+    ):
+        return None
+    missing_source = value.get("missing")
+    if not isinstance(missing_source, list) or not missing_source:
+        return None
+    missing = []
+    for source in missing_source[:_SKILL_EVIDENCE_MAX_REQUIREMENTS]:
+        if not isinstance(source, dict):
+            return None
+        requirement_id = str(source.get("id") or "")
+        tool_name = str(source.get("tool") or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", requirement_id)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", tool_name)
+        ):
+            return None
+        missing.append({
+            "id": requirement_id,
+            "tool": tool_name,
+            "minCount": max(1, min(100, int(source.get("minCount") or 1))),
+            "succeededCount": max(0, min(100, int(source.get("succeededCount") or 0))),
+            "failedCount": max(0, min(100, int(source.get("failedCount") or 0))),
+        })
+    return {
+        "version": 1,
+        "gateId": gate_id,
+        "activeSkill": {"name": name, "contentHash": content_hash},
+        "candidateResult": candidate,
+        "evidenceStatus": str(value.get("evidenceStatus") or "partial")[:64],
+        "missing": missing,
+        "createdAt": str(value.get("createdAt") or now_iso()),
+    }
+
+
+def _agent_public_pending_skill_evidence(run):
+    pending = _normalize_agent_pending_skill_evidence(
+        run.get("pending_skill_evidence")
+    )
+    if not pending:
+        return None
+    return {
+        "version": 1,
+        "gateId": pending["gateId"],
+        "activeSkill": _json_clone(pending["activeSkill"]),
+        "evidenceStatus": pending["evidenceStatus"],
+        "missing": _json_clone(pending["missing"]),
+        "actions": ["continue", "skip", "cancel"],
+        "createdAt": pending["createdAt"],
+    }
+
+
+def _normalize_agent_skill_evidence_override(value):
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    action_id = str(value.get("actionId") or "")
+    gate_id = str(value.get("gateId") or "")
+    if (
+        value.get("action") != "skip"
+        or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", action_id)
+        or not re.fullmatch(r"skill-evidence-[0-9a-f]{40}", gate_id)
+    ):
+        return None
+    return {
+        "version": 1,
+        "action": "skip",
+        "actionId": action_id,
+        "gateId": gate_id,
+        "createdAt": str(value.get("createdAt") or now_iso()),
+    }
+
+
+def _normalize_agent_skill_evidence_actions(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for action_id, source in list(value.items())[-_SKILL_EVIDENCE_MAX_ACTION_RECEIPTS:]:
+        action_id = str(action_id or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", action_id)
+            or not isinstance(source, dict)
+        ):
+            continue
+        action = str(source.get("action") or "")
+        gate_id = str(source.get("gateId") or "")
+        if (
+            action not in _SKILL_EVIDENCE_ACTIONS
+            or not re.fullmatch(r"skill-evidence-[0-9a-f]{40}", gate_id)
+        ):
+            continue
+        normalized[action_id] = {
+            "version": 1,
+            "actionId": action_id,
+            "gateId": gate_id,
+            "action": action,
+            "resultStatus": str(source.get("resultStatus") or "")[:64],
+            "createdAt": str(source.get("createdAt") or now_iso()),
+        }
+    return normalized
+
+
+def _enter_agent_skill_evidence_gate(run, candidate_result):
+    if run.get("pending_steers"):
+        return None
+    observer = _agent_skill_evidence_enforcement_observer(run)
+    gap = _agent_skill_evidence_gap(run, observer)
+    candidate = _normalize_agent_skill_candidate_result(candidate_result)
+    if not gap or candidate is None:
+        return None
+    candidate["content"] = _redact_agent_secrets(run, candidate["content"])
+    existing = _normalize_agent_pending_skill_evidence(
+        run.get("pending_skill_evidence")
+    )
+    if existing:
+        return existing
+    fingerprint = hashlib.sha256(
+        (
+            f"{run.get('id') or ''}\0{len(run.get('rounds') or [])}\0"
+            + hashlib.sha256(candidate["content"].encode("utf-8")).hexdigest()
+        ).encode("utf-8")
+    ).hexdigest()[:40]
+    pending = {
+        "version": 1,
+        "gateId": f"skill-evidence-{fingerprint}",
+        "activeSkill": gap["activeSkill"],
+        "candidateResult": candidate,
+        "evidenceStatus": gap["status"],
+        "missing": gap["missing"],
+        "createdAt": now_iso(),
+    }
+    with run["condition"]:
+        if run["status"] in _AGENT_RUN_TERMINAL:
+            return None
+        run["pending_skill_evidence"] = pending
+        run["status"] = "waiting_skill_evidence"
+        run["resume_status"] = ""
+        run["result"] = {}
+        run["error"] = ""
+        run["error_code"] = ""
+        run["keys"] = []
+        run["updated_at"] = pending["createdAt"]
+        run["condition"].notify_all()
+    _append_agent_event(run, "waiting_skill_evidence", {
+        "gateId": pending["gateId"],
+        "activeSkill": pending["activeSkill"]["name"],
+        "evidenceStatus": pending["evidenceStatus"],
+        "missing": _json_clone(pending["missing"]),
+    })
+    return pending
+
+
+def _submit_agent_skill_evidence_action(run, gate_id, action, action_id):
+    gate_id = str(gate_id or "")
+    action = str(action or "").strip().lower()
+    action_id = str(action_id or "")
+    if action not in _SKILL_EVIDENCE_ACTIONS:
+        raise ValueError("invalid Skill evidence action")
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", action_id):
+        raise ValueError("invalid Skill evidence action id")
+    existing = (run.get("skill_evidence_actions") or {}).get(action_id)
+    if isinstance(existing, dict):
+        if existing.get("gateId") != gate_id or existing.get("action") != action:
+            raise AgentRunConflictError("Skill evidence action identity conflict")
+        if action == "cancel" and run.get("status") not in _AGENT_RUN_TERMINAL:
+            _cancel_agent_run(run["id"])
+        return _json_clone(existing)
+
+    pending = _normalize_agent_pending_skill_evidence(
+        run.get("pending_skill_evidence")
+    )
+    if run.get("status") != "waiting_skill_evidence" or not pending:
+        raise AgentRunConflictError("Agent run is not waiting for Skill evidence")
+    if pending["gateId"] != gate_id:
+        raise AgentRunConflictError("Skill evidence gate identity mismatch")
+    created_at = now_iso()
+    result_status = {
+        "continue": "waiting_credentials",
+        "skip": "completed",
+        "cancel": "cancelled",
+    }[action]
+    receipt = {
+        "version": 1,
+        "actionId": action_id,
+        "gateId": gate_id,
+        "action": action,
+        "resultStatus": result_status,
+        "createdAt": created_at,
+    }
+    with run["condition"]:
+        actions = dict(run.get("skill_evidence_actions") or {})
+        if len(actions) >= _SKILL_EVIDENCE_MAX_ACTION_RECEIPTS:
+            actions.pop(next(iter(actions)), None)
+        actions[action_id] = receipt
+        run["skill_evidence_actions"] = actions
+        _append_agent_event_locked(run, "skill_evidence_action", {
+            "actionId": action_id,
+            "gateId": gate_id,
+            "action": action,
+        })
+        if action == "continue":
+            missing = ", ".join(
+                f"{item['tool']} {item['succeededCount']}/{item['minCount']}"
+                for item in pending["missing"]
+            )
+            run["messages"].append({
+                "role": "system",
+                "content": (
+                    "[Server-owned Skill evidence continuation]\n"
+                    "Continue the same AgentRun and satisfy only the frozen missing evidence "
+                    f"requirements ({missing}). Reuse authoritative completed tool results, "
+                    "do not repeat completed tools or side effects, and then provide the final answer."
+                ),
+            })
+            run["pending_skill_evidence"] = None
+            run["status"] = "waiting_credentials"
+            run["resume_status"] = "model"
+            run["error"] = ""
+            run["error_code"] = ""
+            run["updated_at"] = created_at
+            _append_agent_event_locked(run, "waiting_credentials", {
+                "resumeStatus": "model",
+                "reason": "skill_evidence_continue",
+            })
+        elif action == "skip":
+            run["pending_skill_evidence"] = None
+            run["skill_evidence_override"] = {
+                "version": 1,
+                "action": "skip",
+                "actionId": action_id,
+                "gateId": gate_id,
+                "createdAt": created_at,
+            }
+            run["result"] = _json_clone(pending["candidateResult"])
+            _finish_agent_run_locked(run, "completed")
+        run["condition"].notify_all()
+    _persist_agent_run(run)
+    if action == "skip":
+        _persist_agent_session_context_resolution(run)
+    elif action == "cancel":
+        _cancel_agent_run(run["id"])
+    return _json_clone(receipt)
 
 
 def _skill_requirement_for_api(requirement):
@@ -12222,6 +12689,7 @@ def _persist_import_snapshot(
         source=source,
         source_badge_visible=_source_badge_visible(meta),
         last_message_time=meta["lastMessageTime"],
+        interaction_state=_session_interaction_state(meta),
     )
     return _import_result_record(meta, action, root_session_id)
 
@@ -12806,6 +13274,7 @@ def append_index(
     source="code",
     source_badge_visible=False,
     last_message_time=_SESSION_INDEX_LAST_MESSAGE_UNSET,
+    interaction_state=_SESSION_INDEX_INTERACTION_STATE_UNSET,
 ):
     """Append a session entry to the sessions index."""
     _write_session_index_entry(
@@ -12818,6 +13287,7 @@ def append_index(
         source=source,
         source_badge_visible=source_badge_visible,
         last_message_time=last_message_time,
+        interaction_state=interaction_state,
     )
 
 
@@ -16218,6 +16688,34 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "result": result,
                 })
                 return
+            if route.startswith("/api/agent/runs/") and route.endswith("/skill-evidence"):
+                run_id = route.rsplit("/", 2)[-2]
+                run = _get_agent_run(run_id)
+                if not run:
+                    self.send_json({"error": "Agent run not found"}, 404)
+                    return
+                body = self.read_body_json()
+                try:
+                    result = _submit_agent_skill_evidence_action(
+                        run,
+                        body.get("gateId") or "",
+                        body.get("action") or "",
+                        body.get("actionId") or "",
+                    )
+                except AgentRunConflictError as exc:
+                    self.send_json({
+                        "error": str(exc),
+                        "errorCode": "skill_evidence_action_conflict",
+                        "agentRunId": run["id"],
+                        "status": run["status"],
+                    }, 409)
+                    return
+                self.send_json({
+                    "agentRunId": run["id"],
+                    "status": run["status"],
+                    "result": result,
+                })
+                return
             if route.startswith("/api/agent/runs/") and route.endswith("/input"):
                 run_id = route.rsplit("/", 2)[-2]
                 body = self.read_body_json()
@@ -16886,6 +17384,17 @@ class CodeHandler(BaseHTTPRequestHandler):
                             source_badge_visible = False
                         entry["sourceBadgeVisible"] = source_badge_visible
                         index_dirty = True
+                    interaction_state = _normalize_session_interaction_state(
+                        entry.get("interactionState")
+                    )
+                    if (
+                        "interactionState" not in entry
+                        or entry.get("interactionState") != interaction_state
+                    ):
+                        meta = meta if meta is not None else read_json(meta_path, {})
+                        interaction_state = _session_interaction_state(meta)
+                        entry["interactionState"] = interaction_state
+                        index_dirty = True
                     sessions.append(_session_api_record({
                         "id": sid,
                         "title": entry.get("title", ""),
@@ -16898,6 +17407,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                         "_branches": [],
                         "_branchMsgCount": None,
                         "runState": {},
+                        "interactionState": interaction_state,
                         "projectId": entry.get("projectId") or entry.get("project"),
                         "cwd": entry.get("cwd"),
                         "source": source,
@@ -17009,6 +17519,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             source=source,
             source_badge_visible=_source_badge_visible(meta),
             last_message_time=meta["lastMessageTime"],
+            interaction_state=_session_interaction_state(meta),
         )
         meta["_filePath"] = str(session_path(session_id).resolve())
         meta["_messageFilePath"] = str(messages_path(session_id).resolve())
@@ -17130,6 +17641,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "lastMessageTime",
                     _SESSION_INDEX_LAST_MESSAGE_UNSET,
                 ),
+                interaction_state=_session_interaction_state(session),
             )
         session["_filePath"] = str(path.resolve())
         session["_messageFilePath"] = str(messages_path(session_id).resolve())

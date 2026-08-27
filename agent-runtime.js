@@ -264,6 +264,7 @@
   async function createAgentRun({
     sessionId,
     clientRequestId = "",
+    activeSkillName = "",
     activeSkillNames = [],
     payload,
     baseUrl,
@@ -286,6 +287,7 @@
       body: JSON.stringify({
         sessionId,
         clientRequestId,
+        activeSkillName: String(activeSkillName || ""),
         activeSkillNames: Array.isArray(activeSkillNames) ? [...activeSkillNames] : [],
         payload,
         ...(routeRef
@@ -360,6 +362,18 @@
     });
   }
 
+  async function submitSkillEvidenceAction(
+    agentRunId,
+    { gateId = "", action = "", actionId = "", signal } = {},
+  ) {
+    return apiJson(`/api/agent/runs/${encodeURIComponent(agentRunId)}/skill-evidence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ gateId, action, actionId }),
+      signal,
+    });
+  }
+
   async function watchAgentRun({
     agentRunId,
     cursor = 0,
@@ -419,6 +433,7 @@
         "waiting_recovery",
         "waiting_user_input",
         "waiting_authorization",
+        "waiting_skill_evidence",
       ].includes(snapshot.status)) {
         return { ...snapshot, nextCursor: activeCursor };
       }
@@ -747,6 +762,7 @@
     steerAgentRun,
     submitAgentInput,
     submitAgentAuthorization,
+    submitSkillEvidenceAction,
     normalizeAgentEvent,
     watchAgentRun,
     cancelAgentRun,

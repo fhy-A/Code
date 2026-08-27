@@ -22,6 +22,9 @@ const PARALLEL_VISUAL_PROTOCOL_CALL_IDS = [
   "h4-parallel-visual-call-b",
 ];
 const TOOL_PROTOCOL_ERROR_USER = "H4_TOOL_PROTOCOL_ERROR_USER";
+const SKILL_EVIDENCE_USER = "H4_SKILL_EVIDENCE_USER";
+const SKILL_EVIDENCE_CANDIDATE = "H4_SKILL_EVIDENCE_CANDIDATE";
+const SKILL_EVIDENCE_FINAL = "H4_SKILL_EVIDENCE_FINAL";
 const RUNTIME_RECOVERY_USER = "H4_RUNTIME_RECOVERY_USER";
 const RUNTIME_RECOVERY_PARTIAL_ONE = "H4_RUNTIME_RECOVERY_PARTIAL_ONE";
 const RUNTIME_RECOVERY_PARTIAL_TWO = "H4_RUNTIME_RECOVERY_PARTIAL_TWO";
@@ -2929,7 +2932,7 @@ function describeLoopbackRequest(request) {
   const url = new URL(request.url());
   const method = request.method();
   const agentActionMatch = url.pathname.match(
-    /^\/api\/agent\/runs\/([^/]+)\/(input|resume|authorization)$/,
+    /^\/api\/agent\/runs\/([^/]+)\/(input|resume|authorization|skill-evidence)$/,
   );
   const agentMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
   const runtimeMatch = url.pathname.match(/^\/api\/runtime\/runs\/([^/]+)$/);
@@ -27421,6 +27424,346 @@ async function exerciseHistoricToolMessageProtocol(h4, runtime) {
   });
 }
 
+async function startSkillEvidenceGate(h4, runtime, userMarker) {
+  await h4.open(runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await h4.submit(`/code-review ${userMarker}`);
+
+  const panel = h4.page.locator("#skillEvidencePanel");
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  await expect(panel).toContainText("Skill evidence needs confirmation");
+  await expect(panel.locator("[data-skill-evidence-action]")).toHaveCount(3);
+  await expect(panel.locator('[data-skill-evidence-action="continue"]'))
+    .toHaveText("Continue validation");
+  await expect(panel.locator('[data-skill-evidence-action="skip"]'))
+    .toHaveText("Skip and finish");
+  await expect(panel.locator('[data-skill-evidence-action="cancel"]'))
+    .toHaveText("Cancel task");
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+
+  const runId = h4.controlIds().agentRunIds[0];
+  const active = h4.page.locator(
+    "#sessionList .session-row.active button.session-main",
+  );
+  await expect(active).toHaveCount(1);
+  const sessionId = String(await active.getAttribute("data-session-id") || "");
+  const snapshot = await fetchProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(runId)}?cursor=0&wait=0`,
+  );
+  expect(snapshot.status).toBe(200);
+  expect(snapshot.body).toMatchObject({
+    status: "waiting_skill_evidence",
+    skillEvidence: { status: "partial" },
+    pendingSkillEvidence: {
+      evidenceStatus: "partial",
+      activeSkill: { name: "code-review" },
+    },
+  });
+  expect(JSON.stringify(snapshot.body.pendingSkillEvidence))
+    .not.toContain(SKILL_EVIDENCE_CANDIDATE);
+  const gateId = snapshot.body.pendingSkillEvidence.gateId;
+  expect(String(gateId || "")).not.toBe("");
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests.filter((entry) => (
+    entry.scenario === "skill-evidence-candidate"
+  ))).toHaveLength(1);
+  expect(metrics.toolExecutions).toEqual([]);
+  return { gateId, runId, sessionId };
+}
+
+async function exerciseSkillEvidenceContinue(h4, runtime) {
+  const gate = await startSkillEvidenceGate(
+    h4,
+    runtime,
+    `${SKILL_EVIDENCE_USER}_CONTINUE`,
+  );
+  const beforeContinue = await h4.metrics();
+  const continueActionBoundary = h4.requestBoundary();
+  await h4.page.locator(
+    '#skillEvidencePanel [data-skill-evidence-action="continue"]',
+  ).click();
+  await expect(h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: SKILL_EVIDENCE_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  await expect(h4.page.locator("#skillEvidencePanel")).toBeHidden();
+
+  const terminal = await fetchProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(gate.runId)}?cursor=0&wait=0`,
+  );
+  expect(terminal.body).toMatchObject({
+    status: "completed",
+    result: { content: SKILL_EVIDENCE_FINAL },
+    skillEvidence: { status: "satisfied" },
+    pendingSkillEvidence: null,
+    skillEvidenceOverride: null,
+  });
+  const readExecutions = (terminal.body.toolExecutions || []).filter((entry) => (
+    entry.name === "read_file"
+  ));
+  expect(readExecutions).toHaveLength(1);
+  expect(readExecutions[0].status).toBe("completed");
+  const afterContinue = await h4.metrics();
+  expect(afterContinue.chatRequests.slice(beforeContinue.chatRequests.length).map((entry) => (
+    entry.scenario
+  ))).toEqual(["skill-evidence-call", "skill-evidence-final"]);
+  expect(afterContinue.chatRequests.at(-1).skillEvidence).toEqual({
+    originalUserCount: 1,
+    continuationCount: 1,
+    toolReceiptCount: 1,
+  });
+  expect(afterContinue.toolExecutions).toEqual([
+    { action: "read_file", path: "fixture.txt" },
+  ]);
+  const continueActionRequests = h4.requestSummarySince(continueActionBoundary);
+  expect(continueActionRequests["POST /api/agent/runs/[id]/skill-evidence"]).toBe(1);
+  expect(continueActionRequests["POST /api/agent/runs/[id]/resume"]).toBe(1);
+  const session = await fetchProductionJson(
+    h4.page,
+    `/api/sessions/${encodeURIComponent(gate.sessionId)}`,
+  );
+  expect((session.body.messages || []).filter((message) => (
+    message.role === "user" && String(message.content || "").includes(SKILL_EVIDENCE_USER)
+  ))).toHaveLength(1);
+
+  const duplicateMetrics = await h4.metrics();
+  const duplicate = await sendProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(gate.runId)}/skill-evidence`,
+    "POST",
+    {
+      gateId: gate.gateId,
+      action: "continue",
+      actionId: `skill-evidence:${gate.gateId}:continue`,
+    },
+  );
+  expect(duplicate.status).toBe(200);
+  expect(await h4.metrics()).toEqual(duplicateMetrics);
+
+  const reloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  const restoredSession = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"]`,
+  );
+  await expect(restoredSession).toHaveCount(1);
+  await restoredSession.click();
+  await expect(h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: SKILL_EVIDENCE_FINAL,
+  })).toHaveCount(1);
+  const afterReload = await h4.metrics();
+  expect(afterReload.chatRequests).toEqual(afterContinue.chatRequests);
+  expect(afterReload.toolExecutions).toEqual(afterContinue.toolExecutions);
+  expect(afterReload.production.agentRuns).toEqual(afterContinue.production.agentRuns);
+  expect(afterReload.productionToolDelegations)
+    .toBe(afterContinue.productionToolDelegations);
+  expect(afterReload.unsafeToolRequests).toBe(afterContinue.unsafeToolRequests);
+  expect(afterReload.fakeRequests.slice(afterContinue.fakeRequests.length).every((entry) => (
+    entry.kind === "platform-sync"
+  ))).toBe(true);
+  const reloadRequests = h4.requestEvidenceSince(reloadBoundary);
+  expect(reloadRequests.agentPost).toBe(0);
+  expect(reloadRequests.runtimePost).toBe(0);
+  const reloadRequestSummary = h4.requestSummarySince(reloadBoundary);
+  expect(reloadRequestSummary["POST /api/agent/runs/[id]/skill-evidence"] || 0).toBe(0);
+  expect(reloadRequestSummary["POST /api/agent/runs/[id]/resume"] || 0).toBe(0);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-skill-evidence-continue`, {
+    runtime,
+    runId: idHash(gate.runId),
+    uniqueReadExecutionCount: readExecutions.length,
+    originalUserCount: afterContinue.chatRequests.at(-1).skillEvidence.originalUserCount,
+    continuationCount: afterContinue.chatRequests.at(-1).skillEvidence.continuationCount,
+    duplicateModelDelta: 0,
+  });
+}
+
+async function exerciseSkillEvidenceRestartAction(h4, runtime, action) {
+  const marker = action === "skip" ? "RESTART_SKIP" : "RESTART_CANCEL";
+  const gate = await startSkillEvidenceGate(
+    h4,
+    runtime,
+    `${SKILL_EVIDENCE_USER}_${marker}`,
+  );
+  const inactiveResponse = await sendProductionJson(
+    h4.page,
+    "/api/sessions",
+    "POST",
+    { title: `H4 Skill evidence ${action} inactive ${runtime}` },
+  );
+  expect(inactiveResponse.status).toBe(201);
+  const inactiveSessionId = inactiveResponse.body.id;
+
+  await h4.reloadRuntime(runtime);
+  let inactiveButton = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${inactiveSessionId}"]`,
+  );
+  let gateButton = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"]`,
+  );
+  await expect(inactiveButton).toHaveCount(1);
+  await expect(gateButton).toHaveCount(1);
+  await inactiveButton.click();
+  await expect(h4.page.locator(
+    `#sessionList .session-row.active[data-session-id="${inactiveSessionId}"]`,
+  )).toHaveCount(1);
+  await expect(h4.page.locator("#skillEvidencePanel")).toBeHidden();
+  const statusSlot = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"] .session-status-slot`,
+  );
+  await expect(statusSlot).toHaveAttribute(
+    "data-session-status",
+    "waiting-skill-evidence",
+  );
+  await expect(statusSlot).toHaveAttribute("title", "Waiting for Skill evidence");
+  await h4.reloadRuntime(runtime);
+  gateButton = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"]`,
+  );
+  await expect(gateButton).toHaveCount(1);
+  await gateButton.click();
+  await expect(h4.page.locator(
+    `#sessionList .session-row.active[data-session-id="${gate.sessionId}"]`,
+  )).toHaveCount(1);
+  await expect(h4.page.locator("#skillEvidencePanel")).toBeVisible({ timeout: 30_000 });
+
+  const processAPid = h4.host.childPid;
+  await h4.page.close();
+  const restartBoundary = h4.requestBoundary();
+  const transition = await h4.restartGeneration();
+  expect(transition.previousPid).toBe(processAPid);
+  expect(transition.currentPid).not.toBe(transition.previousPid);
+  expect(transition.previousCleanup.childExited).toBe(true);
+  expect(transition.previousCleanup.portsClosed).toEqual([true, true]);
+  expect(transition.previousCleanup.rootRetained).toBe(true);
+  await h4.replacePage();
+  await h4.open(runtime);
+  inactiveButton = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${inactiveSessionId}"]`,
+  );
+  gateButton = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"]`,
+  );
+  await expect(inactiveButton).toHaveCount(1);
+  await expect(gateButton).toHaveCount(1);
+  await inactiveButton.click();
+  await expect(h4.page.locator("#skillEvidencePanel")).toBeHidden();
+  const restoredStatusSlot = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"] .session-status-slot`,
+  );
+  await expect(restoredStatusSlot).toHaveAttribute(
+    "data-session-status",
+    "waiting-skill-evidence",
+  );
+  await h4.reloadRuntime(runtime);
+  gateButton = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${gate.sessionId}"]`,
+  );
+  await expect(gateButton).toHaveCount(1);
+  await gateButton.click();
+  await expect(h4.page.locator(
+    `#sessionList .session-row.active[data-session-id="${gate.sessionId}"]`,
+  )).toHaveCount(1);
+  await expect(h4.page.locator("#skillEvidencePanel")).toBeVisible({ timeout: 30_000 });
+  const restored = await fetchProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(gate.runId)}?cursor=0&wait=0`,
+  );
+  expect(restored.body).toMatchObject({
+    status: "waiting_skill_evidence",
+    pendingSkillEvidence: { gateId: gate.gateId },
+  });
+  expect(JSON.stringify(restored.body.pendingSkillEvidence))
+    .not.toContain(SKILL_EVIDENCE_CANDIDATE);
+  expect(h4.requestEvidenceSince(restartBoundary).agentPost).toBe(0);
+
+  const beforeAction = await h4.metrics();
+  const actionBoundary = h4.requestBoundary();
+  await h4.page.locator(
+    `#skillEvidencePanel [data-skill-evidence-action="${action}"]`,
+  ).click();
+  await expect(h4.page.locator("#skillEvidencePanel")).toBeHidden();
+  await expect.poll(async () => (
+    await fetchProductionJson(
+      h4.page,
+      `/api/agent/runs/${encodeURIComponent(gate.runId)}?cursor=0&wait=0`,
+    )
+  ).body.status).toBe(action === "skip" ? "completed" : "cancelled");
+  const terminal = await fetchProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(gate.runId)}?cursor=0&wait=0`,
+  );
+  if (action === "skip") {
+    await expect(h4.page.locator("#messages article.msg.assistant").filter({
+      hasText: SKILL_EVIDENCE_CANDIDATE,
+    })).toHaveCount(1);
+    expect(terminal.body).toMatchObject({
+      status: "completed",
+      skillEvidence: { status: "unsupported_completion" },
+      skillEvidenceOverride: {
+        action: "skip",
+        actionId: `skill-evidence:${gate.gateId}:skip`,
+      },
+    });
+  } else {
+    expect(terminal.body.result).toEqual({});
+    expect((terminal.body.events || []).filter((event) => (
+      event.type === "skill_evidence_action"
+    ))).toHaveLength(1);
+    expect((terminal.body.events || []).find((event) => (
+      event.type === "skill_evidence_action"
+    ))?.data).toMatchObject({
+      action: "cancel",
+      actionId: `skill-evidence:${gate.gateId}:cancel`,
+    });
+  }
+  const actionRequests = h4.requestSummarySince(actionBoundary);
+  expect(actionRequests["POST /api/agent/runs/[id]/skill-evidence"]).toBe(1);
+  const afterAction = await h4.metrics();
+  expect(afterAction.chatRequests).toEqual(beforeAction.chatRequests);
+  expect(afterAction.toolExecutions).toEqual(beforeAction.toolExecutions);
+  expect(afterAction.unsafeToolRequests).toBe(0);
+  const sessionList = await fetchProductionJson(h4.page, "/api/sessions");
+  const sessionSummary = (sessionList.body.data || []).find((item) => (
+    item.id === gate.sessionId
+  ));
+  expect(sessionSummary?.interactionState).toBe("");
+  const session = await fetchProductionJson(
+    h4.page,
+    `/api/sessions/${encodeURIComponent(gate.sessionId)}`,
+  );
+  expect((session.body.messages || []).filter((message) => (
+    message.role === "user" && String(message.content || "").includes(SKILL_EVIDENCE_USER)
+  ))).toHaveLength(1);
+
+  const duplicateMetrics = await h4.metrics();
+  const duplicate = await sendProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(gate.runId)}/skill-evidence`,
+    "POST",
+    {
+      gateId: gate.gateId,
+      action,
+      actionId: `skill-evidence:${gate.gateId}:${action}`,
+    },
+  );
+  expect(duplicate.status).toBe(200);
+  expect(await h4.metrics()).toEqual(duplicateMetrics);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-skill-evidence-restart-${action}`, {
+    runtime,
+    action,
+    runId: idHash(gate.runId),
+    restartPreservedGate: restored.body.pendingSkillEvidence.gateId === gate.gateId,
+    nonCurrentStatus: "waiting-skill-evidence",
+    modelDeltaAfterRestart: 0,
+    toolDeltaAfterRestart: 0,
+    uniqueUserCount: 1,
+  });
+}
+
 async function exerciseParallelVisualToolProtocol(h4, runtime) {
   await h4.open(runtime);
   await h4.submit(PARALLEL_VISUAL_PROTOCOL_USER);
@@ -27853,6 +28196,28 @@ test("bundle tool message protocol pairs historic steer history", async ({ h4 })
 test("direct classic tool message protocol pairs historic steer history", async ({ h4 }) => {
   await exerciseHistoricToolMessageProtocol(h4, "classic");
 });
+
+test("bundle explicit code-review continues with evidence exactly once", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseSkillEvidenceContinue(h4, "bundle");
+});
+
+test("direct classic explicit code-review continues with evidence exactly once", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseSkillEvidenceContinue(h4, "classic");
+});
+
+for (const action of ["skip", "cancel"]) {
+  test(`bundle explicit code-review restores and ${action}s without upstream`, async ({ h4 }) => {
+    test.setTimeout(120_000);
+    await exerciseSkillEvidenceRestartAction(h4, "bundle", action);
+  });
+
+  test(`direct classic explicit code-review restores and ${action}s without upstream`, async ({ h4 }) => {
+    test.setTimeout(120_000);
+    await exerciseSkillEvidenceRestartAction(h4, "classic", action);
+  });
+}
 
 test("bundle parallel visual tools persist strict complete blocks without replay", async ({ h4 }) => {
   await exerciseParallelVisualToolProtocol(h4, "bundle");

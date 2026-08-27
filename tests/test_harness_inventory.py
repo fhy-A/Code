@@ -67,7 +67,7 @@ class HarnessFactInventoryTests(unittest.TestCase):
             item["type"] for item in self.inventory["agentRun"]["events"]
         }
         self.assertEqual(produced, listed)
-        self.assertEqual(25, len(listed))
+        self.assertEqual(27, len(listed))
 
     def test_agent_run_record_version_matches_inventory(self):
         record_version = None

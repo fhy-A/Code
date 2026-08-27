@@ -55,6 +55,10 @@ RUNTIME_RECOVERY_PARTIAL_ONE = "H4_RUNTIME_RECOVERY_PARTIAL_ONE"
 RUNTIME_RECOVERY_PARTIAL_TWO = "H4_RUNTIME_RECOVERY_PARTIAL_TWO"
 RUNTIME_RECOVERY_FINAL = "H4_RUNTIME_RECOVERY_FINAL"
 RUNTIME_RECOVERY_CALL_ID = "h4-runtime-recovery-read"
+SKILL_EVIDENCE_USER = "H4_SKILL_EVIDENCE_USER"
+SKILL_EVIDENCE_CANDIDATE = "H4_SKILL_EVIDENCE_CANDIDATE"
+SKILL_EVIDENCE_FINAL = "H4_SKILL_EVIDENCE_FINAL"
+SKILL_EVIDENCE_CALL_ID = "h4-skill-evidence-read"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
 AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
@@ -748,6 +752,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
             PROPOSE_EDIT_TOOL_CALL_ID,
             RUNTIME_RECOVERY_CALL_ID,
+            SKILL_EVIDENCE_CALL_ID,
         }:
             has_tool_result = True
     joined_user_text = "\n".join(user_texts)
@@ -778,6 +783,22 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if RUNTIME_RECOVERY_PARTIAL_ONE in recovery_text:
             return "runtime-recovery-partial-two", True
         return "runtime-recovery-partial-one", True
+    if SKILL_EVIDENCE_USER in joined_user_text:
+        completed = any(
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") == SKILL_EVIDENCE_CALL_ID
+            for message in messages
+        )
+        if completed:
+            return "skill-evidence-final", True
+        continued = any(
+            isinstance(message, dict)
+            and message.get("role") == "system"
+            and "[Server-owned Skill evidence continuation]" in _message_text(message)
+            for message in messages
+        )
+        return ("skill-evidence-call" if continued else "skill-evidence-candidate"), False
     if PARALLEL_VISUAL_PROTOCOL_USER in joined_user_text:
         completed = {
             str(message.get("tool_call_id") or "")
@@ -2018,6 +2039,28 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     for message in projected_messages
                 ),
             }
+        if scenario.startswith("skill-evidence-"):
+            projected_messages = [
+                message for message in (payload.get("messages") or [])
+                if isinstance(message, dict)
+            ]
+            chat_metric["skillEvidence"] = {
+                "originalUserCount": sum(
+                    1 for message in projected_messages
+                    if message.get("role") == "user"
+                    and SKILL_EVIDENCE_USER in _message_text(message)
+                ),
+                "continuationCount": sum(
+                    1 for message in projected_messages
+                    if message.get("role") == "system"
+                    and "[Server-owned Skill evidence continuation]" in _message_text(message)
+                ),
+                "toolReceiptCount": sum(
+                    1 for message in projected_messages
+                    if message.get("role") == "tool"
+                    and str(message.get("tool_call_id") or "") == SKILL_EVIDENCE_CALL_ID
+                ),
+            }
         if scenario == "context-calibration":
             chat_metric["usedContextCalibrationUnusedKey"] = (
                 self.headers.get("Authorization", "")
@@ -2426,6 +2469,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "edit-authorization-reject-call", "edit-authorization-conflict-call",
             "parallel-visual-protocol-call",
             "runtime-recovery-call",
+            "skill-evidence-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2456,6 +2500,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "edit-authorization-conflict-call": EDIT_AUTHORIZATION_STAGE,
                 "parallel-visual-protocol-call": PARALLEL_VISUAL_PROTOCOL_STAGE,
                 "runtime-recovery-call": RUNTIME_RECOVERY_STAGE,
+                "skill-evidence-call": "",
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -2486,6 +2531,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 tool_calls = [{
                     "index": 0,
                     "id": RUNTIME_RECOVERY_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": READ_PATH}, separators=(",", ":"),
+                        ),
+                    },
+                }]
+            elif scenario == "skill-evidence-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": SKILL_EVIDENCE_CALL_ID,
                     "type": "function",
                     "function": {
                         "name": "read_file",
@@ -2963,6 +3020,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "context-compaction-final": AUTO_COMPACTION_FINAL,
                 "context-calibration": CONTEXT_CALIBRATION_FINAL,
                 "runtime-recovery-final": RUNTIME_RECOVERY_FINAL,
+                "skill-evidence-candidate": SKILL_EVIDENCE_CANDIDATE,
+                "skill-evidence-final": SKILL_EVIDENCE_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,
@@ -3358,6 +3417,25 @@ def main() -> int:
     os.environ["CODE_AGENT_EVENT_PROTOCOL_V1"] = "1"
     os.environ["NEW_API_BASE_URL"] = fake_url
     os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+
+    code_review_dir = data_dir / "skills" / "code-review"
+    code_review_dir.mkdir(parents=True, exist_ok=True)
+    (code_review_dir / "SKILL.md").write_text(
+        "---\nname: code-review\ndescription: H4 explicit evidence pilot\n"
+        "keywords: h4+skill+evidence\ntools: read_file\n---\n\n"
+        "Use read_file once before the final review answer.\n",
+        encoding="utf-8",
+    )
+    (code_review_dir / "evidence.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "requirements": [{
+            "id": "inspect-source",
+            "type": "tool_execution",
+            "tool": "read_file",
+            "minCount": 1,
+        }],
+        "enforcement": {"schemaVersion": 1, "mode": "explicit_only"},
+    }, separators=(",", ":")), encoding="utf-8")
 
     repo_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(repo_root))

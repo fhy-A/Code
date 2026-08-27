@@ -12,6 +12,7 @@
     "waiting_recovery",
     "waiting_user_input",
     "waiting_authorization",
+    "waiting_skill_evidence",
     "completed",
     "failed",
     "cancelled",
@@ -22,6 +23,7 @@
     "resumed",
     "waiting_credentials",
     "waiting_recovery",
+    "waiting_skill_evidence",
     "model_pending",
     "model_started",
     "model_completed",
@@ -36,6 +38,7 @@
     "authorization_submitted",
     "user_input_required",
     "user_input_submitted",
+    "skill_evidence_action",
     "child_agent_created",
     "context_compaction_started",
     "context_compaction_completed",
@@ -51,6 +54,7 @@
     resumed: "run",
     waiting_credentials: "run",
     waiting_recovery: "run",
+    waiting_skill_evidence: "skill-evidence",
     model_pending: "model",
     model_started: "model",
     model_completed: "model",
@@ -65,6 +69,7 @@
     authorization_submitted: "authorization",
     user_input_required: "user-input",
     user_input_submitted: "user-input",
+    skill_evidence_action: "skill-evidence",
     child_agent_created: "tool",
     context_compaction_started: "compaction",
     context_compaction_completed: "compaction",
@@ -79,6 +84,7 @@
     resumed: "resumed",
     waiting_credentials: "waiting",
     waiting_recovery: "waiting",
+    waiting_skill_evidence: "waiting",
     model_pending: "pending",
     model_started: "running",
     model_completed: "completed",
@@ -93,6 +99,7 @@
     authorization_submitted: "submitted",
     user_input_required: "waiting",
     user_input_submitted: "submitted",
+    skill_evidence_action: "submitted",
     child_agent_created: "created",
     context_compaction_started: "running",
     context_compaction_completed: "completed",
@@ -177,6 +184,15 @@
         action: stringValue(snapshot?.resumeStatus),
       };
     }
+    if (status === "waiting_skill_evidence" && snapshot?.pendingSkillEvidence) {
+      const source = snapshot.pendingSkillEvidence;
+      return {
+        kind: "skill-evidence",
+        id: stringValue(source.gateId),
+        toolCallId: "",
+        action: stringValue(source.evidenceStatus),
+      };
+    }
     return null;
   }
 
@@ -251,6 +267,9 @@
     }
     if (eventType.startsWith("authorization_")) return stringValue(data.authorizationId);
     if (eventType.startsWith("user_input_")) return stringValue(data.requestId);
+    if (eventType.startsWith("skill_evidence_")) {
+      return stringValue(data.actionId || data.gateId);
+    }
     if (eventType.startsWith("context_compaction_")) return stringValue(data.compactionId);
     if (eventType.startsWith("steer_")) {
       return stringValue(data.steerId || data.steerIds?.[0]);
@@ -393,6 +412,16 @@
         toolCallId: "",
         action: stringValue(data.resumeStatus),
       };
+    } else if (eventType === "waiting_skill_evidence") {
+      next.status = "waiting_skill_evidence";
+      next.pending = {
+        kind: "skill-evidence",
+        id: stringValue(data.gateId),
+        toolCallId: "",
+        action: stringValue(data.evidenceStatus),
+      };
+    } else if (eventType === "skill_evidence_action") {
+      clearPending(next, "skill-evidence", stringValue(data.gateId));
     } else if (["model_pending", "model_started", "model_recovery"].includes(eventType)) {
       next.status = "model";
       if (eventType !== "model_pending") {

@@ -42,10 +42,14 @@
     const activeSkillNames = Array.isArray(metadata.activeSkillNames)
       ? metadata.activeSkillNames.map((name) => normalizedText(name)).filter(Boolean)
       : [];
+    const activeSkillName = normalizedText(metadata.activeSkillName);
     return Object.freeze({
       prompt: segments.map((segment) => segment.content).join("\n\n"),
       segmentNames: Object.freeze(segments.map((segment) => segment.name)),
       activeSkillNames: Object.freeze(activeSkillNames),
+      activeSkillName: activeSkillNames.length === 1 && activeSkillNames[0] === activeSkillName
+        ? activeSkillName
+        : "",
       capturedAt: normalizedText(metadata.capturedAt),
       timeZone: normalizedText(metadata.timeZone),
     });

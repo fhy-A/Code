@@ -238,6 +238,7 @@ class TestSessionIndexConversationTime(unittest.TestCase):
             "messageCount": 1,
             "source": "code",
             "sourceBadgeVisible": False,
+            "interactionState": "",
         }
         self.write_raw_index([
             {
@@ -301,6 +302,135 @@ class TestSessionIndexConversationTime(unittest.TestCase):
         self.assertEqual(index["legacy01"]["lastMessageTime"], "2026-08-20T10:00:00Z")
         self.assertEqual(index["protected02"]["lastMessageTime"], "2026-08-20T13:00:00Z")
         self.assertEqual(index["invalid03"]["lastMessageTime"], "not-a-time")
+
+    def test_interaction_state_derivation_is_whitelisted_and_request_authoritative(self):
+        secret = "SESSION-INTERACTION-SECRET-SENTINEL"
+        cases = [
+            ({"runState": {"userInputRequest": {
+                "status": "pending", "prompt": secret,
+            }}}, "waiting_user_input"),
+            ({"runState": {"authorizationRequest": {
+                "status": "pending", "reason": secret,
+            }}}, "waiting_authorization"),
+            ({"runState": {"skillEvidenceRequest": {
+                "status": "pending", "gateId": secret,
+            }}}, "waiting_skill_evidence"),
+            ({"runState": {"skillEvidenceRequest": {
+                "status": "resolved", "gateId": secret,
+            }}}, ""),
+            ({"runState": {"status": "waiting-skill-evidence"}}, ""),
+            ({"runState": {}, "interactionState": "waiting_authorization"}, ""),
+        ]
+        for session, expected in cases:
+            with self.subTest(expected=expected, session=session):
+                self.assertEqual(server._session_interaction_state(session), expected)
+
+    def test_interaction_state_create_save_clear_and_secret_free_summary(self):
+        secret = "SESSION-INTERACTION-SECRET-SENTINEL"
+        create = self.make_handler({
+            "title": "Interaction state",
+            "messages": [],
+            "interactionState": "waiting_authorization",
+            "runState": {
+                "userInputRequest": {
+                    "status": "pending",
+                    "prompt": secret,
+                },
+            },
+        })
+        server.CodeHandler.create_session(create)
+        session_id = create.send_json.call_args.args[0]["id"]
+
+        expected_states = [
+            "waiting_user_input",
+            "waiting_authorization",
+            "waiting_skill_evidence",
+            "",
+        ]
+        run_states = [
+            {"userInputRequest": {"status": "pending", "prompt": secret}},
+            {"authorizationRequest": {"status": "pending", "reason": secret}},
+            {"skillEvidenceRequest": {"status": "pending", "gateId": secret}},
+            {},
+        ]
+        observed = []
+        for run_state, expected in zip(run_states, expected_states):
+            save = self.make_handler({
+                "runState": run_state,
+                "interactionState": "waiting_authorization",
+            })
+            server.CodeHandler.save_session(save, session_id)
+            index_entry = server._read_session_index()[session_id]
+            self.assertEqual(index_entry["interactionState"], expected)
+            observed.append(index_entry["interactionState"])
+            serialized_index = server._session_index_path().read_text(encoding="utf-8")
+            self.assertNotIn(secret, serialized_index)
+
+            listed = self.make_handler()
+            server.CodeHandler.get_sessions(listed)
+            summary = next(
+                item
+                for item in listed.send_json.call_args.args[0]["data"]
+                if item["id"] == session_id
+            )
+            self.assertEqual(summary["interactionState"], expected)
+            self.assertEqual(summary["runState"], {})
+            self.assertNotIn(secret, json.dumps(summary))
+
+        self.assertEqual(observed, expected_states)
+
+    def test_legacy_interaction_state_backfills_once_and_metadata_writes_preserve_it(self):
+        secret = "SESSION-INTERACTION-SECRET-SENTINEL"
+        self.write_flat_session({
+            "id": "legacy-interaction",
+            "title": "Legacy interaction",
+            "createdAt": "2026-08-20T08:00:00Z",
+            "updatedAt": "2026-08-20T10:00:00Z",
+            "lastMessageTime": "2026-08-20T09:00:00Z",
+            "messageCount": 1,
+            "runState": {
+                "skillEvidenceRequest": {
+                    "status": "pending",
+                    "gateId": secret,
+                },
+            },
+        })
+        self.write_raw_index([{
+            "id": "legacy-interaction",
+            "title": "Legacy interaction",
+            "updatedAt": "2026-08-20T10:00:00Z",
+            "lastMessageTime": "2026-08-20T09:00:00Z",
+            "messageCount": 1,
+            "source": "code",
+            "sourceBadgeVisible": False,
+        }])
+
+        with mock.patch.object(server, "read_json", wraps=server.read_json) as read_meta:
+            first = self.make_handler()
+            server.CodeHandler.get_sessions(first)
+            first_reads = read_meta.call_count
+            second = self.make_handler()
+            server.CodeHandler.get_sessions(second)
+
+        self.assertEqual(first_reads, 1)
+        self.assertEqual(read_meta.call_count, first_reads)
+        index_entry = server._read_session_index()["legacy-interaction"]
+        self.assertEqual(index_entry["interactionState"], "waiting_skill_evidence")
+        self.assertNotIn(secret, json.dumps(index_entry))
+        first_summary = first.send_json.call_args.args[0]["data"][0]
+        second_summary = second.send_json.call_args.args[0]["data"][0]
+        self.assertEqual(first_summary, second_summary)
+        self.assertEqual(first_summary["interactionState"], "waiting_skill_evidence")
+
+        server._write_session_index_entry(
+            "legacy-interaction",
+            "Metadata-only rename",
+            "2026-08-20T11:00:00Z",
+            1,
+        )
+        preserved = server._read_session_index()["legacy-interaction"]
+        self.assertEqual(preserved["interactionState"], "waiting_skill_evidence")
+        self.assertNotIn(secret, json.dumps(preserved))
 
     def test_legacy_shanghai_timestamps_round_trip_as_canonical_utc(self):
         shanghai = server.dt.timezone(server.dt.timedelta(hours=8))
@@ -488,6 +618,12 @@ class TestSessionIndexConversationTime(unittest.TestCase):
             "updatedAt": "2026-08-20T10:00:00Z",
             "lastMessageTime": "2026-08-20T09:00:00Z",
             "messageCount": 1,
+            "runState": {
+                "authorizationRequest": {
+                    "status": "pending",
+                    "reason": "CONCURRENT-INTERACTION-SECRET",
+                },
+            },
         })
         self.write_raw_index([{
             "id": "legacy04",
@@ -528,6 +664,7 @@ class TestSessionIndexConversationTime(unittest.TestCase):
                     "2026-08-20T11:00:00Z",
                     1,
                     last_message_time="2026-08-20T11:00:00Z",
+                    interaction_state="waiting_user_input",
                 )
                 writer_done.set()
             except Exception as exc:  # pragma: no cover - assertion reports details
@@ -552,6 +689,9 @@ class TestSessionIndexConversationTime(unittest.TestCase):
         self.assertEqual(set(index), {"legacy04", "newwrite05"})
         self.assertEqual(index["legacy04"]["lastMessageTime"], "2026-08-20T09:00:00Z")
         self.assertEqual(index["newwrite05"]["lastMessageTime"], "2026-08-20T11:00:00Z")
+        self.assertEqual(index["legacy04"]["interactionState"], "waiting_authorization")
+        self.assertEqual(index["newwrite05"]["interactionState"], "waiting_user_input")
+        self.assertNotIn("CONCURRENT-INTERACTION-SECRET", json.dumps(index))
 
 
 class TestGoalSessionLifecycle(unittest.TestCase):
