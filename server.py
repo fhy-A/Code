@@ -30,6 +30,15 @@ import webbrowser
 import agent_protocol
 import context_calibration
 import context_window
+from image_runtime import (
+    GeneratedAssetRepository,
+    ImageRouteRegistry,
+    ImageRuntimeError,
+    ImageUpstreamClient,
+    ResolvedImageRoute,
+    normalize_generate_request,
+    validate_image_bytes,
+)
 from model_route_registry import ModelRouteError, ModelRouteRegistry
 import windows_explorer
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
@@ -86,6 +95,8 @@ MEMORY_INDEX_PATH = MEMORY_DIR / "MEMORY.md"
 SKILLS_DIR = DATA_DIR / "skills"
 CONFIG_PATH = DATA_DIR / "config.json"
 MODEL_ROUTE_CATALOG_PATH = DATA_DIR / "model-route-registry.json"
+IMAGE_ROUTE_CATALOG_PATH = DATA_DIR / "image-route-registry.json"
+GENERATED_ASSETS_DIR = DATA_DIR / "generated-assets"
 NEW_API_BASE_URL = os.environ.get("NEW_API_BASE_URL", "").rstrip("/")
 WORKBAR_URL = "https://workbar.ai"
 PORT, INSTANCE_MODE = _resolve_instance_settings()
@@ -167,6 +178,9 @@ _AGENT_PROJECTION_SHADOW_ENABLED = _resolve_agent_projection_shadow_enabled()
 _SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
 _MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
 _model_route_registry = ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
+_image_route_registry = ImageRouteRegistry(IMAGE_ROUTE_CATALOG_PATH)
+_generated_asset_repository = GeneratedAssetRepository(GENERATED_ASSETS_DIR)
+_image_upstream_client = ImageUpstreamClient()
 _active_downloads = {}   # downloadId -> {progress, done, error, path, total}
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -2147,6 +2161,12 @@ def _agent_selected_tools(payload, allowed_tools=None, permission_profile="read"
             and spec.get("background")
             and permission_profile in {"plan", "accept", "bypass"}
         )
+        gated_image_generation = (
+            spec.get("effect") == "image_generation"
+            and not spec.get("idempotent")
+            and spec.get("background")
+            and permission_profile in {"accept", "bypass"}
+        )
         if not (
             safe_read
             or safe_interaction
@@ -2155,6 +2175,7 @@ def _agent_selected_tools(payload, allowed_tools=None, permission_profile="read"
             or durable_memory
             or durable_file_mutation
             or durable_delegation
+            or gated_image_generation
         ):
             continue
         definition = _agent_registry_tool_definition(name)
@@ -2643,6 +2664,8 @@ def _agent_run_record(run):
            if run.get("route_ref") else {}),
         **({"catalogRevision": int(run.get("catalog_revision") or 0)}
            if run.get("route_ref") else {}),
+        **({"imageRoute": image_route}
+           if (image_route := _agent_image_route_public(run)) else {}),
         "contextLimit": int(run.get("context_limit") or 0),
         "contextWindowTokens": int(run.get("context_window_tokens") or run.get("context_limit") or 0),
         "contextBudgetTokens": run.get("context_budget_tokens"),
@@ -2782,6 +2805,16 @@ def _agent_public_pending_authorization(run):
     if pending.get("action") == "run_command":
         public["command"] = str(pending.get("command") or "")
         public["description"] = str(pending.get("description") or "")
+    if pending.get("action") == "generate_image":
+        summary = pending.get("summary") if isinstance(pending.get("summary"), dict) else {}
+        public.update({
+            "modelId": str(summary.get("modelId") or ""),
+            "count": int(summary.get("count") or 1),
+            "size": str(summary.get("size") or "auto"),
+            "quality": str(summary.get("quality") or "auto"),
+            "outputFormat": str(summary.get("outputFormat") or "png"),
+            "hasReference": bool(summary.get("hasReference")),
+        })
     if pending.get("childAgentRunId"):
         public["childAgentRunId"] = str(pending.get("childAgentRunId") or "")
     return public
@@ -2823,6 +2856,7 @@ def _agent_snapshot(run, cursor=0):
             "model": str((run.get("request") or {}).get("model") or ""),
             "routeRef": str(run.get("route_ref") or ""),
             "catalogRevision": int(run.get("catalog_revision") or 0),
+            "imageRoute": _agent_image_route_public(run),
             "contextLimit": int(run.get("context_limit") or 0),
             "contextWindowTokens": int(run.get("context_window_tokens") or run.get("context_limit") or 0),
             "contextBudgetTokens": run.get("context_budget_tokens"),
@@ -3592,13 +3626,68 @@ def _agent_run_from_record(record):
     if pending_authorization:
         pending_authorization["submitting"] = False
     tool_executions = dict(record.get("toolExecutions") or {})
-    for execution in tool_executions.values():
+    for execution_call_id, execution in tool_executions.items():
         if not isinstance(execution, dict):
             continue
         if execution.get("status") == "completed" and not execution.get("outcome"):
             execution["outcome"] = _agent_execution_outcome(execution.get("result"))
         spec = _agent_tool_spec(str(execution.get("name") or ""))
-        if spec.get("effect") != "command" or execution.get("status") != "running":
+        if execution.get("status") != "running":
+            continue
+        if spec.get("effect") == "image_generation":
+            dispatch_state = str(execution.get("dispatchState") or "")
+            if dispatch_state == "prepared":
+                # The durable state still proves that no upstream request was
+                # admitted. Credential recovery may safely continue it.
+                continue
+            arguments = {}
+            try:
+                arguments = json.loads(str(execution.get("arguments") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            try:
+                expected_count = normalize_generate_request(arguments).get("count", 1)
+            except ImageRuntimeError:
+                expected_count = 1
+            operation_id = str(execution.get("operationId") or "")
+            recovered_result = None
+            if operation_id:
+                try:
+                    recovered_result = _generated_asset_repository.find_operation_result(
+                        operation_id,
+                        str(record.get("sessionId") or ""),
+                        str(record.get("id") or ""),
+                        str(execution_call_id or ""),
+                        expected_count,
+                    )
+                except ImageRuntimeError:
+                    recovered_result = None
+            if recovered_result:
+                execution["status"] = "completed"
+                execution["dispatchState"] = "assets_persisted"
+                execution["outcome"] = "succeeded"
+                execution["result"] = recovered_result
+                execution["error"] = ""
+                execution["completedAt"] = now_iso()
+                continue
+            result = {
+                "ok": False,
+                "action": "generate_image",
+                "errorCode": "image_outcome_unknown",
+                "outcomeUnknown": True,
+                "notReplayed": True,
+                "error": (
+                    "Image generation was interrupted after dispatch; the upstream outcome "
+                    "is unknown and the paid request was not replayed."
+                ),
+            }
+            execution["status"] = "completed"
+            execution["outcome"] = "failed"
+            execution["result"] = result
+            execution["error"] = result["error"]
+            execution["completedAt"] = now_iso()
+            continue
+        if spec.get("effect") != "command":
             continue
         # A process that was active when the service exited has an unknown
         # external outcome. Persist a synthetic result and never launch it a
@@ -3621,6 +3710,13 @@ def _agent_run_from_record(record):
         execution["result"] = result
         execution["error"] = result["error"]
         execution["completedAt"] = now_iso()
+    image_route_identity = _normalize_agent_image_route_identity(record.get("imageRoute"))
+    restored_tools = list(record.get("tools") or [])
+    if not image_route_identity or not image_route_identity.get("supportsGeneration"):
+        restored_tools = [
+            definition for definition in restored_tools
+            if str((definition.get("function") or {}).get("name") or "") != "generate_image"
+        ]
     cwd, workspace_roots = _agent_run_workspace(
         record.get("sessionId"),
         record.get("cwd"),
@@ -3650,6 +3746,7 @@ def _agent_run_from_record(record):
         "base_url": _agent_base_url(record.get("baseUrl") or ""),
         "route_ref": str(record.get("routeRef") or ""),
         "catalog_revision": max(0, int(record.get("catalogRevision") or 0)),
+        "image_route": image_route_identity,
         "context_limit": _normalize_agent_context_limit(
             record.get("contextLimit"),
             request_options.get("model"),
@@ -3689,10 +3786,10 @@ def _agent_run_from_record(record):
         ),
         "request": request_options,
         "messages": list(record.get("messages") or []),
-        "tools": list(record.get("tools") or []),
+        "tools": restored_tools,
         "tool_budgets": _normalize_agent_tool_budgets(
             record.get("toolBudgets") or [],
-            list(record.get("tools") or []),
+            restored_tools,
         ),
         "rounds": list(record.get("rounds") or []),
         "compactions": list(record.get("compactions") or []),
@@ -3714,7 +3811,7 @@ def _agent_run_from_record(record):
         "tool_executions": tool_executions,
         "skill_evidence_observers": _restore_skill_evidence_observers(
             record.get("skillEvidence"),
-            list(record.get("tools") or []),
+            restored_tools,
         ),
         "skill_evidence_observer": None,
         "usage": dict(record.get("usage") or {}),
@@ -3908,6 +4005,35 @@ def _canonicalize_agent_tool_arguments(action, arguments):
                 canonical["path"] = alias_value
             canonical.pop("file_path", None)
             aliases.append({"from": "file_path", "to": "path"})
+    if action == "generate_image":
+        allowed = {
+            "prompt", "reference", "size", "quality", "count", "outputFormat",
+        }
+        for field in sorted(set(canonical) - allowed):
+            errors.append({
+                "field": field,
+                "reason": "unexpected_property",
+                "message": "is not allowed",
+            })
+            canonical.pop(field, None)
+        reference = canonical.get("reference")
+        if reference is not None and not isinstance(reference, dict):
+            errors.append({
+                "field": "reference",
+                "reason": "type",
+                "message": "must be an object",
+            })
+            canonical["reference"] = {}
+        elif isinstance(reference, dict):
+            sanitized_reference = dict(reference)
+            for field in sorted(set(sanitized_reference) - {"type", "id"}):
+                errors.append({
+                    "field": f"reference.{field}",
+                    "reason": "unexpected_property",
+                    "message": "is not allowed",
+                })
+                sanitized_reference.pop(field, None)
+            canonical["reference"] = sanitized_reference
     return canonical, aliases, errors
 
 
@@ -3941,6 +4067,9 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number):
         except Exception as exc:
             arguments = None
             parse_error = str(exc)
+            if name == "generate_image":
+                arguments_text = "{}"
+                parse_error = "generate_image arguments must be a valid JSON object"
         else:
             parse_error = ""
             arguments_text = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
@@ -4813,6 +4942,30 @@ def _agent_file_authorization_request(run, call):
     }
 
 
+def _agent_image_authorization_request(run, call):
+    call_id = str(call.get("id") or "")
+    arguments = normalize_generate_request(call.get("arguments") or {})
+    route = _agent_image_route_public(run) or {}
+    authorization_id = hashlib.sha256(
+        f"{run['id']}\0{call_id}\0{call.get('fingerprint') or ''}\0generate_image".encode("utf-8")
+    ).hexdigest()
+    return {
+        "authorizationId": authorization_id,
+        "toolCallId": call_id,
+        "action": "generate_image",
+        "summary": {
+            "modelId": str(route.get("modelId") or ""),
+            "count": arguments["count"],
+            "size": arguments["size"],
+            "quality": arguments["quality"],
+            "outputFormat": arguments["outputFormat"],
+            "hasReference": arguments.get("reference") is not None,
+        },
+        "decision": "pending",
+        "requestedAt": now_iso(),
+    }
+
+
 def _submit_agent_command_authorization(run, pending, normalized_decision):
     authorization_id = str(pending.get("authorizationId") or "")
     call_id = str(pending.get("toolCallId") or "")
@@ -4944,6 +5097,70 @@ def _submit_agent_file_authorization(run, pending, normalized_decision):
     return result
 
 
+def _submit_agent_image_authorization(run, pending, normalized_decision):
+    authorization_id = str(pending.get("authorizationId") or "")
+    call_id = str(pending.get("toolCallId") or "")
+    with run["condition"]:
+        current = run.get("pending_authorization") or {}
+        if str(current.get("authorizationId") or "") != authorization_id:
+            raise ValueError("Agent authorization request changed before submission")
+        execution = run.get("tool_executions", {}).get(call_id)
+        if not isinstance(execution, dict):
+            raise ValueError("Agent image tool execution is missing")
+        execution["authorizationDecision"] = normalized_decision
+        if normalized_decision == "approved":
+            execution["status"] = "authorized"
+            execution["error"] = ""
+            execution["authorizedAt"] = now_iso()
+            result = {
+                "ok": True,
+                "action": "generate_image",
+                "authorized": True,
+                "executed": False,
+            }
+            resume_status = "tools"
+        else:
+            result = {
+                "ok": False,
+                "action": "generate_image",
+                "rejected": True,
+                "errorCode": "image_generation_rejected",
+                "error": "User rejected image generation.",
+            }
+            _set_agent_execution_result(execution, result)
+            _append_agent_tool_message_locked(run, call_id, "generate_image", result)
+            run["pending_tool_calls"] = [
+                call for call in run.get("pending_tool_calls") or []
+                if call.get("id") != call_id
+            ]
+            resume_status = _agent_resume_status_after_tool_completion_locked(run)
+        run["pending_authorization"] = None
+        run["keys"] = []
+        run["status"] = "waiting_credentials"
+        run["resume_status"] = resume_status
+        run["updated_at"] = now_iso()
+        run["condition"].notify_all()
+
+    _append_agent_event(run, "authorization_submitted", {
+        "authorizationId": authorization_id,
+        "toolCallId": call_id,
+        "decision": normalized_decision,
+    })
+    if normalized_decision == "rejected":
+        _append_agent_event(run, "tool_completed", {
+            "toolCallId": call_id,
+            "name": "generate_image",
+            "result": result,
+            "outcome": _agent_execution_outcome(result),
+            "replayed": False,
+        })
+    _append_agent_event(run, "waiting_credentials", {
+        "resumeStatus": resume_status,
+        "reason": "authorization_submitted",
+    })
+    return result
+
+
 def _submit_agent_child_authorization(run, pending, normalized_decision):
     child_run_id = str(pending.get("childAgentRunId") or "")
     child_authorization_id = str(pending.get("childAuthorizationId") or "")
@@ -5053,6 +5270,8 @@ def _submit_agent_authorization(run, authorization_id, decision):
         return _submit_agent_command_authorization(run, pending, normalized_decision)
     if pending.get("action") in {"write_file", "delete_file"}:
         return _submit_agent_file_authorization(run, pending, normalized_decision)
+    if pending.get("action") == "generate_image":
+        return _submit_agent_image_authorization(run, pending, normalized_decision)
     call_id = str(pending.get("toolCallId") or "")
     proposal = pending.get("proposal") or {}
 
@@ -5697,6 +5916,140 @@ def _execute_agent_goal_operation(run, call, execution):
     }
 
 
+def _agent_persisted_attachment_reference(session_id, attachment_id):
+    normalized_id = str(attachment_id or "").replace("\\", "/")
+    if not session_path(session_id).exists():
+        raise ImageRuntimeError("image_reference_not_found", "Reference image was not found in this Session.")
+    owned = False
+    for message in read_jsonl(messages_path(session_id)):
+        for image in message.get("_images") or [] if isinstance(message, dict) else []:
+            if isinstance(image, dict) and str(image.get("path") or "").replace("\\", "/") == normalized_id:
+                owned = True
+                break
+        if owned:
+            break
+    if not owned:
+        raise ImageRuntimeError("image_reference_forbidden", "Reference attachment does not belong to this Session.")
+    _root, target = resolve_attachment_path(normalized_id)
+    if target is None or not target.exists() or not target.is_file():
+        raise ImageRuntimeError("image_reference_not_found", "Reference image was not found in this Session.")
+    try:
+        return validate_image_bytes(target.read_bytes(), mimetypes.guess_type(str(target))[0] or "")
+    except OSError as exc:
+        raise ImageRuntimeError("image_reference_not_found", "Reference image could not be read.") from exc
+
+
+def _agent_image_reference(run, normalized_request):
+    reference = normalized_request.get("reference")
+    if not reference:
+        return None
+    session_id = str(run.get("session_id") or "")
+    if reference["type"] == "attachment":
+        return _agent_persisted_attachment_reference(session_id, reference["id"])
+    data, meta = _generated_asset_repository.read(session_id, reference["id"])
+    return validate_image_bytes(data, str(meta.get("mimeType") or ""))
+
+
+def _agent_image_operation_id(run, call):
+    return hashlib.sha256(
+        (
+            f"image-generation-v1\0{run.get('id') or ''}\0{call.get('id') or ''}"
+            f"\0{call.get('fingerprint') or ''}\0{(_agent_image_route_public(run) or {}).get('routeRef') or ''}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _execute_agent_image_generation(run, call, execution):
+    normalized = normalize_generate_request(call.get("arguments") or {})
+    identity = _agent_image_route_public(run)
+    if not identity:
+        raise ImageRuntimeError("image_route_not_found", "AgentRun has no frozen image route.", http_status=409)
+    operation_id = str(execution.get("operationId") or "") or _agent_image_operation_id(run, call)
+    execution["operationId"] = operation_id
+    execution["nonReplayable"] = True
+
+    existing = _generated_asset_repository.find_operation_result(
+        operation_id,
+        str(run.get("session_id") or ""),
+        str(run.get("id") or ""),
+        str(call.get("id") or ""),
+        normalized["count"],
+    )
+    if existing:
+        execution["dispatchState"] = "assets_persisted"
+        execution["result"] = _json_clone(existing)
+        _persist_agent_run(run)
+        return existing
+
+    dispatch_state = str(execution.get("dispatchState") or "")
+    if dispatch_state == "dispatched":
+        raise ImageRuntimeError(
+            "image_outcome_unknown",
+            "Image generation was already dispatched; its upstream outcome is unknown and it was not replayed.",
+            outcome_unknown=True,
+        )
+    if dispatch_state == "assets_persisted" and isinstance(execution.get("result"), dict):
+        return _json_clone(execution["result"])
+    execution["dispatchState"] = "prepared"
+    execution["preparedAt"] = now_iso()
+    _persist_agent_run(run)
+    if run["cancel_event"].is_set():
+        raise ImageRuntimeError("image_cancelled", "Image generation was cancelled before dispatch.")
+    resolved = _image_route_registry.resolve(
+        identity["routeRef"], identity["catalogRevision"], identity["modelId"],
+    )
+    if normalized.get("reference") and not resolved.supports_edit:
+        raise ImageRuntimeError("image_edit_unsupported", "The selected image route does not support reference editing.")
+    reference_image = _agent_image_reference(run, normalized)
+
+    # Persist admission before making the paid external call. A restart after
+    # this boundary must never auto-replay the operation.
+    execution["dispatchState"] = "dispatched"
+    execution["dispatchedAt"] = now_iso()
+    _persist_agent_run(run)
+    try:
+        images = _image_upstream_client.generate(
+            resolved,
+            normalized,
+            operation_id,
+            reference_image=reference_image,
+            cancel_event=run["cancel_event"],
+        )
+    except ImageRuntimeError:
+        raise
+    except Exception as exc:
+        raise ImageRuntimeError(
+            "image_runtime_failed",
+            "Image generation failed after dispatch.",
+            retryable=True,
+            http_status=502,
+            outcome_unknown=True,
+        ) from exc
+    try:
+        result = _generated_asset_repository.save_operation(
+            operation_id,
+            str(run.get("session_id") or ""),
+            str(run.get("id") or ""),
+            str(call.get("id") or ""),
+            images,
+            created_at=now_iso(),
+        )
+    except ImageRuntimeError:
+        raise
+    except Exception as exc:
+        raise ImageRuntimeError(
+            "generated_asset_store_unavailable",
+            "Generated asset storage is unavailable after dispatch.",
+            retryable=True,
+            http_status=503,
+            outcome_unknown=True,
+        ) from exc
+    execution["dispatchState"] = "assets_persisted"
+    execution["result"] = _json_clone(result)
+    _persist_agent_run(run)
+    return result
+
+
 def _execute_agent_pending_tools(run):
     allowed_names = {
         str((definition.get("function") or {}).get("name") or "")
@@ -5748,6 +6101,19 @@ def _execute_agent_pending_tools(run):
                 or execution.get("authorizationDecision") == "approved"
             )
         )
+        resuming_image_generation = bool(
+            execution
+            and (
+                (
+                    execution.get("status") == "authorized"
+                    and execution.get("authorizationDecision") == "approved"
+                )
+                or (
+                    execution.get("status") == "running"
+                    and execution.get("dispatchState") == "prepared"
+                )
+            )
+        )
         resuming_delegation = bool(
             execution
             and execution.get("status") in {
@@ -5770,6 +6136,7 @@ def _execute_agent_pending_tools(run):
                 resuming_proposal
                 or resuming_command
                 or resuming_file_mutation
+                or resuming_image_generation
                 or resuming_delegation
                 or resuming_goal
             ):
@@ -5823,6 +6190,7 @@ def _execute_agent_pending_tools(run):
                 if (
                     spec.get("effect") in {
                         "command", "proposal", "file_mutation", "memory_write", "delegation",
+                        "image_generation",
                     }
                     and str(call.get("fingerprint") or "") in protected_effects
                 ):
@@ -6005,6 +6373,45 @@ def _execute_agent_pending_tools(run):
                         output_callback=on_output,
                         process_callback=set_process,
                     )
+                elif spec.get("effect") == "image_generation":
+                    if call.get("parseError") or not isinstance(call.get("arguments"), dict):
+                        raise ValueError(call.get("parseError") or "tool arguments must be an object")
+                    permission_profile = run.get("permission_profile", "read")
+                    if permission_profile == "accept" and not resuming_image_generation:
+                        pending_authorization = _agent_image_authorization_request(run, call)
+                        execution["status"] = "waiting_authorization"
+                        execution["result"] = None
+                        run["pending_authorization"] = pending_authorization
+                        run["keys"] = []
+                        _set_agent_status(run, "waiting_authorization")
+                        _append_agent_event(
+                            run,
+                            "authorization_required",
+                            _agent_public_pending_authorization(run),
+                        )
+                        return False
+                    if permission_profile != "bypass" and not resuming_image_generation:
+                        raise ValueError(
+                            f"permission profile does not allow image generation: {permission_profile}"
+                        )
+                    try:
+                        result = _execute_agent_image_generation(run, call, execution)
+                    except ImageRuntimeError as exc:
+                        if exc.code == "image_route_credentials_unavailable":
+                            run["keys"] = []
+                            run["resume_phase"] = "tools"
+                            run["resume_error_code"] = exc.code
+                            run["resume_error_message"] = str(exc)
+                            run["updated_at"] = now_iso()
+                            _persist_agent_run(run)
+                            _set_agent_status(run, "waiting_credentials")
+                            _append_agent_event(run, "waiting_credentials", {
+                                "error": str(exc),
+                                "errorCode": exc.code,
+                                "resumePhase": "tools",
+                            })
+                            return False
+                        raise _AgentToolResult(exc.tool_result())
                 elif spec.get("effect") == "file_mutation":
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
@@ -7313,6 +7720,39 @@ def _start_agent_worker(run):
     return worker
 
 
+def _normalize_agent_image_route_identity(value):
+    if isinstance(value, ResolvedImageRoute):
+        value = value.public_identity()
+    if not isinstance(value, dict):
+        return None
+    route_ref = str(value.get("routeRef") or "").strip()
+    connection_id = str(value.get("connectionId") or "").strip()
+    model_id = str(value.get("modelId") or "").strip()
+    revision = value.get("catalogRevision")
+    if (
+        not re.fullmatch(r"ir1_[a-f0-9]{64}", route_ref)
+        or not connection_id
+        or not model_id
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+    ):
+        return None
+    return {
+        "routeRef": route_ref,
+        "catalogRevision": revision,
+        "connectionId": connection_id[:160],
+        "label": str(value.get("label") or "").strip()[:160],
+        "modelId": model_id[:240],
+        "supportsGeneration": value.get("supportsGeneration") is not False,
+        "supportsEdit": value.get("supportsEdit") is True,
+    }
+
+
+def _agent_image_route_public(run):
+    return _normalize_agent_image_route_identity(run.get("image_route"))
+
+
 def _create_agent_run(
     session_id,
     payload,
@@ -7338,6 +7778,7 @@ def _create_agent_run(
     catalog_revision=0,
     active_skill_name="",
     active_skill_names=None,
+    image_route=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -7391,6 +7832,12 @@ def _create_agent_run(
     )
     goal_operations_enabled = bool(origin_message_id)
     tools = _agent_selected_tools(payload, allowed_tools, permission_profile)
+    image_route_identity = _normalize_agent_image_route_identity(image_route)
+    if not image_route_identity or not image_route_identity.get("supportsGeneration"):
+        tools = [
+            definition for definition in tools
+            if str((definition.get("function") or {}).get("name") or "") != "generate_image"
+        ]
     if goal_operations_enabled:
         selected_names = {
             str((definition.get("function") or {}).get("name") or "")
@@ -7450,6 +7897,7 @@ def _create_agent_run(
         "base_url": _agent_base_url(base_url),
         "route_ref": str(route_ref or ""),
         "catalog_revision": max(0, int(catalog_revision or 0)),
+        "image_route": image_route_identity,
         "context_limit": normalized_context_limit,
         "context_window_tokens": context_resolution["contextWindowTokens"],
         "context_budget_tokens": context_resolution["contextBudgetTokens"],
@@ -7534,6 +7982,13 @@ def _create_agent_run(
             "toolBudgets": _json_clone(normalized_tool_budgets),
             "cwd": resolved_cwd,
             "workspaceRoots": list(resolved_workspace_roots),
+            **({
+                "imageRouteRef": image_route_identity["routeRef"],
+                "imageCatalogRevision": image_route_identity["catalogRevision"],
+                "imageModelId": image_route_identity["modelId"],
+                "imageConnectionId": image_route_identity["connectionId"],
+                "imageRouteLabel": image_route_identity["label"],
+            } if image_route_identity else {}),
         })
         if start_worker:
             _start_agent_worker(run)
@@ -7552,6 +8007,7 @@ def _resume_agent_run(
     *,
     route_ref="",
     catalog_revision=0,
+    image_route=None,
 ):
     if not isinstance(keys, list):
         raise ValueError("keys must be an array")
@@ -7570,6 +8026,24 @@ def _resume_agent_run(
     previous_recovery_state = _normalize_agent_recovery_state(
         run.get("recovery_state")
     )
+    expected_image_route = _agent_image_route_public(run)
+    supplied_image_route = _normalize_agent_image_route_identity(image_route)
+    if supplied_image_route and not expected_image_route:
+        raise ImageRuntimeError(
+            "image_route_model_mismatch",
+            "AgentRun recovery cannot add an image connection.",
+            http_status=409,
+        )
+    if supplied_image_route and expected_image_route and (
+        supplied_image_route["routeRef"] != expected_image_route["routeRef"]
+        or supplied_image_route["catalogRevision"] != expected_image_route["catalogRevision"]
+        or supplied_image_route["modelId"] != expected_image_route["modelId"]
+    ):
+        raise ImageRuntimeError(
+            "image_route_model_mismatch",
+            "AgentRun recovery must use its original image connection.",
+            http_status=409,
+        )
     with run["condition"]:
         if run["status"] in _AGENT_RUN_ACTIVE and run.get("worker") is not None:
             # Multiple tabs can observe the same admitted continuation.  The
@@ -7631,6 +8105,22 @@ def _agent_cancel_tool_result(execution, name, *, cancelled_before_start=False):
                 "Tool call cancelled before execution."
                 if cancelled_before_start
                 else "Command cancelled."
+            ),
+        }
+    elif (
+        name == "generate_image"
+        and str((execution or {}).get("dispatchState") or "") == "dispatched"
+    ):
+        result = {
+            "ok": False,
+            "action": "generate_image",
+            "cancelled": True,
+            "outcomeUnknown": True,
+            "notReplayed": True,
+            "errorCode": "image_outcome_unknown",
+            "error": (
+                "Image generation was cancelled after dispatch. The upstream outcome is unknown "
+                "and the paid operation was not replayed."
             ),
         }
     else:
@@ -14739,6 +15229,40 @@ _SERVER_TOOL_DEFINITIONS = {
             },
         },
     },
+    "generate_image": {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate images with the AgentRun's separately selected image connection. Optionally edit one image already owned by the current Session. The route, provider URL, credentials, and local paths are never tool arguments.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "minLength": 1, "maxLength": 8000},
+                    "reference": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["attachment", "generated_asset"]},
+                            "id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        },
+                        "required": ["type", "id"],
+                        "additionalProperties": False,
+                    },
+                    "size": {
+                        "type": "string",
+                        "enum": ["auto", "256x256", "512x512", "1024x1024", "1024x1536", "1536x1024"],
+                    },
+                    "quality": {
+                        "type": "string",
+                        "enum": ["auto", "standard", "hd", "low", "medium", "high"],
+                    },
+                    "count": {"type": "integer", "minimum": 1, "maximum": 4},
+                    "outputFormat": {"type": "string", "enum": ["png", "jpeg", "webp"]},
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    },
     "write_file": {
         "type": "function",
         "function": {
@@ -15109,6 +15633,13 @@ SERVER_TOOL_REGISTRY = {
         "definition": _SERVER_TOOL_DEFINITIONS["save_memory"],
         "effect": "memory_write",
         "idempotent": True,
+        "background": True,
+    },
+    "generate_image": {
+        "execute": None,
+        "definition": _SERVER_TOOL_DEFINITIONS["generate_image"],
+        "effect": "image_generation",
+        "idempotent": False,
         "background": True,
     },
     "write_file": {
@@ -16323,6 +16854,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "routingV2": True,
                 })
                 return
+            if route == "/api/image-routes":
+                self.send_json(_image_route_registry.snapshot())
+                return
             if route == "/api/project-context":
                 self.send_json(load_project_context((query.get("path") or [""])[0]))
                 return
@@ -16466,6 +17000,13 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route.startswith("/api/sessions/") and route.endswith("/goal-v2"):
                 self.get_session_goal_v2(route.rsplit("/", 2)[-2])
                 return
+            if route.startswith("/api/sessions/") and "/generated-assets/" in route:
+                parts = route.strip("/").split("/")
+                if len(parts) != 5 or parts[:2] != ["api", "sessions"] or parts[3] != "generated-assets":
+                    self.send_json({"error": "Generated asset not found"}, 404)
+                    return
+                self.get_generated_asset(parts[2], parts[4])
+                return
             if route.startswith("/api/sessions/"):
                 self.get_session(route.rsplit("/", 1)[-1])
                 return
@@ -16516,6 +17057,14 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         try:
             route = parse.urlparse(self.path).path
+            if route.rstrip("/") == "/api/image-routes/refresh":
+                body = self.read_body_json()
+                connections = body.get("connections")
+                if not isinstance(connections, list):
+                    self.send_json({"error": "connections must be an array"}, 400)
+                    return
+                self.send_json(_image_route_registry.refresh(connections))
+                return
             if route.startswith("/api/sessions/") and route.endswith("/goal-v2/control"):
                 parts = route.strip("/").split("/")
                 if len(parts) != 5:
@@ -16593,6 +17142,21 @@ class CodeHandler(BaseHTTPRequestHandler):
                         payload.get("model"),
                     )
                     keys = [resolved_route.key]
+                image_route_ref = str(body.get("imageRouteRef") or "").strip()
+                image_catalog_revision = body.get("imageCatalogRevision")
+                image_model_id = str(body.get("imageModelId") or "").strip()
+                resolved_image_route = None
+                if image_route_ref or image_catalog_revision is not None or image_model_id:
+                    if not image_route_ref or image_catalog_revision is None or not image_model_id:
+                        raise ImageRuntimeError(
+                            "image_route_invalid",
+                            "imageRouteRef, imageCatalogRevision, and imageModelId must be supplied together.",
+                        )
+                    resolved_image_route = _image_route_registry.resolve(
+                        image_route_ref,
+                        image_catalog_revision,
+                        image_model_id,
+                    )
                 run = _create_agent_run(
                     body.get("sessionId"),
                     payload,
@@ -16611,6 +17175,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
                     active_skill_name=body.get("activeSkillName") or "",
                     active_skill_names=body.get("activeSkillNames"),
+                    image_route=resolved_image_route,
                 )
                 self.send_json({
                     "agentRunId": run["id"],
@@ -16652,12 +17217,28 @@ class CodeHandler(BaseHTTPRequestHandler):
                         (run.get("request") or {}).get("model"),
                     )
                     keys = [resolved_route.key]
+                image_route_ref = str(body.get("imageRouteRef") or "").strip()
+                image_catalog_revision = body.get("imageCatalogRevision")
+                image_model_id = str(body.get("imageModelId") or "").strip()
+                resolved_image_route = None
+                if image_route_ref or image_catalog_revision is not None or image_model_id:
+                    if not image_route_ref or image_catalog_revision is None or not image_model_id:
+                        raise ImageRuntimeError(
+                            "image_route_invalid",
+                            "imageRouteRef, imageCatalogRevision, and imageModelId must be supplied together.",
+                        )
+                    resolved_image_route = _image_route_registry.resolve(
+                        image_route_ref,
+                        image_catalog_revision,
+                        image_model_id,
+                    )
                 _resume_agent_run(
                     run,
                     keys or [],
                     resolved_route.base_url if resolved_route else body.get("baseUrl") or "",
                     route_ref=route_ref,
                     catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
+                    image_route=resolved_image_route,
                 )
                 self.send_json({"agentRunId": run["id"], "status": run["status"]})
                 return
@@ -16943,6 +17524,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             if self.path == "/api/code/auth/validate":
                 self._handle_validate_code_auth()
                 return
+        except ImageRuntimeError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
         except ModelRouteError as exc:
             status = 503 if exc.code in {
                 "route_catalog_unavailable", "route_credentials_unavailable",
@@ -17709,6 +18293,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                         child["_branchDepth"] = 0
                         write_json(child_path, child)
 
+            _generated_asset_repository.delete_session_assets(session_id)
             path.unlink(missing_ok=True)
             jpath.unlink(missing_ok=True)
             _remove_session_index_entry(session_id)
@@ -18061,6 +18646,21 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(preview)
+
+    def get_generated_asset(self, session_id, asset_id):
+        safe_session_id(session_id)
+        try:
+            data, meta = _generated_asset_repository.read(session_id, asset_id)
+        except ImageRuntimeError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", str(meta.get("mimeType") or "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
 
     def get_attachment_preview(self, relative_path):
         if not relative_path:

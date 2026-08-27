@@ -89,7 +89,12 @@
           "permissionProfile",
           "toolBudgets",
           "cwd",
-          "workspaceRoots"
+          "workspaceRoots",
+          "imageRouteRef",
+          "imageCatalogRevision",
+          "imageModelId",
+          "imageConnectionId",
+          "imageRouteLabel"
         ],
         "producer": "_create_agent_run",
         "frontendMode": "durable-only",
@@ -308,9 +313,15 @@
           "requestedAt",
           "command",
           "description",
-          "childAgentRunId"
+          "childAgentRunId",
+          "modelId",
+          "count",
+          "size",
+          "quality",
+          "outputFormat",
+          "hasReference"
         ],
-        "producer": "command, edit, file mutation, and child authorization paths",
+        "producer": "command, edit, file mutation, image generation, and child authorization paths",
         "frontendMode": "snapshot-status",
         "frontendConsumers": [
           "runServerAgentLoop",
