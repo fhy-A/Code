@@ -49,6 +49,12 @@ PARALLEL_VISUAL_PROTOCOL_PATHS = (
     "parallel-visual-b.png",
 )
 TOOL_PROTOCOL_ERROR_USER = "H4_TOOL_PROTOCOL_ERROR_USER"
+RUNTIME_RECOVERY_USER = "H4_RUNTIME_RECOVERY_USER"
+RUNTIME_RECOVERY_STAGE = "H4_RUNTIME_RECOVERY_STAGE"
+RUNTIME_RECOVERY_PARTIAL_ONE = "H4_RUNTIME_RECOVERY_PARTIAL_ONE"
+RUNTIME_RECOVERY_PARTIAL_TWO = "H4_RUNTIME_RECOVERY_PARTIAL_TWO"
+RUNTIME_RECOVERY_FINAL = "H4_RUNTIME_RECOVERY_FINAL"
+RUNTIME_RECOVERY_CALL_ID = "h4-runtime-recovery-read"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
 AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
@@ -741,6 +747,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             FIVE_QUESTIONNAIRE_TOOL_CALL_ID,
             TERMINAL_QUESTIONNAIRE_TOOL_CALL_ID,
             PROPOSE_EDIT_TOOL_CALL_ID,
+            RUNTIME_RECOVERY_CALL_ID,
         }:
             has_tool_result = True
     joined_user_text = "\n".join(user_texts)
@@ -752,6 +759,25 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         return "tool-protocol-history", has_tool_result
     if TOOL_PROTOCOL_ERROR_USER in joined_user_text:
         return "tool-protocol-error", has_tool_result
+    if RUNTIME_RECOVERY_USER in joined_user_text:
+        recovery_text = "\n".join(
+            _message_text(message)
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "system"
+        )
+        completed = any(
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") == RUNTIME_RECOVERY_CALL_ID
+            for message in messages
+        )
+        if not completed:
+            return "runtime-recovery-call", False
+        if RUNTIME_RECOVERY_PARTIAL_TWO in recovery_text:
+            return "runtime-recovery-final", True
+        if RUNTIME_RECOVERY_PARTIAL_ONE in recovery_text:
+            return "runtime-recovery-partial-two", True
+        return "runtime-recovery-partial-one", True
     if PARALLEL_VISUAL_PROTOCOL_USER in joined_user_text:
         completed = {
             str(message.get("tool_call_id") or "")
@@ -1968,6 +1994,30 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             projection = _parallel_visual_protocol_projection(payload)
             chat_metric["parallelVisualProtocol"] = projection
             tool_protocol_rejected = not projection["strictOrder"]
+        if scenario == "runtime-recovery-final":
+            projected_messages = [
+                message for message in (payload.get("messages") or [])
+                if isinstance(message, dict)
+            ]
+            chat_metric["runtimeRecovery"] = {
+                "originalUserCount": sum(
+                    1 for message in projected_messages
+                    if message.get("role") == "user"
+                    and RUNTIME_RECOVERY_USER in _message_text(message)
+                ),
+                "toolReceiptCount": sum(
+                    1 for message in projected_messages
+                    if message.get("role") == "tool"
+                    and str(message.get("tool_call_id") or "")
+                    == RUNTIME_RECOVERY_CALL_ID
+                ),
+                "recoveryInstructionPresent": any(
+                    message.get("role") == "system"
+                    and "[System recovery]" in _message_text(message)
+                    and RUNTIME_RECOVERY_PARTIAL_TWO in _message_text(message)
+                    for message in projected_messages
+                ),
+            }
         if scenario == "context-calibration":
             chat_metric["usedContextCalibrationUnusedKey"] = (
                 self.headers.get("Authorization", "")
@@ -2191,6 +2241,31 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             self.wfile.flush()
             return
+        if scenario in {"runtime-recovery-partial-one", "runtime-recovery-partial-two"}:
+            partial_text = (
+                RUNTIME_RECOVERY_PARTIAL_ONE
+                if scenario == "runtime-recovery-partial-one"
+                else RUNTIME_RECOVERY_PARTIAL_TWO
+            )
+            frame = _chunk({
+                "role": "assistant",
+                "content": partial_text,
+                "reasoning_content": "H4_PRIVATE_RECOVERY_REASONING",
+            })
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(
+                    f"data: {json.dumps(frame, separators=(',', ':'))}\n\n".encode("utf-8")
+                )
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            self.close_connection = True
+            return
         current_chat_count = len(METRICS.snapshot()["chatRequests"])
         if (
             scenario not in (
@@ -2202,6 +2277,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "queue-questionnaire-call",
                 "edit-authorization-approve-call",
                 "edit-authorization-reject-call", "edit-authorization-conflict-call",
+                "runtime-recovery-call",
             )
             and not scenario.startswith("repeated-range-failure-call-")
             and not scenario.startswith("forced-final-model-failure-call-")
@@ -2349,6 +2425,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "missing-file-call", "edit-authorization-approve-call",
             "edit-authorization-reject-call", "edit-authorization-conflict-call",
             "parallel-visual-protocol-call",
+            "runtime-recovery-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2378,6 +2455,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "edit-authorization-reject-call": EDIT_AUTHORIZATION_STAGE,
                 "edit-authorization-conflict-call": EDIT_AUTHORIZATION_STAGE,
                 "parallel-visual-protocol-call": PARALLEL_VISUAL_PROTOCOL_STAGE,
+                "runtime-recovery-call": RUNTIME_RECOVERY_STAGE,
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -2404,6 +2482,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     }
                     for index in range(len(PARALLEL_VISUAL_PROTOCOL_CALL_IDS))
                 ]
+            elif scenario == "runtime-recovery-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": RUNTIME_RECOVERY_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": READ_PATH}, separators=(",", ":"),
+                        ),
+                    },
+                }]
             elif scenario == "multi-tool-detail-call":
                 tool_calls = [
                     {
@@ -2872,6 +2962,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "context-compaction-seed": AUTO_COMPACTION_SEED_FINAL,
                 "context-compaction-final": AUTO_COMPACTION_FINAL,
                 "context-calibration": CONTEXT_CALIBRATION_FINAL,
+                "runtime-recovery-final": RUNTIME_RECOVERY_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,

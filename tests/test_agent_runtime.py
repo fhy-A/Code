@@ -70,6 +70,23 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                 if type(self).scripted_rounds
                 else None
             )
+        if isinstance(scripted_frames, dict) and scripted_frames.get("partial_then_disconnect"):
+            self.send_response(int(scripted_frames.get("http_status") or 200))
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.end_headers()
+            frame = {
+                "choices": [{
+                    "delta": {
+                        "content": str(scripted_frames.get("content") or ""),
+                        "reasoning_content": str(scripted_frames.get("reasoning") or ""),
+                    },
+                    "finish_reason": None,
+                }],
+            }
+            self.wfile.write(("data: " + json.dumps(frame) + "\n\n").encode("utf-8"))
+            self.wfile.flush()
+            self.close_connection = True
+            return
         if isinstance(scripted_frames, dict) and scripted_frames.get("first_response_timeout"):
             self.send_response(int(scripted_frames.get("http_status") or 200))
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -619,6 +636,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
             mock.patch.object(server_mod, "FILE_BACKUP_DIR", self.data_dir / "file-backups"),
             mock.patch.object(server_mod, "SKILLS_DIR", self.data_dir / "skills"),
             mock.patch.object(server_mod, "MEMORY_DIR", self.data_dir / "memory"),
+            mock.patch.object(server_mod, "_MODEL_ROUTE_REGISTRY_ENABLED", False),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -2010,7 +2028,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
             self.base_url,
             ["agent-secret-key", "agent-secondary-key"],
             allowed_tools=["read_file"],
-            context_limit=8192,
+            context_budget_tokens=8192,
             start_worker=False,
         )
         initial_payload, _ = server_mod._agent_model_payload(run)
@@ -2177,14 +2195,15 @@ class TestDurableAgentRuntime(unittest.TestCase):
             },
             self.base_url,
             ["agent-secret-key"],
-            context_limit=128000,
+            context_budget_tokens=128000,
         )
 
-        self._wait_terminal(run)
+        self._wait_status(run, "waiting_recovery")
         snapshot = server_mod._agent_snapshot(run, 0)
 
-        self.assertEqual(snapshot["status"], "failed")
-        self.assertEqual(snapshot["errorCode"], "context_window_exceeded")
+        self.assertEqual(snapshot["status"], "waiting_recovery")
+        self.assertEqual(snapshot["errorCode"], "context_recovery_required")
+        self.assertEqual(snapshot["recoveryState"]["kind"], "context_compaction_failed")
         self.assertEqual(_AgentUpstream.calls, 3)
         self.assertEqual(len(snapshot["compactions"]), 1)
         self.assertEqual(snapshot["contextLimit"], 128_000)
@@ -2532,6 +2551,124 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
         self.assertEqual(_AgentUpstream.calls, 1)
         self.assertEqual(run["active_runtime_id"], "")
+
+    def test_midrun_stream_failure_survives_restart_and_reuses_completed_tool(self):
+        private_reasoning = "private recovery reasoning must not persist"
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{
+                    "choices": [{
+                        "delta": {"tool_calls": [{
+                            "index": 0,
+                            "id": "recovery-read-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "README.md"}),
+                            },
+                        }]},
+                        "finish_reason": "tool_calls",
+                    }],
+                }],
+                {
+                    "partial_then_disconnect": True,
+                    "content": "partial response after completed tool",
+                    "reasoning": private_reasoning,
+                },
+                [{
+                    "choices": [{
+                        "delta": {"content": "recovered on the same AgentRun"},
+                        "finish_reason": "stop",
+                    }],
+                }],
+            ]
+
+        original_execute = server_mod.execute_registered_tool
+        with mock.patch.object(
+            server_mod,
+            "execute_registered_tool",
+            wraps=original_execute,
+        ) as execute_mock:
+            run = server_mod._create_agent_run(
+                "session-midrun-stream-recovery",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "read then recover"}],
+                    "tools": [server_mod._SERVER_TOOL_DEFINITIONS["read_file"]],
+                },
+                self.base_url,
+                ["recovery-key"],
+                allowed_tools=["read_file"],
+            )
+            self._wait_status(run, "waiting_recovery")
+            self._wait_worker_idle(run)
+
+            self.assertEqual(execute_mock.call_count, 1)
+            self.assertEqual(_AgentUpstream.calls, 2)
+            snapshot = server_mod._agent_snapshot(run, 0)
+            self.assertEqual(snapshot["errorCode"], "agent_recovery_required")
+            self.assertEqual(snapshot["recoveryState"]["kind"], "model_interrupted")
+            self.assertNotIn("modelCheckpoint", snapshot)
+            record = server_mod._agent_run_record(run)
+            self.assertEqual(
+                record["modelCheckpoint"]["content"],
+                "partial response after completed tool",
+            )
+            self.assertTrue(record["modelCheckpoint"]["hasReasoning"])
+            self.assertNotIn(private_reasoning, json.dumps(record, ensure_ascii=False))
+            runtime_ids = [
+                event["data"]["runtimeRunId"]
+                for event in run["events"]
+                if event["type"] == "model_started"
+            ]
+            self.assertEqual(len(runtime_ids), 2)
+            self.assertIsNotNone(
+                server_mod._model_runtime_runs[runtime_ids[0]]["first_response_timeout"],
+            )
+            self.assertIsNone(
+                server_mod._model_runtime_runs[runtime_ids[1]]["first_response_timeout"],
+            )
+
+            run_id = run["id"]
+            with server_mod._agent_run_lock:
+                server_mod._agent_runs.pop(run_id, None)
+            restored = server_mod._get_agent_run(run_id)
+            self.assertEqual(restored["id"], run_id)
+            self.assertEqual(restored["status"], "waiting_recovery")
+            server_mod._resume_agent_run(
+                restored,
+                ["recovery-key"],
+                self.base_url,
+            )
+            self._wait_terminal(restored)
+
+            self.assertEqual(execute_mock.call_count, 1)
+
+        self.assertEqual(restored["status"], "completed")
+        self.assertEqual(restored["result"]["content"], "recovered on the same AgentRun")
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertIsNone(restored.get("model_checkpoint"))
+        self.assertIsNone(restored.get("recovery_state"))
+        self.assertEqual(
+            sum(message.get("role") == "user" for message in restored["messages"]),
+            1,
+        )
+        self.assertEqual(
+            sum(message.get("role") == "tool" for message in restored["messages"]),
+            1,
+        )
+        recovery_payload = _AgentUpstream.payloads[-1]
+        recovery_messages = recovery_payload["messages"]
+        self.assertEqual(
+            sum(message.get("role") == "user" for message in recovery_messages),
+            1,
+        )
+        self.assertTrue(any(
+            message.get("role") == "system"
+            and "partial response after completed tool" in str(message.get("content") or "")
+            for message in recovery_messages
+        ))
+        self.assertNotIn(private_reasoning, json.dumps(recovery_payload, ensure_ascii=False))
 
     def test_agent_normalizes_read_file_alias_before_execution_and_history(self):
         with _AgentUpstream.scripted_lock:
@@ -5312,10 +5449,18 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(loaded["status"], "waiting_credentials")
         with mock.patch.object(server_mod, "execute_registered_tool") as execute_mock:
             server_mod._resume_agent_run(loaded, ["edit-bypass-resume-key"])
+            self._wait_status(loaded, "waiting_recovery")
+            execute_mock.assert_not_called()
+            server_mod._resume_agent_run(
+                loaded,
+                ["edit-bypass-resume-key"],
+                self.base_url,
+            )
             self._wait_terminal(loaded)
             execute_mock.assert_not_called()
         result = loaded["tool_executions"]["agent-edit-1"]["result"]
         self.assertTrue(result["replayed"])
+        self.assertEqual(loaded["result"]["content"], "edit task complete")
         self.assertEqual(len(list((self.data_dir / "file-backups").glob("*.bak"))), 1)
 
     def test_restart_recovery_reuses_completed_tool_execution(self):
@@ -5476,7 +5621,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         ]
         self.assertEqual(len(replay_events), 1)
 
-    def test_model_round_limit_is_enforced(self):
+    def test_legacy_model_round_limit_is_read_but_not_enforced(self):
         run = server_mod._create_agent_run(
             "round-limit-session",
             {
@@ -5491,10 +5636,138 @@ class TestDurableAgentRuntime(unittest.TestCase):
         )
         self._wait_terminal(run)
 
-        self.assertEqual(run["status"], "failed")
-        self.assertIn("exceeded 2 model rounds", run["error"])
-        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["result"]["content"], "read-only task complete")
+        self.assertEqual(_AgentUpstream.calls, 3)
         self.assertEqual(run["keys"], [])
+
+    def test_worker_continues_after_legacy_fiftieth_round_without_goal_handoff(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[{
+                "choices": [{
+                    "delta": {"content": "continued after legacy round fifty"},
+                    "finish_reason": "stop",
+                }],
+            }]]
+        run = server_mod._create_agent_run(
+            "legacy-round-fifty-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "continue"}],
+            },
+            self.base_url,
+            ["round-fifty-key"],
+            allowed_tools=[],
+            max_rounds=50,
+            start_worker=False,
+        )
+        run["rounds"] = [{
+            "round": index,
+            "content": "prior progress",
+            "reasoning": "",
+            "toolCalls": [],
+            "finishReason": "stop",
+            "usage": {},
+            "completedAt": "2030-01-01T00:00:00Z",
+            "outcome": "completed",
+        } for index in range(1, 51)]
+
+        server_mod._start_agent_worker(run)
+        self._wait_terminal(run)
+
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(len(run["rounds"]), 51)
+        self.assertEqual(run["result"]["content"], "continued after legacy round fifty")
+        self.assertFalse(run.get("continuation"))
+
+    def test_empty_compaction_summary_retries_once_then_persists_backoff(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{"choices": [{"delta": {}, "finish_reason": "stop"}]}],
+                [{"choices": [{"delta": {}, "finish_reason": "stop"}]}],
+            ]
+        run = server_mod._create_agent_run(
+            "empty-compaction-backoff-session",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "system rules"},
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["compaction-key"],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        original_messages = json.loads(json.dumps(run["messages"]))
+
+        failed = server_mod._run_agent_auto_compaction(
+            run, "threshold", before_estimate=10000,
+        )
+        repeated = server_mod._run_agent_auto_compaction(
+            run, "threshold", before_estimate=10000,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["errorCode"], "empty_compaction_summary")
+        self.assertEqual(failed["attempts"], 2)
+        self.assertEqual(repeated["status"], "skipped")
+        self.assertEqual(repeated["reason"], "compaction_backoff")
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(run["messages"], original_messages)
+        self.assertEqual(run["compaction_recovery"]["lastErrorCode"], "empty_compaction_summary")
+        self.assertTrue(run["compaction_recovery"]["nextRetryAt"])
+        record = server_mod._agent_run_record(run)
+        restored = server_mod._agent_run_from_record(record)
+        repeated_after_restart = server_mod._run_agent_auto_compaction(
+            restored, "threshold", before_estimate=10000,
+        )
+        self.assertEqual(repeated_after_restart["status"], "skipped")
+        self.assertEqual(repeated_after_restart["reason"], "compaction_backoff")
+        self.assertEqual(restored["messages"], original_messages)
+        self.assertEqual(_AgentUpstream.calls, 2)
+
+    def test_nonshrinking_compaction_keeps_original_history_atomically(self):
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[{
+                "choices": [{
+                    "delta": {"content": "A valid but non-shrinking final summary."},
+                    "finish_reason": "stop",
+                }],
+            }]]
+        run = server_mod._create_agent_run(
+            "nonshrinking-compaction-session",
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "system rules"},
+                    {"role": "user", "content": "old task"},
+                    {"role": "assistant", "content": "old result"},
+                    {"role": "user", "content": "current task"},
+                ],
+            },
+            self.base_url,
+            ["compaction-key"],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        original_messages = json.loads(json.dumps(run["messages"]))
+
+        failed = server_mod._run_agent_auto_compaction(
+            run, "threshold", before_estimate=1,
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["errorCode"], "compaction_not_smaller")
+        self.assertEqual(run["messages"], original_messages)
+        self.assertEqual(run["compactions"], [])
+        self.assertEqual(_AgentUpstream.calls, 1)
+        compaction_payload = _AgentUpstream.payloads[0]
+        self.assertNotIn("tools", compaction_payload)
+        self.assertIn("Return only the final summary", compaction_payload["messages"][0]["content"])
 
     def test_credentials_inside_payload_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "credentials"):

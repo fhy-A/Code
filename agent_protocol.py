@@ -26,6 +26,7 @@ AGENT_EVENT_ENVELOPE_FIELDS = frozenset({
 AGENT_RUN_ACTIVE_STATES = frozenset({"model", "tools"})
 AGENT_RUN_WAITING_STATES = frozenset({
     "waiting_credentials",
+    "waiting_recovery",
     "waiting_user_input",
     "waiting_authorization",
 })
@@ -69,6 +70,15 @@ AGENT_EVENT_SPECS = {
         "resumeStatus",
         "reason",
         required=("resumeStatus",),
+    ),
+    "waiting_recovery": _event_spec(
+        "resumeStatus",
+        "reason",
+        "errorCode",
+        "retryAfter",
+        "round",
+        "runtimeRunId",
+        required=("resumeStatus", "reason", "errorCode"),
     ),
     "model_pending": _event_spec("round", required=("round",)),
     "model_started": _event_spec(
@@ -206,6 +216,8 @@ AGENT_EVENT_SPECS = {
         "reason",
         "error",
         "errorCode",
+        "attempts",
+        "retryAfter",
         required=("compactionId", "error"),
     ),
     "completed": _event_spec(),
@@ -220,6 +232,7 @@ AGENT_RUN_TRANSITIONS = {
         "waiting_user_input",
         "waiting_authorization",
         "waiting_credentials",
+        "waiting_recovery",
         "completed",
         "failed",
         "cancelled",
@@ -230,12 +243,20 @@ AGENT_RUN_TRANSITIONS = {
         "waiting_user_input",
         "waiting_authorization",
         "waiting_credentials",
+        "waiting_recovery",
         "completed",
         "failed",
         "cancelled",
     }),
     "waiting_credentials": frozenset({
         "waiting_credentials",
+        "model",
+        "tools",
+        "failed",
+        "cancelled",
+    }),
+    "waiting_recovery": frozenset({
+        "waiting_recovery",
         "model",
         "tools",
         "failed",

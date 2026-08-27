@@ -2807,6 +2807,48 @@ async function scenario(nextMode, existingAgentRunId, failKeys) {{
         self.assertEqual(data["waiting"]["resumeKeys"], ["synthetic-key"])
         self.assertEqual(data["waiting"]["finalCount"], 1)
 
+    def test_agent_runs_do_not_send_legacy_round_or_auto_context_limits(self):
+        foreground_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        foreground_end = APP_SOURCE.index("async function executeRunContext(ctx)", foreground_start)
+        foreground = APP_SOURCE[foreground_start:foreground_end]
+        background_start = APP_SOURCE.index("async function runBackgroundSubAgentJob(job)")
+        background_end = APP_SOURCE.index("function pumpBackgroundDispatcher()", background_start)
+        background = APP_SOURCE[background_start:background_end]
+
+        self.assertNotIn("MAX_TOOL_ROUNDS", APP_SOURCE)
+        self.assertNotIn("maxRounds:", foreground)
+        self.assertNotIn("maxRounds:", background)
+        self.assertNotIn("contextLimit:", foreground)
+        self.assertNotIn("contextLimit:", background)
+        self.assertIn("contextBudgetTokens: contextResolution.contextBudgetTokens", foreground)
+        self.assertIn("contextBudgetTokens: job.contextBudgetTokens", background)
+        self.assertNotIn("maxRounds,", RUNTIME_SOURCE)
+
+    def test_waiting_recovery_resumes_once_then_preserves_the_same_agent_run(self):
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+
+        self.assertIn('snapshot.status === "waiting_recovery"', loop_source)
+        self.assertIn("recoveryResumeAttempts >= 1", loop_source)
+        self.assertIn("throw agentRecoveryPauseError(snapshot)", loop_source)
+        self.assertIn('if (snapshot.status === "waiting_recovery") continue;', loop_source)
+        self.assertIn('error.status = "waiting_recovery"', APP_SOURCE)
+        self.assertIn('"waiting_recovery",', RUNTIME_SOURCE)
+        self.assertIn('kind: "agent-recovery-paused"', APP_SOURCE)
+        self.assertIn('loopError?.recoverable ? "waiting-network"', APP_SOURCE)
+        resume_start = APP_SOURCE.index("async function resumePersistedRuns()")
+        resume_end = APP_SOURCE.index("function createRequestSignal", resume_start)
+        resume_source = APP_SOURCE[resume_start:resume_end]
+        self.assertIn("const activeRunState = getSessionRunState(session.id)", resume_source)
+        self.assertIn("{ ...session, runState: activeRunState }", resume_source)
+        refresh_start = APP_SOURCE.index("function startModelRouteRefresh(request)")
+        refresh_end = APP_SOURCE.index("function queueModelRouteRefresh", refresh_start)
+        refresh_source = APP_SOURCE[refresh_start:refresh_end]
+        self.assertIn("if (result?.ok === false) return;", refresh_source)
+        self.assertIn('typeof resumePersistedRuns === "function"', refresh_source)
+        self.assertIn("queueMicrotask(() => { void resumePersistedRuns(); });", refresh_source)
+
     def test_terminal_idle_publishes_before_checkpoint_and_preserves_next_message(self):
         tail_start = APP_SOURCE.index("// Publish terminal ownership locally")
         throw_line = "if (loopError) throw loopError;  // propagate to chatForm handler"
@@ -9709,8 +9751,8 @@ const feature = createFilesFeature({
         self.assertIn('if (!["completed", "failed", "cancelled"].includes', APP_SOURCE)
         self.assertIn("backgroundJobId: job.id", APP_SOURCE)
         self.assertIn("job.status === \"completed\" ? \"completed\" : \"failed\"", APP_SOURCE)
-        self.assertIn("recoveryError ? (recoveryError?.name === \"AbortError\" ? \"cancelled\" : \"failed\") : \"completed\"", APP_SOURCE)
-        self.assertIn("loopError ? (loopError?.name === \"AbortError\" ? \"cancelled\" : \"failed\") : \"completed\"", APP_SOURCE)
+        self.assertIn('recoveryError?.recoverable ? "paused"', APP_SOURCE)
+        self.assertIn('loopError?.recoverable ? "paused"', APP_SOURCE)
         terminal_schedule = APP_SOURCE.index("scheduleTerminalFileTreeRefresh(\n    ctx,", APP_SOURCE.index("async function sendMessage"))
         final_save = APP_SOURCE.index(
             "await saveSessionState(\n    sessionId,\n    getSessionMessages(sessionId),",
@@ -20339,7 +20381,8 @@ eval(saveSource);
 
     def test_error_code_meta_has_all_codes(self):
         """All runtime error codes have entries in _errorCodeMeta."""
-        codes = ["upstream_error", "model_response_timeout", "config_error",
+        codes = ["upstream_error", "model_response_timeout",
+                 "agent_recovery_required", "context_recovery_required", "config_error",
                  "tool_protocol_error",
                  "model_access_denied", "permission_denied",
                  "tool_error", "user_cancelled", "empty_response",

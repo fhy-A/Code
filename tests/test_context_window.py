@@ -311,15 +311,39 @@ class ContextWindowResolverTest(unittest.TestCase):
         self.assertTrue(resolved["inputBudgetInsufficient"])
         self.assertEqual(resolved["availableInputTokens"], 1024)
 
-    def test_invalid_metadata_and_legacy_hint_only_lower(self):
+    def test_auto_budget_ignores_stale_legacy_hint_and_explicit_controls_win(self):
         entries = context_window.normalize_catalog("https://example.test", [{
             "id": "gpt-5.6", "context_window": "200000", "max_input_tokens": 64000,
         }])
         self.assertEqual(entries[0]["contextWindowSource"], "official")
-        resolved = context_window.resolve(
-            "gpt-5.6", "https://example.test", budget=2000000, legacy_hint=128000,
+        automatic = context_window.resolve(
+            "deepseek-v4-flash-vision-exp",
+            "https://example.test",
+            legacy_hint=128000,
         )
-        self.assertEqual(resolved["contextLimit"], 128000)
+        self.assertEqual(automatic["contextWindowTokens"], 1_000_000)
+        self.assertEqual(automatic["contextLimit"], 1_000_000)
+
+        explicit = context_window.resolve(
+            "deepseek-v4-flash-vision-exp",
+            "https://example.test",
+            budget=256000,
+            legacy_hint=128000,
+        )
+        self.assertEqual(explicit["contextLimit"], 256000)
+
+        calibrated = context_window.resolve(
+            "deepseek-v4-flash-vision-exp",
+            "https://example.test",
+            legacy_hint=128000,
+            calibration={
+                "capTokens": 200000,
+                "evidenceKind": "explicit_max",
+                "expiresAt": "2030-01-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(calibrated["contextLimit"], 200000)
+        self.assertTrue(calibrated["calibrationApplied"])
 
 
 if __name__ == "__main__":

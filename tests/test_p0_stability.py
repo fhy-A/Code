@@ -568,7 +568,10 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
             failure_source,
         )
         self.assertLess(
-            failure_source.index("const status = isAbort ? \"paused\" : \"failed\""),
+            failure_source.index(
+                'const status = isAbort ? "paused" : '
+                '(loopError?.recoverable ? "waiting-network" : "failed")'
+            ),
             failure_source.index("errorRecoveryAssistant = {"),
         )
         self.assertLess(

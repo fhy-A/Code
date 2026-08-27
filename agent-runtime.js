@@ -271,7 +271,6 @@
     catalogRevision = 0,
     allowedTools,
     toolBudgets,
-    maxRounds,
     permissionProfile = "read",
     runKind = "internal",
     cwd = "",
@@ -292,7 +291,6 @@
           : { baseUrl, keys }),
         allowedTools,
         toolBudgets,
-        maxRounds,
         permissionProfile,
         runKind,
         cwd,
@@ -416,6 +414,7 @@
         "failed",
         "cancelled",
         "waiting_credentials",
+        "waiting_recovery",
         "waiting_user_input",
         "waiting_authorization",
       ].includes(snapshot.status)) {

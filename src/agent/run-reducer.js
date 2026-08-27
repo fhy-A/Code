@@ -9,6 +9,7 @@
     "model",
     "tools",
     "waiting_credentials",
+    "waiting_recovery",
     "waiting_user_input",
     "waiting_authorization",
     "completed",
@@ -20,6 +21,7 @@
     "created",
     "resumed",
     "waiting_credentials",
+    "waiting_recovery",
     "model_pending",
     "model_started",
     "model_completed",
@@ -48,6 +50,7 @@
     created: "run",
     resumed: "run",
     waiting_credentials: "run",
+    waiting_recovery: "run",
     model_pending: "model",
     model_started: "model",
     model_completed: "model",
@@ -75,6 +78,7 @@
     created: "created",
     resumed: "resumed",
     waiting_credentials: "waiting",
+    waiting_recovery: "waiting",
     model_pending: "pending",
     model_started: "running",
     model_completed: "completed",
@@ -160,6 +164,14 @@
     if (status === "waiting_credentials") {
       return {
         kind: "credentials",
+        id: "",
+        toolCallId: "",
+        action: stringValue(snapshot?.resumeStatus),
+      };
+    }
+    if (status === "waiting_recovery") {
+      return {
+        kind: "recovery",
         id: "",
         toolCallId: "",
         action: stringValue(snapshot?.resumeStatus),
@@ -369,6 +381,14 @@
       next.status = "waiting_credentials";
       next.pending = {
         kind: "credentials",
+        id: "",
+        toolCallId: "",
+        action: stringValue(data.resumeStatus),
+      };
+    } else if (eventType === "waiting_recovery") {
+      next.status = "waiting_recovery";
+      next.pending = {
+        kind: "recovery",
         id: "",
         toolCallId: "",
         action: stringValue(data.resumeStatus),

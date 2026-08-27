@@ -22,6 +22,11 @@ const PARALLEL_VISUAL_PROTOCOL_CALL_IDS = [
   "h4-parallel-visual-call-b",
 ];
 const TOOL_PROTOCOL_ERROR_USER = "H4_TOOL_PROTOCOL_ERROR_USER";
+const RUNTIME_RECOVERY_USER = "H4_RUNTIME_RECOVERY_USER";
+const RUNTIME_RECOVERY_PARTIAL_ONE = "H4_RUNTIME_RECOVERY_PARTIAL_ONE";
+const RUNTIME_RECOVERY_PARTIAL_TWO = "H4_RUNTIME_RECOVERY_PARTIAL_TWO";
+const RUNTIME_RECOVERY_FINAL = "H4_RUNTIME_RECOVERY_FINAL";
+const RUNTIME_RECOVERY_CALL_ID = "h4-runtime-recovery-read";
 const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
 const AUTO_PERMISSION_ACK_VERSION = "v1";
 const AUTO_PERMISSION_REFRESH_USER = "H4_AUTO_PERMISSION_REFRESH_USER";
@@ -27446,6 +27451,124 @@ async function exerciseToolProtocolErrorClassification(h4, runtime) {
   });
 }
 
+async function exerciseDurableMidrunRecovery(h4, runtime) {
+  await h4.open(runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await restoreGoalH4Connection(h4);
+  await h4.submit(RUNTIME_RECOVERY_USER);
+
+  const recoveryMessage = h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: /Agent 运行可恢复|Agent run is recoverable/,
+  });
+  await expect(recoveryMessage).toHaveCount(1);
+  await expect(recoveryMessage).not.toContainText(/API Key 无效|Invalid API key/);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const agentRunId = h4.controlIds().agentRunIds[0];
+
+  let waiting = null;
+  await expect.poll(async () => {
+    waiting = await fetchProductionJson(
+      h4.page,
+      `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+    );
+    return waiting.body?.status || "";
+  }).toBe("waiting_recovery");
+  expect(waiting.body).toMatchObject({
+    agentRunId,
+    status: "waiting_recovery",
+    errorCode: "agent_recovery_required",
+    round: 1,
+    recoveryState: {
+      kind: "model_interrupted",
+      resumable: true,
+    },
+  });
+  expect(waiting.body.toolExecutions).toHaveLength(1);
+  expect(waiting.body.toolExecutions[0]).toMatchObject({
+    toolCallId: RUNTIME_RECOVERY_CALL_ID,
+    name: "read_file",
+    status: "completed",
+  });
+  const waitingEvents = waiting.body.events.map((event) => event.type);
+  expect(waitingEvents.filter((type) => type === "waiting_recovery")).toHaveLength(2);
+  expect(waitingEvents.filter((type) => type === "resumed")).toHaveLength(1);
+
+  const metricsBeforeReload = await h4.metrics();
+  expect(metricsBeforeReload.chatRequests.map((request) => request.scenario)).toEqual([
+    "runtime-recovery-call",
+    "runtime-recovery-partial-one",
+    "runtime-recovery-partial-two",
+  ]);
+  expect(metricsBeforeReload.toolExecutions).toEqual([
+    { action: "read_file", path: "fixture.txt" },
+  ]);
+  const sessionId = await h4.page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id");
+  expect(sessionId).toBeTruthy();
+
+  await h4.reloadRuntime(runtime);
+  const restoredSession = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(restoredSession).toHaveCount(1);
+  await restoredSession.click();
+  await expect(h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: RUNTIME_RECOVERY_FINAL,
+  })).toHaveCount(1);
+
+  const completed = await fetchProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(agentRunId)}?cursor=0&wait=0`,
+  );
+  expect(completed.status).toBe(200);
+  expect(completed.body).toMatchObject({
+    agentRunId,
+    status: "completed",
+    result: { content: RUNTIME_RECOVERY_FINAL },
+  });
+  expect(completed.body.toolExecutions).toHaveLength(1);
+  expect(completed.body.toolExecutions[0].toolCallId).toBe(RUNTIME_RECOVERY_CALL_ID);
+
+  const metricsAfterReload = await h4.metrics();
+  expect(metricsAfterReload.chatRequests.map((request) => request.scenario)).toEqual([
+    "runtime-recovery-call",
+    "runtime-recovery-partial-one",
+    "runtime-recovery-partial-two",
+    "runtime-recovery-final",
+  ]);
+  expect(metricsAfterReload.chatRequests.at(-1)).toMatchObject({
+    scenario: "runtime-recovery-final",
+    hasToolResult: true,
+    runtimeRecovery: {
+      originalUserCount: 1,
+      toolReceiptCount: 1,
+      recoveryInstructionPresent: true,
+    },
+  });
+  expect(metricsAfterReload.toolExecutions).toEqual(metricsBeforeReload.toolExecutions);
+  const session = await fetchProductionJson(
+    h4.page,
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  expect(session.status).toBe(200);
+  expect(session.body.messages.filter((message) => (
+    message.role === "user" && String(message.content || "").includes(RUNTIME_RECOVERY_USER)
+  ))).toHaveLength(1);
+  expect(String(JSON.stringify(session.body))).not.toContain("H4_PRIVATE_RECOVERY_REASONING");
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-durable-midrun-reload-recovery`, {
+    runtime,
+    agentRunId: idHash(agentRunId),
+    sessionId: idHash(sessionId),
+    waitingRecoveryEvents: 2,
+    completedToolExecutions: 1,
+    reloadToolExecutionDelta: 0,
+    sameAgentRun: completed.body.agentRunId === agentRunId,
+    originalUserCount: metricsAfterReload.chatRequests.at(-1).runtimeRecovery.originalUserCount,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -27654,4 +27777,12 @@ test("bundle tool protocol 400 stays independent from credentials", async ({ h4 
 
 test("direct classic tool protocol 400 stays independent from credentials", async ({ h4 }) => {
   await exerciseToolProtocolErrorClassification(h4, "classic");
+});
+
+test("bundle midrun stream failure reloads the same AgentRun without tool replay", async ({ h4 }) => {
+  await exerciseDurableMidrunRecovery(h4, "bundle");
+});
+
+test("direct classic midrun stream reload matches durable bundle recovery", async ({ h4 }) => {
+  await exerciseDurableMidrunRecovery(h4, "classic");
 });

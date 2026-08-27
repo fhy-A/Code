@@ -35,6 +35,11 @@
         "meaning": "Credentials were intentionally dropped and the run needs a resume request; restored active runs also normalize to this status."
       },
       {
+        "name": "waiting_recovery",
+        "class": "waiting",
+        "meaning": "A progressed run preserved its checkpoint and requires a same-route resume without replaying completed tools."
+      },
+      {
         "name": "waiting_user_input",
         "class": "waiting",
         "meaning": "A normalized questionnaire or empty-response continuation is pending."
@@ -101,6 +106,23 @@
           "reason"
         ],
         "producer": "restore and post-interaction credential boundaries",
+        "frontendMode": "snapshot-status",
+        "frontendConsumers": [
+          "runServerAgentLoop",
+          "runBackgroundSubAgentJob"
+        ]
+      },
+      {
+        "type": "waiting_recovery",
+        "payloadFields": [
+          "resumeStatus",
+          "reason",
+          "errorCode",
+          "retryAfter",
+          "round",
+          "runtimeRunId"
+        ],
+        "producer": "mid-run model interruption and context-compaction recovery boundaries",
         "frontendMode": "snapshot-status",
         "frontendConsumers": [
           "runServerAgentLoop",
@@ -361,7 +383,9 @@
           "compactionId",
           "reason",
           "error",
-          "errorCode"
+          "errorCode",
+          "attempts",
+          "retryAfter"
         ],
         "producer": "_run_agent_auto_compaction",
         "frontendMode": "event-projection",

@@ -442,12 +442,16 @@ def resolve(
         final_limit, clamped = capability, True
     elif not hard and final_limit > capability:
         attempted = True
+    # contextLimit was historically computed by the browser before the model
+    # catalog finished loading.  It is validation-only now: Auto resolution is
+    # owned by the server's connection+model capability, while an explicit
+    # contextBudgetTokens value, hard metadata, or key+model calibration may
+    # still lower the effective limit.
     if legacy_hint not in (None, ""):
         if isinstance(legacy_hint, bool) or not isinstance(legacy_hint, int):
             raise ValueError("contextLimit must be an integer")
         if not MIN_TOKENS <= legacy_hint <= MAX_TOKENS:
             raise ValueError("contextLimit is out of range")
-        final_limit = min(final_limit, legacy_hint)
     calibration_cap = None
     calibration_kind = ""
     calibration_expires_at = ""

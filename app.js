@@ -1676,10 +1676,6 @@ function scheduleTerminalFileTreeRefresh(ctx, terminalStatus) {
 
 
 
-const MAX_TOOL_ROUNDS = 200;
-
-
-
 const SUBAGENT_DELEGATION_RULES = `## 子 Agent 委派规则
 
 Skill 优先级：
@@ -2954,6 +2950,8 @@ function _toolActionLabel(action) {
 var _errorCodeMeta = {
   upstream_error:     { retry: true },
   model_response_timeout: { retry: true },
+  agent_recovery_required: { retry: true },
+  context_recovery_required: { retry: true },
   config_error:       { retry: false },
   tool_protocol_error:{ retry: false },
   model_access_denied:{ retry: false },
@@ -6429,7 +6427,13 @@ function startModelRouteRefresh(request) {
   active.promise = operation;
   state._modelRouteRefreshPromise = operation;
   operation.then(
-    () => finishModelRouteRefresh(active),
+    (result) => {
+      finishModelRouteRefresh(active);
+      if (result?.ok === false) return;
+      if (typeof resumePersistedRuns === "function") {
+        queueMicrotask(() => { void resumePersistedRuns(); });
+      }
+    },
     () => finishModelRouteRefresh(active),
   );
   return operation;
@@ -7801,8 +7805,11 @@ async function resumePersistedSessionRun(summary) {
       await clearRunCheckpoint(ctx);
     } catch (error) {
       recoveryError = error;
-      const status = error?.name === "AbortError" ? "paused" : "failed";
+      const status = error?.name === "AbortError"
+        ? "paused"
+        : (error?.recoverable ? "waiting-network" : "failed");
       if (status === "paused") finalizePausedRun(ctx);
+      if (error?.recoverable) ensureAgentRecoveryMessage(ctx, error);
       publishTerminalRunOwnership(ctx);
       await persistRunCheckpoint(ctx, status, "model", {
         recoveryCount,
@@ -7810,8 +7817,10 @@ async function resumePersistedSessionRun(summary) {
       }, { currentProjection: true }).catch(() => {});
     } finally {
       publishTerminalRunOwnership(ctx);
-      archiveAgentProjectionShadow(ctx);
-      if (ctx.queueItemId) finishQueuedSessionMessage(summary.id, ctx.queueItemId, !recoveryError);
+      if (!recoveryError?.recoverable) archiveAgentProjectionShadow(ctx);
+      if (ctx.queueItemId && !recoveryError?.recoverable) {
+        finishQueuedSessionMessage(summary.id, ctx.queueItemId, !recoveryError);
+      }
       await saveSessionState(
         summary.id,
         getSessionMessages(summary.id),
@@ -7822,7 +7831,9 @@ async function resumePersistedSessionRun(summary) {
       renderSessions();
       scheduleTerminalFileTreeRefresh(
         ctx,
-        recoveryError ? (recoveryError?.name === "AbortError" ? "cancelled" : "failed") : "completed",
+        recoveryError
+          ? (recoveryError?.recoverable ? "paused" : (recoveryError?.name === "AbortError" ? "cancelled" : "failed"))
+          : "completed",
       );
     }
 
@@ -7881,6 +7892,7 @@ const AUTHORITATIVE_AGENT_INPUT_STATUSES = new Set([
   "model",
   "tools",
   "waiting_credentials",
+  "waiting_recovery",
   "waiting_user_input",
   "waiting_authorization",
   ...AUTHORITATIVE_AGENT_INPUT_TERMINAL_STATUSES,
@@ -8407,8 +8419,14 @@ function bindUserInputPanel() {
 
 async function resumePersistedRuns() {
   if (getApiKeys().length === 0 || !els.baseUrl.value.trim()) return;
-  const candidates = state.sessions.filter((session) =>
-    ["running", "waiting-network", "resuming"].includes(session?.runState?.status));
+  const recoverableStatuses = new Set(["running", "waiting-network", "resuming"]);
+  const candidates = state.sessions.map((session) => {
+    if (session?.id !== state.sessionId) return session;
+    const activeRunState = getSessionRunState(session.id);
+    return recoverableStatuses.has(activeRunState?.status)
+      ? { ...session, runState: activeRunState }
+      : session;
+  }).filter((session) => recoverableStatuses.has(session?.runState?.status));
   if (candidates.length === 0) return;
   await Promise.allSettled(candidates.map((session) => resumePersistedSessionRun(session)));
 }
@@ -9795,6 +9813,47 @@ function clearObservedAgentRun(ctx) {
   ctx.run.cancelRequested = false;
 }
 
+function agentRecoveryRetryDelayMs(snapshot, referenceTime = Date.now()) {
+  const retryAfter = String(snapshot?.recoveryState?.retryAfter || "").trim();
+  if (!retryAfter) return 0;
+  const retryAt = Date.parse(retryAfter);
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Number(referenceTime || Date.now())) : 0;
+}
+
+function agentRecoveryPauseError(snapshot) {
+  const code = String(snapshot?.errorCode || snapshot?.recoveryState?.errorCode || "agent_recovery_required");
+  const error = new Error(snapshot?.error || t(_errorCodeInfo(code)?.suggestionKey || "errSugAgentRecoveryRequired"));
+  error.status = "waiting_recovery";
+  error.errorCode = code;
+  error.recoverable = true;
+  error.preservePublicProcess = true;
+  error.agentRunId = String(snapshot?.agentRunId || "");
+  return error;
+}
+
+function ensureAgentRecoveryMessage(ctx, error) {
+  const agentRunId = String(error?.agentRunId || ctx?.agentRunId || "");
+  const existing = (ctx?.messages || []).find((message) => (
+    message?.meta?.kind === "agent-recovery-paused"
+    && String(message?.meta?.agentRunId || "") === agentRunId
+  ));
+  if (existing) return existing;
+  const message = {
+    role: "assistant",
+    content: _formatAgentError(error),
+    meta: {
+      kind: "agent-recovery-paused",
+      agentRunId,
+      _model: ctx?.model || getSelectedModel(),
+    },
+    _time: new Date().toISOString(),
+  };
+  ctx.messages.push(message);
+  setSessionMessages(ctx.sessionId, ctx.messages);
+  renderSessionMessages(ctx.sessionId);
+  return message;
+}
+
 function cancelSessionRun(run) {
   if (!run || run.cancelRequested) return;
   const agentRunId = String(run.agentRunId || run._activeCtx?.agentRunId || "");
@@ -9830,7 +9889,7 @@ function cancelSessionRun(run) {
 function backgroundActiveForSession(sessionId) {
   return state._backgroundDispatcher.jobs.filter((job) => (
     job.sessionId === sessionId
-    && ["running", "waiting-authorization", "waiting-credentials"].includes(job.status)
+    && ["running", "waiting-authorization", "waiting-credentials", "waiting-recovery"].includes(job.status)
   )).length;
 }
 
@@ -9932,6 +9991,7 @@ async function runBackgroundSubAgentJob(job) {
   };
 
   let timedOut = false;
+  let recoveryResumeAttempts = 0;
   let lastUsage = { input: 0, output: 0, cache: 0 };
   const remainingMs = Math.max(0, Number(job.deadlineAt || 0) - Date.now());
   const timeoutId = setTimeout(() => {
@@ -9941,7 +10001,12 @@ async function runBackgroundSubAgentJob(job) {
   }, remainingMs);
   try {
     if (remainingMs <= 0) throw new DOMException("Aborted", "AbortError");
-    if (job.inputBudgetInsufficient) throw new Error(t("contextBudgetInsufficient"));
+    if (
+      job.inputBudgetInsufficient
+      && (job.contextBudgetTokens != null || job.contextWindowHard)
+    ) {
+      throw new Error(t("contextBudgetInsufficient"));
+    }
     if (!job.agentRunId) {
       const dispatch = await resolveJobDispatch();
       const created = await agentRuntime.createAgentRun({
@@ -9953,12 +10018,9 @@ async function runBackgroundSubAgentJob(job) {
         routeRef: dispatch.routeRef,
         catalogRevision: dispatch.catalogRevision,
         allowedTools: serverToolNames,
-        maxRounds: MAX_TOOL_ROUNDS,
         permissionProfile: job.permissionProfile,
         runKind: "background",
         cwd: subCtx.cwd || "",
-        contextLimit: Number(job.contextLimit || getModelContextLimit(job.model || getSelectedModel())),
-        contextWindowTokens: Number(job.contextWindowTokens || 0) || undefined,
         contextBudgetTokens: job.contextBudgetTokens,
         signal: subCtx.run.abortController.signal,
       });
@@ -9988,6 +10050,27 @@ async function runBackgroundSubAgentJob(job) {
           catalogRevision: dispatch.catalogRevision,
           signal: subCtx.run.abortController.signal,
         });
+      } else if (snapshot.status === "waiting_recovery") {
+        updateBackgroundJob(job, "waiting-recovery");
+        await persistBackgroundJob(job);
+        const retryDelay = agentRecoveryRetryDelayMs(snapshot);
+        if (recoveryResumeAttempts >= 1 || retryDelay > 0) {
+          return {
+            ok: false,
+            recoverable: true,
+            result: agentRecoveryPauseError(snapshot).message,
+            usage: lastUsage,
+          };
+        }
+        recoveryResumeAttempts += 1;
+        const dispatch = await resolveJobDispatch(snapshot.routeRef || job.routeRef);
+        await agentRuntime.resumeAgentRun(job.agentRunId, {
+          keys: dispatch.keys,
+          baseUrl: dispatch.baseUrl,
+          routeRef: dispatch.routeRef,
+          catalogRevision: dispatch.catalogRevision,
+          signal: subCtx.run.abortController.signal,
+        });
       }
       snapshot = await agentRuntime.watchAgentRun({
         agentRunId: job.agentRunId,
@@ -10000,6 +10083,7 @@ async function runBackgroundSubAgentJob(job) {
       subCtx.agentEventCursor = job.cursor;
       lastUsage = cloneUsageStats(snapshot.usage || snapshot.result?.usage);
       if (snapshot.status === "waiting_credentials") continue;
+      if (snapshot.status === "waiting_recovery") continue;
       if (snapshot.status === "waiting_user_input") {
         throw new Error("后台任务不能发起交互问卷");
       }
@@ -10068,6 +10152,11 @@ function pumpBackgroundDispatcher() {
           await persistBackgroundJob(job).catch(() => {});
           return;
         }
+        if (sub.recoverable) {
+          updateBackgroundJob(job, "waiting-recovery", sub.result || "agent_recovery_required");
+          await persistBackgroundJob(job).catch(() => {});
+          return;
+        }
         const content = String(sub.result || (sub.ok === false ? "后台任务失败" : "后台任务已完成"));
         const existingResult = hasBackgroundResult(getSessionMessages(job.sessionId), job.id);
         if (!existingResult) {
@@ -10104,11 +10193,12 @@ function pumpBackgroundDispatcher() {
         job.resolve({ ok: false, error: message });
       })
       .finally(() => {
+        const backgroundTerminalStatus = job.status === "completed" ? "completed" : "failed";
         scheduleTerminalFileTreeRefresh({
           backgroundJobId: job.id,
           cwd: job.cwd,
           primaryRoot: job.primaryRoot,
-        }, job.status === "completed" ? "completed" : "failed");
+        }, ["completed", "failed"].includes(job.status) ? backgroundTerminalStatus : "paused");
         dispatcher.activeCount = Math.max(0, dispatcher.activeCount - 1);
         const finished = dispatcher.jobs.filter((item) => item.status === "completed" || item.status === "failed");
         if (finished.length > 50) {
@@ -10255,6 +10345,14 @@ async function restoreBackgroundJobsForSession(summary) {
       fallbackQueuedAt: checkpoint.queuedAt ? 0 : Date.now(),
       fallbackDeadlineAt: checkpoint.deadlineAt ? 0 : (Date.now() + BACKGROUND_JOB_TIMEOUT_MS),
     });
+    if (restoredJobData.status === "waiting-recovery") {
+      restoredJobData.status = "pending";
+      restoredJobData.deadlineAt = Date.now() + BACKGROUND_JOB_TIMEOUT_MS;
+      if (userMessage?.meta?.backgroundDispatch) {
+        userMessage.meta.backgroundDispatch.status = "pending";
+      }
+      checkpointChanged = true;
+    }
     state._backgroundDispatcher.jobs.push({
       ...restoredJobData,
       parentCtx: null,
@@ -10365,6 +10463,9 @@ function agentProjectionPending(snapshot, status) {
   }
   if (status === "waiting_credentials") {
     return { kind: "credentials", id: "", toolCallId: "", action: "" };
+  }
+  if (status === "waiting_recovery") {
+    return { kind: "recovery", id: "", toolCallId: "", action: "" };
   }
   return null;
 }
@@ -11507,6 +11608,7 @@ async function runServerAgentLoop(ctx) {
   if (ctx.sessionId === state.sessionId) state.abortController = ctx.run.abortController;
 
   let resolvedDispatch = null;
+  let recoveryResumeAttempts = 0;
   const resolveRunDispatch = async (routeRef = ctx.routeRef) => {
     if (!resolvedDispatch || (routeRef && resolvedDispatch.routeRef !== routeRef)) {
       resolvedDispatch = await getModelDispatchCredentials(
@@ -11525,7 +11627,10 @@ async function runServerAgentLoop(ctx) {
       ctx.model || getSelectedModel(),
       ctx.maxTokens || getEffectiveMaxTokens(ctx.model || getSelectedModel()),
     );
-    if (contextResolution.inputBudgetInsufficient) {
+    if (
+      contextResolution.inputBudgetInsufficient
+      && (contextResolution.contextBudgetTokens != null || contextResolution.contextWindowHard)
+    ) {
       throw new Error(t("contextBudgetInsufficient"));
     }
     const created = await agentRuntime.createAgentRun({
@@ -11538,12 +11643,9 @@ async function runServerAgentLoop(ctx) {
       catalogRevision: dispatch.catalogRevision,
       allowedTools: serverToolNames,
       toolBudgets: skillToolBudgets,
-      maxRounds: MAX_TOOL_ROUNDS,
       permissionProfile: ctx.permissionProfile || "read",
       runKind: "foreground",
       cwd: ctx.cwd || "",
-      contextLimit: contextResolution.contextLimit,
-      contextWindowTokens: contextResolution.contextWindowTokens,
       contextBudgetTokens: contextResolution.contextBudgetTokens,
       signal: ctx.run.abortController.signal,
     });
@@ -11590,6 +11692,20 @@ async function runServerAgentLoop(ctx) {
         catalogRevision: dispatch.catalogRevision,
         signal: ctx.run.abortController.signal,
       });
+    } else if (snapshot.status === "waiting_recovery") {
+      const retryDelay = agentRecoveryRetryDelayMs(snapshot);
+      if (recoveryResumeAttempts >= 1 || retryDelay > 0) {
+        throw agentRecoveryPauseError(snapshot);
+      }
+      recoveryResumeAttempts += 1;
+      const dispatch = await resolveRunDispatch(snapshot.routeRef || ctx.routeRef);
+      await agentRuntime.resumeAgentRun(ctx.agentRunId, {
+        keys: dispatch.keys,
+        baseUrl: dispatch.baseUrl,
+        routeRef: dispatch.routeRef,
+        catalogRevision: dispatch.catalogRevision,
+        signal: ctx.run.abortController.signal,
+      });
     }
 
     // A page reload can resume after model_started was already consumed by the
@@ -11624,6 +11740,7 @@ async function runServerAgentLoop(ctx) {
     ctx.agentEventCursor = Number(snapshot.nextCursor ?? ctx.agentEventCursor ?? 0);
     ctx.run.agentEventCursor = ctx.agentEventCursor;
     if (snapshot.status === "waiting_credentials") continue;
+    if (snapshot.status === "waiting_recovery") continue;
     if (snapshot.status === "waiting_user_input") {
       await requestServerAgentInput(ctx, snapshot.pendingInput);
       continue;
@@ -12894,7 +13011,7 @@ async function sendMessage(userText, options = {}) {
 
   if (loopError) {
     const isAbort = loopError?.name === "AbortError";
-    const status = isAbort ? "paused" : "failed";
+    const status = isAbort ? "paused" : (loopError?.recoverable ? "waiting-network" : "failed");
     let errorRecoveryAssistant = null;
     if (isAbort) finalizePausedRun(ctx);
     // For non-abort errors, rollback to healthy state so the conversation
@@ -12943,6 +13060,9 @@ async function sendMessage(userText, options = {}) {
       if (loopError && typeof loopError === "object") {
         loopError._codeErrorRendered = true;
       }
+    } else if (loopError?.recoverable) {
+      errorRecoveryAssistant = ensureAgentRecoveryMessage(ctx, loopError);
+      loopError._codeErrorRendered = true;
     } else if (!isAbort) {
       for (const msg of ctx.messages) {
         if (msg && msg.streaming) {
@@ -12972,16 +13092,18 @@ async function sendMessage(userText, options = {}) {
     }
     await persistRunCheckpoint(ctx, status, "model", {
       lastError: loopError?.message || String(loopError),
-    }, {
-      finalizeTimingTarget: errorRecoveryAssistant,
-    }).catch(() => {});
+    }, loopError?.recoverable
+      ? { currentProjection: true }
+      : { finalizeTimingTarget: errorRecoveryAssistant }).catch(() => {});
   } else {
     await clearRunCheckpoint(ctx).catch(() => {});
   }
 
   scheduleTerminalFileTreeRefresh(
     ctx,
-    loopError ? (loopError?.name === "AbortError" ? "cancelled" : "failed") : "completed",
+    loopError
+      ? (loopError?.recoverable ? "paused" : (loopError?.name === "AbortError" ? "cancelled" : "failed"))
+      : "completed",
   );
   // A new foreground submit may start while terminal bookkeeping awaits the
   // checkpoint write. Persist the current projection so the old task cannot
@@ -12998,8 +13120,10 @@ async function sendMessage(userText, options = {}) {
   await goalFeature?.refresh(sessionId, { quiet: true });
   renderSessions();
 
-  notifyTaskComplete(sessionId);
-  archiveAgentProjectionShadow(ctx);
+  if (!loopError?.recoverable) {
+    notifyTaskComplete(sessionId);
+    archiveAgentProjectionShadow(ctx);
+  }
 
   if (loopError) throw loopError;  // propagate to chatForm handler
 }

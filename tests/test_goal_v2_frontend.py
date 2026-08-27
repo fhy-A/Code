@@ -23,11 +23,11 @@ def test_explicit_goal_runs_after_origin_persistence_and_before_foreground_run()
     assert save_boundary < source.index(
         "await goalFeature.prepareExplicitGoal"
     )
-    assert 'persistMessages: explicitGoalAction?.kind === "create"' in source[
+    assert "persistMessages: true" in source[
         save_boundary:source.index("await goalFeature.prepareExplicitGoal")
     ]
     assert source.index("await goalFeature.prepareExplicitGoal") < source.index(
-        "claimActiveRunContext(ctx)"
+        "await executeRunContext(ctx)"
     )
     assert source.index("claimActiveRunContext(ctx)") < source.index(
         "await executeRunContext(ctx)"

@@ -314,7 +314,7 @@ class TestAgentEventContract(unittest.TestCase):
         summary = agent_protocol.public_contract_summary()
         encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True)
         self.assertIn('"protocolVersion": 1', encoded)
-        self.assertEqual(len(summary["eventTypes"]), 24)
+        self.assertEqual(len(summary["eventTypes"]), 25)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn("import agent_protocol", server_source)
         self.assertNotIn("from agent_protocol", server_source)

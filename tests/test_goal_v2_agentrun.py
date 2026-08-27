@@ -108,6 +108,11 @@ def _call(run, name: str, arguments: dict, call_id: str) -> dict:
         "type": "function",
         "function": {"name": name, "arguments": json.dumps(arguments)},
     }], len(run.get("rounds") or []) + 1)
+    run["messages"].append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": server_mod._agent_assistant_tool_calls(normalized),
+    })
     run["pending_tool_calls"] = normalized
     run["status"] = "tools"
     assert server_mod._execute_agent_pending_tools(run) is True
@@ -499,11 +504,11 @@ def test_foreground_worker_runs_autonomous_goal_sequence_and_simple_run_stays_go
         },
     ])
 
-    def create_model_run(session_id, payload, base_url, keys):
+    def create_model_run(session_id, payload, base_url, keys, **_kwargs):
         model_payloads.append(payload)
         return _model_runtime_stub(f"model-{len(model_payloads)}")
 
-    def wait_for_model(_run, _model_run):
+    def wait_for_model(_run, _model_run, **_kwargs):
         result = next(model_results)
         return {
             "status": "completed",
@@ -542,7 +547,7 @@ def test_foreground_worker_runs_autonomous_goal_sequence_and_simple_run_stays_go
     monkeypatch.setattr(
         server_mod,
         "_agent_wait_for_model",
-        lambda _run, _model_run: {
+        lambda _run, _model_run, **_kwargs: {
             "status": "completed",
             "result": {
                 "content": "The simple answer is 4.",
@@ -598,7 +603,7 @@ def test_legacy_ready_goal_worker_can_use_compatibility_completion(
     monkeypatch.setattr(
         server_mod,
         "_create_model_runtime_run",
-        lambda _session_id, payload, _base_url, _keys: (
+        lambda _session_id, payload, _base_url, _keys, **_kwargs: (
             model_payloads.append(payload)
             or _model_runtime_stub(f"model-{len(model_payloads)}")
         ),
@@ -606,7 +611,7 @@ def test_legacy_ready_goal_worker_can_use_compatibility_completion(
     monkeypatch.setattr(
         server_mod,
         "_agent_wait_for_model",
-        lambda _run, _model_run: {
+        lambda _run, _model_run, **_kwargs: {
             "status": "completed",
             "result": {"reasoning": "", "usage": {}, **next(model_results)},
         },
@@ -1103,7 +1108,7 @@ def test_goal_handoff_is_duplicate_safe_and_starts_one_successor(
     ]) == 1
 
 
-def test_worker_crosses_round_40_with_read_tool_then_soft_hands_off(
+def test_worker_crosses_round_40_with_read_tool_without_fixed_handoff(
     isolated_server, monkeypatch,
 ):
     run = _active_goal_run("foreground-worker-soft-boundary")
@@ -1111,46 +1116,54 @@ def test_worker_crosses_round_40_with_read_tool_then_soft_hands_off(
     run["rounds"] = [{"round": index, "content": "", "reasoning": ""}
                      for index in range(1, 40)]
     model_payloads = []
-    started = []
+    model_results = iter([
+        {
+            "content": "",
+            "reasoning": "private",
+            "toolCalls": [{
+                "id": "boundary-read",
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "arguments": json.dumps({"path": "."}),
+                },
+            }],
+            "finishReason": "tool_calls",
+            "usage": {},
+        },
+        {
+            "content": "continued beyond the former Goal round boundary",
+            "reasoning": "",
+            "toolCalls": [],
+            "finishReason": "stop",
+            "usage": {},
+        },
+    ])
     monkeypatch.setattr(
         server_mod,
         "_create_model_runtime_run",
-        lambda _session_id, payload, _base_url, _keys: (
+        lambda _session_id, payload, _base_url, _keys, **_kwargs: (
             model_payloads.append(payload)
-            or _model_runtime_stub("boundary-model-40")
+            or _model_runtime_stub(f"boundary-model-{len(model_payloads)}")
         ),
     )
     monkeypatch.setattr(
         server_mod,
         "_agent_wait_for_model",
-        lambda _run, _model_run: {
+        lambda _run, _model_run, **_kwargs: {
             "status": "completed",
-            "result": {
-                "content": "",
-                "reasoning": "private",
-                "toolCalls": [{
-                    "id": "boundary-read",
-                    "type": "function",
-                    "function": {
-                        "name": "list_files",
-                        "arguments": json.dumps({"path": "."}),
-                    },
-                }],
-                "finishReason": "tool_calls",
-                "usage": {},
-            },
+            "result": next(model_results),
         },
     )
-    monkeypatch.setattr(server_mod, "_start_agent_worker", lambda child: started.append(child["id"]))
 
     server_mod._agent_run_worker(run)
 
-    assert len(model_payloads) == 1
-    assert len(run["rounds"]) == 40
+    assert len(model_payloads) == 2
+    assert len(run["rounds"]) == 41
     assert run["tool_executions"]["boundary-read"]["status"] == "completed"
     assert run["status"] == "completed"
-    assert run["result"]["continuation"]["reason"] == "soft_round_limit"
-    assert started == [run["result"]["continuation"]["agentRunId"]]
+    assert run["result"]["content"] == "continued beyond the former Goal round boundary"
+    assert "continuation" not in run["result"]
 
 
 def test_goal_hard_limit_keeps_auditable_failure_while_successor_continues(
@@ -1170,7 +1183,7 @@ def test_goal_hard_limit_keeps_auditable_failure_while_successor_continues(
     assert server_mod.goal_v2_runtime().read(SESSION_ID).state.goal["lifecycle"] == "active"
 
 
-def test_goal_round_50_hard_fallback_preserves_public_tool_process_when_gated(
+def test_goal_round_50_continues_without_fixed_failure_when_gated(
     isolated_server, monkeypatch,
 ):
     run = _active_goal_run("foreground-worker-hard-boundary")
@@ -1187,40 +1200,50 @@ def test_goal_round_50_hard_fallback_preserves_public_tool_process_when_gated(
     run["max_rounds"] = 50
     run["rounds"] = [{"round": index, "content": "", "reasoning": ""}
                      for index in range(1, 50)]
+    model_results = iter([
+        {
+            "content": "",
+            "reasoning": "private",
+            "toolCalls": [{
+                "id": "hard-boundary-read",
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "arguments": json.dumps({"path": "."}),
+                },
+            }],
+            "finishReason": "tool_calls",
+            "usage": {},
+        },
+        {
+            "content": "continued beyond the former hard boundary",
+            "reasoning": "",
+            "toolCalls": [],
+            "finishReason": "stop",
+            "usage": {},
+        },
+    ])
     monkeypatch.setattr(
         server_mod,
         "_create_model_runtime_run",
-        lambda _session_id, _payload, _base_url, _keys: _model_runtime_stub(
-            "boundary-model-50"
+        lambda _session_id, _payload, _base_url, _keys, **_kwargs: _model_runtime_stub(
+            f"boundary-model-{len(run['rounds']) + 1}"
         ),
     )
     monkeypatch.setattr(
         server_mod,
         "_agent_wait_for_model",
-        lambda _run, _model_run: {
+        lambda _run, _model_run, **_kwargs: {
             "status": "completed",
-            "result": {
-                "content": "",
-                "reasoning": "private",
-                "toolCalls": [{
-                    "id": "hard-boundary-read",
-                    "type": "function",
-                    "function": {
-                        "name": "list_files",
-                        "arguments": json.dumps({"path": "."}),
-                    },
-                }],
-                "finishReason": "tool_calls",
-                "usage": {},
-            },
+            "result": next(model_results),
         },
     )
 
     server_mod._agent_run_worker(run)
 
-    assert len(run["rounds"]) == 50
-    assert run["status"] == "failed"
-    assert run["error_code"] == "goal_run_hard_limit"
+    assert len(run["rounds"]) == 51
+    assert run["status"] == "completed"
+    assert run["error_code"] == ""
     assert run["tool_executions"]["hard-boundary-read"]["status"] == "completed"
     assert "continuation" not in run["result"]
     assert server_mod.goal_v2_runtime().read(SESSION_ID).state.goal["gate"]["type"] == "waiting_user"
