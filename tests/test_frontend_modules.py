@@ -10691,6 +10691,10 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('本地文件、图片或目录', APP_SOURCE)
         self.assertIn('完整规范化绝对路径', APP_SOURCE)
         self.assertIn('工具参数仍使用项目相对路径', APP_SOURCE)
+        self.assertIn('可以把相对路径、裸文件名', APP_SOURCE)
+        self.assertIn('写成普通文本或行内代码', APP_SOURCE)
+        self.assertIn('若要生成可点击的本地文件、图片或目录链接', APP_SOURCE)
+        self.assertNotIn('相对路径、裸文件名和 \\`output/tmp/\\` 等相对目录只能作为普通文本', APP_SOURCE)
 
 
         # 源码级：app.js 别名/预览绑定 + markdown 域名逻辑
@@ -10722,8 +10726,8 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('loadFile(fp, undefined, line && line > 0 ? { line } : {})', answer_source)
         self.assertIn('apiJson("/api/open-file"', answer_source)
 
-    def test_final_answer_path_router_rejects_relative_and_outside_targets(self):
-        open_start = APP_SOURCE.index("function openReferencedPath(")
+    def test_final_answer_path_router_confirms_directories_and_fails_closed(self):
+        open_start = APP_SOURCE.index("async function openReferencedPath(")
         open_end = APP_SOURCE.index("// B: inline thumbnail", open_start)
         root_start = APP_SOURCE.index("function isOutOfRootPath(", open_end)
         root_end = APP_SOURCE.index("function maybeRenderFileCard(", root_start)
@@ -10734,19 +10738,45 @@ require("./src/core/namespace.js");
 require("./src/ui/markdown.js");
 const loads = [];
 const opens = [];
-const loadFile = (path, encoding, options) => {{ loads.push({{path, options: options || null}}); return Promise.resolve(); }};
-const apiJson = (path, options) => {{ opens.push({{path, body: JSON.parse(options.body)}}); return Promise.resolve(); }};
+const probes = [];
+const notDirectory = () => Object.assign(new Error("当前路径不是文件夹"), {{
+  status: 400,
+  data: {{error: "当前路径不是文件夹"}},
+}});
+const missing = () => Object.assign(new Error("路径不存在"), {{
+  status: 400,
+  data: {{error: "路径不存在"}},
+}});
+const loadFile = (path, encoding, options) => {{
+  loads.push({{path, options: options || null}});
+  return path.endsWith("preview-fails.txt") ? Promise.reject(new Error("preview failed")) : Promise.resolve();
+}};
+const apiJson = (path, options = {{}}) => {{
+  if (path.startsWith("/api/files?path=")) {{
+    const target = decodeURIComponent(path.split("path=")[1] || "");
+    probes.push(target);
+    if (target.endsWith("/folder")) return Promise.resolve({{items: []}});
+    if (target.endsWith("/missing")) return Promise.reject(missing());
+    return Promise.reject(notDirectory());
+  }}
+  opens.push({{path, body: JSON.parse(options.body)}});
+  return Promise.resolve({{ok: true}});
+}};
 eval({json.dumps(source)});
 const root = "C:/demo root/项目";
-openReferencedPath("src/a.js", root, 12);
-openReferencedPath("server.py", root, 12);
-openReferencedPath("output/tmp/", root);
-openReferencedPath("C:/outside/a.js", root, 9);
-openReferencedPath("C:/demo root/项目/src/../src/中文 file.js", root, 7);
-openReferencedPath("C:/demo root/项目/archive.zip", root);
-openReferencedPath("C:/demo root/项目/folder", root);
-openToolReferencedPath("src/tool.js", root, 3);
-process.stdout.write(JSON.stringify({{loads, opens}}));
+(async () => {{
+  await openReferencedPath("src/a.js", root, 12);
+  await openReferencedPath("server.py", root, 12);
+  await openReferencedPath("output/tmp/", root);
+  await openReferencedPath("C:/outside/a.js", root, 9);
+  await openReferencedPath("C:/demo root/项目/src/../src/中文 file.js", root, 7);
+  await openReferencedPath("C:/demo root/项目/archive.zip", root);
+  await openReferencedPath("C:/demo root/项目/folder", root);
+  await openReferencedPath("C:/demo root/项目/missing", root);
+  await openReferencedPath("C:/demo root/项目/preview-fails.txt", root);
+  await openToolReferencedPath("src/tool.js", root, 3);
+  process.stdout.write(JSON.stringify({{loads, opens, probes}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         completed = subprocess.run(
             ["node", "-e", script], cwd=ROOT, capture_output=True,
@@ -10757,13 +10787,25 @@ process.stdout.write(JSON.stringify({{loads, opens}}));
             data["loads"],
             [
                 {"path": "C:/demo root/项目/src/中文 file.js", "options": {"line": 7}},
-                {"path": "C:/demo root/项目/folder", "options": {}},
+                {"path": "C:/demo root/项目/preview-fails.txt", "options": {}},
                 {"path": "C:/demo root/项目/src/tool.js", "options": {"line": 3}},
             ],
         )
         self.assertEqual(
             data["opens"],
-            [{"path": "/api/open-file", "body": {"path": "C:/demo root/项目/archive.zip"}}],
+            [
+                {"path": "/api/open-file", "body": {"path": "C:/demo root/项目/archive.zip"}},
+                {"path": "/api/open-file", "body": {"path": "C:/demo root/项目/folder"}},
+            ],
+        )
+        self.assertEqual(
+            data["probes"],
+            [
+                "C:/demo root/项目/src/中文 file.js",
+                "C:/demo root/项目/folder",
+                "C:/demo root/项目/missing",
+                "C:/demo root/项目/preview-fails.txt",
+            ],
         )
 
     def test_external_favicon_binding_uses_same_origin_and_keeps_glyph_on_failure(self):

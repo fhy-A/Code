@@ -1725,7 +1725,7 @@ const defaultSystemPrompt = `
 - 模糊指令先确认范围；信息够就动手，不反复推理
 
 ## 回答格式
-引用本地文件、图片或目录时，只有完整规范化绝对路径才可使用 Markdown 链接或行内代码，可在路径后附 \`:行号\`；相对路径、裸文件名和 \`output/tmp/\` 等相对目录只能作为普通文本，禁止按当前工作目录猜测。显示标签可以简写，底层链接目标必须保留完整绝对路径。工具参数仍使用项目相对路径。URL 用完整 https:// 或标准 [文本](url) 链接；提醒用 GitHub 警告语法 >[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]；表格、代码块、列表用标准 Markdown。引用路径前若不确定其存在，先 glob_files 或 list_files 确认，禁止编造不存在的路径。
+描述项目结构或实现时，可以把相对路径、裸文件名和 \`output/tmp/\` 等相对目录写成普通文本或行内代码，但它们不是可点击目标，也不得按当前工作目录猜测。若要生成可点击的本地文件、图片或目录链接，底层目标必须是完整规范化绝对路径且可访问，可在文件路径后附 \`:行号\`；显示标签可以简写。工具参数仍使用项目相对路径。URL 用完整 https:// 或标准 [文本](url) 链接；提醒用 GitHub 警告语法 >[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]；表格、代码块、列表用标准 Markdown。引用路径前若不确定其存在，先 glob_files 或 list_files 确认，禁止编造不存在的路径。
 
 ## 运行环境
 Windows + PowerShell。创建目录用 mkdir 或 python os.makedirs。
@@ -2144,7 +2144,7 @@ async function buildSystemPromptSnapshot(options = {}) {
     behaviorInstruction,
     environmentInstruction: environment.instruction,
     projectFoldersInstruction,
-    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。最终回答引用本地文件、图片或目录时必须使用完整规范化绝对路径，显示标签可以简写；相对路径和裸文件名不得作为可点击目标，也不得按 cwd 猜测。工具参数仍使用项目相对路径。回复中可用 ![描述](绝对路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
+    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。最终回答可以用相对路径或行内代码描述项目结构，但它们不可点击，也不得按 cwd 猜测；若要生成可点击的本地文件、图片或目录链接，底层目标必须使用完整规范化绝对路径且可访问，显示标签可以简写。工具参数仍使用项目相对路径。回复中可用 ![描述](绝对路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
     delegationInstruction,
     responseLanguageInstruction,
     projectContextInstruction,
@@ -2647,7 +2647,7 @@ function bindExtLinkFavicons() {
 function bindLinkContextMenus() {
   const menuApi = window.Code?.features?.linkContextMenu;
   if (!menuApi?.showLinkContextMenu) return;
-  const showPathMenu = (event, path, line) => {
+  const showPathMenu = (event, path, line, openPath = openReferencedPath) => {
     event.preventDefault();
     const projectRoot = (els.projectRoot?.value || "").replace(/[\\/\\]+$/, "");
     const markdownApi = window.Code?.ui?.markdown;
@@ -2664,7 +2664,7 @@ function bindLinkContextMenus() {
       t: (key) => t(key) || key,
       copyText: (text) => { if (text) copyText(text).then((ok) => { if (ok) showToast(t("pathCopied"), "warning"); }).catch(() => showToast(t("copyFailed"), "error")); },
       callbacks: {
-        open: () => openReferencedPath(fp, projectRoot, line),
+        open: () => openPath(fp, projectRoot, line),
         system: () => apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => showToast(t("openFailed"), "error")),
         reveal: () => apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp, reveal: true }) }).catch(() => showToast(t("openFailed"), "error")),
       },
@@ -2677,7 +2677,7 @@ function bindLinkContextMenus() {
     const fp = markdownApi?.normalizeAbsolutePath?.(path)
       || markdownApi?.normalizeAbsolutePath?.(`${projectRoot}/${String(path || "")}`)
       || "";
-    if (fp) showPathMenu(event, fp, line);
+    if (fp) showPathMenu(event, fp, line, openToolReferencedPath);
   };
   const showLinkMenu = (event, url) => {
     event.preventDefault();
@@ -2878,21 +2878,31 @@ function bindClickablePaths() {
   });
 }
 
-// Preview-vs-external routing matrix (answer-render R008):
-// URL → new tab; image/derived/text → internal preview (with line jump);
-// binary (exe/zip/pdf/docx/media...) → external system open via /api/open-file;
-// out-of-root or unreachable → keep the text alias, never open.
-function openReferencedPath(p, projectRoot, line) {
+// Absolute final-answer routing matrix (answer-render R008):
+// directory → read-only /api/files confirmation, then the existing Explorer route;
+// image/derived/text → internal preview (with line jump); binary → existing
+// external system open. Out-of-root or unreachable targets never open.
+async function openReferencedPath(p, projectRoot, line) {
   const markdownApi = window.Code?.ui?.markdown;
   const fp = markdownApi?.normalizeAbsolutePath?.(p) || "";
   if (!fp) return;
   if (isOutOfRootPath(fp, projectRoot)) return;
   const kind = markdownApi?.classifyLocalPath?.(fp) || "text";
   if (kind === "binary") {
-    apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
-    return;
+    return apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
   }
-  loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
+  try {
+    const directory = await apiJson(`/api/files?path=${encodeURIComponent(fp)}`);
+    if (!Array.isArray(directory?.items)) return;
+    return apiJson("/api/open-file", {
+      method: "POST",
+      body: JSON.stringify({ path: fp }),
+    }).catch(() => {});
+  } catch (error) {
+    const serverError = String(error?.data?.error || error?.message || "");
+    if (Number(error?.status) !== 400 || !serverError.includes("当前路径不是文件夹")) return;
+  }
+  return loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
 }
 
 function openToolReferencedPath(p, projectRoot, line) {
@@ -2901,7 +2911,12 @@ function openToolReferencedPath(p, projectRoot, line) {
     || markdownApi?.normalizeAbsolutePath?.(projectRoot + "/" + String(p || ""))
     || "";
   if (!fp) return;
-  openReferencedPath(fp, projectRoot, line);
+  if (isOutOfRootPath(fp, projectRoot)) return;
+  const kind = markdownApi?.classifyLocalPath?.(fp) || "text";
+  if (kind === "binary") {
+    return apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
+  }
+  return loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
 }
 
 // B: inline thumbnail preview card for image paths inside the project root.

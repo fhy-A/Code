@@ -25428,6 +25428,8 @@ async function exerciseLargeTextPreview(h4, runtime) {
   const { page } = h4;
   const largePath = "H4 中文 large preview.txt";
   const absolutePath = path.resolve(h4.host.projectDir, largePath).replaceAll("\\", "/");
+  const directoryName = "H4 中文 answer folder";
+  const directoryPath = path.resolve(h4.host.projectDir, directoryName).replaceAll("\\", "/");
   const outsidePath = path.resolve(h4.host.projectDir, "..", "H4 outside answer.txt").replaceAll("\\", "/");
   const prefix = [
     "H4_LARGE_PREVIEW_START",
@@ -25436,6 +25438,7 @@ async function exerciseLargeTextPreview(h4, runtime) {
   const content = `${prefix}\n${"x".repeat(1_100_000)}\nH4_LARGE_PREVIEW_END`;
   expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(1024 * 1024);
   await fs.writeFile(absolutePath, content, "utf8");
+  await fs.mkdir(directoryPath, { recursive: false });
 
   await h4.open(runtime);
   await assertFrontendRuntime(page, runtime);
@@ -25484,6 +25487,7 @@ async function exerciseLargeTextPreview(h4, runtime) {
         role: "assistant",
         content: [
           `H4 absolute large text \`${absolutePath}:37\``,
+          `Absolute directory \`${directoryPath}\``,
           `Legacy relative \`${largePath}\` and \`server.py:123\` and \`output/tmp/\``,
           `Outside absolute \`${outsidePath}\``,
           "External [example](https://example.com/docs)",
@@ -25512,6 +25516,10 @@ async function exerciseLargeTextPreview(h4, runtime) {
   await expect(answerFile).toHaveAttribute("data-path", absolutePath);
   await expect(answerFile).toHaveAttribute("data-tooltip", absolutePath);
   await expect(answerFile).toHaveAttribute("data-line", "37");
+  const answerDirectory = answer.locator('[class~="path-file-card"]').filter({ hasText: directoryName });
+  await expect(answerDirectory).toHaveCount(1);
+  await expect(answerDirectory).toHaveAttribute("data-path", directoryPath);
+  await expect(answerDirectory).toHaveAttribute("data-tooltip", directoryPath);
   const relativeCodes = await answer.locator("code:not(.clickable-path)").evaluateAll(
     (elements) => elements.map((element) => element.textContent.trim()),
   );
@@ -25526,6 +25534,20 @@ async function exerciseLargeTextPreview(h4, runtime) {
   const previewRequestsBeforeOutside = localOpenCount();
   await answer.locator(`.clickable-path[data-path="${outsidePath}"]`).click();
   expect(localOpenCount()).toBe(previewRequestsBeforeOutside);
+  const directoryOpen = page.waitForResponse((response) => {
+    const request = response.request();
+    return new URL(response.url()).pathname === "/api/open-file"
+      && request.method() === "POST";
+  });
+  await answerDirectory.click();
+  const directoryOpenResponse = await directoryOpen;
+  expect(directoryOpenResponse.status()).toBe(200);
+  await expect.poll(async () => (await h4.metrics()).explorerRequests).toEqual([{
+    path: directoryName,
+    selectFile: false,
+    targetExists: true,
+    targetKind: "directory",
+  }]);
   await answerFile.click();
   const answerProjection = await assertInternalPreview("answer-link");
 
@@ -25538,9 +25560,13 @@ async function exerciseLargeTextPreview(h4, runtime) {
   const restoredFile = restoredAnswer.locator('[class~="path-file-card"]').filter({ hasText: largePath });
   await expect(restoredFile).toHaveAttribute("data-path", absolutePath);
   await expect(restoredFile).toHaveAttribute("data-line", "37");
-  expect(h4.loopbackRequests.filter(
+  const restoredDirectory = restoredAnswer.locator('[class~="path-file-card"]').filter({ hasText: directoryName });
+  await expect(restoredDirectory).toHaveAttribute("data-path", directoryPath);
+  await expect(restoredDirectory).toHaveAttribute("data-tooltip", directoryPath);
+  const answerOpenRequests = h4.loopbackRequests.filter(
     (request) => request.method === "POST" && request.path === "/api/open-file",
-  )).toEqual([]);
+  );
+  expect(answerOpenRequests).toHaveLength(1);
 
   const allowedBlockedPaths = new Set([
     "/npm/katex@0.16.11/dist/katex.min.css",
@@ -25561,9 +25587,11 @@ async function exerciseLargeTextPreview(h4, runtime) {
     fullBytes: Buffer.byteLength(content, "utf8"),
     sources: ["file-tree", "absolute-answer-link"],
     absoluteIdentity: absolutePath,
+    absoluteDirectoryIdentity: directoryPath,
     line: 37,
     relativeReferencesClickable: false,
     outsideAbsoluteOpened: false,
+    directoryExplorerRequests: metrics.explorerRequests,
     externalHttpsPreserved: true,
     lineCounts: [
       treeProjection.lineCount,
@@ -25572,7 +25600,8 @@ async function exerciseLargeTextPreview(h4, runtime) {
       answerReloadProjection.lineCount,
     ],
     truncatedMarkerVisible: true,
-    implicitSystemOpenRequests: 0,
+    directoryOpenRequests: answerOpenRequests.length,
+    defaultProgramRequests: metrics.defaultOpenRequests.length,
     explicitSystemOpenMenuPresent: true,
     modelRequests: metrics.chatRequests.length,
     toolExecutions: metrics.toolExecutions.length,
