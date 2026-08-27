@@ -1186,6 +1186,7 @@
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
     const formatCompact = options.formatCompact || ((value) => String(value ?? 0));
     const renderMarkdown = options.renderMarkdown || ((value) => escapeHtml(value));
+    const renderAssistantMarkdown = options.renderAssistantMarkdown || renderMarkdown;
     const t = options.t || ((key) => key);
     const getMessageText = options.getMessageText || ((msg) => String(msg?.content || ""));
     const getBackgroundJob = options.getBackgroundJob || (() => null);
@@ -2149,7 +2150,7 @@
         return `
           <article class="msg assistant is-streaming${streamKind === "pending" ? " is-pending" : ""}${streamKind === "thinking" ? " agent-commentary" : ""}${traceClass}" data-msg-index="${index}" data-streaming-message="true" data-stream-session="${escapeHtml(getSessionId() || "")}" data-stream-kind="${streamKind}">
             ${streamKind === "thinking" ? "" : `<div class="role streaming-answer-role${showModel ? "" : " is-empty"}" data-stream-role>${escapeHtml(model)}</div>`}
-            <div class="bubble streaming-answer-output${showContent ? "" : " is-empty"}" data-stream-part="answer">${showContent ? renderMarkdown(content) : ""}</div>
+            <div class="bubble streaming-answer-output${showContent ? "" : " is-empty"}" data-stream-part="answer">${showContent ? renderAssistantMarkdown(content) : ""}</div>
             ${renderNetworkRecoveryStatus(getSessionId())}
           </article>
         `;

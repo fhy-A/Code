@@ -18369,6 +18369,30 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("els.messages.innerHTML = html", render)
         self.assertIn("pruneStaleStreamingNodes(state.sessionId)", render)
 
+    def test_user_and_assistant_markdown_renderers_are_isolated(self):
+        feature_start = MESSAGES_SOURCE.index("function createMessagesFeature")
+        feature_end = MESSAGES_SOURCE.index("function projectMessages", feature_start)
+        feature = MESSAGES_SOURCE[feature_start:feature_end]
+        app_start = APP_SOURCE.index("messagesFeature = createMessagesFeature({")
+        app_end = APP_SOURCE.index("});", app_start) + 3
+        app_wiring = APP_SOURCE[app_start:app_end]
+
+        self.assertIn(
+            "const renderAssistantMarkdown = options.renderAssistantMarkdown || renderMarkdown;",
+            feature,
+        )
+        self.assertIn('<div class="bubble">${renderMarkdown(text)}</div>', feature)
+        self.assertIn("showContent ? renderAssistantMarkdown(content) : \"\"", feature)
+        self.assertIn(
+            "renderMarkdown: (...args) => markdownFeature.renderMarkdownLite(...args),",
+            app_wiring,
+        )
+        self.assertIn(
+            "renderAssistantMarkdown: (...args) => renderAnswerMarkdown(...args),",
+            app_wiring,
+        )
+        self.assertNotIn("renderMarkdown: (...args) => renderAnswerMarkdown(...args)", app_wiring)
+
     def test_auto_context_compaction_is_rendered_inside_execution_trace(self):
         self.assertIn('kind: "auto-context-compaction"', APP_SOURCE)
         self.assertIn("function renderAutoContextCompaction(msg, index)", MESSAGES_SOURCE)

@@ -1274,7 +1274,8 @@ const {
 messagesFeature = createMessagesFeature({
   escapeHtml,
   formatCompact,
-  renderMarkdown: (...args) => renderAnswerMarkdown(...args),
+  renderMarkdown: (...args) => markdownFeature.renderMarkdownLite(...args),
+  renderAssistantMarkdown: (...args) => renderAnswerMarkdown(...args),
   t,
   getMessageText: getMsgText,
   getBackgroundJob,
