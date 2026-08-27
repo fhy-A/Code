@@ -37,6 +37,18 @@ TOOL_PROTOCOL_HISTORY_USER = "H4_TOOL_PROTOCOL_HISTORY_USER"
 TOOL_PROTOCOL_CONTINUE_USER = "H4_TOOL_PROTOCOL_CONTINUE_USER"
 TOOL_PROTOCOL_FINAL = "H4_TOOL_PROTOCOL_FINAL"
 TOOL_PROTOCOL_CALL_ID = "h4-history-tool-call"
+PARALLEL_VISUAL_PROTOCOL_USER = "H4_PARALLEL_VISUAL_PROTOCOL_USER"
+PARALLEL_VISUAL_PROTOCOL_STAGE = "H4_PARALLEL_VISUAL_PROTOCOL_STAGE"
+PARALLEL_VISUAL_PROTOCOL_FINAL = "H4_PARALLEL_VISUAL_PROTOCOL_FINAL"
+PARALLEL_VISUAL_PROTOCOL_CALL_IDS = (
+    "h4-parallel-visual-call-a",
+    "h4-parallel-visual-call-b",
+)
+PARALLEL_VISUAL_PROTOCOL_PATHS = (
+    "parallel-visual-a.png",
+    "parallel-visual-b.png",
+)
+TOOL_PROTOCOL_ERROR_USER = "H4_TOOL_PROTOCOL_ERROR_USER"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
 AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
@@ -625,6 +637,83 @@ def _questionnaire_scenario(
     )
 
 
+def _parallel_visual_protocol_projection(payload: dict) -> dict:
+    messages = [
+        message for message in (payload.get("messages") or [])
+        if isinstance(message, dict)
+    ]
+    assistant_indexes = []
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant":
+            continue
+        ids = [
+            str(call.get("id") or "")
+            for call in (message.get("tool_calls") or [])
+            if isinstance(call, dict)
+        ]
+        if ids == list(PARALLEL_VISUAL_PROTOCOL_CALL_IDS):
+            assistant_indexes.append(index)
+    tool_indexes = {
+        call_id: [
+            index for index, message in enumerate(messages)
+            if message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") == call_id
+        ]
+        for call_id in PARALLEL_VISUAL_PROTOCOL_CALL_IDS
+    }
+    visual_indexes = {}
+    for path in PARALLEL_VISUAL_PROTOCOL_PATHS:
+        visual_indexes[path] = [
+            index for index, message in enumerate(messages)
+            if message.get("role") == "user"
+            and path in _message_text(message)
+            and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in (
+                    message.get("content")
+                    if isinstance(message.get("content"), list)
+                    else []
+                )
+            )
+        ]
+    assistant_index = assistant_indexes[0] if len(assistant_indexes) == 1 else -1
+    ordered_tool_indexes = [
+        tool_indexes[call_id][0]
+        if len(tool_indexes[call_id]) == 1 else -1
+        for call_id in PARALLEL_VISUAL_PROTOCOL_CALL_IDS
+    ]
+    ordered_visual_indexes = [
+        visual_indexes[path][0]
+        if len(visual_indexes[path]) == 1 else -1
+        for path in PARALLEL_VISUAL_PROTOCOL_PATHS
+    ]
+    strict_order = (
+        assistant_index >= 0
+        and ordered_tool_indexes == [assistant_index + 1, assistant_index + 2]
+        and ordered_visual_indexes[0] > ordered_tool_indexes[-1]
+        and ordered_visual_indexes[1] > ordered_visual_indexes[0]
+    )
+    return {
+        "assistantBatchCount": len(assistant_indexes),
+        "toolResultCounts": [
+            len(tool_indexes[call_id])
+            for call_id in PARALLEL_VISUAL_PROTOCOL_CALL_IDS
+        ],
+        "visualCounts": [
+            len(visual_indexes[path])
+            for path in PARALLEL_VISUAL_PROTOCOL_PATHS
+        ],
+        "strictOrder": strict_order,
+        "toolBlockRoles": (
+            [messages[index]["role"] for index in range(
+                assistant_index,
+                min(len(messages), assistant_index + 5),
+            )]
+            if assistant_index >= 0 else []
+        ),
+    }
+
+
 def _scenario_for(payload: dict) -> tuple[str, bool]:
     messages = payload.get("messages") or []
     user_text = ""
@@ -661,6 +750,20 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         return "connection-route", has_tool_result
     if TOOL_PROTOCOL_CONTINUE_USER in joined_user_text:
         return "tool-protocol-history", has_tool_result
+    if TOOL_PROTOCOL_ERROR_USER in joined_user_text:
+        return "tool-protocol-error", has_tool_result
+    if PARALLEL_VISUAL_PROTOCOL_USER in joined_user_text:
+        completed = {
+            str(message.get("tool_call_id") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        } & set(PARALLEL_VISUAL_PROTOCOL_CALL_IDS)
+        return (
+            "parallel-visual-protocol-final"
+            if len(completed) == len(PARALLEL_VISUAL_PROTOCOL_CALL_IDS)
+            else "parallel-visual-protocol-call",
+            bool(completed),
+        )
     if any(
         isinstance(message, dict)
         and message.get("role") == "system"
@@ -1802,6 +1905,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "stream": True,
             "hasToolResult": has_tool_result,
         }
+        tool_protocol_rejected = False
         if scenario == "trusted-model-route":
             key_group = _synthetic_key_group(self.headers.get("Authorization", ""))
             chat_metric["trustedRoute"] = {
@@ -1860,6 +1964,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     if not any(assistant_index < index for assistant_index in assistant_indexes)
                 ),
             }
+        if scenario == "parallel-visual-protocol-final":
+            projection = _parallel_visual_protocol_projection(payload)
+            chat_metric["parallelVisualProtocol"] = projection
+            tool_protocol_rejected = not projection["strictOrder"]
         if scenario == "context-calibration":
             chat_metric["usedContextCalibrationUnusedKey"] = (
                 self.headers.get("Authorization", "")
@@ -2002,6 +2110,28 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 _edit_authorization_conflict_receipt_projection(payload)
             )
         METRICS.append("chatRequests", chat_metric)
+        if scenario == "tool-protocol-error":
+            self._send_json({
+                "error": {
+                    "message": (
+                        "An assistant message with 'tool_calls' must be followed by "
+                        "tool messages responding to each 'tool_call_id'."
+                    ),
+                    "code": "insufficient_tool_messages_following_tool_calls_message",
+                },
+            }, 400)
+            return
+        if tool_protocol_rejected:
+            self._send_json({
+                "error": {
+                    "message": (
+                        "An assistant message with 'tool_calls' must be followed by "
+                        "tool messages responding to each 'tool_call_id'."
+                    ),
+                    "code": "insufficient_tool_messages_following_tool_calls_message",
+                },
+            }, 400)
+            return
         if scenario == "context-calibration":
             calibration_attempts = sum(
                 1 for item in METRICS.snapshot()["chatRequests"]
@@ -2218,6 +2348,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "parse-error-tool-call", "missing-path-tool-call", "executor-range-call",
             "missing-file-call", "edit-authorization-approve-call",
             "edit-authorization-reject-call", "edit-authorization-conflict-call",
+            "parallel-visual-protocol-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2246,6 +2377,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "edit-authorization-approve-call": EDIT_AUTHORIZATION_STAGE,
                 "edit-authorization-reject-call": EDIT_AUTHORIZATION_STAGE,
                 "edit-authorization-conflict-call": EDIT_AUTHORIZATION_STAGE,
+                "parallel-visual-protocol-call": PARALLEL_VISUAL_PROTOCOL_STAGE,
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -2256,7 +2388,23 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "arguments": json.dumps({"path": READ_PATH}, separators=(",", ":")),
                 },
             }]
-            if scenario == "multi-tool-detail-call":
+            if scenario == "parallel-visual-protocol-call":
+                tool_calls = [
+                    {
+                        "index": index,
+                        "id": PARALLEL_VISUAL_PROTOCOL_CALL_IDS[index],
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps(
+                                {"path": PARALLEL_VISUAL_PROTOCOL_PATHS[index]},
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                    for index in range(len(PARALLEL_VISUAL_PROTOCOL_CALL_IDS))
+                ]
+            elif scenario == "multi-tool-detail-call":
                 tool_calls = [
                     {
                         "index": 0,
@@ -2718,6 +2866,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "trusted-model-route": TRUSTED_ROUTE_FINAL,
                 "connection-route": CONNECTION_ROUTE_FINAL,
                 "tool-protocol-history": TOOL_PROTOCOL_FINAL,
+                "parallel-visual-protocol-final": PARALLEL_VISUAL_PROTOCOL_FINAL,
                 "classic-text": CLASSIC_FINAL,
                 "context-compaction": AUTO_COMPACTION_CHECKPOINT,
                 "context-compaction-seed": AUTO_COMPACTION_SEED_FINAL,
@@ -3910,17 +4059,22 @@ def main() -> int:
         is_missing_read = requested == MISSING_READ_PATH
         is_signature_alternation_read = requested == SIGNATURE_ALTERNATION_READ_PATH
         is_success_reset_read = requested == SUCCESS_RESET_READ_PATH
+        is_parallel_visual_read = requested in set(PARALLEL_VISUAL_PROTOCOL_PATHS)
         if requested not in {
             READ_PATH,
             MISSING_READ_PATH,
             SIGNATURE_ALTERNATION_READ_PATH,
             SUCCESS_RESET_READ_PATH,
+            *PARALLEL_VISUAL_PROTOCOL_PATHS,
         }:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 read_file request escaped the fixed synthetic fixture")
         if is_missing_read and payload_keys != {"path"}:
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 missing-file request changed the exact fixed payload")
+        if is_parallel_visual_read and payload_keys != {"path"}:
+            METRICS.increment("unsafeToolRequests")
+            raise ValueError("H4 parallel visual request changed the exact fixed payload")
         if is_missing_read and (
             missing_project_target.exists() or missing_home_target.exists()
         ):

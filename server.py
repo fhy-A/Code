@@ -1047,6 +1047,25 @@ def _append_runtime_event(run, data):
         run["condition"].notify_all()
 
 
+_TOOL_PROTOCOL_ERROR_MARKERS = (
+    "insufficient_tool_messages_following_tool_calls_message",
+    "insufficient tool messages following tool_calls message",
+    "assistant message with 'tool_calls' must be followed by tool messages",
+    'assistant message with "tool_calls" must be followed by tool messages',
+    "tool messages responding to each 'tool_call_id'",
+    'tool messages responding to each "tool_call_id"',
+)
+
+
+def _is_tool_protocol_failure(upstream_status=0, error_message="", explicit_code=""):
+    if int(upstream_status or 0) != 400:
+        return False
+    if str(explicit_code or "").strip().lower() == "tool_protocol_error":
+        return True
+    text = f"{explicit_code or ''} {error_message or ''}".strip().lower()
+    return any(marker in text for marker in _TOOL_PROTOCOL_ERROR_MARKERS)
+
+
 def _classify_runtime_failure(upstream_status=0, error_message=""):
     status = int(upstream_status or 0)
     text = str(error_message or "").strip().lower()
@@ -1073,6 +1092,8 @@ def _classify_runtime_failure(upstream_status=0, error_message=""):
     ))
     if context_exceeded:
         return "context_window_exceeded", False
+    if _is_tool_protocol_failure(status, text):
+        return "tool_protocol_error", False
     if status in {400, 401, 403, 404, 422}:
         return "config_error", False
     if status in {408, 425, 429} or status >= 500:
@@ -1173,11 +1194,17 @@ def _runtime_error_details(exc):
         except Exception:
             pass
     normalized_message = str(message)[:2000]
-    classification = context_calibration.classify_context_failure(
+    classification = dict(context_calibration.classify_context_failure(
         status,
         payload=payload,
         code=explicit_code,
         message=normalized_message,
+    ) or {})
+    classification["explicitCode"] = str(explicit_code or "")[:128]
+    classification["toolProtocolMatched"] = _is_tool_protocol_failure(
+        status,
+        normalized_message,
+        explicit_code,
     )
     return status, normalized_message, classification
 
@@ -1222,6 +1249,7 @@ def _model_runtime_worker(run):
     keys = list(run["keys"] or [""])
     last_error = "Upstream request failed"
     last_status = 0
+    last_error_code = ""
     first_response_deadline = time.monotonic() + _MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT
     received_meaningful_output = False
 
@@ -1331,6 +1359,8 @@ def _model_runtime_worker(run):
                         "The upstream rejected the request because it exceeded "
                         "the model context window"
                     )
+                elif strict_context.get("toolProtocolMatched"):
+                    last_error_code = "tool_protocol_error"
                 if (
                     not received_meaningful_output
                     and time.monotonic() >= first_response_deadline
@@ -1345,6 +1375,8 @@ def _model_runtime_worker(run):
                     )
                     return
                 if strict_context.get("matched"):
+                    break
+                if last_error_code == "tool_protocol_error":
                     break
                 if run["events"] or key_index >= len(keys) - 1:
                     break
@@ -1364,6 +1396,8 @@ def _model_runtime_worker(run):
                 "failed",
                 _redact_runtime_secrets(run, last_error),
                 last_status,
+                error_code=last_error_code,
+                transient=False if last_error_code else None,
             )
     except Exception as exc:
         status, message = _runtime_error_text(exc)
@@ -3893,11 +3927,288 @@ def _agent_tool_vision_marker(result, call_id):
     }
 
 
+class AgentToolProtocolError(ValueError):
+    """Reject an unsafe native-tool request before it reaches an upstream."""
+
+
+def _agent_declared_tool_calls(message):
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return []
+    return [
+        call for call in (message.get("tool_calls") or [])
+        if isinstance(call, dict) and str(call.get("id") or "")
+    ]
+
+
+def _agent_recovered_tool_message(call, execution=None):
+    call_id = str(call.get("id") or "")
+    function = call.get("function") or {}
+    name = str(function.get("name") or (execution or {}).get("name") or "")
+    result = (execution or {}).get("result")
+    if (
+        isinstance(execution, dict)
+        and execution.get("status") == "completed"
+        and isinstance(result, dict)
+    ):
+        recovered = result
+    else:
+        recovered = {
+            "ok": False,
+            "action": name,
+            "errorCode": "missing_tool_result",
+            "unknownState": True,
+            "notReplayed": True,
+            "error": (
+                "The historical tool result was unavailable. The tool was not "
+                "replayed because its external outcome may be unknown."
+            ),
+        }
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "name": name,
+        "content": _agent_tool_message_content(recovered),
+    }
+
+
+def _agent_message_signature(message):
+    return json.dumps(
+        message,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _agent_validate_tool_protocol_messages(messages):
+    source = list(messages or [])
+    index = 0
+    while index < len(source):
+        message = source[index]
+        calls = _agent_declared_tool_calls(message)
+        if calls:
+            call_ids = [str(call.get("id") or "") for call in calls]
+            if len(call_ids) != len(set(call_ids)):
+                raise AgentToolProtocolError(
+                    "Assistant declared duplicate tool call IDs; no upstream request was sent"
+                )
+            for offset, call_id in enumerate(call_ids, start=1):
+                receipt_index = index + offset
+                receipt = source[receipt_index] if receipt_index < len(source) else None
+                if not (
+                    isinstance(receipt, dict)
+                    and receipt.get("role") == "tool"
+                    and str(receipt.get("tool_call_id") or "") == call_id
+                ):
+                    raise AgentToolProtocolError(
+                        "Assistant tool calls did not have one continuous ordered "
+                        "result block; no upstream request was sent"
+                    )
+            index += len(call_ids) + 1
+            continue
+        if isinstance(message, dict) and message.get("role") == "tool":
+            raise AgentToolProtocolError(
+                "An orphan native tool result remained after recovery; no upstream request was sent"
+            )
+        index += 1
+    return True
+
+
+def _agent_canonicalize_tool_protocol_messages(messages, tool_executions=None):
+    """Return a request-only tool protocol projection without mutating history."""
+    source = list(messages or [])
+    executions = tool_executions or {}
+    output = []
+    index = 0
+    while index < len(source):
+        message = source[index]
+        calls = _agent_declared_tool_calls(message)
+        if not calls:
+            if isinstance(message, dict) and (
+                message.get("role") == "tool"
+                or message.get("_agentToolVisionCallId")
+            ):
+                raise AgentToolProtocolError(
+                    "Orphan tool evidence could not be bound to one assistant "
+                    "declaration; no upstream request was sent"
+                )
+            output.append(_json_clone(message))
+            index += 1
+            continue
+
+        call_ids = [str(call.get("id") or "") for call in calls]
+        if len(call_ids) != len(set(call_ids)):
+            raise AgentToolProtocolError(
+                "Assistant declared duplicate tool call IDs; no upstream request was sent"
+            )
+        call_id_set = set(call_ids)
+        end = index + 1
+        while end < len(source):
+            candidate = source[end]
+            if isinstance(candidate, dict) and candidate.get("role") == "assistant":
+                break
+            end += 1
+
+        receipts = {call_id: [] for call_id in call_ids}
+        markers = {call_id: [] for call_id in call_ids}
+        consumed = set()
+        for candidate_index in range(index + 1, end):
+            candidate = source[candidate_index]
+            if not isinstance(candidate, dict):
+                continue
+            receipt_id = str(candidate.get("tool_call_id") or "")
+            marker_id = str(candidate.get("_agentToolVisionCallId") or "")
+            if candidate.get("role") == "tool" and receipt_id in call_id_set:
+                receipts[receipt_id].append(candidate)
+                consumed.add(candidate_index)
+            elif marker_id in call_id_set:
+                markers[marker_id].append(candidate)
+                consumed.add(candidate_index)
+
+        output.append(_json_clone(message))
+        for call in calls:
+            call_id = str(call.get("id") or "")
+            matches = receipts[call_id]
+            if matches:
+                signatures = {_agent_message_signature(item) for item in matches}
+                if len(signatures) > 1:
+                    raise AgentToolProtocolError(
+                        "Conflicting duplicate tool results were found; no upstream request was sent"
+                    )
+                output.append(_json_clone(matches[0]))
+            else:
+                output.append(_agent_recovered_tool_message(
+                    call,
+                    executions.get(call_id) if isinstance(executions, dict) else None,
+                ))
+
+        for call in calls:
+            call_id = str(call.get("id") or "")
+            matches = markers[call_id]
+            if matches:
+                signatures = {_agent_message_signature(item) for item in matches}
+                if len(signatures) > 1:
+                    raise AgentToolProtocolError(
+                        "Conflicting duplicate visual markers were found; no upstream request was sent"
+                    )
+                output.append(_json_clone(matches[0]))
+                continue
+            execution = executions.get(call_id) if isinstance(executions, dict) else None
+            marker = _agent_tool_vision_marker(
+                (execution or {}).get("result") or {}, call_id,
+            )
+            if marker:
+                output.append(marker)
+
+        for candidate_index in range(index + 1, end):
+            if candidate_index in consumed:
+                continue
+            candidate = source[candidate_index]
+            if isinstance(candidate, dict) and (
+                candidate.get("role") == "tool"
+                or candidate.get("_agentToolVisionCallId")
+            ):
+                raise AgentToolProtocolError(
+                    "Orphan tool evidence could not be bound to one assistant "
+                    "declaration; no upstream request was sent"
+                )
+            output.append(_json_clone(candidate))
+        index = end
+
+    _agent_validate_tool_protocol_messages(output)
+    return output
+
+
+def _append_agent_tool_message_locked(run, call_id, name, result):
+    if _agent_has_current_tool_message(run, call_id):
+        return False
+    message = {
+        "role": "tool",
+        "tool_call_id": str(call_id or ""),
+        "name": str(name or ""),
+        "content": _agent_tool_message_content(result),
+    }
+    messages = run.get("messages") or []
+    assistant_index = -1
+    declared_ids = []
+    for candidate_index in range(len(messages) - 1, -1, -1):
+        calls = _agent_declared_tool_calls(messages[candidate_index])
+        ids = [str(call.get("id") or "") for call in calls]
+        if str(call_id or "") in ids:
+            assistant_index = candidate_index
+            declared_ids = ids
+            break
+    if assistant_index < 0:
+        messages.append(message)
+        return True
+
+    current_rank = declared_ids.index(str(call_id or ""))
+    insert_at = len(messages)
+    for candidate_index in range(assistant_index + 1, len(messages)):
+        candidate = messages[candidate_index]
+        if isinstance(candidate, dict) and candidate.get("role") == "tool":
+            candidate_id = str(candidate.get("tool_call_id") or "")
+            if candidate_id in declared_ids:
+                if declared_ids.index(candidate_id) > current_rank:
+                    insert_at = candidate_index
+                    break
+                continue
+        insert_at = candidate_index
+        break
+    messages.insert(insert_at, message)
+    return True
+
+
+def _flush_agent_tool_vision_markers_locked(run):
+    if run.get("pending_tool_calls"):
+        return False
+    messages = run.get("messages") or []
+    assistant_index = -1
+    calls = []
+    for candidate_index in range(len(messages) - 1, -1, -1):
+        candidate_calls = _agent_declared_tool_calls(messages[candidate_index])
+        if candidate_calls:
+            assistant_index = candidate_index
+            calls = candidate_calls
+            break
+    if assistant_index < 0:
+        return False
+    call_ids = [str(call.get("id") or "") for call in calls]
+    if not all(_agent_has_current_tool_message(run, call_id) for call_id in call_ids):
+        return False
+    existing_marker_ids = {
+        str(message.get("_agentToolVisionCallId") or "")
+        for message in messages[assistant_index + 1:]
+        if isinstance(message, dict) and message.get("_agentToolVisionCallId")
+    }
+    changed = False
+    for call_id in call_ids:
+        if call_id in existing_marker_ids:
+            continue
+        execution = (run.get("tool_executions") or {}).get(call_id) or {}
+        marker = _agent_tool_vision_marker(execution.get("result") or {}, call_id)
+        if marker:
+            messages.append(marker)
+            existing_marker_ids.add(call_id)
+            changed = True
+    return changed
+
+
+def _agent_resume_status_after_tool_completion_locked(run):
+    if run.get("pending_tool_calls"):
+        return "tools"
+    _flush_agent_tool_vision_markers_locked(run)
+    return "model"
+
+
 def _agent_model_messages(run):
     """Expand durable image markers only for the next model request."""
     expanded = []
     executions = run.get("tool_executions") or {}
-    for source in run.get("messages") or []:
+    canonical = _agent_canonicalize_tool_protocol_messages(
+        run.get("messages") or [], executions,
+    )
+    for source in canonical:
         if not isinstance(source, dict) or not source.get("_agentToolVisionCallId"):
             expanded.append(_json_clone(source))
             continue
@@ -3928,6 +4239,7 @@ def _agent_model_messages(run):
                 {"type": "image_url", "image_url": {"url": image_url}},
             ],
         })
+    _agent_validate_tool_protocol_messages(expanded)
     return expanded
 
 
@@ -4192,21 +4504,18 @@ def _submit_agent_input(run, answers, request_id=""):
         if not isinstance(execution, dict):
             raise ValueError("Agent user-input tool execution is missing")
         _set_agent_execution_result(execution, result)
-        if not _agent_has_current_tool_message(run, call_id):
-            run["messages"].append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": "request_user_input",
-                "content": _agent_tool_message_content(result),
-            })
+        _append_agent_tool_message_locked(
+            run, call_id, "request_user_input", result,
+        )
         run["pending_tool_calls"] = [
             pending for pending in run.get("pending_tool_calls") or []
             if pending.get("id") != call_id
         ]
+        resume_status = _agent_resume_status_after_tool_completion_locked(run)
         run["pending_input"] = None
         run["keys"] = []
         run["status"] = "waiting_credentials"
-        run["resume_status"] = "model"
+        run["resume_status"] = resume_status
         run["updated_at"] = now_iso()
         run["condition"].notify_all()
 
@@ -4312,18 +4621,12 @@ def _submit_agent_command_authorization(run, pending, normalized_decision):
                 "error": "User rejected the command.",
             }
             _set_agent_execution_result(execution, result)
-            if not _agent_has_current_tool_message(run, call_id):
-                run["messages"].append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": "run_command",
-                    "content": _agent_tool_message_content(result),
-                })
+            _append_agent_tool_message_locked(run, call_id, "run_command", result)
             run["pending_tool_calls"] = [
                 call for call in run.get("pending_tool_calls") or []
                 if call.get("id") != call_id
             ]
-            resume_status = "tools" if run["pending_tool_calls"] else "model"
+            resume_status = _agent_resume_status_after_tool_completion_locked(run)
         run["pending_authorization"] = None
         run["keys"] = []
         run["status"] = "waiting_credentials"
@@ -4384,18 +4687,12 @@ def _submit_agent_file_authorization(run, pending, normalized_decision):
                 "error": f"User rejected {action}.",
             }
             _set_agent_execution_result(execution, result)
-            if not _agent_has_current_tool_message(run, call_id):
-                run["messages"].append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": action,
-                    "content": _agent_tool_message_content(result),
-                })
+            _append_agent_tool_message_locked(run, call_id, action, result)
             run["pending_tool_calls"] = [
                 call for call in run.get("pending_tool_calls") or []
                 if call.get("id") != call_id
             ]
-            resume_status = "tools" if run["pending_tool_calls"] else "model"
+            resume_status = _agent_resume_status_after_tool_completion_locked(run)
         run["pending_authorization"] = None
         run["keys"] = []
         run["status"] = "waiting_credentials"
@@ -4594,18 +4891,12 @@ def _submit_agent_authorization(run, authorization_id, decision):
             raise ValueError("Agent authorization request changed during submission")
         execution = run.get("tool_executions", {}).get(call_id)
         _set_agent_execution_result(execution, result)
-        if not _agent_has_current_tool_message(run, call_id):
-            run["messages"].append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": "propose_edit",
-                "content": _agent_tool_message_content(result),
-            })
+        _append_agent_tool_message_locked(run, call_id, "propose_edit", result)
         run["pending_tool_calls"] = [
             call for call in run.get("pending_tool_calls") or []
             if call.get("id") != call_id
         ]
-        resume_status = "tools" if run["pending_tool_calls"] else "model"
+        resume_status = _agent_resume_status_after_tool_completion_locked(run)
         run["pending_authorization"] = None
         run["keys"] = []
         run["status"] = "waiting_credentials"
@@ -4884,13 +5175,7 @@ def _flush_agent_delegation_results(run, calls):
         call_id = call["id"]
         execution = run["tool_executions"][call_id]
         result = execution.get("result") or {}
-        if not _agent_has_current_tool_message(run, call_id):
-            run["messages"].append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": "task",
-                "content": _agent_tool_message_content(result),
-            })
+        _append_agent_tool_message_locked(run, call_id, "task", result)
         run["pending_tool_calls"] = [
             pending
             for pending in run["pending_tool_calls"]
@@ -5594,20 +5879,7 @@ def _execute_agent_pending_tools(run):
                         )[:2000]
                 _set_agent_execution_result(execution, result)
 
-            if not _agent_has_current_tool_message(run, call_id):
-                run["messages"].append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": _agent_tool_message_content(result),
-                })
-            vision_marker = _agent_tool_vision_marker(result, call_id)
-            if vision_marker and not any(
-                isinstance(message, dict)
-                and message.get("_agentToolVisionCallId") == call_id
-                for message in run.get("messages") or []
-            ):
-                run["messages"].append(vision_marker)
+            _append_agent_tool_message_locked(run, call_id, name, result)
             run["pending_tool_calls"] = [
                 pending
                 for pending in run["pending_tool_calls"]
@@ -6183,6 +6455,10 @@ def _agent_run_worker(run):
             if run["status"] == "tools" or run.get("pending_tool_calls"):
                 if not _execute_agent_pending_tools(run):
                     return
+                with run["condition"]:
+                    vision_markers_added = _flush_agent_tool_vision_markers_locked(run)
+                if vision_markers_added:
+                    _persist_agent_run(run)
                 _set_agent_status(run, "model")
                 _append_agent_event(run, "model_pending", {
                     "round": len(run["rounds"]) + 1,
@@ -6482,6 +6758,13 @@ def _agent_run_worker(run):
             if _finish_agent_run(run, "completed"):
                 return
             continue
+    except AgentToolProtocolError as exc:
+        _finish_agent_run(
+            run,
+            "failed",
+            str(exc),
+            error_code="tool_protocol_error",
+        )
     except Exception as exc:
         pending = _normalize_pending_context_calibration(
             run.get("pending_context_calibration")

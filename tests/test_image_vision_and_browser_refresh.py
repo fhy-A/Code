@@ -55,17 +55,32 @@ class TestImageVisionBridge(unittest.TestCase):
         }
         marker = server._agent_tool_vision_marker(result, "call-image")
         run = {
-            "messages": [marker],
-            "tool_executions": {"call-image": {"result": result}},
+            "messages": [{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-image",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            }, {
+                "role": "tool",
+                "tool_call_id": "call-image",
+                "name": "read_file",
+                "content": "image loaded",
+            }, marker],
+            "tool_executions": {
+                "call-image": {"status": "completed", "result": result},
+            },
         }
 
         messages = server._agent_model_messages(run)
 
         self.assertEqual(marker["_agentToolVisionCallId"], "call-image")
-        self.assertEqual(messages[0]["role"], "user")
-        self.assertEqual(messages[0]["content"][1]["type"], "image_url")
+        self.assertEqual([message["role"] for message in messages], ["assistant", "tool", "user"])
+        self.assertEqual(messages[2]["content"][1]["type"], "image_url")
         self.assertEqual(
-            messages[0]["content"][1]["image_url"]["url"],
+            messages[2]["content"][1]["image_url"]["url"],
             "data:image/png;base64,aW1hZ2U=",
         )
 
@@ -81,6 +96,162 @@ class TestImageVisionBridge(unittest.TestCase):
         }
         marker = server._agent_tool_vision_marker(result, "call-image")
         self.assertNotIn("aW1hZ2U=", json.dumps(marker))
+
+    def test_parallel_visual_history_is_projected_as_one_complete_tool_block(self):
+        def visual_result(encoded):
+            return {
+                "ok": True,
+                "action": "read_file",
+                "path": "assets/example.png",
+                "binary": True,
+                "visual": True,
+                "mime": "image/png",
+                "base64": encoded,
+            }
+
+        calls = [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        } for call_id, name in (("call-a", "read_file"), ("call-b", "glob_files"))]
+        result_a = visual_result("YQ==")
+        result_b = visual_result("Yg==")
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_call_id": "call-a", "name": "read_file", "content": "A"},
+            server._agent_tool_vision_marker(result_a, "call-a"),
+            {"role": "tool", "tool_call_id": "call-b", "name": "read_file", "content": "B"},
+            server._agent_tool_vision_marker(result_b, "call-b"),
+        ]
+        before = json.dumps(messages, ensure_ascii=False)
+        run = {
+            "messages": messages,
+            "tool_executions": {
+                "call-a": {"status": "completed", "result": result_a},
+                "call-b": {"status": "completed", "result": result_b},
+            },
+        }
+
+        projected = server._agent_model_messages(run)
+
+        self.assertEqual(json.dumps(messages, ensure_ascii=False), before)
+        self.assertEqual(
+            [message["role"] for message in projected],
+            ["assistant", "tool", "tool", "user", "user"],
+        )
+        self.assertEqual(
+            [projected[1]["tool_call_id"], projected[2]["tool_call_id"]],
+            ["call-a", "call-b"],
+        )
+        self.assertTrue(projected[3]["content"][1]["image_url"]["url"].endswith("YQ=="))
+        self.assertTrue(projected[4]["content"][1]["image_url"]["url"].endswith("Yg=="))
+
+    def test_new_parallel_visual_writes_defer_markers_until_receipts_are_complete(self):
+        calls = [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        } for call_id in ("call-a", "call-b")]
+        visual = {
+            "ok": True,
+            "action": "read_file",
+            "path": "assets/example.png",
+            "binary": True,
+            "visual": True,
+            "mime": "image/png",
+            "base64": "YQ==",
+        }
+        failed = {"ok": False, "action": "glob_files", "error": "missing"}
+        run = {
+            "messages": [{"role": "assistant", "content": "", "tool_calls": calls}],
+            "pending_tool_calls": [{"id": "call-b"}],
+            "tool_executions": {
+                "call-a": {"status": "completed", "result": visual},
+                "call-b": {"status": "completed", "result": failed},
+            },
+        }
+
+        server._append_agent_tool_message_locked(run, "call-a", "read_file", visual)
+        self.assertFalse(server._flush_agent_tool_vision_markers_locked(run))
+        self.assertEqual([message["role"] for message in run["messages"]], ["assistant", "tool"])
+
+        server._append_agent_tool_message_locked(run, "call-b", "glob_files", failed)
+        run["pending_tool_calls"] = []
+        self.assertTrue(server._flush_agent_tool_vision_markers_locked(run))
+        self.assertEqual(
+            [message["role"] for message in run["messages"]],
+            ["assistant", "tool", "tool", "user"],
+        )
+        self.assertEqual(run["messages"][-1]["_agentToolVisionCallId"], "call-a")
+
+    def test_protocol_recovery_uses_completed_execution_and_never_replays_unknown(self):
+        calls = [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        } for call_id in ("call-a", "call-b", "call-c")]
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_call_id": "call-a", "name": "read_file", "content": "A"},
+        ]
+        executions = {
+            "call-b": {
+                "status": "completed",
+                "name": "read_file",
+                "result": {"ok": True, "action": "read_file", "content": "B"},
+            },
+        }
+
+        projected = server._agent_canonicalize_tool_protocol_messages(messages, executions)
+
+        self.assertEqual([message["role"] for message in projected], ["assistant", "tool", "tool", "tool"])
+        self.assertEqual(
+            [message["tool_call_id"] for message in projected[1:]],
+            ["call-a", "call-b", "call-c"],
+        )
+        self.assertTrue(json.loads(projected[2]["content"])["ok"])
+        unknown = json.loads(projected[3]["content"])
+        self.assertTrue(unknown["unknownState"])
+        self.assertTrue(unknown["notReplayed"])
+
+        identical_duplicate = messages + [dict(messages[1])]
+        deduplicated = server._agent_canonicalize_tool_protocol_messages(
+            identical_duplicate, executions,
+        )
+        self.assertEqual(sum(message.get("role") == "tool" for message in deduplicated), 3)
+
+        conflicting = messages + [{
+            "role": "tool",
+            "tool_call_id": "call-a",
+            "name": "read_file",
+            "content": "different",
+        }]
+        with self.assertRaises(server.AgentToolProtocolError):
+            server._agent_canonicalize_tool_protocol_messages(conflicting, executions)
+
+        duplicate_call_ids = [{
+            "id": "call-a",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }, {
+            "id": "call-a",
+            "type": "function",
+            "function": {"name": "glob_files", "arguments": "{}"},
+        }]
+        with self.assertRaises(server.AgentToolProtocolError):
+            server._agent_canonicalize_tool_protocol_messages([{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": duplicate_call_ids,
+            }])
+
+        with self.assertRaises(server.AgentToolProtocolError):
+            server._agent_canonicalize_tool_protocol_messages([{
+                "role": "tool",
+                "tool_call_id": "orphan-call",
+                "name": "read_file",
+                "content": "preserved evidence",
+            }])
 
     def test_model_image_projection_accepts_or_converts_supported_matrix(self):
         for image_format, expected_mime, converted in (

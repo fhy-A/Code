@@ -3321,6 +3321,128 @@ class TestDurableAgentRuntime(unittest.TestCase):
         payload, _ = server_mod._agent_model_payload(restored)
         self.assertEqual(payload["messages"][0]["content"], system_prompt)
 
+    def test_v4_and_v5_records_project_interleaved_visual_tools_without_rewriting(self):
+        seed = server_mod._create_agent_run(
+            "tool-protocol-version-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "inspect without starting"}],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["read_file"]],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            start_worker=False,
+        )
+        calls = [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        } for call_id in ("call-a", "call-b")]
+        result_a = {
+            "ok": True, "action": "read_file", "path": "a.png",
+            "binary": True, "visual": True, "mime": "image/png", "base64": "YQ==",
+        }
+        result_b = {
+            "ok": True, "action": "read_file", "path": "b.png",
+            "binary": True, "visual": True, "mime": "image/png", "base64": "Yg==",
+        }
+        broken = [
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_call_id": "call-a", "name": "read_file", "content": "A"},
+            server_mod._agent_tool_vision_marker(result_a, "call-a"),
+            {"role": "tool", "tool_call_id": "call-b", "name": "read_file", "content": "B"},
+            server_mod._agent_tool_vision_marker(result_b, "call-b"),
+        ]
+        base_record = server_mod._agent_run_record(seed)
+        base_record["status"] = "failed"
+        base_record["messages"] = broken
+        base_record["toolExecutions"] = {
+            "call-a": {"status": "completed", "name": "read_file", "result": result_a},
+            "call-b": {"status": "completed", "name": "read_file", "result": result_b},
+        }
+
+        for version in (4, 5):
+            with self.subTest(version=version):
+                record = json.loads(json.dumps(base_record))
+                record["version"] = version
+                before = json.dumps(record["messages"], ensure_ascii=False)
+                restored = server_mod._agent_run_from_record(record)
+                payload, _ = server_mod._agent_model_payload(restored)
+                self.assertEqual(json.dumps(record["messages"], ensure_ascii=False), before)
+                self.assertEqual(
+                    [message["role"] for message in payload["messages"]],
+                    ["assistant", "tool", "tool", "user", "user"],
+                )
+                self.assertEqual(
+                    [payload["messages"][1]["tool_call_id"], payload["messages"][2]["tool_call_id"]],
+                    ["call-a", "call-b"],
+                )
+
+    def test_conflicting_tool_history_fails_locally_without_upstream_or_replay(self):
+        run = server_mod._create_agent_run(
+            "tool-protocol-conflict-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "seed"}],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["read_file"]],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            start_worker=False,
+        )
+        call = {
+            "id": "call-conflict",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        run["messages"] = [
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call-conflict", "content": "first"},
+            {"role": "tool", "tool_call_id": "call-conflict", "content": "second"},
+        ]
+        run["status"] = "model"
+        run["keys"] = ["must-not-be-used"]
+
+        server_mod._start_agent_worker(run)
+        self._wait_terminal(run)
+
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "tool_protocol_error")
+        self.assertEqual(_AgentUpstream.calls, 0)
+        self.assertEqual(run["tool_executions"], {})
+
+    def test_orphan_tool_history_fails_locally_without_upstream_or_replay(self):
+        run = server_mod._create_agent_run(
+            "tool-protocol-orphan-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "seed"}],
+                "tools": [server_mod._SERVER_TOOL_DEFINITIONS["read_file"]],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            start_worker=False,
+        )
+        run["messages"] = [{
+            "role": "tool",
+            "tool_call_id": "orphan-call",
+            "name": "read_file",
+            "content": "preserved evidence",
+        }]
+        run["status"] = "model"
+        run["keys"] = ["must-not-be-used"]
+
+        server_mod._start_agent_worker(run)
+        self._wait_terminal(run)
+
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "tool_protocol_error")
+        self.assertEqual(_AgentUpstream.calls, 0)
+        self.assertEqual(run["tool_executions"], {})
+
     def test_restart_reuses_completed_child_without_second_child_request(self):
         parent = server_mod._create_agent_run(
             "delegated-restart-session",
@@ -3406,7 +3528,11 @@ class TestDurableAgentRuntime(unittest.TestCase):
 
         loaded = server_mod._get_agent_run(parent["id"])
         self.assertEqual(loaded["status"], "waiting_credentials")
-        server_mod._resume_agent_run(loaded, ["restart-resume-key"])
+        server_mod._resume_agent_run(
+            loaded,
+            ["restart-resume-key"],
+            self.base_url,
+        )
         self._wait_terminal(loaded)
 
         self.assertEqual(loaded["status"], "completed")
@@ -4942,7 +5068,11 @@ class TestDurableAgentRuntime(unittest.TestCase):
         restored = server_mod._get_agent_run(run["id"])
         self.assertEqual(restored["status"], "waiting_credentials")
         self.assertEqual(len(restored["pending_steers"]), 1)
-        server_mod._resume_agent_run(restored, ["steer-resume-key"])
+        server_mod._resume_agent_run(
+            restored,
+            ["steer-resume-key"],
+            self.base_url,
+        )
         self._wait_terminal(restored)
         self.assertEqual(restored["result"]["content"], "restored guided result")
         self.assertEqual(restored["pending_steers"], [])
@@ -5303,7 +5433,11 @@ class TestDurableAgentRuntime(unittest.TestCase):
             "values": ["ui"],
         }])
         self.assertEqual(loaded["status"], "waiting_credentials")
-        server_mod._resume_agent_run(loaded, ["question-after-restart-key"])
+        server_mod._resume_agent_run(
+            loaded,
+            ["question-after-restart-key"],
+            self.base_url,
+        )
         self._wait_terminal(loaded)
         self.assertEqual(loaded["result"]["content"], "questionnaire task complete")
         self.assertEqual(_AgentUpstream.calls, 2)

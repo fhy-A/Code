@@ -215,10 +215,22 @@
       || explicitlyUnavailableRoute;
   }
 
+  function isToolProtocolError(status = 0, code = "", message = "") {
+    const numericStatus = Number(status || 0);
+    const normalizedCode = String(code || "").toLowerCase();
+    const text = `${normalizedCode} ${message || ""}`.toLowerCase();
+    if (normalizedCode === "tool_protocol_error") return true;
+    if (numericStatus !== 400) return false;
+    return /insufficient_tool_messages_following_tool_calls_message|insufficient tool messages following tool_calls message|assistant message with ['"]tool_calls['"] must be followed by tool messages|tool messages responding to each ['"]tool_call_id['"]/.test(text);
+  }
+
   function classifyModelRequestFailure(status = 0, code = "", message = "") {
     const numericStatus = Number(status || 0);
     if (isModelAccessDenied(numericStatus, code, message)) {
       return { code: "model_access_denied", transient: false };
+    }
+    if (isToolProtocolError(numericStatus, code, message)) {
+      return { code: "tool_protocol_error", transient: false };
     }
     const transient = [408, 425, 429, 500, 502, 503, 504].includes(numericStatus)
       || /upstream error|do request failed|timed out|timeout|network|fetch failed|connection/i.test(message);
@@ -238,6 +250,7 @@
     createModelTurnAccumulator,
     createModelRequestError,
     isModelAccessDenied,
+    isToolProtocolError,
     classifyModelRequestFailure,
     shouldRetryWithoutNativeTools,
   });

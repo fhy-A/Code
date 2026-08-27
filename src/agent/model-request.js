@@ -89,65 +89,122 @@
     return { role: "user", content: getMessageText(message) };
   }
 
-  function isSteerMessage(message) {
-    return Boolean(
-      message?.role === "user"
-      && String(message.meta?.steerDispatch?.agentRunId || ""),
-    );
+  function createToolProtocolError(message) {
+    const error = new Error(String(message || "Tool protocol history is invalid"));
+    error.code = "tool_protocol_error";
+    error.errorCode = "tool_protocol_error";
+    error.transient = false;
+    return error;
+  }
+
+  function toolResultSignature(message) {
+    return JSON.stringify({
+      content: getMessageText(message),
+      action: String(message?.meta?.action || ""),
+    });
+  }
+
+  function recoveredToolResultMessage(toolCall) {
+    const toolCallId = String(toolCall?.id || "");
+    const action = String(toolCall?.function?.name || toolCall?.name || "");
+    return {
+      role: "tool-result",
+      content: JSON.stringify({
+        ok: false,
+        action,
+        errorCode: "missing_tool_result",
+        unknownState: true,
+        notReplayed: true,
+        error: "The historical tool result was unavailable and was not replayed.",
+      }),
+      meta: {
+        action,
+        toolCallId,
+        native: true,
+        protocolRecovery: true,
+      },
+    };
   }
 
   function canonicalizeSteerToolResultOrder(messages) {
     const source = Array.isArray(messages) ? messages : [];
-    const futureResultsById = new Map();
-    source.forEach((message, index) => {
-      if (message?.role !== "tool-result" || !message.meta?.toolCallId) return;
-      const id = String(message.meta.toolCallId);
-      if (!futureResultsById.has(id)) futureResultsById.set(id, []);
-      futureResultsById.get(id).push({ index, message });
-    });
-
     const output = [];
-    const movedResultIndexes = new Set();
-    const pendingCalls = new Map();
-    const rememberCall = (id, runId = "") => {
-      const normalizedId = String(id || "");
-      if (!normalizedId) return;
-      pendingCalls.set(normalizedId, String(runId || pendingCalls.get(normalizedId) || ""));
-    };
-
-    source.forEach((message, index) => {
-      if (movedResultIndexes.has(index)) return;
-
-      if (isSteerMessage(message)) {
-        const steerRunId = String(message.meta.steerDispatch.agentRunId || "");
-        const matchingResults = [];
-        pendingCalls.forEach((runId, toolCallId) => {
-          if (runId && steerRunId && runId !== steerRunId) return;
-          const match = (futureResultsById.get(toolCallId) || []).find((entry) => (
-            entry.index > index && !movedResultIndexes.has(entry.index)
-          ));
-          if (match) matchingResults.push({ ...match, toolCallId });
-        });
-        matchingResults
-          .sort((left, right) => left.index - right.index)
-          .forEach((entry) => {
-            output.push(entry.message);
-            movedResultIndexes.add(entry.index);
-            pendingCalls.delete(entry.toolCallId);
-          });
+    let index = 0;
+    while (index < source.length) {
+      const message = source[index];
+      const toolCalls = message?.role === "assistant" && Array.isArray(message.meta?.toolCalls)
+        ? message.meta.toolCalls.filter((call) => String(call?.id || ""))
+        : [];
+      if (toolCalls.length === 0) {
+        if (
+          ["tool-call", "tool-result"].includes(message?.role)
+          && String(message.meta?.toolCallId || "")
+        ) {
+          throw createToolProtocolError(
+            "Orphan tool evidence could not be bound to one assistant declaration; no model request was sent",
+          );
+        }
         output.push(message);
-        return;
+        index += 1;
+        continue;
+      }
+
+      const callIds = toolCalls.map((call) => String(call.id));
+      if (new Set(callIds).size !== callIds.length) {
+        throw createToolProtocolError(
+          "Assistant declared duplicate tool call IDs; no model request was sent",
+        );
+      }
+      const callIdSet = new Set(callIds);
+      let end = index + 1;
+      while (end < source.length && source[end]?.role !== "assistant") end += 1;
+
+      const results = new Map(callIds.map((callId) => [callId, []]));
+      const consumed = new Set();
+      for (let candidateIndex = index + 1; candidateIndex < end; candidateIndex += 1) {
+        const candidate = source[candidateIndex];
+        const toolCallId = String(candidate?.meta?.toolCallId || "");
+        if (candidate?.role === "tool-result" && callIdSet.has(toolCallId)) {
+          results.get(toolCallId).push(candidate);
+          consumed.add(candidateIndex);
+        }
       }
 
       output.push(message);
-      if (message?.role === "assistant") {
-        (Array.isArray(message.meta?.toolCalls) ? message.meta.toolCalls : []).forEach((call) => {
-          rememberCall(call?.id, message.meta?.agentRunId);
-        });
-      } else if (message?.role === "tool-result") {
-        pendingCalls.delete(String(message.meta?.toolCallId || ""));
+      toolCalls.forEach((toolCall) => {
+        const toolCallId = String(toolCall.id);
+        const matches = results.get(toolCallId) || [];
+        if (matches.length > 0) {
+          const signatures = new Set(matches.map(toolResultSignature));
+          if (signatures.size > 1) {
+            throw createToolProtocolError(
+              "Conflicting duplicate tool results were found; no model request was sent",
+            );
+          }
+          output.push(matches[0]);
+        } else {
+          output.push(recoveredToolResultMessage(toolCall));
+        }
+      });
+      for (let candidateIndex = index + 1; candidateIndex < end; candidateIndex += 1) {
+        if (consumed.has(candidateIndex)) continue;
+        const candidate = source[candidateIndex];
+        const candidateToolCallId = String(candidate?.meta?.toolCallId || "");
+        if (
+          candidateToolCallId
+          && (
+            candidate?.role === "tool-result"
+            || (candidate?.role === "tool-call" && !callIdSet.has(candidateToolCallId))
+          )
+        ) {
+          throw createToolProtocolError(
+            "Orphan tool evidence could not be bound to one assistant declaration; no model request was sent",
+          );
+        }
+        output.push(candidate);
       }
-    });
+      index = end;
+    }
 
     return output;
   }

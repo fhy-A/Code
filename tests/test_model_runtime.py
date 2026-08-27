@@ -86,6 +86,22 @@ class _StreamingUpstream(BaseHTTPRequestHandler):
                             return
                         time.sleep(0.01)
                     return
+        if user_content == "tool protocol failure":
+            body = json.dumps({
+                "error": {
+                    "message": (
+                        "An assistant message with 'tool_calls' must be followed by "
+                        "tool messages responding to each 'tool_call_id'."
+                    ),
+                    "code": "insufficient_tool_messages_following_tool_calls_message",
+                },
+            }).encode("utf-8")
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if user_content == "always 502":
             body = json.dumps({
                 "error": {
@@ -369,6 +385,41 @@ class TestModelRuntime(unittest.TestCase):
         self.assertEqual(snapshot["errorCode"], "model_access_denied")
         self.assertFalse(snapshot["transient"])
         self.assertIn("无权访问模型", snapshot["error"])
+
+    def test_tool_protocol_400_is_non_transient_and_does_not_rotate_keys(self):
+        run = server_mod._create_model_runtime_run(
+            "session-tool-protocol",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "tool protocol failure"}],
+            },
+            self.base_url,
+            ["primary-key", "secondary-key"],
+        )
+        self._wait_for_terminal(run)
+
+        snapshot = server_mod._runtime_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["upstreamStatus"], 400)
+        self.assertEqual(snapshot["errorCode"], "tool_protocol_error")
+        self.assertFalse(snapshot["transient"])
+        self.assertEqual(_StreamingUpstream.calls, 1)
+        self.assertEqual(_StreamingUpstream.authorizations, ["Bearer primary-key"])
+        self.assertEqual(
+            server_mod._classify_runtime_failure(400, snapshot["error"]),
+            ("tool_protocol_error", False),
+        )
+        self.assertEqual(
+            server_mod._classify_runtime_failure(400, "generic invalid request"),
+            ("config_error", False),
+        )
+        self.assertEqual(
+            server_mod._classify_runtime_failure(401, "generic authorization failure"),
+            ("config_error", False),
+        )
+        self.assertTrue(
+            server_mod._is_tool_protocol_failure(400, "", "tool_protocol_error")
+        )
 
     def test_transient_http_failure_is_structured_without_duplicate_retry(self):
         run = server_mod._create_model_runtime_run(

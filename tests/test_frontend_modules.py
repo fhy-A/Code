@@ -5646,17 +5646,16 @@ const messages = [
       {type: "image_url", image_url: {url: "data:image/png;base64,x"}},
     ],
   },
-  {
-    role: "tool-result",
-    content: "orphan",
-    meta: {toolCallId: "missing"},
-  },
   {role: "assistant", content: "pending", streaming: true},
   {role: "system", content: "hidden", meta: {skipApi: true}},
 ];
 const before = JSON.stringify(messages);
 const nativeMessages = request.buildModelRequestMessages(messages, true);
-const fallbackMessages = request.buildModelRequestMessages(messages, false);
+const fallbackMessages = request.buildModelRequestMessages([
+  ...messages.slice(0, 4),
+  {role: "tool-result", content: "orphan", meta: {toolCallId: "missing"}},
+  ...messages.slice(4),
+], false);
 const textOnlyMessages = request.projectMessagesWithoutImages(messages);
 const pureImageRetry = request.projectMessagesWithoutImages([{
   role: "user",
@@ -5711,7 +5710,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(len(native_messages), 4)
         self.assertEqual(
             [call["id"] for call in native_messages[0]["tool_calls"]],
-            ["call-1"],
+            ["call-1", "call-2"],
         )
         self.assertEqual(
             native_messages[1],
@@ -5721,11 +5720,11 @@ process.stdout.write(JSON.stringify({
                 "content": "A result",
             },
         )
-        self.assertEqual(native_messages[2]["content"][1]["type"], "image_url")
-        self.assertEqual(
-            native_messages[3],
-            {"role": "user", "content": "[Tool result]\norphan"},
-        )
+        recovered = json.loads(native_messages[2]["content"])
+        self.assertTrue(recovered["unknownState"])
+        self.assertTrue(recovered["notReplayed"])
+        self.assertEqual(native_messages[2]["tool_call_id"], "call-2")
+        self.assertEqual(native_messages[3]["content"][1]["type"], "image_url")
         self.assertEqual(
             data["textOnlyMessages"][3]["content"],
             [{"type": "text", "text": "next"}],
@@ -5819,12 +5818,38 @@ const lateVisualMessages = [
 ];
 const lateVisualCanonical = request.canonicalizeSteerToolResultOrder(lateVisualMessages);
 const lateVisualNative = request.buildModelRequestMessages(lateVisualMessages, true);
-const orphanVisualNative = request.buildModelRequestMessages([
-  {role: "user", content: "old history"},
-  {role: "tool-call", content: "visual only", meta: {toolCallId: "orphan-call"}},
-  {role: "tool-result", content: "historic result", meta: {toolCallId: "orphan-call"}},
-  {role: "user", content: "continue"},
-], true);
+let orphanVisualNative = null;
+try {
+  request.buildModelRequestMessages([
+    {role: "user", content: "old history"},
+    {role: "tool-call", content: "visual only", meta: {toolCallId: "orphan-call"}},
+    {role: "tool-result", content: "historic result", meta: {toolCallId: "orphan-call"}},
+    {role: "user", content: "continue"},
+  ], true);
+} catch (error) {
+  orphanVisualNative = {
+    code: error.code,
+    errorCode: error.errorCode,
+    transient: error.transient,
+  };
+}
+let conflictingDuplicate = null;
+try {
+  request.buildModelRequestMessages([
+    {role: "assistant", content: "checking", meta: {toolCalls: [{
+      id: "call-conflict", type: "function",
+      function: {name: "read_file", arguments: "{}"},
+    }]}},
+    {role: "tool-result", content: "first", meta: {toolCallId: "call-conflict"}},
+    {role: "tool-result", content: "second", meta: {toolCallId: "call-conflict"}},
+  ], true);
+} catch (error) {
+  conflictingDuplicate = {
+    code: error.code,
+    errorCode: error.errorCode,
+    transient: error.transient,
+  };
+}
 process.stdout.write(JSON.stringify({
   inputUnchanged: JSON.stringify(messages) === before,
   canonicalRoles: canonical.map((message) => message.role),
@@ -5833,6 +5858,7 @@ process.stdout.write(JSON.stringify({
   lateVisualCanonicalRoles: lateVisualCanonical.map((message) => message.role),
   lateVisualNative,
   orphanVisualNative,
+  conflictingDuplicate,
 }));
 """
         completed = subprocess.run(
@@ -5848,11 +5874,12 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(
             data["canonicalRoles"],
             [
-                "user", "assistant", "tool-call", "tool-result", "user",
-                "assistant", "tool-call", "tool-result", "user", "assistant",
+                "user", "assistant", "tool-result", "tool-call", "user",
+                "assistant", "tool-result", "tool-call", "user", "assistant",
             ],
         )
-        self.assertEqual(data["canonicalContent"][3:5], ["clean", "steer"])
+        self.assertEqual(data["canonicalContent"][2], "clean")
+        self.assertEqual(data["canonicalContent"][4], "steer")
         self.assertEqual(
             [message["role"] for message in data["nativeMessages"]],
             ["user", "assistant", "tool", "user", "assistant", "tool", "user", "assistant"],
@@ -5883,11 +5910,16 @@ process.stdout.write(JSON.stringify({
             "content": "README result",
         })
         self.assertEqual(data["lateVisualNative"][3]["content"], "steer while tool runs")
-        self.assertEqual(data["orphanVisualNative"], [
-            {"role": "user", "content": "old history"},
-            {"role": "user", "content": "[Tool result]\nhistoric result"},
-            {"role": "user", "content": "continue"},
-        ])
+        self.assertEqual(data["orphanVisualNative"], {
+            "code": "tool_protocol_error",
+            "errorCode": "tool_protocol_error",
+            "transient": False,
+        })
+        self.assertEqual(data["conflictingDuplicate"], {
+            "code": "tool_protocol_error",
+            "errorCode": "tool_protocol_error",
+            "transient": False,
+        })
         self.assertNotIn(
             'message?.role === "tool-call"',
             MODEL_REQUEST_SOURCE[
@@ -7150,6 +7182,11 @@ const result = {
   accessDenied: protocol.classifyModelRequestFailure(
     403, "", "Not authorized to access model",
   ),
+  toolProtocol: protocol.classifyModelRequestFailure(
+    400,
+    "invalid_request_error",
+    "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'.",
+  ),
   unavailableRouteZh: protocol.classifyModelRequestFailure(
     503,
     "upstream_error",
@@ -7252,6 +7289,10 @@ process.stdout.write(JSON.stringify(result));
         self.assertEqual(
             data["accessDenied"],
             {"code": "model_access_denied", "transient": False},
+        )
+        self.assertEqual(
+            data["toolProtocol"],
+            {"code": "tool_protocol_error", "transient": False},
         )
         for key in (
             "unavailableRouteZh", "unavailableChannelEn", "unavailableRouteEn",
@@ -20299,6 +20340,7 @@ eval(saveSource);
     def test_error_code_meta_has_all_codes(self):
         """All runtime error codes have entries in _errorCodeMeta."""
         codes = ["upstream_error", "model_response_timeout", "config_error",
+                 "tool_protocol_error",
                  "model_access_denied", "permission_denied",
                  "tool_error", "user_cancelled", "empty_response",
                  "content_filtered", "internal_error",
@@ -20366,6 +20408,8 @@ eval(saveSource);
         self.assertIn("errSugEmptyResponse", I18N_SOURCE)
         self.assertIn("errLabelContentFiltered", I18N_SOURCE)
         self.assertIn("errSugContentFiltered", I18N_SOURCE)
+        self.assertIn("errLabelToolProtocolError", I18N_SOURCE)
+        self.assertIn("errSugToolProtocolError", I18N_SOURCE)
         for suffix in (
             "RouteCatalogUnavailable", "RouteNotFound", "RouteStale",
             "RouteModelMismatch", "RouteDisabled", "RouteCredentialsUnavailable",
@@ -20382,6 +20426,8 @@ eval(saveSource);
         self.assertIn("No response generated", I18N_SOURCE)
         self.assertIn("响应被内容策略拦截", I18N_SOURCE)
         self.assertIn("Response blocked by content policy", I18N_SOURCE)
+        self.assertIn("工具调用历史异常", I18N_SOURCE)
+        self.assertIn("Tool-call history error", I18N_SOURCE)
 
     # ── Session import UI ──
 

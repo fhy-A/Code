@@ -7,6 +7,10 @@ const readline = require("node:readline");
 
 const TEMP_PREFIX = "code-h4-e2e-";
 const FIXTURE_CONTENT = "H4_SYNTHETIC_FILE_CONTENT\n";
+const VISUAL_FIXTURE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNUqPjwn4GBgYEJRIAwACXYAoumRkB8AAAAAElFTkSuQmCC",
+  "base64",
+);
 const COMMAND_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 5_000;
 const activeChildren = new Set();
@@ -203,7 +207,11 @@ async function createOwnedWorkspace() {
       fs.mkdir(homeDir, { recursive: true }),
       fs.mkdir(temporaryDir, { recursive: true }),
     ]);
-    await fs.writeFile(path.join(projectDir, "fixture.txt"), FIXTURE_CONTENT, "utf8");
+    await Promise.all([
+      fs.writeFile(path.join(projectDir, "fixture.txt"), FIXTURE_CONTENT, "utf8"),
+      fs.writeFile(path.join(projectDir, "parallel-visual-a.png"), VISUAL_FIXTURE_PNG),
+      fs.writeFile(path.join(projectDir, "parallel-visual-b.png"), VISUAL_FIXTURE_PNG),
+    ]);
   } catch (error) {
     assertOwnedRoot(root);
     await fs.rm(root, { recursive: true, force: true });

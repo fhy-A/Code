@@ -119,12 +119,6 @@ _上次更新：2026-08-27_
 
 ## 可直接启动
 
-### CODE-047 · 并行视觉工具回执顺序与错误分类
-
-- **类型 / 优先级 / 风险**：工具协议兼容修复 / P0 / STRICT
-- **下一动作**：基于已复现的“同一 assistant 并行发出多个 `read_file` 后，服务端按 `tool` 回执 → 视觉 `user` 标记 → 下一 `tool` 回执交错展开”问题，设计并修复 AgentRun 持久消息与模型请求投影：同轮全部 `tool_call_id` 的 `tool` 回执必须连续、逐一且 exactly-once 紧跟原 assistant，视觉内容只能在完整工具块之后统一注入；发送前增加不破坏工具证据的协议预检与安全恢复，并将 `insufficient_tool_messages_following_tool_calls_message` 等请求序列 400 与 Key/模型授权错误分开分类。
-- **完成定义**：单个及多个视觉 `read_file`、并行成功/部分失败、授权等待、取消、steer/queue、压缩、重启恢复和旧 AgentRun 均不会产生夹入 `user`/`system` 的不完整工具块，不重复执行已有副作用工具，视觉内容仍完整到达模型；严格 OpenAI 工具协议渠道及代表性 DeepSeek 渠道完成真实闭环，bundle/direct classic 回归通过。工具协议错误展示可操作的内部协议提示并保留脱敏请求标识，不再提示“API Key 无效或模型未授权”，真实 401/403 与模型权限错误的既有分类保持不变。
-
 ### CODE-042 · 项目级多标签预览工作区
 
 - **类型 / 优先级 / 风险**：预览工作区 / P1 / STANDARD

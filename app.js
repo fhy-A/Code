@@ -2955,6 +2955,7 @@ var _errorCodeMeta = {
   upstream_error:     { retry: true },
   model_response_timeout: { retry: true },
   config_error:       { retry: false },
+  tool_protocol_error:{ retry: false },
   model_access_denied:{ retry: false },
   permission_denied:  { retry: false },
   tool_error:         { retry: true },

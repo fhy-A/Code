@@ -15,6 +15,13 @@ const CONNECTION_ROUTE_USER = "H4_CONNECTION_ROUTE_USER";
 const CONNECTION_ROUTE_FINAL = "H4_CONNECTION_ROUTE_FINAL";
 const TOOL_PROTOCOL_CONTINUE_USER = "H4_TOOL_PROTOCOL_CONTINUE_USER";
 const TOOL_PROTOCOL_FINAL = "H4_TOOL_PROTOCOL_FINAL";
+const PARALLEL_VISUAL_PROTOCOL_USER = "H4_PARALLEL_VISUAL_PROTOCOL_USER";
+const PARALLEL_VISUAL_PROTOCOL_FINAL = "H4_PARALLEL_VISUAL_PROTOCOL_FINAL";
+const PARALLEL_VISUAL_PROTOCOL_CALL_IDS = [
+  "h4-parallel-visual-call-a",
+  "h4-parallel-visual-call-b",
+];
+const TOOL_PROTOCOL_ERROR_USER = "H4_TOOL_PROTOCOL_ERROR_USER";
 const AUTO_PERMISSION_ACK_KEY = "code-auto-permission-risk-ack";
 const AUTO_PERMISSION_ACK_VERSION = "v1";
 const AUTO_PERMISSION_REFRESH_USER = "H4_AUTO_PERMISSION_REFRESH_USER";
@@ -27318,6 +27325,127 @@ async function exerciseHistoricToolMessageProtocol(h4, runtime) {
   });
 }
 
+async function exerciseParallelVisualToolProtocol(h4, runtime) {
+  await h4.open(runtime);
+  await h4.submit(PARALLEL_VISUAL_PROTOCOL_USER);
+  await expect(h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: PARALLEL_VISUAL_PROTOCOL_FINAL,
+  })).toHaveCount(1);
+  const activeSession = h4.page.locator(
+    "#sessionList .session-row.active button.session-main",
+  );
+  await expect(activeSession).toHaveCount(1);
+  const sessionId = await activeSession.getAttribute("data-session-id");
+
+  const metricsAtTerminal = await h4.metrics();
+  const protocolRequests = metricsAtTerminal.chatRequests.filter((request) => (
+    String(request.scenario || "").startsWith("parallel-visual-protocol-")
+  ));
+  expect(protocolRequests.map((request) => request.scenario)).toEqual([
+    "parallel-visual-protocol-call",
+    "parallel-visual-protocol-final",
+  ]);
+  expect(protocolRequests[1].parallelVisualProtocol).toEqual({
+    assistantBatchCount: 1,
+    toolResultCounts: [1, 1],
+    visualCounts: [1, 1],
+    strictOrder: true,
+    toolBlockRoles: ["assistant", "tool", "tool", "user", "user"],
+  });
+  expect(metricsAtTerminal.toolExecutions).toEqual([
+    { action: "read_file", path: "parallel-visual-a.png" },
+    { action: "read_file", path: "parallel-visual-b.png" },
+  ]);
+  expect(metricsAtTerminal.productionToolDelegations).toBe(2);
+  expect(metricsAtTerminal.unsafeToolRequests).toBe(0);
+  expect(metricsAtTerminal.production.agentRuns).toHaveLength(1);
+  expect(metricsAtTerminal.production.agentRuns[0].status).toBe("completed");
+
+  const reloadBoundary = h4.requestBoundary();
+  await h4.reloadRuntime(runtime);
+  await expect(h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: PARALLEL_VISUAL_PROTOCOL_FINAL,
+  })).toHaveCount(1);
+  const metricsAfterReload = await h4.metrics();
+  expect(metricsAfterReload.chatRequests).toEqual(metricsAtTerminal.chatRequests);
+  expect(metricsAfterReload.toolExecutions).toEqual(metricsAtTerminal.toolExecutions);
+  const reloadRequests = h4.requestEvidenceSince(reloadBoundary);
+  expect(reloadRequests.agentPost).toBe(0);
+  expect(reloadRequests.runtimePost).toBe(0);
+
+  await h4.page.close();
+  const restartBoundary = h4.requestBoundary();
+  const transition = await h4.restartGeneration();
+  expect(transition.currentPid).not.toBe(transition.previousPid);
+  expect(transition.previousCleanup.childExited).toBe(true);
+  expect(transition.previousCleanup.portsClosed).toEqual([true, true]);
+  expect(transition.previousCleanup.rootRetained).toBe(true);
+  await h4.replacePage();
+  await h4.open(runtime);
+  const restoredSession = h4.page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(restoredSession).toHaveCount(1);
+  await restoredSession.click();
+  await expect(h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: PARALLEL_VISUAL_PROTOCOL_FINAL,
+  })).toHaveCount(1);
+  const metricsAfterRestart = await h4.metrics();
+  expect(metricsAfterRestart.chatRequests).toEqual([]);
+  expect(metricsAfterRestart.toolExecutions).toEqual([]);
+  const restartRequests = h4.requestEvidenceSince(restartBoundary);
+  expect(restartRequests.agentPost).toBe(0);
+  expect(restartRequests.runtimePost).toBe(0);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-parallel-visual-tool-protocol`, {
+    runtime,
+    sessionId: idHash(sessionId),
+    callIds: PARALLEL_VISUAL_PROTOCOL_CALL_IDS,
+    strictOrder: protocolRequests[1].parallelVisualProtocol.strictOrder,
+    executionCount: metricsAtTerminal.toolExecutions.length,
+    reloadExecutionDelta: 0,
+    restartExecutionDelta: 0,
+  });
+}
+
+async function exerciseToolProtocolErrorClassification(h4, runtime) {
+  await h4.open(runtime);
+  await h4.submit(TOOL_PROTOCOL_ERROR_USER);
+  const protocolErrorMessage = h4.page.locator("#messages article.msg.assistant").filter({
+    hasText: /工具调用历史异常|Tool-call history error/,
+  });
+  await expect(protocolErrorMessage).toHaveCount(1);
+  await expect(protocolErrorMessage).not.toContainText("API Key 无效或模型未授权");
+  await expect(protocolErrorMessage).not.toContainText("Invalid API key or unauthorized model");
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const protocolErrorRunId = h4.controlIds().agentRunIds[0];
+  const protocolErrorSnapshot = await fetchProductionJson(
+    h4.page,
+    `/api/agent/runs/${encodeURIComponent(protocolErrorRunId)}?cursor=0&wait=0`,
+  );
+  expect(protocolErrorSnapshot.status).toBe(200);
+  expect(protocolErrorSnapshot.body.status).toBe("failed");
+  expect(protocolErrorSnapshot.body.errorCode).toBe("tool_protocol_error");
+  const metrics = await h4.metrics();
+  expect(metrics.chatRequests).toEqual([{
+    scenario: "tool-protocol-error",
+    stream: true,
+    hasToolResult: false,
+  }]);
+  expect(metrics.toolExecutions).toEqual([]);
+  expect(metrics.production.agentRuns).toHaveLength(1);
+  expect(metrics.production.agentRuns[0].status).toBe("failed");
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-tool-protocol-error-classification`, {
+    runtime,
+    protocolErrorCode: protocolErrorSnapshot.body.errorCode,
+    toolExecutionCount: metrics.toolExecutions.length,
+    keySuggestionAbsent: true,
+  });
+}
+
 test("bundle refresh before first model delta reattaches one live run", async ({ h4 }) => {
   await exerciseRefreshBeforeFirst(h4, {
     runtime: "bundle",
@@ -27510,4 +27638,20 @@ test("bundle tool message protocol pairs historic steer history", async ({ h4 })
 
 test("direct classic tool message protocol pairs historic steer history", async ({ h4 }) => {
   await exerciseHistoricToolMessageProtocol(h4, "classic");
+});
+
+test("bundle parallel visual tools persist strict complete blocks without replay", async ({ h4 }) => {
+  await exerciseParallelVisualToolProtocol(h4, "bundle");
+});
+
+test("direct classic parallel visual tools persist strict complete blocks without replay", async ({ h4 }) => {
+  await exerciseParallelVisualToolProtocol(h4, "classic");
+});
+
+test("bundle tool protocol 400 stays independent from credentials", async ({ h4 }) => {
+  await exerciseToolProtocolErrorClassification(h4, "bundle");
+});
+
+test("direct classic tool protocol 400 stays independent from credentials", async ({ h4 }) => {
+  await exerciseToolProtocolErrorClassification(h4, "classic");
 });
