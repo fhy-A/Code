@@ -660,14 +660,57 @@
       return skill;
     }
 
-    async function getMatchedSkillPrompts(userMessage) {
-      const matched = rankMatchedSkills(state.skills || [], state.disabledSkills, userMessage);
-      if (!matched.length) return "";
+    async function getSkillPromptSnapshot(
+      userMessage, explicitSkill = "", snapshotOptions = {},
+    ) {
+      const availableSkills = Array.isArray(snapshotOptions.skills)
+        ? snapshotOptions.skills
+        : (state.skills || []);
+      const disabledSkills = snapshotOptions.disabledSkills instanceof Set
+        ? snapshotOptions.disabledSkills
+        : state.disabledSkills;
+      if (explicitSkill) {
+        const skill = await ensureSkillBody(
+          availableSkills.find((item) => item.name === explicitSkill),
+        );
+        if (!skill?.body) {
+          return Object.freeze({
+            instruction: "",
+            matchedPrompt: "",
+            activeSkillNames: Object.freeze([]),
+          });
+        }
+        return Object.freeze({
+          instruction: `=== 已激活 Skill: ${skill.name}（正文已加载，不要再次调用 use_skill） ===\n${formatSkillInstructions(skill)}`,
+          matchedPrompt: "",
+          activeSkillNames: Object.freeze([skill.name]),
+        });
+      }
+
+      const matched = rankMatchedSkills(
+        availableSkills, disabledSkills, userMessage,
+      );
+      if (!matched.length) {
+        return Object.freeze({
+          instruction: "",
+          matchedPrompt: "",
+          activeSkillNames: Object.freeze([]),
+        });
+      }
       await Promise.all(matched.map(ensureSkillBody));
       matched.sort((a, b) => (a.body || "").length - (b.body || "").length);
-      return matched.map((skill) => (
+      const matchedPrompt = matched.map((skill) => (
         `[Skill: ${skill.name}]\n${formatSkillInstructions(skill)}`
       )).join("\n\n---\n\n");
+      return Object.freeze({
+        instruction: `=== 匹配的 Skill（正文已加载，不要再次调用 use_skill） ===\n${matchedPrompt}`,
+        matchedPrompt,
+        activeSkillNames: Object.freeze(matched.map((skill) => skill.name)),
+      });
+    }
+
+    async function getMatchedSkillPrompts(userMessage) {
+      return (await getSkillPromptSnapshot(userMessage)).matchedPrompt;
     }
 
     function toggleSkill(name) {
@@ -1893,6 +1936,7 @@
       ensureSkillBody,
       formatSkillInstructions,
       getMatchedSkillPrompts,
+      getSkillPromptSnapshot,
       loadMemoryContext,
       loadSkills,
       navigateSlash,

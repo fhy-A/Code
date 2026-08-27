@@ -4140,6 +4140,162 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(partial_snapshot["status"], "completed")
         self.assertEqual(partial_snapshot["skillEvidence"]["status"], "partial")
 
+    def test_skill_evidence_observer_freezes_multiple_active_skills_and_reads_single_shape(self):
+        skills_root = self.data_dir / "skills"
+        contract_a = {
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "inspect-a",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+        }
+        contract_b = {
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "inspect-b",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+        }
+        contract_invalid = {
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "expand-command",
+                "type": "tool_execution",
+                "tool": "run_command",
+                "minCount": 1,
+            }],
+        }
+
+        def write_skill(name, contract):
+            skill_dir = skills_root / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Multi observer fixture\n"
+                "tools: read_file\n---\n\nFixture body.\n",
+                encoding="utf-8",
+            )
+            (skill_dir / "evidence.json").write_text(
+                json.dumps(contract), encoding="utf-8",
+            )
+            return skill_dir
+
+        dirs = {
+            "observer-a": write_skill("observer-a", contract_a),
+            "observer-b": write_skill("observer-b", contract_b),
+            "observer-invalid": write_skill("observer-invalid", contract_invalid),
+        }
+        run = server_mod._create_agent_run(
+            "multi-skill-evidence-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "run matched skills"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            active_skill_names=["observer-a", "observer-b", "observer-invalid"],
+            start_worker=False,
+        )
+        initial = server_mod._agent_snapshot(run, 0)["skillEvidence"]
+        self.assertEqual(
+            [item["name"] for item in initial["activeSkills"]],
+            ["observer-a", "observer-b", "observer-invalid"],
+        )
+        self.assertEqual(
+            [item["status"] for item in initial["skills"]],
+            ["partial", "partial", "legacy_unverified"],
+        )
+        self.assertEqual(initial["skills"][2]["diagnosticCode"], "invalid_contract")
+        self.assertEqual(initial["status"], "partial")
+
+        run["tool_executions"]["shared-read-call"] = {
+            "name": "read_file",
+            "status": "completed",
+            "outcome": "succeeded",
+            "result": {"ok": True, "action": "read_file", "path": "README.md"},
+        }
+        after_execution = server_mod._agent_snapshot(run, 0)["skillEvidence"]
+        self.assertEqual(
+            [item["status"] for item in after_execution["skills"]],
+            ["satisfied", "satisfied", "legacy_unverified"],
+        )
+        self.assertEqual(
+            [item.get("uniqueCompletedExecutions", 0) for item in after_execution["skills"]],
+            [1, 1, 0],
+        )
+        self.assertEqual(after_execution["status"], "partial")
+
+        server_mod._persist_agent_run(run)
+        for name, skill_dir in dirs.items():
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: changed\n---\n\nCHANGED\n",
+                encoding="utf-8",
+            )
+            (skill_dir / "evidence.json").write_text(
+                json.dumps({"schemaVersion": 999, "requirements": []}),
+                encoding="utf-8",
+            )
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertEqual(
+            server_mod._agent_snapshot(restored, 0)["skillEvidence"],
+            after_execution,
+        )
+
+        secret = "SECRET-DUPLICATE-SKILL-INTENT"
+        malformed = server_mod._create_agent_run(
+            "malformed-multi-skill-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "malformed selection"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            active_skill_names=["observer-a", "observer-a", f"unknown-{secret}"],
+            start_worker=False,
+        )
+        malformed_snapshot = server_mod._agent_snapshot(malformed, 0)["skillEvidence"]
+        self.assertEqual(len(malformed_snapshot["skills"]), 3)
+        self.assertEqual(
+            [item.get("diagnosticCode", "") for item in malformed_snapshot["skills"]],
+            ["invalid_contract", "active_skill_duplicate", "active_skill_not_found"],
+        )
+        self.assertNotIn(secret, json.dumps(server_mod._agent_run_record(malformed)))
+
+        oversized = server_mod._create_agent_run(
+            "oversized-multi-skill-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "too many selections"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["read_file"],
+            active_skill_names=["observer-a", "observer-b", "observer-invalid", secret],
+            start_worker=False,
+        )
+        oversized_snapshot = server_mod._agent_snapshot(oversized, 0)["skillEvidence"]
+        self.assertEqual(len(oversized_snapshot["skills"]), 1)
+        self.assertEqual(
+            oversized_snapshot["skills"][0]["diagnosticCode"],
+            "active_skill_set_invalid",
+        )
+        self.assertNotIn(secret, json.dumps(server_mod._agent_run_record(oversized)))
+
+        single_record = server_mod._agent_run_record(run)
+        single_record["skillEvidence"] = single_record["skillEvidence"]["skills"][0]
+        restored_single = server_mod._agent_run_from_record(single_record)
+        single_snapshot = server_mod._agent_snapshot(restored_single, 0)["skillEvidence"]
+        self.assertEqual(len(single_snapshot["skills"]), 1)
+        self.assertEqual(single_snapshot["activeSkills"][0]["name"], "observer-a")
+        self.assertEqual(single_snapshot["status"], "satisfied")
+
     def test_accept_command_waits_for_authorization_then_executes_once(self):
         run = server_mod._create_agent_run(
             "command-accept-session",

@@ -1494,9 +1494,7 @@ goalFeature = createGoalFeature({
   elements: els,
 });
 const {
-  ensureSkillBody,
-  formatSkillInstructions,
-  getMatchedSkillPrompts,
+  getSkillPromptSnapshot,
   loadMemoryContext,
   loadSkills,
   navigateSlash,
@@ -2121,23 +2119,17 @@ async function buildSystemPromptSnapshot(options = {}) {
     ? `=== 长期记忆（跨会话保留） ===\n以下信息已融入当前上下文，直接使用，不要提及"长期记忆"或"根据记忆"。\n${memoryContext.content}`
     : "";
   let skillInstruction = "";
+  let activeSkillNames = [];
 
   // Inject explicit skill first, then auto-matched
   if (_loadSkills) {
-    if (explicitSkill) {
-      const availableSkills = Array.isArray(options.skills) ? options.skills : state.skills;
-      const skill = await ensureSkillBody(availableSkills.find((s) => s.name === explicitSkill));
-      if (skill && skill.body) {
-        skillInstruction = `=== 已激活 Skill: ${skill.name}（正文已加载，不要再次调用 use_skill） ===\n${formatSkillInstructions(skill)}`;
-      }
-    } else {
-      if (lastUserMsg) {
-        const skillPrompt = await getMatchedSkillPrompts(lastUserMsg.content || "");
-        if (skillPrompt) {
-          skillInstruction = `=== 匹配的 Skill（正文已加载，不要再次调用 use_skill） ===\n${skillPrompt}`;
-        }
-      }
-    }
+    const skillSnapshot = await getSkillPromptSnapshot(
+      lastUserMsg?.content || "", explicitSkill || "", {
+        skills: options.skills,
+      },
+    );
+    skillInstruction = skillSnapshot.instruction;
+    activeSkillNames = [...skillSnapshot.activeSkillNames];
   }
 
   return createSystemPromptSnapshotData({
@@ -2155,6 +2147,7 @@ async function buildSystemPromptSnapshot(options = {}) {
   }, {
     capturedAt: environment.capturedAt,
     timeZone: environment.timeZone,
+    activeSkillNames,
   });
 }
 
@@ -2167,6 +2160,7 @@ async function getTaskSystemPrompt(ctx, options = {}) {
     ctx,
     () => buildSystemPromptSnapshot(options),
   );
+  ctx.activeSkillNames = [...(snapshot.activeSkillNames || [])];
   return snapshot.prompt;
 }
 
@@ -10107,6 +10101,7 @@ async function runBackgroundSubAgentJob(job) {
       const created = await agentRuntime.createAgentRun({
         sessionId: job.sessionId,
         clientRequestId: job.clientRequestId || job.id,
+        activeSkillNames: subCtx.activeSkillNames || [],
         payload: prepared.payload,
         baseUrl: dispatch.baseUrl,
         keys: dispatch.keys,
@@ -11731,7 +11726,7 @@ async function runServerAgentLoop(ctx) {
     const created = await agentRuntime.createAgentRun({
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
-      activeSkillName: ctx.explicitSkill || "",
+      activeSkillNames: ctx.activeSkillNames || [],
       payload: prepared.payload,
       baseUrl: dispatch.baseUrl,
       keys: dispatch.keys,

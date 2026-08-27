@@ -44,6 +44,7 @@
     }
     return {
       ...inheritedContext,
+      activeSkillNames: [],
       messages: [
         { role: "system", content: subSystem },
         { role: "user", content: taskPrompt },

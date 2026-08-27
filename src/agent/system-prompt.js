@@ -39,9 +39,13 @@
 
   function createSystemPromptSnapshot(values = {}, metadata = {}) {
     const segments = buildSystemPromptSegments(values);
+    const activeSkillNames = Array.isArray(metadata.activeSkillNames)
+      ? metadata.activeSkillNames.map((name) => normalizedText(name)).filter(Boolean)
+      : [];
     return Object.freeze({
       prompt: segments.map((segment) => segment.content).join("\n\n"),
       segmentNames: Object.freeze(segments.map((segment) => segment.name)),
+      activeSkillNames: Object.freeze(activeSkillNames),
       capturedAt: normalizedText(metadata.capturedAt),
       timeZone: normalizedText(metadata.timeZone),
     });

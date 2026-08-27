@@ -153,6 +153,23 @@ class TestHealthAndConfig(TestServerFixture):
                 "minCount": 1,
             }],
         }), encoding="utf-8")
+        second_skill_name = "observer-route-review"
+        second_skill_dir = self._tmp_data / "skills" / second_skill_name
+        second_skill_dir.mkdir(exist_ok=True)
+        (second_skill_dir / "SKILL.md").write_text(
+            f"---\nname: {second_skill_name}\ndescription: Route review observer\n"
+            "tools: read_file\n---\n\nObserve review only.\n",
+            encoding="utf-8",
+        )
+        (second_skill_dir / "evidence.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "requirements": [{
+                "id": "review-input",
+                "type": "tool_execution",
+                "tool": "read_file",
+                "minCount": 1,
+            }],
+        }), encoding="utf-8")
         with (
             mock.patch.object(server_mod, "_MODEL_ROUTE_REGISTRY_ENABLED", False),
             mock.patch.object(server_mod, "_start_agent_worker", return_value=None),
@@ -167,7 +184,8 @@ class TestHealthAndConfig(TestServerFixture):
                 "baseUrl": "http://127.0.0.1:1",
                 "keys": [],
                 "allowedTools": ["read_file"],
-                "activeSkillName": skill_name,
+                "activeSkillName": "ignored-legacy-selection",
+                "activeSkillNames": [skill_name, second_skill_name],
                 "skillEvidenceContract": {"secret": secret},
             })
 
@@ -175,9 +193,16 @@ class TestHealthAndConfig(TestServerFixture):
         run_id = data["agentRunId"]
         snapshot_status, snapshot = _req("GET", f"/api/agent/runs/{run_id}")
         self.assertEqual(snapshot_status, 200)
-        self.assertEqual(snapshot["skillEvidence"]["contractState"], "valid")
         self.assertEqual(snapshot["skillEvidence"]["status"], "partial")
-        self.assertEqual(snapshot["skillEvidence"]["activeSkill"]["name"], skill_name)
+        self.assertEqual(
+            [item["contractState"] for item in snapshot["skillEvidence"]["skills"]],
+            ["valid", "valid"],
+        )
+        self.assertEqual(
+            [item["name"] for item in snapshot["skillEvidence"]["activeSkills"]],
+            [skill_name, second_skill_name],
+        )
+        self.assertEqual(len(snapshot["skillEvidence"]["skills"]), 2)
         persisted = server_mod._agent_run_path(run_id).read_text(encoding="utf-8")
         self.assertEqual(json.loads(persisted)["version"], 5)
         self.assertNotIn(secret, persisted)

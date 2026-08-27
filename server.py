@@ -2686,7 +2686,10 @@ def _agent_run_record(run):
         "steerReceipts": _json_clone(run.get("steer_receipts") or []),
         "toolExecutions": _json_clone(run.get("tool_executions") or {}),
         **({"skillEvidence": _agent_skill_evidence_record(run)}
-           if isinstance(run.get("skill_evidence_observer"), dict) else {}),
+           if (
+               isinstance(run.get("skill_evidence_observer"), dict)
+               or bool(run.get("skill_evidence_observers"))
+           ) else {}),
         "usage": _json_clone(run.get("usage") or {}),
         "result": result,
         "events": events,
@@ -3680,10 +3683,11 @@ def _agent_run_from_record(record):
         "pending_steers": list(record.get("pendingSteers") or []),
         "steer_receipts": list(record.get("steerReceipts") or []),
         "tool_executions": tool_executions,
-        "skill_evidence_observer": _restore_skill_evidence_observer(
+        "skill_evidence_observers": _restore_skill_evidence_observers(
             record.get("skillEvidence"),
             list(record.get("tools") or []),
         ),
+        "skill_evidence_observer": None,
         "usage": dict(record.get("usage") or {}),
         "result": dict(record.get("result") or {}),
         "events": events,
@@ -7294,6 +7298,7 @@ def _create_agent_run(
     route_ref="",
     catalog_revision=0,
     active_skill_name="",
+    active_skill_names=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -7359,8 +7364,8 @@ def _create_agent_run(
             if definition:
                 tools.append(definition)
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
-    skill_evidence_observer = _freeze_skill_evidence_observer(
-        active_skill_name, tools,
+    skill_evidence_observers = _freeze_skill_evidence_observers(
+        active_skill_names, active_skill_name, tools,
     )
     try:
         rounds_limit = int(max_rounds or _AGENT_RUN_DEFAULT_MAX_ROUNDS)
@@ -7441,7 +7446,8 @@ def _create_agent_run(
         "pending_steers": [],
         "steer_receipts": [],
         "tool_executions": {},
-        "skill_evidence_observer": skill_evidence_observer,
+        "skill_evidence_observers": skill_evidence_observers,
+        "skill_evidence_observer": None,
         "usage": {},
         "result": {},
         "events": [],
@@ -9870,6 +9876,39 @@ def _freeze_skill_evidence_observer(active_skill_name, tool_definitions):
     }
 
 
+def _freeze_skill_evidence_observers(
+    active_skill_names, legacy_active_skill_name, tool_definitions,
+):
+    """Freeze the complete request-level Skill identity set in stable order."""
+    if active_skill_names is None:
+        legacy = _freeze_skill_evidence_observer(
+            legacy_active_skill_name, tool_definitions,
+        )
+        return [legacy] if isinstance(legacy, dict) else []
+    if not isinstance(active_skill_names, list) or len(active_skill_names) > 3:
+        return [_skill_evidence_invalid_observer("active_skill_set_invalid")]
+    observers = []
+    seen = set()
+    for source_name in active_skill_names:
+        if not isinstance(source_name, str):
+            observers.append(_skill_evidence_invalid_observer("active_skill_invalid"))
+            continue
+        normalized_name = source_name.strip()
+        if not normalized_name:
+            observers.append(_skill_evidence_invalid_observer("active_skill_invalid"))
+            continue
+        if normalized_name in seen:
+            observers.append(_skill_evidence_invalid_observer("active_skill_duplicate"))
+            continue
+        seen.add(normalized_name)
+        observer = _freeze_skill_evidence_observer(
+            normalized_name, tool_definitions,
+        )
+        if isinstance(observer, dict):
+            observers.append(observer)
+    return observers
+
+
 def _restore_skill_evidence_observer(value, tool_definitions):
     """Read a frozen observer without consulting the mutable Skill directory."""
     if not isinstance(value, dict) or value.get("version") != 1:
@@ -9909,6 +9948,8 @@ def _restore_skill_evidence_observer(value, tool_definitions):
         }
     allowed_diagnostics = {
         "active_skill_invalid",
+        "active_skill_set_invalid",
+        "active_skill_duplicate",
         "active_skill_not_found",
         "active_skill_unreadable",
         "invalid_contract",
@@ -9918,6 +9959,24 @@ def _restore_skill_evidence_observer(value, tool_definitions):
     if diagnostic not in allowed_diagnostics:
         diagnostic = "invalid_persisted_contract"
     return _skill_evidence_invalid_observer(diagnostic, active_skill)
+
+
+def _restore_skill_evidence_observers(value, tool_definitions):
+    """Restore plural observer v1 and the 5987436 single-Skill shape."""
+    if not isinstance(value, dict):
+        return []
+    sources = value.get("skills")
+    if isinstance(sources, list):
+        if len(sources) > 3:
+            return [_skill_evidence_invalid_observer("active_skill_set_invalid")]
+        restored = []
+        for source in sources:
+            observer = _restore_skill_evidence_observer(source, tool_definitions)
+            if isinstance(observer, dict):
+                restored.append(observer)
+        return restored
+    observer = _restore_skill_evidence_observer(value, tool_definitions)
+    return [observer] if isinstance(observer, dict) else []
 
 
 def _skill_evidence_artifact_satisfied(execution, artifact_kind):
@@ -9932,15 +9991,8 @@ def _skill_evidence_artifact_satisfied(execution, artifact_kind):
     )
 
 
-def _agent_skill_evidence_snapshot(run):
-    """Evaluate frozen evidence from unique authoritative execution records."""
-    observer = run.get("skill_evidence_observer")
-    if not isinstance(observer, dict):
-        return {
-            "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
-            "status": "legacy_unverified",
-            "contractState": "legacy",
-        }
+def _agent_single_skill_evidence_snapshot(run, observer):
+    """Evaluate one frozen Skill from unique authoritative executions."""
     public = {
         "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
         "status": "legacy_unverified",
@@ -10021,16 +10073,76 @@ def _agent_skill_evidence_snapshot(run):
     return public
 
 
+def _agent_skill_evidence_observers(run):
+    observers = run.get("skill_evidence_observers")
+    if isinstance(observers, list):
+        return [item for item in observers if isinstance(item, dict)]
+    legacy = run.get("skill_evidence_observer")
+    return [legacy] if isinstance(legacy, dict) else []
+
+
+def _agent_skill_evidence_snapshot(run):
+    """Return a plural observer projection with single-Skill compatibility keys."""
+    observers = _agent_skill_evidence_observers(run)
+    if not observers:
+        return {
+            "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+            "status": "legacy_unverified",
+            "contractState": "legacy",
+            "activeSkills": [],
+            "skills": [],
+        }
+    skills = [
+        _agent_single_skill_evidence_snapshot(run, observer)
+        for observer in observers
+    ]
+    statuses = [item["status"] for item in skills]
+    if statuses and all(status == "satisfied" for status in statuses):
+        aggregate_status = "satisfied"
+    elif "failed" in statuses:
+        aggregate_status = "failed"
+    elif statuses and all(status == "legacy_unverified" for status in statuses):
+        aggregate_status = "legacy_unverified"
+    elif statuses and all(status == "unsupported_completion" for status in statuses):
+        aggregate_status = "unsupported_completion"
+    else:
+        aggregate_status = "partial"
+    active_skills = [
+        _json_clone(item["activeSkill"])
+        for item in skills
+        if isinstance(item.get("activeSkill"), dict)
+    ]
+    projection = {
+        "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+        "status": aggregate_status,
+        "activeSkills": active_skills,
+        "skills": skills,
+    }
+    if len(skills) == 1:
+        projection.update({
+            key: _json_clone(value)
+            for key, value in skills[0].items()
+            if key not in {"version", "status"}
+        })
+    return projection
+
+
 def _agent_skill_evidence_record(run):
     """Persist the validated frozen contract alongside its current evaluation."""
     record = _agent_skill_evidence_snapshot(run)
-    observer = run.get("skill_evidence_observer")
-    if (
-        isinstance(observer, dict)
-        and observer.get("contractState") == "valid"
-        and isinstance(observer.get("contract"), dict)
-    ):
-        record["contract"] = _json_clone(observer["contract"])
+    observers = _agent_skill_evidence_observers(run)
+    persisted_skills = []
+    for observer, public in zip(observers, record.get("skills") or []):
+        persisted = _json_clone(public)
+        if (
+            observer.get("contractState") == "valid"
+            and isinstance(observer.get("contract"), dict)
+        ):
+            persisted["contract"] = _json_clone(observer["contract"])
+        persisted_skills.append(persisted)
+    record["skills"] = persisted_skills
+    if len(persisted_skills) == 1 and "contract" in persisted_skills[0]:
+        record["contract"] = _json_clone(persisted_skills[0]["contract"])
     return record
 
 
@@ -16028,6 +16140,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     route_ref=route_ref,
                     catalog_revision=(resolved_route.catalog_revision if resolved_route else 0),
                     active_skill_name=body.get("activeSkillName") or "",
+                    active_skill_names=body.get("activeSkillNames"),
                 )
                 self.send_json({
                     "agentRunId": run["id"],

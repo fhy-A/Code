@@ -2153,14 +2153,17 @@ setImmediate(() => {{
         ):
             self.assertIn(expected, RUNTIME_SOURCE)
         self.assertIn('clientRequestId = ""', RUNTIME_SOURCE)
-        self.assertIn('activeSkillName = ""', RUNTIME_SOURCE)
-        self.assertIn("activeSkillName,", RUNTIME_SOURCE)
+        self.assertIn("activeSkillNames = []", RUNTIME_SOURCE)
+        self.assertIn("activeSkillNames: Array.isArray(activeSkillNames)", RUNTIME_SOURCE)
         self.assertIn("clientRequestId,", RUNTIME_SOURCE)
         self.assertIn("agent.runtime = runtime", RUNTIME_SOURCE)
         self.assertNotIn("global." + "AgentRuntime", RUNTIME_SOURCE)
         self.assertNotIn("window." + "AgentRuntime", APP_SOURCE)
         self.assertIn("const agentRuntime = window.Code.agent.runtime;", APP_SOURCE)
-        self.assertIn('activeSkillName: ctx.explicitSkill || ""', APP_SOURCE)
+        self.assertIn("activeSkillNames: ctx.activeSkillNames || []", APP_SOURCE)
+        self.assertIn("activeSkillNames: subCtx.activeSkillNames || []", APP_SOURCE)
+        self.assertIn("ctx.activeSkillNames = [...(snapshot.activeSkillNames || [])]", APP_SOURCE)
+        self.assertIn("activeSkillNames: [],", SUBAGENTS_SOURCE)
 
     def test_agent_runtime_questionnaire_error_contract_is_machine_readable(self):
         script = f"""
@@ -2548,7 +2551,7 @@ eval(source);
   await window.Code.agent.runtime.createAgentRun({{
     sessionId: "session-1",
     clientRequestId: "background-123",
-    activeSkillName: "runtime-skill",
+    activeSkillNames: ["runtime-skill", "review-skill"],
     payload: {{model: "test-model", messages: [{{role: "user", content: "hi"}}]}},
     keys: [],
     toolBudgets: [{{name: "reading", tools: ["read_file"], limit: 4}}],
@@ -2567,7 +2570,10 @@ eval(source);
         data = json.loads(completed.stdout)
         self.assertEqual(data["url"], "/api/agent/runs")
         self.assertEqual(data["body"]["clientRequestId"], "background-123")
-        self.assertEqual(data["body"]["activeSkillName"], "runtime-skill")
+        self.assertEqual(
+            data["body"]["activeSkillNames"],
+            ["runtime-skill", "review-skill"],
+        )
         self.assertEqual(data["body"]["toolBudgets"][0]["limit"], 4)
         self.assertEqual(data["body"]["contextLimit"], 128000)
 
@@ -3510,6 +3516,7 @@ const parent = {{
   model: "test-model",
   cwd: "C:/project",
   primaryRoot: "C:/workspace",
+  activeSkillNames: ["parent-skill"],
   messages: [{{role: "user", content: "parent history"}}],
   stats: {{input: 9, output: 8, cache: 7}},
   _agentProjectionShadow: {{id: "parent-shadow"}},
@@ -3536,6 +3543,7 @@ process.stdout.write(JSON.stringify({{
     messages: context.messages,
     stats: context.stats,
     taskUsage: context.taskUsage,
+    activeSkillNames: context.activeSkillNames,
     ownsProjectionShadow: Object.prototype.hasOwnProperty.call(context, "_agentProjectionShadow"),
     ownsLegacyProjection: Object.prototype.hasOwnProperty.call(context, "_agentProjectionLegacyObservation"),
     ownsProjectionArchiveFlag: Object.prototype.hasOwnProperty.call(context, "_agentProjectionShadowArchived"),
@@ -3596,6 +3604,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("[DECISION_POINT]", data["context"]["messages"][0]["content"])
         self.assertEqual(data["context"]["stats"], {"input": 0, "output": 0, "cache": 0})
         self.assertEqual(data["context"]["taskUsage"], {"input": 0, "output": 0, "cache": 0})
+        self.assertEqual(data["context"]["activeSkillNames"], [])
+        self.assertNotIn("parent-skill", data["context"]["messages"][0]["content"])
         self.assertFalse(data["context"]["ownsProjectionShadow"])
         self.assertFalse(data["context"]["ownsLegacyProjection"])
         self.assertFalse(data["context"]["ownsProjectionArchiveFlag"])
@@ -5039,7 +5049,10 @@ const values = {
   skillInstruction: "=== 已激活 Skill: fixture-skill（正文已加载，不要再次调用 use_skill） ===\nSKILL BODY",
   permissionInstruction: "PERMISSION INSTRUCTION",
 };
-const snapshot = prompt.createSystemPromptSnapshot(values, environment);
+const snapshot = prompt.createSystemPromptSnapshot(values, {
+  ...environment,
+  activeSkillNames: ["fixture-skill"],
+});
 const normalizedLegacy = snapshot.prompt.replace(
   "（Asia/Shanghai UTC+08:00）",
   "（北京时间）",
@@ -5108,13 +5121,14 @@ const minimalNames = prompt.buildSystemPromptSegments({
 process.stdout.write(JSON.stringify({
   definitions: prompt.SYSTEM_PROMPT_SEGMENTS,
   names: snapshot.segmentNames,
+  activeSkillNames: snapshot.activeSkillNames,
   normalizedLegacyHash: hash(normalizedLegacy),
   newHash: hash(snapshot.prompt),
   environment,
   cachedIdentity: cachedA === cachedB && cachedA === sameTask,
   factoryCalls,
   hiddenFromSerialization: !JSON.stringify(owner).includes("CUSTOM BEHAVIOR"),
-  frozen: Object.isFrozen(snapshot) && Object.isFrozen(snapshot.segmentNames),
+  frozen: Object.isFrozen(snapshot) && Object.isFrozen(snapshot.segmentNames) && Object.isFrozen(snapshot.activeSkillNames),
   sameTaskPrompt: sameTask.prompt,
   nextTaskPrompt: nextTask.prompt,
   failureCount,
@@ -5156,6 +5170,7 @@ process.stdout.write(JSON.stringify({
             ],
         )
         self.assertEqual(data["definitions"][0]["refresh"], "static")
+        self.assertEqual(data["activeSkillNames"], ["fixture-skill"])
         self.assertEqual(data["definitions"][-1]["name"], "permission")
         self.assertEqual(
             data["normalizedLegacyHash"],
@@ -5209,8 +5224,8 @@ process.stdout.write(JSON.stringify({
             "options.appVersion ?? state.appVersion",
             "options.memoryContext ?? state.memoryContext",
             "options.projectContext ?? state.projectContext",
-            "ensureSkillBody(",
-            "getMatchedSkillPrompts(",
+            "getSkillPromptSnapshot(",
+            "activeSkillNames,",
             "getPermissionInstruction(permissionProfile)",
             "allowedToolNames.has(\"task\")",
             "userLang !== \"Chinese\"",
@@ -11875,12 +11890,78 @@ const feature = createSkillsMemoryFeature({
         self.assertIn("Preferred tools: read_file", data["matchedPrompt"])
         self.assertIn("does not expand the current mode's permissions", data["matchedPrompt"])
         self.assertIn("Do not call task unless it is listed", data["matchedPrompt"])
-        self.assertIn("正文已加载，不要再次调用 use_skill", APP_SOURCE)
+        self.assertIn("正文已加载，不要再次调用 use_skill", SKILLS_MEMORY_SOURCE)
         self.assertEqual(data["memory"], {"found": True, "count": 2, "content": "memory"})
         self.assertEqual(
             data["calls"],
             ["/api/skills?brief=1", "/api/skills/demo", "/api/memory-context"],
         )
+
+    def test_skill_prompt_snapshot_freezes_exact_explicit_and_auto_identity_sets(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require("./src/features/skills-memory.js");
+const {createSkillsMemoryFeature} = window.Code.features.skillsMemory;
+const skills = [
+  {name: "explicit-one", body: "Explicit body", keywords: [], tools: ["read_file"]},
+  {name: "auto-a", body: "AAAA", keywords: ["shared+match"], tools: ["read_file"]},
+  {name: "auto-b", body: "B", keywords: ["shared+match"], tools: ["read_file"]},
+  {name: "auto-c", body: "CC", keywords: ["shared+match"], tools: ["read_file"]},
+  {name: "auto-fourth", body: "DDDD", keywords: ["shared+match"], tools: ["read_file"]},
+  {name: "auto-disabled", body: "disabled", keywords: ["shared+match"], tools: ["read_file"]},
+];
+const state = {skills, disabledSkills: new Set(["auto-disabled"])};
+const feature = createSkillsMemoryFeature({
+  state,
+  elements: {},
+  apiJson: async () => { throw new Error("preloaded fixtures must not fetch"); },
+  document: {getElementById: () => null},
+  storage: {setItem: () => {}},
+});
+function namesFromInstruction(instruction) {
+  const explicit = String(instruction).match(/已激活 Skill: ([^（]+)（/);
+  if (explicit) return [explicit[1]];
+  return [...String(instruction).matchAll(/\[Skill: ([^\]]+)\]/g)].map((match) => match[1]);
+}
+(async () => {
+  const explicit = await feature.getSkillPromptSnapshot("shared match", "explicit-one");
+  const automatic = await feature.getSkillPromptSnapshot("please shared match now", "");
+  const noMatch = await feature.getSkillPromptSnapshot("nothing relevant", "");
+  process.stdout.write(JSON.stringify({
+    explicit,
+    explicitPromptNames: namesFromInstruction(explicit.instruction),
+    automatic,
+    automaticPromptNames: namesFromInstruction(automatic.instruction),
+    noMatch,
+    noMatchPromptNames: namesFromInstruction(noMatch.instruction),
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["explicit"]["activeSkillNames"], ["explicit-one"])
+        self.assertEqual(data["explicitPromptNames"], ["explicit-one"])
+        self.assertEqual(
+            data["automatic"]["activeSkillNames"],
+            data["automaticPromptNames"],
+        )
+        self.assertEqual(
+            set(data["automatic"]["activeSkillNames"]),
+            {"auto-a", "auto-b", "auto-c"},
+        )
+        self.assertEqual(len(data["automatic"]["activeSkillNames"]), 3)
+        self.assertNotIn("auto-fourth", data["automatic"]["activeSkillNames"])
+        self.assertNotIn("auto-disabled", data["automatic"]["activeSkillNames"])
+        self.assertEqual(data["noMatch"]["activeSkillNames"], [])
+        self.assertEqual(data["noMatch"]["instruction"], "")
+        self.assertEqual(data["noMatchPromptNames"], [])
 
     def test_settings_feature_owns_theme_update_auth_and_key_storage(self):
         self.assertIn("features.settings = Object.freeze", SETTINGS_SOURCE)
