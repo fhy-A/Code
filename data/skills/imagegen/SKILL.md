@@ -15,6 +15,7 @@ metadata:
 
 - 新图：把用户的主题、构图、风格、文字、视角、光线和必要限制整理成准确 prompt，再调用一次 `generate_image`。默认且未明确数量时必须 `count=1`；只有当前用户消息明确要求 2–4 张/版本时，才在一次工具调用中传对应 `count`。模糊的“多张/多个版本”先询问确切数量；4K、尺寸和历史消息中的数字都不是本次数量。
 - 编辑：在 prompt 中明确保留与改变的内容；reference 仅使用当前 Session 已提供的附件 identity、先前 `generate_image` 返回的生成资产 ID，或当前项目 `output/generated-images` 内已验证的 workspace image identity。存在多个候选而用户未明确指定时先询问，不要猜测“最后一张”。不要传远程 URL、连接、Key、header 或其他本地路径。
+- 后续模型请求会在原工具回执位置提供当前 Session 的权威生成资产身份和必要元数据。直接使用这些回执中的 `assetId`；不得要求用户查找、复制、粘贴或从图片卡片读取内部 ID。多个候选时先按用户原始语义和回执顺序选择；只有“哪张/哪几张”仍有真实语义歧义时才询问自然位置或特征，不能询问 ID。
 - 不传 `size`、`quality` 或 `outputFormat`；把视觉质量、比例意图和构图要求写进 prompt，供应商执行参数由运行时管理。
 - 成功资产由运行时自动校验并在对话 gallery 展示。回答中不制作预览表、不猜测缓存或桌面路径。同 Session 二次编辑直接使用 `generated_asset`，不要求先转存；只有跨 Session、重命名或工作区文件处理且用户明确要求时才调用一次 `manage_generated_image`。只有其权威成功回执中的完整绝对路径可作为可点击本地链接。
 - 数据图表、缩放、裁剪、拼接和基础标注属于 `image-generation` 的本地确定性工作流，不要用本 Skill 代替。

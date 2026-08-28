@@ -82,6 +82,28 @@ IMAGE_WORKSPACE_EDIT_CALL_ID = "h4-image-workspace-edit-call"
 IMAGE_COUNT_GUARD_USER = "H4_IMAGE_COUNT_GUARD_USER"
 IMAGE_COUNT_GUARD_FINAL = "H4_IMAGE_COUNT_GUARD_FINAL"
 IMAGE_COUNT_GUARD_CALL_ID = "h4-image-count-guard-call"
+IMAGE_HISTORY_FIRST_USER = "H4_IMAGE_HISTORY_FIRST_USER"
+IMAGE_HISTORY_FIRST_FINAL = "H4_IMAGE_HISTORY_FIRST_FINAL"
+IMAGE_HISTORY_FIRST_CALL_ID = "h4-image-history-first-call"
+IMAGE_HISTORY_SECOND_USER = "H4_IMAGE_HISTORY_SECOND_USER"
+IMAGE_HISTORY_SECOND_FINAL = "H4_IMAGE_HISTORY_SECOND_FINAL"
+IMAGE_HISTORY_SECOND_CALL_ID = "h4-image-history-second-call"
+IMAGE_HISTORY_COMBINE_USER = "H4_IMAGE_HISTORY_COMBINE_USER"
+IMAGE_HISTORY_COMBINE_FINAL = "H4_IMAGE_HISTORY_COMBINE_FINAL"
+IMAGE_HISTORY_EXPORT_FIRST_CALL_ID = "h4-image-history-export-first-call"
+IMAGE_HISTORY_EXPORT_SECOND_CALL_ID = "h4-image-history-export-second-call"
+IMAGE_HISTORY_PROCESS_CALL_ID = "h4-image-history-process-call"
+IMAGE_HISTORY_FIRST_PATH = "output/generated-images/h4-history-first.png"
+IMAGE_HISTORY_SECOND_PATH = "output/generated-images/h4-history-second.png"
+IMAGE_HISTORY_COMBINED_PATH = "output/generated-images/h4-history-combined.png"
+IMAGE_HISTORY_PROCESS_COMMAND = (
+    "python -c \"from PIL import Image; "
+    "a=Image.open('output/generated-images/h4-history-first.png').convert('RGBA'); "
+    "b=Image.open('output/generated-images/h4-history-second.png').convert('RGBA'); "
+    "o=Image.new('RGBA',(a.width+b.width,max(a.height,b.height)),(0,0,0,0)); "
+    "o.paste(a,(0,0)); o.paste(b,(a.width,0)); "
+    "o.save('output/generated-images/h4-history-combined.png')\""
+)
 IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER"
 IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL"
 IMAGE_EDIT_CALL_ID = "h4-image-edit-call"
@@ -793,6 +815,134 @@ def _parallel_visual_protocol_projection(payload: dict) -> dict:
     }
 
 
+def _generated_asset_history_projection(payload: dict) -> dict:
+    messages = [
+        message for message in (payload.get("messages") or [])
+        if isinstance(message, dict)
+    ]
+    expected_call_ids = (
+        IMAGE_HISTORY_FIRST_CALL_ID,
+        IMAGE_HISTORY_SECOND_CALL_ID,
+    )
+    asset_ids = []
+    result_counts = []
+    metadata_shapes = []
+    pair_indexes = []
+    projected_results = []
+    valid = True
+    allowed_result_keys = {
+        "action", "authoritativeGeneratedAssets", "ok", "count", "requested",
+        "succeeded", "failed", "partial", "assets", "outcomeUnknown", "notReplayed",
+    }
+    allowed_asset_keys = {"assetId", "mimeType", "width", "height", "byteLength"}
+    for call_id in expected_call_ids:
+        assistant_indexes = [
+            index for index, message in enumerate(messages)
+            if message.get("role") == "assistant"
+            and any(
+                isinstance(call, dict) and str(call.get("id") or "") == call_id
+                for call in (message.get("tool_calls") or [])
+            )
+        ]
+        tool_indexes = [
+            index for index, message in enumerate(messages)
+            if message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") == call_id
+        ]
+        if len(assistant_indexes) != 1 or len(tool_indexes) != 1:
+            valid = False
+            continue
+        pair_indexes.append((assistant_indexes[0], tool_indexes[0]))
+        try:
+            result = json.loads(str(messages[tool_indexes[0]].get("content") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            valid = False
+            continue
+        projected_results.append(result)
+        assets = result.get("assets") if isinstance(result, dict) else None
+        if (
+            not isinstance(result, dict)
+            or set(result) - allowed_result_keys
+            or result.get("action") != "generate_image"
+            or result.get("authoritativeGeneratedAssets") is not True
+            or result.get("ok") is not True
+            or result.get("count") != 1
+            or result.get("requested") != 1
+            or result.get("succeeded") != 1
+            or result.get("failed") != 0
+            or result.get("partial") is not False
+            or not isinstance(assets, list)
+            or len(assets) != 1
+            or not isinstance(assets[0], dict)
+            or set(assets[0]) != allowed_asset_keys
+        ):
+            valid = False
+            continue
+        asset = assets[0]
+        asset_id = str(asset.get("assetId") or "")
+        if (
+            not re.fullmatch(r"ga1_[A-Za-z0-9_-]{32,96}", asset_id)
+            or str(asset.get("mimeType") or "") not in {"image/png", "image/jpeg", "image/webp"}
+            or not isinstance(asset.get("width"), int)
+            or not isinstance(asset.get("height"), int)
+            or not isinstance(asset.get("byteLength"), int)
+        ):
+            valid = False
+            continue
+        asset_ids.append(asset_id)
+        result_counts.append(len(assets))
+        metadata_shapes.append(sorted(asset))
+
+    serialized = json.dumps(projected_results, ensure_ascii=False)
+    user_text = "\n".join(
+        _message_text(message) for message in messages
+        if message.get("role") == "user"
+    )
+    request_user_input_calls = sum(
+        1 for message in messages
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+        if isinstance(call, dict)
+        and str((call.get("function") or {}).get("name") or "") == "request_user_input"
+    )
+    unexpected_generate_image_calls = sum(
+        1 for message in messages
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+        if isinstance(call, dict)
+        and str((call.get("function") or {}).get("name") or "") == "generate_image"
+        and str(call.get("id") or "") not in expected_call_ids
+    )
+    return {
+        "valid": bool(
+            valid
+            and len(asset_ids) == 2
+            and len(set(asset_ids)) == 2
+            and len(pair_indexes) == 2
+        ),
+        "assetIds": asset_ids,
+        "resultCounts": result_counts,
+        "metadataShapes": metadata_shapes,
+        "pairedOrder": bool(
+            len(pair_indexes) == 2
+            and all(tool_index == assistant_index + 1 for assistant_index, tool_index in pair_indexes)
+            and pair_indexes[0][1] < pair_indexes[1][0]
+        ),
+        "userPromptContainsAssetId": bool(
+            re.search(r"ga1_[A-Za-z0-9_-]{32,96}", user_text)
+        ),
+        "requestUserInputCalls": request_user_input_calls,
+        "unexpectedGenerateImageCalls": unexpected_generate_image_calls,
+        "unsafePayloadAbsent": not any(
+            marker in serialized.lower()
+            for marker in (
+                "generated-assets", "base64", "authorization", "provider.invalid",
+                "?token=", "internalpath", "c:/private", "h4_secret_generated_asset_history",
+            )
+        ),
+    }
+
+
 def _scenario_for(payload: dict) -> tuple[str, bool]:
     messages = payload.get("messages") or []
     user_text = ""
@@ -828,6 +978,26 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if message.get("role") == "tool":
             completed_tool_call_ids.add(str(message.get("tool_call_id") or ""))
     joined_user_text = "\n".join(user_texts)
+    if IMAGE_HISTORY_COMBINE_USER in joined_user_text:
+        if IMAGE_HISTORY_PROCESS_CALL_ID in completed_tool_call_ids:
+            return "image-history-combine-final", True
+        if IMAGE_HISTORY_EXPORT_SECOND_CALL_ID in completed_tool_call_ids:
+            return "image-history-process-call", True
+        if IMAGE_HISTORY_EXPORT_FIRST_CALL_ID in completed_tool_call_ids:
+            return "image-history-export-second-call", True
+        return "image-history-export-first-call", False
+    if IMAGE_HISTORY_SECOND_USER in joined_user_text:
+        completed = IMAGE_HISTORY_SECOND_CALL_ID in completed_tool_call_ids
+        return (
+            "image-history-second-final" if completed else "image-history-second-call",
+            completed,
+        )
+    if IMAGE_HISTORY_FIRST_USER in joined_user_text:
+        completed = IMAGE_HISTORY_FIRST_CALL_ID in completed_tool_call_ids
+        return (
+            "image-history-first-final" if completed else "image-history-first-call",
+            completed,
+        )
     if IMAGE_ASSET_WORKFLOW_USER in joined_user_text:
         if IMAGE_ASSET_RENAME_CALL_ID in completed_tool_call_ids:
             return "image-asset-workflow-final", True
@@ -2331,8 +2501,24 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "[Skill: imagegen]" in system_text
                     or "\u5df2\u6fc0\u6d3b Skill: imagegen" in system_text
                 ),
-                "localChartSkillAbsent": "[Skill: image-generation]" not in system_text,
+                "localChartSkillPresent": (
+                    "[Skill: image-generation]" in system_text
+                    or "\u5df2\u6fc0\u6d3b Skill: image-generation" in system_text
+                ),
+                "localChartSkillAbsent": not (
+                    "[Skill: image-generation]" in system_text
+                    or "\u5df2\u6fc0\u6d3b Skill: image-generation" in system_text
+                ),
             }
+        if scenario in {
+            "image-history-export-first-call",
+            "image-history-export-second-call",
+            "image-history-process-call",
+            "image-history-combine-final",
+        }:
+            chat_metric["generatedAssetHistory"] = (
+                _generated_asset_history_projection(payload)
+            )
         if scenario == "context-calibration":
             chat_metric["usedContextCalibrationUnusedKey"] = (
                 self.headers.get("Authorization", "")
@@ -2750,6 +2936,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "image-asset-generate-call", "image-asset-edit-call",
             "image-asset-export-call", "image-asset-rename-call",
             "image-workspace-edit-call", "image-count-guard-call",
+            "image-history-first-call", "image-history-second-call",
+            "image-history-export-first-call", "image-history-export-second-call",
+            "image-history-process-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2787,6 +2976,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "image-edit-call": "",
                 "image-edit-unsupported-call": "",
                 "image-edit-unsupported-retry": "",
+                "image-history-first-call": "",
+                "image-history-second-call": "",
+                "image-history-export-first-call": "",
+                "image-history-export-second-call": "",
+                "image-history-process-call": "",
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -2842,6 +3036,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "image-edit-unsupported-retry", "image-batch-call", "image-batch-partial-call",
                 "image-asset-generate-call", "image-asset-edit-call",
                 "image-workspace-edit-call", "image-count-guard-call",
+                "image-history-first-call", "image-history-second-call",
             }:
                 is_edit_scenario = scenario in {
                     "image-edit-call", "image-edit-unsupported-call",
@@ -2875,6 +3070,12 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 elif scenario == "image-asset-generate-call":
                     call_id = IMAGE_ASSET_GENERATE_CALL_ID
                     prompt = "Create the first-stage image asset"
+                elif scenario == "image-history-first-call":
+                    call_id = IMAGE_HISTORY_FIRST_CALL_ID
+                    prompt = "Create the first authoritative history image"
+                elif scenario == "image-history-second-call":
+                    call_id = IMAGE_HISTORY_SECOND_CALL_ID
+                    prompt = "Create the second authoritative history image"
                 else:
                     call_id = IMAGE_GENERATION_CALL_ID
                     prompt = "A small blue geometric icon on a transparent background"
@@ -2914,7 +3115,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         "arguments": json.dumps(arguments, separators=(",", ":")),
                     },
                 }]
-            elif scenario in {"image-asset-export-call", "image-asset-rename-call"}:
+            elif scenario in {
+                "image-asset-export-call", "image-asset-rename-call",
+                "image-history-export-first-call", "image-history-export-second-call",
+            }:
                 serialized_messages = json.dumps(
                     payload.get("messages") or [], ensure_ascii=False,
                 )
@@ -2927,6 +3131,20 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         "operation": "export",
                         "assetId": asset_matches[-1] if asset_matches else "missing",
                         "name": "h4-stage-export.png",
+                    }
+                elif scenario == "image-history-export-first-call":
+                    call_id = IMAGE_HISTORY_EXPORT_FIRST_CALL_ID
+                    arguments = {
+                        "operation": "export",
+                        "assetId": asset_matches[0] if asset_matches else "missing",
+                        "name": "h4-history-first.png",
+                    }
+                elif scenario == "image-history-export-second-call":
+                    call_id = IMAGE_HISTORY_EXPORT_SECOND_CALL_ID
+                    arguments = {
+                        "operation": "export",
+                        "assetId": asset_matches[1] if len(asset_matches) > 1 else "missing",
+                        "name": "h4-history-second.png",
                     }
                 else:
                     call_id = IMAGE_ASSET_RENAME_CALL_ID
@@ -2942,6 +3160,19 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "function": {
                         "name": "manage_generated_image",
                         "arguments": json.dumps(arguments, separators=(",", ":")),
+                    },
+                }]
+            elif scenario == "image-history-process-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": IMAGE_HISTORY_PROCESS_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "arguments": json.dumps(
+                            {"command": IMAGE_HISTORY_PROCESS_COMMAND},
+                            separators=(",", ":"),
+                        ),
                     },
                 }]
             elif scenario == "multi-tool-detail-call":
@@ -3421,6 +3652,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "image-asset-workflow-final": IMAGE_ASSET_WORKFLOW_FINAL,
                 "image-workspace-edit-final": IMAGE_WORKSPACE_EDIT_FINAL,
                 "image-count-guard-final": IMAGE_COUNT_GUARD_FINAL,
+                "image-history-first-final": IMAGE_HISTORY_FIRST_FINAL,
+                "image-history-second-final": IMAGE_HISTORY_SECOND_FINAL,
+                "image-history-combine-final": IMAGE_HISTORY_COMBINE_FINAL,
                 "image-edit-final": IMAGE_EDIT_FINAL,
                 "image-edit-unsupported-final": IMAGE_EDIT_UNSUPPORTED_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
@@ -3826,6 +4060,14 @@ def main() -> int:
     shutil.copytree(
         imagegen_source,
         data_dir / "skills" / "imagegen",
+        dirs_exist_ok=True,
+    )
+    image_generation_source = repo_root / "data" / "skills" / "image-generation"
+    if not image_generation_source.is_dir():
+        raise RuntimeError("H4 image-generation Skill source is missing")
+    shutil.copytree(
+        image_generation_source,
+        data_dir / "skills" / "image-generation",
         dirs_exist_ok=True,
     )
 
@@ -4637,25 +4879,37 @@ def main() -> int:
                 key: value for key, value in body.items()
                 if not str(key).startswith("_")
             }
-            expected = (
-                {
+            tool_call_id = str(body.get("_toolCallId") or "")
+            manage_contracts = {
+                IMAGE_ASSET_EXPORT_CALL_ID: {
                     "operation": "export",
                     "assetId": str(body.get("assetId") or ""),
                     "name": "h4-stage-export.png",
-                }
-                if operation == "export"
-                else {
+                },
+                IMAGE_ASSET_RENAME_CALL_ID: {
                     "operation": "rename",
                     "path": "output/generated-images/h4-stage-export.png",
                     "name": "h4-stage-renamed.png",
-                }
-            )
+                },
+                IMAGE_HISTORY_EXPORT_FIRST_CALL_ID: {
+                    "operation": "export",
+                    "assetId": str(body.get("assetId") or ""),
+                    "name": "h4-history-first.png",
+                },
+                IMAGE_HISTORY_EXPORT_SECOND_CALL_ID: {
+                    "operation": "export",
+                    "assetId": str(body.get("assetId") or ""),
+                    "name": "h4-history-second.png",
+                },
+            }
+            expected = manage_contracts.get(tool_call_id)
             internal_keys = {
                 "_operationId", "_sessionId", "_agentRunId", "_toolCallId", "_projectRoot",
             }
             asset_id = str(body.get("assetId") or "")
             if (
-                operation not in {"export", "rename"}
+                expected is None
+                or operation not in {"export", "rename"}
                 or public != expected
                 or set(body) != set(expected) | internal_keys
                 or not all(str(body.get(key) or "") for key in internal_keys)
@@ -4663,14 +4917,6 @@ def main() -> int:
                 or (
                     operation == "export"
                     and not re.fullmatch(r"ga1_[A-Za-z0-9_-]{32,96}", asset_id)
-                )
-                or (
-                    operation == "export"
-                    and str(body.get("_toolCallId") or "") != IMAGE_ASSET_EXPORT_CALL_ID
-                )
-                or (
-                    operation == "rename"
-                    and str(body.get("_toolCallId") or "") != IMAGE_ASSET_RENAME_CALL_ID
                 )
             ):
                 METRICS.increment("unsafeToolRequests")
@@ -4791,7 +5037,7 @@ def main() -> int:
             ):
                 raise RuntimeError("H4 missing-file fixture was created during execution")
 
-    def rejected_execute_run_command_tool(
+    def controlled_execute_run_command_tool(
         body,
         *,
         cancel_event=None,
@@ -4799,6 +5045,53 @@ def main() -> int:
         process_callback=None,
     ):
         payload = body if isinstance(body, dict) else {}
+        command = str(payload.get("command") or "")
+        if command == IMAGE_HISTORY_PROCESS_COMMAND and set(payload) == {"command"}:
+            first_path = project_dir / Path(*IMAGE_HISTORY_FIRST_PATH.split("/"))
+            second_path = project_dir / Path(*IMAGE_HISTORY_SECOND_PATH.split("/"))
+            combined_path = project_dir / Path(*IMAGE_HISTORY_COMBINED_PATH.split("/"))
+            if (
+                not first_path.is_file()
+                or not second_path.is_file()
+                or combined_path.exists()
+            ):
+                METRICS.increment("unsafeToolRequests")
+                raise ValueError("H4 fixed image process precondition changed")
+            METRICS.append("toolExecutions", {
+                "action": "run_command",
+                "path": IMAGE_HISTORY_COMBINED_PATH,
+            })
+            from PIL import Image
+            with Image.open(first_path) as first_source:
+                first = first_source.convert("RGBA")
+            with Image.open(second_path) as second_source:
+                second = second_source.convert("RGBA")
+            result_image = Image.new(
+                "RGBA",
+                (first.width + second.width, max(first.height, second.height)),
+                (0, 0, 0, 0),
+            )
+            result_image.paste(first, (0, 0))
+            result_image.paste(second, (first.width, 0))
+            combined_path.parent.mkdir(parents=True, exist_ok=True)
+            result_image.save(combined_path, format="PNG")
+            result = {
+                "ok": True,
+                "action": "run_command",
+                "command": command,
+                "cwd": str(project_dir),
+                "exitCode": 0,
+                "stdout": "",
+                "stderr": "",
+                "stdoutTruncated": False,
+                "stderrTruncated": False,
+                "cancelled": False,
+                "timedOut": False,
+                "error": None,
+            }
+            if not combined_path.is_file():
+                raise RuntimeError("H4 fixed image process did not create its output")
+            return result
         METRICS.increment("unsafeToolRequests")
         METRICS.append("runCommandAttempts", {
             "payloadIsObject": isinstance(body, dict),
@@ -4926,9 +5219,9 @@ def main() -> int:
             "artifacts": owned_tree_fingerprint(artifacts_dir),
         }
         reject_stub_symbols = {
-            *rejected_execute_run_command_tool.__code__.co_names,
-            *rejected_execute_run_command_tool.__code__.co_freevars,
-            *rejected_execute_run_command_tool.__code__.co_cellvars,
+            *controlled_execute_run_command_tool.__code__.co_names,
+            *controlled_execute_run_command_tool.__code__.co_freevars,
+            *controlled_execute_run_command_tool.__code__.co_cellvars,
         }
 
         return {
@@ -5034,7 +5327,7 @@ def main() -> int:
                 ),
                 "entryIsRejectStub": (
                     code_server.execute_run_command_tool
-                    is rejected_execute_run_command_tool
+                    is controlled_execute_run_command_tool
                 ),
                 "capturedOriginalCallable": callable(original_execute_run_command_tool),
                 "stubReferencesOriginal": any(
@@ -5061,7 +5354,7 @@ def main() -> int:
 
     code_server.execute_registered_tool = counted_execute_registered_tool
     code_server.execute_apply_edit_proposal = counted_execute_apply_edit_proposal
-    code_server.execute_run_command_tool = rejected_execute_run_command_tool
+    code_server.execute_run_command_tool = controlled_execute_run_command_tool
     code_server.ThreadingHTTPServer.daemon_threads = True
     code_server._migrate_sessions_to_hierarchy()
     code_server._migrate_codex_project_sessions_support()

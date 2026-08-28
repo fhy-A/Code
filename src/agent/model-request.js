@@ -13,6 +13,132 @@
     return String(content);
   }
 
+  const GENERATED_ASSET_ID_PATTERN = /^ga1_[A-Za-z0-9_-]{32,96}$/;
+  const GENERATED_ASSET_MIME_TYPES = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+  ]);
+  const GENERATED_ASSET_MAX_BYTES = 20 * 1024 * 1024;
+  const GENERATED_ASSET_MAX_PIXELS = 40_000_000;
+
+  function boundedInteger(value, minimum, maximum) {
+    return Number.isInteger(value) && value >= minimum && value <= maximum
+      ? value
+      : null;
+  }
+
+  function projectAuthoritativeGeneratedAsset(asset) {
+    if (!asset || typeof asset !== "object" || Array.isArray(asset)) return null;
+    const assetId = String(asset.assetId || "");
+    const mimeType = String(asset.mimeType || "").toLowerCase();
+    const width = boundedInteger(asset.width, 1, GENERATED_ASSET_MAX_PIXELS);
+    const height = boundedInteger(asset.height, 1, GENERATED_ASSET_MAX_PIXELS);
+    const byteLength = boundedInteger(asset.byteLength, 1, GENERATED_ASSET_MAX_BYTES);
+    if (
+      !GENERATED_ASSET_ID_PATTERN.test(assetId)
+      || !GENERATED_ASSET_MIME_TYPES.has(mimeType)
+      || width === null
+      || height === null
+      || width * height > GENERATED_ASSET_MAX_PIXELS
+      || byteLength === null
+    ) {
+      return null;
+    }
+    return { assetId, mimeType, width, height, byteLength };
+  }
+
+  function projectGeneratedImageHistoryResult(result) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+    if (result.action && result.action !== "generate_image") return null;
+
+    if (result.ok === true) {
+      if (!Array.isArray(result.assets) || result.assets.length < 1 || result.assets.length > 4) {
+        return null;
+      }
+      const assets = result.assets.map(projectAuthoritativeGeneratedAsset);
+      if (assets.some((asset) => !asset)) return null;
+
+      const count = result.count === undefined
+        ? assets.length
+        : boundedInteger(result.count, 1, 4);
+      const requested = result.requested === undefined
+        ? assets.length
+        : boundedInteger(result.requested, 1, 4);
+      const succeeded = result.succeeded === undefined
+        ? assets.length
+        : boundedInteger(result.succeeded, 1, 4);
+      const failed = result.failed === undefined
+        ? requested - succeeded
+        : boundedInteger(result.failed, 0, 4);
+      if (
+        count === null
+        || requested === null
+        || succeeded === null
+        || failed === null
+        || count !== assets.length
+        || succeeded !== assets.length
+        || succeeded + failed !== requested
+      ) {
+        return null;
+      }
+      const partial = succeeded > 0 && failed > 0;
+      if (result.partial !== undefined && result.partial !== partial) return null;
+      return {
+        action: "generate_image",
+        authoritativeGeneratedAssets: true,
+        ok: true,
+        count,
+        requested,
+        succeeded,
+        failed,
+        partial,
+        assets,
+        ...(result.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+        ...(result.notReplayed === true ? { notReplayed: true } : {}),
+      };
+    }
+
+    if (result.ok !== false) return null;
+    const projection = {
+      action: "generate_image",
+      authoritativeGeneratedAssets: true,
+      ok: false,
+    };
+    const errorCode = String(result.errorCode || "");
+    if (/^[a-z][a-z0-9_]{0,63}$/.test(errorCode)) projection.errorCode = errorCode;
+    const countKeys = ["requested", "succeeded", "failed"];
+    for (const key of countKeys) {
+      if (result[key] === undefined) continue;
+      const value = boundedInteger(result[key], 0, 4);
+      if (value === null) return null;
+      projection[key] = value;
+    }
+    if (
+      projection.requested !== undefined
+      && projection.succeeded !== undefined
+      && projection.failed !== undefined
+      && (
+        projection.succeeded !== 0
+        || projection.succeeded + projection.failed !== projection.requested
+      )
+    ) {
+      return null;
+    }
+    if (typeof result.partial === "boolean") projection.partial = result.partial;
+    if (typeof result.retryable === "boolean") projection.retryable = result.retryable;
+    if (result.outcomeUnknown === true) projection.outcomeUnknown = true;
+    if (result.notReplayed === true) projection.notReplayed = true;
+    return projection;
+  }
+
+  function getModelToolResultText(message) {
+    const fallback = getMessageText(message);
+    if (message?.meta?.action !== "generate_image") return fallback;
+    const projection = projectGeneratedImageHistoryResult(message.meta?.result);
+    return projection ? JSON.stringify(projection) : fallback;
+  }
+
   function hasImageContent(messages) {
     return (Array.isArray(messages) ? messages : []).some((message) => (
       Array.isArray(message?.content)
@@ -71,14 +197,15 @@
     if (message.role === "tool-call") return null;
 
     if (message.role === "tool-result") {
+      const content = getModelToolResultText(message);
       if (includeNativeTools && message.meta?.toolCallId) {
         return {
           role: "tool",
           tool_call_id: message.meta.toolCallId,
-          content: getMessageText(message),
+          content,
         };
       }
-      return { role: "user", content: `【工具结果】\n${getMessageText(message)}` };
+      return { role: "user", content: `【工具结果】\n${content}` };
     }
 
     if (message.role === "user") {
@@ -99,7 +226,7 @@
 
   function toolResultSignature(message) {
     return JSON.stringify({
-      content: getMessageText(message),
+      content: getModelToolResultText(message),
       action: String(message?.meta?.action || ""),
     });
   }

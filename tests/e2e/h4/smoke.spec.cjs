@@ -48,6 +48,20 @@ const IMAGE_WORKSPACE_EDIT_CALL_ID = "h4-image-workspace-edit-call";
 const IMAGE_COUNT_GUARD_USER = "H4_IMAGE_COUNT_GUARD_USER";
 const IMAGE_COUNT_GUARD_FINAL = "H4_IMAGE_COUNT_GUARD_FINAL";
 const IMAGE_COUNT_GUARD_CALL_ID = "h4-image-count-guard-call";
+const IMAGE_HISTORY_FIRST_USER = "H4_IMAGE_HISTORY_FIRST_USER";
+const IMAGE_HISTORY_FIRST_FINAL = "H4_IMAGE_HISTORY_FIRST_FINAL";
+const IMAGE_HISTORY_FIRST_CALL_ID = "h4-image-history-first-call";
+const IMAGE_HISTORY_SECOND_USER = "H4_IMAGE_HISTORY_SECOND_USER";
+const IMAGE_HISTORY_SECOND_FINAL = "H4_IMAGE_HISTORY_SECOND_FINAL";
+const IMAGE_HISTORY_SECOND_CALL_ID = "h4-image-history-second-call";
+const IMAGE_HISTORY_COMBINE_USER = "H4_IMAGE_HISTORY_COMBINE_USER";
+const IMAGE_HISTORY_COMBINE_FINAL = "H4_IMAGE_HISTORY_COMBINE_FINAL";
+const IMAGE_HISTORY_EXPORT_FIRST_CALL_ID = "h4-image-history-export-first-call";
+const IMAGE_HISTORY_EXPORT_SECOND_CALL_ID = "h4-image-history-export-second-call";
+const IMAGE_HISTORY_PROCESS_CALL_ID = "h4-image-history-process-call";
+const IMAGE_HISTORY_FIRST_PATH = "output/generated-images/h4-history-first.png";
+const IMAGE_HISTORY_SECOND_PATH = "output/generated-images/h4-history-second.png";
+const IMAGE_HISTORY_COMBINED_PATH = "output/generated-images/h4-history-combined.png";
 const IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER";
 const IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL";
 const IMAGE_EDIT_UNSUPPORTED_USER = "H4_IMAGE_EDIT_UNSUPPORTED_USER";
@@ -29660,6 +29674,203 @@ async function exerciseImageAssetWorkflow(h4, runtime) {
   });
 }
 
+async function exerciseGeneratedAssetHistoryProjection(h4, runtime) {
+  await configureConnectionRouteCatalog(h4, runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  await configureImageGenerationConnection(h4);
+  const page = h4.page;
+  const initialRunIds = [...h4.controlIds().agentRunIds];
+  const initialMetrics = await h4.metrics();
+
+  await h4.submit(`/imagegen ${IMAGE_HISTORY_FIRST_USER} generate exactly one image`);
+  const firstRunId = await waitForNewAgentRunId(h4, initialRunIds);
+  const firstApproval = await waitForBoundAgentAuthorization(h4, {
+    runId: firstRunId,
+    toolCallId: IMAGE_HISTORY_FIRST_CALL_ID,
+    action: "generate_image",
+    expectedCount: 1,
+    expectedReference: null,
+  });
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_HISTORY_FIRST_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  const firstAsset = firstApproval.execution.result.assets[0];
+  expect(firstAsset.assetId).toMatch(/^ga1_[A-Za-z0-9_-]{32,96}$/);
+
+  const beforeSecondIds = [...h4.controlIds().agentRunIds];
+  await h4.submit(`/imagegen ${IMAGE_HISTORY_SECOND_USER} generate exactly one image`);
+  const secondRunId = await waitForNewAgentRunId(h4, beforeSecondIds);
+  const secondApproval = await waitForBoundAgentAuthorization(h4, {
+    runId: secondRunId,
+    toolCallId: IMAGE_HISTORY_SECOND_CALL_ID,
+    action: "generate_image",
+    expectedCount: 1,
+    expectedReference: null,
+  });
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_HISTORY_SECOND_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  const secondAsset = secondApproval.execution.result.assets[0];
+  expect(secondAsset.assetId).toMatch(/^ga1_[A-Za-z0-9_-]{32,96}$/);
+  expect(secondAsset.assetId).not.toBe(firstAsset.assetId);
+
+  const beforeCombineIds = [...h4.controlIds().agentRunIds];
+  await h4.submit(`/image-generation ${IMAGE_HISTORY_COMBINE_USER} 拼接这两张`);
+  const combineRunId = await waitForNewAgentRunId(h4, beforeCombineIds);
+  const firstExport = await waitForBoundAgentAuthorization(h4, {
+    runId: combineRunId,
+    toolCallId: IMAGE_HISTORY_EXPORT_FIRST_CALL_ID,
+    action: "manage_generated_image",
+    expectedPath: IMAGE_HISTORY_FIRST_PATH,
+    expectedManageResult: {
+      operation: "export",
+      path: IMAGE_HISTORY_FIRST_PATH,
+    },
+  });
+  expect(firstExport.arguments.assetId).toBe(firstAsset.assetId);
+  const secondExport = await waitForBoundAgentAuthorization(h4, {
+    runId: combineRunId,
+    toolCallId: IMAGE_HISTORY_EXPORT_SECOND_CALL_ID,
+    action: "manage_generated_image",
+    previousAuthorizationId: firstExport.authorizationId,
+    expectedPath: IMAGE_HISTORY_SECOND_PATH,
+    expectedManageResult: {
+      operation: "export",
+      path: IMAGE_HISTORY_SECOND_PATH,
+    },
+  });
+  expect(secondExport.arguments.assetId).toBe(secondAsset.assetId);
+  await waitForBoundAgentAuthorization(h4, {
+    runId: combineRunId,
+    toolCallId: IMAGE_HISTORY_PROCESS_CALL_ID,
+    action: "run_command",
+    previousAuthorizationId: secondExport.authorizationId,
+  });
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_HISTORY_COMBINE_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+
+  const combineSnapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(combineRunId)}?cursor=0&wait=0`,
+  );
+  expect(combineSnapshot.status).toBe(200);
+  expect(combineSnapshot.body.status).toBe("completed");
+  const combineExecutions = combineSnapshot.body.toolExecutions || [];
+  expect(combineExecutions.map((entry) => entry.toolCallId)).toEqual([
+    IMAGE_HISTORY_EXPORT_FIRST_CALL_ID,
+    IMAGE_HISTORY_EXPORT_SECOND_CALL_ID,
+    IMAGE_HISTORY_PROCESS_CALL_ID,
+  ]);
+  expect(combineExecutions.map((entry) => entry.name)).toEqual([
+    "manage_generated_image", "manage_generated_image", "run_command",
+  ]);
+  expect(combineExecutions.every((entry) => (
+    entry.status === "completed"
+    && entry.authorizationDecision === "approved"
+    && entry.result?.ok === true
+  ))).toBe(true);
+  expect(combineExecutions.some((entry) => entry.name === "generate_image")).toBe(false);
+  expect(combineExecutions.some((entry) => entry.name === "request_user_input")).toBe(false);
+  const combineAuthorizationEvents = (combineSnapshot.body.events || []).filter((event) => (
+    event.type === "authorization_required"
+  ));
+  expect(combineAuthorizationEvents).toHaveLength(3);
+  expect(combineAuthorizationEvents.map((event) => event.data?.action)).toEqual([
+    "manage_generated_image", "manage_generated_image", "run_command",
+  ]);
+
+  const combinedAbsolutePath = path.resolve(
+    h4.host.projectDir,
+    ...IMAGE_HISTORY_COMBINED_PATH.split("/"),
+  );
+  const combinedBytes = await fs.readFile(combinedAbsolutePath);
+  expect([...combinedBytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  expect(combinedBytes.readUInt32BE(16)).toBe(firstAsset.width + secondAsset.width);
+  expect(combinedBytes.readUInt32BE(20)).toBe(Math.max(firstAsset.height, secondAsset.height));
+
+  const afterWorkflow = await h4.metrics();
+  const imageRequests = afterWorkflow.imageRequests.slice(initialMetrics.imageRequests.length);
+  expect(imageRequests).toHaveLength(2);
+  expect(imageRequests.every((entry) => (
+    entry.kind === "generation" && entry.contract.count === 1
+  ))).toBe(true);
+  const historyChats = afterWorkflow.chatRequests.slice(initialMetrics.chatRequests.length)
+    .filter((entry) => String(entry.scenario || "").startsWith("image-history-"));
+  expect(historyChats.map((entry) => entry.scenario)).toEqual([
+    "image-history-first-call",
+    "image-history-first-final",
+    "image-history-second-call",
+    "image-history-second-final",
+    "image-history-export-first-call",
+    "image-history-export-second-call",
+    "image-history-process-call",
+    "image-history-combine-final",
+  ]);
+  const combineChats = historyChats.slice(4);
+  for (const entry of combineChats) {
+    expect(entry.generatedAssetHistory).toMatchObject({
+      valid: true,
+      assetIds: [firstAsset.assetId, secondAsset.assetId],
+      resultCounts: [1, 1],
+      pairedOrder: true,
+      userPromptContainsAssetId: false,
+      requestUserInputCalls: 0,
+      unexpectedGenerateImageCalls: 0,
+      unsafePayloadAbsent: true,
+    });
+    expect(entry.imageToolContract).toMatchObject({
+      imagegenSkillPresent: false,
+      localChartSkillPresent: true,
+    });
+  }
+
+  const sessionId = String(await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id") || "");
+  expect(sessionId).not.toBe("");
+  const beforeReload = await h4.metrics();
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await page.evaluate(() => {
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+  });
+  await h4.reloadRuntime(runtime);
+  const restored = page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(restored).toHaveCount(1);
+  await restored.click();
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_HISTORY_COMBINE_FINAL,
+  })).toHaveCount(1);
+  await expect(page.locator("[data-generated-image-gallery]")).toHaveCount(2);
+  const afterReload = await h4.metrics();
+  expect(afterReload.imageRequests).toEqual(beforeReload.imageRequests);
+  expect(afterReload.chatRequests).toEqual(beforeReload.chatRequests);
+  expect(h4.controlIds().agentRunIds).toEqual([
+    ...initialRunIds,
+    firstRunId,
+    secondRunId,
+    combineRunId,
+  ]);
+  expect((await fs.readFile(combinedAbsolutePath)).length).toBe(combinedBytes.length);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-generated-asset-history-projection`, {
+    runtime,
+    sessionId: idHash(sessionId),
+    agentRuns: 3,
+    projectedAssets: 2,
+    generatedRequests: 2,
+    manageAuthorizations: 2,
+    localProcessAuthorizations: 1,
+    requestUserInputCalls: 0,
+    reloadReplayDelta: 0,
+  });
+}
+
 async function exerciseParallelVisualToolProtocol(h4, runtime) {
   await h4.open(runtime);
   await h4.submit(PARALLEL_VISUAL_PROTOCOL_USER);
@@ -30139,6 +30350,16 @@ test("bundle image stages export rename and reuse controlled workspace assets", 
 test("direct classic image stages export rename and reuse controlled workspace assets", async ({ h4 }) => {
   test.setTimeout(150_000);
   await exerciseImageAssetWorkflow(h4, "classic");
+});
+
+test("bundle generated asset history projects identities for local processing", async ({ h4 }) => {
+  test.setTimeout(150_000);
+  await exerciseGeneratedAssetHistoryProjection(h4, "bundle");
+});
+
+test("direct classic generated asset history projects identities for local processing", async ({ h4 }) => {
+  test.setTimeout(150_000);
+  await exerciseGeneratedAssetHistoryProjection(h4, "classic");
 });
 
 test("bundle image route stale create rebinds once for new and existing sessions", async ({ h4 }) => {

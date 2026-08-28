@@ -6359,6 +6359,243 @@ process.stdout.write(JSON.stringify({
             {"role": "user", "content": "【工具结果】\norphan"},
         )
 
+    def test_model_request_projects_authoritative_generated_asset_history(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+
+const request = window.Code.agent.modelRequest;
+const assetA = `ga1_${"A".repeat(43)}`;
+const assetB = `ga1_${"B".repeat(43)}`;
+const secret = "H4_SECRET_GENERATED_ASSET_HISTORY";
+const resultMessage = ({toolCallId, content, result}) => ({
+  role: "tool-result",
+  content,
+  meta: {action: "generate_image", toolCallId, result},
+});
+const assistantMessage = (toolCallId) => ({
+  role: "assistant",
+  content: "",
+  meta: {toolCalls: [{
+    id: toolCallId,
+    type: "function",
+    function: {name: "generate_image", arguments: '{"prompt":"fixture","count":1}'},
+  }]},
+});
+const messages = [
+  {role: "user", content: "first"},
+  assistantMessage("image-call-a"),
+  resultMessage({
+    toolCallId: "image-call-a",
+    content: "Generated 1 image.",
+    result: {
+      ok: true,
+      action: "generate_image",
+      count: 1,
+      requested: 1,
+      succeeded: 1,
+      failed: 0,
+      partial: false,
+      assets: [{
+        assetId: assetA,
+        url: `/api/generated-assets/${assetA}?token=${secret}`,
+        mimeType: "image/png",
+        width: 640,
+        height: 360,
+        byteLength: 12345,
+        sha256: secret,
+        internalPath: `C:/private/data/generated-assets/${secret}`,
+        base64: secret,
+      }],
+    },
+  }),
+  {role: "user", content: "second"},
+  assistantMessage("image-call-b"),
+  resultMessage({
+    toolCallId: "image-call-b",
+    content: "Generated 1 image.",
+    result: {
+      ok: true,
+      action: "generate_image",
+      count: 1,
+      requested: 1,
+      succeeded: 1,
+      failed: 0,
+      partial: false,
+      assets: [{
+        assetId: assetB,
+        mimeType: "image/webp",
+        width: 512,
+        height: 512,
+        byteLength: 54321,
+      }],
+    },
+  }),
+  {role: "user", content: "combine the two authoritative images"},
+];
+const before = JSON.stringify(messages);
+const native = request.buildModelRequestMessages(messages, true);
+const fallback = request.buildModelRequestMessages(messages, false);
+
+const partial = request.mapMessageForApi(resultMessage({
+  toolCallId: "image-call-partial",
+  content: "Generated 1 of 2 images.",
+  result: {
+    ok: true,
+    action: "generate_image",
+    count: 1,
+    requested: 2,
+    succeeded: 1,
+    failed: 1,
+    partial: true,
+    assets: [{
+      assetId: assetA,
+      mimeType: "image/jpeg",
+      width: 320,
+      height: 200,
+      byteLength: 9000,
+    }],
+    items: [{index: 1, errorCode: "image_upstream_http_error", error: secret}],
+  },
+}), true);
+const failed = request.mapMessageForApi(resultMessage({
+  toolCallId: "image-call-failed",
+  content: "Image generation failed.",
+  result: {
+    ok: false,
+    action: "generate_image",
+    requested: 1,
+    succeeded: 0,
+    failed: 1,
+    partial: false,
+    errorCode: "image_upstream_timeout",
+    error: `timeout at C:/private/${secret}`,
+    outcomeUnknown: true,
+    notReplayed: true,
+    assets: [{assetId: assetB, url: `https://provider.invalid/${secret}`}],
+  },
+}), true);
+const missing = request.mapMessageForApi(resultMessage({
+  toolCallId: "image-call-missing",
+  content: "Legacy generated image summary.",
+}), true);
+const malformed = request.mapMessageForApi(resultMessage({
+  toolCallId: "image-call-malformed",
+  content: "Malformed generated image summary.",
+  result: {
+    ok: true,
+    action: "generate_image",
+    assets: [{assetId: "not-an-asset", mimeType: "image/png", width: 1, height: 1, byteLength: 1}],
+  },
+}), true);
+const otherTool = request.mapMessageForApi({
+  role: "tool-result",
+  content: "ordinary result",
+  meta: {action: "read_file", toolCallId: "read-call", result: {secret}},
+}, true);
+const otherSession = request.buildModelRequestMessages([
+  {role: "user", content: "other session"},
+  assistantMessage("image-call-b"),
+  messages[5],
+], true);
+let conflictingAssets = null;
+try {
+  request.buildModelRequestMessages([
+    assistantMessage("image-call-conflict"),
+    resultMessage({
+      toolCallId: "image-call-conflict",
+      content: "Generated 1 image.",
+      result: messages[2].meta.result,
+    }),
+    resultMessage({
+      toolCallId: "image-call-conflict",
+      content: "Generated 1 image.",
+      result: messages[5].meta.result,
+    }),
+  ], true);
+} catch (error) {
+  conflictingAssets = {code: error.code, transient: error.transient};
+}
+
+process.stdout.write(JSON.stringify({
+  assetA,
+  assetB,
+  inputUnchanged: JSON.stringify(messages) === before,
+  native,
+  fallback,
+  partial,
+  failed,
+  missing,
+  malformed,
+  otherTool,
+  otherSession,
+  conflictingAssets,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["inputUnchanged"])
+        native_tools = [message for message in data["native"] if message["role"] == "tool"]
+        self.assertEqual(
+            [message["tool_call_id"] for message in native_tools],
+            ["image-call-a", "image-call-b"],
+        )
+        projected = [json.loads(message["content"]) for message in native_tools]
+        self.assertEqual(
+            [item["assets"][0]["assetId"] for item in projected],
+            [data["assetA"], data["assetB"]],
+        )
+        self.assertEqual(
+            projected[0]["assets"][0],
+            {
+                "assetId": data["assetA"],
+                "mimeType": "image/png",
+                "width": 640,
+                "height": 360,
+                "byteLength": 12345,
+            },
+        )
+        self.assertTrue(projected[0]["authoritativeGeneratedAssets"])
+        native_serialized = json.dumps(data["native"], ensure_ascii=False)
+        self.assertNotIn("H4_SECRET_GENERATED_ASSET_HISTORY", native_serialized)
+        self.assertNotIn("generated-assets", native_serialized)
+        self.assertNotIn("provider.invalid", native_serialized)
+        fallback_serialized = json.dumps(data["fallback"], ensure_ascii=False)
+        self.assertIn(data["assetA"], fallback_serialized)
+        self.assertIn(data["assetB"], fallback_serialized)
+
+        partial = json.loads(data["partial"]["content"])
+        self.assertEqual(
+            (partial["requested"], partial["succeeded"], partial["failed"], partial["partial"]),
+            (2, 1, 1, True),
+        )
+        self.assertEqual(partial["assets"][0]["assetId"], data["assetA"])
+        self.assertNotIn("H4_SECRET_GENERATED_ASSET_HISTORY", data["partial"]["content"])
+        failed = json.loads(data["failed"]["content"])
+        self.assertEqual(failed["errorCode"], "image_upstream_timeout")
+        self.assertTrue(failed["outcomeUnknown"])
+        self.assertTrue(failed["notReplayed"])
+        self.assertNotIn("assets", failed)
+        self.assertNotIn("H4_SECRET_GENERATED_ASSET_HISTORY", data["failed"]["content"])
+        self.assertEqual(data["missing"]["content"], "Legacy generated image summary.")
+        self.assertEqual(data["malformed"]["content"], "Malformed generated image summary.")
+        self.assertEqual(data["otherTool"]["content"], "ordinary result")
+        other_session_serialized = json.dumps(data["otherSession"], ensure_ascii=False)
+        self.assertNotIn(data["assetA"], other_session_serialized)
+        self.assertIn(data["assetB"], other_session_serialized)
+        self.assertEqual(
+            data["conflictingAssets"],
+            {"code": "tool_protocol_error", "transient": False},
+        )
+
     def test_model_request_canonicalizes_tool_result_before_same_run_steer(self):
         script = r"""
 global.window = {};
