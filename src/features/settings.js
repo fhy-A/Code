@@ -33,7 +33,7 @@
     if (!source || typeof source !== "object" || Array.isArray(source)) return null;
     const id = String(source.id || source.modelId || "").trim().slice(0, 240);
     if (!id) return null;
-    return { id, supportsEdit: source.supportsEdit === true };
+    return { id };
   }
 
   function normalizeImageConnectionEntry(value) {
@@ -127,7 +127,6 @@
       label: String(route.label || ""),
       modelId: String(route.modelId || ""),
       supportsGeneration: route.supportsGeneration !== false,
-      supportsEdit: route.supportsEdit === true,
     };
   }
 
@@ -726,13 +725,12 @@
     function renderImageModelRow(model = {}) {
       return `<div class="image-model-row">
         <input class="image-model-id" type="text" autocomplete="off" placeholder="${escapeHtml(t("imageModelIdPlaceholder"))}" />
-        <label class="image-edit-capability"><input class="image-model-edit" type="checkbox" ${model.supportsEdit === true ? "checked" : ""} /><span>${t("imageModelSupportsEdit")}</span></label>
         <button class="key-act-btn image-model-delete" type="button" title="${t("delete")}" data-i18n-title="delete">${trashIcon()}</button>
       </div>`;
     }
 
     function renderImageConnectionCard(connection, index) {
-      const models = connection.models.length ? connection.models : [{ id: "", supportsEdit: false }];
+      const models = connection.models.length ? connection.models : [{ id: "" }];
       return `<section class="settings-lite-card image-connection-card${connection.enabled ? "" : " disabled"}" data-image-connection-id="${escapeHtml(connection.connectionId)}" data-image-connection-index="${index}">
         <div class="image-connection-head">
           <strong>${escapeHtml(connection.name || t("imageConnectionUnnamed"))}</strong>
@@ -776,7 +774,6 @@
         enabled: card.querySelector(".image-connection-enabled")?.checked !== false,
         models: [...card.querySelectorAll(".image-model-row")].map((row) => ({
           id: row.querySelector(".image-model-id")?.value || "",
-          supportsEdit: row.querySelector(".image-model-edit")?.checked === true,
         })),
       }));
       return normalizeImageConnectionConfig({

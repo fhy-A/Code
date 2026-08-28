@@ -83,7 +83,7 @@ class ImageRouteRegistryTests(unittest.TestCase):
             set(route),
             {
                 "routeRef", "connectionId", "label", "modelId",
-                "supportsGeneration", "supportsEdit", "enabled",
+                "supportsGeneration", "enabled",
                 "credentialsAvailable",
             },
         )
@@ -130,6 +130,36 @@ class ImageRouteRegistryTests(unittest.TestCase):
         durable_after_rotation = self.path.read_text(encoding="utf-8")
         self.assertNotIn("ROTATED_SECRET_SENTINEL", durable_after_rotation)
         self.assertNotIn("rotated-provider.invalid", durable_after_rotation)
+
+    def test_legacy_durable_edit_capability_is_read_without_migration(self):
+        initial = self.registry.refresh([self.connection(models=[{
+            "id": "image-model",
+            "supportsEdit": False,
+        }])])
+        legacy = json.loads(self.path.read_text(encoding="utf-8"))
+        legacy["routes"][0]["supportsEdit"] = False
+        self.path.write_text(
+            json.dumps(legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        before_load = self.path.read_bytes()
+
+        restarted = ImageRouteRegistry(self.path)
+        snapshot = restarted.snapshot()
+        self.assertEqual(self.path.read_bytes(), before_load)
+        self.assertNotIn("supportsEdit", snapshot["routes"][0])
+
+        rebound = restarted.refresh([self.connection(models=[{
+            "id": "image-model",
+            "supportsEdit": True,
+        }])])
+        self.assertEqual(rebound["catalogRevision"], initial["catalogRevision"])
+        self.assertEqual(rebound["routes"][0]["routeRef"], initial["routes"][0]["routeRef"])
+        self.assertTrue(restarted.resolve(
+            rebound["routes"][0]["routeRef"],
+            rebound["catalogRevision"],
+            "image-model",
+        ).supports_edit)
 
     def test_stale_disabled_missing_and_invalid_connections_fail_closed(self):
         initial = self.registry.refresh([self.connection()])
@@ -274,6 +304,88 @@ class ImageUpstreamClientTests(unittest.TestCase):
         self.assertEqual(req.data.count(b'name="image"'), 1)
         self.assertNotIn(b"SECRET_SENTINEL", req.data)
         self.assertEqual(result[0].mime_type, "image/webp")
+
+    def test_edit_ignores_legacy_capability_values(self):
+        reference = validate_image_bytes(image_bytes("JPEG"))
+        output = image_bytes("WEBP")
+        normalized = {
+            **self.normalized,
+            "reference": {"type": "attachment", "id": "attachments/ref.jpg"},
+            "outputFormat": "webp",
+        }
+
+        for label, model in (
+            ("false", {"id": "image-model", "supportsEdit": False}),
+            ("missing", {"id": "image-model"}),
+            ("true", {"id": "image-model", "supportsEdit": True}),
+        ):
+            with self.subTest(legacy_capability=label), tempfile.TemporaryDirectory() as root:
+                registry = ImageRouteRegistry(Path(root) / "routes.json")
+                catalog = registry.refresh([{
+                    "connectionId": "legacy-image",
+                    "name": "Legacy image",
+                    "baseUrl": "https://provider.invalid/v1",
+                    "key": "SECRET_SENTINEL",
+                    "models": [model],
+                }])
+                route = registry.resolve(
+                    catalog["routes"][0]["routeRef"],
+                    catalog["catalogRevision"],
+                    "image-model",
+                )
+                requests = []
+
+                def urlopen(req, timeout):
+                    requests.append(req)
+                    payload = json.dumps({"data": [{
+                        "b64_json": base64.b64encode(output).decode("ascii"),
+                    }]}).encode("utf-8")
+                    return FakeResponse(payload)
+
+                result = ImageUpstreamClient(urlopen=urlopen).generate(
+                    route,
+                    normalized,
+                    f"operation-edit-{label}",
+                    reference_image=reference,
+                )
+                self.assertEqual(len(requests), 1)
+                self.assertTrue(requests[0].full_url.endswith("/v1/images/edits"))
+                self.assertEqual(result[0].mime_type, "image/webp")
+
+    def test_unimplemented_edit_endpoint_is_stable_and_not_replayed(self):
+        reference = validate_image_bytes(image_bytes("JPEG"))
+        normalized = {
+            **self.normalized,
+            "reference": {"type": "attachment", "id": "attachments/ref.jpg"},
+        }
+
+        for status in (404, 405, 501):
+            calls = []
+
+            def unsupported(req, timeout, status=status):
+                calls.append(req)
+                raise image_runtime.error.HTTPError(
+                    req.full_url,
+                    status,
+                    "UNSUPPORTED_EDIT_SECRET_SENTINEL",
+                    {},
+                    None,
+                )
+
+            with self.subTest(status=status), self.assertRaises(ImageRuntimeError) as captured:
+                ImageUpstreamClient(urlopen=unsupported).generate(
+                    self.route,
+                    normalized,
+                    f"operation-unsupported-{status}",
+                    reference_image=reference,
+                )
+            payload = captured.exception.public_payload()
+            self.assertEqual(captured.exception.code, "image_edit_unsupported")
+            self.assertFalse(captured.exception.retryable)
+            self.assertTrue(captured.exception.outcome_unknown)
+            self.assertTrue(payload["notReplayed"])
+            self.assertNotIn("SECRET_SENTINEL", json.dumps(payload))
+            self.assertEqual(len(calls), 1)
 
     def test_generation_and_edit_reject_paid_format_or_size_mismatch(self):
         png = image_bytes("PNG")

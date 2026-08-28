@@ -122,7 +122,6 @@ class ResolvedImageRoute:
             "label": self.label,
             "modelId": self.model_id,
             "supportsGeneration": self.supports_generation,
-            "supportsEdit": self.supports_edit,
         }
 
 
@@ -167,10 +166,8 @@ def _normalize_model_entries(values: Iterable[object]) -> list[dict]:
     for raw in list(values or [])[:MAX_IMAGE_MODELS_PER_CONNECTION]:
         if isinstance(raw, str):
             model_id = _clean_text(raw, 240)
-            supports_edit = False
         elif isinstance(raw, dict):
             model_id = _clean_text(raw.get("id") or raw.get("modelId"), 240)
-            supports_edit = raw.get("supportsEdit") is True
         else:
             continue
         if not model_id:
@@ -178,7 +175,6 @@ def _normalize_model_entries(values: Iterable[object]) -> list[dict]:
         result[model_id] = {
             "modelId": model_id,
             "supportsGeneration": True,
-            "supportsEdit": supports_edit,
         }
     return [result[key] for key in sorted(result)]
 
@@ -228,7 +224,6 @@ class ImageRouteRegistry:
             "label": _clean_text(raw.get("label"), 160),
             "modelId": model_id,
             "supportsGeneration": raw.get("supportsGeneration") is not False,
-            "supportsEdit": raw.get("supportsEdit") is True,
             "enabled": raw.get("enabled") is not False,
         }
 
@@ -294,7 +289,6 @@ class ImageRouteRegistry:
                     "label": route["label"],
                     "modelId": route["modelId"],
                     "supportsGeneration": route.get("supportsGeneration") is not False,
-                    "supportsEdit": route.get("supportsEdit") is True,
                     "enabled": route.get("enabled") is not False,
                     "credentialsAvailable": bool(
                         route.get("enabled") is not False
@@ -366,7 +360,6 @@ class ImageRouteRegistry:
                         "label": label,
                         "modelId": model["modelId"],
                         "supportsGeneration": True,
-                        "supportsEdit": model["supportsEdit"],
                         "enabled": True,
                     }
                     next_routes.append(route)
@@ -449,7 +442,9 @@ class ImageRouteRegistry:
                 label=route["label"],
                 model_id=route["modelId"],
                 supports_generation=route.get("supportsGeneration") is not False,
-                supports_edit=route.get("supportsEdit") is True,
+                # Legacy supportsEdit values are intentionally ignored. A
+                # single owned reference always attempts the edits endpoint.
+                supports_edit=True,
                 base_url=base_url,
                 key=key,
             )
@@ -823,9 +818,16 @@ class ImageUpstreamClient:
         return b"".join(chunks)
 
     @staticmethod
-    def _http_error(status: int) -> ImageRuntimeError:
+    def _http_error(status: int, *, reference_edit: bool = False) -> ImageRuntimeError:
         if status in {401, 403}:
             return ImageRuntimeError("image_credentials_rejected", "Image connection credentials were rejected.", http_status=502)
+        if reference_edit and status in {404, 405, 501}:
+            return ImageRuntimeError(
+                "image_edit_unsupported",
+                "Image service does not support reference editing.",
+                http_status=502,
+                outcome_unknown=True,
+            )
         if status == 429:
             return ImageRuntimeError("image_rate_limited", "Image service rate limit was reached.", retryable=True, http_status=429)
         if status in {408, 504}:
@@ -906,8 +908,6 @@ class ImageUpstreamClient:
             raise ImageRuntimeError("image_cancelled", "Image generation was cancelled before dispatch.")
         bounded_timeout = max(1, min(int(timeout), IMAGE_TIMEOUT_SECONDS))
         deadline = self._clock() + bounded_timeout
-        if reference_image is not None and not route.supports_edit:
-            raise ImageRuntimeError("image_edit_unsupported", "The selected image route does not support reference editing.")
         endpoint = "/v1/images/edits" if reference_image is not None else "/v1/images/generations"
         target = self._endpoint_url(route.base_url, endpoint)
         fields = {
@@ -941,7 +941,7 @@ class ImageUpstreamClient:
             response = self._urlopen(upstream_request, timeout=bounded_timeout)
             status = int(getattr(response, "status", 200) or 200)
             if status < 200 or status >= 300:
-                raise self._http_error(status)
+                raise self._http_error(status, reference_edit=reference_image is not None)
             try:
                 raw = self._read_bounded(response, MAX_IMAGE_RESPONSE_BYTES)
             except ImageRuntimeError as exc:
@@ -955,7 +955,10 @@ class ImageUpstreamClient:
         except ImageRuntimeError:
             raise
         except error.HTTPError as exc:
-            raise self._http_error(int(exc.code)) from None
+            raise self._http_error(
+                int(exc.code),
+                reference_edit=reference_image is not None,
+            ) from None
         except (TimeoutError, socket.timeout) as exc:
             raise ImageRuntimeError("image_upstream_timeout", "Image service timed out after dispatch.", retryable=True, http_status=504, outcome_unknown=True) from exc
         except (error.URLError, OSError, http.client.HTTPException) as exc:

@@ -12511,9 +12511,13 @@ const configured = settings.saveImageConnectionConfig({
     baseUrl: "https://image-secret.invalid/v1",
     key: "image-key-secret-sentinel",
     enabled: true,
-    models: [{id: "fixture-image-1", supportsEdit: true}],
+    models: [
+      {id: "fixture-image-false", supportsEdit: false},
+      {id: "fixture-image-missing"},
+      {id: "fixture-image-true", supportsEdit: true},
+    ],
   }],
-  defaultRoute: {connectionId: "image_fixture", modelId: "fixture-image-1"},
+  defaultRoute: {connectionId: "image_fixture", modelId: "fixture-image-missing"},
 }, storage);
 const state = {};
 let requestSummary = null;
@@ -12529,6 +12533,7 @@ const feature = settings.createSettingsFeature({
     requestSummary = {
       url,
       connectionCount: body.connections?.length || 0,
+      models: body.connections?.[0]?.models || [],
       credentialPresent: body.connections?.[0]?.key === "image-key-secret-sentinel",
       endpointPresent: body.connections?.[0]?.baseUrl === "https://image-secret.invalid/v1",
     };
@@ -12538,11 +12543,11 @@ const feature = settings.createSettingsFeature({
         routeRef,
         connectionId: "image_fixture",
         label: "Fixture image provider",
-        modelId: "fixture-image-1",
+        modelId: "fixture-image-missing",
         enabled: true,
         credentialsAvailable: true,
         supportsGeneration: true,
-        supportsEdit: true,
+        supportsEdit: false,
       }],
     };
   },
@@ -12579,9 +12584,17 @@ const feature = settings.createSettingsFeature({
         self.assertTrue(data["requestSummary"]["credentialPresent"])
         self.assertTrue(data["requestSummary"]["endpointPresent"])
         self.assertEqual(data["selected"]["catalogRevision"], 7)
-        self.assertEqual(data["selected"]["modelId"], "fixture-image-1")
+        self.assertEqual(data["selected"]["modelId"], "fixture-image-missing")
         self.assertEqual(data["selected"]["routeRef"], "ir1_" + "a" * 64)
-        self.assertTrue(data["selected"]["supportsEdit"])
+        self.assertNotIn("supportsEdit", data["selected"])
+        self.assertEqual(
+            data["requestSummary"]["models"],
+            [
+                {"id": "fixture-image-false"},
+                {"id": "fixture-image-missing"},
+                {"id": "fixture-image-true"},
+            ],
+        )
         self.assertIsNone(data["disabled"])
         self.assertTrue(data["storageHasCredential"])
         self.assertFalse(data["publicStateHasCredential"])
@@ -12590,6 +12603,16 @@ const feature = settings.createSettingsFeature({
         self.assertIn(".image-connection-key\").value", SETTINGS_SOURCE)
         self.assertNotIn("escapeHtml(connection.key)", SETTINGS_SOURCE)
         self.assertNotIn("escapeHtml(connection.baseUrl)", SETTINGS_SOURCE)
+        self.assertNotIn("image-model-edit", SETTINGS_SOURCE)
+        self.assertNotIn("imageModelSupportsEdit", SETTINGS_SOURCE)
+        self.assertIn(
+            'imageGenerationSettingsHint: "生图模型独立于 Agent 聊天模型。"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'imageGenerationSettingsHint: "Image generation models are independent of Agent chat models."',
+            I18N_SOURCE,
+        )
 
     def test_workbar_login_callback_follows_current_code_origin(self):
         self.assertNotIn('encodeURIComponent("http://127.0.0.1:3010/")', SETTINGS_SOURCE)

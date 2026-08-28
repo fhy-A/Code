@@ -913,7 +913,6 @@ function normalizeImageRouteDispatch(value) {
     label: String(value.label || "").trim().slice(0, 160),
     modelId: modelId.slice(0, 240),
     supportsGeneration: value.supportsGeneration !== false,
-    supportsEdit: value.supportsEdit === true,
   };
 }
 

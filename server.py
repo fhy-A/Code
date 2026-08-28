@@ -5998,8 +5998,6 @@ def _execute_agent_image_generation(run, call, execution):
     resolved = _image_route_registry.resolve(
         identity["routeRef"], identity["catalogRevision"], identity["modelId"],
     )
-    if normalized.get("reference") and not resolved.supports_edit:
-        raise ImageRuntimeError("image_edit_unsupported", "The selected image route does not support reference editing.")
     reference_image = _agent_image_reference(run, normalized)
 
     # Persist admission before making the paid external call. A restart after
@@ -7749,7 +7747,6 @@ def _normalize_agent_image_route_identity(value):
         "label": str(value.get("label") or "").strip()[:160],
         "modelId": model_id[:240],
         "supportsGeneration": value.get("supportsGeneration") is not False,
-        "supportsEdit": value.get("supportsEdit") is True,
     }
 
 

@@ -67,6 +67,9 @@ IMAGE_GENERATION_CALL_ID = "h4-image-generation-call"
 IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER"
 IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL"
 IMAGE_EDIT_CALL_ID = "h4-image-edit-call"
+IMAGE_EDIT_UNSUPPORTED_USER = "H4_IMAGE_EDIT_UNSUPPORTED_USER"
+IMAGE_EDIT_UNSUPPORTED_FINAL = "H4_IMAGE_EDIT_UNSUPPORTED_FINAL"
+IMAGE_EDIT_UNSUPPORTED_CALL_ID = "h4-image-edit-unsupported-call"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
 AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
@@ -768,6 +771,13 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if message.get("role") == "tool":
             completed_tool_call_ids.add(str(message.get("tool_call_id") or ""))
     joined_user_text = "\n".join(user_texts)
+    if IMAGE_EDIT_UNSUPPORTED_USER in joined_user_text:
+        image_edit_completed = IMAGE_EDIT_UNSUPPORTED_CALL_ID in completed_tool_call_ids
+        return (
+            "image-edit-unsupported-final" if image_edit_completed
+            else "image-edit-unsupported-call",
+            image_edit_completed,
+        )
     if IMAGE_EDIT_USER in joined_user_text:
         image_edit_completed = IMAGE_EDIT_CALL_ID in completed_tool_call_ids
         return (
@@ -1959,8 +1969,10 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             return
         if route in {"/v1/images/generations", "/v1/images/edits"}:
             is_edit = route.endswith("/edits")
+            unsupported_edit = False
             if is_edit:
                 raw_body = self._read_body()
+                unsupported_edit = b"H4_UNSUPPORTED_IMAGE_EDIT" in raw_body
                 model_matches = f'name="model"\r\n\r\n{IMAGE_MODEL_ID}'.encode() in raw_body
                 request_contract = {
                     "modelMatches": model_matches,
@@ -1983,6 +1995,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "idempotencyPresent": bool(self.headers.get("Idempotency-Key")),
                 "contract": request_contract,
             })
+            if unsupported_edit:
+                self._send_json({"error": "image edit endpoint is unsupported"}, 404)
+                return
             self._send_json({
                 "created": 1,
                 "data": [{"b64_json": base64.b64encode(FAVICON_PNG).decode("ascii")}],
@@ -2552,6 +2567,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "skill-evidence-call",
             "image-generation-call",
             "image-edit-call",
+            "image-edit-unsupported-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2585,6 +2601,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "skill-evidence-call": "",
                 "image-generation-call": "",
                 "image-edit-call": "",
+                "image-edit-unsupported-call": "",
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -2635,23 +2652,32 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         ),
                     },
                 }]
-            elif scenario in {"image-generation-call", "image-edit-call"}:
+            elif scenario in {
+                "image-generation-call", "image-edit-call", "image-edit-unsupported-call",
+            }:
+                is_edit_scenario = scenario in {
+                    "image-edit-call", "image-edit-unsupported-call",
+                }
                 call_id = (
-                    IMAGE_EDIT_CALL_ID if scenario == "image-edit-call"
-                    else IMAGE_GENERATION_CALL_ID
+                    IMAGE_EDIT_UNSUPPORTED_CALL_ID
+                    if scenario == "image-edit-unsupported-call"
+                    else (IMAGE_EDIT_CALL_ID if scenario == "image-edit-call" else IMAGE_GENERATION_CALL_ID)
                 )
                 arguments = {
                     "prompt": (
-                        "Turn the supplied image into a blue geometric icon"
+                        "H4_UNSUPPORTED_IMAGE_EDIT"
+                        if scenario == "image-edit-unsupported-call"
+                        else ("Turn the supplied image into a blue geometric icon"
                         if scenario == "image-edit-call"
                         else "A small blue geometric icon on a transparent background"
+                        )
                     ),
                     "size": "auto",
                     "quality": "standard",
                     "count": 1,
                     "outputFormat": "png",
                 }
-                if scenario == "image-edit-call":
+                if is_edit_scenario:
                     serialized_messages = json.dumps(
                         payload.get("messages") or [], ensure_ascii=False,
                     )
@@ -3143,6 +3169,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "skill-evidence-final": SKILL_EVIDENCE_FINAL,
                 "image-generation-final": IMAGE_GENERATION_FINAL,
                 "image-edit-final": IMAGE_EDIT_FINAL,
+                "image-edit-unsupported-final": IMAGE_EDIT_UNSUPPORTED_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,

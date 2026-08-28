@@ -31,6 +31,8 @@ const IMAGE_GENERATION_USER = "H4_IMAGE_GENERATION_USER";
 const IMAGE_GENERATION_FINAL = "H4_IMAGE_GENERATION_FINAL";
 const IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER";
 const IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL";
+const IMAGE_EDIT_UNSUPPORTED_USER = "H4_IMAGE_EDIT_UNSUPPORTED_USER";
+const IMAGE_EDIT_UNSUPPORTED_FINAL = "H4_IMAGE_EDIT_UNSUPPORTED_FINAL";
 const RUNTIME_RECOVERY_USER = "H4_RUNTIME_RECOVERY_USER";
 const RUNTIME_RECOVERY_PARTIAL_ONE = "H4_RUNTIME_RECOVERY_PARTIAL_ONE";
 const RUNTIME_RECOVERY_PARTIAL_TWO = "H4_RUNTIME_RECOVERY_PARTIAL_TWO";
@@ -27785,8 +27787,10 @@ async function configureImageGenerationConnection(h4) {
   await card.locator(".image-connection-base-url").fill(h4.host.ready.fakeUrl);
   await card.locator(".image-connection-key").fill("h4-image-synthetic-credential");
   await card.locator(".image-model-id").first().fill(IMAGE_MODEL_ID);
-  const editCapability = card.locator(".image-model-edit").first();
-  if (!(await editCapability.isChecked())) await editCapability.check();
+  await expect(card.locator(".image-model-edit")).toHaveCount(0);
+  await expect(page.locator("#settingsDetail .settings-panel-description")).toHaveText(
+    /Image generation models are independent of Agent chat models\.|生图模型独立于 Agent 聊天模型。/,
+  );
   const responsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
     && new URL(response.url()).pathname === "/api/image-routes/refresh"
@@ -27807,8 +27811,8 @@ async function configureImageGenerationConnection(h4) {
     enabled: true,
     credentialsAvailable: true,
     supportsGeneration: true,
-    supportsEdit: true,
   });
+  expect(catalog.body.routes[0]).not.toHaveProperty("supportsEdit");
   expect(String(catalog.body.routes[0].routeRef || "")).toMatch(/^ir1_[a-f0-9]{64}$/);
   const publicCatalog = JSON.stringify(catalog.body);
   expect(publicCatalog).not.toContain("h4-image-synthetic-credential");
@@ -27870,18 +27874,18 @@ async function exerciseImageProductSurface(h4, runtime) {
   const sessionId = String(await activeSession.getAttribute("data-session-id") || "");
   const firstCard = page.locator(".generated-image-card").first();
   await expect(firstCard).toHaveCount(1);
-  if (!(await firstCard.isVisible())) {
-    const firstTrace = page.locator("#messages .execution-trace.completed").filter({
-      has: firstCard,
-    });
-    await expect(firstTrace).toHaveCount(1);
-    const firstTraceToggle = firstTrace.locator(
-      ":scope > [data-execution-trace-toggle]",
-    );
-    await expect(firstTraceToggle).toHaveAttribute("aria-expanded", "false");
+  const firstTrace = page.locator("#messages .execution-trace.completed").filter({
+    has: firstCard,
+  });
+  await expect(firstTrace).toHaveCount(1);
+  const firstTraceToggle = firstTrace.locator(
+    ":scope > [data-execution-trace-toggle]",
+  );
+  if ((await firstTraceToggle.getAttribute("aria-expanded")) === "false") {
     await firstTraceToggle.click();
-    await expect(firstTrace).toHaveClass(/\bis-expanded\b/);
   }
+  await expect(firstTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(firstTraceToggle).toHaveAttribute("aria-expanded", "true");
   await expect(firstCard).toBeVisible();
   await expect(firstCard).not.toContainText("small blue geometric icon");
   const firstPreview = firstCard.locator("[data-generated-image-preview]");
@@ -27921,7 +27925,6 @@ async function exerciseImageProductSurface(h4, runtime) {
     imageRoute: {
       routeRef: selectedRoute.routeRef,
       modelId: IMAGE_MODEL_ID,
-      supportsEdit: true,
     },
     skillEvidence: {
       status: "satisfied",
@@ -27940,6 +27943,7 @@ async function exerciseImageProductSurface(h4, runtime) {
   const generationSnapshotText = JSON.stringify(generationRun.body);
   expect(generationSnapshotText).not.toContain("h4-image-synthetic-credential");
   expect(generationSnapshotText).not.toContain(h4.host.ready.fakeUrl);
+  expect(generationRun.body.imageRoute).not.toHaveProperty("supportsEdit");
 
   const chatRouteBeforeReload = await page.evaluate(async (modelId) => {
     const response = await fetch("/api/model-routes", { cache: "no-store" });
@@ -28041,6 +28045,36 @@ async function exerciseImageProductSurface(h4, runtime) {
     png: true,
   });
 
+  await h4.submit(`/imagegen ${IMAGE_EDIT_UNSUPPORTED_USER} ${firstAssetId}`);
+  await waitForImageAuthorization(h4, true);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_EDIT_UNSUPPORTED_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator(".generated-image-card")).toHaveCount(2);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(3);
+  const unsupportedRunId = h4.controlIds().agentRunIds.find((id) => (
+    id !== generationRunId && id !== editRunId
+  ));
+  const unsupportedRun = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(unsupportedRunId)}?cursor=0&wait=0`,
+  );
+  const unsupportedExecutions = (unsupportedRun.body.toolExecutions || []).filter((entry) => (
+    entry.name === "generate_image"
+  ));
+  expect(unsupportedExecutions).toHaveLength(1);
+  expect(unsupportedExecutions[0]).toMatchObject({
+    status: "completed",
+    outcome: "failed",
+    result: {
+      ok: false,
+      errorCode: "image_edit_unsupported",
+      retryable: false,
+      outcomeUnknown: true,
+      notReplayed: true,
+    },
+  });
+
   const metrics = await h4.metrics();
   expect(metrics.imageRequests).toEqual([
     {
@@ -28065,6 +28099,17 @@ async function exerciseImageProductSurface(h4, runtime) {
         responseFormatPresent: true,
       },
     },
+    {
+      kind: "edit",
+      authorizationPresent: true,
+      idempotencyPresent: true,
+      contract: {
+        modelMatches: true,
+        multipart: true,
+        referencePresent: true,
+        responseFormatPresent: true,
+      },
+    },
   ]);
   const imageChats = metrics.chatRequests.filter((entry) => (
     String(entry.scenario || "").startsWith("image-")
@@ -28074,6 +28119,8 @@ async function exerciseImageProductSurface(h4, runtime) {
     "image-generation-final",
     "image-edit-call",
     "image-edit-final",
+    "image-edit-unsupported-call",
+    "image-edit-unsupported-final",
   ]);
   expect(imageChats.every((entry) => (
     entry.imageToolContract?.generateImageAvailable === true
@@ -28182,6 +28229,7 @@ async function exerciseImageProductSurface(h4, runtime) {
     sessionId: idHash(sessionId),
     generationRunId: idHash(generationRunId),
     editRunId: idHash(editRunId),
+    unsupportedRunId: idHash(unsupportedRunId),
     publicRouteStable: selectedRoute.routeRef === generationRun.body.imageRoute.routeRef,
     imageRequestKinds: metrics.imageRequests.map((entry) => entry.kind),
     reloadImageRequestDelta: 0,

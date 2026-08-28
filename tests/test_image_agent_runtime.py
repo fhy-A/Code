@@ -447,6 +447,43 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(result["errorCode"], "image_reference_forbidden")
         self.assertEqual(len(self.client.calls), 1)
 
+    def test_legacy_false_edit_capability_does_not_block_owned_reference(self):
+        legacy_route = image_runtime.ResolvedImageRoute(
+            route_ref=self.route.route_ref,
+            catalog_revision=self.route.catalog_revision,
+            connection_id=self.route.connection_id,
+            label=self.route.label,
+            model_id=self.route.model_id,
+            supports_generation=True,
+            supports_edit=False,
+            base_url=self.route.base_url,
+            key=self.route.key,
+        )
+        run = self._run(session_id="legacy-edit-capability", route=legacy_route)
+        attachment = self.attachments / "legacy-reference.png"
+        attachment.write_bytes(_png(4, 5))
+        server_mod.write_jsonl(server_mod.messages_path(run["session_id"]), [{
+            "role": "user",
+            "content": "reference",
+            "_images": [{
+                "path": "attachments/legacy-reference.png",
+                "name": "legacy-reference.png",
+                "mime": "image/png",
+            }],
+        }])
+        call = self._queue(run, arguments={
+            "prompt": "edit the legacy owned image",
+            "reference": {"type": "attachment", "id": "attachments/legacy-reference.png"},
+            "count": 1,
+            "outputFormat": "png",
+        })
+        with mock.patch.object(self.registry, "resolve", return_value=legacy_route):
+            self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.client.calls[0]["reference"].width, 4)
+
     def test_route_and_asset_http_apis_are_secret_free_and_session_scoped(self):
         run = self._run()
         call = self._queue(run)
