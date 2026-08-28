@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-28 | `CODE-006` Session 删除后 keep-alive 请求消费修复：陈旧 Session PUT 命中 tombstone 410 和 deleted/missing messages POST 早退前均精确消费当前 body 一次，不再让残留 JSON 污染同一 HTTP/1.1 连接的下一请求。fail-first 真实单连接从 `JSON + GET` 拼接 400 修正为 410 → 资产 404，并列 messages 链修正为 410/404 → Session 列表 200；Session persistence/routes/server 回归 `352 passed + 73 subtests`，compile/diff 通过，未重跑展示 H4/Browser | [查看](2026/2026-08-28.md) |
 | 2026-08-28 | `CODE-006` Session 删除准备失败边界补齐：路径解析、Session/JSONL/index/Goal/分支与资产快照全部纳入 `SessionDeleteError`；快照完成前的 PermissionError/OSError 不执行删除或无依据回滚，仅返回脱敏 `session_delete_failed`/503。含绝对路径/秘密哨兵的 fail-first 从 400 修正为 503，全部事实字节不变；相关扩大回归 `547 passed + 166 subtests` | [查看](2026/2026-08-28.md) |
 | 2026-08-28 | `CODE-006` Session 删除一致性修复：Windows 并发读取下旧 `Path.unlink()` 触发 `PermissionError/winerror=32`，且会先删 Goal/资产、泄露临时路径并允许迟到 save 复活。现以 Session 生命周期锁、可回滚 JSON/JSONL/index/资产快照与稳定 `session_delete_failed` 脱敏失败统一 save/Goal/资产删除边界；成功 DELETE 保持幂等，迟到 PUT 与付费生图均不复活 Session/资产。相关扩大回归 `546 passed + 166 subtests`，compile/diff/doctor 通过；未运行已熔断展示 H4，未使用内置 Browser 或真实数据 | [查看](2026/2026-08-28.md) |
 | 2026-08-28 | `CODE-006` 生图上游共享总预算从 60 秒提升至 180 秒：默认与最大 override 均固定为 180 秒，上游 POST、JSON 响应读取 socket、响应处理和受控 URL 回退共享同一 deadline；超过边界仍为 `image_upstream_timeout + outcomeUnknown + notReplayed`，同一 AgentRun 零自动重试、零第二 operationId/派发。fake clock 证明 66 秒完成可唯一保存资产，响应读取与 URL 回退的 179/181 秒边界闭合；image runtime/AgentRun `39 passed + 24 subtests`，相关 server/Goal/route 6 项、Python compile 与 diff 门禁通过，无真实模型/外网/凭据 | [查看](2026/2026-08-28.md) |

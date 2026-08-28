@@ -17811,6 +17811,27 @@ class CodeHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(body.decode("utf-8"))
 
+    def consume_request_body(self):
+        """Drain one body on an early response without parsing or reading twice."""
+        headers = getattr(self, "headers", None)
+        stream = getattr(self, "rfile", None)
+        if headers is None or stream is None:
+            # Direct unit-test handlers model body consumption with their
+            # existing read_body_json stub and do not expose an HTTP stream.
+            reader = getattr(self, "read_body_json", None)
+            if callable(reader):
+                reader()
+            return
+        length = int(headers.get("Content-Length", "0") or "0")
+        if length < 0:
+            raise ValueError("Content-Length must be non-negative")
+        remaining = length
+        while remaining:
+            chunk = stream.read(remaining)
+            if not chunk:
+                raise ConnectionError("request body ended before Content-Length")
+            remaining -= len(chunk)
+
     def send_json(self, data, status=200):
         status, payload = json_bytes(data, status)
         self.send_response(status)
@@ -18322,6 +18343,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
             if _session_was_deleted(session_id) and not session_path(session_id).exists():
+                CodeHandler.consume_request_body(self)
                 self.send_json({
                     "error": "Session was deleted and cannot be restored by a stale save.",
                     "errorCode": "session_deleted",
@@ -18670,6 +18692,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
             if _session_was_deleted(session_id) or not session_path(session_id).exists():
+                CodeHandler.consume_request_body(self)
                 self.send_json({
                     "error": "session not found",
                     "errorCode": "session_deleted" if _session_was_deleted(session_id) else "session_not_found",

@@ -1,5 +1,6 @@
 import json
 import hashlib
+import http.client
 import os
 import tempfile
 import threading
@@ -1172,6 +1173,116 @@ class TestSessionDeleteConsistency(unittest.TestCase):
         }), encoding="utf-8")
         return asset_dir
 
+    def start_http_server(self):
+        server.ThreadingHTTPServer.daemon_threads = True
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.CodeHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+
+        def cleanup():
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(cleanup)
+        return http.client.HTTPConnection(
+            "127.0.0.1",
+            httpd.server_address[1],
+            timeout=5,
+        )
+
+    @staticmethod
+    def http_json(connection, method, path, body=None):
+        payload = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {}
+        if payload is not None:
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(payload)),
+            }
+        connection.request(method, path, body=payload, headers=headers)
+        response = connection.getresponse()
+        raw = response.read()
+        return response.status, json.loads(raw.decode("utf-8"))
+
+    def test_stale_put_consumes_body_before_asset_get_on_same_connection(self):
+        connection = self.start_http_server()
+        self.addCleanup(connection.close)
+        status, created = self.http_json(connection, "POST", "/api/sessions", {
+            "title": "keep-alive stale PUT",
+            "messages": [],
+        })
+        self.assertEqual(status, 201)
+        session_id = created["id"]
+        self.assertEqual(
+            self.http_json(connection, "DELETE", f"/api/sessions/{session_id}"),
+            (200, {"ok": True}),
+        )
+
+        stale_body = {
+            "title": "must stay deleted",
+            "messages": [{"role": "user", "content": "stale body sentinel"}],
+            "expectedRevision": 0,
+        }
+        status, payload = self.http_json(
+            connection,
+            "PUT",
+            f"/api/sessions/{session_id}",
+            stale_body,
+        )
+        self.assertEqual(status, 410)
+        self.assertEqual(payload["errorCode"], "session_deleted")
+
+        asset_id = "ga1_" + ("z" * 43)
+        status, payload = self.http_json(
+            connection,
+            "GET",
+            f"/api/sessions/{session_id}/generated-assets/{asset_id}",
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["errorCode"], "generated_asset_not_found")
+
+    def test_early_messages_post_consumes_body_before_next_same_connection_request(self):
+        for state in ("deleted", "missing"):
+            with self.subTest(state=state):
+                connection = self.start_http_server()
+                self.addCleanup(connection.close)
+                if state == "deleted":
+                    status, created = self.http_json(
+                        connection,
+                        "POST",
+                        "/api/sessions",
+                        {"title": "deleted messages", "messages": []},
+                    )
+                    self.assertEqual(status, 201)
+                    session_id = created["id"]
+                    self.assertEqual(
+                        self.http_json(
+                            connection,
+                            "DELETE",
+                            f"/api/sessions/{session_id}",
+                        ),
+                        (200, {"ok": True}),
+                    )
+                    expected_status = 410
+                    expected_code = "session_deleted"
+                else:
+                    session_id = "missingmessages01"
+                    expected_status = 404
+                    expected_code = "session_not_found"
+
+                status, payload = self.http_json(
+                    connection,
+                    "POST",
+                    f"/api/sessions/{session_id}/messages",
+                    {"messages": [{"role": "assistant", "content": "stale"}]},
+                )
+                self.assertEqual(status, expected_status)
+                self.assertEqual(payload["errorCode"], expected_code)
+                status, payload = self.http_json(connection, "GET", "/api/sessions")
+                self.assertEqual(status, 200)
+                self.assertIn("data", payload)
+
     @unittest.skipUnless(os.name == "nt", "Windows file sharing semantics")
     def test_delete_file_lock_is_sanitized_and_rolls_back_all_session_state(self):
         session = self.create_session()
@@ -1356,11 +1467,23 @@ class TestSessionDeleteConsistency(unittest.TestCase):
         server.CodeHandler.save_session(stale, session_id)
 
         payload, status = stale.send_json.call_args.args
+        stale.read_body_json.assert_called_once_with()
         self.assertEqual(status, 410)
         self.assertEqual(payload["errorCode"], "session_deleted")
         self.assertFalse(server.session_path(session_id).exists())
         self.assertFalse(server.messages_path(session_id).exists())
         self.assertNotIn(session_id, server._read_session_index())
+
+    def test_missing_messages_test_double_consumes_body_exactly_once(self):
+        handler = self.make_handler({
+            "messages": [{"role": "assistant", "content": "discard once"}],
+        })
+        server.CodeHandler.append_messages(handler, "missingmessages02")
+
+        handler.read_body_json.assert_called_once_with()
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["errorCode"], "session_not_found")
 
     def test_concurrent_save_completes_before_delete_and_cannot_revive_session(self):
         session = self.create_session()
