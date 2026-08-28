@@ -2244,6 +2244,196 @@ process.stdout.write(JSON.stringify({{
             APP_SOURCE[recovered_start:recovered_end],
         )
 
+    def test_image_route_create_rebinds_once_without_changing_request_identity(self):
+        normalize_start = APP_SOURCE.index("function normalizeImageRouteDispatch(")
+        normalize_end = APP_SOURCE.index("function buildRunContext(", normalize_start)
+        script = f"""
+const t = (key) => key;
+{APP_SOURCE[normalize_start:normalize_end]}
+const routeRef = `ir1_${{"d".repeat(64)}}`;
+const frozen = normalizeImageRouteDispatch({{
+  routeRef,
+  catalogRevision: 3,
+  connectionId: "image-connection",
+  label: "Image fixture",
+  modelId: "image-model",
+  supportsGeneration: true,
+}});
+const request = {{
+  sessionId: "existing-session",
+  clientRequestId: "stable-client-request",
+  payload: {{messages: [{{role: "user", content: "one message"}}]}},
+  imageRoute: frozen,
+}};
+const attempts = [];
+let refreshes = 0;
+async function createAgentRun(candidate) {{
+  attempts.push(candidate);
+  if (attempts.length === 1) {{
+    const error = new Error("stale");
+    error.errorCode = "image_route_stale";
+    throw error;
+  }}
+  return {{agentRunId: "agent-run-1"}};
+}}
+async function refreshImageRoutes() {{
+  refreshes += 1;
+  return {{
+    catalogRevision: 5,
+    routes: [{{
+      routeRef,
+      connectionId: "image-connection",
+      label: "Image fixture",
+      modelId: "image-model",
+      enabled: true,
+      credentialsAvailable: true,
+      supportsGeneration: true,
+    }}],
+  }};
+}}
+(async () => {{
+  const result = await createAgentRunWithImageRouteRebind({{
+    request,
+    createAgentRun,
+    refreshImageRoutes,
+  }});
+  const failures = {{}};
+  for (const [code, catalog] of [
+    ["image_route_catalog_unavailable", {{catalogRevision: 6, routes: []}}],
+    ["image_route_credentials_unavailable", {{catalogRevision: 6, routes: [{{...frozen, enabled: true, credentialsAvailable: false}}]}}],
+    ["image_route_stale", {{catalogRevision: 6, routes: [{{...frozen, enabled: false, credentialsAvailable: true}}]}}],
+  ]) {{
+    let calls = 0;
+    let refreshCalls = 0;
+    try {{
+      await createAgentRunWithImageRouteRebind({{
+        request,
+        createAgentRun: async () => {{
+          calls += 1;
+          const error = new Error(code);
+          error.errorCode = code;
+          throw error;
+        }},
+        refreshImageRoutes: async () => {{ refreshCalls += 1; return catalog; }},
+      }});
+    }} catch (error) {{
+      failures[code] = {{errorCode: error.errorCode, calls, refreshCalls}};
+    }}
+  }}
+  let nonRecoverable;
+  try {{
+    await createAgentRunWithImageRouteRebind({{
+      request,
+      createAgentRun: async () => {{
+        const error = new Error("disabled");
+        error.errorCode = "image_route_disabled";
+        throw error;
+      }},
+      refreshImageRoutes: async () => {{ throw new Error("must not refresh"); }},
+    }});
+  }} catch (error) {{ nonRecoverable = error.errorCode; }}
+  let refreshFailure;
+  try {{
+    await createAgentRunWithImageRouteRebind({{
+      request,
+      createAgentRun: async () => {{
+        const error = new Error("catalog unavailable");
+        error.errorCode = "image_route_catalog_unavailable";
+        throw error;
+      }},
+      refreshImageRoutes: async () => {{ throw new Error("refresh failed"); }},
+    }});
+  }} catch (error) {{ refreshFailure = error.errorCode; }}
+  let secondFailureCalls = 0;
+  let secondFailureRefreshes = 0;
+  let secondFailure;
+  try {{
+    await createAgentRunWithImageRouteRebind({{
+      request,
+      createAgentRun: async () => {{
+        secondFailureCalls += 1;
+        const error = new Error("still stale");
+        error.errorCode = "image_route_stale";
+        throw error;
+      }},
+      refreshImageRoutes: async () => {{
+        secondFailureRefreshes += 1;
+        return {{
+          catalogRevision: 5,
+          routes: [{{...frozen, enabled: true, credentialsAvailable: true}}],
+        }};
+      }},
+    }});
+  }} catch (error) {{ secondFailure = error.errorCode; }}
+  process.stdout.write(JSON.stringify({{
+    result,
+    refreshes,
+    attempts: attempts.map((item) => ({{
+      sessionId: item.sessionId,
+      clientRequestId: item.clientRequestId,
+      payload: item.payload,
+      imageRoute: item.imageRoute,
+    }})),
+    failures,
+    nonRecoverable,
+    refreshFailure,
+    secondFailure: {{errorCode: secondFailure, calls: secondFailureCalls, refreshes: secondFailureRefreshes}},
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["result"]["created"]["agentRunId"], "agent-run-1")
+        self.assertEqual(data["result"]["imageRoute"]["catalogRevision"], 5)
+        self.assertEqual(data["refreshes"], 1)
+        self.assertEqual(len(data["attempts"]), 2)
+        self.assertEqual(data["attempts"][0]["sessionId"], data["attempts"][1]["sessionId"])
+        self.assertEqual(
+            data["attempts"][0]["clientRequestId"],
+            data["attempts"][1]["clientRequestId"],
+        )
+        self.assertEqual(data["attempts"][0]["payload"], data["attempts"][1]["payload"])
+        self.assertEqual(data["attempts"][1]["imageRoute"]["routeRef"], "ir1_" + "d" * 64)
+        self.assertEqual(data["attempts"][1]["imageRoute"]["catalogRevision"], 5)
+        self.assertEqual(
+            data["failures"],
+            {
+                "image_route_catalog_unavailable": {
+                    "errorCode": "image_route_not_found", "calls": 1, "refreshCalls": 1,
+                },
+                "image_route_credentials_unavailable": {
+                    "errorCode": "image_route_credentials_unavailable", "calls": 1, "refreshCalls": 1,
+                },
+                "image_route_stale": {
+                    "errorCode": "image_route_disabled", "calls": 1, "refreshCalls": 1,
+                },
+            },
+        )
+        self.assertEqual(data["nonRecoverable"], "image_route_disabled")
+        self.assertEqual(data["refreshFailure"], "image_route_catalog_unavailable")
+        self.assertEqual(
+            data["secondFailure"],
+            {"errorCode": "image_route_stale", "calls": 2, "refreshes": 1},
+        )
+
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+        create_start = loop_source.index("if (!ctx.agentRunId)")
+        rebind_call = loop_source.index("createAgentRunWithImageRouteRebind", create_start)
+        resume_loop = loop_source.index("while (true)", rebind_call)
+        self.assertLess(create_start, rebind_call)
+        self.assertLess(rebind_call, resume_loop)
+        self.assertEqual(loop_source.count("createAgentRunWithImageRouteRebind"), 1)
+        self.assertIn("refreshImageRoutes: () => refreshImageRoutes()", loop_source)
+
     def test_image_authorization_summary_accepts_event_and_snapshot_shapes_without_prompt(self):
         start = APP_SOURCE.index("function imageAuthorizationSummary(")
         end = APP_SOURCE.index("function authorizationTarget(", start)
@@ -2870,7 +3060,8 @@ eval(source);
 
         for expected in (
             "await buildModelRequestPayload(ctx, true, serverTools)",
-            "await agentRuntime.createAgentRun",
+            "createAgentRun: (request) => agentRuntime.createAgentRun(request)",
+            "refreshImageRoutes: () => refreshImageRoutes()",
             "await persistRunCheckpoint(ctx, \"running\", \"model\"",
             "onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot)",
             "onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot)",
@@ -2923,6 +3114,12 @@ const getModelContextResolution = () => ({{
 const getEffectiveMaxTokens = () => 128;
 const persistRunCheckpoint = async () => {{}};
 const settleForegroundDispatchAfterAgentRunCreated = async () => true;
+const refreshImageRoutes = async () => ({{catalogRevision: 0, routes: []}});
+const createAgentRunWithImageRouteRebind = async (options) => ({{
+  created: await options.createAgentRun(options.request),
+  imageRoute: options.request.imageRoute || null,
+  rebound: false,
+}});
 const resumePendingSessionSteers = async () => {{}};
 const recoverActiveAgentRuntimeProjection = async () => {{}};
 const observeAgentProjectionSnapshot = () => {{}};

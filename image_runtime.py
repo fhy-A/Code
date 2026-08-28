@@ -831,7 +831,13 @@ class ImageUpstreamClient:
         if status == 429:
             return ImageRuntimeError("image_rate_limited", "Image service rate limit was reached.", retryable=True, http_status=429)
         if status in {408, 504}:
-            return ImageRuntimeError("image_upstream_timeout", "Image service timed out after dispatch.", retryable=True, http_status=504, outcome_unknown=True)
+            return ImageRuntimeError(
+                "image_upstream_timeout",
+                "Timed out while contacting the image service; delivery and the result are unknown.",
+                retryable=True,
+                http_status=504,
+                outcome_unknown=True,
+            )
         return ImageRuntimeError(
             "image_upstream_http_error",
             "Image service rejected the request.",
@@ -860,9 +866,10 @@ class ImageUpstreamClient:
             if remaining <= 0:
                 raise ImageRuntimeError(
                     "image_upstream_timeout",
-                    "Image service response processing timed out after dispatch.",
+                    "Timed out while processing the image service response; the final result is unknown.",
                     retryable=True,
                     http_status=504,
+                    outcome_unknown=True,
                 )
             if not isinstance(item, dict):
                 raise ImageRuntimeError("image_response_invalid", "Image service returned an invalid image item.")
@@ -962,7 +969,13 @@ class ImageUpstreamClient:
                 reference_edit=reference_image is not None,
             ) from None
         except (TimeoutError, socket.timeout) as exc:
-            raise ImageRuntimeError("image_upstream_timeout", "Image service timed out after dispatch.", retryable=True, http_status=504, outcome_unknown=True) from exc
+            raise ImageRuntimeError(
+                "image_upstream_timeout",
+                "Timed out while contacting the image service; delivery and the result are unknown.",
+                retryable=True,
+                http_status=504,
+                outcome_unknown=True,
+            ) from exc
         except (error.URLError, OSError, http.client.HTTPException) as exc:
             raise ImageRuntimeError("image_upstream_network_error", "Image service connection failed after dispatch.", retryable=True, http_status=502, outcome_unknown=True) from exc
         finally:

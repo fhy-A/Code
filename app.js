@@ -916,6 +916,76 @@ function normalizeImageRouteDispatch(value) {
   };
 }
 
+const IMAGE_ROUTE_CREATE_REBIND_ERROR_CODES = new Set([
+  "image_route_catalog_unavailable",
+  "image_route_stale",
+  "image_route_credentials_unavailable",
+]);
+
+function imageRouteCreateError(errorCode) {
+  const error = new Error(t("imageRouteRebindFailed"));
+  error.code = String(errorCode || "image_route_catalog_unavailable");
+  error.errorCode = error.code;
+  return error;
+}
+
+function resolveReboundImageRoute(catalog, frozenRoute) {
+  const original = normalizeImageRouteDispatch(frozenRoute);
+  if (!original) throw imageRouteCreateError("image_route_not_configured");
+  const route = (Array.isArray(catalog?.routes) ? catalog.routes : []).find((candidate) => (
+    String(candidate?.routeRef || "") === original.routeRef
+    && String(candidate?.connectionId || "") === original.connectionId
+    && String(candidate?.modelId || "") === original.modelId
+  ));
+  if (!route) throw imageRouteCreateError("image_route_not_found");
+  if (route.enabled === false) throw imageRouteCreateError("image_route_disabled");
+  if (route.credentialsAvailable !== true) {
+    throw imageRouteCreateError("image_route_credentials_unavailable");
+  }
+  const rebound = normalizeImageRouteDispatch({
+    ...route,
+    catalogRevision: Math.max(0, Number(catalog?.catalogRevision || 0)),
+  });
+  if (!rebound) throw imageRouteCreateError("image_route_catalog_unavailable");
+  return rebound;
+}
+
+async function createAgentRunWithImageRouteRebind(options = {}) {
+  const request = options.request && typeof options.request === "object"
+    ? options.request
+    : {};
+  const createAgentRun = options.createAgentRun;
+  const refreshImageRoutesForCreate = options.refreshImageRoutes;
+  if (typeof createAgentRun !== "function") throw new Error("AgentRun creator is unavailable");
+  try {
+    return {
+      created: await createAgentRun(request),
+      imageRoute: normalizeImageRouteDispatch(request.imageRoute),
+      rebound: false,
+    };
+  } catch (error) {
+    const errorCode = String(error?.errorCode || error?.code || "");
+    if (
+      !IMAGE_ROUTE_CREATE_REBIND_ERROR_CODES.has(errorCode)
+      || !normalizeImageRouteDispatch(request.imageRoute)
+      || typeof refreshImageRoutesForCreate !== "function"
+    ) throw error;
+    let catalog;
+    try {
+      catalog = await refreshImageRoutesForCreate();
+    } catch (_) {
+      throw imageRouteCreateError("image_route_catalog_unavailable");
+    }
+    const imageRoute = resolveReboundImageRoute(catalog, request.imageRoute);
+    const reboundRequest = { ...request, imageRoute };
+    return {
+      created: await createAgentRun(reboundRequest),
+      imageRoute,
+      rebound: true,
+    };
+  }
+}
+
 function buildRunContext(sessionId, options = {}) {
   const run = ensureSessionRun(sessionId);
   const messages = getSessionMessages(sessionId);
@@ -1577,6 +1647,7 @@ const {
   getSelectedImageRoute,
   initializePlatformAuth,
   initializeImageRoutes,
+  refreshImageRoutes,
   syncPlatformKeysSilently,
   verifyPlatformConnection,
 } = settingsFeature;
@@ -12059,7 +12130,7 @@ async function runServerAgentLoop(ctx) {
     ) {
       throw new Error(t("contextBudgetInsufficient"));
     }
-    const created = await agentRuntime.createAgentRun({
+    const createRequest = {
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
       activeSkillName: ctx.activeSkillName || "",
@@ -12077,7 +12148,18 @@ async function runServerAgentLoop(ctx) {
       cwd: ctx.cwd || "",
       contextBudgetTokens: contextResolution.contextBudgetTokens,
       signal: ctx.run.abortController.signal,
+    };
+    const creation = await createAgentRunWithImageRouteRebind({
+      request: createRequest,
+      createAgentRun: (request) => agentRuntime.createAgentRun(request),
+      refreshImageRoutes: () => refreshImageRoutes(),
     });
+    const created = creation.created;
+    if (creation.rebound) {
+      ctx.imageRoute = creation.imageRoute;
+      const pendingDispatch = ctx.foregroundOriginMessage?.meta?.pendingDispatch;
+      if (pendingDispatch) pendingDispatch.imageRoute = { ...ctx.imageRoute };
+    }
     ctx.agentRunId = String(created.agentRunId || "");
     if (!ctx.agentRunId) throw new Error("Server Agent did not return an agentRunId");
     const onAgentRunCreated = ctx.onAgentRunCreated;

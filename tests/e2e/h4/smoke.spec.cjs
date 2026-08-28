@@ -27855,6 +27855,171 @@ async function generatedAssetResponse(page, assetUrl) {
   }, assetUrl);
 }
 
+async function forceImageRouteStale(h4, selectedRoute, suffix) {
+  const before = await fetchProductionJson(h4.page, "/api/image-routes");
+  expect(before.status).toBe(200);
+  expect(before.body.routes).toHaveLength(1);
+  expect(before.body.routes[0].routeRef).toBe(selectedRoute.routeRef);
+  const changed = await sendProductionJson(
+    h4.page,
+    "/api/image-routes/refresh",
+    "POST",
+    {
+      connections: [{
+        connectionId: selectedRoute.connectionId,
+        name: `${IMAGE_CONNECTION_NAME} stale ${suffix}`,
+        baseUrl: h4.host.ready.fakeUrl,
+        key: "h4-image-synthetic-credential",
+        models: [{ id: IMAGE_MODEL_ID }],
+      }],
+    },
+  );
+  expect(changed.status).toBe(200);
+  expect(changed.body.routes).toHaveLength(1);
+  expect(changed.body.routes[0].routeRef).toBe(selectedRoute.routeRef);
+  expect(changed.body.catalogRevision).toBeGreaterThan(before.body.catalogRevision);
+  return {
+    beforeRevision: Number(before.body.catalogRevision || 0),
+    staleRevision: Number(changed.body.catalogRevision || 0),
+  };
+}
+
+async function exerciseImageRouteCreateRebind(h4, runtime) {
+  await h4.open(runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  const selectedRoute = await configureImageGenerationConnection(h4);
+  const { page } = h4;
+
+  const runCase = async (caseName) => {
+    const revision = await forceImageRouteStale(h4, selectedRoute, caseName);
+    const beforeMetrics = await h4.metrics();
+    const beforeRunIds = [...h4.controlIds().agentRunIds];
+    const boundary = h4.requestBoundary();
+    const createAttempts = [];
+    const captureCreate = (response) => {
+      const request = response.request();
+      if (
+        request.method() !== "POST"
+        || new URL(response.url()).pathname !== "/api/agent/runs"
+      ) return;
+      let body = {};
+      try { body = JSON.parse(request.postData() || "{}"); } catch {}
+      createAttempts.push({
+        status: response.status(),
+        clientRequestId: String(body.clientRequestId || ""),
+        imageRouteRef: String(body.imageRouteRef || ""),
+        imageCatalogRevision: Number(body.imageCatalogRevision || 0),
+      });
+    };
+    page.on("response", captureCreate);
+    await h4.submit(`/imagegen ${IMAGE_GENERATION_USER}`);
+    await waitForImageAuthorization(h4, false);
+    await expect(page.locator("#messages article.msg.assistant").filter({
+      hasText: IMAGE_GENERATION_FINAL,
+    })).toHaveCount(1, { timeout: 30_000 });
+    page.off("response", captureCreate);
+
+    await expect.poll(() => h4.controlIds().agentRunIds.length)
+      .toBe(beforeRunIds.length + 1);
+    const runId = h4.controlIds().agentRunIds.find((id) => !beforeRunIds.includes(id));
+    const run = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(runId)}?cursor=0&wait=0`,
+    );
+    expect(run.status).toBe(200);
+    expect(run.body).toMatchObject({
+      status: "completed",
+      imageRoute: {
+        routeRef: selectedRoute.routeRef,
+        modelId: IMAGE_MODEL_ID,
+      },
+    });
+    expect(String(run.body.clientRequestId || "")).not.toBe("");
+    expect((run.body.toolExecutions || []).filter((entry) => (
+      entry.name === "generate_image" && entry.status === "completed"
+    ))).toHaveLength(1);
+    expect((run.body.events || []).filter((entry) => (
+      entry.type === "authorization_required"
+    ))).toHaveLength(1);
+
+    expect(createAttempts).toEqual([
+      {
+        status: 409,
+        clientRequestId: expect.any(String),
+        imageRouteRef: selectedRoute.routeRef,
+        imageCatalogRevision: revision.beforeRevision,
+      },
+      {
+        status: 201,
+        clientRequestId: expect.any(String),
+        imageRouteRef: selectedRoute.routeRef,
+        imageCatalogRevision: expect.any(Number),
+      },
+    ]);
+    expect(createAttempts[0].clientRequestId).not.toBe("");
+    expect(createAttempts[1].clientRequestId).toBe(createAttempts[0].clientRequestId);
+    expect(createAttempts[1].imageCatalogRevision).toBeGreaterThan(revision.staleRevision);
+    const requests = h4.requestEvidenceSince(boundary);
+    const summary = h4.requestSummarySince(boundary);
+    expect(requests.agentPost).toBe(2);
+    expect(summary["POST /api/image-routes/refresh"]).toBe(1);
+    const afterMetrics = await h4.metrics();
+    expect(afterMetrics.imageRequests.length).toBe(beforeMetrics.imageRequests.length + 1);
+    expect(afterMetrics.chatRequests.length).toBe(beforeMetrics.chatRequests.length + 2);
+    const sessionId = String(await page.locator(
+      "#sessionList .session-row.active button.session-main",
+    ).getAttribute("data-session-id") || "");
+    const session = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    expect((session.body.messages || []).filter((message) => (
+      message.role === "user"
+      && JSON.stringify(message.content || "").includes(IMAGE_GENERATION_USER)
+    ))).toHaveLength(1);
+    return { sessionId, runId };
+  };
+
+  const newSession = await runCase("new-session");
+  const existing = await sendProductionJson(
+    page,
+    "/api/sessions",
+    "POST",
+    { title: `H4 image rebind existing ${runtime}` },
+  );
+  expect(existing.status).toBe(201);
+  const existingSessionId = String(existing.body.id || "");
+  expect(existingSessionId).not.toBe("");
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await page.evaluate(() => {
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+  });
+  await h4.reloadRuntime(runtime);
+  const existingButton = page.locator(
+    `#sessionList button.session-main[data-session-id="${existingSessionId}"]`,
+  );
+  await expect(existingButton).toHaveCount(1);
+  await existingButton.click();
+  await expect(page.locator(
+    `#sessionList .session-row.active[data-session-id="${existingSessionId}"]`,
+  )).toHaveCount(1);
+  const existingSession = await runCase("existing-session");
+  expect(existingSession.sessionId).toBe(existingSessionId);
+  expect(existingSession.runId).not.toBe(newSession.runId);
+  expect(h4.controlIds().agentRunIds).toHaveLength(2);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-image-route-create-rebind`, {
+    runtime,
+    newSessionId: idHash(newSession.sessionId),
+    existingSessionId: idHash(existingSession.sessionId),
+    agentRuns: h4.controlIds().agentRunIds.length,
+    imageRequests: (await h4.metrics()).imageRequests.length,
+  });
+}
+
 async function exerciseImageProductSurface(h4, runtime) {
   await h4.open(runtime);
   await assertFrontendRuntime(h4.page, runtime);
@@ -28728,6 +28893,16 @@ test("bundle independent image generation settings authorize preview edit and cl
 test("direct classic independent image generation settings authorize preview edit and clean assets", async ({ h4 }) => {
   test.setTimeout(120_000);
   await exerciseImageProductSurface(h4, "classic");
+});
+
+test("bundle image route stale create rebinds once for new and existing sessions", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseImageRouteCreateRebind(h4, "bundle");
+});
+
+test("direct classic image route stale create rebinds once for new and existing sessions", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseImageRouteCreateRebind(h4, "classic");
 });
 
 for (const action of ["skip", "cancel"]) {

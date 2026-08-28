@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -691,6 +692,117 @@ class TestImageAgentRuntime(unittest.TestCase):
             self.assertEqual(deleted.status_code, 200)
             with self.assertRaises(image_runtime.ImageRuntimeError):
                 self.assets.read(run["session_id"], asset_id)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+    def test_agent_run_create_can_rebind_empty_runtime_catalog_once_with_same_request_id(self):
+        session_id = self._session("image-rebind-session")
+        frozen_route = {
+            "routeRef": self.route.route_ref,
+            "catalogRevision": self.route.catalog_revision,
+            "modelId": self.route.model_id,
+        }
+        runtime_registry = image_runtime.ImageRouteRegistry(self.registry_path)
+        with runtime_registry._lock:
+            runtime_registry._catalog["routes"] = []
+            runtime_registry._credentials = {}
+            runtime_registry._base_urls = {}
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server_mod.CodeHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        create_payload = {
+            "sessionId": session_id,
+            "clientRequestId": "stable-image-rebind-request",
+            "payload": {
+                "model": "chat-model",
+                "messages": [{"role": "user", "content": "one image request"}],
+            },
+            "baseUrl": "http://127.0.0.1:9/v1",
+            "keys": ["CHAT_SECRET_SENTINEL"],
+            "allowedTools": ["generate_image"],
+            "permissionProfile": "bypass",
+            "imageRouteRef": frozen_route["routeRef"],
+            "imageCatalogRevision": frozen_route["catalogRevision"],
+            "imageModelId": frozen_route["modelId"],
+        }
+        try:
+            with (
+                mock.patch.object(server_mod, "_image_route_registry", runtime_registry),
+                mock.patch.object(server_mod, "_start_agent_worker") as start_worker,
+            ):
+                failed = requests.post(
+                    f"{base}/api/agent/runs", json=create_payload, timeout=3,
+                )
+                self.assertEqual(failed.status_code, 503)
+                self.assertEqual(failed.json()["errorCode"], "image_route_catalog_unavailable")
+                self.assertEqual(server_mod._agent_runs, {})
+                start_worker.assert_not_called()
+
+                refreshed = requests.post(f"{base}/api/image-routes/refresh", json={
+                    "connections": [{
+                        "connectionId": "image-qa",
+                        "name": "Image QA",
+                        "baseUrl": "https://rotated-images.example/v1",
+                        "key": "ROTATED_IMAGE_SECRET_SENTINEL",
+                        "models": [{"id": "image-model-v1"}],
+                    }],
+                }, timeout=3)
+                self.assertEqual(refreshed.status_code, 200)
+                rebound = refreshed.json()
+                self.assertEqual(rebound["routes"][0]["routeRef"], frozen_route["routeRef"])
+                self.assertGreater(
+                    rebound["catalogRevision"], frozen_route["catalogRevision"],
+                )
+
+                retried_payload = {
+                    **create_payload,
+                    "imageCatalogRevision": rebound["catalogRevision"],
+                }
+                created = requests.post(
+                    f"{base}/api/agent/runs", json=retried_payload, timeout=3,
+                )
+                self.assertEqual(created.status_code, 201)
+                run_id = created.json()["agentRunId"]
+                self.assertTrue(run_id)
+                self.assertEqual(len(server_mod._agent_runs), 1)
+                self.assertEqual(
+                    server_mod._agent_runs[run_id]["client_request_id"],
+                    "stable-image-rebind-request",
+                )
+                self.assertEqual(
+                    server_mod._agent_runs[run_id]["image_route"]["catalogRevision"],
+                    rebound["catalogRevision"],
+                )
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    repeats = list(pool.map(
+                        lambda _: requests.post(
+                            f"{base}/api/agent/runs", json=retried_payload, timeout=3,
+                        ),
+                        range(2),
+                    ))
+                self.assertEqual([item.status_code for item in repeats], [201, 201])
+                self.assertEqual(
+                    [item.json()["agentRunId"] for item in repeats],
+                    [run_id, run_id],
+                )
+                self.assertEqual(len(server_mod._agent_runs), 1)
+                start_worker.assert_called_once()
+                serialized = json.dumps({
+                    "failed": failed.json(),
+                    "catalog": rebound,
+                    "created": created.json(),
+                })
+                for secret in (
+                    "CHAT_SECRET_SENTINEL",
+                    "ROTATED_IMAGE_SECRET_SENTINEL",
+                    "rotated-images.example",
+                ):
+                    self.assertNotIn(secret, serialized)
         finally:
             httpd.shutdown()
             httpd.server_close()
