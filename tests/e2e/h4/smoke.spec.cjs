@@ -36,6 +36,18 @@ const IMAGE_BATCH_CALL_ID = "h4-image-batch-full-call";
 const IMAGE_BATCH_PARTIAL_USER = "H4_IMAGE_BATCH_PARTIAL_USER";
 const IMAGE_BATCH_PARTIAL_FINAL = "H4_IMAGE_BATCH_PARTIAL_FINAL";
 const IMAGE_BATCH_PARTIAL_CALL_ID = "h4-image-batch-partial-call";
+const IMAGE_ASSET_WORKFLOW_USER = "H4_IMAGE_ASSET_WORKFLOW_USER";
+const IMAGE_ASSET_WORKFLOW_FINAL = "H4_IMAGE_ASSET_WORKFLOW_FINAL";
+const IMAGE_ASSET_GENERATE_CALL_ID = "h4-image-asset-generate-call";
+const IMAGE_ASSET_EDIT_CALL_ID = "h4-image-asset-edit-call";
+const IMAGE_ASSET_EXPORT_CALL_ID = "h4-image-asset-export-call";
+const IMAGE_ASSET_RENAME_CALL_ID = "h4-image-asset-rename-call";
+const IMAGE_WORKSPACE_EDIT_USER = "H4_IMAGE_WORKSPACE_EDIT_USER";
+const IMAGE_WORKSPACE_EDIT_FINAL = "H4_IMAGE_WORKSPACE_EDIT_FINAL";
+const IMAGE_WORKSPACE_EDIT_CALL_ID = "h4-image-workspace-edit-call";
+const IMAGE_COUNT_GUARD_USER = "H4_IMAGE_COUNT_GUARD_USER";
+const IMAGE_COUNT_GUARD_FINAL = "H4_IMAGE_COUNT_GUARD_FINAL";
+const IMAGE_COUNT_GUARD_CALL_ID = "h4-image-count-guard-call";
 const IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER";
 const IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL";
 const IMAGE_EDIT_UNSUPPORTED_USER = "H4_IMAGE_EDIT_UNSUPPORTED_USER";
@@ -28269,6 +28281,190 @@ async function waitForImageAuthorization(h4, expectedReference, expectedCount = 
   await approve.click();
 }
 
+async function waitForImageAssetAuthorization(h4, expectedPath) {
+  const panel = h4.page.locator("#authorizationPanel");
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  const row = panel.locator(".authorization-row");
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText(expectedPath);
+  const approve = panel.locator('[data-auth-action="approve"]');
+  await expect(approve).toBeEnabled();
+  await approve.click();
+}
+
+async function waitForNewAgentRunId(h4, previousIds) {
+  let runId = "";
+  await expect.poll(() => {
+    runId = h4.controlIds().agentRunIds.find((id) => !previousIds.includes(id)) || "";
+    return runId;
+  }, { timeout: 30_000 }).not.toBe("");
+  return runId;
+}
+
+function boundedToolExecutionResult(execution) {
+  const result = execution?.result;
+  return {
+    toolCallId: String(execution?.toolCallId || ""),
+    status: String(execution?.status || ""),
+    authorizationDecision: String(execution?.authorizationDecision || ""),
+    resultIsObject: Boolean(result && typeof result === "object" && !Array.isArray(result)),
+    ok: result?.ok === true,
+    errorCode: String(result?.errorCode || ""),
+    operation: String(result?.operation || ""),
+    path: String(result?.path || ""),
+    mimeType: String(result?.mimeType || ""),
+    sha256Valid: /^[0-9a-f]{64}$/.test(String(result?.sha256 || "")),
+    byteLength: Math.max(0, Number(result?.byteLength || 0)),
+  };
+}
+
+async function waitForBoundAgentAuthorization(h4, {
+  runId,
+  toolCallId,
+  action,
+  previousAuthorizationId = "",
+  expectedCount = null,
+  expectedReference,
+  expectedPath = "",
+  expectedManageResult = null,
+}) {
+  let binding = null;
+  await expect.poll(async () => {
+    const snapshot = await fetchProductionJson(
+      h4.page,
+      `/api/agent/runs/${encodeURIComponent(runId)}?cursor=0&wait=0`,
+    );
+    const pending = snapshot.body?.pendingAuthorization || {};
+    const execution = (snapshot.body?.toolExecutions || []).find(
+      (entry) => entry.toolCallId === toolCallId,
+    );
+    const authorizationId = String(pending.authorizationId || "");
+    if (execution?.status === "completed" && pending.toolCallId !== toolCallId) {
+      const projection = boundedToolExecutionResult({ ...execution, toolCallId });
+      h4.diagnosticSteps.push({
+        step: "authorization-missing-after-terminal-tool-result",
+        ...projection,
+      });
+      throw new Error(`H4 authorization was skipped after terminal tool result: ${JSON.stringify(projection)}`);
+    }
+    if (
+      snapshot.status !== 200
+      || snapshot.body?.status !== "waiting_authorization"
+      || !authorizationId
+      || authorizationId === previousAuthorizationId
+      || pending.toolCallId !== toolCallId
+      || pending.action !== action
+      || !execution
+    ) {
+      return false;
+    }
+    binding = { authorizationId, execution, snapshot: snapshot.body };
+    return true;
+  }, { timeout: 30_000 }).toBe(true);
+
+  const args = JSON.parse(binding.execution.arguments || "{}");
+  if (expectedCount !== null) expect(args.count).toBe(expectedCount);
+  if (expectedReference === null) expect(args).not.toHaveProperty("reference");
+  if (expectedReference && typeof expectedReference === "object") {
+    expect(args.reference).toEqual(expectedReference);
+  }
+
+  const panel = h4.page.locator("#authorizationPanel");
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  const row = panel.locator(
+    `.authorization-row[data-auth-id="server-authorization-${binding.authorizationId}"]`,
+  );
+  await expect(row).toHaveCount(1);
+  if (expectedCount !== null) {
+    const text = await row.innerText();
+    expect(text).toContain(IMAGE_MODEL_ID);
+    expect(text).toMatch(new RegExp(`${expectedCount} (?:image|\\u5f20)`, "i"));
+    expect(text).toContain("png");
+    expect(text).toMatch(new RegExp(
+      `(?:up to ${expectedCount} independent image requests|\\u6700\\u591a ${expectedCount} \\u6b21\\u72ec\\u7acb\\u56fe\\u7247\\u8bf7\\u6c42)`,
+      "i",
+    ));
+    expect(text).not.toContain("small blue geometric icon");
+    expect(text).not.toContain("Turn the supplied image");
+    if (expectedReference) expect(text).toMatch(/reference edit|\u53c2\u8003\u56fe\u7f16\u8f91/i);
+  }
+  if (expectedPath) await expect(row).toContainText(expectedPath);
+
+  const approve = panel.locator('[data-auth-action="approve"]');
+  await expect(approve).toBeEnabled();
+  await approve.click();
+
+  let completed = null;
+  await expect.poll(async () => {
+    const snapshot = await fetchProductionJson(
+      h4.page,
+      `/api/agent/runs/${encodeURIComponent(runId)}?cursor=0&wait=0`,
+    );
+    const pendingId = String(snapshot.body?.pendingAuthorization?.authorizationId || "");
+    const execution = (snapshot.body?.toolExecutions || []).find(
+      (entry) => entry.toolCallId === toolCallId,
+    );
+    if (
+      snapshot.status !== 200
+      || pendingId === binding.authorizationId
+      || execution?.status !== "completed"
+      || execution?.authorizationDecision !== "approved"
+    ) {
+      return false;
+    }
+    completed = { execution, snapshot: snapshot.body };
+    return true;
+  }, { timeout: 30_000 }).toBe(true);
+  await expect(row).toHaveCount(0);
+  const projection = boundedToolExecutionResult({ ...completed.execution, toolCallId });
+  h4.diagnosticSteps.push({ step: "authorized-tool-result", ...projection });
+  expect(projection.resultIsObject).toBe(true);
+  expect(projection.ok).toBe(true);
+  if (expectedManageResult) {
+    const result = completed.execution.result;
+    const expectedAbsolutePath = path.resolve(
+      h4.host.projectDir,
+      ...expectedManageResult.path.split("/"),
+    );
+    const absolutePathMatches = path.resolve(String(result.absolutePath || ""))
+      === expectedAbsolutePath;
+    const absolutePathWithinProject = expectedAbsolutePath.startsWith(
+      `${path.resolve(h4.host.projectDir)}${path.sep}`,
+    );
+    let fileBytes = null;
+    try {
+      fileBytes = await fs.readFile(expectedAbsolutePath);
+    } catch {}
+    const fileHash = fileBytes
+      ? crypto.createHash("sha256").update(fileBytes).digest("hex")
+      : "";
+    const fileEvidence = {
+      operationMatches: result.operation === expectedManageResult.operation,
+      pathMatches: result.path === expectedManageResult.path,
+      absolutePathMatches,
+      absolutePathWithinProject,
+      mimeValid: /^image\/(?:png|jpeg|webp)$/.test(String(result.mimeType || "")),
+      sha256Valid: /^[0-9a-f]{64}$/.test(String(result.sha256 || "")),
+      byteLengthValid: Number(result.byteLength || 0) > 0,
+      fileExists: Boolean(fileBytes),
+      fileHashMatches: Boolean(fileBytes) && fileHash === result.sha256,
+      fileBytesMatch: Boolean(fileBytes) && fileBytes.length === Number(result.byteLength || 0),
+    };
+    h4.diagnosticSteps.push({
+      step: "managed-image-file-result-verified",
+      toolCallId,
+      ...fileEvidence,
+    });
+    expect(Object.values(fileEvidence).every(Boolean)).toBe(true);
+  }
+  return {
+    authorizationId: binding.authorizationId,
+    arguments: args,
+    execution: completed.execution,
+    snapshot: completed.snapshot,
+  };
+}
+
 async function generatedAssetResponse(page, assetUrl) {
   return page.evaluate(async (url) => {
     const response = await fetch(url, { cache: "no-store" });
@@ -29009,7 +29205,7 @@ async function exerciseImageBatchConcurrency(h4, runtime) {
   const runBatch = async ({ marker, finalText, callId, kind, expectedSucceeded }) => {
     const beforeRunIds = [...h4.controlIds().agentRunIds];
     const beforeMetrics = await h4.metrics();
-    await h4.submit(`/imagegen ${marker}`);
+    await h4.submit(`/imagegen ${marker} make exactly 4 images`);
     await waitForImageAuthorization(h4, false, 4);
     await expect(page.locator("#messages article.msg.assistant").filter({
       hasText: finalText,
@@ -29176,6 +29372,290 @@ async function exerciseImageBatchConcurrency(h4, runtime) {
     partialAssets: partial.assetIds.length,
     upstreamRequests: 8,
     maxConcurrency: 2,
+    restartReplayDelta: 0,
+  });
+}
+
+async function exerciseImageAssetWorkflow(h4, runtime) {
+  await configureConnectionRouteCatalog(h4, runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  await configureImageGenerationConnection(h4);
+  let page = h4.page;
+
+  const initialRunIds = [...h4.controlIds().agentRunIds];
+  const initialMetrics = await h4.metrics();
+  await h4.submit(
+    `/imagegen ${IMAGE_ASSET_WORKFLOW_USER} generate one image, edit that asset once, export it, and rename the workspace copy`,
+  );
+  const workflowRunId = await waitForNewAgentRunId(h4, initialRunIds);
+  const generationApproval = await waitForBoundAgentAuthorization(h4, {
+    runId: workflowRunId,
+    toolCallId: IMAGE_ASSET_GENERATE_CALL_ID,
+    action: "generate_image",
+    expectedCount: 1,
+    expectedReference: null,
+  });
+  const generatedAssetId = String(generationApproval.execution.result?.assets?.[0]?.assetId || "");
+  expect(generatedAssetId).toMatch(/^ga1_[A-Za-z0-9_-]{32,96}$/);
+  const editApproval = await waitForBoundAgentAuthorization(h4, {
+    runId: workflowRunId,
+    toolCallId: IMAGE_ASSET_EDIT_CALL_ID,
+    action: "generate_image",
+    previousAuthorizationId: generationApproval.authorizationId,
+    expectedCount: 1,
+    expectedReference: { type: "generated_asset", id: generatedAssetId },
+  });
+  const exportApproval = await waitForBoundAgentAuthorization(h4, {
+    runId: workflowRunId,
+    toolCallId: IMAGE_ASSET_EXPORT_CALL_ID,
+    action: "manage_generated_image",
+    previousAuthorizationId: editApproval.authorizationId,
+    expectedPath: "output/generated-images/h4-stage-export.png",
+    expectedManageResult: {
+      operation: "export",
+      path: "output/generated-images/h4-stage-export.png",
+    },
+  });
+  await waitForBoundAgentAuthorization(h4, {
+    runId: workflowRunId,
+    toolCallId: IMAGE_ASSET_RENAME_CALL_ID,
+    action: "manage_generated_image",
+    previousAuthorizationId: exportApproval.authorizationId,
+    expectedPath: "output/generated-images/h4-stage-renamed.png",
+    expectedManageResult: {
+      operation: "rename",
+      path: "output/generated-images/h4-stage-renamed.png",
+    },
+  });
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_ASSET_WORKFLOW_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+
+  await expect.poll(() => h4.controlIds().agentRunIds.length)
+    .toBe(initialRunIds.length + 1);
+  const workflowSessionId = String(await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id") || "");
+  expect(workflowSessionId).not.toBe("");
+  const workflowSnapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(workflowRunId)}?cursor=0&wait=0`,
+  );
+  expect(workflowSnapshot.status).toBe(200);
+  const workflowExecutions = workflowSnapshot.body.toolExecutions || [];
+  expect(workflowExecutions.map((entry) => entry.toolCallId)).toEqual([
+    IMAGE_ASSET_GENERATE_CALL_ID,
+    IMAGE_ASSET_EDIT_CALL_ID,
+    IMAGE_ASSET_EXPORT_CALL_ID,
+    IMAGE_ASSET_RENAME_CALL_ID,
+  ]);
+  expect(workflowExecutions.map((entry) => entry.status)).toEqual([
+    "completed", "completed", "completed", "completed",
+  ]);
+  expect(workflowExecutions.map((entry) => entry.authorizationDecision)).toEqual([
+    "approved", "approved", "approved", "approved",
+  ]);
+  const generated = workflowExecutions[0].result.assets[0];
+  const edited = workflowExecutions[1].result.assets[0];
+  expect(generated.assetId).not.toBe(edited.assetId);
+  const exported = workflowExecutions[2].result;
+  const renamed = workflowExecutions[3].result;
+  expect(exported).toMatchObject({
+    ok: true,
+    operation: "export",
+    path: "output/generated-images/h4-stage-export.png",
+  });
+  expect(renamed).toMatchObject({
+    ok: true,
+    operation: "rename",
+    path: "output/generated-images/h4-stage-renamed.png",
+    sha256: exported.sha256,
+  });
+  expect(path.isAbsolute(renamed.absolutePath)).toBe(true);
+  expect(JSON.stringify(workflowSnapshot.body)).not.toMatch(
+    /data[\\/]+generated-assets/i,
+  );
+  const renamedBytes = await fs.readFile(renamed.absolutePath);
+  expect([...renamedBytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  let oldExportExists = true;
+  try {
+    await fs.stat(exported.absolutePath);
+  } catch (error) {
+    oldExportExists = false;
+  }
+  expect(oldExportExists).toBe(false);
+  expect((workflowSnapshot.body.events || []).filter((event) => (
+    event.type === "authorization_required"
+  ))).toHaveLength(4);
+  await expect(page.locator("[data-generated-image-gallery]")).toHaveCount(2);
+
+  const afterWorkflowMetrics = await h4.metrics();
+  const workflowImageRequests = afterWorkflowMetrics.imageRequests.slice(
+    initialMetrics.imageRequests.length,
+  );
+  expect(workflowImageRequests).toHaveLength(2);
+  expect(workflowImageRequests.map((entry) => entry.kind)).toEqual([
+    "generation", "edit",
+  ]);
+  expect(workflowImageRequests.every((entry) => entry.contract.count === 1)).toBe(true);
+
+  await page.locator("#newChat").click();
+  const workspaceBeforeIds = [...h4.controlIds().agentRunIds];
+  await h4.submit(
+    `/imagegen ${IMAGE_WORKSPACE_EDIT_USER} edit output/generated-images/h4-stage-renamed.png once`,
+  );
+  const workspaceRunId = await waitForNewAgentRunId(h4, workspaceBeforeIds);
+  await waitForBoundAgentAuthorization(h4, {
+    runId: workspaceRunId,
+    toolCallId: IMAGE_WORKSPACE_EDIT_CALL_ID,
+    action: "generate_image",
+    expectedCount: 1,
+    expectedReference: {
+      type: "workspace_image",
+      id: "output/generated-images/h4-stage-renamed.png",
+    },
+  });
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_WORKSPACE_EDIT_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  const workspaceSessionId = String(await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id") || "");
+  const workspaceSnapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(workspaceRunId)}?cursor=0&wait=0`,
+  );
+  expect(workspaceSnapshot.status).toBe(200);
+  const workspaceExecution = (workspaceSnapshot.body.toolExecutions || []).find(
+    (entry) => entry.toolCallId === IMAGE_WORKSPACE_EDIT_CALL_ID,
+  );
+  expect(workspaceExecution).toMatchObject({
+    status: "completed",
+    result: { ok: true },
+  });
+  expect(JSON.parse(workspaceExecution.arguments).reference).toEqual({
+    type: "workspace_image",
+    id: "output/generated-images/h4-stage-renamed.png",
+  });
+
+  await page.locator("#newChat").click();
+  const guardBeforeIds = [...h4.controlIds().agentRunIds];
+  const guardBeforeMetrics = await h4.metrics();
+  await h4.submit(`/imagegen ${IMAGE_COUNT_GUARD_USER} create alternatives`);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_COUNT_GUARD_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  const guardRunId = h4.controlIds().agentRunIds.find(
+    (id) => !guardBeforeIds.includes(id),
+  );
+  const guardSessionId = String(await page.locator(
+    "#sessionList .session-row.active button.session-main",
+  ).getAttribute("data-session-id") || "");
+  const guardSnapshot = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(guardRunId)}?cursor=0&wait=0`,
+  );
+  const guardExecution = (guardSnapshot.body.toolExecutions || []).find(
+    (entry) => entry.toolCallId === IMAGE_COUNT_GUARD_CALL_ID,
+  );
+  expect(guardExecution).toMatchObject({
+    status: "completed",
+    result: {
+      ok: false,
+      errorCode: "image_count_not_explicit",
+      requestedCount: 2,
+    },
+  });
+  expect((guardSnapshot.body.events || []).filter((event) => (
+    event.type === "authorization_required"
+  ))).toHaveLength(0);
+  const guardAfterMetrics = await h4.metrics();
+  expect(guardAfterMetrics.imageRequests).toEqual(guardBeforeMetrics.imageRequests);
+
+  // Session navigation intentionally debounces genuine user switches for
+  // 300 ms. Keep each explicit session projection check beyond that boundary.
+  const waitForSessionSwitchDebounce = () => page.waitForTimeout(350);
+  const assertSessionProjection = async ({
+    sessionId, finalText, toolCallId, galleries,
+  }) => {
+    await waitForSessionSwitchDebounce();
+    const button = page.locator(
+      `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+    );
+    await expect(button).toHaveCount(1);
+    await button.click();
+    await expect(page.locator(
+      `#sessionList .session-row.active[data-session-id="${sessionId}"]`,
+    )).toHaveCount(1);
+    await expect(page.locator("#messages article.msg.assistant").filter({
+      hasText: finalText,
+    })).toHaveCount(1);
+    await expect(page.locator(`[data-tool-call-id="${toolCallId}"]`)).toHaveCount(1);
+    await expect(page.locator("[data-generated-image-gallery]")).toHaveCount(galleries);
+  };
+  const sessionProjections = [
+    {
+      sessionId: workflowSessionId,
+      finalText: IMAGE_ASSET_WORKFLOW_FINAL,
+      toolCallId: IMAGE_ASSET_RENAME_CALL_ID,
+      galleries: 2,
+    },
+    {
+      sessionId: workspaceSessionId,
+      finalText: IMAGE_WORKSPACE_EDIT_FINAL,
+      toolCallId: IMAGE_WORKSPACE_EDIT_CALL_ID,
+      galleries: 1,
+    },
+    {
+      sessionId: guardSessionId,
+      finalText: IMAGE_COUNT_GUARD_FINAL,
+      toolCallId: IMAGE_COUNT_GUARD_CALL_ID,
+      galleries: 0,
+    },
+  ];
+
+  const beforeReload = await h4.metrics();
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await page.evaluate(() => {
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+  });
+  await h4.reloadRuntime(runtime);
+  for (const entry of sessionProjections) {
+    await assertSessionProjection(entry);
+  }
+  const afterReload = await h4.metrics();
+  expect(afterReload.imageRequests).toEqual(beforeReload.imageRequests);
+  expect(afterReload.chatRequests).toEqual(beforeReload.chatRequests);
+  expect((await fs.readFile(renamed.absolutePath)).length).toBe(renamed.byteLength);
+
+  await page.close();
+  const transition = await h4.restartGeneration();
+  expect(transition.previousCleanup.childExited).toBe(true);
+  expect(transition.previousCleanup.portsClosed).toEqual([true, true]);
+  page = await h4.replacePage();
+  await configureConnectionRouteCatalog(h4, runtime);
+  for (const entry of sessionProjections) {
+    await assertSessionProjection(entry);
+  }
+  const afterRestart = await h4.metrics();
+  expect(afterRestart.imageRequests).toEqual([]);
+  expect(afterRestart.chatRequests).toEqual([]);
+  expect((await fs.readFile(renamed.absolutePath)).length).toBe(renamed.byteLength);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-image-asset-workflow`, {
+    runtime,
+    workflowSessionId: idHash(workflowSessionId),
+    workspaceSessionId: idHash(workspaceSessionId),
+    guardSessionId: idHash(guardSessionId),
+    imageStages: 3,
+    imageUpstreamRequests: 3,
+    authorizations: 5,
+    exportPath: renamed.path,
+    countGuardUpstreamDelta: 0,
+    reloadReplayDelta: 0,
     restartReplayDelta: 0,
   });
 }
@@ -29649,6 +30129,16 @@ test("bundle image batch uses concurrent single-image upstream operations", asyn
 test("direct classic image batch uses concurrent single-image upstream operations", async ({ h4 }) => {
   test.setTimeout(120_000);
   await exerciseImageBatchConcurrency(h4, "classic");
+});
+
+test("bundle image stages export rename and reuse controlled workspace assets", async ({ h4 }) => {
+  test.setTimeout(150_000);
+  await exerciseImageAssetWorkflow(h4, "bundle");
+});
+
+test("direct classic image stages export rename and reuse controlled workspace assets", async ({ h4 }) => {
+  test.setTimeout(150_000);
+  await exerciseImageAssetWorkflow(h4, "classic");
 });
 
 test("bundle image route stale create rebinds once for new and existing sessions", async ({ h4 }) => {

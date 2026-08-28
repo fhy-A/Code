@@ -44,7 +44,7 @@
     zh: {
       toolListFiles: "列出文件", toolReadFile: "读取文件", toolSearchFiles: "搜索文件",
       toolGlobFiles: "匹配文件", toolProposeEdit: "生成修改方案", toolApplyEdit: "应用修改",
-      toolRunCommand: "执行命令", toolWriteFile: "写入文件", toolDeleteFile: "删除文件",
+      toolRunCommand: "执行命令", toolWriteFile: "写入文件", toolDeleteFile: "删除文件", toolManageGeneratedImage: "转存或重命名图片",
       toolWebFetch: "抓取网页", toolTask: "子任务", toolRequestUserInput: "询问用户", toolUseSkill: "加载 Skill", toolCheckSkillDependencies: "检查 Skill 依赖", toolReadSkill: "读取 Skill 资源", toolSaveMemory: "保存记忆",
       newSession: "+ 新建会话", newSkill: "+ 新建 Skill", sessionTitleDefault: "新会话", untitledSession: "未命名会话",
       skillDesc: "描述", skillKeywords: "关键词", skillTools: "工具", skillPathLabel: "文件路径",
@@ -473,7 +473,7 @@
     en: {
       toolListFiles: "List Files", toolReadFile: "Read File", toolSearchFiles: "Search Files",
       toolGlobFiles: "Glob Files", toolProposeEdit: "Propose Edit", toolApplyEdit: "Apply Edit",
-      toolRunCommand: "Run Command", toolWriteFile: "Write File", toolDeleteFile: "Delete File",
+      toolRunCommand: "Run Command", toolWriteFile: "Write File", toolDeleteFile: "Delete File", toolManageGeneratedImage: "Export or rename image",
       toolWebFetch: "Web Fetch", toolTask: "Sub Task", toolRequestUserInput: "Ask user", toolUseSkill: "Use Skill", toolCheckSkillDependencies: "Check Skill Dependencies", toolReadSkill: "Read Skill Resource", toolSaveMemory: "Save Memory",
       newSession: "+ New Session", newSkill: "+ New Skill", sessionTitleDefault: "New Session", untitledSession: "Untitled",
       skillDesc: "Description", skillKeywords: "Keywords", skillTools: "Tools", skillPathLabel: "File Path",

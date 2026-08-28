@@ -30,7 +30,7 @@
     if (!msg || msg.role !== "tool-result") return false;
     const meta = msg.meta || {};
     const action = meta.action || meta.tool?.action || "";
-    return !!meta.pendingEditId && (["propose_edit", "apply_edit", "write_file", "delete_file"].includes(action) || !!meta.newContent);
+    return !!meta.pendingEditId && (["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"].includes(action) || !!meta.newContent);
   }
 
   function getEditSuggestionInstanceId(meta = {}) {

@@ -3163,7 +3163,7 @@ function _toolActionLabel(action) {
   const map = { list_files:"toolListFiles", read_file:"toolReadFile", search_files:"toolSearchFiles",
     glob_files:"toolGlobFiles", propose_edit:"toolProposeEdit", apply_edit:"toolApplyEdit",
     run_command:"toolRunCommand", write_file:"toolWriteFile", delete_file:"toolDeleteFile",
-    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory", generate_image:"toolGenerateImage" };
+    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory", generate_image:"toolGenerateImage", manage_generated_image:"toolManageGeneratedImage" };
   return map[action] ? t(map[action]) : action;
 }
 
@@ -7680,7 +7680,7 @@ function renderAuthorizationPanel() {
   }
 
   const selectedCount = items.filter((item) => item.selected && !item._finishing).length;
-  const editCount = items.filter((item) => ["propose_edit", "write_file", "delete_file"].includes(item.tool.action)).length;
+  const editCount = items.filter((item) => ["propose_edit", "write_file", "delete_file", "manage_generated_image"].includes(item.tool.action)).length;
   const commandCount = items.filter((item) => item.tool.action === "run_command").length;
   const summary = [editCount ? t("fileOpsCount", { count: editCount }) : "", commandCount ? t("commandsCount", { count: commandCount }) : ""].filter(Boolean).join(" · ");
   const groups = groupAuthorizations(items);
@@ -11679,7 +11679,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
   const toolCallId = String(data.toolCallId || "");
   const toolAction = String(data.name || callMessage?.meta?.action || result?.action || "");
   const resultAction = String(result?.action || toolAction);
-  const editActions = ["propose_edit", "apply_edit", "write_file", "delete_file"];
+  const editActions = ["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"];
   let projection = ctx.messages.find((message) => (
     message?.role === "tool-result"
     && message.meta?.serverManaged
@@ -11697,7 +11697,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
   const applied = Boolean(projection?.meta?.applied)
     || result?.applied === true
     || (delegatedEditCompletion && result?.ok !== false && !projection?.meta?.rejected)
-    || (["write_file", "delete_file"].includes(resultAction) && result?.ok !== false && !result?.rejected);
+    || (["write_file", "delete_file", "manage_generated_image"].includes(resultAction) && result?.ok !== false && !result?.rejected);
   const rejected = Boolean(projection?.meta?.rejected)
     || result?.rejected === true
     || (delegatedEditCompletion && result?.ok === false && !projection?.meta?.applied)
@@ -11892,7 +11892,7 @@ async function requestEmptyResponseContinue(ctx, pendingInput) {
 function ensureServerAuthorizationProjection(ctx, pendingAuthorization) {
   const authorizationId = String(pendingAuthorization.authorizationId || "");
   const authorizationAction = String(pendingAuthorization.action || "propose_edit");
-  if (!["propose_edit", "apply_edit", "write_file", "delete_file"].includes(authorizationAction)) {
+  if (!["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"].includes(authorizationAction)) {
     return "";
   }
   const proposalId = String(pendingAuthorization.proposalId || authorizationId);

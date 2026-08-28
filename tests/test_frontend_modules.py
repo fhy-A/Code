@@ -5350,7 +5350,7 @@ process.stdout.write(JSON.stringify({{
             "const profileAllowedToolNames = getAllowedToolNamesForProfile(",
             "allowedTools: serverToolNames",
             "toolBudgets: skillToolBudgets",
-            '["propose_edit", "apply_edit", "write_file", "delete_file"]',
+            '["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"]',
             'const authorizationAction = String(pendingAuthorization.action || "propose_edit")',
             'command: String(pendingAuthorization.command || "")',
             "projectServerEditToolCompleted(ctx, event, callMessage, result)",
@@ -6796,6 +6796,12 @@ process.stdout.write(JSON.stringify({
   imageRequired: byName.generate_image.function.parameters.required,
   imageReferenceRequired:
     byName.generate_image.function.parameters.properties.reference.required,
+  imageReferenceTypes:
+    byName.generate_image.function.parameters.properties.reference.properties.type.enum,
+  imageAssetProperties:
+    Object.keys(byName.manage_generated_image.function.parameters.properties),
+  imageAssetOperations:
+    byName.manage_generated_image.function.parameters.properties.operation.enum,
 }));
 """
         completed = subprocess.run(
@@ -6811,6 +6817,7 @@ process.stdout.write(JSON.stringify({
             data["names"],
             [
                 "generate_image",
+                "manage_generated_image",
                 "request_user_input",
                 "list_files",
                 "read_file",
@@ -6830,7 +6837,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "dbe734d46a3de24a1d84ef2142cbfd1abfa2ac2bb201a1bedfa42b4c51a08e99",
+            "768d393eb938e34a9208af306b86638cc741de27c6f94723e6137c380d8a627b",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
@@ -6859,6 +6866,15 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(data["imageRequired"], ["prompt"])
         self.assertEqual(data["imageReferenceRequired"], ["type", "id"])
+        self.assertEqual(
+            data["imageReferenceTypes"],
+            ["attachment", "generated_asset", "workspace_image"],
+        )
+        self.assertEqual(
+            data["imageAssetProperties"],
+            ["operation", "assetId", "path", "name"],
+        )
+        self.assertEqual(data["imageAssetOperations"], ["export", "rename"])
         self.assertIn("const nativeTools = [", TOOLS_SOURCE)
         self.assertIn(
             "nativeTools,",
@@ -6882,6 +6898,9 @@ const profiles = Object.fromEntries(
 const firstRead = permissions.getAllowedToolNamesForProfile("read");
 firstRead.add("run_command");
 const secondRead = permissions.getAllowedToolNamesForProfile("read");
+const frozenAcceptTools = [...permissions.getAllowedToolNamesForProfile("accept")];
+const laterBypassTools = permissions.getAllowedToolNamesForProfile("bypass");
+laterBypassTools.add("future_page_only_tool");
 
 process.stdout.write(JSON.stringify({
   frozen: Object.isFrozen(permissions),
@@ -6889,6 +6908,8 @@ process.stdout.write(JSON.stringify({
   unknown: [...permissions.getAllowedToolNamesForProfile("unknown")],
   planFull: [...permissions.getAllowedToolNamesForProfile("plan", "full")],
   readIsolated: !secondRead.has("run_command"),
+  frozenAcceptTools,
+  frozenUnaffectedByLaterProfileChange: !frozenAcceptTools.includes("future_page_only_tool"),
   owners: Object.fromEntries(
     ["read", "plan", "accept", "bypass", "unknown"].map((profile) => [
       profile,
@@ -6908,6 +6929,7 @@ process.stdout.write(JSON.stringify({
         data = json.loads(completed.stdout)
         self.assertTrue(data["frozen"])
         self.assertTrue(data["readIsolated"])
+        self.assertTrue(data["frozenUnaffectedByLaterProfileChange"])
         self.assertEqual(
             data["profiles"]["read"],
             [
@@ -6954,8 +6976,12 @@ process.stdout.write(JSON.stringify({
                 "save_memory",
                 "read_skill_resource",
                 "generate_image",
+                "manage_generated_image",
             ],
         )
+        self.assertEqual(data["frozenAcceptTools"], data["profiles"]["accept"])
+        self.assertNotIn("manage_generated_image", data["profiles"]["read"])
+        self.assertNotIn("manage_generated_image", data["profiles"]["plan"])
         self.assertEqual(data["profiles"]["accept"], data["profiles"]["bypass"])
         self.assertEqual(data["unknown"], data["profiles"]["accept"])
         self.assertNotIn("run_command", data["planFull"])

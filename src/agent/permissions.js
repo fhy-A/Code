@@ -55,6 +55,7 @@
       "save_memory",
       "read_skill_resource",
       "generate_image",
+      "manage_generated_image",
     ]),
     bypass: Object.freeze([
       "request_user_input",
@@ -73,6 +74,7 @@
       "save_memory",
       "read_skill_resource",
       "generate_image",
+      "manage_generated_image",
     ]),
   });
 

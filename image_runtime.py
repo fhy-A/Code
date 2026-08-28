@@ -480,7 +480,9 @@ def normalize_generate_request(payload: dict) -> dict:
             raise ImageRuntimeError("image_reference_invalid", "Image reference identity is invalid.")
         reference_type = str(reference.get("type") or "").strip()
         reference_id = str(reference.get("id") or "").strip()
-        if reference_type not in {"attachment", "generated_asset"} or not reference_id or len(reference_id) > 512:
+        if reference_type not in {
+            "attachment", "generated_asset", "workspace_image",
+        } or not reference_id or len(reference_id) > 512:
             raise ImageRuntimeError("image_reference_invalid", "Image reference identity is invalid.")
         reference = {"type": reference_type, "id": reference_id}
     return {

@@ -107,11 +107,14 @@ class TestImageAgentRuntime(unittest.TestCase):
         server_mod.write_jsonl(server_mod.messages_path(session_id), [])
         return session_id
 
-    def _run(self, permission="bypass", session_id="image-session", route=None):
+    def _run(
+        self, permission="bypass", session_id="image-session", route=None,
+        content="make one image",
+    ):
         self._session(session_id)
         return server_mod._create_agent_run(
             session_id,
-            {"model": "chat-model", "messages": [{"role": "user", "content": "make an image"}]},
+            {"model": "chat-model", "messages": [{"role": "user", "content": content}]},
             "https://chat.example/v1",
             [],
             allowed_tools=["generate_image"],
@@ -271,7 +274,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual((meta["width"], meta["height"]), (3, 2))
 
     def test_count_four_uses_four_single_image_children_with_two_way_concurrency(self):
-        run = self._run(session_id="image-batch-four")
+        run = self._run(session_id="image-batch-four", content="make four images")
         call = self._queue(run, call_id="image-batch-call", arguments={
             "prompt": "four ordered variants",
             "count": 4,
@@ -345,7 +348,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual([asset["width"] for asset in result["assets"]], [2, 3, 4, 5])
 
     def test_batch_partial_success_keeps_order_and_does_not_refill_failed_items(self):
-        run = self._run(session_id="image-batch-partial")
+        run = self._run(session_id="image-batch-partial", content="make four images")
         call = self._queue(run, call_id="image-batch-partial-call", arguments={
             "prompt": "four variants with one ordinary failure",
             "count": 4,
@@ -386,7 +389,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         })
 
     def test_batch_unknown_stops_undispatched_items_without_retry(self):
-        run = self._run(session_id="image-batch-unknown")
+        run = self._run(session_id="image-batch-unknown", content="make four images")
         call = self._queue(run, call_id="image-batch-unknown-call", arguments={
             "prompt": "stop after unknown paid outcome",
             "count": 4,
@@ -432,7 +435,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertTrue(result["items"][3]["notDispatched"])
 
     def test_batch_cancel_stops_new_admission_but_keeps_inflight_successes(self):
-        run = self._run(session_id="image-batch-cancel")
+        run = self._run(session_id="image-batch-cancel", content="make four images")
         call = self._queue(run, call_id="image-batch-cancel-call", arguments={
             "prompt": "cancel remaining variants",
             "count": 4,
@@ -954,7 +957,10 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(len(self.client.calls), 0)
 
     def test_reference_edit_batch_reuses_one_explicit_reference_for_each_child(self):
-        run = self._run(session_id="image-batch-reference-edit")
+        run = self._run(
+            session_id="image-batch-reference-edit",
+            content="make two edits of the explicit reference",
+        )
         attachment = self.attachments / "reference.png"
         attachment.write_bytes(_png(4, 5))
         server_mod.write_jsonl(server_mod.messages_path(run["session_id"]), [{
@@ -983,7 +989,10 @@ class TestImageAgentRuntime(unittest.TestCase):
         })
 
     def test_batch_cancel_between_admissions_does_not_dispatch_next_child(self):
-        run = self._run(session_id="image-batch-cancel-between-admissions")
+        run = self._run(
+            session_id="image-batch-cancel-between-admissions",
+            content="make three images",
+        )
         call = self._queue(run, call_id="image-batch-cancel-between-call", arguments={
             "prompt": "cancel after the first durable admission",
             "count": 3,
@@ -1045,7 +1054,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(len(self.client.calls), 0)
 
     def test_batch_total_size_limit_fails_paid_item_before_asset_save(self):
-        run = self._run(session_id="image-batch-total-size")
+        run = self._run(session_id="image-batch-total-size", content="make two images")
         call = self._queue(run, call_id="image-batch-total-size-call", arguments={
             "prompt": "batch total size limit",
             "count": 2,
@@ -1110,7 +1119,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(meta["operationId"], execution["operationId"])
 
     def test_accept_gate_redacts_prompt_and_reject_is_terminal_for_tool(self):
-        run = self._run(permission="accept")
+        run = self._run(permission="accept", content="make two images")
         call = self._queue(run, arguments={
             "prompt": "PROMPT_SECRET_SENTINEL",
             "count": 2,

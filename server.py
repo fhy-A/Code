@@ -4155,6 +4155,154 @@ def _normalize_agent_image_arguments(arguments):
     return normalize_generate_request(effective)
 
 
+_AGENT_IMAGE_COUNT_WORDS = {
+    "1": 1, "one": 1, "一": 1,
+    "2": 2, "two": 2, "二": 2, "两": 2,
+    "3": 3, "three": 3, "三": 3,
+    "4": 4, "four": 4, "四": 4,
+}
+_AGENT_IMAGE_COUNT_PATTERNS = (
+    re.compile(
+        r"(?<![0-9A-Za-z])(?P<count>[1-4]|one|two|three|four)\s*"
+        r"(?:images?|pictures?|versions?|variants?|edits?|options?|alternatives?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:images?|pictures?|versions?|variants?|edits?|options?|alternatives?)\s*"
+        r"(?:x|:)?\s*(?P<count>[1-4]|one|two|three|four)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?P<count>[一二两三四1-4])\s*(?:张|幅)\s*(?:图片|图像|图)?",
+    ),
+    re.compile(
+        r"(?P<count>[一二两三四1-4])\s*个\s*(?:图片|图像|图|版本|变体|方案)",
+    ),
+    re.compile(
+        r"(?P<count>[一二两三四1-4])\s*(?:版|版本|变体|方案)",
+    ),
+)
+
+
+def _agent_user_text_content(content):
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type in {"text", "input_text"} and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "\n".join(parts)
+
+
+def _agent_current_user_text(messages):
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if (
+            message.get("_agentToolVisionCallId")
+            or message.get("_agentQueueMarker")
+            or (isinstance(message.get("meta"), dict) and message["meta"].get("_system"))
+        ):
+            continue
+        return _agent_user_text_content(message.get("content"))
+    return ""
+
+
+def _agent_explicit_image_count(messages):
+    """Return the exact image count in the current frozen user message.
+
+    A missing exact count returns 1 for the default single-image contract.
+    Ambiguous plural requests return None so count>1 cannot be authorized.
+    """
+    text = _agent_current_user_text(messages).strip()
+    if not text:
+        return 1
+    counts = set()
+    for pattern in _AGENT_IMAGE_COUNT_PATTERNS:
+        for match in pattern.finditer(text):
+            token = str(match.group("count") or "").lower()
+            value = _AGENT_IMAGE_COUNT_WORDS.get(token)
+            if value:
+                counts.add(value)
+    if len(counts) == 1:
+        return next(iter(counts))
+    if len(counts) > 1:
+        return None
+    if re.search(
+        r"(?:多张|多幅|多个(?:版本|变体|方案)?|若干|几张|几个(?:版本|变体|方案)?|"
+        r"\b(?:multiple|several|some|a few)\s+(?:images?|pictures?|versions?|variants?|edits?|options?)\b)",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
+    return 1
+
+
+def _agent_image_count_intent_result(run, call, execution, *, resuming=False):
+    normalized = _normalize_agent_image_arguments(call.get("arguments") or {})
+    requested = int(normalized.get("count") or 1)
+    frozen = execution.get("imageCountIntent")
+    if isinstance(frozen, dict):
+        allowed = frozen.get("allowedCount")
+    elif resuming:
+        # Compatibility for an already-authorized or durably prepared v5 run.
+        allowed = requested
+        execution["imageCountIntent"] = {
+            "version": 1,
+            "requestedCount": requested,
+            "allowedCount": requested,
+            "legacyAuthorized": True,
+        }
+    else:
+        allowed = _agent_explicit_image_count(run.get("messages") or [])
+        execution["imageCountIntent"] = {
+            "version": 1,
+            "requestedCount": requested,
+            "allowedCount": allowed,
+            "legacyAuthorized": False,
+        }
+    if requested == 1:
+        return None
+    if type(allowed) is int and allowed == requested and 2 <= allowed <= 4:
+        return None
+    return {
+        "ok": False,
+        "action": "generate_image",
+        "errorCode": "image_count_not_explicit",
+        "retryable": False,
+        "requestedCount": requested,
+        "error": (
+            "Multiple images require the current user message to state one exact count "
+            "from 2 to 4. Ask the user for the exact number; no image request was sent."
+        ),
+    }
+
+
+def _agent_image_completed_stage_duplicate(run, call, *, exclude_call_id=""):
+    fingerprint = str(call.get("fingerprint") or "")
+    if not fingerprint:
+        return False
+    for tool_call_id, execution in (run.get("tool_executions") or {}).items():
+        if str(tool_call_id or "") == str(exclude_call_id or ""):
+            continue
+        if not isinstance(execution, dict) or execution.get("name") != "generate_image":
+            continue
+        result = execution.get("result")
+        if (
+            execution.get("status") == "completed"
+            and isinstance(result, dict)
+            and result.get("ok") is True
+            and str(execution.get("fingerprint") or "") == fingerprint
+        ):
+            return True
+    return False
+
+
 def _agent_image_effective_fingerprint(call):
     try:
         normalized = _normalize_agent_image_arguments(call.get("arguments") or {})
@@ -5069,7 +5217,22 @@ def _agent_command_authorization_request(run, call):
 def _agent_file_authorization_request(run, call):
     call_id = str(call.get("id") or "")
     action = str((call.get("function") or {}).get("name") or "")
-    preview = prepare_file_mutation_preview(action, call.get("arguments") or {})
+    preview_payload = dict(call.get("arguments") or {})
+    if action == "manage_generated_image":
+        preview_payload.update({
+            "_sessionId": str(run.get("session_id") or ""),
+            "_agentRunId": str(run.get("id") or ""),
+            "_toolCallId": call_id,
+            "_projectRoot": str(run.get("cwd") or ""),
+        })
+    try:
+        preview = prepare_file_mutation_preview(action, preview_payload)
+    except ImageRuntimeError as exc:
+        raise _AgentToolResult({
+            "ok": False,
+            "action": action,
+            **exc.public_payload(),
+        }) from None
     authorization_id = hashlib.sha256(
         f"{run['id']}\0{call_id}\0{call.get('fingerprint') or ''}\0{action}".encode("utf-8")
     ).hexdigest()
@@ -5411,7 +5574,9 @@ def _submit_agent_authorization(run, authorization_id, decision):
         return _submit_agent_child_authorization(run, pending, normalized_decision)
     if pending.get("action") == "run_command":
         return _submit_agent_command_authorization(run, pending, normalized_decision)
-    if pending.get("action") in {"write_file", "delete_file"}:
+    if pending.get("action") in {
+        "write_file", "delete_file", "manage_generated_image",
+    }:
         return _submit_agent_file_authorization(run, pending, normalized_decision)
     if pending.get("action") == "generate_image":
         return _submit_agent_image_authorization(run, pending, normalized_decision)
@@ -6097,6 +6262,28 @@ def _agent_image_reference(run, normalized_request):
     session_id = str(run.get("session_id") or "")
     if reference["type"] == "attachment":
         return _agent_persisted_attachment_reference(session_id, reference["id"])
+    if reference["type"] == "workspace_image":
+        try:
+            project_root = _image_asset_project_root({
+                "_projectRoot": str(run.get("cwd") or ""),
+            })
+            workspace_dir = _image_asset_workspace_dir(project_root, create=False)
+            rel_path = _image_asset_relative_path(reference["id"])
+            target = project_root.joinpath(*rel_path.split("/"))
+            if target.parent != workspace_dir:
+                raise _image_asset_error(
+                    "image_workspace_reference_invalid",
+                    "Workspace image references must stay inside output/generated-images.",
+                )
+            return _image_asset_validated_file(target)
+        except ImageRuntimeError as exc:
+            if exc.code == "image_workspace_reference_invalid":
+                raise
+            raise ImageRuntimeError(
+                "image_workspace_reference_invalid",
+                "Workspace image references must be verified files inside output/generated-images.",
+                retryable=False,
+            ) from None
     data, meta = _generated_asset_repository.read(session_id, reference["id"])
     return validate_image_bytes(data, str(meta.get("mimeType") or ""))
 
@@ -7353,6 +7540,33 @@ def _execute_agent_pending_tools(run):
                 elif spec.get("effect") == "image_generation":
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
+                    count_intent_error = _agent_image_count_intent_result(
+                        run, call, execution, resuming=resuming_image_generation,
+                    )
+                    if count_intent_error:
+                        _persist_agent_run(run)
+                        raise _AgentToolResult(count_intent_error)
+                    if _agent_image_completed_stage_duplicate(
+                        run, call, exclude_call_id=call_id,
+                    ):
+                        blocked = {
+                            "ok": False,
+                            "action": "generate_image",
+                            "errorCode": "image_stage_already_completed",
+                            "retryable": False,
+                            "notReplayed": True,
+                            "error": (
+                                "This exact image stage already completed in the current AgentRun. "
+                                "Reuse its authoritative asset or begin a distinct user-requested edit stage; "
+                                "no new image request was sent."
+                            ),
+                        }
+                        _append_agent_event(run, "tool_retry_blocked", {
+                            "toolCallId": call_id,
+                            "name": name,
+                            "reason": "completed_image_stage_duplicate",
+                        })
+                        raise _AgentToolResult(blocked)
                     retry_blocker = _agent_image_retry_blocker(
                         run, exclude_call_id=call_id,
                     )
@@ -7430,9 +7644,23 @@ def _execute_agent_pending_tools(run):
                     execution["status"] = "applying_file_mutation"
                     _persist_agent_run(run)
                     arguments = {**call["arguments"], "_operationId": operation_id}
-                    result = execute_registered_tool(
-                        name, arguments, _arguments_validated=True,
-                    )
+                    if name == "manage_generated_image":
+                        arguments.update({
+                            "_sessionId": str(run.get("session_id") or ""),
+                            "_agentRunId": str(run.get("id") or ""),
+                            "_toolCallId": call_id,
+                            "_projectRoot": str(run.get("cwd") or ""),
+                        })
+                    try:
+                        result = execute_registered_tool(
+                            name, arguments, _arguments_validated=True,
+                        )
+                    except ImageRuntimeError as exc:
+                        raise _AgentToolResult({
+                            "ok": False,
+                            "action": name,
+                            **exc.public_payload(),
+                        }) from None
                 elif spec.get("effect") == "delegation":
                     result = _execute_agent_delegation(run, call, execution)
                     if result is None:
@@ -12997,6 +13225,586 @@ def _read_delete_receipt(operation_id, rel_path):
     return receipt
 
 
+_IMAGE_WORKSPACE_DIRECTORY = "output/generated-images"
+_IMAGE_ASSET_RECEIPT_SCHEMA = "code-image-asset-mutation/v1"
+_IMAGE_ASSET_EXTENSIONS = {
+    "image/png": {"png"},
+    "image/jpeg": {"jpg", "jpeg"},
+    "image/webp": {"webp"},
+}
+
+
+def _image_asset_error(code, message, *, retryable=False):
+    return ImageRuntimeError(code, message, retryable=retryable)
+
+
+def _image_asset_project_root(payload):
+    raw = str((payload or {}).get("_projectRoot") or _effective_agent_project_root()).strip()
+    if not raw:
+        raise _image_asset_error(
+            "image_asset_project_unavailable",
+            "The frozen project root is unavailable for this image asset operation.",
+        )
+    root = Path(raw).expanduser().resolve(strict=False)
+    if not root.exists() or not root.is_dir():
+        raise _image_asset_error(
+            "image_asset_project_unavailable",
+            "The frozen project root is unavailable for this image asset operation.",
+        )
+    return root
+
+
+def _image_asset_workspace_dir(project_root, *, create=False):
+    current = Path(project_root)
+    for part in ("output", "generated-images"):
+        candidate = current / part
+        if candidate.is_symlink():
+            raise _image_asset_error(
+                "image_asset_symlink_forbidden",
+                "Image asset operations do not follow symbolic links.",
+            )
+        if candidate.exists():
+            if not candidate.is_dir():
+                raise _image_asset_error(
+                    "image_asset_path_invalid",
+                    "The controlled image output directory is unavailable.",
+                )
+        elif create:
+            try:
+                candidate.mkdir()
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise _image_asset_error(
+                    "image_asset_write_failed",
+                    "The controlled image output directory could not be created.",
+                    retryable=True,
+                ) from exc
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise _image_asset_error(
+                    "image_asset_symlink_forbidden",
+                    "Image asset operations do not follow symbolic links.",
+                )
+        current = candidate
+    return current
+
+
+def _image_asset_filename(name, validated):
+    image_sha256 = (
+        str(validated.get("sha256") or "")
+        if isinstance(validated, dict) else validated.sha256
+    )
+    image_extension = (
+        str(validated.get("extension") or "")
+        if isinstance(validated, dict) else validated.extension
+    )
+    image_mime = (
+        str(validated.get("mimeType") or "")
+        if isinstance(validated, dict) else validated.mime_type
+    )
+    raw = str(name or "").strip()
+    if not raw:
+        raw = f"image-{image_sha256[:16]}.{image_extension}"
+    if (
+        len(raw) > 120
+        or raw in {".", ".."}
+        or raw.endswith((" ", "."))
+        or any(char in raw for char in '<>:"/\\|?*\0')
+        or any(ord(char) < 32 for char in raw)
+        or Path(raw).name != raw
+        or Path(raw).stem.upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        }
+    ):
+        raise _image_asset_error(
+            "image_asset_name_invalid",
+            "Image asset names must be plain file names without directories or reserved characters.",
+        )
+    suffix = Path(raw).suffix.lower().lstrip(".")
+    if not suffix:
+        raw = f"{raw}.{image_extension}"
+        suffix = image_extension
+    if suffix not in _IMAGE_ASSET_EXTENSIONS.get(image_mime, set()):
+        raise _image_asset_error(
+            "image_asset_format_mismatch",
+            "The image asset file extension must match the verified image format.",
+        )
+    return raw
+
+
+def _image_asset_relative_path(path):
+    raw = str(path or "").strip().replace("\\", "/")
+    if (
+        not raw
+        or raw.startswith("/")
+        or re.match(r"^[A-Za-z]:", raw)
+        or ":" in raw
+        or raw.split("/")[:2] != ["output", "generated-images"]
+        or len(raw.split("/")) != 3
+        or raw.split("/")[-1] in {"", ".", ".."}
+    ):
+        raise _image_asset_error(
+            "image_asset_path_invalid",
+            "Image asset paths must stay directly inside output/generated-images.",
+        )
+    return raw
+
+
+def _image_asset_validated_file(path, *, expected_sha256=""):
+    target = Path(path)
+    if target.is_symlink():
+        raise _image_asset_error(
+            "image_asset_symlink_forbidden",
+            "Image asset operations do not follow symbolic links.",
+        )
+    if not target.exists() or not target.is_file():
+        raise _image_asset_error(
+            "image_asset_source_missing",
+            "The controlled workspace image was not found.",
+        )
+    try:
+        validated = validate_image_bytes(
+            target.read_bytes(), mimetypes.guess_type(str(target))[0] or "",
+        )
+    except OSError as exc:
+        raise _image_asset_error(
+            "image_asset_read_failed",
+            "The controlled workspace image could not be read.",
+            retryable=True,
+        ) from exc
+    if expected_sha256 and validated.sha256 != str(expected_sha256):
+        raise _image_asset_error(
+            "image_asset_target_conflict",
+            "The target image already exists with different content.",
+        )
+    return validated
+
+
+def _image_asset_receipt_path(operation_id):
+    operation_id = str(operation_id or "")
+    if not operation_id:
+        return None
+    token = hashlib.sha256(
+        f"image-asset\0{operation_id}".encode("utf-8")
+    ).hexdigest()
+    return FILE_BACKUP_DIR / "operations" / f"image-asset-{token}.json"
+
+
+def _read_image_asset_receipt(operation_id):
+    path = _image_asset_receipt_path(operation_id)
+    if not path or not path.is_file():
+        return None
+    value = read_json(path, {})
+    if not isinstance(value, dict) or value.get("schema") != _IMAGE_ASSET_RECEIPT_SCHEMA:
+        return None
+    return value
+
+
+def _write_image_asset_receipt(operation_id, receipt):
+    path = _image_asset_receipt_path(operation_id)
+    if not path:
+        raise _image_asset_error(
+            "image_asset_operation_invalid",
+            "Image asset writes require a durable operation identity.",
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_edit_text(
+        path,
+        json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+    )
+
+
+def _image_asset_receipt_image(receipt):
+    try:
+        mime_type = str(receipt.get("mimeType") or "")
+        extensions = _IMAGE_ASSET_EXTENSIONS[mime_type]
+        sha256 = str(receipt.get("sha256") or "")
+        width = int(receipt.get("width") or 0)
+        height = int(receipt.get("height") or 0)
+        byte_length = int(receipt.get("byteLength") or 0)
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", sha256)
+            or width < 1
+            or height < 1
+            or byte_length < 1
+        ):
+            raise ValueError("invalid image receipt metadata")
+        return {
+            "mimeType": mime_type,
+            "extension": "jpg" if mime_type == "image/jpeg" else sorted(extensions)[0],
+            "width": width,
+            "height": height,
+            "sha256": sha256,
+            "byteLength": byte_length,
+        }
+    except Exception as exc:
+        raise _image_asset_error(
+            "image_asset_receipt_invalid",
+            "The durable image asset operation receipt is invalid.",
+        ) from exc
+
+
+def _image_asset_public_result(
+    operation, rel_path, validated, *, replayed, project_root=None,
+):
+    if isinstance(validated, dict):
+        mime_type = str(validated.get("mimeType") or "")
+        sha256 = str(validated.get("sha256") or "")
+        byte_length = int(validated.get("byteLength") or 0)
+        width = int(validated.get("width") or 0)
+        height = int(validated.get("height") or 0)
+    else:
+        mime_type = validated.mime_type
+        sha256 = validated.sha256
+        byte_length = validated.byte_length
+        width = validated.width
+        height = validated.height
+    return {
+        "ok": True,
+        "action": "manage_generated_image",
+        "operation": operation,
+        "path": rel_path,
+        "absolutePath": str(
+            (Path(project_root or _effective_agent_project_root()) / rel_path).resolve()
+        ),
+        "mimeType": mime_type,
+        "sha256": sha256,
+        "byteLength": byte_length,
+        "width": width,
+        "height": height,
+        "replayed": bool(replayed),
+    }
+
+
+def _image_asset_receipt_record(operation_id, prepared):
+    image = prepared["image"]
+    if isinstance(image, dict):
+        mime_type = image["mimeType"]
+        sha256 = image["sha256"]
+        byte_length = image["byteLength"]
+        width = image["width"]
+        height = image["height"]
+    else:
+        mime_type = image.mime_type
+        sha256 = image.sha256
+        byte_length = image.byte_length
+        width = image.width
+        height = image.height
+    return {
+        "schema": _IMAGE_ASSET_RECEIPT_SCHEMA,
+        "operationId": str(operation_id or ""),
+        "operation": prepared["operation"],
+        "sourceAssetId": prepared.get("sourceAssetId") or "",
+        "sourcePath": prepared.get("sourcePath") or "",
+        "targetPath": prepared["targetPath"],
+        "mimeType": mime_type,
+        "sha256": sha256,
+        "byteLength": int(byte_length),
+        "width": int(width),
+        "height": int(height),
+        "targetExisted": bool(prepared.get("targetExisted")),
+        "status": "prepared",
+        "preparedAt": now_iso(),
+    }
+
+
+def _image_asset_receipt_matches(receipt, expected):
+    fields = (
+        "operationId", "operation", "sourceAssetId", "sourcePath",
+        "targetPath", "mimeType", "sha256", "byteLength", "width", "height",
+        "targetExisted",
+    )
+    return all(receipt.get(field) == expected.get(field) for field in fields)
+
+
+def _prepare_image_asset_mutation(payload, *, receipt=None, create_directory=False):
+    body = dict(payload or {})
+    operation = str(body.get("operation") or "").strip().lower()
+    if operation not in {"export", "rename"}:
+        raise _image_asset_error(
+            "image_asset_operation_invalid",
+            "Image asset operation must be export or rename.",
+        )
+    project_root = _image_asset_project_root(body)
+    workspace_dir = _image_asset_workspace_dir(
+        project_root, create=create_directory,
+    )
+    if workspace_dir.is_symlink():
+        raise _image_asset_error(
+            "image_asset_symlink_forbidden",
+            "Image asset operations do not follow symbolic links.",
+        )
+
+    if operation == "export":
+        session_id = str(body.get("_sessionId") or "")
+        asset_id = str(body.get("assetId") or "").strip()
+        if not session_id or not asset_id:
+            raise _image_asset_error(
+                "image_asset_source_invalid",
+                "Export requires one current-Session generated asset identity.",
+            )
+        image = None
+        data = b""
+        try:
+            with _session_lifecycle_lock(session_id):
+                data, meta = _generated_asset_repository.read(session_id, asset_id)
+            image = validate_image_bytes(data, str(meta.get("mimeType") or ""))
+        except ImageRuntimeError:
+            if not (
+                isinstance(receipt, dict)
+                and receipt.get("operation") == "export"
+                and receipt.get("sourceAssetId") == asset_id
+            ):
+                raise
+            image = _image_asset_receipt_image(receipt)
+        requested_name = str(body.get("name") or "").strip()
+        if receipt and not requested_name:
+            file_name = Path(str(receipt.get("targetPath") or "")).name
+        else:
+            file_name = _image_asset_filename(requested_name, image)
+        target_path = f"{_IMAGE_WORKSPACE_DIRECTORY}/{file_name}"
+        if receipt and str(receipt.get("targetPath") or "") != target_path:
+            raise _image_asset_error(
+                "image_asset_operation_conflict",
+                "The durable image asset operation identity is already bound to different arguments.",
+            )
+        target = workspace_dir / file_name
+        if target.is_symlink():
+            raise _image_asset_error(
+                "image_asset_symlink_forbidden",
+                "Image asset operations do not follow symbolic links.",
+            )
+        if target.exists():
+            _image_asset_validated_file(
+                target,
+                expected_sha256=(
+                    image["sha256"] if isinstance(image, dict) else image.sha256
+                ),
+            )
+        return {
+            "operation": operation,
+            "projectRoot": project_root,
+            "workspaceDir": workspace_dir,
+            "sourceAssetId": asset_id,
+            "sourceData": data,
+            "sourcePath": "",
+            "target": target,
+            "targetPath": target_path,
+            "targetExisted": (
+                bool(receipt.get("targetExisted")) if receipt else target.exists()
+            ),
+            "image": image,
+        }
+
+    source_path = _image_asset_relative_path(body.get("path"))
+    source = project_root.joinpath(*source_path.split("/"))
+    if source.parent != workspace_dir:
+        raise _image_asset_error(
+            "image_asset_path_invalid",
+            "Image asset paths must stay directly inside output/generated-images.",
+        )
+    if source.is_symlink():
+        raise _image_asset_error(
+            "image_asset_symlink_forbidden",
+            "Image asset operations do not follow symbolic links.",
+        )
+    if source.exists():
+        image = _image_asset_validated_file(source)
+    elif (
+        isinstance(receipt, dict)
+        and receipt.get("operation") == "rename"
+        and receipt.get("sourcePath") == source_path
+    ):
+        image = _image_asset_receipt_image(receipt)
+    else:
+        raise _image_asset_error(
+            "image_asset_source_missing",
+            "The controlled workspace image was not found.",
+        )
+    file_name = _image_asset_filename(body.get("name"), image)
+    target_path = f"{_IMAGE_WORKSPACE_DIRECTORY}/{file_name}"
+    if receipt and str(receipt.get("targetPath") or "") != target_path:
+        raise _image_asset_error(
+            "image_asset_operation_conflict",
+            "The durable image asset operation identity is already bound to different arguments.",
+        )
+    target = workspace_dir / file_name
+    if target.is_symlink():
+        raise _image_asset_error(
+            "image_asset_symlink_forbidden",
+            "Image asset operations do not follow symbolic links.",
+        )
+    if target.exists():
+        _image_asset_validated_file(
+            target,
+            expected_sha256=(image["sha256"] if isinstance(image, dict) else image.sha256),
+        )
+    return {
+        "operation": operation,
+        "projectRoot": project_root,
+        "workspaceDir": workspace_dir,
+        "sourceAssetId": "",
+        "sourceData": b"",
+        "source": source,
+        "sourcePath": source_path,
+        "target": target,
+        "targetPath": target_path,
+        "targetExisted": (
+            bool(receipt.get("targetExisted")) if receipt else target.exists()
+        ),
+        "image": image,
+    }
+
+
+def _image_asset_atomic_export(prepared, operation_id):
+    target = prepared["target"]
+    image = prepared["image"]
+    expected = image["sha256"] if isinstance(image, dict) else image.sha256
+    if target.exists():
+        return True
+    data = bytes(prepared.get("sourceData") or b"")
+    if not data:
+        raise _image_asset_error(
+            "image_asset_source_missing",
+            "The generated asset is no longer available for export.",
+        )
+    token = hashlib.sha256(str(operation_id).encode("utf-8")).hexdigest()[:16]
+    temp_path = target.parent / f".{target.name}.{token}.tmp"
+    if temp_path.is_symlink():
+        raise _image_asset_error(
+            "image_asset_symlink_forbidden",
+            "Image asset operations do not follow symbolic links.",
+        )
+    try:
+        if temp_path.exists():
+            temp_path.unlink()
+        with temp_path.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _image_asset_validated_file(temp_path, expected_sha256=expected)
+        try:
+            os.link(temp_path, target)
+        except FileExistsError:
+            _image_asset_validated_file(target, expected_sha256=expected)
+            return True
+        return False
+    except ImageRuntimeError:
+        raise
+    except OSError as exc:
+        raise _image_asset_error(
+            "image_asset_write_failed",
+            "The image could not be written to the controlled workspace directory.",
+            retryable=True,
+        ) from exc
+    finally:
+        try:
+            if temp_path.exists() and not temp_path.is_symlink():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def execute_manage_generated_image_tool(payload):
+    body = dict(payload or {})
+    operation_id = str(body.pop("_operationId", "") or "")
+    receipt = _read_image_asset_receipt(operation_id)
+    with _edit_apply_lock:
+        prepared = _prepare_image_asset_mutation(
+            body, receipt=receipt, create_directory=True,
+        )
+        expected_receipt = _image_asset_receipt_record(operation_id, prepared)
+        if receipt and not _image_asset_receipt_matches(receipt, expected_receipt):
+            raise _image_asset_error(
+                "image_asset_operation_conflict",
+                "The durable image asset operation identity is already bound to different arguments.",
+            )
+        if not receipt:
+            try:
+                _write_image_asset_receipt(operation_id, expected_receipt)
+            except OSError as exc:
+                raise _image_asset_error(
+                    "image_asset_write_failed",
+                    "The image asset operation could not be prepared durably.",
+                    retryable=True,
+                ) from exc
+
+        image = prepared["image"]
+        expected_hash = image["sha256"] if isinstance(image, dict) else image.sha256
+        replayed = False
+        if prepared["operation"] == "export":
+            replayed = _image_asset_atomic_export(prepared, operation_id)
+        else:
+            source = prepared["source"]
+            target = prepared["target"]
+            if source == target:
+                replayed = True
+            elif target.exists():
+                _image_asset_validated_file(target, expected_sha256=expected_hash)
+                if source.exists():
+                    _image_asset_validated_file(source, expected_sha256=expected_hash)
+                    try:
+                        source.unlink()
+                    except OSError as exc:
+                        if not prepared.get("targetExisted"):
+                            try:
+                                target.unlink()
+                            except OSError:
+                                pass
+                        raise _image_asset_error(
+                            "image_asset_write_failed",
+                            "The controlled workspace image could not be renamed.",
+                            retryable=True,
+                        ) from exc
+                replayed = True
+            else:
+                if not source.exists():
+                    raise _image_asset_error(
+                        "image_asset_source_missing",
+                        "The controlled workspace image was not found.",
+                    )
+                linked_target = False
+                try:
+                    os.link(source, target)
+                    linked_target = True
+                    source.unlink()
+                except FileExistsError:
+                    _image_asset_validated_file(target, expected_sha256=expected_hash)
+                    if source.exists():
+                        source.unlink()
+                    replayed = True
+                except OSError as exc:
+                    if linked_target and source.exists():
+                        try:
+                            target.unlink()
+                        except OSError:
+                            pass
+                    raise _image_asset_error(
+                        "image_asset_write_failed",
+                        "The controlled workspace image could not be renamed.",
+                        retryable=True,
+                    ) from exc
+
+        final_image = _image_asset_validated_file(
+            prepared["target"], expected_sha256=expected_hash,
+        )
+        completed_receipt = dict(expected_receipt)
+        completed_receipt.update({"status": "completed", "completedAt": now_iso()})
+        try:
+            _write_image_asset_receipt(operation_id, completed_receipt)
+        except OSError:
+            # The prepared receipt plus the verified target is sufficient for
+            # deterministic restart recovery.
+            pass
+        return _image_asset_public_result(
+            prepared["operation"], prepared["targetPath"], final_image,
+            replayed=replayed,
+            project_root=prepared["projectRoot"],
+        )
+
+
 def _prepare_write_file_data(payload):
     payload = dict(payload or {})
     path = str(payload.get("path") or "").strip()
@@ -13040,6 +13848,19 @@ def _prepare_delete_file_data(payload):
 
 
 def prepare_file_mutation_preview(action, payload):
+    if action == "manage_generated_image":
+        prepared = _prepare_image_asset_mutation(payload, create_directory=False)
+        verb = "Export generated image" if prepared["operation"] == "export" else "Rename workspace image"
+        return {
+            "action": action,
+            "path": prepared["targetPath"],
+            "diff": f"{verb} -> {prepared['targetPath']}",
+            "size": (
+                prepared["image"]["byteLength"]
+                if isinstance(prepared["image"], dict)
+                else prepared["image"].byte_length
+            ),
+        }
     if action == "write_file":
         _, rel, old_content, content = _prepare_write_file_data(payload)
         diff = make_unified_diff(old_content, content, rel)
@@ -16327,7 +17148,7 @@ _SERVER_TOOL_DEFINITIONS = {
                     "reference": {
                         "type": "object",
                         "properties": {
-                            "type": {"type": "string", "enum": ["attachment", "generated_asset"]},
+                            "type": {"type": "string", "enum": ["attachment", "generated_asset", "workspace_image"]},
                             "id": {"type": "string", "minLength": 1, "maxLength": 512},
                         },
                         "required": ["type", "id"],
@@ -16336,6 +17157,37 @@ _SERVER_TOOL_DEFINITIONS = {
                     "count": {"type": "integer", "minimum": 1, "maximum": 4},
                 },
                 "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "manage_generated_image": {
+        "type": "function",
+        "function": {
+            "name": "manage_generated_image",
+            "description": (
+                "On explicit user request, export one current-Session generated asset to "
+                "output/generated-images or rename one verified image already in that directory. "
+                "Never invent a path or move the internal generated-asset cache."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "enum": ["export", "rename"]},
+                    "assetId": {
+                        "type": "string", "minLength": 1, "maxLength": 128,
+                        "description": "Current-Session generated asset ID for export.",
+                    },
+                    "path": {
+                        "type": "string", "minLength": 1, "maxLength": 512,
+                        "description": "Source path for rename; directly inside output/generated-images.",
+                    },
+                    "name": {
+                        "type": "string", "minLength": 1, "maxLength": 120,
+                        "description": "Optional export name or new rename name, without directories.",
+                    },
+                },
+                "required": ["operation"],
                 "additionalProperties": False,
             },
         },
@@ -16719,6 +17571,13 @@ SERVER_TOOL_REGISTRY = {
         "idempotent": False,
         "background": True,
     },
+    "manage_generated_image": {
+        "execute": execute_manage_generated_image_tool,
+        "definition": _SERVER_TOOL_DEFINITIONS["manage_generated_image"],
+        "effect": "file_mutation",
+        "idempotent": True,
+        "background": True,
+    },
     "write_file": {
         "execute": lambda payload: execute_write_file_tool(payload),
         "definition": _SERVER_TOOL_DEFINITIONS["write_file"],
@@ -16783,8 +17642,12 @@ def execute_registered_tool(action, payload, *, _arguments_validated=False):
         raise ValueError("tool payload must be an object")
     if not _arguments_validated:
         validation_payload = dict(payload)
-        if action in {"write_file", "delete_file"}:
+        if action in {"write_file", "delete_file", "manage_generated_image"}:
             validation_payload.pop("_operationId", None)
+            validation_payload.pop("_sessionId", None)
+            validation_payload.pop("_agentRunId", None)
+            validation_payload.pop("_toolCallId", None)
+            validation_payload.pop("_projectRoot", None)
         errors = _registered_tool_argument_errors(action, validation_payload)
         if errors:
             raise ValueError(_format_tool_argument_error(action, errors))

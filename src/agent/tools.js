@@ -33,7 +33,7 @@ const nativeTools = [
 
             properties: {
 
-              type: { type: "string", enum: ["attachment", "generated_asset"] },
+              type: { type: "string", enum: ["attachment", "generated_asset", "workspace_image"] },
 
               id: { type: "string", minLength: 1, maxLength: 512 },
 
@@ -50,6 +50,42 @@ const nativeTools = [
         },
 
         required: ["prompt"],
+
+        additionalProperties: false,
+
+      },
+
+    },
+
+  },
+
+  {
+
+    type: "function",
+
+    function: {
+
+      name: "manage_generated_image",
+
+      description: "On explicit user request, export one current-Session generated asset to output/generated-images or rename one verified image already in that directory. Never invent a path or move the internal generated-asset cache.",
+
+      parameters: {
+
+        type: "object",
+
+        properties: {
+
+          operation: { type: "string", enum: ["export", "rename"] },
+
+          assetId: { type: "string", minLength: 1, maxLength: 128 },
+
+          path: { type: "string", minLength: 1, maxLength: 512 },
+
+          name: { type: "string", minLength: 1, maxLength: 120 },
+
+        },
+
+        required: ["operation"],
 
         additionalProperties: false,
 

@@ -70,6 +70,18 @@ IMAGE_BATCH_CALL_ID = "h4-image-batch-full-call"
 IMAGE_BATCH_PARTIAL_USER = "H4_IMAGE_BATCH_PARTIAL_USER"
 IMAGE_BATCH_PARTIAL_FINAL = "H4_IMAGE_BATCH_PARTIAL_FINAL"
 IMAGE_BATCH_PARTIAL_CALL_ID = "h4-image-batch-partial-call"
+IMAGE_ASSET_WORKFLOW_USER = "H4_IMAGE_ASSET_WORKFLOW_USER"
+IMAGE_ASSET_WORKFLOW_FINAL = "H4_IMAGE_ASSET_WORKFLOW_FINAL"
+IMAGE_ASSET_GENERATE_CALL_ID = "h4-image-asset-generate-call"
+IMAGE_ASSET_EDIT_CALL_ID = "h4-image-asset-edit-call"
+IMAGE_ASSET_EXPORT_CALL_ID = "h4-image-asset-export-call"
+IMAGE_ASSET_RENAME_CALL_ID = "h4-image-asset-rename-call"
+IMAGE_WORKSPACE_EDIT_USER = "H4_IMAGE_WORKSPACE_EDIT_USER"
+IMAGE_WORKSPACE_EDIT_FINAL = "H4_IMAGE_WORKSPACE_EDIT_FINAL"
+IMAGE_WORKSPACE_EDIT_CALL_ID = "h4-image-workspace-edit-call"
+IMAGE_COUNT_GUARD_USER = "H4_IMAGE_COUNT_GUARD_USER"
+IMAGE_COUNT_GUARD_FINAL = "H4_IMAGE_COUNT_GUARD_FINAL"
+IMAGE_COUNT_GUARD_CALL_ID = "h4-image-count-guard-call"
 IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER"
 IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL"
 IMAGE_EDIT_CALL_ID = "h4-image-edit-call"
@@ -816,6 +828,28 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if message.get("role") == "tool":
             completed_tool_call_ids.add(str(message.get("tool_call_id") or ""))
     joined_user_text = "\n".join(user_texts)
+    if IMAGE_ASSET_WORKFLOW_USER in joined_user_text:
+        if IMAGE_ASSET_RENAME_CALL_ID in completed_tool_call_ids:
+            return "image-asset-workflow-final", True
+        if IMAGE_ASSET_EXPORT_CALL_ID in completed_tool_call_ids:
+            return "image-asset-rename-call", True
+        if IMAGE_ASSET_EDIT_CALL_ID in completed_tool_call_ids:
+            return "image-asset-export-call", True
+        if IMAGE_ASSET_GENERATE_CALL_ID in completed_tool_call_ids:
+            return "image-asset-edit-call", True
+        return "image-asset-generate-call", False
+    if IMAGE_WORKSPACE_EDIT_USER in joined_user_text:
+        completed = IMAGE_WORKSPACE_EDIT_CALL_ID in completed_tool_call_ids
+        return (
+            "image-workspace-edit-final" if completed else "image-workspace-edit-call",
+            completed,
+        )
+    if IMAGE_COUNT_GUARD_USER in joined_user_text:
+        completed = IMAGE_COUNT_GUARD_CALL_ID in completed_tool_call_ids
+        return (
+            "image-count-guard-final" if completed else "image-count-guard-call",
+            completed,
+        )
     if IMAGE_BATCH_PARTIAL_USER in joined_user_text:
         completed = IMAGE_BATCH_PARTIAL_CALL_ID in completed_tool_call_ids
         return (
@@ -2058,6 +2092,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 request_contract = {
                     "modelMatches": model_matches,
                     "multipart": "multipart/form-data" in str(self.headers.get("Content-Type") or ""),
+                    "count": 1 if b'name="n"\r\n\r\n1\r\n' in raw_body else 0,
                     "referencePresent": b'name="image"' in raw_body,
                     "responseFormatPresent": b'name="response_format"' in raw_body,
                     "sizePresent": b'name="size"' in raw_body,
@@ -2712,6 +2747,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "image-edit-call",
             "image-edit-unsupported-call",
             "image-edit-unsupported-retry",
+            "image-asset-generate-call", "image-asset-edit-call",
+            "image-asset-export-call", "image-asset-rename-call",
+            "image-workspace-edit-call", "image-count-guard-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2802,10 +2840,13 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             elif scenario in {
                 "image-generation-call", "image-edit-call", "image-edit-unsupported-call",
                 "image-edit-unsupported-retry", "image-batch-call", "image-batch-partial-call",
+                "image-asset-generate-call", "image-asset-edit-call",
+                "image-workspace-edit-call", "image-count-guard-call",
             }:
                 is_edit_scenario = scenario in {
                     "image-edit-call", "image-edit-unsupported-call",
-                    "image-edit-unsupported-retry",
+                    "image-edit-unsupported-retry", "image-asset-edit-call",
+                    "image-workspace-edit-call",
                 }
                 if scenario == "image-batch-partial-call":
                     call_id = IMAGE_BATCH_PARTIAL_CALL_ID
@@ -2822,6 +2863,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 elif scenario == "image-edit-call":
                     call_id = IMAGE_EDIT_CALL_ID
                     prompt = "Turn the supplied image into a blue geometric icon"
+                elif scenario == "image-asset-edit-call":
+                    call_id = IMAGE_ASSET_EDIT_CALL_ID
+                    prompt = "Edit the authoritative first-stage asset into a blue version"
+                elif scenario == "image-workspace-edit-call":
+                    call_id = IMAGE_WORKSPACE_EDIT_CALL_ID
+                    prompt = "Edit the controlled workspace image in a new Session"
+                elif scenario == "image-count-guard-call":
+                    call_id = IMAGE_COUNT_GUARD_CALL_ID
+                    prompt = "Model guessed multiple alternatives without an explicit user count"
+                elif scenario == "image-asset-generate-call":
+                    call_id = IMAGE_ASSET_GENERATE_CALL_ID
+                    prompt = "Create the first-stage image asset"
                 else:
                     call_id = IMAGE_GENERATION_CALL_ID
                     prompt = "A small blue geometric icon on a transparent background"
@@ -2829,18 +2882,28 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "prompt": prompt,
                     "size": "1024x1024",
                     "quality": "hd",
-                    "count": 4 if scenario in {"image-batch-call", "image-batch-partial-call"} else 1,
+                    "count": (
+                        4 if scenario in {"image-batch-call", "image-batch-partial-call"}
+                        else (2 if scenario == "image-count-guard-call" else 1)
+                    ),
                     "outputFormat": "webp" if scenario == "image-edit-unsupported-retry" else "png",
                 }
-                if is_edit_scenario:
+                if scenario == "image-workspace-edit-call":
+                    arguments["reference"] = {
+                        "type": "workspace_image",
+                        "id": "output/generated-images/h4-stage-renamed.png",
+                    }
+                elif is_edit_scenario:
                     serialized_messages = json.dumps(
                         payload.get("messages") or [], ensure_ascii=False,
                     )
-                    asset_match = re.search(r"ga1_[A-Za-z0-9_-]{32,96}", serialized_messages)
-                    if asset_match:
+                    asset_matches = list(dict.fromkeys(
+                        re.findall(r"ga1_[A-Za-z0-9_-]{32,96}", serialized_messages)
+                    ))
+                    if asset_matches:
                         arguments["reference"] = {
                             "type": "generated_asset",
-                            "id": asset_match.group(0),
+                            "id": asset_matches[-1],
                         }
                 tool_calls = [{
                     "index": 0,
@@ -2848,6 +2911,36 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "type": "function",
                     "function": {
                         "name": "generate_image",
+                        "arguments": json.dumps(arguments, separators=(",", ":")),
+                    },
+                }]
+            elif scenario in {"image-asset-export-call", "image-asset-rename-call"}:
+                serialized_messages = json.dumps(
+                    payload.get("messages") or [], ensure_ascii=False,
+                )
+                asset_matches = list(dict.fromkeys(
+                    re.findall(r"ga1_[A-Za-z0-9_-]{32,96}", serialized_messages)
+                ))
+                if scenario == "image-asset-export-call":
+                    call_id = IMAGE_ASSET_EXPORT_CALL_ID
+                    arguments = {
+                        "operation": "export",
+                        "assetId": asset_matches[-1] if asset_matches else "missing",
+                        "name": "h4-stage-export.png",
+                    }
+                else:
+                    call_id = IMAGE_ASSET_RENAME_CALL_ID
+                    arguments = {
+                        "operation": "rename",
+                        "path": "output/generated-images/h4-stage-export.png",
+                        "name": "h4-stage-renamed.png",
+                    }
+                tool_calls = [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "manage_generated_image",
                         "arguments": json.dumps(arguments, separators=(",", ":")),
                     },
                 }]
@@ -3325,6 +3418,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "image-generation-final": IMAGE_GENERATION_FINAL,
                 "image-batch-final": IMAGE_BATCH_FINAL,
                 "image-batch-partial-final": IMAGE_BATCH_PARTIAL_FINAL,
+                "image-asset-workflow-final": IMAGE_ASSET_WORKFLOW_FINAL,
+                "image-workspace-edit-final": IMAGE_WORKSPACE_EDIT_FINAL,
+                "image-count-guard-final": IMAGE_COUNT_GUARD_FINAL,
                 "image-edit-final": IMAGE_EDIT_FINAL,
                 "image-edit-unsupported-final": IMAGE_EDIT_UNSUPPORTED_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
@@ -4530,6 +4626,56 @@ def main() -> int:
                 METRICS.increment("unsafeToolRequests")
                 raise ValueError("H4 propose_edit fixture precondition changed")
             return delegate_propose_edit_to_production(
+                action,
+                payload,
+                _arguments_validated=_arguments_validated,
+            )
+        if action == "manage_generated_image":
+            body = payload if isinstance(payload, dict) else {}
+            operation = str(body.get("operation") or "")
+            public = {
+                key: value for key, value in body.items()
+                if not str(key).startswith("_")
+            }
+            expected = (
+                {
+                    "operation": "export",
+                    "assetId": str(body.get("assetId") or ""),
+                    "name": "h4-stage-export.png",
+                }
+                if operation == "export"
+                else {
+                    "operation": "rename",
+                    "path": "output/generated-images/h4-stage-export.png",
+                    "name": "h4-stage-renamed.png",
+                }
+            )
+            internal_keys = {
+                "_operationId", "_sessionId", "_agentRunId", "_toolCallId", "_projectRoot",
+            }
+            asset_id = str(body.get("assetId") or "")
+            if (
+                operation not in {"export", "rename"}
+                or public != expected
+                or set(body) != set(expected) | internal_keys
+                or not all(str(body.get(key) or "") for key in internal_keys)
+                or str(body.get("_projectRoot") or "") != str(project_dir)
+                or (
+                    operation == "export"
+                    and not re.fullmatch(r"ga1_[A-Za-z0-9_-]{32,96}", asset_id)
+                )
+                or (
+                    operation == "export"
+                    and str(body.get("_toolCallId") or "") != IMAGE_ASSET_EXPORT_CALL_ID
+                )
+                or (
+                    operation == "rename"
+                    and str(body.get("_toolCallId") or "") != IMAGE_ASSET_RENAME_CALL_ID
+                )
+            ):
+                METRICS.increment("unsafeToolRequests")
+                raise ValueError("H4 managed image asset request changed the fixed contract")
+            return original_execute_registered_tool(
                 action,
                 payload,
                 _arguments_validated=_arguments_validated,
