@@ -18478,35 +18478,46 @@ class CodeHandler(BaseHTTPRequestHandler):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
             with _json_write_lock:
-                path = session_path(session_id)
-                jpath = messages_path(session_id)
-                session = read_json(path, {}) if path.exists() else {}
-                parent_id = session.get("_parentId")
-                child_ids = [
-                    str(child_id)
-                    for child_id in (session.get("_branches") or [])
-                    if isinstance(child_id, str)
-                ]
-                deleted_depth = session.get("_branchDepth", 0)
-                related_paths = []
-                if parent_id:
-                    related_paths.append(session_path(parent_id))
-                related_paths.extend(session_path(child_id) for child_id in child_ids)
-                snapshots = {
-                    path: _path_snapshot(path),
-                    jpath: _path_snapshot(jpath),
-                    _session_index_path(): _path_snapshot(_session_index_path()),
-                }
-                for related_path in related_paths:
-                    snapshots.setdefault(related_path, _path_snapshot(related_path))
-                goal_service = goal_v2_runtime().service
-                goal_path = goal_service.events_path(session_id)
-                goal_snapshot = _path_snapshot(goal_path)
+                snapshots = {}
                 asset_snapshots = []
+                goal_path = None
+                goal_snapshot = None
+                prepared = False
                 try:
+                    path = session_path(session_id)
+                    jpath = messages_path(session_id)
+                    session = read_json(path, {}) if path.exists() else {}
+                    parent_id = session.get("_parentId")
+                    child_ids = [
+                        str(child_id)
+                        for child_id in (session.get("_branches") or [])
+                        if isinstance(child_id, str)
+                    ]
+                    deleted_depth = session.get("_branchDepth", 0)
+                    related_paths = []
+                    if parent_id:
+                        related_paths.append(session_path(parent_id))
+                    related_paths.extend(
+                        session_path(child_id) for child_id in child_ids
+                    )
+                    index_path = _session_index_path()
+                    snapshots = {
+                        path: _path_snapshot(path),
+                        jpath: _path_snapshot(jpath),
+                        index_path: _path_snapshot(index_path),
+                    }
+                    for related_path in related_paths:
+                        snapshots.setdefault(
+                            related_path,
+                            _path_snapshot(related_path),
+                        )
+                    goal_service = goal_v2_runtime().service
+                    goal_path = goal_service.events_path(session_id)
+                    goal_snapshot = _path_snapshot(goal_path)
                     asset_snapshots = (
                         _generated_asset_repository.snapshot_session_assets(session_id)
                     )
+                    prepared = True
                     # Remove the primary Session files first. A Windows sharing
                     # violation therefore happens before any sidecar or asset is
                     # changed, while later failures can restore these snapshots.
@@ -18551,15 +18562,16 @@ class CodeHandler(BaseHTTPRequestHandler):
                     goal_service.delete_sidecar(session_id)
                 except Exception as exc:
                     rollback_failed = False
-                    try:
-                        for snapshot_path, payload in snapshots.items():
-                            _restore_path_snapshot(snapshot_path, payload)
-                        _restore_path_snapshot(goal_path, goal_snapshot)
-                        _generated_asset_repository.restore_session_assets(
-                            asset_snapshots,
-                        )
-                    except Exception:
-                        rollback_failed = True
+                    if prepared:
+                        try:
+                            for snapshot_path, payload in snapshots.items():
+                                _restore_path_snapshot(snapshot_path, payload)
+                            _restore_path_snapshot(goal_path, goal_snapshot)
+                            _generated_asset_repository.restore_session_assets(
+                                asset_snapshots,
+                            )
+                        except Exception:
+                            rollback_failed = True
                     raise SessionDeleteError(
                         recovery_failed=rollback_failed,
                     ) from exc

@@ -1200,6 +1200,58 @@ class TestSessionDeleteConsistency(unittest.TestCase):
         self.assertTrue(asset_dir.exists())
         self.assertEqual(server._session_index_path().read_bytes(), index_before)
 
+    def test_delete_snapshot_preparation_failure_is_sanitized_and_changes_nothing(self):
+        session = self.create_session()
+        session_id = session["id"]
+        session_path = server.session_path(session_id)
+        message_path = server.messages_path(session_id)
+        self.create_goal(session_id)
+        goal_path = GoalV2Runtime(self.root).service.events_path(session_id)
+        asset_dir = self.create_asset(session_id)
+        index_path = server._session_index_path()
+        before = {
+            "session": session_path.read_bytes(),
+            "messages": message_path.read_bytes(),
+            "index": index_path.read_bytes(),
+            "goal": goal_path.read_bytes(),
+            "assets": {
+                path.relative_to(asset_dir).as_posix(): path.read_bytes()
+                for path in asset_dir.rglob("*")
+                if path.is_file()
+            },
+        }
+        sentinel = str(self.root / "PREPARATION-SECRET-SENTINEL")
+        original_snapshot = server._path_snapshot
+
+        def fail_session_snapshot(path):
+            if Path(path) == session_path:
+                raise PermissionError(13, sentinel, str(session_path))
+            return original_snapshot(path)
+
+        handler = self.make_handler(path=f"/api/sessions/{session_id}")
+        with mock.patch.object(server, "_path_snapshot", side_effect=fail_session_snapshot):
+            server.CodeHandler.do_DELETE(handler)
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload, {
+            "error": "Session deletion could not be completed safely.",
+            "errorCode": "session_delete_failed",
+            "retryable": True,
+        })
+        serialized = json.dumps(payload)
+        self.assertNotIn(str(self.root), serialized)
+        self.assertNotIn("PREPARATION-SECRET-SENTINEL", serialized)
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(message_path.read_bytes(), before["messages"])
+        self.assertEqual(index_path.read_bytes(), before["index"])
+        self.assertEqual(goal_path.read_bytes(), before["goal"])
+        self.assertEqual({
+            path.relative_to(asset_dir).as_posix(): path.read_bytes()
+            for path in asset_dir.rglob("*")
+            if path.is_file()
+        }, before["assets"])
+
     def test_delete_removes_session_goal_owned_assets_and_index_idempotently(self):
         first = self.create_session()
         second = self.create_session()
