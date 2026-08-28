@@ -87,6 +87,9 @@ AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL"
 CONTEXT_CALIBRATION_USER = "H4_CONTEXT_CALIBRATION_USER"
 CONTEXT_CALIBRATION_FINAL = "H4_CONTEXT_CALIBRATION_FINAL"
 CONTEXT_CALIBRATION_UNUSED_KEY = "h4-context-calibration-unused-key"
+CONTEXT_BUDGET_CATALOG_KEY = "h4-context-budget-catalog-credential"
+CONTEXT_BUDGET_SOFT_MODEL_ID = "gpt-5.4-mini"
+CONTEXT_BUDGET_HARD_MODEL_ID = "h4-hard-128k-context-model"
 FAVICON_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNUqPjwn4GBgYEJRIAwACXYAoumRkB8AAAAAElFTkSuQmCC"
 )
@@ -1932,6 +1935,8 @@ def _synthetic_key_group(authorization: str) -> str:
         return "trusted-route"
     if value == f"Bearer {CONTEXT_CALIBRATION_UNUSED_KEY}":
         return "calibration-fallback"
+    if value == f"Bearer {CONTEXT_BUDGET_CATALOG_KEY}":
+        return "context-budget-catalog"
     return "unknown"
 
 
@@ -1987,13 +1992,29 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "synthetic catalog unavailable"}, 503)
                 return
             models = {
-                "primary": [MODEL_ID, CONNECTION_SHARED_MODEL_ID],
-                "trusted-route": [TRUSTED_ROUTE_MODEL_ID, CONNECTION_SHARED_MODEL_ID],
-                "calibration-fallback": [MODEL_ID],
+                "primary": [
+                    {"id": MODEL_ID, "object": "model"},
+                    {"id": CONNECTION_SHARED_MODEL_ID, "object": "model"},
+                ],
+                "trusted-route": [
+                    {"id": TRUSTED_ROUTE_MODEL_ID, "object": "model"},
+                    {"id": CONNECTION_SHARED_MODEL_ID, "object": "model"},
+                ],
+                "calibration-fallback": [
+                    {"id": MODEL_ID, "object": "model"},
+                ],
+                "context-budget-catalog": [
+                    {"id": CONTEXT_BUDGET_SOFT_MODEL_ID, "object": "model"},
+                    {
+                        "id": CONTEXT_BUDGET_HARD_MODEL_ID,
+                        "object": "model",
+                        "context_window": 128_000,
+                    },
+                ],
             }.get(key_group, [])
             self._send_json({
                 "object": "list",
-                "data": [{"id": model, "object": "model"} for model in models],
+                "data": models,
             })
             return
         if route == "/api/token/":

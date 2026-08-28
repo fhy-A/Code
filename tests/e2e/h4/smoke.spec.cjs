@@ -58,6 +58,9 @@ const AUTO_COMPACTION_FINAL = "H4_AUTO_COMPACTION_FINAL";
 const CONTEXT_CALIBRATION_USER = "H4_CONTEXT_CALIBRATION_USER";
 const CONTEXT_CALIBRATION_FINAL = "H4_CONTEXT_CALIBRATION_FINAL";
 const CONTEXT_CALIBRATION_UNUSED_KEY = "h4-context-calibration-unused-key";
+const CONTEXT_BUDGET_CATALOG_KEY = "h4-context-budget-catalog-credential";
+const CONTEXT_BUDGET_SOFT_MODEL_ID = "gpt-5.4-mini";
+const CONTEXT_BUDGET_HARD_MODEL_ID = "h4-hard-128k-context-model";
 const STREAM_USER = "H4_STREAM_REFRESH_USER";
 const STREAM_ONE = "H4_STREAM_ONE";
 const STREAM_TWO = "H4_STREAM_TWO";
@@ -2926,6 +2929,41 @@ async function fetchProductionJson(page, pathName) {
     } catch {}
     return { status: response.status, body };
   }, pathName);
+}
+
+async function fetchRoutedModelCatalog(codeUrl, {
+  routeRef,
+  catalogRevision,
+  modelId,
+}) {
+  const target = new URL("/proxy/models", codeUrl);
+  const body = Buffer.from(JSON.stringify({ model: modelId }), "utf8");
+  return new Promise((resolve, reject) => {
+    const request = http.request(target, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": String(body.length),
+        "X-Model-Route-Ref": routeRef,
+        "X-Model-Route-Revision": String(catalogRevision),
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        try {
+          resolve({
+            status: Number(response.statusCode || 0),
+            body: JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"),
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
 }
 
 async function sendProductionJson(page, pathName, method, body) {
@@ -18701,33 +18739,141 @@ test("bundle failed Goal supplement stays gated and recovers without replay", as
 
 async function exerciseContextBudgetSnapshot(h4, runtime) {
   const { page } = h4;
-  await h4.open(runtime);
+  const softModel = CONTEXT_BUDGET_SOFT_MODEL_ID;
+  const hardModel = CONTEXT_BUDGET_HARD_MODEL_ID;
+  const agentBudgetRequests = [];
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await page.addInitScript(({ credential }) => {
+    if (!/^https?:$/.test(location.protocol)) return;
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+    if (sessionStorage.getItem("h4-context-budget-catalog-ready") === "1") return;
+    localStorage.setItem("code-key-config", JSON.stringify([{
+      name: "H4 context budget catalog",
+      key: credential,
+      enabled: true,
+      source: "manual",
+      connectionId: "manual_h4_context_budget_catalog",
+    }]));
+    localStorage.removeItem("code-model");
+    localStorage.removeItem("code-model-route-ref");
+    localStorage.removeItem("code-model-route-revision");
+    sessionStorage.setItem("h4-context-budget-catalog-ready", "1");
+  }, { credential: CONTEXT_BUDGET_CATALOG_KEY });
+  const target = runtime === "classic"
+    ? `${h4.host.ready.codeUrl}/dist/frontend/index.classic.html`
+    : `${h4.host.ready.codeUrl}/`;
+  await page.goto(target, { waitUntil: "domcontentloaded" });
   await assertFrontendRuntime(page, runtime);
+  await expect.poll(async () => page.evaluate(async (models) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const routes = (catalog.routes || []).filter((route) => models.includes(route.modelId));
+    return {
+      status: response.status,
+      routeCount: routes.length,
+      modelIds: routes.map((route) => route.modelId).sort(),
+      allEnabled: routes.every((route) => route.enabled !== false),
+      allCredentialed: routes.every((route) => route.credentialsAvailable === true),
+      selectedModel: document.querySelector("#modelPillBtn")?.dataset.model || "",
+    };
+  }, [softModel, hardModel])).toEqual({
+    status: 200,
+    routeCount: 2,
+    modelIds: [softModel, hardModel].sort(),
+    allEnabled: true,
+    allCredentialed: true,
+    selectedModel: "",
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() !== "POST" || url.pathname !== "/api/agent/runs") return;
+    const payload = request.postDataJSON();
+    agentBudgetRequests.push({
+      model: payload?.payload?.model || "",
+      contextBudgetTokens: payload?.contextBudgetTokens ?? null,
+    });
+  });
   await page.locator("#settingsMenuBtn").click();
   await expect(page.locator("#settingsPage")).not.toHaveClass(/hidden/);
-  await page.locator("#settingsMaxTokens").selectOption("8192");
-  await expect(page.locator("#maxTokens")).toHaveValue("8192");
-  expect(await page.evaluate(() => localStorage.getItem("code-max-tokens"))).toBe("8192");
-  await page.locator("#closeSettingsPage").click();
-  await page.locator("#settingsMenuBtn").click();
-  await expect(page.locator("#settingsMaxTokens")).toHaveValue("8192");
-  await page.locator("#closeSettingsPage").click();
-  await page.locator("#contextBudget").evaluate((element) => {
-    element.value = "400000";
+  await expect(page.locator("#settingsMaxTokens")).toHaveValue("auto");
+  await expect(page.locator("#settingsContextBudget").locator("xpath=preceding-sibling::span")).toHaveText(
+    "Maximum context window",
+  );
+  await page.locator("#settingsContextBudget").evaluate((element) => {
+    element.value = "200K";
     element.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await expect(page.locator("#contextBudget")).toHaveValue("400k");
-  await expect(page.locator("#contextBudgetStatus")).toContainText("Adjusted to 400k");
-  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("400000");
-  await page.locator("#contextBudget").evaluate((element) => {
+  await expect(page.locator("#settingsContextBudget")).toHaveValue("200k");
+  await expect(page.locator("#settingsContextBudgetStatus")).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("200000");
+  await page.locator("#settingsContextBudget").evaluate((element) => {
     element.value = "12g";
     element.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await expect(page.locator("#contextBudget")).toHaveValue("400k");
-  await expect(page.locator("#contextBudgetStatus")).toContainText("Invalid format");
-  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("400000");
+  await expect(page.locator("#settingsContextBudget")).toHaveValue("200k");
+  await expect(page.locator("#settingsContextBudgetStatus")).toContainText("Invalid format");
+  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("200000");
+  await page.locator("#closeSettingsPage").click();
 
-  await restoreGoalH4Connection(h4);
+  await page.locator("#settingsMenuBtn").click();
+  await page.locator("#settingsRefreshModels").click();
+  await expect(page.locator("#settingsModelList")).toContainText(softModel);
+  await expect(page.locator("#settingsModelList")).toContainText(hardModel);
+  await expect(page.locator("#settingsContextBudget")).toHaveValue("200k");
+  await expect(page.locator("#settingsContextBudgetStatus")).toBeHidden();
+  const routeIdentity = await page.evaluate(async (model) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const route = (catalog.routes || []).find((item) => item.modelId === model);
+    return {
+      routeRef: String(route?.routeRef || ""),
+      catalogRevision: Number(catalog.catalogRevision || 0),
+      modelId: String(route?.modelId || ""),
+    };
+  }, hardModel);
+  expect(routeIdentity).toMatchObject({
+    routeRef: expect.stringMatching(/^mr1_[a-f0-9]{64}$/),
+    catalogRevision: expect.any(Number),
+    modelId: hardModel,
+  });
+  const normalizedResponse = await fetchRoutedModelCatalog(
+    h4.host.ready.codeUrl,
+    routeIdentity,
+  );
+  const normalizedCatalog = {
+    status: normalizedResponse.status,
+    data: normalizedResponse.body.data || [],
+  };
+  expect(normalizedCatalog.status).toBe(200);
+  expect(normalizedCatalog.data.find((item) => item.id === softModel)).toMatchObject({
+    contextWindowTokens: 400000,
+    contextWindowSource: "official",
+    contextWindowHard: false,
+  });
+  expect(normalizedCatalog.data.find((item) => item.id === hardModel)).toMatchObject({
+    contextWindowTokens: 128000,
+    contextWindowSource: "metadata",
+    contextWindowHard: true,
+  });
+  await page.locator("#closeSettingsPage").click();
+  await page.locator("#modelPillBtn").click();
+  await page.locator(`#modelPillDropdown [data-model="${softModel}"]`).click();
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", softModel);
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsContextBudget")).toHaveValue("200k");
+  await expect(page.locator("#settingsContextBudgetStatus")).toBeHidden();
+  await page.locator("#closeSettingsPage").click();
+  await page.locator("#modelPillBtn").click();
+  await page.locator(`#modelPillDropdown [data-model="${hardModel}"]`).click();
+  await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", hardModel);
+  await expect(page.locator("#contextBudget")).toHaveValue("200k");
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  expect(await page.evaluate((credential) => {
+    const entries = JSON.parse(localStorage.getItem("code-key-config") || "[]");
+    return entries.length === 1
+      && entries[0]?.enabled !== false
+      && entries[0]?.key === credential;
+  }, CONTEXT_BUDGET_CATALOG_KEY)).toBe(true);
   await h4.submit("H4_PLAIN_USER");
   await expect(page.locator("#messages article.msg.assistant").filter({ hasText: "H4_PLAIN_FINAL" })).toHaveCount(1);
   await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
@@ -18738,44 +18884,65 @@ async function exerciseContextBudgetSnapshot(h4, runtime) {
   );
   expect(snapshot.status).toBe(200);
   expect(snapshot.body).toMatchObject({
-    contextLimit: 400000,
+    model: hardModel,
+    contextLimit: 128000,
     contextWindowTokens: 128000,
-    contextBudgetTokens: 400000,
-    contextWindowSource: "unknown",
-    contextWindowHard: false,
-    availableInputTokens: 371808,
-    compressionTriggerTokens: 360000,
-    budgetClamped: false,
-    budgetAboveEstimate: true,
+    contextBudgetTokens: 200000,
+    contextWindowSource: "metadata",
+    contextWindowHard: true,
+    budgetClamped: true,
+    budgetAboveEstimate: false,
   });
+  expect(agentBudgetRequests).toEqual([{
+    model: hardModel,
+    contextBudgetTokens: 200000,
+  }]);
 
   const sessionButton = page.locator("#sessionList .session-row.active button.session-main");
   const sessionId = await sessionButton.getAttribute("data-session-id");
   expect(sessionId).toBeTruthy();
+  const metricsBeforeReload = await h4.metrics();
+  const reloadBoundary = h4.requestBoundary();
   await h4.reloadRuntime(runtime);
-  await expect(page.locator("#maxTokens")).toHaveValue("8192");
-  expect(await page.evaluate(() => localStorage.getItem("code-max-tokens"))).toBe("8192");
+  await expect(page.locator("#maxTokens")).toHaveValue("auto");
+  await expect(page.locator("#contextBudget")).toHaveValue("200k");
+  expect(await page.evaluate(() => localStorage.getItem("code-context-budget"))).toBe("200000");
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsContextBudget")).toHaveValue("200k");
+  await expect(page.locator("#settingsContextBudgetStatus")).toBeHidden();
+  await page.locator("#closeSettingsPage").click();
   await page.locator("#usageStrip").click();
   await expect(page.locator("#statContext")).toHaveText(/^\d+%$/);
-  await expect(page.locator("#tokenContext")).toHaveText(/^\d+% · 400k$/);
+  await expect(page.locator("#tokenContext")).toHaveText(/^\d+% · 128k$/);
   const persisted = await fetchProductionJson(
     page,
     `/api/sessions/${encodeURIComponent(sessionId)}`,
   );
   expect(persisted.status).toBe(200);
   expect(persisted.body?.stats?.contextResolution).toMatchObject({
-    contextLimit: 400000,
+    contextLimit: 128000,
     contextWindowTokens: 128000,
-    contextBudgetTokens: 400000,
-    contextWindowSource: "unknown",
-    budgetAboveEstimate: true,
+    contextBudgetTokens: 200000,
+    contextWindowSource: "metadata",
+    contextWindowHard: true,
+    budgetClamped: true,
+    budgetAboveEstimate: false,
   });
+  const metricsAfterReload = await h4.metrics();
+  expect(h4.requestEvidenceSince(reloadBoundary).agentPost).toBe(0);
+  expect(metricsAfterReload.chatRequests).toEqual(metricsBeforeReload.chatRequests);
+  expect(metricsAfterReload.toolExecutions).toEqual(metricsBeforeReload.toolExecutions);
+  expect(metricsAfterReload.production.agentRuns).toEqual(metricsBeforeReload.production.agentRuns);
+  expect(metricsAfterReload.modelRouteRequests.filter((entry) => (
+    entry.kind === "catalog" && entry.keyGroup === "context-budget-catalog"
+  )).length).toBeGreaterThanOrEqual(2);
   expect(h4.pageErrors).toEqual([]);
   h4.evidence(`${runtime}-context-budget-snapshot`, {
     runtime,
     agentRunId: idHash(agentRunId),
     sessionId: idHash(sessionId),
     contextLimit: snapshot.body.contextLimit,
+    desiredMaximum: snapshot.body.contextBudgetTokens,
     capability: snapshot.body.contextWindowTokens,
     source: snapshot.body.contextWindowSource,
     persistedAfterReload: true,

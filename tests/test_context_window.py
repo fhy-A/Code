@@ -56,6 +56,60 @@ class ContextWindowResolverTest(unittest.TestCase):
         self.assertEqual(resolved["availableInputTokens"], 364000)
         self.assertEqual(resolved["contextWindowSource"], "unknown")
 
+    def test_desired_maximum_is_preserved_while_runtime_limit_stays_authoritative(self):
+        hard_url = "https://hard-context.example/v1"
+        context_window.normalize_catalog(hard_url, [{
+            "id": "custom-hard-context",
+            "context_window": 128_000,
+        }])
+        hard = context_window.resolve(
+            "custom-hard-context",
+            hard_url,
+            budget=200_000,
+            max_tokens=4_096,
+        )
+        self.assertEqual(hard["contextBudgetTokens"], 200_000)
+        self.assertEqual(hard["contextLimit"], 128_000)
+        self.assertTrue(hard["budgetClamped"])
+        self.assertFalse(hard["budgetAboveEstimate"])
+
+        soft = context_window.resolve(
+            "unknown-soft-context",
+            "https://soft-context.example/v1",
+            budget=200_000,
+            max_tokens=4_096,
+        )
+        self.assertEqual(soft["contextWindowTokens"], 128_000)
+        self.assertEqual(soft["contextBudgetTokens"], 200_000)
+        self.assertEqual(soft["contextLimit"], 200_000)
+        self.assertFalse(soft["budgetClamped"])
+        self.assertTrue(soft["budgetAboveEstimate"])
+
+        calibrated = context_window.resolve(
+            "unknown-soft-context",
+            "https://soft-context.example/v1",
+            budget=200_000,
+            max_tokens=4_096,
+            calibration={
+                "capTokens": 96_000,
+                "evidenceKind": "explicit_max",
+                "expiresAt": "2030-02-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(calibrated["contextBudgetTokens"], 200_000)
+        self.assertEqual(calibrated["contextLimit"], 96_000)
+        self.assertTrue(calibrated["calibrationApplied"])
+
+        automatic = context_window.resolve(
+            "custom-hard-context",
+            hard_url,
+            budget="auto",
+            max_tokens=4_096,
+        )
+        self.assertIsNone(automatic["contextBudgetTokens"])
+        self.assertEqual(automatic["contextLimit"], 128_000)
+        self.assertFalse(automatic["budgetClamped"])
+
     def test_static_official_catalog_has_audited_shape_and_pending_boundary(self):
         data = json.loads(context_window.CATALOG_JSON)
         catalog = context_window.load_official_catalog(data=data)

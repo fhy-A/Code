@@ -4804,21 +4804,22 @@ process.stdout.write(JSON.stringify({{hard, estimated, mixedEstimated, mixedHard
         parser_script = f"""
 eval({json.dumps(helper_source)});
 const cases = {{
-  blank: resolveContextBudgetInput("", {{contextWindowTokens:128000,maxTokens:4096}}),
-  legacyAuto: resolveContextBudgetInput("auto", {{contextWindowTokens:128000,maxTokens:4096}}),
-  legacyNumber: resolveContextBudgetInput("400000", {{contextWindowTokens:128000,maxTokens:4096}}),
-  suffixK: resolveContextBudgetInput("128K", {{contextWindowTokens:128000,maxTokens:4096,reportFormatAdjustment:true}}),
-  suffixM: resolveContextBudgetInput("1m", {{contextWindowTokens:128000,maxTokens:4096}}),
-  low: resolveContextBudgetInput("1", {{contextWindowTokens:128000,maxTokens:4096}}),
-  high: resolveContextBudgetInput("3M", {{contextWindowTokens:128000,maxTokens:4096}}),
-  hard: resolveContextBudgetInput("400k", {{contextWindowTokens:200000,contextWindowHard:true,maxTokens:4096}}),
-  estimated: resolveContextBudgetInput("400k", {{contextWindowTokens:128000,maxTokens:4096}}),
-  impossible: resolveContextBudgetInput("", {{contextWindowTokens:4096,contextWindowHard:true,maxTokens:16384}}),
-  invalid: resolveContextBudgetInput("12.5k", {{contextWindowTokens:128000,maxTokens:4096,autoLabel:"Auto"}}),
-  negative: resolveContextBudgetInput("-1", {{contextWindowTokens:128000,maxTokens:4096}}),
-  unit: resolveContextBudgetInput("12g", {{contextWindowTokens:128000,maxTokens:4096}}),
-  text: resolveContextBudgetInput("hello", {{contextWindowTokens:128000,maxTokens:4096}}),
-  oldBinary: resolveContextBudgetInput("65536", {{contextWindowTokens:128000,maxTokens:4096}}),
+  blank: resolveContextBudgetInput("", {{maxTokens:null}}),
+  legacyAuto: resolveContextBudgetInput("auto", {{maxTokens:null}}),
+  legacyNumber: resolveContextBudgetInput("400000", {{maxTokens:null}}),
+  suffixK: resolveContextBudgetInput("128K", {{maxTokens:null,reportFormatAdjustment:true}}),
+  suffixM: resolveContextBudgetInput("1m", {{maxTokens:null}}),
+  low: resolveContextBudgetInput("1", {{maxTokens:null}}),
+  high: resolveContextBudgetInput("3M", {{maxTokens:null}}),
+  hard128k: resolveContextBudgetInput("200k", {{contextWindowTokens:128000,contextWindowHard:true,maxTokens:null}}),
+  soft128k: resolveContextBudgetInput("200k", {{contextWindowTokens:128000,contextWindowHard:false,maxTokens:null}}),
+  explicitOutputAdjustment: resolveContextBudgetInput("1k", {{maxTokens:8192}}),
+  autoWithExplicitOutput: resolveContextBudgetInput("", {{maxTokens:16384}}),
+  invalid: resolveContextBudgetInput("12.5k", {{maxTokens:null,autoLabel:"Auto"}}),
+  negative: resolveContextBudgetInput("-1", {{maxTokens:null}}),
+  unit: resolveContextBudgetInput("12g", {{maxTokens:null}}),
+  text: resolveContextBudgetInput("hello", {{maxTokens:null}}),
+  oldBinary: resolveContextBudgetInput("65536", {{maxTokens:null}}),
 }};
 process.stdout.write(JSON.stringify(cases));
 """
@@ -4834,13 +4835,18 @@ process.stdout.write(JSON.stringify(cases));
         self.assertEqual(cases["legacyNumber"]["storageValue"], "400000")
         self.assertEqual(cases["suffixK"]["tokens"], 128000)
         self.assertEqual(cases["suffixM"]["tokens"], 1000000)
-        self.assertEqual(cases["low"]["tokens"], 9216)
+        self.assertEqual(cases["low"]["tokens"], 1024)
         self.assertEqual(cases["high"]["tokens"], 2000000)
-        self.assertEqual(cases["hard"]["tokens"], 200000)
-        self.assertEqual(cases["hard"]["statusKey"], "contextBudgetAdjusted")
-        self.assertTrue(cases["estimated"]["aboveEstimate"])
-        self.assertEqual(cases["estimated"]["statusKey"], "contextBudgetEstimateWarning")
-        self.assertTrue(cases["impossible"]["insufficient"])
+        self.assertEqual(cases["hard128k"]["tokens"], 200000)
+        self.assertEqual(cases["hard128k"]["statusKey"], "")
+        self.assertFalse(cases["hard128k"]["aboveEstimate"])
+        self.assertEqual(cases["soft128k"]["tokens"], 200000)
+        self.assertEqual(cases["soft128k"]["statusKey"], "")
+        self.assertFalse(cases["soft128k"]["aboveEstimate"])
+        self.assertEqual(cases["explicitOutputAdjustment"]["tokens"], 13312)
+        self.assertEqual(cases["explicitOutputAdjustment"]["statusKey"], "contextBudgetAdjusted")
+        self.assertEqual(cases["autoWithExplicitOutput"]["storageValue"], "auto")
+        self.assertEqual(cases["autoWithExplicitOutput"]["statusKey"], "")
         for invalid in ("invalid", "negative", "unit", "text"):
             self.assertFalse(cases[invalid]["valid"])
             self.assertIsNone(cases[invalid]["storageValue"])
@@ -4856,11 +4862,15 @@ const localStorage = {{
   getItem: (key) => values.has(key) ? values.get(key) : null,
   setItem: (key, value) => {{ values.set(key, String(value)); writes.push([key, String(value)]); }},
 }};
-const els = {{contextBudget: {{value: "12g"}}, contextBudgetStatus: {{textContent:"", hidden:true, dataset:{{}}}}}};
+const els = {{
+  contextBudget: {{value: "12g"}},
+  contextBudgetStatus: {{textContent:"", hidden:true, dataset:{{}}}},
+  maxTokens: {{value: "auto"}},
+}};
 const document = {{getElementById: () => null}};
-const getSelectedModel = () => "unknown-model";
-const getEffectiveMaxTokens = () => 4096;
-const getModelContextResolution = () => ({{contextWindowTokens:128000,contextWindowHard:false}});
+const getSelectedModel = () => {{ throw new Error("settings must not read the selected model"); }};
+const getEffectiveMaxTokens = () => {{ throw new Error("settings must not infer model output limits"); }};
+const getModelContextResolution = () => {{ throw new Error("settings must not read model capability"); }};
 let selectedBudget = null;
 const setContextBudgetTokens = (value) => {{ selectedBudget = value; }};
 const t = (key) => key === "contextBudgetInvalidFormat" ? "Invalid format" : key;
@@ -4888,6 +4898,28 @@ globalThis.__invalidFallback.auto = {
   writes: [...writes],
   selectedBudget,
 };
+values.set(CONTEXT_BUDGET_KEY, "200000");
+writes.length = 0;
+els.contextBudget.value = "200k";
+els.maxTokens.value = "auto";
+selectedBudget = null;
+const desiredResult = normalizeContextBudgetSetting({reportFormatAdjustment:true});
+globalThis.__invalidFallback.desired = {
+  result: desiredResult,
+  value: els.contextBudget.value,
+  stored: values.get(CONTEXT_BUDGET_KEY),
+  writes: [...writes],
+  selectedBudget,
+};
+els.contextBudget.value = "1k";
+els.maxTokens.value = "8192";
+const adjustedResult = normalizeContextBudgetSetting({reportFormatAdjustment:true});
+globalThis.__invalidFallback.adjusted = {
+  result: adjustedResult,
+  value: els.contextBudget.value,
+  stored: values.get(CONTEXT_BUDGET_KEY),
+  selectedBudget,
+};
 ''')});
 process.stdout.write(JSON.stringify(globalThis.__invalidFallback));
 """
@@ -4908,6 +4940,14 @@ process.stdout.write(JSON.stringify(globalThis.__invalidFallback));
         self.assertEqual(fallback["auto"]["stored"], "auto")
         self.assertEqual(fallback["auto"]["writes"], [])
         self.assertEqual(fallback["auto"]["selectedBudget"], "auto")
+        self.assertEqual(fallback["desired"]["result"]["tokens"], 200000)
+        self.assertEqual(fallback["desired"]["value"], "200k")
+        self.assertEqual(fallback["desired"]["stored"], "200000")
+        self.assertEqual(fallback["desired"]["selectedBudget"], 200000)
+        self.assertEqual(fallback["adjusted"]["result"]["tokens"], 13312)
+        self.assertEqual(fallback["adjusted"]["value"], "13312")
+        self.assertEqual(fallback["adjusted"]["stored"], "13312")
+        self.assertEqual(fallback["adjusted"]["selectedBudget"], 13312)
         self.assertIn('id="contextBudget" type="text"', INDEX_SOURCE)
         self.assertNotIn('id="contextBudgetCustom"', INDEX_SOURCE)
         self.assertIn("context-settings-primary", INDEX_SOURCE)
@@ -4919,9 +4959,10 @@ process.stdout.write(JSON.stringify(globalThis.__invalidFallback));
         self.assertIn("els.maxTokens.value = savedMax", APP_SOURCE)
         self.assertIn('temperature: "温度", maxTokens: "最大输出"', I18N_SOURCE)
         self.assertIn('temperature: "Temperature", maxTokens: "Max Tokens"', I18N_SOURCE)
+        self.assertIn('contextBudget: "最大上下文窗口"', I18N_SOURCE)
+        self.assertIn('contextBudget: "Maximum context window"', I18N_SOURCE)
         self.assertIn("contextBudgetPlaceholder", I18N_SOURCE)
         self.assertIn("contextBudgetInvalidFormat", I18N_SOURCE)
-        self.assertIn("contextBudgetEstimateWarning", I18N_SOURCE)
         self.assertIn("contextBudgetInsufficient", I18N_SOURCE)
         self.assertIn("rememberFrozenSessionContextResolution(ctx.sessionId, frozen)", APP_SOURCE)
         self.assertIn("getSessionStats(sessionId)?.contextResolution", APP_SOURCE)

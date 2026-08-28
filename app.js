@@ -14010,12 +14010,15 @@ function resolveContextBudgetInput(value, options = {}) {
       aboveEstimate: false,
     };
   }
-  const capability = Math.max(1024, Math.min(
-    2_000_000,
-    Math.trunc(Number(options.contextWindowTokens) || 128000),
-  ));
-  const hard = options.contextWindowHard === true;
-  const minimum = minimumContextBudgetForMaxTokens(options.maxTokens);
+  const configuredMaxTokens = options.maxTokens;
+  const numericMaxTokens = Number(configuredMaxTokens);
+  const hasExplicitMaxTokens = configuredMaxTokens != null
+    && configuredMaxTokens !== ""
+    && Number.isFinite(numericMaxTokens)
+    && numericMaxTokens > 0;
+  const minimum = hasExplicitMaxTokens
+    ? minimumContextBudgetForMaxTokens(numericMaxTokens)
+    : null;
   let tokens = parsed.valid ? parsed.tokens : null;
   let adjusted = !parsed.valid;
 
@@ -14023,17 +14026,10 @@ function resolveContextBudgetInput(value, options = {}) {
     const bounded = Math.max(1024, Math.min(2_000_000, tokens));
     adjusted ||= bounded !== tokens;
     tokens = bounded;
-    if (hard && tokens > capability) {
-      tokens = capability;
-      adjusted = true;
-    }
   }
 
-  const effective = tokens == null ? capability : tokens;
-  const insufficient = minimum == null || effective < minimum && (
-    tokens == null || hard && capability < minimum
-  );
-  if (!insufficient && tokens != null && tokens < minimum) {
+  const insufficient = tokens != null && hasExplicitMaxTokens && minimum == null;
+  if (!insufficient && tokens != null && minimum != null && tokens < minimum) {
     tokens = minimum;
     adjusted = true;
   }
@@ -14045,7 +14041,6 @@ function resolveContextBudgetInput(value, options = {}) {
     && raw
     && raw.toLowerCase() !== displayValue
   ) adjusted = true;
-  const aboveEstimate = tokens != null && !hard && tokens > capability;
   return {
     valid: true,
     tokens,
@@ -14055,14 +14050,14 @@ function resolveContextBudgetInput(value, options = {}) {
       ? "contextBudgetInsufficient"
       : (adjusted
         ? "contextBudgetAdjusted"
-        : (aboveEstimate ? "contextBudgetEstimateWarning" : "")),
+        : ""),
     statusParams: adjusted
       ? { value: displayValue || options.autoLabel || "Auto" }
       : {},
-    tone: insufficient ? "error" : (adjusted || aboveEstimate ? "warning" : ""),
+    tone: insufficient ? "error" : (adjusted ? "warning" : ""),
     insufficient,
     adjusted,
-    aboveEstimate,
+    aboveEstimate: false,
   };
 }
 
@@ -14081,12 +14076,14 @@ function renderContextBudgetStatus(result) {
 }
 
 function normalizeContextBudgetSetting({ reportFormatAdjustment = false } = {}) {
-  const model = getSelectedModel();
-  const maxTokens = getEffectiveMaxTokens(model);
-  const capability = getModelContextResolution(model, maxTokens);
+  const configuredMaxTokens = String(els.maxTokens?.value || "auto").trim();
+  const numericMaxTokens = Number(configuredMaxTokens);
+  const maxTokens = configuredMaxTokens.toLowerCase() !== "auto"
+    && Number.isFinite(numericMaxTokens)
+    && numericMaxTokens > 0
+    ? numericMaxTokens
+    : null;
   const result = resolveContextBudgetInput(els.contextBudget.value, {
-    contextWindowTokens: capability.contextWindowTokens,
-    contextWindowHard: capability.contextWindowHard,
     maxTokens,
     reportFormatAdjustment,
     autoLabel: t("auto"),
@@ -14094,15 +14091,11 @@ function normalizeContextBudgetSetting({ reportFormatAdjustment = false } = {}) 
   if (!result.valid) {
     const storedValue = localStorage.getItem(CONTEXT_BUDGET_KEY) || "auto";
     let fallback = resolveContextBudgetInput(storedValue, {
-      contextWindowTokens: capability.contextWindowTokens,
-      contextWindowHard: capability.contextWindowHard,
       maxTokens,
       autoLabel: t("auto"),
     });
     if (!fallback.valid) {
       fallback = resolveContextBudgetInput("", {
-        contextWindowTokens: capability.contextWindowTokens,
-        contextWindowHard: capability.contextWindowHard,
         maxTokens,
         autoLabel: t("auto"),
       });
