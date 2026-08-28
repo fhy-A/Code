@@ -6517,7 +6517,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "69fdf9dfc8fbf50273d76167e6101f5501d1dc72d3e62428889f3ed9885a8016",
+            "dbe734d46a3de24a1d84ef2142cbfd1abfa2ac2bb201a1bedfa42b4c51a08e99",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
@@ -6542,7 +6542,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["imageProperties"],
-            ["prompt", "reference", "size", "quality", "count", "outputFormat"],
+            ["prompt", "reference", "count"],
         )
         self.assertEqual(data["imageRequired"], ["prompt"])
         self.assertEqual(data["imageReferenceRequired"], ["type", "id"])

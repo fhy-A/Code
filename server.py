@@ -4016,6 +4016,10 @@ def _canonicalize_agent_tool_arguments(action, arguments):
                 "message": "is not allowed",
             })
             canonical.pop(field, None)
+        for field in ("size", "quality", "outputFormat"):
+            if field in canonical:
+                canonical.pop(field, None)
+                aliases.append({"from": field, "to": "runtime_default"})
         reference = canonical.get("reference")
         if reference is not None and not isinstance(reference, dict):
             errors.append({
@@ -4035,6 +4039,30 @@ def _canonicalize_agent_tool_arguments(action, arguments):
                 sanitized_reference.pop(field, None)
             canonical["reference"] = sanitized_reference
     return canonical, aliases, errors
+
+
+def _normalize_agent_image_arguments(arguments):
+    """Apply the server-owned image execution defaults to model arguments."""
+    source = arguments if isinstance(arguments, dict) else {}
+    effective = {
+        field: _json_clone(source[field])
+        for field in ("prompt", "reference", "count")
+        if field in source
+    }
+    return normalize_generate_request(effective)
+
+
+def _agent_image_effective_fingerprint(call):
+    try:
+        normalized = _normalize_agent_image_arguments(call.get("arguments") or {})
+    except ImageRuntimeError:
+        return str(call.get("fingerprint") or "")
+    arguments_text = json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(
+        f"generate_image\0{arguments_text}".encode("utf-8", errors="replace")
+    ).hexdigest()
 
 
 def _normalize_agent_tool_calls(run, tool_calls, round_number):
@@ -4078,8 +4106,19 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number):
         except (TypeError, ValueError):
             index = fallback_index
         call_id = str(source.get("id") or f"call_{run['id']}_{round_number}_{index}")
+        fingerprint_arguments = arguments_text
+        if name == "generate_image" and not parse_error and isinstance(arguments, dict):
+            try:
+                fingerprint_arguments = json.dumps(
+                    _normalize_agent_image_arguments(arguments),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except ImageRuntimeError:
+                pass
         fingerprint = hashlib.sha256(
-            f"{name}\0{arguments_text}".encode("utf-8", errors="replace")
+            f"{name}\0{fingerprint_arguments}".encode("utf-8", errors="replace")
         ).hexdigest()
         normalized.append({
             "index": index,
@@ -4944,10 +4983,10 @@ def _agent_file_authorization_request(run, call):
 
 def _agent_image_authorization_request(run, call):
     call_id = str(call.get("id") or "")
-    arguments = normalize_generate_request(call.get("arguments") or {})
+    arguments = _normalize_agent_image_arguments(call.get("arguments") or {})
     route = _agent_image_route_public(run) or {}
     authorization_id = hashlib.sha256(
-        f"{run['id']}\0{call_id}\0{call.get('fingerprint') or ''}\0generate_image".encode("utf-8")
+        f"{run['id']}\0{call_id}\0{_agent_image_effective_fingerprint(call)}\0generate_image".encode("utf-8")
     ).hexdigest()
     return {
         "authorizationId": authorization_id,
@@ -5954,18 +5993,19 @@ def _agent_image_operation_id(run, call):
     return hashlib.sha256(
         (
             f"image-generation-v1\0{run.get('id') or ''}\0{call.get('id') or ''}"
-            f"\0{call.get('fingerprint') or ''}\0{(_agent_image_route_public(run) or {}).get('routeRef') or ''}"
+            f"\0{_agent_image_effective_fingerprint(call)}\0{(_agent_image_route_public(run) or {}).get('routeRef') or ''}"
         ).encode("utf-8")
     ).hexdigest()
 
 
 def _execute_agent_image_generation(run, call, execution):
-    normalized = normalize_generate_request(call.get("arguments") or {})
+    normalized = _normalize_agent_image_arguments(call.get("arguments") or {})
     identity = _agent_image_route_public(run)
     if not identity:
         raise ImageRuntimeError("image_route_not_found", "AgentRun has no frozen image route.", http_status=409)
     operation_id = str(execution.get("operationId") or "") or _agent_image_operation_id(run, call)
     execution["operationId"] = operation_id
+    execution["effectiveFingerprint"] = _agent_image_effective_fingerprint(call)
     execution["nonReplayable"] = True
 
     existing = _generated_asset_repository.find_operation_result(
@@ -6046,6 +6086,42 @@ def _execute_agent_image_generation(run, call, execution):
     execution["result"] = _json_clone(result)
     _persist_agent_run(run)
     return result
+
+
+def _agent_image_retry_blocker(run, *, exclude_call_id=""):
+    for tool_call_id, execution in (run.get("tool_executions") or {}).items():
+        if str(tool_call_id or "") == str(exclude_call_id or ""):
+            continue
+        if not isinstance(execution, dict) or execution.get("name") != "generate_image":
+            continue
+        if execution.get("dispatchState") != "dispatched":
+            continue
+        result = execution.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not False:
+            continue
+        if (
+            result.get("retryable") is False
+            or result.get("outcomeUnknown") is True
+            or result.get("notReplayed") is True
+        ):
+            return str(tool_call_id or "")
+    return ""
+
+
+def _agent_image_retry_blocked_result():
+    return {
+        "ok": False,
+        "action": "generate_image",
+        "errorCode": "image_retry_blocked",
+        "retryBlocked": True,
+        "retryable": False,
+        "notReplayed": True,
+        "error": (
+            "A prior image request in this AgentRun reached a non-retryable or unknown paid "
+            "outcome. No additional image request was authorized or dispatched. Start a new "
+            "user message to try once in a new AgentRun."
+        ),
+    }
 
 
 def _execute_agent_pending_tools(run):
@@ -6374,6 +6450,17 @@ def _execute_agent_pending_tools(run):
                 elif spec.get("effect") == "image_generation":
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
+                    retry_blocker = _agent_image_retry_blocker(
+                        run, exclude_call_id=call_id,
+                    )
+                    if retry_blocker:
+                        blocked = _agent_image_retry_blocked_result()
+                        _append_agent_event(run, "tool_retry_blocked", {
+                            "toolCallId": call_id,
+                            "name": name,
+                            "reason": "prior_image_paid_outcome",
+                        })
+                        raise _AgentToolResult(blocked)
                     permission_profile = run.get("permission_profile", "read")
                     if permission_profile == "accept" and not resuming_image_generation:
                         pending_authorization = _agent_image_authorization_request(run, call)
@@ -15234,7 +15321,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": "Generate images with the AgentRun's separately selected image connection. Optionally edit one image already owned by the current Session. The route, provider URL, credentials, and local paths are never tool arguments.",
+            "description": "Generate images with the AgentRun's separately selected image connection. Optionally edit one image already owned by the current Session. Put visual quality and composition intent in the prompt; runtime owns provider execution parameters and Session-scoped caching. The route, provider URL, credentials, and local paths are never tool arguments.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -15248,16 +15335,7 @@ _SERVER_TOOL_DEFINITIONS = {
                         "required": ["type", "id"],
                         "additionalProperties": False,
                     },
-                    "size": {
-                        "type": "string",
-                        "enum": ["auto", "256x256", "512x512", "1024x1024", "1024x1536", "1536x1024"],
-                    },
-                    "quality": {
-                        "type": "string",
-                        "enum": ["auto", "standard", "hd", "low", "medium", "high"],
-                    },
                     "count": {"type": "integer", "minimum": 1, "maximum": 4},
-                    "outputFormat": {"type": "string", "enum": ["png", "jpeg", "webp"]},
                 },
                 "required": ["prompt"],
                 "additionalProperties": False,

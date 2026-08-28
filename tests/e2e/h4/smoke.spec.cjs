@@ -28062,7 +28062,7 @@ async function exerciseImageProductSurface(h4, runtime) {
   const unsupportedExecutions = (unsupportedRun.body.toolExecutions || []).filter((entry) => (
     entry.name === "generate_image"
   ));
-  expect(unsupportedExecutions).toHaveLength(1);
+  expect(unsupportedExecutions).toHaveLength(2);
   expect(unsupportedExecutions[0]).toMatchObject({
     status: "completed",
     outcome: "failed",
@@ -28074,6 +28074,20 @@ async function exerciseImageProductSurface(h4, runtime) {
       notReplayed: true,
     },
   });
+  expect(unsupportedExecutions[1]).toMatchObject({
+    status: "completed",
+    outcome: "failed",
+    result: {
+      ok: false,
+      errorCode: "image_retry_blocked",
+      retryBlocked: true,
+      retryable: false,
+      notReplayed: true,
+    },
+  });
+  expect((unsupportedRun.body.events || []).filter((entry) => (
+    entry.type === "authorization_required"
+  ))).toHaveLength(1);
 
   const metrics = await h4.metrics();
   expect(metrics.imageRequests).toEqual([
@@ -28084,8 +28098,10 @@ async function exerciseImageProductSurface(h4, runtime) {
       contract: {
         modelMatches: true,
         count: 1,
-        size: "auto",
         responseFormat: "b64_json",
+        sizePresent: false,
+        qualityPresent: false,
+        outputFormat: "png",
       },
     },
     {
@@ -28097,6 +28113,9 @@ async function exerciseImageProductSurface(h4, runtime) {
         multipart: true,
         referencePresent: true,
         responseFormatPresent: true,
+        sizePresent: false,
+        qualityPresent: false,
+        outputFormatPresent: true,
       },
     },
     {
@@ -28108,6 +28127,9 @@ async function exerciseImageProductSurface(h4, runtime) {
         multipart: true,
         referencePresent: true,
         responseFormatPresent: true,
+        sizePresent: false,
+        qualityPresent: false,
+        outputFormatPresent: true,
       },
     },
   ]);
@@ -28120,10 +28142,12 @@ async function exerciseImageProductSurface(h4, runtime) {
     "image-edit-call",
     "image-edit-final",
     "image-edit-unsupported-call",
+    "image-edit-unsupported-retry",
     "image-edit-unsupported-final",
   ]);
   expect(imageChats.every((entry) => (
     entry.imageToolContract?.generateImageAvailable === true
+    && entry.imageToolContract?.executionControlsAbsent === true
     && entry.imageToolContract?.imagegenSkillPresent === true
     && entry.imageToolContract?.localChartSkillAbsent === true
   ))).toBe(true);
@@ -28211,14 +28235,24 @@ async function exerciseImageProductSurface(h4, runtime) {
     try {
       body = await response.json();
     } catch {}
-    return { status: response.status, body };
+    const errorText = String(body?.error || "");
+    const errorKind = /Generated asset cleanup could not be completed/i.test(errorText)
+      ? "generated_asset_cleanup_failed"
+      : (errorText ? "other_safe_error" : "");
+    return { status: response.status, body, errorKind };
   }, `/api/sessions/${encodeURIComponent(sessionId)}`);
   const deleteProjection = {
     status: deleteResponse.status,
     errorCode: String(deleteResponse.body?.errorCode || deleteResponse.body?.code || ""),
     errorClass: String(deleteResponse.body?.errorClass || deleteResponse.body?.error?.class || ""),
+    errorKind: deleteResponse.errorKind,
   };
-  expect(deleteProjection).toEqual({ status: 200, errorCode: "", errorClass: "" });
+  expect(deleteProjection).toEqual({
+    status: 200,
+    errorCode: "",
+    errorClass: "",
+    errorKind: "",
+  });
   expect(deleteResponse.body?.ok).toBe(true);
   expect(await generatedAssetResponse(page, firstAssetUrl)).toMatchObject({ status: 404 });
   expect(await generatedAssetResponse(page, secondAssetUrl)).toMatchObject({ status: 404 });

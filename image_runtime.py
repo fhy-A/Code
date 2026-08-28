@@ -913,12 +913,14 @@ class ImageUpstreamClient:
         fields = {
             "model": route.model_id,
             "prompt": normalized_request["prompt"],
-            "size": normalized_request["size"],
-            "quality": normalized_request["quality"],
             "n": normalized_request["count"],
             "response_format": "b64_json",
             "output_format": normalized_request["outputFormat"],
         }
+        if normalized_request["size"] != "auto":
+            fields["size"] = normalized_request["size"]
+        if normalized_request["quality"] != "auto":
+            fields["quality"] = normalized_request["quality"]
         if reference_image is None:
             body = json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             content_type = "application/json"

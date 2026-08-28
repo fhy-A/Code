@@ -17,7 +17,7 @@ const nativeTools = [
 
       name: "generate_image",
 
-      description: "Generate images using the AgentRun's separately selected image connection. Optionally edit one current-Session attachment or generated asset. Never pass provider URLs, credentials, headers, or local paths.",
+      description: "Generate one or more images using the AgentRun's separately selected image connection. Optionally edit one current-Session attachment or generated asset. Put visual quality and composition intent in the prompt; runtime owns provider execution parameters and Session-scoped caching. Never pass provider URLs, credentials, headers, or local paths.",
 
       parameters: {
 
@@ -45,13 +45,7 @@ const nativeTools = [
 
           },
 
-          size: { type: "string", enum: ["auto", "256x256", "512x512", "1024x1024", "1024x1536", "1536x1024"] },
-
-          quality: { type: "string", enum: ["auto", "standard", "hd", "low", "medium", "high"] },
-
           count: { type: "integer", minimum: 1, maximum: 4 },
-
-          outputFormat: { type: "string", enum: ["png", "jpeg", "webp"] },
 
         },
 

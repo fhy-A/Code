@@ -216,8 +216,15 @@ class TestImageAgentRuntime(unittest.TestCase):
     def test_bypass_generation_persists_assets_and_never_repeats_upstream(self):
         run = self._run()
         call = self._queue(run)
+        self.assertEqual(
+            set((call.get("arguments") or {})),
+            {"prompt", "count"},
+        )
         self.assertTrue(server_mod._execute_agent_pending_tools(run))
         self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.client.calls[0]["request"]["size"], "auto")
+        self.assertEqual(self.client.calls[0]["request"]["quality"], "auto")
+        self.assertEqual(self.client.calls[0]["request"]["outputFormat"], "png")
         execution = run["tool_executions"][call["id"]]
         self.assertEqual(execution["dispatchState"], "assets_persisted")
         result = execution["result"]
@@ -228,6 +235,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         stored, meta = self.assets.read(run["session_id"], asset["assetId"])
         self.assertEqual(stored, _png())
         self.assertEqual(meta["toolCallId"], call["id"])
+        self.assertEqual((meta["width"], meta["height"]), (3, 2))
 
     def test_accept_gate_redacts_prompt_and_reject_is_terminal_for_tool(self):
         run = self._run(permission="accept")
@@ -244,6 +252,9 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(public["action"], "generate_image")
         self.assertEqual(public["modelId"], "image-model-v1")
         self.assertEqual(public["count"], 2)
+        self.assertEqual(public["size"], "auto")
+        self.assertEqual(public["quality"], "auto")
+        self.assertEqual(public["outputFormat"], "png")
         self.assertNotIn("PROMPT_SECRET_SENTINEL", json.dumps(public))
         server_mod._submit_agent_authorization(run, public["authorizationId"], "rejected")
         self.assertEqual(len(self.client.calls), 0)
@@ -279,6 +290,125 @@ class TestImageAgentRuntime(unittest.TestCase):
         }], 2)[0]
         self.assertEqual(malformed["function"]["arguments"], "{}")
         self.assertNotIn("MALFORMED_SECRET", json.dumps(malformed))
+
+    def test_model_surface_omits_execution_controls_and_legacy_values_share_fingerprint(self):
+        run = self._run()
+        definition = next(
+            item for item in server_mod._agent_model_tools(run)
+            if item["function"]["name"] == "generate_image"
+        )
+        properties = definition["function"]["parameters"]["properties"]
+        self.assertNotIn("size", properties)
+        self.assertNotIn("quality", properties)
+        self.assertNotIn("outputFormat", properties)
+
+        raw_calls = []
+        for index, controls in enumerate((
+            {"size": "1024x1024", "quality": "hd", "outputFormat": "webp"},
+            {"size": "999x999", "quality": "provider-ultra", "outputFormat": "gif"},
+        )):
+            raw_calls.append({
+                "id": f"legacy-image-{index}",
+                "type": "function",
+                "function": {
+                    "name": "generate_image",
+                    "arguments": json.dumps({
+                        "prompt": "same effective image request",
+                        "count": 1,
+                        **controls,
+                    }),
+                },
+            })
+        normalized = server_mod._normalize_agent_tool_calls(run, raw_calls, 1)
+        self.assertEqual(normalized[0]["fingerprint"], normalized[1]["fingerprint"])
+        self.assertEqual(normalized[0]["arguments"], {
+            "prompt": "same effective image request",
+            "count": 1,
+        })
+
+    def test_dispatched_nonretryable_failure_blocks_changed_retry_before_authorization_after_restart(self):
+        run = self._run(permission="accept", session_id="image-retry-fuse")
+        first = self._queue(run, call_id="paid-failure", arguments={
+            "prompt": "first paid attempt",
+            "size": "1024x1024",
+            "quality": "hd",
+            "count": 1,
+            "outputFormat": "png",
+        })
+        self.assertFalse(server_mod._execute_agent_pending_tools(run))
+        pending = server_mod._agent_public_pending_authorization(run)
+        server_mod._submit_agent_authorization(run, pending["authorizationId"], "approved")
+        upstream = mock.Mock(side_effect=image_runtime.ImageRuntimeError(
+            "image_upstream_http_error",
+            "Image service rejected the request.",
+            retryable=False,
+            http_status=400,
+        ))
+        self.client.generate = upstream
+        run["status"] = "tools"
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        self.assertEqual(upstream.call_count, 1)
+        first_result = run["tool_executions"][first["id"]]["result"]
+        self.assertFalse(first_result["retryable"])
+        self.assertEqual(run["tool_executions"][first["id"]]["dispatchState"], "dispatched")
+
+        server_mod._persist_agent_run(run)
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertIsNotNone(restored)
+        second = self._queue(restored, call_id="changed-retry", arguments={
+            "prompt": "changed prompt must not spend again",
+            "size": "auto",
+            "quality": "standard",
+            "count": 1,
+            "outputFormat": "jpeg",
+        })
+        authorization_events_before = len([
+            event for event in restored["events"]
+            if event["type"] == "authorization_required"
+        ])
+        self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+        blocked = restored["tool_executions"][second["id"]]["result"]
+        self.assertEqual(blocked["errorCode"], "image_retry_blocked")
+        self.assertTrue(blocked["retryBlocked"])
+        self.assertTrue(blocked["notReplayed"])
+        self.assertFalse(blocked["retryable"])
+        self.assertEqual(upstream.call_count, 1)
+        self.assertIsNone(restored.get("pending_authorization"))
+        self.assertEqual(len([
+            event for event in restored["events"]
+            if event["type"] == "authorization_required"
+        ]), authorization_events_before)
+
+        fresh = self._run(permission="bypass", session_id="image-retry-fresh-run")
+        self._queue(fresh, call_id="fresh-run-attempt", arguments={
+            "prompt": "new user message may try once",
+            "quality": "hd",
+        })
+        self.assertTrue(server_mod._execute_agent_pending_tools(fresh))
+        self.assertEqual(upstream.call_count, 2)
+
+    def test_outcome_unknown_failure_blocks_changed_bypass_retry(self):
+        run = self._run(permission="bypass", session_id="image-unknown-fuse")
+        first = self._queue(run, call_id="unknown-paid-failure")
+        upstream = mock.Mock(side_effect=image_runtime.ImageRuntimeError(
+            "image_response_format_mismatch",
+            "Generated image format did not match the requested output format.",
+            retryable=True,
+            outcome_unknown=True,
+        ))
+        self.client.generate = upstream
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        self.assertTrue(run["tool_executions"][first["id"]]["result"]["outcomeUnknown"])
+        self._queue(run, call_id="unknown-changed-retry", arguments={
+            "prompt": "do not retry an uncertain paid request",
+            "count": 1,
+        })
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        blocked = run["tool_executions"]["unknown-changed-retry"]["result"]
+        self.assertEqual(blocked["errorCode"], "image_retry_blocked")
+        self.assertEqual(upstream.call_count, 1)
 
     def test_unexpected_upstream_diagnostics_are_redacted_after_dispatch(self):
         run = self._run()

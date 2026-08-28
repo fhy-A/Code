@@ -257,7 +257,7 @@ class ImageUpstreamClientTests(unittest.TestCase):
         )
         self.normalized = normalize_generate_request({
             "prompt": "draw fixture", "count": 1, "size": "auto",
-            "quality": "standard", "outputFormat": "png",
+            "quality": "auto", "outputFormat": "png",
         })
 
     def test_generation_uses_json_b64_and_idempotency_key(self):
@@ -279,6 +279,8 @@ class ImageUpstreamClientTests(unittest.TestCase):
         self.assertTrue(captured["request"].full_url.endswith("/v1/images/generations"))
         self.assertEqual(request_body["response_format"], "b64_json")
         self.assertEqual(request_body["n"], 1)
+        self.assertNotIn("size", request_body)
+        self.assertNotIn("quality", request_body)
         self.assertEqual(captured["request"].get_header("Idempotency-key"), "operation-1")
         self.assertEqual(result[0].mime_type, "image/png")
 
@@ -302,6 +304,8 @@ class ImageUpstreamClientTests(unittest.TestCase):
         self.assertTrue(req.full_url.endswith("/v1/images/edits"))
         self.assertIn("multipart/form-data", req.get_header("Content-type"))
         self.assertEqual(req.data.count(b'name="image"'), 1)
+        self.assertNotIn(b'name="size"', req.data)
+        self.assertNotIn(b'name="quality"', req.data)
         self.assertNotIn(b"SECRET_SENTINEL", req.data)
         self.assertEqual(result[0].mime_type, "image/webp")
 
