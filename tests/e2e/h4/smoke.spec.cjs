@@ -25,6 +25,12 @@ const TOOL_PROTOCOL_ERROR_USER = "H4_TOOL_PROTOCOL_ERROR_USER";
 const SKILL_EVIDENCE_USER = "H4_SKILL_EVIDENCE_USER";
 const SKILL_EVIDENCE_CANDIDATE = "H4_SKILL_EVIDENCE_CANDIDATE";
 const SKILL_EVIDENCE_FINAL = "H4_SKILL_EVIDENCE_FINAL";
+const IMAGE_MODEL_ID = "h4-image-model";
+const IMAGE_CONNECTION_NAME = "H4 isolated image connection";
+const IMAGE_GENERATION_USER = "H4_IMAGE_GENERATION_USER";
+const IMAGE_GENERATION_FINAL = "H4_IMAGE_GENERATION_FINAL";
+const IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER";
+const IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL";
 const RUNTIME_RECOVERY_USER = "H4_RUNTIME_RECOVERY_USER";
 const RUNTIME_RECOVERY_PARTIAL_ONE = "H4_RUNTIME_RECOVERY_PARTIAL_ONE";
 const RUNTIME_RECOVERY_PARTIAL_TWO = "H4_RUNTIME_RECOVERY_PARTIAL_TWO";
@@ -27764,6 +27770,431 @@ async function exerciseSkillEvidenceRestartAction(h4, runtime, action) {
   });
 }
 
+async function configureImageGenerationConnection(h4) {
+  const { page } = h4;
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  await page.locator('#settingsNav [data-panel="image"]').click();
+  await expect(page.locator("#settingsDetail .image-settings-panel")).toBeVisible();
+  if (await page.locator("#imageConnectionList .image-connection-card").count() === 0) {
+    await page.locator("#imageConnectionAdd").click();
+  }
+  const card = page.locator("#imageConnectionList .image-connection-card").first();
+  await expect(card).toBeVisible();
+  await card.locator(".image-connection-name").fill(IMAGE_CONNECTION_NAME);
+  await card.locator(".image-connection-base-url").fill(h4.host.ready.fakeUrl);
+  await card.locator(".image-connection-key").fill("h4-image-synthetic-credential");
+  await card.locator(".image-model-id").first().fill(IMAGE_MODEL_ID);
+  const editCapability = card.locator(".image-model-edit").first();
+  if (!(await editCapability.isChecked())) await editCapability.check();
+  const responsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/image-routes/refresh"
+  ));
+  await page.locator("#imageSettingsSave").click();
+  const response = await responsePromise;
+  expect(response.status()).toBe(200);
+  await expect(page.locator("#imageRouteStatus")).toContainText(
+    /Default image model is ready|\u9ed8\u8ba4\u751f\u56fe\u6a21\u578b\u5df2\u5c31\u7eea/i,
+  );
+  const catalog = await fetchProductionJson(page, "/api/image-routes");
+  expect(catalog.status).toBe(200);
+  expect(catalog.body.routes).toHaveLength(1);
+  expect(catalog.body.routes[0]).toMatchObject({
+    connectionId: expect.any(String),
+    label: IMAGE_CONNECTION_NAME,
+    modelId: IMAGE_MODEL_ID,
+    enabled: true,
+    credentialsAvailable: true,
+    supportsGeneration: true,
+    supportsEdit: true,
+  });
+  expect(String(catalog.body.routes[0].routeRef || "")).toMatch(/^ir1_[a-f0-9]{64}$/);
+  const publicCatalog = JSON.stringify(catalog.body);
+  expect(publicCatalog).not.toContain("h4-image-synthetic-credential");
+  expect(publicCatalog).not.toContain(h4.host.ready.fakeUrl);
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#settingsPage")).toBeHidden();
+  return catalog.body.routes[0];
+}
+
+async function waitForImageAuthorization(h4, expectedReference) {
+  const { page } = h4;
+  const panel = page.locator("#authorizationPanel");
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  const row = panel.locator(".authorization-row");
+  await expect(row).toHaveCount(1);
+  const text = await row.innerText();
+  expect(text).toContain(IMAGE_MODEL_ID);
+  expect(text).toMatch(/1 (?:image|\u5f20)/i);
+  expect(text).toContain("png");
+  expect(text).not.toContain("small blue geometric icon");
+  expect(text).not.toContain("Turn the supplied image");
+  if (expectedReference) expect(text).toMatch(/reference edit|\u53c2\u8003\u56fe\u7f16\u8f91/i);
+  const approve = panel.locator('[data-auth-action="approve"]');
+  await expect(approve).toBeEnabled();
+  await approve.click();
+}
+
+async function generatedAssetResponse(page, assetUrl) {
+  return page.evaluate(async (url) => {
+    const response = await fetch(url, { cache: "no-store" });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return {
+      status: response.status,
+      contentType: response.headers.get("content-type") || "",
+      cacheControl: response.headers.get("cache-control") || "",
+      byteLength: bytes.length,
+      png: bytes.length >= 8
+        && [...bytes.slice(0, 8)].join(",") === "137,80,78,71,13,10,26,10",
+    };
+  }, assetUrl);
+}
+
+async function exerciseImageProductSurface(h4, runtime) {
+  await h4.open(runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  const selectedRoute = await configureImageGenerationConnection(h4);
+  const { page } = h4;
+
+  await h4.submit(`/imagegen ${IMAGE_GENERATION_USER}`);
+  await waitForImageAuthorization(h4, false);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_GENERATION_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(1);
+  const generationRunId = h4.controlIds().agentRunIds[0];
+  const activeSession = page.locator("#sessionList .session-row.active button.session-main");
+  await expect(activeSession).toHaveCount(1);
+  const sessionId = String(await activeSession.getAttribute("data-session-id") || "");
+  const firstCard = page.locator(".generated-image-card").first();
+  await expect(firstCard).toHaveCount(1);
+  if (!(await firstCard.isVisible())) {
+    const firstTrace = page.locator("#messages .execution-trace.completed").filter({
+      has: firstCard,
+    });
+    await expect(firstTrace).toHaveCount(1);
+    const firstTraceToggle = firstTrace.locator(
+      ":scope > [data-execution-trace-toggle]",
+    );
+    await expect(firstTraceToggle).toHaveAttribute("aria-expanded", "false");
+    await firstTraceToggle.click();
+    await expect(firstTrace).toHaveClass(/\bis-expanded\b/);
+  }
+  await expect(firstCard).toBeVisible();
+  await expect(firstCard).not.toContainText("small blue geometric icon");
+  const firstPreview = firstCard.locator("[data-generated-image-preview]");
+  const firstAssetUrl = String(await firstPreview.getAttribute("data-generated-image-preview") || "");
+  expect(firstAssetUrl).toMatch(
+    new RegExp(`^/api/sessions/${sessionId}/generated-assets/ga1_[A-Za-z0-9_-]{32,96}$`),
+  );
+  const firstAssetId = firstAssetUrl.split("/").at(-1);
+  await expect(firstCard.locator(".generated-image-download")).toHaveAttribute("href", firstAssetUrl);
+  await expect(firstCard.locator(".generated-image-download")).toHaveAttribute(
+    "download",
+    "generated-image-1.png",
+  );
+  await expect.poll(async () => firstCard.locator("img").evaluate((image) => ({
+    complete: image.complete,
+    width: image.naturalWidth,
+    height: image.naturalHeight,
+  }))).toEqual({ complete: true, width: 2, height: 2 });
+  expect(await generatedAssetResponse(page, firstAssetUrl)).toEqual({
+    status: 200,
+    contentType: "image/png",
+    cacheControl: "private, no-store",
+    byteLength: 78,
+    png: true,
+  });
+  await firstPreview.click();
+  await expect(page.locator("#imageOverlay img")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#imageOverlay")).toHaveCount(0);
+
+  const generationRun = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(generationRunId)}?cursor=0&wait=0`,
+  );
+  expect(generationRun.body).toMatchObject({
+    status: "completed",
+    imageRoute: {
+      routeRef: selectedRoute.routeRef,
+      modelId: IMAGE_MODEL_ID,
+      supportsEdit: true,
+    },
+    skillEvidence: {
+      status: "satisfied",
+      activeSkills: [{ name: "imagegen" }],
+    },
+  });
+  const generationExecutions = (generationRun.body.toolExecutions || []).filter((entry) => (
+    entry.name === "generate_image"
+  ));
+  expect(generationExecutions).toHaveLength(1);
+  expect(generationExecutions[0]).toMatchObject({
+    status: "completed",
+    outcome: "succeeded",
+    authorizationDecision: "approved",
+  });
+  const generationSnapshotText = JSON.stringify(generationRun.body);
+  expect(generationSnapshotText).not.toContain("h4-image-synthetic-credential");
+  expect(generationSnapshotText).not.toContain(h4.host.ready.fakeUrl);
+
+  const chatRouteBeforeReload = await page.evaluate(async (modelId) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const routes = (catalog.routes || []).filter((route) => (
+      route?.modelId === modelId
+      && route?.enabled !== false
+      && route?.credentialsAvailable === true
+    ));
+    return {
+      status: response.status,
+      routeRefs: routes.map((route) => String(route.routeRef || "")),
+    };
+  }, MODEL_ID);
+  expect(chatRouteBeforeReload).toEqual({
+    status: 200,
+    routeRefs: [expect.stringMatching(/^mr1_[a-f0-9]{64}$/)],
+  });
+
+  const metricsBeforeReload = await h4.metrics();
+  const reloadBoundary = h4.requestBoundary();
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await page.evaluate(() => {
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+  });
+  await h4.reloadRuntime(runtime);
+  const restored = page.locator(
+    `#sessionList button.session-main[data-session-id="${sessionId}"]`,
+  );
+  await expect(restored).toHaveCount(1);
+  await restored.click();
+  await expect(page.locator("#permPillBtn")).toHaveAttribute("data-value", "accept");
+  expect(await page.evaluate(() => localStorage.getItem("code-permission-profile")))
+    .toBe("accept");
+  await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
+  const chatRouteAfterReload = await page.evaluate(async (modelId) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const routes = (catalog.routes || []).filter((route) => (
+      route?.modelId === modelId
+      && route?.enabled !== false
+      && route?.credentialsAvailable === true
+    ));
+    return {
+      status: response.status,
+      routeRefs: routes.map((route) => String(route.routeRef || "")),
+    };
+  }, MODEL_ID);
+  expect(chatRouteAfterReload).toEqual(chatRouteBeforeReload);
+  const restoredCard = page.locator(".generated-image-card").first();
+  await expect(page.locator(".generated-image-card")).toHaveCount(1);
+  await expect(restoredCard.locator("[data-generated-image-preview]")).toHaveAttribute(
+    "data-generated-image-preview",
+    firstAssetUrl,
+  );
+  const restoredTrace = page.locator("#messages .execution-trace.completed").filter({
+    has: restoredCard,
+  });
+  await expect(restoredTrace).toHaveCount(1);
+  await expect(restoredTrace).not.toHaveClass(/\bis-expanded\b/);
+  const restoredTraceToggle = restoredTrace.locator(
+    ":scope > [data-execution-trace-toggle]",
+  );
+  await expect(restoredTraceToggle).toHaveAttribute("aria-expanded", "false");
+  const metricsAfterReload = await h4.metrics();
+  expect(metricsAfterReload.imageRequests).toEqual(metricsBeforeReload.imageRequests);
+  expect(metricsAfterReload.chatRequests).toEqual(metricsBeforeReload.chatRequests);
+  expect(metricsAfterReload.production.agentRuns).toEqual(
+    metricsBeforeReload.production.agentRuns,
+  );
+  expect(h4.requestEvidenceSince(reloadBoundary).agentPost).toBe(0);
+  await restoredTraceToggle.click();
+  await expect(restoredTrace).toHaveClass(/\bis-expanded\b/);
+  await expect(restoredTraceToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(restoredCard.locator("img")).toBeVisible();
+
+  await h4.submit(`/imagegen ${IMAGE_EDIT_USER} ${firstAssetId}`);
+  await waitForImageAuthorization(h4, true);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: IMAGE_EDIT_FINAL,
+  })).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator(".generated-image-card")).toHaveCount(2);
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(2);
+  const editRunId = h4.controlIds().agentRunIds.find((id) => id !== generationRunId);
+  const editRun = await fetchProductionJson(
+    page,
+    `/api/agent/runs/${encodeURIComponent(editRunId)}?cursor=0&wait=0`,
+  );
+  expect((editRun.body.toolExecutions || []).filter((entry) => (
+    entry.name === "generate_image" && entry.status === "completed"
+  ))).toHaveLength(1);
+  const secondAssetUrl = String(await page.locator(".generated-image-card").nth(1)
+    .locator("[data-generated-image-preview]")
+    .getAttribute("data-generated-image-preview") || "");
+  expect(await generatedAssetResponse(page, secondAssetUrl)).toMatchObject({
+    status: 200,
+    contentType: "image/png",
+    png: true,
+  });
+
+  const metrics = await h4.metrics();
+  expect(metrics.imageRequests).toEqual([
+    {
+      kind: "generation",
+      authorizationPresent: true,
+      idempotencyPresent: true,
+      contract: {
+        modelMatches: true,
+        count: 1,
+        size: "auto",
+        responseFormat: "b64_json",
+      },
+    },
+    {
+      kind: "edit",
+      authorizationPresent: true,
+      idempotencyPresent: true,
+      contract: {
+        modelMatches: true,
+        multipart: true,
+        referencePresent: true,
+        responseFormatPresent: true,
+      },
+    },
+  ]);
+  const imageChats = metrics.chatRequests.filter((entry) => (
+    String(entry.scenario || "").startsWith("image-")
+  ));
+  expect(imageChats.map((entry) => entry.scenario)).toEqual([
+    "image-generation-call",
+    "image-generation-final",
+    "image-edit-call",
+    "image-edit-final",
+  ]);
+  expect(imageChats.every((entry) => (
+    entry.imageToolContract?.generateImageAvailable === true
+    && entry.imageToolContract?.imagegenSkillPresent === true
+    && entry.imageToolContract?.localChartSkillAbsent === true
+  ))).toBe(true);
+
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  await page.locator('#settingsNav [data-panel="image"]').click();
+  await expect(page.locator("#settingsDetail .image-settings-panel")).toBeVisible();
+  const enabled = page.locator(".image-connection-enabled").first();
+  await expect(enabled).toBeChecked();
+  await enabled.locator("xpath=..").locator(".toggle-track").click();
+  await expect(enabled).not.toBeChecked();
+  const disableResponse = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/image-routes/refresh"
+  ));
+  await page.locator("#imageSettingsSave").click();
+  expect((await disableResponse).status()).toBe(200);
+  await expect(page.locator("#imageRouteStatus")).toContainText(
+    /disabled|\u5df2\u7981\u7528|unavailable|\u4e0d\u53ef\u7528/i,
+  );
+  await page.locator("#closeSettingsPage").click();
+  const beforeDisabled = await h4.metrics();
+  const beforeDisabledRunCount = h4.controlIds().agentRunIds.length;
+  const disabledRequestBoundary = h4.requestBoundary();
+  const disabledSessionPutBoundary = h4.sessionPutBoundary();
+  await page.locator("#prompt").fill(`/imagegen ${IMAGE_GENERATION_USER}_DISABLED`);
+  await page.locator("#sendBtn").click();
+  await expect(page.locator("#messages")).toContainText(
+    /No separate image model is available|\u672a\u914d\u7f6e\u53ef\u7528\u7684\u72ec\u7acb\u751f\u56fe\u6a21\u578b/i,
+  );
+  await expect.poll(() => h4.controlIds().agentRunIds.length).toBe(beforeDisabledRunCount);
+  const afterDisabled = await h4.metrics();
+  expect(afterDisabled.chatRequests).toEqual(beforeDisabled.chatRequests);
+  expect(afterDisabled.imageRequests).toEqual(beforeDisabled.imageRequests);
+  const disabledRequests = h4.requestEvidenceSince(disabledRequestBoundary);
+  expect(disabledRequests.agentPost).toBe(0);
+  expect(h4.requestSummarySince(disabledRequestBoundary)["POST /proxy/chat"] || 0).toBe(0);
+  const terminalPrompt = page.locator("#prompt");
+  const terminalSend = page.locator("#sendBtn");
+  await expect(terminalPrompt).toBeEnabled();
+  await expect(terminalSend).toBeDisabled();
+  await terminalPrompt.fill("H4_IMAGE_TERMINAL_SEND_READY_PROBE");
+  await expect(terminalSend).toBeEnabled();
+  await terminalPrompt.fill("");
+  await expect(terminalSend).toBeDisabled();
+  await expect(page.locator("#stopBtn")).toBeDisabled();
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+
+  await expect.poll(() => h4.sessionPutTimelineSince(disabledSessionPutBoundary)
+    .filter((entry) => (
+      entry.responseStatus === 200
+      && entry.runStateStatus === "failed"
+    )).length).toBeGreaterThan(0);
+  await expect.poll(async () => {
+    const response = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    const persistedText = (response.body?.messages || []).map((message) => {
+      if (typeof message?.content === "string") return message.content;
+      if (!Array.isArray(message?.content)) return "";
+      return message.content.map((item) => String(item?.text || "")).join("\n");
+    }).join("\n");
+    return {
+      status: response.status,
+      runStateStatus: String(response.body?.runState?.status || ""),
+      hasDisabledFailure: /No separate image model is available|\u672a\u914d\u7f6e\u53ef\u7528\u7684\u72ec\u7acb\u751f\u56fe\u6a21\u578b/i.test(persistedText),
+    };
+  }).toEqual({
+    status: 200,
+    runStateStatus: "failed",
+    hasDisabledFailure: true,
+  });
+  const disabledSessionPuts = h4.sessionPutTimelineSince(disabledSessionPutBoundary);
+  const disabledSuccessfulSave = disabledSessionPuts.find((entry) => (
+    entry.responseStatus === 200
+    && entry.runStateStatus === "failed"
+  ));
+  expect(disabledSuccessfulSave).toBeTruthy();
+
+  const deleteResponse = await page.evaluate(async (url) => {
+    const response = await fetch(url, { method: "DELETE" });
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {}
+    return { status: response.status, body };
+  }, `/api/sessions/${encodeURIComponent(sessionId)}`);
+  const deleteProjection = {
+    status: deleteResponse.status,
+    errorCode: String(deleteResponse.body?.errorCode || deleteResponse.body?.code || ""),
+    errorClass: String(deleteResponse.body?.errorClass || deleteResponse.body?.error?.class || ""),
+  };
+  expect(deleteProjection).toEqual({ status: 200, errorCode: "", errorClass: "" });
+  expect(deleteResponse.body?.ok).toBe(true);
+  expect(await generatedAssetResponse(page, firstAssetUrl)).toMatchObject({ status: 404 });
+  expect(await generatedAssetResponse(page, secondAssetUrl)).toMatchObject({ status: 404 });
+  expect(h4.pageErrors).toEqual([]);
+  expectAutoPermissionNetworkIsolation(h4);
+  h4.evidence(`${runtime}-image-product-surface`, {
+    runtime,
+    sessionId: idHash(sessionId),
+    generationRunId: idHash(generationRunId),
+    editRunId: idHash(editRunId),
+    publicRouteStable: selectedRoute.routeRef === generationRun.body.imageRoute.routeRef,
+    imageRequestKinds: metrics.imageRequests.map((entry) => entry.kind),
+    reloadImageRequestDelta: 0,
+    disabledAgentRunDelta: 0,
+    disabledSessionPutConflicts: disabledSessionPuts.filter((entry) => (
+      entry.responseStatus === 409
+    )).length,
+    disabledSuccessfulSaveRevision: disabledSuccessfulSave.returnedRevision,
+    sessionDeleteStatus: deleteProjection.status,
+    sessionDeleteAssetStatus: 404,
+  });
+}
+
 async function exerciseParallelVisualToolProtocol(h4, runtime) {
   await h4.open(runtime);
   await h4.submit(PARALLEL_VISUAL_PROTOCOL_USER);
@@ -28205,6 +28636,16 @@ test("bundle explicit code-review continues with evidence exactly once", async (
 test("direct classic explicit code-review continues with evidence exactly once", async ({ h4 }) => {
   test.setTimeout(120_000);
   await exerciseSkillEvidenceContinue(h4, "classic");
+});
+
+test("bundle independent image generation settings authorize preview edit and clean assets", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseImageProductSurface(h4, "bundle");
+});
+
+test("direct classic independent image generation settings authorize preview edit and clean assets", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseImageProductSurface(h4, "classic");
 });
 
 for (const action of ["skip", "cancel"]) {

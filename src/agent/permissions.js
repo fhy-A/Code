@@ -54,6 +54,7 @@
       "delete_file",
       "save_memory",
       "read_skill_resource",
+      "generate_image",
     ]),
     bypass: Object.freeze([
       "request_user_input",
@@ -71,6 +72,7 @@
       "delete_file",
       "save_memory",
       "read_skill_resource",
+      "generate_image",
     ]),
   });
 

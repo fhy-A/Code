@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import threading
 import time
@@ -59,6 +60,13 @@ SKILL_EVIDENCE_USER = "H4_SKILL_EVIDENCE_USER"
 SKILL_EVIDENCE_CANDIDATE = "H4_SKILL_EVIDENCE_CANDIDATE"
 SKILL_EVIDENCE_FINAL = "H4_SKILL_EVIDENCE_FINAL"
 SKILL_EVIDENCE_CALL_ID = "h4-skill-evidence-read"
+IMAGE_MODEL_ID = "h4-image-model"
+IMAGE_GENERATION_USER = "H4_IMAGE_GENERATION_USER"
+IMAGE_GENERATION_FINAL = "H4_IMAGE_GENERATION_FINAL"
+IMAGE_GENERATION_CALL_ID = "h4-image-generation-call"
+IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER"
+IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL"
+IMAGE_EDIT_CALL_ID = "h4-image-edit-call"
 PLAIN_USER = "H4_PLAIN_USER"
 PLAIN_FINAL = "H4_PLAIN_FINAL"
 AUTO_COMPACTION_SEED = "H4_AUTO_COMPACTION_SEED"
@@ -408,6 +416,7 @@ class MetricState:
             "explorerRequests": [],
             "defaultOpenRequests": [],
             "chatRequests": [],
+            "imageRequests": [],
             "toolExecutions": [],
             "productionToolDelegations": 0,
             "productionEditProposalDelegations": 0,
@@ -729,6 +738,7 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
     user_text = ""
     user_texts = []
     has_tool_result = False
+    completed_tool_call_ids = set()
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -755,7 +765,21 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             SKILL_EVIDENCE_CALL_ID,
         }:
             has_tool_result = True
+        if message.get("role") == "tool":
+            completed_tool_call_ids.add(str(message.get("tool_call_id") or ""))
     joined_user_text = "\n".join(user_texts)
+    if IMAGE_EDIT_USER in joined_user_text:
+        image_edit_completed = IMAGE_EDIT_CALL_ID in completed_tool_call_ids
+        return (
+            "image-edit-final" if image_edit_completed else "image-edit-call",
+            image_edit_completed,
+        )
+    if IMAGE_GENERATION_USER in joined_user_text:
+        image_generation_completed = IMAGE_GENERATION_CALL_ID in completed_tool_call_ids
+        return (
+            "image-generation-final" if image_generation_completed else "image-generation-call",
+            image_generation_completed,
+        )
     if TRUSTED_ROUTE_USER in joined_user_text:
         return "trusted-model-route", has_tool_result
     if CONNECTION_ROUTE_USER in joined_user_text:
@@ -1848,9 +1872,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         return
 
     def _read_json(self) -> dict:
+        return json.loads(self._read_body().decode("utf-8"))
+
+    def _read_body(self) -> bytes:
         size = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(size) if size else b"{}"
-        return json.loads(raw.decode("utf-8"))
+        return self.rfile.read(size) if size else b"{}"
 
     def _record(self, kind: str) -> None:
         route = parse.urlparse(self.path).path
@@ -1930,6 +1956,37 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             self._read_json()
             self._record("platform-sync")
             self._send_json({"data": {"keys": {}}})
+            return
+        if route in {"/v1/images/generations", "/v1/images/edits"}:
+            is_edit = route.endswith("/edits")
+            if is_edit:
+                raw_body = self._read_body()
+                model_matches = f'name="model"\r\n\r\n{IMAGE_MODEL_ID}'.encode() in raw_body
+                request_contract = {
+                    "modelMatches": model_matches,
+                    "multipart": "multipart/form-data" in str(self.headers.get("Content-Type") or ""),
+                    "referencePresent": b'name="image"' in raw_body,
+                    "responseFormatPresent": b'name="response_format"' in raw_body,
+                }
+            else:
+                payload = self._read_json()
+                request_contract = {
+                    "modelMatches": payload.get("model") == IMAGE_MODEL_ID,
+                    "count": int(payload.get("n") or 0),
+                    "size": str(payload.get("size") or ""),
+                    "responseFormat": str(payload.get("response_format") or ""),
+                }
+            self._record("image-edit" if is_edit else "image-generation")
+            METRICS.append("imageRequests", {
+                "kind": "edit" if is_edit else "generation",
+                "authorizationPresent": bool(self.headers.get("Authorization")),
+                "idempotencyPresent": bool(self.headers.get("Idempotency-Key")),
+                "contract": request_contract,
+            })
+            self._send_json({
+                "created": 1,
+                "data": [{"b64_json": base64.b64encode(FAVICON_PNG).decode("ascii")}],
+            })
             return
         if route != "/v1/chat/completions":
             self._record("unexpected")
@@ -2060,6 +2117,29 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     if message.get("role") == "tool"
                     and str(message.get("tool_call_id") or "") == SKILL_EVIDENCE_CALL_ID
                 ),
+            }
+        if scenario.startswith("image-"):
+            tool_names = [
+                str((item.get("function") or {}).get("name") or "")
+                for item in (payload.get("tools") or [])
+                if isinstance(item, dict)
+            ]
+            system_text = "\n".join(
+                _message_text(message)
+                for message in (payload.get("messages") or [])
+                if isinstance(message, dict) and message.get("role") == "system"
+            )
+            public_tool_names = [
+                name for name in tool_names
+                if not name.startswith("goal_")
+            ]
+            chat_metric["imageToolContract"] = {
+                "generateImageAvailable": "generate_image" in public_tool_names,
+                "imagegenSkillPresent": (
+                    "[Skill: imagegen]" in system_text
+                    or "\u5df2\u6fc0\u6d3b Skill: imagegen" in system_text
+                ),
+                "localChartSkillAbsent": "[Skill: image-generation]" not in system_text,
             }
         if scenario == "context-calibration":
             chat_metric["usedContextCalibrationUnusedKey"] = (
@@ -2470,6 +2550,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "parallel-visual-protocol-call",
             "runtime-recovery-call",
             "skill-evidence-call",
+            "image-generation-call",
+            "image-edit-call",
         ) or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
@@ -2501,6 +2583,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "parallel-visual-protocol-call": PARALLEL_VISUAL_PROTOCOL_STAGE,
                 "runtime-recovery-call": RUNTIME_RECOVERY_STAGE,
                 "skill-evidence-call": "",
+                "image-generation-call": "",
+                "image-edit-call": "",
             }.get(scenario, "")
             tool_calls = [{
                 "index": 0,
@@ -2549,6 +2633,41 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                         "arguments": json.dumps(
                             {"path": READ_PATH}, separators=(",", ":"),
                         ),
+                    },
+                }]
+            elif scenario in {"image-generation-call", "image-edit-call"}:
+                call_id = (
+                    IMAGE_EDIT_CALL_ID if scenario == "image-edit-call"
+                    else IMAGE_GENERATION_CALL_ID
+                )
+                arguments = {
+                    "prompt": (
+                        "Turn the supplied image into a blue geometric icon"
+                        if scenario == "image-edit-call"
+                        else "A small blue geometric icon on a transparent background"
+                    ),
+                    "size": "auto",
+                    "quality": "standard",
+                    "count": 1,
+                    "outputFormat": "png",
+                }
+                if scenario == "image-edit-call":
+                    serialized_messages = json.dumps(
+                        payload.get("messages") or [], ensure_ascii=False,
+                    )
+                    asset_match = re.search(r"ga1_[A-Za-z0-9_-]{32,96}", serialized_messages)
+                    if asset_match:
+                        arguments["reference"] = {
+                            "type": "generated_asset",
+                            "id": asset_match.group(0),
+                        }
+                tool_calls = [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "generate_image",
+                        "arguments": json.dumps(arguments, separators=(",", ":")),
                     },
                 }]
             elif scenario == "multi-tool-detail-call":
@@ -3022,6 +3141,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "runtime-recovery-final": RUNTIME_RECOVERY_FINAL,
                 "skill-evidence-candidate": SKILL_EVIDENCE_CANDIDATE,
                 "skill-evidence-final": SKILL_EVIDENCE_FINAL,
+                "image-generation-final": IMAGE_GENERATION_FINAL,
+                "image-edit-final": IMAGE_EDIT_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,
                 "timing-main": TIMING_MAIN_FINAL,
                 "timing-parallel": TIMING_PARALLEL_FINAL,
@@ -3418,6 +3539,16 @@ def main() -> int:
     os.environ["NEW_API_BASE_URL"] = fake_url
     os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
+    repo_root = Path(__file__).resolve().parents[3]
+    imagegen_source = repo_root / "data" / "skills" / "imagegen"
+    if not imagegen_source.is_dir():
+        raise RuntimeError("H4 imagegen Skill source is missing")
+    shutil.copytree(
+        imagegen_source,
+        data_dir / "skills" / "imagegen",
+        dirs_exist_ok=True,
+    )
+
     code_review_dir = data_dir / "skills" / "code-review"
     code_review_dir.mkdir(parents=True, exist_ok=True)
     (code_review_dir / "SKILL.md").write_text(
@@ -3437,7 +3568,6 @@ def main() -> int:
         "enforcement": {"schemaVersion": 1, "mode": "explicit_only"},
     }, separators=(",", ":")), encoding="utf-8")
 
-    repo_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(repo_root))
     import server as code_server
 

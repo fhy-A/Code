@@ -271,6 +271,7 @@
     keys,
     routeRef = "",
     catalogRevision = 0,
+    imageRoute = null,
     allowedTools,
     toolBudgets,
     permissionProfile = "read",
@@ -293,6 +294,11 @@
         ...(routeRef
           ? { routeRef, catalogRevision }
           : { baseUrl, keys }),
+        ...(imageRoute?.routeRef ? {
+          imageRouteRef: String(imageRoute.routeRef),
+          imageCatalogRevision: Math.max(0, Number(imageRoute.catalogRevision || 0)),
+          imageModelId: String(imageRoute.modelId || ""),
+        } : {}),
         allowedTools,
         toolBudgets,
         permissionProfile,

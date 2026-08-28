@@ -15,6 +15,62 @@ const nativeTools = [
 
     function: {
 
+      name: "generate_image",
+
+      description: "Generate images using the AgentRun's separately selected image connection. Optionally edit one current-Session attachment or generated asset. Never pass provider URLs, credentials, headers, or local paths.",
+
+      parameters: {
+
+        type: "object",
+
+        properties: {
+
+          prompt: { type: "string", minLength: 1, maxLength: 8000 },
+
+          reference: {
+
+            type: "object",
+
+            properties: {
+
+              type: { type: "string", enum: ["attachment", "generated_asset"] },
+
+              id: { type: "string", minLength: 1, maxLength: 512 },
+
+            },
+
+            required: ["type", "id"],
+
+            additionalProperties: false,
+
+          },
+
+          size: { type: "string", enum: ["auto", "256x256", "512x512", "1024x1024", "1024x1536", "1536x1024"] },
+
+          quality: { type: "string", enum: ["auto", "standard", "hd", "low", "medium", "high"] },
+
+          count: { type: "integer", minimum: 1, maximum: 4 },
+
+          outputFormat: { type: "string", enum: ["png", "jpeg", "webp"] },
+
+        },
+
+        required: ["prompt"],
+
+        additionalProperties: false,
+
+      },
+
+    },
+
+  },
+
+  {
+
+    type: "function",
+
+    function: {
+
       name: "request_user_input",
 
       description: "Ask the user for a critical decision that cannot be safely inferred from context or discovered with available tools. Use this sparingly: do not ask about ordinary implementation choices, and search or inspect first when the answer is discoverable. Before asking, scan the conversation for previous answers or decisions on this topic — do not re-ask questions that have already been answered. Ask one question by default and normally use no more than three; use four or five only when the same stage has that many independent, necessary decisions. After receiving the answers, continue the original task immediately.",

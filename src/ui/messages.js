@@ -1185,6 +1185,7 @@
   function createMessagesFeature(options = {}) {
     const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
     const formatCompact = options.formatCompact || ((value) => String(value ?? 0));
+    const formatSize = options.formatSize || ((value) => String(value ?? 0));
     const renderMarkdown = options.renderMarkdown || ((value) => escapeHtml(value));
     const renderAssistantMarkdown = options.renderAssistantMarkdown || renderMarkdown;
     const t = options.t || ((key) => key);
@@ -1362,6 +1363,22 @@
         const image = event.target?.closest?.("[data-message-image-preview]");
         if (image && (!root.contains || root.contains(image))) {
           onImagePreview(image.currentSrc || image.src || "");
+          return;
+        }
+        const generatedPreview = event.target?.closest?.("[data-generated-image-preview]");
+        if (generatedPreview && (!root.contains || root.contains(generatedPreview))) {
+          const source = String(generatedPreview.dataset.generatedImagePreview || "");
+          const gallery = generatedPreview.closest?.("[data-generated-image-gallery]");
+          const previews = gallery
+            ? [...gallery.querySelectorAll("[data-generated-image-preview]")]
+            : [generatedPreview];
+          const sources = previews
+            .map((node) => String(node.dataset.generatedImagePreview || ""))
+            .filter(Boolean);
+          onImagePreview(source, {
+            sources,
+            index: Math.max(0, previews.indexOf(generatedPreview)),
+          });
         }
       });
 
@@ -1375,9 +1392,11 @@
         }
       }, true);
       root.addEventListener("error", (event) => {
-        const image = event.target?.closest?.("[data-message-image-preview]");
+        const image = event.target?.closest?.("[data-message-image-preview]")
+          || event.target?.closest?.("[data-generated-image-preview-img]");
         if (!image || (root.contains && !root.contains(image))) return;
-        const fallback = image.parentElement?.querySelector?.("[data-message-image-fallback]");
+        const fallback = image.parentElement?.querySelector?.("[data-message-image-fallback]")
+          || image.parentElement?.querySelector?.("[data-generated-image-fallback]");
         if (!fallback) return;
         image.hidden = true;
         fallback.hidden = false;
@@ -1794,15 +1813,96 @@
 
     function processCallArguments(call) {
       if (!call?.args || !Object.keys(call.args).length) return "";
+      if (call.action === "generate_image") {
+        return boundedProcessDetail({
+          size: String(call.args.size || "auto"),
+          quality: String(call.args.quality || "auto"),
+          count: Math.max(1, Number(call.args.count || 1)),
+          outputFormat: String(call.args.outputFormat || "png"),
+          hasReference: Boolean(call.args.reference),
+        }, 400);
+      }
       return boundedProcessDetail(call.args, 1200);
     }
 
     function processCallResult(call) {
       if (call?.error) return boundedProcessDetail(call.error);
+      if (call?.action === "generate_image") {
+        if (call?.result?.ok === false) {
+          return boundedProcessDetail(
+            String(call.result.errorCode || call.result.error || t("toolProcessFailed")),
+            240,
+          );
+        }
+        const count = generatedAssetsForCall(call).length || Number(call?.result?.count || 0);
+        return count > 0 ? t("imageAssetsGenerated", { count }) : "";
+      }
       const content = getMessageText(call?.resultMessage);
       if (content) return boundedProcessDetail(content);
       if (call?.result) return boundedProcessDetail(call.result);
       return "";
+    }
+
+    function generatedAssetExtension(mimeType) {
+      if (mimeType === "image/png") return "png";
+      if (mimeType === "image/jpeg") return "jpg";
+      if (mimeType === "image/webp") return "webp";
+      return "";
+    }
+
+    function generatedAssetsForCall(call) {
+      if (call?.action !== "generate_image" || call?.result?.ok === false) return [];
+      const sessionId = String(getSessionId() || "");
+      if (!sessionId) return [];
+      return (Array.isArray(call?.result?.assets) ? call.result.assets : [])
+        .map((asset) => {
+          const assetId = String(asset?.assetId || "");
+          const mimeType = String(asset?.mimeType || "").toLowerCase();
+          const extension = generatedAssetExtension(mimeType);
+          const width = Number(asset?.width);
+          const height = Number(asset?.height);
+          const byteLength = Number(asset?.byteLength);
+          if (
+            !/^ga1_[A-Za-z0-9_-]{32,96}$/.test(assetId)
+            || !extension
+            || !Number.isInteger(width)
+            || width <= 0
+            || !Number.isInteger(height)
+            || height <= 0
+            || !Number.isInteger(byteLength)
+            || byteLength <= 0
+          ) return null;
+          return {
+            assetId,
+            mimeType,
+            extension,
+            width,
+            height,
+            byteLength,
+            url: `/api/sessions/${encodeURIComponent(sessionId)}/generated-assets/${encodeURIComponent(assetId)}`,
+          };
+        })
+        .filter(Boolean);
+    }
+
+    function renderGeneratedAssetGallery(call) {
+      const assets = generatedAssetsForCall(call);
+      if (!assets.length) return "";
+      return `<section class="generated-image-result" data-generated-image-gallery>
+        <strong>${escapeHtml(t("imageAssetsGenerated", { count: assets.length }))}</strong>
+        <div class="generated-image-grid">
+          ${assets.map((asset, index) => `<article class="generated-image-card">
+            <button class="generated-image-preview" type="button" data-generated-image-preview="${escapeHtml(asset.url)}" aria-label="${escapeHtml(t("imageAssetPreview"))}">
+              <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(t("imageAssetPreview"))}" loading="lazy" data-generated-image-preview-img />
+              <span class="generated-image-fallback" data-generated-image-fallback hidden>${escapeHtml(t("imageReadFailed"))}</span>
+            </button>
+            <div class="generated-image-meta">
+              <span>${escapeHtml(t("imageAssetMeta", { width: asset.width, height: asset.height, format: asset.mimeType.replace("image/", "").toUpperCase(), size: formatSize(asset.byteLength) }))}</span>
+              <a class="generated-image-download" href="${escapeHtml(asset.url)}" download="generated-image-${index + 1}.${asset.extension}">${escapeHtml(t("imageAssetDownload"))}</a>
+            </div>
+          </article>`).join("")}
+        </div>
+      </section>`;
     }
 
     function currentProcessCall(calls) {
@@ -1891,8 +1991,10 @@
       const expandedToolItems = options.expandedToolItems instanceof Set
         ? options.expandedToolItems
         : new Set(options.expandedToolItems || []);
+      const hasGeneratedAssets = visibleCalls.some((call) => generatedAssetsForCall(call).length > 0);
       const open = (
         options.open
+        || hasGeneratedAssets
         || (
           options.allowExpanded
           && (
@@ -1926,7 +2028,7 @@
                       || expandedToolItems.has(toolCallId)
                     )
                     ? " open"
-                    : "";
+                    : (generatedAssetsForCall(call).length ? " open" : "");
                   return `<details class="tool-process-item ${escapeHtml(call.outcome)}" data-tool-call-id="${escapeHtml(toolCallId)}" data-agent-run-id="${escapeHtml(call.agentRunId || "")}" data-tool-process-item-key="${escapeHtml(itemKey)}"${itemOpen}>
                     <summary>
                       <span class="tool-process-indicator ${escapeHtml(call.outcome)}" aria-hidden="true"></span>
@@ -1937,6 +2039,7 @@
                     <div class="tool-process-body">
                       ${argumentsText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessArguments"))}</strong><pre>${escapeHtml(argumentsText)}</pre></section>` : ""}
                       ${resultText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessResult"))}</strong><pre>${escapeHtml(resultText)}</pre></section>` : ""}
+                      ${renderGeneratedAssetGallery(call)}
                     </div>
                   </details>`;
                 }).join("")}

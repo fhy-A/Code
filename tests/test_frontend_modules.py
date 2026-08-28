@@ -2169,6 +2169,134 @@ setImmediate(() => {{
         self.assertIn("ctx.activeSkillNames = [...(snapshot.activeSkillNames || [])]", APP_SOURCE)
         self.assertIn("activeSkillNames: [],", SUBAGENTS_SOURCE)
 
+    def test_image_route_dispatch_is_public_frozen_and_not_inherited_by_child(self):
+        normalize_start = APP_SOURCE.index("function normalizeImageRouteDispatch(")
+        normalize_end = APP_SOURCE.index("function buildRunContext(", normalize_start)
+        checkpoint_start = APP_SOURCE.index("function queuedMessageCheckpoint(")
+        checkpoint_end = APP_SOURCE.index("function findQueuedUserMessage", checkpoint_start)
+        script = f"""
+{APP_SOURCE[normalize_start:normalize_end]}
+{APP_SOURCE[checkpoint_start:checkpoint_end]}
+const valid = normalizeImageRouteDispatch({{
+  routeRef: "ir1_{'c' * 64}",
+  catalogRevision: 12,
+  connectionId: "image-connection",
+  label: "Image fixture",
+  modelId: "image-model-1",
+  supportsGeneration: true,
+  supportsEdit: true,
+  key: "secret-key",
+  baseUrl: "https://secret.invalid",
+}});
+const checkpoint = queuedMessageCheckpoint({{
+  id: "queue-1",
+  clientRequestId: "request-1",
+  content: "generate",
+  imageRoute: {{...valid, key: "secret-key", baseUrl: "https://secret.invalid"}},
+}});
+process.stdout.write(JSON.stringify({{
+  valid,
+  checkpoint,
+  invalidRef: normalizeImageRouteDispatch({{...valid, routeRef: "bad"}}),
+  missingModel: normalizeImageRouteDispatch({{...valid, modelId: ""}}),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["valid"]["routeRef"], "ir1_" + "c" * 64)
+        self.assertNotIn("key", data["valid"])
+        self.assertNotIn("baseUrl", data["valid"])
+        self.assertEqual(data["checkpoint"]["imageRoute"], data["valid"])
+        self.assertIsNone(data["invalidRef"])
+        self.assertIsNone(data["missingModel"])
+
+        enqueue_start = APP_SOURCE.index("async function enqueueSessionMessage(")
+        enqueue_end = APP_SOURCE.index("function followUpMessageText", enqueue_start)
+        enqueue_source = APP_SOURCE[enqueue_start:enqueue_end]
+        self.assertIn(
+            "const imageRoute = normalizeImageRouteDispatch(getSelectedImageRoute?.())",
+            enqueue_source,
+        )
+        self.assertIn("...(imageRoute ? { imageRoute } : {})", enqueue_source)
+        queued_run_start = APP_SOURCE.index("async function runQueuedSessionMessage(")
+        queued_run_end = APP_SOURCE.index("async function pumpQueuedSessionMessages", queued_run_start)
+        self.assertIn(
+            "imageRoute: item.imageRoute || null",
+            APP_SOURCE[queued_run_start:queued_run_end],
+        )
+        child_start = APP_SOURCE.index("async function runBackgroundSubAgentJob(")
+        child_end = APP_SOURCE.index("function pumpBackgroundDispatcher", child_start)
+        self.assertIn(
+            'allowedToolNames.delete("generate_image")',
+            APP_SOURCE[child_start:child_end],
+        )
+        recovered_start = APP_SOURCE.index("function buildRecoveredRunContext(")
+        recovered_end = APP_SOURCE.index("function finalizeLegacyBrowserRunMessages", recovered_start)
+        self.assertIn(
+            "imageRoute: normalizeImageRouteDispatch(runState.imageRoute)",
+            APP_SOURCE[recovered_start:recovered_end],
+        )
+
+    def test_image_authorization_summary_accepts_event_and_snapshot_shapes_without_prompt(self):
+        start = APP_SOURCE.index("function imageAuthorizationSummary(")
+        end = APP_SOURCE.index("function authorizationTarget(", start)
+        script = f"""
+{APP_SOURCE[start:end]}
+const nested = imageAuthorizationSummary({{
+  action: "generate_image",
+  summary: {{
+    modelId: "image-model",
+    count: 2,
+    size: "1024x1024",
+    quality: "high",
+    outputFormat: "webp",
+    hasReference: true,
+    prompt: "private prompt",
+    key: "private key",
+  }},
+}});
+const flat = imageAuthorizationSummary({{
+  action: "generate_image",
+  modelId: "image-model",
+  count: 2,
+  size: "1024x1024",
+  quality: "high",
+  outputFormat: "webp",
+  hasReference: true,
+  prompt: "private prompt",
+  baseUrl: "https://private.invalid",
+}});
+process.stdout.write(JSON.stringify({{nested, flat}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        expected = {
+            "modelId": "image-model",
+            "count": 2,
+            "size": "1024x1024",
+            "quality": "high",
+            "outputFormat": "webp",
+            "hasReference": True,
+        }
+        self.assertEqual(data["nested"], expected)
+        self.assertEqual(data["flat"], expected)
+        self.assertNotIn("prompt", data["flat"])
+        self.assertNotIn("baseUrl", data["flat"])
+
     def test_agent_runtime_skill_evidence_intent_and_action_bodies_are_exact(self):
         script = f"""
 global.window = {{Code: {{agent: {{}}}}}};
@@ -2187,6 +2315,14 @@ eval({json.dumps(RUNTIME_SOURCE)});
     payload: {{model: "fixture", messages: [{{role: "user", content: "review"}}]}},
     baseUrl: "http://fixture.invalid",
     keys: [],
+    imageRoute: {{
+      routeRef: "ir1_{'b' * 64}",
+      catalogRevision: 9,
+      connectionId: "image-fixture",
+      label: "Fixture image",
+      modelId: "fixture-image-1",
+      supportsEdit: true,
+    }},
     allowedTools: ["read_file"],
   }});
   await window.Code.agent.runtime.submitSkillEvidenceAction("run-1", {{
@@ -2209,6 +2345,13 @@ eval({json.dumps(RUNTIME_SOURCE)});
         self.assertEqual(requests[0]["url"], "/api/agent/runs")
         self.assertEqual(requests[0]["body"]["activeSkillName"], "code-review")
         self.assertEqual(requests[0]["body"]["activeSkillNames"], ["code-review"])
+        self.assertEqual(requests[0]["body"]["imageRouteRef"], "ir1_" + "b" * 64)
+        self.assertEqual(requests[0]["body"]["imageCatalogRevision"], 9)
+        self.assertEqual(requests[0]["body"]["imageModelId"], "fixture-image-1")
+        self.assertNotIn("imageConnectionId", requests[0]["body"])
+        self.assertNotIn("imageRouteLabel", requests[0]["body"])
+        self.assertNotIn("imageBaseUrl", requests[0]["body"])
+        self.assertNotIn("imageKey", requests[0]["body"])
         self.assertNotIn("skillEvidenceContract", requests[0]["body"])
         self.assertEqual(
             requests[1],
@@ -2650,7 +2793,7 @@ eval(source);
 
     def test_server_agent_questionnaire_uses_durable_submit_and_reload_path(self):
         self.assertIn('name: "request_user_input"', TOOLS_SOURCE)
-        self.assertIn("const skillAllowedToolNames = applySkillTaskPolicy(", APP_SOURCE)
+        self.assertIn("const skillAllowedToolNames = new Set(applySkillTaskPolicy(", APP_SOURCE)
         self.assertIn("const serverTools = getNativeTools(ctx.toolPreset, skillAllowedToolNames)", APP_SOURCE)
         self.assertIn('if (snapshot.status === "waiting_user_input")', APP_SOURCE)
         self.assertIn("await requestServerAgentInput(ctx, snapshot.pendingInput)", APP_SOURCE)
@@ -6336,6 +6479,10 @@ process.stdout.write(JSON.stringify({
     byName.request_user_input.function.parameters.properties.questions.items.properties.options.items.required,
   runCommandProperties: Object.keys(byName.run_command.function.parameters.properties),
   saveMemoryRequired: byName.save_memory.function.parameters.required,
+  imageProperties: Object.keys(byName.generate_image.function.parameters.properties),
+  imageRequired: byName.generate_image.function.parameters.required,
+  imageReferenceRequired:
+    byName.generate_image.function.parameters.properties.reference.required,
 }));
 """
         completed = subprocess.run(
@@ -6350,6 +6497,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(
             data["names"],
             [
+                "generate_image",
                 "request_user_input",
                 "list_files",
                 "read_file",
@@ -6369,7 +6517,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "943267db6a843b8931afdaf01ec65bbc6becd17142efb1e55e1f7df9d7e0f9f8",
+            "69fdf9dfc8fbf50273d76167e6101f5501d1dc72d3e62428889f3ed9885a8016",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
@@ -6392,6 +6540,12 @@ process.stdout.write(JSON.stringify({
             data["saveMemoryRequired"],
             ["name", "description", "body"],
         )
+        self.assertEqual(
+            data["imageProperties"],
+            ["prompt", "reference", "size", "quality", "count", "outputFormat"],
+        )
+        self.assertEqual(data["imageRequired"], ["prompt"])
+        self.assertEqual(data["imageReferenceRequired"], ["type", "id"])
         self.assertIn("const nativeTools = [", TOOLS_SOURCE)
         self.assertIn(
             "nativeTools,",
@@ -6486,6 +6640,7 @@ process.stdout.write(JSON.stringify({
                 "delete_file",
                 "save_memory",
                 "read_skill_resource",
+                "generate_image",
             ],
         )
         self.assertEqual(data["profiles"]["accept"], data["profiles"]["bypass"])
@@ -12116,6 +12271,58 @@ const feature = createSkillsMemoryFeature({
             ["/api/skills?brief=1", "/api/skills/demo", "/api/memory-context"],
         )
 
+    def test_imagegen_and_local_image_generation_skills_route_without_overlap(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require("./src/features/skills-memory.js");
+const {rankMatchedSkills} = window.Code.features.skillsMemory;
+const skills = [
+  {
+    name: "imagegen",
+    description: "Generative images, not charts",
+    keywords: ["文生图", "生成+图片", "image+generation"],
+  },
+  {
+    name: "image-generation",
+    description: "Local deterministic charts and Pillow",
+    keywords: ["matplotlib", "生成+图表", "柱状图"],
+  },
+];
+const names = (prompt, disabled = new Set()) => (
+  rankMatchedSkills(skills, disabled, prompt).map((skill) => skill.name)
+);
+process.stdout.write(JSON.stringify({
+  generative: names("请生成一张图片，画夜晚的城市"),
+  chart: names("用 matplotlib 生成柱状图"),
+  disabled: names("请生成一张图片", new Set(["imagegen"])),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["generative"], ["imagegen"])
+        self.assertEqual(data["chart"], ["image-generation"])
+        self.assertEqual(data["disabled"], [])
+
+        imagegen = (ROOT / "data" / "skills" / "imagegen" / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        evidence = json.loads(
+            (ROOT / "data" / "skills" / "imagegen" / "evidence.json").read_text(
+                encoding="utf-8",
+            )
+        )
+        self.assertIn("tools: generate_image", imagegen)
+        self.assertIn("不用于数据图表", imagegen)
+        self.assertEqual(evidence["requirements"][0]["tool"], "generate_image")
+        self.assertNotIn("enforcement", evidence)
+
     def test_skill_prompt_snapshot_freezes_exact_explicit_and_auto_identity_sets(self):
         script = r"""
 global.window = {Code: {features: {}}};
@@ -12272,6 +12479,117 @@ const feature = createSettingsFeature({
         self.assertEqual(data["auth"], {"token": "token-1", "userId": "user-1", "username": "Alice"})
         self.assertEqual(data["replaced"], [[None, "", "/"]])
         self.assertEqual(data["toasts"], [["loggedInAs:Alice", "warning"]])
+
+    def test_image_settings_are_independent_masked_and_bind_only_public_route_identity(self):
+        script = r"""
+const values = new Map();
+const storage = {
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+};
+global.window = {
+  Code: {core: {}, features: {}},
+  localStorage: storage,
+  URLSearchParams,
+  URL,
+  location: {href: "http://localhost:3010/", search: ""},
+  matchMedia: () => ({matches: false, addEventListener: () => {}}),
+  addEventListener: () => {},
+  setTimeout,
+  setInterval,
+  clearInterval,
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const settings = window.Code.features.settings;
+const configured = settings.saveImageConnectionConfig({
+  connections: [{
+    connectionId: "image_fixture",
+    name: "Fixture image provider",
+    baseUrl: "https://image-secret.invalid/v1",
+    key: "image-key-secret-sentinel",
+    enabled: true,
+    models: [{id: "fixture-image-1", supportsEdit: true}],
+  }],
+  defaultRoute: {connectionId: "image_fixture", modelId: "fixture-image-1"},
+}, storage);
+const state = {};
+let requestSummary = null;
+const routeRef = `ir1_${"a".repeat(64)}`;
+const feature = settings.createSettingsFeature({
+  state,
+  elements: {},
+  t: (key) => key,
+  document: {getElementById: () => null, querySelectorAll: () => []},
+  storage,
+  apiJson: async (url, options = {}) => {
+    const body = JSON.parse(options.body || "{}");
+    requestSummary = {
+      url,
+      connectionCount: body.connections?.length || 0,
+      credentialPresent: body.connections?.[0]?.key === "image-key-secret-sentinel",
+      endpointPresent: body.connections?.[0]?.baseUrl === "https://image-secret.invalid/v1",
+    };
+    return {
+      catalogRevision: 7,
+      routes: [{
+        routeRef,
+        connectionId: "image_fixture",
+        label: "Fixture image provider",
+        modelId: "fixture-image-1",
+        enabled: true,
+        credentialsAvailable: true,
+        supportsGeneration: true,
+        supportsEdit: true,
+      }],
+    };
+  },
+});
+(async () => {
+  await feature.initializeImageRoutes();
+  const selected = feature.getSelectedImageRoute();
+  const publicState = JSON.stringify(state);
+  const disabled = settings.selectDefaultImageRoute({
+    catalogRevision: 8,
+    routes: [{...selected, enabled: false, credentialsAvailable: true}],
+  }, configured);
+  process.stdout.write(JSON.stringify({
+    requestSummary,
+    selected,
+    disabled,
+    storageHasCredential: feature.loadImageConnectionConfig().connections[0].key.length > 0,
+    publicStateHasCredential: publicState.includes("image-key-secret-sentinel"),
+    publicStateHasEndpoint: publicState.includes("image-secret.invalid"),
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["requestSummary"]["url"], "/api/image-routes/refresh")
+        self.assertEqual(data["requestSummary"]["connectionCount"], 1)
+        self.assertTrue(data["requestSummary"]["credentialPresent"])
+        self.assertTrue(data["requestSummary"]["endpointPresent"])
+        self.assertEqual(data["selected"]["catalogRevision"], 7)
+        self.assertEqual(data["selected"]["modelId"], "fixture-image-1")
+        self.assertEqual(data["selected"]["routeRef"], "ir1_" + "a" * 64)
+        self.assertTrue(data["selected"]["supportsEdit"])
+        self.assertIsNone(data["disabled"])
+        self.assertTrue(data["storageHasCredential"])
+        self.assertFalse(data["publicStateHasCredential"])
+        self.assertFalse(data["publicStateHasEndpoint"])
+        self.assertIn('type="password"', SETTINGS_SOURCE)
+        self.assertIn(".image-connection-key\").value", SETTINGS_SOURCE)
+        self.assertNotIn("escapeHtml(connection.key)", SETTINGS_SOURCE)
+        self.assertNotIn("escapeHtml(connection.baseUrl)", SETTINGS_SOURCE)
 
     def test_workbar_login_callback_follows_current_code_origin(self):
         self.assertNotIn('encodeURIComponent("http://127.0.0.1:3010/")', SETTINGS_SOURCE)
@@ -16120,6 +16438,96 @@ process.stdout.write(JSON.stringify({
         self.assertIn('processedLabel: "已处理"', I18N_SOURCE)
         self.assertIn('completedElapsedLabel: "用时"', I18N_SOURCE)
         self.assertIn('completedElapsedLabel: "Worked for"', I18N_SOURCE)
+
+    def test_generated_image_results_render_only_session_scoped_asset_identity(self):
+        script = r"""
+global.window = {Code: {features: {}, ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const templates = {
+  imageAssetsGenerated: "Generated {count}",
+  imageAssetMeta: "{width}×{height} · {format} · {size}",
+};
+const interpolate = (key, args = {}) => Object.entries(args).reduce(
+  (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+  templates[key] || key,
+);
+const feature = createMessagesFeature({
+  escapeHtml: (value) => String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;"),
+  t: interpolate,
+  formatSize: (value) => `${value} bytes`,
+  getSessionId: () => "session fixture/one",
+  getToolActionLabel: (value) => value,
+});
+const assetId = `ga1_${"A".repeat(43)}`;
+const html = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [{
+    id: "image-call-1",
+    function: {name: "generate_image", arguments: '{"prompt":"private prompt"}'},
+  }]}}, index: 1},
+  {msg: {role: "tool-result", content: "", meta: {
+    action: "generate_image",
+    toolCallId: "image-call-1",
+    outcome: "succeeded",
+    result: {
+      ok: true,
+      action: "generate_image",
+      count: 1,
+      providerUrl: "https://upstream-secret.invalid/image?token=secret",
+      localPath: "C:/private/generated.png",
+      assets: [{
+        assetId,
+        url: "https://upstream-secret.invalid/ignored",
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        byteLength: 4096,
+      }],
+    },
+  }}, index: 2},
+], 1);
+const invalidHtml = feature.renderToolProcessProjection([
+  {msg: {role: "assistant", meta: {toolCalls: [{
+    id: "image-call-2",
+    function: {name: "generate_image", arguments: '{}'},
+  }]}}, index: 1},
+  {msg: {role: "tool-result", content: "invalid", meta: {
+    action: "generate_image",
+    toolCallId: "image-call-2",
+    outcome: "succeeded",
+    result: {ok: true, assets: [{assetId: "../escape", mimeType: "image/png", width: 1, height: 1, byteLength: 1}]},
+  }}, index: 2},
+], 2);
+process.stdout.write(JSON.stringify({html, invalidHtml, assetId}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        controlled_url = (
+            "/api/sessions/session%20fixture%2Fone/generated-assets/" + data["assetId"]
+        )
+        self.assertIn(controlled_url, data["html"])
+        self.assertIn("data-generated-image-preview", data["html"])
+        self.assertIn('download="generated-image-1.png"', data["html"])
+        self.assertIn("1024×1024", data["html"])
+        self.assertIn("4096 bytes", data["html"])
+        self.assertIn("<details class=\"tool-process-stage succeeded single-tool\"", data["html"])
+        self.assertIn(" open>", data["html"])
+        self.assertNotIn("upstream-secret", data["html"])
+        self.assertNotIn("token=secret", data["html"])
+        self.assertNotIn("C:/private", data["html"])
+        self.assertNotIn("private prompt", data["html"])
+        self.assertNotIn("data-generated-image-preview", data["invalidHtml"])
 
     def test_messages_ui_binds_copy_and_image_events_without_inline_globals(self):
         self.assertNotIn('onclick="copyMessageText', MESSAGES_SOURCE)

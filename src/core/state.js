@@ -75,6 +75,11 @@
       selectedRouteRef: getStoredValue("code-model-route-ref") || "",
       selectedRouteCatalogRevision: Number(getStoredValue("code-model-route-revision") || 0),
       _modelRouteRefreshPromise: null,
+      imageRoutes: [],
+      imageRouteCatalogRevision: 0,
+      selectedImageRoute: null,
+      imageRouteStatusKey: "imageRoutesNotConfigured",
+      _imageRouteRefreshPromise: null,
       stats: {
         input: 0,
         output: 0,

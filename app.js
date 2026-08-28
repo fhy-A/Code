@@ -476,6 +476,9 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     ...(ctx.run || {}),
     taskStartTime: ctx.run?.taskStartTime || ctx.taskStartedAt || null,
   };
+  const imageRoute = normalizeImageRouteDispatch(
+    extra.imageRoute ?? ctx.imageRoute ?? previous.imageRoute,
+  );
   return {
     version: 1,
     status,
@@ -488,6 +491,7 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     catalogRevision: Math.max(0, Number(
       extra.catalogRevision ?? ctx.catalogRevision ?? previous.catalogRevision ?? 0,
     )),
+    ...(imageRoute ? { imageRoute } : {}),
     temperature: Number(ctx.temperature ?? 0.2),
     maxTokens: Number(ctx.maxTokens || 0),
     toolPreset: ctx.toolPreset || "default",
@@ -889,6 +893,30 @@ function setupComposerSafeArea() {
   window.addEventListener("resize", syncComposerSafeArea);
 }
 
+function normalizeImageRouteDispatch(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const routeRef = String(value.routeRef || "").trim();
+  const connectionId = String(value.connectionId || "").trim();
+  const modelId = String(value.modelId || "").trim();
+  const catalogRevision = Number(value.catalogRevision);
+  if (
+    !/^ir1_[a-f0-9]{64}$/.test(routeRef)
+    || !connectionId
+    || !modelId
+    || !Number.isInteger(catalogRevision)
+    || catalogRevision < 0
+  ) return null;
+  return {
+    routeRef,
+    catalogRevision,
+    connectionId: connectionId.slice(0, 160),
+    label: String(value.label || "").trim().slice(0, 160),
+    modelId: modelId.slice(0, 240),
+    supportsGeneration: value.supportsGeneration !== false,
+    supportsEdit: value.supportsEdit === true,
+  };
+}
+
 function buildRunContext(sessionId, options = {}) {
   const run = ensureSessionRun(sessionId);
   const messages = getSessionMessages(sessionId);
@@ -906,6 +934,10 @@ function buildRunContext(sessionId, options = {}) {
   const toolPreset = String(options.toolPreset || els.toolPreset.value || "default");
   const permissionProfile = String(options.permissionProfile || getPermissionProfile());
   const allowedToolNames = getAllowedToolNamesForProfile(permissionProfile, toolPreset);
+  const hasFrozenImageRoute = Object.prototype.hasOwnProperty.call(options, "imageRoute");
+  const imageRoute = normalizeImageRouteDispatch(
+    hasFrozenImageRoute ? options.imageRoute : getSelectedImageRoute?.(),
+  );
   setSessionMessages(sessionId, messages);
   if (run) run.model = model;
   return {
@@ -922,6 +954,7 @@ function buildRunContext(sessionId, options = {}) {
     model,
     routeRef: String(options.routeRef || ""),
     catalogRevision: Math.max(0, Number(options.catalogRevision || 0)),
+    imageRoute,
     temperature: Number(options.temperature ?? els.temperature.value ?? 0.2),
     maxTokens: Number(options.maxTokens || getEffectiveMaxTokens(model)),
     contextResolution: options.contextResolution || null,
@@ -1275,6 +1308,7 @@ const {
 messagesFeature = createMessagesFeature({
   escapeHtml,
   formatCompact,
+  formatSize,
   renderMarkdown: (...args) => markdownFeature.renderMarkdownLite(...args),
   renderAssistantMarkdown: (...args) => renderAnswerMarkdown(...args),
   t,
@@ -1541,7 +1575,9 @@ const {
   applyTheme,
   checkForUpdates,
   getPlatformAuth,
+  getSelectedImageRoute,
   initializePlatformAuth,
+  initializeImageRoutes,
   syncPlatformKeysSilently,
   verifyPlatformConnection,
 } = settingsFeature;
@@ -2120,6 +2156,18 @@ async function buildSystemPromptSnapshot(options = {}) {
   const memoryInstruction = memoryContext?.found
     ? `=== 长期记忆（跨会话保留） ===\n以下信息已融入当前上下文，直接使用，不要提及"长期记忆"或"根据记忆"。\n${memoryContext.content}`
     : "";
+  const imageAttachmentRefs = allowedToolNames.has("generate_image")
+    ? (Array.isArray(lastUserMsg?._images) ? lastUserMsg._images : [])
+      .map((image) => ({
+        id: String(image?.path || "").trim(),
+        name: String(image?.name || "").trim(),
+      }))
+      .filter((image) => image.id)
+      .slice(0, 8)
+    : [];
+  const imageAttachmentInstruction = imageAttachmentRefs.length
+    ? `\n当前 Session 可用于 generate_image 单参考图编辑的附件 identity：\n${imageAttachmentRefs.map((image) => `- attachment id=${JSON.stringify(image.id)}${image.name ? ` name=${JSON.stringify(image.name)}` : ""}`).join("\n")}\n这些 identity 仅是工具参数，不是本地路径或公开链接。`
+    : "";
   let skillInstruction = "";
   let activeSkillNames = [];
 
@@ -2139,7 +2187,7 @@ async function buildSystemPromptSnapshot(options = {}) {
     behaviorInstruction,
     environmentInstruction: environment.instruction,
     projectFoldersInstruction,
-    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。最终回答可以用相对路径或行内代码描述项目结构，但它们不可点击，也不得按 cwd 猜测；若要生成可点击的本地文件、图片或目录链接，底层目标必须使用完整规范化绝对路径且可访问，显示标签可以简写。工具参数仍使用项目相对路径。回复中可用 ![描述](绝对路径) 嵌入本地图片（png/jpg/gif/webp/svg）。`,
+    externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。最终回答可以用相对路径或行内代码描述项目结构，但它们不可点击，也不得按 cwd 猜测；若要生成可点击的本地文件、图片或目录链接，底层目标必须使用完整规范化绝对路径且可访问，显示标签可以简写。工具参数仍使用项目相对路径。回复中可用 ![描述](绝对路径) 嵌入本地图片（png/jpg/gif/webp/svg）。${imageAttachmentInstruction}`,
     delegationInstruction,
     responseLanguageInstruction,
     projectContextInstruction,
@@ -3036,7 +3084,7 @@ function _toolActionLabel(action) {
   const map = { list_files:"toolListFiles", read_file:"toolReadFile", search_files:"toolSearchFiles",
     glob_files:"toolGlobFiles", propose_edit:"toolProposeEdit", apply_edit:"toolApplyEdit",
     run_command:"toolRunCommand", write_file:"toolWriteFile", delete_file:"toolDeleteFile",
-    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory" };
+    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory", generate_image:"toolGenerateImage" };
   return map[action] ? t(map[action]) : action;
 }
 
@@ -7405,11 +7453,38 @@ function authorizationActionLabel(action) {
     write_file: t("actionWrite"),
     delete_file: t("actionDelete"),
     run_command: t("actionRun"),
+    generate_image: t("imageAuthorizationAction"),
   };
   return labels[action] || action || t("actionGeneric");
 }
 
+function imageAuthorizationSummary(tool) {
+  if (tool?.action !== "generate_image") return null;
+  const source = tool.summary && typeof tool.summary === "object"
+    ? tool.summary
+    : tool;
+  return {
+    modelId: String(source.modelId || ""),
+    count: Math.max(1, Number(source.count || 1)),
+    size: String(source.size || "auto"),
+    quality: String(source.quality || "auto"),
+    outputFormat: String(source.outputFormat || "png"),
+    hasReference: source.hasReference === true,
+  };
+}
+
 function authorizationTarget(tool) {
+  if (tool.action === "generate_image") {
+    const summary = imageAuthorizationSummary(tool) || {};
+    return t("imageAuthorizationTarget", {
+      model: String(summary.modelId || "-"),
+      count: Math.max(1, Number(summary.count || 1)),
+      size: String(summary.size || "auto"),
+      quality: String(summary.quality || "auto"),
+      format: String(summary.outputFormat || "png"),
+      reference: summary.hasReference ? t("imageAuthorizationReference") : "",
+    });
+  }
   if (tool.action === "run_command") return tool.command || t("commandLabel");
   return tool.path || tool.query || describeToolForConfirm(tool);
 }
@@ -7670,6 +7745,7 @@ function toolProgressSummary(toolCalls) {
       case "web_fetch":    return t("progressFetch", { target: args.url || "Web" });
       case "task":         return t("progressTask", { target: (args.description || args.prompt || "").slice(0, 30) });
       case "request_user_input": return t("progressUserInput");
+      case "generate_image": return t("progressGenerateImage");
       default:             return fn ? `→ ${fn}` : "";
     }
   }).filter(Boolean);
@@ -7801,7 +7877,9 @@ function buildRecoveredRunContext(session, runState) {
   setSessionMessages(sessionId, messages);
   setSessionStats(sessionId, session.stats || { input: 0, output: 0, cache: 0, cost: 0 });
 
-  const ctx = buildRunContext(sessionId);
+  const ctx = buildRunContext(sessionId, {
+    imageRoute: normalizeImageRouteDispatch(runState.imageRoute),
+  });
   ctx.messages = messages;
   ctx.stats = getSessionStats(sessionId);
   ctx.model = runState.model || ctx.model;
@@ -9208,6 +9286,14 @@ function formatToolResult(result) {
 
   }
 
+  if (result.action === "generate_image") {
+
+    const assets = Array.isArray(result.assets) ? result.assets : [];
+
+    return t("imageAssetsGenerated", { count: assets.length || Number(result.count || 0) });
+
+  }
+
   if (result.action === "list_files") {
 
     const rows = (result.items || []).map((item) => {
@@ -9505,6 +9591,7 @@ function createSubContext(parentCtx, taskPrompt) {
 }
 
 function queuedMessageCheckpoint(item) {
+  const imageRoute = normalizeImageRouteDispatch(item.imageRoute);
   return {
     id: String(item.id || ""),
     clientRequestId: String(item.clientRequestId || item.id || ""),
@@ -9513,6 +9600,7 @@ function queuedMessageCheckpoint(item) {
     model: String(item.model || ""),
     routeRef: String(item.routeRef || ""),
     catalogRevision: Math.max(0, Number(item.catalogRevision || 0)),
+    ...(imageRoute ? { imageRoute } : {}),
     permissionProfile: String(item.permissionProfile || "accept"),
     toolPreset: String(item.toolPreset || "default"),
     thinkingLevel: String(item.thinkingLevel || "auto"),
@@ -9622,6 +9710,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
     routeRef: options.routeRef || existingMessage?.meta?.queuedDispatch?.routeRef || "",
     catalogRevision: options.catalogRevision || existingMessage?.meta?.queuedDispatch?.catalogRevision || 0,
   });
+  const imageRoute = normalizeImageRouteDispatch(getSelectedImageRoute?.());
 
   const queuedAt = Date.now();
   const id = `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
@@ -9651,6 +9740,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
     model,
     routeRef: dispatchRoute.routeRef,
     catalogRevision: dispatchRoute.catalogRevision,
+    imageRoute,
     permissionProfile,
     toolPreset,
     thinkingLevel,
@@ -9679,6 +9769,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
         routeRef: dispatchRoute.routeRef,
         catalogRevision: dispatchRoute.catalogRevision,
       } : {}),
+      ...(imageRoute ? { imageRoute } : {}),
     },
     detachedFromMain: true,
   };
@@ -9872,6 +9963,7 @@ async function runQueuedSessionMessage(sessionId, item) {
       model: item.model,
       routeRef: item.routeRef,
       catalogRevision: item.catalogRevision,
+      imageRoute: item.imageRoute || null,
       permissionProfile: item.permissionProfile,
       toolPreset: item.toolPreset,
       thinkingLevel: item.thinkingLevel,
@@ -10226,6 +10318,7 @@ async function runBackgroundSubAgentJob(job) {
   const allowedToolNames = getAllowedToolNamesForProfile(job.permissionProfile, job.toolPreset);
   allowedToolNames.delete("task");
   allowedToolNames.delete("request_user_input");
+  allowedToolNames.delete("generate_image");
   const serverTools = getNativeTools(job.toolPreset, allowedToolNames);
   const serverToolNames = serverTools.map((tool) => String(tool.function?.name || "")).filter(Boolean);
   subCtx.allowedToolNames = allowedToolNames;
@@ -11737,6 +11830,7 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
         path: String(pendingAuthorization.path || ""),
         command: String(pendingAuthorization.command || ""),
         description: String(pendingAuthorization.description || ""),
+        summary: imageAuthorizationSummary(pendingAuthorization),
       },
       editId,
       stats: diff ? getDiffStats(normalizeDiffText(diff)) : null,
@@ -11761,6 +11855,7 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
     path: String(pendingAuthorization.path || ""),
     command: String(pendingAuthorization.command || ""),
     description: String(pendingAuthorization.description || ""),
+    summary: imageAuthorizationSummary(pendingAuthorization),
   };
   request.stats = diff ? getDiffStats(normalizeDiffText(diff)) : null;
   request.status = "pending";
@@ -11906,13 +12001,14 @@ async function runServerAgentLoop(ctx) {
     ctx.toolPreset,
   );
   const latestUserMessage = [...ctx.messages].reverse().find((message) => message?.role === "user");
-  const skillAllowedToolNames = applySkillTaskPolicy(
+  const skillAllowedToolNames = new Set(applySkillTaskPolicy(
     profileAllowedToolNames,
     state.skills || [],
     state.disabledSkills || new Set(),
     latestUserMessage?.content || "",
     ctx.explicitSkill || "",
-  );
+  ));
+  if (!ctx.imageRoute) skillAllowedToolNames.delete("generate_image");
   const skillToolBudgets = getSkillToolBudgets(
     state.skills || [],
     state.disabledSkills || new Set(),
@@ -11946,8 +12042,14 @@ async function runServerAgentLoop(ctx) {
     return resolvedDispatch;
   };
   if (!ctx.agentRunId) {
-    const dispatch = await resolveRunDispatch();
     const prepared = await buildModelRequestPayload(ctx, true, serverTools);
+    if (!ctx.imageRoute && (ctx.activeSkillNames || []).includes("imagegen")) {
+      const error = new Error(t("imageRouteNotConfigured"));
+      error.code = "image_route_not_configured";
+      error.errorCode = "image_route_not_configured";
+      throw error;
+    }
+    const dispatch = await resolveRunDispatch();
     const contextResolution = ctx.contextResolution || getModelContextResolution(
       ctx.model || getSelectedModel(),
       ctx.maxTokens || getEffectiveMaxTokens(ctx.model || getSelectedModel()),
@@ -11968,6 +12070,7 @@ async function runServerAgentLoop(ctx) {
       keys: dispatch.keys,
       routeRef: dispatch.routeRef,
       catalogRevision: dispatch.catalogRevision,
+      imageRoute: ctx.imageRoute,
       allowedTools: serverToolNames,
       toolBudgets: skillToolBudgets,
       permissionProfile: ctx.permissionProfile || "read",
@@ -11988,6 +12091,7 @@ async function runServerAgentLoop(ctx) {
       agentEventCursor: 0,
       routeRef: ctx.routeRef,
       catalogRevision: ctx.catalogRevision,
+      imageRoute: ctx.imageRoute,
     });
     await settleForegroundDispatchAfterAgentRunCreated(ctx);
     ctx.onAgentRunCreated = null;
@@ -13024,6 +13128,9 @@ async function sendMessage(userText, options = {}) {
   }
   const run = ensureSessionRun(sessionId);
   const ctx = buildRunContext(sessionId, options);
+  if (optimisticMessage?.meta?.pendingDispatch && ctx.imageRoute) {
+    optimisticMessage.meta.pendingDispatch.imageRoute = { ...ctx.imageRoute };
+  }
   ctx.onAgentRunCreated = typeof options.onAgentRunCreated === "function"
     ? options.onAgentRunCreated
     : null;
@@ -15722,6 +15829,7 @@ async function init() {
   els.systemPromptText.value = localStorage.getItem("code-system-prompt") || defaultSystemPrompt;
 
   applyI18n(); // run early, before async ops, to prevent flicker
+  await initializeImageRoutes().catch(() => {});
   const hasEnabledKey = storedKeyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim());
   let cachedModelCatalog = [];
   try {

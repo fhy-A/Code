@@ -19,6 +19,117 @@
   });
   const FOLLOW_UP_BEHAVIOR_STORAGE_KEY = "code-follow-up-behavior";
   const FOLLOW_UP_BEHAVIORS = Object.freeze(["steer", "queue"]);
+  const IMAGE_CONNECTION_CONFIG_STORAGE_KEY = "code-image-connections-v1";
+  const IMAGE_CONNECTION_CONFIG_VERSION = 1;
+
+  function createImageConnectionId(cryptoRef = global.crypto) {
+    const suffix = cryptoRef?.randomUUID?.()
+      || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+    return `image_${String(suffix).replace(/[^A-Za-z0-9_.-]/g, "_")}`;
+  }
+
+  function normalizeImageModelEntry(value) {
+    const source = typeof value === "string" ? { id: value } : value;
+    if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+    const id = String(source.id || source.modelId || "").trim().slice(0, 240);
+    if (!id) return null;
+    return { id, supportsEdit: source.supportsEdit === true };
+  }
+
+  function normalizeImageConnectionEntry(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const connectionId = String(value.connectionId || "").trim();
+    if (!/^[A-Za-z0-9_.-]{1,160}$/.test(connectionId)) return null;
+    const models = [];
+    const seenModels = new Set();
+    for (const candidate of Array.isArray(value.models) ? value.models : []) {
+      const model = normalizeImageModelEntry(candidate);
+      if (!model || seenModels.has(model.id)) continue;
+      seenModels.add(model.id);
+      models.push(model);
+    }
+    return {
+      connectionId,
+      name: String(value.name || value.label || "").trim().slice(0, 160),
+      baseUrl: String(value.baseUrl || "").trim().slice(0, 2048),
+      key: String(value.key || "").trim().slice(0, 8192),
+      enabled: value.enabled !== false,
+      models,
+    };
+  }
+
+  function normalizeImageConnectionConfig(value) {
+    const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const connections = [];
+    const seenConnections = new Set();
+    for (const candidate of Array.isArray(source.connections) ? source.connections : []) {
+      const connection = normalizeImageConnectionEntry(candidate);
+      if (!connection || seenConnections.has(connection.connectionId)) continue;
+      seenConnections.add(connection.connectionId);
+      connections.push(connection);
+    }
+    const requestedDefault = source.defaultRoute && typeof source.defaultRoute === "object"
+      ? {
+          connectionId: String(source.defaultRoute.connectionId || "").trim(),
+          modelId: String(source.defaultRoute.modelId || "").trim(),
+        }
+      : null;
+    const requestedExists = Boolean(requestedDefault?.connectionId && requestedDefault?.modelId && connections.some(
+      (connection) => connection.connectionId === requestedDefault.connectionId
+        && connection.models.some((model) => model.id === requestedDefault.modelId),
+    ));
+    const fallbackConnection = connections.find((connection) => (
+      connection.enabled && connection.models.length > 0
+    ));
+    const defaultRoute = requestedExists
+      ? requestedDefault
+      : (fallbackConnection
+        ? {
+            connectionId: fallbackConnection.connectionId,
+            modelId: fallbackConnection.models[0].id,
+          }
+        : null);
+    return { version: IMAGE_CONNECTION_CONFIG_VERSION, connections, defaultRoute };
+  }
+
+  function loadImageConnectionConfig(storage = global.localStorage) {
+    try {
+      return normalizeImageConnectionConfig(JSON.parse(
+        storage?.getItem?.(IMAGE_CONNECTION_CONFIG_STORAGE_KEY) || "null",
+      ));
+    } catch (_) {
+      return normalizeImageConnectionConfig(null);
+    }
+  }
+
+  function saveImageConnectionConfig(value, storage = global.localStorage) {
+    const normalized = normalizeImageConnectionConfig(value);
+    storage?.setItem?.(IMAGE_CONNECTION_CONFIG_STORAGE_KEY, JSON.stringify(normalized));
+    return normalized;
+  }
+
+  function selectDefaultImageRoute(catalog, config) {
+    const normalized = normalizeImageConnectionConfig(config);
+    const selected = normalized.defaultRoute;
+    if (!selected) return null;
+    const routes = Array.isArray(catalog?.routes) ? catalog.routes : [];
+    const route = routes.find((candidate) => (
+      candidate?.connectionId === selected.connectionId
+      && candidate?.modelId === selected.modelId
+      && candidate?.enabled !== false
+      && candidate?.credentialsAvailable === true
+    ));
+    if (!route?.routeRef) return null;
+    return {
+      routeRef: String(route.routeRef),
+      catalogRevision: Math.max(0, Number(catalog?.catalogRevision || 0)),
+      connectionId: String(route.connectionId || ""),
+      label: String(route.label || ""),
+      modelId: String(route.modelId || ""),
+      supportsGeneration: route.supportsGeneration !== false,
+      supportsEdit: route.supportsEdit === true,
+    };
+  }
 
   function normalizeFollowUpBehavior(value) {
     return value === "queue" ? "queue" : "steer";
@@ -78,6 +189,7 @@
       .sort()
       .join("\n");
     let lastRoutingConnectionIdentity = routingConnectionIdentity(loadKeyConfig(storage));
+    let imageRouteRefreshChain = Promise.resolve();
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
 
@@ -91,6 +203,77 @@
       lastRoutingConnectionIdentity = nextRoutingConnectionIdentity;
       onKeyConfigChanged(saved, { routingChanged });
       return saved;
+    }
+
+    function imageRouteStatusKey(config, catalog, selectedRoute) {
+      if (!config.connections.length) return "imageRoutesNotConfigured";
+      if (selectedRoute) return "imageRoutesReady";
+      if (Number(catalog?.failedConnections || 0) > 0) return "imageRoutesUnavailable";
+      if (!config.defaultRoute) return "imageDefaultRequired";
+      return "imageDefaultUnavailable";
+    }
+
+    function applyImageRouteCatalog(catalog, config) {
+      const routes = Array.isArray(catalog?.routes)
+        ? catalog.routes.filter((route) => route && typeof route === "object").map((route) => ({ ...route }))
+        : [];
+      const selectedRoute = selectDefaultImageRoute(catalog, config);
+      state.imageRoutes = routes;
+      state.imageRouteCatalogRevision = Math.max(0, Number(catalog?.catalogRevision || 0));
+      state.selectedImageRoute = selectedRoute;
+      state.imageRouteStatusKey = imageRouteStatusKey(config, catalog, selectedRoute);
+      const status = byId("imageRouteStatus");
+      if (status) {
+        status.textContent = t(state.imageRouteStatusKey);
+        status.dataset.tone = selectedRoute ? "success" : "warning";
+      }
+      return selectedRoute;
+    }
+
+    function refreshImageRoutes(options = {}) {
+      const config = loadImageConnectionConfig(storage);
+      const task = imageRouteRefreshChain
+        .catch(() => null)
+        .then(async () => {
+          const catalog = await apiJson("/api/image-routes/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ connections: config.connections }),
+          });
+          applyImageRouteCatalog(catalog, config);
+          if (options.rerender === true) {
+            const detail = byId("settingsDetail");
+            if (detail && documentRef.querySelector('.settings-nav-item.active')?.dataset.panel === "image") {
+              renderImagePanel(detail);
+              applyI18n();
+            }
+          }
+          return catalog;
+        })
+        .catch((error) => {
+          state.imageRoutes = [];
+          state.imageRouteCatalogRevision = 0;
+          state.selectedImageRoute = null;
+          state.imageRouteStatusKey = config.connections.length
+            ? "imageRoutesUnavailable"
+            : "imageRoutesNotConfigured";
+          const status = byId("imageRouteStatus");
+          if (status) {
+            status.textContent = t(state.imageRouteStatusKey);
+            status.dataset.tone = "warning";
+          }
+          if (options.notify === true) showToast(t("imageRoutesSaveFailed"), "error");
+          throw error;
+        });
+      imageRouteRefreshChain = task;
+      state._imageRouteRefreshPromise = task;
+      return task.finally(() => {
+        if (state._imageRouteRefreshPromise === task) state._imageRouteRefreshPromise = null;
+      });
+    }
+
+    function getSelectedImageRoute() {
+      return state.selectedImageRoute ? { ...state.selectedImageRoute } : null;
     }
 
     function parseKeyLines(raw, notifyDuplicates = true) {
@@ -524,6 +707,152 @@
           button.title = t("detectAvailableModels");
         }
       }
+    }
+
+    function imageDefaultOptionValue(connectionId, modelId) {
+      return `${encodeURIComponent(connectionId)}|${encodeURIComponent(modelId)}`;
+    }
+
+    function parseImageDefaultOptionValue(value) {
+      const [connectionId = "", modelId = ""] = String(value || "").split("|", 2);
+      if (!connectionId || !modelId) return null;
+      try {
+        return { connectionId: decodeURIComponent(connectionId), modelId: decodeURIComponent(modelId) };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function renderImageModelRow(model = {}) {
+      return `<div class="image-model-row">
+        <input class="image-model-id" type="text" autocomplete="off" placeholder="${escapeHtml(t("imageModelIdPlaceholder"))}" />
+        <label class="image-edit-capability"><input class="image-model-edit" type="checkbox" ${model.supportsEdit === true ? "checked" : ""} /><span>${t("imageModelSupportsEdit")}</span></label>
+        <button class="key-act-btn image-model-delete" type="button" title="${t("delete")}" data-i18n-title="delete">${trashIcon()}</button>
+      </div>`;
+    }
+
+    function renderImageConnectionCard(connection, index) {
+      const models = connection.models.length ? connection.models : [{ id: "", supportsEdit: false }];
+      return `<section class="settings-lite-card image-connection-card${connection.enabled ? "" : " disabled"}" data-image-connection-id="${escapeHtml(connection.connectionId)}" data-image-connection-index="${index}">
+        <div class="image-connection-head">
+          <strong>${escapeHtml(connection.name || t("imageConnectionUnnamed"))}</strong>
+          <div class="image-connection-actions">
+            <label class="toggle-switch" title="${t(connection.enabled ? "enabledStatus" : "disabledStatus")}">
+              <input class="image-connection-enabled" type="checkbox" ${connection.enabled ? "checked" : ""} />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <button class="key-act-btn image-connection-delete" type="button" title="${t("delete")}" data-i18n-title="delete">${trashIcon()}</button>
+          </div>
+        </div>
+        <div class="image-connection-grid">
+          <label class="field"><span>${t("imageConnectionName")}</span><input class="image-connection-name" type="text" autocomplete="off" /></label>
+          <label class="field"><span>${t("imageConnectionBaseUrl")}</span><input class="image-connection-base-url" type="url" autocomplete="off" spellcheck="false" /></label>
+          <label class="field image-key-field"><span>${t("imageConnectionKey")}</span><span class="image-key-input-wrap"><input class="image-connection-key" type="password" autocomplete="off" spellcheck="false" /><button class="key-act-btn image-key-eye" type="button" title="${t("toggleVisibility")}" data-i18n-title="toggleVisibility">${eyeIcon()}</button></span></label>
+        </div>
+        <div class="image-models-head"><strong>${t("imageExplicitModels")}</strong><button class="mini-btn image-model-add" type="button">${t("imageAddModel")}</button></div>
+        <div class="image-model-list">${models.map(renderImageModelRow).join("")}</div>
+      </section>`;
+    }
+
+    function populateImageConnectionSecrets(container, config) {
+      container.querySelectorAll(".image-connection-card").forEach((card, index) => {
+        const connection = config.connections[index];
+        if (!connection) return;
+        card.querySelector(".image-connection-name").value = connection.name;
+        card.querySelector(".image-connection-base-url").value = connection.baseUrl;
+        card.querySelector(".image-connection-key").value = connection.key;
+        card.querySelectorAll(".image-model-row").forEach((row, modelIndex) => {
+          row.querySelector(".image-model-id").value = connection.models[modelIndex]?.id || "";
+        });
+      });
+    }
+
+    function collectImagePanelConfig(container) {
+      const connections = [...container.querySelectorAll(".image-connection-card")].map((card) => ({
+        connectionId: String(card.dataset.imageConnectionId || ""),
+        name: card.querySelector(".image-connection-name")?.value || "",
+        baseUrl: card.querySelector(".image-connection-base-url")?.value || "",
+        key: card.querySelector(".image-connection-key")?.value || "",
+        enabled: card.querySelector(".image-connection-enabled")?.checked !== false,
+        models: [...card.querySelectorAll(".image-model-row")].map((row) => ({
+          id: row.querySelector(".image-model-id")?.value || "",
+          supportsEdit: row.querySelector(".image-model-edit")?.checked === true,
+        })),
+      }));
+      return normalizeImageConnectionConfig({
+        version: IMAGE_CONNECTION_CONFIG_VERSION,
+        connections,
+        defaultRoute: parseImageDefaultOptionValue(
+          container.querySelector("#imageDefaultRoute")?.value || "",
+        ),
+      });
+    }
+
+    function renderImagePanel(container) {
+      const config = loadImageConnectionConfig(storage);
+      const defaultValue = config.defaultRoute
+        ? imageDefaultOptionValue(config.defaultRoute.connectionId, config.defaultRoute.modelId)
+        : "";
+      const defaultOptions = config.connections.flatMap((connection) => connection.models.map((model) => {
+        const value = imageDefaultOptionValue(connection.connectionId, model.id);
+        const label = `${connection.name || t("imageConnectionUnnamed")} · ${model.id}`;
+        return `<option value="${escapeHtml(value)}" ${value === defaultValue ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      })).join("");
+      container.innerHTML = `<h3 class="settings-section-title" data-i18n="imageGenerationSettings">${t("imageGenerationSettings")}</h3>
+        <div class="settings-lite-page image-settings-panel">
+          <p class="settings-panel-description">${t("imageGenerationSettingsHint")}</p>
+          <div id="imageConnectionList" class="image-connection-list">${config.connections.map(renderImageConnectionCard).join("")}</div>
+          <button id="imageConnectionAdd" class="key-add-btn" type="button">${t("imageAddConnection")}</button>
+          <label class="field image-default-route-field"><span>${t("imageDefaultModel")}</span><select id="imageDefaultRoute"><option value="">${t("imageDefaultNone")}</option>${defaultOptions}</select></label>
+          <div class="image-settings-footer"><small id="imageRouteStatus" class="field-hint" data-tone="${state.selectedImageRoute ? "success" : "warning"}">${t(state.imageRouteStatusKey || "imageRoutesNotConfigured")}</small><button id="imageSettingsSave" class="primary-btn" type="button">${t("saveAndRefresh")}</button></div>
+        </div>`;
+      populateImageConnectionSecrets(container, config);
+
+      container.onclick = async (event) => {
+        const card = event.target.closest(".image-connection-card");
+        if (event.target.closest("#imageConnectionAdd")) {
+          const current = collectImagePanelConfig(container);
+          current.connections.push({
+            connectionId: createImageConnectionId(),
+            name: "",
+            baseUrl: "",
+            key: "",
+            enabled: true,
+            models: [],
+          });
+          saveImageConnectionConfig(current, storage);
+          renderImagePanel(container);
+          return;
+        }
+        if (event.target.closest(".image-model-add") && card) {
+          card.querySelector(".image-model-list")?.insertAdjacentHTML("beforeend", renderImageModelRow());
+          return;
+        }
+        if (event.target.closest(".image-model-delete")) {
+          event.target.closest(".image-model-row")?.remove();
+          return;
+        }
+        if (event.target.closest(".image-key-eye") && card) {
+          const input = card.querySelector(".image-connection-key");
+          input.type = input.type === "password" ? "text" : "password";
+          return;
+        }
+        if (event.target.closest(".image-connection-delete") && card) {
+          card.remove();
+          const saved = saveImageConnectionConfig(collectImagePanelConfig(container), storage);
+          applyImageRouteCatalog({ catalogRevision: state.imageRouteCatalogRevision, routes: state.imageRoutes }, saved);
+          await refreshImageRoutes({ notify: true, rerender: true }).catch(() => {});
+          return;
+        }
+        if (event.target.closest("#imageSettingsSave")) {
+          saveImageConnectionConfig(collectImagePanelConfig(container), storage);
+          await refreshImageRoutes({ notify: true, rerender: true }).catch(() => {});
+        }
+      };
+      container.onchange = (event) => {
+        if (!event.target.matches(".image-connection-enabled")) return;
+        event.target.closest(".image-connection-card")?.classList.toggle("disabled", !event.target.checked);
+      };
     }
 
     function renderModelsPanel(container) {
@@ -1269,6 +1598,7 @@
         case "models":
           renderModelsPanel(detail);
           break;
+        case "image": renderImagePanel(detail); break;
         case "account": renderAccountPanel(detail); break;
         case "memory": renderMemoryPanel(detail); break;
         case "skills": renderSkillsInSettings(detail); break;
@@ -1321,6 +1651,9 @@
           });
           break;
         }
+        case "image":
+          renderImagePanel(detail);
+          break;
         default:
           break;
       }
@@ -1389,6 +1722,10 @@
           global.location.reload();
           return;
         }
+        if (event.key === IMAGE_CONNECTION_CONFIG_STORAGE_KEY) {
+          void refreshImageRoutes({ rerender: true }).catch(() => {});
+          return;
+        }
         if (event.key !== platform.KEY_CONFIG_STORAGE_KEY) return;
         const config = syncKeyEditorFromStorage();
         const nextRoutingConnectionIdentity = routingConnectionIdentity(config);
@@ -1428,9 +1765,14 @@
       checkForUpdates,
       closeDropdown,
       getPlatformAuth,
+      getSelectedImageRoute,
+      initializeImageRoutes: () => refreshImageRoutes(),
+      loadImageConnectionConfig: () => loadImageConnectionConfig(storage),
       loadKeyConfig: () => loadKeyConfig(storage),
       initializePlatformAuth,
       parseKeyLines,
+      refreshImageRoutes,
+      saveImageConnectionConfig: (value) => saveImageConnectionConfig(value, storage),
       saveKeyConfig,
       serializeKeys,
       openSettingsPage,
@@ -1445,14 +1787,21 @@
   Code.features.settings = Object.freeze({
     FOLLOW_UP_BEHAVIORS,
     FOLLOW_UP_BEHAVIOR_STORAGE_KEY,
+    IMAGE_CONNECTION_CONFIG_STORAGE_KEY,
+    IMAGE_CONNECTION_CONFIG_VERSION,
     UPDATE_NOTICE_STORAGE_KEYS,
     WORKBAR_URL,
     buildPlatformLoginUrl,
+    createImageConnectionId,
     createSettingsFeature,
     loadKeyConfig,
+    loadImageConnectionConfig,
     loadFollowUpBehavior,
     normalizeFollowUpBehavior,
+    normalizeImageConnectionConfig,
     oppositeFollowUpBehavior,
     saveFollowUpBehavior,
+    saveImageConnectionConfig,
+    selectDefaultImageRoute,
   });
 })(window);

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "requirements": [
+    {
+      "id": "generated-image",
+      "type": "tool_execution",
+      "tool": "generate_image",
+      "minCount": 1
+    }
+  ]
+}
