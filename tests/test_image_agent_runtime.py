@@ -143,6 +143,37 @@ class TestImageAgentRuntime(unittest.TestCase):
         run["status"] = "tools"
         return run["pending_tool_calls"][0]
 
+    def _prepared_batch_execution(self, run, call, count):
+        batch_id = server_mod._agent_image_batch_id(run, call)
+        return {
+            "name": "generate_image",
+            "arguments": call["function"]["arguments"],
+            "fingerprint": call["fingerprint"],
+            "status": "running",
+            "operationId": batch_id,
+            "dispatchState": "prepared",
+            "imageBatch": {
+                "schema": "image-batch/v1",
+                "batchId": batch_id,
+                "requested": count,
+                "maxConcurrency": 2,
+                "admissionStopped": False,
+                "items": [
+                    {
+                        "index": index,
+                        "operationId": server_mod._agent_image_batch_operation_id(
+                            batch_id, index,
+                        ),
+                        "dispatchState": "prepared",
+                        "result": None,
+                    }
+                    for index in range(count)
+                ],
+            },
+            "result": None,
+            "error": "",
+        }
+
     def test_image_tool_requires_frozen_route_and_is_secret_free(self):
         session_id = self._session("no-image-route")
         run = server_mod._create_agent_run(
@@ -604,6 +635,389 @@ class TestImageAgentRuntime(unittest.TestCase):
         result = execution["result"]
         self.assertEqual((result["requested"], result["succeeded"], result["failed"]), (3, 3, 0))
         self.assertEqual([asset["batchIndex"] for asset in result["assets"]], [0, 1, 2])
+
+    def test_restart_fails_closed_when_persisted_batch_asset_is_missing(self):
+        run = self._run(session_id="image-batch-missing-asset")
+        call = self._queue(run, call_id="image-batch-missing-call", arguments={
+            "prompt": "recover a missing persisted asset",
+            "count": 2,
+        })
+        execution = self._prepared_batch_execution(run, call, 2)
+        batch = execution["imageBatch"]
+        missing_asset_id = "ga1_" + "a" * 43
+        batch["items"][0].update({
+            "dispatchState": "assets_persisted",
+            "result": {
+                "ok": True,
+                "action": "generate_image",
+                "count": 1,
+                "assets": [{
+                    "assetId": missing_asset_id,
+                    "url": (
+                        f"/api/sessions/{run['session_id']}/generated-assets/"
+                        f"{missing_asset_id}"
+                    ),
+                    "mimeType": "image/png",
+                    "width": 2,
+                    "height": 2,
+                    "byteLength": len(_png(2, 2)),
+                    "sha256": "a" * 64,
+                    "batchId": batch["batchId"],
+                    "batchIndex": 0,
+                }],
+            },
+        })
+        run["tool_executions"][call["id"]] = execution
+
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        recovered = restored["tool_executions"][call["id"]]
+        result = recovered["result"]
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(result["items"][0]["errorCode"], "generated_asset_not_found")
+        self.assertTrue(result["items"][0]["notReplayed"])
+        self.assertNotIn("outcomeUnknown", result["items"][0])
+        self.assertEqual(result["items"][1]["status"], "not_dispatched")
+        self.assertEqual(result["assets"], [])
+        restored["status"] = "tools"
+        self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_restart_replaces_completed_batch_stale_success_when_asset_is_missing(self):
+        run = self._run(session_id="image-batch-completed-missing")
+        call = self._queue(run, call_id="image-batch-completed-missing-call", arguments={
+            "prompt": "do not project a nonexistent completed asset",
+            "count": 2,
+        })
+        execution = self._prepared_batch_execution(run, call, 2)
+        batch = execution["imageBatch"]
+        persisted = self.assets.save_operation(
+            batch["items"][0]["operationId"],
+            run["session_id"],
+            run["id"],
+            call["id"],
+            [image_runtime.validate_image_bytes(_png(2, 2))],
+            created_at=server_mod.now_iso(),
+            batch_id=batch["batchId"],
+            batch_index=0,
+        )
+        missing_asset_id = "ga1_" + "b" * 43
+        missing = {
+            "ok": True,
+            "action": "generate_image",
+            "count": 1,
+            "assets": [{
+                "assetId": missing_asset_id,
+                "url": (
+                    f"/api/sessions/{run['session_id']}/generated-assets/"
+                    f"{missing_asset_id}"
+                ),
+                "mimeType": "image/png",
+                "width": 2,
+                "height": 2,
+                "byteLength": len(_png(2, 2)),
+                "sha256": "b" * 64,
+                "batchId": batch["batchId"],
+                "batchIndex": 1,
+            }],
+        }
+        batch["items"][0].update({
+            "dispatchState": "assets_persisted",
+            "result": persisted,
+        })
+        batch["items"][1].update({
+            "dispatchState": "assets_persisted",
+            "result": missing,
+        })
+        execution.update({
+            "status": "completed",
+            "dispatchState": "assets_persisted",
+            "result": server_mod._agent_image_batch_result(batch),
+            "outcome": "succeeded",
+        })
+        run["tool_executions"][call["id"]] = execution
+
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        recovered = restored["tool_executions"][call["id"]]
+        result = recovered["result"]
+        self.assertEqual(recovered["status"], "completed")
+        self.assertTrue(result["partial"])
+        self.assertEqual((result["succeeded"], result["failed"]), (1, 1))
+        self.assertEqual(result["assets"], persisted["assets"])
+        self.assertEqual(result["items"][1]["errorCode"], "generated_asset_not_found")
+        self.assertTrue(result["items"][1]["notReplayed"])
+        self.assertNotIn(missing_asset_id, json.dumps(server_mod._agent_snapshot(restored, 0)))
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_restart_fails_closed_for_corrupt_partial_or_unavailable_batch_asset(self):
+        for failure_kind in ("corrupt", "partial", "unavailable"):
+            with self.subTest(failure_kind=failure_kind):
+                run = self._run(session_id=f"image-batch-{failure_kind}-asset")
+                call = self._queue(
+                    run,
+                    call_id=f"image-batch-{failure_kind}-call",
+                    arguments={"prompt": "recover durable evidence", "count": 2},
+                )
+                execution = self._prepared_batch_execution(run, call, 2)
+                batch = execution["imageBatch"]
+                persisted = self.assets.save_operation(
+                    batch["items"][0]["operationId"],
+                    run["session_id"],
+                    run["id"],
+                    call["id"],
+                    [image_runtime.validate_image_bytes(_png(2, 2))],
+                    created_at=server_mod.now_iso(),
+                    batch_id=batch["batchId"],
+                    batch_index=0,
+                )
+                batch["items"][0].update({
+                    "dispatchState": "assets_persisted",
+                    "result": persisted,
+                })
+                run["tool_executions"][call["id"]] = execution
+                if failure_kind == "corrupt":
+                    asset_id = persisted["assets"][0]["assetId"]
+                    (self.data / "generated-assets" / asset_id / "content.png").write_bytes(
+                        b"corrupt-image-evidence"
+                    )
+                    restore_context = mock.patch.object(
+                        server_mod, "_generated_asset_repository", self.assets,
+                    )
+                elif failure_kind == "partial":
+                    restore_context = mock.patch.object(
+                        self.assets,
+                        "find_operation_result",
+                        side_effect=image_runtime.ImageRuntimeError(
+                            "image_operation_partial",
+                            "A prior image operation left partial durable assets.",
+                            outcome_unknown=True,
+                        ),
+                    )
+                else:
+                    restore_context = mock.patch.object(
+                        self.assets,
+                        "find_operation_result",
+                        side_effect=image_runtime.ImageRuntimeError(
+                            "generated_asset_store_unavailable",
+                            "Generated asset storage is unavailable.",
+                            retryable=True,
+                            http_status=503,
+                        ),
+                    )
+                with restore_context:
+                    restored = server_mod._agent_run_from_record(
+                        server_mod._agent_run_record(run)
+                    )
+                result = restored["tool_executions"][call["id"]]["result"]
+                expected = {
+                    "corrupt": "generated_asset_corrupt",
+                    "partial": "image_operation_partial",
+                    "unavailable": "generated_asset_store_unavailable",
+                }[failure_kind]
+                self.assertEqual(result["items"][0]["errorCode"], expected)
+                self.assertTrue(result["items"][0]["notReplayed"])
+                self.assertNotIn("outcomeUnknown", result["items"][0])
+                self.assertEqual(result["items"][1]["status"], "not_dispatched")
+                self.assertEqual(len(self.client.calls), 0)
+
+    def test_execute_rejects_corrupt_batch_state_before_upstream(self):
+        run = self._run(session_id="invalid-batch-execution")
+        call = self._queue(run, call_id="invalid-batch-execution-call", arguments={
+            "prompt": "reject a corrupt prepared batch",
+            "count": 2,
+        })
+        execution = self._prepared_batch_execution(run, call, 2)
+        execution["imageBatch"]["items"][0]["operationId"] = (
+            "IMAGE_BATCH_EXECUTION_SECRET_SENTINEL"
+        )
+        run["tool_executions"][call["id"]] = execution
+
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertEqual(result["errorCode"], "image_batch_state_invalid")
+        self.assertTrue(result["outcomeUnknown"])
+        self.assertTrue(result["notReplayed"])
+        self.assertNotIn("imageBatch", run["tool_executions"][call["id"]])
+        self.assertNotIn(
+            "IMAGE_BATCH_EXECUTION_SECRET_SENTINEL",
+            json.dumps(server_mod._agent_snapshot(run, 0)),
+        )
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_corrupt_batch_identity_and_structure_are_bounded_and_never_replayed(self):
+        sentinel = "IMAGE_BATCH_INVALID_SECRET_SENTINEL"
+        mutations = {
+            "batch_id": lambda batch: batch.update({"batchId": sentinel}),
+            "requested": lambda batch: batch.update({"requested": sentinel}),
+            "max_concurrency": lambda batch: batch.update({"maxConcurrency": 4}),
+            "non_bool_admission": lambda batch: batch.update({
+                "admissionStopped": sentinel,
+            }),
+            "duplicate_index": lambda batch: batch["items"][1].update({"index": 0}),
+            "missing_index": lambda batch: batch["items"].pop(),
+            "out_of_order_index": lambda batch: batch["items"].reverse(),
+            "wrong_operation": lambda batch: batch["items"][0].update({
+                "operationId": sentinel,
+            }),
+            "duplicate_operation": lambda batch: batch["items"][1].update({
+                "operationId": batch["items"][0]["operationId"],
+            }),
+            "empty_operation": lambda batch: batch["items"][0].update({
+                "operationId": "",
+            }),
+            "unsupported_state": lambda batch: batch["items"][0].update({
+                "dispatchState": sentinel,
+            }),
+            "malformed_result": lambda batch: batch["items"][0].update({
+                "dispatchState": "failed",
+                "result": {
+                    "ok": False,
+                    "action": "generate_image",
+                    "errorCode": "image_upstream_http_error",
+                    "retryable": False,
+                    "unexpected": sentinel,
+                },
+            }),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                run = self._run(session_id=f"invalid-batch-{name}")
+                call = self._queue(
+                    run,
+                    call_id=f"invalid-batch-{name}-call",
+                    arguments={"prompt": "validate persisted batch", "count": 2},
+                )
+                execution = self._prepared_batch_execution(run, call, 2)
+                mutate(execution["imageBatch"])
+                run["tool_executions"][call["id"]] = execution
+                raw_snapshot = server_mod._agent_snapshot(run, 0)
+                raw_public = next(
+                    item for item in raw_snapshot["toolExecutions"]
+                    if item["toolCallId"] == call["id"]
+                )
+                self.assertEqual(
+                    raw_public["result"]["errorCode"],
+                    "image_batch_state_invalid",
+                )
+                self.assertNotIn(sentinel, json.dumps(raw_snapshot))
+                record = server_mod._agent_run_record(run)
+                restored = server_mod._agent_run_from_record(record)
+                recovered = restored["tool_executions"][call["id"]]
+                self.assertEqual(recovered["status"], "completed")
+                self.assertEqual(
+                    recovered["result"]["errorCode"],
+                    "image_batch_state_invalid",
+                )
+                self.assertTrue(recovered["result"]["outcomeUnknown"])
+                self.assertTrue(recovered["result"]["notReplayed"])
+                snapshot = server_mod._agent_snapshot(restored, 0)
+                self.assertNotIn(sentinel, json.dumps(snapshot))
+                restored["status"] = "tools"
+                self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+                self.assertEqual(len(self.client.calls), 0)
+
+    def test_legacy_completed_multi_image_operation_reuses_two_assets(self):
+        run = self._run(session_id="legacy-completed-multi")
+        call = self._queue(run, call_id="legacy-completed-multi-call", arguments={
+            "prompt": "legacy completed pair",
+            "count": 2,
+        })
+        operation_id = "legacy-completed-multi-operation"
+        expected = self.assets.save_operation(
+            operation_id,
+            run["session_id"],
+            run["id"],
+            call["id"],
+            [
+                image_runtime.validate_image_bytes(_png(2, 2)),
+                image_runtime.validate_image_bytes(_png(3, 2)),
+            ],
+            created_at=server_mod.now_iso(),
+        )
+        run["tool_executions"][call["id"]] = {
+            "name": "generate_image",
+            "arguments": call["function"]["arguments"],
+            "fingerprint": call["fingerprint"],
+            "status": "completed",
+            "operationId": operation_id,
+            "dispatchState": "assets_persisted",
+            "result": expected,
+            "error": "",
+        }
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        self.assertEqual(run["tool_executions"][call["id"]]["result"], expected)
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        restored["status"] = "tools"
+        self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+        self.assertEqual(restored["tool_executions"][call["id"]]["result"], expected)
+        self.assertEqual(len(expected["assets"]), 2)
+        self.assertNotIn("imageBatch", restored["tool_executions"][call["id"]])
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_reference_edit_batch_reuses_one_explicit_reference_for_each_child(self):
+        run = self._run(session_id="image-batch-reference-edit")
+        attachment = self.attachments / "reference.png"
+        attachment.write_bytes(_png(4, 5))
+        server_mod.write_jsonl(server_mod.messages_path(run["session_id"]), [{
+            "role": "user",
+            "content": "explicit reference",
+            "_images": [{
+                "path": "attachments/reference.png",
+                "name": "reference.png",
+                "mime": "image/png",
+            }],
+        }])
+        call = self._queue(run, call_id="image-batch-reference-call", arguments={
+            "prompt": "two edits of the explicit reference",
+            "reference": {"type": "attachment", "id": "attachments/reference.png"},
+            "count": 2,
+        })
+
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual([entry["request"]["count"] for entry in self.client.calls], [1, 1])
+        self.assertEqual(len({entry["operationId"] for entry in self.client.calls}), 2)
+        references = [entry["reference"] for entry in self.client.calls]
+        self.assertTrue(all(reference is not None for reference in references))
+        self.assertEqual({reference.sha256 for reference in references}, {
+            image_runtime.validate_image_bytes(_png(4, 5)).sha256,
+        })
+
+    def test_batch_cancel_between_admissions_does_not_dispatch_next_child(self):
+        run = self._run(session_id="image-batch-cancel-between-admissions")
+        call = self._queue(run, call_id="image-batch-cancel-between-call", arguments={
+            "prompt": "cancel after the first durable admission",
+            "count": 3,
+        })
+        original_persist = server_mod._persist_agent_run
+        cancellation_observed = threading.Event()
+
+        def persist_then_cancel(candidate_run):
+            original_persist(candidate_run)
+            execution = candidate_run.get("tool_executions", {}).get(call["id"], {})
+            batch = execution.get("imageBatch") or {}
+            items = batch.get("items") or []
+            if (
+                not cancellation_observed.is_set()
+                and items
+                and items[0].get("dispatchState") == "dispatched"
+            ):
+                cancellation_observed.set()
+                candidate_run["cancel_event"].set()
+
+        with mock.patch.object(
+            server_mod,
+            "_persist_agent_run",
+            side_effect=persist_then_cancel,
+        ):
+            server_mod._execute_agent_pending_tools(run)
+
+        self.assertTrue(cancellation_observed.is_set())
+        self.assertEqual(len(self.client.calls), 1)
+        batch = run["tool_executions"][call["id"]]["imageBatch"]
+        self.assertEqual(
+            [item["dispatchState"] for item in batch["items"]],
+            ["assets_persisted", "cancelled", "cancelled"],
+        )
 
     def test_legacy_multi_image_dispatched_record_is_unknown_and_not_split(self):
         run = self._run(session_id="legacy-multi-image-dispatched")

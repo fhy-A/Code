@@ -2758,6 +2758,19 @@ def _agent_public_tool_executions(run):
         if execution.get("status") == "waiting_authorization" and isinstance(public_result, dict):
             for private_key in ("newContent", "baseHash", "newHash"):
                 public_result.pop(private_key, None)
+        public_batch = _agent_image_batch_public(
+            execution.get("imageBatch"),
+            run=run,
+            call_id=call_id,
+            execution=execution,
+        )
+        if (
+            isinstance(public_batch, dict)
+            and public_batch.get("errorCode") == "image_batch_state_invalid"
+        ):
+            public_result = _agent_image_batch_invalid_result(
+                public_batch.get("requested")
+            )
         items.append({
             "toolCallId": call_id,
             "name": execution.get("name", ""),
@@ -2781,8 +2794,7 @@ def _agent_public_tool_executions(run):
             "stderrChars": int(execution.get("stderrChars") or 0),
             "lastOutputAt": str(execution.get("lastOutputAt") or ""),
             "childAgentRunId": str(execution.get("childAgentRunId") or ""),
-            **({"imageBatch": public_batch}
-               if (public_batch := _agent_image_batch_public(execution.get("imageBatch"))) else {}),
+            **({"imageBatch": public_batch} if public_batch else {}),
         })
     return items
 
@@ -3635,6 +3647,12 @@ def _agent_run_from_record(record):
     )
     if pending_authorization:
         pending_authorization["submitting"] = False
+    image_route_identity = _normalize_agent_image_route_identity(record.get("imageRoute"))
+    recovery_run = {
+        "id": run_id,
+        "session_id": str(record.get("sessionId") or ""),
+        "image_route": image_route_identity,
+    }
     tool_executions = dict(record.get("toolExecutions") or {})
     for execution_call_id, execution in tool_executions.items():
         if not isinstance(execution, dict):
@@ -3642,56 +3660,65 @@ def _agent_run_from_record(record):
         if execution.get("status") == "completed" and not execution.get("outcome"):
             execution["outcome"] = _agent_execution_outcome(execution.get("result"))
         spec = _agent_tool_spec(str(execution.get("name") or ""))
-        if execution.get("status") != "running":
-            continue
         if spec.get("effect") == "image_generation":
             dispatch_state = str(execution.get("dispatchState") or "")
-            batch = execution.get("imageBatch")
-            if isinstance(batch, dict) and batch.get("schema") == _AGENT_IMAGE_BATCH_SCHEMA:
-                interrupted = False
+            batch_value = execution.get("imageBatch")
+            if batch_value is not None:
+                call = None
+                requested = 0
+                try:
+                    call = _agent_image_batch_call_from_execution(
+                        execution_call_id, execution,
+                    )
+                    requested = _agent_image_batch_requested(call)
+                    batch = _agent_image_batch_validate_state(
+                        recovery_run, call, execution, requested,
+                    )
+                except ImageRuntimeError:
+                    _agent_image_batch_mark_invalid(
+                        recovery_run,
+                        call or {"id": str(execution_call_id or ""), "arguments": {}},
+                        execution,
+                        requested,
+                    )
+                    continue
+                execution["imageBatch"] = batch
+                recovery_failed = False
                 for item in batch.get("items") or []:
-                    if not isinstance(item, dict):
-                        continue
                     state = str(item.get("dispatchState") or "prepared")
                     if state not in {"dispatched", "assets_persisted"}:
                         continue
-                    recovered_item = None
-                    try:
-                        recovered_item = _generated_asset_repository.find_operation_result(
-                            str(item.get("operationId") or ""),
-                            str(record.get("sessionId") or ""),
-                            str(record.get("id") or ""),
-                            str(execution_call_id or ""),
-                            1,
-                        )
-                    except ImageRuntimeError:
-                        recovered_item = None
+                    recovered_item, recovery_failure = _agent_image_batch_recover_item(
+                        recovery_run, execution_call_id, batch, item,
+                    )
                     if recovered_item:
                         item["dispatchState"] = "assets_persisted"
                         item["result"] = recovered_item
                         item["completedAt"] = str(item.get("completedAt") or now_iso())
                         continue
-                    if state == "dispatched":
-                        item["dispatchState"] = "failed"
-                        item["result"] = {
-                            "ok": False,
-                            "action": "generate_image",
-                            "errorCode": "image_outcome_unknown",
-                            "outcomeUnknown": True,
-                            "notReplayed": True,
-                            "retryable": False,
-                            "error": (
-                                "Image batch item was interrupted after dispatch; the upstream "
-                                "outcome is unknown and the paid request was not replayed."
-                            ),
-                        }
-                        item["completedAt"] = now_iso()
-                        interrupted = True
-                if interrupted:
+                    item["dispatchState"] = "failed"
+                    item["result"] = recovery_failure
+                    item["completedAt"] = now_iso()
+                    recovery_failed = True
                     batch["admissionStopped"] = True
-                    batch["stopReason"] = "image_outcome_unknown"
+                    batch["stopReason"] = str(
+                        (recovery_failure or {}).get("errorCode")
+                        or "generated_asset_store_unavailable"
+                    )
+                if execution.get("status") == "cancelled":
+                    recovery_failed = True
+                    batch["admissionStopped"] = True
+                    batch["stopReason"] = "cancelled"
                     for item in batch.get("items") or []:
-                        if isinstance(item, dict) and item.get("dispatchState") == "prepared":
+                        if item.get("dispatchState") == "prepared":
+                            item["dispatchState"] = "cancelled"
+                            item["result"] = _agent_image_batch_not_dispatched_result(
+                                cancelled=True,
+                            )
+                            item["completedAt"] = now_iso()
+                elif recovery_failed:
+                    for item in batch.get("items") or []:
+                        if item.get("dispatchState") == "prepared":
                             item["dispatchState"] = "not_dispatched"
                             item["result"] = _agent_image_batch_not_dispatched_result()
                             item["completedAt"] = now_iso()
@@ -3702,11 +3729,14 @@ def _agent_run_from_record(record):
                 ):
                     continue
                 recovered_result = _agent_image_batch_result(batch)
-                execution["status"] = "completed"
-                execution["outcome"] = _agent_execution_outcome(recovered_result)
-                execution["result"] = recovered_result
-                execution["error"] = str(recovered_result.get("error") or "")
-                execution["completedAt"] = now_iso()
+                if execution.get("status") != "cancelled":
+                    execution["status"] = "completed"
+                    execution["outcome"] = _agent_execution_outcome(recovered_result)
+                    execution["result"] = recovered_result
+                    execution["error"] = str(recovered_result.get("error") or "")
+                    execution["completedAt"] = now_iso()
+                continue
+            if execution.get("status") != "running":
                 continue
             if dispatch_state == "prepared":
                 # The durable state still proves that no upstream request was
@@ -3759,6 +3789,8 @@ def _agent_run_from_record(record):
             execution["error"] = result["error"]
             execution["completedAt"] = now_iso()
             continue
+        if execution.get("status") != "running":
+            continue
         if spec.get("effect") != "command":
             continue
         # A process that was active when the service exited has an unknown
@@ -3782,7 +3814,6 @@ def _agent_run_from_record(record):
         execution["result"] = result
         execution["error"] = result["error"]
         execution["completedAt"] = now_iso()
-    image_route_identity = _normalize_agent_image_route_identity(record.get("imageRoute"))
     restored_tools = list(record.get("tools") or [])
     if not image_route_identity or not image_route_identity.get("supportsGeneration"):
         restored_tools = [
@@ -6081,6 +6112,29 @@ def _agent_image_operation_id(run, call):
 
 _AGENT_IMAGE_BATCH_SCHEMA = "image-batch/v1"
 _AGENT_IMAGE_BATCH_CONCURRENCY = 2
+_AGENT_IMAGE_BATCH_STATES = frozenset({
+    "prepared", "dispatched", "assets_persisted", "failed",
+    "not_dispatched", "cancelled",
+})
+_AGENT_IMAGE_BATCH_KEYS = frozenset({
+    "schema", "batchId", "requested", "maxConcurrency", "admissionStopped",
+    "createdAt", "stopReason", "items",
+})
+_AGENT_IMAGE_BATCH_ITEM_KEYS = frozenset({
+    "index", "operationId", "dispatchState", "result", "dispatchedAt",
+    "completedAt",
+})
+_AGENT_IMAGE_BATCH_SUCCESS_RESULT_KEYS = frozenset({
+    "ok", "action", "count", "assets", "replayed",
+})
+_AGENT_IMAGE_BATCH_FAILURE_RESULT_KEYS = frozenset({
+    "ok", "action", "error", "errorCode", "retryable", "outcomeUnknown",
+    "notReplayed", "notDispatched", "cancelled", "cancelledBeforeStart",
+})
+_AGENT_IMAGE_BATCH_ASSET_KEYS = frozenset({
+    "assetId", "url", "mimeType", "width", "height", "byteLength", "sha256",
+    "batchId", "batchIndex",
+})
 
 
 def _agent_image_batch_id(run, call):
@@ -6096,20 +6150,325 @@ def _agent_image_batch_operation_id(batch_id, index):
     return f"{str(batch_id)}.{int(index)}"
 
 
-def _agent_image_batch_public(batch):
-    if not isinstance(batch, dict) or batch.get("schema") != _AGENT_IMAGE_BATCH_SCHEMA:
+def _agent_image_batch_validation_error():
+    return ImageRuntimeError(
+        "image_batch_state_invalid",
+        "Persisted image batch state is invalid and was not replayed.",
+        retryable=False,
+        outcome_unknown=True,
+    )
+
+
+def _agent_image_batch_invalid_result(requested=0):
+    safe_requested = requested if type(requested) is int and 2 <= requested <= 4 else 0
+    return {
+        "ok": False,
+        "action": "generate_image",
+        "errorCode": "image_batch_state_invalid",
+        "retryable": False,
+        "outcomeUnknown": True,
+        "notReplayed": True,
+        "count": 0,
+        "requested": safe_requested,
+        "succeeded": 0,
+        "failed": safe_requested,
+        "partial": False,
+        "assets": [],
+        "items": [],
+        "error": "Persisted image batch state is invalid and was not replayed.",
+    }
+
+
+def _agent_image_batch_call_from_execution(call_id, execution):
+    if not isinstance(execution, dict) or not str(call_id or ""):
+        raise _agent_image_batch_validation_error()
+    raw_arguments = execution.get("arguments")
+    if isinstance(raw_arguments, dict):
+        arguments = _json_clone(raw_arguments)
+    elif isinstance(raw_arguments, str):
+        try:
+            arguments = json.loads(raw_arguments)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise _agent_image_batch_validation_error() from exc
+    else:
+        raise _agent_image_batch_validation_error()
+    if not isinstance(arguments, dict):
+        raise _agent_image_batch_validation_error()
+    return {"id": str(call_id), "arguments": arguments}
+
+
+def _agent_image_batch_requested(call):
+    try:
+        requested = _normalize_agent_image_arguments(call.get("arguments") or {})["count"]
+    except (ImageRuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise _agent_image_batch_validation_error() from exc
+    if type(requested) is not int or not 2 <= requested <= 4:
+        raise _agent_image_batch_validation_error()
+    return requested
+
+
+def _agent_image_batch_timestamp(value):
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or len(value) > 64:
+        raise _agent_image_batch_validation_error()
+    return value
+
+
+def _agent_image_batch_sanitize_asset(value, run, batch_id, index):
+    if not isinstance(value, dict) or not set(value).issubset(_AGENT_IMAGE_BATCH_ASSET_KEYS):
+        raise _agent_image_batch_validation_error()
+    asset_id = str(value.get("assetId") or "")
+    if not GeneratedAssetRepository._valid_asset_id(asset_id):
+        raise _agent_image_batch_validation_error()
+    session_id = str(run.get("session_id") or "")
+    expected_url = f"/api/sessions/{session_id}/generated-assets/{asset_id}"
+    if str(value.get("url") or "") != expected_url:
+        raise _agent_image_batch_validation_error()
+    mime_type = str(value.get("mimeType") or "")
+    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise _agent_image_batch_validation_error()
+    width = value.get("width")
+    height = value.get("height")
+    byte_length = value.get("byteLength")
+    if (
+        type(width) is not int or type(height) is not int
+        or width <= 0 or height <= 0 or width * height > 40_000_000
+        or type(byte_length) is not int or byte_length <= 0
+        or byte_length > 20 * 1024 * 1024
+    ):
+        raise _agent_image_batch_validation_error()
+    sha256 = str(value.get("sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise _agent_image_batch_validation_error()
+    if str(value.get("batchId") or "") != batch_id:
+        raise _agent_image_batch_validation_error()
+    if type(value.get("batchIndex")) is not int or value.get("batchIndex") != index:
+        raise _agent_image_batch_validation_error()
+    return {
+        "assetId": asset_id,
+        "url": expected_url,
+        "mimeType": mime_type,
+        "width": width,
+        "height": height,
+        "byteLength": byte_length,
+        "sha256": sha256,
+        "batchId": batch_id,
+        "batchIndex": index,
+    }
+
+
+def _agent_image_batch_sanitize_item_result(result, state, run, batch_id, index):
+    if state in {"prepared", "dispatched"}:
+        if result is not None:
+            raise _agent_image_batch_validation_error()
         return None
+    if not isinstance(result, dict):
+        raise _agent_image_batch_validation_error()
+    if state == "assets_persisted":
+        if not set(result).issubset(_AGENT_IMAGE_BATCH_SUCCESS_RESULT_KEYS):
+            raise _agent_image_batch_validation_error()
+        assets = result.get("assets")
+        if (
+            result.get("ok") is not True
+            or str(result.get("action") or "") != "generate_image"
+            or type(result.get("count")) is not int
+            or result.get("count") != 1
+            or not isinstance(assets, list)
+            or len(assets) != 1
+        ):
+            raise _agent_image_batch_validation_error()
+        sanitized = {
+            "ok": True,
+            "action": "generate_image",
+            "count": 1,
+            "assets": [
+                _agent_image_batch_sanitize_asset(
+                    assets[0], run, batch_id, index,
+                )
+            ],
+        }
+        if "replayed" in result:
+            if type(result.get("replayed")) is not bool:
+                raise _agent_image_batch_validation_error()
+            sanitized["replayed"] = bool(result.get("replayed"))
+        return sanitized
+    if not set(result).issubset(_AGENT_IMAGE_BATCH_FAILURE_RESULT_KEYS):
+        raise _agent_image_batch_validation_error()
+    error_code = str(result.get("errorCode") or "")
+    if (
+        result.get("ok") is not False
+        or str(result.get("action") or "") != "generate_image"
+        or not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", error_code)
+        or type(result.get("retryable")) is not bool
+    ):
+        raise _agent_image_batch_validation_error()
+    for flag in (
+        "outcomeUnknown", "notReplayed", "notDispatched", "cancelled",
+        "cancelledBeforeStart",
+    ):
+        if flag in result and type(result.get(flag)) is not bool:
+            raise _agent_image_batch_validation_error()
+    if state == "failed" and (
+        result.get("notDispatched") is True or result.get("cancelled") is True
+    ):
+        raise _agent_image_batch_validation_error()
+    if state == "not_dispatched" and result.get("notDispatched") is not True:
+        raise _agent_image_batch_validation_error()
+    if state == "cancelled" and (
+        result.get("cancelled") is not True or result.get("notDispatched") is not True
+    ):
+        raise _agent_image_batch_validation_error()
+    sanitized = {
+        "ok": False,
+        "action": "generate_image",
+        "errorCode": error_code,
+        "retryable": bool(result.get("retryable")),
+    }
+    for flag in (
+        "outcomeUnknown", "notReplayed", "notDispatched", "cancelled",
+        "cancelledBeforeStart",
+    ):
+        if result.get(flag) is True:
+            sanitized[flag] = True
+    return sanitized
+
+
+def _agent_image_batch_validate_state(run, call, execution, requested=None):
+    batch = execution.get("imageBatch") if isinstance(execution, dict) else None
+    if not isinstance(batch, dict) or not set(batch).issubset(_AGENT_IMAGE_BATCH_KEYS):
+        raise _agent_image_batch_validation_error()
+    expected_requested = _agent_image_batch_requested(call)
+    if requested is not None and requested != expected_requested:
+        raise _agent_image_batch_validation_error()
+    if (
+        batch.get("schema") != _AGENT_IMAGE_BATCH_SCHEMA
+        or type(batch.get("requested")) is not int
+        or batch.get("requested") != expected_requested
+        or type(batch.get("maxConcurrency")) is not int
+        or batch.get("maxConcurrency") != _AGENT_IMAGE_BATCH_CONCURRENCY
+    ):
+        raise _agent_image_batch_validation_error()
+    batch_id = _agent_image_batch_id(run, call)
+    if (
+        str(batch.get("batchId") or "") != batch_id
+        or str(execution.get("operationId") or "") != batch_id
+    ):
+        raise _agent_image_batch_validation_error()
+    if "admissionStopped" in batch and type(batch.get("admissionStopped")) is not bool:
+        raise _agent_image_batch_validation_error()
+    stop_reason = str(batch.get("stopReason") or "")
+    if stop_reason and not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", stop_reason):
+        raise _agent_image_batch_validation_error()
+    items = batch.get("items")
+    if not isinstance(items, list) or len(items) != expected_requested:
+        raise _agent_image_batch_validation_error()
+    sanitized_items = []
+    operation_ids = []
+    for expected_index, item in enumerate(items):
+        if not isinstance(item, dict) or not set(item).issubset(_AGENT_IMAGE_BATCH_ITEM_KEYS):
+            raise _agent_image_batch_validation_error()
+        if type(item.get("index")) is not int or item.get("index") != expected_index:
+            raise _agent_image_batch_validation_error()
+        expected_operation_id = _agent_image_batch_operation_id(batch_id, expected_index)
+        operation_id = str(item.get("operationId") or "")
+        if operation_id != expected_operation_id:
+            raise _agent_image_batch_validation_error()
+        operation_ids.append(operation_id)
+        state = str(item.get("dispatchState") or "")
+        if state not in _AGENT_IMAGE_BATCH_STATES:
+            raise _agent_image_batch_validation_error()
+        sanitized_item = {
+            "index": expected_index,
+            "operationId": expected_operation_id,
+            "dispatchState": state,
+            "result": _agent_image_batch_sanitize_item_result(
+                item.get("result"), state, run, batch_id, expected_index,
+            ),
+        }
+        for timestamp_key in ("dispatchedAt", "completedAt"):
+            timestamp = _agent_image_batch_timestamp(item.get(timestamp_key))
+            if timestamp:
+                sanitized_item[timestamp_key] = timestamp
+        sanitized_items.append(sanitized_item)
+    if len(set(operation_ids)) != expected_requested:
+        raise _agent_image_batch_validation_error()
+    if execution.get("status") == "completed" and any(
+        item["dispatchState"] in {"prepared", "dispatched"}
+        for item in sanitized_items
+    ):
+        raise _agent_image_batch_validation_error()
+    sanitized = {
+        "schema": _AGENT_IMAGE_BATCH_SCHEMA,
+        "batchId": batch_id,
+        "requested": expected_requested,
+        "maxConcurrency": _AGENT_IMAGE_BATCH_CONCURRENCY,
+        "admissionStopped": bool(batch.get("admissionStopped")),
+        "items": sanitized_items,
+    }
+    created_at = _agent_image_batch_timestamp(batch.get("createdAt"))
+    if created_at:
+        sanitized["createdAt"] = created_at
+    if stop_reason:
+        sanitized["stopReason"] = stop_reason
+    return sanitized
+
+
+def _agent_image_batch_mark_invalid(run, call, execution, requested=0):
+    result = _agent_image_batch_invalid_result(requested)
+    execution.pop("imageBatch", None)
+    try:
+        execution["operationId"] = _agent_image_batch_id(run, call)
+    except Exception:
+        execution["operationId"] = ""
+    execution["dispatchState"] = "batch_completed"
+    execution["nonReplayable"] = True
+    execution["status"] = "completed"
+    execution["outcome"] = "failed"
+    execution["result"] = result
+    execution["error"] = result["error"]
+    execution["completedAt"] = now_iso()
+    return result
+
+
+def _agent_image_batch_public(batch, *, run=None, call_id="", execution=None):
+    if batch is None:
+        return None
+    try:
+        if run is None or not isinstance(execution, dict):
+            raise _agent_image_batch_validation_error()
+        call = _agent_image_batch_call_from_execution(call_id, execution)
+        sanitized = _agent_image_batch_validate_state(run, call, execution)
+    except (ImageRuntimeError, TypeError, ValueError):
+        requested = 0
+        try:
+            requested = _agent_image_batch_requested(
+                _agent_image_batch_call_from_execution(call_id, execution)
+            )
+        except (ImageRuntimeError, TypeError, ValueError):
+            pass
+        return {
+            "schema": _AGENT_IMAGE_BATCH_SCHEMA,
+            "batchId": "",
+            "requested": requested,
+            "maxConcurrency": _AGENT_IMAGE_BATCH_CONCURRENCY,
+            "admissionStopped": True,
+            "items": [],
+            "errorCode": "image_batch_state_invalid",
+            "outcomeUnknown": True,
+            "notReplayed": True,
+        }
     return {
         "schema": _AGENT_IMAGE_BATCH_SCHEMA,
-        "batchId": str(batch.get("batchId") or ""),
-        "requested": int(batch.get("requested") or 0),
-        "maxConcurrency": int(batch.get("maxConcurrency") or _AGENT_IMAGE_BATCH_CONCURRENCY),
-        "admissionStopped": bool(batch.get("admissionStopped")),
+        "batchId": sanitized["batchId"],
+        "requested": sanitized["requested"],
+        "maxConcurrency": _AGENT_IMAGE_BATCH_CONCURRENCY,
+        "admissionStopped": sanitized["admissionStopped"],
         "items": [
             {
-                "index": int(item.get("index") or 0),
-                "operationId": str(item.get("operationId") or ""),
-                "dispatchState": str(item.get("dispatchState") or "prepared"),
+                "index": item["index"],
+                "operationId": item["operationId"],
+                "dispatchState": item["dispatchState"],
                 **({"errorCode": str((item.get("result") or {}).get("errorCode") or "")}
                    if isinstance(item.get("result"), dict) and (item.get("result") or {}).get("errorCode") else {}),
                 **({"outcomeUnknown": True}
@@ -6117,10 +6476,7 @@ def _agent_image_batch_public(batch):
                 **({"notReplayed": True}
                    if isinstance(item.get("result"), dict) and (item.get("result") or {}).get("notReplayed") is True else {}),
             }
-            for item in sorted(
-                (item for item in batch.get("items") or [] if isinstance(item, dict)),
-                key=lambda item: int(item.get("index") or 0),
-            )
+            for item in sanitized["items"]
         ],
     }
 
@@ -6223,20 +6579,120 @@ def _agent_image_batch_not_dispatched_result(*, cancelled=False):
     }
 
 
+def _agent_image_batch_recovery_failure(error_code, *, outcome_unknown=False):
+    code = str(error_code or "")
+    messages = {
+        "generated_asset_not_found": (
+            "A persisted image batch asset is missing and the paid request was not replayed."
+        ),
+        "generated_asset_corrupt": (
+            "A persisted image batch asset is corrupt and the paid request was not replayed."
+        ),
+        "image_operation_partial": (
+            "A persisted image batch item has partial durable assets and was not replayed."
+        ),
+        "generated_asset_store_unavailable": (
+            "Persisted image batch assets could not be verified and the paid request was not replayed."
+        ),
+        "image_outcome_unknown": (
+            "Image batch item dispatch was interrupted; delivery and the result are unknown and the paid request was not replayed."
+        ),
+    }
+    if code not in messages:
+        code = "generated_asset_store_unavailable"
+    result = {
+        "ok": False,
+        "action": "generate_image",
+        "errorCode": code,
+        "retryable": False,
+        "notReplayed": True,
+        "error": messages[code],
+    }
+    if outcome_unknown:
+        result["outcomeUnknown"] = True
+    return result
+
+
+def _agent_image_batch_recover_item(run, call_id, batch, item):
+    state = str(item.get("dispatchState") or "")
+    operation_id = str(item.get("operationId") or "")
+    session_id = str(run.get("session_id") or "")
+    run_id = str(run.get("id") or "")
+    recovered = None
+    try:
+        recovered = _generated_asset_repository.find_operation_result(
+            operation_id,
+            session_id,
+            run_id,
+            str(call_id or ""),
+            1,
+        )
+    except ImageRuntimeError as exc:
+        code = exc.code if exc.code in {
+            "image_operation_partial", "generated_asset_store_unavailable",
+            "generated_asset_corrupt", "generated_asset_not_found",
+        } else "generated_asset_store_unavailable"
+        return None, _agent_image_batch_recovery_failure(
+            code,
+            outcome_unknown=(
+                state == "dispatched" and code == "generated_asset_store_unavailable"
+            ),
+        )
+    if not recovered:
+        if state == "assets_persisted":
+            return None, _agent_image_batch_recovery_failure(
+                "generated_asset_not_found"
+            )
+        return None, _agent_image_batch_recovery_failure(
+            "image_outcome_unknown", outcome_unknown=True,
+        )
+    try:
+        sanitized = _agent_image_batch_sanitize_item_result(
+            recovered,
+            "assets_persisted",
+            run,
+            str(batch.get("batchId") or ""),
+            int(item.get("index")),
+        )
+        for asset in sanitized["assets"]:
+            _data, meta = _generated_asset_repository.read(
+                session_id, asset["assetId"],
+            )
+            if (
+                str(meta.get("operationId") or "") != operation_id
+                or str(meta.get("agentRunId") or "") != run_id
+                or str(meta.get("toolCallId") or "") != str(call_id or "")
+                or str(meta.get("batchId") or "") != str(batch.get("batchId") or "")
+                or type(meta.get("batchIndex")) is not int
+                or meta.get("batchIndex") != item.get("index")
+            ):
+                raise ImageRuntimeError(
+                    "generated_asset_corrupt",
+                    "Generated asset metadata does not match its image batch item.",
+                    retryable=False,
+                    http_status=409,
+                )
+    except ImageRuntimeError as exc:
+        code = exc.code if exc.code in {
+            "generated_asset_not_found", "generated_asset_corrupt",
+            "generated_asset_store_unavailable",
+        } else "generated_asset_corrupt"
+        return None, _agent_image_batch_recovery_failure(code)
+    return sanitized, None
+
+
 def _agent_image_batch_state(run, call, execution, requested):
     batch = execution.get("imageBatch")
-    if isinstance(batch, dict):
-        if (
-            batch.get("schema") != _AGENT_IMAGE_BATCH_SCHEMA
-            or int(batch.get("requested") or 0) != int(requested)
-            or len(batch.get("items") or []) != int(requested)
-        ):
-            raise ImageRuntimeError(
-                "image_batch_state_invalid",
-                "Persisted image batch state is invalid and was not replayed.",
-                outcome_unknown=True,
+    if batch is not None:
+        try:
+            sanitized = _agent_image_batch_validate_state(
+                run, call, execution, requested,
             )
-        return batch
+        except ImageRuntimeError:
+            _agent_image_batch_mark_invalid(run, call, execution, requested)
+            raise
+        execution["imageBatch"] = sanitized
+        return sanitized
     batch_id = _agent_image_batch_id(run, call)
     batch = {
         "schema": _AGENT_IMAGE_BATCH_SCHEMA,
@@ -6306,6 +6762,11 @@ def _execute_agent_image_batch(run, call, execution, normalized, resolved, refer
                 batch["admissionStopped"] = True
                 batch["stopReason"] = "cancelled"
             while not stop_admission and len(in_flight) < _AGENT_IMAGE_BATCH_CONCURRENCY:
+                if run["cancel_event"].is_set():
+                    stop_admission = True
+                    batch["admissionStopped"] = True
+                    batch["stopReason"] = "cancelled"
+                    break
                 item = next((
                     candidate for candidate in batch.get("items") or []
                     if candidate.get("dispatchState") == "prepared"
