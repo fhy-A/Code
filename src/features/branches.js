@@ -20,7 +20,7 @@
     if (typeof requestJson !== "function") {
       throw new TypeError("Branches feature requires JSON request access");
     }
-    if (!session?.loadSession || !session?.refreshSessions || !session?.deleteSession) {
+    if (!session?.loadSession || !session?.refreshSessions || !session?.archiveSession) {
       throw new TypeError("Branches feature requires session coordination");
     }
 
@@ -86,7 +86,7 @@
         const activeClass = node.isActive ? " active" : "";
         let html = `<div class="branch-node${activeClass}" data-session-id="${escapeHtml(node.id)}" style="padding-left:${indent + 12}px">`;
         html += `<span class="branch-title">${escapeHtml(node.title)}</span>`;
-        html += `<button class="branch-delete-btn" data-session-id="${escapeHtml(node.id)}" title="${t("delete")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>`;
+        html += `<button class="branch-archive-btn" data-session-id="${escapeHtml(node.id)}" title="${t("archiveSession")}" aria-label="${t("archiveSession")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg></button>`;
         html += "</div>";
         for (const child of node.children) html += renderNode(child, depth + 1);
         return html;
@@ -95,16 +95,16 @@
       elements.branchTree.innerHTML = renderNode(root, 0);
       elements.branchTree.querySelectorAll(".branch-node").forEach((node) => {
         node.addEventListener("click", (event) => {
-          if (event.target.closest(".branch-delete-btn")) return;
+          if (event.target.closest(".branch-archive-btn")) return;
           const sessionId = node.getAttribute("data-session-id");
           if (sessionId && sessionId !== state.sessionId) void switchToBranch(sessionId);
         });
       });
-      elements.branchTree.querySelectorAll(".branch-delete-btn").forEach((button) => {
+      elements.branchTree.querySelectorAll(".branch-archive-btn").forEach((button) => {
         button.addEventListener("click", (event) => {
           event.stopPropagation();
           const sessionId = button.getAttribute("data-session-id");
-          if (sessionId) void session.deleteSession(sessionId);
+          if (sessionId) void session.archiveSession(sessionId);
         });
       });
     }

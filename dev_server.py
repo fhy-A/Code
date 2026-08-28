@@ -155,6 +155,7 @@ def run_dev_server(
     server_module._migrate_sessions_to_hierarchy()
     server_module._migrate_codex_project_sessions_support()
     server_module._migrate_project_root_paths()
+    server_module._start_agent_run_nonterminal_index_build()
 
     handler = create_dev_handler(server_module.CodeHandler, ensure_frontend)
     httpd = server_factory(("127.0.0.1", port), handler)

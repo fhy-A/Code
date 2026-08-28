@@ -8939,19 +8939,19 @@ const sessions = createSessionsFeature({requestJson});
         refresh_start = APP_SOURCE.index("async function refreshSessions()")
         refresh_end = APP_SOURCE.index("function scheduleDeferredSessionRefresh(", refresh_start)
         rename_start = APP_SOURCE.index("async function renameSession(")
-        delete_start = APP_SOURCE.index("async function deleteSession(", rename_start)
-        pinned_start = APP_SOURCE.index("function getPinnedSessions()", delete_start)
+        archive_start = APP_SOURCE.index("async function archiveSession(", rename_start)
+        pinned_start = APP_SOURCE.index("function getPinnedSessions()", archive_start)
         self.assertIn(
             "state.sessions = await listSessionRecords();",
             APP_SOURCE[refresh_start:refresh_end],
         )
         self.assertIn(
             "await updateSessionRecord(sessionId",
-            APP_SOURCE[rename_start:delete_start],
+            APP_SOURCE[rename_start:archive_start],
         )
         self.assertIn(
-            "await deleteSessionRecord(sessionId);",
-            APP_SOURCE[delete_start:pinned_start],
+            "await archiveSessionRecord(normalizedId);",
+            APP_SOURCE[archive_start:pinned_start],
         )
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
         self.assertIn(
@@ -9905,7 +9905,7 @@ const feature = window.Code.features.branches.createBranchesFeature({
       events.push(["load", sessionId]);
       state.sessionId = sessionId;
     },
-    deleteSession: async (sessionId) => events.push(["delete", sessionId]),
+    archiveSession: async (sessionId) => events.push(["archive", sessionId]),
   },
   view: {
     showToast: (message, kind) => events.push(["toast", message, kind]),
@@ -9913,7 +9913,7 @@ const feature = window.Code.features.branches.createBranchesFeature({
   t: (key, params = {}) => ({
     untitledSession: "Untitled",
     noBranches: "No branches",
-    delete: "Delete",
+    archiveSession: "Archive",
     branchTitleTemplate: `Branch: ${params.title || ""}`,
     createSessionFirst: "Create session first",
     stopBeforeBranch: "Stop first",
@@ -9994,7 +9994,7 @@ const feature = window.Code.features.branches.createBranchesFeature({
 
         self.assertIn("const response = await requestJson(", BRANCHES_SOURCE)
         self.assertIn("item._parentId === record.id", BRANCHES_SOURCE)
-        self.assertIn("void session.deleteSession(sessionId);", BRANCHES_SOURCE)
+        self.assertIn("void session.archiveSession(sessionId);", BRANCHES_SOURCE)
         self.assertIn("await session.refreshSessions();", BRANCHES_SOURCE)
         self.assertIn("await session.loadSession(response.id);", BRANCHES_SOURCE)
         self.assertNotIn("function buildBranchTree(", APP_SOURCE)
@@ -10334,7 +10334,14 @@ global.window = {
   Code: {services: {}},
   document: {
     getElementById: () => ({appendChild: (child) => children.push(child)}),
-    createElement: () => ({style: {}, remove: () => {}}),
+    createElement: (tagName) => ({
+      tagName,
+      style: {},
+      children: [],
+      appendChild(child) { this.children.push(child); },
+      remove: () => {},
+    }),
+    createTextNode: (text) => ({nodeType: 3, textContent: text}),
   },
   setTimeout: (_callback, delay) => scheduled.push(delay),
 };
@@ -10343,7 +10350,17 @@ const {showToast} = window.Code.services.notifications;
 showToast("default");
 showToast("long", "info", {duration: 7000});
 showToast("bounded", "info", {duration: 99999});
-process.stdout.write(JSON.stringify({scheduled, childCount: children.length}));
+showToast("Archived. Settings - Archived sessions", "success", {
+  duration: 4000,
+  emphasis: "Settings - Archived sessions",
+});
+process.stdout.write(JSON.stringify({
+  scheduled,
+  childCount: children.length,
+  emphasisTag: children[3].children[1].tagName,
+  emphasisClass: children[3].children[1].className,
+  emphasisText: children[3].children[1].textContent,
+}));
 """
         completed = subprocess.run(
             ["node", "-e", script],
@@ -10355,7 +10372,13 @@ process.stdout.write(JSON.stringify({scheduled, childCount: children.length}));
         )
         self.assertEqual(
             json.loads(completed.stdout),
-            {"scheduled": [3000, 7000, 15000], "childCount": 3},
+            {
+                "scheduled": [3000, 7000, 15000, 4000],
+                "childCount": 4,
+                "emphasisTag": "span",
+                "emphasisClass": "toast-emphasis",
+                "emphasisText": "Settings - Archived sessions",
+            },
         )
 
     def test_api_client_exports_and_preserves_json_request_behavior(self):
@@ -18264,23 +18287,436 @@ process.stdout.write(JSON.stringify({
         self.assertIn("white-space: pre-line", STYLE_SOURCE)
         self.assertNotIn(".tl-dot {", STYLE_SOURCE)
 
-    def test_delete_session_confirmation_uses_i18n_and_localized_fallback(self):
-        delete_start = APP_SOURCE.index("async function deleteSession(")
-        delete_end = APP_SOURCE.index("function getPinnedSessions()", delete_start)
-        delete_source = APP_SOURCE[delete_start:delete_end]
+    def test_archived_session_permanent_delete_confirmation_is_explicit_and_localized(self):
+        confirm_start = SETTINGS_SOURCE.index("function confirmArchivedSessionDelete(")
+        confirm_end = SETTINGS_SOURCE.index("async function deleteArchivedSession(", confirm_start)
+        confirm_source = SETTINGS_SOURCE[confirm_start:confirm_end]
 
-        self.assertIn('session?.title || t("untitledSession")', delete_source)
+        self.assertIn('t("archiveSessionConfirmPermanent", { name: title })', confirm_source)
+        self.assertIn('archiveSessionConfirmPermanent: "永久删除「{name}」？此操作不可撤销，将删除消息、Goal、生成资产和运行记录。"', I18N_SOURCE)
         self.assertIn(
-            't("deleteSessionConfirmMessage", { name: title })',
-            delete_source,
-        )
-        self.assertIn('deleteSessionConfirmMessage: "删除会话「{name}」？此操作不可恢复。"', I18N_SOURCE)
-        self.assertIn(
-            'deleteSessionConfirmMessage: "Delete session \\"{name}\\"? This action cannot be undone."',
+            'archiveSessionConfirmPermanent: "Permanently delete \\"{name}\\"? This cannot be undone and will delete its messages, Goal, generated assets, and run records."',
             I18N_SOURCE,
         )
-        self.assertNotIn("Untitled session", delete_source)
-        self.assertNotIn("This action cannot be undone.`", delete_source)
+        self.assertIn('role="alertdialog"', INDEX_SOURCE)
+        self.assertNotIn("archiveToken", confirm_source)
+        settings_layer = re.search(r"\.settings-modal\s*\{.*?z-index:\s*(\d+)", STYLE_SOURCE, re.S)
+        delete_layer = re.search(r"#deleteConfirmModal\s*\{.*?z-index:\s*(\d+)", STYLE_SOURCE, re.S)
+        self.assertIsNotNone(settings_layer)
+        self.assertIsNotNone(delete_layer)
+        self.assertGreater(int(delete_layer.group(1)), int(settings_layer.group(1)))
+
+    def test_session_archive_data_api_is_bodyless_and_token_scoped(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+const requests = [];
+const requestJson = async (url, options = {}) => {
+  requests.push({url, method: options.method || "GET", hasBody: Object.hasOwn(options, "body")});
+  if (url === "/api/session-archive") return {data: [{id: "archived-1", archiveToken: "token-1"}]};
+  return {ok: true};
+};
+const sessions = window.Code.features.sessions.createSessionsFeature({requestJson});
+(async () => {
+  const listed = await sessions.listArchivedSessions();
+  await sessions.archiveSession("active / 1");
+  await sessions.restoreArchivedSession("archived-1");
+  await sessions.deleteArchivedSession("archived-1", "token / current");
+  process.stdout.write(JSON.stringify({listed, requests}));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "listed": [{"id": "archived-1", "archiveToken": "token-1"}],
+            "requests": [
+                {"url": "/api/session-archive", "method": "GET", "hasBody": False},
+                {"url": "/api/session-archive/active%20%2F%201/archive", "method": "POST", "hasBody": False},
+                {"url": "/api/session-archive/archived-1/restore", "method": "POST", "hasBody": False},
+                {"url": "/api/session-archive/archived-1?archiveToken=token%20%2F%20current", "method": "DELETE", "hasBody": False},
+            ],
+        })
+
+    def test_archive_product_surface_replaces_active_delete_and_adds_settings_management(self):
+        self.assertIn('data-panel="archives"', INDEX_SOURCE)
+        self.assertIn('data-action="archive"', APP_SOURCE)
+        self.assertNotIn('data-action="delete"', APP_SOURCE)
+        self.assertIn("async function archiveSession(sessionId)", APP_SOURCE)
+        self.assertIn("renderArchivedSessionsPanel", SETTINGS_SOURCE)
+        self.assertIn("restoreArchivedSession", SETTINGS_SOURCE)
+        self.assertIn("deleteArchivedSession", SETTINGS_SOURCE)
+        self.assertIn("archiveSessionConfirmPermanent", I18N_SOURCE)
+        self.assertEqual(I18N_SOURCE.count("archivedSessions:"), 2)
+        self.assertIn(".archived-session-row", STYLE_SOURCE)
+
+    def test_archive_feedback_is_authoritative_safe_localized_and_releases_pending_before_refresh(self):
+        start = APP_SOURCE.index("async function archiveSession(sessionId)")
+        end = APP_SOURCE.index("function getPinnedSessions()", start)
+        source = APP_SOURCE[start:end]
+        for error_code, key in {
+            "session_archive_not_terminal": "sessionArchiveNotTerminal",
+            "session_archive_failed": "sessionArchiveRetryableFailure",
+            "session_archive_index_unavailable": "sessionArchiveIndexUnavailable",
+            "session_archive_recovery_failed": "sessionArchiveRecoveryUnavailable",
+            "session_archive_location_conflict": "sessionArchiveLocationConflict",
+        }.items():
+            self.assertIn(f'{error_code}: "{key}"', source)
+        self.assertNotIn("error.message", source)
+        self.assertNotIn("${error", source)
+        self.assertIn('showToast(t("sessionArchiveSuccess"), "success", {', source)
+        self.assertIn('emphasis: t("sessionArchiveSuccessEmphasis")', source)
+        self.assertLess(
+            source.index("archiveSessionPending.delete(normalizedId);", source.index("await archiveSessionRecord")),
+            source.index("await refreshSessions()"),
+        )
+        self.assertIn('sessionArchiveSuccess: "已成功归档会话，可在 设置－已归档会话 进行恢复"', I18N_SOURCE)
+        self.assertIn('sessionArchiveSuccessEmphasis: "设置－已归档会话"', I18N_SOURCE)
+        self.assertIn('sessionArchiveSuccess: "Session archived. Restore it from Settings - Archived sessions"', I18N_SOURCE)
+        self.assertIn('sessionArchiveSuccessEmphasis: "Settings - Archived sessions"', I18N_SOURCE)
+        self.assertIn(".toast-emphasis", STYLE_SOURCE)
+        notification_source = (ROOT / "src/services/notifications.js").read_text(encoding="utf-8")
+        self.assertIn('highlighted.className = "toast-emphasis"', notification_source)
+        self.assertNotIn("innerHTML", notification_source)
+        self.assertNotIn("createElement(\"a\")", notification_source)
+
+    def test_archive_action_dedupes_and_pending_ends_at_authoritative_post_boundary(self):
+        start = APP_SOURCE.index("async function archiveSession(sessionId)")
+        end = APP_SOURCE.index("function getPinnedSessions()", start)
+        archive_source = APP_SOURCE[start:end]
+        script = f"""
+const events = [];
+const archiveSessionPending = new Set();
+const state = {{sessions: [{{id: "s1", projectId: "p1"}}], sessionId: "other", branchPanelOpen: false}};
+let postResolve;
+let postReject;
+let refreshResolve;
+let mode = "pending";
+function archiveSessionRecord(sessionId) {{
+  events.push(["post", sessionId]);
+  if (mode === "pending") return new Promise((resolve, reject) => {{ postResolve = resolve; postReject = reject; }});
+  return Promise.reject(Object.assign(new Error("RAW-ARCHIVE-SECRET"), {{data: {{errorCode: mode}}}}));
+}}
+function renderSessions() {{ events.push(["render", [...archiveSessionPending]]); }}
+function beginNewConversation() {{ events.push(["new"]); }}
+function refreshSessions() {{
+  events.push(["refresh", [...archiveSessionPending]]);
+  return new Promise((resolve) => {{ refreshResolve = resolve; }});
+}}
+function renderBranchTree() {{ events.push(["branch"]); }}
+const settingsFeature = {{refreshArchivedSessions: () => Promise.resolve()}};
+function t(key) {{ return key; }}
+function showToast(...args) {{ events.push(["toast", ...args]); }}
+eval({json.dumps(archive_source)} + "\\nglobalThis.__archiveSession = archiveSession;");
+async function waitFor(predicate) {{
+  for (let index = 0; index < 20; index += 1) {{
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }}
+  throw new Error("condition not reached");
+}}
+(async () => {{
+  const first = globalThis.__archiveSession("s1");
+  const duplicate = await globalThis.__archiveSession("s1");
+  postResolve({{ok: true}});
+  await waitFor(() => events.some((item) => item[0] === "refresh"));
+  const pendingAtRefresh = events.find((item) => item[0] === "refresh")[1];
+  const successToast = events.find((item) => item[0] === "toast" && item[1] === "sessionArchiveSuccess");
+  refreshResolve({{data: []}});
+  const firstResult = await first;
+  const failures = {{}};
+  for (const code of [
+    "session_archive_not_terminal",
+    "session_archive_failed",
+    "session_archive_index_unavailable",
+    "session_archive_recovery_failed",
+    "session_archive_location_conflict",
+  ]) {{
+    state.sessions = [{{id: "s1", projectId: "p1"}}];
+    mode = code;
+    const before = events.length;
+    failures[code] = await globalThis.__archiveSession("s1");
+    failures[code + "Toast"] = events.slice(before).find((item) => item[0] === "toast")?.[1] || "";
+  }}
+  process.stdout.write(JSON.stringify({{
+    firstResult,
+    duplicate,
+    postCount: events.filter((item) => item[0] === "post").length,
+    pendingAtRefresh,
+    pendingAfter: [...archiveSessionPending],
+    successToast,
+    failures,
+    rawSecretVisible: JSON.stringify(events).includes("RAW-ARCHIVE-SECRET"),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["firstResult"])
+        self.assertFalse(data["duplicate"])
+        self.assertEqual(data["postCount"], 6)
+        self.assertEqual(data["pendingAtRefresh"], [])
+        self.assertEqual(data["pendingAfter"], [])
+        self.assertEqual(data["successToast"], [
+            "toast",
+            "sessionArchiveSuccess",
+            "success",
+            {"duration": 4000, "emphasis": "sessionArchiveSuccessEmphasis"},
+        ])
+        self.assertEqual(data["failures"], {
+            "session_archive_not_terminal": False,
+            "session_archive_not_terminalToast": "sessionArchiveNotTerminal",
+            "session_archive_failed": False,
+            "session_archive_failedToast": "sessionArchiveRetryableFailure",
+            "session_archive_index_unavailable": False,
+            "session_archive_index_unavailableToast": "sessionArchiveIndexUnavailable",
+            "session_archive_recovery_failed": False,
+            "session_archive_recovery_failedToast": "sessionArchiveRecoveryUnavailable",
+            "session_archive_location_conflict": False,
+            "session_archive_location_conflictToast": "sessionArchiveLocationConflict",
+        })
+        self.assertFalse(data["rawSecretVisible"])
+
+    def test_archived_settings_actions_dedupe_preserve_rows_and_use_current_token(self):
+        script = r'''
+const storage = {getItem: () => null, setItem: () => {}, removeItem: () => {}};
+const focusCalls = [];
+const listenerNode = (id = "") => {
+  const listeners = new Map();
+  const classes = new Set(["hidden"]);
+  return {
+    id,
+    dataset: {},
+    innerHTML: "",
+    textContent: "",
+    disabled: false,
+    classList: {
+      add: (...names) => names.forEach((name) => classes.add(name)),
+      remove: (...names) => names.forEach((name) => classes.delete(name)),
+      contains: (name) => classes.has(name),
+      toggle: (name, active) => active ? classes.add(name) : classes.delete(name),
+    },
+    addEventListener: (name, fn) => {
+      const handlers = listeners.get(name) || [];
+      handlers.push(fn);
+      listeners.set(name, handlers);
+    },
+    removeEventListener: (name, fn) => {
+      listeners.set(name, (listeners.get(name) || []).filter((item) => item !== fn));
+    },
+    emit: (name, event = {}) => (listeners.get(name) || []).slice().forEach((fn) => fn({target: null, ...event})),
+    focus: () => focusCalls.push(id),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+};
+const detail = listenerNode("settingsDetail");
+let underlyingClicks = 0;
+detail.addEventListener("click", () => { underlyingClicks += 1; });
+const modal = listenerNode("deleteConfirmModal");
+const text = listenerNode("deleteConfirmText");
+const confirm = listenerNode("confirmDeleteSession");
+const cancel = listenerNode("cancelDeleteSession");
+const close = listenerNode("closeDeleteConfirm");
+const nodes = new Map([[detail.id, detail], [modal.id, modal], [text.id, text], [confirm.id, confirm], [cancel.id, cancel], [close.id, close]]);
+const documentListeners = new Map();
+const documentStub = {
+  body: {classList: {toggle: () => {}}},
+  getElementById: (id) => nodes.get(id) || null,
+  querySelector: (selector) => selector === ".settings-nav-item.active" ? {dataset: {panel: "archives"}} : null,
+  querySelectorAll: () => [],
+  addEventListener: (name, fn) => documentListeners.set(name, fn),
+  removeEventListener: (name, fn) => { if (documentListeners.get(name) === fn) documentListeners.delete(name); },
+};
+global.window = {
+  Code: {core: {}, features: {}},
+  localStorage: storage,
+  URLSearchParams,
+  location: {search: "", href: "http://localhost/"},
+  history: {replaceState: () => {}},
+  matchMedia: () => ({matches: false, addEventListener: () => {}}),
+  addEventListener: () => {},
+  setTimeout,
+  setInterval,
+  clearInterval,
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const records = [
+  {id: "restore-1", title: "Restore me", projectId: "p1", source: "local", archivedAt: "2026-08-28T10:00:00Z", archiveToken: "restore-token"},
+  {id: "restore-fail", title: "Keep me", projectId: "p1", source: "import", archivedAt: "2026-08-28T09:00:00Z", archiveToken: "keep-token"},
+  {id: "delete-1", title: "Delete me", projectId: null, source: "local", archivedAt: "2026-08-28T08:00:00Z", archiveToken: "delete-token-current"},
+  {id: "delete-fail", title: "Retry me", projectId: null, source: "local", archivedAt: "2026-08-28T07:00:00Z", archiveToken: "retry-token-current"},
+];
+let listCalls = 0;
+let resolveList;
+const listGate = new Promise((resolve) => { resolveList = resolve; });
+let resolveRestore;
+const restoreGate = new Promise((resolve) => { resolveRestore = resolve; });
+const restoreCalls = [];
+const deleteCalls = [];
+let deleteFailOnce = true;
+const changes = [];
+const toasts = [];
+const feature = window.Code.features.settings.createSettingsFeature({
+  state: {lang: "en", projects: [{id: "p1", name: "Project One"}]},
+  elements: {},
+  t: (key, params = {}) => Object.entries(params).reduce((value, [name, replacement]) => value.replaceAll(`{${name}}`, replacement), ({
+    archivedSessions: "Archived sessions",
+    archivedSessionsDescription: "Restore first",
+    archivedSessionsLoading: "Loading",
+    archivedSessionsEmpty: "Empty",
+    archivedSessionsLoadFailed: "Load failed",
+    archivedSessionUnknownProject: "No project",
+    archivedSessionTime: "Archived {time}",
+    archivedSessionSource: "Source: {source}",
+    untitledSession: "Untitled",
+    restoreSession: "Restore",
+    restoringSession: "Restoring",
+    permanentlyDelete: "Delete permanently",
+    deletingArchivedSession: "Deleting",
+    sessionRestored: "Restored",
+    sessionRestoreFailed: "Restore failed",
+    archiveSessionConfirmPermanent: "Delete {name}; messages, Goal, generated assets, and run records",
+    archivedSessionDeleted: "Deleted",
+    archivedSessionDeleteFailed: "Delete failed",
+  }[key] || key)),
+  escapeHtml: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
+  apiJson: async () => ({}),
+  showToast: (...args) => toasts.push(args),
+  document: documentStub,
+  storage,
+  sessionArchive: {
+    listArchivedSessions: async () => { listCalls += 1; await listGate; return records; },
+    restoreArchivedSession: async (id) => {
+      restoreCalls.push(id);
+      if (id === "restore-fail") throw new Error("conflict");
+      await restoreGate;
+      return {ok: true};
+    },
+    deleteArchivedSession: async (id, token) => {
+      deleteCalls.push([id, token]);
+      if (id === "delete-fail" && deleteFailOnce) { deleteFailOnce = false; throw new Error("locked"); }
+      return {ok: true};
+    },
+  },
+  onArchivedSessionsChanged: async (event) => changes.push(event),
+});
+(async () => {
+  const firstLoad = feature.refreshArchivedSessions({rerender: true});
+  const secondLoad = feature.refreshArchivedSessions({rerender: true});
+  resolveList();
+  const [firstRecords, secondRecords] = await Promise.all([firstLoad, secondLoad]);
+  const htmlAfterLoad = detail.innerHTML;
+
+  const restoreFirst = feature.restoreArchivedSession(records[0]);
+  const restoreDuplicate = await feature.restoreArchivedSession(records[0]);
+  resolveRestore();
+  const restoreResult = await restoreFirst;
+  const restoreFailure = await feature.restoreArchivedSession(records[1]);
+  const htmlAfterRestoreFailure = detail.innerHTML;
+
+  const deleteFirst = feature.deleteArchivedSession(records[2], confirm);
+  const deleteDuplicate = await feature.deleteArchivedSession(records[2], confirm);
+  const confirmText = text.textContent;
+  confirm.emit("click");
+  const deleteResult = await deleteFirst;
+
+  const deleteFailurePromise = feature.deleteArchivedSession(records[3], confirm);
+  confirm.emit("click");
+  const deleteFailure = await deleteFailurePromise;
+  const htmlAfterDeleteFailure = detail.innerHTML;
+  const deleteRetryPromise = feature.deleteArchivedSession(records[3], confirm);
+  confirm.emit("click");
+  const deleteRetry = await deleteRetryPromise;
+
+  const cancelled = feature.deleteArchivedSession({id: "cancelled", title: "Cancel", archiveToken: "cancel-token"}, detail);
+  cancel.emit("click");
+  const cancelResult = await cancelled;
+  const backdrop = feature.deleteArchivedSession({id: "backdrop", title: "Backdrop", archiveToken: "backdrop-token"}, detail);
+  modal.emit("click", {target: modal});
+  const backdropResult = await backdrop;
+  const escaped = feature.deleteArchivedSession({id: "escaped", title: "Escape", archiveToken: "escape-token"}, detail);
+  documentListeners.get("keydown")?.({key: "Escape"});
+  const escapeResult = await escaped;
+
+  process.stdout.write(JSON.stringify({
+    listCalls,
+    sameLoadPayload: JSON.stringify(firstRecords) === JSON.stringify(secondRecords),
+    htmlAfterLoad,
+    restoreCalls,
+    restoreDuplicate,
+    restoreResult,
+    restoreFailure,
+    htmlAfterRestoreFailure,
+    deleteCalls,
+    deleteDuplicate,
+    deleteResult,
+    deleteFailure,
+    deleteRetry,
+    confirmText,
+    htmlAfterDeleteFailure,
+    finalHtml: detail.innerHTML,
+    cancelResult,
+    backdropResult,
+    escapeResult,
+    focusCalls,
+    underlyingClicks,
+    changes,
+    toasts,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+'''
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["listCalls"], 1)
+        self.assertTrue(data["sameLoadPayload"])
+        self.assertIn("Restore me", data["htmlAfterLoad"])
+        self.assertIn("Project One", data["htmlAfterLoad"])
+        self.assertNotIn("delete-token-current", data["htmlAfterLoad"])
+        self.assertEqual(data["restoreCalls"], ["restore-1", "restore-fail"])
+        self.assertFalse(data["restoreDuplicate"])
+        self.assertTrue(data["restoreResult"])
+        self.assertFalse(data["restoreFailure"])
+        self.assertIn("restore-fail", data["htmlAfterRestoreFailure"])
+        self.assertEqual(data["deleteCalls"], [
+            ["delete-1", "delete-token-current"],
+            ["delete-fail", "retry-token-current"],
+            ["delete-fail", "retry-token-current"],
+        ])
+        self.assertFalse(data["deleteDuplicate"])
+        self.assertTrue(data["deleteResult"])
+        self.assertFalse(data["deleteFailure"])
+        self.assertTrue(data["deleteRetry"])
+        self.assertFalse(data["cancelResult"])
+        self.assertFalse(data["backdropResult"])
+        self.assertFalse(data["escapeResult"])
+        self.assertEqual(data["underlyingClicks"], 0)
+        self.assertGreaterEqual(data["focusCalls"].count("cancelDeleteSession"), 6)
+        self.assertEqual(data["focusCalls"][-1], "settingsDetail")
+        self.assertIn("messages, Goal, generated assets, and run records", data["confirmText"])
+        self.assertNotIn("retry-token-current", data["confirmText"])
+        self.assertIn("delete-fail", data["htmlAfterDeleteFailure"])
+        self.assertNotIn("delete-fail", data["finalHtml"])
+        self.assertEqual(data["changes"], [
+            {"type": "restore", "sessionId": "restore-1"},
+            {"type": "delete", "sessionId": "delete-1"},
+            {"type": "delete", "sessionId": "delete-fail"},
+        ])
 
     def test_remaining_visible_status_strings_use_i18n(self):
         self.assertIn('showToast(t("notEnoughToExtract"))', APP_SOURCE)

@@ -434,9 +434,14 @@ const sessionDataFeature = Object.freeze({
   createSession: createSessionRecord,
   updateSession: updateSessionRecord,
   deleteSession: rawSessionDataFeature.deleteSession,
+  listArchivedSessions: rawSessionDataFeature.listArchivedSessions,
+  archiveSession: rawSessionDataFeature.archiveSession,
+  restoreArchivedSession: rawSessionDataFeature.restoreArchivedSession,
+  deleteArchivedSession: rawSessionDataFeature.deleteArchivedSession,
 });
 const listSessionRecords = sessionDataFeature.listSessions;
-const deleteSessionRecord = sessionDataFeature.deleteSession;
+const archiveSessionRecord = sessionDataFeature.archiveSession;
+const archiveSessionPending = new Set();
 
 const { t, setLang, applyI18n } = createI18nRuntime({
   getLanguage: () => state.lang,
@@ -1561,7 +1566,7 @@ branchesFeature = createBranchesFeature({
   session: {
     loadSession,
     refreshSessions,
-    deleteSession,
+    archiveSession,
   },
   view: {
     showToast,
@@ -1640,6 +1645,15 @@ const settingsFeature = createSettingsFeature({
         .catch(() => {});
     }
     void resolvePendingOnboardingKey(config);
+  },
+  sessionArchive: {
+    listArchivedSessions: sessionDataFeature.listArchivedSessions,
+    restoreArchivedSession: sessionDataFeature.restoreArchivedSession,
+    deleteArchivedSession: sessionDataFeature.deleteArchivedSession,
+  },
+  onArchivedSessionsChanged: async () => {
+    await refreshSessions();
+    if (state.branchPanelOpen) renderBranchTree();
   },
   trashIcon,
 });
@@ -4458,57 +4472,50 @@ async function renameSession(sessionId, title) {
 
 
 
-async function deleteSession(sessionId) {
+async function archiveSession(sessionId) {
+  const normalizedId = String(sessionId || "").trim();
+  if (!normalizedId || archiveSessionPending.has(normalizedId)) return false;
   const session = state.sessions.find((item) => item.id === sessionId);
-  const title = session?.title || t("untitledSession");
-  showDeleteConfirm(sessionId, title);
-}
+  if (!session) return false;
+  const projectId = session.projectId || null;
+  archiveSessionPending.add(normalizedId);
+  renderSessions();
+  try {
+    await archiveSessionRecord(normalizedId);
+  } catch (error) {
+    archiveSessionPending.delete(normalizedId);
+    renderSessions();
+    const errorCode = String(error?.data?.errorCode || "");
+    const key = ({
+      session_archive_not_terminal: "sessionArchiveNotTerminal",
+      session_archive_failed: "sessionArchiveRetryableFailure",
+      session_archive_index_unavailable: "sessionArchiveIndexUnavailable",
+      session_archive_recovery_failed: "sessionArchiveRecoveryUnavailable",
+      session_archive_conflict: "sessionArchiveLocationConflict",
+      session_archive_location_conflict: "sessionArchiveLocationConflict",
+    })[errorCode] || "sessionArchiveFailed";
+    showToast(t(key), "error", { duration: 4000 });
+    return false;
+  }
 
-function hideDeleteConfirm() {
-  document.getElementById("deleteConfirmModal").classList.add("hidden");
-}
-
-function showDeleteConfirm(sessionId, title) {
-  const modal = document.getElementById("deleteConfirmModal");
-  document.getElementById("deleteConfirmText").textContent = t("deleteSessionConfirmMessage", { name: title });
-  modal.classList.remove("hidden");
-  const confirmBtn = document.getElementById("confirmDeleteSession");
-  const cancelBtn = document.getElementById("cancelDeleteSession");
-  const closeBtn = document.getElementById("closeDeleteConfirm");
-  const cleanup = () => {
-    confirmBtn.removeEventListener("click", handler);
-    cancelBtn.removeEventListener("click", cleanup);
-    closeBtn.removeEventListener("click", cleanup);
-    modal.removeEventListener("click", onModal);
-    document.removeEventListener("keydown", onEsc);
-    modal.classList.add("hidden");
-  };
-  const onModal = (e) => { if (e.target === modal) cleanup(); };
-  const onEsc = (e) => { if (e.key === "Escape") cleanup(); };
-  const handler = async () => {
-    cleanup();
-    await deleteSessionRecord(sessionId);
-    if (state.sessionId === sessionId) {
-      invalidateForegroundSessionNavigation();
-      state.sessionId = null;
-      state.messages = [];
-      state.pendingEdits = {};
-      state.stats = { input: 0, output: 0, cache: 0 };
-      state.responseUsage = null;
-      els.sessionTitle.value = "";
-      rememberWelcomeForeground();
-      syncActiveStreamingState();
-      renderMessages();
-      updateSendButtonState();
-    }
-    await refreshSessions();
-    if (state.branchPanelOpen) renderBranchTree();
-  };
-  confirmBtn.addEventListener("click", handler);
-  cancelBtn.addEventListener("click", cleanup);
-  closeBtn.addEventListener("click", cleanup);
-  modal.addEventListener("click", onModal);
-  document.addEventListener("keydown", onEsc);
+  // The authority-changing POST has completed. Release the per-row pending
+  // state before any list reconciliation so a slow refresh cannot prolong the
+  // visible "archiving" state or produce a duplicate submission.
+  archiveSessionPending.delete(normalizedId);
+  state.sessions = state.sessions.filter((item) => item.id !== normalizedId);
+  if (state.sessionId === normalizedId) beginNewConversation(projectId);
+  else renderSessions();
+  showToast(t("sessionArchiveSuccess"), "success", {
+    duration: 4000,
+    emphasis: t("sessionArchiveSuccessEmphasis"),
+  });
+  await refreshSessions().catch(() => {
+    showToast(t("sessionArchiveRefreshFailed"), "warning", { duration: 4000 });
+  });
+  if (state.branchPanelOpen) renderBranchTree();
+  const archivedRefresh = settingsFeature?.refreshArchivedSessions?.({ rerender: true });
+  if (archivedRefresh) await Promise.resolve(archivedRefresh).catch(() => {});
+  return true;
 }
 
 function getPinnedSessions() {
@@ -4963,7 +4970,7 @@ function renderSessions() {
       menu.style.top = (rect.bottom + 2) + "px";
       menu.innerHTML = '<button class="session-more-item pin ' + (getPinnedSessions().includes(id) ? 'is-pinned' : '') + '" data-action="pin">' + (getPinnedSessions().includes(id) ? t('unpin') : t('pin')) + '</button>' +
         '<button class="session-more-item" data-action="rename">' + t("rename") + '</button>' +
-        '<button class="session-more-item danger" data-action="delete">' + t("delete") + '</button>';
+        '<button class="session-more-item" data-action="archive"' + (archiveSessionPending.has(id) ? ' disabled' : '') + '>' + t(archiveSessionPending.has(id) ? "archivingSession" : "archiveSession") + '</button>';
       menu.querySelectorAll(".session-more-item").forEach((item) => {
         item.addEventListener("click", () => {
           if (item.dataset.action === "rename") {
@@ -4973,8 +4980,8 @@ function renderSessions() {
             if (renameInput) renameInput.select();
           } else if (item.dataset.action === "pin") {
             togglePinSession(id);
-          } else if (item.dataset.action === "delete") {
-            deleteSession(id).catch((err) => appendSystemError(err.message));
+          } else if (item.dataset.action === "archive") {
+            void archiveSession(id);
           }
           menu.remove();
         });

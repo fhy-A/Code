@@ -5352,6 +5352,154 @@ def main() -> int:
             },
         }
 
+    archive_fixture_records = {}
+    archive_index_gate = {"held": False}
+
+    def hold_session_archive_index_build():
+        if archive_index_gate["held"]:
+            return {"state": "building"}
+        if not code_server._agent_run_index_rebuild_lock.acquire(blocking=False):
+            raise RuntimeError("AgentRun index rebuild is already active")
+        archive_index_gate["held"] = True
+        key = str(code_server._agent_run_nonterminal_index_path().resolve(strict=False))
+        with code_server._agent_run_index_builds_lock:
+            code_server._agent_run_index_initialized_roots.discard(key)
+        code_server._write_agent_run_nonterminal_index_building()
+        return {"state": "building"}
+
+    def restore_session_archive_index():
+        if archive_index_gate["held"]:
+            archive_index_gate["held"] = False
+            code_server._agent_run_index_rebuild_lock.release()
+        rebuilt = code_server._rebuild_agent_run_nonterminal_index(force=True)
+        return {"state": rebuilt["state"], "entries": len(rebuilt["entries"])}
+
+    def seed_session_archive_sidecars(session_id):
+        session_id = code_server.safe_session_id(str(session_id or ""))
+        meta_path = code_server.session_path(session_id)
+        messages_path = code_server.messages_path(session_id)
+        if not meta_path.is_file() or not messages_path.is_file():
+            raise ValueError("H4 archive fixture Session is missing")
+        existing = archive_fixture_records.get(session_id)
+        if existing:
+            return dict(existing["public"])
+
+        goal_runtime = code_server.GoalV2Runtime(data_dir)
+        created = goal_runtime.create_goal(
+            session_id,
+            "H4 archived terminal Goal",
+            context=code_server.GoalCreationContext(
+                session_id=session_id,
+                origin_message_id="h4-archive-origin",
+                client_request_id="h4-archive-request",
+                owner_run_id="h4-archive-owner",
+                permission_profile="read",
+                source_kind="explicit",
+            ),
+            expected_revision=0,
+            idempotency_key=f"h4-archive-goal-create-{session_id}",
+        )
+        goal = created["goal"]
+        goal_runtime.cancel_goal(
+            session_id,
+            goal["goalId"],
+            reason="H4 terminal archive fixture",
+            source_run_id="h4-archive-owner",
+            expected_revision=created["revision"],
+            idempotency_key=f"h4-archive-goal-cancel-{session_id}",
+        )
+        goal_path = goal_runtime.service.events_path(session_id)
+
+        asset_id = "ga1_" + hashlib.sha256(
+            f"h4-archive-asset:{session_id}".encode("utf-8")
+        ).hexdigest()[:43]
+        asset_dir = code_server._generated_asset_repository.root / asset_id
+        asset_dir.mkdir(parents=True, exist_ok=False)
+        asset_bytes = FAVICON_PNG
+        asset_sha256 = hashlib.sha256(asset_bytes).hexdigest()
+        (asset_dir / "content.png").write_bytes(asset_bytes)
+        (asset_dir / "meta.json").write_text(json.dumps({
+            "schema": "code-generated-asset/v1",
+            "assetId": asset_id,
+            "operationId": f"h4-archive-asset-{session_id}",
+            "sessionId": session_id,
+            "agentRunId": "h4-archive-terminal-run",
+            "toolCallId": "h4-archive-terminal-call",
+            "index": 0,
+            "sha256": asset_sha256,
+            "mimeType": "image/png",
+            "width": 2,
+            "height": 2,
+            "byteLength": len(asset_bytes),
+            "createdAt": "2026-08-28T12:00:00Z",
+            "fileName": "content.png",
+        }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+        run_id = hashlib.sha256(
+            f"h4-archive-run:{session_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        run_path = code_server._agent_run_path(run_id)
+        run_record = {
+            "version": 5,
+            "id": run_id,
+            "sessionId": session_id,
+            "session_id": session_id,
+            "status": "completed",
+        }
+        code_server.write_json(run_path, run_record)
+
+        public = {
+            "sessionId": session_id,
+            "assetId": asset_id,
+            "assetSha256": asset_sha256,
+            "agentRunId": run_id,
+            "goalIdHash": hashlib.sha256(goal["goalId"].encode("utf-8")).hexdigest(),
+        }
+        archive_fixture_records[session_id] = {
+            "public": public,
+            "metaPath": meta_path,
+            "messagesPath": messages_path,
+            "goalPath": goal_path,
+            "assetDir": asset_dir,
+            "runPath": run_path,
+        }
+        return dict(public)
+
+    def session_archive_fixture_evidence(session_id):
+        session_id = code_server.safe_session_id(str(session_id or ""))
+        record = archive_fixture_records.get(session_id)
+        asset_id = "ga1_" + hashlib.sha256(
+            f"h4-archive-asset:{session_id}".encode("utf-8")
+        ).hexdigest()[:43]
+        run_id = hashlib.sha256(
+            f"h4-archive-run:{session_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        bundle = code_server._session_archive_bundle_path(session_id)
+        manifest = bundle / "manifest.json"
+        active_meta = record["metaPath"] if record else code_server.session_path(session_id)
+        active_messages = record["messagesPath"] if record else code_server.messages_path(session_id)
+        goal_path = (
+            record["goalPath"] if record
+            else code_server.GoalV2Runtime(data_dir).service.events_path(session_id)
+        )
+        asset_dir = (
+            record["assetDir"] if record
+            else code_server._generated_asset_repository.root / asset_id
+        )
+        run_path = record["runPath"] if record else code_server._agent_run_path(run_id)
+        return {
+            "sessionId": session_id,
+            "activeMeta": active_meta.is_file(),
+            "activeMessages": active_messages.is_file(),
+            "archiveBundle": bundle.is_dir(),
+            "archiveManifest": manifest.is_file(),
+            "archiveSession": (bundle / "session.json").is_file(),
+            "archiveMessages": (bundle / "messages.jsonl").is_file(),
+            "goal": goal_path.is_file(),
+            "asset": asset_dir.is_dir(),
+            "agentRun": run_path.is_file(),
+        }
+
     code_server.execute_registered_tool = counted_execute_registered_tool
     code_server.execute_apply_edit_proposal = counted_execute_apply_edit_proposal
     code_server.execute_run_command_tool = controlled_execute_run_command_tool
@@ -5359,6 +5507,7 @@ def main() -> int:
     code_server._migrate_sessions_to_hierarchy()
     code_server._migrate_codex_project_sessions_support()
     code_server._migrate_project_root_paths()
+    code_server._rebuild_agent_run_nonterminal_index(force=True)
     code_httpd = code_server.ThreadingHTTPServer(("127.0.0.1", 0), H4CodeHandler)
     code_httpd.daemon_threads = True
     code_port = code_httpd.server_address[1]
@@ -5524,6 +5673,42 @@ def main() -> int:
                     "id": request_id,
                     "ok": True,
                     "toolProtocolHistory": seeded_history,
+                })
+                continue
+            if operation == "seed-session-archive-sidecars":
+                seeded_archive = seed_session_archive_sidecars(command.get("sessionId"))
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "archiveFixture": seeded_archive,
+                })
+                continue
+            if operation == "session-archive-fixture-evidence":
+                archive_evidence = session_archive_fixture_evidence(command.get("sessionId"))
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "archiveEvidence": archive_evidence,
+                })
+                continue
+            if operation == "hold-session-archive-index-build":
+                index_state = hold_session_archive_index_build()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "agentRunIndex": index_state,
+                })
+                continue
+            if operation == "restore-session-archive-index":
+                index_state = restore_session_archive_index()
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "agentRunIndex": index_state,
                 })
                 continue
             if operation == "set-model-route-catalog-outage":

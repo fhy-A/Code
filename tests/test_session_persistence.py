@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -727,6 +728,7 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         with server._agent_run_lock:
             self.saved_agent_runs = dict(server._agent_runs)
             server._agent_runs.clear()
+        server._rebuild_agent_run_nonterminal_index(force=True)
         self.addCleanup(self.restore_agent_runs)
 
     def restore_agent_runs(self):
@@ -1453,19 +1455,219 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
 
         run_session = self.create_session(title="Persisted AgentRun")
         runs_dir = self.root / "agent-runs"
-        runs_dir.mkdir(parents=True)
+        runs_dir.mkdir(parents=True, exist_ok=True)
         server.write_json(runs_dir / ("a" * 32 + ".json"), {
             "version": 5,
             "id": "a" * 32,
             "sessionId": run_session["id"],
             "status": "waiting_recovery",
         })
+        server._agent_run_nonterminal_index_register("a" * 32, run_session["id"])
         rejected_run = self.archive(run_session["id"])
         self.assertEqual(rejected_run.send_json.call_args.args[1], 409)
         self.assertEqual(
             rejected_run.send_json.call_args.args[0]["errorCode"],
             "session_archive_not_terminal",
         )
+
+    def test_archive_eligibility_does_not_read_unrelated_agent_run_history(self):
+        target = self.create_session(title="Indexed archive target")
+        runs_dir = self.root / "agent-runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(1001):
+            run_id = f"{index:032x}"
+            server.write_json(runs_dir / f"{run_id}.json", {
+                "version": 5,
+                "id": run_id,
+                "sessionId": "unrelated-session",
+                "status": "completed",
+            })
+        rebuild = getattr(server, "_rebuild_agent_run_nonterminal_index", None)
+        if callable(rebuild):
+            rebuild()
+
+        original_read_text = Path.read_text
+        unrelated_reads = []
+
+        def tracked_read_text(path, *args, **kwargs):
+            resolved = Path(path)
+            if resolved.parent == runs_dir and resolved.suffix == ".json":
+                unrelated_reads.append(resolved.name)
+            return original_read_text(path, *args, **kwargs)
+
+        started = time.monotonic()
+        with mock.patch.object(Path, "read_text", tracked_read_text):
+            archived = self.archive(target["id"])
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        self.assertEqual(unrelated_reads, [])
+        self.assertLess(elapsed, 1.0)
+
+    def test_agent_run_index_legacy_build_is_secret_free_and_idempotent(self):
+        runs_dir = self.root / "agent-runs"
+        secret = "AGENT-INDEX-SECRET-SENTINEL"
+        nonterminal_id = "b" * 32
+        terminal_id = "c" * 32
+        server.write_json(runs_dir / f"{nonterminal_id}.json", {
+            "version": 5,
+            "id": nonterminal_id,
+            "sessionId": "legacy-index-session",
+            "status": "waiting_authorization",
+            "messages": [{"role": "user", "content": secret}],
+            "request": {"url": f"https://example.invalid/?token={secret}"},
+        })
+        server.write_json(runs_dir / f"{terminal_id}.json", {
+            "version": 5,
+            "id": terminal_id,
+            "sessionId": "terminal-index-session",
+            "status": "completed",
+            "result": {"secret": secret},
+        })
+        shutil.rmtree(server._agent_run_nonterminal_index_dir())
+
+        first = server._rebuild_agent_run_nonterminal_index(force=False)
+        first_bytes = server._agent_run_nonterminal_index_path().read_bytes()
+        second = server._rebuild_agent_run_nonterminal_index(force=False)
+
+        self.assertEqual(first["entries"], {nonterminal_id: "legacy-index-session"})
+        self.assertEqual(second["entries"], first["entries"])
+        self.assertEqual(server._agent_run_nonterminal_index_path().read_bytes(), first_bytes)
+        self.assertNotIn(secret.encode("utf-8"), first_bytes)
+        self.assertEqual(
+            set(json.loads(first_bytes)["entries"][0]),
+            {"runId", "sessionId"},
+        )
+
+    def test_agent_run_index_unavailable_is_safe_and_rebuild_recovers(self):
+        session = self.create_session(title="Index recovery")
+        index_path = server._agent_run_nonterminal_index_path()
+        shutil.rmtree(index_path.parent)
+        with mock.patch.object(
+            server, "_start_agent_run_nonterminal_index_build", return_value=None,
+        ):
+            missing = self.archive(session["id"])
+        payload, status = missing.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_index_unavailable")
+
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel = "CORRUPT-INDEX-SECRET-SENTINEL"
+        index_path.write_text('{"schema":"wrong","secret":"' + sentinel + '"}', encoding="utf-8")
+        with mock.patch.object(
+            server, "_start_agent_run_nonterminal_index_build", return_value=None,
+        ):
+            corrupt = self.archive(session["id"])
+        payload, status = corrupt.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_index_unavailable")
+        self.assertNotIn(sentinel, json.dumps(payload))
+
+        server._rebuild_agent_run_nonterminal_index(force=True)
+        recovered = self.archive(session["id"])
+        self.assertEqual(recovered.send_json.call_args.args[0]["status"], "archived")
+
+    def test_agent_run_index_crash_windows_never_replay_or_underblock(self):
+        missing_session = self.create_session(title="Prepared index fact")
+        missing_run_id = "d" * 32
+        server._agent_run_nonterminal_index_register(
+            missing_run_id, missing_session["id"],
+        )
+        with mock.patch.object(
+            server, "_start_agent_run_nonterminal_index_build", return_value=None,
+        ):
+            missing_record = self.archive(missing_session["id"])
+        payload, status = missing_record.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_index_unavailable")
+        self.assertTrue(server.session_path(missing_session["id"]).exists())
+
+        terminal_session = self.create_session(title="Terminal before index clear")
+        terminal_run_id = "e" * 32
+        server._rebuild_agent_run_nonterminal_index(force=True)
+        server._agent_run_nonterminal_index_register(
+            terminal_run_id, terminal_session["id"],
+        )
+        server.write_json(server._agent_run_path(terminal_run_id), {
+            "version": 5,
+            "id": terminal_run_id,
+            "sessionId": terminal_session["id"],
+            "status": "failed",
+        })
+        archived = self.archive(terminal_session["id"])
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        self.assertNotIn(
+            terminal_run_id,
+            server._read_agent_run_nonterminal_index()["entries"],
+        )
+
+    def test_process_freshness_rebuild_catches_legacy_writer_after_ready_index(self):
+        session = self.create_session(title="Rollback writer compatibility")
+        run_id = "f" * 32
+        run_path = server._agent_run_path(run_id)
+        server.write_json(run_path, {
+            "version": 5,
+            "id": run_id,
+            "sessionId": session["id"],
+            "status": "waiting_recovery",
+        })
+        key = str(server._agent_run_nonterminal_index_path().resolve(strict=False))
+        with server._agent_run_index_builds_lock:
+            server._agent_run_index_initialized_roots.discard(key)
+        started = threading.Event()
+        release = threading.Event()
+        original_read_text = Path.read_text
+
+        def gated_read_text(path, *args, **kwargs):
+            if Path(path) == run_path:
+                started.set()
+                release.wait(timeout=5)
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", gated_read_text):
+            worker = server._start_agent_run_nonterminal_index_build()
+            self.assertIsNotNone(worker)
+            self.assertTrue(started.wait(timeout=2))
+            blocked = self.archive(session["id"])
+            payload, status = blocked.send_json.call_args.args
+            self.assertEqual(status, 503)
+            self.assertEqual(payload["errorCode"], "session_archive_index_unavailable")
+            release.set()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        rejected = self.archive(session["id"])
+        payload, status = rejected.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_archive_not_terminal")
+
+    def test_agent_run_index_concurrent_register_preserves_all_entries(self):
+        session_a = self.create_session(title="Concurrent register A")
+        session_b = self.create_session(title="Concurrent register B")
+        barrier = threading.Barrier(3)
+        errors = []
+
+        def register(run_id, session_id):
+            try:
+                barrier.wait(timeout=2)
+                server._agent_run_nonterminal_index_register(run_id, session_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=register, args=("1" * 32, session_a["id"])),
+            threading.Thread(target=register, args=("2" * 32, session_b["id"])),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=2)
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(server._read_agent_run_nonterminal_index()["entries"], {
+            "1" * 32: session_a["id"],
+            "2" * 32: session_b["id"],
+        })
 
     def test_archive_only_delete_requires_current_token_and_keeps_siblings_safe(self):
         first = self.create_session(title="Delete archived")

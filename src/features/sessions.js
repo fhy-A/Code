@@ -155,6 +155,13 @@
       return `/api/sessions/${encodeURIComponent(normalized)}`;
     }
 
+    function sessionArchiveUrl(sessionId, action = "") {
+      const normalized = String(sessionId || "").trim();
+      if (!normalized) throw new TypeError("Session id is required");
+      const base = `/api/session-archive/${encodeURIComponent(normalized)}`;
+      return action ? `${base}/${action}` : base;
+    }
+
     async function listSessions() {
       const response = await requestJson("/api/sessions");
       return Array.isArray(response?.data) ? response.data : [];
@@ -182,12 +189,38 @@
       return requestJson(sessionUrl(sessionId), { method: "DELETE" });
     }
 
+    async function listArchivedSessions() {
+      const response = await requestJson("/api/session-archive");
+      return Array.isArray(response?.data) ? response.data : [];
+    }
+
+    function archiveSession(sessionId) {
+      return requestJson(sessionArchiveUrl(sessionId, "archive"), { method: "POST" });
+    }
+
+    function restoreArchivedSession(sessionId) {
+      return requestJson(sessionArchiveUrl(sessionId, "restore"), { method: "POST" });
+    }
+
+    function deleteArchivedSession(sessionId, archiveToken) {
+      const token = String(archiveToken || "").trim();
+      if (!token) throw new TypeError("Archive token is required");
+      return requestJson(
+        `${sessionArchiveUrl(sessionId)}?archiveToken=${encodeURIComponent(token)}`,
+        { method: "DELETE" },
+      );
+    }
+
     return Object.freeze({
       listSessions,
       getSession,
       createSession,
       updateSession,
       deleteSession,
+      listArchivedSessions,
+      archiveSession,
+      restoreArchivedSession,
+      deleteArchivedSession,
     });
   }
 

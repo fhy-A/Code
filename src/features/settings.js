@@ -171,6 +171,8 @@
     const getDefaultSystemPrompt = options.getDefaultSystemPrompt || (() => "");
     const onPlatformLogout = options.onPlatformLogout || (() => {});
     const onKeyConfigChanged = options.onKeyConfigChanged || (() => {});
+    const sessionArchive = options.sessionArchive || {};
+    const onArchivedSessionsChanged = options.onArchivedSessionsChanged || (async () => {});
     const trashIcon = options.trashIcon || (() => "");
     const documentRef = options.document || global.document;
     const storage = options.storage || global.localStorage;
@@ -209,6 +211,11 @@
     let lastRoutingConnectionConfig = loadKeyConfig(storage);
     let lastRoutingConnectionIdentity = routingConnectionIdentity(lastRoutingConnectionConfig);
     let imageRouteRefreshChain = Promise.resolve();
+    let archivedSessions = [];
+    let archivedSessionsStatus = "idle";
+    let archivedSessionsError = "";
+    let archivedSessionsLoadPromise = null;
+    const archivedSessionPending = new Set();
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
 
@@ -1611,6 +1618,219 @@
       return true;
     }
 
+    function archivedSessionProjectName(record) {
+      const projectId = String(record?.projectId || "").trim();
+      if (!projectId) return t("archivedSessionUnknownProject");
+      const project = (Array.isArray(state.projects) ? state.projects : [])
+        .find((item) => String(item?.id || "") === projectId);
+      return String(project?.name || project?.title || projectId);
+    }
+
+    function archivedSessionTime(record) {
+      const value = String(record?.archivedAt || record?.updatedAt || "").trim();
+      if (!value) return "—";
+      const date = new Date(value);
+      if (!Number.isFinite(date.getTime())) return value;
+      try {
+        return new Intl.DateTimeFormat(state.lang === "en" ? "en" : "zh-CN", {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(date);
+      } catch {
+        return value;
+      }
+    }
+
+    function archivedSessionGroups() {
+      const groups = new Map();
+      archivedSessions.forEach((record) => {
+        const key = String(record?.projectId || "").trim() || "__unassigned__";
+        if (!groups.has(key)) groups.set(key, {
+          key,
+          name: archivedSessionProjectName(record),
+          records: [],
+        });
+        groups.get(key).records.push(record);
+      });
+      return [...groups.values()];
+    }
+
+    function archiveRowHtml(record) {
+      const sessionId = String(record?.id || "").trim();
+      const pending = archivedSessionPending.has(sessionId);
+      const title = String(record?.title || "").trim() || t("untitledSession");
+      const projectName = archivedSessionProjectName(record);
+      const source = String(record?.source || "local");
+      const time = archivedSessionTime(record);
+      return `<article class="archived-session-row" data-session-id="${escapeHtml(sessionId)}">
+        <div class="archived-session-copy">
+          <strong class="archived-session-title">${escapeHtml(title)}</strong>
+          <span class="archived-session-meta">${escapeHtml(projectName)} · ${escapeHtml(t("archivedSessionTime", { time }))}</span>
+          <span class="archived-session-source">${escapeHtml(t("archivedSessionSource", { source }))}</span>
+        </div>
+        <div class="archived-session-actions">
+          <button class="mini-btn archived-session-restore" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pending ? "restoringSession" : "restoreSession"))}</button>
+          <button class="mini-btn danger archived-session-delete" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pending ? "deletingArchivedSession" : "permanentlyDelete"))}</button>
+        </div>
+      </article>`;
+    }
+
+    function renderArchivedSessionsPanel(container = byId("settingsDetail")) {
+      if (!container) return;
+      let body = "";
+      if (archivedSessionsStatus === "loading" && !archivedSessions.length) {
+        body = `<div class="archived-session-state" role="status">${escapeHtml(t("archivedSessionsLoading"))}</div>`;
+      } else if (archivedSessionsStatus === "error" && !archivedSessions.length) {
+        body = `<div class="archived-session-state is-error" role="alert">
+          <span>${escapeHtml(t("archivedSessionsLoadFailed"))}</span>
+          <button class="mini-btn archived-session-retry" type="button">${escapeHtml(t("retry"))}</button>
+        </div>`;
+      } else if (!archivedSessions.length) {
+        body = `<div class="archived-session-state">${escapeHtml(t("archivedSessionsEmpty"))}</div>`;
+      } else {
+        body = archivedSessionGroups().map((group) => `<section class="archived-session-group" data-project-id="${escapeHtml(group.key)}">
+          <h4>${escapeHtml(group.name)}</h4>
+          <div class="archived-session-list">${group.records.map(archiveRowHtml).join("")}</div>
+        </section>`).join("");
+        if (archivedSessionsStatus === "error") {
+          body = `<div class="archived-session-inline-error" role="alert">${escapeHtml(t("archivedSessionsLoadFailed"))}</div>${body}`;
+        }
+      }
+      container.innerHTML = `<div class="settings-section archived-sessions-panel">
+        <div class="settings-section-header">
+          <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
+        </div>
+        <div class="archived-sessions-content">${body}</div>
+      </div>`;
+      container.querySelector(".archived-session-retry")?.addEventListener("click", () => {
+        void refreshArchivedSessions({ rerender: true, notify: true });
+      });
+      container.querySelectorAll(".archived-session-row").forEach((row) => {
+        const sessionId = String(row.dataset.sessionId || "");
+        const record = archivedSessions.find((item) => String(item?.id || "") === sessionId);
+        row.querySelector(".archived-session-restore")?.addEventListener("click", () => {
+          if (record) void restoreArchivedSession(record);
+        });
+        const deleteButton = row.querySelector(".archived-session-delete");
+        deleteButton?.addEventListener("click", () => {
+          if (record) void deleteArchivedSession(record, deleteButton);
+        });
+      });
+    }
+
+    function refreshArchivedSessions(options = {}) {
+      if (archivedSessionsLoadPromise) return archivedSessionsLoadPromise;
+      if (typeof sessionArchive.listArchivedSessions !== "function") {
+        return Promise.reject(new Error("Archived session API is unavailable"));
+      }
+      archivedSessionsStatus = "loading";
+      archivedSessionsError = "";
+      if (options.rerender === true) renderArchivedSessionsPanel();
+      const task = Promise.resolve(sessionArchive.listArchivedSessions())
+        .then((records) => {
+          archivedSessions = Array.isArray(records)
+            ? records.filter((record) => record && typeof record === "object" && String(record.id || "").trim())
+            : [];
+          archivedSessionsStatus = "ready";
+          return archivedSessions.map((record) => ({ ...record }));
+        })
+        .catch((error) => {
+          archivedSessionsStatus = "error";
+          archivedSessionsError = String(error?.message || error || "");
+          if (options.notify === true) showToast(t("archivedSessionsLoadFailed"), "error");
+          throw error;
+        })
+        .finally(() => {
+          if (archivedSessionsLoadPromise === task) archivedSessionsLoadPromise = null;
+          if (documentRef.querySelector('.settings-nav-item.active')?.dataset.panel === "archives") {
+            renderArchivedSessionsPanel();
+          }
+        });
+      archivedSessionsLoadPromise = task;
+      return task;
+    }
+
+    async function restoreArchivedSession(record) {
+      const sessionId = String(record?.id || "").trim();
+      if (!sessionId || archivedSessionPending.has(sessionId)) return false;
+      if (typeof sessionArchive.restoreArchivedSession !== "function") return false;
+      archivedSessionPending.add(sessionId);
+      renderArchivedSessionsPanel();
+      try {
+        await sessionArchive.restoreArchivedSession(sessionId);
+        archivedSessions = archivedSessions.filter((item) => String(item?.id || "") !== sessionId);
+        await onArchivedSessionsChanged({ type: "restore", sessionId });
+        showToast(t("sessionRestored"), "success");
+        return true;
+      } catch (error) {
+        showToast(`${t("sessionRestoreFailed")}: ${error?.message || error}`, "error");
+        return false;
+      } finally {
+        archivedSessionPending.delete(sessionId);
+        renderArchivedSessionsPanel();
+      }
+    }
+
+    function confirmArchivedSessionDelete(record, trigger) {
+      const modal = byId("deleteConfirmModal");
+      const text = byId("deleteConfirmText");
+      const confirm = byId("confirmDeleteSession");
+      const cancel = byId("cancelDeleteSession");
+      const close = byId("closeDeleteConfirm");
+      if (!modal || !text || !confirm || !cancel) return Promise.resolve(false);
+      const title = String(record?.title || "").trim() || t("untitledSession");
+      text.textContent = t("archiveSessionConfirmPermanent", { name: title });
+      modal.classList.remove("hidden");
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (confirmed) => {
+          if (settled) return;
+          settled = true;
+          modal.classList.add("hidden");
+          confirm.removeEventListener("click", onConfirm);
+          cancel.removeEventListener("click", onCancel);
+          close?.removeEventListener("click", onCancel);
+          modal.removeEventListener("click", onBackdrop);
+          documentRef.removeEventListener("keydown", onKeydown);
+          trigger?.focus?.();
+          resolve(confirmed);
+        };
+        const onConfirm = () => finish(true);
+        const onCancel = () => finish(false);
+        const onBackdrop = (event) => { if (event.target === modal) finish(false); };
+        const onKeydown = (event) => { if (event.key === "Escape") finish(false); };
+        confirm.addEventListener("click", onConfirm);
+        cancel.addEventListener("click", onCancel);
+        close?.addEventListener("click", onCancel);
+        modal.addEventListener("click", onBackdrop);
+        documentRef.addEventListener("keydown", onKeydown);
+        cancel.focus?.();
+      });
+    }
+
+    async function deleteArchivedSession(record, trigger) {
+      const sessionId = String(record?.id || "").trim();
+      const archiveToken = String(record?.archiveToken || "").trim();
+      if (!sessionId || !archiveToken || archivedSessionPending.has(sessionId)) return false;
+      if (typeof sessionArchive.deleteArchivedSession !== "function") return false;
+      archivedSessionPending.add(sessionId);
+      renderArchivedSessionsPanel();
+      try {
+        if (!await confirmArchivedSessionDelete(record, trigger)) return false;
+        await sessionArchive.deleteArchivedSession(sessionId, archiveToken);
+        archivedSessions = archivedSessions.filter((item) => String(item?.id || "") !== sessionId);
+        await onArchivedSessionsChanged({ type: "delete", sessionId });
+        showToast(t("archivedSessionDeleted"), "success");
+        return true;
+      } catch (error) {
+        showToast(`${t("archivedSessionDeleteFailed")}: ${error?.message || error}`, "error");
+        return false;
+      } finally {
+        archivedSessionPending.delete(sessionId);
+        renderArchivedSessionsPanel();
+      }
+    }
+
     function switchSettingsPanel(panel) {
       documentRef.querySelectorAll(".settings-nav-item").forEach((element) => {
         element.classList.toggle("active", element.dataset.panel === panel);
@@ -1627,6 +1847,10 @@
         case "skills": renderSkillsInSettings(detail); break;
         case "system": renderSystemPanel(detail); break;
         case "editor": renderEditorPanel(detail); break;
+        case "archives":
+          renderArchivedSessionsPanel(detail);
+          void refreshArchivedSessions({ rerender: true }).catch(() => {});
+          break;
         case "theme": renderThemePanel(detail); break;
         case "update": renderUpdatePanel(detail); break;
         default: return;
@@ -1676,6 +1900,9 @@
         }
         case "image":
           renderImagePanel(detail);
+          break;
+        case "archives":
+          renderArchivedSessionsPanel(detail);
           break;
         default:
           break;
@@ -1802,6 +2029,9 @@
       loadKeyConfig: () => loadKeyConfig(storage),
       initializePlatformAuth,
       parseKeyLines,
+      deleteArchivedSession,
+      refreshArchivedSessions,
+      restoreArchivedSession,
       refreshImageRoutes,
       saveImageConnectionConfig: (value) => saveImageConnectionConfig(value, storage),
       saveKeyConfig,

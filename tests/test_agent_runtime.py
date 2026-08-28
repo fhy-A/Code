@@ -750,6 +750,176 @@ class TestDurableAgentRuntime(unittest.TestCase):
             )
         return actual_runtime_ids
 
+    def test_nonterminal_agent_run_index_registers_and_clears_in_durable_order(self):
+        secret = "AGENT-RUN-INDEX-NOT-PERSISTED"
+        writes = []
+        original_write_json = server_mod.write_json
+
+        def tracked_write_json(path, payload):
+            writes.append((Path(path), str((payload or {}).get("state") or "")))
+            return original_write_json(path, payload)
+
+        with mock.patch.object(server_mod, "write_json", tracked_write_json):
+            run = server_mod._create_agent_run(
+                "agent-index-order-session",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": secret}],
+                },
+                self.base_url,
+                ["synthetic-agent-key"],
+                allowed_tools=[],
+                start_worker=False,
+            )
+            ready = server_mod._read_agent_run_nonterminal_index()
+            self.assertEqual(
+                ready["entries"],
+                {run["id"]: "agent-index-order-session"},
+            )
+            self.assertNotIn(
+                secret,
+                server_mod._agent_run_nonterminal_index_path().read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                server_mod.read_json(server_mod._agent_run_path(run["id"]), {})["status"],
+                "model",
+            )
+            self.assertTrue(server_mod._finish_agent_run(run, "cancelled"))
+
+        run_writes = [index for index, item in enumerate(writes) if item[0] == server_mod._agent_run_path(run["id"])]
+        index_writes = [index for index, item in enumerate(writes) if item[0] == server_mod._agent_run_nonterminal_index_path()]
+        self.assertTrue(index_writes[0] < run_writes[0])
+        self.assertTrue(run_writes[-1] < index_writes[-1])
+        self.assertEqual(server_mod._read_agent_run_nonterminal_index()["entries"], {})
+        self.assertEqual(
+            server_mod.read_json(server_mod._agent_run_path(run["id"]), {})["status"],
+            "cancelled",
+        )
+
+    def test_agent_run_index_rebuild_and_admission_have_no_lock_cycle(self):
+        server_mod._rebuild_agent_run_nonterminal_index(force=True)
+        legacy_run_id = "9" * 32
+        legacy_path = server_mod._agent_run_path(legacy_run_id)
+        server_mod.write_json(legacy_path, {
+            "version": 5,
+            "id": legacy_run_id,
+            "sessionId": "legacy-lock-cycle-session",
+            "status": "completed",
+        })
+        entered = threading.Event()
+        release = threading.Event()
+        original_entry = server_mod._agent_run_index_record_entry
+        original_ensure = server_mod._ensure_agent_run_nonterminal_index_ready
+
+        def gated_entry(path, record):
+            if Path(path) == legacy_path:
+                entered.set()
+                release.wait(timeout=5)
+            return original_entry(path, record)
+
+        first_ensure = True
+
+        def racing_ensure(*, wait=False):
+            nonlocal first_ensure
+            current = original_ensure(wait=wait)
+            if first_ensure:
+                first_ensure = False
+                key = str(server_mod._agent_run_nonterminal_index_path().resolve(strict=False))
+                with server_mod._agent_run_index_builds_lock:
+                    server_mod._agent_run_index_initialized_roots.discard(key)
+                server_mod._start_agent_run_nonterminal_index_build()
+                self.assertTrue(entered.wait(timeout=2))
+            return current
+
+        try:
+            with mock.patch.object(
+                server_mod, "_agent_run_index_record_entry", gated_entry,
+            ), mock.patch.object(
+                server_mod, "_ensure_agent_run_nonterminal_index_ready", racing_ensure,
+            ):
+                with self.assertRaises(server_mod.SessionLifecycleConflictError) as raised:
+                    server_mod._create_agent_run(
+                        "admission-lock-cycle-session",
+                        {
+                            "model": "test-model",
+                            "messages": [{"role": "user", "content": "no deadlock"}],
+                        },
+                        self.base_url,
+                        ["synthetic-agent-key"],
+                        allowed_tools=[],
+                        start_worker=False,
+                    )
+                self.assertEqual(raised.exception.error_code, "agent_run_index_unavailable")
+                self.assertEqual(set(server_mod._agent_runs), set())
+                self.assertEqual(
+                    {path.name for path in server_mod._agent_runs_dir().glob("*.json")},
+                    {legacy_path.name},
+                )
+        finally:
+            release.set()
+            with server_mod._agent_run_index_builds_lock:
+                workers = list(server_mod._agent_run_index_builds.values())
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+
+        run = server_mod._create_agent_run(
+            "terminal-lock-cycle-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "terminal no deadlock"}],
+            },
+            self.base_url,
+            ["synthetic-agent-key"],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        entered.clear()
+        release.clear()
+        key = str(server_mod._agent_run_nonterminal_index_path().resolve(strict=False))
+        with server_mod._agent_run_index_builds_lock:
+            server_mod._agent_run_index_initialized_roots.discard(key)
+        with mock.patch.object(server_mod, "_agent_run_index_record_entry", gated_entry):
+            worker = server_mod._start_agent_run_nonterminal_index_build()
+            self.assertTrue(entered.wait(timeout=2))
+            self.assertTrue(server_mod._finish_agent_run(run, "cancelled"))
+            release.set()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn(
+            run["id"],
+            server_mod._read_agent_run_nonterminal_index()["entries"],
+        )
+
+    def test_agent_run_index_clears_every_terminal_status(self):
+        for index, status in enumerate(("completed", "failed", "cancelled")):
+            with self.subTest(status=status):
+                session_id = f"terminal-index-{index}"
+                run = server_mod._create_agent_run(
+                    session_id,
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": status}],
+                    },
+                    self.base_url,
+                    ["synthetic-agent-key"],
+                    allowed_tools=[],
+                    start_worker=False,
+                )
+                self.assertEqual(
+                    server_mod._read_agent_run_nonterminal_index()["entries"].get(run["id"]),
+                    session_id,
+                )
+                self.assertTrue(server_mod._finish_agent_run(run, status))
+                self.assertNotIn(
+                    run["id"],
+                    server_mod._read_agent_run_nonterminal_index()["entries"],
+                )
+                self.assertEqual(
+                    server_mod.read_json(server_mod._agent_run_path(run["id"]), {})["status"],
+                    status,
+                )
+
     def test_h3_2c1_agent_failures_and_runtime_snapshots_consume_same_case_data(self):
         fixtures = [
             fixture for fixture in _load_h3_2c1_evidence_fixtures()

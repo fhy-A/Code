@@ -3274,6 +3274,10 @@ async function assertFrontendRuntime(page, runtime) {
   await expect(page.locator("html")).toHaveAttribute("data-frontend-runtime", expected);
   if (runtime === "bundle") {
     await expect(page.locator("html")).toHaveAttribute("data-code-frontend-ready", "true");
+  } else {
+    await expect.poll(() => page.evaluate(() => (
+      typeof window.Code?.agent?.projectionShadowDiagnostics?.snapshot === "function"
+    ))).toBe(true);
   }
 }
 
@@ -16718,68 +16722,136 @@ const test = base.test.extend({
     const domTimeline = [];
     const observedAgentRunIds = new Set();
     const observedRuntimeRunIds = new Set();
+    const pageObserverBindings = new Map();
+    const pageCleanupBindings = new Map();
+    let contextRouteHandler = null;
+    let contextRouteInstalled = false;
+    let ownedBrowserResourcesReleased = false;
+    let ownedBrowserReleaseSnapshot = null;
+    let closedPageCount = 0;
+    const registerPageCleanup = (targetPage, cleanup) => {
+      if (!targetPage || typeof cleanup !== "function") {
+        throw new Error("H4 page cleanup registration requires a Page and callback");
+      }
+      const callbacks = pageCleanupBindings.get(targetPage) || new Set();
+      callbacks.add(cleanup);
+      pageCleanupBindings.set(targetPage, callbacks);
+    };
+    const detachPageObservers = (targetPage) => {
+      const handlers = pageObserverBindings.get(targetPage);
+      if (!handlers) return;
+      targetPage.off("console", handlers.console);
+      targetPage.off("pageerror", handlers.pageerror);
+      targetPage.off("request", handlers.request);
+      targetPage.off("response", handlers.response);
+      pageObserverBindings.delete(targetPage);
+    };
+    const releasePageBindings = async (targetPage) => {
+      const callbacks = pageCleanupBindings.get(targetPage) || [];
+      pageCleanupBindings.delete(targetPage);
+      for (const cleanup of callbacks) await cleanup();
+      detachPageObservers(targetPage);
+    };
+    const closeOwnedPage = async (targetPage) => {
+      if (!targetPage) return;
+      await releasePageBindings(targetPage);
+      if (!targetPage.isClosed()) {
+        await targetPage.close();
+        closedPageCount += 1;
+      }
+    };
+    const releaseOwnedBrowserResources = async () => {
+      if (ownedBrowserResourcesReleased) return ownedBrowserReleaseSnapshot;
+      if (context && contextRouteInstalled && contextRouteHandler) {
+        await context.unrouteAll({ behavior: "wait" });
+        contextRouteInstalled = false;
+      }
+      const pages = context ? [...context.pages()] : [];
+      for (const targetPage of pages) await closeOwnedPage(targetPage);
+      for (const targetPage of [...pageObserverBindings.keys()]) {
+        await releasePageBindings(targetPage);
+      }
+      if (context) await context.close();
+      ownedBrowserResourcesReleased = true;
+      ownedBrowserReleaseSnapshot = Object.freeze({
+        contextClosed: true,
+        contextRouteInstalled,
+        trackedPageObservers: pageObserverBindings.size,
+        registeredPageCleanups: pageCleanupBindings.size,
+        closedPageCount,
+      });
+      return ownedBrowserReleaseSnapshot;
+    };
     const attachPageObservers = (targetPage) => {
-      targetPage.on("console", (message) => {
-        consoleEntries.push({ type: message.type(), text: host.sanitize(message.text()) });
-      });
-      targetPage.on("pageerror", (error) => {
-        pageErrors.push(host.sanitize(error.stack || error.message));
-      });
-      targetPage.on("request", (request) => {
-        let url;
-        try { url = new URL(request.url()); } catch { return; }
-        const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
-        if (request.method() !== "PUT" || !sessionMatch) return;
-        let payload = {};
-        try { payload = request.postDataJSON() || {}; } catch {}
-        const messages = Array.isArray(payload.messages) ? payload.messages : [];
-        const pending = messages.find((message) => (
-          message?.role === "user" && message?.meta?.pendingDispatch
-        ))?.meta?.pendingDispatch;
-        const entry = {
-          sequence: sessionPutTimeline.length + 1,
-          sessionIdHash: idHash(decodeURIComponent(sessionMatch[1])),
-          hasMessages: Object.prototype.hasOwnProperty.call(payload, "messages"),
-          expectedRevision: Object.prototype.hasOwnProperty.call(payload, "expectedRevision")
-            ? Number(payload.expectedRevision)
-            : null,
-          pendingStatus: String(pending?.status || ""),
-          dispatchErrors: messages.filter((message) => (
-            message?.meta?.kind === "dispatch-error"
-          )).length,
-          finalAnswers: messages.filter((message) => (
-            message?.role === "assistant"
-            && message?.meta?.kind !== "dispatch-error"
-            && String(message?.content || "").trim()
-          )).length,
-          runStateStatus: String(payload?.runState?.status || ""),
-          agentRunIdHash: payload?.runState?.agentRunId
-            ? idHash(payload.runState.agentRunId)
-            : "",
-          clientRequestIdHash: payload?.runState?.clientRequestId
-            ? idHash(payload.runState.clientRequestId)
-            : "",
-          responseStatus: 0,
-          returnedRevision: null,
-          currentRevision: null,
-        };
-        sessionPutTimeline.push(entry);
-        sessionPutRequests.set(request, entry);
-      });
-      targetPage.on("response", async (response) => {
-        const entry = sessionPutRequests.get(response.request());
-        if (!entry) return;
-        entry.responseStatus = response.status();
-        try {
-          const body = await response.json();
-          entry.returnedRevision = Object.prototype.hasOwnProperty.call(body || {}, "revision")
-            ? Number(body.revision)
-            : null;
-          entry.currentRevision = Object.prototype.hasOwnProperty.call(body || {}, "currentRevision")
-            ? Number(body.currentRevision)
-            : null;
-        } catch {}
-      });
+      if (pageObserverBindings.has(targetPage)) return;
+      const handlers = {
+        console: (message) => {
+          consoleEntries.push({ type: message.type(), text: host.sanitize(message.text()) });
+        },
+        pageerror: (error) => {
+          pageErrors.push(host.sanitize(error.stack || error.message));
+        },
+        request: (request) => {
+          let url;
+          try { url = new URL(request.url()); } catch { return; }
+          const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+          if (request.method() !== "PUT" || !sessionMatch) return;
+          let payload = {};
+          try { payload = request.postDataJSON() || {}; } catch {}
+          const messages = Array.isArray(payload.messages) ? payload.messages : [];
+          const pending = messages.find((message) => (
+            message?.role === "user" && message?.meta?.pendingDispatch
+          ))?.meta?.pendingDispatch;
+          const entry = {
+            sequence: sessionPutTimeline.length + 1,
+            sessionIdHash: idHash(decodeURIComponent(sessionMatch[1])),
+            hasMessages: Object.prototype.hasOwnProperty.call(payload, "messages"),
+            expectedRevision: Object.prototype.hasOwnProperty.call(payload, "expectedRevision")
+              ? Number(payload.expectedRevision)
+              : null,
+            pendingStatus: String(pending?.status || ""),
+            dispatchErrors: messages.filter((message) => (
+              message?.meta?.kind === "dispatch-error"
+            )).length,
+            finalAnswers: messages.filter((message) => (
+              message?.role === "assistant"
+              && message?.meta?.kind !== "dispatch-error"
+              && String(message?.content || "").trim()
+            )).length,
+            runStateStatus: String(payload?.runState?.status || ""),
+            agentRunIdHash: payload?.runState?.agentRunId
+              ? idHash(payload.runState.agentRunId)
+              : "",
+            clientRequestIdHash: payload?.runState?.clientRequestId
+              ? idHash(payload.runState.clientRequestId)
+              : "",
+            responseStatus: 0,
+            returnedRevision: null,
+            currentRevision: null,
+          };
+          sessionPutTimeline.push(entry);
+          sessionPutRequests.set(request, entry);
+        },
+        response: async (response) => {
+          const entry = sessionPutRequests.get(response.request());
+          if (!entry) return;
+          entry.responseStatus = response.status();
+          try {
+            const body = await response.json();
+            entry.returnedRevision = Object.prototype.hasOwnProperty.call(body || {}, "revision")
+              ? Number(body.revision)
+              : null;
+            entry.currentRevision = Object.prototype.hasOwnProperty.call(body || {}, "currentRevision")
+              ? Number(body.currentRevision)
+              : null;
+          } catch {}
+        },
+      };
+      targetPage.on("console", handlers.console);
+      targetPage.on("pageerror", handlers.pageerror);
+      targetPage.on("request", handlers.request);
+      targetPage.on("response", handlers.response);
+      pageObserverBindings.set(targetPage, handlers);
     };
 
     try {
@@ -17029,7 +17101,7 @@ const test = base.test.extend({
         modelId: MODEL_ID,
       });
 
-      await context.route("**/*", async (route) => {
+      contextRouteHandler = async (route) => {
         const request = route.request();
         const url = new URL(request.url());
         const isLoopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
@@ -17053,7 +17125,9 @@ const test = base.test.extend({
           return;
         }
         await route.continue();
-      });
+      };
+      await context.route("**/*", contextRouteHandler);
+      contextRouteInstalled = true;
 
       page = await context.newPage();
       attachPageObservers(page);
@@ -17189,8 +17263,12 @@ const test = base.test.extend({
             runtimeRunIds: [...observedRuntimeRunIds],
           };
         },
+        registerPageCleanup,
+        async releaseOwnedBrowserResources() {
+          return releaseOwnedBrowserResources();
+        },
         async replacePage() {
-          if (page && !page.isClosed()) await page.close();
+          await closeOwnedPage(page);
           page = await context.newPage();
           attachPageObservers(page);
           this.page = page;
@@ -17237,8 +17315,9 @@ const test = base.test.extend({
         });
       }
       let contextCloseError = null;
+      let lifecycleRelease = null;
       try {
-        if (context) await context.close();
+        lifecycleRelease = await releaseOwnedBrowserResources();
       } catch (error) {
         contextCloseError = error;
       }
@@ -17270,6 +17349,13 @@ const test = base.test.extend({
         ...(isAutomaticFallback
           ? { metricsPhaseSummary: summarizeMetricsBreadcrumbs(breadcrumbs) }
           : {}),
+      })}`);
+      console.log(`H4_LIFECYCLE ${JSON.stringify({
+        title: testInfo.title,
+        ...(lifecycleRelease || {}),
+        activeResources: typeof process.getActiveResourcesInfo === "function"
+          ? process.getActiveResourcesInfo().slice(0, 32).sort()
+          : [],
       })}`);
       expect(repeatedCleanup).toBe(cleanup);
       expect(cleanup.childExited).toBe(true);
@@ -30296,12 +30382,362 @@ test("direct classic connection route disabled selection never crosses connectio
   await exerciseConnectionRouteDisabledNoFallback(h4, "classic");
 });
 
+test("H4 archive fixture releases restarted page listeners and routes", async ({ h4 }) => {
+  test.setTimeout(60_000);
+  let page = h4.page;
+  const observedRequests = [];
+  const bindAudit = (targetPage) => {
+    const onRequest = (request) => {
+      const url = new URL(request.url());
+      if (url.pathname.startsWith("/api/session-archive")) observedRequests.push(url.pathname);
+    };
+    targetPage.on("request", onRequest);
+    h4.registerPageCleanup(targetPage, () => targetPage.off("request", onRequest));
+  };
+  bindAudit(page);
+  await page.goto(`${h4.host.ready.codeUrl}/`, { waitUntil: "commit" });
+  await assertFrontendRuntime(page, "bundle");
+  await page.context().addInitScript(() => {
+    localStorage.setItem("h4-lifecycle-proof", "ready");
+  });
+  const transition = await h4.restartGeneration();
+  expect(transition.previousCleanup).toMatchObject({
+    portsClosed: [true, true],
+    childExited: true,
+    activeChildCount: 0,
+    rootRetained: true,
+  });
+  page = await h4.replacePage();
+  bindAudit(page);
+  await page.goto(`${h4.host.ready.codeUrl}/`, { waitUntil: "commit" });
+  await assertFrontendRuntime(page, "bundle");
+  expect(await page.evaluate(() => localStorage.getItem("h4-lifecycle-proof"))).toBe("ready");
+  const lifecycle = await h4.releaseOwnedBrowserResources();
+  expect(lifecycle).toMatchObject({
+    contextClosed: true,
+    contextRouteInstalled: false,
+    trackedPageObservers: 0,
+    registeredPageCleanups: 0,
+    closedPageCount: 2,
+  });
+  expect(observedRequests).toEqual([]);
+  h4.evidence("archive-fixture-lifecycle", lifecycle);
+});
+
+async function exerciseSessionArchiveProductSurface(h4, runtime) {
+  let page = h4.page;
+  const archiveRequests = [];
+  const archiveResponses = [];
+  const boundPages = new WeakSet();
+  const bindArchiveAudit = (targetPage) => {
+    if (boundPages.has(targetPage)) return;
+    boundPages.add(targetPage);
+    const onRequest = (request) => {
+      const url = new URL(request.url());
+      if (!url.pathname.startsWith("/api/session-archive")) return;
+      archiveRequests.push({
+        method: request.method(),
+        path: url.pathname,
+        query: url.searchParams.has("archiveToken") ? "archiveToken" : "",
+        hasBody: request.postData() !== null,
+      });
+    };
+    const onResponse = (response) => {
+      const url = new URL(response.url());
+      if (!url.pathname.startsWith("/api/session-archive")) return;
+      archiveResponses.push({
+        method: response.request().method(),
+        path: url.pathname,
+        status: response.status(),
+      });
+    };
+    targetPage.on("request", onRequest);
+    targetPage.on("response", onResponse);
+    h4.registerPageCleanup(targetPage, () => {
+      targetPage.off("request", onRequest);
+      targetPage.off("response", onResponse);
+      boundPages.delete(targetPage);
+    });
+  };
+  const openArchiveRuntime = async () => {
+    const target = runtime === "classic"
+      ? `${h4.host.ready.codeUrl}/dist/frontend/index.classic.html`
+      : `${h4.host.ready.codeUrl}/`;
+    await page.goto(target, { waitUntil: "commit" });
+    await assertFrontendRuntime(page, runtime);
+  };
+  const expandArchiveSessionList = async (sessionIds) => {
+    const toggle = page.locator("#sessionList .unassigned-project .project-sessions-toggle");
+    const allFixtureSessionsVisible = async () => {
+      const counts = await Promise.all(sessionIds.map((sessionId) => (
+        page.locator(`#sessionList .session-row[data-session-id="${sessionId}"]`).count()
+      )));
+      return counts.every((count) => count === 1);
+    };
+    await expect.poll(async () => {
+      if (await allFixtureSessionsVisible()) return true;
+      if (await toggle.count() !== 1 || !await toggle.isVisible()) return false;
+      return String(await toggle.textContent() || "").trim() === "Show all";
+    }).toBe(true);
+    if (!await allFixtureSessionsVisible()) {
+      await expect(toggle).toBeVisible();
+      await expect(toggle).toHaveText("Show all");
+      await toggle.click();
+      await expect(toggle).toHaveText("Show less");
+    }
+    await expect.poll(allFixtureSessionsVisible).toBe(true);
+  };
+  bindArchiveAudit(page);
+  await openArchiveRuntime();
+
+  const parentCreated = await sendProductionJson(page, "/api/sessions", "POST", {
+    title: "H4 Archive Parent",
+    messages: [
+      { role: "user", content: "H4_ARCHIVE_PARENT_USER" },
+      { role: "assistant", content: "H4_ARCHIVE_PARENT_FINAL" },
+    ],
+    runState: { status: "completed" },
+    source: "codex",
+  });
+  expect(parentCreated.status).toBe(201);
+  const parentId = String(parentCreated.body?.id || "");
+  expect(parentId).not.toBe("");
+  const childCreated = await sendProductionJson(
+    page,
+    `/api/sessions/${encodeURIComponent(parentId)}/branch`,
+    "POST",
+    { title: "H4 Archive Child" },
+  );
+  expect(childCreated.status).toBe(201);
+  const childId = String(childCreated.body?.id || "");
+  expect(childId).not.toBe("");
+  const blockedCreated = await sendProductionJson(page, "/api/sessions", "POST", {
+    title: "H4 Archive Waiting",
+    messages: [{ role: "user", content: "H4_ARCHIVE_WAITING_USER" }],
+    runState: { status: "waiting_authorization" },
+  });
+  expect(blockedCreated.status).toBe(201);
+  const blockedId = String(blockedCreated.body?.id || "");
+  const indexBlockedCreated = await sendProductionJson(page, "/api/sessions", "POST", {
+    title: "H4 Archive Index Building",
+    messages: [{ role: "user", content: "H4_ARCHIVE_INDEX_BUILDING_USER" }],
+    runState: { status: "completed" },
+  });
+  expect(indexBlockedCreated.status).toBe(201);
+  const indexBlockedId = String(indexBlockedCreated.body?.id || "");
+  const sidecars = await h4.host.command("seed-session-archive-sidecars", {
+    sessionId: parentId,
+  });
+  expect(sidecars).toMatchObject({ ok: true, archiveFixture: { sessionId: parentId } });
+  const assetId = String(sidecars.archiveFixture.assetId || "");
+  expect(assetId).toMatch(/^ga1_[a-f0-9]{43}$/);
+  const assetUrl = `/api/sessions/${encodeURIComponent(parentId)}/generated-assets/${encodeURIComponent(assetId)}`;
+  expect((await fetchProductionJson(page, assetUrl)).status).toBe(200);
+
+  await h4.reloadRuntime(runtime);
+  const fixtureSessionIds = [parentId, childId, blockedId, indexBlockedId];
+  await expandArchiveSessionList(fixtureSessionIds);
+  for (const [sessionId, title] of [[parentId, "H4 Archive Parent"], [childId, "H4 Archive Child"], [blockedId, "H4 Archive Waiting"], [indexBlockedId, "H4 Archive Index Building"]]) {
+    await expect(page.locator(`#sessionList .session-row[data-session-id="${sessionId}"]`)).toHaveCount(1);
+    await expect(page.locator(`#sessionList .session-row[data-session-id="${sessionId}"] .session-title-text`)).toHaveText(title);
+  }
+
+  const blockedMenu = page.locator(`#sessionList .session-more-btn[data-session-id="${blockedId}"]`);
+  await blockedMenu.click();
+  await page.locator('.session-more-menu [data-action="archive"]').click();
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${blockedId}"]`)).toHaveCount(1);
+  await expect(page.locator("#toastContainer .toast.error").filter({ hasText: "This session still has active work" })).toHaveCount(1);
+  await expect.poll(() => archiveResponses.filter((entry) => (
+    entry.method === "POST"
+    && entry.path === `/api/session-archive/${blockedId}/archive`
+  )).map((entry) => entry.status)).toEqual([409]);
+
+  expect(await h4.host.command("hold-session-archive-index-build")).toMatchObject({
+    ok: true,
+    agentRunIndex: { state: "building" },
+  });
+  await page.locator(`#sessionList .session-more-btn[data-session-id="${indexBlockedId}"]`).click();
+  await page.locator('.session-more-menu [data-action="archive"]').click();
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${indexBlockedId}"]`)).toHaveCount(1);
+  await expect(page.locator("#toastContainer .toast.error").filter({ hasText: "Archive eligibility is still being prepared" })).toHaveCount(1);
+  await expect.poll(() => archiveResponses.filter((entry) => (
+    entry.method === "POST"
+    && entry.path === `/api/session-archive/${indexBlockedId}/archive`
+  )).map((entry) => entry.status)).toEqual([503]);
+  expect(await h4.host.command("restore-session-archive-index")).toMatchObject({
+    ok: true,
+    agentRunIndex: { state: "ready" },
+  });
+
+  await page.locator(`#sessionList .session-main[data-session-id="${parentId}"]`).click();
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${parentId}"]`)).toHaveClass(/active/);
+  await page.locator(`#sessionList .session-more-btn[data-session-id="${parentId}"]`).click();
+  await page.locator('.session-more-menu [data-action="pin"]').click();
+  await expect(page.locator(`#sessionList .session-main[data-session-id="${parentId}"] .session-pin-badge`)).toHaveCount(1);
+  await page.locator("#prompt").fill("H4_ARCHIVE_UNSAVED_DRAFT");
+  const metricsBeforeArchive = await h4.metrics();
+  const runRequestBoundary = h4.requestBoundary();
+  await page.locator(`#sessionList .session-more-btn[data-session-id="${parentId}"]`).click();
+  await page.locator('.session-more-menu [data-action="archive"]').click();
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${parentId}"]`)).toHaveCount(0);
+  await expect(page.locator("#prompt")).toHaveValue("H4_ARCHIVE_UNSAVED_DRAFT");
+  await expect(page.locator("#sessionList .session-row.active")).toHaveCount(0);
+  await expect(page.locator("#sessionTitle")).toHaveValue("");
+  await expect(page.getByRole("heading", { name: "Turn ideas into working code", exact: true })).toBeVisible();
+  await expect(page.locator("#prompt")).toBeEditable();
+  const archiveSuccessToast = page.locator("#toastContainer .toast.success").filter({ hasText: "Session archived" }).last();
+  await expect(archiveSuccessToast).toHaveCount(1);
+  await expect(archiveSuccessToast.locator(".toast-emphasis")).toHaveText("Settings - Archived sessions");
+  await expect(archiveSuccessToast.locator("a, button, [role=link], [tabindex]")).toHaveCount(0);
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${childId}"]`)).toHaveCount(1);
+  const archivedList = await fetchProductionJson(page, "/api/session-archive");
+  expect(archivedList.status).toBe(200);
+  const archivedParent = (archivedList.body?.data || []).find((item) => item.id === parentId);
+  expect(archivedParent).toMatchObject({
+    id: parentId,
+    title: "H4 Archive Parent",
+    source: "codex",
+    archiveToken: expect.stringMatching(/^[a-f0-9]{32}$/),
+  });
+  expect((await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(parentId)}`)).status).toBe(409);
+  expect((await fetchProductionJson(page, assetUrl)).status).toBe(200);
+  expect((await h4.host.command("session-archive-fixture-evidence", { sessionId: parentId })).archiveEvidence).toEqual({
+    sessionId: parentId,
+    activeMeta: false,
+    activeMessages: false,
+    archiveBundle: true,
+    archiveManifest: true,
+    archiveSession: true,
+    archiveMessages: true,
+    goal: true,
+    asset: true,
+    agentRun: true,
+  });
+  expect(h4.requestEvidenceSince(runRequestBoundary)).toMatchObject({ agentPost: 0, runtimePost: 0 });
+
+  const isolatedPinnedSessions = await page.evaluate(() => {
+    try {
+      const value = JSON.parse(localStorage.getItem("code-pinned") || "[]");
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  });
+  expect(isolatedPinnedSessions).toEqual([parentId]);
+  await page.context().addInitScript((expectedPinnedSessionId) => {
+    localStorage.setItem("code-pinned", JSON.stringify([expectedPinnedSessionId]));
+  }, parentId);
+
+  const transition = await h4.restartGeneration();
+  expect(transition.previousCleanup.rootRetained).toBe(true);
+  page = await h4.replacePage();
+  bindArchiveAudit(page);
+  await openArchiveRuntime();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("code-pinned") || "[]"))).toEqual([parentId]);
+  await page.locator("#settingsMenuBtn").click();
+  await page.locator('#settingsNav [data-panel="archives"]').click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const archivedRow = page.locator(`.archived-session-row[data-session-id="${parentId}"]`);
+  await expect(archivedRow).toHaveCount(1);
+  await expect(archivedRow).toContainText("H4 Archive Parent");
+  await expect(archivedRow).toContainText("codex");
+  await expect(archivedRow).not.toContainText(archivedParent.archiveToken);
+  await archivedRow.locator(".archived-session-restore").click();
+  await expect(archivedRow).toHaveCount(0);
+  await page.locator("#closeSettingsPage").click();
+  await expandArchiveSessionList(fixtureSessionIds);
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${parentId}"]`)).toHaveCount(1);
+  await expect(page.locator(`#sessionList .session-main[data-session-id="${parentId}"] .session-pin-badge`)).toHaveCount(1);
+  const restoredParent = await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(parentId)}`);
+  const restoredChild = await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(childId)}`);
+  expect(restoredParent.status).toBe(200);
+  expect(restoredChild.status).toBe(200);
+  expect(restoredChild.body?._parentId).toBe(parentId);
+  expect(restoredParent.body?._branches || []).toContain(childId);
+  expect((await h4.host.command("session-archive-fixture-evidence", { sessionId: parentId })).archiveEvidence).toMatchObject({
+    activeMeta: true,
+    activeMessages: true,
+    archiveBundle: false,
+    goal: true,
+    asset: true,
+    agentRun: true,
+  });
+
+  await page.locator(`#sessionList .session-main[data-session-id="${childId}"]`).click();
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${childId}"]`)).toHaveClass(/active/);
+  await page.locator(`#sessionList .session-more-btn[data-session-id="${parentId}"]`).click();
+  await page.locator('.session-more-menu [data-action="archive"]').click();
+  await expect(page.locator(`#sessionList .session-row[data-session-id="${parentId}"]`)).toHaveCount(0);
+  await page.locator("#settingsMenuBtn").click();
+  await page.locator('#settingsNav [data-panel="archives"]').click();
+  const deleteRow = page.locator(`.archived-session-row[data-session-id="${parentId}"]`);
+  await expect(deleteRow).toHaveCount(1);
+  await deleteRow.locator(".archived-session-delete").click();
+  await expect(page.locator("#deleteConfirmModal")).toBeVisible();
+  await expect(page.locator("#deleteConfirmText")).toContainText("messages, Goal, generated assets, and run records");
+  await expect(page.locator("#deleteConfirmText")).not.toContainText(archivedParent.archiveToken);
+  await page.locator("#confirmDeleteSession").click();
+  await expect(deleteRow).toHaveCount(0);
+  await expect(page.locator("#toastContainer .toast.success").filter({ hasText: "permanently deleted" })).toHaveCount(1);
+  expect((await fetchProductionJson(page, assetUrl)).status).toBe(404);
+  expect((await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(parentId)}`)).status).toBe(404);
+  expect((await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(childId)}`)).status).toBe(200);
+  expect((await h4.host.command("session-archive-fixture-evidence", { sessionId: parentId })).archiveEvidence).toEqual({
+    sessionId: parentId,
+    activeMeta: false,
+    activeMessages: false,
+    archiveBundle: false,
+    archiveManifest: false,
+    archiveSession: false,
+    archiveMessages: false,
+    goal: false,
+    asset: false,
+    agentRun: false,
+  });
+
+  const actionRequests = archiveRequests.filter((entry) => entry.method !== "GET");
+  expect(actionRequests.filter((entry) => entry.path === `/api/session-archive/${parentId}/archive`)).toHaveLength(2);
+  expect(actionRequests.filter((entry) => entry.path === `/api/session-archive/${parentId}/restore`)).toHaveLength(1);
+  expect(actionRequests.filter((entry) => entry.path === `/api/session-archive/${parentId}`)).toHaveLength(1);
+  expect(actionRequests.filter((entry) => entry.path === `/api/session-archive/${blockedId}/archive`)).toHaveLength(1);
+  expect(actionRequests.filter((entry) => entry.path === `/api/session-archive/${indexBlockedId}/archive`)).toHaveLength(1);
+  expect(actionRequests.every((entry) => entry.hasBody === false)).toBe(true);
+  expect(actionRequests.find((entry) => entry.path === `/api/session-archive/${parentId}`)?.query).toBe("archiveToken");
+  const metricsAfter = await h4.metrics();
+  expect(metricsAfter.chatRequests).toEqual(metricsBeforeArchive.chatRequests);
+  expect(metricsAfter.imageRequests).toEqual(metricsBeforeArchive.imageRequests);
+  expect(h4.requestEvidenceSince(runRequestBoundary)).toMatchObject({ agentPost: 0, runtimePost: 0 });
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-session-archive-product-surface`, {
+    runtime,
+    currentArchiveDraftPreserved: true,
+    blockedArchiveStatus: 409,
+    indexBuildingArchiveStatus: 503,
+    successToastEmphasis: "Settings - Archived sessions",
+    archiveActions: actionRequests.length,
+    physicalBundleObserved: true,
+    restartRestoreObserved: true,
+    deleteCleanup: { core: true, goal: true, asset: true, agentRun: true },
+    modelSideEffects: 0,
+  });
+}
+
 test("bundle key deletion and disable revoke model routes fail closed", async ({ h4 }) => {
   await exerciseKeyRouteRevocation(h4, "bundle");
 });
 
 test("direct classic key deletion and disable revoke model routes fail closed", async ({ h4 }) => {
   await exerciseKeyRouteRevocation(h4, "classic");
+});
+
+test("bundle archived sessions restore and permanently delete through settings", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseSessionArchiveProductSurface(h4, "bundle");
+});
+
+test("direct classic archived sessions restore and permanently delete through settings", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseSessionArchiveProductSurface(h4, "classic");
 });
 
 test("bundle tool message protocol pairs historic steer history", async ({ h4 }) => {

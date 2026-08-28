@@ -16,7 +16,22 @@
 
     const toast = global.document.createElement("div");
     toast.className = `toast ${type}`;
-    toast.textContent = message;
+    const text = String(message ?? "");
+    const emphasis = String(options.emphasis || "");
+    const emphasisIndex = emphasis ? text.indexOf(emphasis) : -1;
+    if (emphasisIndex >= 0 && typeof global.document.createTextNode === "function") {
+      if (emphasisIndex > 0) {
+        toast.appendChild(global.document.createTextNode(text.slice(0, emphasisIndex)));
+      }
+      const highlighted = global.document.createElement("span");
+      highlighted.className = "toast-emphasis";
+      highlighted.textContent = emphasis;
+      toast.appendChild(highlighted);
+      const suffix = text.slice(emphasisIndex + emphasis.length);
+      if (suffix) toast.appendChild(global.document.createTextNode(suffix));
+    } else {
+      toast.textContent = text;
+    }
     container.appendChild(toast);
 
     global.setTimeout(() => {

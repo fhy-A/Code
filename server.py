@@ -11,6 +11,7 @@ import ctypes
 import datetime as dt
 import difflib
 import hashlib
+import hmac
 import ipaddress
 import io
 import json
@@ -813,6 +814,11 @@ _MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT = 120.0
 _MODEL_RUNTIME_STREAM_IDLE_TIMEOUT = 180.0
 _agent_runs = {}
 _agent_run_lock = threading.RLock()
+_agent_run_index_lock = threading.RLock()
+_agent_run_index_rebuild_lock = threading.Lock()
+_agent_run_index_builds_lock = threading.Lock()
+_agent_run_index_builds = {}
+_agent_run_index_initialized_roots = set()
 _agent_created_at_lock = threading.Lock()
 _agent_last_created_microsecond = 0
 _AGENT_RUN_TERMINAL = {"completed", "failed", "cancelled"}
@@ -1536,6 +1542,288 @@ def _cancel_model_runtime_run(run_id):
 def _agent_runs_dir():
     """Return the Agent run directory while respecting patched DATA_DIR values."""
     return DATA_DIR / "agent-runs"
+
+
+_AGENT_RUN_NONTERMINAL_INDEX_SCHEMA = "code-agent-run-nonterminal-index/v1"
+
+
+def _agent_run_nonterminal_index_dir():
+    return _agent_runs_dir() / ".nonterminal-index"
+
+
+def _agent_run_nonterminal_index_path():
+    return _agent_run_nonterminal_index_dir() / "index.json"
+
+
+def _agent_run_nonterminal_index_entries_payload(entries):
+    normalized = [
+        {"runId": run_id, "sessionId": session_id}
+        for run_id, session_id in sorted(dict(entries or {}).items())
+    ]
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return normalized, hashlib.sha256(encoded).hexdigest()
+
+
+def _agent_run_nonterminal_index_payload(entries):
+    normalized, digest = _agent_run_nonterminal_index_entries_payload(entries)
+    return {
+        "schema": _AGENT_RUN_NONTERMINAL_INDEX_SCHEMA,
+        "state": "ready",
+        "entries": normalized,
+        "digest": digest,
+    }
+
+
+def _write_agent_run_nonterminal_index(entries):
+    payload = _agent_run_nonterminal_index_payload(entries)
+    with _agent_run_index_lock:
+        write_json(_agent_run_nonterminal_index_path(), payload)
+    return payload
+
+
+def _write_agent_run_nonterminal_index_building():
+    payload = {
+        "schema": _AGENT_RUN_NONTERMINAL_INDEX_SCHEMA,
+        "state": "building",
+    }
+    with _agent_run_index_lock:
+        write_json(_agent_run_nonterminal_index_path(), payload)
+    return payload
+
+
+def _read_agent_run_nonterminal_index():
+    path = _agent_run_nonterminal_index_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AgentRunIndexError("AgentRun index is unavailable") from exc
+    if not isinstance(payload, dict):
+        raise AgentRunIndexError("AgentRun index is invalid")
+    if payload.get("schema") != _AGENT_RUN_NONTERMINAL_INDEX_SCHEMA:
+        raise AgentRunIndexError("AgentRun index schema is invalid")
+    state = str(payload.get("state") or "")
+    if state == "building":
+        if set(payload) != {"schema", "state"}:
+            raise AgentRunIndexError("AgentRun index build marker is invalid")
+        return {"state": "building", "entries": {}}
+    if state != "ready" or set(payload) != {"schema", "state", "entries", "digest"}:
+        raise AgentRunIndexError("AgentRun index payload is invalid")
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        raise AgentRunIndexError("AgentRun index entries are invalid")
+    entries = {}
+    for item in raw_entries:
+        if not isinstance(item, dict) or set(item) != {"runId", "sessionId"}:
+            raise AgentRunIndexError("AgentRun index entry is invalid")
+        try:
+            run_id = _safe_agent_run_id(item.get("runId"))
+            session_id = safe_session_id(item.get("sessionId"))
+        except (TypeError, ValueError) as exc:
+            raise AgentRunIndexError("AgentRun index identity is invalid") from exc
+        if run_id in entries:
+            raise AgentRunIndexError("AgentRun index identity is duplicated")
+        entries[run_id] = session_id
+    normalized, digest = _agent_run_nonterminal_index_entries_payload(entries)
+    if normalized != raw_entries or not hmac.compare_digest(
+        str(payload.get("digest") or ""), digest,
+    ):
+        raise AgentRunIndexError("AgentRun index integrity check failed")
+    return {"state": "ready", "entries": entries}
+
+
+def _agent_run_index_record_entry(path, record):
+    if not isinstance(record, dict):
+        raise AgentRunIndexError("AgentRun record is invalid")
+    try:
+        run_id = _safe_agent_run_id(record.get("id"))
+    except ValueError as exc:
+        raise AgentRunIndexError("AgentRun record identity is invalid") from exc
+    if Path(path).stem != run_id:
+        raise AgentRunIndexError("AgentRun record identity conflicts with its path")
+    session_value = str(record.get("sessionId") or "").strip()
+    if not session_value:
+        return run_id, "", str(record.get("status") or "")
+    try:
+        session_id = safe_session_id(session_value)
+    except ValueError as exc:
+        raise AgentRunIndexError("AgentRun session identity is invalid") from exc
+    return run_id, session_id, str(record.get("status") or "")
+
+
+def _rebuild_agent_run_nonterminal_index(*, force=True):
+    """Build the additive index once from authoritative v5 records.
+
+    The building marker is durable and makes archive eligibility fail closed.
+    The potentially large history scan intentionally runs without the live run
+    lock; the final merge happens under that lock so concurrent in-memory runs
+    cannot be omitted.
+    """
+    with _agent_run_index_rebuild_lock:
+        if not force:
+            try:
+                current = _read_agent_run_nonterminal_index()
+                if current.get("state") == "ready":
+                    return current
+            except AgentRunIndexError:
+                pass
+        _write_agent_run_nonterminal_index_building()
+        entries = {}
+        runs_dir = _agent_runs_dir()
+        try:
+            run_paths = tuple(sorted(runs_dir.glob("*.json"))) if runs_dir.exists() else ()
+            for path in run_paths:
+                record = json.loads(path.read_text(encoding="utf-8-sig"))
+                run_id, session_id, status = _agent_run_index_record_entry(path, record)
+                if session_id and status not in _AGENT_RUN_TERMINAL:
+                    entries[run_id] = session_id
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AgentRunIndexError("AgentRun history could not be indexed") from exc
+        with _agent_run_lock:
+            for run_id, run in _agent_runs.items():
+                if not isinstance(run, dict):
+                    raise AgentRunIndexError("Live AgentRun state is invalid")
+                try:
+                    normalized_run_id = _safe_agent_run_id(run_id)
+                    if str(run.get("id") or normalized_run_id) != normalized_run_id:
+                        raise ValueError("AgentRun identity mismatch")
+                    session_value = str(
+                        run.get("session_id") or run.get("sessionId") or ""
+                    ).strip()
+                    session_id = safe_session_id(session_value) if session_value else ""
+                except ValueError as exc:
+                    raise AgentRunIndexError("Live AgentRun identity is invalid") from exc
+                if session_id and str(run.get("status") or "") not in _AGENT_RUN_TERMINAL:
+                    previous = entries.get(normalized_run_id)
+                    if previous and previous != session_id:
+                        raise AgentRunIndexError("AgentRun identity is conflicting")
+                    entries[normalized_run_id] = session_id
+                else:
+                    entries.pop(normalized_run_id, None)
+            payload = _write_agent_run_nonterminal_index(entries)
+        key = str(_agent_run_nonterminal_index_path().resolve(strict=False))
+        with _agent_run_index_builds_lock:
+            _agent_run_index_initialized_roots.add(key)
+        return {"state": "ready", "entries": dict(entries), "payload": payload}
+
+
+def _agent_run_nonterminal_index_build_worker():
+    key = str(_agent_run_nonterminal_index_path().resolve(strict=False))
+    try:
+        _rebuild_agent_run_nonterminal_index(force=True)
+    except AgentRunIndexError:
+        with _agent_run_index_builds_lock:
+            _agent_run_index_initialized_roots.discard(key)
+    finally:
+        with _agent_run_index_builds_lock:
+            current = _agent_run_index_builds.get(key)
+            if current is threading.current_thread():
+                _agent_run_index_builds.pop(key, None)
+
+
+def _start_agent_run_nonterminal_index_build():
+    key = str(_agent_run_nonterminal_index_path().resolve(strict=False))
+    with _agent_run_index_builds_lock:
+        existing = _agent_run_index_builds.get(key)
+        if existing is not None and existing.is_alive():
+            return existing
+        if key in _agent_run_index_initialized_roots:
+            try:
+                current = _read_agent_run_nonterminal_index()
+                if current.get("state") == "ready":
+                    return None
+            except AgentRunIndexError:
+                _agent_run_index_initialized_roots.discard(key)
+        try:
+            # Publish the fail-closed process freshness boundary before the
+            # worker can be observed as running. This catches records written
+            # by a rolled-back/legacy process since the last ready snapshot.
+            _write_agent_run_nonterminal_index_building()
+        except (OSError, AgentRunIndexError):
+            _agent_run_index_initialized_roots.discard(key)
+            return None
+        worker = threading.Thread(
+            target=_agent_run_nonterminal_index_build_worker,
+            name="agent-run-index-build",
+            daemon=True,
+        )
+        _agent_run_index_builds[key] = worker
+        worker.start()
+        return worker
+
+
+def _invalidate_agent_run_nonterminal_index():
+    key = str(_agent_run_nonterminal_index_path().resolve(strict=False))
+    with _agent_run_index_builds_lock:
+        _agent_run_index_initialized_roots.discard(key)
+    _write_agent_run_nonterminal_index_building()
+    return _start_agent_run_nonterminal_index_build()
+
+
+def _ensure_agent_run_nonterminal_index_ready(*, wait=False):
+    key = str(_agent_run_nonterminal_index_path().resolve(strict=False))
+    try:
+        current = _read_agent_run_nonterminal_index()
+        if current.get("state") == "ready":
+            with _agent_run_index_builds_lock:
+                process_initialized = key in _agent_run_index_initialized_roots
+            if process_initialized:
+                return current
+    except AgentRunIndexError:
+        current = None
+    if not wait:
+        _start_agent_run_nonterminal_index_build()
+        raise AgentRunIndexError("AgentRun index is not ready")
+    return _rebuild_agent_run_nonterminal_index(force=True)
+
+
+def _agent_run_nonterminal_index_register(run_id, session_id, *, wait=True):
+    run_id = _safe_agent_run_id(run_id)
+    session_id = safe_session_id(session_id)
+    if wait:
+        # Never wait for the rebuild lock while holding either the AgentRun or
+        # index lock. Callers inside _agent_run_lock pass wait=False after a
+        # lock-free readiness check.
+        _ensure_agent_run_nonterminal_index_ready(wait=True)
+    with _agent_run_index_lock:
+        try:
+            current = _read_agent_run_nonterminal_index()
+        except AgentRunIndexError:
+            current = None
+        if not current or current.get("state") != "ready":
+            raise AgentRunIndexError("AgentRun index changed during admission")
+        entries = dict(current.get("entries") or {})
+        existing = entries.get(run_id)
+        if existing and existing != session_id:
+            raise AgentRunIndexError("AgentRun index identity is conflicting")
+        if existing == session_id:
+            return False
+        entries[run_id] = session_id
+        _write_agent_run_nonterminal_index(entries)
+        return True
+
+
+def _agent_run_nonterminal_index_unregister(run_id):
+    with _agent_run_index_lock:
+        try:
+            run_id = _safe_agent_run_id(run_id)
+            current = _read_agent_run_nonterminal_index()
+        except (ValueError, AgentRunIndexError):
+            _start_agent_run_nonterminal_index_build()
+            return False
+        if current.get("state") != "ready":
+            _start_agent_run_nonterminal_index_build()
+            return False
+        entries = dict(current.get("entries") or {})
+        if run_id not in entries:
+            return False
+        entries.pop(run_id, None)
+        _write_agent_run_nonterminal_index(entries)
+        return True
 
 
 def _safe_agent_run_id(run_id):
@@ -2746,7 +3034,23 @@ def _persist_agent_run(run):
     with run["persist_lock"]:
         with run["condition"]:
             record = _agent_run_record(run)
-        write_json(_agent_run_path(run["id"]), record)
+        terminal = str(record.get("status") or "") in _AGENT_RUN_TERMINAL
+        if not terminal and str(record.get("sessionId") or ""):
+            # A nonterminal derived fact must be durable before the larger run
+            # record can become authoritative. A crash may therefore leave a
+            # conservative stale entry, but can never omit live work.
+            _ensure_agent_run_nonterminal_index_ready(wait=True)
+        with _agent_run_lock:
+            if not terminal and str(record.get("sessionId") or ""):
+                _agent_run_nonterminal_index_register(
+                    record["id"], record["sessionId"], wait=False,
+                )
+            write_json(_agent_run_path(run["id"]), record)
+            if terminal:
+                # Terminal state is written first. Failure to clear the derived
+                # entry only over-blocks archive and is repaired from that
+                # exact run record on the next eligibility check.
+                _agent_run_nonterminal_index_unregister(record["id"])
 
 
 def _agent_public_tool_executions(run):
@@ -4167,6 +4471,10 @@ _AGENT_IMAGE_COUNT_WORDS = {
     "3": 3, "three": 3, "三": 3,
     "4": 4, "four": 4, "四": 4,
 }
+
+
+class AgentRunIndexError(RuntimeError):
+    """The secret-free nonterminal AgentRun index is not authoritative."""
 _AGENT_IMAGE_COUNT_PATTERNS = (
     re.compile(
         r"(?<![0-9A-Za-z])(?P<count>[1-4]|one|two|three|four)\s*"
@@ -9187,6 +9495,15 @@ def _create_agent_run(
         "worker": None,
         "cancel_finalizing": False,
     }
+    if str(session_id or ""):
+        try:
+            _ensure_agent_run_nonterminal_index_ready(wait=True)
+        except AgentRunIndexError as exc:
+            raise SessionLifecycleConflictError(
+                "agent_run_index_unavailable",
+                "AgentRun admission is temporarily unavailable.",
+                http_status=503,
+            ) from exc
     with _agent_run_lock:
         if str(session_id or ""):
             if _session_archive_bundle_path(str(session_id)).exists():
@@ -9212,6 +9529,17 @@ def _create_agent_run(
         existing = _agent_runs.get(run_id)
         if existing:
             return existing
+        if str(session_id or ""):
+            try:
+                _agent_run_nonterminal_index_register(
+                    run_id, session_id, wait=False,
+                )
+            except AgentRunIndexError as exc:
+                raise SessionLifecycleConflictError(
+                    "agent_run_index_unavailable",
+                    "AgentRun admission is temporarily unavailable.",
+                    http_status=503,
+                ) from exc
         _agent_runs[run_id] = run
     try:
         _append_agent_event(run, "created", {
@@ -9248,6 +9576,7 @@ def _create_agent_run(
         run["keys"] = []
         with _agent_run_lock:
             _agent_runs.pop(run_id, None)
+            _agent_run_nonterminal_index_unregister(run_id)
         raise
     return run
 
@@ -14826,29 +15155,76 @@ def _assert_session_active_location(session_id):
 
 
 def _session_has_nonterminal_agent_run(session_id):
-    """Inspect raw authoritative AgentRun facts without restoring or mutating them."""
-    target = str(session_id or "")
-    observed_ids = set()
+    """Check only the target Session's secret-free derived AgentRun facts."""
+    target = safe_session_id(session_id)
+    try:
+        index = _ensure_agent_run_nonterminal_index_ready(wait=False)
+    except AgentRunIndexError as exc:
+        raise SessionLifecycleConflictError(
+            "session_archive_index_unavailable",
+            "Session archive eligibility is still being prepared.",
+            http_status=503,
+        ) from exc
+    entries = dict(index.get("entries") or {})
+    target_run_ids = {
+        run_id for run_id, indexed_session_id in entries.items()
+        if indexed_session_id == target
+    }
+    stale_terminal_ids = set()
     for run_id, run in _agent_runs.items():
-        if not isinstance(run, dict) or str(run.get("session_id") or "") != target:
+        if not isinstance(run, dict):
+            _invalidate_agent_run_nonterminal_index()
+            raise SessionLifecycleConflictError(
+                "session_archive_index_unavailable",
+                "Session archive eligibility is unavailable.",
+                http_status=503,
+            )
+        run_session_id = str(run.get("session_id") or run.get("sessionId") or "")
+        if run_session_id != target:
             continue
-        observed_ids.add(str(run_id))
+        normalized_run_id = str(run_id or "")
         if str(run.get("status") or "") not in _AGENT_RUN_TERMINAL:
+            if entries.get(normalized_run_id) != target:
+                _invalidate_agent_run_nonterminal_index()
+                raise SessionLifecycleConflictError(
+                    "session_archive_index_unavailable",
+                    "Session archive eligibility is unavailable.",
+                    http_status=503,
+                )
             return True
-    runs_dir = _agent_runs_dir()
-    if not runs_dir.exists():
-        return False
-    for path in runs_dir.glob("*.json"):
-        if path.stem in observed_ids:
-            continue
+        if normalized_run_id in target_run_ids:
+            stale_terminal_ids.add(normalized_run_id)
+
+    for run_id in sorted(target_run_ids - stale_terminal_ids):
+        path = _agent_run_path(run_id)
         try:
             record = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(record, dict) or str(record.get("sessionId") or "") != target:
-            continue
-        if str(record.get("status") or "") not in _AGENT_RUN_TERMINAL:
+            record_run_id, record_session_id, status = _agent_run_index_record_entry(
+                path, record,
+            )
+        except (
+            FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError,
+            AgentRunIndexError,
+        ) as exc:
+            _invalidate_agent_run_nonterminal_index()
+            raise SessionLifecycleConflictError(
+                "session_archive_index_unavailable",
+                "Session archive eligibility is unavailable.",
+                http_status=503,
+            ) from exc
+        if record_run_id != run_id or record_session_id != target:
+            _invalidate_agent_run_nonterminal_index()
+            raise SessionLifecycleConflictError(
+                "session_archive_index_unavailable",
+                "Session archive eligibility is unavailable.",
+                http_status=503,
+            )
+        if status not in _AGENT_RUN_TERMINAL:
             return True
+        stale_terminal_ids.add(run_id)
+
+    for run_id in sorted(stale_terminal_ids):
+        _agent_run_nonterminal_index_unregister(run_id)
     return False
 
 
@@ -14942,6 +15318,8 @@ def _mutate_session_archive_state(session_id, *, archived):
                 if archived:
                     try:
                         eligible = _session_archive_eligible(session_id, meta)
+                    except (SessionLifecycleConflictError, SessionArchiveMutationError):
+                        raise
                     except Exception as exc:
                         raise SessionArchiveMutationError() from exc
                     if not eligible:
@@ -22815,6 +23193,7 @@ if __name__ == "__main__":
     _migrate_sessions_to_hierarchy()
     _migrate_codex_project_sessions_support()
     _migrate_project_root_paths()
+    _start_agent_run_nonterminal_index_build()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), CodeHandler)
     server.socket.settimeout(2.0)
     start_tray(PORT, server)
