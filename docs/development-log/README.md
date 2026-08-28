@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-28 | `CODE-006` 生图结果一等输出展示完成：成功资产作为 standalone gallery 位于 compact trace 后/final answer 前，trace 无重复图片且默认折叠，单图大图、多图响应网格且无内部滚动，受控 metadata/download/overlay 与 reload 去重保持。bundle/direct classic 等价 H4 `2 passed`：两入口 reload 零模型/工具/上游重放，edit/disabled 合同不变，权威 Session PUT 后唯一 DELETE=200；删除后同一 keep-alive socket 上 stale PUT=410、紧随资产 GET=404，两资产均 404。前端 `280 passed`、build/freshness、语法/diff 证据闭合，未使用 Browser/真实模型/外网/Key | [查看](2026/2026-08-28.md) |
 | 2026-08-28 | `CODE-006` Session 删除后 keep-alive 请求消费修复：陈旧 Session PUT 命中 tombstone 410 和 deleted/missing messages POST 早退前均精确消费当前 body 一次，不再让残留 JSON 污染同一 HTTP/1.1 连接的下一请求。fail-first 真实单连接从 `JSON + GET` 拼接 400 修正为 410 → 资产 404，并列 messages 链修正为 410/404 → Session 列表 200；Session persistence/routes/server 回归 `352 passed + 73 subtests`，compile/diff 通过，未重跑展示 H4/Browser | [查看](2026/2026-08-28.md) |
 | 2026-08-28 | `CODE-006` Session 删除准备失败边界补齐：路径解析、Session/JSONL/index/Goal/分支与资产快照全部纳入 `SessionDeleteError`；快照完成前的 PermissionError/OSError 不执行删除或无依据回滚，仅返回脱敏 `session_delete_failed`/503。含绝对路径/秘密哨兵的 fail-first 从 400 修正为 503，全部事实字节不变；相关扩大回归 `547 passed + 166 subtests` | [查看](2026/2026-08-28.md) |
 | 2026-08-28 | `CODE-006` Session 删除一致性修复：Windows 并发读取下旧 `Path.unlink()` 触发 `PermissionError/winerror=32`，且会先删 Goal/资产、泄露临时路径并允许迟到 save 复活。现以 Session 生命周期锁、可回滚 JSON/JSONL/index/资产快照与稳定 `session_delete_failed` 脱敏失败统一 save/Goal/资产删除边界；成功 DELETE 保持幂等，迟到 PUT 与付费生图均不复活 Session/资产。相关扩大回归 `546 passed + 166 subtests`，compile/diff/doctor 通过；未运行已熔断展示 H4，未使用内置 Browser 或真实数据 | [查看](2026/2026-08-28.md) |

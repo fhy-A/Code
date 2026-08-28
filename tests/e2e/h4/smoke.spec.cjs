@@ -1,6 +1,7 @@
 const base = require("@playwright/test");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
+const http = require("node:http");
 const path = require("node:path");
 const { FIXTURE_CONTENT, startIsolatedHost } = require("./isolated-host.cjs");
 
@@ -27855,6 +27856,75 @@ async function generatedAssetResponse(page, assetUrl) {
   }, assetUrl);
 }
 
+async function staleSessionPutThenAssetGetSameConnection(
+  pageUrl,
+  sessionId,
+  assetUrl,
+) {
+  const origin = new URL(pageUrl).origin;
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  const send = (method, requestPath, body) => new Promise((resolve, reject) => {
+    const payload = body === undefined
+      ? null
+      : Buffer.from(JSON.stringify(body), "utf8");
+    let socket = null;
+    const request = http.request(new URL(requestPath, origin), {
+      method,
+      agent,
+      headers: payload
+        ? {
+          "Content-Type": "application/json",
+          "Content-Length": String(payload.length),
+        }
+        : undefined,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        let responseBody = null;
+        try { responseBody = JSON.parse(raw); } catch {}
+        resolve({
+          status: Number(response.statusCode || 0),
+          body: responseBody,
+          reusedSocket: request.reusedSocket === true,
+          socket,
+        });
+      });
+    });
+    request.on("socket", (value) => { socket = value; });
+    request.on("error", reject);
+    request.end(payload || undefined);
+  });
+
+  try {
+    const stalePut = await send(
+      "PUT",
+      `/api/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        title: "H4 stale save must stay deleted",
+        messages: [],
+        expectedRevision: 0,
+      },
+    );
+    const assetGet = await send("GET", assetUrl);
+    return {
+      stalePut: {
+        status: stalePut.status,
+        errorCode: String(stalePut.body?.errorCode || ""),
+      },
+      assetGet: {
+        status: assetGet.status,
+        errorCode: String(assetGet.body?.errorCode || ""),
+      },
+      sameSocket: Boolean(stalePut.socket && stalePut.socket === assetGet.socket),
+      assetRequestReusedSocket: assetGet.reusedSocket,
+    };
+  } finally {
+    agent.destroy();
+  }
+}
+
 async function forceImageRouteStale(h4, selectedRoute, suffix) {
   const before = await fetchProductionJson(h4.page, "/api/image-routes");
   expect(before.status).toBe(200);
@@ -28037,22 +28107,52 @@ async function exerciseImageProductSurface(h4, runtime) {
   const activeSession = page.locator("#sessionList .session-row.active button.session-main");
   await expect(activeSession).toHaveCount(1);
   const sessionId = String(await activeSession.getAttribute("data-session-id") || "");
+  const firstGallery = page.locator("[data-generated-image-gallery]").first();
   const firstCard = page.locator(".generated-image-card").first();
+  await expect(firstGallery).toHaveCount(1);
   await expect(firstCard).toHaveCount(1);
-  const firstTrace = page.locator("#messages .execution-trace.completed").filter({
-    has: firstCard,
-  });
+  const firstTrace = page.locator("#messages .execution-trace.completed").first();
   await expect(firstTrace).toHaveCount(1);
   const firstTraceToggle = firstTrace.locator(
     ":scope > [data-execution-trace-toggle]",
   );
-  if ((await firstTraceToggle.getAttribute("aria-expanded")) === "false") {
-    await firstTraceToggle.click();
-  }
-  await expect(firstTrace).toHaveClass(/\bis-expanded\b/);
-  await expect(firstTraceToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(firstTrace).not.toHaveClass(/\bis-expanded\b/);
+  await expect(firstTraceToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(firstTrace.locator("[data-generated-image-gallery]")).toHaveCount(0);
+  await expect(firstTrace.locator("details[open]")).toHaveCount(0);
   await expect(firstCard).toBeVisible();
   await expect(firstCard).not.toContainText("small blue geometric icon");
+  const presentation = await firstGallery.evaluate((gallery, finalText) => {
+    const messages = gallery.closest("#messages");
+    const trace = messages?.querySelector(".execution-trace.completed");
+    const finalAnswer = [...(messages?.querySelectorAll("article.msg.assistant") || [])]
+      .find((element) => element.textContent?.includes(finalText));
+    const scrollAncestors = [];
+    for (let parent = gallery.parentElement; parent && parent !== messages; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (/auto|scroll/.test(`${style.overflowX} ${style.overflowY}`)) {
+        scrollAncestors.push(parent.className || parent.tagName);
+      }
+    }
+    return {
+      insideToolBody: Boolean(gallery.closest(
+        ".tool-process-stage-body, .tool-process-body, .execution-trace",
+      )),
+      traceBeforeGallery: Boolean(
+        trace && (trace.compareDocumentPosition(gallery) & Node.DOCUMENT_POSITION_FOLLOWING)
+      ),
+      galleryBeforeFinal: Boolean(
+        finalAnswer && (gallery.compareDocumentPosition(finalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING)
+      ),
+      scrollAncestors,
+    };
+  }, IMAGE_GENERATION_FINAL);
+  expect(presentation).toEqual({
+    insideToolBody: false,
+    traceBeforeGallery: true,
+    galleryBeforeFinal: true,
+    scrollAncestors: [],
+  });
   const firstPreview = firstCard.locator("[data-generated-image-preview]");
   const firstAssetUrl = String(await firstPreview.getAttribute("data-generated-image-preview") || "");
   expect(firstAssetUrl).toMatch(
@@ -28068,7 +28168,18 @@ async function exerciseImageProductSurface(h4, runtime) {
     complete: image.complete,
     width: image.naturalWidth,
     height: image.naturalHeight,
-  }))).toEqual({ complete: true, width: 2, height: 2 });
+    renderedHeight: Math.round(image.getBoundingClientRect().height),
+    objectFit: getComputedStyle(image).objectFit,
+  }))).toEqual({
+    complete: true,
+    width: 2,
+    height: 2,
+    renderedHeight: expect.any(Number),
+    objectFit: "contain",
+  });
+  expect(await firstCard.locator("img").evaluate((image) => (
+    image.getBoundingClientRect().height
+  ))).toBeGreaterThanOrEqual(320);
   expect(await generatedAssetResponse(page, firstAssetUrl)).toEqual({
     status: 200,
     contentType: "image/png",
@@ -28159,15 +28270,15 @@ async function exerciseImageProductSurface(h4, runtime) {
     };
   }, MODEL_ID);
   expect(chatRouteAfterReload).toEqual(chatRouteBeforeReload);
-  const restoredCard = page.locator(".generated-image-card").first();
+  const restoredGallery = page.locator("[data-generated-image-gallery]").first();
+  const restoredCard = restoredGallery.locator(".generated-image-card").first();
+  await expect(page.locator("[data-generated-image-gallery]")).toHaveCount(1);
   await expect(page.locator(".generated-image-card")).toHaveCount(1);
   await expect(restoredCard.locator("[data-generated-image-preview]")).toHaveAttribute(
     "data-generated-image-preview",
     firstAssetUrl,
   );
-  const restoredTrace = page.locator("#messages .execution-trace.completed").filter({
-    has: restoredCard,
-  });
+  const restoredTrace = page.locator("#messages .execution-trace.completed").first();
   await expect(restoredTrace).toHaveCount(1);
   await expect(restoredTrace).not.toHaveClass(/\bis-expanded\b/);
   const restoredTraceToggle = restoredTrace.locator(
@@ -28181,9 +28292,8 @@ async function exerciseImageProductSurface(h4, runtime) {
     metricsBeforeReload.production.agentRuns,
   );
   expect(h4.requestEvidenceSince(reloadBoundary).agentPost).toBe(0);
-  await restoredTraceToggle.click();
-  await expect(restoredTrace).toHaveClass(/\bis-expanded\b/);
-  await expect(restoredTraceToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(restoredTrace.locator("[data-generated-image-gallery]")).toHaveCount(0);
+  await expect(restoredGallery).toBeVisible();
   await expect(restoredCard.locator("img")).toBeVisible();
 
   await h4.submit(`/imagegen ${IMAGE_EDIT_USER} ${firstAssetId}`);
@@ -28419,7 +28529,23 @@ async function exerciseImageProductSurface(h4, runtime) {
     errorKind: "",
   });
   expect(deleteResponse.body?.ok).toBe(true);
-  expect(await generatedAssetResponse(page, firstAssetUrl)).toMatchObject({ status: 404 });
+  const keepAliveAfterDelete = await staleSessionPutThenAssetGetSameConnection(
+    page.url(),
+    sessionId,
+    firstAssetUrl,
+  );
+  expect(keepAliveAfterDelete).toEqual({
+    stalePut: {
+      status: 410,
+      errorCode: "session_deleted",
+    },
+    assetGet: {
+      status: 404,
+      errorCode: "generated_asset_not_found",
+    },
+    sameSocket: true,
+    assetRequestReusedSocket: true,
+  });
   expect(await generatedAssetResponse(page, secondAssetUrl)).toMatchObject({ status: 404 });
   expect(h4.pageErrors).toEqual([]);
   expectAutoPermissionNetworkIsolation(h4);
@@ -28439,6 +28565,9 @@ async function exerciseImageProductSurface(h4, runtime) {
     disabledSuccessfulSaveRevision: disabledSuccessfulSave.returnedRevision,
     sessionDeleteStatus: deleteProjection.status,
     sessionDeleteAssetStatus: 404,
+    stalePutAfterDeleteStatus: keepAliveAfterDelete.stalePut.status,
+    keepAliveAssetStatus: keepAliveAfterDelete.assetGet.status,
+    keepAliveSocketReused: keepAliveAfterDelete.sameSocket,
   });
 }
 

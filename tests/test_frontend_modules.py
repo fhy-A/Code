@@ -16680,16 +16680,33 @@ const feature = createMessagesFeature({
     .replaceAll(">", "&gt;"),
   t: interpolate,
   formatSize: (value) => `${value} bytes`,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => String(value),
+  getMessageText: (msg) => String(msg?.content || ""),
   getSessionId: () => "session fixture/one",
+  getSelectedModel: () => "model fixture",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => `<answer>${String(value)}</answer>`,
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
   getToolActionLabel: (value) => value,
 });
 const assetId = `ga1_${"A".repeat(43)}`;
-const html = feature.renderToolProcessProjection([
-  {msg: {role: "assistant", meta: {toolCalls: [{
-    id: "image-call-1",
-    function: {name: "generate_image", arguments: '{"prompt":"private prompt"}'},
-  }]}}, index: 1},
-  {msg: {role: "tool-result", content: "", meta: {
+const secondAssetId = `ga1_${"B".repeat(43)}`;
+const asset = {
+  assetId,
+  url: "https://upstream-secret.invalid/ignored",
+  mimeType: "image/png",
+  width: 1024,
+  height: 1024,
+  byteLength: 4096,
+};
+const toolResult = {
+  role: "tool-result",
+  content: "",
+  meta: {
+    agentRunId: "run-image-1",
     action: "generate_image",
     toolCallId: "image-call-1",
     outcome: "succeeded",
@@ -16699,30 +16716,52 @@ const html = feature.renderToolProcessProjection([
       count: 1,
       providerUrl: "https://upstream-secret.invalid/image?token=secret",
       localPath: "C:/private/generated.png",
-      assets: [{
-        assetId,
-        url: "https://upstream-secret.invalid/ignored",
-        mimeType: "image/png",
-        width: 1024,
-        height: 1024,
-        byteLength: 4096,
-      }],
+      assets: [asset, {...asset}],
     },
-  }}, index: 2},
-], 1);
-const invalidHtml = feature.renderToolProcessProjection([
-  {msg: {role: "assistant", meta: {toolCalls: [{
-    id: "image-call-2",
-    function: {name: "generate_image", arguments: '{}'},
-  }]}}, index: 1},
-  {msg: {role: "tool-result", content: "invalid", meta: {
-    action: "generate_image",
-    toolCallId: "image-call-2",
-    outcome: "succeeded",
-    result: {ok: true, assets: [{assetId: "../escape", mimeType: "image/png", width: 1, height: 1, byteLength: 1}]},
-  }}, index: 2},
-], 2);
-process.stdout.write(JSON.stringify({html, invalidHtml, assetId}));
+  },
+};
+const assistantCall = {role: "assistant", content: "", meta: {
+  agentRunId: "run-image-1",
+  toolCalls: [{
+    id: "image-call-1",
+    function: {name: "generate_image", arguments: '{"prompt":"private prompt"}'},
+  }],
+}};
+const toolItems = [
+  {msg: assistantCall, index: 1},
+  {msg: toolResult, index: 2},
+];
+const messages = [
+  {role: "user", content: "generate one image"},
+  assistantCall,
+  toolResult,
+  {role: "assistant", content: "final answer", _responseTime: "5s", meta: {agentRunId: "run-image-1"}},
+];
+const toolHtml = feature.renderToolProcessProjection(toolItems, 1);
+const html = feature.projectMessages(messages, {hasActiveRun: false});
+const multiResult = JSON.parse(JSON.stringify(toolResult));
+multiResult.meta.result.assets = [asset, {
+  ...asset,
+  assetId: secondAssetId,
+  width: 768,
+  height: 1024,
+  byteLength: 8192,
+}];
+const multiHtml = feature.projectMessages([
+  messages[0], assistantCall, multiResult, messages[3],
+], {hasActiveRun: false});
+const failedResult = JSON.parse(JSON.stringify(toolResult));
+failedResult.meta.outcome = "failed";
+failedResult.meta.result = {ok: false, errorCode: "image_upstream_timeout", assets: [asset]};
+const failedHtml = feature.projectMessages([
+  messages[0], assistantCall, failedResult, messages[3],
+], {hasActiveRun: false});
+const invalidResult = JSON.parse(JSON.stringify(toolResult));
+invalidResult.meta.result.assets = [{assetId: "../escape", mimeType: "image/png", width: 1, height: 1, byteLength: 1}];
+const invalidHtml = feature.projectMessages([
+  messages[0], assistantCall, invalidResult, messages[3],
+], {hasActiveRun: false});
+process.stdout.write(JSON.stringify({toolHtml, html, multiHtml, failedHtml, invalidHtml, assetId}));
 """
         completed = subprocess.run(
             ["node", "-e", script],
@@ -16738,16 +16777,29 @@ process.stdout.write(JSON.stringify({html, invalidHtml, assetId}));
         )
         self.assertIn(controlled_url, data["html"])
         self.assertIn("data-generated-image-preview", data["html"])
+        self.assertNotIn("data-generated-image-preview", data["toolHtml"])
+        self.assertIn("Generated 1", data["toolHtml"])
         self.assertIn('download="generated-image-1.png"', data["html"])
         self.assertIn("1024×1024", data["html"])
         self.assertIn("4096 bytes", data["html"])
-        self.assertIn("<details class=\"tool-process-stage succeeded single-tool\"", data["html"])
-        self.assertIn(" open>", data["html"])
+        self.assertIn('class="execution-trace completed"', data["html"])
+        self.assertNotIn('class="execution-trace completed is-expanded"', data["html"])
+        self.assertIn('class="msg assistant generated-image-result is-single"', data["html"])
+        self.assertEqual(data["html"].count("data-generated-image-preview="), 1)
+        self.assertLess(data["html"].index("execution-trace completed"), data["html"].index("generated-image-result"))
+        self.assertLess(data["html"].index("generated-image-result"), data["html"].index("final answer"))
+        self.assertNotIn(" open>", data["toolHtml"])
+        self.assertIn('data-generated-image-count="2"', data["multiHtml"])
+        self.assertEqual(data["multiHtml"].count("data-generated-image-preview="), 2)
+        self.assertNotIn("data-generated-image-preview", data["failedHtml"])
         self.assertNotIn("upstream-secret", data["html"])
         self.assertNotIn("token=secret", data["html"])
         self.assertNotIn("C:/private", data["html"])
         self.assertNotIn("private prompt", data["html"])
         self.assertNotIn("data-generated-image-preview", data["invalidHtml"])
+        self.assertIn(".generated-image-result.is-single", STYLE_SOURCE)
+        self.assertIn(".generated-image-result.is-multiple", STYLE_SOURCE)
+        self.assertIn("object-fit: contain", STYLE_SOURCE)
 
     def test_messages_ui_binds_copy_and_image_events_without_inline_globals(self):
         self.assertNotIn('onclick="copyMessageText', MESSAGES_SOURCE)

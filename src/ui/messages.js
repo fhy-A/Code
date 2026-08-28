@@ -1854,6 +1854,7 @@
       if (call?.action !== "generate_image" || call?.result?.ok === false) return [];
       const sessionId = String(getSessionId() || "");
       if (!sessionId) return [];
+      const seenAssetIds = new Set();
       return (Array.isArray(call?.result?.assets) ? call.result.assets : [])
         .map((asset) => {
           const assetId = String(asset?.assetId || "");
@@ -1872,6 +1873,8 @@
             || !Number.isInteger(byteLength)
             || byteLength <= 0
           ) return null;
+          if (seenAssetIds.has(assetId)) return null;
+          seenAssetIds.add(assetId);
           return {
             assetId,
             mimeType,
@@ -1888,10 +1891,11 @@
     function renderGeneratedAssetGallery(call) {
       const assets = generatedAssetsForCall(call);
       if (!assets.length) return "";
-      return `<section class="generated-image-result" data-generated-image-gallery>
+      const layoutClass = assets.length === 1 ? "is-single" : "is-multiple";
+      return `<article class="msg assistant generated-image-result ${layoutClass}" data-generated-image-gallery data-generated-image-count="${assets.length}" data-generated-image-tool-call-id="${escapeHtml(call.id || "")}">
         <strong>${escapeHtml(t("imageAssetsGenerated", { count: assets.length }))}</strong>
         <div class="generated-image-grid">
-          ${assets.map((asset, index) => `<article class="generated-image-card">
+          ${assets.map((asset, index) => `<article class="generated-image-card" data-generated-image-asset-id="${escapeHtml(asset.assetId)}">
             <button class="generated-image-preview" type="button" data-generated-image-preview="${escapeHtml(asset.url)}" aria-label="${escapeHtml(t("imageAssetPreview"))}">
               <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(t("imageAssetPreview"))}" loading="lazy" data-generated-image-preview-img />
               <span class="generated-image-fallback" data-generated-image-fallback hidden>${escapeHtml(t("imageReadFailed"))}</span>
@@ -1902,7 +1906,7 @@
             </div>
           </article>`).join("")}
         </div>
-      </section>`;
+      </article>`;
     }
 
     function currentProcessCall(calls) {
@@ -1991,10 +1995,8 @@
       const expandedToolItems = options.expandedToolItems instanceof Set
         ? options.expandedToolItems
         : new Set(options.expandedToolItems || []);
-      const hasGeneratedAssets = visibleCalls.some((call) => generatedAssetsForCall(call).length > 0);
       const open = (
         options.open
-        || hasGeneratedAssets
         || (
           options.allowExpanded
           && (
@@ -2028,7 +2030,7 @@
                       || expandedToolItems.has(toolCallId)
                     )
                     ? " open"
-                    : (generatedAssetsForCall(call).length ? " open" : "");
+                    : "";
                   return `<details class="tool-process-item ${escapeHtml(call.outcome)}" data-tool-call-id="${escapeHtml(toolCallId)}" data-agent-run-id="${escapeHtml(call.agentRunId || "")}" data-tool-process-item-key="${escapeHtml(itemKey)}"${itemOpen}>
                     <summary>
                       <span class="tool-process-indicator ${escapeHtml(call.outcome)}" aria-hidden="true"></span>
@@ -2039,7 +2041,6 @@
                     <div class="tool-process-body">
                       ${argumentsText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessArguments"))}</strong><pre>${escapeHtml(argumentsText)}</pre></section>` : ""}
                       ${resultText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessResult"))}</strong><pre>${escapeHtml(resultText)}</pre></section>` : ""}
-                      ${renderGeneratedAssetGallery(call)}
                     </div>
                   </details>`;
                 }).join("")}
@@ -2306,6 +2307,8 @@
       const rows = [];
       const queuedTailMessages = [];
       const claimedToolResultIndexes = new Set();
+      const renderedGeneratedImageCalls = new Set();
+      let pendingGeneratedImageRows = [];
       const toolResultsByIdentity = new Map();
       messages.forEach((message, index) => {
         if (message?.role !== "tool-result" || !message.meta?.toolCallId || isInternalGoalTool(message)) return;
@@ -2360,6 +2363,22 @@
         const anchor = takeActiveRunAnchor();
         if (anchor) rows.push(anchor);
       };
+      const queueGeneratedImageOutputs = (calls) => {
+        calls.forEach((call) => {
+          const assets = generatedAssetsForCall(call);
+          if (!assets.length) return;
+          const callIdentity = `${String(call.agentRunId || "")}\u0000${String(call.id || assets.map((asset) => asset.assetId).join(":"))}`;
+          if (renderedGeneratedImageCalls.has(callIdentity)) return;
+          renderedGeneratedImageCalls.add(callIdentity);
+          const gallery = renderGeneratedAssetGallery(call);
+          if (gallery) pendingGeneratedImageRows.push(gallery);
+        });
+      };
+      const flushGeneratedImageOutputs = () => {
+        if (!pendingGeneratedImageRows.length) return;
+        rows.push(...pendingGeneratedImageRows);
+        pendingGeneratedImageRows = [];
+      };
       const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
         const existingIndexes = new Set(pendingProcess.map((item) => item.index));
@@ -2397,6 +2416,9 @@
           expandedToolProcesses,
           expandedToolItems,
         }));
+        queueGeneratedImageOutputs(
+          collectToolProcess(pendingProcess).calls.map(getProcessCallView),
+        );
         if (pendingProcessAfterRows.length) rows.push(...pendingProcessAfterRows);
         pendingProcess = [];
         pendingProcessAfterRows = [];
@@ -2424,9 +2446,11 @@
       };
       const closeExecutionTrace = (options = {}) => {
         flushProcess(options);
-        if (openExecutionTraceUserIndex < 0) return;
-        rows.push("</div></section>");
-        openExecutionTraceUserIndex = -1;
+        if (openExecutionTraceUserIndex >= 0) {
+          rows.push("</div></section>");
+          openExecutionTraceUserIndex = -1;
+        }
+        flushGeneratedImageOutputs();
       };
       const insertBranchMarker = () => {
         if (!branchMarker || branchMarkerInserted) return;
