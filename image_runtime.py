@@ -1221,28 +1221,106 @@ class GeneratedAssetRepository:
                 raise ImageRuntimeError("generated_asset_corrupt", "Generated asset metadata does not match its bytes.", http_status=409)
             return data, meta
 
-    def delete_session_assets(self, session_id: str) -> int:
+    def snapshot_session_assets(self, session_id: str) -> list[dict]:
+        """Capture one Session's owned asset files for an in-memory rollback.
+
+        The snapshot never crosses the repository boundary or enters logs.  It
+        exists only while an explicit Session deletion holds the repository
+        lock, so a later failure can restore every already-removed asset.
+        """
         normalized_session = str(session_id or "")
         if not normalized_session or not self.root.exists():
-            return 0
-        removed = 0
-        try:
-            with self._lock:
+            return []
+        snapshots = []
+        with self._lock:
+            try:
                 for candidate in list(self.root.iterdir()):
                     if not candidate.is_dir() or not self._valid_asset_id(candidate.name):
                         continue
                     meta = self._read_meta_dir(candidate)
                     if not meta or str(meta.get("sessionId") or "") != normalized_session:
                         continue
-                    target = candidate.resolve()
-                    root = self.root.resolve()
-                    if root not in target.parents:
-                        raise ImageRuntimeError("generated_asset_cleanup_failed", "Generated asset cleanup target was rejected.")
+                    files = {}
+                    for file_path in candidate.rglob("*"):
+                        if not file_path.is_file():
+                            continue
+                        relative = file_path.relative_to(candidate).as_posix()
+                        files[relative] = file_path.read_bytes()
+                    snapshots.append({"assetId": candidate.name, "files": files})
+            except OSError as exc:
+                raise ImageRuntimeError(
+                    "generated_asset_cleanup_failed",
+                    "Generated asset cleanup could not be prepared.",
+                    retryable=True,
+                    http_status=503,
+                ) from exc
+        return snapshots
+
+    def restore_session_assets(self, snapshots: list[dict]) -> None:
+        """Restore a trusted in-memory snapshot after a delete transaction fails."""
+        with self._lock:
+            try:
+                for snapshot in snapshots or []:
+                    asset_id = str(snapshot.get("assetId") or "")
+                    target = self._asset_dir(asset_id)
+                    target.mkdir(parents=True, exist_ok=True)
+                    for relative, payload in (snapshot.get("files") or {}).items():
+                        relative_path = Path(str(relative or ""))
+                        if (
+                            not relative_path.parts
+                            or relative_path.is_absolute()
+                            or ".." in relative_path.parts
+                        ):
+                            raise ImageRuntimeError(
+                                "generated_asset_cleanup_failed",
+                                "Generated asset rollback target was rejected.",
+                            )
+                        file_path = (target / relative_path).resolve()
+                        if target.resolve() not in file_path.parents:
+                            raise ImageRuntimeError(
+                                "generated_asset_cleanup_failed",
+                                "Generated asset rollback target was rejected.",
+                            )
+                        file_path.parent.mkdir(parents=True, exist_ok=True)
+                        file_path.write_bytes(bytes(payload))
+            except ImageRuntimeError:
+                raise
+            except OSError as exc:
+                raise ImageRuntimeError(
+                    "generated_asset_cleanup_failed",
+                    "Generated asset cleanup rollback could not be completed.",
+                    retryable=True,
+                    http_status=503,
+                ) from exc
+
+    def delete_session_assets(self, session_id: str, *, snapshots: list[dict] | None = None) -> int:
+        normalized_session = str(session_id or "")
+        if not normalized_session or not self.root.exists():
+            return 0
+        removed = 0
+        owned_snapshots = snapshots
+        try:
+            with self._lock:
+                if owned_snapshots is None:
+                    owned_snapshots = self.snapshot_session_assets(normalized_session)
+                for snapshot in owned_snapshots:
+                    target = self._asset_dir(str(snapshot.get("assetId") or ""))
+                    if not target.exists():
+                        continue
                     shutil.rmtree(target)
                     removed += 1
         except ImageRuntimeError:
             raise
         except OSError as exc:
+            try:
+                self.restore_session_assets(owned_snapshots or [])
+            except ImageRuntimeError as rollback_exc:
+                raise ImageRuntimeError(
+                    "generated_asset_cleanup_failed",
+                    "Generated asset cleanup and rollback could not be completed.",
+                    retryable=False,
+                    http_status=500,
+                ) from rollback_exc
             raise ImageRuntimeError(
                 "generated_asset_cleanup_failed",
                 "Generated asset cleanup could not be completed.",

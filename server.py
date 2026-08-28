@@ -796,6 +796,9 @@ class _FaviconProxy:
 _favicon_proxy = _FaviconProxy()
 
 _json_write_lock = threading.RLock()
+_session_lifecycle_locks_guard = threading.Lock()
+_session_lifecycle_locks = {}
+_deleted_session_ids = set()
 _edit_apply_lock = threading.RLock()
 _model_runtime_runs = {}
 _model_runtime_lock = threading.RLock()
@@ -5868,6 +5871,14 @@ def _agent_goal_prepare_operation(run, call, execution):
 
 
 def _execute_agent_goal_operation(run, call, execution):
+    session_id = safe_session_id(str(run.get("session_id") or ""))
+    with _session_lifecycle_lock(session_id):
+        if _session_was_deleted(session_id) or not session_path(session_id).exists():
+            raise GoalV2ContextError("Goal Session no longer exists")
+        return _execute_agent_goal_operation_unlocked(run, call, execution)
+
+
+def _execute_agent_goal_operation_unlocked(run, call, execution):
     prepared = _agent_goal_prepare_operation(run, call, execution)
     runtime = goal_v2_runtime()
     context = _agent_goal_context(run)
@@ -6064,14 +6075,24 @@ def _execute_agent_image_generation(run, call, execution):
             outcome_unknown=True,
         ) from exc
     try:
-        result = _generated_asset_repository.save_operation(
-            operation_id,
-            str(run.get("session_id") or ""),
-            str(run.get("id") or ""),
-            str(call.get("id") or ""),
-            images,
-            created_at=now_iso(),
-        )
+        session_id = safe_session_id(str(run.get("session_id") or ""))
+        with _session_lifecycle_lock(session_id):
+            if _session_was_deleted(session_id) or not session_path(session_id).exists():
+                raise ImageRuntimeError(
+                    "image_session_deleted",
+                    "The Session was deleted after image dispatch; no asset was stored.",
+                    retryable=False,
+                    http_status=410,
+                    outcome_unknown=True,
+                )
+            result = _generated_asset_repository.save_operation(
+                operation_id,
+                session_id,
+                str(run.get("id") or ""),
+                str(call.get("id") or ""),
+                images,
+                created_at=now_iso(),
+            )
     except ImageRuntimeError:
         raise
     except Exception as exc:
@@ -10032,19 +10053,61 @@ def _write_session_index_entry(
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _remove_session_index_entry(session_id):
-    """Remove an entry from session_index.jsonl by rewriting the file."""
-    index = _read_session_index()
-    index.pop(session_id, None)
-    entries = list(index.values())
-    _sort_sessions_by_last_message(entries)
-    payload = "\n".join(
-        json.dumps(e, ensure_ascii=False) for e in entries
-    ) + ("\n" if entries else "")
+def _path_snapshot(path):
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_path_snapshot(path, payload):
+    if payload is None:
+        if not path.exists():
+            return
+        path.unlink(missing_ok=True)
+        return
+    try:
+        if path.read_bytes() == payload:
+            return
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.restore.tmp")
+    try:
+        temp_path.write_bytes(payload)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_session_index_payload(payload):
     ipath = _session_index_path()
     ipath.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = ipath.with_name(f".{ipath.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(payload, encoding="utf-8")
+        os.replace(temp_path, ipath)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _remove_session_index_entry(session_id):
+    """Remove an entry from session_index.jsonl by rewriting the file."""
     with _json_write_lock:
-        ipath.write_text(payload, encoding="utf-8")
+        index = _read_session_index()
+        index.pop(session_id, None)
+        entries = list(index.values())
+        _sort_sessions_by_last_message(entries)
+        payload = "\n".join(
+            json.dumps(e, ensure_ascii=False) for e in entries
+        ) + ("\n" if entries else "")
+        _write_session_index_payload(payload)
 
 
 def _rebuild_index_if_needed():
@@ -12272,6 +12335,59 @@ def safe_session_id(session_id):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", session_id or ""):
         raise ValueError("invalid session id")
     return session_id
+
+
+class SessionDeleteError(RuntimeError):
+    """Stable public projection for a rolled-back Session deletion."""
+
+    def __init__(self, *, recovery_failed=False):
+        super().__init__("Session deletion could not be completed safely.")
+        self.error_code = (
+            "session_delete_recovery_failed"
+            if recovery_failed
+            else "session_delete_failed"
+        )
+        self.retryable = not recovery_failed
+        self.http_status = 500 if recovery_failed else 503
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": self.retryable,
+        }
+
+
+def _session_lifecycle_lock(session_id):
+    safe_id = safe_session_id(str(session_id or ""))
+    key = (os.path.normcase(str(DATA_DIR.resolve(strict=False))), safe_id)
+    with _session_lifecycle_locks_guard:
+        lock = _session_lifecycle_locks.setdefault(key, threading.RLock())
+    return lock
+
+
+def _session_was_deleted(session_id):
+    key = (
+        os.path.normcase(str(DATA_DIR.resolve(strict=False))),
+        str(session_id or ""),
+    )
+    return key in _deleted_session_ids
+
+
+def _mark_session_deleted(session_id):
+    key = (
+        os.path.normcase(str(DATA_DIR.resolve(strict=False))),
+        str(session_id or ""),
+    )
+    _deleted_session_ids.add(key)
+
+
+def _mark_session_created(session_id):
+    key = (
+        os.path.normcase(str(DATA_DIR.resolve(strict=False))),
+        str(session_id or ""),
+    )
+    _deleted_session_ids.discard(key)
 
 
 def session_path(session_id):
@@ -17678,7 +17794,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                 self.delete_project(pid)
                 return
             if self.path.startswith("/api/sessions/"):
-                self.delete_session(self.path.rsplit("/", 1)[-1])
+                try:
+                    self.delete_session(self.path.rsplit("/", 1)[-1])
+                except SessionDeleteError as exc:
+                    self.send_json(exc.public_payload(), exc.http_status)
                 return
         except Exception as exc:
             self.send_json({"error": str(exc)}, 400)
@@ -18092,6 +18211,11 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json({"data": sessions})
 
     def get_session(self, session_id):
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            return CodeHandler._get_session_unlocked(self, session_id)
+
+    def _get_session_unlocked(self, session_id):
         path = session_path(session_id)
         if not path.exists():
             self.send_json({"error": "session not found"}, 404)
@@ -18109,38 +18233,43 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def get_session_goal_v2(self, session_id):
         """Return only the isolated Goal v2 projection for one Session."""
-        if not session_path(session_id).exists():
-            self.send_json({"error": "session not found"}, 404)
-            return
-        self.send_json({"data": goal_v2_runtime().read(session_id).projection()})
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            if not session_path(session_id).exists():
+                self.send_json({"error": "session not found"}, 404)
+                return
+            self.send_json({"data": goal_v2_runtime().read(session_id).projection()})
 
     def control_session_goal_v2(self, session_id):
         """Apply one strict user-owned Goal v2 control operation."""
-        if not session_path(session_id).exists():
-            self.send_json({"error": "session not found"}, 404)
-            return
-        try:
-            result = control_goal_v2(session_id, self.read_body_json())
-        except (GoalV2ConflictError, GoalV2CorruptionError) as exc:
-            self.send_json({
-                "error": str(exc), "errorCode": "goal_v2_conflict",
-            }, 409)
-            return
-        except (GoalV2ProtocolError, GoalV2ContextError, ValueError) as exc:
-            self.send_json({
-                "error": str(exc), "errorCode": "goal_v2_invalid",
-            }, 400)
-            return
-        except GoalV2PersistenceError as exc:
-            self.send_json({
-                "error": str(exc), "errorCode": "goal_v2_persistence_failed",
-            }, 503)
-            return
-        self.send_json({"data": result})
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            if not session_path(session_id).exists():
+                self.send_json({"error": "session not found"}, 404)
+                return
+            try:
+                result = control_goal_v2(session_id, self.read_body_json())
+            except (GoalV2ConflictError, GoalV2CorruptionError) as exc:
+                self.send_json({
+                    "error": str(exc), "errorCode": "goal_v2_conflict",
+                }, 409)
+                return
+            except (GoalV2ProtocolError, GoalV2ContextError, ValueError) as exc:
+                self.send_json({
+                    "error": str(exc), "errorCode": "goal_v2_invalid",
+                }, 400)
+                return
+            except GoalV2PersistenceError as exc:
+                self.send_json({
+                    "error": str(exc), "errorCode": "goal_v2_persistence_failed",
+                }, 503)
+                return
+            self.send_json({"data": result})
 
     def create_session(self):
         body = self.read_body_json()
         session_id = uuid.uuid4().hex[:16]
+        _mark_session_created(session_id)
         messages = body.get("messages") or []
         project_id, cwd = _session_location(
             body.get("projectId"),
@@ -18190,6 +18319,18 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json(_session_api_record(meta), 201)
 
     def save_session(self, session_id):
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            if _session_was_deleted(session_id) and not session_path(session_id).exists():
+                self.send_json({
+                    "error": "Session was deleted and cannot be restored by a stale save.",
+                    "errorCode": "session_deleted",
+                    "retryable": False,
+                }, 410)
+                return
+            return CodeHandler._save_session_unlocked(self, session_id)
+
+    def _save_session_unlocked(self, session_id):
         body = self.read_body_json()
         path = session_path(session_id)
         with _json_write_lock:
@@ -18334,48 +18475,95 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "path": str(path)})
 
     def delete_session(self, session_id):
-        path = session_path(session_id)
-        jpath = messages_path(session_id)
-        if path.exists():
-            goal_v2_runtime().service.delete_sidecar(session_id)
-            session = read_json(path, {})
-            parent_id = session.get("_parentId")
-            child_ids = session.get("_branches") or []
-            deleted_depth = session.get("_branchDepth", 0)
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            with _json_write_lock:
+                path = session_path(session_id)
+                jpath = messages_path(session_id)
+                session = read_json(path, {}) if path.exists() else {}
+                parent_id = session.get("_parentId")
+                child_ids = [
+                    str(child_id)
+                    for child_id in (session.get("_branches") or [])
+                    if isinstance(child_id, str)
+                ]
+                deleted_depth = session.get("_branchDepth", 0)
+                related_paths = []
+                if parent_id:
+                    related_paths.append(session_path(parent_id))
+                related_paths.extend(session_path(child_id) for child_id in child_ids)
+                snapshots = {
+                    path: _path_snapshot(path),
+                    jpath: _path_snapshot(jpath),
+                    _session_index_path(): _path_snapshot(_session_index_path()),
+                }
+                for related_path in related_paths:
+                    snapshots.setdefault(related_path, _path_snapshot(related_path))
+                goal_service = goal_v2_runtime().service
+                goal_path = goal_service.events_path(session_id)
+                goal_snapshot = _path_snapshot(goal_path)
+                asset_snapshots = []
+                try:
+                    asset_snapshots = (
+                        _generated_asset_repository.snapshot_session_assets(session_id)
+                    )
+                    # Remove the primary Session files first. A Windows sharing
+                    # violation therefore happens before any sidecar or asset is
+                    # changed, while later failures can restore these snapshots.
+                    path.unlink(missing_ok=True)
+                    jpath.unlink(missing_ok=True)
+                    _generated_asset_repository.delete_session_assets(
+                        session_id,
+                        snapshots=asset_snapshots,
+                    )
 
-            # 1. Remove from parent's _branches
-            if parent_id:
-                parent_path = session_path(parent_id)
-                if parent_path.exists():
-                    parent_data = read_json(parent_path, {})
-                    branches = parent_data.get("_branches") or []
-                    if session_id in branches:
-                        branches.remove(session_id)
-                    # 2. Re-parent children to grandparent
-                    for cid in child_ids:
-                        child_path = session_path(cid)
-                        if child_path.exists():
-                            child = read_json(child_path, {})
-                            child["_parentId"] = parent_id
-                            child["_branchDepth"] = deleted_depth
-                            write_json(child_path, child)
-                            branches.append(cid)
-                    parent_data["_branches"] = branches
-                    write_json(parent_path, parent_data)
-            else:
-                # Root session: children become new roots
-                for cid in child_ids:
-                    child_path = session_path(cid)
-                    if child_path.exists():
-                        child = read_json(child_path, {})
-                        child.pop("_parentId", None)
-                        child["_branchDepth"] = 0
-                        write_json(child_path, child)
+                    # Preserve the established branch re-parenting behavior.
+                    if parent_id:
+                        parent_path = session_path(parent_id)
+                        if parent_path.exists():
+                            parent_data = read_json(parent_path, {})
+                            branches = list(parent_data.get("_branches") or [])
+                            if session_id in branches:
+                                branches.remove(session_id)
+                            for child_id in child_ids:
+                                child_path = session_path(child_id)
+                                if child_path.exists():
+                                    child = read_json(child_path, {})
+                                    child["_parentId"] = parent_id
+                                    child["_branchDepth"] = deleted_depth
+                                    write_json(child_path, child)
+                                    if child_id not in branches:
+                                        branches.append(child_id)
+                            parent_data["_branches"] = branches
+                            write_json(parent_path, parent_data)
+                    else:
+                        for child_id in child_ids:
+                            child_path = session_path(child_id)
+                            if child_path.exists():
+                                child = read_json(child_path, {})
+                                child.pop("_parentId", None)
+                                child["_branchDepth"] = 0
+                                write_json(child_path, child)
 
-            _generated_asset_repository.delete_session_assets(session_id)
-            path.unlink(missing_ok=True)
-            jpath.unlink(missing_ok=True)
-            _remove_session_index_entry(session_id)
+                    _remove_session_index_entry(session_id)
+                    # Goal facts are last: if the locked unlink fails, every
+                    # earlier mutation is still covered by the rollback set.
+                    goal_service.delete_sidecar(session_id)
+                except Exception as exc:
+                    rollback_failed = False
+                    try:
+                        for snapshot_path, payload in snapshots.items():
+                            _restore_path_snapshot(snapshot_path, payload)
+                        _restore_path_snapshot(goal_path, goal_snapshot)
+                        _generated_asset_repository.restore_session_assets(
+                            asset_snapshots,
+                        )
+                    except Exception:
+                        rollback_failed = True
+                    raise SessionDeleteError(
+                        recovery_failed=rollback_failed,
+                    ) from exc
+                _mark_session_deleted(session_id)
         self.send_json({"ok": True})
 
     def branch_session(self, parent_id):
@@ -18467,6 +18655,17 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json(_session_api_record(child_meta), 201)
 
     def append_messages(self, session_id):
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            if _session_was_deleted(session_id) or not session_path(session_id).exists():
+                self.send_json({
+                    "error": "session not found",
+                    "errorCode": "session_deleted" if _session_was_deleted(session_id) else "session_not_found",
+                }, 410 if _session_was_deleted(session_id) else 404)
+                return
+            return CodeHandler._append_messages_unlocked(self, session_id)
+
+    def _append_messages_unlocked(self, session_id):
         """Append messages to an existing session's JSONL (incremental save)."""
         body = self.read_body_json()
         new_msgs = body.get("messages") or []

@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
 import socket
 import tempfile
 import threading
@@ -859,6 +860,33 @@ class GeneratedAssetRepositoryTests(unittest.TestCase):
             self.repository.read("session-a", first["assets"][0]["assetId"])
         self.assertTrue(self.repository.read("session-b", second["assets"][0]["assetId"])[0])
         self.assertEqual(self.repository.delete_session_assets("session-a"), 0)
+
+    def test_session_cleanup_restores_all_assets_after_partial_filesystem_failure(self):
+        first = self.repository.save_operation(
+            "operation-a", "session-a", "run-a", "call-a", self.images,
+            created_at="2026-08-28T00:00:00Z",
+        )
+        second = self.repository.save_operation(
+            "operation-b", "session-a", "run-b", "call-b", self.images,
+            created_at="2026-08-28T00:00:00Z",
+        )
+        original_rmtree = shutil.rmtree
+        calls = 0
+
+        def fail_second_delete(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PermissionError(13, "Permission denied", "generated-asset")
+            return original_rmtree(path, *args, **kwargs)
+
+        with mock.patch("image_runtime.shutil.rmtree", side_effect=fail_second_delete):
+            with self.assertRaises(ImageRuntimeError) as captured:
+                self.repository.delete_session_assets("session-a")
+
+        self.assertEqual(captured.exception.code, "generated_asset_cleanup_failed")
+        self.assertTrue(self.repository.read("session-a", first["assets"][0]["assetId"])[0])
+        self.assertTrue(self.repository.read("session-a", second["assets"][0]["assetId"])[0])
 
 
 if __name__ == "__main__":

@@ -546,6 +546,49 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertTrue(result["notReplayed"])
         self.assertFalse((self.data / "generated-assets").exists())
 
+    def test_session_delete_during_paid_dispatch_never_leaves_a_late_asset(self):
+        run = self._run(session_id="delete-during-image")
+        call = self._queue(run)
+        upstream_entered = threading.Event()
+        release_upstream = threading.Event()
+        errors = []
+        validated = image_runtime.validate_image_bytes(_png())
+
+        def blocked_generate(*_args, **_kwargs):
+            upstream_entered.set()
+            if not release_upstream.wait(5):
+                raise AssertionError("image upstream release was not signalled")
+            return [validated]
+
+        self.client.generate = mock.Mock(side_effect=blocked_generate)
+
+        def execute():
+            try:
+                server_mod._execute_agent_pending_tools(run)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        self.assertTrue(upstream_entered.wait(5))
+
+        handler = object.__new__(server_mod.CodeHandler)
+        handler.send_json = mock.Mock()
+        server_mod.CodeHandler.delete_session(handler, run["session_id"])
+        self.assertEqual(handler.send_json.call_args.args[0], {"ok": True})
+        release_upstream.set()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertEqual(result["errorCode"], "image_session_deleted")
+        self.assertTrue(result["outcomeUnknown"])
+        self.assertTrue(result["notReplayed"])
+        self.assertEqual(self.client.generate.call_count, 1)
+        self.assertEqual(self.assets.snapshot_session_assets(run["session_id"]), [])
+        self.assertFalse(server_mod.session_path(run["session_id"]).exists())
+
     def test_accept_approval_and_missing_runtime_credentials_resume_from_prepared(self):
         run = self._run(permission="accept")
         call = self._queue(run)

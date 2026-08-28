@@ -1,5 +1,6 @@
 import json
 import hashlib
+import os
 import tempfile
 import threading
 import unittest
@@ -1094,6 +1095,273 @@ class TestGoalSessionLifecycle(unittest.TestCase):
             "explicit",
         )
 
+
+class TestSessionDeleteConsistency(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.sessions_dir = self.root / "sessions"
+        self.assets = server.GeneratedAssetRepository(self.root / "generated-assets")
+        self.patch_sessions = mock.patch.object(server, "SESSIONS_DIR", self.sessions_dir)
+        self.patch_data = mock.patch.object(server, "DATA_DIR", self.root)
+        self.patch_assets = mock.patch.object(
+            server,
+            "_generated_asset_repository",
+            self.assets,
+        )
+        self.patch_sessions.start()
+        self.patch_data.start()
+        self.patch_assets.start()
+        self.addCleanup(self.patch_sessions.stop)
+        self.addCleanup(self.patch_data.stop)
+        self.addCleanup(self.patch_assets.stop)
+
+    @staticmethod
+    def make_handler(body=None, *, path=""):
+        handler = object.__new__(server.CodeHandler)
+        handler.path = path
+        handler.read_body_json = mock.Mock(return_value=body or {})
+        handler.send_json = mock.Mock()
+        return handler
+
+    def create_session(self, messages=None):
+        handler = self.make_handler({
+            "title": "Delete consistency",
+            "messages": messages or [{"role": "user", "content": "keep consistent"}],
+        })
+        server.CodeHandler.create_session(handler)
+        return handler.send_json.call_args.args[0]
+
+    def create_goal(self, session_id):
+        return GoalV2Runtime(self.root).create_goal(
+            session_id,
+            "Keep Session deletion consistent",
+            context=GoalCreationContext(
+                session_id=session_id,
+                origin_message_id="message-delete-consistency",
+                client_request_id="request-delete-consistency",
+                owner_run_id="run-delete-consistency",
+                permission_profile="read",
+                source_kind="explicit",
+            ),
+            expected_revision=0,
+            idempotency_key="create-delete-consistency-goal",
+        )
+
+    def create_asset(self, session_id, marker="a"):
+        asset_id = "ga1_" + (str(marker)[:1] * 43)
+        asset_dir = self.assets.root / asset_id
+        asset_dir.mkdir(parents=True)
+        (asset_dir / "content.png").write_bytes(b"not-read-by-delete")
+        (asset_dir / "meta.json").write_text(json.dumps({
+            "schema": "code-generated-asset/v1",
+            "assetId": asset_id,
+            "operationId": f"operation-delete-consistency-{marker}",
+            "sessionId": session_id,
+            "agentRunId": "run-delete-consistency",
+            "toolCallId": "call-delete-consistency",
+            "index": 0,
+            "sha256": "0" * 64,
+            "mimeType": "image/png",
+            "width": 1,
+            "height": 1,
+            "byteLength": 18,
+            "createdAt": "2026-08-28T00:00:00Z",
+            "fileName": "content.png",
+        }), encoding="utf-8")
+        return asset_dir
+
+    @unittest.skipUnless(os.name == "nt", "Windows file sharing semantics")
+    def test_delete_file_lock_is_sanitized_and_rolls_back_all_session_state(self):
+        session = self.create_session()
+        session_id = session["id"]
+        session_path = server.session_path(session_id)
+        message_path = server.messages_path(session_id)
+        goal_path = GoalV2Runtime(self.root).service.events_path(session_id)
+        asset_dir = self.create_asset(session_id)
+        self.create_goal(session_id)
+        index_before = server._session_index_path().read_bytes()
+
+        handler = self.make_handler(path=f"/api/sessions/{session_id}")
+        with session_path.open("rb"):
+            server.CodeHandler.do_DELETE(handler)
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload, {
+            "error": "Session deletion could not be completed safely.",
+            "errorCode": "session_delete_failed",
+            "retryable": True,
+        })
+        self.assertTrue(session_path.exists())
+        self.assertTrue(message_path.exists())
+        self.assertTrue(goal_path.exists())
+        self.assertTrue(asset_dir.exists())
+        self.assertEqual(server._session_index_path().read_bytes(), index_before)
+
+    def test_delete_removes_session_goal_owned_assets_and_index_idempotently(self):
+        first = self.create_session()
+        second = self.create_session()
+        first_goal = GoalV2Runtime(self.root).service.events_path(first["id"])
+        second_goal = GoalV2Runtime(self.root).service.events_path(second["id"])
+        self.create_goal(first["id"])
+        self.create_goal(second["id"])
+        first_assets = [
+            self.create_asset(first["id"], "a"),
+            self.create_asset(first["id"], "b"),
+        ]
+        second_asset = self.create_asset(second["id"], "c")
+
+        delete = self.make_handler()
+        server.CodeHandler.delete_session(delete, first["id"])
+        self.assertEqual(delete.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(server.session_path(first["id"]).exists())
+        self.assertFalse(server.messages_path(first["id"]).exists())
+        self.assertFalse(first_goal.exists())
+        self.assertTrue(all(not path.exists() for path in first_assets))
+        self.assertNotIn(first["id"], server._read_session_index())
+
+        self.assertTrue(server.session_path(second["id"]).exists())
+        self.assertTrue(server.messages_path(second["id"]).exists())
+        self.assertTrue(second_goal.exists())
+        self.assertTrue(second_asset.exists())
+        self.assertIn(second["id"], server._read_session_index())
+
+        repeated = self.make_handler()
+        server.CodeHandler.delete_session(repeated, first["id"])
+        self.assertEqual(repeated.send_json.call_args.args[0], {"ok": True})
+        restarted_assets = server.GeneratedAssetRepository(self.assets.root)
+        self.assertEqual(restarted_assets.snapshot_session_assets(first["id"]), [])
+        self.assertFalse(GoalV2Runtime(self.root).read(first["id"]).exists)
+
+    def test_index_failure_rolls_back_session_goal_assets_and_index(self):
+        session = self.create_session()
+        session_id = session["id"]
+        session_path = server.session_path(session_id)
+        message_path = server.messages_path(session_id)
+        self.create_goal(session_id)
+        goal_path = GoalV2Runtime(self.root).service.events_path(session_id)
+        asset_dir = self.create_asset(session_id)
+        index_before = server._session_index_path().read_bytes()
+
+        handler = self.make_handler(path=f"/api/sessions/{session_id}")
+        with mock.patch.object(
+            server,
+            "_remove_session_index_entry",
+            side_effect=PermissionError(13, "Permission denied", "session-index.jsonl"),
+        ):
+            server.CodeHandler.do_DELETE(handler)
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_delete_failed")
+        self.assertNotIn(str(self.root), json.dumps(payload))
+        self.assertTrue(session_path.exists())
+        self.assertTrue(message_path.exists())
+        self.assertTrue(goal_path.exists())
+        self.assertTrue(asset_dir.exists())
+        self.assertEqual(server._session_index_path().read_bytes(), index_before)
+
+    def test_goal_failure_rolls_back_session_assets_and_index(self):
+        session = self.create_session()
+        session_id = session["id"]
+        session_path = server.session_path(session_id)
+        message_path = server.messages_path(session_id)
+        self.create_goal(session_id)
+        goal_path = GoalV2Runtime(self.root).service.events_path(session_id)
+        asset_dir = self.create_asset(session_id)
+        index_before = server._session_index_path().read_bytes()
+
+        handler = self.make_handler(path=f"/api/sessions/{session_id}")
+        with mock.patch(
+            "goal_v2_store.GoalV2Service.delete_sidecar",
+            side_effect=PermissionError(13, "Permission denied", "goal-sidecar.jsonl"),
+        ):
+            server.CodeHandler.do_DELETE(handler)
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_delete_failed")
+        self.assertNotIn(str(self.root), json.dumps(payload))
+        self.assertTrue(session_path.exists())
+        self.assertTrue(message_path.exists())
+        self.assertTrue(goal_path.exists())
+        self.assertTrue(asset_dir.exists())
+        self.assertEqual(server._session_index_path().read_bytes(), index_before)
+
+    def test_stale_save_after_delete_is_rejected_without_resurrection(self):
+        session = self.create_session()
+        session_id = session["id"]
+        deleted = self.make_handler()
+        server.CodeHandler.delete_session(deleted, session_id)
+
+        stale = self.make_handler({
+            "title": "stale save",
+            "messages": [{"role": "user", "content": "must not return"}],
+            "expectedRevision": session.get("revision", 0),
+        })
+        server.CodeHandler.save_session(stale, session_id)
+
+        payload, status = stale.send_json.call_args.args
+        self.assertEqual(status, 410)
+        self.assertEqual(payload["errorCode"], "session_deleted")
+        self.assertFalse(server.session_path(session_id).exists())
+        self.assertFalse(server.messages_path(session_id).exists())
+        self.assertNotIn(session_id, server._read_session_index())
+
+    def test_concurrent_save_completes_before_delete_and_cannot_revive_session(self):
+        session = self.create_session()
+        session_id = session["id"]
+        save_entered = threading.Event()
+        release_save = threading.Event()
+        original_write_jsonl = server.write_jsonl
+        errors = []
+
+        def blocked_write(path, messages):
+            if Path(path) == server.messages_path(session_id):
+                save_entered.set()
+                if not release_save.wait(5):
+                    raise AssertionError("save release was not signalled")
+            return original_write_jsonl(path, messages)
+
+        save = self.make_handler({
+            "title": "concurrent save",
+            "messages": [{"role": "user", "content": "saved before delete"}],
+            "expectedRevision": session.get("revision", 0),
+        })
+        deleted = self.make_handler()
+
+        def run_save():
+            try:
+                server.CodeHandler.save_session(save, session_id)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        def run_delete():
+            try:
+                server.CodeHandler.delete_session(deleted, session_id)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        with mock.patch.object(server, "write_jsonl", side_effect=blocked_write):
+            save_thread = threading.Thread(target=run_save)
+            delete_thread = threading.Thread(target=run_delete)
+            save_thread.start()
+            self.assertTrue(save_entered.wait(5))
+            delete_thread.start()
+            release_save.set()
+            save_thread.join(timeout=5)
+            delete_thread.join(timeout=5)
+
+        self.assertFalse(save_thread.is_alive())
+        self.assertFalse(delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(save.send_json.call_args.args[0]["revision"], 1)
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(server.session_path(session_id).exists())
+        self.assertFalse(server.messages_path(session_id).exists())
+        self.assertNotIn(session_id, server._read_session_index())
 
 if __name__ == "__main__":
     unittest.main()
