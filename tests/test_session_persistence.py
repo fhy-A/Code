@@ -2,6 +2,7 @@ import json
 import hashlib
 import http.client
 import os
+import shutil
 import tempfile
 import threading
 import unittest
@@ -835,6 +836,173 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         with server._agent_run_lock:
             server._agent_runs[run_id] = dict(run)
         return run_id, path
+
+    def test_preexisting_unowned_archive_directory_is_ignored_without_mutation(self):
+        active = self.create_session(title="Legacy backup compatibility")
+        legacy = self.root / "session-archive" / "latency-test-20260731-040804"
+        legacy.mkdir(parents=True)
+        sentinel = legacy / "opaque-backup.bin"
+        sentinel.write_bytes(b"PRE-CODE009-LEGACY-BACKUP-SENTINEL")
+        metadata_before = {
+            "bytes": sentinel.read_bytes(),
+            "mtime": sentinel.stat().st_mtime_ns,
+            "entries": sorted(path.name for path in legacy.iterdir()),
+        }
+
+        active_handler = self.make_handler()
+        server.CodeHandler.get_sessions(active_handler)
+        archive_handler = self.make_handler()
+        server.CodeHandler.get_archived_sessions(archive_handler)
+
+        self.assertEqual(active_handler.send_json.call_args.args[0]["data"][0]["id"], active["id"])
+        self.assertEqual(archive_handler.send_json.call_args.args[0], {"data": []})
+        self.assertEqual(active_handler.send_json.call_args.args[1:] or (200,), (200,))
+        self.assertEqual(archive_handler.send_json.call_args.args[1:] or (200,), (200,))
+        self.assertEqual(sentinel.read_bytes(), metadata_before["bytes"])
+        self.assertEqual(sentinel.stat().st_mtime_ns, metadata_before["mtime"])
+        self.assertEqual(sorted(path.name for path in legacy.iterdir()), metadata_before["entries"])
+
+    def test_new_archives_use_owned_versioned_namespace(self):
+        session = self.create_session(title="Managed namespace")
+        archived = self.archive(session["id"])
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        bundle = server._session_archive_bundle_path(session["id"])
+        self.assertEqual(
+            bundle.parent,
+            self.root / "session-archive" / server._SESSION_ARCHIVE_NAMESPACE_NAME,
+        )
+        self.assertTrue(bundle.is_dir())
+        self.assertEqual(
+            server.read_json(server._session_archive_managed_marker_path(), {}),
+            {"schema": server._SESSION_ARCHIVE_NAMESPACE_SCHEMA},
+        )
+        self.assertFalse((self.root / "session-archive" / session["id"]).exists())
+
+    def test_valid_root_v1_bundle_restores_rearchives_and_deletes_after_restart(self):
+        session = self.create_session(title="Root v1 compatibility")
+        session_id = session["id"]
+        goal_path = self.create_terminal_goal(session_id)
+        asset_path = self.create_asset_sidecar(session_id, "r")
+        _, run_path = self.create_terminal_agent_run(session_id, "r")
+        first = self.archive(session_id).send_json.call_args.args[0]
+        managed_bundle = server._session_archive_bundle_path(session_id)
+        root_bundle = self.root / "session-archive" / session_id
+        shutil.move(str(managed_bundle), str(root_bundle))
+
+        server._recover_all_session_archive_transactions()
+        self.assertEqual(server._session_archive_bundle_path(session_id), root_bundle)
+        summaries = self.archive_summary()
+        self.assertEqual([item["id"] for item in summaries], [session_id])
+        self.assertEqual(summaries[0]["archiveToken"], first["archiveToken"])
+
+        restored = self.unarchive(session_id)
+        self.assertEqual(restored.send_json.call_args.args[0], {"ok": True, "status": "active"})
+        self.assertFalse(root_bundle.exists())
+        self.assertTrue(server.session_path(session_id).exists())
+        self.assertTrue(server.messages_path(session_id).exists())
+        self.assertTrue(goal_path.exists())
+        self.assertTrue(asset_path.exists())
+        self.assertTrue(run_path.exists())
+
+        second = self.archive(session_id).send_json.call_args.args[0]
+        self.assertNotEqual(second["archiveToken"], first["archiveToken"])
+        self.assertEqual(
+            server._session_archive_bundle_path(session_id).parent,
+            server._session_archive_managed_root(),
+        )
+        server._recover_all_session_archive_transactions()
+        deleted = self.make_handler()
+        server.CodeHandler.delete_archived_session(
+            deleted,
+            session_id,
+            second["archiveToken"],
+        )
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(server._session_archive_bundle_path(session_id).exists())
+        self.assertFalse(goal_path.exists())
+        self.assertFalse(asset_path.exists())
+        self.assertFalse(run_path.exists())
+
+    def test_owned_namespace_corruption_fails_closed_but_unmarked_peer_is_ignored(self):
+        active = self.create_session(title="Owned corruption")
+        server._ensure_session_archive_managed_root()
+        corrupt_id = "ownedcorrupt01"
+        corrupt = server._session_archive_managed_bundle_path(corrupt_id)
+        corrupt.mkdir()
+        (corrupt / "session.json").write_text("{}", encoding="utf-8")
+        unowned = self.root / "session-archive" / "external-backup"
+        unowned.mkdir()
+        (unowned / "manifest.backup").write_bytes(b"opaque")
+
+        handler = self.make_handler()
+        server.CodeHandler.get_sessions(handler)
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["errorCode"], "session_archive_recovery_failed")
+        self.assertTrue(server.session_path(active["id"]).exists())
+        self.assertEqual((unowned / "manifest.backup").read_bytes(), b"opaque")
+
+    def test_tampered_root_manifest_is_owned_and_fails_closed(self):
+        corrupt_id = "rootcorrupt01"
+        corrupt = self.root / "session-archive" / corrupt_id
+        corrupt.mkdir(parents=True)
+        (corrupt / "manifest.json").write_text('{"schema":"unexpected"}', encoding="utf-8")
+        handler = self.make_handler()
+        server.CodeHandler.get_archived_sessions(handler)
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["errorCode"], "session_archive_recovery_failed")
+        self.assertTrue((corrupt / "manifest.json").exists())
+
+    def test_root_and_managed_v1_for_same_session_fail_closed(self):
+        session = self.create_session(title="Duplicate namespace")
+        session_id = session["id"]
+        self.archive(session_id)
+        managed = server._session_archive_bundle_path(session_id)
+        root_bundle = self.root / "session-archive" / session_id
+        shutil.copytree(managed, root_bundle)
+
+        active_handler = self.make_handler()
+        server.CodeHandler.get_sessions(active_handler)
+        payload, status = active_handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_archive_location_conflict")
+        archive_handler = self.make_handler()
+        server.CodeHandler.get_archived_sessions(archive_handler)
+        payload, status = archive_handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_archive_location_conflict")
+
+    def test_root_v1_journal_and_staging_recovery_remain_compatible(self):
+        session = self.create_session(title="Root transaction compatibility")
+        session_id = session["id"]
+        self.archive(session_id)
+        managed_bundle = server._session_archive_bundle_path(session_id)
+        root_bundle = self.root / "session-archive" / session_id
+        shutil.move(str(managed_bundle), str(root_bundle))
+        transaction_id = "e" * 32
+        legacy_journal = server._session_archive_legacy_journal_path(session_id)
+        server.write_json(legacy_journal, {
+            "schema": "code-session-archive-transaction/v1",
+            "sessionId": session_id,
+            "action": "archive",
+            "state": "bundle_committed",
+            "transactionId": transaction_id,
+        })
+        orphan_id = "legacystaging01"
+        legacy_staging = server._session_archive_legacy_staging_path(
+            orphan_id,
+            transaction_id,
+        )
+        legacy_staging.mkdir(parents=True)
+        (legacy_staging / "opaque.tmp").write_bytes(b"owned-old-staging")
+
+        server._recover_all_session_archive_transactions()
+
+        self.assertFalse(legacy_journal.exists())
+        self.assertTrue(root_bundle.exists())
+        self.assertFalse(legacy_staging.exists())
+        self.assertEqual(self.archive_summary()[0]["id"], session_id)
 
     def test_archive_unarchive_lists_are_idempotent_secret_free_and_non_destructive(self):
         secret = "ARCHIVE-SECRET-SENTINEL"

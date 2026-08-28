@@ -14205,18 +14205,157 @@ def _session_archive_root():
     return SESSIONS_DIR.parent / "session-archive"
 
 
-def _session_archive_bundle_path(session_id):
+_SESSION_ARCHIVE_NAMESPACE_SCHEMA = "code-session-archive-namespace/v1"
+_SESSION_ARCHIVE_NAMESPACE_NAME = "code-v1"
+_SESSION_ARCHIVE_NAMESPACE_MARKER = ".owner.json"
+
+
+def _session_archive_managed_root():
+    return _session_archive_root() / _SESSION_ARCHIVE_NAMESPACE_NAME
+
+
+def _session_archive_managed_marker_path():
+    return _session_archive_managed_root() / _SESSION_ARCHIVE_NAMESPACE_MARKER
+
+
+def _session_archive_managed_root_owned():
+    """Return ownership without adopting a pre-existing unmarked directory."""
+    managed_root = _session_archive_managed_root()
+    marker_path = _session_archive_managed_marker_path()
+    if not managed_root.exists():
+        return False
+    if not managed_root.is_dir() or not marker_path.is_file():
+        return False
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    if marker != {"schema": _SESSION_ARCHIVE_NAMESPACE_SCHEMA}:
+        raise SessionArchiveMutationError(recovery_failed=True)
+    return True
+
+
+def _ensure_session_archive_managed_root():
+    managed_root = _session_archive_managed_root()
+    if managed_root.exists():
+        if not _session_archive_managed_root_owned():
+            raise SessionArchiveMutationError(recovery_failed=True)
+        return managed_root
+    managed_root.mkdir(parents=True, exist_ok=False)
+    write_json(
+        _session_archive_managed_marker_path(),
+        {"schema": _SESSION_ARCHIVE_NAMESPACE_SCHEMA},
+    )
+    return managed_root
+
+
+def _session_archive_managed_bundle_path(session_id):
+    return _session_archive_managed_root() / safe_session_id(session_id)
+
+
+def _session_archive_legacy_bundle_path(session_id):
     return _session_archive_root() / safe_session_id(session_id)
 
 
-def _session_archive_journal_path(session_id):
+def _session_archive_legacy_bundle_owned(path):
+    return Path(path).is_dir() and (Path(path) / "manifest.json").is_file()
+
+
+def _session_archive_bundle_path(session_id):
+    """Resolve existing v1 storage, defaulting new writes to the managed namespace."""
+    session_id = safe_session_id(session_id)
+    managed = _session_archive_managed_bundle_path(session_id)
+    legacy = _session_archive_legacy_bundle_path(session_id)
+    managed_exists = _session_archive_managed_root_owned() and managed.exists()
+    legacy_exists = _session_archive_legacy_bundle_owned(legacy)
+    if managed_exists and legacy_exists:
+        raise SessionLifecycleConflictError(
+            "session_archive_location_conflict",
+            "Session exists in multiple archive storage locations.",
+        )
+    if managed_exists:
+        return managed
+    if legacy_exists:
+        return legacy
+    return managed
+
+
+def _session_archive_owned_bundle_paths():
+    """Discover only marked v1 storage and valid legacy root-level ownership."""
+    bundles = []
+    managed_root = _session_archive_managed_root()
+    if _session_archive_managed_root_owned():
+        try:
+            managed_entries = tuple(
+                path for path in managed_root.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            )
+        except OSError as exc:
+            raise SessionArchiveMutationError(recovery_failed=True) from exc
+        bundles.extend(managed_entries)
+    archive_root = _session_archive_root()
+    try:
+        legacy_entries = tuple(
+            path for path in archive_root.iterdir()
+            if (
+                path.is_dir()
+                and not path.name.startswith(".")
+                and path.name != _SESSION_ARCHIVE_NAMESPACE_NAME
+                and _session_archive_legacy_bundle_owned(path)
+            )
+        ) if archive_root.exists() else ()
+    except OSError as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    bundles.extend(legacy_entries)
+    by_session = {}
+    for bundle in bundles:
+        try:
+            session_id = safe_session_id(bundle.name)
+        except ValueError as exc:
+            raise SessionArchiveMutationError(recovery_failed=True) from exc
+        if session_id in by_session:
+            raise SessionLifecycleConflictError(
+                "session_archive_location_conflict",
+                "Session exists in multiple archive storage locations.",
+            )
+        by_session[session_id] = bundle
+    return tuple(by_session.values())
+
+
+def _session_archive_legacy_journal_path(session_id):
     return _session_archive_root() / ".transactions" / f"{safe_session_id(session_id)}.json"
 
 
-def _session_archive_staging_path(session_id, transaction_id):
+def _session_archive_journal_path(session_id):
+    session_id = safe_session_id(session_id)
+    managed = _session_archive_managed_root() / ".transactions" / f"{session_id}.json"
+    legacy = _session_archive_legacy_journal_path(session_id)
+    managed_exists = _session_archive_managed_root_owned() and managed.exists()
+    legacy_exists = legacy.exists()
+    if managed_exists and legacy_exists:
+        raise SessionArchiveMutationError(recovery_failed=True)
+    return legacy if legacy_exists else managed
+
+
+def _session_archive_legacy_staging_path(session_id, transaction_id):
     return _session_archive_root() / ".staging" / (
         f"{safe_session_id(session_id)}-{str(transaction_id or '')}"
     )
+
+
+def _session_archive_staging_path(session_id, transaction_id):
+    session_id = safe_session_id(session_id)
+    managed = _session_archive_managed_root() / ".staging" / (
+        f"{session_id}-{str(transaction_id or '')}"
+    )
+    legacy = _session_archive_legacy_staging_path(session_id, transaction_id)
+    managed_exists = _session_archive_managed_root_owned() and managed.exists()
+    legacy_exists = legacy.exists()
+    if managed_exists and legacy_exists:
+        raise SessionArchiveMutationError(recovery_failed=True)
+    if legacy_exists or _session_archive_legacy_journal_path(session_id).exists():
+        return legacy
+    return managed
 
 
 def _normalize_session_archive_transaction_id(value):
@@ -14414,7 +14553,11 @@ def _write_session_archive_journal(session_id, payload):
         raise ValueError("Session archive transaction journal is invalid")
     if action not in allowed_states or state not in allowed_states[action]:
         raise ValueError("Session archive transaction state is invalid")
-    write_json(_session_archive_journal_path(session_id), journal)
+    journal_path = _session_archive_journal_path(session_id)
+    managed_root = _session_archive_managed_root().resolve(strict=False)
+    if managed_root in journal_path.resolve(strict=False).parents:
+        _ensure_session_archive_managed_root()
+    write_json(journal_path, journal)
     return journal
 
 
@@ -14430,8 +14573,11 @@ def _remove_owned_archive_tree(path):
 def _remove_session_archive_staging(session_id, transaction_id):
     transaction_id = _normalize_session_archive_transaction_id(transaction_id)
     target = _session_archive_staging_path(session_id, transaction_id).resolve(strict=False)
-    staging_root = (_session_archive_root() / ".staging").resolve(strict=False)
-    if target.parent != staging_root:
+    staging_roots = {
+        (_session_archive_root() / ".staging").resolve(strict=False),
+        (_session_archive_managed_root() / ".staging").resolve(strict=False),
+    }
+    if target.parent not in staging_roots:
         raise ValueError("Refusing to remove an invalid archive staging path")
     if target.exists():
         shutil.rmtree(target)
@@ -14582,26 +14728,43 @@ def _recover_session_archive_transaction(session_id):
 
 
 def _recover_all_session_archive_transactions():
-    transactions = _session_archive_root() / ".transactions"
+    transaction_roots = [_session_archive_root() / ".transactions"]
+    if _session_archive_managed_root_owned():
+        transaction_roots.append(_session_archive_managed_root() / ".transactions")
     try:
-        journal_paths = tuple(transactions.glob("*.json")) if transactions.exists() else ()
+        journal_paths = tuple(
+            path
+            for transactions in transaction_roots
+            if transactions.exists()
+            for path in transactions.glob("*.json")
+        )
     except OSError as exc:
         raise SessionArchiveMutationError(recovery_failed=True) from exc
+    observed_journal_ids = set()
     for journal_path in journal_paths:
         try:
             session_id = safe_session_id(journal_path.stem)
+            if session_id in observed_journal_ids:
+                raise SessionArchiveMutationError(recovery_failed=True)
+            observed_journal_ids.add(session_id)
             with _session_lifecycle_lock(session_id):
                 _recover_session_archive_transaction(session_id)
         except (SessionLifecycleConflictError, SessionArchiveMutationError):
             raise
         except Exception as exc:
             raise SessionArchiveMutationError(recovery_failed=True) from exc
-    staging_root = _session_archive_root() / ".staging"
+    staging_roots = [_session_archive_root() / ".staging"]
+    if _session_archive_managed_root_owned():
+        staging_roots.append(_session_archive_managed_root() / ".staging")
     try:
         staging_paths = (
-            tuple(path for path in staging_root.iterdir() if path.is_dir())
-            if staging_root.exists()
-            else ()
+            tuple(
+                path
+                for staging_root in staging_roots
+                if staging_root.exists()
+                for path in staging_root.iterdir()
+                if path.is_dir()
+            )
         )
     except OSError as exc:
         raise SessionArchiveMutationError(recovery_failed=True) from exc
@@ -14622,18 +14785,7 @@ def _recover_all_session_archive_transactions():
             raise
         except Exception as exc:
             raise SessionArchiveMutationError(recovery_failed=True) from exc
-    archive_root = _session_archive_root()
-    try:
-        bundles = (
-            tuple(
-                path for path in archive_root.iterdir()
-                if path.is_dir() and not path.name.startswith(".")
-            )
-            if archive_root.exists()
-            else ()
-        )
-    except OSError as exc:
-        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    bundles = _session_archive_owned_bundle_paths()
     for bundle in bundles:
         try:
             session_id = safe_session_id(bundle.name)
@@ -14800,6 +14952,7 @@ def _mutate_session_archive_state(session_id, *, archived):
                 if archived:
                     if not message_path.exists():
                         raise SessionArchiveMutationError()
+                    _ensure_session_archive_managed_root()
                     archived_at = _normalized_session_timestamp(_session_now_iso())
                     archive_token = uuid.uuid4().hex
                     transaction_id = uuid.uuid4().hex
@@ -20934,11 +21087,13 @@ class CodeHandler(BaseHTTPRequestHandler):
             self.send_json(exc.public_payload(), exc.http_status)
             return
         summaries = []
-        archive_root = _session_archive_root()
-        if archive_root.exists():
-            for bundle in archive_root.iterdir():
-                if not bundle.is_dir() or bundle.name.startswith("."):
-                    continue
+        try:
+            bundles = _session_archive_owned_bundle_paths()
+        except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        if bundles:
+            for bundle in bundles:
                 try:
                     session_id = safe_session_id(bundle.name)
                     with _session_lifecycle_lock(session_id):
