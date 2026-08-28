@@ -284,6 +284,149 @@ class ImageUpstreamClientTests(unittest.TestCase):
         self.assertEqual(captured["request"].get_header("Idempotency-key"), "operation-1")
         self.assertEqual(result[0].mime_type, "image/png")
 
+    def test_default_and_max_timeout_allow_simulated_66_second_completion(self):
+        self.assertEqual(image_runtime.IMAGE_TIMEOUT_SECONDS, 180)
+        png = image_bytes("PNG")
+        payload = json.dumps({"data": [{
+            "b64_json": base64.b64encode(png).decode("ascii"),
+        }]}).encode("utf-8")
+
+        for label, timeout_kwargs in (
+            ("default", {}),
+            ("maximum", {"timeout": 999}),
+        ):
+            with self.subTest(timeout=label):
+                now = {"value": 0.0}
+                observed = []
+
+                def clock():
+                    return now["value"]
+
+                def urlopen(req, timeout):
+                    observed.append(timeout)
+                    now["value"] = 66.0
+                    return FakeResponse(payload)
+
+                result = ImageUpstreamClient(
+                    urlopen=urlopen,
+                    clock=clock,
+                ).generate(
+                    self.route,
+                    self.normalized,
+                    f"operation-66-seconds-{label}",
+                    **timeout_kwargs,
+                )
+                self.assertEqual(observed, [180])
+                self.assertEqual(result[0].mime_type, "image/png")
+
+    def test_response_read_and_url_fallback_share_total_deadline(self):
+        png = validate_image_bytes(image_bytes("PNG"))
+        encoded_payload = json.dumps({"data": [{
+            "b64_json": base64.b64encode(png.data).decode("ascii"),
+        }]}).encode("utf-8")
+        now = {"value": 0.0}
+        response_socket = mock.Mock()
+        response = FakeResponse(encoded_payload)
+        response.fp = mock.Mock()
+        response.fp.raw = mock.Mock()
+        response.fp.raw._sock = response_socket
+
+        def clock():
+            return now["value"]
+
+        def response_after_40_seconds(req, timeout):
+            self.assertEqual(timeout, 180)
+            now["value"] = 40.0
+            return response
+
+        result = ImageUpstreamClient(
+            urlopen=response_after_40_seconds,
+            clock=clock,
+        ).generate(
+            self.route,
+            self.normalized,
+            "operation-response-read-budget",
+        )
+        response_socket.settimeout.assert_any_call(140.0)
+        self.assertEqual(result[0].sha256, png.sha256)
+
+        now["value"] = 0.0
+        slow_socket = mock.Mock()
+
+        class SlowResponse(FakeResponse):
+            def __init__(self):
+                super().__init__(encoded_payload)
+                self.fp = mock.Mock()
+                self.fp.raw = mock.Mock()
+                self.fp.raw._sock = slow_socket
+
+            def read(self, size=-1):
+                now["value"] = 181.0
+                return super().read(size)
+
+        def response_finishes_after_deadline(req, timeout):
+            self.assertEqual(timeout, 180)
+            return SlowResponse()
+
+        with self.assertRaises(ImageRuntimeError) as captured:
+            ImageUpstreamClient(
+                urlopen=response_finishes_after_deadline,
+                clock=clock,
+            ).generate(
+                self.route,
+                self.normalized,
+                "operation-response-read-timeout",
+            )
+        self.assertEqual(captured.exception.code, "image_upstream_timeout")
+        self.assertTrue(captured.exception.outcome_unknown)
+        self.assertTrue(captured.exception.public_payload()["notReplayed"])
+        slow_socket.settimeout.assert_called_once_with(180.0)
+
+        for finished_at, expected_code in (
+            (179.0, ""),
+            (181.0, "image_upstream_timeout"),
+        ):
+            with self.subTest(url_fallback_finished_at=finished_at):
+                now = {"value": 0.0}
+                downloader = mock.Mock()
+
+                def urlopen(req, timeout):
+                    self.assertEqual(timeout, 180)
+                    now["value"] = 66.0
+                    return FakeResponse(json.dumps({"data": [{
+                        "url": "https://public.invalid/generated.png",
+                    }]}).encode("utf-8"))
+
+                def download(url, *, timeout):
+                    self.assertEqual(timeout, 114.0)
+                    now["value"] = finished_at
+                    return png
+
+                downloader.fetch.side_effect = download
+                client = ImageUpstreamClient(
+                    urlopen=urlopen,
+                    downloader=downloader,
+                    clock=lambda: now["value"],
+                )
+                if expected_code:
+                    with self.assertRaises(ImageRuntimeError) as captured:
+                        client.generate(
+                            self.route,
+                            self.normalized,
+                            f"operation-url-deadline-{finished_at}",
+                        )
+                    self.assertEqual(captured.exception.code, expected_code)
+                    self.assertTrue(captured.exception.outcome_unknown)
+                    self.assertTrue(captured.exception.public_payload()["notReplayed"])
+                else:
+                    result = client.generate(
+                        self.route,
+                        self.normalized,
+                        f"operation-url-deadline-{finished_at}",
+                    )
+                    self.assertEqual(result[0].sha256, png.sha256)
+                downloader.fetch.assert_called_once()
+
     def test_edit_uses_single_multipart_reference(self):
         captured = {}
         output = image_bytes("WEBP")

@@ -1,5 +1,6 @@
 """AgentRun and route integration coverage for the independent image runtime."""
 
+import base64
 import io
 import json
 import tempfile
@@ -238,6 +239,55 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(meta["toolCallId"], call["id"])
         self.assertEqual((meta["width"], meta["height"]), (3, 2))
 
+    def test_simulated_66_second_completion_persists_one_idempotent_asset(self):
+        now = {"value": 0.0}
+        requests = []
+        payload = json.dumps({"data": [{
+            "b64_json": base64.b64encode(_png()).decode("ascii"),
+        }]}).encode("utf-8")
+
+        class Response:
+            status = 200
+            headers = {"Content-Length": str(len(payload))}
+
+            def __init__(self):
+                self.body = io.BytesIO(payload)
+
+            def read(self, size=-1):
+                return self.body.read(size)
+
+            def close(self):
+                pass
+
+        def urlopen(req, timeout):
+            requests.append({
+                "timeout": timeout,
+                "idempotencyKey": req.get_header("Idempotency-key"),
+            })
+            now["value"] = 66.0
+            return Response()
+
+        client = image_runtime.ImageUpstreamClient(
+            urlopen=urlopen,
+            clock=lambda: now["value"],
+        )
+        run = self._run(permission="bypass", session_id="image-66-second-success")
+        call = self._queue(run, call_id="slow-image-success")
+        with mock.patch.object(server_mod, "_image_upstream_client", client):
+            self.assertTrue(server_mod._execute_agent_pending_tools(run))
+
+        execution = run["tool_executions"][call["id"]]
+        self.assertEqual(execution["dispatchState"], "assets_persisted")
+        self.assertEqual(requests, [{
+            "timeout": 180,
+            "idempotencyKey": execution["operationId"],
+        }])
+        asset = execution["result"]["assets"][0]
+        stored, meta = self.assets.read(run["session_id"], asset["assetId"])
+        self.assertEqual(stored, _png())
+        self.assertEqual((meta["width"], meta["height"]), (3, 2))
+        self.assertEqual(meta["operationId"], execution["operationId"])
+
     def test_accept_gate_redacts_prompt_and_reject_is_terminal_for_tool(self):
         run = self._run(permission="accept")
         call = self._queue(run, arguments={
@@ -410,6 +460,56 @@ class TestImageAgentRuntime(unittest.TestCase):
         blocked = run["tool_executions"]["unknown-changed-retry"]["result"]
         self.assertEqual(blocked["errorCode"], "image_retry_blocked")
         self.assertEqual(upstream.call_count, 1)
+
+    def test_timeout_persists_one_operation_and_blocks_second_paid_dispatch(self):
+        run = self._run(permission="bypass", session_id="image-timeout-fuse")
+        first = self._queue(run, call_id="timed-out-paid-request")
+        upstream = mock.Mock(side_effect=image_runtime.ImageRuntimeError(
+            "image_upstream_timeout",
+            "Timed out while contacting the image service; delivery and the result are unknown.",
+            retryable=True,
+            http_status=504,
+            outcome_unknown=True,
+        ))
+        self.client.generate = upstream
+
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        first_execution = run["tool_executions"][first["id"]]
+        first_result = first_execution["result"]
+        operation_id = first_execution["operationId"]
+        self.assertTrue(operation_id)
+        self.assertEqual(first_execution["dispatchState"], "dispatched")
+        self.assertEqual(first_result["errorCode"], "image_upstream_timeout")
+        self.assertTrue(first_result["outcomeUnknown"])
+        self.assertTrue(first_result["notReplayed"])
+        self.assertEqual(upstream.call_count, 1)
+        self.assertEqual(upstream.call_args.args[2], operation_id)
+
+        server_mod._persist_agent_run(run)
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertIsNotNone(restored)
+        second = self._queue(restored, call_id="changed-after-timeout", arguments={
+            "prompt": "a different paid image request must be blocked",
+            "count": 1,
+        })
+        self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+        blocked_execution = restored["tool_executions"][second["id"]]
+        self.assertEqual(blocked_execution["result"]["errorCode"], "image_retry_blocked")
+        self.assertTrue(blocked_execution["result"]["notReplayed"])
+        self.assertNotIn("operationId", blocked_execution)
+        operation_ids = [
+            execution.get("operationId")
+            for execution in restored["tool_executions"].values()
+            if execution.get("operationId")
+        ]
+        self.assertEqual(operation_ids, [operation_id])
+        self.assertEqual(upstream.call_count, 1)
+        self.assertFalse(any(
+            event["type"] == "authorization_required"
+            for event in restored["events"]
+        ))
 
     def test_unexpected_upstream_diagnostics_are_redacted_after_dispatch(self):
         run = self._run()

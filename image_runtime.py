@@ -43,7 +43,7 @@ MAX_IMAGE_TOTAL_BYTES = MAX_IMAGE_COUNT * MAX_IMAGE_BYTES
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_IMAGE_RESPONSE_BYTES = 112 * 1024 * 1024
 MAX_IMAGE_REDIRECTS = 3
-IMAGE_TIMEOUT_SECONDS = 60
+IMAGE_TIMEOUT_SECONDS = 180
 
 ALLOWED_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/webp"})
 IMAGE_EXTENSIONS = {
@@ -794,7 +794,40 @@ class ImageUpstreamClient:
         return f"{base}/{suffix}"
 
     @staticmethod
-    def _read_bounded(response, limit: int) -> bytes:
+    def _upstream_timeout_error(*, processing: bool = False) -> ImageRuntimeError:
+        return ImageRuntimeError(
+            "image_upstream_timeout",
+            (
+                "Timed out while processing the image service response; the final result is unknown."
+                if processing
+                else "Timed out while contacting the image service; delivery and the result are unknown."
+            ),
+            retryable=True,
+            http_status=504,
+            outcome_unknown=True,
+        )
+
+    def _remaining_budget(self, deadline: float, *, processing: bool = False) -> float:
+        remaining = float(deadline) - self._clock()
+        if remaining <= 0:
+            raise self._upstream_timeout_error(processing=processing)
+        return remaining
+
+    @staticmethod
+    def _set_response_timeout(response, timeout: float):
+        response_fp = getattr(response, "fp", None)
+        candidates = (
+            getattr(getattr(response_fp, "raw", None), "_sock", None),
+            getattr(response_fp, "_sock", None),
+            getattr(getattr(response, "raw", None), "_sock", None),
+            getattr(response, "sock", None),
+        )
+        for candidate in candidates:
+            if candidate is not None and hasattr(candidate, "settimeout"):
+                candidate.settimeout(max(0.001, float(timeout)))
+                return
+
+    def _read_bounded(self, response, limit: int, *, deadline: float) -> bytes:
         declared = response.headers.get("Content-Length") if response.headers else None
         if declared is not None:
             try:
@@ -806,7 +839,14 @@ class ImageUpstreamClient:
         chunks = []
         total = 0
         while True:
-            chunk = response.read(min(64 * 1024, limit + 1 - total))
+            remaining = self._remaining_budget(deadline, processing=True)
+            self._set_response_timeout(response, remaining)
+            try:
+                chunk = response.read(min(64 * 1024, limit + 1 - total))
+            except (TimeoutError, socket.timeout) as exc:
+                raise self._upstream_timeout_error(processing=True) from exc
+            if self._clock() > deadline:
+                raise self._upstream_timeout_error(processing=True)
             if not chunk:
                 break
             chunks.append(chunk)
@@ -862,15 +902,7 @@ class ImageUpstreamClient:
         images = []
         total = 0
         for item in items:
-            remaining = deadline - self._clock()
-            if remaining <= 0:
-                raise ImageRuntimeError(
-                    "image_upstream_timeout",
-                    "Timed out while processing the image service response; the final result is unknown.",
-                    retryable=True,
-                    http_status=504,
-                    outcome_unknown=True,
-                )
+            remaining = self._remaining_budget(deadline, processing=True)
             if not isinstance(item, dict):
                 raise ImageRuntimeError("image_response_invalid", "Image service returned an invalid image item.")
             encoded = item.get("b64_json")
@@ -885,6 +917,7 @@ class ImageUpstreamClient:
                 image = self._downloader.fetch(item["url"], timeout=remaining)
             else:
                 raise ImageRuntimeError("image_response_invalid", "Image service returned no supported image payload.")
+            self._remaining_budget(deadline, processing=True)
             if image.mime_type != expected_mime:
                 raise ImageRuntimeError(
                     "image_response_format_mismatch",
@@ -952,7 +985,11 @@ class ImageUpstreamClient:
             if status < 200 or status >= 300:
                 raise self._http_error(status, reference_edit=reference_image is not None)
             try:
-                raw = self._read_bounded(response, MAX_IMAGE_RESPONSE_BYTES)
+                raw = self._read_bounded(
+                    response,
+                    MAX_IMAGE_RESPONSE_BYTES,
+                    deadline=deadline,
+                )
             except ImageRuntimeError as exc:
                 raise ImageRuntimeError(
                     exc.code,
