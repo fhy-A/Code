@@ -10460,6 +10460,7 @@ async function runBackgroundSubAgentJob(job) {
   allowedToolNames.delete("task");
   allowedToolNames.delete("request_user_input");
   allowedToolNames.delete("generate_image");
+  allowedToolNames.delete("manage_generated_image");
   const serverTools = getNativeTools(job.toolPreset, allowedToolNames);
   const serverToolNames = serverTools.map((tool) => String(tool.function?.name || "")).filter(Boolean);
   subCtx.allowedToolNames = allowedToolNames;

@@ -1233,6 +1233,124 @@ class TestDurableAgentRuntime(unittest.TestCase):
         ):
             self.assertEqual(child[field], parent[field])
 
+    def test_child_create_and_restore_filter_image_generation_and_asset_mutation(self):
+        image_route = {
+            "routeRef": "ir1_" + "a" * 64,
+            "catalogRevision": 7,
+            "connectionId": "child-isolation-image-connection",
+            "label": "Child isolation image route",
+            "modelId": "child-isolation-image-model",
+            "supportsGeneration": True,
+        }
+        requested_tools = [
+            "read_file", "generate_image", "manage_generated_image",
+        ]
+
+        for case, child_identity in (
+            ("explicit", {"run_kind": "child"}),
+            ("parent", {"run_kind": "foreground", "parent_run_id": "parent-run"}),
+            ("depth", {"run_kind": "foreground", "agent_depth": 1}),
+        ):
+            with self.subTest(case=case):
+                run = server_mod._create_agent_run(
+                    f"child-tool-isolation-{case}",
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "inspect child tools"}],
+                    },
+                    self.base_url,
+                    [],
+                    allowed_tools=requested_tools,
+                    permission_profile="accept",
+                    image_route=image_route,
+                    start_worker=False,
+                    **child_identity,
+                )
+                snapshot = server_mod._agent_snapshot(run, 0)
+                self.assertEqual(snapshot["runKind"], "child")
+                self.assertEqual(snapshot["allowedTools"], ["read_file"])
+                self.assertEqual(snapshot["availableTools"], ["read_file"])
+                self.assertEqual(snapshot["toolExecutions"], [])
+                self.assertIsNone(snapshot["pendingAuthorization"])
+
+        foreground = server_mod._create_agent_run(
+            "foreground-tool-isolation",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "keep foreground tools"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=requested_tools,
+            permission_profile="accept",
+            image_route=image_route,
+            run_kind="foreground",
+            start_worker=False,
+        )
+        foreground_snapshot = server_mod._agent_snapshot(foreground, 0)
+        self.assertIn("generate_image", foreground_snapshot["allowedTools"])
+        self.assertIn("manage_generated_image", foreground_snapshot["allowedTools"])
+
+        record = server_mod._agent_run_record(foreground)
+        record["runKind"] = "foreground"
+        record["parentAgentRunId"] = "legacy-parent-run"
+        record["agentDepth"] = 1
+        persisted_tool_names = [
+            definition["function"]["name"] for definition in record["tools"]
+        ]
+        self.assertIn("manage_generated_image", persisted_tool_names)
+        serialized_record = json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+        restored = server_mod._agent_run_from_record(record)
+        restored_snapshot = server_mod._agent_snapshot(restored, 0)
+        self.assertEqual(restored_snapshot["runKind"], "child")
+        self.assertEqual(restored_snapshot["allowedTools"], ["read_file"])
+        self.assertEqual(restored_snapshot["availableTools"], ["read_file"])
+        self.assertEqual(restored_snapshot["toolExecutions"], [])
+        self.assertIsNone(restored_snapshot["pendingAuthorization"])
+        self.assertEqual(
+            json.dumps(record, ensure_ascii=False, sort_keys=True),
+            serialized_record,
+        )
+
+        for permission_profile in ("read", "plan"):
+            with self.subTest(permission_profile=permission_profile):
+                restricted = server_mod._create_agent_run(
+                    f"foreground-tool-{permission_profile}",
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "respect profile"}],
+                    },
+                    self.base_url,
+                    [],
+                    allowed_tools=["manage_generated_image"],
+                    permission_profile=permission_profile,
+                    run_kind="foreground",
+                    start_worker=False,
+                )
+                self.assertNotIn(
+                    "manage_generated_image",
+                    server_mod._agent_snapshot(restricted, 0)["allowedTools"],
+                )
+
+        bypass = server_mod._create_agent_run(
+            "foreground-tool-bypass",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "keep bypass tool"}],
+            },
+            self.base_url,
+            [],
+            allowed_tools=["manage_generated_image"],
+            permission_profile="bypass",
+            run_kind="foreground",
+            start_worker=False,
+        )
+        self.assertIn(
+            "manage_generated_image",
+            server_mod._agent_snapshot(bypass, 0)["allowedTools"],
+        )
+
     def test_same_second_newer_calibrated_run_wins_session_and_stale_client_merge(self):
         session_id = "same-second-calibration-session"
         session_file = server_mod.session_path(session_id)

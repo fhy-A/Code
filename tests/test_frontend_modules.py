@@ -2311,6 +2311,13 @@ process.stdout.write(JSON.stringify({{
             'allowedToolNames.delete("generate_image")',
             APP_SOURCE[child_start:child_end],
         )
+        self.assertIn(
+            'allowedToolNames.delete("manage_generated_image")',
+            APP_SOURCE[child_start:child_end],
+        )
+        queued_run_source = APP_SOURCE[queued_run_start:queued_run_end]
+        self.assertIn("permissionProfile: item.permissionProfile", queued_run_source)
+        self.assertNotIn('delete("manage_generated_image")', queued_run_source)
         recovered_start = APP_SOURCE.index("function buildRecoveredRunContext(")
         recovered_end = APP_SOURCE.index("function finalizeLegacyBrowserRunMessages", recovered_start)
         self.assertIn(

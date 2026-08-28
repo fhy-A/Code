@@ -3815,6 +3815,12 @@ def _agent_run_from_record(record):
         execution["error"] = result["error"]
         execution["completedAt"] = now_iso()
     restored_tools = list(record.get("tools") or [])
+    if run_kind == "child":
+        restored_tools = [
+            definition for definition in restored_tools
+            if str((definition.get("function") or {}).get("name") or "")
+            not in {"generate_image", "manage_generated_image"}
+        ]
     if not image_route_identity or not image_route_identity.get("supportsGeneration"):
         restored_tools = [
             definition for definition in restored_tools
@@ -9052,6 +9058,12 @@ def _create_agent_run(
     goal_operations_enabled = bool(origin_message_id)
     tools = _agent_selected_tools(payload, allowed_tools, permission_profile)
     image_route_identity = _normalize_agent_image_route_identity(image_route)
+    if normalized_run_kind == "child":
+        tools = [
+            definition for definition in tools
+            if str((definition.get("function") or {}).get("name") or "")
+            not in {"generate_image", "manage_generated_image"}
+        ]
     if not image_route_identity or not image_route_identity.get("supportsGeneration"):
         tools = [
             definition for definition in tools

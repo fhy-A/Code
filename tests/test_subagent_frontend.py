@@ -237,6 +237,8 @@ class TestSubAgentFrontend(unittest.TestCase):
     def test_background_server_agent_cannot_delegate_or_open_questionnaire(self):
         self.assertIn('allowedToolNames.delete("task")', self.source)
         self.assertIn('allowedToolNames.delete("request_user_input")', self.source)
+        self.assertIn('allowedToolNames.delete("generate_image")', self.source)
+        self.assertIn('allowedToolNames.delete("manage_generated_image")', self.source)
         self.assertIn('if (snapshot.status === "waiting_user_input")', self.source)
         self.assertIn('throw new Error("后台任务不能发起交互问卷")', self.source)
 
