@@ -9188,6 +9188,27 @@ def _create_agent_run(
         "cancel_finalizing": False,
     }
     with _agent_run_lock:
+        if str(session_id or ""):
+            if _session_archive_bundle_path(str(session_id)).exists():
+                raise SessionLifecycleConflictError(
+                    "session_archived",
+                    "Archived sessions cannot start new Agent runs.",
+                )
+            session_meta_path = session_path(str(session_id))
+            try:
+                session_meta = _read_session_meta_strict(session_meta_path)
+            except Exception as exc:
+                raise SessionLifecycleConflictError(
+                    "session_state_unavailable",
+                    "Session state is unavailable; a new AgentRun cannot be created.",
+                    http_status=503,
+                ) from exc
+            if session_meta is None and _session_was_deleted(str(session_id)):
+                raise SessionLifecycleConflictError(
+                    "session_deleted",
+                    "Deleted sessions cannot start new Agent runs.",
+                    http_status=410,
+                )
         existing = _agent_runs.get(run_id)
         if existing:
             return existing
@@ -10991,6 +11012,10 @@ _SESSION_INTERACTION_STATES = frozenset({
     "waiting_authorization",
     "waiting_skill_evidence",
 })
+_SESSION_ARCHIVE_TOKEN_RE = re.compile(r"[0-9a-f]{32}\Z")
+_SESSION_RUN_STATE_TERMINAL = frozenset({
+    "", "idle", "completed", "failed", "cancelled", "canceled",
+})
 
 
 def _normalize_session_interaction_state(value):
@@ -11013,6 +11038,58 @@ def _session_interaction_state(session):
         if isinstance(request, dict) and request.get("status") == "pending":
             return interaction_state
     return ""
+
+
+def _normalize_session_archive_token(value):
+    token = str(value or "").strip().lower()
+    return token if _SESSION_ARCHIVE_TOKEN_RE.fullmatch(token) else ""
+
+
+def _session_archive_state(session):
+    """Return the bounded additive archive projection for one Session."""
+    record = session if isinstance(session, dict) else {}
+    archived_raw = str(record.get("archivedAt") or "").strip()
+    return {
+        "archived": bool(archived_raw),
+        "archivedAt": _normalized_session_timestamp(archived_raw),
+        "archiveToken": _normalize_session_archive_token(
+            record.get("archiveToken")
+        ),
+    }
+
+
+def _session_run_state_has_nonterminal_work(session):
+    record = session if isinstance(session, dict) else {}
+    run_state = record.get("runState")
+    if not isinstance(run_state, dict):
+        return False
+    if _session_interaction_state(record):
+        return True
+    status = str(run_state.get("status") or "").strip().lower()
+    if status and status not in _SESSION_RUN_STATE_TERMINAL:
+        return True
+    for collection_key in ("queuedMessages", "backgroundRuns"):
+        values = run_state.get(collection_key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                return True
+            item_status = str(item.get("status") or "pending").strip().lower()
+            if item_status not in _SESSION_RUN_STATE_TERMINAL:
+                return True
+    return False
+
+
+def _read_session_meta_strict(path):
+    """Read lifecycle metadata without converting corruption into an active Session."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("Session metadata must be an object")
+    return payload
 
 
 def _session_api_record(session, *, include_revision=True):
@@ -11259,6 +11336,8 @@ def _rebuild_index_if_needed():
                         meta.get("group"),
                     ),
                     "interactionState": _session_interaction_state(meta),
+                    "archivedAt": "",
+                    "archiveToken": "",
                 })
         except Exception:
             pass
@@ -14057,10 +14136,49 @@ class SessionDeleteError(RuntimeError):
 
     def __init__(self, *, recovery_failed=False):
         super().__init__("Session deletion could not be completed safely.")
+        self.recovery_failed = bool(recovery_failed)
         self.error_code = (
             "session_delete_recovery_failed"
             if recovery_failed
             else "session_delete_failed"
+        )
+        self.retryable = not recovery_failed
+        self.http_status = 500 if recovery_failed else 503
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": self.retryable,
+        }
+
+
+class SessionLifecycleConflictError(RuntimeError):
+    """Stable public conflict for Session archive lifecycle operations."""
+
+    def __init__(self, error_code, message, *, http_status=409):
+        super().__init__(message)
+        self.error_code = str(error_code or "session_archive_conflict")
+        self.http_status = int(http_status)
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": False,
+        }
+
+
+class SessionArchiveMutationError(RuntimeError):
+    """Stable public projection for a rolled-back archive state mutation."""
+
+    def __init__(self, *, recovery_failed=False):
+        super().__init__("Session archive state could not be updated safely.")
+        self.recovery_failed = bool(recovery_failed)
+        self.error_code = (
+            "session_archive_recovery_failed"
+            if recovery_failed
+            else "session_archive_failed"
         )
         self.retryable = not recovery_failed
         self.http_status = 500 if recovery_failed else 503
@@ -14079,6 +14197,724 @@ def _session_lifecycle_lock(session_id):
     with _session_lifecycle_locks_guard:
         lock = _session_lifecycle_locks.setdefault(key, threading.RLock())
     return lock
+
+
+def _session_archive_root():
+    # Follow the active Session repository root so isolated persistence tests
+    # and alternate data roots never inspect another environment's archives.
+    return SESSIONS_DIR.parent / "session-archive"
+
+
+def _session_archive_bundle_path(session_id):
+    return _session_archive_root() / safe_session_id(session_id)
+
+
+def _session_archive_journal_path(session_id):
+    return _session_archive_root() / ".transactions" / f"{safe_session_id(session_id)}.json"
+
+
+def _session_archive_staging_path(session_id, transaction_id):
+    return _session_archive_root() / ".staging" / (
+        f"{safe_session_id(session_id)}-{str(transaction_id or '')}"
+    )
+
+
+def _normalize_session_archive_transaction_id(value):
+    transaction_id = str(value or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", transaction_id):
+        raise ValueError("Session archive transaction identity is invalid")
+    return transaction_id
+
+
+def _session_archive_relative_path(path):
+    resolved = Path(path).resolve(strict=False)
+    root = DATA_DIR.resolve(strict=False)
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError("Session archive path is outside the data root") from exc
+
+
+def _session_archive_original_path(value):
+    raw = str(value or "").strip().replace("\\", "/")
+    candidate = (DATA_DIR / raw).resolve(strict=False)
+    root = DATA_DIR.resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Session archive path is outside the data root") from exc
+    return candidate
+
+
+def _session_archive_original_paths(session_id, original, *, archived_meta=None):
+    """Bind untrusted manifest paths to this Session's canonical core pair."""
+    if not isinstance(original, dict) or set(original) != {"session", "messages"}:
+        raise ValueError("Session archive original paths are invalid")
+    session_id = safe_session_id(session_id)
+    active_session = _session_archive_original_path(original.get("session"))
+    active_messages = _session_archive_original_path(original.get("messages"))
+    if active_session.name != f"{session_id}.json":
+        raise ValueError("Session archive metadata path identity is invalid")
+    if active_messages.name != f"{session_id}.jsonl":
+        raise ValueError("Session archive messages path identity is invalid")
+    sessions_root = SESSIONS_DIR.resolve(strict=False)
+    if archived_meta is None:
+        try:
+            archived_meta = json.loads(
+                (_session_archive_bundle_path(session_id) / "session.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Session archive metadata is invalid") from exc
+    if not isinstance(archived_meta, dict) or str(archived_meta.get("id") or "") != session_id:
+        raise ValueError("Session archive metadata identity is invalid")
+    def storage_parent(path):
+        try:
+            parts = path.parent.relative_to(sessions_root).parts
+        except ValueError as exc:
+            raise ValueError("Session archive core path is outside Session storage") from exc
+        if not parts:
+            return None
+        if len(parts) != 3:
+            raise ValueError("Session archive core path is not canonical")
+        year, month, day = parts
+        try:
+            dt.date(int(year), int(month), int(day))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Session archive core date path is invalid") from exc
+        if len(year) != 4 or len(month) != 2 or len(day) != 2:
+            raise ValueError("Session archive core date path is invalid")
+        return parts
+
+    session_storage = storage_parent(active_session)
+    message_storage = storage_parent(active_messages)
+    if (
+        session_storage is not None
+        and message_storage is not None
+        and session_storage != message_storage
+    ):
+        raise ValueError("Session archive dated core paths do not match")
+    return active_session, active_messages
+
+
+def _session_archive_file_fact(payload, *, mtime_ns):
+    return {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "byteLength": len(payload),
+        "mtimeNs": max(0, int(mtime_ns or 0)),
+    }
+
+
+def _restore_session_archive_file(target, source, fact):
+    _restore_path_snapshot(target, Path(source).read_bytes())
+    mtime_ns = int((fact or {}).get("mtimeNs") or 0)
+    if mtime_ns > 0:
+        os.utime(target, ns=(mtime_ns, mtime_ns))
+
+
+def _read_session_archive_manifest(session_id):
+    bundle = _session_archive_bundle_path(session_id)
+    manifest_path = bundle / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return None
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {
+            "schema", "sessionId", "archivedAt", "archiveToken", "original", "files"
+        }
+        or manifest.get("schema") != "code-session-archive/v1"
+    ):
+        raise ValueError("Session archive manifest is invalid")
+    if str(manifest.get("sessionId") or "") != session_id:
+        raise ValueError("Session archive manifest identity is invalid")
+    state = _session_archive_state(manifest)
+    if not state["archived"] or not state["archiveToken"]:
+        raise ValueError("Session archive manifest state is invalid")
+    original = manifest.get("original")
+    files = manifest.get("files")
+    if not isinstance(original, dict) or not isinstance(files, dict):
+        raise ValueError("Session archive manifest structure is invalid")
+    if set(files) != {"session.json", "messages.jsonl"}:
+        raise ValueError("Session archive manifest file set is invalid")
+    for name in ("session.json", "messages.jsonl"):
+        fact = files.get(name)
+        if not isinstance(fact, dict) or set(fact) != {"sha256", "byteLength", "mtimeNs"}:
+            raise ValueError("Session archive manifest file facts are invalid")
+        payload = (bundle / name).read_bytes()
+        if (
+            fact.get("sha256") != hashlib.sha256(payload).hexdigest()
+            or fact.get("byteLength") != len(payload)
+            or not isinstance(fact.get("mtimeNs"), int)
+            or fact.get("mtimeNs") < 0
+        ):
+            raise ValueError("Session archive file integrity check failed")
+    try:
+        archived_meta = json.loads((bundle / "session.json").read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Session archive metadata is invalid") from exc
+    if not isinstance(archived_meta, dict) or str(archived_meta.get("id") or "") != session_id:
+        raise ValueError("Session archive metadata identity is invalid")
+    _session_archive_original_paths(
+        session_id,
+        original,
+        archived_meta=archived_meta,
+    )
+    return manifest
+
+
+def _read_session_archive_journal(session_id):
+    journal_path = _session_archive_journal_path(session_id)
+    journal = _read_session_meta_strict(journal_path)
+    if journal is None:
+        return None
+    expected_keys = {"schema", "sessionId", "action", "state", "transactionId"}
+    if not isinstance(journal, dict) or set(journal) != expected_keys:
+        raise ValueError("Session archive transaction journal is invalid")
+    if journal.get("schema") != "code-session-archive-transaction/v1":
+        raise ValueError("Session archive transaction schema is invalid")
+    if str(journal.get("sessionId") or "") != session_id:
+        raise ValueError("Session archive transaction Session identity is invalid")
+    action = str(journal.get("action") or "")
+    state = str(journal.get("state") or "")
+    allowed_states = {
+        "archive": {"prepared", "bundle_committed"},
+        "restore": {"prepared", "active_committed"},
+        "delete": {"prepared", "core_restored", "facts_deleted"},
+    }
+    if action not in allowed_states or state not in allowed_states[action]:
+        raise ValueError("Session archive transaction state is invalid")
+    journal["transactionId"] = _normalize_session_archive_transaction_id(
+        journal.get("transactionId")
+    )
+    return journal
+
+
+def _write_session_archive_journal(session_id, payload):
+    transaction_id = _normalize_session_archive_transaction_id(
+        (payload or {}).get("transactionId")
+    )
+    journal = {
+        "schema": "code-session-archive-transaction/v1",
+        "sessionId": session_id,
+        **dict(payload or {}),
+        "transactionId": transaction_id,
+    }
+    # Apply the same strict validation before any durable write.
+    action = str(journal.get("action") or "")
+    state = str(journal.get("state") or "")
+    allowed_states = {
+        "archive": {"prepared", "bundle_committed"},
+        "restore": {"prepared", "active_committed"},
+        "delete": {"prepared", "core_restored", "facts_deleted"},
+    }
+    if set(journal) != {"schema", "sessionId", "action", "state", "transactionId"}:
+        raise ValueError("Session archive transaction journal is invalid")
+    if action not in allowed_states or state not in allowed_states[action]:
+        raise ValueError("Session archive transaction state is invalid")
+    write_json(_session_archive_journal_path(session_id), journal)
+    return journal
+
+
+def _remove_owned_archive_tree(path):
+    target = Path(path).resolve(strict=False)
+    root = _session_archive_root().resolve(strict=False)
+    if target == root or root not in target.parents:
+        raise ValueError("Refusing to remove an unowned archive path")
+    if target.exists():
+        shutil.rmtree(target)
+
+
+def _remove_session_archive_staging(session_id, transaction_id):
+    transaction_id = _normalize_session_archive_transaction_id(transaction_id)
+    target = _session_archive_staging_path(session_id, transaction_id).resolve(strict=False)
+    staging_root = (_session_archive_root() / ".staging").resolve(strict=False)
+    if target.parent != staging_root:
+        raise ValueError("Refusing to remove an invalid archive staging path")
+    if target.exists():
+        shutil.rmtree(target)
+
+
+def _recover_session_archive_transaction(session_id):
+    """Complete or roll back one durable archive transaction deterministically."""
+    journal_path = _session_archive_journal_path(session_id)
+    if not journal_path.exists():
+        archived = _session_archive_bundle_path(session_id).exists()
+        if archived:
+            manifest = _read_session_archive_manifest(session_id)
+            if manifest is None:
+                raise SessionArchiveMutationError(recovery_failed=True)
+            active_session, active_messages = _session_archive_original_paths(
+                session_id,
+                manifest["original"],
+            )
+            active = active_session.exists() or active_messages.exists()
+        else:
+            active = session_path(session_id).exists() or messages_path(session_id).exists()
+        if active and archived:
+            raise SessionLifecycleConflictError(
+                "session_archive_location_conflict",
+                "Session exists in both active and archive storage.",
+            )
+        return
+    try:
+        journal = _read_session_archive_journal(session_id)
+    except Exception as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    if journal is None:
+        raise SessionArchiveMutationError(recovery_failed=True)
+    action = str(journal.get("action") or "")
+    state = str(journal.get("state") or "")
+    bundle = _session_archive_bundle_path(session_id)
+    transaction_id = journal["transactionId"]
+    if action == "archive":
+        if state == "prepared" and not bundle.exists():
+            _remove_session_archive_staging(session_id, transaction_id)
+            journal_path.unlink(missing_ok=True)
+            return
+        manifest = _read_session_archive_manifest(session_id)
+        if manifest is None:
+            raise SessionArchiveMutationError(recovery_failed=True)
+        session_path(session_id).unlink(missing_ok=True)
+        messages_path(session_id).unlink(missing_ok=True)
+        _remove_session_index_entry(session_id)
+        _remove_session_archive_staging(session_id, transaction_id)
+        journal_path.unlink(missing_ok=True)
+        return
+    if action == "restore":
+        if state == "active_committed" and not bundle.exists():
+            active_session = session_path(session_id)
+            active_messages = messages_path(session_id)
+            meta = _read_session_meta_strict(active_session)
+            if (
+                not isinstance(meta, dict)
+                or str(meta.get("id") or "") != session_id
+                or not active_messages.exists()
+            ):
+                raise SessionArchiveMutationError(recovery_failed=True)
+            _write_session_index_from_meta(meta)
+            journal_path.unlink(missing_ok=True)
+            return
+        manifest = _read_session_archive_manifest(session_id)
+        if manifest is None:
+            raise SessionArchiveMutationError(recovery_failed=True)
+        if (
+            state == "prepared"
+            and not session_path(session_id).exists()
+            and not messages_path(session_id).exists()
+        ):
+            journal_path.unlink(missing_ok=True)
+            return
+        active_session, active_messages = _session_archive_original_paths(
+            session_id,
+            manifest["original"],
+        )
+        _restore_session_archive_file(
+            active_session,
+            bundle / "session.json",
+            manifest["files"]["session.json"],
+        )
+        _restore_session_archive_file(
+            active_messages,
+            bundle / "messages.jsonl",
+            manifest["files"]["messages.jsonl"],
+        )
+        meta = _read_session_meta_strict(active_session) or {}
+        _write_session_index_from_meta(meta)
+        _remove_owned_archive_tree(bundle)
+        journal_path.unlink(missing_ok=True)
+        return
+    if action == "delete":
+        if state == "facts_deleted" and not bundle.exists():
+            if session_path(session_id).exists() or messages_path(session_id).exists():
+                raise SessionArchiveMutationError(recovery_failed=True)
+            journal_path.unlink(missing_ok=True)
+            return
+        # Permanent delete is always forward-recovered after token admission.
+        # The bundle remains authoritative until every Session-owned fact has
+        # passed through the existing transactional delete contract.
+        manifest = _read_session_archive_manifest(session_id)
+        if manifest is None:
+            raise SessionArchiveMutationError(recovery_failed=True)
+        active_session, active_messages = _session_archive_original_paths(
+            session_id,
+            manifest["original"],
+        )
+        if state in {"prepared", "core_restored"}:
+            _restore_session_archive_file(
+                active_session,
+                bundle / "session.json",
+                manifest["files"]["session.json"],
+            )
+            _restore_session_archive_file(
+                active_messages,
+                bundle / "messages.jsonl",
+                manifest["files"]["messages.jsonl"],
+            )
+            restored_meta = _read_session_meta_strict(active_session) or {}
+            _write_session_index_from_meta(restored_meta)
+            _write_session_archive_journal(session_id, {
+                "action": "delete",
+                "state": "core_restored",
+                "transactionId": transaction_id,
+            })
+            handler = object.__new__(CodeHandler)
+            handler.send_json = lambda *_args, **_kwargs: None
+            CodeHandler.delete_session(
+                handler,
+                session_id,
+                send_response=False,
+                delete_terminal_agent_runs=True,
+                session_core_path=active_session,
+                messages_core_path=active_messages,
+            )
+            _write_session_archive_journal(session_id, {
+                "action": "delete",
+                "state": "facts_deleted",
+                "transactionId": transaction_id,
+            })
+        _remove_owned_archive_tree(bundle)
+        journal_path.unlink(missing_ok=True)
+        return
+    raise SessionArchiveMutationError(recovery_failed=True)
+
+
+def _recover_all_session_archive_transactions():
+    transactions = _session_archive_root() / ".transactions"
+    try:
+        journal_paths = tuple(transactions.glob("*.json")) if transactions.exists() else ()
+    except OSError as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    for journal_path in journal_paths:
+        try:
+            session_id = safe_session_id(journal_path.stem)
+            with _session_lifecycle_lock(session_id):
+                _recover_session_archive_transaction(session_id)
+        except (SessionLifecycleConflictError, SessionArchiveMutationError):
+            raise
+        except Exception as exc:
+            raise SessionArchiveMutationError(recovery_failed=True) from exc
+    staging_root = _session_archive_root() / ".staging"
+    try:
+        staging_paths = (
+            tuple(path for path in staging_root.iterdir() if path.is_dir())
+            if staging_root.exists()
+            else ()
+        )
+    except OSError as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    for staging_path in staging_paths:
+        name = staging_path.name
+        if len(name) < 41 or name[-33] != "-":
+            raise SessionArchiveMutationError(recovery_failed=True)
+        try:
+            session_id = safe_session_id(name[:-33])
+            transaction_id = _normalize_session_archive_transaction_id(name[-32:])
+            with _session_lifecycle_lock(session_id):
+                if _session_archive_journal_path(session_id).exists():
+                    continue
+                if _session_archive_bundle_path(session_id).exists():
+                    raise SessionArchiveMutationError(recovery_failed=True)
+                _remove_session_archive_staging(session_id, transaction_id)
+        except SessionArchiveMutationError:
+            raise
+        except Exception as exc:
+            raise SessionArchiveMutationError(recovery_failed=True) from exc
+    archive_root = _session_archive_root()
+    try:
+        bundles = (
+            tuple(
+                path for path in archive_root.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            )
+            if archive_root.exists()
+            else ()
+        )
+    except OSError as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    for bundle in bundles:
+        try:
+            session_id = safe_session_id(bundle.name)
+        except ValueError as exc:
+            raise SessionArchiveMutationError(recovery_failed=True) from exc
+        try:
+            manifest = _read_session_archive_manifest(session_id)
+            if manifest is None:
+                raise SessionArchiveMutationError(recovery_failed=True)
+            active_session, active_messages = _session_archive_original_paths(
+                session_id,
+                manifest["original"],
+            )
+        except SessionArchiveMutationError:
+            raise
+        except Exception as exc:
+            raise SessionArchiveMutationError(recovery_failed=True) from exc
+        if active_session.exists() or active_messages.exists():
+            raise SessionLifecycleConflictError(
+                "session_archive_location_conflict",
+                "Session exists in both active and archive storage.",
+            )
+
+
+def _assert_session_active_location(session_id):
+    session_id = safe_session_id(session_id)
+    try:
+        _recover_session_archive_transaction(session_id)
+    except SessionLifecycleConflictError:
+        raise
+    except Exception as exc:
+        raise SessionArchiveMutationError(recovery_failed=True) from exc
+    if _session_archive_bundle_path(session_id).exists():
+        raise SessionLifecycleConflictError(
+            "session_archived",
+            "Archived sessions must be restored before use.",
+        )
+
+
+def _session_has_nonterminal_agent_run(session_id):
+    """Inspect raw authoritative AgentRun facts without restoring or mutating them."""
+    target = str(session_id or "")
+    observed_ids = set()
+    for run_id, run in _agent_runs.items():
+        if not isinstance(run, dict) or str(run.get("session_id") or "") != target:
+            continue
+        observed_ids.add(str(run_id))
+        if str(run.get("status") or "") not in _AGENT_RUN_TERMINAL:
+            return True
+    runs_dir = _agent_runs_dir()
+    if not runs_dir.exists():
+        return False
+    for path in runs_dir.glob("*.json"):
+        if path.stem in observed_ids:
+            continue
+        try:
+            record = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or str(record.get("sessionId") or "") != target:
+            continue
+        if str(record.get("status") or "") not in _AGENT_RUN_TERMINAL:
+            return True
+    return False
+
+
+def _session_has_nonterminal_goal(session_id):
+    projection = goal_v2_runtime().read(session_id).projection()
+    goal = projection.get("goal") if isinstance(projection, dict) else None
+    if not isinstance(goal, dict):
+        return False
+    return str(goal.get("lifecycle") or "") not in {"completed", "cancelled"}
+
+
+def _session_archive_eligible(session_id, meta):
+    if _session_run_state_has_nonterminal_work(meta):
+        return False
+    if _session_has_nonterminal_goal(session_id):
+        return False
+    return not _session_has_nonterminal_agent_run(session_id)
+
+
+def _write_session_index_from_meta(meta):
+    _write_session_index_entry(
+        meta["id"],
+        meta.get("title", ""),
+        meta.get("updatedAt", ""),
+        meta.get("messageCount", 0),
+        meta.get("_parentId"),
+        meta.get("_branchDepth", 0),
+        project_id=meta.get("projectId"),
+        cwd=meta.get("cwd"),
+        source=meta.get("source"),
+        source_badge_visible=_source_badge_visible(meta),
+        last_message_time=meta.get(
+            "lastMessageTime",
+            _SESSION_INDEX_LAST_MESSAGE_UNSET,
+        ),
+        interaction_state=_session_interaction_state(meta),
+    )
+
+
+def _mutate_session_archive_state(session_id, *, archived):
+    """Move Session core files across the durable active/archive boundary."""
+    session_id = safe_session_id(session_id)
+    with _session_lifecycle_lock(session_id):
+        with _agent_run_lock:
+            with _json_write_lock:
+                try:
+                    _recover_session_archive_transaction(session_id)
+                except (SessionLifecycleConflictError, SessionArchiveMutationError):
+                    raise
+                except Exception as exc:
+                    raise SessionArchiveMutationError(recovery_failed=True) from exc
+                path = session_path(session_id)
+                message_path = messages_path(session_id)
+                bundle = _session_archive_bundle_path(session_id)
+                try:
+                    meta = _read_session_meta_strict(path)
+                except Exception as exc:
+                    raise SessionArchiveMutationError() from exc
+                if meta is not None and (
+                    not isinstance(meta, dict)
+                    or str(meta.get("id") or "") != session_id
+                ):
+                    raise SessionArchiveMutationError()
+                manifest = None
+                if bundle.exists():
+                    try:
+                        manifest = _read_session_archive_manifest(session_id)
+                    except Exception as exc:
+                        raise SessionArchiveMutationError(recovery_failed=True) from exc
+                if archived and manifest is not None and meta is None:
+                    state = _session_archive_state(manifest)
+                    return {
+                        "ok": True,
+                        "status": "archived",
+                        "archivedAt": state["archivedAt"],
+                        "archiveToken": state["archiveToken"],
+                    }
+                if not archived and manifest is None and meta is not None:
+                    return {"ok": True, "status": "active"}
+                if meta is not None and manifest is not None:
+                    raise SessionLifecycleConflictError(
+                        "session_archive_location_conflict",
+                        "Session exists in both active and archive storage.",
+                    )
+                if meta is None and manifest is None:
+                    raise SessionLifecycleConflictError(
+                        "session_deleted" if _session_was_deleted(session_id) else "session_not_found",
+                        "Session was deleted." if _session_was_deleted(session_id) else "Session was not found.",
+                        http_status=410 if _session_was_deleted(session_id) else 404,
+                    )
+                if archived:
+                    try:
+                        eligible = _session_archive_eligible(session_id, meta)
+                    except Exception as exc:
+                        raise SessionArchiveMutationError() from exc
+                    if not eligible:
+                        raise SessionLifecycleConflictError(
+                            "session_archive_not_terminal",
+                            "Session still has nonterminal work and cannot be archived.",
+                        )
+                if archived:
+                    if not message_path.exists():
+                        raise SessionArchiveMutationError()
+                    archived_at = _normalized_session_timestamp(_session_now_iso())
+                    archive_token = uuid.uuid4().hex
+                    transaction_id = uuid.uuid4().hex
+                    staging = _session_archive_staging_path(session_id, transaction_id)
+                    session_bytes = path.read_bytes()
+                    message_bytes = message_path.read_bytes()
+                    original = {
+                        "session": _session_archive_relative_path(path),
+                        "messages": _session_archive_relative_path(message_path),
+                    }
+                    archive_manifest = {
+                        "schema": "code-session-archive/v1",
+                        "sessionId": session_id,
+                        "archivedAt": archived_at,
+                        "archiveToken": archive_token,
+                        "original": original,
+                        "files": {
+                            "session.json": _session_archive_file_fact(
+                                session_bytes,
+                                mtime_ns=path.stat().st_mtime_ns,
+                            ),
+                            "messages.jsonl": _session_archive_file_fact(
+                                message_bytes,
+                                mtime_ns=message_path.stat().st_mtime_ns,
+                            ),
+                        },
+                    }
+                    try:
+                        staging.mkdir(parents=True, exist_ok=False)
+                        (staging / "session.json").write_bytes(session_bytes)
+                        (staging / "messages.jsonl").write_bytes(message_bytes)
+                        write_json(staging / "manifest.json", archive_manifest)
+                        _write_session_archive_journal(session_id, {
+                            "action": "archive",
+                            "state": "prepared",
+                            "transactionId": transaction_id,
+                        })
+                        bundle.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(staging, bundle)
+                        _write_session_archive_journal(session_id, {
+                            "action": "archive",
+                            "state": "bundle_committed",
+                            "transactionId": transaction_id,
+                        })
+                        path.unlink()
+                        message_path.unlink()
+                        _remove_session_index_entry(session_id)
+                        _session_archive_journal_path(session_id).unlink(missing_ok=True)
+                    except Exception as exc:
+                        try:
+                            _recover_session_archive_transaction(session_id)
+                        except Exception as recovery_exc:
+                            raise SessionArchiveMutationError(recovery_failed=True) from recovery_exc
+                        if not _session_archive_journal_path(session_id).exists() and not bundle.exists():
+                            try:
+                                _remove_session_archive_staging(session_id, transaction_id)
+                            except Exception as recovery_exc:
+                                raise SessionArchiveMutationError(recovery_failed=True) from recovery_exc
+                        raise SessionArchiveMutationError() from exc
+                    return {
+                        "ok": True,
+                        "status": "archived",
+                        "archivedAt": archived_at,
+                        "archiveToken": archive_token,
+                    }
+                state = _session_archive_state(manifest)
+                active_session, active_messages = _session_archive_original_paths(
+                    session_id,
+                    manifest["original"],
+                )
+                transaction_id = uuid.uuid4().hex
+                try:
+                    _write_session_archive_journal(session_id, {
+                        "action": "restore",
+                        "state": "prepared",
+                        "transactionId": transaction_id,
+                    })
+                    _restore_session_archive_file(
+                        active_session,
+                        bundle / "session.json",
+                        manifest["files"]["session.json"],
+                    )
+                    _restore_session_archive_file(
+                        active_messages,
+                        bundle / "messages.jsonl",
+                        manifest["files"]["messages.jsonl"],
+                    )
+                    _write_session_archive_journal(session_id, {
+                        "action": "restore",
+                        "state": "active_committed",
+                        "transactionId": transaction_id,
+                    })
+                    restored_meta = _read_session_meta_strict(active_session) or {}
+                    _write_session_index_from_meta(restored_meta)
+                    _remove_owned_archive_tree(bundle)
+                    _session_archive_journal_path(session_id).unlink(missing_ok=True)
+                except Exception as exc:
+                    try:
+                        _recover_session_archive_transaction(session_id)
+                    except Exception as recovery_exc:
+                        raise SessionArchiveMutationError(recovery_failed=True) from recovery_exc
+                    raise SessionArchiveMutationError() from exc
+                return {"ok": True, "status": "active"}
+
+
+def _write_session_meta_preserving_archive(path, meta):
+    """Write imported metadata only while this Session is physically active."""
+    session_id = safe_session_id(str((meta or {}).get("id") or path.stem))
+    with _session_lifecycle_lock(session_id):
+        _assert_session_active_location(session_id)
+        payload = dict(meta or {})
+        payload.pop("archivedAt", None)
+        payload.pop("archiveToken", None)
+        write_json(path, payload)
+        return payload
 
 
 def _session_was_deleted(session_id):
@@ -14859,6 +15695,38 @@ def _import_result_record(meta, action, root_session_id):
 
 
 def _persist_import_snapshot(
+    **kwargs,
+):
+    """Serialize one imported root snapshot against physical lifecycle moves."""
+    source = _normalize_session_source(kwargs.get("source"))
+    source_path = kwargs.get("source_path")
+    source_session_id = kwargs.get("source_session_id")
+    requested_session_id = kwargs.get("requested_session_id")
+    force_requested_id = bool(kwargs.get("force_requested_id"))
+    registry = _import_session_registry(source)
+    candidate = None if force_requested_id else _matching_import_record(
+        registry,
+        source_path,
+        source_session_id,
+    )
+    root_session_id = safe_session_id(
+        (
+            candidate["state"].get("rootSessionId")
+            or candidate["meta"].get("id")
+        )
+        if candidate
+        else requested_session_id
+    )
+    with _session_lifecycle_lock(root_session_id):
+        _assert_session_active_location(root_session_id)
+        with _json_write_lock:
+            # Re-check under the only write boundary shared with archive so a
+            # winning physical move cannot be followed by a stale import write.
+            _assert_session_active_location(root_session_id)
+            return _persist_import_snapshot_unlocked(**kwargs)
+
+
+def _persist_import_snapshot_unlocked(
     *,
     source,
     source_path,
@@ -14896,6 +15764,11 @@ def _persist_import_snapshot(
         if candidate
         else requested_session_id
     )
+    if _session_archive_bundle_path(root_session_id).exists():
+        raise SessionLifecycleConflictError(
+            "session_archived",
+            "Archived sessions must be restored before import updates.",
+        )
     root_meta_path = session_path(root_session_id)
     existing = read_json(root_meta_path, {}) if root_meta_path.exists() else {}
     existing_messages = (
@@ -14943,7 +15816,7 @@ def _persist_import_snapshot(
 
     if root_meta_path.exists() and not previous_state and current_hash == snapshot_hash:
         existing["importState"] = state_for(root_session_id)
-        write_json(root_meta_path, existing)
+        existing = _write_session_meta_preserving_archive(root_meta_path, existing)
         return _import_result_record(existing, "unchanged", root_session_id)
 
     if root_meta_path.exists() and previous_state and source_same:
@@ -14960,7 +15833,7 @@ def _persist_import_snapshot(
         else:
             previous_state.pop("codeModifiedAt", None)
         existing["importState"] = previous_state
-        write_json(root_meta_path, existing)
+        existing = _write_session_meta_preserving_archive(root_meta_path, existing)
         action = "continued" if code_modified else "unchanged"
         return _import_result_record(existing, action, root_session_id)
 
@@ -14977,7 +15850,7 @@ def _persist_import_snapshot(
                 previous_state.get("codeModifiedAt") or now_iso()
             )
         existing["importState"] = next_state
-        write_json(root_meta_path, existing)
+        existing = _write_session_meta_preserving_archive(root_meta_path, existing)
         action = "continued" if code_modified else "unchanged"
         return _import_result_record(existing, action, root_session_id)
 
@@ -14999,7 +15872,10 @@ def _persist_import_snapshot(
                     root_session_id,
                     target_existing.get("importState"),
                 )
-                write_json(target_meta_path, target_existing)
+                target_existing = _write_session_meta_preserving_archive(
+                    target_meta_path,
+                    target_existing,
+                )
                 return _import_result_record(
                     target_existing,
                     "unchanged",
@@ -15087,7 +15963,7 @@ def _persist_import_snapshot(
     if action == "snapshot-created":
         meta["importState"]["previousSessionId"] = root_session_id
     write_jsonl(target_meta_path.with_suffix(".jsonl"), messages)
-    write_json(target_meta_path, meta)
+    meta = _write_session_meta_preserving_archive(target_meta_path, meta)
     append_index(
         target_id,
         preserved_title,
@@ -18966,6 +19842,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 else:
                     self.send_json({"error": "project not found"}, 404)
                 return
+            if route == "/api/session-archive":
+                self.get_archived_sessions()
+                return
             if route == "/api/sessions":
                 self.get_sessions()
                 return
@@ -19037,6 +19916,15 @@ class CodeHandler(BaseHTTPRequestHandler):
                     return
                 self.send_json(_image_route_registry.refresh(connections))
                 return
+            if route.startswith("/api/session-archive/"):
+                parts = route.strip("/").split("/")
+                if len(parts) == 4 and parts[:2] == ["api", "session-archive"]:
+                    if parts[3] == "archive":
+                        self.archive_session_lifecycle(parts[2])
+                        return
+                    if parts[3] in {"restore", "unarchive"}:
+                        self.unarchive_session_lifecycle(parts[2])
+                        return
             if route.startswith("/api/sessions/") and route.endswith("/goal-v2/control"):
                 parts = route.strip("/").split("/")
                 if len(parts) != 5:
@@ -19496,6 +20384,12 @@ class CodeHandler(BaseHTTPRequestHandler):
             if self.path == "/api/code/auth/validate":
                 self._handle_validate_code_auth()
                 return
+        except SessionLifecycleConflictError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        except SessionArchiveMutationError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
         except ImageRuntimeError as exc:
             self.send_json(exc.public_payload(), exc.http_status)
             return
@@ -19529,6 +20423,15 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         try:
+            parsed = parse.urlparse(self.path)
+            route = parsed.path
+            if route.startswith("/api/session-archive/"):
+                parts = route.strip("/").split("/")
+                if len(parts) == 3 and parts[:2] == ["api", "session-archive"]:
+                    query = parse.parse_qs(parsed.query)
+                    token = (query.get("archiveToken") or [""])[0]
+                    self.delete_archived_session(parts[2], token)
+                    return
             if self.path.startswith("/api/skills/dependencies/operations/"):
                 operation_id = parse.urlparse(self.path).path.rsplit("/", 1)[-1]
                 operation = cancel_skill_dependency_operation(operation_id)
@@ -19896,6 +20799,17 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True})
 
     def assign_session_project(self, session_id):
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                CodeHandler.consume_request_body(self)
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
+            return CodeHandler._assign_session_project_unlocked(self, session_id)
+
+    def _assign_session_project_unlocked(self, session_id):
         """PUT /api/sessions/:id/project — assign session to a project."""
         body = self.read_body_json()
         requested_project_id = str(body.get("projectId") or "").strip() or None
@@ -19931,6 +20845,11 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "projectId": project_id, "cwd": cwd})
 
     def get_sessions(self):
+        try:
+            _recover_all_session_archive_transactions()
+        except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
         sessions = []
         orphans = []
         index_dirty = False
@@ -20008,9 +20927,181 @@ class CodeHandler(BaseHTTPRequestHandler):
         _sort_sessions_by_last_message(sessions)
         self.send_json({"data": sessions})
 
+    def get_archived_sessions(self):
+        try:
+            _recover_all_session_archive_transactions()
+        except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        summaries = []
+        archive_root = _session_archive_root()
+        if archive_root.exists():
+            for bundle in archive_root.iterdir():
+                if not bundle.is_dir() or bundle.name.startswith("."):
+                    continue
+                try:
+                    session_id = safe_session_id(bundle.name)
+                    with _session_lifecycle_lock(session_id):
+                        _recover_session_archive_transaction(session_id)
+                        manifest = _read_session_archive_manifest(session_id)
+                    if manifest is None:
+                        continue
+                    meta = json.loads((bundle / "session.json").read_text(encoding="utf-8-sig"))
+                    state = _session_archive_state(manifest)
+                    summaries.append({
+                        "id": session_id,
+                        "title": str(meta.get("title") or ""),
+                        "projectId": str(meta.get("projectId") or "").strip() or None,
+                        "source": _normalize_session_source(meta.get("source"), meta.get("group")),
+                        "createdAt": _normalized_session_timestamp(meta.get("createdAt")),
+                        "updatedAt": _normalized_session_timestamp(meta.get("updatedAt")),
+                        "lastMessageTime": _session_effective_last_message_time(meta),
+                        "archivedAt": state["archivedAt"],
+                        "archiveToken": state["archiveToken"],
+                    })
+                except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                    self.send_json(exc.public_payload(), exc.http_status)
+                    return
+                except Exception:
+                    failure = SessionArchiveMutationError(recovery_failed=True)
+                    self.send_json(failure.public_payload(), failure.http_status)
+                    return
+        summaries.sort(key=lambda item: str(item.get("id") or ""))
+        summaries.sort(
+            key=lambda item: _session_timestamp_sort_value(item.get("archivedAt")),
+            reverse=True,
+        )
+        self.send_json({"data": summaries})
+
+    def archive_session_lifecycle(self, session_id):
+        try:
+            result = _mutate_session_archive_state(session_id, archived=True)
+        except SessionLifecycleConflictError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        except SessionArchiveMutationError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        self.send_json(result)
+
+    def unarchive_session_lifecycle(self, session_id):
+        try:
+            result = _mutate_session_archive_state(session_id, archived=False)
+        except SessionLifecycleConflictError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        except SessionArchiveMutationError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        self.send_json(result)
+
+    def delete_archived_session(self, session_id, archive_token):
+        session_id = safe_session_id(session_id)
+        supplied_token = _normalize_session_archive_token(archive_token)
+        with _session_lifecycle_lock(session_id):
+            try:
+                _recover_session_archive_transaction(session_id)
+                manifest = _read_session_archive_manifest(session_id)
+            except Exception:
+                failure = SessionArchiveMutationError(recovery_failed=True)
+                self.send_json(failure.public_payload(), failure.http_status)
+                return
+            if manifest is None:
+                conflict = SessionLifecycleConflictError(
+                    "session_deleted" if _session_was_deleted(session_id) else "session_not_found",
+                    "Session was deleted." if _session_was_deleted(session_id) else "Session was not found.",
+                    http_status=410 if _session_was_deleted(session_id) else 404,
+                )
+                self.send_json(conflict.public_payload(), conflict.http_status)
+                return
+            state = _session_archive_state(manifest)
+            if not supplied_token or supplied_token != state["archiveToken"]:
+                conflict = SessionLifecycleConflictError(
+                    "session_archive_token_mismatch",
+                    "Session archive state changed; refresh before deleting.",
+                )
+                self.send_json(conflict.public_payload(), conflict.http_status)
+                return
+            bundle = _session_archive_bundle_path(session_id)
+            active_session, active_messages = _session_archive_original_paths(
+                session_id,
+                manifest["original"],
+            )
+            transaction_id = uuid.uuid4().hex
+            try:
+                with _agent_run_lock:
+                    _write_session_archive_journal(session_id, {
+                        "action": "delete",
+                        "state": "prepared",
+                        "transactionId": transaction_id,
+                    })
+                    _restore_session_archive_file(
+                        active_session,
+                        bundle / "session.json",
+                        manifest["files"]["session.json"],
+                    )
+                    _restore_session_archive_file(
+                        active_messages,
+                        bundle / "messages.jsonl",
+                        manifest["files"]["messages.jsonl"],
+                    )
+                    restored_meta = _read_session_meta_strict(active_session) or {}
+                    _write_session_index_from_meta(restored_meta)
+                    _write_session_archive_journal(session_id, {
+                        "action": "delete",
+                        "state": "core_restored",
+                        "transactionId": transaction_id,
+                    })
+                    CodeHandler.delete_session(
+                        self,
+                        session_id,
+                        send_response=False,
+                        delete_terminal_agent_runs=True,
+                        session_core_path=active_session,
+                        messages_core_path=active_messages,
+                    )
+                    _write_session_archive_journal(session_id, {
+                        "action": "delete",
+                        "state": "facts_deleted",
+                        "transactionId": transaction_id,
+                    })
+                    _remove_owned_archive_tree(bundle)
+                    _session_archive_journal_path(session_id).unlink(missing_ok=True)
+                    self.send_json({"ok": True})
+            except SessionDeleteError as exc:
+                if not exc.recovery_failed:
+                    # The underlying delete transaction restored every fact,
+                    # so it is safe to return to the original archive-only
+                    # authority and allow an explicit retry.
+                    try:
+                        active_session.unlink(missing_ok=True)
+                        active_messages.unlink(missing_ok=True)
+                        _remove_session_index_entry(session_id)
+                        _session_archive_journal_path(session_id).unlink(missing_ok=True)
+                    except Exception:
+                        failed = SessionDeleteError(recovery_failed=True)
+                        self.send_json(failed.public_payload(), failed.http_status)
+                        return
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
+            except Exception as exc:
+                try:
+                    _recover_session_archive_transaction(session_id)
+                except Exception as recovery_exc:
+                    failure = SessionArchiveMutationError(recovery_failed=True)
+                    self.send_json(failure.public_payload(), failure.http_status)
+                    return
+                failure = SessionArchiveMutationError()
+                self.send_json(failure.public_payload(), failure.http_status)
+
     def get_session(self, session_id):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
             return CodeHandler._get_session_unlocked(self, session_id)
 
     def _get_session_unlocked(self, session_id):
@@ -20033,6 +21124,11 @@ class CodeHandler(BaseHTTPRequestHandler):
         """Return only the isolated Goal v2 projection for one Session."""
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
             if not session_path(session_id).exists():
                 self.send_json({"error": "session not found"}, 404)
                 return
@@ -20042,6 +21138,12 @@ class CodeHandler(BaseHTTPRequestHandler):
         """Apply one strict user-owned Goal v2 control operation."""
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                CodeHandler.consume_request_body(self)
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
             if not session_path(session_id).exists():
                 self.send_json({"error": "session not found"}, 404)
                 return
@@ -20119,6 +21221,12 @@ class CodeHandler(BaseHTTPRequestHandler):
     def save_session(self, session_id):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                CodeHandler.consume_request_body(self)
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
             if _session_was_deleted(session_id) and not session_path(session_id).exists():
                 CodeHandler.consume_request_body(self)
                 self.send_json({
@@ -20273,7 +21381,15 @@ class CodeHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"ok": True, "path": str(path)})
 
-    def delete_session(self, session_id):
+    def delete_session(
+        self,
+        session_id,
+        *,
+        send_response=True,
+        delete_terminal_agent_runs=False,
+        session_core_path=None,
+        messages_core_path=None,
+    ):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
             with _json_write_lock:
@@ -20281,10 +21397,20 @@ class CodeHandler(BaseHTTPRequestHandler):
                 asset_snapshots = []
                 goal_path = None
                 goal_snapshot = None
+                agent_run_snapshots = {}
+                terminal_agent_run_ids = set()
                 prepared = False
                 try:
-                    path = session_path(session_id)
-                    jpath = messages_path(session_id)
+                    path = (
+                        Path(session_core_path)
+                        if session_core_path is not None
+                        else session_path(session_id)
+                    )
+                    jpath = (
+                        Path(messages_core_path)
+                        if messages_core_path is not None
+                        else messages_path(session_id)
+                    )
                     session = read_json(path, {}) if path.exists() else {}
                     parent_id = session.get("_parentId")
                     child_ids = [
@@ -20316,6 +21442,25 @@ class CodeHandler(BaseHTTPRequestHandler):
                     asset_snapshots = (
                         _generated_asset_repository.snapshot_session_assets(session_id)
                     )
+                    if delete_terminal_agent_runs:
+                        for run_id, run in _agent_runs.items():
+                            if not isinstance(run, dict):
+                                continue
+                            if str(run.get("session_id") or run.get("sessionId") or "") != session_id:
+                                continue
+                            if str(run.get("status") or "") not in _AGENT_RUN_TERMINAL:
+                                raise SessionDeleteError()
+                            terminal_agent_run_ids.add(str(run_id))
+                        for run_path in _agent_runs_dir().glob("*.json"):
+                            record = _read_session_meta_strict(run_path)
+                            if not isinstance(record, dict):
+                                continue
+                            if str(record.get("sessionId") or "") != session_id:
+                                continue
+                            if str(record.get("status") or "") not in _AGENT_RUN_TERMINAL:
+                                raise SessionDeleteError()
+                            terminal_agent_run_ids.add(run_path.stem)
+                            agent_run_snapshots[run_path] = _path_snapshot(run_path)
                     prepared = True
                     # Remove the primary Session files first. A Windows sharing
                     # violation therefore happens before any sidecar or asset is
@@ -20326,6 +21471,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                         session_id,
                         snapshots=asset_snapshots,
                     )
+                    for run_path in agent_run_snapshots:
+                        run_path.unlink(missing_ok=True)
 
                     # Preserve the established branch re-parenting behavior.
                     if parent_id:
@@ -20359,6 +21506,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                     # Goal facts are last: if the locked unlink fails, every
                     # earlier mutation is still covered by the rollback set.
                     goal_service.delete_sidecar(session_id)
+                    if delete_terminal_agent_runs and terminal_agent_run_ids:
+                        with _agent_run_lock:
+                            for run_id in terminal_agent_run_ids:
+                                _agent_runs.pop(run_id, None)
                 except Exception as exc:
                     rollback_failed = False
                     if prepared:
@@ -20366,6 +21517,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                             for snapshot_path, payload in snapshots.items():
                                 _restore_path_snapshot(snapshot_path, payload)
                             _restore_path_snapshot(goal_path, goal_snapshot)
+                            for run_path, payload in agent_run_snapshots.items():
+                                _restore_path_snapshot(run_path, payload)
                             _generated_asset_repository.restore_session_assets(
                                 asset_snapshots,
                             )
@@ -20375,9 +21528,21 @@ class CodeHandler(BaseHTTPRequestHandler):
                         recovery_failed=rollback_failed,
                     ) from exc
                 _mark_session_deleted(session_id)
-        self.send_json({"ok": True})
+        if send_response:
+            self.send_json({"ok": True})
 
     def branch_session(self, parent_id):
+        parent_id = safe_session_id(parent_id)
+        with _session_lifecycle_lock(parent_id):
+            try:
+                _assert_session_active_location(parent_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                CodeHandler.consume_request_body(self)
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
+            return CodeHandler._branch_session_unlocked(self, parent_id)
+
+    def _branch_session_unlocked(self, parent_id):
         safe_session_id(parent_id)
         parent_path = session_path(parent_id)
         if not parent_path.exists():
@@ -20468,6 +21633,12 @@ class CodeHandler(BaseHTTPRequestHandler):
     def append_messages(self, session_id):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                CodeHandler.consume_request_body(self)
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
             if _session_was_deleted(session_id) or not session_path(session_id).exists():
                 CodeHandler.consume_request_body(self)
                 self.send_json({

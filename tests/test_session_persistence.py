@@ -696,6 +696,1284 @@ class TestSessionIndexConversationTime(unittest.TestCase):
         self.assertNotIn("CONCURRENT-INTERACTION-SECRET", json.dumps(index))
 
 
+class TestSessionArchiveLifecycle(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.sessions_dir = self.root / "sessions"
+        self.assets = server.GeneratedAssetRepository(self.root / "generated-assets")
+        self.patch_sessions = mock.patch.object(server, "SESSIONS_DIR", self.sessions_dir)
+        self.patch_data = mock.patch.object(server, "DATA_DIR", self.root)
+        self.patch_assets = mock.patch.object(
+            server,
+            "_generated_asset_repository",
+            self.assets,
+        )
+        self.patch_location = mock.patch.object(
+            server,
+            "_session_location",
+            return_value=(None, ""),
+        )
+        self.patch_sessions.start()
+        self.patch_data.start()
+        self.patch_assets.start()
+        self.patch_location.start()
+        self.addCleanup(self.patch_sessions.stop)
+        self.addCleanup(self.patch_data.stop)
+        self.addCleanup(self.patch_assets.stop)
+        self.addCleanup(self.patch_location.stop)
+        with server._agent_run_lock:
+            self.saved_agent_runs = dict(server._agent_runs)
+            server._agent_runs.clear()
+        self.addCleanup(self.restore_agent_runs)
+
+    def restore_agent_runs(self):
+        with server._agent_run_lock:
+            server._agent_runs.clear()
+            server._agent_runs.update(self.saved_agent_runs)
+
+    @staticmethod
+    def make_handler(body=None, *, path=""):
+        handler = object.__new__(server.CodeHandler)
+        handler.path = path
+        handler.read_body_json = mock.Mock(return_value=body or {})
+        handler.send_json = mock.Mock()
+        handler.send_error = mock.Mock()
+        return handler
+
+    def create_session(self, *, title="Archive lifecycle", run_state=None, messages=None):
+        handler = self.make_handler({
+            "title": title,
+            "messages": messages or [{
+                "role": "user",
+                "content": "archive fixture",
+                "_time": "2026-08-28T12:00:00Z",
+            }],
+            "runState": run_state or {},
+        })
+        server.CodeHandler.create_session(handler)
+        return handler.send_json.call_args.args[0]
+
+    def archive(self, session_id):
+        handler = self.make_handler()
+        server.CodeHandler.archive_session_lifecycle(handler, session_id)
+        return handler
+
+    def unarchive(self, session_id):
+        handler = self.make_handler()
+        server.CodeHandler.unarchive_session_lifecycle(handler, session_id)
+        return handler
+
+    def archive_summary(self):
+        handler = self.make_handler()
+        server.CodeHandler.get_archived_sessions(handler)
+        return handler.send_json.call_args.args[0]["data"]
+
+    def create_asset_sidecar(self, session_id, marker="a"):
+        asset_id = "ga1_" + (str(marker)[:1] * 43)
+        asset_dir = self.assets.root / asset_id
+        asset_dir.mkdir(parents=True)
+        content = b"archive-lifecycle-asset"
+        (asset_dir / "content.png").write_bytes(content)
+        (asset_dir / "meta.json").write_text(json.dumps({
+            "schema": "code-generated-asset/v1",
+            "assetId": asset_id,
+            "operationId": f"archive-lifecycle-{marker}",
+            "sessionId": session_id,
+            "agentRunId": "run-archive-lifecycle",
+            "toolCallId": "call-archive-lifecycle",
+            "index": 0,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "mimeType": "image/png",
+            "width": 1,
+            "height": 1,
+            "byteLength": len(content),
+            "createdAt": "2026-08-28T12:00:00Z",
+            "fileName": "content.png",
+        }), encoding="utf-8")
+        return asset_dir
+
+    def create_terminal_goal(self, session_id):
+        runtime = GoalV2Runtime(self.root)
+        created = runtime.create_goal(
+            session_id,
+            "Archived terminal Goal",
+            context=GoalCreationContext(
+                session_id=session_id,
+                origin_message_id="message-archive-terminal",
+                client_request_id="request-archive-terminal",
+                owner_run_id="run-archive-terminal",
+                permission_profile="read",
+                source_kind="explicit",
+            ),
+            expected_revision=0,
+            idempotency_key=f"create-terminal-{session_id}",
+        )
+        goal = created["goal"]
+        runtime.cancel_goal(
+            session_id,
+            goal["goalId"],
+            reason="terminal fixture",
+            source_run_id="run-archive-terminal",
+            expected_revision=created["revision"],
+            idempotency_key=f"cancel-terminal-{session_id}",
+        )
+        return runtime.service.events_path(session_id)
+
+    def create_terminal_agent_run(self, session_id, marker="a"):
+        run_id = (str(marker)[:1] or "a") * 32
+        run = {
+            "version": 5,
+            "id": run_id,
+            "sessionId": session_id,
+            "session_id": session_id,
+            "status": "completed",
+        }
+        path = self.root / "agent-runs" / f"{run_id}.json"
+        server.write_json(path, run)
+        with server._agent_run_lock:
+            server._agent_runs[run_id] = dict(run)
+        return run_id, path
+
+    def test_archive_unarchive_lists_are_idempotent_secret_free_and_non_destructive(self):
+        secret = "ARCHIVE-SECRET-SENTINEL"
+        archived = self.create_session(
+            title="Archived fixture",
+            run_state={"status": "completed", "secret": secret},
+        )
+        active = self.create_session(title="Active fixture")
+        active_meta_path = server.session_path(archived["id"])
+        active_messages_path = server.messages_path(archived["id"])
+        meta_before = active_meta_path.read_bytes()
+        messages_before = active_messages_path.read_bytes()
+        goal_path = self.create_terminal_goal(archived["id"])
+        goal_before = goal_path.read_bytes()
+        asset_dir = self.create_asset_sidecar(archived["id"])
+        asset_before = {
+            path.name: path.read_bytes()
+            for path in asset_dir.iterdir()
+            if path.is_file()
+        }
+
+        first = self.archive(archived["id"])
+        payload = first.send_json.call_args.args[0]
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "archived")
+        self.assertRegex(payload["archiveToken"], r"^[0-9a-f]{32}$")
+        self.assertTrue(payload["archivedAt"].endswith("Z"))
+        token = payload["archiveToken"]
+        archived_at = payload["archivedAt"]
+        bundle = server._session_archive_bundle_path(archived["id"])
+        self.assertFalse(active_meta_path.exists())
+        self.assertFalse(active_messages_path.exists())
+        self.assertEqual((bundle / "session.json").read_bytes(), meta_before)
+        self.assertEqual((bundle / "messages.jsonl").read_bytes(), messages_before)
+        manifest_after_first = (bundle / "manifest.json").read_bytes()
+        index_after_first = server._session_index_path().read_bytes()
+
+        repeated = self.archive(archived["id"])
+        repeated_payload = repeated.send_json.call_args.args[0]
+        self.assertEqual(repeated_payload["archiveToken"], token)
+        self.assertEqual(repeated_payload["archivedAt"], archived_at)
+        self.assertEqual((bundle / "manifest.json").read_bytes(), manifest_after_first)
+        self.assertEqual(server._session_index_path().read_bytes(), index_after_first)
+
+        active_list = self.make_handler()
+        server.CodeHandler.get_sessions(active_list)
+        active_ids = [item["id"] for item in active_list.send_json.call_args.args[0]["data"]]
+        self.assertEqual(active_ids, [active["id"]])
+
+        summaries = self.archive_summary()
+        self.assertEqual(len(summaries), 1)
+        summary = summaries[0]
+        self.assertEqual(set(summary), {
+            "id", "title", "projectId", "source", "createdAt", "updatedAt",
+            "lastMessageTime", "archivedAt", "archiveToken",
+        })
+        self.assertEqual(summary["id"], archived["id"])
+        self.assertEqual(summary["archiveToken"], token)
+        self.assertNotIn(secret, json.dumps(summary))
+        self.assertNotIn("runState", summary)
+        self.assertNotIn("messages", summary)
+        self.assertNotIn("cwd", summary)
+        self.assertEqual((bundle / "messages.jsonl").read_bytes(), messages_before)
+        self.assertEqual(goal_path.read_bytes(), goal_before)
+        self.assertEqual({
+            path.name: path.read_bytes()
+            for path in asset_dir.iterdir()
+            if path.is_file()
+        }, asset_before)
+
+        restored = self.unarchive(archived["id"])
+        self.assertEqual(restored.send_json.call_args.args[0], {
+            "ok": True,
+            "status": "active",
+        })
+        self.assertEqual(active_meta_path.read_bytes(), meta_before)
+        self.assertEqual(active_messages_path.read_bytes(), messages_before)
+        self.assertFalse(bundle.exists())
+        meta_after_restore = server.session_path(archived["id"]).read_bytes()
+        index_after_restore = server._session_index_path().read_bytes()
+        repeated_restore = self.unarchive(archived["id"])
+        self.assertEqual(repeated_restore.send_json.call_args.args[0], {
+            "ok": True,
+            "status": "active",
+        })
+        self.assertEqual(server.session_path(archived["id"]).read_bytes(), meta_after_restore)
+        self.assertEqual(server._session_index_path().read_bytes(), index_after_restore)
+        self.assertEqual(self.archive_summary(), [])
+
+    def test_manifest_paths_identity_and_integrity_fail_closed(self):
+        session = self.create_session(title="Manifest binding")
+        other = self.create_session(title="Manifest sibling")
+        self.archive(session["id"])
+        bundle = server._session_archive_bundle_path(session["id"])
+        manifest_path = bundle / "manifest.json"
+        original_manifest = manifest_path.read_bytes()
+        sibling_before = server.session_path(other["id"]).read_bytes()
+        sentinel = "MANIFEST-PATH-SECRET"
+        tamper_cases = (
+            ("other-session", lambda manifest: manifest["original"].__setitem__(
+                "session", server._session_archive_relative_path(server.session_path(other["id"]))
+            )),
+            ("staging-traversal", lambda manifest: manifest["original"].__setitem__(
+                "messages", f"sessions/../session-archive/{sentinel}.jsonl"
+            )),
+            ("wrong-identity", lambda manifest: manifest.__setitem__("sessionId", other["id"])),
+        )
+        for label, mutate in tamper_cases:
+            with self.subTest(label=label):
+                manifest = json.loads(original_manifest)
+                mutate(manifest)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                failed = self.unarchive(session["id"])
+                payload, status = failed.send_json.call_args.args
+                self.assertEqual(status, 500)
+                self.assertEqual(payload["errorCode"], "session_archive_recovery_failed")
+                self.assertNotIn(sentinel, json.dumps(payload))
+                self.assertEqual(server.session_path(other["id"]).read_bytes(), sibling_before)
+                self.assertFalse(server.session_path(session["id"]).exists())
+                manifest_path.write_bytes(original_manifest)
+
+        archived_messages_path = bundle / "messages.jsonl"
+        archived_messages_before = archived_messages_path.read_bytes()
+        archived_messages_path.write_bytes(b"CORRUPT-ARCHIVE-CONTENT")
+        failed = self.unarchive(session["id"])
+        self.assertEqual(failed.send_json.call_args.args[1], 500)
+        self.assertEqual(
+            failed.send_json.call_args.args[0]["errorCode"],
+            "session_archive_recovery_failed",
+        )
+        self.assertFalse(server.session_path(session["id"]).exists())
+        archived_messages_path.write_bytes(archived_messages_before)
+
+        archived_meta_path = bundle / "session.json"
+        archived_meta_before = archived_meta_path.read_bytes()
+        wrong_meta = json.loads(archived_meta_before)
+        wrong_meta["id"] = other["id"]
+        archived_meta_path.write_text(json.dumps(wrong_meta), encoding="utf-8")
+        manifest = json.loads(original_manifest)
+        meta_bytes = archived_meta_path.read_bytes()
+        manifest["files"]["session.json"] = server._session_archive_file_fact(
+            meta_bytes,
+            mtime_ns=manifest["files"]["session.json"]["mtimeNs"],
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        failed = self.unarchive(session["id"])
+        self.assertEqual(failed.send_json.call_args.args[1], 500)
+        self.assertEqual(
+            failed.send_json.call_args.args[0]["errorCode"],
+            "session_archive_recovery_failed",
+        )
+        self.assertEqual(server.session_path(other["id"]).read_bytes(), sibling_before)
+
+    def test_journal_identity_state_and_staging_are_strictly_bounded(self):
+        session = self.create_session(title="Journal binding")
+        session_id = session["id"]
+        active_before = server.session_path(session_id).read_bytes()
+        journal_path = server._session_archive_journal_path(session_id)
+        transaction_id = "a" * 32
+        staging = server._session_archive_staging_path(session_id, transaction_id)
+        staging.mkdir(parents=True)
+        (staging / "sentinel.txt").write_text("bounded", encoding="utf-8")
+        sibling = server._session_archive_root() / "sibling-archive"
+        sibling.mkdir(parents=True)
+        (sibling / "keep.txt").write_text("keep", encoding="utf-8")
+
+        invalid_journals = (
+            {"schema": "code-session-archive-transaction/v1", "sessionId": session_id,
+             "action": "archive", "state": "prepared", "transactionId": "../sibling-archive"},
+            {"schema": "code-session-archive-transaction/v1", "sessionId": "z" * 16,
+             "action": "archive", "state": "prepared", "transactionId": transaction_id},
+            {"schema": "code-session-archive-transaction/v1", "sessionId": session_id,
+             "action": "archive", "state": "unknown", "transactionId": transaction_id},
+        )
+        for journal in invalid_journals:
+            with self.subTest(journal=journal):
+                server.write_json(journal_path, journal)
+                with self.assertRaises(server.SessionArchiveMutationError) as raised:
+                    server._recover_session_archive_transaction(session_id)
+                self.assertTrue(raised.exception.recovery_failed)
+                self.assertTrue(staging.exists())
+                self.assertTrue((sibling / "keep.txt").exists())
+                self.assertEqual(server.session_path(session_id).read_bytes(), active_before)
+        journal_path.unlink()
+
+    def test_legacy_flat_metadata_with_dated_messages_archives_and_restores(self):
+        session_id = "legacyflat01"
+        flat_meta = self.sessions_dir / f"{session_id}.json"
+        meta = {
+            "id": session_id,
+            "title": "Legacy flat",
+            "messageCount": 1,
+            "runState": {},
+        }
+        server.write_json(flat_meta, meta)
+        dated_messages = server.messages_path(session_id)
+        server.write_jsonl(dated_messages, [{"role": "user", "content": "legacy"}])
+        server._write_session_index_from_meta(meta)
+        meta_before = flat_meta.read_bytes()
+        messages_before = dated_messages.read_bytes()
+
+        archived = self.archive(session_id)
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        self.assertFalse(flat_meta.exists())
+        self.assertFalse(dated_messages.exists())
+        with server._agent_run_lock:
+            server._agent_runs.clear()
+        self.assertEqual(self.archive_summary()[0]["id"], session_id)
+        restored = self.unarchive(session_id)
+        self.assertEqual(restored.send_json.call_args.args[0]["status"], "active")
+        self.assertEqual(flat_meta.read_bytes(), meta_before)
+        self.assertEqual(dated_messages.read_bytes(), messages_before)
+        self.assertEqual(server.messages_path(session_id), dated_messages)
+        token = self.archive(session_id).send_json.call_args.args[0]["archiveToken"]
+        deleted = self.make_handler()
+        server.CodeHandler.delete_archived_session(deleted, session_id, token)
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(flat_meta.exists())
+        self.assertFalse(dated_messages.exists())
+
+    def test_legacy_index_without_lifecycle_fields_and_restart_projection_are_safe(self):
+        legacy_active = self.create_session(title="Legacy active")
+        recovered_archive = self.create_session(title="Recovered archive")
+
+        index = server._read_session_index()
+        for entry in index.values():
+            entry.pop("archivedAt", None)
+            entry.pop("archiveToken", None)
+        entries = list(index.values())
+        server._write_session_index_payload("\n".join(
+            json.dumps(entry, ensure_ascii=False) for entry in entries
+        ) + "\n")
+
+        listed = self.make_handler()
+        server.CodeHandler.get_sessions(listed)
+        self.assertEqual(
+            {item["id"] for item in listed.send_json.call_args.args[0]["data"]},
+            {legacy_active["id"], recovered_archive["id"]},
+        )
+        rebuilt_index = server._read_session_index()
+        self.assertNotIn("archivedAt", rebuilt_index[legacy_active["id"]])
+        self.assertNotIn("archiveToken", rebuilt_index[legacy_active["id"]])
+        self.assertNotIn("archiveToken", rebuilt_index[recovered_archive["id"]])
+
+        recovered_token = self.archive(recovered_archive["id"]).send_json.call_args.args[0]["archiveToken"]
+
+        # A process restart has no in-memory archive dependency.
+        with server._agent_run_lock:
+            server._agent_runs.clear()
+        summaries = self.archive_summary()
+        self.assertEqual([item["id"] for item in summaries], [recovered_archive["id"]])
+        self.assertEqual(summaries[0]["archiveToken"], recovered_token)
+
+    def test_archive_state_survives_session_writers_import_and_index_rebuild(self):
+        session = self.create_session(
+            title="Preserved archive",
+            messages=[{"role": "user", "content": "imported"}],
+        )
+        session_id = session["id"]
+        archive_payload = self.archive(session_id).send_json.call_args.args[0]
+        bundle = server._session_archive_bundle_path(session_id)
+        bundle_before = {
+            path.name: path.read_bytes()
+            for path in bundle.iterdir()
+            if path.is_file()
+        }
+
+        saved = self.make_handler({
+            "title": "Renamed while archived",
+            "runState": {"status": "completed"},
+        })
+        server.CodeHandler.save_session(saved, session_id)
+        appended = self.make_handler({
+            "messages": [{"role": "assistant", "content": "preserved"}],
+        })
+        server.CodeHandler.append_messages(appended, session_id)
+        with mock.patch.object(server, "_session_location", return_value=("project-archive", "")):
+            assigned = self.make_handler({"projectId": "project-archive"})
+            server.CodeHandler.assign_session_project(assigned, session_id)
+        branched = self.make_handler({"title": "Branch from archived"})
+        server.CodeHandler.branch_session(branched, session_id)
+        for handler in (saved, appended, assigned, branched):
+            payload, status = handler.send_json.call_args.args
+            self.assertEqual(status, 409)
+            self.assertEqual(payload["errorCode"], "session_archived")
+
+        source_path = self.root / "import-source.jsonl"
+        source_path.write_text('{"type":"message"}\n', encoding="utf-8")
+        with self.assertRaises(server.SessionLifecycleConflictError) as raised:
+            server._persist_import_snapshot(
+                source="codex",
+                source_path=source_path,
+                source_session_id="source-archive-lifecycle",
+                requested_session_id=session_id,
+                force_requested_id=True,
+                title="Imported archive",
+                created_at="2026-08-28T12:00:00Z",
+                messages=[],
+                stats={},
+                last_usage={},
+                resolved_project_id="project-archive",
+                resolved_cwd="",
+            )
+        self.assertEqual(raised.exception.error_code, "session_archived")
+        self.assertEqual({
+            path.name: path.read_bytes()
+            for path in bundle.iterdir()
+            if path.is_file()
+        }, bundle_before)
+
+        server._session_index_path().unlink()
+        server._rebuild_index_if_needed()
+        self.assertNotIn(session_id, server._read_session_index())
+        listed = self.archive_summary()
+        self.assertEqual([item["id"] for item in listed], [session_id])
+
+    def test_archived_session_all_active_read_write_and_goal_entrypoints_fail_closed(self):
+        session = self.create_session(title="Archived API guards")
+        session_id = session["id"]
+        self.archive(session_id)
+        bundle = server._session_archive_bundle_path(session_id)
+        before = {
+            path.name: path.read_bytes()
+            for path in bundle.iterdir()
+            if path.is_file()
+        }
+        handlers = []
+
+        opened = self.make_handler()
+        server.CodeHandler.get_session(opened, session_id)
+        handlers.append(opened)
+        goal_read = self.make_handler()
+        server.CodeHandler.get_session_goal_v2(goal_read, session_id)
+        handlers.append(goal_read)
+        goal_control = self.make_handler({"action": "cancel"})
+        server.CodeHandler.control_session_goal_v2(goal_control, session_id)
+        handlers.append(goal_control)
+        saved = self.make_handler({"title": "blocked"})
+        server.CodeHandler.save_session(saved, session_id)
+        handlers.append(saved)
+        appended = self.make_handler({"messages": [{"role": "user", "content": "blocked"}]})
+        server.CodeHandler.append_messages(appended, session_id)
+        handlers.append(appended)
+        assigned = self.make_handler({"projectId": "blocked"})
+        server.CodeHandler.assign_session_project(assigned, session_id)
+        handlers.append(assigned)
+        branched = self.make_handler({"title": "blocked"})
+        server.CodeHandler.branch_session(branched, session_id)
+        handlers.append(branched)
+
+        for handler in handlers:
+            payload, status = handler.send_json.call_args.args
+            self.assertEqual(status, 409)
+            self.assertEqual(payload["errorCode"], "session_archived")
+        self.assertEqual({
+            path.name: path.read_bytes()
+            for path in bundle.iterdir()
+            if path.is_file()
+        }, before)
+
+    def test_archive_restore_leave_branch_goal_asset_and_message_facts_unchanged(self):
+        parent = self.create_session(title="Archive tree")
+        child_handler = self.make_handler({"title": "Archive child"})
+        server.CodeHandler.branch_session(child_handler, parent["id"])
+        child = child_handler.send_json.call_args.args[0]
+        goal_path = self.create_terminal_goal(parent["id"])
+        asset_dir = self.create_asset_sidecar(parent["id"], "t")
+        _, run_path = self.create_terminal_agent_run(parent["id"], "t")
+        parent_messages = server.messages_path(parent["id"])
+        child_meta = server.session_path(child["id"])
+        child_messages = server.messages_path(child["id"])
+        before = {
+            "parentMessages": parent_messages.read_bytes(),
+            "childMeta": child_meta.read_bytes(),
+            "childMessages": child_messages.read_bytes(),
+            "goal": goal_path.read_bytes(),
+            "agentRun": run_path.read_bytes(),
+            "assets": {
+                path.name: path.read_bytes()
+                for path in asset_dir.iterdir()
+                if path.is_file()
+            },
+            "branches": server.read_json(server.session_path(parent["id"]), {})["_branches"],
+        }
+
+        self.archive(parent["id"])
+        self.unarchive(parent["id"])
+
+        self.assertEqual(parent_messages.read_bytes(), before["parentMessages"])
+        self.assertEqual(child_meta.read_bytes(), before["childMeta"])
+        self.assertEqual(child_messages.read_bytes(), before["childMessages"])
+        self.assertEqual(goal_path.read_bytes(), before["goal"])
+        self.assertEqual(run_path.read_bytes(), before["agentRun"])
+        self.assertEqual({
+            path.name: path.read_bytes()
+            for path in asset_dir.iterdir()
+            if path.is_file()
+        }, before["assets"])
+        self.assertEqual(
+            server.read_json(server.session_path(parent["id"]), {})["_branches"],
+            before["branches"],
+        )
+
+    def test_archive_rejects_nonterminal_session_goal_and_agent_run_facts(self):
+        run_state_cases = [
+            {"status": "running"},
+            {"status": "waiting-network"},
+            {"queuedMessages": [{"id": "queued-1", "status": "pending"}]},
+            {"backgroundRuns": [{"id": "background-1", "status": "waiting-recovery"}]},
+            {"authorizationRequest": {"status": "pending", "reason": "secret"}},
+        ]
+        for index, run_state in enumerate(run_state_cases):
+            with self.subTest(run_state=run_state):
+                session = self.create_session(
+                    title=f"Nonterminal {index}",
+                    run_state=run_state,
+                )
+                before_meta = server.session_path(session["id"]).read_bytes()
+                before_index = server._session_index_path().read_bytes()
+                rejected = self.archive(session["id"])
+                payload, status = rejected.send_json.call_args.args
+                self.assertEqual(status, 409)
+                self.assertEqual(payload["errorCode"], "session_archive_not_terminal")
+                self.assertEqual(server.session_path(session["id"]).read_bytes(), before_meta)
+                self.assertEqual(server._session_index_path().read_bytes(), before_index)
+
+        goal_session = self.create_session(title="Active Goal")
+        GoalV2Runtime(self.root).create_goal(
+            goal_session["id"],
+            "Archive must wait for Goal completion",
+            context=GoalCreationContext(
+                session_id=goal_session["id"],
+                origin_message_id="message-archive-lifecycle",
+                client_request_id="request-archive-lifecycle",
+                owner_run_id="run-archive-lifecycle",
+                permission_profile="read",
+                source_kind="explicit",
+            ),
+            expected_revision=0,
+            idempotency_key="create-archive-lifecycle-goal",
+        )
+        rejected_goal = self.archive(goal_session["id"])
+        self.assertEqual(rejected_goal.send_json.call_args.args[1], 409)
+        self.assertEqual(
+            rejected_goal.send_json.call_args.args[0]["errorCode"],
+            "session_archive_not_terminal",
+        )
+
+        run_session = self.create_session(title="Persisted AgentRun")
+        runs_dir = self.root / "agent-runs"
+        runs_dir.mkdir(parents=True)
+        server.write_json(runs_dir / ("a" * 32 + ".json"), {
+            "version": 5,
+            "id": "a" * 32,
+            "sessionId": run_session["id"],
+            "status": "waiting_recovery",
+        })
+        rejected_run = self.archive(run_session["id"])
+        self.assertEqual(rejected_run.send_json.call_args.args[1], 409)
+        self.assertEqual(
+            rejected_run.send_json.call_args.args[0]["errorCode"],
+            "session_archive_not_terminal",
+        )
+
+    def test_archive_only_delete_requires_current_token_and_keeps_siblings_safe(self):
+        first = self.create_session(title="Delete archived")
+        second = self.create_session(title="Keep sibling")
+        child_handler = self.make_handler({"title": "Reparent after archive delete"})
+        server.CodeHandler.branch_session(child_handler, first["id"])
+        child_id = child_handler.send_json.call_args.args[0]["id"]
+        first_goal = self.create_terminal_goal(first["id"])
+        second_goal = self.create_terminal_goal(second["id"])
+        first_run_id, first_run_path = self.create_terminal_agent_run(first["id"], "d")
+        second_run_id, second_run_path = self.create_terminal_agent_run(second["id"], "e")
+        first_run_before = first_run_path.read_bytes()
+        first_token = self.archive(first["id"]).send_json.call_args.args[0]["archiveToken"]
+        second_token = self.archive(second["id"]).send_json.call_args.args[0]["archiveToken"]
+        self.assertEqual(first_run_path.read_bytes(), first_run_before)
+        first_asset = self.create_asset_sidecar(first["id"], "d")
+        second_asset = self.create_asset_sidecar(second["id"], "e")
+
+        wrong = self.make_handler()
+        server.CodeHandler.delete_archived_session(wrong, first["id"], "0" * 32)
+        wrong_payload, wrong_status = wrong.send_json.call_args.args
+        self.assertEqual(wrong_status, 409)
+        self.assertEqual(wrong_payload["errorCode"], "session_archive_token_mismatch")
+        self.assertTrue(server._session_archive_bundle_path(first["id"]).exists())
+        self.assertTrue(first_asset.exists())
+
+        self.unarchive(first["id"])
+        replacement_token = self.archive(first["id"]).send_json.call_args.args[0]["archiveToken"]
+        self.assertNotEqual(replacement_token, first_token)
+        stale = self.make_handler()
+        server.CodeHandler.delete_archived_session(stale, first["id"], first_token)
+        stale_payload, stale_status = stale.send_json.call_args.args
+        self.assertEqual(stale_status, 409)
+        self.assertEqual(stale_payload["errorCode"], "session_archive_token_mismatch")
+
+        deleted = self.make_handler()
+        server.CodeHandler.delete_archived_session(deleted, first["id"], replacement_token)
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(server.session_path(first["id"]).exists())
+        self.assertFalse(server.messages_path(first["id"]).exists())
+        self.assertFalse(first_asset.exists())
+        self.assertFalse(first_goal.exists())
+        self.assertFalse(first_run_path.exists())
+        self.assertNotIn(first_run_id, server._agent_runs)
+        self.assertNotIn(first["id"], server._read_session_index())
+        self.assertTrue(server._session_archive_bundle_path(second["id"]).exists())
+        self.assertTrue(second_asset.exists())
+        self.assertTrue(second_goal.exists())
+        self.assertTrue(second_run_path.exists())
+        self.assertIn(second_run_id, server._agent_runs)
+        child_meta = server.read_json(server.session_path(child_id), {})
+        self.assertNotIn("_parentId", child_meta)
+        self.assertEqual(child_meta["_branchDepth"], 0)
+        self.assertEqual(self.archive_summary()[0]["archiveToken"], second_token)
+
+        repeated = self.make_handler()
+        server.CodeHandler.delete_archived_session(repeated, first["id"], replacement_token)
+        repeated_payload, repeated_status = repeated.send_json.call_args.args
+        self.assertEqual(repeated_status, 410)
+        self.assertEqual(repeated_payload["errorCode"], "session_deleted")
+        with self.assertRaises(server.SessionLifecycleConflictError) as raised:
+            server._create_agent_run(
+                first["id"],
+                {"model": "fixture-model", "messages": [{
+                    "role": "user",
+                    "content": "must stay deleted",
+                }]},
+                "http://127.0.0.1:9",
+                ["synthetic-key"],
+                start_worker=False,
+            )
+        self.assertEqual(raised.exception.error_code, "session_deleted")
+
+    def test_archive_only_delete_failure_keeps_archived_state_recoverable(self):
+        session = self.create_session(title="Delete rollback remains archived")
+        token = self.archive(session["id"]).send_json.call_args.args[0]["archiveToken"]
+        asset = self.create_asset_sidecar(session["id"], "r")
+        meta_path = server.session_path(session["id"])
+        messages_path = server.messages_path(session["id"])
+        index_path = server._session_index_path()
+        bundle = server._session_archive_bundle_path(session["id"])
+        before = {
+            "bundle": {
+                path.name: path.read_bytes()
+                for path in bundle.iterdir()
+                if path.is_file()
+            },
+            "index": index_path.read_bytes(),
+        }
+        handler = self.make_handler()
+        original_remove_index = server._remove_session_index_entry
+        remove_calls = 0
+
+        def fail_first_remove(session_id):
+            nonlocal remove_calls
+            remove_calls += 1
+            if remove_calls == 1:
+                raise PermissionError(13, "ARCHIVE-DELETE-SECRET", str(index_path))
+            return original_remove_index(session_id)
+
+        with mock.patch.object(
+            server,
+            "_remove_session_index_entry",
+            side_effect=fail_first_remove,
+        ):
+            server.CodeHandler.delete_archived_session(handler, session["id"], token)
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_delete_failed")
+        self.assertNotIn("ARCHIVE-DELETE-SECRET", json.dumps(payload))
+        self.assertFalse(meta_path.exists())
+        self.assertFalse(messages_path.exists())
+        self.assertEqual({
+            path.name: path.read_bytes()
+            for path in bundle.iterdir()
+            if path.is_file()
+        }, before["bundle"])
+        self.assertEqual(index_path.read_bytes(), before["index"])
+        self.assertTrue(asset.exists())
+        self.assertEqual(self.archive_summary()[0]["archiveToken"], token)
+        retried = self.make_handler()
+        server.CodeHandler.delete_archived_session(retried, session["id"], token)
+        self.assertEqual(retried.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(meta_path.exists())
+        self.assertFalse(asset.exists())
+
+    def test_concurrent_save_finishes_before_archive_and_state_is_not_lost(self):
+        session = self.create_session(title="Concurrent archive")
+        session_id = session["id"]
+        save_entered = threading.Event()
+        release_save = threading.Event()
+        original_write_jsonl = server.write_jsonl
+        errors = []
+
+        def blocked_write(path, messages):
+            if Path(path) == server.messages_path(session_id):
+                save_entered.set()
+                if not release_save.wait(5):
+                    raise AssertionError("save release was not signalled")
+            return original_write_jsonl(path, messages)
+
+        save = self.make_handler({
+            "title": "Saved before archive",
+            "messages": [{"role": "user", "content": "saved"}],
+            "expectedRevision": 0,
+        })
+        archived = self.make_handler()
+
+        def run_save():
+            try:
+                server.CodeHandler.save_session(save, session_id)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        def run_archive():
+            try:
+                server.CodeHandler.archive_session_lifecycle(archived, session_id)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                errors.append(exc)
+
+        with mock.patch.object(server, "write_jsonl", side_effect=blocked_write):
+            save_thread = threading.Thread(target=run_save)
+            archive_thread = threading.Thread(target=run_archive)
+            save_thread.start()
+            self.assertTrue(save_entered.wait(5))
+            archive_thread.start()
+            release_save.set()
+            save_thread.join(timeout=5)
+            archive_thread.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        self.assertFalse(save_thread.is_alive())
+        self.assertFalse(archive_thread.is_alive())
+        self.assertEqual(save.send_json.call_args.args[0]["revision"], 1)
+        archive_payload = archived.send_json.call_args.args[0]
+        self.assertEqual(archive_payload["status"], "archived")
+        meta = server.read_json(
+            server._session_archive_bundle_path(session_id) / "session.json",
+            {},
+        )
+        self.assertEqual(meta["title"], "Saved before archive")
+        self.assertNotIn(session_id, server._read_session_index())
+        self.assertEqual(
+            server._read_session_archive_manifest(session_id)["archiveToken"],
+            archive_payload["archiveToken"],
+        )
+
+    def test_lifecycle_http_routes_are_distinct_from_compaction_archive(self):
+        session = self.create_session(title="Lifecycle routes")
+        archive_handler = self.make_handler(
+            path=f"/api/session-archive/{session['id']}/archive",
+        )
+        server.CodeHandler.do_POST(archive_handler)
+        archive_payload = archive_handler.send_json.call_args.args[0]
+        self.assertEqual(archive_payload["status"], "archived")
+
+        list_handler = self.make_handler(path="/api/session-archive")
+        server.CodeHandler.do_GET(list_handler)
+        self.assertEqual(
+            [item["id"] for item in list_handler.send_json.call_args.args[0]["data"]],
+            [session["id"]],
+        )
+
+        restore_handler = self.make_handler(
+            path=f"/api/session-archive/{session['id']}/restore",
+        )
+        server.CodeHandler.do_POST(restore_handler)
+        self.assertEqual(
+            restore_handler.send_json.call_args.args[0],
+            {"ok": True, "status": "active"},
+        )
+        token = self.archive(session["id"]).send_json.call_args.args[0]["archiveToken"]
+        delete_handler = self.make_handler(
+            path=f"/api/session-archive/{session['id']}?archiveToken={token}",
+        )
+        server.CodeHandler.do_DELETE(delete_handler)
+        self.assertEqual(delete_handler.send_json.call_args.args[0], {"ok": True})
+
+        # The established full-history compaction endpoint keeps its method/path.
+        compact = self.make_handler({"messages": [{"role": "user", "content": "history"}]})
+        compact.path = f"/api/sessions/{'b' * 16}/archive"
+        with mock.patch.object(server.CodeHandler, "archive_session") as archive_copy:
+            server.CodeHandler.do_PUT(compact)
+        archive_copy.assert_called_once_with("b" * 16)
+
+        # Legacy active-Session DELETE keeps its established method/path.
+        legacy = self.create_session(title="Legacy delete route")
+        legacy_delete = self.make_handler(path=f"/api/sessions/{legacy['id']}")
+        server.CodeHandler.do_DELETE(legacy_delete)
+        self.assertEqual(legacy_delete.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(server.session_path(legacy["id"]).exists())
+
+    def test_archived_session_rejects_new_agent_run_before_creation(self):
+        session = self.create_session(title="No new AgentRun")
+        self.archive(session["id"])
+        runs_before = list((self.root / "agent-runs").glob("*.json"))
+        with self.assertRaises(server.SessionLifecycleConflictError) as raised:
+            server._create_agent_run(
+                session["id"],
+                {"model": "fixture-model", "messages": [{
+                    "role": "user",
+                    "content": "must not run",
+                }]},
+                "http://127.0.0.1:9",
+                ["synthetic-key"],
+                start_worker=False,
+            )
+        self.assertEqual(raised.exception.error_code, "session_archived")
+        self.assertEqual(list((self.root / "agent-runs").glob("*.json")), runs_before)
+
+    def test_active_and_archive_dual_location_fails_closed_everywhere(self):
+        session = self.create_session(title="Dual location conflict")
+        session_id = session["id"]
+        self.archive(session_id)
+        bundle = server._session_archive_bundle_path(session_id)
+        manifest = server._read_session_archive_manifest(session_id)
+        active_meta, active_messages = server._session_archive_original_paths(
+            session_id,
+            manifest["original"],
+        )
+        server._restore_path_snapshot(active_meta, (bundle / "session.json").read_bytes())
+        server._restore_path_snapshot(active_messages, (bundle / "messages.jsonl").read_bytes())
+
+        active_list = self.make_handler()
+        server.CodeHandler.get_sessions(active_list)
+        archived_list = self.make_handler()
+        server.CodeHandler.get_archived_sessions(archived_list)
+        opened = self.make_handler()
+        server.CodeHandler.get_session(opened, session_id)
+        saved = self.make_handler({"title": "must not save"})
+        server.CodeHandler.save_session(saved, session_id)
+        for handler in (active_list, archived_list, opened, saved):
+            payload, status = handler.send_json.call_args.args
+            self.assertEqual(status, 409)
+            self.assertEqual(payload["errorCode"], "session_archive_location_conflict")
+        self.assertTrue(active_meta.exists())
+        self.assertTrue(active_messages.exists())
+        self.assertTrue(bundle.exists())
+
+    def test_archive_windows_lock_failure_is_durable_and_restart_recovers_forward(self):
+        session = self.create_session(title="Windows lock recovery")
+        session_id = session["id"]
+        active_meta = server.session_path(session_id)
+        active_messages = server.messages_path(session_id)
+        original_unlink = Path.unlink
+        sentinel = "WINDOWS-LOCK-ARCHIVE-SECRET"
+
+        def locked_unlink(path, *args, **kwargs):
+            if Path(path) == active_meta:
+                raise PermissionError(32, sentinel, str(path))
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", new=locked_unlink):
+            failed = self.archive(session_id)
+        payload, status = failed.send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["errorCode"], "session_archive_recovery_failed")
+        self.assertNotIn(sentinel, json.dumps(payload))
+        self.assertTrue(active_meta.exists())
+        self.assertTrue(active_messages.exists())
+        self.assertTrue(server._session_archive_bundle_path(session_id).exists())
+        self.assertTrue(server._session_archive_journal_path(session_id).exists())
+
+        # A new process/list request can deterministically finish the admitted move.
+        server._recover_all_session_archive_transactions()
+        self.assertFalse(active_meta.exists())
+        self.assertFalse(active_messages.exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        self.assertEqual(self.archive_summary()[0]["id"], session_id)
+
+    def test_archive_preparation_failure_is_sanitized_and_byte_preserving(self):
+        session = self.create_session(title="Archive preparation failure")
+        session_id = session["id"]
+        active_meta = server.session_path(session_id)
+        active_messages = server.messages_path(session_id)
+        index_path = server._session_index_path()
+        before = {
+            "meta": active_meta.read_bytes(),
+            "messages": active_messages.read_bytes(),
+            "index": index_path.read_bytes(),
+        }
+        original_write_json = server.write_json
+        sentinel = "ARCHIVE-PREPARE-PATH-SECRET"
+
+        def fail_manifest(path, payload):
+            if Path(path).name == "manifest.json":
+                raise PermissionError(13, sentinel, str(path))
+            return original_write_json(path, payload)
+
+        with mock.patch.object(server, "write_json", side_effect=fail_manifest):
+            failed = self.archive(session_id)
+        payload, status = failed.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_failed")
+        self.assertNotIn(sentinel, json.dumps(payload))
+        self.assertEqual(active_meta.read_bytes(), before["meta"])
+        self.assertEqual(active_messages.read_bytes(), before["messages"])
+        self.assertEqual(index_path.read_bytes(), before["index"])
+        self.assertFalse(server._session_archive_bundle_path(session_id).exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        staging_root = server._session_archive_root() / ".staging"
+        self.assertEqual(list(staging_root.iterdir()) if staging_root.exists() else [], [])
+
+    def test_archive_index_commit_failure_is_forward_recovered_without_dual_authority(self):
+        session = self.create_session(title="Archive index commit failure")
+        session_id = session["id"]
+        original_remove = server._remove_session_index_entry
+        calls = 0
+
+        def fail_once(target_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError(13, "ARCHIVE-INDEX-SECRET", "hidden")
+            return original_remove(target_id)
+
+        with mock.patch.object(
+            server,
+            "_remove_session_index_entry",
+            side_effect=fail_once,
+        ):
+            failed = self.archive(session_id)
+        payload, status = failed.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_failed")
+        self.assertNotIn("ARCHIVE-INDEX-SECRET", json.dumps(payload))
+        self.assertFalse(server.session_path(session_id).exists())
+        self.assertFalse(server.messages_path(session_id).exists())
+        self.assertTrue(server._session_archive_bundle_path(session_id).exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        self.assertNotIn(session_id, server._read_session_index())
+
+    def test_restore_commit_crash_recovers_to_unique_active_location(self):
+        session = self.create_session(title="Restore crash recovery")
+        session_id = session["id"]
+        active_meta = server.session_path(session_id)
+        active_messages = server.messages_path(session_id)
+        meta_before = active_meta.read_bytes()
+        messages_before = active_messages.read_bytes()
+        self.archive(session_id)
+        bundle = server._session_archive_bundle_path(session_id)
+        original_remove = server._remove_owned_archive_tree
+
+        def fail_bundle_remove(path):
+            if Path(path).resolve(strict=False) == bundle.resolve(strict=False):
+                raise PermissionError(32, "RESTORE-LOCK-SECRET", str(path))
+            return original_remove(path)
+
+        with mock.patch.object(
+            server,
+            "_remove_owned_archive_tree",
+            side_effect=fail_bundle_remove,
+        ):
+            failed = self.unarchive(session_id)
+        payload, status = failed.send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["errorCode"], "session_archive_recovery_failed")
+        self.assertNotIn("RESTORE-LOCK-SECRET", json.dumps(payload))
+        self.assertTrue(active_meta.exists())
+        self.assertTrue(active_messages.exists())
+        self.assertTrue(bundle.exists())
+        self.assertTrue(server._session_archive_journal_path(session_id).exists())
+
+        server._recover_all_session_archive_transactions()
+        self.assertEqual(active_meta.read_bytes(), meta_before)
+        self.assertEqual(active_messages.read_bytes(), messages_before)
+        self.assertFalse(bundle.exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        self.assertIn(session_id, server._read_session_index())
+
+    def test_restore_active_committed_without_bundle_finishes_journal_only(self):
+        session = self.create_session(title="Restore commit window")
+        session_id = session["id"]
+        self.archive(session_id)
+        bundle = server._session_archive_bundle_path(session_id)
+        manifest = server._read_session_archive_manifest(session_id)
+        active_meta, active_messages = server._session_archive_original_paths(
+            session_id,
+            manifest["original"],
+        )
+        transaction_id = "c" * 32
+        server._restore_session_archive_file(
+            active_meta,
+            bundle / "session.json",
+            manifest["files"]["session.json"],
+        )
+        server._restore_session_archive_file(
+            active_messages,
+            bundle / "messages.jsonl",
+            manifest["files"]["messages.jsonl"],
+        )
+        server._write_session_archive_journal(session_id, {
+            "action": "restore",
+            "state": "active_committed",
+            "transactionId": transaction_id,
+        })
+        server._remove_owned_archive_tree(bundle)
+
+        server._recover_all_session_archive_transactions()
+        self.assertTrue(active_meta.exists())
+        self.assertTrue(active_messages.exists())
+        self.assertFalse(bundle.exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        self.assertIn(session_id, server._read_session_index())
+
+    def test_delete_prepared_crash_recovers_full_owned_fact_deletion(self):
+        session = self.create_session(title="Delete crash recovery")
+        session_id = session["id"]
+        goal_path = self.create_terminal_goal(session_id)
+        asset_path = self.create_asset_sidecar(session_id, "x")
+        run_id, run_path = self.create_terminal_agent_run(session_id, "x")
+        token = self.archive(session_id).send_json.call_args.args[0]["archiveToken"]
+        transaction_id = "b" * 32
+        server._write_session_archive_journal(session_id, {
+            "action": "delete",
+            "state": "prepared",
+            "transactionId": transaction_id,
+        })
+
+        # Simulate a process restart before active core restoration.
+        with server._agent_run_lock:
+            server._agent_runs.clear()
+        server._recover_all_session_archive_transactions()
+        self.assertFalse(server._session_archive_bundle_path(session_id).exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        self.assertFalse(goal_path.exists())
+        self.assertFalse(asset_path.exists())
+        self.assertFalse(run_path.exists())
+        self.assertNotIn(run_id, server._agent_runs)
+        repeated = self.make_handler()
+        server.CodeHandler.delete_archived_session(repeated, session_id, token)
+        self.assertEqual(repeated.send_json.call_args.args[1], 410)
+        self.assertEqual(repeated.send_json.call_args.args[0]["errorCode"], "session_deleted")
+
+    def test_delete_facts_committed_without_bundle_finishes_journal_only(self):
+        session = self.create_session(title="Delete commit window")
+        session_id = session["id"]
+        token = self.archive(session_id).send_json.call_args.args[0]["archiveToken"]
+        bundle = server._session_archive_bundle_path(session_id)
+        manifest = server._read_session_archive_manifest(session_id)
+        active_meta, active_messages = server._session_archive_original_paths(
+            session_id,
+            manifest["original"],
+        )
+        transaction_id = "d" * 32
+        server._restore_session_archive_file(
+            active_meta,
+            bundle / "session.json",
+            manifest["files"]["session.json"],
+        )
+        server._restore_session_archive_file(
+            active_messages,
+            bundle / "messages.jsonl",
+            manifest["files"]["messages.jsonl"],
+        )
+        server.CodeHandler.delete_session(
+            self.make_handler(),
+            session_id,
+            send_response=False,
+            delete_terminal_agent_runs=True,
+            session_core_path=active_meta,
+            messages_core_path=active_messages,
+        )
+        server._write_session_archive_journal(session_id, {
+            "action": "delete",
+            "state": "facts_deleted",
+            "transactionId": transaction_id,
+        })
+        server._remove_owned_archive_tree(bundle)
+
+        server._recover_all_session_archive_transactions()
+        self.assertFalse(active_meta.exists())
+        self.assertFalse(active_messages.exists())
+        self.assertFalse(bundle.exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        repeated = self.make_handler()
+        server.CodeHandler.delete_archived_session(repeated, session_id, token)
+        self.assertEqual(repeated.send_json.call_args.args[1], 410)
+
+    def test_delete_recovery_failure_preserves_journal_until_forward_recovery(self):
+        session = self.create_session(title="Delete recovery failure")
+        session_id = session["id"]
+        goal_path = self.create_terminal_goal(session_id)
+        asset_path = self.create_asset_sidecar(session_id, "q")
+        _, run_path = self.create_terminal_agent_run(session_id, "q")
+        token = self.archive(session_id).send_json.call_args.args[0]["archiveToken"]
+        bundle = server._session_archive_bundle_path(session_id)
+        original_remove_index = server._remove_session_index_entry
+
+        with mock.patch.object(
+            server,
+            "_remove_session_index_entry",
+            side_effect=PermissionError(32, "DELETE-RECOVERY-SECRET", "hidden"),
+        ):
+            failed = self.make_handler()
+            server.CodeHandler.delete_archived_session(failed, session_id, token)
+        payload, status = failed.send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["errorCode"], "session_delete_recovery_failed")
+        self.assertNotIn("DELETE-RECOVERY-SECRET", json.dumps(payload))
+        self.assertTrue(bundle.exists())
+        self.assertTrue(server._session_archive_journal_path(session_id).exists())
+        self.assertTrue(goal_path.exists())
+        self.assertTrue(asset_path.exists())
+        self.assertTrue(run_path.exists())
+
+        # Once the external lock/failure clears, the durable journal completes
+        # the already-authorized deletion rather than presenting a false archive.
+        self.assertIsNotNone(original_remove_index)
+        server._recover_all_session_archive_transactions()
+        self.assertFalse(bundle.exists())
+        self.assertFalse(server._session_archive_journal_path(session_id).exists())
+        self.assertFalse(goal_path.exists())
+        self.assertFalse(asset_path.exists())
+        self.assertFalse(run_path.exists())
+
+    def test_import_archive_race_cannot_recreate_active_core(self):
+        session = self.create_session(title="Import/archive race")
+        session_id = session["id"]
+        source_path = self.root / "import-race.jsonl"
+        source_path.write_text('{"type":"message"}\n', encoding="utf-8")
+        replace_entered = threading.Event()
+        release_replace = threading.Event()
+        original_replace = server.os.replace
+        archive_errors = []
+        import_errors = []
+
+        def blocked_replace(source, target):
+            if Path(target) == server._session_archive_bundle_path(session_id):
+                replace_entered.set()
+                if not release_replace.wait(5):
+                    raise AssertionError("archive replace release was not signalled")
+            return original_replace(source, target)
+
+        def run_archive():
+            try:
+                self.archive(session_id)
+            except Exception as exc:  # pragma: no cover
+                archive_errors.append(exc)
+
+        def run_import():
+            try:
+                server._persist_import_snapshot(
+                    source="codex",
+                    source_path=source_path,
+                    source_session_id="source-import-race",
+                    requested_session_id=session_id,
+                    force_requested_id=True,
+                    title="Imported race",
+                    created_at="2026-08-28T12:00:00Z",
+                    messages=[{"role": "user", "content": "import race"}],
+                    stats={},
+                    last_usage={},
+                    resolved_project_id=None,
+                    resolved_cwd="",
+                )
+            except Exception as exc:
+                import_errors.append(exc)
+
+        with mock.patch.object(server.os, "replace", side_effect=blocked_replace):
+            archive_thread = threading.Thread(target=run_archive)
+            import_thread = threading.Thread(target=run_import)
+            archive_thread.start()
+            self.assertTrue(replace_entered.wait(5))
+            import_thread.start()
+            release_replace.set()
+            archive_thread.join(5)
+            import_thread.join(5)
+        self.assertEqual(archive_errors, [])
+        self.assertEqual(len(import_errors), 1)
+        self.assertIsInstance(import_errors[0], server.SessionLifecycleConflictError)
+        self.assertEqual(import_errors[0].error_code, "session_archived")
+        self.assertFalse(server.session_path(session_id).exists())
+        self.assertFalse(server.messages_path(session_id).exists())
+        self.assertTrue(server._session_archive_bundle_path(session_id).exists())
+        self.assertNotIn(session_id, server._read_session_index())
+
+    def test_archive_and_new_agent_run_admission_are_race_safe(self):
+        session = self.create_session(title="Archive admission race")
+        session_id = session["id"]
+        archive_write_entered = threading.Event()
+        release_archive_write = threading.Event()
+        archive_errors = []
+        create_errors = []
+        original_replace = server.os.replace
+
+        def blocked_archive_replace(source, target):
+            if Path(target) == server._session_archive_bundle_path(session_id):
+                archive_write_entered.set()
+                if not release_archive_write.wait(5):
+                    raise AssertionError("archive write release was not signalled")
+            return original_replace(source, target)
+
+        archived = self.make_handler()
+
+        def run_archive():
+            try:
+                server.CodeHandler.archive_session_lifecycle(archived, session_id)
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                archive_errors.append(exc)
+
+        def run_create():
+            try:
+                server._create_agent_run(
+                    session_id,
+                    {"model": "fixture-model", "messages": [{
+                        "role": "user",
+                        "content": "must lose archive admission race",
+                    }]},
+                    "http://127.0.0.1:9",
+                    ["synthetic-key"],
+                    start_worker=False,
+                )
+            except Exception as exc:
+                create_errors.append(exc)
+
+        with mock.patch.object(server.os, "replace", side_effect=blocked_archive_replace):
+            archive_thread = threading.Thread(target=run_archive)
+            create_thread = threading.Thread(target=run_create)
+            archive_thread.start()
+            self.assertTrue(archive_write_entered.wait(5))
+            create_thread.start()
+            release_archive_write.set()
+            archive_thread.join(timeout=5)
+            create_thread.join(timeout=5)
+
+        self.assertFalse(archive_thread.is_alive())
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(archive_errors, [])
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        self.assertEqual(len(create_errors), 1)
+        self.assertIsInstance(create_errors[0], server.SessionLifecycleConflictError)
+        self.assertEqual(create_errors[0].error_code, "session_archived")
+        self.assertEqual(list((self.root / "agent-runs").glob("*.json")), [])
+
+
 class TestGoalSessionLifecycle(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
