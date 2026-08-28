@@ -7604,6 +7604,10 @@ function imageAuthorizationSummary(tool) {
     quality: String(source.quality || "auto"),
     outputFormat: String(source.outputFormat || "png"),
     hasReference: source.hasReference === true,
+    maxIndependentRequests: Math.max(
+      1,
+      Number(source.maxIndependentRequests || source.count || 1),
+    ),
   };
 }
 
@@ -7617,6 +7621,9 @@ function authorizationTarget(tool) {
       quality: String(summary.quality || "auto"),
       format: String(summary.outputFormat || "png"),
       reference: summary.hasReference ? t("imageAuthorizationReference") : "",
+      billing: t("imageAuthorizationBilling", {
+        count: Math.max(1, Number(summary.maxIndependentRequests || summary.count || 1)),
+      }),
     });
   }
   if (tool.action === "run_command") return tool.command || t("commandLabel");

@@ -944,6 +944,11 @@ class ImageUpstreamClient:
         cancel_event=None,
         timeout: int = IMAGE_TIMEOUT_SECONDS,
     ) -> list[ValidatedImage]:
+        if int(normalized_request.get("count") or 0) != 1:
+            raise ImageRuntimeError(
+                "image_batch_required",
+                "Image upstream requests must contain exactly one image; batches are split by the Agent runtime.",
+            )
         if cancel_event is not None and cancel_event.is_set():
             raise ImageRuntimeError("image_cancelled", "Image generation was cancelled before dispatch.")
         bounded_timeout = max(1, min(int(timeout), IMAGE_TIMEOUT_SECONDS))
@@ -953,7 +958,7 @@ class ImageUpstreamClient:
         fields = {
             "model": route.model_id,
             "prompt": normalized_request["prompt"],
-            "n": normalized_request["count"],
+            "n": 1,
             "response_format": "b64_json",
             "output_format": normalized_request["outputFormat"],
         }
@@ -1095,7 +1100,7 @@ class GeneratedAssetRepository:
 
     @staticmethod
     def public_asset(meta: dict) -> dict:
-        return {
+        public = {
             "assetId": str(meta.get("assetId") or ""),
             "url": f"/api/sessions/{meta.get('sessionId')}/generated-assets/{meta.get('assetId')}",
             "mimeType": str(meta.get("mimeType") or ""),
@@ -1104,6 +1109,11 @@ class GeneratedAssetRepository:
             "byteLength": int(meta.get("byteLength") or 0),
             "sha256": str(meta.get("sha256") or ""),
         }
+        if meta.get("batchId"):
+            public["batchId"] = str(meta.get("batchId") or "")
+        if meta.get("batchIndex") is not None:
+            public["batchIndex"] = int(meta.get("batchIndex") or 0)
+        return public
 
     def find_operation_result(self, operation_id: str, session_id: str, agent_run_id: str, tool_call_id: str, expected_count: int) -> dict | None:
         with self._lock:
@@ -1145,6 +1155,8 @@ class GeneratedAssetRepository:
         images: list[ValidatedImage],
         *,
         created_at: str,
+        batch_id: str = "",
+        batch_index: int | None = None,
     ) -> dict:
         with self._lock:
             existing = self.find_operation_result(
@@ -1176,6 +1188,10 @@ class GeneratedAssetRepository:
                     "createdAt": created_at,
                     "fileName": file_name,
                 }
+                if batch_id:
+                    meta["batchId"] = str(batch_id)
+                if batch_index is not None:
+                    meta["batchIndex"] = int(batch_index)
                 try:
                     (temp_dir / file_name).write_bytes(image.data)
                     (temp_dir / "meta.json").write_text(

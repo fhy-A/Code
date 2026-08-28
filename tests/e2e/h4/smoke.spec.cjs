@@ -30,6 +30,12 @@ const IMAGE_MODEL_ID = "h4-image-model";
 const IMAGE_CONNECTION_NAME = "H4 isolated image connection";
 const IMAGE_GENERATION_USER = "H4_IMAGE_GENERATION_USER";
 const IMAGE_GENERATION_FINAL = "H4_IMAGE_GENERATION_FINAL";
+const IMAGE_BATCH_USER = "H4_IMAGE_BATCH_FULL_USER";
+const IMAGE_BATCH_FINAL = "H4_IMAGE_BATCH_FULL_FINAL";
+const IMAGE_BATCH_CALL_ID = "h4-image-batch-full-call";
+const IMAGE_BATCH_PARTIAL_USER = "H4_IMAGE_BATCH_PARTIAL_USER";
+const IMAGE_BATCH_PARTIAL_FINAL = "H4_IMAGE_BATCH_PARTIAL_FINAL";
+const IMAGE_BATCH_PARTIAL_CALL_ID = "h4-image-batch-partial-call";
 const IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER";
 const IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL";
 const IMAGE_EDIT_UNSUPPORTED_USER = "H4_IMAGE_EDIT_UNSUPPORTED_USER";
@@ -26487,11 +26493,18 @@ async function pinH4BaseUrlAcrossReloads(page, fakeUrl) {
 }
 
 function installConnectionRouteRefreshAudit(h4) {
-  if (h4.connectionRouteRefreshAudit) return h4.connectionRouteRefreshAudit;
-  const records = [];
+  const records = h4.connectionRouteRefreshAudit || [];
+  if (!h4.connectionRouteRefreshAudit) {
+    h4.connectionRouteRefreshAudit = records;
+    h4.connectionRouteRefreshAuditPages = new WeakSet();
+    h4.connectionRouteRefreshAuditBindingCount = 0;
+  }
+  const page = h4.page;
+  if (h4.connectionRouteRefreshAuditPages.has(page)) return records;
+  h4.connectionRouteRefreshAuditPages.add(page);
+  h4.connectionRouteRefreshAuditBindingCount += 1;
   const byRequest = new WeakMap();
-  h4.connectionRouteRefreshAudit = records;
-  h4.page.on("request", (request) => {
+  page.on("request", (request) => {
     const url = new URL(request.url());
     if (request.method() !== "POST" || url.pathname !== "/api/model-routes/refresh") return;
     let body = {};
@@ -26510,7 +26523,7 @@ function installConnectionRouteRefreshAudit(h4) {
     records.push(record);
     byRequest.set(request, record);
   });
-  h4.page.on("response", async (response) => {
+  page.on("response", async (response) => {
     const record = byRequest.get(response.request());
     if (!record) return;
     record.responseStatus = response.status();
@@ -28067,7 +28080,7 @@ async function configureImageGenerationConnection(h4) {
   return catalog.body.routes[0];
 }
 
-async function waitForImageAuthorization(h4, expectedReference) {
+async function waitForImageAuthorization(h4, expectedReference, expectedCount = 1) {
   const { page } = h4;
   const panel = page.locator("#authorizationPanel");
   await expect(panel).toBeVisible({ timeout: 30_000 });
@@ -28075,8 +28088,12 @@ async function waitForImageAuthorization(h4, expectedReference) {
   await expect(row).toHaveCount(1);
   const text = await row.innerText();
   expect(text).toContain(IMAGE_MODEL_ID);
-  expect(text).toMatch(/1 (?:image|\u5f20)/i);
+  expect(text).toMatch(new RegExp(`${expectedCount} (?:image|\\u5f20)`, "i"));
   expect(text).toContain("png");
+  expect(text).toMatch(new RegExp(
+    `(?:up to ${expectedCount} independent image requests|\\u6700\\u591a ${expectedCount} \\u6b21\\u72ec\\u7acb\\u56fe\\u7247\\u8bf7\\u6c42)`,
+    "i",
+  ));
   expect(text).not.toContain("small blue geometric icon");
   expect(text).not.toContain("Turn the supplied image");
   if (expectedReference) expect(text).toMatch(/reference edit|\u53c2\u8003\u56fe\u7f16\u8f91/i);
@@ -28815,6 +28832,187 @@ async function exerciseImageProductSurface(h4, runtime) {
   });
 }
 
+async function exerciseImageBatchConcurrency(h4, runtime) {
+  await configureConnectionRouteCatalog(h4, runtime);
+  await assertFrontendRuntime(h4.page, runtime);
+  await restoreEditAuthorizationTestConfig(h4);
+  await configureImageGenerationConnection(h4);
+  const { page } = h4;
+
+  const runBatch = async ({ marker, finalText, callId, kind, expectedSucceeded }) => {
+    const beforeRunIds = [...h4.controlIds().agentRunIds];
+    const beforeMetrics = await h4.metrics();
+    await h4.submit(`/imagegen ${marker}`);
+    await waitForImageAuthorization(h4, false, 4);
+    await expect(page.locator("#messages article.msg.assistant").filter({
+      hasText: finalText,
+    })).toHaveCount(1, { timeout: 30_000 });
+    await expect.poll(() => h4.controlIds().agentRunIds.length)
+      .toBe(beforeRunIds.length + 1);
+    const runId = h4.controlIds().agentRunIds.find((id) => !beforeRunIds.includes(id));
+    const sessionId = String(await page.locator(
+      "#sessionList .session-row.active button.session-main",
+    ).getAttribute("data-session-id") || "");
+    expect(sessionId).not.toBe("");
+
+    const snapshot = await fetchProductionJson(
+      page,
+      `/api/agent/runs/${encodeURIComponent(runId)}?cursor=0&wait=0`,
+    );
+    expect(snapshot.status).toBe(200);
+    const executions = (snapshot.body.toolExecutions || []).filter((entry) => (
+      entry.name === "generate_image"
+    ));
+    expect(executions).toHaveLength(1);
+    const execution = executions[0];
+    expect(execution).toMatchObject({
+      toolCallId: callId,
+      status: "completed",
+      authorizationDecision: "approved",
+      result: {
+        ok: true,
+        requested: 4,
+        succeeded: expectedSucceeded,
+        failed: 4 - expectedSucceeded,
+        partial: expectedSucceeded !== 4,
+      },
+      imageBatch: {
+        schema: "image-batch/v1",
+        requested: 4,
+        maxConcurrency: 2,
+      },
+    });
+    expect(execution.imageBatch.items).toHaveLength(4);
+    expect(new Set(execution.imageBatch.items.map((item) => item.operationId)).size).toBe(4);
+    expect(execution.imageBatch.items.map((item) => item.index)).toEqual([0, 1, 2, 3]);
+    expect(execution.result.assets.map((asset) => asset.batchIndex)).toEqual(
+      expectedSucceeded === 4 ? [0, 1, 2, 3] : [0, 1, 3],
+    );
+    expect((snapshot.body.events || []).filter((event) => (
+      event.type === "authorization_required"
+    ))).toHaveLength(1);
+
+    const gallery = page.locator(
+      `[data-generated-image-gallery][data-generated-image-tool-call-id="${callId}"]`,
+    );
+    await expect(gallery).toHaveCount(1);
+    await expect(gallery.locator(".generated-image-card")).toHaveCount(expectedSucceeded);
+    await expect(gallery).toHaveAttribute(
+      "data-generated-image-partial",
+      expectedSucceeded === 4 ? "false" : "true",
+    );
+    const domAssetIds = await gallery.locator(".generated-image-card").evaluateAll((cards) => (
+      cards.map((card) => String(card.getAttribute("data-generated-image-asset-id") || ""))
+    ));
+    expect(domAssetIds).toEqual(execution.result.assets.map((asset) => asset.assetId));
+    for (let index = 0; index < expectedSucceeded; index += 1) {
+      await expect(gallery.locator(".generated-image-download").nth(index)).toHaveAttribute(
+        "download",
+        `generated-image-${index + 1}.png`,
+      );
+    }
+    if (expectedSucceeded !== 4) {
+      await expect(gallery).toContainText(/Generated 3\/4|\u5df2\u751f\u6210 3\/4/);
+    }
+
+    const afterMetrics = await h4.metrics();
+    const requests = afterMetrics.imageRequests.slice(beforeMetrics.imageRequests.length)
+      .filter((entry) => entry.batchKind === kind);
+    const completions = afterMetrics.imageRequestCompletions
+      .slice(beforeMetrics.imageRequestCompletions.length)
+      .filter((entry) => entry.batchKind === kind);
+    expect(requests).toHaveLength(4);
+    expect(requests.every((entry) => (
+      entry.kind === "generation"
+      && entry.contract.count === 1
+      && entry.idempotencyPresent === true
+      && entry.authorizationPresent === true
+    ))).toBe(true);
+    expect(new Set(requests.map((entry) => entry.idempotencyKey)).size).toBe(4);
+    expect(Math.max(...requests.map((entry) => entry.activeAtAdmission))).toBe(2);
+    expect(completions.map((entry) => entry.batchIndex)).toEqual([1, 0, 3, 2]);
+    expect(completions).toHaveLength(4);
+    if (expectedSucceeded !== 4) {
+      expect(completions.filter((entry) => entry.status === 400)).toHaveLength(1);
+      expect(afterMetrics.imageRequests.length - beforeMetrics.imageRequests.length).toBe(4);
+    }
+    return { runId, sessionId, callId, assetIds: domAssetIds };
+  };
+
+  const full = await runBatch({
+    marker: IMAGE_BATCH_USER,
+    finalText: IMAGE_BATCH_FINAL,
+    callId: IMAGE_BATCH_CALL_ID,
+    kind: "full",
+    expectedSucceeded: 4,
+  });
+  const partial = await runBatch({
+    marker: IMAGE_BATCH_PARTIAL_USER,
+    finalText: IMAGE_BATCH_PARTIAL_FINAL,
+    callId: IMAGE_BATCH_PARTIAL_CALL_ID,
+    kind: "partial",
+    expectedSucceeded: 3,
+  });
+
+  const beforeReload = await h4.metrics();
+  await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
+  await page.evaluate(() => {
+    sessionStorage.setItem("h4-preserve-permission-profile", "1");
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+  });
+  await h4.reloadRuntime(runtime);
+  for (const entry of [full, partial]) {
+    const button = page.locator(
+      `#sessionList button.session-main[data-session-id="${entry.sessionId}"]`,
+    );
+    await expect(button).toHaveCount(1);
+    await button.click();
+    const gallery = page.locator(
+      `[data-generated-image-gallery][data-generated-image-tool-call-id="${entry.callId}"]`,
+    );
+    await expect(gallery.locator(".generated-image-card")).toHaveCount(entry.assetIds.length);
+    expect(await gallery.locator(".generated-image-card").evaluateAll((cards) => (
+      cards.map((card) => String(card.getAttribute("data-generated-image-asset-id") || ""))
+    ))).toEqual(entry.assetIds);
+  }
+  const afterReload = await h4.metrics();
+  expect(afterReload.imageRequests).toEqual(beforeReload.imageRequests);
+  expect(afterReload.chatRequests).toEqual(beforeReload.chatRequests);
+
+  await h4.page.close();
+  const transition = await h4.restartGeneration();
+  expect(transition.previousCleanup.childExited).toBe(true);
+  expect(transition.previousCleanup.portsClosed).toEqual([true, true]);
+  await h4.replacePage();
+  await configureConnectionRouteCatalog(h4, runtime);
+  for (const entry of [full, partial]) {
+    const button = h4.page.locator(
+      `#sessionList button.session-main[data-session-id="${entry.sessionId}"]`,
+    );
+    await expect(button).toHaveCount(1);
+    await button.click();
+    const gallery = h4.page.locator(
+      `[data-generated-image-gallery][data-generated-image-tool-call-id="${entry.callId}"]`,
+    );
+    await expect(gallery.locator(".generated-image-card")).toHaveCount(entry.assetIds.length);
+  }
+  const afterRestart = await h4.metrics();
+  expect(afterRestart.imageRequests).toEqual([]);
+  expect(afterRestart.chatRequests).toEqual([]);
+  expectAutoPermissionNetworkIsolation(h4);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-single-image-batch-concurrency`, {
+    runtime,
+    fullSessionId: idHash(full.sessionId),
+    partialSessionId: idHash(partial.sessionId),
+    fullAssets: full.assetIds.length,
+    partialAssets: partial.assetIds.length,
+    upstreamRequests: 8,
+    maxConcurrency: 2,
+    restartReplayDelta: 0,
+  });
+}
+
 async function exerciseParallelVisualToolProtocol(h4, runtime) {
   await h4.open(runtime);
   await h4.submit(PARALLEL_VISUAL_PROTOCOL_USER);
@@ -29274,6 +29472,16 @@ test("bundle independent image generation settings authorize preview edit and cl
 test("direct classic independent image generation settings authorize preview edit and clean assets", async ({ h4 }) => {
   test.setTimeout(120_000);
   await exerciseImageProductSurface(h4, "classic");
+});
+
+test("bundle image batch uses concurrent single-image upstream operations", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseImageBatchConcurrency(h4, "bundle");
+});
+
+test("direct classic image batch uses concurrent single-image upstream operations", async ({ h4 }) => {
+  test.setTimeout(120_000);
+  await exerciseImageBatchConcurrency(h4, "classic");
 });
 
 test("bundle image route stale create rebinds once for new and existing sessions", async ({ h4 }) => {

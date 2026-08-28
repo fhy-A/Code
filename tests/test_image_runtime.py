@@ -285,6 +285,27 @@ class ImageUpstreamClientTests(unittest.TestCase):
         self.assertEqual(captured["request"].get_header("Idempotency-key"), "operation-1")
         self.assertEqual(result[0].mime_type, "image/png")
 
+    def test_direct_multi_image_upstream_request_is_rejected_before_dispatch(self):
+        dispatched = []
+        normalized = normalize_generate_request({
+            "prompt": "runtime must split this batch",
+            "count": 4,
+        })
+
+        client = ImageUpstreamClient(
+            urlopen=lambda *_args, **_kwargs: dispatched.append(True),
+        )
+        for reference in (None, validate_image_bytes(image_bytes("PNG"))):
+            with self.subTest(reference=reference is not None), self.assertRaises(ImageRuntimeError) as captured:
+                client.generate(
+                    self.route,
+                    normalized,
+                    "operation-must-not-dispatch",
+                    reference_image=reference,
+                )
+            self.assertEqual(captured.exception.code, "image_batch_required")
+        self.assertEqual(dispatched, [])
+
     def test_default_and_max_timeout_allow_simulated_66_second_completion(self):
         self.assertEqual(image_runtime.IMAGE_TIMEOUT_SECONDS, 180)
         png = image_bytes("PNG")

@@ -57,6 +57,80 @@ LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_h4_model_route_refresh_audit_binds_each_page_exactly_once(self):
+        start = H4_SMOKE_SOURCE.index("function installConnectionRouteRefreshAudit(")
+        end = H4_SMOKE_SOURCE.index("async function expectConnectionRouteRefresh(", start)
+        function_source = H4_SMOKE_SOURCE[start:end]
+        script = f"""
+{function_source}
+class FakePage {{
+  constructor(name) {{ this.name = name; this.listeners = {{request: [], response: []}}; }}
+  on(name, callback) {{ this.listeners[name].push(callback); }}
+}}
+const first = new FakePage("first");
+const second = new FakePage("second");
+const h4 = {{
+  page: first,
+  host: {{ready: {{fakeUrl: "http://127.0.0.1:30431"}}}},
+}};
+const records = installConnectionRouteRefreshAudit(h4);
+installConnectionRouteRefreshAudit(h4);
+h4.page = second;
+const rebound = installConnectionRouteRefreshAudit(h4);
+const request = {{
+  method: () => "POST",
+  url: () => "http://127.0.0.1:3011/api/model-routes/refresh",
+  postDataJSON: () => ({{
+    baseUrl: "http://127.0.0.1:30431",
+    manualConnections: [{{enabled: true}}, {{enabled: false}}],
+  }}),
+}};
+second.listeners.request[0](request);
+const response = {{
+  request: () => request,
+  status: () => 200,
+  json: async () => ({{ok: true}}),
+}};
+(async () => {{
+  await second.listeners.response[0](response);
+  process.stdout.write(JSON.stringify({{
+    sharedRecords: records === rebound,
+    bindingCount: h4.connectionRouteRefreshAuditBindingCount,
+    firstListeners: {{
+      request: first.listeners.request.length,
+      response: first.listeners.response.length,
+    }},
+    secondListeners: {{
+      request: second.listeners.request.length,
+      response: second.listeners.response.length,
+    }},
+    records,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "sharedRecords": True,
+            "bindingCount": 2,
+            "firstListeners": {"request": 1, "response": 1},
+            "secondListeners": {"request": 1, "response": 1},
+            "records": [{
+                "sequence": 1,
+                "baseUrlMatchesFake": True,
+                "manualConnections": 2,
+                "enabledManualConnections": 1,
+                "responseStatus": 200,
+                "errorCode": "",
+            }],
+        })
+
     def test_same_parent_detached_result_keeps_main_result_in_its_original_slot(self):
         ordering_start = APP_SOURCE.index(
             "function placeMainResultByCompletionOrder(messages, mainMessage, taskStartedAt)"
@@ -2481,6 +2555,7 @@ process.stdout.write(JSON.stringify({{nested, flat}}));
             "quality": "high",
             "outputFormat": "webp",
             "hasReference": True,
+            "maxIndependentRequests": 2,
         }
         self.assertEqual(data["nested"], expected)
         self.assertEqual(data["flat"], expected)
@@ -17092,6 +17167,7 @@ require("./src/ui/messages.js");
 const {createMessagesFeature} = window.Code.ui.messages;
 const templates = {
   imageAssetsGenerated: "Generated {count}",
+  imageAssetsGeneratedPartial: "Generated {succeeded}/{requested}; {failed} failed",
   imageAssetMeta: "{width}×{height} · {format} · {size}",
 };
 const interpolate = (key, args = {}) => Object.entries(args).reduce(
@@ -17173,6 +17249,10 @@ multiResult.meta.result.assets = [asset, {
   height: 1024,
   byteLength: 8192,
 }];
+multiResult.meta.result.partial = true;
+multiResult.meta.result.requested = 4;
+multiResult.meta.result.succeeded = 2;
+multiResult.meta.result.failed = 2;
 const multiHtml = feature.projectMessages([
   messages[0], assistantCall, multiResult, messages[3],
 ], {hasActiveRun: false});
@@ -17216,6 +17296,8 @@ process.stdout.write(JSON.stringify({toolHtml, html, multiHtml, failedHtml, inva
         self.assertLess(data["html"].index("generated-image-result"), data["html"].index("final answer"))
         self.assertNotIn(" open>", data["toolHtml"])
         self.assertIn('data-generated-image-count="2"', data["multiHtml"])
+        self.assertIn('data-generated-image-partial="true"', data["multiHtml"])
+        self.assertIn("Generated 2/4; 2 failed", data["multiHtml"])
         self.assertEqual(data["multiHtml"].count("data-generated-image-preview="), 2)
         self.assertNotIn("data-generated-image-preview", data["failedHtml"])
         self.assertNotIn("upstream-secret", data["html"])
@@ -17226,6 +17308,12 @@ process.stdout.write(JSON.stringify({toolHtml, html, multiHtml, failedHtml, inva
         self.assertIn(".generated-image-result.is-single", STYLE_SOURCE)
         self.assertIn(".generated-image-result.is-multiple", STYLE_SOURCE)
         self.assertIn("object-fit: contain", STYLE_SOURCE)
+
+    def test_image_authorization_discloses_independent_billable_request_count(self):
+        self.assertIn("maxIndependentRequests", APP_SOURCE)
+        self.assertIn("imageAuthorizationBilling", APP_SOURCE)
+        self.assertIn("最多 {count} 次独立图片请求，可能分别计费", I18N_SOURCE)
+        self.assertIn("up to {count} independent image requests, each may be billed", I18N_SOURCE)
 
     def test_messages_ui_binds_copy_and_image_events_without_inline_globals(self):
         self.assertNotIn('onclick="copyMessageText', MESSAGES_SOURCE)

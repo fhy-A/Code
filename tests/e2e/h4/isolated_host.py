@@ -64,6 +64,12 @@ IMAGE_MODEL_ID = "h4-image-model"
 IMAGE_GENERATION_USER = "H4_IMAGE_GENERATION_USER"
 IMAGE_GENERATION_FINAL = "H4_IMAGE_GENERATION_FINAL"
 IMAGE_GENERATION_CALL_ID = "h4-image-generation-call"
+IMAGE_BATCH_USER = "H4_IMAGE_BATCH_FULL_USER"
+IMAGE_BATCH_FINAL = "H4_IMAGE_BATCH_FULL_FINAL"
+IMAGE_BATCH_CALL_ID = "h4-image-batch-full-call"
+IMAGE_BATCH_PARTIAL_USER = "H4_IMAGE_BATCH_PARTIAL_USER"
+IMAGE_BATCH_PARTIAL_FINAL = "H4_IMAGE_BATCH_PARTIAL_FINAL"
+IMAGE_BATCH_PARTIAL_CALL_ID = "h4-image-batch-partial-call"
 IMAGE_EDIT_USER = "H4_IMAGE_EDIT_USER"
 IMAGE_EDIT_FINAL = "H4_IMAGE_EDIT_FINAL"
 IMAGE_EDIT_CALL_ID = "h4-image-edit-call"
@@ -421,6 +427,7 @@ class MetricState:
             "defaultOpenRequests": [],
             "chatRequests": [],
             "imageRequests": [],
+            "imageRequestCompletions": [],
             "toolExecutions": [],
             "productionToolDelegations": 0,
             "productionEditProposalDelegations": 0,
@@ -462,6 +469,40 @@ class MetricState:
 
 METRICS = MetricState()
 MODEL_GATE = threading.Event()
+
+
+class ImageBatchFixtureState:
+    def __init__(self) -> None:
+        self._condition = threading.Condition(threading.RLock())
+        self._active = {}
+        self._completed = {}
+
+    def begin(self, kind: str, batch_index: int) -> int:
+        with self._condition:
+            active = int(self._active.get(kind) or 0) + 1
+            self._active[kind] = active
+            self._condition.notify_all()
+            return active
+
+    def wait_for_later_completion(self, kind: str, batch_index: int) -> None:
+        if batch_index % 2:
+            return
+        with self._condition:
+            completed = self._completed.setdefault(kind, set())
+            if not self._condition.wait_for(
+                lambda: batch_index + 1 in completed,
+                timeout=15.0,
+            ):
+                raise RuntimeError("image batch fixture did not observe paired completion")
+
+    def finish(self, kind: str, batch_index: int) -> None:
+        with self._condition:
+            self._completed.setdefault(kind, set()).add(int(batch_index))
+            self._active[kind] = max(0, int(self._active.get(kind) or 0) - 1)
+            self._condition.notify_all()
+
+
+IMAGE_BATCH_FIXTURE = ImageBatchFixtureState()
 
 
 class ModelRouteFixtureState:
@@ -772,6 +813,18 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
         if message.get("role") == "tool":
             completed_tool_call_ids.add(str(message.get("tool_call_id") or ""))
     joined_user_text = "\n".join(user_texts)
+    if IMAGE_BATCH_PARTIAL_USER in joined_user_text:
+        completed = IMAGE_BATCH_PARTIAL_CALL_ID in completed_tool_call_ids
+        return (
+            "image-batch-partial-final" if completed else "image-batch-partial-call",
+            completed,
+        )
+    if IMAGE_BATCH_USER in joined_user_text:
+        completed = IMAGE_BATCH_CALL_ID in completed_tool_call_ids
+        return (
+            "image-batch-final" if completed else "image-batch-call",
+            completed,
+        )
     if IMAGE_EDIT_UNSUPPORTED_USER in joined_user_text:
         image_edit_completed = IMAGE_EDIT_UNSUPPORTED_CALL_ID in completed_tool_call_ids
         image_edit_retry_completed = (
@@ -1992,6 +2045,11 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }
             else:
                 payload = self._read_json()
+                prompt = str(payload.get("prompt") or "")
+                batch_kind = (
+                    "partial" if IMAGE_BATCH_PARTIAL_USER in prompt
+                    else ("full" if IMAGE_BATCH_USER in prompt else "")
+                )
                 request_contract = {
                     "modelMatches": payload.get("model") == IMAGE_MODEL_ID,
                     "count": int(payload.get("n") or 0),
@@ -2000,20 +2058,57 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "qualityPresent": "quality" in payload,
                     "outputFormat": str(payload.get("output_format") or ""),
                 }
+            if is_edit:
+                batch_kind = ""
+            batch_index = -1
+            active_at_admission = 0
+            idempotency_key = str(self.headers.get("Idempotency-Key") or "")
+            if batch_kind:
+                match = re.search(r"\.([0-3])$", idempotency_key)
+                if not match:
+                    self._send_json({"error": "batch item identity missing"}, 400)
+                    return
+                batch_index = int(match.group(1))
+                active_at_admission = IMAGE_BATCH_FIXTURE.begin(batch_kind, batch_index)
             self._record("image-edit" if is_edit else "image-generation")
-            METRICS.append("imageRequests", {
+            image_metric = {
                 "kind": "edit" if is_edit else "generation",
                 "authorizationPresent": bool(self.headers.get("Authorization")),
                 "idempotencyPresent": bool(self.headers.get("Idempotency-Key")),
                 "contract": request_contract,
-            })
+            }
+            if batch_kind:
+                image_metric.update({
+                    "batchKind": batch_kind,
+                    "batchIndex": batch_index,
+                    "activeAtAdmission": active_at_admission,
+                    "idempotencyKey": idempotency_key,
+                })
+            METRICS.append("imageRequests", image_metric)
             if unsupported_edit:
                 self._send_json({"error": "image edit endpoint is unsupported"}, 404)
                 return
-            self._send_json({
-                "created": 1,
-                "data": [{"b64_json": base64.b64encode(FAVICON_PNG).decode("ascii")}],
-            })
+            try:
+                if batch_kind:
+                    IMAGE_BATCH_FIXTURE.wait_for_later_completion(batch_kind, batch_index)
+                if batch_kind == "partial" and batch_index == 2:
+                    self._send_json({"error": "synthetic ordinary item failure"}, 400)
+                    completion_status = 400
+                else:
+                    self._send_json({
+                        "created": 1,
+                        "data": [{"b64_json": base64.b64encode(FAVICON_PNG).decode("ascii")}],
+                    })
+                    completion_status = 200
+            finally:
+                if batch_kind:
+                    IMAGE_BATCH_FIXTURE.finish(batch_kind, batch_index)
+                    METRICS.append("imageRequestCompletions", {
+                        "batchKind": batch_kind,
+                        "batchIndex": batch_index,
+                        "idempotencyKey": idempotency_key,
+                        "status": completion_status if "completion_status" in locals() else 500,
+                    })
             return
         if route != "/v1/chat/completions":
             self._record("unexpected")
@@ -2592,6 +2687,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "runtime-recovery-call",
             "skill-evidence-call",
             "image-generation-call",
+            "image-batch-call", "image-batch-partial-call",
             "image-edit-call",
             "image-edit-unsupported-call",
             "image-edit-unsupported-retry",
@@ -2627,6 +2723,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "runtime-recovery-call": RUNTIME_RECOVERY_STAGE,
                 "skill-evidence-call": "",
                 "image-generation-call": "",
+                "image-batch-call": "",
+                "image-batch-partial-call": "",
                 "image-edit-call": "",
                 "image-edit-unsupported-call": "",
                 "image-edit-unsupported-retry": "",
@@ -2682,35 +2780,35 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 }]
             elif scenario in {
                 "image-generation-call", "image-edit-call", "image-edit-unsupported-call",
-                "image-edit-unsupported-retry",
+                "image-edit-unsupported-retry", "image-batch-call", "image-batch-partial-call",
             }:
                 is_edit_scenario = scenario in {
                     "image-edit-call", "image-edit-unsupported-call",
                     "image-edit-unsupported-retry",
                 }
-                call_id = (
-                    IMAGE_EDIT_UNSUPPORTED_RETRY_CALL_ID
-                    if scenario == "image-edit-unsupported-retry"
-                    else (
-                        IMAGE_EDIT_UNSUPPORTED_CALL_ID
-                        if scenario == "image-edit-unsupported-call"
-                        else (IMAGE_EDIT_CALL_ID if scenario == "image-edit-call" else IMAGE_GENERATION_CALL_ID)
-                    )
-                )
+                if scenario == "image-batch-partial-call":
+                    call_id = IMAGE_BATCH_PARTIAL_CALL_ID
+                    prompt = IMAGE_BATCH_PARTIAL_USER
+                elif scenario == "image-batch-call":
+                    call_id = IMAGE_BATCH_CALL_ID
+                    prompt = IMAGE_BATCH_USER
+                elif scenario == "image-edit-unsupported-retry":
+                    call_id = IMAGE_EDIT_UNSUPPORTED_RETRY_CALL_ID
+                    prompt = "H4_UNSUPPORTED_IMAGE_EDIT_RETRY_MUST_BE_BLOCKED"
+                elif scenario == "image-edit-unsupported-call":
+                    call_id = IMAGE_EDIT_UNSUPPORTED_CALL_ID
+                    prompt = "H4_UNSUPPORTED_IMAGE_EDIT"
+                elif scenario == "image-edit-call":
+                    call_id = IMAGE_EDIT_CALL_ID
+                    prompt = "Turn the supplied image into a blue geometric icon"
+                else:
+                    call_id = IMAGE_GENERATION_CALL_ID
+                    prompt = "A small blue geometric icon on a transparent background"
                 arguments = {
-                    "prompt": (
-                        "H4_UNSUPPORTED_IMAGE_EDIT_RETRY_MUST_BE_BLOCKED"
-                        if scenario == "image-edit-unsupported-retry"
-                        else ("H4_UNSUPPORTED_IMAGE_EDIT"
-                        if scenario == "image-edit-unsupported-call"
-                        else ("Turn the supplied image into a blue geometric icon"
-                        if scenario == "image-edit-call"
-                        else "A small blue geometric icon on a transparent background"
-                        ))
-                    ),
+                    "prompt": prompt,
                     "size": "1024x1024",
                     "quality": "hd",
-                    "count": 1,
+                    "count": 4 if scenario in {"image-batch-call", "image-batch-partial-call"} else 1,
                     "outputFormat": "webp" if scenario == "image-edit-unsupported-retry" else "png",
                 }
                 if is_edit_scenario:
@@ -3204,6 +3302,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "skill-evidence-candidate": SKILL_EVIDENCE_CANDIDATE,
                 "skill-evidence-final": SKILL_EVIDENCE_FINAL,
                 "image-generation-final": IMAGE_GENERATION_FINAL,
+                "image-batch-final": IMAGE_BATCH_FINAL,
+                "image-batch-partial-final": IMAGE_BATCH_PARTIAL_FINAL,
                 "image-edit-final": IMAGE_EDIT_FINAL,
                 "image-edit-unsupported-final": IMAGE_EDIT_UNSUPPORTED_FINAL,
                 "tiff-image": TIFF_IMAGE_FINAL,

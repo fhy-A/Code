@@ -239,6 +239,413 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(meta["toolCallId"], call["id"])
         self.assertEqual((meta["width"], meta["height"]), (3, 2))
 
+    def test_count_four_uses_four_single_image_children_with_two_way_concurrency(self):
+        run = self._run(session_id="image-batch-four")
+        call = self._queue(run, call_id="image-batch-call", arguments={
+            "prompt": "four ordered variants",
+            "count": 4,
+        })
+        lock = threading.Lock()
+        release_first = threading.Event()
+        release_third = threading.Event()
+        third_started = threading.Event()
+        active = 0
+        peak = 0
+        calls = []
+
+        def generate(_route, normalized, operation_id, **_kwargs):
+            nonlocal active, peak
+            with lock:
+                index = len(calls)
+                calls.append({
+                    "index": index,
+                    "operationId": operation_id,
+                    "count": normalized["count"],
+                })
+                active += 1
+                peak = max(peak, active)
+                if index == 2:
+                    third_started.set()
+            try:
+                if index == 0:
+                    self.assertTrue(release_first.wait(5))
+                elif index == 2:
+                    self.assertTrue(release_third.wait(5))
+                return [image_runtime.validate_image_bytes(_png(index + 2, 2))]
+            finally:
+                with lock:
+                    active -= 1
+
+        errors = []
+        self.client.generate = mock.Mock(side_effect=generate)
+
+        def execute():
+            try:
+                server_mod._execute_agent_pending_tools(run)
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        try:
+            self.assertTrue(third_started.wait(5))
+            release_first.set()
+            release_third.set()
+            worker.join(timeout=5)
+        except Exception as exc:  # pragma: no cover - preserves worker cleanup
+            errors.append(exc)
+            release_first.set()
+            release_third.set()
+            worker.join(timeout=5)
+            raise
+
+        self.assertEqual(errors, [])
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(calls), 4)
+        self.assertEqual([entry["count"] for entry in calls], [1, 1, 1, 1])
+        self.assertEqual(len({entry["operationId"] for entry in calls}), 4)
+        self.assertEqual(peak, 2)
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertEqual(result["requested"], 4)
+        self.assertEqual(result["succeeded"], 4)
+        self.assertEqual(result["failed"], 0)
+        self.assertFalse(result["partial"])
+        self.assertEqual([asset["batchIndex"] for asset in result["assets"]], [0, 1, 2, 3])
+        self.assertEqual([asset["width"] for asset in result["assets"]], [2, 3, 4, 5])
+
+    def test_batch_partial_success_keeps_order_and_does_not_refill_failed_items(self):
+        run = self._run(session_id="image-batch-partial")
+        call = self._queue(run, call_id="image-batch-partial-call", arguments={
+            "prompt": "four variants with one ordinary failure",
+            "count": 4,
+        })
+        lock = threading.Lock()
+        calls = []
+
+        def generate(_route, normalized, operation_id, **_kwargs):
+            with lock:
+                index = len(calls)
+                calls.append({"index": index, "operationId": operation_id})
+            self.assertEqual(normalized["count"], 1)
+            if index == 1:
+                raise image_runtime.ImageRuntimeError(
+                    "image_upstream_http_error",
+                    "Image service rejected the request.",
+                    retryable=False,
+                    http_status=502,
+                )
+            return [image_runtime.validate_image_bytes(_png(index + 2, 2))]
+
+        self.client.generate = mock.Mock(side_effect=generate)
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        self.assertEqual(len(calls), 4)
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["partial"])
+        self.assertEqual(
+            (result["requested"], result["succeeded"], result["failed"]),
+            (4, 3, 1),
+        )
+        self.assertEqual([asset["batchIndex"] for asset in result["assets"]], [0, 2, 3])
+        self.assertEqual(result["items"][1], {
+            "index": 1,
+            "status": "failed",
+            "errorCode": "image_upstream_http_error",
+            "retryable": False,
+        })
+
+    def test_batch_unknown_stops_undispatched_items_without_retry(self):
+        run = self._run(session_id="image-batch-unknown")
+        call = self._queue(run, call_id="image-batch-unknown-call", arguments={
+            "prompt": "stop after unknown paid outcome",
+            "count": 4,
+        })
+        lock = threading.Lock()
+        first_returned = threading.Event()
+        calls = []
+
+        def generate(_route, normalized, operation_id, **_kwargs):
+            with lock:
+                index = len(calls)
+                calls.append({"index": index, "operationId": operation_id})
+            self.assertEqual(normalized["count"], 1)
+            if index == 0:
+                first_returned.set()
+                raise image_runtime.ImageRuntimeError(
+                    "image_upstream_timeout",
+                    "Delivery and result are unknown.",
+                    retryable=True,
+                    http_status=504,
+                    outcome_unknown=True,
+                )
+            self.assertTrue(first_returned.wait(5))
+            return [image_runtime.validate_image_bytes(_png(3, 2))]
+
+        self.client.generate = mock.Mock(side_effect=generate)
+        self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        self.assertEqual(len(calls), 2)
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["partial"])
+        self.assertTrue(result["outcomeUnknown"])
+        self.assertTrue(result["notReplayed"])
+        self.assertEqual(
+            (result["requested"], result["succeeded"], result["failed"]),
+            (4, 1, 3),
+        )
+        self.assertEqual(
+            [item["status"] for item in result["items"]],
+            ["failed", "assets_persisted", "not_dispatched", "not_dispatched"],
+        )
+        self.assertTrue(result["items"][2]["notDispatched"])
+        self.assertTrue(result["items"][3]["notDispatched"])
+
+    def test_batch_cancel_stops_new_admission_but_keeps_inflight_successes(self):
+        run = self._run(session_id="image-batch-cancel")
+        call = self._queue(run, call_id="image-batch-cancel-call", arguments={
+            "prompt": "cancel remaining variants",
+            "count": 4,
+        })
+        lock = threading.Lock()
+        two_started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def generate(_route, normalized, operation_id, **_kwargs):
+            with lock:
+                index = len(calls)
+                calls.append({"index": index, "operationId": operation_id})
+                if len(calls) == 2:
+                    two_started.set()
+            self.assertTrue(release.wait(5))
+            return [image_runtime.validate_image_bytes(_png(index + 2, 2))]
+
+        self.client.generate = mock.Mock(side_effect=generate)
+        errors = []
+
+        def execute():
+            try:
+                server_mod._execute_agent_pending_tools(run)
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        self.assertTrue(two_started.wait(5))
+        run["cancel_event"].set()
+        release.set()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(calls), 2)
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertTrue(result["partial"])
+        self.assertEqual((result["succeeded"], result["failed"]), (2, 2))
+        self.assertEqual(
+            [item["status"] for item in result["items"]],
+            ["assets_persisted", "assets_persisted", "cancelled", "cancelled"],
+        )
+
+    def test_restart_reuses_completed_child_and_never_replays_unknown_batch_item(self):
+        run = self._run(session_id="image-batch-restart")
+        call = self._queue(run, call_id="image-batch-restart-call", arguments={
+            "prompt": "recover mixed batch",
+            "count": 4,
+        })
+        batch_id = server_mod._agent_image_batch_id(run, call)
+        operation_ids = [
+            server_mod._agent_image_batch_operation_id(batch_id, index)
+            for index in range(4)
+        ]
+        completed = self.assets.save_operation(
+            operation_ids[0],
+            run["session_id"],
+            run["id"],
+            call["id"],
+            [image_runtime.validate_image_bytes(_png(2, 2))],
+            created_at=server_mod.now_iso(),
+            batch_id=batch_id,
+            batch_index=0,
+        )
+        run["tool_executions"][call["id"]] = {
+            "name": "generate_image",
+            "arguments": call["function"]["arguments"],
+            "fingerprint": call["fingerprint"],
+            "status": "running",
+            "operationId": batch_id,
+            "dispatchState": "dispatched",
+            "imageBatch": {
+                "schema": "image-batch/v1",
+                "batchId": batch_id,
+                "requested": 4,
+                "maxConcurrency": 2,
+                "items": [
+                    {
+                        "index": 0,
+                        "operationId": operation_ids[0],
+                        "dispatchState": "assets_persisted",
+                        "result": completed,
+                    },
+                    {
+                        "index": 1,
+                        "operationId": operation_ids[1],
+                        "dispatchState": "dispatched",
+                        "result": None,
+                    },
+                    {
+                        "index": 2,
+                        "operationId": operation_ids[2],
+                        "dispatchState": "prepared",
+                        "result": None,
+                    },
+                    {
+                        "index": 3,
+                        "operationId": operation_ids[3],
+                        "dispatchState": "prepared",
+                        "result": None,
+                    },
+                ],
+            },
+            "result": None,
+            "error": "",
+        }
+
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        execution = restored["tool_executions"][call["id"]]
+        self.assertEqual(execution["status"], "completed")
+        result = execution["result"]
+        self.assertTrue(result["partial"])
+        self.assertEqual((result["succeeded"], result["failed"]), (1, 3))
+        self.assertEqual(
+            [item["status"] for item in result["items"]],
+            ["assets_persisted", "failed", "not_dispatched", "not_dispatched"],
+        )
+        self.assertTrue(result["outcomeUnknown"])
+        self.assertEqual(len(self.client.calls), 0)
+
+        restored["status"] = "tools"
+        retry = self._queue(restored, call_id="image-batch-retry-blocked", arguments={
+            "prompt": "a changed prompt must still be blocked",
+            "count": 1,
+        })
+        self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+        self.assertEqual(
+            restored["tool_executions"][retry["id"]]["result"]["errorCode"],
+            "image_retry_blocked",
+        )
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_restart_continues_only_prepared_batch_children(self):
+        run = self._run(session_id="image-batch-prepared-restart")
+        call = self._queue(run, call_id="image-batch-prepared-call", arguments={
+            "prompt": "resume prepared children",
+            "count": 3,
+        })
+        batch_id = server_mod._agent_image_batch_id(run, call)
+        operation_ids = [
+            server_mod._agent_image_batch_operation_id(batch_id, index)
+            for index in range(3)
+        ]
+        completed = self.assets.save_operation(
+            operation_ids[0],
+            run["session_id"],
+            run["id"],
+            call["id"],
+            [image_runtime.validate_image_bytes(_png(2, 2))],
+            created_at=server_mod.now_iso(),
+            batch_id=batch_id,
+            batch_index=0,
+        )
+        run["tool_executions"][call["id"]] = {
+            "name": "generate_image",
+            "arguments": call["function"]["arguments"],
+            "fingerprint": call["fingerprint"],
+            "status": "running",
+            "operationId": batch_id,
+            "dispatchState": "prepared",
+            "imageBatch": {
+                "schema": "image-batch/v1",
+                "batchId": batch_id,
+                "requested": 3,
+                "maxConcurrency": 2,
+                "items": [
+                    {
+                        "index": 0,
+                        "operationId": operation_ids[0],
+                        "dispatchState": "assets_persisted",
+                        "result": completed,
+                    },
+                    *[
+                        {
+                            "index": index,
+                            "operationId": operation_ids[index],
+                            "dispatchState": "prepared",
+                            "result": None,
+                        }
+                        for index in (1, 2)
+                    ],
+                ],
+            },
+            "result": None,
+            "error": "",
+        }
+
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        execution = restored["tool_executions"][call["id"]]
+        self.assertEqual(execution["status"], "running")
+        self.assertEqual(execution["dispatchState"], "prepared")
+        restored["status"] = "tools"
+        self.assertTrue(server_mod._execute_agent_pending_tools(restored))
+        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual(
+            [entry["operationId"] for entry in self.client.calls],
+            operation_ids[1:],
+        )
+        result = execution["result"]
+        self.assertEqual((result["requested"], result["succeeded"], result["failed"]), (3, 3, 0))
+        self.assertEqual([asset["batchIndex"] for asset in result["assets"]], [0, 1, 2])
+
+    def test_legacy_multi_image_dispatched_record_is_unknown_and_not_split(self):
+        run = self._run(session_id="legacy-multi-image-dispatched")
+        call = self._queue(run, call_id="legacy-multi-call", arguments={
+            "prompt": "legacy two image request",
+            "count": 2,
+        })
+        run["tool_executions"][call["id"]] = {
+            "name": "generate_image",
+            "arguments": call["function"]["arguments"],
+            "fingerprint": call["fingerprint"],
+            "status": "running",
+            "operationId": "legacy-multi-operation",
+            "dispatchState": "dispatched",
+            "result": None,
+            "error": "",
+        }
+
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        execution = restored["tool_executions"][call["id"]]
+        self.assertEqual(execution["status"], "completed")
+        self.assertEqual(execution["result"]["errorCode"], "image_outcome_unknown")
+        self.assertTrue(execution["result"]["notReplayed"])
+        self.assertNotIn("imageBatch", execution)
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_batch_total_size_limit_fails_paid_item_before_asset_save(self):
+        run = self._run(session_id="image-batch-total-size")
+        call = self._queue(run, call_id="image-batch-total-size-call", arguments={
+            "prompt": "batch total size limit",
+            "count": 2,
+        })
+        payload = image_runtime.validate_image_bytes(_png(2, 2))
+        self.client.generate = mock.Mock(return_value=[payload])
+        with mock.patch.object(server_mod, "MAX_IMAGE_TOTAL_BYTES", payload.byte_length):
+            self.assertTrue(server_mod._execute_agent_pending_tools(run))
+        result = run["tool_executions"][call["id"]]["result"]
+        self.assertTrue(result["partial"])
+        self.assertEqual((result["succeeded"], result["failed"]), (1, 1))
+        self.assertEqual(result["items"][1]["errorCode"], "image_response_too_large")
+        self.assertEqual(len(self.assets.snapshot_session_assets(run["session_id"])), 1)
+
     def test_simulated_66_second_completion_persists_one_idempotent_asset(self):
         now = {"value": 0.0}
         requests = []
@@ -306,6 +713,7 @@ class TestImageAgentRuntime(unittest.TestCase):
         self.assertEqual(public["size"], "auto")
         self.assertEqual(public["quality"], "auto")
         self.assertEqual(public["outputFormat"], "png")
+        self.assertEqual(public["maxIndependentRequests"], 2)
         self.assertNotIn("PROMPT_SECRET_SENTINEL", json.dumps(public))
         server_mod._submit_agent_authorization(run, public["authorizationId"], "rejected")
         self.assertEqual(len(self.client.calls), 0)

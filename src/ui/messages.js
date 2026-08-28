@@ -1835,7 +1835,15 @@
           );
         }
         const count = generatedAssetsForCall(call).length || Number(call?.result?.count || 0);
-        return count > 0 ? t("imageAssetsGenerated", { count }) : "";
+        if (count <= 0) return "";
+        if (call?.result?.partial === true) {
+          return t("imageAssetsGeneratedPartial", {
+            succeeded: Number(call.result.succeeded || count),
+            requested: Number(call.result.requested || count),
+            failed: Number(call.result.failed || 0),
+          });
+        }
+        return t("imageAssetsGenerated", { count });
       }
       const content = getMessageText(call?.resultMessage);
       if (content) return boundedProcessDetail(content);
@@ -1892,8 +1900,15 @@
       const assets = generatedAssetsForCall(call);
       if (!assets.length) return "";
       const layoutClass = assets.length === 1 ? "is-single" : "is-multiple";
-      return `<article class="msg assistant generated-image-result ${layoutClass}" data-generated-image-gallery data-generated-image-count="${assets.length}" data-generated-image-tool-call-id="${escapeHtml(call.id || "")}">
-        <strong>${escapeHtml(t("imageAssetsGenerated", { count: assets.length }))}</strong>
+      const title = call?.result?.partial === true
+        ? t("imageAssetsGeneratedPartial", {
+          succeeded: Number(call.result.succeeded || assets.length),
+          requested: Number(call.result.requested || assets.length),
+          failed: Number(call.result.failed || 0),
+        })
+        : t("imageAssetsGenerated", { count: assets.length });
+      return `<article class="msg assistant generated-image-result ${layoutClass}" data-generated-image-gallery data-generated-image-count="${assets.length}" data-generated-image-tool-call-id="${escapeHtml(call.id || "")}" data-generated-image-partial="${call?.result?.partial === true ? "true" : "false"}">
+        <strong>${escapeHtml(title)}</strong>
         <div class="generated-image-grid">
           ${assets.map((asset, index) => `<article class="generated-image-card" data-generated-image-asset-id="${escapeHtml(asset.assetId)}">
             <button class="generated-image-preview" type="button" data-generated-image-preview="${escapeHtml(asset.url)}" aria-label="${escapeHtml(t("imageAssetPreview"))}">
