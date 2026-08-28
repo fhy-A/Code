@@ -121,10 +121,135 @@ class ModelRouteRegistryTests(unittest.TestCase):
             lambda _connection: self.fail("disabled connections must not be fetched"),
         )
         self.assertGreater(second["catalogRevision"], first["catalogRevision"])
-        self.assertFalse(second["routes"][0]["enabled"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["routes"], [])
         with self.assertRaises(ModelRouteError) as captured:
             self.registry.resolve(route_ref, second["catalogRevision"], "model-b")
-        self.assertEqual(captured.exception.code, "route_disabled")
+        self.assertEqual(captured.exception.code, "route_catalog_unavailable")
+
+    def test_disabling_the_last_connection_removes_routes_and_credentials(self):
+        first = self.registry.refresh(
+            [self.connection()],
+            lambda _connection: ["model-a"],
+        )
+        route_ref = first["routes"][0]["routeRef"]
+
+        disabled = self.registry.refresh(
+            [{**self.connection(), "enabled": False}],
+            lambda _connection: self.fail("disabled connections must not be fetched"),
+        )
+
+        self.assertTrue(disabled["ok"])
+        self.assertEqual(disabled["routes"], [])
+        self.assertGreater(disabled["catalogRevision"], first["catalogRevision"])
+        with self.assertRaises(ModelRouteError) as captured:
+            self.registry.resolve(route_ref, disabled["catalogRevision"], "model-a")
+        self.assertEqual(captured.exception.code, "route_catalog_unavailable")
+
+    def test_removing_one_connection_preserves_only_the_other_overlapping_route(self):
+        kept_connection = self.connection(
+            connectionId="manual_22222222-2222-4222-8222-222222222222",
+            key="sk-second-synthetic-secret",
+            label="Kept",
+        )
+        first = self.registry.refresh(
+            [self.connection(label="Removed"), kept_connection],
+            lambda _connection: ["shared-model"],
+        )
+        refs = {route["label"]: route["routeRef"] for route in first["routes"]}
+
+        remaining = self.registry.refresh(
+            [kept_connection],
+            lambda _connection: ["shared-model"],
+        )
+
+        self.assertTrue(remaining["ok"])
+        self.assertEqual(
+            [(route["label"], route["routeRef"]) for route in remaining["routes"]],
+            [("Kept", refs["Kept"])],
+        )
+        with self.assertRaises(ModelRouteError) as captured:
+            self.registry.resolve(
+                refs["Removed"], remaining["catalogRevision"], "shared-model",
+            )
+        self.assertEqual(captured.exception.code, "route_not_found")
+        resolved = self.registry.resolve(
+            refs["Kept"], remaining["catalogRevision"], "shared-model",
+        )
+        self.assertEqual(resolved.key, "sk-second-synthetic-secret")
+
+    def test_refresh_empty_is_authoritative_and_removes_every_connection(self):
+        second = self.connection(
+            connectionId="manual_22222222-2222-4222-8222-222222222222",
+            key="sk-second-synthetic-secret",
+        )
+        first = self.registry.refresh(
+            [self.connection(), second],
+            lambda _connection: ["shared-model"],
+        )
+        old_refs = [route["routeRef"] for route in first["routes"]]
+
+        cleared = self.registry.refresh(
+            [],
+            lambda _connection: self.fail("empty refresh must not fetch models"),
+        )
+
+        self.assertTrue(cleared["ok"])
+        self.assertEqual(cleared["routes"], [])
+        self.assertGreater(cleared["catalogRevision"], first["catalogRevision"])
+        for route_ref in old_refs:
+            with self.subTest(route_ref=route_ref), self.assertRaises(ModelRouteError) as captured:
+                self.registry.resolve(route_ref, cleared["catalogRevision"], "shared-model")
+            self.assertEqual(captured.exception.code, "route_catalog_unavailable")
+        restarted = ModelRouteRegistry(self.path)
+        self.assertEqual(restarted.snapshot()["routes"], [])
+        with self.assertRaises(ModelRouteError) as captured:
+            restarted.resolve(old_refs[0], cleared["catalogRevision"], "shared-model")
+        self.assertEqual(captured.exception.code, "route_catalog_unavailable")
+
+    def test_newer_empty_refresh_wins_over_an_older_inflight_catalog(self):
+        initial = self.registry.refresh(
+            [self.connection()],
+            lambda _connection: ["model-a"],
+        )
+        route_ref = initial["routes"][0]["routeRef"]
+        fetch_started = threading.Event()
+        release_fetch = threading.Event()
+        results = {}
+
+        def slow_fetch(_connection):
+            fetch_started.set()
+            self.assertTrue(release_fetch.wait(2))
+            return ["model-a", "model-b"]
+
+        old_refresh = threading.Thread(target=lambda: results.update(
+            old=self.registry.refresh([self.connection()], slow_fetch)
+        ))
+        old_refresh.start()
+        self.assertTrue(fetch_started.wait(1))
+
+        delete_refresh = threading.Thread(target=lambda: results.update(
+            deleted=self.registry.refresh([], lambda _connection: self.fail(
+                "empty refresh must not fetch models"
+            ))
+        ))
+        delete_refresh.start()
+        self.assertTrue(delete_refresh.is_alive())
+        release_fetch.set()
+        old_refresh.join(2)
+        delete_refresh.join(2)
+
+        self.assertFalse(old_refresh.is_alive())
+        self.assertFalse(delete_refresh.is_alive())
+        self.assertEqual(results["deleted"]["routes"], [])
+        self.assertEqual(self.registry.snapshot()["routes"], [])
+        with self.assertRaises(ModelRouteError) as captured:
+            self.registry.resolve(
+                route_ref,
+                results["deleted"]["catalogRevision"],
+                "model-a",
+            )
+        self.assertEqual(captured.exception.code, "route_catalog_unavailable")
 
     def test_resolve_enforces_revision_model_and_runtime_credentials(self):
         first = self.registry.refresh([self.connection()], lambda _connection: ["model-a"])

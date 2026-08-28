@@ -1632,9 +1632,12 @@ const settingsFeature = createSettingsFeature({
   onPlatformLogout: clearPlatformLocalData,
   onKeyConfigChanged: (config, change = {}) => {
     if (change.routingChanged !== false) {
+      const preferredModel = getSelectedModel();
       state._modelRouteConfigGeneration = modelRouteRefreshGeneration() + 1;
-      markModelCatalogStale(config);
-      void refreshModels({ intent: "config" }).catch(() => {});
+      markModelCatalogStale(config, change);
+      void refreshModels({ intent: "config" })
+        .then((result) => restorePreferredModelAfterRefresh(preferredModel, result))
+        .catch(() => {});
     }
     void resolvePendingOnboardingKey(config);
   },
@@ -1712,7 +1715,13 @@ onboardingTasksFeature = createOnboardingTasksFeature({
 onboardingTasksFeature.bind();
 
 function clearPlatformLocalData() {
-  saveKeyConfig([]);
+  const clearedConfig = saveKeyConfig([]);
+  state._modelRouteConfigGeneration = modelRouteRefreshGeneration() + 1;
+  markModelCatalogStale(clearedConfig, {
+    routingChanged: true,
+    retainedManualConnectionIds: [],
+  });
+  void refreshModels({ intent: "config" }).catch(() => {});
   localStorage.removeItem("code-key");
   localStorage.removeItem("code-model");
   els.apiKey.value = "";
@@ -5936,14 +5945,20 @@ function selectedModelRoute() {
 function routeForModel(modelId, { unique = false } = {}) {
   const normalizedModel = String(modelId || "").trim();
   const matches = state.modelRoutes.filter((route) => (
-    route.enabled !== false && route.modelId === normalizedModel
+    route.enabled !== false
+    && route.credentialsAvailable === true
+    && route.modelId === normalizedModel
   ));
   return unique ? (matches.length === 1 ? matches[0] : null) : matches[0] || null;
 }
 
 function setSelectedModelRoute(routeRef, catalogRevision = state.modelRouteCatalogRevision) {
   const normalizedRef = String(routeRef || "").trim();
-  const route = state.modelRoutes.find((candidate) => candidate.routeRef === normalizedRef) || null;
+  const route = state.modelRoutes.find((candidate) => (
+    candidate.routeRef === normalizedRef
+    && candidate.enabled !== false
+    && candidate.credentialsAvailable === true
+  )) || null;
   state.selectedRouteRef = route?.routeRef || "";
   state.selectedRouteCatalogRevision = route
     ? Number(catalogRevision || state.modelRouteCatalogRevision || 0)
@@ -5967,6 +5982,7 @@ function routeRefreshManualConnections() {
   return loadKeyConfig()
     .filter((entry) => (
       entry?.source !== "platform"
+      && entry?.enabled !== false
       && String(entry?.key || "").trim()
       && String(entry?.connectionId || "").trim()
     ))
@@ -5980,12 +5996,22 @@ function routeRefreshManualConnections() {
 
 function routeRefreshPayload() {
   const platformAuth = getPlatformAuth?.();
+  const enabledPlatformTokenIds = loadKeyConfig()
+    .filter((entry) => (
+      entry?.source === "platform"
+      && entry?.enabled !== false
+      && String(entry?.key || "").trim()
+      && String(entry?.platformTokenId || "").trim()
+    ))
+    .map((entry) => String(entry.platformTokenId))
+    .sort((left, right) => Number(left) - Number(right));
   return {
     baseUrl: els.baseUrl.value.trim() || WORKBAR_URL,
     ...(platformAuth ? {
       platformAuth: {
         token: String(platformAuth.token || ""),
         userId: String(platformAuth.userId || ""),
+        enabledTokenIds: enabledPlatformTokenIds,
       },
     } : {}),
     manualConnections: routeRefreshManualConnections(),
@@ -5995,7 +6021,7 @@ function routeRefreshPayload() {
 function connectionRouteGroups(routes = state.modelRoutes) {
   const groups = new Map();
   for (const route of routes) {
-    if (!route?.enabled) continue;
+    if (!route?.enabled || route.credentialsAvailable !== true) continue;
     if (!groups.has(route.connectionId)) {
       groups.set(route.connectionId, {
         connectionId: route.connectionId,
@@ -6043,17 +6069,18 @@ function renderConnectionRouteCatalog(statusKey = "", source = "live") {
   if (settingsCount) settingsCount.textContent = String(availableRoutes.length);
 
   const storedRef = state.selectedRouteRef || localStorage.getItem(MODEL_ROUTE_REF_STORAGE_KEY) || "";
-  const storedRoute = state.modelRoutes.find((route) => route.routeRef === storedRef) || null;
+  const storedRoute = state.modelRoutes.find((route) => (
+    route.routeRef === storedRef
+    && route.enabled !== false
+    && route.credentialsAvailable === true
+  )) || null;
   const legacyModel = localStorage.getItem("code-model") || getSelectedModel();
-  const migratedRoute = storedRoute || (!storedRef ? routeForModel(legacyModel, { unique: true }) : null);
+  const migratedRoute = storedRoute || routeForModel(legacyModel, { unique: true });
   if (migratedRoute) {
     setSelectedModelRoute(migratedRoute.routeRef, state.modelRouteCatalogRevision);
-  } else if (storedRef) {
-    state.selectedRouteRef = storedRef;
-    state.selectedRouteCatalogRevision = state.modelRouteCatalogRevision;
-    applySelectedModelPresentation(legacyModel, null);
   } else {
     setSelectedModelRoute("", state.modelRouteCatalogRevision);
+    try { localStorage.removeItem("code-model"); } catch (_) {}
   }
   return availableRoutes;
 }
@@ -6107,9 +6134,10 @@ async function refreshModelRoutes(payload = routeRefreshPayload(), request = {})
       };
     }
     state.modelRoutes = previousRoutes;
+    const hasAvailableRoute = connectionRouteGroups(previousRoutes).length > 0;
     renderConnectionRouteCatalog(
-      previousRoutes.length ? "modelCatalogRefreshFailedCached" : "modelCatalogRefreshFailed",
-      previousRoutes.length ? "registry-cache" : "empty",
+      hasAvailableRoute ? "modelCatalogRefreshFailedCached" : "modelCatalogRefreshFailed",
+      hasAvailableRoute ? "registry-cache" : "empty",
     );
     throw error;
   } finally {
@@ -6364,14 +6392,25 @@ async function restoreCachedModelCatalog() {
   return renderModelCatalog(cached.models, "detectingModels", "cache");
 }
 
-function markModelCatalogStale(config) {
+function markModelCatalogStale(config, change = {}) {
   const entries = Array.isArray(config) ? config : loadKeyConfig();
   const hasEnabledKey = entries.some((entry) => entry?.enabled !== false && String(entry?.key || "").trim());
   if (state.routingV2 !== false) {
-    invalidateModelRoute("");
+    const retainedManualConnectionIds = new Set(
+      Array.isArray(change.retainedManualConnectionIds)
+        ? change.retainedManualConnectionIds.map((value) => String(value || ""))
+        : [],
+    );
+    state.modelRoutes = state.modelRoutes.map((route) => (
+      route.source === "manual"
+      && retainedManualConnectionIds.has(String(route.connectionId || ""))
+        ? route
+        : { ...route, credentialsAvailable: false }
+    ));
+    const hasAvailableRoute = connectionRouteGroups().length > 0;
     renderConnectionRouteCatalog(
       hasEnabledKey ? "modelCatalogNeedsRefresh" : "enterApiKey",
-      state.modelRoutes.length ? "registry-cache" : "empty",
+      hasAvailableRoute ? "registry-cache" : "empty",
     );
     return;
   }
@@ -6387,6 +6426,16 @@ function markModelCatalogStale(config) {
     return;
   }
   renderModelCatalog(state.modelCatalogModels, "modelCatalogNeedsRefresh", state.modelCatalogModels.length ? "cache" : "empty");
+}
+
+function restorePreferredModelAfterRefresh(preferredModel, refreshResult) {
+  const normalizedModel = String(preferredModel || "").trim();
+  if (!normalizedModel || refreshResult?.ok !== true || state.routingV2 === false) return false;
+  if (selectedModelRoute()) return false;
+  const route = routeForModel(normalizedModel, { unique: true });
+  if (!route) return false;
+  setSelectedModelRoute(route.routeRef, state.modelRouteCatalogRevision);
+  return true;
 }
 
 function modelContextEntryPriority(entry) {
@@ -6976,14 +7025,29 @@ function stopLiveTimer() {
 
 
 
+function composerRouteReadyForNewMessage() {
+  if (state.routingV2 === false) return true;
+  const route = selectedModelRoute();
+  return Boolean(
+    route
+    && route.enabled !== false
+    && route.credentialsAvailable === true
+    && route.modelId === getSelectedModel()
+  );
+}
+
 function updateSendButtonState() {
 
   const hasContent = els.prompt.value.trim().length > 0 || state.attachedImages.length > 0;
+  const routeReady = !hasContent || composerRouteReadyForNewMessage();
+  const ready = hasContent && routeReady;
 
-  els.sendBtn.classList.toggle("ready", hasContent);
+  els.sendBtn.classList.toggle("ready", ready);
   els.sendBtn.classList.toggle("running", state.isStreaming && !hasContent);
-  els.sendBtn.disabled = !hasContent && !state.isStreaming;
-  els.sendBtn.title = state.isStreaming
+  els.sendBtn.disabled = (!hasContent && !state.isStreaming) || !routeReady;
+  els.sendBtn.title = !routeReady
+    ? t("selectModel")
+    : state.isStreaming
     ? (hasContent ? t("queueSendTip") : t("pauseBtn"))
     : (hasContent ? t("sendTip") : t("emptyTip"));
 
@@ -13675,6 +13739,7 @@ function applySelectedModelPresentation(modelId, route = null) {
 
   });
   if (els.contextBudgetStatus) updateContextBudgetStatus();
+  updateSendButtonState();
 
 }
 
@@ -14895,6 +14960,11 @@ els.chatForm.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (!composerRouteReadyForNewMessage()) {
+    updateSendButtonState();
+    return;
+  }
+
   if (autoPermissionGate.requiresDispatchConfirmation()) {
     if (autoPermissionDispatchConfirmationPending) return;
     autoPermissionDispatchConfirmationPending = true;
@@ -15912,19 +15982,26 @@ async function init() {
   applyI18n(); // run early, before async ops, to prevent flicker
   await initializeImageRoutes().catch(() => {});
   const hasEnabledKey = storedKeyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim());
+  const startupPreferredModel = state.routingV2 !== false
+    ? String(localStorage.getItem("code-model") || "").trim()
+    : "";
   let cachedModelCatalog = [];
   try {
     cachedModelCatalog = await restoreModelRoutes();
   } catch (_) {
     cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];
   }
+  if (state.routingV2) {
+    markModelCatalogStale(storedKeyConfig, { retainedManualConnectionIds: [] });
+    cachedModelCatalog = [];
+  }
   if (!cachedModelCatalog.length) {
     if (state.routingV2) renderConnectionRouteCatalog(hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
     else renderModelCatalog([], hasEnabledKey ? "detectingModels" : "enterApiKey", "empty");
   }
-  // Restore the persisted model before platform sync can save other settings.
-  // Availability is validated only after refreshModels receives a real list.
-  setSelectedModel(localStorage.getItem("code-model") || "");
+  // Legacy routing may restore immediately. Routing v2 keeps its startup
+  // preference only in memory until a refresh proves one authoritative route.
+  setSelectedModel(state.routingV2 ? "" : (localStorage.getItem("code-model") || ""));
   if (!state.sessionId) els.sessionTitle.value = t("sessionTitleDefault");
 
   updateModePromptPreview();
@@ -15935,6 +16012,10 @@ async function init() {
 
   const platformReady = await initializePlatformAuth();
   if (!platformReady) {
+    if ((state.routingV2 || getApiKeys().length > 0) && els.baseUrl.value.trim()) {
+      const startupRefresh = await refreshModels({ intent: "background" }).catch(() => null);
+      restorePreferredModelAfterRefresh(startupPreferredModel, startupRefresh);
+    }
     updateSendButtonState();
     return;
   }
@@ -15992,8 +16073,10 @@ async function init() {
       console.error("Failed to hydrate foreground dispatch recovery:", error);
     });
 
-  if (getApiKeys().length > 0 && els.baseUrl.value.trim()) {
-    void refreshModels({ intent: "background" }).catch(() => {});
+  if ((state.routingV2 || getApiKeys().length > 0) && els.baseUrl.value.trim()) {
+    void refreshModels({ intent: "background" })
+      .then((result) => restorePreferredModelAfterRefresh(startupPreferredModel, result))
+      .catch(() => {});
   }
 
   // Restore preview pane state after config/session load.

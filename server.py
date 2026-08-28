@@ -16842,11 +16842,31 @@ def _workbar_model_route_connections(body, context):
     if isinstance(platform_auth, dict):
         token = str(platform_auth.get("token") or "").strip()
         user_id = str(platform_auth.get("userId") or "").strip()
+        enabled_token_ids_raw = platform_auth.get("enabledTokenIds", None)
+        if enabled_token_ids_raw is not None and not isinstance(enabled_token_ids_raw, list):
+            raise ModelRouteError(
+                "route_catalog_unavailable",
+                "enabledTokenIds must be an array.",
+            )
+        enabled_token_ids = (
+            {
+                str(item).strip()
+                for item in enabled_token_ids_raw[:1000]
+                if str(item).strip().isdigit()
+            }
+            if isinstance(enabled_token_ids_raw, list)
+            else None
+        )
         if token and user_id:
+            if enabled_token_ids == set():
+                return connections
             tokens, full_keys = _fetch_workbar_tokens_and_keys(token, user_id)
             for token_entry in tokens:
                 token_id = str(token_entry.get("id") or "").strip()
-                if not token_id:
+                if not token_id or (
+                    enabled_token_ids is not None
+                    and token_id not in enabled_token_ids
+                ):
                     continue
                 key = str(full_keys.get(token_id) or "").strip()
                 if key:
@@ -19527,7 +19547,8 @@ class CodeHandler(BaseHTTPRequestHandler):
         collection = _model_route_connections(body, include_failures=True)
         connections = collection["connections"]
         backend_failures = collection["failures"]
-        if not connections:
+        if not connections and backend_failures:
+            snapshot = _model_route_registry.revoke_runtime_bindings()
             failure_codes = {item.get("code") for item in backend_failures}
             failure_code = (
                 "route_credentials_unavailable"
@@ -19539,7 +19560,14 @@ class CodeHandler(BaseHTTPRequestHandler):
                 if failure_code == "route_credentials_unavailable"
                 else "No model route connections are available."
             )
-            raise ModelRouteError(failure_code, message, retryable=True)
+            self.send_json({
+                **ModelRouteError(failure_code, message, retryable=True).public_payload(),
+                **snapshot,
+                "routingV2": True,
+                "failedConnections": len(backend_failures),
+                "failures": backend_failures,
+            }, 503)
+            return
         refresh_deadline = time.monotonic() + 30.0
 
         def fetch_route_models(connection):

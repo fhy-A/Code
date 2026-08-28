@@ -209,6 +209,13 @@ class ModelRouteRegistry:
                 "routes": routes,
             }
 
+    def revoke_runtime_bindings(self) -> dict:
+        """Fail closed without claiming that the durable catalog was refreshed."""
+        with self._lock:
+            self._credentials = {}
+            self._base_urls = {}
+            return self.snapshot()
+
     @staticmethod
     def _refresh_identity(connections: Iterable[dict]) -> str:
         identities = []
@@ -300,6 +307,7 @@ class ModelRouteRegistry:
         next_credentials: dict[str, str] = {}
         failures = []
         successful_connections = 0
+        enabled_connections = 0
         seen_connections = set()
 
         for raw in connection_list:
@@ -325,8 +333,8 @@ class ModelRouteRegistry:
             prior = previous_by_connection.get(connection_id, [])
 
             if not enabled:
-                next_routes.extend([{**route, "enabled": False} for route in prior])
                 continue
+            enabled_connections += 1
             if not key:
                 next_routes.extend(prior)
                 failures.append({"connectionId": connection_id, "code": "route_credentials_unavailable"})
@@ -375,12 +383,13 @@ class ModelRouteRegistry:
             }
             self._base_urls = {
                 _clean_text(item.get("connectionId"), 160): _clean_text(item.get("baseUrl"), 2048)
-                for item in connection_list if isinstance(item, dict)
+                for item in connection_list
+                if isinstance(item, dict) and item.get("enabled") is not False
             }
             self._write_catalog()
             snapshot = self.snapshot()
             snapshot.update({
-                "ok": successful_connections > 0 or not seen_connections,
+                "ok": successful_connections > 0 or enabled_connections == 0,
                 "changed": changed,
                 "successfulConnections": successful_connections,
                 "failedConnections": len(failures),

@@ -3690,6 +3690,48 @@ class TestConnectionCentricRouteApi(unittest.TestCase):
         self.assertNotIn("key", json.dumps(payload).lower())
         self.assertNotIn("baseurl", json.dumps(payload).lower())
 
+    def test_authoritative_empty_refresh_blocks_old_agent_run_route_before_creation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            registry = server.ModelRouteRegistry(Path(tempdir) / "routes.json")
+            first = registry.refresh(
+                [{
+                    "connectionId": "manual_11111111-1111-4111-8111-111111111111",
+                    "source": "manual",
+                    "group": "manual",
+                    "label": "Synthetic",
+                    "baseUrl": "https://synthetic.invalid",
+                    "key": "sk-synthetic-runtime-only",
+                    "enabled": True,
+                }],
+                lambda _connection: ["shared-model"],
+            )
+            old_route = first["routes"][0]
+            cleared = registry.refresh([], lambda _connection: [])
+            self.assertTrue(cleared["ok"])
+            self.assertEqual(cleared["routes"], [])
+
+            handler = self.handler("/api/agent/runs", {
+                "sessionId": "session-route",
+                "clientRequestId": "request-route",
+                "payload": {
+                    "model": "shared-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                "routeRef": old_route["routeRef"],
+                "catalogRevision": first["catalogRevision"],
+                "allowedTools": [],
+            })
+            with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+                 mock.patch.object(server, "_model_route_registry", registry), \
+                 mock.patch.object(server, "_create_agent_run") as create:
+                server.CodeHandler.do_POST(handler)
+
+            payload, status = handler.send_json.call_args.args
+            self.assertEqual(status, 503)
+            self.assertEqual(payload["errorCode"], "route_catalog_unavailable")
+            create.assert_not_called()
+            self.assertNotIn("synthetic", json.dumps(payload).lower())
+
     def test_runtime_route_ref_uses_same_mutual_exclusion_and_resolution(self):
         handler = self.handler("/api/runtime/runs", {
             "sessionId": "session-route",
@@ -3987,6 +4029,133 @@ class TestConnectionCentricRouteApi(unittest.TestCase):
             "code": "route_catalog_unavailable",
         }])
 
+    def test_workbar_collector_honors_enabled_platform_token_ids(self):
+        body = {
+            "baseUrl": "https://synthetic.invalid",
+            "platformAuth": {
+                "token": "synthetic-auth",
+                "userId": "7",
+                "enabledTokenIds": ["42"],
+            },
+            "manualConnections": [],
+        }
+        with mock.patch.object(
+            server,
+            "_fetch_workbar_tokens_and_keys",
+            return_value=([{
+                "id": 42,
+                "name": "kept",
+                "group": "default",
+                "status": 1,
+                "model_limits_enabled": False,
+            }, {
+                "id": 43,
+                "name": "revoked",
+                "group": "default",
+                "status": 1,
+                "model_limits_enabled": False,
+            }], {
+                "42": "sk-synthetic-kept",
+                "43": "sk-synthetic-revoked",
+            }),
+        ):
+            collection = server._model_route_connections(
+                body,
+                include_failures=True,
+            )
+
+        self.assertEqual(collection["failures"], [])
+        self.assertEqual(len(collection["connections"]), 1)
+        self.assertEqual(collection["connections"][0]["label"], "kept")
+        self.assertEqual(collection["connections"][0]["key"], "sk-synthetic-kept")
+
+    def test_empty_enabled_platform_token_ids_clear_without_upstream_fetch(self):
+        body = {
+            "baseUrl": "https://synthetic.invalid",
+            "platformAuth": {
+                "token": "synthetic-auth",
+                "userId": "7",
+                "enabledTokenIds": [],
+            },
+            "manualConnections": [],
+        }
+        with mock.patch.object(
+            server,
+            "_fetch_workbar_tokens_and_keys",
+            side_effect=AssertionError("empty platform selection must not fetch"),
+        ) as fetch:
+            collection = server._model_route_connections(
+                body,
+                include_failures=True,
+            )
+
+        fetch.assert_not_called()
+        self.assertEqual(collection, {"connections": [], "failures": []})
+
+    def test_model_route_refresh_empty_connections_authoritatively_clears_catalog(self):
+        handler = self.handler("/api/model-routes/refresh", {
+            "baseUrl": "https://synthetic.invalid",
+            "manualConnections": [],
+        })
+        collection = {"connections": [], "failures": []}
+        cleared = {
+            "ok": True,
+            "changed": True,
+            "catalogRevision": 9,
+            "routes": [],
+            "successfulConnections": 0,
+            "failedConnections": 0,
+            "failures": [],
+        }
+        with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+             mock.patch.object(server, "_model_route_connections", return_value=collection), \
+             mock.patch.object(server._model_route_registry, "refresh", return_value=cleared) as refresh:
+            server.CodeHandler.do_POST(handler)
+
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.args[0], [])
+        payload = handler.send_json.call_args.args[0]
+        self.assertEqual(handler.send_json.call_args.kwargs, {})
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["routes"], [])
+        self.assertEqual(payload["catalogRevision"], 9)
+
+    def test_model_route_backend_failure_revokes_runtime_credentials(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            registry = server.ModelRouteRegistry(Path(tempdir) / "routes.json")
+            first = registry.refresh(
+                [{
+                    "connectionId": "manual_11111111-1111-4111-8111-111111111111",
+                    "source": "manual",
+                    "group": "manual",
+                    "label": "Synthetic",
+                    "baseUrl": "https://synthetic.invalid",
+                    "key": "sk-synthetic-secret",
+                    "enabled": True,
+                }],
+                lambda _connection: ["model-a"],
+            )
+            route = first["routes"][0]
+            handler = self.handler("/api/model-routes/refresh", {})
+            collection = {
+                "connections": [],
+                "failures": [{"connectionId": "", "code": "route_catalog_unavailable"}],
+            }
+            with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
+                 mock.patch.object(server, "_model_route_registry", registry), \
+                 mock.patch.object(server, "_model_route_connections", return_value=collection):
+                server.CodeHandler.do_POST(handler)
+
+            payload, status = handler.send_json.call_args.args
+            self.assertEqual(status, 503)
+            self.assertEqual(payload["errorCode"], "route_catalog_unavailable")
+            serialized = json.dumps(payload)
+            self.assertNotIn("sk-synthetic-secret", serialized)
+            self.assertNotIn("https://synthetic.invalid", serialized)
+            with self.assertRaises(server.ModelRouteError) as captured:
+                registry.resolve(route["routeRef"], first["catalogRevision"], "model-a")
+            self.assertEqual(captured.exception.code, "route_credentials_unavailable")
+
     def test_model_route_refresh_partial_backend_failure_returns_healthy_catalog(self):
         handler = self.handler("/api/model-routes/refresh", {})
         collection = {
@@ -4021,7 +4190,6 @@ class TestConnectionCentricRouteApi(unittest.TestCase):
         cases = (
             ([{"connectionId": "", "code": "route_catalog_unavailable"}], "route_catalog_unavailable"),
             ([{"connectionId": "", "code": "route_credentials_unavailable"}], "route_credentials_unavailable"),
-            ([], "route_catalog_unavailable"),
         )
         for failures, expected_code in cases:
             with self.subTest(failures=failures):
@@ -4030,12 +4198,23 @@ class TestConnectionCentricRouteApi(unittest.TestCase):
                     "connections": [],
                     "failures": failures,
                 }
+                revoked = {
+                    "version": 1,
+                    "catalogRevision": 7,
+                    "routes": [],
+                }
                 with mock.patch.object(server, "_MODEL_ROUTE_REGISTRY_ENABLED", True), \
                      mock.patch.object(server, "_model_route_connections", return_value=collection), \
-                     mock.patch.object(server._model_route_registry, "refresh") as refresh:
+                     mock.patch.object(server._model_route_registry, "refresh") as refresh, \
+                     mock.patch.object(
+                         server._model_route_registry,
+                         "revoke_runtime_bindings",
+                         return_value=revoked,
+                     ) as revoke:
                     server.CodeHandler.do_POST(handler)
 
                 refresh.assert_not_called()
+                revoke.assert_called_once_with()
                 payload, status = handler.send_json.call_args.args
                 self.assertEqual(status, 503)
                 self.assertEqual(payload["errorCode"], expected_code)

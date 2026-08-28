@@ -9153,7 +9153,7 @@ const navigation = window.Code.features.sessions.createSessionNavigation({
         auth_check = APP_SOURCE.index("if (platformSync?.authExpired)", platform_sync)
         recovery_call = APP_SOURCE.index("sessionStartup.startRecovery();", auth_check)
         model_refresh = APP_SOURCE.index(
-            'void refreshModels({ intent: "background" }).catch',
+            'void refreshModels({ intent: "background" })',
             recovery_call,
         )
         self.assertLess(platform_sync, auth_check)
@@ -13343,7 +13343,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
       keys: {1: "synthetic-route-key"},
     }),
   }),
-  onKeyConfigChanged: (_config, change) => routeChanges.push(change.routingChanged),
+  onKeyConfigChanged: (_config, change) => routeChanges.push(change),
 });
 (async () => {
   const syncResult = await feature.syncPlatformKeysSilently();
@@ -13356,6 +13356,13 @@ const feature = window.Code.features.settings.createSettingsFeature({
   feature.saveKeyConfig([
     {name: "disabled-renamed", key: "synthetic-route-key", enabled: false, source: "platform"},
   ]);
+  feature.saveKeyConfig([
+    {name: "alpha", key: "sk-alpha", enabled: true, source: "manual", connectionId: "manual_alpha1234"},
+    {name: "bravo", key: "sk-bravo", enabled: true, source: "manual", connectionId: "manual_bravo5678"},
+  ]);
+  feature.saveKeyConfig([
+    {name: "bravo", key: "sk-bravo", enabled: true, source: "manual", connectionId: "manual_bravo5678"},
+  ]);
   process.stdout.write(JSON.stringify({syncResult, routeChanges}));
 })().catch((error) => { console.error(error); process.exit(1); });
 """
@@ -13366,7 +13373,14 @@ const feature = window.Code.features.settings.createSettingsFeature({
         data = json.loads(completed.stdout)
         self.assertTrue(data["syncResult"]["ok"])
         self.assertEqual(data["syncResult"]["status"], "synced")
-        self.assertEqual(data["routeChanges"], [True, True, True, False])
+        self.assertEqual(
+            [change["routingChanged"] for change in data["routeChanges"]],
+            [True, True, True, False, True, True],
+        )
+        self.assertEqual(
+            [change.get("retainedManualConnectionIds", []) for change in data["routeChanges"]],
+            [[], [], [], [], [], ["manual_bravo5678"]],
+        )
 
     def test_settings_interactive_sync_masks_html_and_copies_colon_formatted_keys(self):
         script = r"""
@@ -13516,7 +13530,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
             'class="model-refresh-btn"',
             'refreshSettingsModelList',
             'await refreshModels({ intent: "explicit" })',
-            "onKeyConfigChanged(saved, { routingChanged })",
+            "retainedManualConnectionIds: retainedConnectionIds",
             "hasCatalogState",
         ):
             self.assertIn(expected, SETTINGS_SOURCE)
@@ -13597,10 +13611,10 @@ eval({json.dumps(dispatch_source)});
     ],
   }});
   const initialGroups = connectionRouteGroups().map((group) => [group.displayLabel, group.routes.map((route) => route.modelId)]);
-  const duplicateLabels = connectionRouteGroups([
-    {{routeRef: "mr1_same_a", connectionId: "manual_same_alpha", modelId: "model-a", label: "Same", enabled: true}},
-    {{routeRef: "mr1_same_b", connectionId: "manual_same_bravo", modelId: "model-b", label: "Same", enabled: true}},
-  ]).map((group) => group.displayLabel);
+      const duplicateLabels = connectionRouteGroups([
+        {{routeRef: "mr1_same_a", connectionId: "manual_same_alpha", modelId: "model-a", label: "Same", enabled: true, credentialsAvailable: true}},
+        {{routeRef: "mr1_same_b", connectionId: "manual_same_bravo", modelId: "model-b", label: "Same", enabled: true, credentialsAvailable: true}},
+      ]).map((group) => group.displayLabel);
   const initialDropdown = els.modelPillDropdown.innerHTML;
   const initialSettings = settingsList.innerHTML;
   setSelectedModelRoute("mr1_workbar", 9);
@@ -13678,16 +13692,428 @@ eval({json.dumps(dispatch_source)});
         self.assertEqual(data["explicit"]["routeRef"], "mr1_deepseek")
         self.assertEqual(data["ambiguousCode"], "route_not_found")
         self.assertEqual(data["migrated"]["routeRef"], "mr1_unique")
-        self.assertEqual(data["disabledPinnedCode"], "route_disabled")
+        self.assertEqual(data["disabledPinnedCode"], "")
         self.assertFalse(data["disabledGroupVisible"])
-        self.assertEqual(data["selectedRefAfterDisabled"], "mr1_deepseek")
-        self.assertEqual(data["removedPinnedCode"], "route_not_found")
-        self.assertEqual(data["storageRouteRef"], "mr1_deepseek")
+        self.assertEqual(data["selectedRefAfterDisabled"], "mr1_workbar")
+        self.assertEqual(data["removedPinnedCode"], "")
+        self.assertEqual(data["storageRouteRef"], "mr1_workbar")
         self.assertEqual(data["normalizedKeys"], [
             "connectionId", "credentialsAvailable", "enabled", "label",
             "modelId", "routeRef", "source",
         ])
         self.assertEqual(data["normalizedSource"], "custom-openai")
+
+    def test_route_refresh_payload_excludes_disabled_manual_and_platform_connections(self):
+        payload_start = APP_SOURCE.index("function routeRefreshManualConnections()")
+        payload_end = APP_SOURCE.index("function connectionRouteGroups(", payload_start)
+        payload_source = APP_SOURCE[payload_start:payload_end]
+        script = f"""
+const WORKBAR_URL = "https://workbar.ai";
+const els = {{baseUrl: {{value: "https://synthetic.invalid"}}}};
+const t = (key) => key;
+const loadKeyConfig = () => ([
+  {{connectionId: "manual_disabled1", source: "manual", name: "Disabled", key: "sk-disabled", enabled: false}},
+  {{connectionId: "manual_enabled22", source: "manual", name: "Enabled", key: "sk-enabled", enabled: true}},
+  {{source: "platform", platformTokenId: "42", name: "Platform enabled", key: "sk-platform-a", enabled: true}},
+  {{source: "platform", platformTokenId: "43", name: "Platform disabled", key: "sk-platform-b", enabled: false}},
+]);
+const getPlatformAuth = () => ({{token: "synthetic-auth", userId: "7"}});
+eval({json.dumps(payload_source)});
+process.stdout.write(JSON.stringify(routeRefreshPayload()));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["manualConnections"], [{
+            "connectionId": "manual_enabled22",
+            "label": "Enabled",
+            "key": "sk-enabled",
+            "enabled": True,
+        }])
+        self.assertEqual(data["platformAuth"], {
+            "token": "synthetic-auth",
+            "userId": "7",
+            "enabledTokenIds": ["42"],
+        })
+
+    def test_platform_logout_and_empty_startup_revoke_routes_before_refresh(self):
+        clear_start = APP_SOURCE.index("function clearPlatformLocalData()")
+        clear_end = APP_SOURCE.index("const previewFeature", clear_start)
+        clear_source = APP_SOURCE[clear_start:clear_end]
+        script = f"""
+const state = {{routingV2: true, _modelRouteConfigGeneration: 4, modelRoutes: [{{routeRef: "old"}}]}};
+const localStorage = {{removed: [], removeItem(key) {{ this.removed.push(key); }}}};
+const els = {{apiKey: {{value: "secret"}}, baseUrl: {{value: "old"}}}};
+const WORKBAR_URL = "https://workbar.invalid";
+const events = [];
+const saveKeyConfig = (config) => {{ events.push(["save", config]); return config; }};
+const modelRouteRefreshGeneration = () => state._modelRouteConfigGeneration;
+const markModelCatalogStale = (config, change) => events.push(["stale", config, change]);
+const refreshModels = async (request) => {{ events.push(["refresh", request]); return {{ok: false}}; }};
+const clearModelCatalogCache = () => events.push(["clear-cache"]);
+const renderModelCatalog = (...args) => events.push(["render", ...args]);
+const setSelectedModel = (model) => events.push(["select", model]);
+const updateSendButtonState = () => events.push(["send-state"]);
+eval({json.dumps(clear_source)});
+(async () => {{
+  clearPlatformLocalData();
+  await Promise.resolve();
+  process.stdout.write(JSON.stringify({{
+    events,
+    generation: state._modelRouteConfigGeneration,
+    keyValue: els.apiKey.value,
+    baseUrl: els.baseUrl.value,
+    removed: localStorage.removed,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["generation"], 5)
+        self.assertEqual(data["events"][0], ["save", []])
+        self.assertEqual(data["events"][1], [
+            "stale", [], {"routingChanged": True, "retainedManualConnectionIds": []},
+        ])
+        self.assertIn(["refresh", {"intent": "config"}], data["events"])
+        self.assertEqual(data["keyValue"], "")
+        self.assertEqual(data["baseUrl"], "https://workbar.invalid")
+        self.assertEqual(data["removed"], ["code-key", "code-model"])
+
+        init_start = APP_SOURCE.index("async function init()")
+        init_source = APP_SOURCE[init_start:]
+        self.assertIn(
+            "const startupPreferredModel = state.routingV2 !== false\n"
+            "    ? String(localStorage.getItem(\"code-model\") || \"\").trim()\n"
+            "    : \"\";",
+            init_source,
+        )
+        self.assertIn(
+            "if (state.routingV2) {\n"
+            "    markModelCatalogStale(storedKeyConfig, { retainedManualConnectionIds: [] });\n"
+            "    cachedModelCatalog = [];",
+            init_source,
+        )
+        self.assertIn(
+            'setSelectedModel(state.routingV2 ? "" : (localStorage.getItem("code-model") || ""));',
+            init_source,
+        )
+        self.assertIn(
+            "if (!platformReady) {\n"
+            "    if ((state.routingV2 || getApiKeys().length > 0) && els.baseUrl.value.trim()) {\n"
+            "      const startupRefresh = await refreshModels({ intent: \"background\" }).catch(() => null);\n"
+            "      restorePreferredModelAfterRefresh(startupPreferredModel, startupRefresh);",
+            init_source,
+        )
+        self.assertIn(
+            "if ((state.routingV2 || getApiKeys().length > 0) && els.baseUrl.value.trim()) {\n"
+            "    void refreshModels({ intent: \"background\" })\n"
+            "      .then((result) => restorePreferredModelAfterRefresh(startupPreferredModel, result))",
+            init_source,
+        )
+        settings_callback = APP_SOURCE[
+            APP_SOURCE.index("onKeyConfigChanged: (config, change = {}) => {"):
+            APP_SOURCE.index("trashIcon,", APP_SOURCE.index("onKeyConfigChanged: (config, change = {}) => {"))
+        ]
+        self.assertLess(
+            settings_callback.index("const preferredModel = getSelectedModel();"),
+            settings_callback.index("markModelCatalogStale(config, change);"),
+        )
+        self.assertIn(
+            ".then((result) => restorePreferredModelAfterRefresh(preferredModel, result))",
+            settings_callback,
+        )
+
+    def test_key_route_revocation_is_immediate_and_refresh_failure_does_not_restore_it(self):
+        catalog_start = APP_SOURCE.index("function normalizePublicModelRoute(")
+        catalog_end = APP_SOURCE.index("async function restoreModelRoutes()", catalog_start)
+        catalog_source = APP_SOURCE[catalog_start:catalog_end]
+        refresh_start = APP_SOURCE.index("async function refreshModelRoutes(")
+        refresh_end = APP_SOURCE.index("async function modelCatalogDigest(", refresh_start)
+        refresh_source = APP_SOURCE[refresh_start:refresh_end]
+        stale_start = APP_SOURCE.index("function markModelCatalogStale(")
+        stale_end = APP_SOURCE.index("function modelContextEntryPriority(", stale_start)
+        stale_source = APP_SOURCE[stale_start:stale_end]
+        script = f"""
+const values = new Map([
+  ["code-model", "shared-model"],
+  ["code-model-route-ref", "mr1_removed"],
+]);
+const MODEL_ROUTE_REF_STORAGE_KEY = "code-model-route-ref";
+const MODEL_ROUTE_REVISION_STORAGE_KEY = "code-model-route-revision";
+const localStorage = {{
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+}};
+const state = {{
+  routingV2: true,
+  modelRoutes: [
+    {{routeRef: "mr1_removed", connectionId: "manual_removed1", source: "manual", modelId: "shared-model", label: "Removed", enabled: true, credentialsAvailable: true}},
+    {{routeRef: "mr1_kept", connectionId: "manual_kept222", source: "manual", modelId: "shared-model", label: "Kept", enabled: true, credentialsAvailable: true}},
+    {{routeRef: "mr1_platform", connectionId: "wc1_platform", source: "workbar", modelId: "platform-model", label: "Platform", enabled: true, credentialsAvailable: true}},
+  ],
+  modelRouteCatalogRevision: 7,
+  selectedRouteRef: "mr1_removed",
+  selectedRouteCatalogRevision: 7,
+  modelCatalogModels: ["shared-model", "platform-model"],
+  _modelRouteConfigGeneration: 1,
+}};
+const settingsList = {{innerHTML: ""}};
+const settingsCount = {{textContent: ""}};
+const document = {{getElementById: (id) => id === "settingsModelList" ? settingsList : id === "settingsModelCount" ? settingsCount : null}};
+const els = {{
+  baseUrl: {{value: "https://synthetic.invalid"}},
+  refreshModelsBtn: {{disabled: false}},
+  modelPillDropdown: {{innerHTML: ""}},
+  modelListBox: {{innerHTML: ""}},
+}};
+const t = (key) => key;
+const escapeHtml = (value) => String(value);
+const normalizeModelCatalogModels = (models) => [...new Set(models)].sort();
+const modelCatalogStatusTone = () => "warning";
+const resumeDispatchesWaitingForRoute = async () => false;
+let presentation = {{model: "shared-model", routeRef: "mr1_removed"}};
+const applySelectedModelPresentation = (model, route) => {{ presentation = {{model, routeRef: route?.routeRef || ""}}; }};
+const getSelectedModel = () => presentation.model;
+const invalidateCachedModelCatalogRoutes = () => {{}};
+const clearModelCatalogCache = () => {{}};
+const showToast = () => {{}};
+const invalidateModelRoute = (routeRef = state.selectedRouteRef) => {{
+  const normalizedRef = String(routeRef || "");
+  state.modelRoutes = state.modelRoutes.map((route) => (
+    !normalizedRef || route.routeRef === normalizedRef
+      ? {{...route, credentialsAvailable: false}}
+      : route
+  ));
+}};
+const modelRouteRefreshGeneration = () => Number(state._modelRouteConfigGeneration || 0);
+const apiJson = async () => {{ throw new Error("synthetic refresh failure"); }};
+eval({json.dumps(catalog_source)});
+eval({json.dumps(refresh_source)});
+eval({json.dumps(stale_source)});
+
+(async () => {{
+  markModelCatalogStale([], {{retainedManualConnectionIds: ["manual_kept222"]}});
+  const immediate = {{
+    credentials: Object.fromEntries(state.modelRoutes.map((route) => [route.routeRef, route.credentialsAvailable])),
+    dropdown: els.modelPillDropdown.innerHTML,
+    selectedRouteRef: state.selectedRouteRef,
+    selectedModel: presentation.model,
+    models: state.modelCatalogModels,
+  }};
+  let failure = null;
+  try {{
+    await refreshModelRoutes({{manualConnections: []}}, {{generation: 1, intent: "config"}});
+  }} catch (error) {{ failure = error.message; }}
+  const afterFailure = {{
+    credentials: Object.fromEntries(state.modelRoutes.map((route) => [route.routeRef, route.credentialsAvailable])),
+    dropdown: els.modelPillDropdown.innerHTML,
+    selectedRouteRef: state.selectedRouteRef,
+    selectedModel: presentation.model,
+    models: state.modelCatalogModels,
+  }};
+  process.stdout.write(JSON.stringify({{immediate, afterFailure, failure}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        expected = {
+            "credentials": {
+                "mr1_removed": False,
+                "mr1_kept": True,
+                "mr1_platform": False,
+            },
+            "selectedRouteRef": "mr1_kept",
+            "selectedModel": "shared-model",
+            "models": ["shared-model"],
+        }
+        for snapshot in (data["immediate"], data["afterFailure"]):
+            self.assertEqual(snapshot["credentials"], expected["credentials"])
+            self.assertEqual(snapshot["selectedRouteRef"], expected["selectedRouteRef"])
+            self.assertEqual(snapshot["selectedModel"], expected["selectedModel"])
+            self.assertEqual(snapshot["models"], expected["models"])
+            self.assertIn("Kept", snapshot["dropdown"])
+            self.assertNotIn("Removed", snapshot["dropdown"])
+            self.assertNotIn("Platform", snapshot["dropdown"])
+        self.assertEqual(data["failure"], "synthetic refresh failure")
+
+    def test_startup_model_preference_restores_only_after_unique_authoritative_route(self):
+        helper_start = APP_SOURCE.index("function restorePreferredModelAfterRefresh(")
+        helper_end = APP_SOURCE.index("function modelContextEntryPriority(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const state = {{routingV2: true, modelRoutes: [], modelRouteCatalogRevision: 11}};
+const selections = [];
+let currentSelection = null;
+const selectedModelRoute = () => currentSelection;
+const routeForModel = (model, options = {{}}) => {{
+  const matches = state.modelRoutes.filter((route) => (
+    route.modelId === model
+    && route.enabled !== false
+    && route.credentialsAvailable === true
+  ));
+  return options.unique ? (matches.length === 1 ? matches[0] : null) : matches[0] || null;
+}};
+const setSelectedModelRoute = (routeRef, revision) => selections.push({{routeRef, revision}});
+eval({json.dumps(helper_source)});
+const staleStage = restorePreferredModelAfterRefresh("wanted-model", null);
+state.modelRoutes = [
+  {{routeRef: "route-a", modelId: "wanted-model", enabled: true, credentialsAvailable: true}},
+];
+const failedRefresh = restorePreferredModelAfterRefresh("wanted-model", {{ok: false}});
+const uniqueSuccess = restorePreferredModelAfterRefresh("wanted-model", {{ok: true}});
+currentSelection = {{routeRef: "explicit-route"}};
+const explicitSelectionPreserved = restorePreferredModelAfterRefresh("wanted-model", {{ok: true}});
+currentSelection = null;
+state.modelRoutes.push(
+  {{routeRef: "route-b", modelId: "wanted-model", enabled: true, credentialsAvailable: true}},
+);
+const ambiguousSuccess = restorePreferredModelAfterRefresh("wanted-model", {{ok: true}});
+state.modelRoutes = [
+  {{routeRef: "route-disabled", modelId: "wanted-model", enabled: false, credentialsAvailable: true}},
+  {{routeRef: "route-no-creds", modelId: "wanted-model", enabled: true, credentialsAvailable: false}},
+];
+const unavailableSuccess = restorePreferredModelAfterRefresh("wanted-model", {{ok: true}});
+state.modelRoutes = [];
+const emptySuccess = restorePreferredModelAfterRefresh("wanted-model", {{ok: true}});
+process.stdout.write(JSON.stringify({{
+  staleStage,
+  failedRefresh,
+  uniqueSuccess,
+  explicitSelectionPreserved,
+  ambiguousSuccess,
+  unavailableSuccess,
+  emptySuccess,
+  selections,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data, {
+            "staleStage": False,
+            "failedRefresh": False,
+            "uniqueSuccess": True,
+            "explicitSelectionPreserved": False,
+            "ambiguousSuccess": False,
+            "unavailableSuccess": False,
+            "emptySuccess": False,
+            "selections": [{"routeRef": "route-a", "revision": 11}],
+        })
+
+    def test_send_gate_requires_authoritative_route_only_for_new_routing_v2_messages(self):
+        gate_start = APP_SOURCE.index("function composerRouteReadyForNewMessage(")
+        gate_end = APP_SOURCE.index("async function uploadImagesForStorage(", gate_start)
+        gate_source = APP_SOURCE[gate_start:gate_end]
+        script = f"""
+const state = {{
+  routingV2: true,
+  modelRoutes: [],
+  selectedRouteRef: "",
+  attachedImages: [],
+  isStreaming: false,
+}};
+const els = {{
+  prompt: {{value: ""}},
+  sendBtn: {{
+    disabled: false,
+    title: "",
+    classes: {{}},
+    classList: {{toggle(name, value) {{ els.sendBtn.classes[name] = Boolean(value); }}}},
+  }},
+}};
+const t = (key) => key;
+const getSelectedModel = () => "model-a";
+const selectedModelRoute = () => state.modelRoutes.find((route) => (
+  route.routeRef === state.selectedRouteRef
+)) || null;
+eval({json.dumps(gate_source)});
+const snapshot = () => ({{
+  disabled: els.sendBtn.disabled,
+  title: els.sendBtn.title,
+  ready: els.sendBtn.classes.ready,
+  running: els.sendBtn.classes.running,
+}});
+const cases = {{}};
+els.prompt.value = "hello";
+updateSendButtonState();
+cases.emptyRoute = snapshot();
+state.modelRoutes = [{{routeRef: "disabled", modelId: "model-a", enabled: false, credentialsAvailable: true}}];
+state.selectedRouteRef = "disabled";
+updateSendButtonState();
+cases.disabledRoute = snapshot();
+state.modelRoutes = [{{routeRef: "no-creds", modelId: "model-a", enabled: true, credentialsAvailable: false}}];
+state.selectedRouteRef = "no-creds";
+updateSendButtonState();
+cases.noCredentials = snapshot();
+state.modelRoutes = [{{routeRef: "valid", modelId: "model-a", enabled: true, credentialsAvailable: true}}];
+state.selectedRouteRef = "valid";
+updateSendButtonState();
+cases.validRoute = snapshot();
+state.routingV2 = false;
+state.modelRoutes = [];
+state.selectedRouteRef = "";
+updateSendButtonState();
+cases.routingV1 = snapshot();
+state.routingV2 = true;
+state.isStreaming = true;
+els.prompt.value = "";
+updateSendButtonState();
+cases.stopAction = snapshot();
+state.isStreaming = true;
+els.prompt.value = "queued";
+updateSendButtonState();
+cases.queueWithoutRoute = snapshot();
+process.stdout.write(JSON.stringify(cases));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        for name in ("emptyRoute", "disabledRoute", "noCredentials", "queueWithoutRoute"):
+            self.assertTrue(data[name]["disabled"], name)
+            self.assertFalse(data[name]["ready"], name)
+        self.assertFalse(data["validRoute"]["disabled"])
+        self.assertTrue(data["validRoute"]["ready"])
+        self.assertFalse(data["routingV1"]["disabled"])
+        self.assertTrue(data["routingV1"]["ready"])
+        self.assertFalse(data["stopAction"]["disabled"])
+        self.assertTrue(data["stopAction"]["running"])
+        submit_source = APP_SOURCE[
+            APP_SOURCE.index('els.chatForm.addEventListener("submit", async (event) => {'):
+            APP_SOURCE.index('els.newChat.addEventListener("click"', APP_SOURCE.index('els.chatForm.addEventListener("submit", async (event) => {'))
+        ]
+        self.assertIn(
+            "if (!composerRouteReadyForNewMessage()) {\n"
+            "    updateSendButtonState();\n"
+            "    return;\n"
+            "  }",
+            submit_source,
+        )
+        self.assertLess(
+            submit_source.index("handleUiSlashCommand(text)"),
+            submit_source.index("if (!composerRouteReadyForNewMessage())"),
+        )
+        self.assertLess(
+            submit_source.index("if (!composerRouteReadyForNewMessage())"),
+            submit_source.index("if (isSessionStreaming(state.sessionId))"),
+        )
+        presentation_source = APP_SOURCE[
+            APP_SOURCE.index("function applySelectedModelPresentation("):
+            APP_SOURCE.index("function getThinkingLevel(", APP_SOURCE.index("function applySelectedModelPresentation("))
+        ]
+        self.assertIn("updateSendButtonState();", presentation_source)
 
     def test_model_route_refresh_ownership_queues_one_latest_explicit_snapshot(self):
         refresh_start = APP_SOURCE.index("async function refreshModelRoutes(")

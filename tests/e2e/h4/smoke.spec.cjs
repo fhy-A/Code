@@ -26555,8 +26555,34 @@ async function configureConnectionRouteCatalog(h4, runtime) {
   const { page } = h4;
   await pinH4BaseUrlAcrossReloads(page, h4.host.ready.fakeUrl);
   const refreshAudit = installConnectionRouteRefreshAudit(h4);
-  await h4.open(runtime);
+  const target = runtime === "classic"
+    ? `${h4.host.ready.codeUrl}/dist/frontend/index.classic.html`
+    : `${h4.host.ready.codeUrl}/`;
+  await page.goto(target, { waitUntil: "domcontentloaded" });
   await assertFrontendRuntime(page, runtime);
+  await expect.poll(async () => page.evaluate(async (model) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const authoritativeRoutes = (catalog.routes || []).filter((route) => (
+      route.modelId === model
+      && route.enabled !== false
+      && route.credentialsAvailable === true
+    ));
+    return {
+      status: response.status,
+      routeCount: authoritativeRoutes.length,
+      selectedModel: document.querySelector("#modelPillBtn")?.dataset.model || "",
+      selectedRouteRef: localStorage.getItem("code-model-route-ref") || "",
+    };
+  }, MODEL_ID)).toEqual({
+    status: 200,
+    routeCount: 1,
+    selectedModel: MODEL_ID,
+    selectedRouteRef: expect.stringMatching(/^mr1_[a-f0-9]{64}$/),
+  });
+  await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+    element.value = fakeUrl;
+  }, h4.host.ready.fakeUrl);
   await expect(page.locator("#baseUrl")).toHaveValue(h4.host.ready.fakeUrl);
   expect(await page.evaluate(() => globalThis.__h4PinnedBaseUrl || ""))
     .toBe(h4.host.ready.fakeUrl);
@@ -26887,7 +26913,7 @@ async function exerciseConnectionRouteDisabledNoFallback(h4, runtime) {
   const disabledRefreshStart = h4.connectionRouteRefreshAudit.length;
   await page.locator("#settingsRefreshModels").click();
   const disabledRefresh = await expectConnectionRouteRefresh(h4, disabledRefreshStart, {
-    manualConnections: 2,
+    manualConnections: 1,
     enabledManualConnections: 1,
     responseStatus: 200,
   });
@@ -26969,6 +26995,224 @@ async function exerciseConnectionRouteDisabledNoFallback(h4, runtime) {
     retryReusedOneUserMessage: true,
     refreshBaseUrlsMatchFake: [disabledRefresh, enabledRefresh]
       .every((record) => record.baseUrlMatchesFake),
+  });
+}
+
+async function exerciseKeyRouteRevocation(h4, runtime) {
+  const { page } = h4;
+  const removedRoute = await configureConnectionRouteCatalog(h4, runtime);
+  const initialAgentRuns = h4.controlIds().agentRunIds.length;
+  const initialMetrics = await h4.metrics();
+  expect(initialMetrics.chatRequests).toHaveLength(0);
+
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const removedRow = page.locator(
+    '#settingsKeyList .key-row[data-connection-id="manual_h4_deepseek_connection"]',
+  );
+  await expect(removedRow).toHaveCount(1);
+  const deleteOneRefreshStart = h4.connectionRouteRefreshAudit.length;
+  await removedRow.locator(".key-trash").click();
+  await page.locator(".key-delete-confirm .key-confirm-yes").click();
+  const deleteOneRefresh = await expectConnectionRouteRefresh(
+    h4,
+    deleteOneRefreshStart,
+    { manualConnections: 1, enabledManualConnections: 1, responseStatus: 200 },
+  );
+  await expect(page.locator("#settingsModelList .model-provider-label").filter({
+    hasText: "DeepSeek",
+  })).toHaveCount(0);
+  await expect(page.locator("#settingsModelList .model-provider-label").filter({
+    hasText: "workbar",
+  })).toHaveCount(1);
+  await page.locator("#closeSettingsPage").click();
+
+  const afterDeleteOne = await page.evaluate(async ({ model, removedRouteRef }) => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const catalog = await response.json();
+    const selectedRouteRef = localStorage.getItem("code-model-route-ref") || "";
+    const routes = (catalog.routes || []).filter((route) => route.modelId === model);
+    return {
+      status: response.status,
+      selectedRouteRef,
+      selectedLabel: String(routes.find((route) => route.routeRef === selectedRouteRef)?.label || ""),
+      routeLabels: routes.map((route) => route.label),
+      removedStillPresent: routes.some((route) => route.routeRef === removedRouteRef),
+    };
+  }, { model: CONNECTION_SHARED_MODEL_ID, removedRouteRef: removedRoute.routeRef });
+  expect(afterDeleteOne).toEqual({
+    status: 200,
+    selectedRouteRef: expect.stringMatching(/^mr1_[a-f0-9]{64}$/),
+    selectedLabel: "workbar",
+    routeLabels: ["workbar"],
+    removedStillPresent: false,
+  });
+
+  const survivingRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/agent/runs";
+  });
+  await h4.submit(CONNECTION_ROUTE_USER);
+  const survivingBody = (await survivingRequest).postDataJSON();
+  expect(survivingBody.routeRef).toBe(afterDeleteOne.selectedRouteRef);
+  await expect(page.locator("#messages article.msg.assistant").filter({
+    hasText: CONNECTION_ROUTE_FINAL,
+  })).toHaveCount(1);
+  expect(h4.controlIds().agentRunIds).toHaveLength(initialAgentRuns + 1);
+  expect((await h4.metrics()).chatRequests).toHaveLength(1);
+
+  await page.route("**/api/model-routes/refresh", async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: "Model route catalog unavailable.",
+        errorCode: "route_catalog_unavailable",
+        retryable: true,
+        routingV2: true,
+        routes: [],
+      }),
+    });
+  }, { times: 1 });
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const finalRow = page.locator(
+    '#settingsKeyList .key-row[data-connection-id="manual_h4_workbar_connection"]',
+  );
+  await expect(finalRow).toHaveCount(1);
+  const visibleToggle = finalRow.locator(".key-enable");
+  const hiddenToggleInput = visibleToggle.locator("input");
+  await expect(visibleToggle).toBeVisible();
+  await expect(hiddenToggleInput).toBeChecked();
+  await expect(finalRow).not.toHaveClass(/disabled/);
+  const failedDisableRefreshStart = h4.connectionRouteRefreshAudit.length;
+  await visibleToggle.click();
+  await expect(hiddenToggleInput).not.toBeChecked();
+  await expect(finalRow).toHaveClass(/disabled/);
+  await expect(visibleToggle).toHaveAttribute("title", "Disabled");
+  await expect.poll(() => h4.connectionRouteRefreshAudit
+    .slice(failedDisableRefreshStart)
+    .find((record) => record.manualConnections === 0)?.responseStatus || 0).toBe(503);
+  await expect.poll(() => h4.connectionRouteRefreshAudit
+    .slice(failedDisableRefreshStart)
+    .find((record) => record.manualConnections === 0)?.errorCode || "")
+    .toBe("route_catalog_unavailable");
+  const failedDisableRefresh = h4.connectionRouteRefreshAudit
+    .slice(failedDisableRefreshStart)
+    .find((record) => record.manualConnections === 0);
+  expect(failedDisableRefresh?.errorCode).toBe("route_catalog_unavailable");
+  await expect(page.locator("#settingsModelList .model-provider-group")).toHaveCount(0);
+  await page.locator("#closeSettingsPage").click();
+  await expect(page.locator("#modelPillBtn")).not.toHaveAttribute(
+    "data-model",
+    CONNECTION_SHARED_MODEL_ID,
+  );
+  expect(await page.evaluate(() => localStorage.getItem("code-model-route-ref"))).toBeNull();
+
+  const beforeFailClosedAgentRuns = h4.controlIds().agentRunIds.length;
+  const beforeFailClosedMetrics = await h4.metrics();
+  await page.locator("#prompt").fill("H4_KEY_ROUTE_REVOKED");
+  await expect(page.locator("#sendBtn")).toBeDisabled();
+  await expect(page.locator("#activeRunBanner.visible")).toHaveCount(0);
+  expect(h4.controlIds().agentRunIds).toHaveLength(beforeFailClosedAgentRuns);
+  expect((await h4.metrics()).chatRequests).toEqual(beforeFailClosedMetrics.chatRequests);
+
+  await page.locator("#settingsMenuBtn").click();
+  await expect(page.locator("#settingsPage")).toBeVisible();
+  const successfulDisableRefreshStart = h4.connectionRouteRefreshAudit.length;
+  await page.locator("#settingsRefreshModels").click();
+  const successfulDisableRefresh = await expectConnectionRouteRefresh(
+    h4,
+    successfulDisableRefreshStart,
+    { manualConnections: 0, enabledManualConnections: 0, responseStatus: 200 },
+  );
+  const deleteLastRefreshStart = h4.connectionRouteRefreshAudit.length;
+  await finalRow.locator(".key-trash").click();
+  await page.locator(".key-delete-confirm .key-confirm-yes").click();
+  await expect.poll(() => page.evaluate(() => (
+    JSON.parse(localStorage.getItem("code-key-config") || "[]").length
+  ))).toBe(0);
+  expect(h4.connectionRouteRefreshAudit).toHaveLength(deleteLastRefreshStart);
+  const disabledDeleteRefreshDelta =
+    h4.connectionRouteRefreshAudit.length - deleteLastRefreshStart;
+  await page.locator("#closeSettingsPage").click();
+
+  const emptyCatalog = await page.evaluate(async () => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const body = await response.json();
+    return {
+      status: response.status,
+      routes: body.routes || [],
+      config: JSON.parse(localStorage.getItem("code-key-config") || "[]"),
+      selectedRouteRef: localStorage.getItem("code-model-route-ref"),
+    };
+  });
+  expect(emptyCatalog).toEqual({ status: 200, routes: [], config: [], selectedRouteRef: null });
+
+  await page.context().route("**/api/code/sync-keys", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tokens: [], keys: {} }),
+    });
+  });
+  await page.context().addInitScript(() => {
+    sessionStorage.setItem("h4-preserve-key-config", "1");
+    localStorage.setItem("code-key-config", "[]");
+    localStorage.removeItem("code-model");
+    localStorage.removeItem("code-model-route-ref");
+    localStorage.removeItem("code-model-route-revision");
+  });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(page, runtime);
+  await expect(page.locator("#modelPillDropdown .model-pill-optgroup")).toHaveCount(0);
+  const afterReload = await page.evaluate(async () => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const body = await response.json();
+    return { status: response.status, routes: body.routes || [] };
+  });
+  expect(afterReload).toEqual({ status: 200, routes: [] });
+
+  await page.close();
+  const transition = await h4.restartGeneration();
+  expect(transition.currentPid).not.toBe(transition.previousPid);
+  expect(transition.previousCleanup.childExited).toBe(true);
+  expect(transition.previousCleanup.portsClosed).toEqual([true, true]);
+  await h4.replacePage();
+  const restartedTarget = runtime === "classic"
+    ? `${h4.host.ready.codeUrl}/dist/frontend/index.classic.html`
+    : `${h4.host.ready.codeUrl}/`;
+  await h4.page.goto(restartedTarget, { waitUntil: "domcontentloaded" });
+  await assertFrontendRuntime(h4.page, runtime);
+  const afterRestart = await h4.page.evaluate(async () => {
+    const response = await fetch("/api/model-routes", { cache: "no-store" });
+    const body = await response.json();
+    return {
+      status: response.status,
+      routes: body.routes || [],
+      selectedRouteRef: localStorage.getItem("code-model-route-ref"),
+    };
+  });
+  expect(afterRestart).toEqual({ status: 200, routes: [], selectedRouteRef: null });
+  const restartMetrics = await h4.metrics();
+  expect(restartMetrics.chatRequests).toEqual([]);
+  expect(restartMetrics.production.agentRuns).toEqual([]);
+  expect(h4.pageErrors).toEqual([]);
+  h4.evidence(`${runtime}-key-route-revocation`, {
+    runtime,
+    deleteOnePreservedOverlappingRoute: afterDeleteOne.selectedLabel,
+    disableFailureStayedFailClosed: true,
+    deleteLastClearedCatalog: emptyCatalog.routes.length === 0,
+    reloadRoutes: afterReload.routes.length,
+    restartRoutes: afterRestart.routes.length,
+    refreshes: [deleteOneRefresh, failedDisableRefresh, successfulDisableRefresh]
+      .map((record) => ({
+        manualConnections: record?.manualConnections,
+        responseStatus: record?.responseStatus,
+        errorCode: record?.errorCode,
+      })),
+    disabledDeleteRefreshDelta,
   });
 }
 
@@ -28994,6 +29238,14 @@ test("bundle connection route disabled selection never crosses connections", asy
 
 test("direct classic connection route disabled selection never crosses connections", async ({ h4 }) => {
   await exerciseConnectionRouteDisabledNoFallback(h4, "classic");
+});
+
+test("bundle key deletion and disable revoke model routes fail closed", async ({ h4 }) => {
+  await exerciseKeyRouteRevocation(h4, "bundle");
+});
+
+test("direct classic key deletion and disable revoke model routes fail closed", async ({ h4 }) => {
+  await exerciseKeyRouteRevocation(h4, "classic");
 });
 
 test("bundle tool message protocol pairs historic steer history", async ({ h4 }) => {

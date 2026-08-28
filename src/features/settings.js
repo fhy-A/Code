@@ -187,7 +187,27 @@
       }))
       .sort()
       .join("\n");
-    let lastRoutingConnectionIdentity = routingConnectionIdentity(loadKeyConfig(storage));
+    const retainedManualConnectionIds = (previous, next) => {
+      const previousByConnection = new Map((Array.isArray(previous) ? previous : [])
+        .filter((entry) => (
+          entry?.source !== "platform"
+          && entry?.enabled !== false
+          && String(entry?.key || "").trim()
+          && String(entry?.connectionId || "").trim()
+        ))
+        .map((entry) => [String(entry.connectionId), String(entry.key).trim()]));
+      return (Array.isArray(next) ? next : [])
+        .filter((entry) => (
+          entry?.source !== "platform"
+          && entry?.enabled !== false
+          && String(entry?.key || "").trim()
+          && previousByConnection.get(String(entry?.connectionId || "")) === String(entry.key).trim()
+        ))
+        .map((entry) => String(entry.connectionId))
+        .sort();
+    };
+    let lastRoutingConnectionConfig = loadKeyConfig(storage);
+    let lastRoutingConnectionIdentity = routingConnectionIdentity(lastRoutingConnectionConfig);
     let imageRouteRefreshChain = Promise.resolve();
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
@@ -196,11 +216,17 @@
     let bound = false;
 
     function saveKeyConfig(config) {
+      const previous = lastRoutingConnectionConfig;
       const saved = platform.saveKeyConfig(config, storage);
       const nextRoutingConnectionIdentity = routingConnectionIdentity(saved);
       const routingChanged = nextRoutingConnectionIdentity !== lastRoutingConnectionIdentity;
+      const retainedConnectionIds = retainedManualConnectionIds(previous, saved);
+      lastRoutingConnectionConfig = saved;
       lastRoutingConnectionIdentity = nextRoutingConnectionIdentity;
-      onKeyConfigChanged(saved, { routingChanged });
+      onKeyConfigChanged(saved, {
+        routingChanged,
+        retainedManualConnectionIds: retainedConnectionIds,
+      });
       return saved;
     }
 
@@ -1727,8 +1753,16 @@
         const config = syncKeyEditorFromStorage();
         const nextRoutingConnectionIdentity = routingConnectionIdentity(config);
         const routingChanged = nextRoutingConnectionIdentity !== lastRoutingConnectionIdentity;
+        const retainedConnectionIds = retainedManualConnectionIds(
+          lastRoutingConnectionConfig,
+          config,
+        );
+        lastRoutingConnectionConfig = config;
         lastRoutingConnectionIdentity = nextRoutingConnectionIdentity;
-        onKeyConfigChanged(config, { routingChanged });
+        onKeyConfigChanged(config, {
+          routingChanged,
+          retainedManualConnectionIds: retainedConnectionIds,
+        });
       });
       global.addEventListener?.("pageshow", syncKeyEditorFromStorage);
       els.closeSettings?.addEventListener("click", () => showSettings(false));
