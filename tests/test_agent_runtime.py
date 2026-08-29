@@ -3,6 +3,7 @@
 Run: python -m pytest tests/test_agent_runtime.py -v
 """
 
+import ast
 import hashlib
 import json
 import tempfile
@@ -3563,6 +3564,102 @@ class TestDurableAgentRuntime(unittest.TestCase):
                     ["task"],
                 )
 
+    def test_persistent_child_inherits_parent_round_metadata_and_crosses_eight(self):
+        parent = server_mod._create_agent_run(
+            "delegation-round-metadata-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "delegate beyond eight"}],
+                "tools": [
+                    server_mod._SERVER_TOOL_DEFINITIONS["task"],
+                    server_mod._SERVER_TOOL_DEFINITIONS["read_file"],
+                ],
+            },
+            self.base_url,
+            ["delegation-round-parent-key"],
+            allowed_tools=["task", "read_file"],
+            max_rounds=12,
+            permission_profile="plan",
+            start_worker=False,
+        )
+        call = {
+            "id": "agent-task-round-metadata",
+            "arguments": {"prompt": "continue child after eight"},
+            "parseError": "",
+        }
+        execution = {}
+
+        with mock.patch.object(server_mod, "_start_agent_worker") as start_mock:
+            child, prompt = server_mod._ensure_agent_delegation_child(
+                parent, call, execution,
+            )
+
+        self.assertEqual(prompt, "continue child after eight")
+        start_mock.assert_called_once_with(child)
+        self.assertEqual(child["run_kind"], "child")
+        self.assertEqual(child["max_rounds"], 12)
+        self.assertEqual(server_mod._agent_run_record(child)["maxRounds"], 12)
+        child["rounds"] = [{
+            "round": index,
+            "content": "prior child progress",
+            "reasoning": "",
+            "toolCalls": [],
+            "finishReason": "stop",
+            "usage": {},
+            "completedAt": "2030-01-01T00:00:00Z",
+            "outcome": "completed",
+        } for index in range(1, 9)]
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[{
+                "choices": [{
+                    "delta": {"content": "child continued after eight"},
+                    "finish_reason": "stop",
+                }],
+            }]]
+
+        server_mod._start_agent_worker(child)
+        self._wait_terminal(child)
+
+        self.assertEqual(child["status"], "completed")
+        self.assertEqual(len(child["rounds"]), 9)
+        self.assertEqual(child["result"]["content"], "child continued after eight")
+        self.assertEqual(server_mod._agent_run_record(child)["maxRounds"], 12)
+
+    def test_legacy_synchronous_subagent_loop_is_absent_after_call_graph_audit(self):
+        source = Path(server_mod.__file__).resolve().read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function_names = {
+            node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        assigned_names = {
+            target.id
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        called_names = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        public_subagent_routes = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("/api/")
+            and "subagent" in node.value.lower()
+        ]
+
+        self.assertNotIn("run_subagent", function_names)
+        self.assertNotIn("_execute_subagent_tool", function_names)
+        self.assertNotIn("SUBAGENT_MAX_ROUNDS", assigned_names)
+        self.assertNotIn("SUBAGENT_TOOLS", assigned_names)
+        self.assertNotIn("run_subagent", called_names)
+        self.assertNotIn("_execute_subagent_tool", called_names)
+        self.assertEqual(public_subagent_routes, [])
+
     def test_plan_delegation_runs_persistent_child_and_merges_usage_once(self):
         run = server_mod._create_agent_run(
             "delegation-session",
@@ -6766,6 +6863,81 @@ class TestDurableAgentRuntime(unittest.TestCase):
         self.assertEqual(run["result"]["content"], "read-only task complete")
         self.assertEqual(_AgentUpstream.calls, 3)
         self.assertEqual(run["keys"], [])
+
+    def test_legacy_child_records_with_five_or_eight_rounds_resume_past_boundary(self):
+        for legacy_limit in (5, 8):
+            with self.subTest(legacy_limit=legacy_limit):
+                seed = server_mod._create_agent_run(
+                    f"legacy-child-round-{legacy_limit}-session",
+                    {
+                        "model": "test-model",
+                        "messages": [{
+                            "role": "user",
+                            "content": f"resume legacy child {legacy_limit}",
+                        }],
+                    },
+                    self.base_url,
+                    [],
+                    allowed_tools=[],
+                    max_rounds=legacy_limit,
+                    parent_run_id=f"legacy-parent-{legacy_limit}",
+                    parent_tool_call_id=f"legacy-task-{legacy_limit}",
+                    agent_depth=1,
+                    start_worker=False,
+                )
+                record = server_mod._agent_run_record(seed)
+                record["status"] = "model"
+                record["resumeStatus"] = "model"
+                record["maxRounds"] = legacy_limit
+                record["rounds"] = [{
+                    "round": index,
+                    "content": "legacy child progress",
+                    "reasoning": "",
+                    "toolCalls": [],
+                    "finishReason": "stop",
+                    "usage": {},
+                    "completedAt": "2030-01-01T00:00:00Z",
+                    "outcome": "completed",
+                } for index in range(1, legacy_limit + 1)]
+                server_mod._agent_run_path(seed["id"]).write_text(
+                    json.dumps(record, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                with server_mod._agent_run_lock:
+                    server_mod._agent_runs.pop(seed["id"], None)
+
+                loaded = server_mod._get_agent_run(seed["id"])
+                self.assertEqual(loaded["status"], "waiting_credentials")
+                self.assertEqual(loaded["resume_status"], "model")
+                self.assertEqual(loaded["run_kind"], "child")
+                self.assertEqual(loaded["max_rounds"], legacy_limit)
+                with _AgentUpstream.scripted_lock:
+                    _AgentUpstream.scripted_rounds = [[{
+                        "choices": [{
+                            "delta": {
+                                "content": f"legacy child {legacy_limit} continued",
+                            },
+                            "finish_reason": "stop",
+                        }],
+                    }]]
+
+                server_mod._resume_agent_run(
+                    loaded,
+                    [f"legacy-child-{legacy_limit}-resume-key"],
+                    self.base_url,
+                )
+                self._wait_terminal(loaded)
+
+                self.assertEqual(loaded["status"], "completed")
+                self.assertEqual(len(loaded["rounds"]), legacy_limit + 1)
+                self.assertEqual(
+                    loaded["result"]["content"],
+                    f"legacy child {legacy_limit} continued",
+                )
+                self.assertEqual(
+                    server_mod._agent_run_record(loaded)["maxRounds"],
+                    legacy_limit,
+                )
 
     def test_worker_continues_after_legacy_fiftieth_round_without_goal_handoff(self):
         with _AgentUpstream.scripted_lock:
