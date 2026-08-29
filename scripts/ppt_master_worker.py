@@ -242,8 +242,20 @@ def parse_markdown(text: str) -> tuple[str, str, list[SlideSpec]]:
             current.blocks.append(Block("bullets", bullets))
             continue
         if stripped:
-            paragraph = _clean_text(stripped.lstrip("### "), 320)
-            current.blocks.append(Block("paragraph", paragraph))
+            paragraph_lines = []
+            while index < len(lines):
+                candidate = lines[index].strip()
+                if (
+                    not candidate
+                    or candidate.startswith(("## ", "- ", "* "))
+                    or candidate.lower() == "```chart"
+                    or _table_at(lines, index) is not None
+                ):
+                    break
+                paragraph_lines.append(candidate.lstrip("### "))
+                index += 1
+            current.blocks.append(Block("paragraph", _clean_text(" ".join(paragraph_lines), 320)))
+            continue
         index += 1
     if current:
         slides.append(current)
@@ -254,6 +266,20 @@ def parse_markdown(text: str) -> tuple[str, str, list[SlideSpec]]:
     for slide in slides:
         if len(slide.blocks) > 4:
             raise RuntimeError(f"slide is too dense: {slide.title}")
+        structured = [block for block in slide.blocks if block.kind in {"table", "chart"}]
+        if structured and len(slide.blocks) != 1:
+            raise RuntimeError(
+                f"structured table/chart slides cannot mix with other content: {slide.title}"
+            )
+        paragraphs = [block for block in slide.blocks if block.kind == "paragraph"]
+        bullets = [item for block in slide.blocks if block.kind == "bullets" for item in block.value]
+        if paragraphs and bullets and (
+            len(paragraphs) != 1
+            or len(str(paragraphs[0].value)) > 180
+            or len(bullets) > 4
+            or any(len(str(item)) > 100 for item in bullets)
+        ):
+            raise RuntimeError(f"paragraph and list slide is too dense: {slide.title}")
     return title, subtitle, slides
 
 
@@ -410,22 +436,29 @@ def _content_slide(prs, spec: SlideSpec, number: int, validators):
         elif block.kind == "paragraph":
             paragraphs.append(block.value)
     if paragraphs:
-        _add_text(slide, "\n\n".join(paragraphs), 0.95, 1.75, 7.2, 3.7, size=22, color=INK)
+        paragraph_y, paragraph_h = (1.65, 1.2) if bullets else (1.75, 3.7)
+        _add_text(
+            slide, "\n\n".join(paragraphs), 0.95, paragraph_y, 7.2, paragraph_h,
+            size=22, color=INK,
+        )
     if bullets:
         from pptx.dml.color import RGBColor
 
-        shape = _add_text(slide, bullets[0], 1.0, 1.7, 7.2, 4.8, size=22)
+        bullet_y, bullet_h = (3.05, 2.55) if paragraphs else (1.7, 4.8)
+        shape = _add_text(slide, bullets[0], 1.0, bullet_y, 7.2, bullet_h, size=22)
         frame = shape.text_frame
         frame.clear()
         from pptx.util import Pt
+        bullet_font_size = 18 if paragraphs else 21
+        bullet_space_after = 10 if paragraphs else 13
         for index, text in enumerate(bullets):
             paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
             paragraph.text = text
             paragraph.level = 0
             paragraph.font.name = FONT_FACE
-            paragraph.font.size = Pt(21)
+            paragraph.font.size = Pt(bullet_font_size)
             paragraph.font.color.rgb = RGBColor.from_string(INK)
-            paragraph.space_after = Pt(13)
+            paragraph.space_after = Pt(bullet_space_after)
     panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(9.0), Inches(1.85), Inches(2.75), Inches(3.55))
     _fill(panel, INK)
     _add_text(slide, "结构化\n输入", 9.45, 2.35, 1.8, 0.95, size=26, color=WHITE, bold=True, align="CENTER")

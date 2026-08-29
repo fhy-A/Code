@@ -8,7 +8,10 @@ is accepted.
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -30,9 +33,11 @@ SKILL_ROOT = APP_ROOT / "data" / "skills" / "ppt-master"
 MANAGED_PYTHON = APP_ROOT / "data" / "runtime" / "python" / (
     "Scripts/python.exe" if os.name == "nt" else "bin/python"
 )
+PYTHON_ROOT = MANAGED_PYTHON.parents[1]
 WORKER_PATH = APP_ROOT / "scripts" / "ppt_master_worker.py"
 LOCK_PATH = SKILL_ROOT / "dependency-lock.json"
 DEPENDENCY_RECEIPT_PATH = SKILL_ROOT / "dependency-receipt.json"
+EXPECTED_DEPENDENCY_RECEIPT_DIGEST = "c6930137d85d570ea171be06e4b7d97909f979ba6bf32c502184677bfebfc73c"
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_OUTPUT_BYTES = 25 * 1024 * 1024
 TIMEOUT_SECONDS = 30
@@ -94,6 +99,198 @@ def _assert_regular_path(path: Path, *, directory: bool | None = None) -> None:
         raise PptMasterRuntimeError("ppt_master_path_invalid", "Expected a regular file.")
 
 
+def _path_lexists(path: Path) -> bool:
+    return os.path.lexists(str(path))
+
+
+def _assert_owned_path(root: Path, path: Path, *, directory: bool) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise PptMasterRuntimeError(
+            "ppt_master_path_invalid", "Run-owned file escaped its directory."
+        ) from exc
+    _assert_regular_path(root, directory=True)
+    current = root
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        if not _path_lexists(current):
+            raise PptMasterRuntimeError("ppt_master_path_invalid", "Expected run-owned file is missing.")
+        _assert_regular_path(
+            current,
+            directory=directory if index == len(relative.parts) - 1 else True,
+        )
+
+
+def _assert_owned_regular_file(root: Path, path: Path) -> None:
+    _assert_owned_path(root, path, directory=False)
+    if path.lstat().st_nlink != 1:
+        raise PptMasterRuntimeError(
+            "ppt_master_reparse_blocked", "Linked files are not allowed in run-owned paths."
+        )
+
+
+def _assert_owned_regular_directory(root: Path, path: Path) -> None:
+    _assert_owned_path(root, path, directory=True)
+
+
+def _canonical_distribution_name(value: object) -> str:
+    return re.sub(r"[-_.]+", "-", str(value or "").strip()).lower()
+
+
+def _managed_site_packages() -> Path:
+    if os.name == "nt":
+        return PYTHON_ROOT / "Lib" / "site-packages"
+    library_root = PYTHON_ROOT / "lib"
+    _assert_owned_regular_directory(PYTHON_ROOT, library_root)
+    candidates = sorted(library_root.glob("python*/site-packages"))
+    if len(candidates) != 1:
+        raise PptMasterRuntimeError(
+            "ppt_master_dependency_integrity", "Managed dependency integrity check failed."
+        )
+    return candidates[0]
+
+
+def _dependency_integrity_error() -> PptMasterRuntimeError:
+    return PptMasterRuntimeError(
+        "ppt_master_dependency_integrity",
+        "Managed PPT Master dependencies failed the locked integrity check.",
+    )
+
+
+def _validate_ppt_master_dependency_installation() -> dict:
+    _assert_regular_path(PYTHON_ROOT, directory=True)
+    _assert_regular_path(LOCK_PATH, directory=False)
+    _assert_regular_path(DEPENDENCY_RECEIPT_PATH, directory=False)
+    lock_bytes = LOCK_PATH.read_bytes()
+    lock = json.loads(lock_bytes.decode("utf-8"))
+    receipt = json.loads(DEPENDENCY_RECEIPT_PATH.read_text(encoding="utf-8"))
+    receipt_digest = hashlib.sha256(
+        json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if (
+        lock.get("skill") != "ppt-master"
+        or lock.get("capability") != "offline-core"
+        or receipt.get("schema") != "code-ppt-master-dependency-receipt/v1"
+        or receipt.get("status") != "installed"
+        or receipt.get("skill") != "ppt-master"
+        or receipt.get("capability") != "offline-core"
+        or receipt.get("managedRuntime") != "data/runtime/python"
+        or receipt.get("lockSha256") != hashlib.sha256(lock_bytes).hexdigest()
+        or receipt_digest != EXPECTED_DEPENDENCY_RECEIPT_DIGEST
+    ):
+        raise _dependency_integrity_error()
+
+    locked = {
+        _canonical_distribution_name(item.get("project")): item
+        for item in lock.get("wheels", [])
+        if item.get("project")
+    }
+    admitted = {"skia-pathops": "0.9.2", "uharfbuzz": "0.50.0"}
+    if set(locked) != set(admitted) or any(
+        str(locked[name].get("version")) != version
+        or not re.fullmatch(r"[0-9a-f]{64}", str(locked[name].get("sha256") or ""))
+        for name, version in admitted.items()
+    ):
+        raise _dependency_integrity_error()
+    received = {
+        _canonical_distribution_name(item.get("project")): item
+        for item in receipt.get("packages", [])
+        if item.get("project")
+    }
+    if set(received) != set(admitted):
+        raise _dependency_integrity_error()
+    for name, version in admitted.items():
+        item = received[name]
+        if (
+            str(item.get("version")) != version
+            or item.get("wheelSha256") != locked[name].get("sha256")
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+\.dist-info", str(item.get("distInfo") or ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("recordSha256") or ""))
+        ):
+            raise _dependency_integrity_error()
+
+    site_packages = _managed_site_packages()
+    _assert_owned_regular_directory(PYTHON_ROOT, site_packages)
+    target_dist_infos: dict[str, list[tuple[Path, str, str]]] = {name: [] for name in admitted}
+    for directory in site_packages.glob("*.dist-info"):
+        stem = directory.name[:-len(".dist-info")]
+        candidate_name = _canonical_distribution_name(stem.rsplit("-", 1)[0])
+        if candidate_name not in admitted:
+            continue
+        _assert_owned_regular_file(site_packages, directory / "METADATA")
+        metadata = (directory / "METADATA").read_text(encoding="utf-8")
+        fields = {}
+        for line in metadata.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            if key in {"Name", "Version"} and key not in fields:
+                fields[key] = value.strip()
+        actual_name = _canonical_distribution_name(fields.get("Name"))
+        if actual_name in admitted:
+            target_dist_infos[actual_name].append((directory, fields.get("Version", ""), directory.name))
+
+    checked_files = 0
+    for name, version in admitted.items():
+        matches = target_dist_infos[name]
+        expected_dist_info = str(received[name]["distInfo"])
+        if len(matches) != 1 or matches[0][1] != version or matches[0][2] != expected_dist_info:
+            raise _dependency_integrity_error()
+        dist_dir = matches[0][0]
+        record_path = dist_dir / "RECORD"
+        _assert_owned_regular_file(site_packages, record_path)
+        record_bytes = record_path.read_bytes()
+        if hashlib.sha256(record_bytes).hexdigest() != received[name]["recordSha256"]:
+            raise _dependency_integrity_error()
+        record_relative = record_path.relative_to(site_packages).as_posix()
+        rows = list(csv.reader(record_bytes.decode("utf-8").splitlines()))
+        if not rows:
+            raise _dependency_integrity_error()
+        seen_paths = set()
+        for row in rows:
+            if len(row) != 3:
+                raise _dependency_integrity_error()
+            relative_name, encoded_hash, size_text = row
+            relative = PurePosixPath(relative_name)
+            if (
+                not relative_name
+                or "\\" in relative_name
+                or relative.is_absolute()
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or relative_name in seen_paths
+            ):
+                raise _dependency_integrity_error()
+            seen_paths.add(relative_name)
+            installed_file = site_packages.joinpath(*relative.parts)
+            _assert_owned_regular_file(site_packages, installed_file)
+            if relative_name == record_relative:
+                if encoded_hash or size_text:
+                    raise _dependency_integrity_error()
+                continue
+            if not encoded_hash.startswith("sha256=") or not size_text.isdigit():
+                raise _dependency_integrity_error()
+            payload = installed_file.read_bytes()
+            actual_hash = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=").decode("ascii")
+            if encoded_hash[7:] != actual_hash or int(size_text) != len(payload):
+                raise _dependency_integrity_error()
+            checked_files += 1
+        if record_relative not in seen_paths:
+            raise _dependency_integrity_error()
+    return {"ok": True, "receipt": receipt, "lock": lock, "checkedFiles": checked_files}
+
+
+def validate_ppt_master_dependency_installation() -> dict:
+    try:
+        return _validate_ppt_master_dependency_installation()
+    except PptMasterRuntimeError as exc:
+        if exc.code == "ppt_master_dependency_integrity":
+            raise
+        raise _dependency_integrity_error() from None
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, json.JSONDecodeError, csv.Error):
+        raise _dependency_integrity_error() from None
+
+
 def _project_root(value: object) -> Path:
     raw = str(value or "")
     if not raw:
@@ -115,7 +312,7 @@ def _safe_relative_source(root: Path, value: object) -> Path:
     current = root
     for part in relative.parts:
         current = current / part
-        if current.exists():
+        if _path_lexists(current):
             _assert_regular_path(current, directory=None)
     target = current.resolve(strict=True)
     try:
@@ -171,16 +368,9 @@ def _validate_runtime_contract() -> dict:
     if not MANAGED_PYTHON.is_file() or not WORKER_PATH.is_file():
         raise PptMasterRuntimeError("ppt_master_runtime_unavailable", "The managed runtime is incomplete.")
     _assert_regular_path(MANAGED_PYTHON, directory=False)
-    lock_bytes = LOCK_PATH.read_bytes()
-    receipt = json.loads(DEPENDENCY_RECEIPT_PATH.read_text(encoding="utf-8"))
-    if receipt.get("schema") != "code-ppt-master-dependency-receipt/v1":
-        raise PptMasterRuntimeError("ppt_master_receipt_invalid", "The dependency receipt schema is invalid.")
-    if receipt.get("status") != "installed" or receipt.get("capability") != "offline-core":
-        raise PptMasterRuntimeError("ppt_master_runtime_unavailable", "The offline-core receipt is not installed.")
-    if receipt.get("lockSha256") != hashlib.sha256(lock_bytes).hexdigest():
-        raise PptMasterRuntimeError("ppt_master_receipt_invalid", "The dependency lock differs from its receipt.")
+    dependencies = validate_ppt_master_dependency_installation()
     vendor = validate_vendor_package(SKILL_ROOT)
-    return {"receipt": receipt, "vendor": vendor}
+    return {"receipt": dependencies["receipt"], "vendor": vendor}
 
 
 def _run_id(value: object) -> str:
@@ -194,7 +384,7 @@ def _ensure_directory_chain(root: Path, relative: PurePosixPath) -> Path:
     current = root
     for part in relative.parts:
         current = current / part
-        if current.exists():
+        if _path_lexists(current):
             _assert_regular_path(current, directory=True)
         else:
             current.mkdir()
@@ -212,7 +402,7 @@ def _target_paths(project_root: Path, run_id: str, *, create: bool) -> tuple[Pat
         output_root = project_root.joinpath(*OUTPUT_RELATIVE_ROOT.parts)
         staging_root = output_root / ".staging"
         for path in (project_root / "output", output_root, staging_root):
-            if path.exists():
+            if _path_lexists(path):
                 _assert_regular_path(path, directory=True)
     staging_dir = staging_root / run_id
     return final_dir, staging_dir, (relative_dir / "presentation.pptx").as_posix()
@@ -224,10 +414,12 @@ def prepare_ppt_master_preview(payload: dict) -> dict:
     _validate_runtime_contract()
     _normalize_markdown(payload, project_root)
     final_dir, _, relative_path = _target_paths(project_root, run_id, create=False)
-    if final_dir.exists():
+    if _path_lexists(final_dir):
+        _assert_regular_path(final_dir, directory=True)
         receipt = final_dir / "receipt.json"
-        if not receipt.is_file():
+        if not _path_lexists(receipt):
             raise PptMasterRuntimeError("ppt_master_output_exists", "The run output directory already exists.")
+        _assert_owned_regular_file(final_dir, receipt)
     return {
         "action": "create_ppt_master_deck",
         "path": relative_path,
@@ -246,23 +438,206 @@ def _relationship_source(name: str) -> str:
     return PurePosixPath(*parts[:-2], parts[-1][:-5]).as_posix()
 
 
-def _validate_pptx(path: Path) -> dict:
+def _allowed_pptx_part(name: str) -> bool:
+    patterns = (
+        r"\[Content_Types\]\.xml",
+        r"_rels/\.rels",
+        r"docProps/(?:app|core)\.xml",
+        r"docProps/thumbnail\.jpeg",
+        r"ppt/(?:presProps|presentation|tableStyles|viewProps)\.xml",
+        r"ppt/_rels/presentation\.xml\.rels",
+        r"ppt/(?:slides|slideLayouts|slideMasters)/(?:slide|slideLayout|slideMaster)[0-9]+\.xml",
+        r"ppt/(?:slides|slideLayouts|slideMasters)/_rels/(?:slide|slideLayout|slideMaster)[0-9]+\.xml\.rels",
+        r"ppt/theme/theme[0-9]+\.xml",
+        r"ppt/charts/chart[0-9]+\.xml",
+        r"ppt/charts/_rels/chart[0-9]+\.xml\.rels",
+        r"ppt/embeddings/Microsoft_Excel_Sheet[0-9]+\.xlsx",
+        r"ppt/printerSettings/printerSettings[0-9]+\.bin",
+    )
+    return any(re.fullmatch(pattern, name) for pattern in patterns)
+
+
+def _validate_chart_workbook(payload: bytes) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as workbook:
+            listed_names = workbook.namelist()
+            names = set(listed_names)
+            if len(names) != len(listed_names):
+                raise PptMasterRuntimeError(
+                    "ppt_master_forbidden_part", "Embedded chart workbook has duplicate parts."
+                )
+            allowed_patterns = (
+                r"\[Content_Types\]\.xml",
+                r"_rels/\.rels",
+                r"docProps/(?:app|core)\.xml",
+                r"xl/_rels/workbook\.xml\.rels",
+                r"xl/(?:sharedStrings|styles|workbook)\.xml",
+                r"xl/theme/theme[0-9]+\.xml",
+                r"xl/worksheets/sheet[0-9]+\.xml",
+            )
+            if not {"[Content_Types].xml", "xl/workbook.xml"} <= names:
+                raise PptMasterRuntimeError(
+                    "ppt_master_forbidden_part", "Embedded chart workbook is invalid."
+                )
+            for name in names:
+                path = PurePosixPath(name)
+                if (
+                    path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in path.parts)
+                    or not any(re.fullmatch(pattern, name) for pattern in allowed_patterns)
+                ):
+                    raise PptMasterRuntimeError(
+                        "ppt_master_forbidden_part", "Embedded chart workbook contains a forbidden part."
+                    )
+            workbook_content_types = ET.fromstring(workbook.read("[Content_Types].xml"))
+            allowed_workbook_content_types = {
+                "application/xml",
+                "application/vnd.openxmlformats-package.relationships+xml",
+                "application/vnd.openxmlformats-package.core-properties+xml",
+                "application/vnd.openxmlformats-officedocument.extended-properties+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
+                "application/vnd.openxmlformats-officedocument.theme+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",
+            }
+            if any(
+                str(item.attrib.get("ContentType") or "") not in allowed_workbook_content_types
+                for item in workbook_content_types
+            ):
+                raise PptMasterRuntimeError(
+                    "ppt_master_forbidden_part", "Embedded chart workbook has a forbidden content type."
+                )
+            for info in workbook.infolist():
+                unix_mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_IFMT(unix_mode) == stat.S_IFLNK or (info.flag_bits & 0x1):
+                    raise PptMasterRuntimeError(
+                        "ppt_master_forbidden_part", "Embedded chart workbook has an unsafe ZIP member."
+                    )
+            for name in names:
+                if not name.endswith(".rels"):
+                    continue
+                source = _relationship_source(name)
+                base = PurePosixPath(source).parent.as_posix() if source else ""
+                root = ET.fromstring(workbook.read(name))
+                allowed_relationship_types = {
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
+                    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
+                }
+                for rel in root:
+                    if str(rel.attrib.get("TargetMode") or "").lower() == "external":
+                        raise PptMasterRuntimeError(
+                            "ppt_master_forbidden_part", "Embedded chart workbook has an external relationship."
+                        )
+                    if str(rel.attrib.get("Type") or "") not in allowed_relationship_types:
+                        raise PptMasterRuntimeError(
+                            "ppt_master_forbidden_part", "Embedded chart workbook relationship type is forbidden."
+                        )
+                    target = str(rel.attrib.get("Target") or "").replace("\\", "/")
+                    resolved = posixpath.normpath(posixpath.join(base, target))
+                    if (
+                        not target
+                        or target.startswith("/")
+                        or resolved == ".."
+                        or resolved.startswith("../")
+                        or resolved not in names
+                    ):
+                        raise PptMasterRuntimeError(
+                            "ppt_master_forbidden_part", "Embedded chart workbook relationship is unsafe."
+                        )
+    except (ET.ParseError, zipfile.BadZipFile) as exc:
+        raise PptMasterRuntimeError(
+            "ppt_master_forbidden_part", "Embedded chart workbook failed validation."
+        ) from exc
+
+
+def _validate_pptx(path: Path, *, owned_root: Path | None = None) -> dict:
+    if owned_root is None:
+        _assert_regular_path(path, directory=False)
+    else:
+        _assert_owned_regular_file(owned_root, path)
     if not path.is_file() or path.stat().st_size <= 0 or path.stat().st_size > MAX_OUTPUT_BYTES:
         raise PptMasterRuntimeError("ppt_master_output_invalid", "Generated PPTX size is invalid.")
     try:
         with zipfile.ZipFile(path) as archive:
-            if archive.testzip() is not None:
-                raise PptMasterRuntimeError("ppt_master_ooxml_invalid", "Generated PPTX has a corrupt ZIP member.")
-            names = set(archive.namelist())
+            listed_names = archive.namelist()
+            names = set(listed_names)
+            if len(names) != len(listed_names):
+                raise PptMasterRuntimeError(
+                    "ppt_master_forbidden_part", "Generated PPTX contains duplicate internal parts."
+                )
+            for info in archive.infolist():
+                unix_mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_IFMT(unix_mode) == stat.S_IFLNK or (info.flag_bits & 0x1):
+                    raise PptMasterRuntimeError(
+                        "ppt_master_forbidden_part", "Generated PPTX contains an unsafe ZIP member."
+                    )
             required = {"[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"}
             if not required <= names:
                 raise PptMasterRuntimeError("ppt_master_ooxml_invalid", "Generated PPTX is missing required OOXML parts.")
-            if any(name.startswith("ppt/media/") for name in names):
-                raise PptMasterRuntimeError("ppt_master_media_blocked", "The offline pilot produced a media part.")
             for name in names:
                 member = PurePosixPath(name)
                 if member.is_absolute() or any(part in {"", ".", ".."} for part in member.parts):
                     raise PptMasterRuntimeError("ppt_master_ooxml_invalid", "Generated PPTX has an unsafe part path.")
+                if not _allowed_pptx_part(name):
+                    raise PptMasterRuntimeError(
+                        "ppt_master_forbidden_part", "Generated PPTX contains a forbidden internal part."
+                    )
+            if archive.testzip() is not None:
+                raise PptMasterRuntimeError("ppt_master_ooxml_invalid", "Generated PPTX has a corrupt ZIP member.")
+            content_types = ET.fromstring(archive.read("[Content_Types].xml"))
+            allowed_content_types = {
+                "application/xml",
+                "image/jpeg",
+                "application/vnd.openxmlformats-package.relationships+xml",
+                "application/vnd.openxmlformats-package.core-properties+xml",
+                "application/vnd.openxmlformats-officedocument.extended-properties+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.printerSettings",
+                "application/vnd.openxmlformats-officedocument.theme+xml",
+            }
+            if any(
+                str(item.attrib.get("ContentType") or "") not in allowed_content_types
+                for item in content_types
+            ):
+                raise PptMasterRuntimeError(
+                    "ppt_master_forbidden_part", "Generated PPTX declares a forbidden content type."
+                )
+            chart_workbook_targets = set()
+            allowed_relationship_types = {
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps",
+                "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
+                "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail",
+            }
+            embeddings = {
+                name for name in names
+                if re.fullmatch(r"ppt/embeddings/Microsoft_Excel_Sheet[0-9]+\.xlsx", name)
+            }
+            for name in names:
                 if not name.endswith(".rels"):
                     continue
                 source = _relationship_source(name)
@@ -277,6 +652,23 @@ def _validate_pptx(path: Path) -> dict:
                     resolved = posixpath.normpath(posixpath.join(base, target))
                     if resolved == ".." or resolved.startswith("../") or resolved not in names:
                         raise PptMasterRuntimeError("ppt_master_ooxml_invalid", "OOXML relationship target is missing or unsafe.")
+                    relationship_type = str(rel.attrib.get("Type") or "")
+                    if relationship_type not in allowed_relationship_types:
+                        raise PptMasterRuntimeError(
+                            "ppt_master_forbidden_part", "Generated PPTX relationship type is forbidden."
+                        )
+                    if relationship_type.endswith("/package"):
+                        if not source.startswith("ppt/charts/chart") or resolved not in embeddings:
+                            raise PptMasterRuntimeError(
+                                "ppt_master_forbidden_part", "Forbidden embedded package relationship."
+                            )
+                        chart_workbook_targets.add(resolved)
+            if embeddings != chart_workbook_targets:
+                raise PptMasterRuntimeError(
+                    "ppt_master_forbidden_part", "Chart workbook ownership is incomplete."
+                )
+            for name in embeddings:
+                _validate_chart_workbook(archive.read(name))
             slide_names = sorted(
                 name for name in names if re.fullmatch(r"ppt/slides/slide[0-9]+\.xml", name)
             )
@@ -300,12 +692,18 @@ def _validate_pptx(path: Path) -> dict:
 
 def _atomic_json(path: Path, payload: dict) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    if _path_lexists(temp):
+        raise PptMasterRuntimeError("ppt_master_path_invalid", "Atomic staging path already exists.")
+    with temp.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
     os.replace(temp, path)
+
+
+def _validate_staging_files(staging_dir: Path) -> None:
+    for name in ("prepared.json", "request.json", "worker-result.json", "presentation.pptx"):
+        path = staging_dir / name
+        if _path_lexists(path):
+            _assert_owned_regular_file(staging_dir, path)
 
 
 def _clean_worker_residue(staging_dir: Path) -> None:
@@ -433,12 +831,14 @@ def _public_success(relative_path: str, deck: Path, metrics: dict, *, replayed: 
 
 
 def _recover_final(final_dir: Path, operation_id: str, input_sha256: str, relative_path: str) -> dict | None:
-    if not final_dir.exists():
+    if not _path_lexists(final_dir):
         return None
     _assert_regular_path(final_dir, directory=True)
     receipt_path, deck = final_dir / "receipt.json", final_dir / "presentation.pptx"
-    if not receipt_path.is_file() or not deck.is_file():
+    if not _path_lexists(receipt_path) or not _path_lexists(deck):
         raise PptMasterRuntimeError("ppt_master_output_exists", "The run output directory is not a completed receipt.")
+    _assert_owned_regular_file(final_dir, receipt_path)
+    _assert_owned_regular_file(final_dir, deck)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if (
         receipt.get("schema") != "code-ppt-master-output-receipt/v1"
@@ -447,7 +847,7 @@ def _recover_final(final_dir: Path, operation_id: str, input_sha256: str, relati
         or receipt.get("deckSha256") != _sha256(deck)
     ):
         raise PptMasterRuntimeError("ppt_master_output_conflict", "Existing output does not match this execution.")
-    metrics = _validate_pptx(deck)
+    metrics = _validate_pptx(deck, owned_root=final_dir)
     return _public_success(relative_path, deck, metrics, replayed=True)
 
 
@@ -470,17 +870,18 @@ def execute_ppt_master_tool(payload: dict) -> dict:
         if recovered:
             return recovered
 
-        if staging_dir.exists():
+        if _path_lexists(staging_dir):
             _assert_regular_path(staging_dir, directory=True)
+            _validate_staging_files(staging_dir)
             prepared_path = staging_dir / "prepared.json"
             result_path = staging_dir / "worker-result.json"
             deck = staging_dir / "presentation.pptx"
-            prepared = json.loads(prepared_path.read_text(encoding="utf-8")) if prepared_path.is_file() else {}
+            prepared = json.loads(prepared_path.read_text(encoding="utf-8")) if _path_lexists(prepared_path) else {}
             if prepared.get("operationId") != operation_id or prepared.get("inputSha256") != input_sha256:
                 raise PptMasterRuntimeError("ppt_master_staging_conflict", "Existing run staging belongs to another execution.")
-            if result_path.is_file() and deck.is_file():
+            if _path_lexists(result_path) and _path_lexists(deck):
                 worker_result = json.loads(result_path.read_text(encoding="utf-8"))
-                metrics = _validate_pptx(deck)
+                metrics = _validate_pptx(deck, owned_root=staging_dir)
                 if worker_result.get("deckSha256") != _sha256(deck):
                     raise PptMasterRuntimeError("ppt_master_staging_invalid", "Recovered worker output hash is invalid.")
             else:
@@ -567,18 +968,19 @@ def execute_ppt_master_tool(payload: dict) -> dict:
                 )
             result_path = staging_dir / "worker-result.json"
             deck = staging_dir / "presentation.pptx"
-            if not result_path.is_file():
+            _validate_staging_files(staging_dir)
+            if not _path_lexists(result_path):
                 shutil.rmtree(staging_dir, ignore_errors=True)
                 raise PptMasterRuntimeError("ppt_master_worker_failed", "PPT worker result is missing.")
             worker_result = json.loads(result_path.read_text(encoding="utf-8"))
-            metrics = _validate_pptx(deck)
+            metrics = _validate_pptx(deck, owned_root=staging_dir)
             if worker_result.get("deckSha256") != _sha256(deck):
                 shutil.rmtree(staging_dir, ignore_errors=True)
                 raise PptMasterRuntimeError("ppt_master_output_invalid", "PPT worker output hash is invalid.")
 
         _clean_worker_residue(staging_dir)
         deck = staging_dir / "presentation.pptx"
-        metrics = _validate_pptx(deck)
+        metrics = _validate_pptx(deck, owned_root=staging_dir)
         receipt = {
             "schema": "code-ppt-master-output-receipt/v1",
             "operationId": operation_id,
@@ -593,7 +995,7 @@ def execute_ppt_master_tool(payload: dict) -> dict:
         _atomic_json(staging_dir / "receipt.json", receipt)
         for private in ("request.json", "prepared.json", "worker-result.json"):
             (staging_dir / private).unlink(missing_ok=True)
-        if final_dir.exists():
+        if _path_lexists(final_dir):
             raise PptMasterRuntimeError("ppt_master_output_exists", "The run output directory appeared before publish.")
         try:
             os.rename(staging_dir, final_dir)

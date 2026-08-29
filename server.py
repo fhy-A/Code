@@ -47,6 +47,7 @@ from ppt_master_runtime import (
     PptMasterRuntimeError,
     execute_ppt_master_tool,
     prepare_ppt_master_preview,
+    validate_ppt_master_dependency_installation,
 )
 import windows_explorer
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
@@ -13270,6 +13271,39 @@ def _write_skill_dependency_manifest(skill_dir, manifest):
     write_json(path, manifest)
 
 
+def _apply_ppt_master_dependency_integrity(skill_dir, inspection, capability=""):
+    if skill_dir.name != "ppt-master" or capability not in {"", "offline-core"}:
+        return inspection
+    target = next(
+        (
+            item for item in inspection.get("capabilities", [])
+            if item.get("id") == "offline-core"
+        ),
+        None,
+    )
+    if inspection.get("status") != "ready" and (not target or target.get("status") != "ready"):
+        return inspection
+    try:
+        validate_ppt_master_dependency_installation()
+        return inspection
+    except PptMasterRuntimeError:
+        inspection["status"] = "unavailable"
+        if target:
+            target["status"] = "unavailable"
+            for requirement in target.get("required", []):
+                if requirement.get("name") in {"skia-pathops", "uharfbuzz"}:
+                    requirement["available"] = False
+                    requirement["reason"] = "managed_integrity_failed"
+        guidance = inspection.get("installGuidance")
+        if isinstance(guidance, dict):
+            guidance["needed"] = False
+            guidance["availableCapabilities"] = []
+            guidance["instructions"] = (
+                "Managed PPT Master dependency integrity failed; execution and automatic repair are blocked."
+            )
+        return inspection
+
+
 def _skill_frontmatter_tools(meta, skill_dir):
     tools = [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]
     metadata = meta.get("metadata")
@@ -13292,6 +13326,7 @@ def _skill_frontmatter_tools(meta, skill_dir):
             data_dir=DATA_DIR,
             capability_id=capability,
         )
+        inspection = _apply_ppt_master_dependency_integrity(skill_dir, inspection, capability)
     except Exception:
         return []
     return tools if inspection.get("status") == "ready" else []
@@ -13330,22 +13365,34 @@ def list_skills(brief=False):
 
 def get_skill_dependency_status():
     """Run an explicit, read-only preflight for Skills with dependency manifests."""
-    return inspect_skill_dependencies(
+    result = inspect_skill_dependencies(
         SKILLS_DIR,
         bundled_skills_dir=APP_DIR / "data" / "skills",
         app_dir=APP_DIR,
         data_dir=DATA_DIR,
     )
+    for inspection in result.get("skills", []):
+        if inspection.get("name") == "ppt-master":
+            _apply_ppt_master_dependency_integrity(SKILLS_DIR / "ppt-master", inspection)
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        statuses = [item.get("status") for item in result.get("skills", [])]
+        for status in ("ready", "partial", "unavailable"):
+            summary[status] = statuses.count(status)
+    return result
 
 
 def get_single_skill_dependency_status(name, capability=""):
     skill = read_skill(name)
-    return inspect_skill_directory(
+    inspection = inspect_skill_directory(
         SKILLS_DIR / skill["dir"],
         bundled_skills_dir=APP_DIR / "data" / "skills",
         app_dir=APP_DIR,
         data_dir=DATA_DIR,
         capability_id=capability,
+    )
+    return _apply_ppt_master_dependency_integrity(
+        SKILLS_DIR / skill["dir"], inspection, capability,
     )
 
 

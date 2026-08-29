@@ -244,6 +244,21 @@ def _verify_transition(before: dict, after: dict, lock: dict, action: str) -> di
     return {"changedDistributions": changed, "beforeCount": len(before_map), "afterCount": len(after_map)}
 
 
+def _execute_with_verified_recovery(plan: dict, lock: dict, wheels: list[Path], before: dict) -> dict:
+    result = _execute(plan)
+    if result.get("ok"):
+        return result
+    cleanup = _execute(_plan("rollback", lock, wheels))
+    if not cleanup.get("ok"):
+        raise LockedInstallError("locked install failed and automatic rollback failed")
+    restored = _distribution_snapshot()
+    if restored != before:
+        raise LockedInstallError(
+            "locked install failed and automatic rollback did not restore the exact pre-install baseline"
+        )
+    raise LockedInstallError("locked install failed; exact pre-install baseline was restored")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("install", "rollback"))
@@ -269,13 +284,12 @@ def main() -> int:
         raise LockedInstallError("rollback target is absent or differs from the lock")
 
     plan = _plan(args.action, lock, wheels)
-    result = _execute(plan)
-    if not result.get("ok"):
-        if args.action == "install":
-            cleanup = _execute(_plan("rollback", lock, wheels))
-            if not cleanup.get("ok"):
-                raise LockedInstallError("locked install and automatic rollback both failed")
-        raise LockedInstallError(str(result.get("error") or result.get("errorCode") or "operation failed"))
+    if args.action == "install":
+        result = _execute_with_verified_recovery(plan, lock, wheels, before)
+    else:
+        result = _execute(plan)
+        if not result.get("ok"):
+            raise LockedInstallError("locked rollback operation failed")
     after = _distribution_snapshot()
     transition = _verify_transition(before, after, lock, args.action)
     print(json.dumps({

@@ -1,8 +1,12 @@
 import hashlib
 import json
 import subprocess
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from scripts import install_locked_skill_wheels as installer
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +93,83 @@ print(json.dumps(rows, sort_keys=True))
         self.assertNotIn("--upgrade", source)
         self.assertIn('if args.action == "install":', source)
         self.assertIn('wheels = []', source)
+
+    def test_partial_install_failure_must_prove_exact_before_snapshot_restoration(self):
+        lock = {
+            "skill": "ppt-master",
+            "capability": "offline-core",
+            "wheels": [
+                {"project": "skia-pathops", "version": "0.9.2"},
+                {"project": "uharfbuzz", "version": "0.50.0"},
+            ],
+        }
+        before = {
+            "prefix": "managed",
+            "basePrefix": "base",
+            "distributions": [{"name": "pip", "version": "25", "recordSha256": "a"}],
+        }
+        polluted = {
+            **before,
+            "distributions": [
+                *before["distributions"],
+                {"name": "skia-pathops", "version": "0.9.2", "recordSha256": "partial"},
+            ],
+        }
+        with mock.patch.object(sys, "argv", [
+            "install_locked_skill_wheels.py", "install", "--wheel-root", "audited"
+        ]), mock.patch.object(
+            installer, "_safe_wheel_root", return_value=Path("audited")
+        ), mock.patch.object(
+            installer, "_load_lock", return_value=lock
+        ), mock.patch.object(
+            installer, "_load_install_contract", return_value=[Path("one.whl"), Path("two.whl")]
+        ), mock.patch.object(
+            installer, "_distribution_snapshot", side_effect=[before, polluted]
+        ) as snapshots, mock.patch.object(
+            installer, "_execute", side_effect=[
+                {"ok": False, "error": "partial install"},
+                {"ok": True},
+            ]
+        ) as execute:
+            with self.assertRaises(installer.LockedInstallError) as raised:
+                installer.main()
+        self.assertEqual(snapshots.call_count, 2)
+        self.assertEqual(execute.call_count, 2)
+        self.assertIn("exact pre-install baseline", str(raised.exception))
+
+    def test_failed_install_with_verified_cleanup_reports_restored_not_success(self):
+        lock = {
+            "skill": "ppt-master",
+            "capability": "offline-core",
+            "wheels": [
+                {"project": "skia-pathops", "version": "0.9.2"},
+                {"project": "uharfbuzz", "version": "0.50.0"},
+            ],
+        }
+        before = {
+            "prefix": "managed",
+            "basePrefix": "base",
+            "distributions": [{"name": "pip", "version": "25", "recordSha256": "a"}],
+        }
+        with mock.patch.object(sys, "argv", [
+            "install_locked_skill_wheels.py", "install", "--wheel-root", "audited"
+        ]), mock.patch.object(
+            installer, "_safe_wheel_root", return_value=Path("audited")
+        ), mock.patch.object(
+            installer, "_load_lock", return_value=lock
+        ), mock.patch.object(
+            installer, "_load_install_contract", return_value=[Path("one.whl"), Path("two.whl")]
+        ), mock.patch.object(
+            installer, "_distribution_snapshot", side_effect=[before, before]
+        ), mock.patch.object(
+            installer, "_execute", side_effect=[
+                {"ok": False, "error": "partial install"},
+                {"ok": True},
+            ]
+        ):
+            with self.assertRaises(installer.LockedInstallError) as raised:
+                installer.main()
+        self.assertIn("baseline was restored", str(raised.exception))
 
     def test_wheel_auditor_checks_record_license_paths_and_pe_imports(self):
         source = (ROOT / "scripts" / "audit_locked_python_wheels.py").read_text(
