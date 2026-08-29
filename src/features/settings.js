@@ -229,6 +229,9 @@
     let archivedSessionQuery = "";
     const archivedSessionPending = new Map();
     const archivedSessionConfirming = new Set();
+    let updatePanelGeneration = 0;
+    let updatePollId = null;
+    let updateVersionPollId = null;
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
 
@@ -1240,17 +1243,57 @@
       return state._updateCheckPromise;
     }
 
+    function disposeUpdatePanel() {
+      updatePanelGeneration += 1;
+      if (updatePollId !== null) global.clearInterval(updatePollId);
+      if (updateVersionPollId !== null) global.clearInterval(updateVersionPollId);
+      updatePollId = null;
+      updateVersionPollId = null;
+    }
+
     function renderUpdatePanel(container) {
+      disposeUpdatePanel();
+      const generation = updatePanelGeneration;
       const currentVersion = state.appVersion || "unknown";
-      let remoteVersion = null;
-      let downloadUrl = null;
+      let currentJobId = "";
+      let remoteVersion = "";
+      let pollInFlight = false;
+      const isCurrent = () => generation === updatePanelGeneration;
       const status = (key, tone = "neutral", suffix = "") => {
+        if (!isCurrent()) return;
         const element = byId("updateStatus");
         if (!element) return;
         element.innerHTML = `<span data-i18n="${key}">${t(key)}</span>${suffix ? `<span>${escapeHtml(suffix)}</span>` : ""}`;
         element.dataset.tone = tone;
       };
-      const actions = (html) => { const element = byId("updateActions"); if (element) element.innerHTML = html; };
+      const actions = (html) => {
+        if (!isCurrent()) return;
+        const element = byId("updateActions");
+        if (element) element.innerHTML = html;
+      };
+      const manualLink = () => `<a href="https://github.com/fhy-A/Code/releases/latest" target="_blank" rel="noreferrer" class="mini-btn" data-i18n="openDownloadPage">${t("openDownloadPage")}</a>`;
+      const errorKey = (code) => ({
+        download_interrupted: "updateErrorNetwork",
+        download_short_read: "updateErrorNetwork",
+        trusted_asset_unavailable: "updateErrorMetadata",
+        metadata_invalid: "updateErrorMetadata",
+        upstream_protocol_invalid: "updateErrorProtocol",
+        download_size_mismatch: "updateErrorIntegrity",
+        download_digest_mismatch: "updateErrorIntegrity",
+        download_pe_invalid: "updateErrorIntegrity",
+        unsafe_update_path: "updateErrorSafety",
+        target_conflict: "updateErrorConflict",
+        publish_failed: "updateErrorFinalize",
+        install_launch_failed: "updateErrorInstall",
+      }[code] || "updateErrorGeneric");
+      const progress = (value, visible = true) => {
+        if (!isCurrent()) return;
+        const normalized = Math.max(0, Math.min(100, Number(value) || 0));
+        byId("updateProgressWrap")?.classList.toggle("hidden", !visible);
+        if (byId("updateBar")) byId("updateBar").style.width = `${normalized}%`;
+        if (byId("updatePct")) byId("updatePct").textContent = `${Math.floor(normalized)}%`;
+      };
+
       container.innerHTML = `<h3 class="settings-section-title" data-i18n="update">${t("update")}</h3>
         <div class="settings-lite-page update-panel">
           <section class="settings-lite-card update-overview-card">
@@ -1260,92 +1303,170 @@
               <div class="update-ver-row"><span data-i18n="currentVersion">${t("currentVersion")}</span><strong class="update-ver-val" id="updateCurVer">v${escapeHtml(currentVersion)}</strong></div>
               <div class="update-status-row"><span id="updateStatus" data-tone="neutral"><span data-i18n="updateReadyHint">${t("updateReadyHint")}</span></span></div>
             </div>
-            <div class="update-actions" id="updateActions"><button id="updateCheckBtn" class="mini-btn primary-btn" type="button" data-i18n="checkUpdate">${t("checkUpdate")}</button></div>
+            <div class="update-actions" id="updateActions"></div>
           </section>
           <div class="update-progress-wrap hidden" id="updateProgressWrap"><div class="update-progress-bg"><div class="update-progress-fill" id="updateBar"></div></div><span class="update-progress-txt" id="updatePct">0%</span></div>
         </div>`;
-      apiJson("/api/version").then((version) => {
-        const element = byId("updateCurVer");
-        if (version?.localVersion && element) element.textContent = `v${version.localVersion}`;
-      }).catch(() => {});
-      byId("updateCheckBtn").addEventListener("click", async () => {
+
+      const bindCheck = (id = "updateCheckBtn") => {
+        actions(`<button id="${id}" class="mini-btn primary-btn" type="button" data-i18n="checkUpdate">${t("checkUpdate")}</button>`);
+        byId(id)?.addEventListener("click", checkUpdate);
+      };
+
+      const beginVersionPolling = () => {
+        if (!fetchFn || !remoteVersion || updateVersionPollId !== null || !isCurrent()) return;
+        updateVersionPollId = global.setInterval(() => {
+          fetchFn(`/api/version?_=${Date.now()}`, { cache: "no-store" })
+            .then((response) => response.json())
+            .then((versionInfo) => {
+              if (!isCurrent() || versionInfo.localVersion !== remoteVersion) return;
+              global.clearInterval(updateVersionPollId);
+              updateVersionPollId = null;
+              const refreshed = new global.URL(global.location.href);
+              refreshed.searchParams.set("updated", `${remoteVersion}-${Date.now()}`);
+              global.location.replace(refreshed.toString());
+            })
+            .catch(() => {});
+        }, 800);
+      };
+
+      const installUpdate = async () => {
+        status("restarting", "loading");
+        actions("");
+        try {
+          await apiJson("/api/restart", {
+            method: "POST",
+            body: JSON.stringify({ jobId: currentJobId }),
+          });
+        } catch (error) {
+          const code = String(error?.data?.errorCode || "");
+          if (code) {
+            if (!isCurrent()) return;
+            status(errorKey(code), "error");
+            actions(`<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="installRestart">${t("installRestart")}</button>${manualLink()}`);
+            byId("updateRestartBtn")?.addEventListener("click", installUpdate);
+            return;
+          }
+          // A successful verified installer can terminate the old server before
+          // fetch observes its JSON response, so transport-only failure is expected.
+        }
+        if (!isCurrent()) return;
+        showToast(t("restarting"), "success");
+        beginVersionPolling();
+      };
+
+      const startDownload = async (retry = false) => {
+        status(retry ? "retryingUpdate" : "downloading", "loading");
+        progress(0, true);
+        actions("");
+        try {
+          const result = await apiJson("/api/download-update", {
+            method: "POST",
+            body: JSON.stringify({version: remoteVersion || undefined, retry}),
+          });
+          if (isCurrent()) renderJob(result);
+        } catch {
+          if (!isCurrent()) return;
+          status("updateErrorGeneric", "error");
+          actions(manualLink());
+        }
+      };
+
+      const renderJob = (job) => {
+        if (!isCurrent()) return;
+        currentJobId = String(job?.jobId || "");
+        remoteVersion = String(job?.version || remoteVersion || "");
+        const jobStatus = String(job?.status || "idle");
+        if (updatePollId !== null && jobStatus !== "downloading") {
+          global.clearInterval(updatePollId);
+          updatePollId = null;
+        }
+        if (jobStatus === "downloading") {
+          status("downloading", "loading", remoteVersion ? ` (v${remoteVersion})` : "");
+          progress(job.progress, true);
+          actions("");
+          if (updatePollId === null) updatePollId = global.setInterval(refreshJob, 500);
+          return;
+        }
+        if (jobStatus === "failed") {
+          status(errorKey(job.errorCode), "error");
+          progress(job.progress, Number(job.progress) > 0);
+          actions(`${job.retryable ? `<button id="updateRetryBtn" class="mini-btn primary-btn" type="button" data-i18n="retryUpdate">${t("retryUpdate")}</button>` : ""}${manualLink()}`);
+          byId("updateRetryBtn")?.addEventListener("click", () => startDownload(true));
+          return;
+        }
+        if (jobStatus === "completed") {
+          progress(100, false);
+          status("readyToInstall", "success", remoteVersion ? ` (v${remoteVersion})` : "");
+          actions(`<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="installRestart">${t("installRestart")}</button>`);
+          byId("updateRestartBtn")?.addEventListener("click", installUpdate);
+          return;
+        }
+        if (jobStatus === "installing") {
+          progress(100, false);
+          status("restarting", "loading");
+          actions("");
+          beginVersionPolling();
+          return;
+        }
+        if (jobStatus === "installed") {
+          progress(100, false);
+          status("upToDate", "success");
+          bindCheck("updateCheckBtn2");
+          return;
+        }
+        progress(0, false);
+        status("updateReadyHint", "neutral");
+        bindCheck();
+      };
+
+      async function refreshJob() {
+        if (!isCurrent() || pollInFlight) return;
+        pollInFlight = true;
+        try {
+          const job = await apiJson("/api/download-progress");
+          if (isCurrent()) renderJob(job);
+        } catch { /* a restart can briefly make the local server unavailable */ }
+        finally { pollInFlight = false; }
+      }
+
+      async function checkUpdate() {
         status("checkingUpdate", "loading");
         actions("");
         try {
           const data = await checkForUpdates({ silent: false });
+          if (!isCurrent()) return;
           if (data.updateAvailable) {
-            remoteVersion = data.remoteVersion;
-            downloadUrl = data.downloadUrl;
-            status("updateAvailable", "success", ` (v${remoteVersion})`);
-            if (data.isFrozen && downloadUrl) {
+            remoteVersion = String(data.remoteVersion || "");
+            status("updateAvailable", "success", remoteVersion ? ` (v${remoteVersion})` : "");
+            if (data.isFrozen && data.assetName && data.assetSize) {
               actions(`<button id="updateDlBtn" class="mini-btn primary-btn" type="button"><span data-i18n="downloadUpdate">${t("downloadUpdate")}</span> <span>v${escapeHtml(remoteVersion)}</span></button>`);
-              byId("updateDlBtn").addEventListener("click", startDownload);
+              byId("updateDlBtn")?.addEventListener("click", () => startDownload(false));
             } else {
-              actions(`<a href="https://github.com/fhy-A/Code/releases/latest" target="_blank" class="mini-btn" data-i18n="openDownloadPage">${t("openDownloadPage")}</a>`);
+              actions(manualLink());
             }
           } else {
             status("upToDate", "success");
-            actions(`<button id="updateCheckBtn2" class="mini-btn primary-btn" type="button" data-i18n="checkUpdate">${t("checkUpdate")}</button>`);
-            byId("updateCheckBtn2").addEventListener("click", () => renderUpdatePanel(container));
+            bindCheck("updateCheckBtn2");
           }
-        } catch (error) {
-          status("updateFailed", "error", `: ${error.message || ""}`);
-          actions(`<button id="updateCheckBtn3" class="mini-btn primary-btn" type="button" data-i18n="checkUpdate">${t("checkUpdate")}</button>`);
-          byId("updateCheckBtn3").addEventListener("click", () => renderUpdatePanel(container));
+        } catch {
+          if (!isCurrent()) return;
+          status("updateErrorMetadata", "error");
+          actions(`${manualLink()}<button id="updateCheckBtn3" class="mini-btn primary-btn" type="button" data-i18n="checkUpdate">${t("checkUpdate")}</button>`);
+          byId("updateCheckBtn3")?.addEventListener("click", checkUpdate);
         }
-      });
-
-      async function startDownload() {
-        status("downloading", "loading");
-        byId("updateProgressWrap").classList.remove("hidden");
-        actions("");
-        let downloadId;
-        let newExePath;
-        try {
-          const result = await apiJson("/api/download-update", { method: "POST", body: JSON.stringify({ url: downloadUrl }) });
-          downloadId = result.downloadId;
-          newExePath = result.path;
-        } catch (error) {
-          status("updateFailed", "error", `: ${error.message}`);
-          return;
-        }
-        const poll = global.setInterval(async () => {
-          try {
-            const progress = await apiJson(`/api/download-progress?id=${encodeURIComponent(downloadId)}`);
-            byId("updateBar").style.width = `${progress.progress}%`;
-            byId("updatePct").textContent = `${progress.progress}%`;
-            if (progress.error) {
-              global.clearInterval(poll);
-              status("updateFailed", "error", `: ${progress.error}`);
-            }
-            if (!progress.done) return;
-            global.clearInterval(poll);
-            byId("updateProgressWrap").classList.add("hidden");
-            status("readyToInstall", "success");
-            actions(`<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="installRestart">${t("installRestart")}</button>`);
-            byId("updateRestartBtn").addEventListener("click", async () => {
-              status("restarting", "loading");
-              actions("");
-              try { await apiJson("/api/restart", { method: "POST", body: JSON.stringify({ path: newExePath }) }); } catch {}
-              showToast(t("restarting"), "success");
-              global.setTimeout(() => {
-                const check = global.setInterval(() => {
-                  fetchFn(`/api/version?_=${Date.now()}`, { cache: "no-store" })
-                    .then((response) => response.json())
-                    .then((versionInfo) => {
-                      if (versionInfo.localVersion !== remoteVersion) return;
-                      global.clearInterval(check);
-                      const refreshed = new global.URL(global.location.href);
-                      refreshed.searchParams.set("updated", `${remoteVersion}-${Date.now()}`);
-                      global.location.replace(refreshed.toString());
-                    })
-                    .catch(() => {});
-                }, 800);
-              }, 3000);
-            });
-          } catch { /* server may have restarted */ }
-        }, 500);
       }
+
+      apiJson("/api/version").then((version) => {
+        if (!isCurrent()) return;
+        const element = byId("updateCurVer");
+        if (version?.localVersion && element) element.textContent = `v${version.localVersion}`;
+      }).catch(() => {});
+      refreshJob().then(() => {
+        if (!isCurrent() || currentJobId) return;
+        status("updateReadyHint", "neutral");
+        bindCheck();
+      });
     }
 
     function workbarSyncFailureMessage(payload, responseStatus) {
@@ -1901,6 +2022,7 @@
     }
 
     function switchSettingsPanel(panel) {
+      if (panel !== "update") disposeUpdatePanel();
       documentRef.querySelectorAll(".settings-nav-item").forEach((element) => {
         element.classList.toggle("active", element.dataset.panel === panel);
       });
@@ -1988,6 +2110,11 @@
       switchSettingsPanel(panel);
     }
 
+    function closeSettingsPage() {
+      disposeUpdatePanel();
+      byId("settingsPage")?.classList.add("hidden");
+    }
+
     function bind() {
       if (bound) return;
       bound = true;
@@ -2016,9 +2143,9 @@
         refreshActiveSettingsLanguage(activePanel);
       });
       updateLanguageControls();
-      byId("closeSettingsPage")?.addEventListener("click", () => byId("settingsPage")?.classList.add("hidden"));
+      byId("closeSettingsPage")?.addEventListener("click", closeSettingsPage);
       byId("settingsPage")?.addEventListener("click", (event) => {
-        if (event.target === event.currentTarget) event.currentTarget.classList.add("hidden");
+        if (event.target === event.currentTarget) closeSettingsPage();
       });
       [["settingsModels", "models"], ["settingsMemory", "memory"], ["settingsSkills", "skills"], ["settingsSystem", "system"]].forEach(([id, panel]) => {
         byId(id)?.addEventListener("click", () => {

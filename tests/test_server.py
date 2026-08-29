@@ -4,7 +4,11 @@ Run: python -m unittest tests.test_server -v
    or: python tests/test_server.py
 """
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import datetime as dt
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
@@ -15,12 +19,97 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server
 import launcher
+
+
+def _fake_pe_bytes(size=8192):
+    payload = bytearray(max(size, 256))
+    payload[:2] = b"MZ"
+    payload[0x3C:0x40] = (0x80).to_bytes(4, "little")
+    payload[0x80:0x84] = b"PE\0\0"
+    return bytes(payload)
+
+
+@contextmanager
+def _update_http_fixture(payload, behaviors):
+    state = {
+        "payload": bytes(payload),
+        "behaviors": list(behaviors),
+        "requests": [],
+        "active": 0,
+        "peak": 0,
+        "lock": threading.Lock(),
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format, *_args):
+            return
+
+        def do_GET(self):
+            with state["lock"]:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+                behavior = state["behaviors"].pop(0) if state["behaviors"] else "normal"
+            try:
+                range_header = self.headers.get("Range", "")
+                if_range = self.headers.get("If-Range", "")
+                with state["lock"]:
+                    state["requests"].append({
+                        "range": range_header,
+                        "ifRange": if_range,
+                        "behavior": behavior,
+                    })
+                offset = 0
+                match = re.fullmatch(r"bytes=(\d+)-", range_header)
+                if match:
+                    offset = int(match.group(1))
+                ignored = behavior == "ignore_range" and offset > 0
+                status = 200 if not offset or ignored else 206
+                body = state["payload"] if ignored else state["payload"][offset:]
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("ETag", '"fixture-etag"')
+                self.send_header("Connection", "close")
+                if status == 206:
+                    start = offset + (1 if behavior == "bad_range" else 0)
+                    self.send_header(
+                        "Content-Range",
+                        f"bytes {start}-{len(state['payload']) - 1}/{len(state['payload'])}",
+                    )
+                self.end_headers()
+                if behavior in {"interrupt", "short"}:
+                    cutoff = max(1, len(body) // 3)
+                    self.wfile.write(body[:cutoff])
+                    self.wfile.flush()
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self.close_connection = True
+                    return
+                self.wfile.write(body)
+                self.wfile.flush()
+            finally:
+                with state["lock"]:
+                    state["active"] -= 1
+
+    fixture = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=fixture.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{fixture.server_address[1]}/Code-v0.6.7.exe", state
+    finally:
+        fixture.shutdown()
+        fixture.server_close()
+        thread.join(timeout=2)
 
 
 class _FaviconResponse:
@@ -932,14 +1021,385 @@ class TestSkillDependencyOperations(unittest.TestCase):
 
 
 class TestUpdaterHelpers(unittest.TestCase):
+    def setUp(self):
+        server._reset_update_runtime_state_for_tests()
+
+    def _descriptor(self, url, payload, *, digest=None, size=None):
+        return {
+            "version": "0.6.7",
+            "name": "Code-v0.6.7.exe",
+            "url": url,
+            "size": len(payload) if size is None else size,
+            "digest": digest or hashlib.sha256(payload).hexdigest(),
+        }
+
+    def _wait_for_terminal(self, job_id, timeout=5):
+        deadline = time.time() + timeout
+        snapshot = server._current_update_snapshot(job_id)
+        while snapshot["status"] not in {"completed", "failed", "installing"} and time.time() < deadline:
+            time.sleep(0.01)
+            snapshot = server._current_update_snapshot(job_id)
+        self.assertIn(snapshot["status"], {"completed", "failed", "installing"})
+        return snapshot
+
+    @contextmanager
+    def _allow_local_descriptor(self):
+        normalize = server._normalize_update_descriptor
+        with mock.patch.object(
+            server,
+            "_normalize_update_descriptor",
+            side_effect=lambda value, require_official=True: normalize(value, require_official=False),
+        ):
+            yield
+
+    def test_update_start_is_single_flight_for_same_trusted_asset(self):
+        descriptor = {
+            "version": "0.6.7",
+            "name": "Code-v0.6.7.exe",
+            "url": "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            "size": 16,
+            "digest": "a" * 64,
+        }
+        launches = []
+        barrier = threading.Barrier(8)
+
+        def start_once(target_dir):
+            barrier.wait(timeout=2)
+            return server._start_or_attach_update_job(descriptor, target_dir=target_dir)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server._reset_update_runtime_state_for_tests()
+            with mock.patch.object(server, "_launch_update_worker", side_effect=lambda job: launches.append(job["jobId"])):
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    snapshots = list(pool.map(lambda _index: start_once(Path(temp_dir)), range(8)))
+
+        self.assertEqual({item["jobId"] for item in snapshots}, {snapshots[0]["jobId"]})
+        self.assertEqual(launches, [snapshots[0]["jobId"]])
+
+    def test_interrupted_download_resumes_with_strict_range_and_etag(self):
+        payload = _fake_pe_bytes(12 * 1024)
+        identity = {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}
+        with _update_http_fixture(payload, ["interrupt", "normal"]) as (url, fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=identity), \
+                 mock.patch.object(server, "_UPDATE_RETRY_DELAYS", (0, 0)):
+                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                result = self._wait_for_terminal(started["jobId"])
+                final = Path(temp_dir) / descriptor["name"]
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(final.read_bytes(), payload)
+                self.assertEqual(result["progress"], 100)
+        self.assertEqual(len(fixture["requests"]), 2)
+        self.assertEqual(fixture["requests"][0]["range"], "")
+        self.assertRegex(fixture["requests"][1]["range"], r"^bytes=[1-9][0-9]*-$")
+        self.assertEqual(fixture["requests"][1]["ifRange"], '"fixture-etag"')
+        self.assertEqual(fixture["peak"], 1)
+
+    def test_ignored_range_restarts_once_without_duplicate_bytes(self):
+        payload = _fake_pe_bytes(12 * 1024)
+        identity = {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}
+        observed_progress = []
+        set_state = server._set_update_job_state
+
+        def capture_state(*args, **kwargs):
+            result = set_state(*args, **kwargs)
+            if result is not None:
+                observed_progress.append(int(result.get("progress") or 0))
+            return result
+
+        with _update_http_fixture(payload, ["interrupt", "ignore_range", "normal"]) as (url, fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=identity), \
+                 mock.patch.object(server, "_UPDATE_RETRY_DELAYS", (0, 0)), \
+                 mock.patch.object(server, "_set_update_job_state", side_effect=capture_state):
+                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                result = self._wait_for_terminal(started["jobId"])
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual((Path(temp_dir) / descriptor["name"]).read_bytes(), payload)
+        self.assertEqual([item["behavior"] for item in fixture["requests"]], ["interrupt", "ignore_range", "normal"])
+        self.assertRegex(fixture["requests"][1]["range"], r"^bytes=[1-9][0-9]*-$")
+        self.assertEqual(fixture["requests"][2]["range"], "")
+        self.assertEqual(observed_progress, sorted(observed_progress))
+
+    def test_invalid_content_range_fails_closed(self):
+        payload = _fake_pe_bytes(12 * 1024)
+        with _update_http_fixture(payload, ["interrupt", "bad_range"]) as (url, fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_UPDATE_RETRY_DELAYS", (0, 0)):
+                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                result = self._wait_for_terminal(started["jobId"])
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["errorCode"], "upstream_protocol_invalid")
+                self.assertFalse((Path(temp_dir) / f"{descriptor['name']}.part").exists())
+                self.assertFalse((Path(temp_dir) / descriptor["name"]).exists())
+        self.assertEqual(len(fixture["requests"]), 2)
+
+    def test_short_read_is_bounded_and_retryable(self):
+        payload = _fake_pe_bytes(12 * 1024)
+        with _update_http_fixture(payload, ["short", "short", "short"]) as (url, fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_UPDATE_RETRY_DELAYS", (0, 0)):
+                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                result = self._wait_for_terminal(started["jobId"])
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["errorCode"], "download_short_read")
+                self.assertTrue(result["retryable"])
+        self.assertEqual(len(fixture["requests"]), 3)
+
+    def test_digest_and_pe_identity_mismatch_never_publish(self):
+        payload = _fake_pe_bytes(8192)
+        identity = {"version": "9.9.9", "originalFilename": "Wrong.exe", "productName": "Code"}
+        cases = [
+            ("0" * 64, {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}, "download_digest_mismatch"),
+            (hashlib.sha256(payload).hexdigest(), identity, "download_pe_invalid"),
+        ]
+        for digest, observed_identity, expected_code in cases:
+            with self.subTest(expected_code=expected_code), \
+                 _update_http_fixture(payload, ["normal"]) as (url, _fixture), \
+                 tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=observed_identity):
+                server._reset_update_runtime_state_for_tests()
+                descriptor = self._descriptor(url, payload, digest=digest)
+                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                result = self._wait_for_terminal(started["jobId"])
+                self.assertEqual(result["errorCode"], expected_code)
+                self.assertFalse((Path(temp_dir) / descriptor["name"]).exists())
+
+    def test_service_restart_restores_sidecar_and_resumes_same_job(self):
+        payload = _fake_pe_bytes(12 * 1024)
+        identity = {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}
+        with _update_http_fixture(payload, ["normal"]) as (url, fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=identity), \
+                 mock.patch.object(server, "_UPDATE_RETRY_DELAYS", (0, 0)):
+                target = Path(temp_dir)
+                partial = target / f"{descriptor['name']}.part"
+                partial.write_bytes(payload[:3072])
+                job_id = str(uuid.uuid4())
+                metadata = {
+                    "schema": server._UPDATE_JOB_SCHEMA,
+                    "jobId": job_id,
+                    "descriptor": descriptor,
+                    "status": "downloading",
+                    "stage": "downloading",
+                    "progress": 25,
+                    "downloaded": 3072,
+                    "etag": '"fixture-etag"',
+                    "errorCode": "",
+                    "retryable": False,
+                    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+                server._atomic_write_update_metadata(server._update_metadata_path(target, descriptor), metadata)
+                server._reset_update_runtime_state_for_tests()
+                restored = server._restore_update_jobs(target, trusted_descriptor=descriptor)
+                self.assertEqual(restored[0]["jobId"], job_id)
+                result = self._wait_for_terminal(job_id)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual((target / descriptor["name"]).read_bytes(), payload)
+        self.assertEqual(fixture["requests"], [{"range": "bytes=3072-", "ifRange": '"fixture-etag"', "behavior": "normal"}])
+
+    def test_corrupt_or_expired_sidecar_does_not_publish_or_touch_part(self):
+        payload = _fake_pe_bytes(8192)
+        descriptor = self._descriptor(
+            "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            payload,
+        )
+        for expired in (False, True):
+            with self.subTest(expired=expired), tempfile.TemporaryDirectory() as temp_dir:
+                target = Path(temp_dir)
+                partial = target / f"{descriptor['name']}.part"
+                partial.write_bytes(payload[:512])
+                metadata_path = server._update_metadata_path(target, descriptor)
+                if expired:
+                    metadata = {
+                        "schema": server._UPDATE_JOB_SCHEMA,
+                        "jobId": str(uuid.uuid4()),
+                        "descriptor": descriptor,
+                        "status": "downloading",
+                        "stage": "downloading",
+                        "progress": 1,
+                        "downloaded": 512,
+                        "etag": "",
+                        "errorCode": "",
+                        "retryable": False,
+                        "updatedAt": "2020-01-01T00:00:00Z",
+                    }
+                    server._atomic_write_update_metadata(metadata_path, metadata)
+                else:
+                    metadata_path.write_text("{broken", encoding="utf-8")
+                before = partial.read_bytes()
+                self.assertEqual(
+                    server._restore_update_jobs(target, trusted_descriptor=descriptor, start_workers=False),
+                    [],
+                )
+                self.assertEqual(partial.read_bytes(), before)
+                self.assertFalse((target / descriptor["name"]).exists())
+
+    def test_restore_marks_already_running_verified_version_installed(self):
+        payload = _fake_pe_bytes(8192)
+        descriptor = self._descriptor(
+            "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            payload,
+        )
+        identity = {"version": "0.6.7", "originalFilename": descriptor["name"], "productName": "Code"}
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             mock.patch.object(server, "_read_windows_file_identity", return_value=identity), \
+             mock.patch.object(server, "_read_version_file", return_value="0.6.7"):
+            target = Path(temp_dir)
+            (target / descriptor["name"]).write_bytes(payload)
+            metadata = {
+                "schema": server._UPDATE_JOB_SCHEMA,
+                "jobId": str(uuid.uuid4()),
+                "descriptor": descriptor,
+                "status": "completed",
+                "stage": "completed",
+                "progress": 100,
+                "downloaded": len(payload),
+                "etag": '"fixture-etag"',
+                "errorCode": "",
+                "retryable": False,
+                "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            server._atomic_write_update_metadata(server._update_metadata_path(target, descriptor), metadata)
+            restored = server._restore_update_jobs(target, trusted_descriptor=descriptor, start_workers=False)
+            self.assertEqual(restored[0]["status"], "installed")
+            persisted = json.loads(server._update_metadata_path(target, descriptor).read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "installed")
+
+    def test_arbitrary_url_or_path_is_rejected_before_trusted_lookup(self):
+        handler = object.__new__(server.CodeHandler)
+        handler.send_json = mock.Mock()
+        with mock.patch.object(server, "_get_trusted_update_descriptor") as trusted:
+            handler._handle_download_update({"url": "https://evil.invalid/Code-v0.6.7.exe"})
+            trusted.assert_not_called()
+        self.assertEqual(handler.send_json.call_args.args[1], 400)
+        self.assertEqual(handler.send_json.call_args.args[0]["errorCode"], "invalid_update_request")
+
+        handler.send_json.reset_mock()
+        with mock.patch.object(server, "_get_trusted_update_descriptor") as trusted:
+            handler._handle_download_update({"path": r"C:\\Users\\Alice\\malware.exe"})
+            trusted.assert_not_called()
+        self.assertNotIn("Alice", json.dumps(handler.send_json.call_args.args[0]))
+
+        handler.read_body_json = mock.Mock(return_value={"path": r"C:\\Users\\Alice\\malware.exe"})
+        handler.send_json.reset_mock()
+        with mock.patch.object(server.sys, "frozen", True, create=True):
+            handler._handle_restart()
+        self.assertEqual(handler.send_json.call_args.args[0]["errorCode"], "invalid_update_request")
+        self.assertNotIn("Alice", json.dumps(handler.send_json.call_args.args[0]))
+
+    def test_public_failure_is_sanitized_and_omits_paths_urls_and_digest(self):
+        payload = _fake_pe_bytes(8192)
+        with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+             mock.patch.object(server, "_UPDATE_RETRY_DELAYS", (0, 0)), \
+             mock.patch.object(
+                 server.request,
+                 "urlopen",
+                 side_effect=OSError(r"C:\\Users\\Alice\\secret.part ?token=secret"),
+             ):
+            descriptor = self._descriptor("http://127.0.0.1:1/Code-v0.6.7.exe?token=secret", payload)
+            started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+            result = self._wait_for_terminal(started["jobId"])
+        serialized = json.dumps(result)
+        self.assertEqual(result["errorCode"], "download_interrupted")
+        self.assertNotIn("token", serialized)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn(temp_dir, serialized)
+        self.assertNotIn("url", result)
+        self.assertNotIn("digest", result)
+
+    def test_size_mismatch_and_hardlinked_part_fail_before_publish(self):
+        payload = _fake_pe_bytes(8192)
+        descriptor = self._descriptor(
+            "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            payload,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir)
+            part = target / f"{descriptor['name']}.part"
+            part.write_bytes(payload[:-1])
+            with self.assertRaises(server._UpdateFailure) as size_error:
+                server._validate_completed_update_file(part, descriptor, target, partial=True)
+            self.assertEqual(size_error.exception.code, "download_size_mismatch")
+
+            part.unlink()
+            source = target / "source.bin"
+            source.write_bytes(payload)
+            os.link(source, part)
+            with self.assertRaises(server._UpdateFailure) as link_error:
+                server._validate_safe_update_file(
+                    part, target, allowed_names={part.name}, required=True,
+                )
+            self.assertEqual(link_error.exception.code, "unsafe_update_path")
+
+    def test_legacy_url_must_exactly_match_trusted_descriptor(self):
+        payload = _fake_pe_bytes(8192)
+        descriptor = self._descriptor(
+            "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            payload,
+        )
+        handler = object.__new__(server.CodeHandler)
+        handler.send_json = mock.Mock()
+        attached = {
+            "jobId": "job-1", "downloadId": "job-1", "version": "0.6.7",
+            "name": descriptor["name"], "status": "downloading", "stage": "downloading",
+            "progress": 1, "downloaded": 1, "total": len(payload), "done": False,
+            "errorCode": None, "error": None, "retryable": False,
+        }
+        with mock.patch.object(server, "_get_trusted_update_descriptor", return_value=descriptor), \
+             mock.patch.object(server, "_start_or_attach_update_job", return_value=attached) as start:
+            handler._handle_download_update({"url": descriptor["url"]})
+        start.assert_called_once_with(descriptor, retry=False)
+        self.assertEqual(handler.send_json.call_args.args[0]["jobId"], "job-1")
+
+        handler.send_json.reset_mock()
+        with mock.patch.object(server, "_get_trusted_update_descriptor", return_value=descriptor), \
+             mock.patch.object(server, "_start_or_attach_update_job") as start:
+            handler._handle_download_update({
+                "url": "https://github.com/fhy-A/Code/releases/download/v0.6.8/Code-v0.6.8.exe",
+            })
+        start.assert_not_called()
+        self.assertEqual(handler.send_json.call_args.args[0]["errorCode"], "invalid_update_request")
+
+    def test_repeated_restart_of_verified_job_launches_installer_once(self):
+        payload = _fake_pe_bytes(8192)
+        identity = {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}
+        with _update_http_fixture(payload, ["normal"]) as (url, _fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=identity):
+                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                completed = self._wait_for_terminal(started["jobId"])
+                self.assertEqual(completed["status"], "completed")
+                handler = object.__new__(server.CodeHandler)
+                handler.read_body_json = mock.Mock(return_value={"jobId": completed["jobId"]})
+                handler.send_json = mock.Mock()
+                with mock.patch.object(server.sys, "frozen", True, create=True), \
+                     mock.patch.object(server, "_build_update_script", return_value=Path(temp_dir) / "update.bat"), \
+                     mock.patch.object(server.subprocess, "Popen") as popen, \
+                     mock.patch.object(server.os, "_exit") as exit_process:
+                    handler._handle_restart()
+                    handler._handle_restart()
+                self.assertEqual(popen.call_count, 1)
+                self.assertEqual(exit_process.call_count, 1)
+                self.assertEqual(server._current_update_snapshot(completed["jobId"])["status"], "installing")
+
     def test_remote_version_selects_matching_code_asset(self):
+        download_url = "https://github.com/fhy-A/Code/releases/download/v0.5.4/Code-v0.5.4.exe"
         payload = {
             "tag_name": "v0.5.4",
             "assets": [
                 {"name": "helper.exe", "browser_download_url": "https://example.test/helper.exe"},
                 {
                     "name": "Code-v0.5.4.exe",
-                    "browser_download_url": "https://example.test/Code-v0.5.4.exe",
+                    "browser_download_url": download_url,
+                    "size": 1234,
+                    "digest": "sha256:" + ("a" * 64),
                 },
             ],
         }
@@ -948,12 +1408,26 @@ class TestUpdaterHelpers(unittest.TestCase):
         with mock.patch.object(server.request, "urlopen", return_value=response):
             version, url = server._read_remote_version()
         self.assertEqual(version, "0.5.4")
-        self.assertEqual(url, "https://example.test/Code-v0.5.4.exe")
+        self.assertEqual(url, download_url)
+
+    def test_remote_version_rejects_asset_without_size_or_digest(self):
+        payload = {
+            "tag_name": "v0.5.4",
+            "assets": [{
+                "name": "Code-v0.5.4.exe",
+                "browser_download_url": "https://github.com/fhy-A/Code/releases/download/v0.5.4/Code-v0.5.4.exe",
+                "size": 1234,
+            }],
+        }
+        response = mock.Mock()
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        with mock.patch.object(server.request, "urlopen", return_value=response):
+            self.assertIsNone(server._read_remote_update())
 
     def test_valid_windows_executable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             exe = Path(temp_dir) / "Code-v1.2.3.exe"
-            exe.write_bytes(b"MZ" + (b"\0" * (1024 * 1024)))
+            exe.write_bytes(_fake_pe_bytes())
             self.assertTrue(server._is_valid_windows_executable(exe))
 
     def test_rejects_incomplete_or_non_pe_download(self):
@@ -991,8 +1465,12 @@ class TestUpdaterHelpers(unittest.TestCase):
     def test_check_update_detects_newer_release(self):
         handler = object.__new__(server.CodeHandler)
         download_url = "https://github.com/fhy-A/Code/releases/download/v0.4.11/Code-v0.4.11.exe"
+        descriptor = {
+            "version": "0.4.11", "name": "Code-v0.4.11.exe", "url": download_url,
+            "size": 1234, "digest": "a" * 64,
+        }
         with mock.patch.object(server, "_read_version_file", return_value="0.4.10"), \
-             mock.patch.object(server, "_read_remote_version", return_value=("0.4.11", download_url)):
+             mock.patch.object(server, "_get_trusted_update_descriptor", return_value=descriptor):
             result = handler._check_update()
         self.assertTrue(result["updateAvailable"])
         self.assertEqual(result["remoteVersion"], "0.4.11")
@@ -1002,7 +1480,7 @@ class TestUpdaterHelpers(unittest.TestCase):
         settings_js = (
             Path(__file__).resolve().parent.parent / "src" / "features" / "settings.js"
         ).read_text(encoding="utf-8")
-        self.assertIn('if (versionInfo.localVersion !== remoteVersion) return;', settings_js)
+        self.assertIn('versionInfo.localVersion !== remoteVersion) return;', settings_js)
         self.assertIn('cache: "no-store"', settings_js)
         self.assertIn(
             'refreshed.searchParams.set("updated", `${remoteVersion}-${Date.now()}`)',

@@ -615,7 +615,11 @@ class TestPEValidation(unittest.TestCase):
     def test_accepts_valid_pe(self):
         with tempfile.TemporaryDirectory() as tmp:
             exe = Path(tmp) / "valid.exe"
-            exe.write_bytes(b"MZ" + (b"\x00" * (1024 * 1024)))
+            payload = bytearray(1024)
+            payload[:2] = b"MZ"
+            payload[0x3C:0x40] = (0x80).to_bytes(4, "little")
+            payload[0x80:0x84] = b"PE\x00\x00"
+            exe.write_bytes(payload)
             self.assertTrue(server._is_valid_windows_executable(exe))
 
 

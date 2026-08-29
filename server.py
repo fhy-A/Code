@@ -21,6 +21,7 @@ import re
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -190,7 +191,20 @@ _model_route_registry = ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 _image_route_registry = ImageRouteRegistry(IMAGE_ROUTE_CATALOG_PATH)
 _generated_asset_repository = GeneratedAssetRepository(GENERATED_ASSETS_DIR)
 _image_upstream_client = ImageUpstreamClient()
-_active_downloads = {}   # downloadId -> {progress, done, error, path, total}
+_active_downloads = {}   # jobId -> authoritative updater job (public snapshots omit paths)
+_update_jobs_by_key = {}  # (normalized target dir, version) -> jobId
+_update_job_lock = threading.RLock()
+_current_update_job_id = None
+_trusted_update_cache = None
+_trusted_update_cache_at = 0.0
+_UPDATE_JOB_SCHEMA = "code-update-job/v1"
+_UPDATE_JOB_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+_UPDATE_DESCRIPTOR_CACHE_SECONDS = 5 * 60
+_UPDATE_DOWNLOAD_CHUNK_BYTES = 256 * 1024
+_UPDATE_DOWNLOAD_ATTEMPTS = 3
+_UPDATE_RETRY_DELAYS = (0.05, 0.15)
+_UPDATE_TERMINAL_STATUSES = frozenset({"completed", "failed", "installing", "installed"})
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
 _server_instance_id = uuid.uuid4().hex
@@ -10286,59 +10300,122 @@ def _read_version_file():
     return "0.0.0"
 
 
-def _read_remote_version():
-    """Fetch latest release version + download URL from GitHub Releases API.
-    Only returns a version if a release with an .exe asset actually exists.
-    Returns (version, download_url) or (None, None)."""
+def _normalize_update_descriptor(value, *, require_official=True):
+    """Return a canonical trusted Release asset descriptor or ``None``.
+
+    GitHub's Release asset ``digest`` and ``size`` are mandatory.  The former
+    redirect/HEAD fallback intentionally cannot satisfy this contract.
+    """
+    if not isinstance(value, dict):
+        return None
+    version = str(value.get("version") or "").strip().lstrip("v")
+    if not re.fullmatch(r"\d+(?:\.\d+)+", version):
+        return None
+    name = str(value.get("name") or "").strip()
+    expected_name = f"Code-v{version}.exe"
+    if name != expected_name:
+        return None
+    url = str(value.get("url") or "").strip()
+    try:
+        parsed = parse.urlsplit(url)
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    expected_path = f"/fhy-A/Code/releases/download/v{version}/{expected_name}"
+    if (
+        require_official
+        and (
+            parsed.scheme != "https"
+            or parsed.hostname != "github.com"
+            or parsed.path != expected_path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed_port not in {None, 443}
+        )
+    ):
+        return None
+    try:
+        size = int(value.get("size"))
+    except (TypeError, ValueError):
+        return None
+    if size <= 0 or size > 2 * 1024 * 1024 * 1024:
+        return None
+    digest = str(value.get("digest") or "").strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest[len("sha256:"):]
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    return {
+        "version": version,
+        "name": expected_name,
+        "url": url,
+        "size": size,
+        "digest": digest,
+    }
+
+
+def _read_remote_update():
+    """Fetch the latest official GitHub Release's trusted Windows asset."""
+    response = None
     try:
         req = request.Request(
             "https://api.github.com/repos/fhy-A/Code/releases/latest",
             headers={"Accept": "application/vnd.github+json", "User-Agent": "Code"},
         )
-        resp = request.urlopen(req, timeout=10)
-        data = json.loads(resp.read())
-        tag = data.get("tag_name", "").lstrip("v")
-        assets = data.get("assets") or []
-        exe_url = None
-        expected_name = f"Code-v{tag}.exe".lower()
-        for a in assets:
-            name = a.get("name", "")
-            if name.lower() == expected_name:
-                exe_url = a.get("browser_download_url")
-                break
-        if tag and exe_url:
-            return tag, exe_url
-    except Exception:
+        response = request.urlopen(req, timeout=10)
+        data = json.loads(response.read())
+        if not isinstance(data, dict):
+            return None
+        tag = str(data.get("tag_name") or "").strip().lstrip("v")
+        expected_name = f"Code-v{tag}.exe"
+        for asset in data.get("assets") or []:
+            if not isinstance(asset, dict):
+                continue
+            if str(asset.get("name") or "") != expected_name:
+                continue
+            return _normalize_update_descriptor({
+                "version": tag,
+                "name": asset.get("name"),
+                "url": asset.get("browser_download_url"),
+                "size": asset.get("size"),
+                "digest": asset.get("digest"),
+            })
+    except (error.HTTPError, error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
         pass
+    finally:
+        try:
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+    return None
 
-    # Anonymous GitHub API requests can be rate-limited on shared networks.
-    # Fall back to the public latest-release redirect, then verify that the
-    # versioned installer exists before advertising the update.
-    try:
-        latest_req = request.Request(
-            "https://github.com/fhy-A/Code/releases/latest",
-            headers={"User-Agent": "Code"},
-        )
-        with request.urlopen(latest_req, timeout=10) as latest_resp:
-            latest_url = latest_resp.geturl()
-        match = re.search(r"/releases/tag/([^/?#]+)", latest_url)
-        tag = match.group(1).lstrip("v") if match else ""
-        if tag and re.fullmatch(r"\d+(?:\.\d+)+", tag):
-            exe_url = (
-                "https://github.com/fhy-A/Code/releases/download/"
-                f"v{tag}/Code-v{tag}.exe"
-            )
-            asset_req = request.Request(
-                exe_url,
-                method="HEAD",
-                headers={"User-Agent": "Code"},
-            )
-            with request.urlopen(asset_req, timeout=10) as asset_resp:
-                if asset_resp.status < 400:
-                    return tag, exe_url
-    except Exception:
-        pass
-    return None, None
+
+def _get_trusted_update_descriptor(*, force=False):
+    global _trusted_update_cache, _trusted_update_cache_at
+    now = time.monotonic()
+    with _update_job_lock:
+        if (
+            not force
+            and _trusted_update_cache is not None
+            and now - _trusted_update_cache_at <= _UPDATE_DESCRIPTOR_CACHE_SECONDS
+        ):
+            return dict(_trusted_update_cache)
+    descriptor = _read_remote_update()
+    with _update_job_lock:
+        _trusted_update_cache = dict(descriptor) if descriptor else None
+        _trusted_update_cache_at = now
+    return dict(descriptor) if descriptor else None
+
+
+def _read_remote_version():
+    """Compatibility wrapper for internal callers expecting ``(version, url)``."""
+    descriptor = _get_trusted_update_descriptor()
+    if not descriptor:
+        return None, None
+    return descriptor["version"], descriptor["url"]
 
 
 def _cleanup_old_versions(target_dir):
@@ -10367,14 +10444,25 @@ def _cleanup_old_versions(target_dir):
 
 
 def _is_valid_windows_executable(path):
-    """Return True when *path* looks like a complete Windows PE executable."""
+    """Return True when *path* has a bounded DOS header and PE signature."""
     try:
         candidate = Path(path)
-        if not candidate.is_file() or candidate.stat().st_size < 1024 * 1024:
+        size = candidate.stat().st_size
+        if not candidate.is_file() or size < 256:
             return False
         with candidate.open("rb") as stream:
-            return stream.read(2) == b"MZ"
-    except OSError:
+            if stream.read(2) != b"MZ":
+                return False
+            stream.seek(0x3C)
+            offset_raw = stream.read(4)
+            if len(offset_raw) != 4:
+                return False
+            pe_offset = int.from_bytes(offset_raw, "little")
+            if pe_offset < 0x40 or pe_offset > size - 4:
+                return False
+            stream.seek(pe_offset)
+            return stream.read(4) == b"PE\0\0"
+    except (OSError, ValueError):
         return False
 
 
@@ -10432,7 +10520,7 @@ if not exist "%newExe%" (
 )
 
 :: Clean up older versioned builds, keep only the new one.
-for %%f in ("%targetDir%\Code-v*.exe") do (
+for %%f in ("%targetDir%\\Code-v*.exe") do (
     if /i not "%%f"=="%newExe%" (
         del /f "%%f" >nul 2>&1
         if not errorlevel 1 echo %date% %time% cleaned up: %%~nxf >> "%logPath%"
@@ -10444,6 +10532,819 @@ echo %date% %time% update completed >> "%logPath%"
 del "%~f0" & exit
 """)
     return bat_path
+
+
+class _UpdateFailure(Exception):
+    def __init__(self, code, *, retryable=False, stage="downloading", reset_part=False):
+        super().__init__(code)
+        self.code = str(code)
+        self.retryable = bool(retryable)
+        self.stage = str(stage)
+        self.reset_part = bool(reset_part)
+
+
+_UPDATE_PUBLIC_ERRORS = {
+    "trusted_asset_unavailable": "A verified update asset is not available.",
+    "invalid_update_request": "The update request does not match the verified release.",
+    "target_conflict": "The update destination is not available.",
+    "unsafe_update_path": "The update destination is not safe.",
+    "download_interrupted": "The update download was interrupted.",
+    "download_short_read": "The update download ended before all bytes arrived.",
+    "upstream_protocol_invalid": "The update server returned an invalid resume response.",
+    "download_size_mismatch": "The downloaded update has an unexpected size.",
+    "download_digest_mismatch": "The downloaded update failed integrity verification.",
+    "download_pe_invalid": "The downloaded update is not a valid Code executable.",
+    "publish_failed": "The verified update could not be finalized.",
+    "metadata_invalid": "Saved update state could not be verified.",
+    "update_not_ready": "No verified update is ready to install.",
+    "install_launch_failed": "The update installer could not be started.",
+}
+
+
+def _update_target_dir():
+    return Path.home() / ".code" if getattr(sys, "frozen", False) else APP_DIR / "dist"
+
+
+def _absolute_lexical_path(path):
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _path_stat_is_reparse(info):
+    return bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _lstat_or_none(path):
+    try:
+        return Path(path).lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _validate_safe_update_directory(target_dir, *, create=False):
+    try:
+        target = _absolute_lexical_path(target_dir)
+        chain = list(reversed((target, *target.parents)))
+        for index, component in enumerate(chain):
+            info = _lstat_or_none(component)
+            if info is None:
+                if create and component == target and index == len(chain) - 1:
+                    component.mkdir()
+                    info = component.lstat()
+                else:
+                    raise _UpdateFailure("unsafe_update_path", stage="preparing")
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _path_stat_is_reparse(info):
+                raise _UpdateFailure("unsafe_update_path", stage="preparing")
+        return target
+    except _UpdateFailure:
+        raise
+    except OSError:
+        raise _UpdateFailure("unsafe_update_path", stage="preparing") from None
+
+
+def _validate_safe_update_file(path, target_dir, *, allowed_names, required=False):
+    target = _validate_safe_update_directory(target_dir)
+    candidate = _absolute_lexical_path(path)
+    if candidate.parent != target or candidate.name not in set(allowed_names):
+        raise _UpdateFailure("unsafe_update_path", stage="verifying")
+    try:
+        info = _lstat_or_none(candidate)
+    except OSError:
+        raise _UpdateFailure("unsafe_update_path", stage="verifying") from None
+    if info is None:
+        if required:
+            raise _UpdateFailure("unsafe_update_path", stage="verifying")
+        return candidate
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or _path_stat_is_reparse(info)
+        or int(getattr(info, "st_nlink", 1)) != 1
+    ):
+        raise _UpdateFailure("unsafe_update_path", stage="verifying")
+    return candidate
+
+
+def _read_windows_file_identity(path):
+    """Read immutable PE version-resource identity using the Windows API."""
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return None
+    try:
+        version_api = ctypes.windll.version
+        size = version_api.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version_api.GetFileVersionInfoW(str(path), 0, size, buffer):
+            return None
+
+        class _VSFixedFileInfo(ctypes.Structure):
+            _fields_ = [
+                ("dwSignature", ctypes.c_uint32), ("dwStrucVersion", ctypes.c_uint32),
+                ("dwFileVersionMS", ctypes.c_uint32), ("dwFileVersionLS", ctypes.c_uint32),
+                ("dwProductVersionMS", ctypes.c_uint32), ("dwProductVersionLS", ctypes.c_uint32),
+                ("dwFileFlagsMask", ctypes.c_uint32), ("dwFileFlags", ctypes.c_uint32),
+                ("dwFileOS", ctypes.c_uint32), ("dwFileType", ctypes.c_uint32),
+                ("dwFileSubtype", ctypes.c_uint32), ("dwFileDateMS", ctypes.c_uint32),
+                ("dwFileDateLS", ctypes.c_uint32),
+            ]
+
+        fixed_pointer = ctypes.c_void_p()
+        fixed_length = ctypes.c_uint()
+        if not version_api.VerQueryValueW(buffer, "\\", ctypes.byref(fixed_pointer), ctypes.byref(fixed_length)):
+            return None
+        fixed = ctypes.cast(fixed_pointer, ctypes.POINTER(_VSFixedFileInfo)).contents
+        if fixed.dwSignature != 0xFEEF04BD:
+            return None
+        version_parts = [
+            fixed.dwFileVersionMS >> 16,
+            fixed.dwFileVersionMS & 0xFFFF,
+            fixed.dwFileVersionLS >> 16,
+            fixed.dwFileVersionLS & 0xFFFF,
+        ]
+        if version_parts[-1] == 0:
+            version_parts.pop()
+        version = ".".join(str(value) for value in version_parts)
+
+        translation_pointer = ctypes.c_void_p()
+        translation_length = ctypes.c_uint()
+        translation = "040904B0"
+        if version_api.VerQueryValueW(
+            buffer, "\\VarFileInfo\\Translation",
+            ctypes.byref(translation_pointer), ctypes.byref(translation_length),
+        ) and translation_length.value >= 4:
+            raw = ctypes.cast(translation_pointer, ctypes.POINTER(ctypes.c_ushort * 2)).contents
+            translation = f"{raw[0]:04x}{raw[1]:04x}"
+
+        def query_string(key):
+            pointer = ctypes.c_void_p()
+            length = ctypes.c_uint()
+            sub_block = f"\\StringFileInfo\\{translation}\\{key}"
+            if not version_api.VerQueryValueW(
+                buffer, sub_block, ctypes.byref(pointer), ctypes.byref(length),
+            ) or not pointer.value or not length.value:
+                return ""
+            return ctypes.wstring_at(pointer, max(0, length.value - 1))
+
+        return {
+            "version": version,
+            "originalFilename": query_string("OriginalFilename"),
+            "productName": query_string("ProductName"),
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _sha256_file(path):
+    hasher = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while True:
+            chunk = stream.read(_UPDATE_DOWNLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _validate_completed_update_file(path, descriptor, target_dir, *, partial=False):
+    allowed_name = descriptor["name"] + (".part" if partial else "")
+    candidate = _validate_safe_update_file(
+        path, target_dir, allowed_names={allowed_name}, required=True,
+    )
+    if candidate.stat().st_size != descriptor["size"]:
+        raise _UpdateFailure("download_size_mismatch", stage="verifying", reset_part=True)
+    if not hmac.compare_digest(_sha256_file(candidate), descriptor["digest"]):
+        raise _UpdateFailure("download_digest_mismatch", stage="verifying", reset_part=True)
+    if not _is_valid_windows_executable(candidate):
+        raise _UpdateFailure("download_pe_invalid", stage="verifying", reset_part=True)
+    identity = _read_windows_file_identity(candidate)
+    if (
+        not identity
+        or identity.get("version") != descriptor["version"]
+        or identity.get("originalFilename") != descriptor["name"]
+        or identity.get("productName") != "Code"
+    ):
+        raise _UpdateFailure("download_pe_invalid", stage="verifying", reset_part=True)
+    return candidate
+
+
+def _update_metadata_path(target_dir, descriptor):
+    return _absolute_lexical_path(target_dir) / f"{descriptor['name']}.update.json"
+
+
+def _update_job_key(target_dir, descriptor):
+    return os.path.normcase(str(_absolute_lexical_path(target_dir))), descriptor["version"]
+
+
+def _public_update_error(code):
+    return _UPDATE_PUBLIC_ERRORS.get(str(code or ""), "The update could not be completed.")
+
+
+def _update_job_snapshot(job):
+    code = str(job.get("errorCode") or "")
+    status = str(job.get("status") or "idle")
+    return {
+        "jobId": str(job.get("jobId") or ""),
+        "downloadId": str(job.get("jobId") or ""),
+        "version": str(job.get("descriptor", {}).get("version") or ""),
+        "name": str(job.get("descriptor", {}).get("name") or ""),
+        "status": status,
+        "stage": str(job.get("stage") or status),
+        "progress": max(0, min(100, int(job.get("progress") or 0))),
+        "downloaded": max(0, int(job.get("downloaded") or 0)),
+        "total": max(0, int(job.get("descriptor", {}).get("size") or 0)),
+        "done": status == "completed",
+        "errorCode": code or None,
+        "error": _public_update_error(code) if code else None,
+        "retryable": bool(job.get("retryable")),
+    }
+
+
+def _update_job_metadata(job):
+    return {
+        "schema": _UPDATE_JOB_SCHEMA,
+        "jobId": job["jobId"],
+        "descriptor": dict(job["descriptor"]),
+        "status": job["status"],
+        "stage": job["stage"],
+        "progress": int(job["progress"]),
+        "downloaded": int(job["downloaded"]),
+        "etag": str(job.get("etag") or ""),
+        "errorCode": str(job.get("errorCode") or ""),
+        "retryable": bool(job.get("retryable")),
+        "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _atomic_write_update_metadata(path, payload):
+    target = Path(path)
+    _validate_safe_update_directory(target.parent)
+    try:
+        existing = _lstat_or_none(target)
+    except OSError:
+        raise _UpdateFailure("metadata_invalid", retryable=True, stage="persisting") from None
+    if existing is not None and (
+        not stat.S_ISREG(existing.st_mode)
+        or stat.S_ISLNK(existing.st_mode)
+        or _path_stat_is_reparse(existing)
+        or int(getattr(existing, "st_nlink", 1)) != 1
+    ):
+        raise _UpdateFailure("unsafe_update_path", stage="persisting")
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    fd = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        fd = os.open(temporary, flags, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = None
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except _UpdateFailure:
+        raise
+    except OSError:
+        raise _UpdateFailure("metadata_invalid", retryable=True, stage="persisting") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _persist_update_job(job):
+    with _update_job_lock:
+        payload = _update_job_metadata(job)
+        path = Path(job["metadataPath"])
+        _atomic_write_update_metadata(path, payload)
+
+
+def _set_update_job_state(job_id, generation, **changes):
+    with _update_job_lock:
+        job = _active_downloads.get(job_id)
+        if not job or int(job.get("generation") or 0) != int(generation):
+            return None
+        for key, value in changes.items():
+            if key == "progress":
+                job[key] = max(int(job.get(key) or 0), int(value or 0))
+            else:
+                job[key] = value
+        if changes.get("status") in _UPDATE_TERMINAL_STATUSES:
+            job["terminalCommitted"] = True
+        snapshot = dict(job)
+    _persist_update_job(snapshot)
+    return snapshot
+
+
+def _reset_update_runtime_state_for_tests():
+    global _current_update_job_id, _trusted_update_cache, _trusted_update_cache_at
+    with _update_job_lock:
+        _active_downloads.clear()
+        _update_jobs_by_key.clear()
+        _current_update_job_id = None
+        _trusted_update_cache = None
+        _trusted_update_cache_at = 0.0
+
+
+def _start_or_attach_update_job(descriptor, *, target_dir=None, retry=False):
+    """Create or attach to the single writer for one trusted version/target."""
+    global _current_update_job_id
+    trusted = _normalize_update_descriptor(descriptor)
+    if not trusted:
+        raise _UpdateFailure("trusted_asset_unavailable", stage="preparing")
+    target = _validate_safe_update_directory(target_dir or _update_target_dir(), create=True)
+    key = _update_job_key(target, trusted)
+    with _update_job_lock:
+        known_job = _update_jobs_by_key.get(key)
+    try:
+        metadata_exists = _lstat_or_none(_update_metadata_path(target, trusted)) is not None
+    except OSError:
+        raise _UpdateFailure("unsafe_update_path", stage="preparing") from None
+    if not known_job and metadata_exists:
+        restored = _restore_update_jobs(
+            target, trusted_descriptor=trusted, start_workers=True,
+        )
+        if restored:
+            if retry:
+                return _start_or_attach_update_job(trusted, target_dir=target, retry=True)
+            return restored[0]
+    should_launch = False
+    should_persist = False
+    with _update_job_lock:
+        existing_id = _update_jobs_by_key.get(key)
+        job = _active_downloads.get(existing_id) if existing_id else None
+        if job:
+            _current_update_job_id = job["jobId"]
+            if (
+                retry
+                and job.get("status") == "failed"
+                and job.get("retryable")
+                and not job.get("writerActive")
+            ):
+                job["generation"] = int(job.get("generation") or 0) + 1
+                job["status"] = "downloading"
+                job["stage"] = "connecting"
+                job["errorCode"] = ""
+                job["retryable"] = False
+                job["terminalCommitted"] = False
+                job["writerActive"] = True
+                should_launch = True
+                should_persist = True
+            snapshot = _update_job_snapshot(job)
+        else:
+            final_path = target / trusted["name"]
+            part_path = target / f"{trusted['name']}.part"
+            metadata_path = _update_metadata_path(target, trusted)
+            try:
+                conflict = any(_lstat_or_none(path) is not None for path in (final_path, part_path, metadata_path))
+            except OSError:
+                raise _UpdateFailure("unsafe_update_path", stage="preparing") from None
+            job = {
+                "jobId": str(uuid.uuid4()),
+                "descriptor": trusted,
+                "targetDir": str(target),
+                "finalPath": str(final_path),
+                "partPath": str(part_path),
+                "metadataPath": str(metadata_path),
+                "status": "failed" if conflict else "downloading",
+                "stage": "preparing" if conflict else "connecting",
+                "progress": 0,
+                "downloaded": 0,
+                "etag": "",
+                "errorCode": "target_conflict" if conflict else "",
+                "retryable": False,
+                "generation": 1,
+                "writerActive": not conflict,
+                "terminalCommitted": bool(conflict),
+                "restartStarted": False,
+            }
+            _active_downloads[job["jobId"]] = job
+            _update_jobs_by_key[key] = job["jobId"]
+            _current_update_job_id = job["jobId"]
+            should_launch = not conflict
+            should_persist = True
+            snapshot = _update_job_snapshot(job)
+    if should_persist:
+        try:
+            _persist_update_job(job)
+        except _UpdateFailure as exc:
+            with _update_job_lock:
+                job["status"] = "failed"
+                job["stage"] = exc.stage
+                job["errorCode"] = exc.code
+                job["retryable"] = exc.retryable
+                job["writerActive"] = False
+                job["terminalCommitted"] = True
+            raise
+    if should_launch:
+        _launch_update_worker(job)
+    return snapshot
+
+
+def _response_header(response, name):
+    if hasattr(response, "getheader"):
+        value = response.getheader(name)
+    else:
+        value = getattr(response, "headers", {}).get(name)
+    return str(value) if value is not None else ""
+
+
+def _parse_content_range(value):
+    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", str(value or "").strip())
+    if not match:
+        return None
+    start, end, total = (int(item) for item in match.groups())
+    if end < start or total <= end:
+        return None
+    return start, end, total
+
+
+def _safe_part_size(job):
+    part = _validate_safe_update_file(
+        job["partPath"], job["targetDir"],
+        allowed_names={job["descriptor"]["name"] + ".part"}, required=False,
+    )
+    info = _lstat_or_none(part)
+    return (part, int(info.st_size)) if info is not None else (part, 0)
+
+
+def _open_update_part(part_path, *, append):
+    flags = os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if append:
+        flags |= os.O_APPEND
+    else:
+        flags |= os.O_CREAT | os.O_EXCL
+    fd = os.open(part_path, flags, 0o600)
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or _path_stat_is_reparse(info)
+        or int(getattr(info, "st_nlink", 1)) != 1
+    ):
+        os.close(fd)
+        raise _UpdateFailure("unsafe_update_path", stage="downloading")
+    return os.fdopen(fd, "ab" if append else "wb", buffering=0)
+
+
+def _truncate_update_part(job, generation):
+    part, _size = _safe_part_size(job)
+    with part.open("r+b") as stream:
+        info = os.fstat(stream.fileno())
+        if int(getattr(info, "st_nlink", 1)) != 1 or _path_stat_is_reparse(info):
+            raise _UpdateFailure("unsafe_update_path", stage="downloading")
+        stream.truncate(0)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _set_update_job_state(job["jobId"], generation, downloaded=0, etag="")
+
+
+def _publish_verified_update(job, generation):
+    descriptor = job["descriptor"]
+    part = _validate_completed_update_file(
+        job["partPath"], descriptor, job["targetDir"], partial=True,
+    )
+    final = _validate_safe_update_file(
+        job["finalPath"], job["targetDir"],
+        allowed_names={descriptor["name"]}, required=False,
+    )
+    if _lstat_or_none(final) is not None:
+        raise _UpdateFailure("target_conflict", stage="publishing")
+    last_error = None
+    for attempt in range(5):
+        try:
+            os.link(part, final, follow_symlinks=False)
+            part.unlink()
+            _validate_completed_update_file(final, descriptor, job["targetDir"])
+            return
+        except FileExistsError:
+            raise _UpdateFailure("target_conflict", stage="publishing")
+        except _UpdateFailure:
+            try:
+                final.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        except OSError as exc:
+            last_error = exc
+            try:
+                final.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt < 4:
+                time.sleep(0.05)
+    raise _UpdateFailure("publish_failed", retryable=True, stage="publishing") from last_error
+
+
+def _download_update_worker(job_id, generation):
+    with _update_job_lock:
+        job = _active_downloads.get(job_id)
+        if not job or int(job.get("generation") or 0) != int(generation):
+            return
+        job = dict(job)
+    descriptor = job["descriptor"]
+    response = None
+    last_transient = "download_interrupted"
+    try:
+        part, offset = _safe_part_size(job)
+        if offset > descriptor["size"]:
+            raise _UpdateFailure("download_size_mismatch", stage="verifying", reset_part=True)
+        _set_update_job_state(job_id, generation, downloaded=offset)
+        ignored_range = False
+        if offset < descriptor["size"]:
+            for attempt in range(_UPDATE_DOWNLOAD_ATTEMPTS):
+                with _update_job_lock:
+                    current = _active_downloads.get(job_id) or {}
+                    etag = str(current.get("etag") or "")
+                headers = {"Accept": "application/octet-stream", "User-Agent": "Code"}
+                if offset:
+                    headers["Range"] = f"bytes={offset}-"
+                    if etag:
+                        headers["If-Range"] = etag
+                req = request.Request(descriptor["url"], headers=headers)
+                try:
+                    response = request.urlopen(req, timeout=10)
+                    status = int(getattr(response, "status", response.getcode()))
+                    if offset and status == 200:
+                        if ignored_range:
+                            raise _UpdateFailure("upstream_protocol_invalid", stage="downloading", reset_part=True)
+                        ignored_range = True
+                        response.close()
+                        response = None
+                        _truncate_update_part(job, generation)
+                        offset = 0
+                        continue
+                    if status not in {200, 206}:
+                        raise _UpdateFailure("upstream_protocol_invalid", stage="downloading")
+                    parsed_range = _parse_content_range(_response_header(response, "Content-Range"))
+                    if status == 206:
+                        if (
+                            not parsed_range
+                            or parsed_range[0] != offset
+                            or parsed_range[1] != descriptor["size"] - 1
+                            or parsed_range[2] != descriptor["size"]
+                        ):
+                            raise _UpdateFailure("upstream_protocol_invalid", stage="downloading", reset_part=True)
+                    elif offset:
+                        raise _UpdateFailure("upstream_protocol_invalid", stage="downloading", reset_part=True)
+                    elif _response_header(response, "Content-Range"):
+                        raise _UpdateFailure("upstream_protocol_invalid", stage="downloading", reset_part=True)
+                    content_length = _response_header(response, "Content-Length")
+                    if content_length:
+                        try:
+                            declared = int(content_length)
+                        except ValueError as exc:
+                            raise _UpdateFailure("upstream_protocol_invalid", stage="downloading") from exc
+                        expected = descriptor["size"] - offset
+                        if declared != expected:
+                            raise _UpdateFailure("upstream_protocol_invalid", stage="downloading", reset_part=True)
+                    response_etag = _response_header(response, "ETag")
+                    if response_etag and len(response_etag) <= 256 and "\r" not in response_etag and "\n" not in response_etag:
+                        etag = response_etag
+                    with _open_update_part(part, append=_lstat_or_none(part) is not None) as stream:
+                        while True:
+                            chunk = response.read(_UPDATE_DOWNLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            if offset + len(chunk) > descriptor["size"]:
+                                raise _UpdateFailure("download_size_mismatch", stage="downloading", reset_part=True)
+                            stream.write(chunk)
+                            offset += len(chunk)
+                            progress = int(offset * 100 / descriptor["size"])
+                            _set_update_job_state(
+                                job_id, generation, downloaded=offset,
+                                progress=progress, etag=etag, stage="downloading",
+                            )
+                    response.close()
+                    response = None
+                    if offset == descriptor["size"]:
+                        break
+                    last_transient = "download_short_read"
+                    if attempt >= _UPDATE_DOWNLOAD_ATTEMPTS - 1:
+                        raise _UpdateFailure(last_transient, retryable=True, stage="downloading")
+                except _UpdateFailure:
+                    raise
+                except (error.HTTPError, error.URLError, TimeoutError, OSError, http.client.IncompleteRead, ConnectionError):
+                    last_transient = "download_interrupted"
+                    try:
+                        _part, offset = _safe_part_size(job)
+                    except _UpdateFailure:
+                        raise
+                    if attempt >= _UPDATE_DOWNLOAD_ATTEMPTS - 1:
+                        raise _UpdateFailure(last_transient, retryable=True, stage="downloading")
+                finally:
+                    try:
+                        if response is not None:
+                            response.close()
+                    except Exception:
+                        pass
+                    response = None
+                time.sleep(_UPDATE_RETRY_DELAYS[min(attempt, len(_UPDATE_RETRY_DELAYS) - 1)])
+            if offset != descriptor["size"]:
+                raise _UpdateFailure(last_transient, retryable=True, stage="downloading")
+        _set_update_job_state(job_id, generation, stage="verifying", downloaded=descriptor["size"], progress=100)
+        _publish_verified_update(job, generation)
+        _set_update_job_state(
+            job_id, generation, status="completed", stage="completed",
+            downloaded=descriptor["size"], progress=100, errorCode="", retryable=False,
+            writerActive=False,
+        )
+    except _UpdateFailure as exc:
+        if exc.reset_part:
+            try:
+                Path(job["partPath"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            _part, downloaded = _safe_part_size(job)
+        except _UpdateFailure:
+            downloaded = 0
+        _set_update_job_state(
+            job_id, generation, status="failed", stage=exc.stage,
+            downloaded=downloaded, errorCode=exc.code,
+            retryable=exc.retryable, writerActive=False,
+        )
+    except Exception:
+        _set_update_job_state(
+            job_id, generation, status="failed", stage="downloading",
+            errorCode="download_interrupted", retryable=True, writerActive=False,
+        )
+
+
+def _launch_update_worker(job):
+    generation = int(job.get("generation") or 0)
+    thread = threading.Thread(
+        target=_download_update_worker,
+        args=(job["jobId"], generation),
+        daemon=True,
+        name=f"code-update-{job['descriptor']['version']}",
+    )
+    with _update_job_lock:
+        current = _active_downloads.get(job["jobId"])
+        if current:
+            current["thread"] = thread
+    thread.start()
+
+
+def _parse_update_timestamp(value):
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(dt.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _restore_update_jobs(target_dir=None, *, trusted_descriptor=None, start_workers=True, now=None):
+    """Restore only the exact sidecar for the current trusted Release asset."""
+    global _current_update_job_id
+    descriptor = _normalize_update_descriptor(trusted_descriptor or _get_trusted_update_descriptor())
+    if not descriptor:
+        return []
+    try:
+        target = _validate_safe_update_directory(target_dir or _update_target_dir(), create=True)
+    except _UpdateFailure:
+        return []
+    metadata_path = _update_metadata_path(target, descriptor)
+    try:
+        info = _lstat_or_none(metadata_path)
+    except OSError:
+        return []
+    if info is None:
+        return []
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or _path_stat_is_reparse(info)
+        or int(getattr(info, "st_nlink", 1)) != 1
+        or info.st_size > 64 * 1024
+    ):
+        return []
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(metadata_path, flags)
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _path_stat_is_reparse(opened)
+                or int(getattr(opened, "st_nlink", 1)) != 1
+                or (
+                    getattr(info, "st_ino", 0)
+                    and getattr(opened, "st_ino", 0)
+                    and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                )
+            ):
+                return []
+            raw = stream.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            return []
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    expected_keys = {
+        "schema", "jobId", "descriptor", "status", "stage", "progress",
+        "downloaded", "etag", "errorCode", "retryable", "updatedAt",
+    }
+    updated_at = _parse_update_timestamp(payload.get("updatedAt") if isinstance(payload, dict) else None)
+    current_time = now or dt.datetime.now(dt.timezone.utc)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload.get("schema") != _UPDATE_JOB_SCHEMA
+        or _normalize_update_descriptor(payload.get("descriptor")) != descriptor
+        or updated_at is None
+        or current_time - updated_at > dt.timedelta(seconds=_UPDATE_JOB_MAX_AGE_SECONDS)
+        or updated_at - current_time > dt.timedelta(minutes=5)
+    ):
+        return []
+    try:
+        uuid.UUID(str(payload.get("jobId") or ""))
+        progress = max(0, min(100, int(payload.get("progress") or 0)))
+        downloaded = int(payload.get("downloaded") or 0)
+    except (ValueError, TypeError):
+        return []
+    status = str(payload.get("status") or "")
+    if status not in {"downloading", "failed", "completed", "installing", "installed"}:
+        return []
+    if downloaded < 0 or downloaded > descriptor["size"]:
+        return []
+    etag = str(payload.get("etag") or "")
+    if len(etag) > 256 or "\r" in etag or "\n" in etag:
+        return []
+    job = {
+        "jobId": str(payload["jobId"]),
+        "descriptor": descriptor,
+        "targetDir": str(target),
+        "finalPath": str(target / descriptor["name"]),
+        "partPath": str(target / f"{descriptor['name']}.part"),
+        "metadataPath": str(metadata_path),
+        "status": status,
+        "stage": str(payload.get("stage") or status),
+        "progress": progress,
+        "downloaded": downloaded,
+        "etag": etag,
+        "errorCode": str(payload.get("errorCode") or ""),
+        "retryable": bool(payload.get("retryable")),
+        "generation": 1,
+        "writerActive": status == "downloading",
+        "terminalCommitted": status in _UPDATE_TERMINAL_STATUSES,
+        "restartStarted": status == "installing",
+    }
+    try:
+        if status in {"completed", "installing", "installed"}:
+            _validate_completed_update_file(job["finalPath"], descriptor, target)
+        else:
+            _part, actual = _safe_part_size(job)
+            if actual != downloaded:
+                return []
+    except _UpdateFailure:
+        return []
+    if status in {"completed", "installing"} and _read_version_file() == descriptor["version"]:
+        job["status"] = "installed"
+        job["stage"] = "installed"
+        job["restartStarted"] = False
+        status = "installed"
+    with _update_job_lock:
+        key = _update_job_key(target, descriptor)
+        existing_id = _update_jobs_by_key.get(key)
+        if existing_id and existing_id != job["jobId"]:
+            return []
+        _active_downloads[job["jobId"]] = job
+        _update_jobs_by_key[key] = job["jobId"]
+        _current_update_job_id = job["jobId"]
+    if status == "downloading" and start_workers:
+        _launch_update_worker(job)
+    elif status == "installed":
+        try:
+            _persist_update_job(job)
+        except _UpdateFailure:
+            pass
+    return [_update_job_snapshot(job)]
+
+
+def _current_update_snapshot(job_id=None):
+    with _update_job_lock:
+        selected_id = str(job_id or _current_update_job_id or "")
+        job = _active_downloads.get(selected_id)
+        if job:
+            return _update_job_snapshot(job)
+    return {
+        "jobId": "", "downloadId": "", "version": "", "name": "",
+        "status": "idle", "stage": "idle", "progress": 0,
+        "downloaded": 0, "total": 0, "done": False,
+        "errorCode": None, "error": None, "retryable": False,
+    }
 
 def _load_tray_icon():
     """Load tray icon image. Try data dir first, then APP_DIR, fall back to generated."""
@@ -20576,17 +21477,15 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/download-progress":
                 did = query.get("id", [None])[0]
-                state = _active_downloads.get(did)
-                if not state:
-                    self.send_json({"error": "Unknown download"}, 404)
-                else:
+                snapshot = _current_update_snapshot(did)
+                if did and not snapshot["jobId"]:
                     self.send_json({
-                        "progress": state["progress"],
-                        "done": state["done"],
-                        "error": state["error"],
-                        "path": state["path"],
-                        "total": state["total"],
-                    })
+                        "errorCode": "unknown_update_job",
+                        "error": "The update task is not available.",
+                        "retryable": False,
+                    }, 404)
+                else:
+                    self.send_json(snapshot)
                 return
             if route == "/api/import/sessions":
                 src = query.get("source", ["codex"])[0]
@@ -23097,7 +23996,9 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def _check_update(self):
         local = _read_version_file()
-        remote, download_url = _read_remote_version()
+        descriptor = _get_trusted_update_descriptor()
+        remote = descriptor["version"] if descriptor else None
+        download_url = descriptor["url"] if descriptor else None
         is_frozen = getattr(sys, 'frozen', False)
         update_available = False
         if remote and download_url:
@@ -23113,67 +24014,68 @@ class CodeHandler(BaseHTTPRequestHandler):
             "updateAvailable": update_available,
             "isFrozen": is_frozen,
             "downloadUrl": download_url,
+            "assetName": descriptor["name"] if descriptor else None,
+            "assetSize": descriptor["size"] if descriptor else None,
         }
 
     def _handle_download_update(self, body):
-        url = body.get("url", "")
-        if not url:
-            self.send_json({"error": "No download URL provided"}, 400)
+        if (
+            not isinstance(body, dict)
+            or any(key not in {"url", "version", "retry"} for key in body)
+            or ("retry" in body and not isinstance(body.get("retry"), bool))
+        ):
+            self.send_json({
+                "errorCode": "invalid_update_request",
+                "error": _public_update_error("invalid_update_request"),
+                "retryable": False,
+            }, 400)
             return
-        # Download to the permanent installation directory with a versioned name.
-        if getattr(sys, 'frozen', False):
-            target_dir = Path.home() / ".code"
-        else:
-            target_dir = APP_DIR / "dist"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        ver_tag = "update"
-        m = re.search(r'Code-v([\d.]+)\.exe', url)
-        if m:
-            ver_tag = m.group(1)
-        new_exe = target_dir / f"Code-v{ver_tag}.exe"
-        partial_exe = new_exe.with_suffix(new_exe.suffix + ".part")
-        download_id = str(uuid.uuid4())
-        state = {"progress": 0, "done": False, "error": None, "path": str(new_exe), "total": 0}
-        _active_downloads[download_id] = state
-
-        def _do_download():
-            try:
-                partial_exe.unlink(missing_ok=True)
-                def _report(b, s, t):
-                    if t > 0:
-                        state["total"] = t
-                        state["progress"] = min(int(b * s / t * 100), 100)
-                request.urlretrieve(url, str(partial_exe), reporthook=_report)
-                if not _is_valid_windows_executable(partial_exe):
-                    raise ValueError("Downloaded file is not a valid Windows executable")
-                # os.replace can fail transiently due to antivirus locks;
-                # retry a few times with a short delay before giving up.
-                rename_ok = False
-                last_err = None
-                for attempt in range(5):
-                    try:
-                        os.replace(partial_exe, new_exe)
-                        rename_ok = True
-                        break
-                    except OSError as e:
-                        last_err = e
-                        time.sleep(0.5)
-                if not rename_ok:
-                    # Keep the .part file — it is a valid download and can be
-                    # renamed manually.  The frontend will show the error so the
-                    # user knows to rename Code-vX.exe.part → Code-vX.exe.
-                    raise OSError(f"os.replace failed after retries: {last_err}")
-                state["done"] = True
-                state["progress"] = 100
-            except Exception as e:
-                state["error"] = str(e)
-                # Keep the .part on rename failures so the user doesn't have to
-                # re-download; only delete it for truly broken downloads.
-                partial_exe.unlink(missing_ok=True)
-
-        t = threading.Thread(target=_do_download, daemon=True)
-        t.start()
-        self.send_json({"ok": True, "downloadId": download_id, "path": str(new_exe)})
+        legacy_url = str(body.get("url") or "").strip()
+        legacy_match = re.fullmatch(
+            r"https://github\.com/fhy-A/Code/releases/download/v(\d+(?:\.\d+)+)/Code-v\1\.exe",
+            legacy_url,
+        ) if legacy_url else None
+        if legacy_url and (
+            legacy_match is None
+            or _normalize_update_descriptor({
+                "version": legacy_match.group(1),
+                "name": f"Code-v{legacy_match.group(1)}.exe",
+                "url": legacy_url,
+                "size": 1,
+                "digest": "0" * 64,
+            }) is None
+        ):
+            self.send_json({
+                "errorCode": "invalid_update_request",
+                "error": _public_update_error("invalid_update_request"),
+                "retryable": False,
+            }, 400)
+            return
+        descriptor = _get_trusted_update_descriptor()
+        requested_version = str(body.get("version") or "").strip().lstrip("v")
+        if (
+            not descriptor
+            or (legacy_url and legacy_url != descriptor["url"])
+            or (requested_version and requested_version != descriptor["version"])
+        ):
+            code = "trusted_asset_unavailable" if not descriptor else "invalid_update_request"
+            self.send_json({
+                "errorCode": code,
+                "error": _public_update_error(code),
+                "retryable": code == "trusted_asset_unavailable",
+            }, 503 if not descriptor else 400)
+            return
+        try:
+            snapshot = _start_or_attach_update_job(
+                descriptor, retry=bool(body.get("retry")),
+            )
+            self.send_json({"ok": True, **snapshot})
+        except _UpdateFailure as exc:
+            self.send_json({
+                "errorCode": exc.code,
+                "error": _public_update_error(exc.code),
+                "retryable": exc.retryable,
+            }, 409 if exc.code == "target_conflict" else 400)
 
     def _handle_open_file(self):
         body = self.read_body_json()
@@ -23184,51 +24086,76 @@ class CodeHandler(BaseHTTPRequestHandler):
 
     def _handle_restart(self):
         body = self.read_body_json()
-        new_exe_path = (body.get("path") or "").strip()
-        if not new_exe_path:
-            self.send_json({"error": "No update path provided"}, 400)
-            return
         if not getattr(sys, 'frozen', False):
-            self.send_json({"error": "Update only supported in compiled exe", "devMode": True}, 400)
+            self.send_json({
+                "errorCode": "update_not_ready",
+                "error": _public_update_error("update_not_ready"),
+                "retryable": False,
+                "devMode": True,
+            }, 400)
             return
-        current_exe = Path(sys.executable).resolve()
-        new_exe = Path(new_exe_path).resolve()
-        target_dir = (Path.home() / ".code").resolve()
-        expected_name = re.compile(r'^Code-v[0-9]+(?:[.][0-9]+)*[.]exe$', re.IGNORECASE)
-        if new_exe.parent != target_dir or not expected_name.match(new_exe.name):
-            self.send_json({"error": "Update executable must be a versioned Code file in the .code directory"}, 400)
+        if (
+            not isinstance(body, dict)
+            or any(key not in {"jobId"} for key in body)
+            or not isinstance(body.get("jobId", ""), str)
+        ):
+            self.send_json({
+                "errorCode": "invalid_update_request",
+                "error": _public_update_error("invalid_update_request"),
+                "retryable": False,
+            }, 400)
             return
-        if new_exe == current_exe:
-            self.send_json({"error": "Downloaded version is already running"}, 400)
-            return
-        # If the .exe is missing but a valid .exe.part exists, complete the rename.
-        # This recovers from os.replace failures (e.g. transient antivirus locks).
-        if not new_exe.is_file():
-            partial = new_exe.with_suffix(new_exe.suffix + ".part")
-            if partial.is_file() and _is_valid_windows_executable(partial):
-                try:
-                    os.replace(partial, new_exe)
-                except OSError:
-                    # Last resort: the PS updater can also handle the .part
-                    pass
-        if not _is_valid_windows_executable(new_exe):
-            partial_exe = new_exe.with_suffix(new_exe.suffix + ".part")
-            if partial_exe.is_file() and _is_valid_windows_executable(partial_exe):
-                new_exe = partial_exe  # batch updater will rename it
-            else:
-                self.send_json({"error": "Update file not found or invalid"}, 400)
+        requested_id = str((body or {}).get("jobId") or "").strip()
+        with _update_job_lock:
+            selected_id = requested_id or _current_update_job_id
+            job = _active_downloads.get(selected_id)
+            if job and job.get("status") == "installing" and job.get("restartStarted"):
+                self.send_json({"ok": True, **_update_job_snapshot(job)})
                 return
-        else:
-            partial_exe = None
-        log_path = DATA_DIR / "update.log"
-        bat_path = _build_update_script(target_dir, new_exe, partial_exe, log_path)
-        self.send_json({"ok": True, "nextExecutable": str(new_exe)})
-        subprocess.Popen(
-            ["cmd", "/c", str(bat_path)],
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
-            close_fds=True,
-            cwd=str(target_dir),
-        )
+            if not job or job.get("status") != "completed":
+                self.send_json({
+                    "errorCode": "update_not_ready",
+                    "error": _public_update_error("update_not_ready"),
+                    "retryable": False,
+                }, 409)
+                return
+            generation = int(job.get("generation") or 0)
+            job["status"] = "installing"
+            job["stage"] = "installing"
+            job["restartStarted"] = True
+            job["terminalCommitted"] = True
+            job_copy = dict(job)
+        try:
+            _validate_completed_update_file(
+                job_copy["finalPath"], job_copy["descriptor"], job_copy["targetDir"],
+            )
+            _persist_update_job(job_copy)
+            target_dir = Path(job_copy["targetDir"])
+            new_exe = Path(job_copy["finalPath"])
+            current_exe = _absolute_lexical_path(sys.executable)
+            if new_exe == current_exe:
+                raise _UpdateFailure("update_not_ready", stage="installing")
+            log_path = DATA_DIR / "update.log"
+            bat_path = _build_update_script(target_dir, new_exe, None, log_path)
+            subprocess.Popen(
+                ["cmd", "/c", str(bat_path)],
+                creationflags=0x08000000,
+                close_fds=True,
+                cwd=str(target_dir),
+            )
+        except Exception:
+            _set_update_job_state(
+                job_copy["jobId"], generation, status="completed", stage="completed",
+                errorCode="install_launch_failed", retryable=True,
+                restartStarted=False, terminalCommitted=True,
+            )
+            self.send_json({
+                "errorCode": "install_launch_failed",
+                "error": _public_update_error("install_launch_failed"),
+                "retryable": True,
+            }, 500)
+            return
+        self.send_json({"ok": True, **_current_update_snapshot(job_copy["jobId"])})
         os._exit(0)
 
     def _handle_sync_keys(self):
@@ -23400,30 +24327,13 @@ class CodeHandler(BaseHTTPRequestHandler):
 
 
 def _complete_orphaned_parts(target_dir=None):
-    """On startup, look for orphaned .part files and complete their rename.
-
-    This handles the case where a previous update download completed but
-    os.replace failed (e.g. antivirus lock)."""
-    if target_dir is None:
-        target_dir = Path.home() / ".code"
-    if not target_dir.is_dir():
-        return
-    for part in sorted(target_dir.glob("Code-v*.exe.part")):
-        target = part.with_suffix("")
-        if target.exists():
-            part.unlink(missing_ok=True)
-            continue
-        if _is_valid_windows_executable(part):
-            try:
-                os.replace(part, target)
-                print(f"[startup] completed rename: {part.name} -> {target.name}")
-            except OSError as e:
-                print(f"[startup] rename failed, will retry next startup: {part.name} ({e})")
+    """Compatibility name: restore only a trusted, versioned updater sidecar."""
+    return _restore_update_jobs(target_dir)
 
 
 if __name__ == "__main__":
     os.chdir(APP_DIR)
-    _complete_orphaned_parts()
+    _restore_update_jobs()
 
     # Kill any existing Code process using our port
     import subprocess as _sp

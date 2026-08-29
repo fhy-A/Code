@@ -4150,6 +4150,7 @@ def main() -> int:
     code_server.CODEX_SESSIONS_DIR = root / "home" / ".codex" / "sessions"
     code_server.CLAUDE_PROJECTS_DIR = root / "home" / ".claude" / "projects"
     code_server._read_remote_version = lambda: (None, None)
+    code_server._get_trusted_update_descriptor = lambda **_kwargs: None
     code_server.write_json(code_server.CONFIG_PATH, {
         "projectRoot": str(project_dir),
         "newApiBaseUrl": fake_url,

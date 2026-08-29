@@ -13086,6 +13086,156 @@ const feature = createSettingsFeature({
         self.assertEqual(data["replaced"], [[None, "", "/"]])
         self.assertEqual(data["toasts"], [["loggedInAs:Alice", "warning"]])
 
+    def test_update_panel_reopen_attaches_same_job_with_one_poll(self):
+        script = r"""
+const elements = {};
+const activeIntervals = new Map();
+const clearedIntervals = [];
+let nextInterval = 1;
+class FakeElement {
+  constructor(id) {
+    this.id = id;
+    this.listeners = {};
+    this.classes = new Set();
+    this.classList = {
+      add: (...names) => names.forEach((name) => this.classes.add(name)),
+      remove: (...names) => names.forEach((name) => this.classes.delete(name)),
+      toggle: (name, force) => {
+        const next = force === undefined ? !this.classes.has(name) : Boolean(force);
+        if (next) this.classes.add(name); else this.classes.delete(name);
+      },
+      contains: (name) => this.classes.has(name),
+    };
+    this.style = {};
+    this.dataset = {};
+    this.textContent = "";
+    this._html = "";
+  }
+  addEventListener(type, callback) { this.listeners[type] = callback; }
+  click() { return this.listeners.click?.({target: this, currentTarget: this}); }
+  querySelectorAll() { return []; }
+  querySelector() { return null; }
+  set innerHTML(value) {
+    this._html = String(value);
+    for (const match of this._html.matchAll(/id="([^"]+)"/g)) elements[match[1]] = new FakeElement(match[1]);
+  }
+  get innerHTML() { return this._html; }
+}
+elements.settingsDetail = new FakeElement("settingsDetail");
+elements.settingsPage = new FakeElement("settingsPage");
+elements.closeSettingsPage = new FakeElement("closeSettingsPage");
+const documentStub = {
+  body: new FakeElement("body"),
+  getElementById: (id) => elements[id] || null,
+  querySelectorAll: () => [],
+  querySelector: () => null,
+  addEventListener: () => {},
+};
+global.window = {
+  Code: {core: {}, features: {}},
+  URL,
+  URLSearchParams,
+  location: {href: "http://127.0.0.1:3010/", search: ""},
+  localStorage: {getItem: () => null, setItem: () => {}, removeItem: () => {}},
+  matchMedia: () => ({matches: false, addEventListener: () => {}}),
+  addEventListener: () => {},
+  setTimeout,
+  setInterval: (callback) => { const id = nextInterval++; activeIntervals.set(id, callback); return id; },
+  clearInterval: (id) => { clearedIntervals.push(id); activeIntervals.delete(id); },
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/settings.js");
+const calls = [];
+const retryBodies = [];
+let job = {jobId: "job-stable", version: "0.6.7", status: "downloading", stage: "downloading", progress: 42, done: false, retryable: false};
+const feature = window.Code.features.settings.createSettingsFeature({
+  state: {},
+  elements: {},
+  t: (key) => key,
+  document: documentStub,
+  storage: window.localStorage,
+  apiJson: async (url, options = {}) => {
+    calls.push({url, options});
+    if (url === "/api/version") return {localVersion: "0.6.6"};
+    if (url === "/api/download-progress") return job;
+    if (url === "/api/download-update") {
+      retryBodies.push(JSON.parse(options.body || "{}"));
+      job = {...job, status: "downloading", stage: "downloading", retryable: false, errorCode: null};
+      return job;
+    }
+    if (url === "/api/restart") {
+      const error = new Error("sanitized");
+      error.data = {errorCode: "install_launch_failed"};
+      throw error;
+    }
+    throw new Error(`unexpected ${url}`);
+  },
+});
+(async () => {
+  feature.bind();
+  feature.openSettingsPage("update");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const firstActive = activeIntervals.size;
+  await elements.closeSettingsPage.click();
+  const afterClose = activeIntervals.size;
+  feature.openSettingsPage("update");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const reopenedActive = activeIntervals.size;
+  const downloadingStatus = elements.updateStatus?.innerHTML || "";
+  job = {...job, status: "failed", stage: "downloading", errorCode: "download_interrupted", retryable: true};
+  await [...activeIntervals.values()][0]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const failedActive = activeIntervals.size;
+  const failedStatus = elements.updateStatus?.innerHTML || "";
+  const retryVisible = Boolean(elements.updateRetryBtn);
+  await elements.updateRetryBtn.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const retryActive = activeIntervals.size;
+  job = {...job, status: "completed", stage: "completed", progress: 100, done: true};
+  await [...activeIntervals.values()][0]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await elements.updateRestartBtn.click();
+  const installFailureStatus = elements.updateStatus?.innerHTML || "";
+  const installRetryVisible = Boolean(elements.updateRestartBtn);
+  process.stdout.write(JSON.stringify({
+    firstActive,
+    afterClose,
+    reopenedActive,
+    failedActive,
+    retryActive,
+    retryVisible,
+    retryBodies,
+    clearedIntervals,
+    currentCalls: calls.filter((item) => item.url === "/api/download-progress").map((item) => item.url),
+    downloadingStatus,
+    failedStatus,
+    installFailureStatus,
+    installRetryVisible,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["firstActive"], 1)
+        self.assertEqual(data["afterClose"], 0)
+        self.assertEqual(data["reopenedActive"], 1)
+        self.assertEqual(data["failedActive"], 0)
+        self.assertEqual(data["retryActive"], 1)
+        self.assertTrue(data["retryVisible"])
+        self.assertEqual(data["retryBodies"], [{"version": "0.6.7", "retry": True}])
+        self.assertGreaterEqual(len(data["clearedIntervals"]), 2)
+        self.assertEqual(data["currentCalls"][:2], ["/api/download-progress", "/api/download-progress"])
+        self.assertIn("downloading", data["downloadingStatus"])
+        self.assertIn("updateErrorNetwork", data["failedStatus"])
+        self.assertIn("updateErrorInstall", data["installFailureStatus"])
+        self.assertTrue(data["installRetryVisible"])
+        self.assertIn('updateErrorNetwork: "下载中断，可继续重试。"', I18N_SOURCE)
+        self.assertIn('updateErrorNetwork: "The download was interrupted and can be resumed."', I18N_SOURCE)
+
     def test_image_settings_are_independent_masked_and_bind_only_public_route_identity(self):
         script = r"""
 const values = new Map();
