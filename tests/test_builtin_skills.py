@@ -26,6 +26,7 @@ DEPENDENCY_SKILLS = {
     "mcp-builder",
     "office-files",
     "pdf",
+    "ppt-master",
     "pptx",
     "web-artifacts-builder",
     "xlsx",

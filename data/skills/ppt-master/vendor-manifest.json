@@ -1,0 +1,654 @@
+{
+  "schema": "code-ppt-master-vendor/v1",
+  "source": {
+    "repository": "https://github.com/hugohe3/ppt-master.git",
+    "tag": "v5.1.0",
+    "commit": "d6bcaf96b7946667f4a8871b0688b903181db527",
+    "tree": "cd5fad962cf856ccaf0a5101695439cbff30635a"
+  },
+  "upstreamInventory": {
+    "files": 13008,
+    "bytes": 115940805,
+    "manifestSha256": "0ebe6478337139a98f0f616a84f611238a8e50469ea06f95d22e8bf35ed602ea"
+  },
+  "selection": {
+    "kind": "static-offline-core",
+    "pythonSeeds": [
+      "svg_to_pptx.drawingml.elements",
+      "svg_to_pptx.native_objects",
+      "svg_to_pptx.native_objects.inline_formula",
+      "svg_to_pptx.native_objects.formula_compiler",
+      "pptx_opc_validation",
+      "semantic_table"
+    ],
+    "closure": "top-level AST imports plus explicitly selected lazy native-object modules",
+    "executableEntrypoints": [],
+    "allowedExternalImports": [
+      "openpyxl",
+      "pathops",
+      "pptx",
+      "uharfbuzz",
+      "xlsxwriter",
+      "yaml"
+    ],
+    "excludedCapabilities": [
+      "automatic-update",
+      "credentials-and-dotenv",
+      "direct-network-and-providers",
+      "web-and-image-download",
+      "tts-audio-narration-video-animation",
+      "confirm-ui-and-svg-editor-services",
+      "image-to-pptx",
+      "brands-icons-sounds-decks-and-ai-comparison-assets"
+    ]
+  },
+  "licenseClosure": [
+    "LICENSE",
+    "scripts/pptx_shapes/data/LICENSE-APACHE-2.0.txt",
+    "scripts/pptx_shapes/data/LICENSE-OPEN-XML-SDK-MIT.txt",
+    "scripts/pptx_shapes/data/NOTICE.md"
+  ],
+  "limits": {
+    "maxFiles": 1000,
+    "maxBytes": 15728640
+  },
+  "fileCount": 66,
+  "totalBytes": 1840608,
+  "manifestDigest": "b624171959890a6c2d663332bf709c8b05c266272cd6e632e7dc4dbb970e13cf",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sourcePath": "skills/ppt-master/LICENSE",
+      "mode": "100644",
+      "size": 1069,
+      "sha256": "80cefc234c1ec12a8cece4344f16300c634fa03df7891686fcf979e3828f0921",
+      "gitBlobOid": "9c261c3d9a1d3249fa8f18611c950d719d288560",
+      "category": "resource"
+    },
+    {
+      "path": "SPONSORS.md",
+      "sourcePath": "skills/ppt-master/SPONSORS.md",
+      "mode": "100644",
+      "size": 4485,
+      "sha256": "46f309860abbf4aca987ee08ff686f7e59d2a5f588755580411464246c10d060",
+      "gitBlobOid": "817227a6a63a7054969f1f8e35bc6a984fbd2e9a",
+      "category": "resource"
+    },
+    {
+      "path": "SPONSORS_CN.md",
+      "sourcePath": "skills/ppt-master/SPONSORS_CN.md",
+      "mode": "100644",
+      "size": 4194,
+      "sha256": "37284cf1d109caccab379904cfc575acc2f934e74246cbb66423f8f4912e83d0",
+      "gitBlobOid": "10f395cc9569a2e853700dcd5adf6d39c2a13404",
+      "category": "resource"
+    },
+    {
+      "path": "references/native-formula.md",
+      "sourcePath": "skills/ppt-master/references/native-formula.md",
+      "mode": "100644",
+      "size": 9636,
+      "sha256": "6ef9038f0c6390499d63c9ccfb20926142f738c2af66e9745f1db7487cbf1742",
+      "gitBlobOid": "e10986c5f81a271d471daf8d6f58780eb3250ec3",
+      "category": "resource"
+    },
+    {
+      "path": "references/native-hyperlinks.md",
+      "sourcePath": "skills/ppt-master/references/native-hyperlinks.md",
+      "mode": "100644",
+      "size": 5244,
+      "sha256": "7e2a6bd7fb749c0fd13de1608c41a15883c63b7ba0fed2f5442a955aca9f57dc",
+      "gitBlobOid": "dc638f906c5328bf16b9e851eecca116da96c29d",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/hyperlink_contract.py",
+      "sourcePath": "skills/ppt-master/scripts/hyperlink_contract.py",
+      "mode": "100644",
+      "size": 13579,
+      "sha256": "c92921c1252c8b4a95f18d6fc447b00bb9463fc7a30f3bc6f59a3a0d511b9825",
+      "gitBlobOid": "07f67bc084e24756eace7e1ac7f26bfa92f4e986",
+      "category": "python"
+    },
+    {
+      "path": "scripts/language_tags.py",
+      "sourcePath": "skills/ppt-master/scripts/language_tags.py",
+      "mode": "100644",
+      "size": 7563,
+      "sha256": "2c84d88bf075923b6f040b4009e32331ad18d1c7f5c0122fcfaff5ac9a6ac20d",
+      "gitBlobOid": "4ac532669d991251dd6d956a545f5f728e75a384",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_effects.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_effects.py",
+      "mode": "100644",
+      "size": 8488,
+      "sha256": "ec9341c82723d97ed9a583a98ef36ca7e4ebfe0496a845a2981c67d1a479a014",
+      "gitBlobOid": "e9200e2ef1c33f9986de8928df56e91e178cb14c",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_gradients.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_gradients.py",
+      "mode": "100644",
+      "size": 4353,
+      "sha256": "3b1f2877007994ed60e4b0f77e5029eca624595180fd123dfcaadc3a7274debe",
+      "gitBlobOid": "abe29a5e6c44f896b6a1862cd863dee5b86fbff4",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_opc_validation.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_opc_validation.py",
+      "mode": "100644",
+      "size": 12373,
+      "sha256": "4b209dc4741b35314ecc4b8279c92c734aac79e9aa25e96c2911d231c67d7e4c",
+      "gitBlobOid": "1f2e5a861f96ef416c352b0ac90ab50d85f5b24e",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/__init__.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/__init__.py",
+      "mode": "100644",
+      "size": 3311,
+      "sha256": "dcb690214811cbcf5174b295391dfd020db654ae358fc83faeef67ec861d228b",
+      "gitBlobOid": "52d7ccbefec89d87933019e24b1a8ac49d195d1e",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/data/LICENSE-APACHE-2.0.txt",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/data/LICENSE-APACHE-2.0.txt",
+      "mode": "100644",
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "gitBlobOid": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/pptx_shapes/data/LICENSE-OPEN-XML-SDK-MIT.txt",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/data/LICENSE-OPEN-XML-SDK-MIT.txt",
+      "mode": "100644",
+      "size": 1116,
+      "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310",
+      "gitBlobOid": "984713a49622a96da110443c15477613bc12656b",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/pptx_shapes/data/NOTICE.md",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/data/NOTICE.md",
+      "mode": "100644",
+      "size": 2365,
+      "sha256": "57f3e499fbf289e2d03a3a494ea69a5cd1685a707ad8f2618e46144ea1ec88cb",
+      "gitBlobOid": "0f1424823026959f8ba871dc8951c883f5cd53bc",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/pptx_shapes/data/presetShapeDefinitions.xml",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/data/presetShapeDefinitions.xml",
+      "mode": "100644",
+      "size": 538970,
+      "sha256": "4a762444d8d85876881c02a5b1dedf6f73006fcd8acb7b4e393435615b37c780",
+      "gitBlobOid": "b425872e062cb992ae78d3cf288192724c0b25c8",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/pptx_shapes/data/presetShapeSemantics.json",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/data/presetShapeSemantics.json",
+      "mode": "100644",
+      "size": 54373,
+      "sha256": "5ea777349e00fa7796709fa28bdcb6ba6b65705874113cbeca31380465a6e998",
+      "gitBlobOid": "f534c955487937ddd8ad5553eea77672216aa69c",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/pptx_shapes/data/shape_type_values.txt",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/data/shape_type_values.txt",
+      "mode": "100644",
+      "size": 2527,
+      "sha256": "f2c3bdcda8569b358ce3196cfeb183849e33bfc7955fac961dc85fceb6b3b587",
+      "gitBlobOid": "cba0a418cd6af38c28724cb4ac6b6515c435303f",
+      "category": "resource"
+    },
+    {
+      "path": "scripts/pptx_shapes/errors.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/errors.py",
+      "mode": "100644",
+      "size": 1017,
+      "sha256": "ee3a22954c6c49eabeb76ae4a26bdea395d8b4318cfde8233758ccd9d28bab6b",
+      "gitBlobOid": "e0d3199a4f02ed18deccbd44655c501752fd19a7",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/formula.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/formula.py",
+      "mode": "100644",
+      "size": 11046,
+      "sha256": "4e140cffb5413362746f20abbbdce107f8a4de8a79edcf4843093c662985259f",
+      "gitBlobOid": "3c07a23f196a72c4d88be0285213c032211ba2ae",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/loader.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/loader.py",
+      "mode": "100644",
+      "size": 12654,
+      "sha256": "81e04c63f65d39bcbec3b27322ba04e8706d062add4f85c8cfd8730b6104f422",
+      "gitBlobOid": "8089a2a2672a4334f540707c94be903782a50eac",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/models.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/models.py",
+      "mode": "100644",
+      "size": 4881,
+      "sha256": "6e1a6f38e8dde4f0a40abb3142e748a03e52ccced5e29684cdd69573527e5423",
+      "gitBlobOid": "0c60151953d9842f00e9cbbf4a831fe287b7553b",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/registry.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/registry.py",
+      "mode": "100644",
+      "size": 8888,
+      "sha256": "1e2299877aa96f704deacd3216ed3add6d24226d0267941682de755b08dc9155",
+      "gitBlobOid": "adb8cc14fc4a1e8af62154f3ddf1d73ef5acdc68",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/semantic_hash.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/semantic_hash.py",
+      "mode": "100644",
+      "size": 14001,
+      "sha256": "e47096d88923df44e38185ada3b32fd1dc9789c04e20809bbabdb5f2d280a597",
+      "gitBlobOid": "88cea092f8838ffa612b5975ce1bca4b42d37bca",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/semantics.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/semantics.py",
+      "mode": "100644",
+      "size": 18527,
+      "sha256": "cecc082f9530ea36ccf99ef89a62269371f13b7f45c823296a051829f9c5eb35",
+      "gitBlobOid": "a941005fa1e6ce733c51832cbfabe9fce4ca68a4",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_shapes/xml_safety.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_shapes/xml_safety.py",
+      "mode": "100644",
+      "size": 634,
+      "sha256": "b411dc284fc176bee652de58ca27a93f293b952c8f804b2aaf44394c574dbc3c",
+      "gitBlobOid": "c0b717e6a7856780ae7382b92f68060a428d7c20",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_to_svg/emu_units.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_to_svg/emu_units.py",
+      "mode": "100644",
+      "size": 8845,
+      "sha256": "877ce22705f1cc87ad645ae855d06b4e765b2e29ac9e0489c9a0a45edb0e5bf1",
+      "gitBlobOid": "ab48120449dd0c184c4f00cfd36420a9a87d9e2a",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_to_svg/preset_authoring.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_to_svg/preset_authoring.py",
+      "mode": "100644",
+      "size": 32084,
+      "sha256": "31d7eb7c2d5e40ce97906d094ef6304d8159ba4edbe8a1b9fee6e1e9bc497b07",
+      "gitBlobOid": "04b200e6ae45dfb2be619512a427f63e906eb52f",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_to_svg/preset_registry_to_svg.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_to_svg/preset_registry_to_svg.py",
+      "mode": "100644",
+      "size": 6695,
+      "sha256": "41344cfe2cdcd42c88b2a716b7a56f8245be7a1f2076f6284a5075ed46012825",
+      "gitBlobOid": "db0a7fd25add19f5917a7cd0b031f8ca988a9304",
+      "category": "python"
+    },
+    {
+      "path": "scripts/pptx_to_svg/preset_svg_markup.py",
+      "sourcePath": "skills/ppt-master/scripts/pptx_to_svg/preset_svg_markup.py",
+      "mode": "100644",
+      "size": 6284,
+      "sha256": "ee5bf97cd129c7623b92551d9a8a43a183e316ae030249f2196b54ee5adc8848",
+      "gitBlobOid": "d64532378569fc189b4b054e9ce2ead65d88be4c",
+      "category": "python"
+    },
+    {
+      "path": "scripts/resource_paths.py",
+      "sourcePath": "skills/ppt-master/scripts/resource_paths.py",
+      "mode": "100644",
+      "size": 9638,
+      "sha256": "c8ee17e1a83e946201e5c2944c3b4ef30b05eddebc4b62995fe7a9b722ccda3e",
+      "gitBlobOid": "00fe7a2659e29608300d3157a37addedbc9aa7b3",
+      "category": "python"
+    },
+    {
+      "path": "scripts/semantic_table.py",
+      "sourcePath": "skills/ppt-master/scripts/semantic_table.py",
+      "mode": "100644",
+      "size": 15840,
+      "sha256": "ed044f1dce1accc504b569bd1b2ab1894578f5bce92257a6bd9e49b27a37634d",
+      "gitBlobOid": "fffb1b1a89e00ad82650cc8b96b91c17149a74af",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/__init__.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/__init__.py",
+      "mode": "100644",
+      "size": 59,
+      "sha256": "9313e6cb2ce93064d10a3f96f65252241a95300efcbfa3de3455fc5e2d1775dd",
+      "gitBlobOid": "a892d4d57c43b20428aecf052b192961671e8553",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/context.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/context.py",
+      "mode": "100644",
+      "size": 12779,
+      "sha256": "89ba196a3266d39580751cf04dd01dbc35506cf850695fa570cca41577548036",
+      "gitBlobOid": "1ccdb94f231331c685d55619f9c39589d5f40557",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/elements.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/elements.py",
+      "mode": "100644",
+      "size": 184363,
+      "sha256": "f7dfa8fbf28ff295a05cffeaef10ac0755f9bb3cd6d40731d5eb34c016d1a30d",
+      "gitBlobOid": "915505a148522a073b25582f85dc577e1b88813c",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/hyperlinks.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/hyperlinks.py",
+      "mode": "100644",
+      "size": 5001,
+      "sha256": "576e6a19e38fbe60952831b31ff19fba675d8bc14463e2130e09a06e6eaac21c",
+      "gitBlobOid": "a1123973a96740bba0c8f2550d60f17a3b5b76b6",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/paths.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/paths.py",
+      "mode": "100644",
+      "size": 29381,
+      "sha256": "3d8599d6510c9ad32a4b8ef1079a7ae65f0f09abd240f245366e6384b6103b90",
+      "gitBlobOid": "a12a6594e3e4d2bb1ba02d8b1e765f922612bdee",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/styles.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/styles.py",
+      "mode": "100644",
+      "size": 25931,
+      "sha256": "23e31b9bd81a8980a8cf91ca161fad7b6c856831c5a369339f0057691fb728a0",
+      "gitBlobOid": "7d294053d6f061acea6a21de7298c56c4659a6b3",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/text_properties.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/text_properties.py",
+      "mode": "100644",
+      "size": 25881,
+      "sha256": "d8954b6916d7b3afb1c7f01e0d62f209dc9afd654b43ef71c53d4f2ebcd04662",
+      "gitBlobOid": "a15115c480fdd6f35f44441dd2472cced02105da",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/theme_colors.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/theme_colors.py",
+      "mode": "100644",
+      "size": 10018,
+      "sha256": "09c7ccce9c0839605d1c71fa400654ba71b3c4bb041c34ad1a99101369173e9c",
+      "gitBlobOid": "a296d9d4fc7793f143be804bd3aad23e4a9b897d",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/theme_fonts.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/theme_fonts.py",
+      "mode": "100644",
+      "size": 14526,
+      "sha256": "d6ab255c22d0b96a998c08708903f9475460874a8c2696f800fc6fe91c8ec433",
+      "gitBlobOid": "f4837c2f6f937300ba1f7cd8d5fd048ab04821d1",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/drawingml/utils.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/drawingml/utils.py",
+      "mode": "100644",
+      "size": 127907,
+      "sha256": "ee90e5d713b85d6d71cfd8ee27832ac014d5dd4029871c03a1b92c8865ebe2d7",
+      "gitBlobOid": "da3532f220890a3985d870a5a9202b08fbd3d6eb",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/__init__.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/__init__.py",
+      "mode": "100644",
+      "size": 23442,
+      "sha256": "f6adbea6c064faf85d76fc3f0723132c5c28b8d88fc567f23ff63cc2786858b8",
+      "gitBlobOid": "824acabe19c3eff4ff3257eb761b59ed351242da",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/chart_data.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/chart_data.py",
+      "mode": "100644",
+      "size": 59447,
+      "sha256": "98a93fcedac4a8d1ed75efccae2a03a02a4ec4d628a11846efcf98151850326b",
+      "gitBlobOid": "42f148d5d11d794e1f6784adafe718d9a6f3a504",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/chart_style.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/chart_style.py",
+      "mode": "100644",
+      "size": 40248,
+      "sha256": "d7aadd134b8f5671d3ee9bf0d45633548ff09b36bb5873b8d63ef64144da8ba6",
+      "gitBlobOid": "c2b86cbc566e6954ea00fff11f40bf7b5512ef88",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/chart_xml.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/chart_xml.py",
+      "mode": "100644",
+      "size": 55947,
+      "sha256": "d08f124944f5ba15cd14a9d8e4a380e0d37ed2a5ee4224ce77b42e9b9440b4c1",
+      "gitBlobOid": "1441c90704537ca90c84acaa857cd1318a8783d5",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/chartex.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/chartex.py",
+      "mode": "100644",
+      "size": 22173,
+      "sha256": "dd1d76cbaa2068adf2e93df6e0840a01cd5361ecee6a4edebef1d89e86a62976",
+      "gitBlobOid": "36c8fcfd49b9164390b9dceb91d2cff2276689a1",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/fallback_hash.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/fallback_hash.py",
+      "mode": "100644",
+      "size": 5831,
+      "sha256": "ffc5f50f2b790ad0a1cb890ba5315745a23fc803b3628b06bf27948dfafbc4ea",
+      "gitBlobOid": "0bf3a5fba4acce3f7ed046bf948dff24bf036ea4",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula.py",
+      "mode": "100644",
+      "size": 7732,
+      "sha256": "34bb4d29486fd947911e4cec91ec416cd4585ad9f66b1e4405d1cdad00ce0034",
+      "gitBlobOid": "13b6b0dd02d94f7a2f5617f2b37f8e05916901de",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula_ast.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula_ast.py",
+      "mode": "100644",
+      "size": 17422,
+      "sha256": "67c65000fdf8682f9542fb03a39a75ccf9352a7a9efb53152dfe3383cbf17878",
+      "gitBlobOid": "1d6c9fa1c028cd6b576fed8005b6a7e71485c344",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula_compiler.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula_compiler.py",
+      "mode": "100644",
+      "size": 2897,
+      "sha256": "4b487806c1350f9f373bef8815206ba37dc02c5db158de72370c26d1b9ad92ba",
+      "gitBlobOid": "fa4bdaa79655d8ff3a80dbcdd6116e52fbb26d05",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula_omml.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula_omml.py",
+      "mode": "100644",
+      "size": 39999,
+      "sha256": "07e0db594546646b88772ab772820e959b0efdcc03b51bbaa9df0ce1b990ce6d",
+      "gitBlobOid": "2a6fe44086f85a80c3c8184d0d727a5f7dad39d6",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula_parser.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula_parser.py",
+      "mode": "100644",
+      "size": 86442,
+      "sha256": "4636546110b62a105f11b0554058ed8ccf6154db0bc631147777f9b3b9384088",
+      "gitBlobOid": "30c13539294be6d3affe549ae75fe8e8860fa846",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula_profile.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula_profile.py",
+      "mode": "100644",
+      "size": 14976,
+      "sha256": "bedc1382bfc5f0c771f0137d75a3df246fd7d896f7610ff519b14c073b27bbd3",
+      "gitBlobOid": "604dcd60cab5028d5442adddc1a19ab485c5b5cf",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/formula_run_properties.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/formula_run_properties.py",
+      "mode": "100644",
+      "size": 7058,
+      "sha256": "eac4cb86857333fce0a84a0d91b7cfb817fca3821d1dd63a28193d977c979ed7",
+      "gitBlobOid": "5f449d34635019ced673042a9343bd39f0056a8b",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/inline_formula.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/inline_formula.py",
+      "mode": "100644",
+      "size": 11382,
+      "sha256": "da0b066c6b10d7cc69251febbbc4e7eb6d69511055b8631e92b32a419af688c1",
+      "gitBlobOid": "d429b951bd04492a7d4875ccfc6d0c9311b791bb",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/marker_attributes.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/marker_attributes.py",
+      "mode": "100644",
+      "size": 6984,
+      "sha256": "9511e323278b7bc94179823e8629f71570c64699ec2d6bd2c6f0017993d6c44d",
+      "gitBlobOid": "db7f29a293b090cb133cd82a7d942aaaefa96c69",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/marker_common.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/marker_common.py",
+      "mode": "100644",
+      "size": 33125,
+      "sha256": "671dc1dff171e9170a29ff4aefa9cc2bfa22b81e90fb5904c214643b28df990e",
+      "gitBlobOid": "a5424d4e8dd03c7c9eda0fd046cb70820f4ca43c",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/marker_status.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/marker_status.py",
+      "mode": "100644",
+      "size": 8185,
+      "sha256": "3b9e5c134d3521d86bf7eb93f66c9eeee81278484090ba53cbacfec70c4aa9a0",
+      "gitBlobOid": "996e52bc4a51b7b03cc529ac269d1966bf2c5b2f",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/table.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/table.py",
+      "mode": "100644",
+      "size": 67062,
+      "sha256": "4ce4503609e72d9a357bdd6843cb83c49c142747ce06f6d098494e709565cd86",
+      "gitBlobOid": "bfa7a84f2466e4904e8459bf43abb7582c8355c6",
+      "category": "python"
+    },
+    {
+      "path": "scripts/svg_to_pptx/native_objects/workbook.py",
+      "sourcePath": "skills/ppt-master/scripts/svg_to_pptx/native_objects/workbook.py",
+      "mode": "100644",
+      "size": 9518,
+      "sha256": "f725bb2dc58aadc8ffc293bba994a91cf0477b871829fffbe965acaa36a5b3ea",
+      "gitBlobOid": "29770395b01bcb33958134dbf705fda935eedcb3",
+      "category": "python"
+    },
+    {
+      "path": "templates/design_spec_reference.md",
+      "sourcePath": "skills/ppt-master/templates/design_spec_reference.md",
+      "mode": "100644",
+      "size": 17701,
+      "sha256": "39f8f7193f6ba96bbd4b38b01377bc68405ea0e14a3670fdeb4563a2f5f0511c",
+      "gitBlobOid": "a78aac524e85591fb3821c629055b904d5f900bd",
+      "category": "resource"
+    },
+    {
+      "path": "templates/scaffolds/design_spec.md",
+      "sourcePath": "skills/ppt-master/templates/scaffolds/design_spec.md",
+      "mode": "100644",
+      "size": 3017,
+      "sha256": "ecb9da036f656c3fa6cf831a4e11e5ac5652632357bbc6dd2660cf2c44a91a86",
+      "gitBlobOid": "2df132f5aa6f4bb0ee285d3e0a84c69d50cea9a6",
+      "category": "resource"
+    },
+    {
+      "path": "templates/scaffolds/spec_lock.md",
+      "sourcePath": "skills/ppt-master/templates/scaffolds/spec_lock.md",
+      "mode": "100644",
+      "size": 858,
+      "sha256": "b04def0962247560e74eb57b26daed65aab64566c71ecc43ad9ab44fcdd80194",
+      "gitBlobOid": "e66e3bad7b0b6201bd47388251b5b13245a9ac14",
+      "category": "resource"
+    },
+    {
+      "path": "templates/schemas/design_spec.schema.json",
+      "sourcePath": "skills/ppt-master/templates/schemas/design_spec.schema.json",
+      "mode": "100644",
+      "size": 3383,
+      "sha256": "8f9989bdacde3cc80f1739bc3c1e2730b1e41d866c0931ce478f60d0876b8769",
+      "gitBlobOid": "4a561650e594f1b353f2e16c1d209ed517d22fb4",
+      "category": "resource"
+    },
+    {
+      "path": "templates/schemas/spec_lock.schema.json",
+      "sourcePath": "skills/ppt-master/templates/schemas/spec_lock.schema.json",
+      "mode": "100644",
+      "size": 11999,
+      "sha256": "d8df614a2fe93ceb558f082d97615ed6a62706bc399188a09abb67f7ebeb74c6",
+      "gitBlobOid": "c025f47cbcec3f442a75ec6882853eb5171ae67b",
+      "category": "resource"
+    },
+    {
+      "path": "templates/spec_lock_reference.md",
+      "sourcePath": "skills/ppt-master/templates/spec_lock_reference.md",
+      "mode": "100644",
+      "size": 11896,
+      "sha256": "cf3e759615503465398731981c030f88c53df02080c78283eb37b247b1ffa11c",
+      "gitBlobOid": "5df95d46d9ba1be506046c28a3751b830034ee6f",
+      "category": "resource"
+    }
+  ]
+}
