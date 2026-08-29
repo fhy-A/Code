@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-29 | Code 开发任务复用与命名规则正式收口：小任务、单个阶段和正式发布完成继续复用当前开发任务；只有累计多个中大型任务并出现真实上下文/恢复问题时才建议轮换，新建仍需用户明确授权。开发任务标题固定为 `code开发·[目前具体任务]`，阶段切换只重命名原任务；根目录与 `code` 四份协作规则已同步，当前任务继续承接 `CODE-051` | [查看](2026/2026-08-29.md) |
 | 2026-08-29 | `CODE-052` 子 Agent 固定轮次语义收敛：持久 Child 的兼容 `maxRounds` 改为原样继承父 Run，不再专属夹到 8；普通主/子 worker 均无固定模型轮次终止，旧 5/8 记录无需迁移且可在重启后跨界继续。全仓调用图证明旧同步 `run_subagent` 5 轮实现无产品/API/插件调用者后删除；AgentRuntime `137 passed + 81 subtests`，Goal/server/Session/协议/取消相关扩大回归 `398 passed + 245 subtests`，doctor `10/10` | [查看](2026/2026-08-29.md) |
 | 2026-08-29 | Code v0.6.6 发布 blocker test/evidence correction：manual compaction VM 适配 routing-v2 并冻结 dispatch identity；legacy AgentRun suite 升级为 credential-free v5 与双派生索引前置；P0、canonical/alias context、图片 Session 删除安全终态断言对齐现行生产合同。三组 harness `18 passed + 58 subtests`，default replay `17/124/25/25/4`，完整 pytest `1717 passed + 1193 subtests`；生产与发布实现、未跟踪 v0.6.6 notes、用户 data 均未改动，未重新运行 prepare 或任何外部发布 | [查看](2026/2026-08-29.md) |
 | 2026-08-29 | `CODE-049` 用户验收通过：用户实际打开 PPT Master 离线运行时验收样例后明确回复 `PASS`；最终实现提交 `5f25cb1`、加固提交 `92b3a3d`，样例 SHA-256 `d67134c3092114c46e910e2c2600bb0925d2b4d8cb8d48639384c7a6b1916997`。供应链准入、静态共存、受管依赖、离线运行时、安全加固与人工验收均完成，canonical TODO 中的 CODE-049 主项已整项移除 | [查看](2026/2026-08-29.md) |
