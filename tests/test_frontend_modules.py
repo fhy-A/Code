@@ -18293,9 +18293,12 @@ process.stdout.write(JSON.stringify({
         confirm_source = SETTINGS_SOURCE[confirm_start:confirm_end]
 
         self.assertIn('t("archiveSessionConfirmPermanent", { name: title })', confirm_source)
-        self.assertIn('archiveSessionConfirmPermanent: "永久删除「{name}」？此操作不可撤销，将删除消息、Goal、生成资产和运行记录。"', I18N_SOURCE)
         self.assertIn(
-            'archiveSessionConfirmPermanent: "Permanently delete \\"{name}\\"? This cannot be undone and will delete its messages, Goal, generated assets, and run records."',
+            'archiveSessionConfirmPermanent: "永久删除「{name}」？此操作不可撤销。该会话的消息、生成内容及相关运行记录将被一并删除；已保存到项目目录的文件不受影响。"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'archiveSessionConfirmPermanent: "Permanently delete “{name}”? This cannot be undone. This session’s messages, generated content, and related run records will be deleted; files saved to the project directory will not be affected."',
             I18N_SOURCE,
         )
         self.assertIn('role="alertdialog"', INDEX_SOURCE)
@@ -18593,7 +18596,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
     deletingArchivedSession: "Deleting",
     sessionRestored: "Restored",
     sessionRestoreFailed: "Restore failed",
-    archiveSessionConfirmPermanent: "Delete {name}; messages, Goal, generated assets, and run records",
+    archiveSessionConfirmPermanent: "Permanently delete “{name}”? This cannot be undone. This session’s messages, generated content, and related run records will be deleted; files saved to the project directory will not be affected.",
     archivedSessionDeleted: "Deleted",
     archivedSessionDeleteFailed: "Delete failed",
     archivedSessionRefreshFailed: "Deleted but refresh failed",
@@ -18774,7 +18777,10 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertEqual(data["underlyingClicks"], 0)
         self.assertGreaterEqual(data["focusCalls"].count("cancelDeleteSession"), 6)
         self.assertEqual(data["focusCalls"][-1], "settingsDetail")
-        self.assertIn("messages, Goal, generated assets, and run records", data["confirmText"])
+        self.assertEqual(
+            data["confirmText"],
+            "Permanently delete “Delete me”? This cannot be undone. This session’s messages, generated content, and related run records will be deleted; files saved to the project directory will not be affected.",
+        )
         self.assertNotIn("retry-token-current", data["confirmText"])
         self.assertIn("delete-fail", data["htmlAfterDeleteFailure"])
         self.assertNotIn("delete-fail", data["finalHtml"])
