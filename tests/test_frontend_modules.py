@@ -18309,6 +18309,125 @@ process.stdout.write(JSON.stringify({
         self.assertIsNotNone(delete_layer)
         self.assertGreater(int(delete_layer.group(1)), int(settings_layer.group(1)))
 
+    def test_separated_active_and_archived_session_search_contract(self):
+        script = r'''
+global.window = {
+  Code: {core: {}, features: {}},
+  localStorage: {getItem: () => null, setItem: () => {}, removeItem: () => {}},
+  location: {href: "http://localhost/", search: ""},
+  URL,
+};
+require("./src/core/namespace.js");
+require("./src/core/platform.js");
+require("./src/features/sessions.js");
+require("./src/features/settings.js");
+const {resolveSessionSearchStatus, selectSessionSearchResults} = window.Code.features.sessions;
+const {filterArchivedSessionRecords} = window.Code.features.settings;
+const sessions = Array.from({length: 12}, (_, index) => ({
+  id: `session-${index}`,
+  title: `Shared title ${index}`,
+  projectId: index % 2 ? "project-b" : "project-a",
+  lastMessageTime: new Date(Date.UTC(2026, 7, 20, 0, index, 0)).toISOString(),
+}));
+const originalOrder = sessions.map((session) => session.id);
+const tie = selectSessionSearchResults([
+  {id: "tie-beta", title: "Beta", updatedAt: "2026-08-21T10:00:00Z"},
+  {id: "tie-alpha", title: "Alpha", updatedAt: "2026-08-21T10:00:00Z"},
+], "tie").map((session) => session.id);
+const fallback = selectSessionSearchResults([
+  {id: "created", title: "Created", lastMessageTime: "invalid", updatedAt: "invalid", createdAt: "2026-08-21T09:00:00Z"},
+  {id: "updated", title: "Updated", lastMessageTime: "invalid", updatedAt: "2026-08-21T10:00:00Z", createdAt: "2026-08-20T00:00:00Z"},
+], "").map((session) => session.id);
+const archived = [
+  {id: "archive-alpha-001", title: "Archived Design", projectId: "project-a"},
+  {id: "archive-beta-002", title: "Budget Notes", projectId: "project-b"},
+];
+process.stdout.write(JSON.stringify({
+  recent: selectSessionSearchResults(sessions, "").map((session) => session.id),
+  allMatches: selectSessionSearchResults(sessions, "shared").map((session) => session.id),
+  partialId: selectSessionSearchResults(sessions, "SESSION-1").map((session) => session.id),
+  fullId: selectSessionSearchResults(sessions, "session-10").map((session) => session.id),
+  title: selectSessionSearchResults(sessions, "sHaReD TiTlE 3").map((session) => session.id),
+  tie,
+  fallback,
+  originalOrder,
+  orderAfter: sessions.map((session) => session.id),
+  archivedEmpty: filterArchivedSessionRecords(archived, "").map((record) => record.id),
+  archivedTitle: filterArchivedSessionRecords(archived, "DESIGN").map((record) => record.id),
+  archivedPartialId: filterArchivedSessionRecords(archived, "BETA-00").map((record) => record.id),
+  archivedNoMatch: filterArchivedSessionRecords(archived, "missing").map((record) => record.id),
+  searchStatuses: {
+    streaming: resolveSessionSearchStatus({streaming: true}),
+    activeButNotStreaming: resolveSessionSearchStatus({streaming: false}),
+    defaultState: resolveSessionSearchStatus(),
+  },
+}));
+'''
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["recent"], [f"session-{index}" for index in range(11, 1, -1)])
+        self.assertEqual(data["allMatches"], [f"session-{index}" for index in range(11, -1, -1)])
+        self.assertEqual(data["partialId"], ["session-11", "session-10", "session-1"])
+        self.assertEqual(data["fullId"], ["session-10"])
+        self.assertEqual(data["title"], ["session-3"])
+        self.assertEqual(data["tie"], ["tie-alpha", "tie-beta"])
+        self.assertEqual(data["fallback"], ["updated", "created"])
+        self.assertEqual(data["orderAfter"], data["originalOrder"])
+        self.assertEqual(data["archivedEmpty"], ["archive-alpha-001", "archive-beta-002"])
+        self.assertEqual(data["archivedTitle"], ["archive-alpha-001"])
+        self.assertEqual(data["archivedPartialId"], ["archive-beta-002"])
+        self.assertEqual(data["archivedNoMatch"], [])
+        self.assertEqual(
+            data["searchStatuses"],
+            {
+                "streaming": "running",
+                "activeButNotStreaming": "idle",
+                "defaultState": "idle",
+            },
+        )
+        self.assertIn('id="sessionSearchBtn"', INDEX_SOURCE)
+        self.assertIn('role="dialog" aria-modal="true"', INDEX_SOURCE)
+        self.assertIn('id="sessionSearchInput" type="search"', INDEX_SOURCE)
+        self.assertIn(".session-search-results", STYLE_SOURCE)
+        self.assertIn("overflow-y: auto", STYLE_SOURCE)
+        search_input_focus = re.search(
+            r"\.session-search-field input:focus,\s*"
+            r"\.session-search-field input:focus-visible,\s*"
+            r"\.archived-session-search-field input:focus,\s*"
+            r"\.archived-session-search-field input:focus-visible\s*\{([^}]*)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(search_input_focus)
+        self.assertIn("border-color: transparent", search_input_focus.group(1))
+        self.assertIn("outline: none", search_input_focus.group(1))
+        self.assertIn("box-shadow: none", search_input_focus.group(1))
+        search_container_focus = re.search(
+            r"\.session-search-field:focus-within,\s*"
+            r"\.archived-session-search-field:focus-within\s*\{([^}]*)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(search_container_focus)
+        self.assertIn("border-color:", search_container_focus.group(1))
+        self.assertIn("box-shadow:", search_container_focus.group(1))
+        self.assertNotIn("box-shadow: none", search_container_focus.group(1))
+        self.assertIn('statusKind === "running"', SESSIONS_SOURCE)
+        self.assertNotRegex(SESSIONS_SOURCE, r"Ctrl\s*\+\s*\d")
+        for key in (
+            "sessionSearchTitle",
+            "sessionSearchPlaceholder",
+            "sessionSearchNoResults",
+            "sessionSearchIdle",
+            "sessionSearchRunning",
+            "archivedSessionSearchPlaceholder",
+            "archivedSessionSearchNoResults",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2, key)
+
     def test_session_archive_data_api_is_bodyless_and_token_scoped(self):
         script = r"""
 global.window = {};

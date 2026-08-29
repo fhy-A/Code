@@ -20,6 +20,14 @@
           </svg>
           <span id="productName">Code</span>
         </div>
+        <button id="sessionSearchBtn" class="session-search-trigger" type="button"
+          data-i18n-title="sessionSearchOpen" data-i18n-aria-label="sessionSearchOpen"
+          title="搜索会话" aria-label="搜索会话">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+          </svg>
+        </button>
       </header>
 
       <button id="newChat" class="new-session-bar" type="button" data-i18n="newSession">+ 新建会话</button>
@@ -633,6 +641,32 @@
         <div class="settings-detail" id="settingsDetail"></div>
       </div>
     </div>
+  </div>
+
+  <div class="session-search-modal hidden" id="sessionSearchModal">
+    <section class="session-search-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="sessionSearchTitle" aria-describedby="sessionSearchDescription">
+      <header class="session-search-header">
+        <div>
+          <h2 id="sessionSearchTitle" data-i18n="sessionSearchTitle">搜索会话</h2>
+          <p id="sessionSearchDescription" data-i18n="sessionSearchDescription">搜索所有项目中的未归档会话</p>
+        </div>
+        <button id="sessionSearchClose" class="icon-btn session-search-close" type="button"
+          data-i18n-title="close" data-i18n-aria-label="close" title="关闭" aria-label="关闭">×</button>
+      </header>
+      <label class="session-search-field" for="sessionSearchInput">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+        </svg>
+        <span class="sr-only" data-i18n="sessionSearchLabel">搜索标题或会话 ID</span>
+        <input id="sessionSearchInput" type="search" autocomplete="off"
+          data-i18n="sessionSearchPlaceholder" data-i18n-aria-label="sessionSearchLabel"
+          placeholder="搜索标题或会话 ID…" aria-label="搜索标题或会话 ID">
+      </label>
+      <div id="sessionSearchResults" class="session-search-results" role="list"
+        aria-live="polite"></div>
+    </section>
   </div>
 
   <div id="toastContainer" class="toast-container"></div>

@@ -49,6 +49,7 @@ const { createPanelsFeature } = window.Code.ui.panels;
 const {
   createSessionStatusTicker,
   createSessionNavigation,
+  createSessionSearchFeature,
   createSessionStartup,
   createSessionsFeature,
   resolveSessionStatus,
@@ -89,6 +90,7 @@ const agentRunReducer = window.Code.agent.runReducer;
 const agentRunProjectionShadow = window.Code.agent.runProjectionShadow;
 let goalFeature = null;
 let onboardingTasksFeature = null;
+let sessionSearchFeature = null;
 const {
   createSystemPromptSnapshot: createSystemPromptSnapshotData,
   formatSystemPromptEnvironment,
@@ -459,6 +461,7 @@ const { t, setLang, applyI18n } = createI18nRuntime({
 
     if (!state.sessionId) els.sessionTitle.value = t("sessionTitleDefault");
     if (typeof renderSessions === "function") renderSessions();
+    sessionSearchFeature?.refreshLanguage();
     if (typeof renderMessages === "function") renderMessages();
     if (typeof renderProjectEditFolders === "function" && editingProjectId) {
       renderProjectEditFolders();
@@ -1150,6 +1153,12 @@ const els = {
 
   sessionList: document.getElementById("sessionList"),
 
+  sessionSearchBtn: document.getElementById("sessionSearchBtn"),
+  sessionSearchModal: document.getElementById("sessionSearchModal"),
+  sessionSearchClose: document.getElementById("sessionSearchClose"),
+  sessionSearchInput: document.getElementById("sessionSearchInput"),
+  sessionSearchResults: document.getElementById("sessionSearchResults"),
+
   sidebarSplitter: document.getElementById("sidebarSplitter"),
 
   sidebarResizer: document.getElementById("sidebarResizer"),
@@ -1540,6 +1549,26 @@ const {
   createSession,
   loadSession,
 } = sessionNavigation;
+
+sessionSearchFeature = createSessionSearchFeature({
+  state,
+  elements: {
+    trigger: els.sessionSearchBtn,
+    modal: els.sessionSearchModal,
+    close: els.sessionSearchClose,
+    input: els.sessionSearchInput,
+    results: els.sessionSearchResults,
+  },
+  t,
+  escapeHtml,
+  projectName: (session) => {
+    const project = session?.projectId ? state.projectsMap?.[session.projectId] : null;
+    return project ? projectDisplayName(project) : "";
+  },
+  isSessionRunning: isSessionStreaming,
+  loadSession,
+});
+sessionSearchFeature.bind();
 
 const sessionStartup = createSessionStartup({
   state,
@@ -4901,6 +4930,7 @@ function renderSessions() {
   if (!state.sessions.length && !projects.length) {
     els.sessionList.innerHTML = `<div class="muted-line" style="padding:12px;">${t("noSessions")}</div>`;
     updateGroupBadge({});
+    sessionSearchFeature?.refresh();
     return;
   }
 
@@ -5014,6 +5044,7 @@ function renderSessions() {
   });
 
   attachProjectSessionListeners();
+  sessionSearchFeature?.refresh();
 }
 
 function openProjectContextMenu(projectId, rect) {

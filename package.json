@@ -5,6 +5,7 @@
     "check:frontend": "npm run build:frontend && npm run verify:frontend",
     "verify:harness-replay": "node scripts/replay-agent-traces.cjs",
     "test:h4:infra": "node tests/e2e/h4/infrastructure-selfcheck.cjs",
+    "test:h4:session-search": "node tests/e2e/h4/session-search-selfcheck.cjs",
     "test:h4:smoke": "playwright test --config playwright.h4.config.cjs",
     "test:h4:e2e": "npm run test:h4:infra && npm run test:h4:smoke"
   },

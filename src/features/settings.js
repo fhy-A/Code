@@ -152,6 +152,17 @@
     return platform.loadKeyConfig(storage);
   }
 
+  function filterArchivedSessionRecords(records, query = "") {
+    const normalized = String(query || "").trim().toLowerCase();
+    const source = (Array.isArray(records) ? records : [])
+      .filter((record) => record && typeof record === "object" && String(record.id || "").trim());
+    if (!normalized) return source.slice();
+    return source.filter((record) => (
+      String(record.title || "").toLowerCase().includes(normalized)
+      || String(record.id || "").toLowerCase().includes(normalized)
+    ));
+  }
+
   function createSettingsFeature(options = {}) {
     const state = options.state || {};
     const els = options.elements || {};
@@ -215,6 +226,7 @@
     let archivedSessionsStatus = "idle";
     let archivedSessionsError = "";
     let archivedSessionsLoadPromise = null;
+    let archivedSessionQuery = "";
     const archivedSessionPending = new Map();
     const archivedSessionConfirming = new Set();
 
@@ -1642,9 +1654,13 @@
       }
     }
 
-    function archivedSessionGroups() {
+    function filteredArchivedSessions() {
+      return filterArchivedSessionRecords(archivedSessions, archivedSessionQuery);
+    }
+
+    function archivedSessionGroups(records = archivedSessions) {
       const groups = new Map();
-      archivedSessions.forEach((record) => {
+      records.forEach((record) => {
         const key = String(record?.projectId || "").trim() || "__unassigned__";
         if (!groups.has(key)) groups.set(key, {
           key,
@@ -1677,8 +1693,7 @@
       </article>`;
     }
 
-    function renderArchivedSessionsPanel(container = byId("settingsDetail")) {
-      if (!container) return;
+    function archivedSessionsBodyHtml() {
       let body = "";
       if (archivedSessionsStatus === "loading" && !archivedSessions.length) {
         body = `<div class="archived-session-state" role="status">${escapeHtml(t("archivedSessionsLoading"))}</div>`;
@@ -1690,20 +1705,21 @@
       } else if (!archivedSessions.length) {
         body = `<div class="archived-session-state">${escapeHtml(t("archivedSessionsEmpty"))}</div>`;
       } else {
-        body = archivedSessionGroups().map((group) => `<section class="archived-session-group" data-project-id="${escapeHtml(group.key)}">
-          <h4>${escapeHtml(group.name)}</h4>
-          <div class="archived-session-list">${group.records.map(archiveRowHtml).join("")}</div>
-        </section>`).join("");
+        const filtered = filteredArchivedSessions();
+        body = filtered.length
+          ? archivedSessionGroups(filtered).map((group) => `<section class="archived-session-group" data-project-id="${escapeHtml(group.key)}">
+            <h4>${escapeHtml(group.name)}</h4>
+            <div class="archived-session-list">${group.records.map(archiveRowHtml).join("")}</div>
+          </section>`).join("")
+          : `<div class="archived-session-state">${escapeHtml(t("archivedSessionSearchNoResults"))}</div>`;
         if (archivedSessionsStatus === "error") {
           body = `<div class="archived-session-inline-error" role="alert">${escapeHtml(t("archivedSessionsLoadFailed"))}</div>${body}`;
         }
       }
-      container.innerHTML = `<div class="settings-section archived-sessions-panel">
-        <div class="settings-section-header">
-          <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
-        </div>
-        <div class="archived-sessions-content">${body}</div>
-      </div>`;
+      return body;
+    }
+
+    function bindArchivedSessionContent(container) {
       container.querySelector(".archived-session-retry")?.addEventListener("click", () => {
         void refreshArchivedSessions({ rerender: true, notify: true });
       });
@@ -1718,6 +1734,41 @@
           if (record) void deleteArchivedSession(record, deleteButton);
         });
       });
+    }
+
+    function renderArchivedSessionsContent(container = byId("settingsDetail")) {
+      const content = container?.querySelector(".archived-sessions-content");
+      if (!content) return;
+      content.innerHTML = archivedSessionsBodyHtml();
+      bindArchivedSessionContent(content);
+    }
+
+    function renderArchivedSessionsPanel(container = byId("settingsDetail")) {
+      if (!container) return;
+      container.innerHTML = `<div class="settings-section archived-sessions-panel">
+        <div class="settings-section-header">
+          <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
+        </div>
+        <label class="archived-session-search-field" for="archivedSessionSearchInput">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+          </svg>
+          <span class="sr-only">${escapeHtml(t("archivedSessionSearchLabel"))}</span>
+          <input id="archivedSessionSearchInput" type="search" autocomplete="off"
+            placeholder="${escapeHtml(t("archivedSessionSearchPlaceholder"))}"
+            aria-label="${escapeHtml(t("archivedSessionSearchLabel"))}">
+        </label>
+        <div class="archived-sessions-content">${archivedSessionsBodyHtml()}</div>
+      </div>`;
+      const input = container.querySelector("#archivedSessionSearchInput");
+      if (input) {
+        input.value = archivedSessionQuery;
+        input.addEventListener("input", () => {
+          archivedSessionQuery = input.value;
+          renderArchivedSessionsContent(container);
+        });
+      }
+      bindArchivedSessionContent(container);
     }
 
     function refreshArchivedSessions(options = {}) {
@@ -2073,6 +2124,7 @@
     buildPlatformLoginUrl,
     createImageConnectionId,
     createSettingsFeature,
+    filterArchivedSessionRecords,
     loadKeyConfig,
     loadImageConnectionConfig,
     loadFollowUpBehavior,

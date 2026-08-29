@@ -144,6 +144,199 @@
     return Object.freeze({ refresh, start, stop });
   }
 
+  function compareSessionSearchRecords(left, right) {
+    const leftTime = sessionActivityTime(left);
+    const rightTime = sessionActivityTime(right);
+    const normalizedLeft = Number.isFinite(leftTime) ? leftTime : Number.NEGATIVE_INFINITY;
+    const normalizedRight = Number.isFinite(rightTime) ? rightTime : Number.NEGATIVE_INFINITY;
+    if (normalizedLeft !== normalizedRight) return normalizedRight - normalizedLeft;
+    const leftId = String(left?.id || "");
+    const rightId = String(right?.id || "");
+    if (leftId < rightId) return -1;
+    if (leftId > rightId) return 1;
+    return 0;
+  }
+
+  function selectSessionSearchResults(sessions, query = "", options = {}) {
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    const recentLimit = Math.max(0, Number(options.recentLimit ?? 10) || 0);
+    const matches = (Array.isArray(sessions) ? sessions : [])
+      .filter((session) => session && typeof session === "object" && String(session.id || "").trim())
+      .filter((session) => {
+        if (!normalizedQuery) return true;
+        const title = String(session.title || "").toLowerCase();
+        const sessionId = String(session.id || "").toLowerCase();
+        return title.includes(normalizedQuery) || sessionId.includes(normalizedQuery);
+      })
+      .slice()
+      .sort(compareSessionSearchRecords);
+    return normalizedQuery ? matches : matches.slice(0, recentLimit);
+  }
+
+  function resolveSessionSearchStatus({ streaming = false } = {}) {
+    return streaming === true ? "running" : "idle";
+  }
+
+  function createSessionSearchFeature(options = {}) {
+    const state = options.state || {};
+    const elements = options.elements || {};
+    const t = options.t || ((key) => key);
+    const escapeHtml = options.escapeHtml || ((value) => String(value ?? ""));
+    const projectName = options.projectName || (() => "");
+    const isSessionRunning = options.isSessionRunning || (() => false);
+    const loadSession = options.loadSession;
+    const documentRef = options.document || global.document;
+    let trigger = null;
+    let visibleResults = [];
+    let bound = false;
+
+    if (typeof loadSession !== "function") {
+      throw new TypeError("Session search requires session navigation");
+    }
+
+    function isOpen() {
+      return Boolean(elements.modal && !elements.modal.classList.contains("hidden"));
+    }
+
+    function resultButtons() {
+      return Array.from(elements.results?.querySelectorAll(".session-search-result") || []);
+    }
+
+    function render() {
+      if (!elements.results) return [];
+      const query = String(elements.input?.value || "");
+      visibleResults = selectSessionSearchResults(state.sessions, query);
+      if (!visibleResults.length) {
+        elements.results.innerHTML = `<div class="session-search-empty">${escapeHtml(t("sessionSearchNoResults"))}</div>`;
+        return [];
+      }
+      elements.results.innerHTML = visibleResults.map((session) => {
+        const title = String(session.title || "").trim() || t("untitledSession");
+        const statusKind = resolveSessionSearchStatus({
+          streaming: isSessionRunning(String(session.id || "")) === true,
+        });
+        const running = statusKind === "running";
+        const status = t(running ? "sessionSearchRunning" : "sessionSearchIdle");
+        const project = String(projectName(session) || "").trim() || t("sessionSearchNoProject");
+        return `<button class="session-search-result" type="button" data-session-id="${escapeHtml(session.id)}">
+          <span class="session-search-status${running ? " is-running" : ""}">${escapeHtml(status)}</span>
+          <strong class="session-search-result-title">${escapeHtml(title)}</strong>
+          <span class="session-search-result-project">${escapeHtml(project)}</span>
+        </button>`;
+      }).join("");
+      return visibleResults.slice();
+    }
+
+    function open() {
+      if (!elements.modal || !elements.input) return false;
+      trigger = documentRef.activeElement || elements.trigger;
+      elements.input.value = "";
+      elements.modal.classList.remove("hidden");
+      render();
+      elements.input.focus();
+      return true;
+    }
+
+    function close({ restoreFocus = true } = {}) {
+      if (!isOpen()) return false;
+      elements.modal.classList.add("hidden");
+      elements.input.value = "";
+      visibleResults = [];
+      if (restoreFocus && typeof trigger?.focus === "function") trigger.focus();
+      trigger = null;
+      return true;
+    }
+
+    async function navigate(sessionId) {
+      const normalized = String(sessionId || "").trim();
+      if (!normalized || !visibleResults.some((session) => String(session.id) === normalized)) return false;
+      close({ restoreFocus: false });
+      await loadSession(normalized);
+      return true;
+    }
+
+    function focusRelative(button, direction) {
+      const buttons = resultButtons();
+      const index = buttons.indexOf(button);
+      if (index < 0) return;
+      const target = buttons[index + direction];
+      if (target) target.focus();
+      else if (direction < 0) elements.input?.focus();
+    }
+
+    function trapTab(event) {
+      if (event.key !== "Tab" || !isOpen()) return;
+      const focusable = [elements.close, elements.input, ...resultButtons()].filter(Boolean);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && documentRef.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && documentRef.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    function bind() {
+      if (bound) return;
+      bound = true;
+      elements.trigger?.addEventListener("click", open);
+      elements.close?.addEventListener("click", () => close());
+      elements.modal?.addEventListener("click", (event) => {
+        if (event.target === elements.modal) close();
+      });
+      elements.modal?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+          return;
+        }
+        trapTab(event);
+      });
+      elements.input?.addEventListener("input", render);
+      elements.input?.addEventListener("keydown", (event) => {
+        const buttons = resultButtons();
+        if (event.key === "ArrowDown" && buttons[0]) {
+          event.preventDefault();
+          buttons[0].focus();
+        } else if (event.key === "ArrowUp" && buttons[buttons.length - 1]) {
+          event.preventDefault();
+          buttons[buttons.length - 1].focus();
+        } else if (event.key === "Enter" && buttons[0]) {
+          event.preventDefault();
+          buttons[0].click();
+        }
+      });
+      elements.results?.addEventListener("click", (event) => {
+        const button = event.target.closest(".session-search-result");
+        if (button) void navigate(button.dataset.sessionId);
+      });
+      elements.results?.addEventListener("keydown", (event) => {
+        const button = event.target.closest(".session-search-result");
+        if (!button) return;
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          focusRelative(button, 1);
+        } else if (event.key === "ArrowUp") {
+          event.preventDefault();
+          focusRelative(button, -1);
+        } else if (event.key === "Enter") {
+          event.preventDefault();
+          button.click();
+        }
+      });
+    }
+
+    function refreshLanguage() {
+      if (isOpen()) render();
+    }
+
+    return Object.freeze({ bind, close, isOpen, open, refresh: render, refreshLanguage });
+  }
+
   function createSessionsFeature({ requestJson }) {
     if (typeof requestJson !== "function") {
       throw new TypeError("Sessions feature requires a requestJson function");
@@ -525,6 +718,10 @@
     formatSessionRelativeTime,
     resolveSessionStatus,
     createSessionStatusTicker,
+    compareSessionSearchRecords,
+    selectSessionSearchResults,
+    resolveSessionSearchStatus,
+    createSessionSearchFeature,
     createSessionsFeature,
     createSessionNavigation,
     createSessionStartup,
