@@ -10,7 +10,7 @@ import context_window
 class ContextWindowResolverTest(unittest.TestCase):
     def test_key_scoped_calibration_caps_final_limit_without_relabeling_capability(self):
         resolved = context_window.resolve(
-            "gpt-5.6",
+            "gpt-5.6-sol",
             "https://gateway.example/v1",
             budget=1_000_000,
             max_tokens=16_000,
@@ -30,7 +30,7 @@ class ContextWindowResolverTest(unittest.TestCase):
         self.assertEqual(resolved["availableInputTokens"], 174_000)
 
         lower_budget = context_window.resolve(
-            "gpt-5.6",
+            "gpt-5.6-sol",
             "https://gateway.example/v1",
             budget=128_000,
             calibration={
@@ -158,7 +158,7 @@ class ContextWindowResolverTest(unittest.TestCase):
             "gpt-5.3-codex": 400000,
             "gpt-5.2-codex": 400000,
             "gpt-5.1-codex": 400000,
-            "gpt-5.6": 1050000,
+            "gpt-5.6-sol": 1050000,
             "claude-sonnet-4-6": 1000000,
             "gemini-3.7-flash": 1048576,
             "grok-4.5": 500000,
@@ -185,6 +185,14 @@ class ContextWindowResolverTest(unittest.TestCase):
 
     def test_exact_aliases_moving_expiry_stale_and_blacklist(self):
         checked = dt.date(2026, 8, 21)
+        canonical = context_window.official_resolution("gpt-5.6-sol")
+        self.assertEqual(canonical["contextWindowTokens"], 1_050_000)
+        self.assertEqual(canonical["contextWindowSource"], "official")
+        self.assertIsNone(context_window.official_resolution("gpt-5.6"))
+        current_alias = context_window.resolve("gpt-5.6", "https://example.test")
+        self.assertEqual(current_alias["contextWindowTokens"], 1_000_000)
+        self.assertEqual(current_alias["contextWindowSource"], "family")
+        context_window._catalog.clear()
         self.assertEqual(
             context_window.official_resolution("gpt-5.6", today=checked)[
                 "contextWindowTokens"
@@ -367,7 +375,7 @@ class ContextWindowResolverTest(unittest.TestCase):
 
     def test_auto_budget_ignores_stale_legacy_hint_and_explicit_controls_win(self):
         entries = context_window.normalize_catalog("https://example.test", [{
-            "id": "gpt-5.6", "context_window": "200000", "max_input_tokens": 64000,
+            "id": "gpt-5.6-sol", "context_window": "200000", "max_input_tokens": 64000,
         }])
         self.assertEqual(entries[0]["contextWindowSource"], "official")
         automatic = context_window.resolve(

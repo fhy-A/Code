@@ -2582,7 +2582,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         run = server_mod._create_agent_run(
             "session-explicit-calibration",
             {
-                "model": "gpt-5.6",
+                "model": "gpt-5.6-sol",
                 "messages": [
                     {"role": "user", "content": "old task"},
                     {"role": "assistant", "content": "old result"},
@@ -2608,7 +2608,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         same_scope = server_mod._create_agent_run(
             "session-explicit-next",
             {
-                "model": "gpt-5.6",
+                "model": "gpt-5.6-sol",
                 "messages": [{"role": "user", "content": "next task"}],
             },
             self.base_url,
@@ -2618,7 +2618,7 @@ class TestDurableAgentRuntime(unittest.TestCase):
         other_key = server_mod._create_agent_run(
             "session-explicit-other-key",
             {
-                "model": "gpt-5.6",
+                "model": "gpt-5.6-sol",
                 "messages": [{"role": "user", "content": "other key task"}],
             },
             self.base_url,

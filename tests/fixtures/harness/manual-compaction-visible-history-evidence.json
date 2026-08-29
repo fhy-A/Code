@@ -10,13 +10,15 @@
     "startMarker": "async function compactConversation()",
     "endMarker": "function projectOptimisticFirstMessage(",
     "requiredFunction": "function hideCompactConfirm()",
-    "sha256": "f5e00ec0dff387461cc71a4841ca4c37b45a0240979782ff1f933538c39ec156"
+    "sha256": "75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710"
   },
   "fixedInputs": {
     "sessionId": "session-h3-2d2-synthetic",
     "now": "2026-08-06T10:00:00.000Z",
     "model": "synthetic-compaction-model",
     "baseUrl": "https://synthetic.invalid",
+    "routeRef": "route-h3-2d2-synthetic",
+    "catalogRevision": 17,
     "summary": "SYNTHETIC_COMPACT_SUMMARY_INTERNAL",
     "markerSentinel": "VISIBLE_MANUAL_COMPACTION_COMPLETED"
   },
@@ -176,8 +178,8 @@
       "startMarkerCount": 1,
       "endMarkerCount": 1,
       "containsHideCompactConfirm": true,
-      "characterLength": 21270,
-      "sha256": "f5e00ec0dff387461cc71a4841ca4c37b45a0240979782ff1f933538c39ec156",
+      "characterLength": 23499,
+      "sha256": "75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710",
       "compiledInVm": true
     },
     "plan": {
@@ -247,6 +249,15 @@
       "repeatClickAddedSaveCalls": 0,
       "fixedMarkerTime": "2026-08-06T10:00:00.000Z",
       "savePersistMessages": true
+    },
+    "dispatch": {
+      "requestedModels": [
+        "synthetic-compaction-model"
+      ],
+      "routeRef": "route-h3-2d2-synthetic",
+      "catalogRevision": "17",
+      "baseUrl": "https://synthetic.invalid",
+      "authorizationPresent": false
     },
     "archive": {
       "requestPath": "/api/sessions/session-h3-2d2-synthetic/archive",
@@ -340,6 +351,6 @@
       "toolCalls": 0,
       "workerStarts": 0
     },
-    "replayHash": "dbccf7cabc2a83735a163cb7b99a40b472beb3f003a12dcc466170c0daca1ae4"
+    "replayHash": "399fa7facde8ac77e1f9157e6644dbaea2d060749f96dd5669453c0ed9e58e49"
   }
 }

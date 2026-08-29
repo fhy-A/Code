@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "harness"
 SCHEMA_PATH = FIXTURE_DIR / "legacy-agent-run-recovery-suite.schema.json"
 MANIFEST_PATH = FIXTURE_DIR / "legacy-agent-run-recovery-suite.json"
-EXPECTED_MANIFEST_HASH = "5b6a55273e0fc390dba2f704a2c6e547be99cdb66ad9c831c439ec9206ed1b49"
+EXPECTED_MANIFEST_HASH = "93e03639c22bb0a0fa8b99bc34d4f429b86a305b3df2c62bb334b41eb6964a61"
 EXPECTED_SOURCE_HASHES = {
     "agent-run-v1": "a2bed1af692366f4af3f21f1b41bba7f09cccac4456da57e93e193a0c5345598",
     "agent-run-v2": "890db5b3840b5bd2ffb2d0f4ac5f1cc0611865debf981a87fa29f3a32fd8cc66",
@@ -235,7 +235,7 @@ def collect_memory_evidence(manifest, case):
         "sourceCanonicalSha256": canonical_hash(fixture),
         "sourceRecordVersion": record["version"],
         "missingFields": [
-            field for field in manifest["persistedV4Fields"]
+            field for field in manifest["persistedV5CoreFields"]
             if field not in record
         ],
         "expected": {
@@ -276,10 +276,21 @@ def collect_disk_evidence(case):
         ):
             with server_mod._agent_run_lock:
                 server_mod._agent_runs.clear()
+            session_id = source_record["sessionId"]
+            server_mod.write_json(server_mod.session_path(session_id), {
+                "id": session_id,
+                "title": "Legacy AgentRun recovery evidence",
+                "createdAt": source_record["createdAt"],
+                "updatedAt": source_record["updatedAt"],
+            })
             run_path = server_mod._agent_run_path(source_record["id"])
             if data_dir.resolve() not in run_path.resolve().parents:
                 raise AssertionError(f"AgentRun path escaped temporary DATA_DIR: {run_path}")
             server_mod.write_json(run_path, deepcopy(source_record))
+            server_mod._rebuild_agent_run_session_index(force=True)
+            server_mod._rebuild_agent_run_nonterminal_index(force=True)
+            session_index_before = server_mod._read_agent_run_session_index()["entries"]
+            nonterminal_index_before = server_mod._read_agent_run_nonterminal_index()["entries"]
 
             first = server_mod._get_agent_run(source_record["id"])
             cached = server_mod._get_agent_run(source_record["id"])
@@ -308,6 +319,8 @@ def collect_disk_evidence(case):
             second = server_mod._get_agent_run(source_record["id"])
             second_cached = server_mod._get_agent_run(source_record["id"])
             second_snapshot = server_mod._agent_snapshot(second)
+            session_index_after = server_mod._read_agent_run_session_index()["entries"]
+            nonterminal_index_after = server_mod._read_agent_run_nonterminal_index()["entries"]
 
             side_effect_mocks = (
                 worker_mock,
@@ -337,11 +350,23 @@ def collect_disk_evidence(case):
                 "firstLoadNextCursor": first_snapshot["nextCursor"],
                 "restartEvents": restart_events,
                 "cacheHitSameObject": cached is first and second_cached is second,
+                "sessionIndexBeforePersist": (
+                    session_index_before.get(source_record["id"]) == session_id
+                ),
+                "nonterminalIndexBeforePersist": (
+                    nonterminal_index_before.get(source_record["id"]) == session_id
+                ),
                 "persistedVersion": normalized_record["version"],
                 "secondLoadStatus": second["status"],
                 "secondLoadEventTypes": [event["type"] for event in second["events"]],
                 "secondLoadNextSeq": second["next_seq"],
                 "secondLoadNextCursor": second_snapshot["nextCursor"],
+                "sessionIndexAfterSecondLoad": (
+                    session_index_after.get(source_record["id"]) == session_id
+                ),
+                "nonterminalIndexAfterSecondLoad": (
+                    nonterminal_index_after.get(source_record["id"]) == session_id
+                ),
                 "publicSnapshotStable": second_snapshot == first_snapshot,
                 "persistedRecordStable": (
                     server_mod._agent_run_record(second) == normalized_record
@@ -442,8 +467,10 @@ class LegacyAgentRunRecoveryContractTests(unittest.TestCase):
                 evidence = collect_memory_evidence(self.manifest, case)
                 self.assertEqual(
                     evidence["persistedFieldNames"],
-                    self.manifest["persistedV4Fields"],
+                    self.manifest["persistedV5CoreFields"],
                 )
+                self.assertNotIn("baseUrl", evidence["persistedFieldNames"])
+                self.assertNotIn("keys", evidence["persistedFieldNames"])
                 self.assertNotIn("resumeStatus", case["expected"]["snapshot"]["fields"])
                 self.assertNotIn("forceFinalReason", case["expected"]["snapshot"]["fields"])
                 assert_case_contract(case, index, evidence)

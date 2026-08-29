@@ -1411,7 +1411,12 @@ class TestImageAgentRuntime(unittest.TestCase):
         worker.join(timeout=5)
 
         self.assertFalse(worker.is_alive())
-        self.assertEqual(errors, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], server_mod.AgentRunIndexError)
+        self.assertEqual(
+            str(errors[0]),
+            "Archived or deleted Session cannot persist AgentRun state",
+        )
         result = run["tool_executions"][call["id"]]["result"]
         self.assertEqual(result["errorCode"], "image_session_deleted")
         self.assertTrue(result["outcomeUnknown"])

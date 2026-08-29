@@ -49,7 +49,7 @@
     "expected": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceFixtureSha256", "slice", "scenarioHashes", "suiteHash", "mutationFirstDifferencePaths"],
+      "required": ["sourceFixtureSha256", "slice", "dispatchIdentity", "scenarioHashes", "suiteHash", "mutationFirstDifferencePaths"],
       "properties": {
         "sourceFixtureSha256": {"$ref": "#/$defs/sha256"},
         "slice": {
@@ -59,6 +59,15 @@
           "properties": {
             "sha256": {"$ref": "#/$defs/sha256"},
             "characterLength": {"type": "integer", "minimum": 1}
+          }
+        },
+        "dispatchIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["routeRef", "catalogRevision"],
+          "properties": {
+            "routeRef": {"const": "route-h3-2d3-synthetic"},
+            "catalogRevision": {"const": 23}
           }
         },
         "scenarioHashes": {

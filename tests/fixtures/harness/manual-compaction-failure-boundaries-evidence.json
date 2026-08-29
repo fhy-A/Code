@@ -30,33 +30,37 @@
     {"id": "operation-lock-render-throws"}
   ],
   "expected": {
-    "sourceFixtureSha256": "b940417c33e68e40ba404d4b6e57fe4bc366386ff0106d0dc13358ba8a48f4bf",
+    "sourceFixtureSha256": "f1a5ae6abcd16759c9a788349b91cd5887735859c23111d9df965003896b0fe5",
     "slice": {
-      "sha256": "f5e00ec0dff387461cc71a4841ca4c37b45a0240979782ff1f933538c39ec156",
-      "characterLength": 21270
+      "sha256": "75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710",
+      "characterLength": 23499
+    },
+    "dispatchIdentity": {
+      "routeRef": "route-h3-2d3-synthetic",
+      "catalogRevision": 23
     },
     "scenarioHashes": {
-      "compact-throws": "2f3947a9a10a0ff29438e3ce648f1b3c72259c58df7027383307cf209612de10",
-      "compact-ok-false": "ffce276f8ec1753f7485752f81050a100b676b0dfc537791e1244b0929fda2a5",
-      "summary-build-throws": "feca3920a2b9d85ab8e492278712198f21731cd74d4bcf220718bf3186ae2a75",
-      "archive-fails": "b7ac22408d547b5066053ffa72adf89cabe2c0c66b0f12d7c76e783cbacf9e47",
-      "first-save-fails-retry-succeeds": "35f08f36eef377a84ccae674ce4a3bd7c72476d828361bced89b4e7ee7e39cb7",
-      "both-saves-fail": "c7673524720d283ead71bf4127c03ca4182b10c71fc9604fccfa5f5e33e0f40d",
-      "apply-fails": "bbcecca740ce36c0eae5f1bca4ebe7be9eb21dc6bf7421aa6914eb287681a662",
-      "repeat-confirm": "b97a562737c3b58968e277b8485c0701cc83b33acf47175eb026201c7bcf6ae4",
-      "switch-before-confirm": "421da9b77189246f8e2983d593e9c4c57c9ebca3e44d599f8e1b0e5f2a3e1f93",
-      "switch-during-compact": "6138fff31f2605f1da670724ab0687b8a4b0713f3afc44b28dbead0beee714e6",
-      "target-changes-during-compact": "8ad880fa72c17751adf7ffb8361fb08870cbce7179a6bddac1e358c666999cff",
-      "switch-during-save-retry": "7e4bb44c6acd74112d4535203442464edaa542a9f72121a6444a12c69043f2c6",
-      "state-appended-before-retry": "dd33b3db19da5362f639bfb0d7aa6a16a4b4599ef20901661d5a914c542a926d",
-      "save-response-lost-after-server-write": "d5fd159dbaee706f54831dfc81665198ca6937d26fe42a48edd8665182d4e2d9",
-      "target-changes-during-retry": "285c9311efc091351adddaf3d732a0bf7347d85d71cde7256101c83f8794458c",
-      "second-compaction-blocked-pending": "8c194523ddf448e963862933c7e00bfd00933416dba61e146bd6dd1ec97e1a5b",
-      "explicit-retry-succeeds": "cee59c9ffac5b4e86d2a6243f15cec704f6e84cd9188ab65fd50b53fa1b4511f",
-      "failed-marker-persistence-retry-succeeds": "4e2226284650275bf154078c2efd6f23e99ef1a6e0a3a986a27dadbfe80e1b9f",
-      "operation-lock-render-throws": "78031f810f634901d55c689660bb7cc6ed038c1a9dc881d78a59e8c45bfa8b08"
+      "compact-throws": "385b8171d299c8cbe68ac05267f643ee29440b1c05fd290b233e49aa75ef4b1d",
+      "compact-ok-false": "f9d576fd3fbbfd612727ccb988e373390164e6f874d6ee884d6d39ef82f8d256",
+      "summary-build-throws": "9565e6930cc13f29902f53729c86523b449225e755d2708ef1dcca8d0c97024a",
+      "archive-fails": "87250ae61d685ea011a73ada84eaae0ee8dae61c77f4141dad25ef8f4a46fd75",
+      "first-save-fails-retry-succeeds": "1885bb653447b57227c10e654afbba30fb9d972850c0387ad3f03c2cfe34a20e",
+      "both-saves-fail": "6cc76f1ae2c30e2dda528bc54efe5c06fdde8842dea52f6726c61ca711a6d49c",
+      "apply-fails": "3ce3ce8469e28b21c49d587c0d98af7dd4f9ac4dd9909506cb1d0ca26adce26e",
+      "repeat-confirm": "82b90f9d7e85a08efa2d0278bda87b506f8291dd1a5c4d09af3b2b2dbc2fa2d9",
+      "switch-before-confirm": "8b388cc121163bdfcdd563c2ff1d64348fad225b7a8bdb5c6307ca7ba537ed4e",
+      "switch-during-compact": "9b2861c1ddeaf889fe7b128fc2701aaaafe28e80ec7ff6a9122f4a670be6d9be",
+      "target-changes-during-compact": "f81868ba9f94d56ea4aaab3a3582546830ea38817052ec6b215621203c3ed234",
+      "switch-during-save-retry": "f8409a09e27cfc73b22ee8ca59066a42926c5feaff0cc172990eb78f4bc250d9",
+      "state-appended-before-retry": "fa09f74abbfe625f892f2d8b5d27fb19da3d2e61f952c697c98ee16abf25c02a",
+      "save-response-lost-after-server-write": "c466ad2a08c06dafd58dd1e1ab30fab03653ea1ee3d7048c8705b10e941ac485",
+      "target-changes-during-retry": "6ada3289b0c91da120883f868d137fbf1a46e690ab8b5f1c45e8163e011d51a8",
+      "second-compaction-blocked-pending": "d3dcf882c4ea7d83ff4219350f28ef1350e1ad682b1cdd787d58f87a5a9c6aab",
+      "explicit-retry-succeeds": "dedf75a2be0a9604897cede1cdf80b60a2c8116608a2c284f0c48f7725c5b41e",
+      "failed-marker-persistence-retry-succeeds": "0c90b65389142d4d2a209ab6bf969daacdf203da34fe90af065e6ff5b2b0e0a5",
+      "operation-lock-render-throws": "545f6df40dacea52dcaade55026de3fe19a8941a35573724334afa01a5f73c93"
     },
-    "suiteHash": "f2e35a398b3b3a97da12167ac6a832da59ebc62aa6754b377096e0cdb588da54",
+    "suiteHash": "c9c61155a071365398a2b6d47fcd305757f19bba61e8889f8600440138121a97",
     "mutationFirstDifferencePaths": {
       "caseOrder": "$.cases[0].id",
       "errorCode": "$.results.compact-throws.marker.errorCode",

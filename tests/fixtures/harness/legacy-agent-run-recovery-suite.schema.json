@@ -4,7 +4,7 @@
   "title": "H3-2C2 legacy AgentRun recovery evidence manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["manifestVersion", "evidenceProfile", "persistedV4Fields", "cases"],
+  "required": ["manifestVersion", "evidenceProfile", "persistedV5CoreFields", "cases"],
   "properties": {
     "manifestVersion": {"const": 1},
     "evidenceProfile": {
@@ -18,10 +18,10 @@
         "productionEvidence": {"const": "agent-run-loader-snapshot-persistence-v1"}
       }
     },
-    "persistedV4Fields": {
+    "persistedV5CoreFields": {
       "type": "array",
-      "minItems": 52,
-      "maxItems": 52,
+      "minItems": 51,
+      "maxItems": 51,
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
     },
@@ -119,7 +119,7 @@
         "pendingSteers", "pendingInputPresent", "steerReceiptCount", "compactionCount", "nextSeq"
       ],
       "properties": {
-        "version": {"const": 4},
+        "version": {"const": 5},
         "status": {"type": "string"},
         "resumeStatus": {"type": "string"},
         "clientRequestId": {"type": "string"},
@@ -155,8 +155,10 @@
       "additionalProperties": false,
       "required": [
         "firstLoadStatus", "firstLoadEventTypes", "firstLoadNextSeq", "firstLoadNextCursor",
-        "restartEvents", "cacheHitSameObject", "persistedVersion", "secondLoadStatus",
+        "restartEvents", "cacheHitSameObject", "sessionIndexBeforePersist",
+        "nonterminalIndexBeforePersist", "persistedVersion", "secondLoadStatus",
         "secondLoadEventTypes", "secondLoadNextSeq", "secondLoadNextCursor",
+        "sessionIndexAfterSecondLoad", "nonterminalIndexAfterSecondLoad",
         "publicSnapshotStable", "persistedRecordStable"
       ],
       "properties": {
@@ -166,11 +168,15 @@
         "firstLoadNextCursor": {"type": "integer", "minimum": 0},
         "restartEvents": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/restartEvent"}},
         "cacheHitSameObject": {"const": true},
-        "persistedVersion": {"const": 4},
+        "sessionIndexBeforePersist": {"const": true},
+        "nonterminalIndexBeforePersist": {"type": "boolean"},
+        "persistedVersion": {"const": 5},
         "secondLoadStatus": {"type": "string"},
         "secondLoadEventTypes": {"type": "array", "items": {"type": "string"}},
         "secondLoadNextSeq": {"type": "integer", "minimum": 1},
         "secondLoadNextCursor": {"type": "integer", "minimum": 0},
+        "sessionIndexAfterSecondLoad": {"const": true},
+        "nonterminalIndexAfterSecondLoad": {"type": "boolean"},
         "publicSnapshotStable": {"const": true},
         "persistedRecordStable": {"const": true}
       }

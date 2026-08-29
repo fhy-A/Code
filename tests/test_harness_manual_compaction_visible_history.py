@@ -22,8 +22,8 @@ SCHEMA_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.schema.j
 FIXTURE_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.json"
 APP_PATH = ROOT / "app.js"
 
-EXPECTED_FIXTURE_SHA256 = "b940417c33e68e40ba404d4b6e57fe4bc366386ff0106d0dc13358ba8a48f4bf"
-EXPECTED_SLICE_SHA256 = "f5e00ec0dff387461cc71a4841ca4c37b45a0240979782ff1f933538c39ec156"
+EXPECTED_FIXTURE_SHA256 = "f1a5ae6abcd16759c9a788349b91cd5887735859c23111d9df965003896b0fe5"
+EXPECTED_SLICE_SHA256 = "75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710"
 EXPECTED_PROFILE = {
     "id": "h3-2d2-manual-compaction-visible-history",
     "version": 1,
@@ -204,6 +204,7 @@ const plan = compaction.buildManualCompactionPlan(activeContext, {
 });
 
 const apiCalls = [];
+const dispatchCalls = [];
 const saveCalls = [];
 const renderCalls = [];
 const setStreamingCalls = [];
@@ -212,7 +213,12 @@ let resolveSave;
 const saveCompleted = new Promise((resolve) => { resolveSave = resolve; });
 const apiJson = async (path, options = {}) => {
   const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
-  apiCalls.push({path, method: options.method || "GET", body: structuredClone(body)});
+  apiCalls.push({
+    path,
+    method: options.method || "GET",
+    headers: structuredClone(options.headers || {}),
+    body: structuredClone(body),
+  });
   if (path === "/api/compact") {
     return {ok: true, summary: input.fixedInputs.summary};
   }
@@ -243,7 +249,15 @@ const context = vm.createContext({
   els,
   encodeURIComponent,
   formatCompact: (value) => String(value),
-  getFallbackKeys: async () => ["synthetic-test-credential"],
+  getModelDispatchCredentials: async (model) => {
+    dispatchCalls.push(model);
+    return {
+      baseUrl: input.fixedInputs.baseUrl,
+      keys: [],
+      routeRef: input.fixedInputs.routeRef,
+      catalogRevision: input.fixedInputs.catalogRevision,
+    };
+  },
   getSessionLastUsage: stateAccessors.getSessionLastUsage,
   getSessionMessages: stateAccessors.getSessionMessages,
   getSessionRunState: stateAccessors.getSessionRunState,
@@ -346,6 +360,7 @@ if (typeof context.__compactConversation !== "function") {
       requestMessages: plan.requestMessages,
     },
     apiCalls,
+    dispatchCalls,
     saveCalls,
     finalState: {
       messages: structuredClone(state.messages),
@@ -681,6 +696,7 @@ def collect_evidence(fixture):
         raise EvidenceContractError("$.expected.execution.archiveCalls", 1, len(archive_calls))
     if len(save_calls) != 1:
         raise EvidenceContractError("$.expected.execution.saveCalls", 1, len(save_calls))
+    compact_call = compact_calls[0]
     archive_call = archive_calls[0]
     archive_messages = archive_call["body"].get("messages") or []
     if archive_messages != source_messages:
@@ -904,6 +920,13 @@ def collect_evidence(fixture):
             "repeatClickAddedSaveCalls": execution["repeatDelta"]["save"],
             "fixedMarkerTime": markers[0]["_time"],
             "savePersistMessages": save_calls[0]["options"].get("persistMessages") is True,
+        },
+        "dispatch": {
+            "requestedModels": orchestration["dispatchCalls"],
+            "routeRef": compact_call["headers"].get("X-Model-Route-Ref"),
+            "catalogRevision": compact_call["headers"].get("X-Model-Route-Revision"),
+            "baseUrl": compact_call["headers"].get("X-Base-URL"),
+            "authorizationPresent": "Authorization" in compact_call["headers"],
         },
         "archive": {
             "requestPath": archive_call["path"],

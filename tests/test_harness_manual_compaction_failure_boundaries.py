@@ -91,6 +91,10 @@ const modelRequest = window.Code.agent.modelRequest;
 const compaction = window.Code.agent.compaction;
 const messagesUi = window.Code.ui.messages;
 const scenario = input.scenario;
+const dispatchIdentity = {
+  routeRef: "route-h3-2d3-synthetic",
+  catalogRevision: 23,
+};
 const targetSessionId = "session-h3-2d3-target";
 const secondarySessionId = "session-h3-2d3-secondary";
 const originalStats = {input: 41, output: 17, cache: 3};
@@ -207,6 +211,7 @@ class FixedDate extends NativeDate {
 
 const callTrace = [];
 const apiCalls = [];
+const dispatchCalls = [];
 const saveCalls = [];
 const renderCalls = [];
 const toastCalls = [];
@@ -226,7 +231,14 @@ const apiJson = async (path, options = {}) => {
   const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
   if (path === "/api/compact") {
     callTrace.push("compact");
-    apiCalls.push({path, method: options.method, messageCount: body?.messages?.length || 0});
+    apiCalls.push({
+      path,
+      method: options.method,
+      messageCount: body?.messages?.length || 0,
+      routeRef: options.headers?.["X-Model-Route-Ref"] || null,
+      catalogRevision: options.headers?.["X-Model-Route-Revision"] || null,
+      authorizationPresent: Boolean(options.headers?.Authorization),
+    });
     if ([
       "compact-throws",
       "failed-marker-persistence-retry-succeeds",
@@ -350,7 +362,14 @@ const context = vm.createContext({
   els,
   encodeURIComponent,
   formatCompact: (value) => String(value),
-  getFallbackKeys: async () => ["SECRET_D3_KEY"],
+  getModelDispatchCredentials: async (model) => {
+    dispatchCalls.push(model);
+    return {
+      baseUrl: els.baseUrl.value,
+      keys: [],
+      ...dispatchIdentity,
+    };
+  },
   getModelContextMessages: compaction.getModelContextMessages,
   getMsgText: (message) => Array.isArray(message?.content)
     ? String(message.content.find((part) => part?.type === "text")?.text || "")
@@ -519,6 +538,8 @@ async function settle() {
     secondaryMessages: structuredClone(accessors.getSessionMessages(secondarySessionId)),
     callTrace,
     apiCalls,
+    dispatchCalls,
+    dispatchIdentity,
     saveCalls,
     renderCalls,
     toastCalls,
@@ -576,6 +597,16 @@ def summarize_case(output):
     result = {
         "id": output["scenario"],
         "callTrace": output["callTrace"],
+        "dispatchCalls": output["dispatchCalls"],
+        "compactRouteHeaders": [
+            {
+                "routeRef": call["routeRef"],
+                "catalogRevision": call["catalogRevision"],
+                "authorizationPresent": call["authorizationPresent"],
+            }
+            for call in output["apiCalls"]
+            if call["path"] == "/api/compact"
+        ],
         "counts": {
             "messages": len(messages),
             "summaries": len(summaries),
@@ -620,6 +651,7 @@ def collect_suite(fixture):
     results = {}
     raw_outputs = {}
     slice_evidence = None
+    dispatch_identity = None
     for case in fixture["cases"]:
         output = run_node(ORCHESTRATION_SCRIPT, {
             "scenario": case["id"],
@@ -628,11 +660,16 @@ def collect_suite(fixture):
         raw_outputs[case["id"]] = output
         results[case["id"]] = summarize_case(output)
         slice_evidence = output["slice"]
+        if dispatch_identity is None:
+            dispatch_identity = output["dispatchIdentity"]
+        elif output["dispatchIdentity"] != dispatch_identity:
+            raise AssertionError("dispatch identity changed across scenarios")
     evidence = {
         "evidenceProfile": fixture["evidenceProfile"],
         "cases": fixture["cases"],
         "sourceFixtureSha256": file_hash(D2_FIXTURE_PATH),
         "slice": slice_evidence,
+        "dispatchIdentity": dispatch_identity,
         "results": results,
     }
     evidence["suiteHash"] = canonical_hash(evidence)
@@ -888,6 +925,7 @@ class TestHarnessManualCompactionFailureBoundaries(unittest.TestCase):
         self.assertEqual(len(output["saveCalls"]), 2)
         first_payload = output["saveCalls"][0]["payload"]
         retry_payload = output["saveCalls"][1]["payload"]
+        first_request = {**deepcopy(first_payload), "expectedRevision": 0}
         session_id = "session-h3-2d3-response-lost"
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -906,18 +944,25 @@ class TestHarnessManualCompactionFailureBoundaries(unittest.TestCase):
                     "createdAt": "2026-08-06T12:00:00.000Z",
                 })
 
-                first_handler = SaveHandler(first_payload, lose_response=True)
+                first_handler = SaveHandler(first_request, lose_response=True)
                 with self.assertRaises(ConnectionError):
                     server.CodeHandler.save_session(first_handler, session_id)
                 first_disk = server.read_jsonl(server.messages_path(session_id))
                 self.assertEqual(first_disk, first_payload["messages"])
+                committed_revision = server.read_json(meta_path, {})["revision"]
+                self.assertEqual(committed_revision, 1)
 
-                retry_handler = SaveHandler(retry_payload)
+                retry_request = {
+                    **deepcopy(retry_payload),
+                    "expectedRevision": committed_revision,
+                }
+                retry_handler = SaveHandler(retry_request)
                 server.CodeHandler.save_session(retry_handler, session_id)
                 final_path = server.messages_path(session_id).resolve()
                 self.assertTrue(final_path.is_relative_to(sessions_dir))
                 final_disk = server.read_jsonl(final_path)
                 self.assertEqual(final_disk, retry_payload["messages"])
+                self.assertEqual(server.read_json(meta_path, {})["revision"], 2)
                 self.assertEqual(sum(
                     message.get("meta", {}).get("kind") == "compact-summary"
                     for message in final_disk
@@ -931,6 +976,7 @@ class TestHarnessManualCompactionFailureBoundaries(unittest.TestCase):
         expected = self.fixture["expected"]
         self.assertEqual(self.evidence["sourceFixtureSha256"], expected["sourceFixtureSha256"])
         self.assertEqual(self.evidence["slice"], expected["slice"])
+        self.assertEqual(self.evidence["dispatchIdentity"], expected["dispatchIdentity"])
         actual_hashes = {
             case_id: self.evidence["results"][case_id]["scenarioHash"]
             for case_id in CASE_IDS

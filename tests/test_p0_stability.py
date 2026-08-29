@@ -272,14 +272,23 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
             init_pos,
         )
         auth_check_pos = APP_SOURCE.index("if (platformSync?.authExpired)", platform_sync_pos)
-        recovery_pos = APP_SOURCE.index("sessionStartup.startRecovery();", auth_check_pos)
+        recovery_pos = APP_SOURCE.index(
+            "const recoveryTasks = sessionStartup.startRecovery();",
+            auth_check_pos,
+        )
+        hydration_pos = APP_SOURCE.index(
+            ".then(() => hydrateForegroundDispatchRecovery())",
+            recovery_pos,
+        )
         models_pos = APP_SOURCE.index(
-            'void refreshModels({ intent: "background" }).catch',
+            'void refreshModels({ intent: "background" })',
             recovery_pos,
         )
         self.assertLess(platform_sync_pos, auth_check_pos)
         self.assertLess(auth_check_pos, recovery_pos)
+        self.assertLess(recovery_pos, hydration_pos)
         self.assertLess(recovery_pos, models_pos)
+        self.assertLess(hydration_pos, models_pos)
         self.assertEqual(APP_SOURCE.count("sessionStartup.startRecovery();"), 1)
         startup_start = SESSIONS_SOURCE.index("function createSessionStartup(")
         coordination_start = SESSIONS_SOURCE.index("function startRecovery()", startup_start)
@@ -293,7 +302,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
     def test_init_restores_saved_model_before_platform_sync_and_validates_availability(self):
         route_restore = "cachedModelCatalog = await restoreModelRoutes();"
         legacy_restore = "cachedModelCatalog = hasEnabledKey ? await restoreCachedModelCatalog() : [];"
-        restore = 'setSelectedModel(localStorage.getItem("code-model") || "");'
+        restore = 'setSelectedModel(state.routingV2 ? "" : (localStorage.getItem("code-model") || ""));'
         route_pos = APP_SOURCE.index(route_restore)
         legacy_pos = APP_SOURCE.index(legacy_restore, route_pos)
         restore_pos = APP_SOURCE.index(restore)
@@ -301,6 +310,15 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertLess(route_pos, legacy_pos)
         self.assertLess(legacy_pos, restore_pos)
         self.assertLess(restore_pos, sync_pos)
+        self.assertIn(
+            'const startupPreferredModel = state.routingV2 !== false',
+            APP_SOURCE,
+        )
+        preferred_restore_pos = APP_SOURCE.index(
+            "restorePreferredModelAfterRefresh(startupPreferredModel, result)",
+            sync_pos,
+        )
+        self.assertGreater(preferred_restore_pos, sync_pos)
 
         route_render_start = APP_SOURCE.index("function renderConnectionRouteCatalog(")
         route_render_end = APP_SOURCE.index("function applyModelRouteSnapshot(", route_render_start)

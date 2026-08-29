@@ -6,11 +6,11 @@
     "sourceKind": "referenced-compatibility-fixtures",
     "productionEvidence": "agent-run-loader-snapshot-persistence-v1"
   },
-  "persistedV4Fields": [
+  "persistedV5CoreFields": [
     "version", "id", "sessionId", "cwd", "workspaceRoots", "clientRequestId", "runKind",
     "parentAgentRunId", "parentToolCallId", "agentDepth", "status", "resumeStatus",
     "permissionProfile", "error", "errorCode", "nonActionCount", "forceFinalRound",
-    "forceFinalReason", "baseUrl", "contextLimit", "contextWindowTokens",
+    "forceFinalReason", "contextLimit", "contextWindowTokens",
     "contextBudgetTokens", "contextWindowSource", "contextWindowHard",
     "availableInputTokens", "compressionTriggerTokens", "budgetClamped",
     "budgetAboveEstimate", "calibrationCapTokens", "calibrationEvidenceKind",
@@ -54,7 +54,7 @@
           "nextCursor": 0
         }},
         "persisted": {"fields": {
-          "version": 4, "status": "waiting_credentials", "resumeStatus": "tools",
+          "version": 5, "status": "waiting_credentials", "resumeStatus": "tools",
           "clientRequestId": "", "parentAgentRunId": "", "parentToolCallId": "",
           "agentDepth": 0, "permissionProfile": "read", "errorCode": "",
           "nonActionCount": 0, "forceFinalRound": false, "forceFinalReason": "",
@@ -69,11 +69,15 @@
           "firstLoadNextCursor": 1,
           "restartEvents": [{"type": "waiting_credentials", "reason": "server_restarted", "resumeStatus": "tools"}],
           "cacheHitSameObject": true,
-          "persistedVersion": 4,
+          "sessionIndexBeforePersist": true,
+          "nonterminalIndexBeforePersist": true,
+          "persistedVersion": 5,
           "secondLoadStatus": "waiting_credentials",
           "secondLoadEventTypes": ["waiting_credentials"],
           "secondLoadNextSeq": 2,
           "secondLoadNextCursor": 1,
+          "sessionIndexAfterSecondLoad": true,
+          "nonterminalIndexAfterSecondLoad": true,
           "publicSnapshotStable": true,
           "persistedRecordStable": true
         }
@@ -111,7 +115,7 @@
           "nextCursor": 0
         }},
         "persisted": {"fields": {
-          "version": 4, "status": "waiting_user_input", "resumeStatus": "",
+          "version": 5, "status": "waiting_user_input", "resumeStatus": "",
           "clientRequestId": "", "parentAgentRunId": "", "parentToolCallId": "",
           "agentDepth": 0, "permissionProfile": "read", "errorCode": "",
           "nonActionCount": 0, "forceFinalRound": false, "forceFinalReason": "",
@@ -126,11 +130,15 @@
           "firstLoadNextCursor": 0,
           "restartEvents": [],
           "cacheHitSameObject": true,
-          "persistedVersion": 4,
+          "sessionIndexBeforePersist": true,
+          "nonterminalIndexBeforePersist": true,
+          "persistedVersion": 5,
           "secondLoadStatus": "waiting_user_input",
           "secondLoadEventTypes": [],
           "secondLoadNextSeq": 1,
           "secondLoadNextCursor": 0,
+          "sessionIndexAfterSecondLoad": true,
+          "nonterminalIndexAfterSecondLoad": true,
           "publicSnapshotStable": true,
           "persistedRecordStable": true
         }
@@ -167,7 +175,7 @@
           "nextCursor": 1
         }},
         "persisted": {"fields": {
-          "version": 4, "status": "completed", "resumeStatus": "",
+          "version": 5, "status": "completed", "resumeStatus": "",
           "clientRequestId": "client-fixture-v3", "parentAgentRunId": "", "parentToolCallId": "",
           "agentDepth": 0, "permissionProfile": "read", "errorCode": "",
           "nonActionCount": 0, "forceFinalRound": false, "forceFinalReason": "",
@@ -182,11 +190,15 @@
           "firstLoadNextCursor": 1,
           "restartEvents": [],
           "cacheHitSameObject": true,
-          "persistedVersion": 4,
+          "sessionIndexBeforePersist": true,
+          "nonterminalIndexBeforePersist": false,
+          "persistedVersion": 5,
           "secondLoadStatus": "completed",
           "secondLoadEventTypes": ["completed"],
           "secondLoadNextSeq": 2,
           "secondLoadNextCursor": 1,
+          "sessionIndexAfterSecondLoad": true,
+          "nonterminalIndexAfterSecondLoad": false,
           "publicSnapshotStable": true,
           "persistedRecordStable": true
         }
@@ -223,7 +235,7 @@
           "nextCursor": 3
         }},
         "persisted": {"fields": {
-          "version": 4, "status": "completed", "resumeStatus": "",
+          "version": 5, "status": "completed", "resumeStatus": "",
           "clientRequestId": "client-fixture-v4", "parentAgentRunId": "", "parentToolCallId": "",
           "agentDepth": 0, "permissionProfile": "read", "errorCode": "",
           "nonActionCount": 0, "forceFinalRound": false, "forceFinalReason": "",
@@ -238,11 +250,15 @@
           "firstLoadNextCursor": 3,
           "restartEvents": [],
           "cacheHitSameObject": true,
-          "persistedVersion": 4,
+          "sessionIndexBeforePersist": true,
+          "nonterminalIndexBeforePersist": false,
+          "persistedVersion": 5,
           "secondLoadStatus": "completed",
           "secondLoadEventTypes": ["steer_submitted", "steer_consumed", "completed"],
           "secondLoadNextSeq": 4,
           "secondLoadNextCursor": 3,
+          "sessionIndexAfterSecondLoad": true,
+          "nonterminalIndexAfterSecondLoad": false,
           "publicSnapshotStable": true,
           "persistedRecordStable": true
         }

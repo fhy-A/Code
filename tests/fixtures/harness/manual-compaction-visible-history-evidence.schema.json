@@ -69,12 +69,14 @@
     "fixedInputs": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId", "now", "model", "baseUrl", "summary", "markerSentinel"],
+      "required": ["sessionId", "now", "model", "baseUrl", "routeRef", "catalogRevision", "summary", "markerSentinel"],
       "properties": {
         "sessionId": {"const": "session-h3-2d2-synthetic"},
         "now": {"type": "string", "format": "date-time"},
         "model": {"const": "synthetic-compaction-model"},
         "baseUrl": {"const": "https://synthetic.invalid"},
+        "routeRef": {"const": "route-h3-2d2-synthetic"},
+        "catalogRevision": {"const": 17},
         "summary": {"const": "SYNTHETIC_COMPACT_SUMMARY_INTERNAL"},
         "markerSentinel": {"const": "VISIBLE_MANUAL_COMPACTION_COMPLETED"}
       }
@@ -172,6 +174,7 @@
         "slice",
         "plan",
         "execution",
+        "dispatch",
         "archive",
         "completed",
         "save",
@@ -186,6 +189,7 @@
         "slice": {"$ref": "#/$defs/sliceExpected"},
         "plan": {"$ref": "#/$defs/planExpected"},
         "execution": {"$ref": "#/$defs/executionExpected"},
+        "dispatch": {"$ref": "#/$defs/dispatchExpected"},
         "archive": {"$ref": "#/$defs/archiveExpected"},
         "completed": {"$ref": "#/$defs/completedExpected"},
         "save": {"$ref": "#/$defs/saveExpected"},
@@ -269,6 +273,22 @@
         "repeatClickAddedSaveCalls": {"type": "integer", "const": 0},
         "fixedMarkerTime": {"type": "string", "format": "date-time"},
         "savePersistMessages": {"const": true}
+      }
+    },
+    "dispatchExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestedModels", "routeRef", "catalogRevision", "baseUrl", "authorizationPresent"],
+      "properties": {
+        "requestedModels": {
+          "type": "array",
+          "prefixItems": [{"const": "synthetic-compaction-model"}],
+          "items": false
+        },
+        "routeRef": {"const": "route-h3-2d2-synthetic"},
+        "catalogRevision": {"const": "17"},
+        "baseUrl": {"const": "https://synthetic.invalid"},
+        "authorizationPresent": {"const": false}
       }
     },
     "archiveExpected": {
