@@ -225,6 +225,10 @@ class _AgentUpstream(BaseHTTPRequestHandler):
             message.get("role") == "user" and message.get("content") == "delete project file"
             for message in messages
         )
+        creates_ppt_master = any(
+            message.get("role") == "user" and message.get("content") == "create ppt master"
+            for message in messages
+        )
         delegation_prompt_map = {
             "delegate inspection": "inspect child file",
             "delegate write child": "write project file",
@@ -338,6 +342,41 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                     "prompt_tokens": 8,
                     "completion_tokens": 3,
                     "total_tokens": 11,
+                }},
+            ]
+        elif creates_ppt_master and tool_result_count == 0:
+            frames = [{
+                "choices": [{
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "agent-ppt-master-1",
+                        "type": "function",
+                        "function": {
+                            "name": "create_ppt_master_deck",
+                            "arguments": json.dumps({
+                                "markdown": (
+                                    "# AgentRun 离线验收\n"
+                                    "授权后生成可编辑演示文稿\n\n"
+                                    "## 权限与去重\n"
+                                    "- file_mutation 授权\n"
+                                    "- completed execution 零重放\n"
+                                ),
+                            }, ensure_ascii=False),
+                        },
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            }]
+        elif creates_ppt_master:
+            frames = [
+                {"choices": [{
+                    "delta": {"content": "ppt master task complete"},
+                    "finish_reason": "stop",
+                }]},
+                {"choices": [], "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 4,
+                    "total_tokens": 12,
                 }},
             ]
         elif saves_memory and tool_result_count == 0:
@@ -4058,24 +4097,95 @@ class TestDurableAgentRuntime(unittest.TestCase):
         payload = {"tools": [
             server_mod._SERVER_TOOL_DEFINITIONS["write_file"],
             server_mod._SERVER_TOOL_DEFINITIONS["delete_file"],
+            server_mod._SERVER_TOOL_DEFINITIONS["create_ppt_master_deck"],
         ]}
         for profile in ("read", "plan"):
             with self.subTest(profile=profile):
                 self.assertEqual(
                     server_mod._agent_selected_tools(
-                        payload, ["write_file", "delete_file"], profile,
+                        payload, ["write_file", "delete_file", "create_ppt_master_deck"], profile,
                     ),
                     [],
                 )
         for profile in ("accept", "bypass"):
             with self.subTest(profile=profile):
                 selected = server_mod._agent_selected_tools(
-                    payload, ["write_file", "delete_file"], profile,
+                    payload, ["write_file", "delete_file", "create_ppt_master_deck"], profile,
                 )
                 self.assertEqual(
                     [item["function"]["name"] for item in selected],
-                    ["write_file", "delete_file"],
+                    ["write_file", "delete_file", "create_ppt_master_deck"],
                 )
+
+    def test_ppt_master_accept_reject_approve_and_completed_record_recovery(self):
+        definition = server_mod._SERVER_TOOL_DEFINITIONS["create_ppt_master_deck"]
+
+        rejected_run = server_mod._create_agent_run(
+            "ppt-master-rejected-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "create ppt master"}],
+                "tools": [definition],
+            },
+            self.base_url,
+            ["ppt-reject-before-key"],
+            allowed_tools=["create_ppt_master_deck"],
+            permission_profile="accept",
+        )
+        self._wait_status(rejected_run, "waiting_authorization", timeout=10)
+        rejected_pending = server_mod._agent_snapshot(rejected_run, 0)["pendingAuthorization"]
+        self.assertEqual(rejected_pending["action"], "create_ppt_master_deck")
+        self.assertEqual(
+            rejected_pending["path"],
+            f"output/ppt-master/{rejected_run['id']}/presentation.pptx",
+        )
+        rejected_target = self.project_dir / rejected_pending["path"]
+        self.assertFalse(rejected_target.exists())
+        server_mod._submit_agent_authorization(
+            rejected_run, rejected_pending["authorizationId"], "rejected",
+        )
+        server_mod._resume_agent_run(rejected_run, ["ppt-reject-after-key"])
+        self._wait_terminal(rejected_run, timeout=10)
+        rejected_execution = server_mod._agent_snapshot(rejected_run, 0)["toolExecutions"][0]
+        self.assertTrue(rejected_execution["result"]["rejected"])
+        self.assertFalse(rejected_target.exists())
+
+        approved_run = server_mod._create_agent_run(
+            "ppt-master-approved-session",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "create ppt master"}],
+                "tools": [definition],
+            },
+            self.base_url,
+            ["ppt-approve-before-key"],
+            allowed_tools=["create_ppt_master_deck"],
+            permission_profile="accept",
+        )
+        self._wait_status(approved_run, "waiting_authorization", timeout=10)
+        approved_pending = server_mod._agent_snapshot(approved_run, 0)["pendingAuthorization"]
+        approved_target = self.project_dir / approved_pending["path"]
+        self.assertFalse(approved_target.exists())
+        server_mod._submit_agent_authorization(
+            approved_run, approved_pending["authorizationId"], "approved",
+        )
+        server_mod._resume_agent_run(approved_run, ["ppt-approve-after-key"])
+        self._wait_terminal(approved_run, timeout=15)
+        self._wait_worker_idle(approved_run)
+        approved_snapshot = server_mod._agent_snapshot(approved_run, 0)
+        execution = approved_snapshot["toolExecutions"][0]
+        self.assertTrue(execution["result"]["ok"])
+        self.assertFalse(execution["result"]["replayed"])
+        self.assertTrue(approved_target.is_file())
+        before_bytes = approved_target.read_bytes()
+
+        record = server_mod._agent_run_record(approved_run)
+        restored = server_mod._agent_run_from_record(record)
+        restored_execution = restored["tool_executions"]["agent-ppt-master-1"]
+        self.assertEqual(restored_execution["status"], "completed")
+        self.assertEqual(restored_execution["result"], execution["result"])
+        self.assertIsNone(restored.get("worker"))
+        self.assertEqual(approved_target.read_bytes(), before_bytes)
 
     def test_accept_write_waits_for_authorization_then_executes_after_resume(self):
         target = self.project_dir / "generated.txt"

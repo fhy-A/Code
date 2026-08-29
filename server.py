@@ -43,6 +43,11 @@ from image_runtime import (
     validate_image_bytes,
 )
 from model_route_registry import ModelRouteError, ModelRouteRegistry
+from ppt_master_runtime import (
+    PptMasterRuntimeError,
+    execute_ppt_master_tool,
+    prepare_ppt_master_preview,
+)
 import windows_explorer
 from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
 from goal_v2_protocol import GoalV2ProtocolError, require_identifier
@@ -4519,7 +4524,7 @@ def _agent_run_from_record(record):
         restored_tools = [
             definition for definition in restored_tools
             if str((definition.get("function") or {}).get("name") or "")
-            not in {"generate_image", "manage_generated_image"}
+            not in {"generate_image", "manage_generated_image", "create_ppt_master_deck"}
         ]
     if not image_route_identity or not image_route_identity.get("supportsGeneration"):
         restored_tools = [
@@ -5928,7 +5933,7 @@ def _agent_file_authorization_request(run, call):
     call_id = str(call.get("id") or "")
     action = str((call.get("function") or {}).get("name") or "")
     preview_payload = dict(call.get("arguments") or {})
-    if action == "manage_generated_image":
+    if action in {"manage_generated_image", "create_ppt_master_deck"}:
         preview_payload.update({
             "_sessionId": str(run.get("session_id") or ""),
             "_agentRunId": str(run.get("id") or ""),
@@ -5937,11 +5942,11 @@ def _agent_file_authorization_request(run, call):
         })
     try:
         preview = prepare_file_mutation_preview(action, preview_payload)
-    except ImageRuntimeError as exc:
+    except (ImageRuntimeError, PptMasterRuntimeError) as exc:
         raise _AgentToolResult({
             "ok": False,
             "action": action,
-            **exc.public_payload(),
+            **(exc.public_payload() if isinstance(exc, ImageRuntimeError) else exc.tool_result()),
         }) from None
     authorization_id = hashlib.sha256(
         f"{run['id']}\0{call_id}\0{call.get('fingerprint') or ''}\0{action}".encode("utf-8")
@@ -6285,7 +6290,7 @@ def _submit_agent_authorization(run, authorization_id, decision):
     if pending.get("action") == "run_command":
         return _submit_agent_command_authorization(run, pending, normalized_decision)
     if pending.get("action") in {
-        "write_file", "delete_file", "manage_generated_image",
+        "write_file", "delete_file", "manage_generated_image", "create_ppt_master_deck",
     }:
         return _submit_agent_file_authorization(run, pending, normalized_decision)
     if pending.get("action") == "generate_image":
@@ -8354,13 +8359,15 @@ def _execute_agent_pending_tools(run):
                     execution["status"] = "applying_file_mutation"
                     _persist_agent_run(run)
                     arguments = {**call["arguments"], "_operationId": operation_id}
-                    if name == "manage_generated_image":
+                    if name in {"manage_generated_image", "create_ppt_master_deck"}:
                         arguments.update({
                             "_sessionId": str(run.get("session_id") or ""),
                             "_agentRunId": str(run.get("id") or ""),
                             "_toolCallId": call_id,
                             "_projectRoot": str(run.get("cwd") or ""),
                         })
+                    if name == "create_ppt_master_deck":
+                        arguments["_cancelEvent"] = run["cancel_event"]
                     try:
                         result = execute_registered_tool(
                             name, arguments, _arguments_validated=True,
@@ -8371,6 +8378,8 @@ def _execute_agent_pending_tools(run):
                             "action": name,
                             **exc.public_payload(),
                         }) from None
+                    except PptMasterRuntimeError as exc:
+                        raise _AgentToolResult(exc.tool_result()) from None
                 elif spec.get("effect") == "delegation":
                     result = _execute_agent_delegation(run, call, execution)
                     if result is None:
@@ -9766,7 +9775,7 @@ def _create_agent_run(
         tools = [
             definition for definition in tools
             if str((definition.get("function") or {}).get("name") or "")
-            not in {"generate_image", "manage_generated_image"}
+            not in {"generate_image", "manage_generated_image", "create_ppt_master_deck"}
         ]
     if not image_route_identity or not image_route_identity.get("supportsGeneration"):
         tools = [
@@ -13260,6 +13269,33 @@ def _write_skill_dependency_manifest(skill_dir, manifest):
         return
     write_json(path, manifest)
 
+
+def _skill_frontmatter_tools(meta, skill_dir):
+    tools = [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]
+    metadata = meta.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+    capability = str(
+        (metadata or {}).get("toolCapability")
+        if isinstance(metadata, dict) else ""
+    ).strip()
+    if not capability:
+        return tools
+    try:
+        inspection = inspect_skill_directory(
+            skill_dir,
+            bundled_skills_dir=APP_DIR / "data" / "skills",
+            app_dir=APP_DIR,
+            data_dir=DATA_DIR,
+            capability_id=capability,
+        )
+    except Exception:
+        return []
+    return tools if inspection.get("status") == "ready" else []
+
 def list_skills(brief=False):
     """List all installed skills. brief=True returns metadata only (no body)."""
     skills = []
@@ -13278,7 +13314,7 @@ def list_skills(brief=False):
                 "name": meta.get("name", skill_dir.name),
                 "description": meta.get("description", ""),
                 "keywords": [k.strip() for k in meta.get("keywords", "").split(",") if k.strip()],
-                "tools": [t.strip() for t in meta.get("tools", "").split(",") if t.strip()],
+                "tools": _skill_frontmatter_tools(meta, skill_dir),
                 "dir": skill_dir.name,
             }
             if not brief:
@@ -13615,7 +13651,7 @@ def read_skill(name, brief=False):
                     "name": meta.get("name", skill_dir.name),
                     "description": meta.get("description", ""),
                     "keywords": [k.strip() for k in meta.get("keywords", "").split(",") if k.strip()],
-                    "tools": [t.strip() for t in meta.get("tools", "").split(",") if t.strip()],
+                    "tools": _skill_frontmatter_tools(meta, skill_dir),
                     "dir": skill_dir.name,
                 }
                 if not brief:
@@ -14672,6 +14708,8 @@ def _prepare_delete_file_data(payload):
 
 
 def prepare_file_mutation_preview(action, payload):
+    if action == "create_ppt_master_deck":
+        return prepare_ppt_master_preview(payload)
     if action == "manage_generated_image":
         prepared = _prepare_image_asset_mutation(payload, create_directory=False)
         verb = "Export generated image" if prepared["operation"] == "export" else "Rename workspace image"
@@ -14708,6 +14746,10 @@ def prepare_file_mutation_preview(action, payload):
             "isDirectory": bool(is_dir),
         }
     raise ValueError(f"unsupported file mutation: {action}")
+
+
+def execute_create_ppt_master_deck_tool(payload):
+    return execute_ppt_master_tool(payload)
 
 
 def execute_write_file_tool(payload):
@@ -19018,6 +19060,36 @@ _SERVER_TOOL_DEFINITIONS = {
             },
         },
     },
+    "create_ppt_master_deck": {
+        "type": "function",
+        "function": {
+            "name": "create_ppt_master_deck",
+            "description": (
+                "Create one new editable, offline PowerPoint from inline UTF-8 Markdown or "
+                "one project-relative .md/.txt file. Output is fixed to the current AgentRun; "
+                "URLs, images, templates, existing-PPT edits, commands, and custom output paths "
+                "are not supported."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "markdown": {
+                        "type": "string",
+                        "maxLength": 1048576,
+                        "description": "Inline UTF-8 Markdown. Mutually exclusive with sourcePath.",
+                    },
+                    "sourcePath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024,
+                        "description": "Project-relative .md or .txt path. Mutually exclusive with markdown.",
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
     "write_file": {
         "type": "function",
         "function": {
@@ -19404,6 +19476,13 @@ SERVER_TOOL_REGISTRY = {
         "idempotent": True,
         "background": True,
     },
+    "create_ppt_master_deck": {
+        "execute": execute_create_ppt_master_deck_tool,
+        "definition": _SERVER_TOOL_DEFINITIONS["create_ppt_master_deck"],
+        "effect": "file_mutation",
+        "idempotent": True,
+        "background": True,
+    },
     "write_file": {
         "execute": lambda payload: execute_write_file_tool(payload),
         "definition": _SERVER_TOOL_DEFINITIONS["write_file"],
@@ -19468,12 +19547,15 @@ def execute_registered_tool(action, payload, *, _arguments_validated=False):
         raise ValueError("tool payload must be an object")
     if not _arguments_validated:
         validation_payload = dict(payload)
-        if action in {"write_file", "delete_file", "manage_generated_image"}:
+        if action in {
+            "write_file", "delete_file", "manage_generated_image", "create_ppt_master_deck",
+        }:
             validation_payload.pop("_operationId", None)
             validation_payload.pop("_sessionId", None)
             validation_payload.pop("_agentRunId", None)
             validation_payload.pop("_toolCallId", None)
             validation_payload.pop("_projectRoot", None)
+            validation_payload.pop("_cancelEvent", None)
         errors = _registered_tool_argument_errors(action, validation_payload)
         if errors:
             raise ValueError(_format_tool_argument_error(action, errors))

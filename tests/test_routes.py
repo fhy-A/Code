@@ -393,6 +393,7 @@ class TestFileTools(TestServerFixture):
             "request_user_input", "list_files", "read_file", "search_files", "glob_files",
             "web_fetch", "use_skill", "check_skill_dependencies", "read_skill_resource", "save_memory", "run_command",
             "propose_edit", "write_file", "delete_file", "task", "generate_image", "manage_generated_image",
+            "create_ppt_master_deck",
         })
         interaction = server_mod.SERVER_TOOL_REGISTRY["request_user_input"]
         self.assertEqual(interaction["effect"], "interaction")
@@ -418,7 +419,7 @@ class TestFileTools(TestServerFixture):
         self.assertEqual(memory["effect"], "memory_write")
         self.assertTrue(memory["idempotent"])
         self.assertTrue(memory["background"])
-        for name in ("write_file", "delete_file"):
+        for name in ("write_file", "delete_file", "create_ppt_master_deck"):
             mutation = server_mod.SERVER_TOOL_REGISTRY[name]
             self.assertEqual(mutation["effect"], "file_mutation")
             self.assertTrue(mutation["idempotent"])

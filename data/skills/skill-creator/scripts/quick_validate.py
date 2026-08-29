@@ -109,7 +109,7 @@ def validate_skill(skill_path):
         'request_user_input', 'list_files', 'read_file', 'search_files',
         'glob_files', 'web_fetch', 'use_skill', 'read_skill_resource',
         'save_memory', 'write_file', 'delete_file', 'task', 'run_command',
-        'propose_edit',
+        'propose_edit', 'create_ppt_master_deck',
     }
     declared_tools = {
         item.strip() for item in str(frontmatter.get('tools') or '').split(',')

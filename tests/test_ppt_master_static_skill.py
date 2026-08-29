@@ -29,7 +29,7 @@ def directory_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-class TestPptMasterStaticSkill(unittest.TestCase):
+class TestPptMasterRuntimeSkill(unittest.TestCase):
     def test_fixed_vendor_slice_passes_static_validation(self):
         result = validate_vendor_package(SKILL_DIR)
         self.assertTrue(result["ok"])
@@ -39,14 +39,15 @@ class TestPptMasterStaticSkill(unittest.TestCase):
         self.assertLess(result["fileCount"], 1_000)
         self.assertLess(result["totalBytes"], 15 * 1024 * 1024)
 
-    def test_wrapper_is_flat_explicit_and_static_only(self):
+    def test_wrapper_is_flat_explicit_and_runtime_gated(self):
         skills = {item["name"]: item for item in server_mod.list_skills()}
         skill = skills["ppt-master"]
         self.assertEqual(skill["dir"], "ppt-master")
         self.assertEqual(skill["keywords"], [])
         self.assertNotIn("run_command", skill["tools"])
         self.assertNotIn("write_file", skill["tools"])
-        self.assertIn("STATIC_ONLY_DO_NOT_EXECUTE", skill["body"])
+        self.assertEqual(skill["tools"], ["create_ppt_master_deck"])
+        self.assertNotIn("STATIC_ONLY_DO_NOT_EXECUTE", skill["body"])
         self.assertIn("/ppt-master", skill["body"])
         self.assertNotIn("${SKILL_DIR}", skill["body"])
 
@@ -64,20 +65,25 @@ class TestPptMasterStaticSkill(unittest.TestCase):
         )
         projected = server_mod.execute_use_skill_tool({"name": "ppt-master"})
         self.assertTrue(projected["ok"])
-        self.assertIn("STATIC_ONLY_DO_NOT_EXECUTE", projected["body"])
-        self.assertEqual(projected["dependencies"]["status"], "unavailable")
+        self.assertIn("create_ppt_master_deck", projected["body"])
+        self.assertEqual(projected["dependencies"]["status"], "ready")
+        self.assertEqual(projected["tools"], ["create_ppt_master_deck"])
 
-    def test_dependency_gate_is_stably_unavailable(self):
+    def test_dependency_gate_is_ready_with_exact_locked_versions(self):
         status = server_mod.get_single_skill_dependency_status(
             "ppt-master", "offline-core"
         )
-        self.assertEqual(status["status"], "unavailable")
+        self.assertEqual(status["status"], "ready")
         self.assertEqual(len(status["capabilities"]), 1)
         capability = status["capabilities"][0]
         self.assertEqual(capability["id"], "offline-core")
-        self.assertEqual(capability["status"], "unavailable")
-        missing = {item["name"] for item in capability["required"] if not item["available"]}
-        self.assertEqual(missing, {"skia-pathops", "uharfbuzz"})
+        self.assertEqual(capability["status"], "ready")
+        versions = {
+            item["name"]: item["detectedVersion"]
+            for item in capability["required"]
+            if item["name"] in {"skia-pathops", "uharfbuzz"}
+        }
+        self.assertEqual(versions, {"skia-pathops": "0.9.2", "uharfbuzz": "0.50.0"})
 
     def test_default_pptx_bytes_and_matching_stay_unchanged(self):
         self.assertEqual(directory_digest(PPTX_DIR), PPTX_BASELINE_DIGEST)
@@ -94,6 +100,8 @@ class TestPptMasterStaticSkill(unittest.TestCase):
         }
         self.assertIn("ppt-master/SKILL.md", packaged)
         self.assertIn("ppt-master/vendor-manifest.json", packaged)
+        self.assertIn("ppt-master/dependency-lock.json", packaged)
+        self.assertIn("ppt-master/dependency-receipt.json", packaged)
         self.assertEqual(
             len([item for item in packaged if item.startswith("ppt-master/vendor/")]),
             manifest["fileCount"],
