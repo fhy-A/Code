@@ -215,7 +215,8 @@
     let archivedSessionsStatus = "idle";
     let archivedSessionsError = "";
     let archivedSessionsLoadPromise = null;
-    const archivedSessionPending = new Set();
+    const archivedSessionPending = new Map();
+    const archivedSessionConfirming = new Set();
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
 
@@ -1657,7 +1658,8 @@
 
     function archiveRowHtml(record) {
       const sessionId = String(record?.id || "").trim();
-      const pending = archivedSessionPending.has(sessionId);
+      const pendingAction = archivedSessionPending.get(sessionId) || "";
+      const pending = Boolean(pendingAction);
       const title = String(record?.title || "").trim() || t("untitledSession");
       const projectName = archivedSessionProjectName(record);
       const source = String(record?.source || "local");
@@ -1669,8 +1671,8 @@
           <span class="archived-session-source">${escapeHtml(t("archivedSessionSource", { source }))}</span>
         </div>
         <div class="archived-session-actions">
-          <button class="mini-btn archived-session-restore" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pending ? "restoringSession" : "restoreSession"))}</button>
-          <button class="mini-btn danger archived-session-delete" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pending ? "deletingArchivedSession" : "permanentlyDelete"))}</button>
+          <button class="mini-btn archived-session-restore" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pendingAction === "restore" ? "restoringSession" : "restoreSession"))}</button>
+          <button class="mini-btn danger archived-session-delete" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pendingAction === "delete" ? "deletingArchivedSession" : "permanentlyDelete"))}</button>
         </div>
       </article>`;
     }
@@ -1752,9 +1754,9 @@
 
     async function restoreArchivedSession(record) {
       const sessionId = String(record?.id || "").trim();
-      if (!sessionId || archivedSessionPending.has(sessionId)) return false;
+      if (!sessionId || archivedSessionPending.has(sessionId) || archivedSessionConfirming.has(sessionId)) return false;
       if (typeof sessionArchive.restoreArchivedSession !== "function") return false;
-      archivedSessionPending.add(sessionId);
+      archivedSessionPending.set(sessionId, "restore");
       renderArchivedSessionsPanel();
       try {
         await sessionArchive.restoreArchivedSession(sessionId);
@@ -1763,7 +1765,7 @@
         showToast(t("sessionRestored"), "success");
         return true;
       } catch (error) {
-        showToast(`${t("sessionRestoreFailed")}: ${error?.message || error}`, "error");
+        showToast(t("sessionRestoreFailed"), "error");
         return false;
       } finally {
         archivedSessionPending.delete(sessionId);
@@ -1811,19 +1813,35 @@
     async function deleteArchivedSession(record, trigger) {
       const sessionId = String(record?.id || "").trim();
       const archiveToken = String(record?.archiveToken || "").trim();
-      if (!sessionId || !archiveToken || archivedSessionPending.has(sessionId)) return false;
+      if (
+        !sessionId
+        || !archiveToken
+        || archivedSessionPending.has(sessionId)
+        || archivedSessionConfirming.has(sessionId)
+      ) return false;
       if (typeof sessionArchive.deleteArchivedSession !== "function") return false;
-      archivedSessionPending.add(sessionId);
+      archivedSessionConfirming.add(sessionId);
+      let confirmed = false;
+      try {
+        confirmed = await confirmArchivedSessionDelete(record, trigger);
+      } finally {
+        archivedSessionConfirming.delete(sessionId);
+      }
+      if (!confirmed || archivedSessionPending.has(sessionId)) return false;
+      archivedSessionPending.set(sessionId, "delete");
       renderArchivedSessionsPanel();
       try {
-        if (!await confirmArchivedSessionDelete(record, trigger)) return false;
         await sessionArchive.deleteArchivedSession(sessionId, archiveToken);
         archivedSessions = archivedSessions.filter((item) => String(item?.id || "") !== sessionId);
-        await onArchivedSessionsChanged({ type: "delete", sessionId });
+        archivedSessionPending.delete(sessionId);
+        renderArchivedSessionsPanel();
         showToast(t("archivedSessionDeleted"), "success");
+        void Promise.resolve()
+          .then(() => onArchivedSessionsChanged({ type: "delete", sessionId }))
+          .catch(() => showToast(t("archivedSessionRefreshFailed"), "warning"));
         return true;
       } catch (error) {
-        showToast(`${t("archivedSessionDeleteFailed")}: ${error?.message || error}`, "error");
+        showToast(t("archivedSessionDeleteFailed"), "error");
         return false;
       } finally {
         archivedSessionPending.delete(sessionId);

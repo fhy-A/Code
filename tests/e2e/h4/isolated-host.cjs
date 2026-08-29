@@ -232,7 +232,10 @@ async function createOwnedWorkspace() {
 
 async function startIsolatedGeneration(
   workspace,
-  { injectFailureAfterSpawn = false } = {},
+  {
+    injectFailureAfterSpawn = false,
+    injectIndexBuildFailure = false,
+  } = {},
 ) {
   const {
     root,
@@ -253,7 +256,12 @@ async function startIsolatedGeneration(
     const scriptPath = path.join(__dirname, "isolated_host.py");
     child = childProcess.spawn("python", ["-u", scriptPath, root], {
       cwd: path.resolve(__dirname, "..", "..", ".."),
-      env: buildChildEnvironment(homeDir, temporaryDir),
+      env: {
+        ...buildChildEnvironment(homeDir, temporaryDir),
+        ...(injectIndexBuildFailure
+          ? { CODE_H4_INJECT_AGENT_INDEX_BUILD_FAILURE: "1" }
+          : {}),
+      },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -531,7 +539,7 @@ async function startIsolatedGeneration(
   }
 }
 
-async function startIsolatedHost() {
+async function startIsolatedHost(initialGenerationOptions = {}) {
   const workspace = await createOwnedWorkspace();
   let currentGeneration = null;
   let finalStopPromise = null;
@@ -543,7 +551,7 @@ async function startIsolatedHost() {
   };
 
   try {
-    currentGeneration = await startGeneration();
+    currentGeneration = await startGeneration(initialGenerationOptions);
   } catch (error) {
     assertOwnedRoot(workspace.root);
     await fs.rm(workspace.root, { recursive: true, force: true });

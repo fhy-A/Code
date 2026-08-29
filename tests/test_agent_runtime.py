@@ -776,9 +776,18 @@ class TestDurableAgentRuntime(unittest.TestCase):
                 ready["entries"],
                 {run["id"]: "agent-index-order-session"},
             )
+            session_ready = server_mod._read_agent_run_session_index()
+            self.assertEqual(
+                session_ready["entries"],
+                {run["id"]: "agent-index-order-session"},
+            )
             self.assertNotIn(
                 secret,
                 server_mod._agent_run_nonterminal_index_path().read_text(encoding="utf-8"),
+            )
+            self.assertNotIn(
+                secret,
+                server_mod._agent_run_session_index_path().read_text(encoding="utf-8"),
             )
             self.assertEqual(
                 server_mod.read_json(server_mod._agent_run_path(run["id"]), {})["status"],
@@ -788,9 +797,18 @@ class TestDurableAgentRuntime(unittest.TestCase):
 
         run_writes = [index for index, item in enumerate(writes) if item[0] == server_mod._agent_run_path(run["id"])]
         index_writes = [index for index, item in enumerate(writes) if item[0] == server_mod._agent_run_nonterminal_index_path()]
+        session_index_writes = [
+            index for index, item in enumerate(writes)
+            if item[0] == server_mod._agent_run_session_index_path()
+        ]
         self.assertTrue(index_writes[0] < run_writes[0])
+        self.assertTrue(session_index_writes[0] < run_writes[0])
         self.assertTrue(run_writes[-1] < index_writes[-1])
         self.assertEqual(server_mod._read_agent_run_nonterminal_index()["entries"], {})
+        self.assertEqual(
+            server_mod._read_agent_run_session_index()["entries"],
+            {run["id"]: "agent-index-order-session"},
+        )
         self.assertEqual(
             server_mod.read_json(server_mod._agent_run_path(run["id"]), {})["status"],
             "cancelled",

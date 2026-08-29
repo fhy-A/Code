@@ -18558,12 +18558,17 @@ const records = [
   {id: "restore-fail", title: "Keep me", projectId: "p1", source: "import", archivedAt: "2026-08-28T09:00:00Z", archiveToken: "keep-token"},
   {id: "delete-1", title: "Delete me", projectId: null, source: "local", archivedAt: "2026-08-28T08:00:00Z", archiveToken: "delete-token-current"},
   {id: "delete-fail", title: "Retry me", projectId: null, source: "local", archivedAt: "2026-08-28T07:00:00Z", archiveToken: "retry-token-current"},
+  {id: "delete-refresh-fail", title: "Refresh warning", projectId: null, source: "local", archivedAt: "2026-08-28T06:00:00Z", archiveToken: "refresh-token-current"},
 ];
 let listCalls = 0;
 let resolveList;
 const listGate = new Promise((resolve) => { resolveList = resolve; });
 let resolveRestore;
 const restoreGate = new Promise((resolve) => { resolveRestore = resolve; });
+let resolveDelete;
+const deleteGate = new Promise((resolve) => { resolveDelete = resolve; });
+let resolveDeleteRefresh;
+const deleteRefreshGate = new Promise((resolve) => { resolveDeleteRefresh = resolve; });
 const restoreCalls = [];
 const deleteCalls = [];
 let deleteFailOnce = true;
@@ -18591,6 +18596,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
     archiveSessionConfirmPermanent: "Delete {name}; messages, Goal, generated assets, and run records",
     archivedSessionDeleted: "Deleted",
     archivedSessionDeleteFailed: "Delete failed",
+    archivedSessionRefreshFailed: "Deleted but refresh failed",
   }[key] || key)),
   escapeHtml: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
   apiJson: async () => ({}),
@@ -18607,11 +18613,16 @@ const feature = window.Code.features.settings.createSettingsFeature({
     },
     deleteArchivedSession: async (id, token) => {
       deleteCalls.push([id, token]);
+      if (id === "delete-1") await deleteGate;
       if (id === "delete-fail" && deleteFailOnce) { deleteFailOnce = false; throw new Error("locked"); }
       return {ok: true};
     },
   },
-  onArchivedSessionsChanged: async (event) => changes.push(event),
+  onArchivedSessionsChanged: async (event) => {
+    changes.push(event);
+    if (event.type === "delete" && event.sessionId === "delete-1") await deleteRefreshGate;
+    if (event.type === "delete" && event.sessionId === "delete-refresh-fail") throw new Error("refresh failed");
+  },
 });
 (async () => {
   const firstLoad = feature.refreshArchivedSessions({rerender: true});
@@ -18622,6 +18633,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
 
   const restoreFirst = feature.restoreArchivedSession(records[0]);
   const restoreDuplicate = await feature.restoreArchivedSession(records[0]);
+  const htmlWhileRestoring = detail.innerHTML;
   resolveRestore();
   const restoreResult = await restoreFirst;
   const restoreFailure = await feature.restoreArchivedSession(records[1]);
@@ -18629,8 +18641,18 @@ const feature = window.Code.features.settings.createSettingsFeature({
 
   const deleteFirst = feature.deleteArchivedSession(records[2], confirm);
   const deleteDuplicate = await feature.deleteArchivedSession(records[2], confirm);
+  const htmlWhileDeleteConfirm = detail.innerHTML;
   const confirmText = text.textContent;
   confirm.emit("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  const htmlWhileDeleting = detail.innerHTML;
+  resolveDelete();
+  await Promise.resolve();
+  await Promise.resolve();
+  const htmlAfterDeleteAuthority = detail.innerHTML;
+  const toastsAfterDeleteAuthority = [...toasts];
+  resolveDeleteRefresh();
   const deleteResult = await deleteFirst;
 
   const deleteFailurePromise = feature.deleteArchivedSession(records[3], confirm);
@@ -18641,13 +18663,24 @@ const feature = window.Code.features.settings.createSettingsFeature({
   confirm.emit("click");
   const deleteRetry = await deleteRetryPromise;
 
+  const deleteRefreshFailurePromise = feature.deleteArchivedSession(records[4], confirm);
+  confirm.emit("click");
+  const deleteRefreshFailure = await deleteRefreshFailurePromise;
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const htmlAfterDeleteRefreshFailure = detail.innerHTML;
+  const toastsAfterDeleteRefreshFailure = [...toasts];
+
   const cancelled = feature.deleteArchivedSession({id: "cancelled", title: "Cancel", archiveToken: "cancel-token"}, detail);
+  const htmlWhileCancelConfirm = detail.innerHTML;
   cancel.emit("click");
   const cancelResult = await cancelled;
   const backdrop = feature.deleteArchivedSession({id: "backdrop", title: "Backdrop", archiveToken: "backdrop-token"}, detail);
   modal.emit("click", {target: modal});
   const backdropResult = await backdrop;
   const escaped = feature.deleteArchivedSession({id: "escaped", title: "Escape", archiveToken: "escape-token"}, detail);
+  const htmlWhileEscapeConfirm = detail.innerHTML;
   documentListeners.get("keydown")?.({key: "Escape"});
   const escapeResult = await escaped;
 
@@ -18659,18 +18692,28 @@ const feature = window.Code.features.settings.createSettingsFeature({
     restoreDuplicate,
     restoreResult,
     restoreFailure,
+    htmlWhileRestoring,
     htmlAfterRestoreFailure,
     deleteCalls,
     deleteDuplicate,
     deleteResult,
     deleteFailure,
     deleteRetry,
+    deleteRefreshFailure,
     confirmText,
+    htmlWhileDeleteConfirm,
+    htmlWhileDeleting,
+    htmlAfterDeleteAuthority,
+    toastsAfterDeleteAuthority,
     htmlAfterDeleteFailure,
+    htmlAfterDeleteRefreshFailure,
+    toastsAfterDeleteRefreshFailure,
     finalHtml: detail.innerHTML,
     cancelResult,
+    htmlWhileCancelConfirm,
     backdropResult,
     escapeResult,
+    htmlWhileEscapeConfirm,
     focusCalls,
     underlyingClicks,
     changes,
@@ -18692,19 +18735,42 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertFalse(data["restoreDuplicate"])
         self.assertTrue(data["restoreResult"])
         self.assertFalse(data["restoreFailure"])
+        self.assertIn("Restoring", data["htmlWhileRestoring"])
+        self.assertIn("Delete permanently", data["htmlWhileRestoring"])
+        self.assertNotIn("Deleting", data["htmlWhileRestoring"])
         self.assertIn("restore-fail", data["htmlAfterRestoreFailure"])
         self.assertEqual(data["deleteCalls"], [
             ["delete-1", "delete-token-current"],
             ["delete-fail", "retry-token-current"],
             ["delete-fail", "retry-token-current"],
+            ["delete-refresh-fail", "refresh-token-current"],
         ])
         self.assertFalse(data["deleteDuplicate"])
         self.assertTrue(data["deleteResult"])
+        self.assertNotIn("Deleting", data["htmlWhileDeleteConfirm"])
+        self.assertIn("Restore", data["htmlWhileDeleteConfirm"])
+        self.assertIn("Delete permanently", data["htmlWhileDeleteConfirm"])
+        self.assertIn("Deleting", data["htmlWhileDeleting"])
+        self.assertIn("Restore", data["htmlWhileDeleting"])
+        self.assertNotIn("Restoring", data["htmlWhileDeleting"])
+        self.assertNotIn("delete-1", data["htmlAfterDeleteAuthority"])
+        self.assertIn(
+            ["Deleted", "success"],
+            data["toastsAfterDeleteAuthority"],
+        )
         self.assertFalse(data["deleteFailure"])
         self.assertTrue(data["deleteRetry"])
+        self.assertTrue(data["deleteRefreshFailure"])
+        self.assertNotIn("delete-refresh-fail", data["htmlAfterDeleteRefreshFailure"])
+        self.assertIn(
+            ["Deleted but refresh failed", "warning"],
+            data["toastsAfterDeleteRefreshFailure"],
+        )
         self.assertFalse(data["cancelResult"])
+        self.assertNotIn("Deleting", data["htmlWhileCancelConfirm"])
         self.assertFalse(data["backdropResult"])
         self.assertFalse(data["escapeResult"])
+        self.assertNotIn("Deleting", data["htmlWhileEscapeConfirm"])
         self.assertEqual(data["underlyingClicks"], 0)
         self.assertGreaterEqual(data["focusCalls"].count("cancelDeleteSession"), 6)
         self.assertEqual(data["focusCalls"][-1], "settingsDetail")
@@ -18716,6 +18782,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
             {"type": "restore", "sessionId": "restore-1"},
             {"type": "delete", "sessionId": "delete-1"},
             {"type": "delete", "sessionId": "delete-fail"},
+            {"type": "delete", "sessionId": "delete-refresh-fail"},
         ])
 
     def test_remaining_visible_status_strings_use_i18n(self):

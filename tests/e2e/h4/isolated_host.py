@@ -5354,6 +5354,34 @@ def main() -> int:
 
     archive_fixture_records = {}
     archive_index_gate = {"held": False}
+    archive_run_read_counts = {}
+    original_read_session_meta_strict = code_server._read_session_meta_strict
+
+    def counted_read_session_meta_strict(path):
+        candidate = Path(path)
+        if (
+            candidate.suffix == ".json"
+            and candidate.parent.resolve(strict=False)
+            == code_server._agent_runs_dir().resolve(strict=False)
+        ):
+            run_id = candidate.stem
+            archive_run_read_counts[run_id] = archive_run_read_counts.get(run_id, 0) + 1
+        return original_read_session_meta_strict(path)
+
+    code_server._read_session_meta_strict = counted_read_session_meta_strict
+
+    def session_archive_run_read_evidence(run_ids, *, reset=False):
+        normalized = [
+            code_server._safe_agent_run_id(run_id)
+            for run_id in list(run_ids or [])
+        ]
+        evidence = {
+            run_id: archive_run_read_counts.get(run_id, 0)
+            for run_id in normalized
+        }
+        if reset:
+            archive_run_read_counts.clear()
+        return evidence
 
     def hold_session_archive_index_build():
         if archive_index_gate["held"]:
@@ -5446,7 +5474,17 @@ def main() -> int:
             "session_id": session_id,
             "status": "completed",
         }
-        code_server.write_json(run_path, run_record)
+        code_server._ensure_agent_run_session_index_ready(wait=True)
+        session_index_added = code_server._agent_run_session_index_register(
+            run_id,
+            session_id,
+        )
+        try:
+            code_server.write_json(run_path, run_record)
+        except Exception:
+            if session_index_added:
+                code_server._agent_run_session_index_unregister_run(run_id)
+            raise
 
         public = {
             "sessionId": session_id,
@@ -5500,6 +5538,57 @@ def main() -> int:
             "agentRun": run_path.is_file(),
         }
 
+    def prepare_agent_run_indexes_before_listener():
+        """Match production startup, then make listener publication deterministic."""
+        if os.environ.get("CODE_H4_INJECT_AGENT_INDEX_BUILD_FAILURE") == "1":
+            corrupt_path = code_server._agent_runs_dir() / ("f" * 32 + ".json")
+            corrupt_path.parent.mkdir(parents=True, exist_ok=True)
+            corrupt_path.write_text("{", encoding="utf-8")
+
+        indexes = (
+            (
+                "nonterminal",
+                code_server._start_agent_run_nonterminal_index_build,
+                code_server._read_agent_run_nonterminal_index,
+                code_server._agent_run_nonterminal_index_path,
+            ),
+            (
+                "session",
+                code_server._start_agent_run_session_index_build,
+                code_server._read_agent_run_session_index,
+                code_server._agent_run_session_index_path,
+            ),
+        )
+        workers = [(name, start()) for name, start, _read, _path in indexes]
+        for name, worker in workers:
+            if worker is None:
+                continue
+            worker.join(timeout=5)
+            if worker.is_alive():
+                raise RuntimeError(f"H4 {name} AgentRun index startup timed out")
+
+        readiness = {}
+        for name, _start, read, index_path in indexes:
+            try:
+                current = read()
+            except code_server.AgentRunIndexError as exc:
+                raise RuntimeError(
+                    f"H4 {name} AgentRun index failed before listener"
+                ) from exc
+            key = str(index_path().resolve(strict=False))
+            with code_server._agent_run_index_builds_lock:
+                process_initialized = key in code_server._agent_run_index_initialized_roots
+            if current.get("state") != "ready" or not process_initialized:
+                raise RuntimeError(
+                    f"H4 {name} AgentRun index is not ready before listener"
+                )
+            readiness[name] = {
+                "state": "ready",
+                "entries": len(current.get("entries") or {}),
+                "processInitialized": True,
+            }
+        return readiness
+
     code_server.execute_registered_tool = counted_execute_registered_tool
     code_server.execute_apply_edit_proposal = counted_execute_apply_edit_proposal
     code_server.execute_run_command_tool = controlled_execute_run_command_tool
@@ -5507,7 +5596,7 @@ def main() -> int:
     code_server._migrate_sessions_to_hierarchy()
     code_server._migrate_codex_project_sessions_support()
     code_server._migrate_project_root_paths()
-    code_server._rebuild_agent_run_nonterminal_index(force=True)
+    agent_run_indexes = prepare_agent_run_indexes_before_listener()
     code_httpd = code_server.ThreadingHTTPServer(("127.0.0.1", 0), H4CodeHandler)
     code_httpd.daemon_threads = True
     code_port = code_httpd.server_address[1]
@@ -5525,6 +5614,7 @@ def main() -> int:
         "fakeUrl": fake_url,
         "codePort": code_port,
         "fakePort": fake_port,
+        "agentRunIndexes": agent_run_indexes,
         "fixtureSha256": fixture_sha256,
         "proposeEditFixture": {
             "path": PROPOSE_EDIT_PATH,
@@ -5691,6 +5781,18 @@ def main() -> int:
                     "id": request_id,
                     "ok": True,
                     "archiveEvidence": archive_evidence,
+                })
+                continue
+            if operation == "session-archive-run-read-evidence":
+                run_reads = session_archive_run_read_evidence(
+                    command.get("runIds"),
+                    reset=bool(command.get("reset")),
+                )
+                _json_line({
+                    "type": "response",
+                    "id": request_id,
+                    "ok": True,
+                    "runReads": run_reads,
                 })
                 continue
             if operation == "hold-session-archive-index-build":

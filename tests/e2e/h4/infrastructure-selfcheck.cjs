@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
 const {
   classifyPendingCommandOnChildExit,
@@ -36,6 +37,200 @@ async function pathExists(target) {
   }
 }
 
+function assertAgentRunIndexesReady(ready) {
+  assert.deepEqual(ready.agentRunIndexes, {
+    nonterminal: {
+      state: "ready",
+      entries: ready.agentRunIndexes.nonterminal.entries,
+      processInitialized: true,
+    },
+    session: {
+      state: "ready",
+      entries: ready.agentRunIndexes.session.entries,
+      processInitialized: true,
+    },
+  });
+  assert.equal(Number.isInteger(ready.agentRunIndexes.nonterminal.entries), true);
+  assert.equal(Number.isInteger(ready.agentRunIndexes.session.entries), true);
+}
+
+async function listOwnedH4Roots() {
+  const entries = await fs.readdir(os.tmpdir(), { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("code-h4-e2e-"))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+async function requestJson(codeUrl, pathname, {
+  method = "GET",
+  body,
+} = {}) {
+  const headers = {};
+  let encodedBody;
+  if (body !== undefined) {
+    headers["content-type"] = "application/json";
+    encodedBody = JSON.stringify(body);
+  }
+  const response = await fetch(new URL(pathname, codeUrl), {
+    method,
+    headers,
+    body: encodedBody,
+    signal: AbortSignal.timeout(5_000),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    body: text ? JSON.parse(text) : null,
+  };
+}
+
+async function runArchiveDeleteRestartEquivalentEvidence() {
+  const host = await startIsolatedHost();
+  let cleanup;
+  try {
+    assertAgentRunIndexesReady(host.ready);
+    const targetCreated = await requestJson(host.ready.codeUrl, "/api/sessions", {
+      method: "POST",
+      body: {
+        title: "H4 equivalent archive target",
+        messages: [{ role: "user", content: "H4_EQUIVALENT_TARGET" }],
+        runState: { status: "completed" },
+      },
+    });
+    const unrelatedCreated = await requestJson(host.ready.codeUrl, "/api/sessions", {
+      method: "POST",
+      body: {
+        title: "H4 equivalent unrelated Session",
+        messages: [{ role: "user", content: "H4_EQUIVALENT_UNRELATED" }],
+        runState: { status: "completed" },
+      },
+    });
+    assert.equal(targetCreated.status, 201);
+    assert.equal(unrelatedCreated.status, 201);
+    const targetSessionId = String(targetCreated.body.id || "");
+    const unrelatedSessionId = String(unrelatedCreated.body.id || "");
+    assert.match(targetSessionId, /^[a-f0-9]{16}$/);
+    assert.match(unrelatedSessionId, /^[a-f0-9]{16}$/);
+
+    const targetSeed = await host.command("seed-session-archive-sidecars", {
+      sessionId: targetSessionId,
+    });
+    const unrelatedSeed = await host.command("seed-session-archive-sidecars", {
+      sessionId: unrelatedSessionId,
+    });
+    assert.equal(targetSeed.ok, true);
+    assert.equal(unrelatedSeed.ok, true);
+    const targetRunId = targetSeed.archiveFixture.agentRunId;
+    const unrelatedRunId = unrelatedSeed.archiveFixture.agentRunId;
+
+    const archived = await requestJson(
+      host.ready.codeUrl,
+      `/api/session-archive/${targetSessionId}/archive`,
+      { method: "POST" },
+    );
+    assert.equal(archived.status, 200);
+    assert.equal(archived.body.status, "archived");
+
+    const transition = await host.restartGeneration();
+    assert.equal(transition.generationNumber, 2);
+    assertAgentRunIndexesReady(transition.currentReady);
+    assert.equal(transition.currentReady.agentRunIndexes.session.entries >= 2, true);
+
+    const listed = await requestJson(host.ready.codeUrl, "/api/session-archive");
+    assert.equal(listed.status, 200);
+    const targetArchive = listed.body.data.find((item) => item.id === targetSessionId);
+    assert.match(String(targetArchive?.archiveToken || ""), /^[a-f0-9]{32}$/);
+
+    const resetReads = await host.command("session-archive-run-read-evidence", {
+      runIds: [targetRunId, unrelatedRunId],
+      reset: true,
+    });
+    assert.deepEqual(resetReads.runReads, {
+      [targetRunId]: 0,
+      [unrelatedRunId]: 0,
+    });
+
+    const deletePath = `/api/session-archive/${targetSessionId}`
+      + `?archiveToken=${targetArchive.archiveToken}`;
+    const deleted = await requestJson(host.ready.codeUrl, deletePath, {
+      method: "DELETE",
+    });
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, { ok: true });
+
+    const targetEvidence = (await host.command(
+      "session-archive-fixture-evidence",
+      { sessionId: targetSessionId },
+    )).archiveEvidence;
+    assert.deepEqual(targetEvidence, {
+      sessionId: targetSessionId,
+      activeMeta: false,
+      activeMessages: false,
+      archiveBundle: false,
+      archiveManifest: false,
+      archiveSession: false,
+      archiveMessages: false,
+      goal: false,
+      asset: false,
+      agentRun: false,
+    });
+    const unrelatedEvidence = (await host.command(
+      "session-archive-fixture-evidence",
+      { sessionId: unrelatedSessionId },
+    )).archiveEvidence;
+    assert.deepEqual(unrelatedEvidence, {
+      sessionId: unrelatedSessionId,
+      activeMeta: true,
+      activeMessages: true,
+      archiveBundle: false,
+      archiveManifest: false,
+      archiveSession: false,
+      archiveMessages: false,
+      goal: true,
+      asset: true,
+      agentRun: true,
+    });
+    const readsAfterDelete = await host.command("session-archive-run-read-evidence", {
+      runIds: [targetRunId, unrelatedRunId],
+    });
+    assert.deepEqual(readsAfterDelete.runReads, {
+      [targetRunId]: 1,
+      [unrelatedRunId]: 0,
+    });
+
+    const repeated = await requestJson(host.ready.codeUrl, deletePath, {
+      method: "DELETE",
+    });
+    assert.equal(repeated.status, 410);
+    assert.equal(repeated.body.errorCode, "session_deleted");
+    const readsAfterRepeatedDelete = await host.command(
+      "session-archive-run-read-evidence",
+      { runIds: [targetRunId, unrelatedRunId] },
+    );
+    assert.deepEqual(readsAfterRepeatedDelete.runReads, readsAfterDelete.runReads);
+    assert.deepEqual((await host.command(
+      "session-archive-fixture-evidence",
+      { sessionId: unrelatedSessionId },
+    )).archiveEvidence, unrelatedEvidence);
+
+    return {
+      firstDeleteStatus: deleted.status,
+      repeatedDeleteStatus: repeated.status,
+      targetFactsRemoved: true,
+      unrelatedRunReads: readsAfterDelete.runReads[unrelatedRunId],
+      unrelatedFactsPreserved: true,
+      processFreshRestartReady: true,
+    };
+  } finally {
+    cleanup = await host.stop();
+    assert.equal(cleanup.childExited, true);
+    assert.deepEqual(cleanup.portsClosed, [true, true]);
+    assert.equal(cleanup.rootRemoved, true);
+    assert.deepEqual(cleanup.cleanupErrors, []);
+  }
+}
+
 async function assertControlStdoutIsolationSourceContract() {
   const pythonHostPath = path.join(__dirname, "isolated_host.py");
   const productionServerPath = path.resolve(__dirname, "../../../server.py");
@@ -50,6 +245,10 @@ async function assertControlStdoutIsolationSourceContract() {
   assert.match(
     pythonHostSource,
     /code_server\.ThreadingHTTPServer\(\("127\.0\.0\.1", 0\), H4CodeHandler\)/,
+  );
+  assert.match(
+    pythonHostSource,
+    /agent_run_indexes = prepare_agent_run_indexes_before_listener\(\)\s+code_httpd = code_server\.ThreadingHTTPServer/,
   );
   assert.doesNotMatch(
     pythonHostSource,
@@ -393,6 +592,7 @@ async function main() {
 
   try {
     host = await startIsolatedHost();
+    assertAgentRunIndexesReady(host.ready);
     environment = host.ready.environment;
     proposeEditFixture = host.ready.proposeEditFixture;
     proposeEditThirdPartyTransition = host.ready.proposeEditThirdPartyTransition;
@@ -507,7 +707,9 @@ async function main() {
     homeDir: restartHost.homeDir,
   };
   const firstReady = restartHost.ready;
+  assertAgentRunIndexesReady(firstReady);
   const transition = await restartHost.restartGeneration();
+  assertAgentRunIndexesReady(transition.currentReady);
   assert.notEqual(transition.previousPid, transition.currentPid);
   assert.equal(transition.previousPid > 0, true);
   assert.equal(transition.currentPid > 0, true);
@@ -541,16 +743,35 @@ async function main() {
   assert.deepEqual(restartCleanup.cleanupErrors, []);
   assert.strictEqual(await restartHost.stop(), restartCleanup);
 
+  const rootsBeforeIndexFailure = await listOwnedH4Roots();
+  let initialIndexFailureObserved = false;
+  try {
+    await startIsolatedHost({ injectIndexBuildFailure: true });
+  } catch (error) {
+    assert.match(error.message, /^H4 isolated host exited \(/);
+    initialIndexFailureObserved = true;
+  }
+  assert.equal(initialIndexFailureObserved, true);
+  assert.deepEqual(await listOwnedH4Roots(), rootsBeforeIndexFailure);
+  assert.equal(getActiveChildCount(), 0);
+
   const failedRestartHost = await startIsolatedHost();
   const failedRestartRoot = failedRestartHost.root;
+  const failedRestartReady = failedRestartHost.ready;
+  assertAgentRunIndexesReady(failedRestartReady);
   let startupFailureObserved = false;
   try {
-    await failedRestartHost.restartGeneration({ injectFailureAfterSpawn: true });
+    await failedRestartHost.restartGeneration({ injectIndexBuildFailure: true });
   } catch (error) {
-    assert.equal(error.message, "H4 injected generation startup failure");
+    assert.match(error.message, /^H4 isolated host exited \(/);
     startupFailureObserved = true;
   }
   assert.equal(startupFailureObserved, true);
+  assert.equal(await pathExists(failedRestartRoot), true);
+  assert.equal(getActiveChildCount(), 0);
+  assert.equal(failedRestartHost.ready, null);
+  assert.equal(failedRestartHost.generationNumber, 2);
+  assert.equal(failedRestartReady.codePort > 0, true);
   assert.equal(await pathExists(failedRestartRoot), true);
   const failedRestartCleanup = await failedRestartHost.stop();
   assert.equal(failedRestartCleanup.childExited, true);
@@ -558,6 +779,9 @@ async function main() {
   assert.equal(failedRestartCleanup.rootRemoved, true);
   assert.deepEqual(failedRestartCleanup.cleanupErrors, []);
   assert.strictEqual(await failedRestartHost.stop(), failedRestartCleanup);
+  assert.equal(getActiveChildCount(), 0);
+
+  const archiveDeleteEquivalent = await runArchiveDeleteRestartEquivalentEvidence();
   assert.equal(getActiveChildCount(), 0);
 
   process.stdout.write(`${JSON.stringify({
@@ -599,10 +823,13 @@ async function main() {
       finalStopIdempotent: true,
     },
     restartStartupFailure: {
+      initialObserved: initialIndexFailureObserved,
       observed: startupFailureObserved,
+      listenerCreated: false,
       finalRootRemoved: failedRestartCleanup.rootRemoved,
       activeChildCount: getActiveChildCount(),
     },
+    archiveDeleteRestartEquivalent: archiveDeleteEquivalent,
   })}\n`);
 }
 

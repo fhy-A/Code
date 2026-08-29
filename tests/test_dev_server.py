@@ -90,6 +90,7 @@ class TestDevServer(unittest.TestCase):
         fake_module._migrate_codex_project_sessions_support.assert_called_once_with()
         fake_module._migrate_project_root_paths.assert_called_once_with()
         fake_module._start_agent_run_nonterminal_index_build.assert_called_once_with()
+        fake_module._start_agent_run_session_index_build.assert_called_once_with()
         fake_module.start_tray.assert_called_once_with(3011, instance)
         ensure_frontend.assert_called_once_with()
         self.assertTrue(issubclass(instance.handler, fake_module.CodeHandler))

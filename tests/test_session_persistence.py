@@ -729,6 +729,8 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             self.saved_agent_runs = dict(server._agent_runs)
             server._agent_runs.clear()
         server._rebuild_agent_run_nonterminal_index(force=True)
+        if hasattr(server, "_rebuild_agent_run_session_index"):
+            server._rebuild_agent_run_session_index(force=True)
         self.addCleanup(self.restore_agent_runs)
 
     def restore_agent_runs(self):
@@ -825,7 +827,9 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         return runtime.service.events_path(session_id)
 
     def create_terminal_agent_run(self, session_id, marker="a"):
-        run_id = (str(marker)[:1] or "a") * 32
+        run_id = hashlib.sha256(
+            f"archive-terminal-run\0{session_id}\0{marker}".encode("utf-8")
+        ).hexdigest()[:32]
         run = {
             "version": 5,
             "id": run_id,
@@ -834,9 +838,15 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             "status": "completed",
         }
         path = self.root / "agent-runs" / f"{run_id}.json"
-        server.write_json(path, run)
-        with server._agent_run_lock:
-            server._agent_runs[run_id] = dict(run)
+        index_added = server._agent_run_session_index_register(run_id, session_id)
+        try:
+            server.write_json(path, run)
+            with server._agent_run_lock:
+                server._agent_runs[run_id] = dict(run)
+        except Exception:
+            if index_added:
+                server._agent_run_session_index_unregister_run(run_id)
+            raise
         return run_id, path
 
     def test_preexisting_unowned_archive_directory_is_ignored_without_mutation(self):
@@ -1669,6 +1679,323 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             "2" * 32: session_b["id"],
         })
 
+    def test_agent_run_session_index_legacy_build_is_secret_free_and_idempotent(self):
+        runs_dir = self.root / "agent-runs"
+        secret = "AGENT-RUN-SESSION-INDEX-SECRET-SENTINEL"
+        records = {
+            "3" * 32: ("legacy-session-index-a", "waiting_recovery"),
+            "4" * 32: ("legacy-session-index-b", "completed"),
+        }
+        for run_id, (session_id, status) in records.items():
+            server.write_json(runs_dir / f"{run_id}.json", {
+                "version": 5,
+                "id": run_id,
+                "sessionId": session_id,
+                "status": status,
+                "messages": [{"role": "user", "content": secret}],
+                "request": {"url": f"https://example.invalid/?token={secret}"},
+                "result": {"path": f"C:/secret/{secret}"},
+            })
+        shutil.rmtree(server._agent_run_session_index_dir())
+
+        first = server._rebuild_agent_run_session_index(force=False)
+        first_bytes = server._agent_run_session_index_path().read_bytes()
+        second = server._rebuild_agent_run_session_index(force=False)
+
+        expected = {run_id: session_id for run_id, (session_id, _status) in records.items()}
+        self.assertEqual(first["entries"], expected)
+        self.assertEqual(second["entries"], expected)
+        self.assertEqual(server._agent_run_session_index_path().read_bytes(), first_bytes)
+        self.assertNotIn(secret.encode("utf-8"), first_bytes)
+        self.assertTrue(all(
+            set(item) == {"runId", "sessionId"}
+            for item in json.loads(first_bytes)["entries"]
+        ))
+
+    def test_agent_run_session_index_unavailable_or_stale_delete_fails_closed(self):
+        session = self.create_session(title="Session index fail closed")
+        run_id, run_path = self.create_terminal_agent_run(session["id"], "fail-closed")
+        archived = self.archive(session["id"]).send_json.call_args.args[0]
+        index_path = server._agent_run_session_index_path()
+        secret = "SESSION-INDEX-FAILURE-SECRET-SENTINEL"
+
+        def mutate(case):
+            if case == "missing":
+                index_path.unlink(missing_ok=True)
+            elif case == "building":
+                server._write_agent_run_session_index_building()
+            elif case == "corrupt":
+                index_path.write_text(
+                    '{"schema":"wrong","secret":"' + secret + '"}',
+                    encoding="utf-8",
+                )
+            elif case == "stale":
+                server._write_agent_run_session_index({})
+            elif case == "conflict":
+                server._write_agent_run_session_index({run_id: "other-session"})
+            else:
+                raise AssertionError(case)
+
+        for case in ("missing", "building", "corrupt", "stale", "conflict"):
+            with self.subTest(case=case):
+                server._rebuild_agent_run_session_index(force=True)
+                mutate(case)
+                with mock.patch.object(
+                    server, "_start_agent_run_session_index_build", return_value=None,
+                ):
+                    rejected = self.make_handler()
+                    server.CodeHandler.delete_archived_session(
+                        rejected,
+                        session["id"],
+                        archived["archiveToken"],
+                    )
+                payload, status = rejected.send_json.call_args.args
+                self.assertEqual(status, 503)
+                self.assertEqual(
+                    payload["errorCode"],
+                    "session_delete_failed"
+                    if case in {"stale", "conflict"}
+                    else "session_archive_failed",
+                )
+                self.assertNotIn(secret, json.dumps(payload))
+                self.assertTrue(server._session_archive_bundle_path(session["id"]).exists())
+                self.assertFalse(server.session_path(session["id"]).exists())
+                self.assertFalse(server.messages_path(session["id"]).exists())
+                self.assertTrue(run_path.exists())
+
+        server._rebuild_agent_run_session_index(force=True)
+        deleted = self.make_handler()
+        server.CodeHandler.delete_archived_session(
+            deleted,
+            session["id"],
+            archived["archiveToken"],
+        )
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(run_path.exists())
+
+    def test_agent_run_session_index_process_rebuild_catches_legacy_terminal_run(self):
+        session = self.create_session(title="Legacy writer process rebuild")
+        run_id = "5" * 32
+        run_path = server._agent_run_path(run_id)
+        server.write_json(run_path, {
+            "version": 5,
+            "id": run_id,
+            "sessionId": session["id"],
+            "status": "completed",
+        })
+        archived = self.archive(session["id"]).send_json.call_args.args[0]
+        key = str(server._agent_run_session_index_path().resolve(strict=False))
+        with server._agent_run_index_builds_lock:
+            server._agent_run_index_initialized_roots.discard(key)
+        started = threading.Event()
+        release = threading.Event()
+        original_read_text = Path.read_text
+
+        def gated_read_text(path, *args, **kwargs):
+            if Path(path) == run_path:
+                started.set()
+                release.wait(timeout=5)
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", gated_read_text):
+            worker = server._start_agent_run_session_index_build()
+            self.assertIsNotNone(worker)
+            self.assertTrue(started.wait(timeout=2))
+            blocked = self.make_handler()
+            server.CodeHandler.delete_archived_session(
+                blocked,
+                session["id"],
+                archived["archiveToken"],
+            )
+            payload, status = blocked.send_json.call_args.args
+            self.assertEqual(status, 503)
+            self.assertEqual(payload["errorCode"], "session_archive_failed")
+            self.assertTrue(run_path.exists())
+            release.set()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+
+        deleted = self.make_handler()
+        server.CodeHandler.delete_archived_session(
+            deleted,
+            session["id"],
+            archived["archiveToken"],
+        )
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertFalse(run_path.exists())
+
+    def test_permanent_delete_and_late_agent_run_persist_are_race_safe(self):
+        session = self.create_session(title="Delete/persist race")
+        session_id = session["id"]
+        run = server._create_agent_run(
+            session_id,
+            {
+                "model": "fixture-model",
+                "messages": [{"role": "user", "content": "terminal before delete"}],
+            },
+            "http://127.0.0.1:9",
+            ["synthetic-key"],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        self.assertTrue(server._finish_agent_run(run, "completed"))
+        run_path = server._agent_run_path(run["id"])
+        archived = self.archive(session_id).send_json.call_args.args[0]
+        delete_entered = threading.Event()
+        release_delete = threading.Event()
+        persist_started = threading.Event()
+        create_started = threading.Event()
+        delete_errors = []
+        persist_errors = []
+        create_errors = []
+        original_restore = server._restore_session_archive_file
+
+        def gated_restore(*args, **kwargs):
+            if not delete_entered.is_set():
+                delete_entered.set()
+                if not release_delete.wait(timeout=5):
+                    raise AssertionError("delete release was not signalled")
+            return original_restore(*args, **kwargs)
+
+        deleted = self.make_handler()
+
+        def run_delete():
+            try:
+                server.CodeHandler.delete_archived_session(
+                    deleted,
+                    session_id,
+                    archived["archiveToken"],
+                )
+            except Exception as exc:
+                delete_errors.append(exc)
+
+        def run_persist():
+            persist_started.set()
+            try:
+                server._persist_agent_run(run)
+            except Exception as exc:
+                persist_errors.append(exc)
+
+        def run_create():
+            create_started.set()
+            try:
+                server._create_agent_run(
+                    session_id,
+                    {
+                        "model": "fixture-model",
+                        "messages": [{"role": "user", "content": "must lose delete race"}],
+                    },
+                    "http://127.0.0.1:9",
+                    ["synthetic-key"],
+                    allowed_tools=[],
+                    start_worker=False,
+                )
+            except Exception as exc:
+                create_errors.append(exc)
+
+        with mock.patch.object(
+            server,
+            "_restore_session_archive_file",
+            side_effect=gated_restore,
+        ):
+            delete_thread = threading.Thread(target=run_delete)
+            persist_thread = threading.Thread(target=run_persist)
+            create_thread = threading.Thread(target=run_create)
+            delete_thread.start()
+            self.assertTrue(delete_entered.wait(timeout=2))
+            persist_thread.start()
+            create_thread.start()
+            self.assertTrue(persist_started.wait(timeout=2))
+            self.assertTrue(create_started.wait(timeout=2))
+            release_delete.set()
+            delete_thread.join(timeout=5)
+            persist_thread.join(timeout=5)
+            create_thread.join(timeout=5)
+
+        self.assertFalse(delete_thread.is_alive())
+        self.assertFalse(persist_thread.is_alive())
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(delete_errors, [])
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertEqual(len(persist_errors), 1)
+        self.assertIsInstance(persist_errors[0], server.AgentRunIndexError)
+        self.assertEqual(len(create_errors), 1)
+        self.assertIsInstance(create_errors[0], server.SessionLifecycleConflictError)
+        self.assertEqual(create_errors[0].error_code, "session_deleted")
+        self.assertFalse(run_path.exists())
+        self.assertEqual(list(server._agent_runs_dir().glob("*.json")), [])
+        self.assertNotIn(
+            run["id"],
+            server._read_agent_run_session_index()["entries"],
+        )
+
+    def test_agent_run_session_index_concurrent_register_preserves_all_entries(self):
+        barrier = threading.Barrier(3)
+        errors = []
+
+        def register(run_id, session_id):
+            try:
+                barrier.wait(timeout=2)
+                server._agent_run_session_index_register(run_id, session_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=register, args=("6" * 32, "session-index-a")),
+            threading.Thread(target=register, args=("7" * 32, "session-index-b")),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=2)
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(server._read_agent_run_session_index()["entries"], {
+            "6" * 32: "session-index-a",
+            "7" * 32: "session-index-b",
+        })
+
+    def test_agent_run_index_unregister_schedules_rebuild_outside_shared_index_lock(self):
+        def assert_index_lock_available():
+            acquired = threading.Event()
+
+            def probe():
+                if server._agent_run_index_lock.acquire(timeout=0.5):
+                    try:
+                        acquired.set()
+                    finally:
+                        server._agent_run_index_lock.release()
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=1)
+            self.assertTrue(acquired.is_set())
+
+        cases = (
+            (
+                server._agent_run_nonterminal_index_unregister,
+                "_read_agent_run_nonterminal_index",
+                "_start_agent_run_nonterminal_index_build",
+            ),
+            (
+                server._agent_run_session_index_unregister_run,
+                "_read_agent_run_session_index",
+                "_start_agent_run_session_index_build",
+            ),
+        )
+        for unregister, read_name, start_name in cases:
+            with self.subTest(unregister=unregister.__name__), mock.patch.object(
+                server,
+                read_name,
+                side_effect=server.AgentRunIndexError("synthetic unavailable"),
+            ), mock.patch.object(
+                server,
+                start_name,
+                side_effect=assert_index_lock_available,
+            ):
+                self.assertFalse(unregister("8" * 32))
+
     def test_archive_only_delete_requires_current_token_and_keeps_siblings_safe(self):
         first = self.create_session(title="Delete archived")
         second = self.create_session(title="Keep sibling")
@@ -1740,6 +2067,44 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
                 start_worker=False,
             )
         self.assertEqual(raised.exception.error_code, "session_deleted")
+
+    def test_archive_only_delete_reads_only_target_agent_runs_from_ready_index(self):
+        session = self.create_session(title="Indexed permanent delete")
+        target_run_id, target_run_path = self.create_terminal_agent_run(
+            session["id"], "d",
+        )
+        unrelated_dir = self.root / "agent-runs"
+        for index in range(1001):
+            run_id = f"{index + 1:032x}"
+            server.write_json(unrelated_dir / f"{run_id}.json", {
+                "version": 5,
+                "id": run_id,
+                "sessionId": f"unrelated-{index:04d}",
+                "status": "completed",
+            })
+        server._rebuild_agent_run_session_index(force=True)
+        archived = self.archive(session["id"]).send_json.call_args.args[0]
+
+        original_read = server._read_session_meta_strict
+        observed_run_reads = []
+
+        def tracked_read(path):
+            candidate = Path(path)
+            if candidate.parent == unrelated_dir and candidate.suffix == ".json":
+                observed_run_reads.append(candidate.stem)
+            return original_read(path)
+
+        deleted = self.make_handler()
+        with mock.patch.object(server, "_read_session_meta_strict", tracked_read):
+            server.CodeHandler.delete_archived_session(
+                deleted,
+                session["id"],
+                archived["archiveToken"],
+            )
+
+        self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+        self.assertEqual(observed_run_reads, [target_run_id])
+        self.assertFalse(target_run_path.exists())
 
     def test_archive_only_delete_failure_keeps_archived_state_recoverable(self):
         session = self.create_session(title="Delete rollback remains archived")

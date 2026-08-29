@@ -30672,12 +30672,72 @@ async function exerciseSessionArchiveProductSurface(h4, runtime) {
   await page.locator('#settingsNav [data-panel="archives"]').click();
   const deleteRow = page.locator(`.archived-session-row[data-session-id="${parentId}"]`);
   await expect(deleteRow).toHaveCount(1);
+
+  const permanentDeleteRequestCount = () => archiveRequests.filter((entry) => (
+    entry.method === "DELETE"
+    && entry.path === `/api/session-archive/${parentId}`
+  )).length;
+  await deleteRow.locator(".archived-session-delete").click();
+  await expect(page.locator("#deleteConfirmModal")).toBeVisible();
+  await expect(deleteRow.locator(".archived-session-restore")).toHaveText("Restore");
+  await expect(deleteRow.locator(".archived-session-delete")).toHaveText("Delete permanently");
+  await page.locator("#cancelDeleteSession").click();
+  await expect(page.locator("#deleteConfirmModal")).toBeHidden();
+  expect(permanentDeleteRequestCount()).toBe(0);
+
+  await deleteRow.locator(".archived-session-delete").click();
+  await expect(page.locator("#deleteConfirmModal")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#deleteConfirmModal")).toBeHidden();
+  await expect(deleteRow.locator(".archived-session-restore")).toHaveText("Restore");
+  await expect(deleteRow.locator(".archived-session-delete")).toHaveText("Delete permanently");
+  expect(permanentDeleteRequestCount()).toBe(0);
+
+  let releasePermanentDelete;
+  const permanentDeleteGate = new Promise((resolve) => { releasePermanentDelete = resolve; });
+  const permanentDeleteRoutePattern = "**/api/session-archive/**";
+  const permanentDeleteRouteHandler = async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (
+      request.method() === "DELETE"
+      && url.pathname === `/api/session-archive/${parentId}`
+    ) {
+      await permanentDeleteGate;
+    }
+    await route.continue();
+  };
+  let permanentDeleteRouteInstalled = true;
+  const releasePermanentDeleteRoute = async () => {
+    releasePermanentDelete?.();
+    if (!permanentDeleteRouteInstalled || page.isClosed()) return;
+    permanentDeleteRouteInstalled = false;
+    await page.unroute(permanentDeleteRoutePattern, permanentDeleteRouteHandler);
+  };
+  await page.route(permanentDeleteRoutePattern, permanentDeleteRouteHandler);
+  h4.registerPageCleanup(page, releasePermanentDeleteRoute);
   await deleteRow.locator(".archived-session-delete").click();
   await expect(page.locator("#deleteConfirmModal")).toBeVisible();
   await expect(page.locator("#deleteConfirmText")).toContainText("messages, Goal, generated assets, and run records");
   await expect(page.locator("#deleteConfirmText")).not.toContainText(archivedParent.archiveToken);
   await page.locator("#confirmDeleteSession").click();
+  await expect.poll(permanentDeleteRequestCount).toBe(1);
+  await expect(deleteRow.locator(".archived-session-restore")).toBeDisabled();
+  await expect(deleteRow.locator(".archived-session-restore")).toHaveText("Restore");
+  await expect(deleteRow.locator(".archived-session-delete")).toBeDisabled();
+  await expect(deleteRow.locator(".archived-session-delete")).toHaveText("Deleting…");
+  const permanentDeleteResponse = page.waitForResponse((response) => {
+    const request = response.request();
+    const url = new URL(response.url());
+    return (
+      request.method() === "DELETE"
+      && url.pathname === `/api/session-archive/${parentId}`
+    );
+  });
+  releasePermanentDelete();
+  expect((await permanentDeleteResponse).status()).toBe(200);
   await expect(deleteRow).toHaveCount(0);
+  await releasePermanentDeleteRoute();
   await expect(page.locator("#toastContainer .toast.success").filter({ hasText: "permanently deleted" })).toHaveCount(1);
   expect((await fetchProductionJson(page, assetUrl)).status).toBe(404);
   expect((await fetchProductionJson(page, `/api/sessions/${encodeURIComponent(parentId)}`)).status).toBe(404);
@@ -30717,6 +30777,8 @@ async function exerciseSessionArchiveProductSurface(h4, runtime) {
     archiveActions: actionRequests.length,
     physicalBundleObserved: true,
     restartRestoreObserved: true,
+    deleteConfirmCancelAndEscapeRequests: 0,
+    deleteActionSpecificPendingObserved: true,
     deleteCleanup: { core: true, goal: true, asset: true, agentRun: true },
     modelSideEffects: 0,
   });
