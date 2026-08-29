@@ -1,3 +1,4 @@
+import io
 import json
 import hashlib
 import http.client
@@ -3217,6 +3218,167 @@ class TestSessionDeleteConsistency(unittest.TestCase):
         response = connection.getresponse()
         raw = response.read()
         return response.status, json.loads(raw.decode("utf-8"))
+
+    def test_archive_action_posts_consume_body_before_next_same_connection_request(self):
+        server._rebuild_agent_run_nonterminal_index(force=True)
+        server._rebuild_agent_run_session_index(force=True)
+        connection = self.start_http_server()
+        self.addCleanup(connection.close)
+        status, created = self.http_json(connection, "POST", "/api/sessions", {
+            "title": "keep-alive archive body",
+            "messages": [],
+        })
+        self.assertEqual(status, 201)
+        session_id = created["id"]
+        original_mutation = server._mutate_session_archive_state
+
+        with mock.patch.object(
+            server,
+            "_mutate_session_archive_state",
+            wraps=original_mutation,
+        ) as mutation:
+            status, archived = self.http_json(
+                connection,
+                "POST",
+                f"/api/session-archive/{session_id}/archive",
+                {"ignored": "archive body sentinel"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(archived["status"], "archived")
+            status, archive_list = self.http_json(
+                connection,
+                "GET",
+                "/api/session-archive",
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual([item["id"] for item in archive_list["data"]], [session_id])
+
+            self.assertEqual(
+                self.http_json(
+                    connection,
+                    "POST",
+                    f"/api/session-archive/{session_id}/restore",
+                    {"ignored": "restore body sentinel"},
+                ),
+                (200, {"ok": True, "status": "active"}),
+            )
+            status, active_list = self.http_json(connection, "GET", "/api/sessions")
+            self.assertEqual(status, 200)
+            self.assertIn(session_id, [item["id"] for item in active_list["data"]])
+
+            status, archived_again = self.http_json(
+                connection,
+                "POST",
+                f"/api/session-archive/{session_id}/archive",
+                {"ignored": "second archive body sentinel"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(archived_again["status"], "archived")
+            self.assertEqual(
+                self.http_json(
+                    connection,
+                    "POST",
+                    f"/api/session-archive/{session_id}/unarchive",
+                    {"ignored": "unarchive body sentinel"},
+                ),
+                (200, {"ok": True, "status": "active"}),
+            )
+            status, active_after_alias = self.http_json(connection, "GET", "/api/sessions")
+            self.assertEqual(status, 200)
+            self.assertIn(session_id, [item["id"] for item in active_after_alias["data"]])
+
+        self.assertEqual(
+            mutation.call_args_list,
+            [
+                mock.call(session_id, archived=True),
+                mock.call(session_id, archived=False),
+                mock.call(session_id, archived=True),
+                mock.call(session_id, archived=False),
+            ],
+        )
+
+    def test_archive_action_routes_drain_exact_body_before_mutation(self):
+        body = b'{"ignored":"transport-only"}'
+        routes = (
+            ("archive", "archive"),
+            ("restore", "unarchive"),
+            ("unarchive", "unarchive"),
+        )
+        for action, expected_mutation in routes:
+            with self.subTest(action=action):
+                handler = object.__new__(server.CodeHandler)
+                handler.path = f"/api/session-archive/{'a' * 16}/{action}"
+                handler.headers = {"Content-Length": str(len(body))}
+                handler.rfile = io.BytesIO(body)
+                handler.close_connection = False
+                handler.send_json = mock.Mock()
+                observed = []
+
+                def record_archive(_handler, session_id):
+                    observed.append(("archive", session_id, handler.rfile.tell()))
+
+                def record_unarchive(_handler, session_id):
+                    observed.append(("unarchive", session_id, handler.rfile.tell()))
+
+                with mock.patch.object(
+                    server.CodeHandler,
+                    "archive_session_lifecycle",
+                    autospec=True,
+                    side_effect=record_archive,
+                ) as archive_mutation, mock.patch.object(
+                    server.CodeHandler,
+                    "unarchive_session_lifecycle",
+                    autospec=True,
+                    side_effect=record_unarchive,
+                ) as unarchive_mutation:
+                    server.CodeHandler.do_POST(handler)
+
+                self.assertEqual(
+                    observed,
+                    [(expected_mutation, "a" * 16, len(body))],
+                )
+                self.assertEqual(archive_mutation.call_count, expected_mutation == "archive")
+                self.assertEqual(unarchive_mutation.call_count, expected_mutation == "unarchive")
+                handler.send_json.assert_not_called()
+                self.assertFalse(handler.close_connection)
+
+    def test_archive_action_body_failure_closes_connection_without_mutation(self):
+        failure_cases = (
+            ("truncated", {"Content-Length": "8"}, b"{}"),
+            (
+                "oversized",
+                {"Content-Length": str(server._SESSION_ARCHIVE_ACTION_BODY_MAX_BYTES + 1)},
+                b"",
+            ),
+            ("transfer-encoding", {"Transfer-Encoding": "chunked"}, b""),
+        )
+        for action in ("archive", "restore", "unarchive"):
+            for label, headers, body in failure_cases:
+                with self.subTest(action=action, failure=label):
+                    handler = object.__new__(server.CodeHandler)
+                    handler.path = f"/api/session-archive/{'b' * 16}/{action}"
+                    handler.headers = headers
+                    handler.rfile = io.BytesIO(body)
+                    handler.close_connection = False
+                    handler.send_json = mock.Mock()
+                    with mock.patch.object(
+                        server.CodeHandler,
+                        "archive_session_lifecycle",
+                        autospec=True,
+                    ) as archive_mutation, mock.patch.object(
+                        server.CodeHandler,
+                        "unarchive_session_lifecycle",
+                        autospec=True,
+                    ) as unarchive_mutation:
+                        server.CodeHandler.do_POST(handler)
+
+                    archive_mutation.assert_not_called()
+                    unarchive_mutation.assert_not_called()
+                    handler.send_json.assert_called_once()
+                    payload, status = handler.send_json.call_args.args
+                    self.assertEqual(status, 400)
+                    self.assertEqual(set(payload), {"error"})
+                    self.assertTrue(handler.close_connection)
 
     def test_stale_put_consumes_body_before_asset_get_on_same_connection(self):
         connection = self.start_http_server()

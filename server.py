@@ -14941,6 +14941,7 @@ def _session_archive_root():
 _SESSION_ARCHIVE_NAMESPACE_SCHEMA = "code-session-archive-namespace/v1"
 _SESSION_ARCHIVE_NAMESPACE_NAME = "code-v1"
 _SESSION_ARCHIVE_NAMESPACE_MARKER = ".owner.json"
+_SESSION_ARCHIVE_ACTION_BODY_MAX_BYTES = 64 * 1024
 
 
 def _session_archive_managed_root():
@@ -20856,6 +20857,11 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route.startswith("/api/session-archive/"):
                 parts = route.strip("/").split("/")
                 if len(parts) == 4 and parts[:2] == ["api", "session-archive"]:
+                    if parts[3] in {"archive", "restore", "unarchive"}:
+                        CodeHandler.consume_request_body(
+                            self,
+                            max_bytes=_SESSION_ARCHIVE_ACTION_BODY_MAX_BYTES,
+                        )
                     if parts[3] == "archive":
                         self.archive_session_lifecycle(parts[2])
                         return
@@ -21428,7 +21434,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(body.decode("utf-8"))
 
-    def consume_request_body(self):
+    def consume_request_body(self, *, max_bytes=None):
         """Drain one body on an early response without parsing or reading twice."""
         headers = getattr(self, "headers", None)
         stream = getattr(self, "rfile", None)
@@ -21439,15 +21445,26 @@ class CodeHandler(BaseHTTPRequestHandler):
             if callable(reader):
                 reader()
             return
-        length = int(headers.get("Content-Length", "0") or "0")
-        if length < 0:
-            raise ValueError("Content-Length must be non-negative")
-        remaining = length
-        while remaining:
-            chunk = stream.read(remaining)
-            if not chunk:
-                raise ConnectionError("request body ended before Content-Length")
-            remaining -= len(chunk)
+        try:
+            transfer_encoding = str(headers.get("Transfer-Encoding", "") or "").strip()
+            if transfer_encoding:
+                raise ValueError("Transfer-Encoding is not supported")
+            length = int(headers.get("Content-Length", "0") or "0")
+            if length < 0:
+                raise ValueError("Content-Length must be non-negative")
+            if max_bytes is not None and length > int(max_bytes):
+                raise ValueError("request body exceeds the allowed size")
+            remaining = length
+            while remaining:
+                chunk = stream.read(min(remaining, 64 * 1024))
+                if not chunk:
+                    raise ConnectionError("request body ended before Content-Length")
+                remaining -= len(chunk)
+        except Exception:
+            # A body that cannot be drained must not be interpreted as the
+            # next request on this one connection.
+            self.close_connection = True
+            raise
 
     def send_json(self, data, status=200):
         status, payload = json_bytes(data, status)
