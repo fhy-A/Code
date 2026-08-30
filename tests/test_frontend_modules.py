@@ -24701,7 +24701,7 @@ process.stdout.write(JSON.stringify({streaming, terminal, foreground}));
 
     def test_same_status_kind_patches_slot_and_indicator_in_place(self):
         status_start = APP_SOURCE.index("function resolveSessionStatusSlot(")
-        status_end = APP_SOURCE.index("const sessionStatusTicker", status_start)
+        status_end = APP_SOURCE.index("const sessionTitleMarquee", status_start)
         status_source = APP_SOURCE[status_start:status_end]
         script = f"""
 const state = {{sessionId: "session-1", sessions: [{{id: "session-1"}}]}};
@@ -24716,6 +24716,7 @@ const isSessionStreaming = () => nextStatus.kind === "running";
 const t = (key) => key;
 const resolveSessionStatus = () => ({{...nextStatus}});
 const escapeHtml = (value) => String(value);
+const scheduleSessionTitleOverflowRefresh = () => 0;
 function makeIndicator() {{
   return {{attrs: {{}}, setAttribute(name, value) {{ this.attrs[name] = value; }}}};
 }}
@@ -24844,12 +24845,17 @@ const getSessionRunState = (id) => runStates[id] || {{}};
 const getUserInputRequest = (id) => userInputs[id] || null;
 const pendingAuthorizations = (id) => authorizations[id] ? [authorizations[id]] : [];
 const getSkillEvidenceRequest = (id) => skillEvidence[id] || null;
-const isSessionStreaming = () => false;
+const isSessionStreaming = (id) => id === "newRun";
 const t = (key) => key;
 const resolveSessionStatus = (_session, options) => ({{
   waitingUserInput: options.waitingUserInput,
   waitingAuthorization: options.waitingAuthorization,
   waitingSkillEvidence: options.waitingSkillEvidence,
+  ...(["failed", "newRun", "paused", "cancelled"].includes(_session.id) ? {{
+    streaming: options.streaming,
+    failed: options.failed,
+    failedLabel: options.failedLabel,
+  }} : {{}}),
 }});
 eval({json.dumps(status_source)});
 const project = (id, interactionState) => resolveSessionStatusSlot({{id, interactionState}});
@@ -24857,6 +24863,10 @@ const project = (id, interactionState) => resolveSessionStatusSlot({{id, interac
 skillEvidence.fullSkill = {{status: "pending", gateId: "gate"}};
 skillEvidence.resolvedSkill = {{status: "resolved", gateId: "gate"}};
 userInputs.fullUser = {{status: "pending", id: "question"}};
+runStates.failed = {{status: "failed"}};
+runStates.newRun = {{status: "running"}};
+runStates.paused = {{status: "paused"}};
+runStates.cancelled = {{status: "cancelled"}};
 process.stdout.write(JSON.stringify({{
   userFallback: project("userFallback", "waiting_user_input"),
   authorizationFallback: project("authorizationFallback", "waiting_authorization"),
@@ -24866,6 +24876,10 @@ process.stdout.write(JSON.stringify({{
   resolvedSkillSuppressesStaleSummary: project("resolvedSkill", "waiting_skill_evidence"),
   fullUserWinsOverSkillSummary: project("fullUser", "waiting_skill_evidence"),
   activeSummary: project("active", "waiting_skill_evidence"),
+  failed: project("failed", ""),
+  newRun: project("newRun", ""),
+  paused: project("paused", ""),
+  cancelled: project("cancelled", ""),
 }}));
 """
         completed = subprocess.run(
@@ -24913,12 +24927,26 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(data["resolvedSkillSuppressesStaleSummary"], data["invalidFallback"])
         self.assertEqual(data["fullUserWinsOverSkillSummary"], data["userFallback"])
         self.assertEqual(data["activeSummary"], data["skillFallback"])
+        self.assertEqual(
+            data["failed"],
+            {
+                "waitingUserInput": False,
+                "waitingAuthorization": False,
+                "waitingSkillEvidence": False,
+                "streaming": False,
+                "failed": True,
+                "failedLabel": "sessionRunFailed",
+            },
+        )
+        for lifecycle in ("newRun", "paused", "cancelled"):
+            self.assertFalse(data[lifecycle]["failed"])
+        self.assertTrue(data["newRun"]["streaming"])
 
     def test_relative_time_boundaries_fallbacks_and_status_priority(self):
         script = f"""
 const window = {{Code: {{features: {{}}}}}};
 global.window = window;
-eval({json.dumps(SESSIONS_SOURCE)});
+require("./src/features/sessions.js");
 const sessions = window.Code.features.sessions;
 const now = Date.parse("2026-08-24T12:00:00Z");
 const translate = (language) => (key, params = {{}}) => {{
@@ -25035,11 +25063,53 @@ process.stdout.write(JSON.stringify({{
             {"kind": "unread", "text": "", "label": "unread"},
         )
 
+    def test_failed_status_follows_waiting_and_running_but_precedes_unread(self):
+        script = r"""
+global.window = {setInterval, clearInterval};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+const resolve = window.Code.features.sessions.resolveSessionStatus;
+const base = {
+  active: false,
+  waitingUserInputLabel: "answer",
+  waitingAuthorizationLabel: "confirm",
+  waitingSkillEvidenceLabel: "evidence",
+  runningLabel: "running",
+  failedLabel: "failed",
+  unreadLabel: "unread",
+  translate: () => "idle",
+  now: Date.parse("2026-08-24T12:00:00Z"),
+};
+process.stdout.write(JSON.stringify({
+  waiting: resolve({_unread: true}, {...base, waitingUserInput: true, streaming: true, failed: true}),
+  running: resolve({_unread: true}, {...base, streaming: true, failed: true}),
+  failed: resolve({_unread: true}, {...base, failed: true}),
+  unread: resolve({_unread: true}, {...base, failed: false}),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "waiting": {"kind": "waiting-user-input", "text": "", "label": "answer"},
+                "running": {"kind": "running", "text": "", "label": "running"},
+                "failed": {"kind": "failed", "text": "", "label": "failed"},
+                "unread": {"kind": "unread", "text": "", "label": "unread"},
+            },
+        )
+
     def test_ticker_updates_only_idle_slots_once_per_minute_without_reordering(self):
         script = f"""
 const window = {{Code: {{features: {{}}}}}};
 global.window = window;
-eval({json.dumps(SESSIONS_SOURCE)});
+require("./src/features/sessions.js");
 const sessionsFeature = window.Code.features.sessions;
 let now = Date.parse("2026-08-24T12:00:59Z");
 const sessionItems = [
@@ -25164,25 +25234,573 @@ process.stdout.write(JSON.stringify({{
             "sessionRelativeDays",
             "sessionWaitingAnswer",
             "sessionWaitingConfirmation",
+            "sessionWaitingSkillEvidence",
+            "sessionRunFailed",
         ):
             self.assertEqual(I18N_SOURCE.count(key + ":"), 2)
         for css_contract in (
             ".session-main .session-status-slot",
-            "flex: 0 0 46px;",
+            ".session-status-slot.is-idle",
+            "width: max-content;",
+            "flex: 0 0 auto;",
+            ".session-status-slot:not(.is-idle)",
+            "flex: 0 0 14px;",
             "white-space: nowrap;",
             ".session-status-slot.is-running .session-status-indicator",
             ".session-status-slot.is-unread .session-status-indicator",
             ".session-status-slot.is-waiting-user-input .session-status-indicator",
             ".session-status-slot.is-waiting-authorization .session-status-indicator",
+            ".session-status-slot.is-waiting-skill-evidence .session-status-indicator",
+            ".session-status-slot.is-failed .session-status-indicator",
             'content: "?";',
             'content: "!";',
             "background: var(--accent);",
+            "border: 2px solid var(--red);",
             "@keyframes session-status-spin",
             "@media (prefers-reduced-motion: reduce)",
             "animation: none;",
         ):
             self.assertIn(css_contract, STYLE_SOURCE)
         self.assertIn("position: absolute;", STYLE_SOURCE[STYLE_SOURCE.index(".session-more-wrap"):])
+
+
+class TestSessionTitleHoverMarquee(unittest.TestCase):
+    def test_overflow_scrolls_once_resets_and_respects_reduced_motion(self):
+        script = r"""
+global.window = {setTimeout, clearTimeout};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+const createController = window.Code.features.sessions.createSessionTitleMarqueeController;
+
+let nextTimerId = 1;
+const timers = new Map();
+const cleared = [];
+let reducedMotion = false;
+const controller = createController({
+  setTimeout(callback, delay) {
+    const id = nextTimerId++;
+    timers.set(id, {callback, delay});
+    return id;
+  },
+  clearTimeout(id) {
+    cleared.push(id);
+    timers.delete(id);
+  },
+  prefersReducedMotion: () => reducedMotion,
+  hoverDelayMs: 400,
+  pixelsPerSecond: 24,
+});
+
+function makeClassList() {
+  const values = new Set();
+  return {
+    add(...names) { names.forEach((name) => values.add(name)); },
+    remove(...names) { names.forEach((name) => values.delete(name)); },
+    contains(name) { return values.has(name); },
+    values() { return [...values].sort(); },
+  };
+}
+
+function makeTitle(clientWidth, scrollWidth) {
+  const inner = {scrollWidth};
+  const properties = new Map();
+  return {
+    clientWidth,
+    inner,
+    classList: makeClassList(),
+    style: {
+      setProperty(name, value) { properties.set(name, String(value)); },
+      removeProperty(name) { properties.delete(name); },
+      values() { return Object.fromEntries(properties); },
+    },
+    querySelector(selector) {
+      return selector === ":scope > .session-title-scroll-text" ? inner : null;
+    },
+  };
+}
+
+const initialShortTitle = makeTitle(120, 120);
+const initialLongTitle = makeTitle(100, 180);
+const initiallyMarked = controller.refresh([initialShortTitle, initialLongTitle]);
+const initialProjection = {
+  shortClasses: initialShortTitle.classList.values(),
+  longClasses: initialLongTitle.classList.values(),
+  longStyle: initialLongTitle.style.values(),
+  timerCount: timers.size,
+};
+
+const speedTitles = [
+  makeTitle(100, 124),
+  makeTitle(100, 180),
+  makeTitle(100, 580),
+];
+controller.refresh(speedTitles);
+const speedSamples = speedTitles.map((title) => {
+  const style = title.style.values();
+  const distance = Number.parseFloat(style["--session-title-scroll-distance"]);
+  const durationMs = Number.parseFloat(style["--session-title-scroll-duration"]);
+  return {distance, durationMs, pixelsPerSecond: distance / (durationMs / 1000)};
+});
+
+const shortTitle = makeTitle(120, 120);
+const shortAccepted = controller.enter(shortTitle);
+
+const longTitle = makeTitle(100, 180);
+const longAccepted = controller.enter(longTitle);
+const beforeStart = {
+  classes: longTitle.classList.values(),
+  style: longTitle.style.values(),
+  timers: [...timers.values()].map((timer) => timer.delay),
+};
+const firstTimer = [...timers.entries()][0];
+firstTimer[1].callback();
+timers.delete(firstTimer[0]);
+const afterStart = longTitle.classList.values();
+const completed = controller.finish(longTitle, {
+  target: longTitle.inner,
+  propertyName: "transform",
+});
+const completedAgain = controller.finish(longTitle, {
+  target: longTitle.inner,
+  propertyName: "transform",
+});
+const afterFinish = longTitle.classList.values();
+const left = controller.leave(longTitle);
+const afterLeave = {
+  classes: longTitle.classList.values(),
+  style: longTitle.style.values(),
+};
+const replayAccepted = controller.enter(longTitle);
+const replayTimers = [...timers.values()].map((timer) => timer.delay);
+controller.leave(longTitle);
+
+reducedMotion = true;
+const reducedTitle = makeTitle(100, 180);
+const reducedAccepted = controller.enter(reducedTitle);
+const reduced = {
+  classes: reducedTitle.classList.values(),
+  style: reducedTitle.style.values(),
+  timerCount: timers.size,
+};
+controller.leave(reducedTitle);
+
+process.stdout.write(JSON.stringify({
+  initiallyMarked,
+  initialProjection,
+  speedSamples,
+  shortAccepted,
+  shortClasses: shortTitle.classList.values(),
+  longAccepted,
+  beforeStart,
+  afterStart,
+  completed,
+  completedAgain,
+  afterFinish,
+  left,
+  afterLeave,
+  replayAccepted,
+  replayTimers,
+  reducedAccepted,
+  reduced,
+  cleared,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["initiallyMarked"], 1)
+        self.assertEqual(data["initialProjection"]["shortClasses"], [])
+        self.assertEqual(data["initialProjection"]["longClasses"], ["is-overflowing"])
+        self.assertEqual(
+            data["initialProjection"]["longStyle"],
+            {
+                "--session-title-scroll-distance": "80px",
+                "--session-title-scroll-duration": "3333ms",
+            },
+        )
+        self.assertEqual(data["initialProjection"]["timerCount"], 0)
+        self.assertEqual(
+            [(item["distance"], item["durationMs"]) for item in data["speedSamples"]],
+            [(24, 1000), (80, 3333), (480, 20000)],
+        )
+        for item in data["speedSamples"]:
+            self.assertAlmostEqual(item["pixelsPerSecond"], 24, places=2)
+        controller_start = SESSIONS_SOURCE.index(
+            "function createSessionTitleMarqueeController("
+        )
+        controller_end = SESSIONS_SOURCE.index(
+            "function compareSessionSearchRecords(", controller_start
+        )
+        controller_source = SESSIONS_SOURCE[controller_start:controller_end]
+        self.assertIn(
+            "const durationMs = Math.round((distance / pixelsPerSecond) * 1000);",
+            controller_source,
+        )
+        self.assertNotIn("minDurationMs", controller_source)
+        self.assertNotIn("maxDurationMs", controller_source)
+        self.assertFalse(data["shortAccepted"])
+        self.assertEqual(data["shortClasses"], [])
+        self.assertTrue(data["longAccepted"])
+        self.assertEqual(data["beforeStart"]["classes"], ["is-overflowing"])
+        self.assertEqual(
+            data["beforeStart"]["style"],
+            {
+                "--session-title-scroll-distance": "80px",
+                "--session-title-scroll-duration": "3333ms",
+            },
+        )
+        self.assertEqual(data["beforeStart"]["timers"], [400])
+        self.assertEqual(data["afterStart"], ["is-overflowing", "is-scrolling"])
+        self.assertTrue(data["completed"])
+        self.assertFalse(data["completedAgain"])
+        self.assertEqual(
+            data["afterFinish"],
+            ["is-overflowing", "is-scroll-complete", "is-scrolling"],
+        )
+        self.assertTrue(data["left"])
+        self.assertEqual(data["afterLeave"]["classes"], ["is-overflowing"])
+        self.assertEqual(
+            data["afterLeave"]["style"],
+            {
+                "--session-title-scroll-distance": "80px",
+                "--session-title-scroll-duration": "3333ms",
+            },
+        )
+        self.assertTrue(data["replayAccepted"])
+        self.assertEqual(data["replayTimers"], [400])
+        self.assertTrue(data["reducedAccepted"])
+        self.assertEqual(data["reduced"]["classes"], ["is-overflowing"])
+        self.assertEqual(data["reduced"]["timerCount"], 0)
+
+    def test_hover_distance_uses_the_real_operation_surface_boundary(self):
+        script = r"""
+global.window = {
+  setTimeout,
+  clearTimeout,
+  getComputedStyle(element) {
+    return {
+      getPropertyValue(name) {
+        return name === "--session-more-cover-inset"
+          ? `${element.coverInset || 0}px`
+          : "";
+      },
+    };
+  },
+};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+const createController = window.Code.features.sessions.createSessionTitleMarqueeController;
+
+function makeClassList() {
+  const values = new Set();
+  return {
+    add(...names) { names.forEach((name) => values.add(name)); },
+    remove(...names) { names.forEach((name) => values.delete(name)); },
+    contains(name) { return values.has(name); },
+    values() { return [...values].sort(); },
+  };
+}
+
+function makeTitle({clientWidth, scrollWidth, wrapLeft, coverInset = 16}) {
+  const titleLeft = 100;
+  const properties = new Map();
+  const inner = {
+    scrollWidth,
+    getBoundingClientRect: () => ({left: titleLeft, right: titleLeft + scrollWidth}),
+  };
+  const moreWrap = {
+    coverInset,
+    getBoundingClientRect: () => ({left: wrapLeft, right: wrapLeft + 28}),
+  };
+  const row = {
+    querySelector(selector) {
+      return selector === ".session-more-wrap" ? moreWrap : null;
+    },
+  };
+  return {
+    clientWidth,
+    inner,
+    classList: makeClassList(),
+    style: {
+      setProperty(name, value) { properties.set(name, String(value)); },
+      removeProperty(name) { properties.delete(name); },
+      values() { return Object.fromEntries(properties); },
+    },
+    getBoundingClientRect: () => ({left: titleLeft, right: titleLeft + clientWidth}),
+    querySelector(selector) {
+      return selector === ":scope > .session-title-scroll-text" ? inner : null;
+    },
+    closest(selector) {
+      return selector === ".session-row" ? row : null;
+    },
+  };
+}
+
+function measureSample(spec) {
+  const controller = createController({
+    prefersReducedMotion: () => true,
+    pixelsPerSecond: 24,
+    endGapPx: 4,
+  });
+  const title = makeTitle(spec);
+  const accepted = controller.enter(title);
+  const style = title.style.values();
+  const distance = Number.parseFloat(style["--session-title-scroll-distance"] || "0");
+  const durationMs = Number.parseFloat(style["--session-title-scroll-duration"] || "0");
+  const surfaceLeft = spec.wrapLeft - (spec.coverInset ?? 16);
+  const targetRight = Math.min(100 + spec.clientWidth, surfaceLeft - 4);
+  return {
+    accepted,
+    distance,
+    durationMs,
+    endRight: 100 + spec.scrollWidth - distance,
+    targetRight,
+  };
+}
+
+const shortOverflow = measureSample({clientWidth: 100, scrollWidth: 124, wrapLeft: 200});
+const longOverflow = measureSample({clientWidth: 100, scrollWidth: 580, wrapLeft: 200});
+const widerStatus = measureSample({clientWidth: 82, scrollWidth: 180, wrapLeft: 188});
+
+const edgeController = createController({
+  prefersReducedMotion: () => true,
+  pixelsPerSecond: 24,
+  endGapPx: 4,
+});
+const edge = makeTitle({clientWidth: 100, scrollWidth: 96, wrapLeft: 190});
+const staticMarked = edgeController.refresh([edge]);
+const staticClasses = edge.classList.values();
+const hoverAccepted = edgeController.enter(edge);
+const hoverStyle = edge.style.values();
+const hoverDistance = Number.parseFloat(hoverStyle["--session-title-scroll-distance"] || "0");
+const hoverEndRight = 196 - hoverDistance;
+const hoverTargetRight = 190 - 16 - 4;
+const left = edgeController.leave(edge);
+
+process.stdout.write(JSON.stringify({
+  shortOverflow,
+  longOverflow,
+  widerStatus,
+  edge: {
+    staticMarked,
+    staticClasses,
+    hoverAccepted,
+    hoverDistance,
+    hoverEndRight,
+    hoverTargetRight,
+    left,
+    afterLeaveClasses: edge.classList.values(),
+    afterLeaveStyle: edge.style.values(),
+  },
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(
+            [data[name]["distance"] for name in ("shortOverflow", "longOverflow", "widerStatus")],
+            [44, 500, 112],
+        )
+        for name in ("shortOverflow", "longOverflow", "widerStatus"):
+            sample = data[name]
+            self.assertTrue(sample["accepted"])
+            self.assertLessEqual(sample["endRight"], sample["targetRight"])
+            self.assertAlmostEqual(
+                sample["distance"] / (sample["durationMs"] / 1000),
+                24,
+                places=2,
+            )
+        self.assertEqual(data["edge"]["staticMarked"], 0)
+        self.assertEqual(data["edge"]["staticClasses"], [])
+        self.assertTrue(data["edge"]["hoverAccepted"])
+        self.assertEqual(data["edge"]["hoverDistance"], 26)
+        self.assertLessEqual(data["edge"]["hoverEndRight"], data["edge"]["hoverTargetRight"])
+        self.assertTrue(data["edge"]["left"])
+        self.assertEqual(data["edge"]["afterLeaveClasses"], [])
+        self.assertEqual(data["edge"]["afterLeaveStyle"], {})
+
+    def test_markup_wiring_and_css_preserve_row_ownership(self):
+        row_start = APP_SOURCE.index("function renderProjectSessionRow(")
+        row_end = APP_SOURCE.index("function renderProjectSection(", row_start)
+        row_source = APP_SOURCE[row_start:row_end]
+        wiring_start = APP_SOURCE.index("function attachSessionTitleMarqueeListeners(")
+        wiring_end = APP_SOURCE.index("function attachProjectSessionListeners(", wiring_start)
+        wiring_source = APP_SOURCE[wiring_start:wiring_end]
+        render_start = APP_SOURCE.index("function renderSessions()")
+        render_end = APP_SOURCE.index("function openProjectContextMenu", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        phase_start = STYLE_SOURCE.index(
+            "/* CODE-043 phase 3A: one compact authoritative session status */"
+        )
+        phase_end = STYLE_SOURCE.index(".session-main .session-status-slot", phase_start)
+        phase_source = STYLE_SOURCE[phase_start:phase_end]
+        refresh_start = APP_SOURCE.index("function cancelSessionTitleOverflowRefresh(")
+        refresh_end = APP_SOURCE.index("const sessionStatusTicker", refresh_start)
+        refresh_source = APP_SOURCE[refresh_start:refresh_end]
+        slot_refresh_start = APP_SOURCE.index("function refreshSessionStatusSlot(")
+        slot_refresh_end = APP_SOURCE.index("const sessionTitleMarquee", slot_refresh_start)
+        slot_refresh_source = APP_SOURCE[slot_refresh_start:slot_refresh_end]
+        ticker_start = APP_SOURCE.index("const sessionStatusTicker", refresh_end)
+        ticker_end = APP_SOURCE.index("function renderProjectSessionRow", ticker_start)
+        ticker_source = APP_SOURCE[ticker_start:ticker_end]
+        sidebar_width_start = APP_SOURCE.index("function applySidebarWidth(")
+        sidebar_width_end = APP_SOURCE.index(
+            "function applySidebarSessionHeight(", sidebar_width_start
+        )
+        sidebar_width_source = APP_SOURCE[sidebar_width_start:sidebar_width_end]
+        status_start = STYLE_SOURCE.index(".session-main .session-status-slot", phase_start)
+        status_end = STYLE_SOURCE.index(".session-status-indicator", status_start)
+        status_source = STYLE_SOURCE[status_start:status_end]
+
+        self.assertIn(
+            '<span class="session-title-text"><span class="session-title-scroll-text">',
+            row_source,
+        )
+        self.assertNotIn("aria-hidden", row_source)
+        self.assertIn("_sessionTitleMarqueeBound", wiring_source)
+        for event_type in ("mouseover", "mouseout", "transitionend"):
+            self.assertEqual(wiring_source.count(f'addEventListener("{event_type}"'), 1)
+        self.assertNotIn("setInterval", wiring_source)
+        self.assertNotIn("preventDefault", wiring_source)
+        self.assertNotIn("stopPropagation", wiring_source)
+        self.assertNotIn('addEventListener("click"', wiring_source)
+        self.assertIn("sessionTitleMarquee.reset();", render_source)
+        self.assertIn("cancelSessionTitleOverflowRefresh();", render_source)
+        self.assertIn("scheduleSessionTitleOverflowRefresh();", render_source)
+        self.assertIn("attachSessionTitleMarqueeListeners();", render_source)
+        self.assertIn('document.querySelectorAll(".session-main")', render_source)
+        self.assertIn("loadSession(button.dataset.sessionId)", render_source)
+        for refresh_contract in (
+            "requestAnimationFrame",
+            "cancelAnimationFrame",
+            'querySelectorAll(".session-title-text")',
+            "sessionTitleMarquee.refresh(",
+        ):
+            self.assertIn(refresh_contract, refresh_source)
+        for forbidden in ("setInterval", "ResizeObserver", "MutationObserver"):
+            self.assertNotIn(forbidden, refresh_source)
+        self.assertIn("scheduleSessionTitleOverflowRefresh();", slot_refresh_source)
+        self.assertIn("onRefresh: scheduleSessionTitleOverflowRefresh", ticker_source)
+        self.assertIn("scheduleSessionTitleOverflowRefresh();", sidebar_width_source)
+
+        for status_contract in (
+            "margin-left: var(--shell-space-1);",
+            ".session-main .session-status-slot.is-idle",
+            "width: max-content;",
+            "flex: 0 0 auto;",
+            "justify-content: flex-end;",
+            ".session-main .session-status-slot:not(.is-idle)",
+            "width: 14px;",
+            "flex: 0 0 14px;",
+        ):
+            self.assertIn(status_contract, status_source)
+        self.assertNotIn("width: 46px;", status_source)
+        self.assertNotIn("opacity:", status_source)
+        self.assertNotIn("mask", status_source)
+        self.assertIn("--shell-space-1: 4px;", STYLE_SOURCE)
+
+        for contract in (
+            "text-overflow: clip;",
+            ".session-title-scroll-text",
+            "min-width: max-content;",
+            "transform: translateX(0);",
+            "transition: none;",
+            ".session-main > .session-title-text.is-overflowing:not(.is-scroll-complete)",
+            "-webkit-mask-image: linear-gradient(",
+            "mask-image: linear-gradient(",
+            ".session-title-text.is-scrolling > .session-title-scroll-text",
+            "var(--session-title-scroll-distance)",
+            "var(--session-title-scroll-duration)",
+            "@media (prefers-reduced-motion: reduce)",
+            "transition: none !important;",
+            "transform: translateX(0) !important;",
+        ):
+            self.assertIn(contract, phase_source)
+        self.assertNotIn("text-overflow: ellipsis", phase_source)
+        self.assertNotIn("animation:", phase_source)
+        for selector in (
+            ".session-main > .session-title-text {",
+            ".session-main > .session-title-text > .session-title-scroll-text {",
+        ):
+            rule_start = phase_source.index(selector)
+            rule_end = phase_source.index("}", rule_start)
+            rule = phase_source[rule_start:rule_end]
+            self.assertIn("text-overflow: clip;", rule)
+            self.assertNotIn("!important", rule)
+        mask_start = phase_source.index(
+            ".session-main > .session-title-text.is-overflowing:not(.is-scroll-complete)"
+        )
+        mask_end = phase_source.index("}", mask_start)
+        mask_rule = phase_source[mask_start:mask_end]
+        self.assertNotIn("background", mask_rule)
+        self.assertNotIn("var(--panel", mask_rule)
+        self.assertNotIn("opacity", mask_rule)
+        self.assertNotIn("session-status", mask_rule)
+        self.assertNotIn("session-more", mask_rule)
+
+        for surface_contract in (
+            "--session-more-surface: var(--panel);",
+            "--session-more-surface: color-mix(in srgb, var(--text) 6%, var(--panel));",
+            "--session-more-surface: var(--shell-state-selected);",
+        ):
+            self.assertIn(surface_contract, phase_source)
+        cover_start = phase_source.index(".session-row .session-more-wrap::before {")
+        cover_end = phase_source.index("}", cover_start)
+        cover_rule = phase_source[cover_start:cover_end]
+        for cover_contract in (
+            'content: "";',
+            "position: absolute;",
+            "inset: 0 0 0 calc(0px - var(--session-more-cover-inset));",
+            "pointer-events: none;",
+            "background: var(--session-more-surface);",
+        ):
+            self.assertIn(cover_contract, cover_rule)
+        for layout_or_alpha_change in (
+            "opacity:",
+            "width:",
+            "padding:",
+            "margin:",
+            "transform:",
+        ):
+            self.assertNotIn(layout_or_alpha_change, cover_rule)
+        self.assertIn(
+            "--session-more-cover-inset: 16px;",
+            phase_source,
+        )
+        button_surface_start = phase_source.index(".session-row .session-more-btn {")
+        button_surface_end = phase_source.index("}", button_surface_start)
+        button_surface_rule = phase_source[button_surface_start:button_surface_end]
+        for seamless_contract in (
+            "border: 0;",
+            "background: transparent;",
+            "box-shadow: none;",
+        ):
+            self.assertIn(seamless_contract, button_surface_rule)
+        self.assertNotIn("opacity:", button_surface_rule)
+        more_hover_start = phase_source.index(".session-row .session-more-btn:hover {")
+        more_hover_end = phase_source.index("}", more_hover_start)
+        more_hover_rule = phase_source[more_hover_start:more_hover_end]
+        self.assertIn("background: transparent;", more_hover_rule)
+        self.assertNotIn("box-shadow", more_hover_rule)
+        more_focus_start = phase_source.index(
+            ".session-row .session-more-btn:focus-visible {"
+        )
+        more_focus_end = phase_source.index("}", more_focus_start)
+        more_focus_rule = phase_source[more_focus_start:more_focus_end]
+        self.assertIn("outline: 2px solid", more_focus_rule)
+        self.assertIn("outline-offset: -2px;", more_focus_rule)
 
 
 class TestSidebarProjectArchitecture(unittest.TestCase):
@@ -25262,6 +25880,72 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn('class="pin-icon"', APP_SOURCE)
         self.assertIn(".pin-icon", STYLE_SOURCE)
         self.assertNotIn("&#9733;", APP_SOURCE)
+
+    def test_session_pin_uses_the_left_gutter_without_affecting_project_pin(self):
+        row_start = APP_SOURCE.index("function renderProjectSessionRow(")
+        row_end = APP_SOURCE.index("function renderProjectSection(", row_start)
+        row_source = APP_SOURCE[row_start:row_end]
+        project_start = APP_SOURCE.index("function renderProjectSection(")
+        project_end = APP_SOURCE.index("function renderSessions()", project_start)
+        project_source = APP_SOURCE[project_start:project_end]
+
+        badge_start = STYLE_SOURCE.index(".session-pin-badge {")
+        badge_end = STYLE_SOURCE.index("}", badge_start)
+        badge_rule = STYLE_SOURCE[badge_start:badge_end]
+        for contract in (
+            "position: absolute;",
+            "left: 6px;",
+            "top: 50%;",
+            "width: 14px;",
+            "height: 14px;",
+            "margin: 0;",
+            "transform: translateY(-50%);",
+            "pointer-events: none;",
+            "color: var(--muted);",
+        ):
+            self.assertIn(contract, badge_rule)
+        self.assertNotIn("flex:", badge_rule)
+        self.assertNotIn("margin-right:", badge_rule)
+
+        session_icon_start = STYLE_SOURCE.index(".session-pin-badge .pin-icon {")
+        session_icon_end = STYLE_SOURCE.index("}", session_icon_start)
+        session_icon_rule = STYLE_SOURCE[session_icon_start:session_icon_end]
+        for contract in (
+            "width: 13px;",
+            "height: 13px;",
+            "stroke-width: 1.9;",
+            "transform: rotate(38deg);",
+            "transform-origin: center;",
+            "overflow: visible;",
+        ):
+            self.assertIn(contract, session_icon_rule)
+
+        active_start = STYLE_SOURCE.index(".session-row.active .session-pin-badge {")
+        active_end = STYLE_SOURCE.index("}", active_start)
+        self.assertIn("var(--accent)", STYLE_SOURCE[active_start:active_end])
+
+        project_badge_start = STYLE_SOURCE.index(".project-pin-indicator {")
+        project_badge_end = STYLE_SOURCE.index("}", project_badge_start)
+        project_badge_rule = STYLE_SOURCE[project_badge_start:project_badge_end]
+        self.assertNotIn("position: absolute;", project_badge_rule)
+        self.assertIn("flex-shrink: 0;", project_badge_rule)
+
+        shared_icon_start = STYLE_SOURCE.index(".pin-icon {")
+        shared_icon_end = STYLE_SOURCE.index("}", shared_icon_start)
+        shared_icon_rule = STYLE_SOURCE[shared_icon_start:shared_icon_end]
+        for contract in ("width: 12px;", "height: 12px;", "stroke-width: 1.8;"):
+            self.assertIn(contract, shared_icon_rule)
+
+        self.assertLess(
+            row_source.index("session-pin-badge"),
+            row_source.index("session-title-text"),
+        )
+        self.assertIn("project-pin-indicator", project_source)
+        self.assertIn("renderPinIcon()", project_source)
+        self.assertIn(
+            ".project-block .session-row .session-main {\n  padding-left: 24px;\n}",
+            STYLE_SOURCE,
+        )
 
     def test_project_menu_contains_edit_and_pin_only(self):
         menu_start = APP_SOURCE.index("function openProjectContextMenu")

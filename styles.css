@@ -4503,18 +4503,103 @@ body.theme-dark .syn-fn { color: #61afef; }
   background: var(--panel-2);
 }
 
-.session-title-text {
+/* CODE-043 phase 3A: one compact authoritative session status */
+.session-main > .session-title-text {
+  position: relative;
   min-width: 0;
   flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.session-main > .session-title-text > .session-title-scroll-text {
+  display: inline-block;
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
+  transform: translateX(0);
+  transition: none;
+  white-space: nowrap;
+}
+
+.session-main > .session-title-text.is-overflowing:not(.is-scroll-complete) {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+.session-title-text.is-scrolling > .session-title-scroll-text {
+  transform: translateX(calc(-1 * var(--session-title-scroll-distance)));
+  transition: transform var(--session-title-scroll-duration) linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-title-text.is-scrolling > .session-title-scroll-text {
+    transition: none !important;
+    transform: translateX(0) !important;
+  }
+}
+
+.session-row {
+  --session-more-surface: var(--panel);
+}
+
+.session-row:hover:not(.active) {
+  --session-more-surface: color-mix(in srgb, var(--text) 6%, var(--panel));
+}
+
+.session-row.active {
+  --session-more-surface: var(--shell-state-selected);
+}
+
+.session-row .session-more-wrap {
+  --session-more-cover-inset: 16px;
+}
+
+.session-row .session-more-wrap::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 calc(0px - var(--session-more-cover-inset));
+  border-radius: var(--shell-radius-sm);
+  pointer-events: none;
+  background: var(--session-more-surface);
+}
+
+.session-row .session-more-btn {
+  position: relative;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.session-row .session-more-btn:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.session-row .session-more-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: -2px;
 }
 
 .session-main .session-status-slot {
-  width: 46px;
-  flex: 0 0 46px;
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  margin-left: 5px;
+  margin-left: var(--shell-space-1);
   overflow: visible;
   text-overflow: clip;
   white-space: nowrap;
@@ -4522,6 +4607,18 @@ body.theme-dark .syn-fn { color: #61afef; }
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+
+.session-main .session-status-slot.is-idle {
+  width: max-content;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.session-main .session-status-slot:not(.is-idle) {
+  width: 14px;
+  flex: 0 0 14px;
+  justify-content: center;
 }
 
 .session-status-indicator {
@@ -4543,6 +4640,14 @@ body.theme-dark .syn-fn { color: #61afef; }
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+}
+
+.session-status-slot.is-failed .session-status-indicator {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--red);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 
 .session-status-slot.is-waiting-user-input .session-status-indicator,
@@ -4588,11 +4693,18 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .session-pin-badge {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  width: 14px;
+  height: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 auto;
-  margin-right: 2px;
+  margin: 0;
+  transform: translateY(-50%);
+  z-index: 1;
+  pointer-events: none;
   color: var(--muted);
 }
 
@@ -4605,6 +4717,19 @@ body.theme-dark .syn-fn { color: #61afef; }
   stroke-linejoin: round;
   stroke-width: 1.8;
   vector-effect: non-scaling-stroke;
+}
+
+.session-pin-badge .pin-icon {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.9;
+  transform: rotate(38deg);
+  transform-origin: center;
+  overflow: visible;
+}
+
+.session-row.active .session-pin-badge {
+  color: color-mix(in srgb, var(--accent) 72%, var(--muted));
 }
 
 .session-source-badge {

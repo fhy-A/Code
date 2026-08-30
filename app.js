@@ -47,6 +47,7 @@ const {
 const { createTimelineFeature, syncSessionBranchMetadata } = window.Code.ui.timeline;
 const { createPanelsFeature } = window.Code.ui.panels;
 const {
+  createSessionTitleMarqueeController,
   createSessionStatusTicker,
   createSessionNavigation,
   createSessionSearchFeature,
@@ -4909,6 +4910,7 @@ function renderPinIcon() {
 function resolveSessionStatusSlot(session) {
   const active = session.id === state.sessionId;
   const runState = getSessionRunState(session.id) || session.runState || {};
+  const runStatus = String(runState.status || "");
   const userInputRequest = getUserInputRequest(session.id) || runState.userInputRequest;
   const authorizationRequest = pendingAuthorizations(session.id)[0] || runState.authorizationRequest;
   const skillEvidenceRequest = getSkillEvidenceRequest(session.id) || runState.skillEvidenceRequest;
@@ -4935,10 +4937,12 @@ function resolveSessionStatusSlot(session) {
     waitingSkillEvidence: skillEvidenceRequest?.status === "pending"
       || interactionState === "waiting_skill_evidence",
     streaming: isSessionStreaming(session.id),
+    failed: runStatus === "failed",
     waitingUserInputLabel: t("sessionWaitingAnswer"),
     waitingAuthorizationLabel: t("sessionWaitingConfirmation"),
     waitingSkillEvidenceLabel: t("sessionWaitingSkillEvidence"),
     runningLabel: t("modelRunning"),
+    failedLabel: t("sessionRunFailed"),
     unreadLabel: t("unreadMessage"),
     translate: t,
     now: Date.now(),
@@ -4996,13 +5000,36 @@ function refreshSessionStatusSlot(sessionId) {
   if (!patchSessionStatusSlot(slot, session, status)) {
     slot.outerHTML = renderSessionStatusSlot(session, status);
   }
+  scheduleSessionTitleOverflowRefresh();
   return true;
+}
+
+const sessionTitleMarquee = createSessionTitleMarqueeController();
+let sessionTitleOverflowFrame = 0;
+
+function cancelSessionTitleOverflowRefresh() {
+  if (!sessionTitleOverflowFrame) return false;
+  window.cancelAnimationFrame(sessionTitleOverflowFrame);
+  sessionTitleOverflowFrame = 0;
+  return true;
+}
+
+function scheduleSessionTitleOverflowRefresh() {
+  if (sessionTitleOverflowFrame) return sessionTitleOverflowFrame;
+  sessionTitleOverflowFrame = window.requestAnimationFrame(() => {
+    sessionTitleOverflowFrame = 0;
+    sessionTitleMarquee.refresh(
+      els.sessionList?.querySelectorAll(".session-title-text") || [],
+    );
+  });
+  return sessionTitleOverflowFrame;
 }
 
 const sessionStatusTicker = createSessionStatusTicker({
   getRoot: () => els.sessionList,
   getSessions: () => state.sessions,
   translate: t,
+  onRefresh: scheduleSessionTitleOverflowRefresh,
 });
 
 function renderProjectSessionRow(session, pinnedIds) {
@@ -5024,7 +5051,8 @@ function renderProjectSessionRow(session, pinnedIds) {
     '" data-session-id="' + escapeHtml(session.id) + '">' +
     '<button class="session-main" type="button" data-session-id="' +
     escapeHtml(session.id) + '">' +
-    pinBadge + '<span class="session-title-text">' + escapeHtml(title) + '</span>' +
+    pinBadge + '<span class="session-title-text"><span class="session-title-scroll-text">' +
+    escapeHtml(title) + '</span></span>' +
     renderSessionSourceBadge(session) + renderSessionStatusSlot(session) + '</button>' +
     '<div class="session-more-wrap"><button class="session-more-btn" type="button" title="' +
     t("more") + '" aria-label="' + t("more") + '" data-session-id="' + escapeHtml(session.id) + '">' +
@@ -5096,6 +5124,9 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
 }
 
 function renderSessions() {
+  cancelSessionTitleOverflowRefresh();
+  sessionTitleMarquee.reset();
+  attachSessionTitleMarqueeListeners();
   const projects = orderProjects(state.projects, getPinnedProjects());
   if (!state.sessions.length && !projects.length) {
     els.sessionList.innerHTML = `<div class="muted-line" style="padding:12px;">${t("noSessions")}</div>`;
@@ -5215,6 +5246,7 @@ function renderSessions() {
 
   attachProjectSessionListeners();
   sessionSearchFeature?.refresh();
+  scheduleSessionTitleOverflowRefresh();
 }
 
 function openProjectContextMenu(projectId, rect) {
@@ -5235,6 +5267,32 @@ function openProjectContextMenu(projectId, rect) {
     });
   });
   document.body.appendChild(menu);
+}
+
+function attachSessionTitleMarqueeListeners() {
+  const root = els.sessionList;
+  if (!root || root._sessionTitleMarqueeBound) return false;
+  root._sessionTitleMarqueeBound = true;
+
+  const titleFromEvent = (event) => {
+    const title = event.target?.closest?.(".session-title-text");
+    return title && root.contains(title) ? title : null;
+  };
+  root.addEventListener("mouseover", (event) => {
+    const title = titleFromEvent(event);
+    if (!title || title.contains(event.relatedTarget)) return;
+    sessionTitleMarquee.enter(title);
+  });
+  root.addEventListener("mouseout", (event) => {
+    const title = titleFromEvent(event);
+    if (!title || title.contains(event.relatedTarget)) return;
+    sessionTitleMarquee.leave(title);
+  });
+  root.addEventListener("transitionend", (event) => {
+    const title = titleFromEvent(event);
+    if (title) sessionTitleMarquee.finish(title, event);
+  });
+  return true;
 }
 
 function attachProjectSessionListeners() {
@@ -6027,6 +6085,8 @@ function applySidebarWidth(width = state.sidebarWidth, persist = true) {
   setFileTimeDensity(next);
 
   document.documentElement.style.setProperty("--sidebar-width", `${next}px`);
+
+  scheduleSessionTitleOverflowRefresh();
 
   if (persist) localStorage.setItem("code-sidebar-width", String(next));
 

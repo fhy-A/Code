@@ -89,6 +89,9 @@
     if (options.streaming === true) {
       return Object.freeze({ kind: "running", text: "", label: String(options.runningLabel || "") });
     }
+    if (options.failed === true) {
+      return Object.freeze({ kind: "failed", text: "", label: String(options.failedLabel || "") });
+    }
     if (session?._unread === true) {
       return Object.freeze({ kind: "unread", text: "", label: String(options.unreadLabel || "") });
     }
@@ -103,6 +106,7 @@
     const now = options.now || (() => Date.now());
     const schedule = options.setInterval || global.setInterval?.bind(global);
     const cancel = options.clearInterval || global.clearInterval?.bind(global);
+    const onRefresh = options.onRefresh;
     let timerId = null;
 
     function refresh() {
@@ -125,6 +129,7 @@
         if (text) slot.setAttribute?.("aria-label", text);
         else slot.removeAttribute?.("aria-label");
       }
+      if (changes > 0 && typeof onRefresh === "function") onRefresh(changes);
       return changes;
     }
 
@@ -142,6 +147,152 @@
     }
 
     return Object.freeze({ refresh, start, stop });
+  }
+
+  function createSessionTitleMarqueeController(options = {}) {
+    const schedule = options.setTimeout || global.setTimeout?.bind(global);
+    const cancel = options.clearTimeout || global.clearTimeout?.bind(global);
+    const prefersReducedMotion = options.prefersReducedMotion || (() => (
+      global.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true
+    ));
+    const hoverDelayMs = Math.max(0, Number(options.hoverDelayMs ?? 420) || 0);
+    const pixelsPerSecond = Math.max(1, Number(options.pixelsPerSecond ?? 24) || 24);
+    const endGapPx = Math.max(0, Number(options.endGapPx ?? 4) || 0);
+    const getOperationSurfaceLeft = options.getOperationSurfaceLeft || ((title) => {
+      const row = title?.closest?.(".session-row");
+      const moreWrap = row?.querySelector?.(".session-more-wrap");
+      const rect = moreWrap?.getBoundingClientRect?.();
+      const left = Number(rect?.left);
+      if (!Number.isFinite(left)) return Number.NaN;
+      const computed = global.getComputedStyle?.(moreWrap);
+      const coverInset = Math.max(
+        0,
+        Number.parseFloat(
+          computed?.getPropertyValue?.("--session-more-cover-inset") || "0",
+        ) || 0,
+      );
+      return left - coverInset;
+    });
+    let owner = null;
+    let timerId = null;
+
+    function innerFor(title) {
+      return title?.querySelector?.(":scope > .session-title-scroll-text") || null;
+    }
+
+    function clearTimer() {
+      if (timerId !== null) {
+        if (typeof cancel === "function") cancel(timerId);
+        timerId = null;
+      }
+    }
+
+    function clearMotion(title) {
+      title?.classList?.remove("is-scrolling", "is-scroll-complete");
+    }
+
+    function clearMeasurement(title) {
+      clearMotion(title);
+      title?.classList?.remove("is-overflowing");
+      title.style?.removeProperty("--session-title-scroll-distance");
+      title.style?.removeProperty("--session-title-scroll-duration");
+    }
+
+    function measure(title, includeOperationSurface = false) {
+      const inner = innerFor(title);
+      let distance = Math.max(
+        0,
+        Math.ceil(Number(inner?.scrollWidth || 0) - Number(title?.clientWidth || 0)),
+      );
+      if (inner && includeOperationSurface) {
+        const titleRect = title?.getBoundingClientRect?.();
+        const innerRect = inner.getBoundingClientRect?.();
+        const titleRight = Number(titleRect?.right);
+        const innerRight = Number(innerRect?.right);
+        const operationSurfaceLeft = Number(getOperationSurfaceLeft(title));
+        if (
+          Number.isFinite(titleRight)
+          && Number.isFinite(innerRight)
+          && Number.isFinite(operationSurfaceLeft)
+        ) {
+          const visibleRight = Math.min(
+            titleRight,
+            operationSurfaceLeft - endGapPx,
+          );
+          distance = Math.max(distance, Math.ceil(innerRight - visibleRight));
+        }
+      }
+      if (!inner || distance <= 1) {
+        clearMeasurement(title);
+        return false;
+      }
+      const durationMs = Math.round((distance / pixelsPerSecond) * 1000);
+      title.classList.add("is-overflowing");
+      title.style.setProperty("--session-title-scroll-distance", `${distance}px`);
+      title.style.setProperty("--session-title-scroll-duration", `${durationMs}ms`);
+      return true;
+    }
+
+    function reset(title = owner) {
+      if (!title) return false;
+      if (owner === title) {
+        clearTimer();
+        owner = null;
+      }
+      clearMeasurement(title);
+      return true;
+    }
+
+    function enter(title) {
+      if (owner && owner !== title) leave(owner);
+      else if (owner === title) {
+        clearTimer();
+        clearMotion(title);
+      }
+      if (!measure(title, true)) return false;
+
+      owner = title;
+      if (prefersReducedMotion() || typeof schedule !== "function") return true;
+
+      timerId = schedule(() => {
+        timerId = null;
+        if (owner !== title) return;
+        title.classList.add("is-scrolling");
+      }, hoverDelayMs);
+      return true;
+    }
+
+    function finish(title, event = {}) {
+      if (
+        owner !== title
+        || event.target !== innerFor(title)
+        || event.propertyName !== "transform"
+        || !title.classList.contains("is-scrolling")
+        || title.classList.contains("is-scroll-complete")
+      ) return false;
+      title.classList.add("is-scroll-complete");
+      return true;
+    }
+
+    function leave(title) {
+      if (owner !== title) return false;
+      clearTimer();
+      owner = null;
+      clearMotion(title);
+      measure(title);
+      return true;
+    }
+
+    function refresh(titles = []) {
+      if (owner) reset(owner);
+      let marked = 0;
+      for (const title of Array.from(titles || [])) {
+        if (measure(title)) marked += 1;
+      }
+      return marked;
+    }
+
+    return Object.freeze({ enter, finish, leave, refresh, reset });
   }
 
   function compareSessionSearchRecords(left, right) {
@@ -726,6 +877,7 @@
     formatSessionRelativeTime,
     resolveSessionStatus,
     createSessionStatusTicker,
+    createSessionTitleMarqueeController,
     compareSessionSearchRecords,
     selectSessionSearchResults,
     resolveSessionSearchStatus,
