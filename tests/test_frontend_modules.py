@@ -26683,12 +26683,171 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("preventDefault", controller_source)
 
 
+class MarkdownAdmonitionLeadingBlankLineTests(unittest.TestCase):
+    def test_admonition_removes_only_the_optional_leading_blank_quote_line(self):
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("src/ui/markdown.js", "utf8");
+const sandbox = { window: { Code: { ui: {} } } };
+vm.runInNewContext(source, sandbox, { filename: "src/ui/markdown.js" });
+class Renderer {}
+const marked = { Renderer, setOptions() {}, parse(value) { return String(value || ""); } };
+const feature = sandbox.window.Code.ui.markdown.createMarkdownFeature({
+  marked,
+  escapeHtml: (value) => String(value || ""),
+});
+
+function parserFor(captured) {
+  return {
+    parse(tokens) {
+      captured.push(tokens);
+      return tokens.map((token) => {
+        if (token.type === "space") return "";
+        if (token.type === "list") return "<ul><li>list item</li></ul>";
+        if (token.type === "code") return "<pre><code>const x = 1;</code></pre>";
+        const text = Array.isArray(token.tokens)
+          ? token.tokens.map((inner) => String(inner.text || "")).join("")
+          : String(token.text || "");
+        return `<p>${text.replaceAll("\n", "<br>")}</p>`;
+      }).join("");
+    },
+  };
+}
+
+function paragraph(text) {
+  return { type: "paragraph", text, tokens: [{ type: "text", text }] };
+}
+
+function render(type, blankLines, tail = []) {
+  const leading = Array.from({ length: blankLines }, (_, index) => (
+    index % 2 === 0 ? "" : " \t"
+  ));
+  const raw = `[!${type}]\n${leading.length ? `${leading.join("\n")}\n` : ""}正文`;
+  const captured = [];
+  const html = feature.renderer.blockquote.call(
+    { parser: parserFor(captured) },
+    { text: raw, tokens: [paragraph(raw), ...tail] },
+  );
+  return { html, captured };
+}
+
+const types = ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"];
+const variants = {};
+for (const type of types) {
+  variants[type] = {};
+  for (const blankLines of [0, 1, 2, 3]) {
+    variants[type][String(blankLines)] = render(type, blankLines).html;
+  }
+}
+const internal = (() => {
+  const raw = "[!NOTE]\n第一行\n第二行";
+  const captured = [];
+  const html = feature.renderer.blockquote.call(
+    { parser: parserFor(captured) },
+    { text: raw, tokens: [paragraph(raw)] },
+  );
+  return { html, captured };
+})();
+const tail = [
+  { type: "space", raw: "\n\n" },
+  paragraph("第二段"),
+  { type: "list", marker: "preserve-list" },
+  { type: "code", marker: "preserve-code" },
+];
+const structured = render("TIP", 3, tail);
+function renderParsedBody(type, bodyHtml) {
+  const raw = `[!${type}]\n正文`;
+  return feature.renderer.blockquote.call(
+    { parser: { parse() { return bodyHtml; } } },
+    { text: raw, tokens: [paragraph(raw)] },
+  );
+}
+const production = {};
+for (const type of types) {
+  production[type] = {
+    single: renderParsedBody(type, "<p><br>正文</p>"),
+    multiple: renderParsedBody(type, " \n<p> \n<br />\n<br>\t正文<br>内部</p><p><br>第二段</p>"),
+    stable: renderParsedBody(type, "<p>正文<br>内部</p><p><br>第二段</p>"),
+  };
+}
+const nestedBlock = renderParsedBody("NOTE", "<div><p><br>嵌套内容</p></div>");
+const plainTokens = [paragraph("普通引用")];
+const plainCaptured = [];
+const plain = feature.renderer.blockquote.call(
+  { parser: parserFor(plainCaptured) },
+  { text: "普通引用", tokens: plainTokens },
+);
+process.stdout.write(JSON.stringify({ variants, internal, structured, production, nestedBlock, plain, plainCaptured }));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        for kind, variants in data["variants"].items():
+            self.assertEqual(set(variants), {"0", "1", "2", "3"})
+            for form in ("0", "1", "2", "3"):
+                html = variants[form]
+                self.assertIn(f'admonition-{kind.lower()}', html)
+                self.assertIn("<div class=\"admonition-body\"><p>正文</p>", html)
+                self.assertNotIn('<div class="admonition-body"><p><br>', html)
+                self.assertNotIn('<div class="admonition-body"><br>', html)
+                self.assertNotIn("<p></p>", html)
+        self.assertIn("<p>第一行<br>第二行</p>", data["internal"]["html"])
+        structured = data["structured"]
+        self.assertIn('<div class="admonition-body"><p>正文</p><p>第二段</p>', structured["html"])
+        self.assertIn("<ul><li>list item</li></ul>", structured["html"])
+        self.assertIn("<pre><code>const x = 1;</code></pre>", structured["html"])
+        captured_tail = structured["captured"][0][1:]
+        self.assertEqual(captured_tail[0]["type"], "space")
+        self.assertEqual(captured_tail[1]["text"], "第二段")
+        self.assertEqual(captured_tail[2]["marker"], "preserve-list")
+        self.assertEqual(captured_tail[3]["marker"], "preserve-code")
+        for kind, cases in data["production"].items():
+            marker = f'admonition-{kind.lower()}'
+            self.assertIn(marker, cases["single"])
+            self.assertIn('<div class="admonition-body"><p>正文</p>', cases["single"])
+            self.assertNotIn('<div class="admonition-body"><p><br>', cases["single"])
+            self.assertIn(
+                '<div class="admonition-body"><p>正文<br>内部</p><p><br>第二段</p>',
+                cases["multiple"],
+            )
+            self.assertIn(
+                '<div class="admonition-body"><p>正文<br>内部</p><p><br>第二段</p>',
+                cases["stable"],
+            )
+        self.assertIn(
+            '<div class="admonition-body"><div><p><br>嵌套内容</p></div>',
+            data["nestedBlock"],
+        )
+        self.assertEqual(data["plain"], "<blockquote><p>普通引用</p></blockquote>")
+        self.assertEqual(data["plainCaptured"][0], [{"type": "paragraph", "text": "普通引用", "tokens": [{"type": "text", "text": "普通引用"}]}])
+        self.assertIn("function normalizeAdmonitionBodyHtml(body)", MARKDOWN_SOURCE)
+        self.assertIn(
+            "const body = normalizeAdmonitionBodyHtml(parseBlocksSafe(this.parser, rest));",
+            MARKDOWN_SOURCE,
+        )
+        self.assertEqual(MARKDOWN_SOURCE.count("normalizeAdmonitionBodyHtml"), 2)
+
+
 class Code043VisualSystemPhaseOneTests(unittest.TestCase):
     MARKER = "/* CODE-043 phase 1: scoped shell visual system */"
 
-    def test_code043_phase_one_uses_scoped_semantic_visual_tokens(self):
+    def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
         phase_source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return phase_source.split(
+            "/* CODE-043 typography scale: scoped main interface */",
+            1,
+        )[0]
+
+    def test_code043_phase_one_uses_scoped_semantic_visual_tokens(self):
+        phase_source = self.phase_source()
         for token in (
             "--shell-type-caption:",
             "--shell-type-control:",
@@ -26729,7 +26888,7 @@ class Code043VisualSystemPhaseOneTests(unittest.TestCase):
         self.assertNotRegex(phase_source, r"#[0-9a-fA-F]{3,8}\b")
 
     def test_code043_phase_one_does_not_restyle_later_surfaces(self):
-        phase_source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        phase_source = self.phase_source()
         for excluded_selector in (
             ".messages",
             ".msg",
@@ -26778,7 +26937,7 @@ class Code043VisualSystemPhaseOneTests(unittest.TestCase):
             'id="sendBtn"',
         ):
             self.assertIn(fragment, INDEX_SOURCE)
-        phase_source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        phase_source = self.phase_source()
         self.assertIn(":focus-visible", phase_source)
         self.assertIn("min-width: var(--shell-control-sm);", phase_source)
         self.assertIn("min-height: var(--shell-control-sm);", phase_source)
@@ -26943,6 +27102,178 @@ process.stdout.write(JSON.stringify({zh, en}));
         self.assertIn("serverReceived: 0", CODE043_SHELL_SELFCHECK_SOURCE)
         self.assertIn("platformSyncRequests: 0", CODE043_SHELL_SELFCHECK_SOURCE)
         self.assertIn('path.join(host.dataDir, "image-route-registry.json")', CODE043_SHELL_SELFCHECK_SOURCE)
+
+
+class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
+    MARKER = "/* CODE-043 typography scale: scoped main interface */"
+    USER_TEXT = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.user:not(.msg-image-batch):not([data-background-message-id])"
+        ":not([data-queued-message-id]):not(.execution-trace-persistent) "
+        ".user-message-text > .bubble"
+    )
+    ROOT = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion)"
+        ":not(.generated-image-result) > .bubble"
+    )
+    ROLE = ROOT.rsplit(" > .bubble", 1)[0] + " > .role"
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    def assert_token_size(self, phase_source, selector, token):
+        self.assertIn(selector, phase_source)
+        self.assertRegex(
+            phase_source,
+            rf"{re.escape(selector)}\s*(?:,\s*[^{{]+)*\{{[^}}]*"
+            rf"font-size:\s*var\({re.escape(token)}\);",
+        )
+
+    def test_scale_defines_the_five_approved_semantic_tokens(self):
+        phase_source = self.phase_source()
+        for token, value in (
+            ("--type-caption", "12px"),
+            ("--type-interface", "14px"),
+            ("--type-content", "16px"),
+            ("--type-section", "18px"),
+            ("--type-page", "20px"),
+        ):
+            self.assertRegex(
+                phase_source,
+                rf"{re.escape(token)}:\s*{re.escape(value)};",
+            )
+
+    def test_scale_maps_conversation_content_and_metadata(self):
+        phase_source = self.phase_source()
+        for selector, token in (
+            (self.USER_TEXT, "--type-content"),
+            (self.ROOT, "--type-content"),
+            (self.ROLE, "--type-content"),
+            (f"{self.ROOT} > h1", "--type-page"),
+            (f"{self.ROOT} > h2", "--type-section"),
+            (f"{self.ROOT} > :is(h3, h4, h5, h6)", "--type-content"),
+            (f"{self.ROOT} .md-table", "--type-interface"),
+            (f"{self.ROOT} :is(.code-lines, .ansi-block)", "--type-interface"),
+            (f"{self.ROOT} code:not(.line-code)", "--type-interface"),
+            (".chat-pane:not(.empty-chat) .msg.assistant.agent-commentary > .bubble", "--type-interface"),
+            (".chat-pane:not(.empty-chat) .msg.assistant .thought-inline", "--type-interface"),
+            (".chat-pane:not(.empty-chat) .msg.assistant .thought-body", "--type-interface"),
+            (".chat-pane:not(.empty-chat) .tool-process-stage-heading", "--type-interface"),
+            (".chat-pane:not(.empty-chat) .tool-process-row-heading", "--type-interface"),
+            (".chat-pane:not(.empty-chat) .tool-process-detail pre", "--type-interface"),
+        ):
+            self.assert_token_size(phase_source, selector, token)
+        for selector in (
+            ".chat-pane:not(.empty-chat) .msg-meta",
+            ".chat-pane:not(.empty-chat) .response-time",
+            ".chat-pane:not(.empty-chat) .response-info",
+            ".chat-pane:not(.empty-chat) .run-status",
+            ".chat-pane:not(.empty-chat) .tool-process-stage-heading code",
+            ".chat-pane:not(.empty-chat) .tool-process-row-heading code",
+            ".chat-pane:not(.empty-chat) .tool-process-outcome",
+            ".chat-pane:not(.empty-chat) .tool-process-detail > strong",
+            f"{self.ROOT} .code-head",
+            f"{self.ROOT} .line-no",
+        ):
+            self.assert_token_size(phase_source, selector, "--type-caption")
+
+    def test_scale_targets_real_plain_user_bubbles_and_excludes_special_messages(self):
+        phase_source = self.phase_source()
+        self.assert_token_size(phase_source, self.USER_TEXT, "--type-content")
+        for exclusion in (
+            ":not(.msg-image-batch)",
+            ":not([data-background-message-id])",
+            ":not([data-queued-message-id])",
+            ":not(.execution-trace-persistent)",
+        ):
+            self.assertIn(exclusion, self.USER_TEXT)
+        self.assertNotIn(
+            ".chat-pane:not(.empty-chat) .msg.user .user-message-text,",
+            phase_source,
+        )
+        self.assertIn(
+            '<div class="user-message-text is-collapsed"',
+            MESSAGES_SOURCE,
+        )
+        self.assertIn(
+            '<div class="bubble">${renderMarkdown(text)}</div>',
+            MESSAGES_SOURCE,
+        )
+        self.assertIn(
+            '<article class="msg user${traceClass}"',
+            MESSAGES_SOURCE,
+        )
+        self.assertIn(
+            '<article class="msg user msg-image-batch${traceClass}"',
+            MESSAGES_SOURCE,
+        )
+        self.assertNotIn("#attachFile", phase_source)
+        self.assertRegex(
+            STYLE_SOURCE,
+            r"#attachFile\s*\{[^}]*font-size:\s*18px;",
+        )
+
+    def test_scale_maps_composer_topbar_sidebar_and_file_tree(self):
+        phase_source = self.phase_source()
+        for selector in (
+            ".composer textarea",
+        ):
+            self.assert_token_size(phase_source, selector, "--type-content")
+        for selector in (
+            ".composer .bar-btn",
+            ".composer .bar-icon-btn",
+            ".composer .model-pill-btn",
+            ".composer .model-pill-option",
+            ".toolbar .tool-btn",
+            ".side-title",
+            ".new-session-bar",
+            ".project-toolbar-title",
+            ".project-name",
+            ".project-sessions-toggle",
+            ".session-main .session-title-text",
+            ".section-head",
+            ".cwd-name",
+            ".file-search",
+            ".file-search::placeholder",
+            ".file-sort-btn",
+            ".file-name",
+            ".file-at-btn",
+        ):
+            self.assert_token_size(phase_source, selector, "--type-interface")
+        for selector in (
+            ".composer-input-toggle",
+            ".usage-strip",
+            ".live-timer",
+            ".project-empty-sessions",
+            ".session-main .session-status-slot",
+            ".path-line",
+            ".file-item small",
+        ):
+            self.assert_token_size(phase_source, selector, "--type-caption")
+
+    def test_scale_is_property_and_surface_scoped(self):
+        phase_source = self.phase_source()
+        for forbidden in (
+            ".settings",
+            ".session-search",
+            ".archived-session",
+            ".modal",
+            ".notification",
+            ".onboarding",
+            ".preview-pane",
+            ".file-preview",
+            ".welcome-",
+        ):
+            self.assertNotIn(forbidden, phase_source)
+        for forbidden_declaration in (
+            "border:", "border-color:", "border-radius:", "background:",
+            "box-shadow:", "color:", "display:", "gap:", "margin:",
+            "padding:", "position:", "width:", "max-width:", "min-width:",
+        ):
+            self.assertNotIn(forbidden_declaration, phase_source)
+        self.assertNotIn("@media", phase_source)
 
 if __name__ == "__main__":
     unittest.main()

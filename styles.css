@@ -10350,3 +10350,81 @@ body.theme-dark .chat-pane.empty-chat .composer {
   color: var(--faint);
   opacity: .58;
 }
+
+/* CODE-043 typography scale: scoped main interface */
+.pi-shell {
+  --type-caption: 12px;
+  --type-interface: 14px;
+  --type-content: 16px;
+  --type-section: 18px;
+  --type-page: 20px;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not(.msg-image-batch):not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .role,
+.composer textarea {
+  font-size: var(--type-content);
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > h1 {
+  font-size: var(--type-page);
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > h2 {
+  font-size: var(--type-section);
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > :is(h3, h4, h5, h6) {
+  font-size: var(--type-content);
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble .md-table,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble :is(.code-lines, .ansi-block),
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble code:not(.line-code),
+.chat-pane:not(.empty-chat) .msg.assistant.agent-commentary > .bubble,
+.chat-pane:not(.empty-chat) .msg.assistant .thought-inline,
+.chat-pane:not(.empty-chat) .msg.assistant .thought-body,
+.chat-pane:not(.empty-chat) .tool-process-stage-heading,
+.chat-pane:not(.empty-chat) .tool-process-row-heading,
+.chat-pane:not(.empty-chat) .tool-process-detail pre,
+.composer .bar-btn,
+.composer .bar-icon-btn,
+.composer .model-pill-btn,
+.composer .model-pill-option,
+.toolbar .tool-btn,
+.side-title,
+.new-session-bar,
+.project-toolbar-title,
+.project-name,
+.project-sessions-toggle,
+.session-main .session-title-text,
+.section-head,
+.cwd-name,
+.file-search,
+.file-search::placeholder,
+.file-sort-btn,
+.file-name,
+.file-at-btn {
+  font-size: var(--type-interface);
+}
+
+.chat-pane:not(.empty-chat) .msg-meta,
+.chat-pane:not(.empty-chat) .response-time,
+.chat-pane:not(.empty-chat) .response-info,
+.chat-pane:not(.empty-chat) .run-status,
+.chat-pane:not(.empty-chat) .tool-process-stage-heading code,
+.chat-pane:not(.empty-chat) .tool-process-row-heading code,
+.chat-pane:not(.empty-chat) .tool-process-outcome,
+.chat-pane:not(.empty-chat) .tool-process-detail > strong,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble .code-head,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble .line-no,
+.composer-input-toggle,
+.usage-strip,
+.live-timer,
+.project-empty-sessions,
+.session-main .session-status-slot,
+.path-line,
+.file-item small {
+  font-size: var(--type-caption);
+}

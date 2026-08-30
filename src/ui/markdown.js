@@ -518,6 +518,13 @@
       return escapeHtml((tokens || []).map((t) => t?.text ?? "").join("\n"));
     }
 
+    function normalizeAdmonitionBodyHtml(body) {
+      return String(body || "").replace(
+        /^\s*(<p>)(?:\s*<br\s*\/?>)+\s*/i,
+        "$1",
+      );
+    }
+
     const headingIds = new Map();
 
     renderer.blockquote = function renderBlockquote(token) {
@@ -541,7 +548,7 @@
           const filtered = inner.filter((tk) => tk.text !== "");
           return filtered.length ? { ...t, tokens: filtered } : { ...t, tokens: filtered, text: "" };
         }).filter((t) => !(t.text === "" && (!Array.isArray(t.tokens) || t.tokens.length === 0)));
-        const body = parseBlocksSafe(this.parser, rest);
+        const body = normalizeAdmonitionBodyHtml(parseBlocksSafe(this.parser, rest));
         // Title is filled by app.js from i18n (data-admonition attribute).
         return `<div class="admonition admonition-${type}"><div class="admonition-title" data-admonition="${type}"></div><div class="admonition-body">${body}</div></div>`;
       }

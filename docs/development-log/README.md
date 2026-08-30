@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-30 | `CODE-043` 主界面字号层级第一批完成：以 `12 / 14 / 16 / 18 / 20px` 统一辅助信息、常规界面、主要阅读 / 输入、区块与页面标题；普通用户 / 助手正文、模型名和 composer 输入为 `16px`，思考 / 工具及主界面控件为 `14px`，metadata 为 `12px`，SVG 图标保持尺寸例外。富文本 admonition 首段 leading-BR 同步修复；完整前端 `314 passed`、build / freshness 与语法 / diff 通过。新字号 selfcheck 两轮失败后熔断并删除，未记为通过；现有 3011 Browser 实测关键字号并由用户 `PASS`，辅助表面第二批仍未启动 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-043` Code Web 视觉系统第一阶段完成：PC 高频外壳局部接入视觉尺度与 11 个 SVG，保持既有焦点、ARIA 和交互所有权；预览按实时 workbench 夹紧并至少保留 `520px` 会话区 / `250px` 预览区，中英文欢迎语与 composer 提示改为通用任务表达。前端 `307 passed`、build / freshness 与静态门禁通过，R004 model-free selfcheck 的历史通过与原 H4 / 后续窄屏 selfcheck 熔断边界已区分记录；用户完成 PC 深浅主题和预览极限 Browser `PASS`，390px / 手机窄屏留到第四阶段 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-035` 多分组路由待办完成映射：既有 `CODE-046` Route Registry 与提交 `6655055` 已以 `connectionId + modelId` 生成不透明 `routeRef`，为每个 Workbar `platformTokenId` 建立独立 `wc1_` 连接，并闭合同名模型精确选择、reload 持久化及禁用连接零跨组回退；后续 Key 删除 / 禁用即时撤销证据补强 fail-closed 边界。`modelKeyMap` 仅保留为 `routing_v1` 回退兼容，不是 `routing_v2` 权威事实；本次只做文档收口，未使用真实 Key、模型或外网 | [查看](2026/2026-08-30.md) |
 | 2026-08-29 | `CODE-051` 更新下载状态恢复与重复任务防护完成：官方 Release 固定资产的 name/URL/size/SHA-256 形成服务端可信描述，同版本/目标 single-flight 与版本化原子 sidecar 保证设置页/服务重启接管同一 job；严格 Range/Content-Range/ETag 有界续传，size/digest/PE/非 reparse 单链接路径校验后才发布，restart 只接受已验证 job 且只启动一次。前端 generation 清除旧 poll 并投影下载、失败重试、完成、安装及 installed 状态；直接矩阵 `23 passed`、前端 `295 passed`、server/security/dev-server `362 passed`，构建/freshness 与语法/diff 通过 | [查看](2026/2026-08-29.md) |
