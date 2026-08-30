@@ -519,6 +519,9 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (typeof updateProjectContextIndicator === "function") updateProjectContextIndicator();
     if (typeof updateMemoryContextIndicator === "function") updateMemoryContextIndicator();
     if (typeof updateSendButtonState === "function") updateSendButtonState();
+    if (state.routingV2) renderConnectionRouteCatalog(
+      state.modelCatalogStatusKey, state.modelCatalogSource,
+    );
     onboardingTasksFeature?.refreshLanguage();
     if (typeof renderImportList === "function" && document.getElementById("importModal")?.style.display !== "none") {
       renderImportList();
@@ -6022,7 +6025,7 @@ function normalizePublicModelRoute(route) {
     routeRef,
     connectionId,
     modelId,
-    label: String(route.label || "").trim() || t("modelConnectionUnnamed"),
+    label: String(route.label || "").trim(),
     source: String(route.source || "manual").trim() || "manual",
     enabled: route.enabled !== false,
     credentialsAvailable: route.credentialsAvailable === true,
@@ -6080,7 +6083,7 @@ function routeRefreshManualConnections() {
     ))
     .map((entry) => ({
       connectionId: String(entry.connectionId),
-      label: String(entry.name || "").trim() || t("modelConnectionUnnamed"),
+      label: String(entry.name || "").trim(),
       key: String(entry.key),
       enabled: entry.enabled !== false,
     }));
@@ -6117,7 +6120,7 @@ function connectionRouteGroups(routes = state.modelRoutes) {
     if (!groups.has(route.connectionId)) {
       groups.set(route.connectionId, {
         connectionId: route.connectionId,
-        label: route.label || t("modelConnectionUnnamed"),
+        label: String(route.label || "").trim(),
         routes: [],
       });
     }
@@ -6125,16 +6128,20 @@ function connectionRouteGroups(routes = state.modelRoutes) {
   }
   const labelCounts = new Map();
   for (const group of groups.values()) {
-    labelCounts.set(group.label, Number(labelCounts.get(group.label) || 0) + 1);
+    const displayBaseLabel = group.label || t("modelConnectionUnnamed");
+    labelCounts.set(displayBaseLabel, Number(labelCounts.get(displayBaseLabel) || 0) + 1);
   }
   return [...groups.values()]
-    .map((group) => ({
-      ...group,
-      displayLabel: labelCounts.get(group.label) > 1
-        ? `${group.label} · ${group.connectionId.slice(-6)}`
-        : group.label,
-      routes: group.routes.sort((left, right) => left.modelId.localeCompare(right.modelId)),
-    }))
+    .map((group) => {
+      const displayBaseLabel = group.label || t("modelConnectionUnnamed");
+      return {
+        ...group,
+        displayLabel: labelCounts.get(displayBaseLabel) > 1
+          ? `${displayBaseLabel} · ${group.connectionId.slice(-6)}`
+          : displayBaseLabel,
+        routes: group.routes.sort((left, right) => left.modelId.localeCompare(right.modelId)),
+      };
+    })
     .sort((left, right) => left.displayLabel.localeCompare(right.displayLabel));
 }
 

@@ -14112,6 +14112,97 @@ const feature = window.Code.features.settings.createSettingsFeature({
             self.assertIn(expected, STYLE_SOURCE)
         self.assertIn('getFromWorkbar: "从 workbar 获取"', I18N_SOURCE)
 
+    def test_key_connection_name_copy_and_delete_fallback_are_localized(self):
+        self.assertIn('keyNamePlaceholder: "连接名称（可选）"', I18N_SOURCE)
+        self.assertIn('keyNamePlaceholder: "Connection name (optional)"', I18N_SOURCE)
+        self.assertIn('modelConnectionUnnamed: "未命名连接"', I18N_SOURCE)
+        self.assertIn('modelConnectionUnnamed: "Unnamed connection"', I18N_SOURCE)
+        self.assertIn(
+            'keyBulkPlaceholder: "每行一个 Key，格式：名称 Key值（空格或者冒号分隔）。可以粘贴多个；空行自动跳过。"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'keyBulkPlaceholder: "One key per line, format: Name KeyValue (space or colon separated). Paste multiple; blank lines skipped."',
+            I18N_SOURCE,
+        )
+        for expected in (
+            'placeholder="${t("keyNamePlaceholder")}" data-i18n="keyNamePlaceholder"',
+            'const shortName = String(name || "").trim().slice(0, 20);',
+            'const displayName = shortName || t("modelConnectionUnnamed");',
+            'data-settings-delete-name="${escapeHtml(shortName)}"',
+            't("deleteConfirmMsg", { name: escapeHtml(displayName) })',
+            'const name = row.querySelector(".key-name-input")?.value || "";',
+            'const displayName = element.dataset.settingsDeleteName || t("modelConnectionUnnamed");',
+        ):
+            self.assertIn(expected, SETTINGS_SOURCE)
+        self.assertNotIn('|| "未命名"', SETTINGS_SOURCE)
+
+        language_callback = APP_SOURCE[
+            APP_SOURCE.index("onLanguageChanged: () => {"):
+            APP_SOURCE.index("  },\n});", APP_SOURCE.index("onLanguageChanged: () => {"))
+        ]
+        self.assertIn(
+            "if (state.routingV2) renderConnectionRouteCatalog(\n"
+            "      state.modelCatalogStatusKey, state.modelCatalogSource,\n"
+            "    );",
+            language_callback,
+        )
+        self.assertNotIn("refreshModels", language_callback)
+
+        # The pre-existing parser contract remains the compatibility authority:
+        # a Key-only line stays unnamed and serializes back without a prefix.
+        self.assertIn('return { name: "", key: line };', PLATFORM_SOURCE)
+        self.assertIn('entry.name ? `${entry.name}: ${entry.key}` : entry.key', PLATFORM_SOURCE)
+
+        confirm_start = SETTINGS_SOURCE.index("function showInlineKeyDeleteConfirm(")
+        confirm_end = SETTINGS_SOURCE.index("function bindKeyEditorEvents(", confirm_start)
+        confirm_source = SETTINGS_SOURCE[confirm_start:confirm_end]
+        script = f"""
+let language = "zh";
+const messages = {{
+  zh: {{modelConnectionUnnamed: "未命名连接", deleteConfirmMsg: "确定删除「{{name}}」？"}},
+  en: {{modelConnectionUnnamed: "Unnamed connection", deleteConfirmMsg: "Delete \\\"{{name}}\\\"?"}},
+}};
+const t = (key, params = {{}}) => String(messages[language][key] || key)
+  .replace(/\\{{(\\w+)\\}}/g, (_, name) => params[name] ?? `{{${{name}}}}`);
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
+const buttons = {{
+  ".key-confirm-yes": {{addEventListener: () => {{}}}},
+  ".key-confirm-no": {{addEventListener: () => {{}}}},
+}};
+const confirm = {{
+  className: "",
+  innerHTML: "",
+  querySelector: (selector) => buttons[selector],
+  remove: () => {{}},
+}};
+const documentRef = {{
+  querySelector: () => null,
+  createElement: () => confirm,
+}};
+const row = {{after: () => {{}}}};
+eval({json.dumps(confirm_source)});
+showInlineKeyDeleteConfirm(row, "", () => {{}});
+const zh = confirm.innerHTML;
+language = "en";
+showInlineKeyDeleteConfirm(row, "", () => {{}});
+const en = confirm.innerHTML;
+showInlineKeyDeleteConfirm(row, "<named>", () => {{}});
+const named = confirm.innerHTML;
+process.stdout.write(JSON.stringify({{zh, en, named}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertIn("确定删除「未命名连接」？", data["zh"])
+        self.assertIn('Delete "Unnamed connection"?', data["en"])
+        self.assertIn('data-settings-delete-name="&lt;named&gt;"', data["named"])
+        self.assertIn('Delete "&lt;named&gt;"?', data["named"])
+
     def test_connection_route_catalog_groups_models_and_preserves_exact_route_identity(self):
         catalog_start = APP_SOURCE.index("function normalizePublicModelRoute(")
         catalog_end = APP_SOURCE.index("async function restoreModelRoutes()", catalog_start)
@@ -14267,6 +14358,165 @@ eval({json.dumps(dispatch_source)});
             "modelId", "routeRef", "source",
         ])
         self.assertEqual(data["normalizedSource"], "custom-openai")
+
+    def test_empty_connection_names_stay_protocol_empty_and_localize_only_at_render(self):
+        catalog_start = APP_SOURCE.index("function normalizePublicModelRoute(")
+        catalog_end = APP_SOURCE.index("async function restoreModelRoutes()", catalog_start)
+        catalog_source = APP_SOURCE[catalog_start:catalog_end]
+        script = f"""
+const values = new Map([
+  ["code-model", "model-a"],
+  ["code-model-route-ref", "mr1_blank_a"],
+  ["code-model-route-revision", "9"],
+]);
+const MODEL_ROUTE_REF_STORAGE_KEY = "code-model-route-ref";
+const MODEL_ROUTE_REVISION_STORAGE_KEY = "code-model-route-revision";
+const WORKBAR_URL = "https://workbar.invalid";
+const localStorage = {{
+  getItem: (key) => values.has(key) ? values.get(key) : null,
+  setItem: (key, value) => values.set(key, String(value)),
+  removeItem: (key) => values.delete(key),
+}};
+const keyConfig = [
+  {{connectionId: "manual_blank_alpha123456", source: "manual", name: "", key: "sk-empty", enabled: true}},
+  {{connectionId: "manual_named_betaabcdef", source: "manual", name: "Named", key: "sk-named", enabled: true}},
+];
+const loadKeyConfig = () => keyConfig.map((entry) => ({{...entry}}));
+const getPlatformAuth = () => null;
+let language = "zh";
+const labels = {{
+  zh: {{modelConnectionUnnamed: "未命名连接"}},
+  en: {{modelConnectionUnnamed: "Unnamed connection"}},
+}};
+const t = (key) => labels[language]?.[key] || key;
+const state = {{
+  routingV2: true,
+  modelRoutes: [],
+  modelRouteCatalogRevision: 0,
+  selectedRouteRef: "",
+  selectedRouteCatalogRevision: 0,
+  modelCatalogModels: [],
+  modelCatalogStatusKey: "",
+  modelCatalogSource: "registry",
+}};
+const settingsList = {{innerHTML: ""}};
+const settingsCount = {{textContent: ""}};
+const document = {{
+  getElementById: (id) => id === "settingsModelList" ? settingsList
+    : id === "settingsModelCount" ? settingsCount : null,
+}};
+const els = {{
+  baseUrl: {{value: "https://synthetic.invalid"}},
+  modelPillDropdown: {{innerHTML: ""}},
+  modelListBox: {{innerHTML: ""}},
+}};
+const escapeHtml = (value) => String(value);
+const normalizeModelCatalogModels = (models) => [...new Set(models)].sort();
+const modelCatalogStatusTone = () => "info";
+let presentation = null;
+const applySelectedModelPresentation = (model, route) => {{
+  presentation = {{model, routeRef: route?.routeRef || ""}};
+}};
+const getSelectedModel = () => presentation?.model || values.get("code-model") || "";
+const resumeDispatchesWaitingForRoute = async () => false;
+eval({json.dumps(catalog_source)});
+
+applyModelRouteSnapshot({{
+  routingV2: true,
+  catalogRevision: 9,
+  routes: [
+    {{routeRef: "mr1_blank_a", connectionId: "manual_blank_alpha123456", source: "manual", modelId: "model-a", label: "未命名连接", enabled: true, credentialsAvailable: true}},
+    {{routeRef: "mr1_blank_b", connectionId: "manual_blank_betaabcdef", source: "manual", modelId: "model-b", label: "未命名连接", enabled: true, credentialsAvailable: true}},
+  ],
+}});
+const legacySelection = {{
+  routeRef: state.selectedRouteRef,
+  revision: state.selectedRouteCatalogRevision,
+  model: presentation?.model || "",
+}};
+applyModelRouteSnapshot({{
+  routingV2: true,
+  catalogRevision: 10,
+  routes: [
+    {{routeRef: "mr1_blank_a", connectionId: "manual_blank_alpha123456", source: "manual", modelId: "model-a", label: "", enabled: true, credentialsAvailable: true}},
+    {{routeRef: "mr1_blank_b", connectionId: "manual_blank_betaabcdef", source: "manual", modelId: "model-b", label: "", enabled: true, credentialsAvailable: true}},
+  ],
+}});
+const converged = {{
+  labels: state.modelRoutes.map((route) => route.label),
+  routeRefs: state.modelRoutes.map((route) => route.routeRef),
+  routeRef: state.selectedRouteRef,
+  revision: state.selectedRouteCatalogRevision,
+  model: presentation?.model || "",
+  available: selectedModelRoute()?.credentialsAvailable === true,
+  groups: Object.fromEntries(connectionRouteGroups().map((group) => [group.connectionId, group.displayLabel])),
+}};
+const payload = routeRefreshPayload();
+const revisionBeforeLanguage = state.modelRouteCatalogRevision;
+language = "en";
+renderConnectionRouteCatalog(state.modelCatalogStatusKey, state.modelCatalogSource);
+const afterLanguage = {{
+  labels: state.modelRoutes.map((route) => route.label),
+  routeRef: state.selectedRouteRef,
+  selectedRevision: state.selectedRouteCatalogRevision,
+  catalogRevision: state.modelRouteCatalogRevision,
+  model: presentation?.model || "",
+  groups: Object.fromEntries(connectionRouteGroups().map((group) => [group.connectionId, group.displayLabel])),
+  dropdown: els.modelPillDropdown.innerHTML,
+}};
+process.stdout.write(JSON.stringify({{
+  legacySelection,
+  converged,
+  payload,
+  revisionBeforeLanguage,
+  afterLanguage,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["legacySelection"], {
+            "routeRef": "mr1_blank_a",
+            "revision": 9,
+            "model": "model-a",
+        })
+        self.assertEqual(data["payload"]["manualConnections"], [
+            {
+                "connectionId": "manual_blank_alpha123456",
+                "label": "",
+                "key": "sk-empty",
+                "enabled": True,
+            },
+            {
+                "connectionId": "manual_named_betaabcdef",
+                "label": "Named",
+                "key": "sk-named",
+                "enabled": True,
+            },
+        ])
+        self.assertEqual(data["converged"]["labels"], ["", ""])
+        self.assertEqual(data["converged"]["routeRefs"], ["mr1_blank_a", "mr1_blank_b"])
+        self.assertEqual(data["converged"]["routeRef"], "mr1_blank_a")
+        self.assertEqual(data["converged"]["revision"], 10)
+        self.assertEqual(data["converged"]["model"], "model-a")
+        self.assertTrue(data["converged"]["available"])
+        self.assertEqual(data["converged"]["groups"], {
+            "manual_blank_alpha123456": "未命名连接 · 123456",
+            "manual_blank_betaabcdef": "未命名连接 · abcdef",
+        })
+        self.assertEqual(data["revisionBeforeLanguage"], 10)
+        self.assertEqual(data["afterLanguage"]["labels"], ["", ""])
+        self.assertEqual(data["afterLanguage"]["routeRef"], "mr1_blank_a")
+        self.assertEqual(data["afterLanguage"]["selectedRevision"], 10)
+        self.assertEqual(data["afterLanguage"]["catalogRevision"], 10)
+        self.assertEqual(data["afterLanguage"]["model"], "model-a")
+        self.assertEqual(data["afterLanguage"]["groups"], {
+            "manual_blank_alpha123456": "Unnamed connection · 123456",
+            "manual_blank_betaabcdef": "Unnamed connection · abcdef",
+        })
+        self.assertIn("Unnamed connection · 123456", data["afterLanguage"]["dropdown"])
 
     def test_route_refresh_payload_excludes_disabled_manual_and_platform_connections(self):
         payload_start = APP_SOURCE.index("function routeRefreshManualConnections()")

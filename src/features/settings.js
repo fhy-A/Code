@@ -419,8 +419,9 @@
       documentRef.querySelector(".key-delete-confirm")?.remove();
       const confirm = documentRef.createElement("div");
       confirm.className = "key-delete-confirm";
-      const shortName = name.slice(0, 20);
-      confirm.innerHTML = `<span data-settings-delete-name="${escapeHtml(shortName)}">${t("deleteConfirmMsg", { name: shortName })}</span>
+      const shortName = String(name || "").trim().slice(0, 20);
+      const displayName = shortName || t("modelConnectionUnnamed");
+      confirm.innerHTML = `<span data-settings-delete-name="${escapeHtml(shortName)}">${t("deleteConfirmMsg", { name: escapeHtml(displayName) })}</span>
         <button class="key-confirm-yes" type="button" data-i18n="confirmDelete">${t("confirmDelete")}</button>
         <button class="key-confirm-no" type="button" data-i18n="cancel">${t("cancel")}</button>`;
       row.after(confirm);
@@ -500,7 +501,7 @@
       container.querySelectorAll(".key-trash").forEach((button) => {
         button.addEventListener("click", () => {
           const row = button.closest(".key-row");
-          const name = row.querySelector(".key-name-input")?.value || "未命名";
+          const name = row.querySelector(".key-name-input")?.value || "";
           showInlineKeyDeleteConfirm(row, name, () => {
             const key = row.querySelector(".key-value-input")?.value?.trim() || "";
             const storedEntry = loadKeyConfig(storage).find((entry) => entry.key === key);
@@ -2099,7 +2100,8 @@
           break;
       }
       detail.querySelectorAll("[data-settings-delete-name]").forEach((element) => {
-        element.textContent = t("deleteConfirmMsg", { name: element.dataset.settingsDeleteName || "" });
+        const displayName = element.dataset.settingsDeleteName || t("modelConnectionUnnamed");
+        element.textContent = t("deleteConfirmMsg", { name: displayName });
       });
       setUpdateNotice(state.updateInfo);
       applyI18n();

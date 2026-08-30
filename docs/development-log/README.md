@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-30 | `CODE-043` API Key 连接名称语义优化：名称继续可选且仅作显示标签，空名称在刷新 payload、公开 route state 与持久目录中保持 `""`，“未命名连接”仅在前端按当前语言投影，重名继续以稳定 connectionId 后缀区分；显式重命名可刷新目录，语言切换不刷新路由，旧本地化占位收敛后 routeRef / 选择 / 可用性保持。完整前端 `322 passed`、Route Registry `11 passed + 5 subtests`、build / freshness 与语法 / diff 通过；未运行 Browser / H4 或真实网络，收口前用户报告 429 已恢复但本提交未处理或复验 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-043` 三层折叠控件交互统一：执行轨迹 / 阶段 / 工具项使用紧凑 `fit-content`、`32px` 点击高度与统一方向箭头，长路径安全省略；最外层箭头收敛为 `6×6px` / `1.4px`。完整前端 `319 passed`，独立 transition-disabled final-state selfcheck 仅运行一次并通过 bundle / classic；原场景两轮失败后熔断且未第三跑，R003 仅运行直接 `7 passed` 与 build / freshness；用户在 3011 Browser 复核后 `PASS`，后续内容卡片、辅助表面与全面审计仍未启动 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-043` 主界面字号层级第一批完成：以 `12 / 14 / 16 / 18 / 20px` 统一辅助信息、常规界面、主要阅读 / 输入、区块与页面标题；普通用户 / 助手正文、模型名和 composer 输入为 `16px`，思考 / 工具及主界面控件为 `14px`，metadata 为 `12px`，SVG 图标保持尺寸例外。富文本 admonition 首段 leading-BR 同步修复；完整前端 `314 passed`、build / freshness 与语法 / diff 通过。新字号 selfcheck 两轮失败后熔断并删除，未记为通过；现有 3011 Browser 实测关键字号并由用户 `PASS`，辅助表面第二批仍未启动 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-043` Code Web 视觉系统第一阶段完成：PC 高频外壳局部接入视觉尺度与 11 个 SVG，保持既有焦点、ARIA 和交互所有权；预览按实时 workbench 夹紧并至少保留 `520px` 会话区 / `250px` 预览区，中英文欢迎语与 composer 提示改为通用任务表达。前端 `307 passed`、build / freshness 与静态门禁通过，R004 model-free selfcheck 的历史通过与原 H4 / 后续窄屏 selfcheck 熔断边界已区分记录；用户完成 PC 深浅主题和预览极限 Browser `PASS`，390px / 手机窄屏留到第四阶段 | [查看](2026/2026-08-30.md) |
