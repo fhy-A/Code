@@ -1,6 +1,10 @@
 (function registerPreviewFeature(global) {
   "use strict";
 
+  const MIN_CHAT_WORKSPACE_WIDTH = 520;
+  const MIN_PREVIEW_WIDTH = 250;
+  const DEFAULT_PREVIEW_WIDTH = 420;
+
   const Code = global.Code;
   if (!Code?.features) throw new Error("Code namespace must load before preview feature");
 
@@ -83,8 +87,17 @@
     let bound = false;
 
     function applyPreviewWidth(width = state.previewWidth, persist = true) {
-      const viewportLimit = Math.max(320, (global.innerWidth || 1280) - 520);
-      const next = Math.min(Math.max(Number(width) || 420, 250), viewportLimit);
+      const measuredWorkbenchWidth = Number(els.workbench?.getBoundingClientRect?.().width);
+      const availableWorkbenchWidth = Number.isFinite(measuredWorkbenchWidth)
+        && measuredWorkbenchWidth > 0
+        ? measuredWorkbenchWidth
+        : (Number(global.innerWidth) || 1280);
+      const previewLimit = Math.max(
+        MIN_PREVIEW_WIDTH,
+        availableWorkbenchWidth - MIN_CHAT_WORKSPACE_WIDTH,
+      );
+      const requestedWidth = Number(width) || DEFAULT_PREVIEW_WIDTH;
+      const next = Math.min(Math.max(requestedWidth, MIN_PREVIEW_WIDTH), previewLimit);
       state.previewWidth = next;
       documentRef?.documentElement?.style?.setProperty("--preview-width", `${next}px`);
       if (persist) storage?.setItem("code-preview-width", String(next));
@@ -374,6 +387,7 @@
       const data = await apiJson(`/api/file?path=${encodeURIComponent(path)}`);
       const previousPath = state.previewPath;
       els.workbench.classList.add("preview-open");
+      applyPreviewWidth(state.previewWidth, true);
       storage?.setItem("code-preview-open", "1");
       storage?.setItem("code-preview-path", path);
       state.previewPath = data.path || path;
@@ -454,6 +468,7 @@
       const opening = !els.workbench.classList.contains("preview-open");
       if (opening) {
         els.workbench.classList.add("preview-open");
+        applyPreviewWidth(state.previewWidth, true);
       } else {
         close();
       }

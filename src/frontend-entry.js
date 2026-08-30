@@ -41,4 +41,7 @@ import "./agent/run-projection-shadow.js";
 import "../agent-runtime.js";
 import "../app.js";
 
+if (document.documentElement.getAttribute("data-code-phase-one-shell-ready") !== "true") {
+  throw new Error("Phase-one shell icon projection did not complete");
+}
 document.documentElement.setAttribute("data-code-frontend-ready", "true");

@@ -221,6 +221,7 @@ function upgradeStaticIcons() {
   };
 
   iconLabel("newChat", "plus", true);
+  iconOnly("projectCreateBtn", "plus");
   iconOnly("goUp", "up");
   iconOnly("newFolderBtn", "folderPlus");
   iconOnly("refreshFiles", "refresh");
@@ -241,6 +242,55 @@ function upgradeStaticIcons() {
     if (!el.getAttribute("aria-label")) el.setAttribute("aria-label", el.title || "关闭");
   });
 }
+
+function projectPhaseOneShellIcons() {
+  const missing = [];
+  const iconOnly = (id, name) => {
+    const element = document.getElementById(id);
+    if (!element) {
+      missing.push(id);
+      return;
+    }
+    element.innerHTML = uiIcon(name);
+    if (!element.getAttribute("aria-label")) {
+      element.setAttribute("aria-label", element.title || name);
+    }
+  };
+  const iconLabel = (id, name, trimPrefix = false) => {
+    const element = document.getElementById(id);
+    if (!element) {
+      missing.push(id);
+      return;
+    }
+    const existingLabel = element.querySelector("[data-ui-label]");
+    let label = (existingLabel?.textContent || element.innerText || element.textContent || "").trim();
+    if (trimPrefix) label = label.replace(/^[+＋]\s*/, "");
+    element.innerHTML = `${uiIcon(name)}<span data-ui-label>${escapeHtml(label)}</span>`;
+  };
+
+  iconLabel("newChat", "plus", true);
+  iconOnly("projectCreateBtn", "plus");
+  iconOnly("goUp", "up");
+  iconOnly("newFolderBtn", "folderPlus");
+  iconOnly("refreshFiles", "refresh");
+  iconLabel("settingsMenuBtn", "settings");
+  iconOnly("toggleSidebar", "panel");
+  iconOnly("attachFile", "paperclip");
+  iconLabel("togglePreview", "preview");
+
+  const cwdIcon = document.querySelector(".cwd-icon");
+  if (cwdIcon) cwdIcon.innerHTML = uiIcon("folderOpen");
+  else missing.push("cwd-icon");
+  const explorerArrow = document.querySelector(".explorer-arrow");
+  if (explorerArrow) explorerArrow.innerHTML = uiIcon("chevronDown", 14);
+  else missing.push("explorer-arrow");
+
+  if (missing.length > 0) return false;
+  document.documentElement.setAttribute("data-code-phase-one-shell-ready", "true");
+  return true;
+}
+
+projectPhaseOneShellIcons();
 
 const state = createAppState(localStorage);
 state._sessionRevisions = state._sessionRevisions || Object.create(null);
@@ -4861,7 +4911,8 @@ function renderProjectSessionRow(session, pinnedIds) {
     pinBadge + '<span class="session-title-text">' + escapeHtml(title) + '</span>' +
     renderSessionSourceBadge(session) + renderSessionStatusSlot(session) + '</button>' +
     '<div class="session-more-wrap"><button class="session-more-btn" type="button" title="' +
-    t("more") + '" data-session-id="' + escapeHtml(session.id) + '">&#8942;</button></div></div>';
+    t("more") + '" aria-label="' + t("more") + '" data-session-id="' + escapeHtml(session.id) + '">' +
+    uiIcon("more", 16, "shell-action-icon") + '</button></div></div>';
 }
 
 function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, expandedProjects) {
@@ -4889,7 +4940,8 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   html += '<div class="project-header" data-project-key="' + escapeHtml(sectionKey) + '"' +
     (projectId ? ' data-project-id="' + escapeHtml(projectId) + '"' : '') +
     (headerTitle ? ' title="' + escapeHtml(headerTitle) + '"' : '') + '>';
-  html += '<span class="project-arrow">' + (collapsed ? "&#9654;" : "&#9660;") + '</span>';
+  html += '<span class="project-arrow">' +
+    uiIcon(collapsed ? "chevronRight" : "chevronDown", 14, "shell-action-icon") + '</span>';
   if (isProjectPinned) {
     html += '<span class="project-pin-indicator" title="' + t("pinnedLabel") +
       '">' + renderPinIcon() + '</span>';
@@ -4898,10 +4950,12 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   if (!isUnassigned) {
     html += '<button class="project-header-action project-new-session" type="button" data-project-id="' +
       escapeHtml(projectId) + '" title="' + t("newSessionInProject") +
-      '" aria-label="' + t("newSessionInProject") + '">+</button>';
+      '" aria-label="' + t("newSessionInProject") + '">' +
+      uiIcon("plus", 15, "shell-action-icon") + '</button>';
     html += '<button class="project-header-action project-more-btn" type="button" data-project-id="' +
       escapeHtml(projectId) + '" title="' + t("projectActions") +
-      '" aria-label="' + t("projectActions") + '">&#8942;</button>';
+      '" aria-label="' + t("projectActions") + '">' +
+      uiIcon("more", 16, "shell-action-icon") + '</button>';
   }
   html += '</div>';
   html += '<div class="project-children' + (collapsed ? ' collapsed' : '') +

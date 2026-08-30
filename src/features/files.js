@@ -354,7 +354,7 @@
           time: t("sortTime"),
         };
         documentRoot.getElementById("fileSortLabel").textContent = labels[sortMode] || t("sortType");
-        documentRoot.getElementById("fileSortArrow").textContent = ascending ? "↑" : "↓";
+        documentRoot.getElementById("fileSortArrow")?.classList?.toggle("is-descending", !ascending);
       }
 
       const sorted = sortFileItems(filtered, sortMode, ascending);

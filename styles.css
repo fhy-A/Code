@@ -1049,7 +1049,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .workbench.preview-open {
-  grid-template-columns: minmax(280px, 1fr) minmax(250px, var(--preview-width, 420px));
+  grid-template-columns: minmax(520px, 1fr) minmax(250px, min(var(--preview-width, 420px), calc(100% - 520px)));
 }
 
 .resizing-preview .workbench .preview-pane {
@@ -9834,4 +9834,519 @@ body.theme-dark .chat-pane.empty-chat .composer {
   .onboarding-celebration { animation: onboardingCelebrationFade .18s ease-out both; }
   .onboarding-celebration-halo::before,
   .onboarding-celebration-halo::after { animation: none; opacity: .22; }
+}
+
+/* CODE-043 phase 1: scoped shell visual system */
+.pi-shell {
+  --shell-type-caption: 11px;
+  --shell-type-control: 12.5px;
+  --shell-type-body: 13px;
+  --shell-line-tight: 1.3;
+  --shell-line-body: 1.55;
+  --shell-icon-sm: 16px;
+  --shell-icon-md: 18px;
+  --shell-space-1: 4px;
+  --shell-space-2: 8px;
+  --shell-space-3: 12px;
+  --shell-space-4: 16px;
+  --shell-radius-sm: 6px;
+  --shell-radius-md: 10px;
+  --shell-radius-lg: 14px;
+  --shell-control-sm: 28px;
+  --shell-control-md: 34px;
+  --shell-elevation: 0 10px 28px color-mix(in srgb, var(--text) 10%, transparent);
+  --shell-state-hover: color-mix(in srgb, var(--text) 6%, transparent);
+  --shell-state-selected: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  --shell-state-running: color-mix(in srgb, var(--accent) 16%, transparent);
+  --shell-state-success: color-mix(in srgb, var(--green) 14%, transparent);
+  --shell-state-error: color-mix(in srgb, var(--red) 14%, transparent);
+  --shell-focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.side-header {
+  min-height: 54px;
+  gap: var(--shell-space-2);
+  padding: 10px var(--shell-space-3);
+}
+
+.side-title {
+  gap: 9px;
+  font-size: 15px;
+  font-weight: 760;
+  line-height: var(--shell-line-tight);
+}
+
+.side-title .logo-svg {
+  width: 24px;
+  height: 24px;
+}
+
+.session-search-trigger,
+.project-create-btn,
+.project-header-action,
+.tiny-btn,
+.file-at-btn {
+  min-width: var(--shell-control-sm);
+  min-height: var(--shell-control-sm);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border-radius: var(--shell-radius-sm);
+}
+
+.session-search-trigger {
+  width: var(--shell-control-md);
+  height: var(--shell-control-md);
+  border-color: color-mix(in srgb, var(--line) 82%, transparent);
+  background: color-mix(in srgb, var(--panel-3) 72%, transparent);
+}
+
+.session-search-trigger svg,
+.new-session-bar .ui-icon,
+.project-create-btn .ui-icon,
+.project-header-action .ui-icon,
+.tiny-btn .ui-icon,
+.cwd-icon .ui-icon,
+.file-sort-arrow-icon .ui-icon,
+.toolbar .ui-icon,
+.composer .ui-icon {
+  width: var(--shell-icon-sm);
+  height: var(--shell-icon-sm);
+  flex: 0 0 var(--shell-icon-sm);
+  stroke-width: 1.8;
+}
+
+.session-search-trigger:hover,
+.project-create-btn:hover,
+.project-header-action:hover,
+.tiny-btn:hover,
+.file-at-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: var(--shell-state-hover);
+  color: var(--text);
+}
+
+.new-session-bar {
+  min-height: 38px;
+  gap: var(--shell-space-2);
+  margin: 10px 10px 8px;
+  padding: 0 var(--shell-space-3);
+  border-radius: var(--shell-radius-md);
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--line));
+  background: color-mix(in srgb, var(--panel-3) 88%, var(--accent-bg));
+  font-size: var(--shell-type-control);
+  line-height: var(--shell-line-tight);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.new-session-bar:hover {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  background: color-mix(in srgb, var(--accent-bg) 72%, var(--panel-3));
+  color: var(--accent);
+}
+
+.project-toolbar {
+  min-height: 34px;
+  padding: 4px 8px 3px 11px;
+}
+
+.project-toolbar-title,
+.section-head {
+  font-size: var(--shell-type-caption);
+  font-weight: 760;
+  line-height: var(--shell-line-tight);
+  letter-spacing: .48px;
+}
+
+.project-block {
+  margin-bottom: 8px;
+}
+
+.project-header {
+  min-height: 34px;
+  gap: 5px;
+  padding: 3px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--shell-radius-sm);
+}
+
+.project-header:hover,
+.project-block.pending-project > .project-header {
+  border-color: color-mix(in srgb, var(--line) 76%, transparent);
+  background: var(--shell-state-hover);
+}
+
+.project-name {
+  font-size: var(--shell-type-control);
+  line-height: var(--shell-line-tight);
+  font-weight: 660;
+}
+
+.project-arrow {
+  width: 18px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.project-arrow .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.project-header-action {
+  width: var(--shell-control-sm);
+  height: var(--shell-control-sm);
+}
+
+.sessions {
+  padding: 3px 6px 9px;
+}
+
+.session-row,
+.session-item {
+  border-radius: var(--shell-radius-sm);
+}
+
+.session-main {
+  min-height: 36px;
+  gap: var(--shell-space-1);
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--shell-radius-sm);
+}
+
+.session-main span,
+.session-item span {
+  font-size: var(--shell-type-control);
+  line-height: 1.45;
+}
+
+.session-row:hover:not(.active) .session-main,
+.session-item:hover:not(.active) {
+  border-color: color-mix(in srgb, var(--line) 72%, transparent);
+  background: var(--shell-state-hover);
+}
+
+.session-row.active,
+.session-item.active {
+  background: var(--shell-state-selected);
+}
+
+.session-row.active .session-main {
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.session-more-btn {
+  width: var(--shell-control-sm);
+  height: var(--shell-control-sm);
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--shell-radius-sm);
+}
+
+.session-status-slot.is-running .session-status-indicator {
+  width: 12px;
+  height: 12px;
+  background: var(--shell-state-running);
+}
+
+.section-head {
+  height: 38px;
+  padding: 0 9px 0 10px;
+}
+
+.head-actions {
+  gap: var(--shell-space-1);
+}
+
+.tiny-btn {
+  width: var(--shell-control-sm);
+  height: var(--shell-control-sm);
+  border-color: transparent;
+  background: transparent;
+}
+
+.cwd-inline {
+  padding: 4px 10px 7px;
+}
+
+.cwd-name {
+  height: var(--shell-control-md);
+  gap: 7px;
+  padding: 0 9px;
+  border-radius: var(--shell-radius-sm);
+  font-size: 12px;
+  line-height: var(--shell-line-tight);
+}
+
+.cwd-icon {
+  width: var(--shell-icon-sm);
+  height: var(--shell-icon-sm);
+  display: inline-grid;
+  place-items: center;
+}
+
+.file-search-row {
+  gap: 5px;
+  margin: 7px 0 5px;
+  padding-right: 7px;
+}
+
+.file-search,
+.file-sort-btn {
+  height: 30px;
+  border-radius: var(--shell-radius-sm);
+  font-size: 12px;
+  line-height: var(--shell-line-tight);
+}
+
+.file-search {
+  padding: 0 9px;
+}
+
+.file-sort-btn {
+  gap: 5px;
+  padding: 0 8px;
+}
+
+.file-sort-arrow-icon {
+  width: var(--shell-icon-sm);
+  height: var(--shell-icon-sm);
+  display: inline-grid;
+  place-items: center;
+  transition: transform .16s ease;
+}
+
+.file-sort-arrow-icon.is-descending {
+  transform: rotate(180deg);
+}
+
+.path-line {
+  min-height: 24px;
+  margin: 0 10px 5px;
+  padding: 3px 5px;
+  border-radius: var(--shell-radius-sm);
+  font-size: var(--shell-type-caption);
+  line-height: var(--shell-line-tight);
+}
+
+.file-tree {
+  padding: 2px 7px 10px;
+}
+
+.file-item-row {
+  min-height: 29px;
+  border: 1px solid transparent;
+  border-radius: var(--shell-radius-sm);
+}
+
+.file-item {
+  min-height: 29px;
+  height: 29px;
+  padding: 0 7px;
+}
+
+.file-name {
+  font-size: 12.5px;
+  line-height: var(--shell-line-tight);
+}
+
+.file-item-row:hover {
+  border-color: color-mix(in srgb, var(--line) 72%, transparent);
+  background: var(--shell-state-hover);
+}
+
+.file-item-row.active {
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+  background: var(--shell-state-selected);
+}
+
+.file-at-btn {
+  right: 2px;
+  width: var(--shell-control-sm);
+  height: var(--shell-control-sm);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--panel-3) 92%, transparent);
+  font-size: var(--shell-type-caption);
+}
+
+.toolbar {
+  min-width: 0;
+  padding: 0 5px 0 0;
+  background: color-mix(in srgb, var(--panel-3) 94%, var(--bg));
+}
+
+.toolbar .tool-btn {
+  min-width: 42px;
+  height: 44px;
+  gap: 6px;
+  padding: 0 11px;
+  font-size: var(--shell-type-control);
+  line-height: var(--shell-line-tight);
+}
+
+.toolbar .tool-btn:hover,
+.usage-strip:hover {
+  background: var(--shell-state-hover);
+}
+
+.toolbar .tool-btn.active,
+.usage-strip.active {
+  background: var(--shell-state-selected);
+}
+
+.toolbar .tool-btn.active::after,
+.usage-strip.active::after {
+  right: 8px;
+  left: 8px;
+  height: 2px;
+}
+
+.session-transfer-actions {
+  height: var(--shell-control-md);
+  gap: 2px;
+}
+
+.transfer-icon-btn {
+  width: var(--shell-control-md);
+  min-width: var(--shell-control-md);
+  height: var(--shell-control-md);
+  border-radius: var(--shell-radius-sm);
+}
+
+.transfer-icon,
+.toolbar .tool-icon {
+  width: var(--shell-icon-md);
+  height: var(--shell-icon-md);
+}
+
+.usage-strip {
+  height: 44px;
+  gap: 11px;
+  padding: 0 11px;
+  font-size: 12px;
+  line-height: var(--shell-line-tight);
+}
+
+.usage-strip.warn {
+  background: color-mix(in srgb, var(--yellow) 10%, transparent);
+}
+
+.usage-strip.danger {
+  background: var(--shell-state-error);
+}
+
+.chat-pane.empty-chat {
+  gap: clamp(20px, 3.2vh, 28px);
+  padding-right: var(--shell-space-4);
+  padding-left: var(--shell-space-4);
+}
+
+.chat-pane.empty-chat .welcome-screen {
+  gap: var(--shell-space-2);
+}
+
+.welcome-wordmark {
+  gap: clamp(16px, 3vw, 24px);
+}
+
+.welcome-title {
+  color: color-mix(in srgb, var(--muted) 84%, var(--text));
+  font-size: 16px;
+  line-height: var(--shell-line-tight);
+  font-weight: 520;
+}
+
+.composer,
+.chat-pane.empty-chat .composer {
+  border-radius: var(--shell-radius-lg);
+  box-shadow: var(--shell-elevation);
+}
+
+.composer:focus-within,
+.chat-pane.empty-chat .composer:focus-within {
+  box-shadow: var(--shell-focus-ring), var(--shell-elevation);
+}
+
+.composer textarea {
+  min-height: 64px;
+  padding: 15px 17px 13px;
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+
+.composer-bar {
+  min-height: 44px;
+  height: 44px;
+  gap: var(--shell-space-1);
+  padding: 0 10px;
+  border-radius: 0 0 var(--shell-radius-lg) var(--shell-radius-lg);
+}
+
+.bar-left,
+.bar-right {
+  min-width: 0;
+  gap: var(--shell-space-1);
+}
+
+.bar-btn,
+.bar-icon-btn,
+.model-pill-btn,
+.send-btn {
+  min-height: 32px;
+  border-radius: var(--shell-radius-sm);
+}
+
+.bar-btn,
+.bar-icon-btn,
+.send-btn {
+  min-width: 32px;
+}
+
+.model-pill-btn {
+  padding: 0 9px;
+  font-size: var(--shell-type-control);
+  line-height: var(--shell-line-tight);
+}
+
+.send-btn {
+  width: 32px;
+  height: 32px;
+}
+
+.send-btn.running {
+  background: var(--shell-state-running);
+  color: var(--accent);
+}
+
+.session-search-trigger:focus-visible,
+.new-session-bar:focus-visible,
+.project-create-btn:focus-visible,
+.project-header:focus-visible,
+.project-header-action:focus-visible,
+.session-main:focus-visible,
+.section-head:focus-visible,
+.tiny-btn:focus-visible,
+.cwd-name:focus-visible,
+.file-search:focus-visible,
+.file-sort-btn:focus-visible,
+.file-item:focus-visible,
+.file-at-btn:focus-visible,
+.toolbar .tool-btn:focus-visible,
+.usage-strip:focus-visible,
+.composer .bar-btn:focus-visible,
+.composer .bar-icon-btn:focus-visible,
+.composer .model-pill-btn:focus-visible,
+.composer .send-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--shell-focus-ring);
+}
+
+.toolbar .tool-btn:disabled,
+.usage-strip:disabled,
+.composer button:disabled {
+  background: transparent;
+  color: var(--faint);
+  opacity: .58;
 }

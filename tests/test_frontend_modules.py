@@ -48,6 +48,9 @@ BUILD_SOURCE = (ROOT / "build_exe.py").read_text(encoding="utf-8")
 FRONTEND_ENTRY_SOURCE = (ROOT / "src" / "frontend-entry.js").read_text(encoding="utf-8")
 FRONTEND_BUILD_SOURCE = (ROOT / "scripts" / "build-frontend.mjs").read_text(encoding="utf-8")
 H4_SMOKE_SOURCE = (ROOT / "tests" / "e2e" / "h4" / "smoke.spec.cjs").read_text(encoding="utf-8")
+CODE043_SHELL_SELFCHECK_SOURCE = (
+    ROOT / "tests" / "e2e" / "h4" / "code043-shell-selfcheck.cjs"
+).read_text(encoding="utf-8")
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 CURRENT_SPEC_SOURCE = (ROOT / f"Code-v{CURRENT_VERSION}.spec").read_text(encoding="utf-8")
@@ -19383,14 +19386,14 @@ process.stdout.write(JSON.stringify({
     def test_preview_feature_exports_parsing_urls_and_width_rules(self):
         self.assertIn("features.preview = Object.freeze", PREVIEW_SOURCE)
         script = """
-global.window = {Code: {features: {}}, innerWidth: 1000};
+global.window = {Code: {features: {}}, innerWidth: 2000};
 require("./src/features/preview.js");
 const {createPreviewFeature, parseDelimitedText, previewRawUrl} = window.Code.features.preview;
 const styles = [];
 const storage = [];
 const feature = createPreviewFeature({
   state: {previewWidth: 420},
-  elements: {},
+  elements: {workbench: {getBoundingClientRect: () => ({width: 1000})}},
   apiJson: async () => ({}),
   renderMarkdown: (value) => value,
   document: {documentElement: {style: {setProperty: (...args) => styles.push(args)}}},
@@ -19398,12 +19401,14 @@ const feature = createPreviewFeature({
 });
 const parsed = parseDelimitedText('name,note\\nAlice,"hello, world"\\nBob,"two\\nlines"\\n');
 const limited = parseDelimitedText("a\\nb\\nc\\n", ",", 2);
-const wide = feature.applyPreviewWidth(600, false);
+const wide = feature.applyPreviewWidth(2000, false);
+const legal = feature.applyPreviewWidth(420, false);
 const narrow = feature.applyPreviewWidth(100, true);
 process.stdout.write(JSON.stringify({
   parsed,
   limited,
   wide,
+  legal,
   narrow,
   styles,
   storage,
@@ -19426,12 +19431,111 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["limited"]["rows"], [["a"], ["b"]])
         self.assertTrue(data["limited"]["limited"])
         self.assertEqual(data["wide"], 480)
+        self.assertEqual(data["legal"], 420)
         self.assertEqual(data["narrow"], 250)
         self.assertEqual(data["styles"][-1], ["--preview-width", "250px"])
         self.assertEqual(data["storage"], [["code-preview-width", "250"]])
         self.assertEqual(
             data["raw"],
             "/api/file?path=folder%2Fa%20b.pdf&raw=1&v=version%201",
+        )
+
+    def test_preview_open_and_resize_reclamp_against_live_workbench_width(self):
+        script = """
+const handlers = {};
+let resizeCallback = null;
+let workbenchWidth = 1000;
+const classes = new Set();
+const styles = [];
+const storage = [];
+global.window = {
+  Code: {features: {}},
+  innerWidth: 2000,
+  addEventListener: (type, callback) => { if (type === "resize") resizeCallback = callback; },
+  requestAnimationFrame: (callback) => { callback(); return 1; },
+  cancelAnimationFrame: () => {},
+};
+require("./src/features/preview.js");
+const {createPreviewFeature} = window.Code.features.preview;
+const eventElement = (name) => ({
+  addEventListener: (type, callback) => { handlers[`${name}:${type}`] = callback; },
+});
+const workbench = {
+  getBoundingClientRect: () => ({width: workbenchWidth}),
+  classList: {
+    add: (name) => classes.add(name),
+    remove: (name) => classes.delete(name),
+    contains: (name) => classes.has(name),
+  },
+};
+const previewResizer = {
+  ...eventElement("resizer"),
+  hasPointerCapture: () => false,
+  setPointerCapture: () => {},
+  releasePointerCapture: () => {},
+};
+const state = {previewWidth: 2000};
+const feature = createPreviewFeature({
+  state,
+  elements: {
+    workbench,
+    refreshPreview: eventElement("refresh"),
+    copyPreview: eventElement("copy"),
+    togglePreview: eventElement("toggle"),
+    previewResizer,
+  },
+  apiJson: async () => ({}),
+  renderMarkdown: (value) => value,
+  document: {
+    documentElement: {style: {setProperty: (...args) => styles.push(args), removeProperty: () => {}}},
+    body: {classList: {add: () => {}, remove: () => {}}},
+  },
+  storage: {setItem: (...args) => storage.push(args), removeItem: () => {}},
+});
+feature.bind();
+handlers["toggle:click"]();
+const opened = {width: state.previewWidth, style: styles.at(-1), stored: storage.at(-1)};
+workbenchWidth = 900;
+state.previewWidth = 2000;
+resizeCallback();
+const resized = {width: state.previewWidth, style: styles.at(-1), stored: storage.at(-1)};
+process.stdout.write(JSON.stringify({opened, resized, open: classes.has("preview-open")}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["open"])
+        self.assertEqual(
+            data["opened"],
+            {
+                "width": 480,
+                "style": ["--preview-width", "480px"],
+                "stored": ["code-preview-width", "480"],
+            },
+        )
+        self.assertEqual(
+            data["resized"],
+            {
+                "width": 380,
+                "style": ["--preview-width", "380px"],
+                "stored": ["code-preview-width", "380"],
+            },
+        )
+
+    def test_preview_width_contract_has_single_workbench_guard_and_css_hard_limit(self):
+        self.assertEqual(PREVIEW_SOURCE.count("const MIN_CHAT_WORKSPACE_WIDTH = 520;"), 1)
+        self.assertIn("els.workbench?.getBoundingClientRect?.().width", PREVIEW_SOURCE)
+        self.assertIn("availableWorkbenchWidth - MIN_CHAT_WORKSPACE_WIDTH", PREVIEW_SOURCE)
+        self.assertIn("applyPreviewWidth(state.previewWidth, true);", PREVIEW_SOURCE)
+        self.assertIn(
+            ".workbench.preview-open {\n  grid-template-columns: minmax(520px, 1fr) minmax(250px, min(var(--preview-width, 420px), calc(100% - 520px)));\n}",
+            STYLE_SOURCE,
         )
 
     def test_large_text_preview_stays_internal_without_system_open(self):
@@ -26578,6 +26682,267 @@ process.stdout.write(JSON.stringify({
             self.assertIn(expected, controller_source)
         self.assertNotIn("preventDefault", controller_source)
 
+
+class Code043VisualSystemPhaseOneTests(unittest.TestCase):
+    MARKER = "/* CODE-043 phase 1: scoped shell visual system */"
+
+    def test_code043_phase_one_uses_scoped_semantic_visual_tokens(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        phase_source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        for token in (
+            "--shell-type-caption:",
+            "--shell-type-control:",
+            "--shell-type-body:",
+            "--shell-line-tight:",
+            "--shell-icon-sm:",
+            "--shell-icon-md:",
+            "--shell-space-1:",
+            "--shell-space-2:",
+            "--shell-radius-sm:",
+            "--shell-radius-md:",
+            "--shell-control-sm:",
+            "--shell-control-md:",
+            "--shell-elevation:",
+            "--shell-state-hover:",
+            "--shell-state-selected:",
+            "--shell-focus-ring:",
+        ):
+            self.assertIn(token, phase_source)
+        for selector in (
+            ".side-header",
+            ".new-session-bar",
+            ".project-header",
+            ".session-main",
+            ".section-head",
+            ".file-search",
+            ".file-item-row",
+            ".toolbar",
+            ".usage-strip",
+            ".chat-pane.empty-chat",
+            ".welcome-screen",
+            ".composer textarea",
+            ".composer-bar",
+            ".send-btn",
+        ):
+            self.assertIn(selector, phase_source)
+        self.assertNotIn("@media (max-width: 640px)", phase_source)
+        self.assertNotRegex(phase_source, r"#[0-9a-fA-F]{3,8}\b")
+
+    def test_code043_phase_one_does_not_restyle_later_surfaces(self):
+        phase_source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        for excluded_selector in (
+            ".messages",
+            ".msg",
+            ".bubble",
+            ".tool-process",
+            ".tool-edit",
+            ".authorization-panel",
+            ".settings-panel",
+            ".session-search-modal",
+            ".archived-session",
+            ".file-preview",
+            ".notification",
+            ".onboarding",
+        ):
+            self.assertNotIn(excluded_selector, phase_source)
+
+    def test_code043_phase_one_reuses_svg_registry_for_shell_actions(self):
+        icon_source = (ROOT / "src" / "core" / "icons.js").read_text(encoding="utf-8")
+        for icon_name in ("plus", "more", "chevronDown", "chevronRight"):
+            self.assertIn(f"{icon_name}:", icon_source)
+        for expected in (
+            'iconOnly("projectCreateBtn", "plus")',
+            'uiIcon("more", 16, "shell-action-icon")',
+            'uiIcon(collapsed ? "chevronRight" : "chevronDown", 14, "shell-action-icon")',
+            'uiIcon("plus", 15, "shell-action-icon")',
+        ):
+            self.assertIn(expected, APP_SOURCE)
+        self.assertNotIn(">&#8942;</button>", APP_SOURCE)
+        self.assertNotIn(">+</button>", APP_SOURCE[APP_SOURCE.index("function renderProjectSection"):APP_SOURCE.index("function renderSessions")])
+        self.assertIn('class="file-sort-arrow-icon" aria-hidden="true"', INDEX_SOURCE)
+        self.assertIn('class="ui-icon" viewBox="0 0 24 24"', INDEX_SOURCE)
+        self.assertIn('classList?.toggle("is-descending", !ascending)', FILES_SOURCE)
+        self.assertNotIn('textContent = ascending ? "↑" : "↓"', FILES_SOURCE)
+
+    def test_code043_phase_one_keeps_existing_shell_accessibility_contracts(self):
+        for fragment in (
+            'id="sessionSearchBtn"',
+            'data-i18n-aria-label="sessionSearchOpen"',
+            'id="newChat"',
+            'id="explorerHead"',
+            'id="fileSearch"',
+            'id="fileSortBtn"',
+            'id="toggleSidebar"',
+            'id="chatForm"',
+            'id="prompt"',
+            'id="sendBtn"',
+        ):
+            self.assertIn(fragment, INDEX_SOURCE)
+        phase_source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        self.assertIn(":focus-visible", phase_source)
+        self.assertIn("min-width: var(--shell-control-sm);", phase_source)
+        self.assertIn("min-height: var(--shell-control-sm);", phase_source)
+
+    def test_code043_phase_one_projects_only_the_approved_static_shell_icons(self):
+        start = APP_SOURCE.index("function projectPhaseOneShellIcons()")
+        end = APP_SOURCE.index("projectPhaseOneShellIcons();", start)
+        projection_source = APP_SOURCE[start:end]
+        expected_ids = {
+            "newChat", "projectCreateBtn", "goUp", "newFolderBtn", "refreshFiles",
+            "settingsMenuBtn", "toggleSidebar", "attachFile", "togglePreview",
+        }
+        projected_ids = set(re.findall(r'(?:iconOnly|iconLabel)\("([^"]+)"', projection_source))
+        self.assertEqual(projected_ids, expected_ids)
+        self.assertIn('document.querySelector(".cwd-icon")', projection_source)
+        self.assertIn('document.querySelector(".explorer-arrow")', projection_source)
+        for excluded_id in (
+            "refreshPreview", "copyPreview", "refreshModelsBtn", "closeSettingsPage",
+        ):
+            self.assertNotIn(f'"{excluded_id}"', projection_source)
+        self.assertNotIn('querySelectorAll(".icon-btn")', projection_source)
+        self.assertEqual(APP_SOURCE.count("upgradeStaticIcons();"), 0)
+
+    def test_code043_phase_one_readiness_precedes_bundle_frontend_readiness(self):
+        projection_call = APP_SOURCE.index("projectPhaseOneShellIcons();")
+        phase_ready = APP_SOURCE.index(
+            'setAttribute("data-code-phase-one-shell-ready", "true")'
+        )
+        self.assertLess(phase_ready, projection_call)
+        phase_guard = FRONTEND_ENTRY_SOURCE.index(
+            'getAttribute("data-code-phase-one-shell-ready")'
+        )
+        frontend_ready = FRONTEND_ENTRY_SOURCE.index(
+            'setAttribute("data-code-frontend-ready", "true")'
+        )
+        self.assertLess(phase_guard, frontend_ready)
+        self.assertIn("throw new Error", FRONTEND_ENTRY_SOURCE[phase_guard:frontend_ready])
+
+    def test_code043_phase_one_labeled_icons_remain_i18n_managed(self):
+        start = APP_SOURCE.index("function projectPhaseOneShellIcons()")
+        end = APP_SOURCE.index("projectPhaseOneShellIcons();", start)
+        projection_source = APP_SOURCE[start:end]
+        self.assertIn("<span data-ui-label>", projection_source)
+        for element_id, key in (
+            ("newChat", "newSession"),
+            ("settingsMenuBtn", "settingsBtn"),
+            ("togglePreview", "previewBtn"),
+        ):
+            self.assertIn(f'{element_id}: "{key}"', I18N_SOURCE)
+            self.assertIn(f'iconLabel("{element_id}"', projection_source)
+        self.assertIn('const uiLabel = element.querySelector("[data-ui-label]")', I18N_SOURCE)
+        self.assertIn('uiLabel.textContent = value', I18N_SOURCE)
+        self.assertIn('newSession: "\u65b0\u5efa\u4f1a\u8bdd"', I18N_SOURCE)
+        self.assertIn('newSession: "New Session"', I18N_SOURCE)
+
+    def test_code043_phase_one_general_copy_projects_in_both_languages(self):
+        for fragment in (
+            'welcomeHeadline: "把想法变成结果"',
+            'inputPlaceholder: "输入想法，或使用/命令"',
+            'welcomeHeadline: "Turn ideas into results"',
+            'inputPlaceholder: "Enter an idea, or use /commands"',
+        ):
+            self.assertIn(fragment, I18N_SOURCE)
+        self.assertIn(
+            'data-i18n="inputPlaceholder" placeholder="输入想法，或使用/命令"',
+            INDEX_SOURCE,
+        )
+        script = """
+global.window = {Code: {core: {}}};
+require("./src/core/i18n.js");
+let language = "zh";
+const prompt = {placeholder: ""};
+const slogan = {textContent: ""};
+const documentRoot = {
+  documentElement: {lang: ""},
+  title: "",
+  querySelectorAll: () => [],
+  querySelector: () => null,
+  getElementById: (id) => id === "prompt" ? prompt : null,
+};
+let runtime = null;
+runtime = window.Code.core.i18n.createI18nRuntime({
+  getLanguage: () => language,
+  setLanguage: (next) => { language = next; },
+  getDocument: () => documentRoot,
+  onLanguageChanged: () => { slogan.textContent = runtime.t("welcomeHeadline"); },
+});
+runtime.applyI18n();
+slogan.textContent = runtime.t("welcomeHeadline");
+const zh = {headline: slogan.textContent, placeholder: prompt.placeholder};
+runtime.setLang("en");
+const en = {headline: slogan.textContent, placeholder: prompt.placeholder};
+process.stdout.write(JSON.stringify({zh, en}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "zh": {"headline": "把想法变成结果", "placeholder": "输入想法，或使用/命令"},
+                "en": {
+                    "headline": "Turn ideas into results",
+                    "placeholder": "Enter an idea, or use /commands",
+                },
+            },
+        )
+        self.assertIn('sloganText.textContent = t("welcomeHeadline")', APP_SOURCE)
+        self.assertIn('if (typeof renderMessages === "function") renderMessages();', APP_SOURCE)
+
+    def test_code043_phase_one_uses_a_new_model_free_equivalence_chain(self):
+        self.assertNotIn("exerciseCode043PhaseOneVisualShell", H4_SMOKE_SOURCE)
+        for fragment in (
+            'realRuntimeLoads: { bundle: 1, classic: 1 }',
+            'data-code-phase-one-shell-ready',
+            'data-code-frontend-ready',
+            'modelCatalogRequests: 0',
+            'productWriteRequests: 0',
+            'getActiveChildCount()',
+        ):
+            self.assertIn(fragment, CODE043_SHELL_SELFCHECK_SOURCE)
+        for forbidden in (
+            "releaseModel(", "waitModelCatalogGate(", "retry", "setTimeout(",
+            "/proxy/chat", "/api/tools/", "/api/agent/runs",
+        ):
+            self.assertNotIn(forbidden, CODE043_SHELL_SELFCHECK_SOURCE)
+
+    def test_code043_phase_one_selfcheck_intercepts_only_known_startup_posts(self):
+        for pathname in (
+            "/api/image-routes/refresh",
+            "/api/code/sync-keys",
+        ):
+            self.assertIn(f'"{pathname}": Object.freeze(', CODE043_SHELL_SELFCHECK_SOURCE)
+        for field in (
+            "version: 1",
+            "catalogRevision: 0",
+            "routes: []",
+            "ok: true",
+            "changed: false",
+            "successfulConnections: 0",
+            "failedConnections: 0",
+            "failures: []",
+            "tokens: []",
+            "keys: {}",
+        ):
+            self.assertIn(field, CODE043_SHELL_SELFCHECK_SOURCE)
+        route_start = CODE043_SHELL_SELFCHECK_SOURCE.index('context.route("**/*"')
+        route_end = CODE043_SHELL_SELFCHECK_SOURCE.index("async function createContext", route_start)
+        route_source = CODE043_SHELL_SELFCHECK_SOURCE[route_start:route_end]
+        fulfill_index = route_source.index("await route.fulfill(")
+        fulfill_return_index = route_source.index("return;", fulfill_index)
+        continue_index = route_source.index("await route.continue();")
+        self.assertLess(fulfill_index, fulfill_return_index)
+        self.assertLess(fulfill_return_index, continue_index)
+        self.assertIn('const fixture = method === "POST"', route_source)
+        self.assertIn("serverBoundRequests.push(", route_source)
+        self.assertIn("serverReceived: 0", CODE043_SHELL_SELFCHECK_SOURCE)
+        self.assertIn("platformSyncRequests: 0", CODE043_SHELL_SELFCHECK_SOURCE)
+        self.assertIn('path.join(host.dataDir, "image-route-registry.json")', CODE043_SHELL_SELFCHECK_SOURCE)
 
 if __name__ == "__main__":
     unittest.main()

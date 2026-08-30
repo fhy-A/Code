@@ -64,7 +64,7 @@
         </div>
         <div class="file-search-row">
           <input id="fileSearch" class="file-search" data-i18n="filterFiles" placeholder="筛选文件…" autocomplete="off" />
-          <button id="fileSortBtn" class="file-sort-btn" type="button" title="左键切换升序降序，右键切换排序规则" data-i18n-title="fileSortTip"><span id="fileSortLabel">默认</span><span id="fileSortArrow" class="file-sort-arrow-icon">↑</span></button>
+          <button id="fileSortBtn" class="file-sort-btn" type="button" title="左键切换升序降序，右键切换排序规则" data-i18n-title="fileSortTip"><span id="fileSortLabel">默认</span><span id="fileSortArrow" class="file-sort-arrow-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-5 5 5-5 5 5"/></svg></span></button>
         </div>
         <div id="filePathBar" class="path-line"></div>
         <div id="fileTree" class="file-tree"></div>
@@ -204,7 +204,7 @@
             </section>
             <section id="skillEvidencePanel" class="skill-evidence-panel hidden" aria-live="assertive"></section>
             <section id="userInputPanel" class="user-input-panel hidden" aria-live="assertive"></section>
-            <textarea id="prompt" rows="2" data-i18n="inputPlaceholder" placeholder="描述需求、粘贴代码，或输入 / 调用命令"></textarea>
+            <textarea id="prompt" rows="2" data-i18n="inputPlaceholder" placeholder="输入想法，或使用/命令"></textarea>
             <button id="composerInputToggle" class="composer-input-toggle" type="button" hidden
               data-i18n="expandComposerInput" data-i18n-title="expandComposerInput" data-i18n-aria-label="expandComposerInput"
               aria-controls="prompt" aria-expanded="false" aria-label="展开输入" title="展开输入">展开输入</button>
