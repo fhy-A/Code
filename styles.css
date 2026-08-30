@@ -10428,3 +10428,50 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .file-item small {
   font-size: var(--type-caption);
 }
+
+/* CODE-043 compact three-level disclosures */
+.execution-trace-summary,
+.tool-process-stage > summary,
+.tool-process-item > summary {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 32px;
+  justify-content: flex-start;
+}
+
+.execution-trace-summary {
+  gap: 7px;
+}
+
+.execution-trace-chevron {
+  width: 6px;
+  height: 6px;
+  border-right: 1.4px solid var(--muted);
+  border-bottom: 1.4px solid var(--muted);
+}
+
+.execution-trace-summary > :is(.completed-run-status.msg, .active-run-anchor.msg) {
+  flex: 0 1 auto;
+}
+
+.tool-process-stage-heading,
+.tool-process-row-heading {
+  flex: 1 1 auto;
+}
+
+.tool-process-stage-heading code,
+.tool-process-row-heading code {
+  flex: 1 1 auto;
+}
+
+.execution-trace-chevron,
+.tool-process-stage-chevron,
+.tool-process-chevron {
+  transform: rotate(-45deg);
+}
+
+.execution-trace.is-expanded > .execution-trace-summary .execution-trace-chevron,
+.tool-process-stage[open] > summary .tool-process-stage-chevron,
+.tool-process-item[open] > summary .tool-process-chevron {
+  transform: rotate(45deg);
+}

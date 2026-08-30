@@ -51,6 +51,9 @@ H4_SMOKE_SOURCE = (ROOT / "tests" / "e2e" / "h4" / "smoke.spec.cjs").read_text(e
 CODE043_SHELL_SELFCHECK_SOURCE = (
     ROOT / "tests" / "e2e" / "h4" / "code043-shell-selfcheck.cjs"
 ).read_text(encoding="utf-8")
+CODE043_COMPACT_DISCLOSURES_FINAL_STATE_SELFCHECK_SOURCE = (
+    ROOT / "tests" / "e2e" / "h4" / "code043-compact-disclosures-final-state-selfcheck.cjs"
+).read_text(encoding="utf-8")
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 CURRENT_SPEC_SOURCE = (ROOT / f"Code-v{CURRENT_VERSION}.spec").read_text(encoding="utf-8")
@@ -27121,7 +27124,10 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
 
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 compact three-level disclosures */",
+            1,
+        )[0]
 
     def assert_token_size(self, phase_source, selector, token):
         self.assertIn(selector, phase_source)
@@ -27274,6 +27280,206 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden_declaration, phase_source)
         self.assertNotIn("@media", phase_source)
+
+
+class Code043CompactDisclosureTests(unittest.TestCase):
+    MARKER = "/* CODE-043 compact three-level disclosures */"
+    SUMMARY_GROUP = (
+        ".execution-trace-summary,\n"
+        ".tool-process-stage > summary,\n"
+        ".tool-process-item > summary {"
+    )
+    COLLAPSED_CHEVRONS = (
+        ".execution-trace-chevron,\n"
+        ".tool-process-stage-chevron,\n"
+        ".tool-process-chevron {"
+    )
+    EXPANDED_CHEVRONS = (
+        ".execution-trace.is-expanded > .execution-trace-summary .execution-trace-chevron,\n"
+        ".tool-process-stage[open] > summary .tool-process-stage-chevron,\n"
+        ".tool-process-item[open] > summary .tool-process-chevron {"
+    )
+
+    def compact_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_three_summary_controls_are_compact_left_aligned_hit_targets(self):
+        source = self.compact_source()
+        rule = self.rule(source, self.SUMMARY_GROUP)
+        for declaration in (
+            "width: fit-content;",
+            "max-width: 100%;",
+            "min-height: 32px;",
+            "justify-content: flex-start;",
+        ):
+            self.assertIn(declaration, rule)
+        self.assertNotRegex(rule, r"(?m)^\s*width:\s*100%;")
+
+    def test_three_chevrons_point_right_when_collapsed_and_down_when_expanded(self):
+        source = self.compact_source()
+        collapsed = self.rule(source, self.COLLAPSED_CHEVRONS)
+        expanded = self.rule(source, self.EXPANDED_CHEVRONS)
+        self.assertIn("transform: rotate(-45deg);", collapsed)
+        self.assertIn("transform: rotate(45deg);", expanded)
+
+    def test_outer_chevron_matches_inner_six_pixel_visual_weight(self):
+        source = self.compact_source()
+        summary = self.rule(source, ".execution-trace-summary {")
+        outer = self.rule(source, ".execution-trace-chevron {")
+        for declaration in (
+            "width: 6px;",
+            "height: 6px;",
+            "border-right: 1.4px solid var(--muted);",
+            "border-bottom: 1.4px solid var(--muted);",
+        ):
+            self.assertIn(declaration, outer)
+        self.assertIn("gap: 7px;", summary)
+
+        inner = self.rule(
+            STYLE_SOURCE,
+            ".tool-process-stage-chevron,\n.tool-process-chevron {",
+        )
+        for declaration in (
+            "width: 6px;",
+            "height: 6px;",
+            "border-right: 1.4px solid currentColor;",
+            "border-bottom: 1.4px solid currentColor;",
+        ):
+            self.assertIn(declaration, inner)
+
+    def test_tool_item_order_and_long_path_priority_are_stable(self):
+        projection_start = MESSAGES_SOURCE.index("function renderToolProcessProjection")
+        projection_end = MESSAGES_SOURCE.index(
+            "function collectAgentResponseInfoProjection",
+            projection_start,
+        )
+        projection = MESSAGES_SOURCE[projection_start:projection_end]
+        item_start = projection.index('<summary>\n                      <span class="tool-process-indicator')
+        item_end = projection.index("</summary>", item_start)
+        item_summary = projection[item_start:item_end]
+        order = (
+            'class="tool-process-indicator',
+            'class="tool-process-row-heading',
+            'class="tool-process-outcome',
+            'class="tool-process-chevron',
+        )
+        positions = [item_summary.index(fragment) for fragment in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("<strong>${escapeHtml(action)}</strong>", item_summary)
+        self.assertIn("<code>${escapeHtml(call.target)}</code>", item_summary)
+
+        path_rule = self.rule(STYLE_SOURCE, ".tool-process-row-heading code {")
+        for declaration in (
+            "min-width: 0;",
+            "overflow: hidden;",
+            "text-overflow: ellipsis;",
+            "white-space: nowrap;",
+        ):
+            self.assertIn(declaration, path_rule)
+        compact = self.compact_source()
+        flex_rule = self.rule(
+            compact,
+            ".tool-process-stage-heading code,\n.tool-process-row-heading code {",
+        )
+        self.assertIn("flex: 1 1 auto;", flex_rule)
+        for selector in (
+            ".tool-process-row-heading strong",
+            ".tool-process-outcome",
+            ".tool-process-chevron",
+        ):
+            self.assertRegex(
+                STYLE_SOURCE,
+                rf"{re.escape(selector)}[^{{]*\{{[^}}]*flex:\s*0\s+0\s+auto;",
+            )
+
+    def test_native_details_and_execution_trace_keyboard_aria_semantics_remain(self):
+        for fragment in (
+            '"[data-execution-trace-toggle]"',
+            '".tool-process-stage > summary"',
+            '".tool-process-item > summary"',
+            'role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle',
+            'root.addEventListener("toggle"',
+            'if (!["Enter", " "].includes(event.key)) return;',
+            "traceToggle.click();",
+            "onLayoutChange();",
+            "syncProjectedElement(currentStage, projectedStage, { preserveChildren: true });",
+            "syncProjectedElement(currentItem, projectedItem, { preserveChildren: true });",
+        ):
+            self.assertIn(fragment, MESSAGES_SOURCE)
+        for fragment in (
+            'querySelectorAll(".execution-trace.completed.is-expanded[data-execution-trace]")',
+            'querySelectorAll(".execution-trace.active:not(.is-expanded)[data-execution-trace]")',
+            'querySelectorAll("details.tool-process-stage[open][data-tool-process-id]")',
+            'querySelectorAll("details.tool-process-item[open][data-tool-process-item-key]")',
+        ):
+            self.assertIn(fragment, APP_SOURCE)
+        self.assertIn(
+            ".execution-trace-summary:focus-visible:not(.is-pointer-focus)",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".tool-process-stage > summary:focus-visible:not(.is-pointer-focus)",
+            STYLE_SOURCE,
+        )
+
+    def test_compact_disclosure_delta_adds_no_visual_surface_or_type_changes(self):
+        source = self.compact_source()
+        for forbidden in (
+            "background:", "border:", "border-radius:", "box-shadow:",
+            "color:", "font-size:", "margin:", "padding:", "position:",
+        ):
+            self.assertNotIn(forbidden, source)
+        for token in (
+            "--type-caption", "--type-interface", "--type-content",
+            "--type-section", "--type-page",
+        ):
+            self.assertNotIn(token, source)
+
+    def test_compact_disclosures_have_an_isolated_final_state_selfcheck(self):
+        source = CODE043_COMPACT_DISCLOSURES_FINAL_STATE_SELFCHECK_SOURCE
+        for required in (
+            'command: "code043-compact-disclosures-final-state-selfcheck"',
+            'realRuntimeLoads: { bundle: 1, classic: 1 }',
+            "installDisclosureFixture",
+            "installFinalStateTransitionOverride",
+            "transition: none !important;",
+            'traceChevron: "0s"',
+            'stageChevron: "0s"',
+            'itemChevron: "0s"',
+            "page.waitForResponse",
+            "clickBlankSpace",
+            'page.keyboard.press("Space")',
+            'page.keyboard.press("Enter")',
+            "LONG_PATH",
+            "scrollWidth > geometry.longPath.clientWidth",
+            "productWriteRequests: 0",
+            "modelCatalogRequests: 0",
+            "serverReceived: 0",
+            "getActiveChildCount()",
+            "cleanup.childExited",
+            "cleanup.portsClosed",
+            "cleanup.rootRemoved",
+        ):
+            self.assertIn(required, source)
+        for forbidden in (
+            "setTimeout(",
+            "retry",
+            "releaseModel(",
+            "waitModelCatalogGate(",
+            "code043-typography-scale-selfcheck",
+            'command: "code043-compact-disclosures-selfcheck"',
+            "3010",
+            "3011",
+        ):
+            self.assertNotIn(forbidden, source)
+
 
 if __name__ == "__main__":
     unittest.main()
