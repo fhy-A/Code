@@ -387,8 +387,16 @@
       return Array.isArray(response?.data) ? response.data : [];
     }
 
-    function archiveSession(sessionId) {
-      return requestJson(sessionArchiveUrl(sessionId, "archive"), { method: "POST" });
+    function archiveSession(sessionId, options = {}) {
+      const signal = options && options.signal;
+      const stopActiveWork = options && options.stopActiveWork === true;
+      return requestJson(sessionArchiveUrl(sessionId, "archive"), {
+        method: "POST",
+        ...(signal ? { signal } : {}),
+        ...(stopActiveWork
+          ? { body: JSON.stringify({ stopActiveWork: true }) }
+          : {}),
+      });
     }
 
     function restoreArchivedSession(sessionId) {

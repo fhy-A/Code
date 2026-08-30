@@ -761,9 +761,13 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         server.CodeHandler.create_session(handler)
         return handler.send_json.call_args.args[0]
 
-    def archive(self, session_id):
+    def archive(self, session_id, *, stop_active_work=False):
         handler = self.make_handler()
-        server.CodeHandler.archive_session_lifecycle(handler, session_id)
+        server.CodeHandler.archive_session_lifecycle(
+            handler,
+            session_id,
+            stop_active_work=stop_active_work,
+        )
         return handler
 
     def unarchive(self, session_id):
@@ -775,6 +779,266 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         handler = self.make_handler()
         server.CodeHandler.get_archived_sessions(handler)
         return handler.send_json.call_args.args[0]["data"]
+
+    def start_http_server(self):
+        server.ThreadingHTTPServer.daemon_threads = True
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.CodeHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+
+        def cleanup():
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(cleanup)
+        return httpd.server_address[1]
+
+    @staticmethod
+    def http_json(port, method, path, body=None, *, timeout=2):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            payload = None if body is None else json.dumps(body).encode("utf-8")
+            headers = {}
+            if payload is not None:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(payload)),
+                }
+            connection.request(method, path, body=payload, headers=headers)
+            response = connection.getresponse()
+            raw = response.read()
+            return response.status, json.loads(raw.decode("utf-8"))
+        finally:
+            connection.close()
+
+    def create_active_goal(self, session_id):
+        return GoalV2Runtime(self.root).create_goal(
+            session_id,
+            "Archive eligibility must remain nonterminal",
+            context=GoalCreationContext(
+                session_id=session_id,
+                origin_message_id="message-archive-active",
+                client_request_id="request-archive-active",
+                owner_run_id="run-archive-active",
+                permission_profile="read",
+                source_kind="explicit",
+            ),
+            expected_revision=0,
+            idempotency_key=f"create-active-{session_id}",
+        )
+
+    def create_active_agent_run(
+        self,
+        session_id,
+        *,
+        run_kind="internal",
+        parent_run_id="",
+        parent_tool_call_id="",
+    ):
+        return server._create_agent_run(
+            session_id,
+            {
+                "model": "fixture-model",
+                "messages": [{"role": "user", "content": "active archive guard"}],
+            },
+            "http://127.0.0.1:9",
+            ["synthetic-key"],
+            allowed_tools=[],
+            parent_run_id=parent_run_id,
+            parent_tool_call_id=parent_tool_call_id,
+            run_kind=run_kind,
+            start_worker=False,
+        )
+
+    def test_unfinished_goal_archives_and_restores_without_reading_or_rewriting_goal(self):
+        session = self.create_session(
+            title="Unfinished Goal is preserved",
+            run_state={"status": "paused", "lastError": "awaiting direction"},
+        )
+        self.create_active_goal(session["id"])
+        goal_path = GoalV2Runtime(self.root).service.events_path(session["id"])
+        before_goal = goal_path.read_bytes()
+
+        with mock.patch.object(
+            server,
+            "goal_v2_runtime",
+            side_effect=AssertionError("archive must not inspect Goal lifecycle"),
+        ):
+            archived = self.archive(session["id"])
+            self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+            self.assertEqual(goal_path.read_bytes(), before_goal)
+            restored = self.unarchive(session["id"])
+
+        self.assertEqual(restored.send_json.call_args.args[0]["status"], "active")
+        self.assertEqual(goal_path.read_bytes(), before_goal)
+        projection = GoalV2Runtime(self.root).read(session["id"]).projection()
+        self.assertEqual(projection["goal"]["lifecycle"], "draft")
+        continued = self.create_active_agent_run(
+            session["id"],
+            run_kind="foreground",
+        )
+        self.assertEqual(continued["status"], "model")
+        server._cancel_agent_run(continued["id"])
+
+    def test_draft_active_and_ready_goals_round_trip_byte_identically(self):
+        for lifecycle in ("draft", "active", "ready_for_acceptance"):
+            with self.subTest(lifecycle=lifecycle):
+                session = self.create_session(
+                    title=f"Preserve {lifecycle} Goal",
+                    run_state={"status": "paused"},
+                )
+                runtime = GoalV2Runtime(self.root)
+                created = self.create_active_goal(session["id"])
+                goal_id = created["goal"]["goalId"]
+                if lifecycle != "draft":
+                    planned = runtime.set_plan(
+                        session["id"],
+                        goal_id,
+                        [{
+                            "id": f"step-{index}",
+                            "description": f"Preserve active Goal stage {index}",
+                            "acceptanceCriteria": [{
+                                "id": f"criterion-{index}",
+                                "description": "Goal bytes remain unchanged",
+                                "kind": "machine",
+                            }],
+                        } for index in range(1, 4)],
+                        source_run_id="run-goal-archive-roundtrip",
+                        expected_revision=created["revision"],
+                        idempotency_key=f"plan-{lifecycle}-{session['id']}",
+                    )
+                    revision = planned["revision"]
+                    step_indexes = range(1, 4) if lifecycle == "ready_for_acceptance" else (1,)
+                    for index in step_indexes:
+                        started = runtime.start_step(
+                            session["id"],
+                            goal_id,
+                            f"step-{index}",
+                            source_run_id="run-goal-archive-roundtrip",
+                            expected_revision=revision,
+                            idempotency_key=f"start-{index}-{session['id']}",
+                        )
+                        revision = started["revision"]
+                        if lifecycle != "ready_for_acceptance":
+                            continue
+                        completed = runtime.service.append(
+                            session["id"],
+                            goal_id,
+                            "step_completed",
+                            {
+                                "stepId": f"step-{index}",
+                                "sourceRunId": "run-goal-archive-roundtrip",
+                                "evidence": [{
+                                    "id": f"evidence-{index}",
+                                    "criterionId": f"criterion-{index}",
+                                    "kind": "machine",
+                                    "summary": "Goal bytes preserved",
+                                    "sourceRunId": "run-goal-archive-roundtrip",
+                                    "sourceToolCallId": f"tool-goal-roundtrip-{index}",
+                                    "recordedAt": "2026-08-30T12:00:00+08:00",
+                                }],
+                            },
+                            expected_revision=revision,
+                            idempotency_key=f"complete-{index}-{session['id']}",
+                            actor="foreground-agent",
+                        )
+                        revision = completed["revision"]
+                    if lifecycle == "ready_for_acceptance":
+                        runtime.ready_for_acceptance(
+                            session["id"],
+                            goal_id,
+                            summary="Ready and preserved",
+                            source_run_id="run-goal-archive-roundtrip",
+                            expected_revision=revision,
+                            idempotency_key=f"ready-{session['id']}",
+                        )
+                goal_path = runtime.service.events_path(session["id"])
+                before = goal_path.read_bytes()
+                self.assertEqual(
+                    runtime.read(session["id"]).projection()["goal"]["lifecycle"],
+                    lifecycle,
+                )
+                self.assertEqual(
+                    self.archive(session["id"]).send_json.call_args.args[0]["status"],
+                    "archived",
+                )
+                self.unarchive(session["id"])
+                self.assertEqual(goal_path.read_bytes(), before)
+                self.assertEqual(
+                    runtime.read(session["id"]).projection()["goal"]["lifecycle"],
+                    lifecycle,
+                )
+
+    def test_confirmed_stop_archives_only_target_after_all_runs_are_terminal(self):
+        session = self.create_session(
+            title="Stop target work",
+            run_state={
+                "status": "waiting_user_input",
+                "userInputRequest": {"status": "pending", "requestId": "input-target"},
+                "queuedMessages": [{"id": "queued-target", "status": "pending"}],
+                "backgroundRuns": [{"id": "background-target", "status": "running"}],
+            },
+        )
+        other = self.create_session(
+            title="Unrelated work remains live",
+            run_state={"status": "running"},
+        )
+        self.create_active_goal(session["id"])
+        goal_path = GoalV2Runtime(self.root).service.events_path(session["id"])
+        before_goal = goal_path.read_bytes()
+        foreground = self.create_active_agent_run(
+            session["id"],
+            run_kind="foreground",
+        )
+        background = self.create_active_agent_run(
+            session["id"],
+            run_kind="background",
+        )
+        parent = self.create_active_agent_run(session["id"])
+        child = self.create_active_agent_run(
+            session["id"],
+            parent_run_id=parent["id"],
+            parent_tool_call_id="call-child-archive",
+        )
+        target_runs = (foreground, background, parent, child)
+        other_run = self.create_active_agent_run(other["id"])
+
+        rejected = self.archive(session["id"])
+        payload, status = rejected.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_archive_active_work")
+        self.assertEqual(
+            [run["run_kind"] for run in target_runs],
+            ["foreground", "background", "internal", "child"],
+        )
+        self.assertTrue(all(
+            server._get_agent_run(run["id"])["status"] == "model"
+            for run in target_runs
+        ))
+
+        archived = self.archive(session["id"], stop_active_work=True)
+        result = archived.send_json.call_args.args[0]
+        self.assertEqual(result["status"], "archived")
+        self.assertTrue(result["workStopped"])
+        self.assertTrue(all(
+            server._get_agent_run(run["id"])["status"] == "cancelled"
+            for run in target_runs
+        ))
+        self.assertEqual(server._get_agent_run(other_run["id"])["status"], "model")
+        self.assertEqual(goal_path.read_bytes(), before_goal)
+        archived_meta = server.read_json(
+            server._session_archive_bundle_path(session["id"]) / "session.json",
+            {},
+        )
+        self.assertEqual(archived_meta["runState"]["status"], "cancelled")
+        self.assertNotIn("queuedMessages", archived_meta["runState"])
+        self.assertNotIn("backgroundRuns", archived_meta["runState"])
+        self.assertNotIn("userInputRequest", archived_meta["runState"])
+        self.assertFalse(server._session_archive_stop_fence_active(session["id"]))
+        repeated = self.archive(session["id"], stop_active_work=True)
+        self.assertEqual(repeated.send_json.call_args.args[0]["status"], "archived")
+        self.assertFalse(repeated.send_json.call_args.args[0]["workStopped"])
 
     def create_asset_sidecar(self, session_id, marker="a"):
         asset_id = "ga1_" + (str(marker)[:1] * 43)
@@ -1419,12 +1683,18 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             before["branches"],
         )
 
-    def test_archive_rejects_nonterminal_session_goal_and_agent_run_facts(self):
+    def test_archive_rejects_active_session_and_agent_work_but_not_goal(self):
         run_state_cases = [
             {"status": "running"},
             {"status": "waiting-network"},
+            {"status": "resuming"},
             {"queuedMessages": [{"id": "queued-1", "status": "pending"}]},
             {"backgroundRuns": [{"id": "background-1", "status": "waiting-recovery"}]},
+            {"status": "paused", "userInputRequest": {"status": "pending"}},
+            {"status": "paused", "authorizationRequest": {"status": "pending"}},
+            {"status": "paused", "skillEvidenceRequest": {"status": "pending"}},
+            {"status": "paused", "queuedMessages": [{"id": "queued-paused", "status": "pending"}]},
+            {"status": "paused", "backgroundRuns": [{"id": "background-paused", "status": "waiting-recovery"}]},
             {"authorizationRequest": {"status": "pending", "reason": "secret"}},
         ]
         for index, run_state in enumerate(run_state_cases):
@@ -1438,11 +1708,14 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
                 rejected = self.archive(session["id"])
                 payload, status = rejected.send_json.call_args.args
                 self.assertEqual(status, 409)
-                self.assertEqual(payload["errorCode"], "session_archive_not_terminal")
+                self.assertEqual(payload["errorCode"], "session_archive_active_work")
                 self.assertEqual(server.session_path(session["id"]).read_bytes(), before_meta)
                 self.assertEqual(server._session_index_path().read_bytes(), before_index)
 
-        goal_session = self.create_session(title="Active Goal")
+        goal_session = self.create_session(
+            title="Paused with active Goal",
+            run_state={"status": "paused"},
+        )
         GoalV2Runtime(self.root).create_goal(
             goal_session["id"],
             "Archive must wait for Goal completion",
@@ -1457,14 +1730,20 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             expected_revision=0,
             idempotency_key="create-archive-lifecycle-goal",
         )
-        rejected_goal = self.archive(goal_session["id"])
-        self.assertEqual(rejected_goal.send_json.call_args.args[1], 409)
+        goal_path = GoalV2Runtime(self.root).service.events_path(goal_session["id"])
+        before_goal = goal_path.read_bytes()
+        archived_goal = self.archive(goal_session["id"])
         self.assertEqual(
-            rejected_goal.send_json.call_args.args[0]["errorCode"],
-            "session_archive_not_terminal",
+            archived_goal.send_json.call_args.args[0]["status"],
+            "archived",
         )
+        self.unarchive(goal_session["id"])
+        self.assertEqual(goal_path.read_bytes(), before_goal)
 
-        run_session = self.create_session(title="Persisted AgentRun")
+        run_session = self.create_session(
+            title="Paused with persisted AgentRun",
+            run_state={"status": "paused"},
+        )
         runs_dir = self.root / "agent-runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         server.write_json(runs_dir / ("a" * 32 + ".json"), {
@@ -1478,8 +1757,59 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         self.assertEqual(rejected_run.send_json.call_args.args[1], 409)
         self.assertEqual(
             rejected_run.send_json.call_args.args[0]["errorCode"],
-            "session_archive_not_terminal",
+            "session_archive_active_work",
         )
+
+        with mock.patch.object(server, "goal_v2_runtime") as goal_runtime:
+            self.assertTrue(server._session_archive_eligible(
+                "ready-goal-session",
+                {"runState": {"status": "paused"}},
+            ))
+        goal_runtime.assert_not_called()
+
+    def test_quiescent_paused_archive_restore_is_byte_identical(self):
+        session = self.create_session(
+            title="Quiescent paused session",
+            run_state={
+                "status": "paused",
+                "agentRunId": "legacy-paused-owner",
+                "lastError": "user paused",
+            },
+        )
+        goal_path = self.create_terminal_goal(session["id"])
+        _, run_path = self.create_terminal_agent_run(session["id"], "p")
+        asset_dir = self.create_asset_sidecar(session["id"], "p")
+        meta_path = server.session_path(session["id"])
+        message_path = server.messages_path(session["id"])
+        before = {
+            "meta": meta_path.read_bytes(),
+            "messages": message_path.read_bytes(),
+            "goal": goal_path.read_bytes(),
+            "agentRun": run_path.read_bytes(),
+            "assets": {
+                path.name: path.read_bytes()
+                for path in asset_dir.iterdir()
+                if path.is_file()
+            },
+        }
+
+        self.assertTrue(server._session_run_state_has_nonterminal_work(
+            server._read_session_meta_strict(meta_path),
+        ))
+        archived = self.archive(session["id"])
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        restored = self.unarchive(session["id"])
+        self.assertEqual(restored.send_json.call_args.args[0]["status"], "active")
+
+        self.assertEqual(meta_path.read_bytes(), before["meta"])
+        self.assertEqual(message_path.read_bytes(), before["messages"])
+        self.assertEqual(goal_path.read_bytes(), before["goal"])
+        self.assertEqual(run_path.read_bytes(), before["agentRun"])
+        self.assertEqual({
+            path.name: path.read_bytes()
+            for path in asset_dir.iterdir()
+            if path.is_file()
+        }, before["assets"])
 
     def test_archive_eligibility_does_not_read_unrelated_agent_run_history(self):
         target = self.create_session(title="Indexed archive target")
@@ -1649,7 +1979,7 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         rejected = self.archive(session["id"])
         payload, status = rejected.send_json.call_args.args
         self.assertEqual(status, 409)
-        self.assertEqual(payload["errorCode"], "session_archive_not_terminal")
+        self.assertEqual(payload["errorCode"], "session_archive_active_work")
 
     def test_agent_run_index_concurrent_register_preserves_all_entries(self):
         session_a = self.create_session(title="Concurrent register A")
@@ -2221,6 +2551,392 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             archive_payload["archiveToken"],
         )
 
+    def test_active_agent_run_rejects_archive_without_reading_goal_and_http_remains_available(self):
+        session = self.create_session(
+            title="Active archive rejection stays bounded",
+            run_state={"status": "paused", "phase": "tools"},
+        )
+        other = self.create_session(title="Unrelated lifecycle remains available")
+        session_id = session["id"]
+        self.create_active_goal(session_id)
+        run = self.create_active_agent_run(session_id)
+        port = self.start_http_server()
+        archive_done = threading.Event()
+        archive_result = {}
+        before = {
+            "session": server.session_path(session_id).read_bytes(),
+            "messages": server.messages_path(session_id).read_bytes(),
+            "goal": GoalV2Runtime(self.root).service.events_path(session_id).read_bytes(),
+            "agentRun": server._agent_run_path(run["id"]).read_bytes(),
+        }
+
+        def request_archive():
+            try:
+                archive_result["response"] = self.http_json(
+                    port,
+                    "POST",
+                    f"/api/session-archive/{session_id}/archive",
+                )
+            except Exception as exc:  # pragma: no cover - assertion reports details
+                archive_result["error"] = repr(exc)
+            finally:
+                archive_done.set()
+
+        with mock.patch.object(
+            server,
+            "goal_v2_runtime",
+            side_effect=AssertionError("active-work check must not read Goal"),
+        ):
+            archive_thread = threading.Thread(target=request_archive)
+            archive_thread.start()
+            returned_without_goal = archive_done.wait(timeout=0.5)
+            archive_thread.join(timeout=5)
+
+        self.assertTrue(returned_without_goal, archive_result)
+        self.assertFalse(archive_thread.is_alive())
+        self.assertNotIn("error", archive_result)
+        status, payload = archive_result["response"]
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_archive_active_work")
+        self.assertEqual(
+            self.http_json(port, "GET", "/api/sessions")[0],
+            200,
+        )
+        self.assertEqual(
+            self.http_json(port, "GET", f"/api/sessions/{session_id}")[0],
+            200,
+        )
+        self.assertEqual(
+            self.http_json(port, "GET", f"/api/sessions/{other['id']}")[0],
+            200,
+        )
+        self.assertEqual(
+            self.http_json(port, "GET", f"/api/agent/runs/{run['id']}")[0],
+            200,
+        )
+        self.assertEqual({
+            "session": server.session_path(session_id).read_bytes(),
+            "messages": server.messages_path(session_id).read_bytes(),
+            "goal": GoalV2Runtime(self.root).service.events_path(session_id).read_bytes(),
+            "agentRun": server._agent_run_path(run["id"]).read_bytes(),
+        }, before)
+        cancel_status, cancel_payload = self.http_json(
+            port,
+            "DELETE",
+            f"/api/agent/runs/{run['id']}",
+        )
+        self.assertEqual(cancel_status, 200)
+        self.assertEqual(cancel_payload["status"], "cancelled")
+
+    def test_stop_fence_blocks_new_agent_runs_and_queue_saves_until_release(self):
+        session = self.create_session(
+            title="Archive stop admission fence",
+            run_state={"status": "running"},
+        )
+        session_id = session["id"]
+        self.create_active_goal(session_id)
+        goal_path = GoalV2Runtime(self.root).service.events_path(session_id)
+        before_goal = goal_path.read_bytes()
+        existing_run = self.create_active_agent_run(session_id)
+        before_meta = server.session_path(session_id).read_bytes()
+        with server._session_archive_stop_fence(session_id):
+            with self.assertRaises(server.SessionLifecycleConflictError) as raised:
+                self.create_active_agent_run(session_id)
+            self.assertEqual(raised.exception.error_code, "session_archive_stopping")
+            save = self.make_handler({
+                "runState": {
+                    "queuedMessages": [{"id": "late-queue", "status": "pending"}],
+                },
+            })
+            server.CodeHandler.save_session(save, session_id)
+            payload, status = save.send_json.call_args.args
+            self.assertEqual(status, 409)
+            self.assertEqual(payload["errorCode"], "session_archive_stopping")
+            self.assertEqual(server.session_path(session_id).read_bytes(), before_meta)
+            goal_control = self.make_handler({"action": "cancel", "reason": "late"})
+            server.CodeHandler.control_session_goal_v2(goal_control, session_id)
+            goal_payload, goal_status = goal_control.send_json.call_args.args
+            self.assertEqual(goal_status, 409)
+            self.assertEqual(goal_payload["errorCode"], "session_archive_stopping")
+            with self.assertRaises(server.AgentRunConflictError):
+                server._execute_agent_goal_operation(
+                    existing_run,
+                    {"id": "call-goal-during-archive"},
+                    {},
+                )
+            self.assertEqual(goal_path.read_bytes(), before_goal)
+        self.assertFalse(server._session_archive_stop_fence_active(session_id))
+        admitted = self.create_active_agent_run(session_id)
+        self.assertEqual(admitted["status"], "model")
+        server._cancel_agent_run(existing_run["id"])
+        server._cancel_agent_run(admitted["id"])
+
+    def test_stop_cancel_timeout_is_bounded_and_clears_fence_without_archive(self):
+        session = self.create_session(
+            title="Bounded stop-and-archive",
+            run_state={"status": "running"},
+        )
+        session_id = session["id"]
+        run = self.create_active_agent_run(session_id)
+        cancel_entered = threading.Event()
+        release_cancel = threading.Event()
+        cancel_finished = threading.Event()
+        original_cancel = server._cancel_agent_run
+
+        def blocked_cancel(run_id):
+            self.assertEqual(run_id, run["id"])
+            cancel_entered.set()
+            release_cancel.wait(timeout=5)
+            try:
+                return original_cancel(run_id)
+            finally:
+                cancel_finished.set()
+
+        handler = self.make_handler()
+        started = time.monotonic()
+        try:
+            with mock.patch.object(
+                server,
+                "_SESSION_ARCHIVE_STOP_TIMEOUT_SECONDS",
+                0.05,
+            ), mock.patch.object(
+                server,
+                "_cancel_agent_run",
+                side_effect=blocked_cancel,
+            ):
+                server.CodeHandler.archive_session_lifecycle(
+                    handler,
+                    session_id,
+                    stop_active_work=True,
+                )
+        finally:
+            release_cancel.set()
+        self.assertTrue(cancel_finished.wait(timeout=2))
+        elapsed = time.monotonic() - started
+        self.assertTrue(cancel_entered.is_set())
+        self.assertLess(elapsed, 0.5)
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_stop_failed")
+        self.assertFalse(payload["workStopped"])
+        self.assertFalse(server._session_archive_stop_fence_active(session_id))
+        for lock in (
+            server._session_lifecycle_lock(session_id),
+            server._agent_run_lock,
+            server._json_write_lock,
+        ):
+            self.assertTrue(lock.acquire(timeout=0.2))
+            lock.release()
+        self.assertTrue(server.session_path(session_id).exists())
+        self.assertFalse(server._session_archive_bundle_path(session_id).exists())
+        retry = self.archive(session_id, stop_active_work=True)
+        self.assertEqual(retry.send_json.call_args.args[0]["status"], "archived")
+        self.assertTrue(retry.send_json.call_args.args[0]["workStopped"])
+
+    def test_stop_wait_holds_no_lifecycle_agent_or_json_lock(self):
+        session = self.create_session(
+            title="Lock-free archive cancellation wait",
+            run_state={"status": "running"},
+        )
+        session_id = session["id"]
+        run = self.create_active_agent_run(session_id)
+        cancel_entered = threading.Event()
+        release_cancel = threading.Event()
+        archive_done = threading.Event()
+        original_cancel = server._cancel_agent_run
+        handler = self.make_handler()
+
+        def blocked_cancel(run_id):
+            self.assertEqual(run_id, run["id"])
+            cancel_entered.set()
+            if not release_cancel.wait(timeout=5):
+                raise AssertionError("cancel release was not signalled")
+            return original_cancel(run_id)
+
+        def request_archive():
+            try:
+                server.CodeHandler.archive_session_lifecycle(
+                    handler,
+                    session_id,
+                    stop_active_work=True,
+                )
+            finally:
+                archive_done.set()
+
+        with mock.patch.object(
+            server,
+            "_cancel_agent_run",
+            side_effect=blocked_cancel,
+        ):
+            thread = threading.Thread(target=request_archive)
+            thread.start()
+            self.assertTrue(cancel_entered.wait(timeout=2))
+            acquired = []
+            for lock in (
+                server._session_lifecycle_lock(session_id),
+                server._agent_run_lock,
+                server._json_write_lock,
+            ):
+                available = lock.acquire(timeout=0.2)
+                acquired.append(available)
+                if available:
+                    lock.release()
+            self.assertTrue(server._session_archive_stop_fence_active(session_id))
+            release_cancel.set()
+            thread.join(timeout=5)
+
+        self.assertEqual(acquired, [True, True, True])
+        self.assertTrue(archive_done.is_set())
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(handler.send_json.call_args.args[0]["status"], "archived")
+        self.assertFalse(server._session_archive_stop_fence_active(session_id))
+
+    def test_restart_stale_runstate_stop_archive_preserves_goal_and_terminal_run(self):
+        session = self.create_session(
+            title="Restart stale Session projection",
+            run_state={
+                "status": "waiting_recovery",
+                "agentRunId": "restart-owned-run",
+                "queuedMessages": [{"id": "restart-queue", "status": "pending"}],
+            },
+        )
+        session_id = session["id"]
+        self.create_active_goal(session_id)
+        goal_path = GoalV2Runtime(self.root).service.events_path(session_id)
+        before_goal = goal_path.read_bytes()
+        run = self.create_active_agent_run(session_id)
+        server._cancel_agent_run(run["id"])
+        with server._agent_run_lock:
+            server._agent_runs.pop(run["id"], None)
+
+        archived = self.archive(session_id, stop_active_work=True)
+        self.assertEqual(archived.send_json.call_args.args[0]["status"], "archived")
+        self.assertTrue(archived.send_json.call_args.args[0]["workStopped"])
+        self.assertEqual(goal_path.read_bytes(), before_goal)
+        restored = self.unarchive(session_id)
+        self.assertEqual(restored.send_json.call_args.args[0]["status"], "active")
+        self.assertEqual(goal_path.read_bytes(), before_goal)
+        reloaded_run = server._get_agent_run(run["id"])
+        self.assertEqual(reloaded_run["status"], "cancelled")
+        restored_meta = server._read_session_meta_strict(server.session_path(session_id))
+        self.assertEqual(restored_meta["runState"]["status"], "cancelled")
+        self.assertNotIn("queuedMessages", restored_meta["runState"])
+
+    def test_stopped_but_archive_failed_is_distinct_retryable_and_fence_free(self):
+        session = self.create_session(
+            title="Stopped before archive transaction failure",
+            run_state={
+                "status": "waiting_authorization",
+                "authorizationRequest": {
+                    "status": "pending",
+                    "requestId": "authorization-stop-archive",
+                },
+            },
+        )
+        session_id = session["id"]
+        original_mutation = server._mutate_session_archive_state
+        handler = self.make_handler()
+        with mock.patch.object(
+            server,
+            "_mutate_session_archive_state",
+            side_effect=server.SessionArchiveMutationError(),
+        ):
+            server.CodeHandler.archive_session_lifecycle(
+                handler,
+                session_id,
+                stop_active_work=True,
+            )
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_archive_after_stop_failed")
+        self.assertTrue(payload["workStopped"])
+        self.assertTrue(payload["retryable"])
+        self.assertFalse(server._session_archive_stop_fence_active(session_id))
+        meta = server._read_session_meta_strict(server.session_path(session_id))
+        self.assertEqual(meta["runState"]["status"], "cancelled")
+        self.assertNotIn("authorizationRequest", meta["runState"])
+        self.assertFalse(server._session_archive_bundle_path(session_id).exists())
+
+        retry = original_mutation(session_id, archived=True)
+        self.assertEqual(retry["status"], "archived")
+
+    def test_archive_lock_acquisition_is_bounded_without_partial_mutation(self):
+        for label in ("lifecycle", "agent", "json"):
+            with self.subTest(lock=label):
+                session = self.create_session(
+                    title=f"Bounded {label} archive lock",
+                    run_state={"status": "paused"},
+                )
+                session_id = session["id"]
+                lock = {
+                    "lifecycle": server._session_lifecycle_lock(session_id),
+                    "agent": server._agent_run_lock,
+                    "json": server._json_write_lock,
+                }[label]
+                lock_held = threading.Event()
+                release_lock = threading.Event()
+
+                def hold_lock():
+                    with lock:
+                        lock_held.set()
+                        release_lock.wait(timeout=5)
+
+                holder = threading.Thread(target=hold_lock)
+                holder.start()
+                self.assertTrue(lock_held.wait(timeout=2))
+                handler = self.make_handler()
+                started = time.monotonic()
+                try:
+                    with mock.patch.object(
+                        server,
+                        "_SESSION_ARCHIVE_LOCK_TIMEOUT_SECONDS",
+                        0.05,
+                    ):
+                        server.CodeHandler.archive_session_lifecycle(handler, session_id)
+                finally:
+                    release_lock.set()
+                    holder.join(timeout=2)
+                self.assertFalse(holder.is_alive())
+                self.assertLess(time.monotonic() - started, 0.5)
+                payload, status = handler.send_json.call_args.args
+                self.assertEqual(status, 503)
+                self.assertEqual(payload["errorCode"], "session_archive_busy")
+                self.assertTrue(payload["retryable"])
+                self.assertTrue(server.session_path(session_id).exists())
+                self.assertTrue(server.messages_path(session_id).exists())
+                self.assertFalse(server._session_archive_bundle_path(session_id).exists())
+
+    def test_goal_created_between_preflight_and_commit_is_preserved(self):
+        session = self.create_session(
+            title="Goal archive race",
+            run_state={"status": "paused"},
+        )
+        session_id = session["id"]
+        original_preflight = server._session_archive_preflight
+
+        def mutate_goal_after_preflight(candidate_session_id, **kwargs):
+            snapshot = original_preflight(candidate_session_id, **kwargs)
+            self.create_active_goal(candidate_session_id)
+            return snapshot
+
+        handler = self.make_handler()
+        with mock.patch.object(
+            server,
+            "_session_archive_preflight",
+            side_effect=mutate_goal_after_preflight,
+        ):
+            server.CodeHandler.archive_session_lifecycle(handler, session_id)
+
+        payload = handler.send_json.call_args.args[0]
+        self.assertEqual(payload["status"], "archived")
+        self.assertFalse(server.session_path(session_id).exists())
+        self.assertTrue(server._session_archive_bundle_path(session_id).exists())
+        self.assertNotIn(
+            GoalV2Runtime(self.root).read(session_id).projection()["goal"]["lifecycle"],
+            {"completed", "cancelled"},
+        )
+
     def test_lifecycle_http_routes_are_distinct_from_compaction_archive(self):
         session = self.create_session(title="Lifecycle routes")
         archive_handler = self.make_handler(
@@ -2245,6 +2961,20 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
             restore_handler.send_json.call_args.args[0],
             {"ok": True, "status": "active"},
         )
+        stopping = self.create_session(
+            title="Explicit stop route",
+            run_state={
+                "status": "waiting_user_input",
+                "userInputRequest": {"status": "pending", "requestId": "route-stop"},
+            },
+        )
+        stop_handler = self.make_handler(
+            {"stopActiveWork": True},
+            path=f"/api/session-archive/{stopping['id']}/archive",
+        )
+        server.CodeHandler.do_POST(stop_handler)
+        self.assertEqual(stop_handler.send_json.call_args.args[0]["status"], "archived")
+        self.assertTrue(stop_handler.send_json.call_args.args[0]["workStopped"])
         token = self.archive(session["id"]).send_json.call_args.args[0]["archiveToken"]
         delete_handler = self.make_handler(
             path=f"/api/session-archive/{session['id']}?archiveToken={token}",
@@ -3314,8 +4044,13 @@ class TestSessionDeleteConsistency(unittest.TestCase):
                 handler.send_json = mock.Mock()
                 observed = []
 
-                def record_archive(_handler, session_id):
-                    observed.append(("archive", session_id, handler.rfile.tell()))
+                def record_archive(_handler, session_id, *, stop_active_work=False):
+                    observed.append((
+                        "archive",
+                        session_id,
+                        handler.rfile.tell(),
+                        stop_active_work,
+                    ))
 
                 def record_unarchive(_handler, session_id):
                     observed.append(("unarchive", session_id, handler.rfile.tell()))
@@ -3335,7 +4070,16 @@ class TestSessionDeleteConsistency(unittest.TestCase):
 
                 self.assertEqual(
                     observed,
-                    [(expected_mutation, "a" * 16, len(body))],
+                    [(
+                        expected_mutation,
+                        "a" * 16,
+                        len(body),
+                        False,
+                    )] if expected_mutation == "archive" else [(
+                        expected_mutation,
+                        "a" * 16,
+                        len(body),
+                    )],
                 )
                 self.assertEqual(archive_mutation.call_count, expected_mutation == "archive")
                 self.assertEqual(unarchive_mutation.call_count, expected_mutation == "unarchive")

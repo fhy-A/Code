@@ -821,6 +821,8 @@ _favicon_proxy = _FaviconProxy()
 _json_write_lock = threading.RLock()
 _session_lifecycle_locks_guard = threading.Lock()
 _session_lifecycle_locks = {}
+_session_archive_stop_fences_guard = threading.Lock()
+_session_archive_stop_fences = set()
 _deleted_session_ids = set()
 _edit_apply_lock = threading.RLock()
 _model_runtime_runs = {}
@@ -6869,6 +6871,10 @@ def _agent_goal_prepare_operation(run, call, execution):
 def _execute_agent_goal_operation(run, call, execution):
     session_id = safe_session_id(str(run.get("session_id") or ""))
     with _session_lifecycle_lock(session_id):
+        if _session_archive_stop_fence_active(session_id):
+            raise AgentRunConflictError(
+                "Session is stopping active work for archive"
+            )
         if _session_was_deleted(session_id) or not session_path(session_id).exists():
             raise GoalV2ContextError("Goal Session no longer exists")
         return _execute_agent_goal_operation_unlocked(run, call, execution)
@@ -9059,15 +9065,19 @@ def _agent_pause_stalled_continuation(run, projection, stalled_count):
     key = "goal-continuation-stalled-" + hashlib.sha256(
         f"{run.get('id') or ''}\0{revision}".encode("utf-8")
     ).hexdigest()[:40]
-    goal_v2_runtime().raise_gate(
-        run.get("session_id") or "",
-        goal_id,
-        "waiting_user",
-        "连续多个 AgentRun 未产生新的 Goal 进度或成功公开工具证据，已暂停自动接续。",
-        source_run_id=str(run.get("id") or ""),
-        expected_revision=revision,
-        idempotency_key=key,
-    )
+    session_id = safe_session_id(str(run.get("session_id") or ""))
+    with _session_lifecycle_lock(session_id):
+        if _session_archive_stop_fence_active(session_id):
+            return False
+        goal_v2_runtime().raise_gate(
+            session_id,
+            goal_id,
+            "waiting_user",
+            "连续多个 AgentRun 未产生新的 Goal 进度或成功公开工具证据，已暂停自动接续。",
+            source_run_id=str(run.get("id") or ""),
+            expected_revision=revision,
+            idempotency_key=key,
+        )
     run["result"] = {
         "content": "",
         "usage": _json_clone(run.get("usage") or {}),
@@ -9927,6 +9937,11 @@ def _create_agent_run(
             ) from exc
     with _agent_run_lock:
         if str(session_id or ""):
+            if _session_archive_stop_fence_active(str(session_id)):
+                raise SessionLifecycleConflictError(
+                    "session_archive_stopping",
+                    "Session is stopping active work for archive.",
+                )
             if _session_archive_bundle_path(str(session_id)).exists():
                 raise SessionLifecycleConflictError(
                     "session_archived",
@@ -12702,7 +12717,11 @@ def _session_archive_state(session):
     }
 
 
-def _session_run_state_has_nonterminal_work(session):
+def _session_run_state_has_nonterminal_work(
+    session,
+    *,
+    allow_quiescent_paused=False,
+):
     record = session if isinstance(session, dict) else {}
     run_state = record.get("runState")
     if not isinstance(run_state, dict):
@@ -12710,7 +12729,11 @@ def _session_run_state_has_nonterminal_work(session):
     if _session_interaction_state(record):
         return True
     status = str(run_state.get("status") or "").strip().lower()
-    if status and status not in _SESSION_RUN_STATE_TERMINAL:
+    if (
+        status
+        and status not in _SESSION_RUN_STATE_TERMINAL
+        and not (allow_quiescent_paused and status == "paused")
+    ):
         return True
     for collection_key in ("queuedMessages", "backgroundRuns"):
         values = run_state.get(collection_key)
@@ -15879,16 +15902,17 @@ class SessionDeleteError(RuntimeError):
 class SessionLifecycleConflictError(RuntimeError):
     """Stable public conflict for Session archive lifecycle operations."""
 
-    def __init__(self, error_code, message, *, http_status=409):
+    def __init__(self, error_code, message, *, http_status=409, retryable=False):
         super().__init__(message)
         self.error_code = str(error_code or "session_archive_conflict")
         self.http_status = int(http_status)
+        self.retryable = bool(retryable)
 
     def public_payload(self):
         return {
             "error": str(self),
             "errorCode": self.error_code,
-            "retryable": False,
+            "retryable": self.retryable,
         }
 
 
@@ -15914,12 +15938,101 @@ class SessionArchiveMutationError(RuntimeError):
         }
 
 
+class SessionStopArchiveError(RuntimeError):
+    """Stable public failure for the explicit stop-and-archive action."""
+
+    def __init__(self, *, archive_failed=False, recovery_failed=False):
+        self.archive_failed = bool(archive_failed)
+        self.recovery_failed = bool(recovery_failed)
+        if self.archive_failed:
+            message = "Session work stopped, but the Session could not be archived."
+            error_code = (
+                "session_archive_after_stop_recovery_failed"
+                if self.recovery_failed
+                else "session_archive_after_stop_failed"
+            )
+        else:
+            message = "Session work could not be stopped safely."
+            error_code = "session_archive_stop_failed"
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = not self.recovery_failed
+        self.http_status = 500 if self.recovery_failed else 503
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": self.retryable,
+            "workStopped": self.archive_failed,
+        }
+
+
 def _session_lifecycle_lock(session_id):
     safe_id = safe_session_id(str(session_id or ""))
     key = (os.path.normcase(str(DATA_DIR.resolve(strict=False))), safe_id)
     with _session_lifecycle_locks_guard:
         lock = _session_lifecycle_locks.setdefault(key, threading.RLock())
     return lock
+
+
+_SESSION_ARCHIVE_LOCK_TIMEOUT_SECONDS = 1.0
+_SESSION_ARCHIVE_STOP_TIMEOUT_SECONDS = 8.0
+
+
+def _session_archive_busy_error():
+    return SessionLifecycleConflictError(
+        "session_archive_busy",
+        "Session archive eligibility is temporarily busy.",
+        http_status=503,
+        retryable=True,
+    )
+
+
+def _session_archive_stop_fence_key(session_id):
+    return (
+        os.path.normcase(str(DATA_DIR.resolve(strict=False))),
+        safe_session_id(str(session_id or "")),
+    )
+
+
+def _session_archive_stop_fence_active(session_id):
+    key = _session_archive_stop_fence_key(session_id)
+    with _session_archive_stop_fences_guard:
+        return key in _session_archive_stop_fences
+
+
+@contextmanager
+def _session_archive_stop_fence(session_id):
+    """Block new target-session AgentRun and queue admission during stopping."""
+    key = _session_archive_stop_fence_key(session_id)
+    # AgentRun admission checks the fence while holding the same lock. Taking
+    # the lock before publishing the fence closes the check/register race.
+    with _session_archive_bounded_lock(_agent_run_lock):
+        with _session_archive_stop_fences_guard:
+            if key in _session_archive_stop_fences:
+                raise _session_archive_busy_error()
+            _session_archive_stop_fences.add(key)
+    try:
+        # Drain any Session mutation admitted before the fence without holding
+        # the AgentRun lock. New Goal/session writers observe the fence after
+        # taking this lifecycle lock, so Goal bytes stay outside stop effects.
+        with _session_archive_bounded_lock(_session_lifecycle_lock(session_id)):
+            pass
+        yield
+    finally:
+        with _session_archive_stop_fences_guard:
+            _session_archive_stop_fences.discard(key)
+
+
+@contextmanager
+def _session_archive_bounded_lock(lock):
+    if not lock.acquire(timeout=_SESSION_ARCHIVE_LOCK_TIMEOUT_SECONDS):
+        raise _session_archive_busy_error()
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _session_archive_root():
@@ -16551,8 +16664,8 @@ def _assert_session_active_location(session_id):
         )
 
 
-def _session_has_nonterminal_agent_run(session_id):
-    """Check only the target Session's secret-free derived AgentRun facts."""
+def _session_nonterminal_agent_run_ids(session_id):
+    """Return only the target Session's validated nonterminal AgentRun ids."""
     target = safe_session_id(session_id)
     try:
         index = _ensure_agent_run_nonterminal_index_ready(wait=False)
@@ -16567,6 +16680,7 @@ def _session_has_nonterminal_agent_run(session_id):
         run_id for run_id, indexed_session_id in entries.items()
         if indexed_session_id == target
     }
+    active_run_ids = set()
     stale_terminal_ids = set()
     for run_id, run in _agent_runs.items():
         if not isinstance(run, dict):
@@ -16588,7 +16702,8 @@ def _session_has_nonterminal_agent_run(session_id):
                     "Session archive eligibility is unavailable.",
                     http_status=503,
                 )
-            return True
+            active_run_ids.add(normalized_run_id)
+            continue
         if normalized_run_id in target_run_ids:
             stale_terminal_ids.add(normalized_run_id)
 
@@ -16617,28 +16732,54 @@ def _session_has_nonterminal_agent_run(session_id):
                 http_status=503,
             )
         if status not in _AGENT_RUN_TERMINAL:
-            return True
-        stale_terminal_ids.add(run_id)
+            active_run_ids.add(run_id)
+        else:
+            stale_terminal_ids.add(run_id)
 
     for run_id in sorted(stale_terminal_ids):
         _agent_run_nonterminal_index_unregister(run_id)
-    return False
+    return tuple(sorted(active_run_ids))
 
 
-def _session_has_nonterminal_goal(session_id):
-    projection = goal_v2_runtime().read(session_id).projection()
-    goal = projection.get("goal") if isinstance(projection, dict) else None
-    if not isinstance(goal, dict):
-        return False
-    return str(goal.get("lifecycle") or "") not in {"completed", "cancelled"}
+def _session_has_nonterminal_agent_run(session_id):
+    return bool(_session_nonterminal_agent_run_ids(session_id))
+
+
+def _session_archive_preflight(session_id, *, stop_fence_owned=False):
+    """Reject obvious live work without holding lifecycle or global write locks."""
+    session_id = safe_session_id(session_id)
+    if not stop_fence_owned and _session_archive_stop_fence_active(session_id):
+        raise _session_archive_busy_error()
+    path = session_path(session_id)
+    try:
+        meta = _read_session_meta_strict(path)
+    except Exception as exc:
+        raise SessionArchiveMutationError() from exc
+    if meta is None:
+        return None
+    if str(meta.get("id") or "") != session_id:
+        raise SessionArchiveMutationError()
+    if _session_run_state_has_nonterminal_work(
+        meta,
+        allow_quiescent_paused=True,
+    ):
+        return {"eligible": False}
+    with _session_archive_bounded_lock(_agent_run_lock):
+        if _session_has_nonterminal_agent_run(session_id):
+            return {"eligible": False}
+    return {"eligible": True}
 
 
 def _session_archive_eligible(session_id, meta):
-    if _session_run_state_has_nonterminal_work(meta):
+    if _session_run_state_has_nonterminal_work(
+        meta,
+        allow_quiescent_paused=True,
+    ):
         return False
-    if _session_has_nonterminal_goal(session_id):
-        return False
-    return not _session_has_nonterminal_agent_run(session_id)
+    with _agent_run_lock:
+        if _session_has_nonterminal_agent_run(session_id):
+            return False
+    return True
 
 
 def _write_session_index_from_meta(meta):
@@ -16661,12 +16802,167 @@ def _write_session_index_from_meta(meta):
     )
 
 
-def _mutate_session_archive_state(session_id, *, archived):
+def _cancel_agent_run_for_archive_bounded(run_id, deadline):
+    result = {}
+    completed = threading.Event()
+
+    def cancel():
+        try:
+            result["run"] = _cancel_agent_run(run_id)
+        except Exception as exc:  # projected below without private details
+            result["error"] = exc
+        finally:
+            completed.set()
+
+    worker = threading.Thread(
+        target=cancel,
+        name=f"session-archive-cancel-{str(run_id)[:12]}",
+        daemon=True,
+    )
+    worker.start()
+    remaining = max(0.0, float(deadline) - time.monotonic())
+    if not completed.wait(timeout=remaining):
+        raise SessionStopArchiveError()
+    if "error" in result:
+        raise SessionStopArchiveError() from result["error"]
+    run = result.get("run")
+    if not isinstance(run, dict) or str(run.get("status") or "") not in _AGENT_RUN_TERMINAL:
+        raise SessionStopArchiveError()
+    return run
+
+
+def _stop_session_agent_runs(session_id):
+    """Cancel every target Session run without waiting under shared locks."""
+    deadline = time.monotonic() + _SESSION_ARCHIVE_STOP_TIMEOUT_SECONDS
+    observed = set()
+    while True:
+        with _session_archive_bounded_lock(_agent_run_lock):
+            run_ids = _session_nonterminal_agent_run_ids(session_id)
+        if not run_ids:
+            return observed
+        for run_id in run_ids:
+            observed.add(run_id)
+            _cancel_agent_run_for_archive_bounded(run_id, deadline)
+        if time.monotonic() >= deadline:
+            raise SessionStopArchiveError()
+
+
+def _clear_session_active_work_state(session_id, *, force=False):
+    """Persist one terminal Session projection after target runs stop."""
+    session_id = safe_session_id(session_id)
+    with _session_archive_bounded_lock(_session_lifecycle_lock(session_id)):
+        with _session_archive_bounded_lock(_json_write_lock):
+            try:
+                _recover_session_archive_transaction(session_id)
+                path = session_path(session_id)
+                meta = _read_session_meta_strict(path)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError):
+                raise
+            except Exception as exc:
+                raise SessionArchiveMutationError() from exc
+            if meta is None or str(meta.get("id") or "") != session_id:
+                raise SessionArchiveMutationError()
+            if force or _session_run_state_has_nonterminal_work(
+                meta,
+                allow_quiescent_paused=True,
+            ):
+                stopped_at = _session_now_iso()
+                meta["runState"] = {
+                    "status": "cancelled",
+                    "updatedAt": stopped_at,
+                    "completedAt": stopped_at,
+                }
+                write_json(path, meta)
+                _write_session_index_from_meta(meta)
+            return meta
+
+
+def _stop_and_archive_session(session_id):
+    """Fence one Session, stop its work, then run the existing archive move."""
+    session_id = safe_session_id(session_id)
+    with _session_archive_stop_fence(session_id):
+        preflight = _session_archive_preflight(
+            session_id,
+            stop_fence_owned=True,
+        )
+        had_active_work = bool(
+            preflight is not None and not preflight.get("eligible")
+        )
+        if not had_active_work:
+            result = _mutate_session_archive_state(
+                session_id,
+                archived=True,
+                stop_fence_owned=True,
+            )
+            return {**result, "workStopped": False}
+
+        try:
+            stopped_run_ids = _stop_session_agent_runs(session_id)
+        except SessionStopArchiveError:
+            raise
+        except Exception as exc:
+            raise SessionStopArchiveError() from exc
+
+        try:
+            _clear_session_active_work_state(
+                session_id,
+                force=bool(stopped_run_ids),
+            )
+            final_preflight = _session_archive_preflight(
+                session_id,
+                stop_fence_owned=True,
+            )
+            if final_preflight is not None and not final_preflight.get("eligible"):
+                raise SessionArchiveMutationError()
+            result = _mutate_session_archive_state(
+                session_id,
+                archived=True,
+                stop_fence_owned=True,
+            )
+        except SessionArchiveMutationError as exc:
+            raise SessionStopArchiveError(
+                archive_failed=True,
+                recovery_failed=exc.recovery_failed,
+            ) from exc
+        except SessionLifecycleConflictError as exc:
+            raise SessionStopArchiveError(archive_failed=True) from exc
+        except Exception as exc:
+            raise SessionStopArchiveError(archive_failed=True) from exc
+        return {**result, "workStopped": True}
+
+
+def _mutate_session_archive_state(
+    session_id,
+    *,
+    archived,
+    stop_fence_owned=False,
+):
     """Move Session core files across the durable active/archive boundary."""
     session_id = safe_session_id(session_id)
-    with _session_lifecycle_lock(session_id):
-        with _agent_run_lock:
-            with _json_write_lock:
+    archive_preflight = (
+        _session_archive_preflight(
+            session_id,
+            stop_fence_owned=stop_fence_owned,
+        )
+        if archived else None
+    )
+    if archive_preflight is not None and not archive_preflight["eligible"]:
+        raise SessionLifecycleConflictError(
+            "session_archive_active_work",
+            "Session still has active work. Confirm stopping it before archiving.",
+        )
+    with _session_archive_bounded_lock(_session_lifecycle_lock(session_id)):
+        with _session_archive_bounded_lock(_agent_run_lock):
+            if (
+                archived
+                and archive_preflight is not None
+                and _session_has_nonterminal_agent_run(session_id)
+            ):
+                raise SessionLifecycleConflictError(
+                    "session_archive_active_work",
+                    "Session still has active work. Confirm stopping it before archiving.",
+                )
+            with _session_archive_bounded_lock(_json_write_lock):
                 try:
                     _recover_session_archive_transaction(session_id)
                 except (SessionLifecycleConflictError, SessionArchiveMutationError):
@@ -16714,15 +17010,18 @@ def _mutate_session_archive_state(session_id, *, archived):
                     )
                 if archived:
                     try:
-                        eligible = _session_archive_eligible(session_id, meta)
+                        eligible = not _session_run_state_has_nonterminal_work(
+                            meta,
+                            allow_quiescent_paused=True,
+                        )
                     except (SessionLifecycleConflictError, SessionArchiveMutationError):
                         raise
                     except Exception as exc:
                         raise SessionArchiveMutationError() from exc
                     if not eligible:
                         raise SessionLifecycleConflictError(
-                            "session_archive_not_terminal",
-                            "Session still has nonterminal work and cannot be archived.",
+                            "session_archive_active_work",
+                            "Session still has active work. Confirm stopping it before archiving.",
                         )
                 if archived:
                     if not message_path.exists():
@@ -21585,13 +21884,20 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route.startswith("/api/session-archive/"):
                 parts = route.strip("/").split("/")
                 if len(parts) == 4 and parts[:2] == ["api", "session-archive"]:
-                    if parts[3] in {"archive", "restore", "unarchive"}:
+                    if parts[3] in {"restore", "unarchive"}:
                         CodeHandler.consume_request_body(
                             self,
                             max_bytes=_SESSION_ARCHIVE_ACTION_BODY_MAX_BYTES,
                         )
                     if parts[3] == "archive":
-                        self.archive_session_lifecycle(parts[2])
+                        body = CodeHandler.read_session_archive_action_json(self)
+                        stop_active_work = body.get("stopActiveWork", False)
+                        if not isinstance(stop_active_work, bool):
+                            raise ValueError("stopActiveWork must be a boolean")
+                        self.archive_session_lifecycle(
+                            parts[2],
+                            stop_active_work=stop_active_work,
+                        )
                         return
                     if parts[3] in {"restore", "unarchive"}:
                         self.unarchive_session_lifecycle(parts[2])
@@ -22162,6 +22468,30 @@ class CodeHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(body.decode("utf-8"))
 
+    def read_session_archive_action_json(self):
+        headers = getattr(self, "headers", None)
+        if headers is not None:
+            transfer_encoding = str(
+                headers.get("Transfer-Encoding", "") or ""
+            ).strip()
+            if transfer_encoding:
+                self.close_connection = True
+                raise ValueError("Transfer-Encoding is not supported")
+            length = int(headers.get("Content-Length", "0") or "0")
+            if length < 0 or length > _SESSION_ARCHIVE_ACTION_BODY_MAX_BYTES:
+                self.close_connection = True
+                raise ValueError("request body exceeds the allowed size")
+            raw = self.rfile.read(length) if length else b""
+            if len(raw) != length:
+                self.close_connection = True
+                raise ValueError("request body ended before Content-Length")
+            body = json.loads((raw or b"{}").decode("utf-8"))
+        else:
+            body = self.read_body_json()
+        if not isinstance(body, dict):
+            raise ValueError("archive action body must be an object")
+        return body
+
     def consume_request_body(self, *, max_bytes=None):
         """Drain one body on an early response without parsing or reading twice."""
         headers = getattr(self, "headers", None)
@@ -22657,13 +22987,20 @@ class CodeHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"data": summaries})
 
-    def archive_session_lifecycle(self, session_id):
+    def archive_session_lifecycle(self, session_id, *, stop_active_work=False):
         try:
-            result = _mutate_session_archive_state(session_id, archived=True)
+            result = (
+                _stop_and_archive_session(session_id)
+                if stop_active_work
+                else _mutate_session_archive_state(session_id, archived=True)
+            )
         except SessionLifecycleConflictError as exc:
             self.send_json(exc.public_payload(), exc.http_status)
             return
         except SessionArchiveMutationError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        except SessionStopArchiveError as exc:
             self.send_json(exc.public_payload(), exc.http_status)
             return
         self.send_json(result)
@@ -22826,6 +23163,14 @@ class CodeHandler(BaseHTTPRequestHandler):
         """Apply one strict user-owned Goal v2 control operation."""
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            if _session_archive_stop_fence_active(session_id):
+                CodeHandler.consume_request_body(self)
+                conflict = SessionLifecycleConflictError(
+                    "session_archive_stopping",
+                    "Session is stopping active work for archive.",
+                )
+                self.send_json(conflict.public_payload(), conflict.http_status)
+                return
             try:
                 _assert_session_active_location(session_id)
             except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
@@ -22909,6 +23254,14 @@ class CodeHandler(BaseHTTPRequestHandler):
     def save_session(self, session_id):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
+            if _session_archive_stop_fence_active(session_id):
+                CodeHandler.consume_request_body(self)
+                conflict = SessionLifecycleConflictError(
+                    "session_archive_stopping",
+                    "Session is stopping active work for archive.",
+                )
+                self.send_json(conflict.public_payload(), conflict.http_status)
+                return
             try:
                 _assert_session_active_location(session_id)
             except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:

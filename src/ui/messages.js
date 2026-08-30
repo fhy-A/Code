@@ -1212,6 +1212,79 @@
     const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
     const boundInteractionRoots = new WeakSet();
     const expandedUserInputSummaries = new Set();
+    const terminalAgentRunStatuses = new Set(["completed", "failed", "cancelled", "canceled"]);
+
+    function agentRunProjectionOwnership(runState, hasActiveRun = false) {
+      const record = runState && typeof runState === "object" ? runState : {};
+      const activeAgentRunIds = new Set();
+      const terminalAgentRunIds = new Set();
+      const foregroundAgentRunId = String(record.agentRunId || "");
+      const foregroundStatus = String(record.status || "").trim().toLowerCase();
+      let unidentifiedActiveOwner = Boolean(hasActiveRun && !foregroundAgentRunId);
+
+      if (foregroundAgentRunId) {
+        if (hasActiveRun) activeAgentRunIds.add(foregroundAgentRunId);
+        else if (terminalAgentRunStatuses.has(foregroundStatus)) {
+          terminalAgentRunIds.add(foregroundAgentRunId);
+        } else if (foregroundStatus && foregroundStatus !== "paused") {
+          activeAgentRunIds.add(foregroundAgentRunId);
+        }
+      }
+
+      (Array.isArray(record.backgroundRuns) ? record.backgroundRuns : []).forEach((item) => {
+        const agentRunId = String(item?.agentRunId || "");
+        if (!agentRunId) {
+          if (!terminalAgentRunStatuses.has(String(item?.status || "").trim().toLowerCase())) {
+            unidentifiedActiveOwner = true;
+          }
+          return;
+        }
+        const status = String(item?.status || "").trim().toLowerCase();
+        if (terminalAgentRunStatuses.has(status)) terminalAgentRunIds.add(agentRunId);
+        else activeAgentRunIds.add(agentRunId);
+      });
+
+      const paused = foregroundStatus === "paused";
+      const hasActiveOwner = unidentifiedActiveOwner || activeAgentRunIds.size > 0;
+      if (paused && !hasActiveOwner && foregroundAgentRunId) {
+        terminalAgentRunIds.add(foregroundAgentRunId);
+      }
+      return { activeAgentRunIds, terminalAgentRunIds, paused, hasActiveOwner };
+    }
+
+    function agentRunProjectionIsInterrupted(agentRunId, ownership) {
+      const normalizedId = String(agentRunId || "");
+      if (normalizedId && ownership?.activeAgentRunIds?.has(normalizedId)) return false;
+      if (normalizedId && ownership?.terminalAgentRunIds?.has(normalizedId)) return true;
+      return Boolean(ownership?.paused && !ownership?.hasActiveOwner);
+    }
+
+    function hasMatchingModelCompletion(messages, message) {
+      const agentRunId = String(message?.meta?.agentRunId || "");
+      const runtimeRunId = String(message?.meta?.agentRuntimeRunId || "");
+      return messages.some((candidate) => (
+        candidate !== message
+        && candidate?.meta?.agentEventType === "model_completed"
+        && String(candidate.meta?.agentRunId || "") === agentRunId
+        && (!runtimeRunId || String(candidate.meta?.agentRuntimeRunId || "") === runtimeRunId)
+      ));
+    }
+
+    function interruptedModelProjection(message, messages, ownership) {
+      if (
+        message?.role !== "assistant"
+        || message.meta?.agentEventType !== "model_started"
+        || hasMatchingModelCompletion(messages, message)
+        || !agentRunProjectionIsInterrupted(message.meta?.agentRunId, ownership)
+      ) return message;
+      const projected = {
+        ...message,
+        streaming: false,
+        meta: { ...(message.meta || {}), projectionInterrupted: true },
+      };
+      delete projected._streamProjection;
+      return projected;
+    }
 
     function visibleAssistantToolCalls(msg) {
       return (Array.isArray(msg?.meta?.toolCalls) ? msg.meta.toolCalls : []).filter((call) => (
@@ -1807,7 +1880,7 @@
       return { calls };
     }
 
-    function getProcessCallView(call) {
+    function getProcessCallView(call, ownership = null) {
       const result = call.result && typeof call.result === "object" ? call.result : {};
       const declaredOutcome = String(call.resultMessage?.meta?.outcome || "");
       let outcome = declaredOutcome;
@@ -1816,6 +1889,9 @@
       if (!outcome && call.resultMessage?.meta?.rejected) outcome = "failed";
       if (!outcome && call.resultMessage?.meta?.pendingEditId) outcome = "running";
       if (!outcome && call.resultMessage) outcome = "completed";
+      if (!outcome && call.started && agentRunProjectionIsInterrupted(call.agentRunId, ownership)) {
+        outcome = "interrupted";
+      }
       if (!outcome) outcome = call.started ? "running" : "pending";
       if (result.cancelled) outcome = "cancelled";
       const target = toolTarget(call.args, result);
@@ -1836,6 +1912,7 @@
       if (outcome === "succeeded") return t("toolProcessSucceeded");
       if (outcome === "completed") return t("toolProcessCompleted");
       if (outcome === "cancelled") return t("toolProcessCancelled");
+      if (outcome === "interrupted") return t("toolProcessInterrupted");
       if (outcome === "running") return t("toolProcessRunning");
       return t("toolProcessPending");
     }
@@ -2015,6 +2092,7 @@
     function stageProcessOutcome(calls) {
       if (calls.some((call) => call.outcome === "running")) return "running";
       if (calls.some((call) => call.outcome === "pending")) return "pending";
+      if (calls.some((call) => call.outcome === "interrupted")) return "interrupted";
       if (calls.some((call) => call.outcome === "failed")) return "failed";
       if (calls.some((call) => call.outcome === "cancelled")) return "cancelled";
       if (calls.every((call) => call.outcome === "succeeded")) return "succeeded";
@@ -2023,7 +2101,11 @@
 
     function renderToolProcessProjection(items, serial, options = {}) {
       const { calls } = collectToolProcess(items);
-      const visibleCalls = calls.map(getProcessCallView);
+      const ownership = options.runOwnership || agentRunProjectionOwnership(
+        options.runState,
+        options.hasActiveRun,
+      );
+      const visibleCalls = calls.map((call) => getProcessCallView(call, ownership));
       if (!visibleCalls.length) return "";
       const currentCall = currentProcessCall(visibleCalls);
       const detectedOutcome = stageProcessOutcome(visibleCalls);
@@ -2301,6 +2383,9 @@
       const model = msg._model || msg.meta?._model || getSelectedModel() || "Agent";
       const content = (getMessageText(msg) || "").trim();
       const traceClass = options.tracePersistent ? " execution-trace-persistent" : "";
+      const interruptedStatus = msg.meta?.projectionInterrupted === true
+        ? `<span class="agent-projection-status interrupted" role="status">${escapeHtml(t("toolProcessInterrupted"))}</span>`
+        : "";
       if (msg.streaming) {
         const hasVisibleContent = content && !isToolPlanningPlaceholder(content);
         const streamKind = msg._streamProjection === "thinking"
@@ -2320,28 +2405,30 @@
           </article>
         `;
       }
-      if (!content
+      if ((!content && !interruptedStatus)
           || isToolPlanningPlaceholder(content)
           || (isInternalGoalOnlyAssistant(msg) && !isPublicProcessCommentary(msg))) return "";
       const isCommentary = isPublicProcessCommentary(msg)
         || visibleAssistantToolCalls(msg).length > 0;
-      if (isCommentary && isOperationalToolNotice(content)) return "";
+      if (isCommentary && isOperationalToolNotice(content) && !interruptedStatus) return "";
       if (isCommentary) {
         return `
           <article class="msg assistant agent-commentary${traceClass}" data-msg-index="${index}">
-            ${renderAssistantContent(content)}
+            ${content ? renderAssistantContent(content) : ""}
+            ${interruptedStatus}
             ${renderAssistantFooter(msg, options)}
           </article>
         `;
       }
       const replyReference = renderBackgroundReplyReference(msg);
-      const copyButton = renderCopyButton(content);
+      const copyButton = content ? renderCopyButton(content) : "";
       const time = formatMessageTime(msg._time);
       return `
         <article class="msg assistant${isCommentary ? " agent-commentary" : ""}${traceClass}" data-msg-index="${index}">
           <div class="role">${escapeHtml(model)}</div>
           ${replyReference}
-          ${renderAssistantContent(content)}
+          ${content ? renderAssistantContent(content) : ""}
+          ${interruptedStatus}
           ${renderAssistantFooter(msg, options, `<span class="msg-footer-hover">${copyButton}${time ? `<span class="msg-time">${time}</span>` : ""}</span>`)}
         </article>
       `;
@@ -2349,6 +2436,7 @@
 
     function projectMessages(messages = [], projection = {}) {
       const hasActiveRun = Boolean(projection.hasActiveRun);
+      const runOwnership = agentRunProjectionOwnership(projection.runState, hasActiveRun);
       const branchMarker = projection.branchMarker || null;
       const completedTurnStatuses = collectCompletedTurnStatuses(messages);
       const executionTraceTurns = collectExecutionTraceTurns(messages);
@@ -2472,13 +2560,15 @@
         rows.push(renderToolProcessProjection(pendingProcess, processSerial, {
           ...options,
           processKey,
+          runOwnership,
+          hasActiveRun,
           activeStage: Boolean(options.activeStage) || activeForegroundStage,
           allowExpanded: hasActiveRun,
           expandedToolProcesses,
           expandedToolItems,
         }));
         queueGeneratedImageOutputs(
-          collectToolProcess(pendingProcess).calls.map(getProcessCallView),
+          collectToolProcess(pendingProcess).calls.map((call) => getProcessCallView(call, runOwnership)),
         );
         if (pendingProcessAfterRows.length) rows.push(...pendingProcessAfterRows);
         pendingProcess = [];
@@ -2522,8 +2612,9 @@
 
       for (let index = 0; index < messages.length; index += 1) {
         if (index === branchBoundary) insertBranchMarker();
-        const msg = messages[index];
+        let msg = messages[index];
         if (!msg) continue;
+        msg = interruptedModelProjection(msg, messages, runOwnership);
         if (msg.role === "user" && ["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)) {
           queuedTailMessages.push({ msg, index });
           continue;

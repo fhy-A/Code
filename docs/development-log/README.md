@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-30 | 会话停止并归档语义完成：Goal `draft` / `active` / `ready_for_acceptance` 不再阻断无活动工作的直接归档，恢复后 sidecar 字节不变且可继续；真实活动前台 / 后台 / Child Run、交互与队列返回专用冲突，经用户确认后以目标会话 fence、锁外 `8s` 有界取消、终态持久化与原事务归档完成。失败区分未能停止与已停止但归档失败，前端提供可访问的“取消 / 停止并归档”确认和独立 `10s` 兜底。Session 99、frontend 348、AgentRuntime 137、Goal v2 66、cancel + server 275 全部通过，build / freshness 与静态检查通过，用户 `PASS`；doctor 仅 9 项通过，Chromium `context.close()` 超时为 `cleanup_failed`，临时根已删除且无本轮进程残留 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | 十天前 Code 会话数据清理完成：冻结 cutoff `2026-08-20T20:09:13.844497+08:00`，R001 因两个未结束 Goal 在零删除预检停止；R002 固定保留它们后，从摘要一致的 176 个旧 Code 候选中以现有 archive → 本次 token 永久删除事务清理 174 个。后置 active meta 为 120，保留 19 paused、2 Goal、4 imported、95 recent 与 1 recent archive，目标 active/archive 均为 0。两个保留的旧 Claude meta 不在现有 session index，磁盘核心仍在且未擅自修复；未读取生成资产内容或 image route registry | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-043` 人工介入界面扁平化完成：授权队列仅在存在非主任务来源时分组并保留批量选择；请求用户问卷合并标题层级、使用两栏布局，“其他”输入一至三行自适应；多选标题只显示模型 prompt。长回答按答案总字符 `>240` 或任一答案至少三行折叠为三个视觉行，提供本地化可访问展开且仅保留当前页状态。直接组 `17 passed`、完整前端 `345 passed`、build / freshness 与语法 / diff 通过，用户 `PASS`；普通消息最终审计与后续阶段仍未启动 | [查看](2026/2026-08-30.md) |
 | 2026-08-30 | `CODE-043` Diff 编辑建议扁平化完成：PC Web 的建议外壳与标题行去除边框 / 背景 / 阴影，代码区成为唯一持久表面；文件名 / 状态控制 / Diff 代码分别为 `14 / 12 / 14px`，状态仅保留语义文字色，展开与授权定位反馈继续可见。直接合同 `6 failed → 6 passed`，完整前端 `328 passed`，build / freshness、Python AST 与 diff 通过；开发任务未运行 Browser / H4 或操作 3010 / 3011，用户在现有 3011 手动刷新后 `PASS`。授权队列、普通消息与后续阶段仍未启动 | [查看](2026/2026-08-30.md) |

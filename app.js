@@ -494,6 +494,7 @@ const sessionDataFeature = Object.freeze({
 const listSessionRecords = sessionDataFeature.listSessions;
 const archiveSessionRecord = sessionDataFeature.archiveSession;
 const archiveSessionPending = new Set();
+let sessionStopArchiveConfirmSerial = 0;
 
 const { t, setLang, applyI18n } = createI18nRuntime({
   getLanguage: () => state.lang,
@@ -4354,6 +4355,7 @@ function renderMessages() {
     : new Set();
   const html = projectMessages(msgs, {
     hasActiveRun,
+    runState: getSessionRunState(state.sessionId),
     branchMarker,
     expandedExecutionTraces,
     collapsedExecutionTraces,
@@ -4554,6 +4556,73 @@ async function renameSession(sessionId, title) {
 
 
 
+function showStopAndArchiveConfirm() {
+  return new Promise((resolve) => {
+    const previouslyFocused = document.activeElement;
+    const dialogSerial = ++sessionStopArchiveConfirmSerial;
+    const titleId = `sessionStopArchiveTitle-${dialogSerial}`;
+    const bodyId = `sessionStopArchiveBody-${dialogSerial}`;
+    const modal = document.createElement("div");
+    modal.className = "settings-modal session-stop-archive-modal";
+    modal.innerHTML = `
+      <div class="modal-card confirm-card session-stop-archive-card" role="alertdialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}">
+        <header>
+          <h2 id="${titleId}">${escapeHtml(t("sessionStopArchiveTitle"))}</h2>
+          <button class="icon-btn session-stop-archive-close" type="button" aria-label="${escapeHtml(t("close"))}">&times;</button>
+        </header>
+        <div class="confirm-body">
+          <p id="${bodyId}">${escapeHtml(t("sessionStopArchiveBody"))}</p>
+        </div>
+        <footer class="confirm-actions">
+          <button class="ghost-btn session-stop-archive-cancel" type="button">${escapeHtml(t("cancel"))}</button>
+          <button class="danger-btn session-stop-archive-confirm" type="button">${escapeHtml(t("sessionStopArchiveAction"))}</button>
+        </footer>
+      </div>`;
+    const closeButton = modal.querySelector(".session-stop-archive-close");
+    const cancelButton = modal.querySelector(".session-stop-archive-cancel");
+    const confirmButton = modal.querySelector(".session-stop-archive-confirm");
+    const focusable = [closeButton, cancelButton, confirmButton].filter(Boolean);
+    let settled = false;
+
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      modal.remove();
+      if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        previouslyFocused.focus();
+      }
+      resolve(Boolean(confirmed));
+    };
+    closeButton?.addEventListener("click", () => finish(false));
+    cancelButton?.addEventListener("click", () => finish(false));
+    confirmButton?.addEventListener("click", () => finish(true));
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) finish(false);
+    });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length < 2) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    document.body.appendChild(modal);
+    cancelButton?.focus();
+  });
+}
+
+
 async function archiveSession(sessionId) {
   const normalizedId = String(sessionId || "").trim();
   if (!normalizedId || archiveSessionPending.has(normalizedId)) return false;
@@ -4562,21 +4631,65 @@ async function archiveSession(sessionId) {
   const projectId = session.projectId || null;
   archiveSessionPending.add(normalizedId);
   renderSessions();
+
+  const requestArchive = async (stopActiveWork = false) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      return await archiveSessionRecord(normalizedId, {
+        signal: controller.signal,
+        stopActiveWork,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
   try {
-    await archiveSessionRecord(normalizedId);
+    try {
+      await requestArchive(false);
+    } catch (error) {
+      const errorCode = String(error?.data?.errorCode || "");
+      if (![
+        "session_archive_active_work",
+        "session_archive_not_terminal",
+      ].includes(errorCode)) throw error;
+      const confirmed = await showStopAndArchiveConfirm();
+      if (!confirmed) {
+        archiveSessionPending.delete(normalizedId);
+        renderSessions();
+        return false;
+      }
+      await requestArchive(true);
+    }
   } catch (error) {
     archiveSessionPending.delete(normalizedId);
     renderSessions();
-    const errorCode = String(error?.data?.errorCode || "");
+    const errorCode = error?.name === "AbortError"
+      ? "session_archive_failed"
+      : String(error?.data?.errorCode || "");
     const key = ({
+      session_archive_active_work: "sessionArchiveNotTerminal",
       session_archive_not_terminal: "sessionArchiveNotTerminal",
+      session_archive_stop_failed: "sessionArchiveStopFailed",
+      session_archive_after_stop_failed: "sessionArchiveAfterStopFailed",
+      session_archive_after_stop_recovery_failed: "sessionArchiveAfterStopRecoveryFailed",
       session_archive_failed: "sessionArchiveRetryableFailure",
+      session_archive_busy: "sessionArchiveRetryableFailure",
       session_archive_index_unavailable: "sessionArchiveIndexUnavailable",
       session_archive_recovery_failed: "sessionArchiveRecoveryUnavailable",
       session_archive_conflict: "sessionArchiveLocationConflict",
       session_archive_location_conflict: "sessionArchiveLocationConflict",
     })[errorCode] || "sessionArchiveFailed";
     showToast(t(key), "error", { duration: 4000 });
+    if ([
+      "session_archive_stop_failed",
+      "session_archive_after_stop_failed",
+      "session_archive_after_stop_recovery_failed",
+    ].includes(errorCode)) {
+      await refreshSessions().catch(() => {});
+      if (state.branchPanelOpen) renderBranchTree();
+    }
     return false;
   }
 

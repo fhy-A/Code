@@ -8956,7 +8956,15 @@ const sessions = createSessionsFeature({requestJson});
             APP_SOURCE[rename_start:archive_start],
         )
         self.assertIn(
-            "await archiveSessionRecord(normalizedId);",
+            "return await archiveSessionRecord(normalizedId, {",
+            APP_SOURCE[archive_start:pinned_start],
+        )
+        self.assertIn(
+            "stopActiveWork,",
+            APP_SOURCE[archive_start:pinned_start],
+        )
+        self.assertIn(
+            "await requestArchive(true);",
             APP_SOURCE[archive_start:pinned_start],
         )
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")
@@ -17696,6 +17704,146 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-usage-kind="cache-write"', data["cacheStatus"])
         self.assertIn('title="statCacheWriteTitle"', data["cacheStatus"])
 
+    def test_terminal_agent_started_projections_are_interrupted_without_mutation(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+const labels = {
+  toolProcessInterrupted: "Interrupted",
+  toolProcessRunning: "Running",
+};
+const feature = createMessagesFeature({
+  escapeHtml,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  renderAssistantMarkdown: (value) => `<markdown>${escapeHtml(value)}</markdown>`,
+  t: (key) => labels[key] || key,
+  getMessageText: (msg) => String(msg?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => [],
+  getSessionId: () => "projection-session",
+  getSelectedModel: () => "model-1",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => `<answer>${escapeHtml(value)}</answer>`,
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+  getToolActionLabel: (action) => `label:${action}`,
+});
+
+const toolMessages = (agentRunId) => [
+  {role: "user", content: "inspect"},
+  {role: "assistant", content: "", meta: {agentRunId, toolCalls: [
+    {id: "call-1", function: {name: "read_file", arguments: '{"path":"README.md"}'}},
+  ]}},
+  {role: "tool-call", content: "read", meta: {
+    agentRunId,
+    agentEventType: "tool_started",
+    toolCallId: "call-1",
+    action: "read_file",
+    tool: {action: "read_file", path: "README.md"},
+  }},
+];
+const modelMessages = (agentRunId) => [
+  {role: "user", content: "answer"},
+  {role: "assistant", content: "partial answer", streaming: true, _streamProjection: "answer", meta: {
+    agentRunId,
+    agentEventType: "model_started",
+    agentRuntimeRunId: `runtime-${agentRunId}`,
+  }},
+];
+const renderTool = (status) => {
+  const messages = toolMessages(`run-${status}`);
+  const before = JSON.stringify(messages);
+  const html = feature.projectMessages(messages, {
+    hasActiveRun: status === "running",
+    runState: {agentRunId: `run-${status}`, status},
+  });
+  return {html, unchanged: JSON.stringify(messages) === before};
+};
+const renderModel = (status) => {
+  const messages = modelMessages(`model-${status}`);
+  const before = JSON.stringify(messages);
+  const html = feature.projectMessages(messages, {
+    hasActiveRun: status === "running",
+    runState: {agentRunId: `model-${status}`, status},
+  });
+  return {html, unchanged: JSON.stringify(messages) === before};
+};
+const pausedLegacy = toolMessages("");
+const pausedLegacyBefore = JSON.stringify(pausedLegacy);
+const pausedLegacyHtml = feature.projectMessages(pausedLegacy, {
+  hasActiveRun: false,
+  runState: {status: "paused"},
+});
+const pausedWithActiveBackground = toolMessages("background-active");
+const pausedWithActiveBackgroundHtml = feature.projectMessages(pausedWithActiveBackground, {
+  hasActiveRun: false,
+  runState: {
+    status: "paused",
+    backgroundRuns: [{agentRunId: "background-active", status: "running"}],
+  },
+});
+process.stdout.write(JSON.stringify({
+  completedTool: renderTool("completed"),
+  failedTool: renderTool("failed"),
+  cancelledTool: renderTool("cancelled"),
+  activeTool: renderTool("running"),
+  completedModel: renderModel("completed"),
+  failedModel: renderModel("failed"),
+  cancelledModel: renderModel("cancelled"),
+  activeModel: renderModel("running"),
+  pausedLegacy: {
+    html: pausedLegacyHtml,
+    unchanged: JSON.stringify(pausedLegacy) === pausedLegacyBefore,
+  },
+  pausedWithActiveBackground: pausedWithActiveBackgroundHtml,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        for key in ("completedTool", "failedTool", "cancelledTool", "pausedLegacy"):
+            self.assertTrue(data[key]["unchanged"])
+            self.assertIn('class="tool-process-stage interrupted', data[key]["html"])
+            self.assertIn('class="tool-process-item interrupted"', data[key]["html"])
+            self.assertIn("Interrupted", data[key]["html"])
+            self.assertNotIn("toolProcessRunning", data[key]["html"])
+        self.assertTrue(data["activeTool"]["unchanged"])
+        self.assertIn('class="tool-process-stage running', data["activeTool"]["html"])
+        self.assertIn("Running", data["activeTool"]["html"])
+        self.assertNotIn("Interrupted", data["activeTool"]["html"])
+        self.assertIn('class="tool-process-stage running', data["pausedWithActiveBackground"])
+        self.assertNotIn("Interrupted", data["pausedWithActiveBackground"])
+
+        for key in ("completedModel", "failedModel", "cancelledModel"):
+            self.assertTrue(data[key]["unchanged"])
+            self.assertIn("partial answer", data[key]["html"])
+            self.assertIn('class="agent-projection-status interrupted"', data[key]["html"])
+            self.assertIn('role="status"', data[key]["html"])
+            self.assertIn("Interrupted", data[key]["html"])
+            self.assertNotIn("data-streaming-message", data[key]["html"])
+        self.assertTrue(data["activeModel"]["unchanged"])
+        self.assertIn("data-streaming-message", data["activeModel"]["html"])
+        self.assertNotIn("Interrupted", data["activeModel"]["html"])
+
+        self.assertIn('toolProcessInterrupted: "已中断"', I18N_SOURCE)
+        self.assertIn('toolProcessInterrupted: "Interrupted"', I18N_SOURCE)
+        self.assertIn("runState: getSessionRunState(state.sessionId)", APP_SOURCE)
+
     def test_primary_turn_owns_completed_elapsed_while_detached_footer_remains(self):
         script = r"""
 global.window = {Code: {ui: {}}};
@@ -18834,14 +18982,14 @@ process.stdout.write(JSON.stringify({
         ):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2, key)
 
-    def test_session_archive_data_api_is_bodyless_and_token_scoped(self):
+    def test_session_archive_data_api_supports_explicit_stop_and_remains_token_scoped(self):
         script = r"""
 global.window = {};
 require("./src/core/namespace.js");
 require("./src/features/sessions.js");
 const requests = [];
 const requestJson = async (url, options = {}) => {
-  requests.push({url, method: options.method || "GET", hasBody: Object.hasOwn(options, "body")});
+  requests.push({url, method: options.method || "GET", body: options.body || null});
   if (url === "/api/session-archive") return {data: [{id: "archived-1", archiveToken: "token-1"}]};
   return {ok: true};
 };
@@ -18849,6 +18997,7 @@ const sessions = window.Code.features.sessions.createSessionsFeature({requestJso
 (async () => {
   const listed = await sessions.listArchivedSessions();
   await sessions.archiveSession("active / 1");
+  await sessions.archiveSession("active / 2", {stopActiveWork: true});
   await sessions.restoreArchivedSession("archived-1");
   await sessions.deleteArchivedSession("archived-1", "token / current");
   process.stdout.write(JSON.stringify({listed, requests}));
@@ -18861,10 +19010,11 @@ const sessions = window.Code.features.sessions.createSessionsFeature({requestJso
         self.assertEqual(json.loads(completed.stdout), {
             "listed": [{"id": "archived-1", "archiveToken": "token-1"}],
             "requests": [
-                {"url": "/api/session-archive", "method": "GET", "hasBody": False},
-                {"url": "/api/session-archive/active%20%2F%201/archive", "method": "POST", "hasBody": False},
-                {"url": "/api/session-archive/archived-1/restore", "method": "POST", "hasBody": False},
-                {"url": "/api/session-archive/archived-1?archiveToken=token%20%2F%20current", "method": "DELETE", "hasBody": False},
+                {"url": "/api/session-archive", "method": "GET", "body": None},
+                {"url": "/api/session-archive/active%20%2F%201/archive", "method": "POST", "body": None},
+                {"url": "/api/session-archive/active%20%2F%202/archive", "method": "POST", "body": '{"stopActiveWork":true}'},
+                {"url": "/api/session-archive/archived-1/restore", "method": "POST", "body": None},
+                {"url": "/api/session-archive/archived-1?archiveToken=token%20%2F%20current", "method": "DELETE", "body": None},
             ],
         })
 
@@ -18885,8 +19035,13 @@ const sessions = window.Code.features.sessions.createSessionsFeature({requestJso
         end = APP_SOURCE.index("function getPinnedSessions()", start)
         source = APP_SOURCE[start:end]
         for error_code, key in {
+            "session_archive_active_work": "sessionArchiveNotTerminal",
             "session_archive_not_terminal": "sessionArchiveNotTerminal",
+            "session_archive_stop_failed": "sessionArchiveStopFailed",
+            "session_archive_after_stop_failed": "sessionArchiveAfterStopFailed",
+            "session_archive_after_stop_recovery_failed": "sessionArchiveAfterStopRecoveryFailed",
             "session_archive_failed": "sessionArchiveRetryableFailure",
+            "session_archive_busy": "sessionArchiveRetryableFailure",
             "session_archive_index_unavailable": "sessionArchiveIndexUnavailable",
             "session_archive_recovery_failed": "sessionArchiveRecoveryUnavailable",
             "session_archive_location_conflict": "sessionArchiveLocationConflict",
@@ -18910,6 +19065,110 @@ const sessions = window.Code.features.sessions.createSessionsFeature({requestJso
         self.assertNotIn("innerHTML", notification_source)
         self.assertNotIn("createElement(\"a\")", notification_source)
 
+    def test_stop_and_archive_confirm_has_exact_copy_focus_escape_close_cancel_and_danger_action(self):
+        start = APP_SOURCE.index("function showStopAndArchiveConfirm()")
+        end = APP_SOURCE.index("async function archiveSession(sessionId)", start)
+        confirm_source = APP_SOURCE[start:end]
+        for fragment in (
+            'role="alertdialog"',
+            'aria-modal="true"',
+            'class="danger-btn session-stop-archive-confirm"',
+            'event.key === "Escape"',
+            'event.key !== "Tab"',
+            'cancelButton?.focus()',
+            'previouslyFocused.focus()',
+        ):
+            self.assertIn(fragment, confirm_source)
+        for exact in (
+            'sessionStopArchiveTitle: "停止任务并归档此会话？"',
+            'sessionStopArchiveBody: "这会停止当前正在进行或等待中的任务。未完成的 Goal 将被保留，恢复会话后仍可继续。"',
+            'sessionStopArchiveAction: "停止并归档"',
+            'sessionStopArchiveTitle: "Stop tasks and archive this session?"',
+            'sessionStopArchiveAction: "Stop and archive"',
+        ):
+            self.assertIn(exact, I18N_SOURCE)
+
+        script = f"""
+const created = [];
+let restoredFocus = 0;
+const originalFocus = {{focus: () => {{ restoredFocus += 1; document.activeElement = originalFocus; }}}};
+function listenerNode(name) {{
+  const listeners = new Map();
+  return {{
+    name,
+    focusCount: 0,
+    addEventListener(type, fn) {{ listeners.set(type, fn); }},
+    emit(type, event = {{}}) {{ listeners.get(type)?.({{target: this, preventDefault() {{}}, stopPropagation() {{}}, ...event}}); }},
+    focus() {{ this.focusCount += 1; document.activeElement = this; }},
+  }};
+}}
+const document = {{
+  activeElement: originalFocus,
+  body: {{appendChild: (node) => created.push(node)}},
+  createElement() {{
+    const listeners = new Map();
+    const nodes = {{
+      close: listenerNode("close"),
+      cancel: listenerNode("cancel"),
+      confirm: listenerNode("confirm"),
+    }};
+    return {{
+      className: "",
+      innerHTML: "",
+      removed: false,
+      nodes,
+      querySelector(selector) {{
+        if (selector.includes("-close")) return nodes.close;
+        if (selector.includes("-cancel")) return nodes.cancel;
+        if (selector.includes("-confirm")) return nodes.confirm;
+        return null;
+      }},
+      addEventListener(type, fn) {{ listeners.set(type, fn); }},
+      emit(type, event = {{}}) {{ listeners.get(type)?.({{target: this, preventDefault() {{}}, stopPropagation() {{}}, ...event}}); }},
+      remove() {{ this.removed = true; }},
+    }};
+  }},
+}};
+let sessionStopArchiveConfirmSerial = 0;
+function t(key) {{ return key; }}
+function escapeHtml(value) {{ return String(value); }}
+eval({json.dumps(confirm_source)} + "\\nglobalThis.__confirmArchive = showStopAndArchiveConfirm;");
+async function run(action) {{
+  document.activeElement = originalFocus;
+  const pending = globalThis.__confirmArchive();
+  const modal = created[created.length - 1];
+  const cancelFocused = modal.nodes.cancel.focusCount > 0;
+  if (action === "escape") {{
+    document.activeElement = modal.nodes.confirm;
+    modal.emit("keydown", {{key: "Tab", shiftKey: false}});
+    modal.emit("keydown", {{key: "Escape"}});
+  }} else if (action === "close") modal.nodes.close.emit("click");
+  else if (action === "cancel") modal.nodes.cancel.emit("click");
+  else if (action === "confirm") modal.nodes.confirm.emit("click");
+  else modal.emit("click", {{target: modal}});
+  return {{result: await pending, removed: modal.removed, cancelFocused}};
+}}
+(async () => {{
+  const results = [];
+  for (const action of ["escape", "close", "cancel", "backdrop", "confirm"]) results.push(await run(action));
+  process.stdout.write(JSON.stringify({{results, restoredFocus, created: created.length}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["created"], 5)
+        self.assertEqual(data["restoredFocus"], 5)
+        self.assertEqual(
+            [item["result"] for item in data["results"]],
+            [False, False, False, False, True],
+        )
+        self.assertTrue(all(item["removed"] for item in data["results"]))
+        self.assertTrue(all(item["cancelFocused"] for item in data["results"]))
+
     def test_archive_action_dedupes_and_pending_ends_at_authoritative_post_boundary(self):
         start = APP_SOURCE.index("async function archiveSession(sessionId)")
         end = APP_SOURCE.index("function getPinnedSessions()", start)
@@ -18919,24 +19178,30 @@ const events = [];
 const archiveSessionPending = new Set();
 const state = {{sessions: [{{id: "s1", projectId: "p1"}}], sessionId: "other", branchPanelOpen: false}};
 let postResolve;
-let postReject;
 let refreshResolve;
 let mode = "pending";
-function archiveSessionRecord(sessionId) {{
-  events.push(["post", sessionId]);
-  if (mode === "pending") return new Promise((resolve, reject) => {{ postResolve = resolve; postReject = reject; }});
+function archiveSessionRecord(sessionId, options = {{}}) {{
+  events.push(["post", sessionId, options.stopActiveWork === true]);
+  if (mode === "pending") return new Promise((resolve) => {{ postResolve = resolve; }});
+  if (mode === "session_archive_active_work" && options.stopActiveWork === true) return Promise.resolve({{ok: true}});
   return Promise.reject(Object.assign(new Error("RAW-ARCHIVE-SECRET"), {{data: {{errorCode: mode}}}}));
 }}
 function renderSessions() {{ events.push(["render", [...archiveSessionPending]]); }}
 function beginNewConversation() {{ events.push(["new"]); }}
 function refreshSessions() {{
   events.push(["refresh", [...archiveSessionPending]]);
+  if (mode !== "pending") return Promise.resolve({{data: []}});
   return new Promise((resolve) => {{ refreshResolve = resolve; }});
 }}
 function renderBranchTree() {{ events.push(["branch"]); }}
 const settingsFeature = {{refreshArchivedSessions: () => Promise.resolve()}};
 function t(key) {{ return key; }}
 function showToast(...args) {{ events.push(["toast", ...args]); }}
+let confirmResult = false;
+async function showStopAndArchiveConfirm() {{
+  events.push(["confirm", confirmResult]);
+  return confirmResult;
+}}
 eval({json.dumps(archive_source)} + "\\nglobalThis.__archiveSession = archiveSession;");
 async function waitFor(predicate) {{
   for (let index = 0; index < 20; index += 1) {{
@@ -18956,11 +19221,14 @@ async function waitFor(predicate) {{
   const firstResult = await first;
   const failures = {{}};
   for (const code of [
-    "session_archive_not_terminal",
     "session_archive_failed",
+    "session_archive_busy",
     "session_archive_index_unavailable",
     "session_archive_recovery_failed",
     "session_archive_location_conflict",
+    "session_archive_stop_failed",
+    "session_archive_after_stop_failed",
+    "session_archive_after_stop_recovery_failed",
   ]) {{
     state.sessions = [{{id: "s1", projectId: "p1"}}];
     mode = code;
@@ -18968,6 +19236,13 @@ async function waitFor(predicate) {{
     failures[code] = await globalThis.__archiveSession("s1");
     failures[code + "Toast"] = events.slice(before).find((item) => item[0] === "toast")?.[1] || "";
   }}
+  state.sessions = [{{id: "s1", projectId: "p1"}}];
+  mode = "session_archive_active_work";
+  confirmResult = false;
+  const cancelled = await globalThis.__archiveSession("s1");
+  const stillPresentAfterCancel = state.sessions.some((item) => item.id === "s1");
+  confirmResult = true;
+  const confirmed = await globalThis.__archiveSession("s1");
   process.stdout.write(JSON.stringify({{
     firstResult,
     duplicate,
@@ -18976,6 +19251,11 @@ async function waitFor(predicate) {{
     pendingAfter: [...archiveSessionPending],
     successToast,
     failures,
+    cancelled,
+    confirmed,
+    stillPresentAfterCancel,
+    confirms: events.filter((item) => item[0] === "confirm"),
+    posts: events.filter((item) => item[0] === "post"),
     rawSecretVisible: JSON.stringify(events).includes("RAW-ARCHIVE-SECRET"),
   }}));
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
@@ -18992,7 +19272,7 @@ async function waitFor(predicate) {{
         data = json.loads(completed.stdout)
         self.assertTrue(data["firstResult"])
         self.assertFalse(data["duplicate"])
-        self.assertEqual(data["postCount"], 6)
+        self.assertEqual(data["postCount"], 12)
         self.assertEqual(data["pendingAtRefresh"], [])
         self.assertEqual(data["pendingAfter"], [])
         self.assertEqual(data["successToast"], [
@@ -19002,18 +19282,134 @@ async function waitFor(predicate) {{
             {"duration": 4000, "emphasis": "sessionArchiveSuccessEmphasis"},
         ])
         self.assertEqual(data["failures"], {
-            "session_archive_not_terminal": False,
-            "session_archive_not_terminalToast": "sessionArchiveNotTerminal",
             "session_archive_failed": False,
             "session_archive_failedToast": "sessionArchiveRetryableFailure",
+            "session_archive_busy": False,
+            "session_archive_busyToast": "sessionArchiveRetryableFailure",
             "session_archive_index_unavailable": False,
             "session_archive_index_unavailableToast": "sessionArchiveIndexUnavailable",
             "session_archive_recovery_failed": False,
             "session_archive_recovery_failedToast": "sessionArchiveRecoveryUnavailable",
             "session_archive_location_conflict": False,
             "session_archive_location_conflictToast": "sessionArchiveLocationConflict",
+            "session_archive_stop_failed": False,
+            "session_archive_stop_failedToast": "sessionArchiveStopFailed",
+            "session_archive_after_stop_failed": False,
+            "session_archive_after_stop_failedToast": "sessionArchiveAfterStopFailed",
+            "session_archive_after_stop_recovery_failed": False,
+            "session_archive_after_stop_recovery_failedToast": "sessionArchiveAfterStopRecoveryFailed",
         })
+        self.assertFalse(data["cancelled"])
+        self.assertTrue(data["confirmed"])
+        self.assertTrue(data["stillPresentAfterCancel"])
+        self.assertEqual(data["confirms"], [["confirm", False], ["confirm", True]])
+        self.assertEqual(data["posts"][-3:], [
+            ["post", "s1", False],
+            ["post", "s1", False],
+            ["post", "s1", True],
+        ])
         self.assertFalse(data["rawSecretVisible"])
+
+    def test_archive_timeout_aborts_only_that_request_and_releases_pending(self):
+        start = APP_SOURCE.index("async function archiveSession(sessionId)")
+        end = APP_SOURCE.index("function getPinnedSessions()", start)
+        archive_source = APP_SOURCE[start:end]
+        for fragment in (
+            "new AbortController()",
+            "setTimeout(",
+            "controller.abort()",
+            "clearTimeout(",
+            "signal: controller.signal",
+        ):
+            self.assertIn(fragment, archive_source)
+        script = f"""
+const events = [];
+const archiveSessionPending = new Set();
+const state = {{sessions: [{{id: "s1", projectId: "p1"}}], sessionId: "other", branchPanelOpen: false}};
+let timerSerial = 0;
+const activeTimers = new Set();
+class FixtureAbortController {{
+  constructor() {{
+    const listeners = [];
+    this.signal = {{
+      aborted: false,
+      addEventListener: (name, listener) => {{ if (name === "abort") listeners.push(listener); }},
+    }};
+    this.abort = () => {{
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      listeners.slice().forEach((listener) => listener());
+    }};
+  }}
+}}
+globalThis.AbortController = FixtureAbortController;
+globalThis.setTimeout = (callback, delay) => {{
+  const id = ++timerSerial;
+  activeTimers.add(id);
+  events.push(["timeout", delay]);
+  setImmediate(() => {{ if (activeTimers.has(id)) callback(); }});
+  return id;
+}};
+globalThis.clearTimeout = (id) => {{ activeTimers.delete(id); events.push(["clear", id]); }};
+function archiveSessionRecord(sessionId, options = {{}}) {{
+  events.push(["post", sessionId, Boolean(options.signal)]);
+  return new Promise((_resolve, reject) => {{
+    options.signal?.addEventListener("abort", () => {{
+      const error = new Error("fixture archive timeout");
+      error.name = "AbortError";
+      reject(error);
+    }});
+  }});
+}}
+function renderSessions() {{ events.push(["render", [...archiveSessionPending]]); }}
+function beginNewConversation() {{ events.push(["new"]); }}
+function refreshSessions() {{ events.push(["refresh"]); return Promise.resolve({{data: []}}); }}
+function renderBranchTree() {{ events.push(["branch"]); }}
+const settingsFeature = {{refreshArchivedSessions: () => Promise.resolve()}};
+function t(key) {{ return key; }}
+function showToast(...args) {{ events.push(["toast", ...args]); }}
+eval({json.dumps(archive_source)} + "\\nglobalThis.__archiveSession = archiveSession;");
+(async () => {{
+  const first = await globalThis.__archiveSession("s1");
+  const pendingAfterFirst = [...archiveSessionPending];
+  const second = await globalThis.__archiveSession("s1");
+  process.stdout.write(JSON.stringify({{
+    first,
+    second,
+    pendingAfterFirst,
+    pendingAfterSecond: [...archiveSessionPending],
+    sessionIds: state.sessions.map((item) => item.id),
+    posts: events.filter((item) => item[0] === "post"),
+    timeouts: events.filter((item) => item[0] === "timeout"),
+    clears: events.filter((item) => item[0] === "clear").length,
+    toasts: events.filter((item) => item[0] === "toast").map((item) => item[1]),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        data = json.loads(completed.stdout)
+        self.assertFalse(data["first"])
+        self.assertFalse(data["second"])
+        self.assertEqual(data["pendingAfterFirst"], [])
+        self.assertEqual(data["pendingAfterSecond"], [])
+        self.assertEqual(data["sessionIds"], ["s1"])
+        self.assertEqual(data["posts"], [["post", "s1", True], ["post", "s1", True]])
+        self.assertEqual(len(data["timeouts"]), 2)
+        self.assertTrue(all(0 < item[1] <= 15000 for item in data["timeouts"]))
+        self.assertEqual(data["clears"], 2)
+        self.assertEqual(data["toasts"], [
+            "sessionArchiveRetryableFailure",
+            "sessionArchiveRetryableFailure",
+        ])
 
     def test_archived_settings_actions_dedupe_preserve_rows_and_use_current_token(self):
         script = r'''
@@ -20627,7 +21023,10 @@ process.stdout.write(JSON.stringify({
         projection_start = MESSAGES_SOURCE.index("function renderToolProcessProjection")
         projection_end = MESSAGES_SOURCE.index("function renderAssistantResponseInfo", projection_start)
         projection = MESSAGES_SOURCE[projection_start:projection_end]
-        self.assertIn("calls.map(getProcessCallView)", projection)
+        self.assertIn(
+            "calls.map((call) => getProcessCallView(call, ownership))",
+            projection,
+        )
         self.assertIn('class="tool-process-item ${escapeHtml(call.outcome)}"', projection)
         self.assertIn('escapeHtml(t("toolProcessArguments"))', projection)
         self.assertIn('escapeHtml(t("toolProcessResult"))', projection)
