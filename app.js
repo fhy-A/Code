@@ -7761,6 +7761,15 @@ function pendingAuthorizations(sessionId = state.sessionId) {
   return filterPendingAuthorizations(state.authorizationRequests, sessionId);
 }
 
+function authorizationGroupingProjection(items) {
+  const list = Array.isArray(items) ? items : [];
+  const mainOnly = list.length > 0 && list.every((item) => item?.sourceKey === "main");
+  return {
+    showGroups: !mainOnly,
+    showHeaderSelectAll: mainOnly && list.length > 1,
+  };
+}
+
 function renderAuthorizationPanel() {
   const panel = els.authorizationPanel;
   if (!panel) return;
@@ -7782,7 +7791,29 @@ function renderAuthorizationPanel() {
   const editCount = items.filter((item) => ["propose_edit", "write_file", "delete_file", "manage_generated_image"].includes(item.tool.action)).length;
   const commandCount = items.filter((item) => item.tool.action === "run_command").length;
   const summary = [editCount ? t("fileOpsCount", { count: editCount }) : "", commandCount ? t("commandsCount", { count: commandCount }) : ""].filter(Boolean).join(" · ");
+  const grouping = authorizationGroupingProjection(items);
   const groups = groupAuthorizations(items);
+  const renderAuthorizationRow = (item) => `
+    <div class="authorization-row${item._finishing ? " is-submitting" : ""}" data-auth-id="${escapeHtml(item.id)}">
+      <input type="checkbox" data-auth-select="${escapeHtml(item.id)}" ${item.selected ? "checked" : ""} ${item._finishing ? "disabled" : ""} />
+      <span class="authorization-kind">${escapeHtml(authorizationActionLabel(item.tool.action))}</span>
+      <span class="authorization-target" title="${escapeHtml(authorizationTarget(item.tool))}">${escapeHtml(authorizationTarget(item.tool))}</span>
+      ${item.stats ? `<span class="authorization-stats"><b>+${item.stats.additions || 0}</b><i>−${item.stats.removals || 0}</i></span>` : ""}
+      ${item.editId ? `<button class="authorization-view" type="button" data-auth-view="${escapeHtml(item.editId)}">${t("view")}</button>` : ""}
+    </div>`;
+  const authorizationList = grouping.showGroups
+    ? groups.map((group) => {
+      const groupSelected = group.items.every((item) => item.selected);
+      return `
+        <section class="authorization-group">
+          <label class="authorization-group-head">
+            <input type="checkbox" data-auth-group="${escapeHtml(group.key)}" ${groupSelected ? "checked" : ""} />
+            <strong>${escapeHtml(group.label)}</strong><span>${t("itemCount", { count: group.items.length })}</span>
+          </label>
+          ${group.items.map(renderAuthorizationRow).join("")}
+        </section>`;
+    }).join("")
+    : items.map(renderAuthorizationRow).join("");
 
   panel.classList.toggle("is-collapsed", state.authorizationPanelCollapsed);
   panel.classList.remove("hidden");
@@ -7793,28 +7824,14 @@ function renderAuthorizationPanel() {
     </button>
     <div class="authorization-card">
       <div class="authorization-head">
-        <div><strong>${t("confirmationRequired", { count: items.length })}</strong><span>${escapeHtml(summary)}</span></div>
-        <button class="authorization-collapse" type="button" data-auth-action="toggle" title="${t("collapse")}">⌄</button>
+        <div class="authorization-head-copy"><strong>${t("confirmationRequired", { count: items.length })}</strong><span>${escapeHtml(summary)}</span></div>
+        <div class="authorization-head-actions">
+          ${grouping.showHeaderSelectAll ? `<label class="authorization-select-all"><input type="checkbox" data-auth-group="main" aria-label="${escapeHtml(t("authorizationSelectAll"))}" ${items.every((item) => item.selected) ? "checked" : ""} /><span>${escapeHtml(t("authorizationSelectAll"))}</span></label>` : ""}
+          <button class="authorization-collapse" type="button" data-auth-action="toggle" title="${t("collapse")}">⌄</button>
+        </div>
       </div>
       <div class="authorization-groups">
-        ${groups.map((group) => {
-          const groupSelected = group.items.every((item) => item.selected);
-          return `
-            <section class="authorization-group">
-              <label class="authorization-group-head">
-                <input type="checkbox" data-auth-group="${escapeHtml(group.key)}" ${groupSelected ? "checked" : ""} />
-                <strong>${escapeHtml(group.label)}</strong><span>${t("itemCount", { count: group.items.length })}</span>
-              </label>
-              ${group.items.map((item) => `
-                <div class="authorization-row${item._finishing ? " is-submitting" : ""}" data-auth-id="${escapeHtml(item.id)}">
-                  <input type="checkbox" data-auth-select="${escapeHtml(item.id)}" ${item.selected ? "checked" : ""} ${item._finishing ? "disabled" : ""} />
-                  <span class="authorization-kind">${escapeHtml(authorizationActionLabel(item.tool.action))}</span>
-                  <span class="authorization-target" title="${escapeHtml(authorizationTarget(item.tool))}">${escapeHtml(authorizationTarget(item.tool))}</span>
-                  ${item.stats ? `<span class="authorization-stats"><b>+${item.stats.additions || 0}</b><i>−${item.stats.removals || 0}</i></span>` : ""}
-                  ${item.editId ? `<button class="authorization-view" type="button" data-auth-view="${escapeHtml(item.editId)}">${t("view")}</button>` : ""}
-                </div>`).join("")}
-            </section>`;
-        }).join("")}
+        ${authorizationList}
       </div>
       <div class="authorization-actions">
         <button type="button" class="authorization-reject-all" data-auth-action="reject-all">${t("rejectAll")}</button>
@@ -8790,9 +8807,16 @@ async function finishUserInputRequest(request) {
   resumePersistedSessionRun(summary).catch((error) => console.error("Failed to resume questionnaire run:", error));
 }
 
-function renderUserInputQuestion(question, index) {
+const USER_INPUT_OTHER_MIN_HEIGHT = 42;
+const USER_INPUT_OTHER_MAX_HEIGHT = 88;
+const USER_INPUT_OTHER_MAX_LENGTH = 2000;
+
+function renderUserInputQuestion(question, index, display = {}) {
   const resolved = question.status !== "pending";
   const statusText = question.status === "resolved" ? t("questionnaireAnswered") : t("questionCanceled");
+  const progress = String(display.progress || index + 1);
+  const reason = String(display.reason || "");
+  const otherValue = String(question.other || "");
   let control = "";
   if (question.type === "text") {
     control = `<input class="user-input-text" data-user-input-text type="text" placeholder="${escapeHtml(t("questionnaireTextPlaceholder"))}" value="${escapeHtml(question.text || "")}" ${resolved ? "disabled" : ""} />`;
@@ -8807,19 +8831,24 @@ function renderUserInputQuestion(question, index) {
     }).join("")}</div>`;
   }
   return `<section class="user-input-question${resolved ? " is-resolved" : ""}" data-question-id="${escapeHtml(question.id)}">
-    <header class="user-input-question-head">
-      <span>${index + 1}</span>
-      <strong>${escapeHtml(question.prompt)}${question.type === "multiple" ? ` (${escapeHtml(t("multiSelect"))})` : ""}</strong>
-      ${resolved ? `<em>${escapeHtml(statusText)}</em>` : ""}
-    </header>
-    <div class="user-input-question-body">
-      ${control}
-      ${question.type !== "text" && question.allowOther ? `<input class="user-input-text" data-user-input-other type="text" placeholder="${escapeHtml(t("questionnaireOtherPlaceholder"))}" value="${escapeHtml(question.other || "")}" ${resolved ? "disabled" : ""} />` : ""}
+    <div class="user-input-question-layout">
+      <span class="user-input-question-progress">${escapeHtml(progress)}</span>
+      <div class="user-input-question-content">
+        <header class="user-input-question-head">
+          <strong>${escapeHtml(question.prompt)}</strong>
+          ${resolved ? `<em>${escapeHtml(statusText)}</em>` : ""}
+        </header>
+        ${reason ? `<p class="user-input-reason">${escapeHtml(reason)}</p>` : ""}
+        <div class="user-input-question-body">
+          ${control}
+          ${question.type !== "text" && question.allowOther ? `<div class="user-input-other-wrap"><textarea class="user-input-other" data-user-input-other rows="1" maxlength="${USER_INPUT_OTHER_MAX_LENGTH}" placeholder="${escapeHtml(t("questionnaireOtherPlaceholder"))}" ${resolved ? "disabled" : ""}>${escapeHtml(otherValue)}</textarea><span class="user-input-other-count" data-user-input-other-count>${otherValue.length}/${USER_INPUT_OTHER_MAX_LENGTH}</span></div>` : ""}
+        </div>
+        ${resolved ? "" : `<footer class="user-input-question-actions">
+          <button type="button" class="user-input-skip" data-user-input-action="cancel">${escapeHtml(t("questionnaireCancel"))}</button>
+          <button type="button" class="user-input-confirm" data-user-input-action="confirm">${escapeHtml(t("questionnaireConfirm"))}</button>
+        </footer>`}
+      </div>
     </div>
-    ${resolved ? "" : `<footer class="user-input-question-actions">
-      <button type="button" class="user-input-skip" data-user-input-action="cancel">${escapeHtml(t("questionnaireCancel"))}</button>
-      <button type="button" class="user-input-confirm" data-user-input-action="confirm">${escapeHtml(t("questionnaireConfirm"))}</button>
-    </footer>`}
   </section>`;
 }
 
@@ -8847,16 +8876,18 @@ function renderUserInputPanel() {
     panel.classList.add("hidden");
     return;
   }
-  // Show only the current question with a reason line and progress badge.
+  // Show only the current question; progress and prompt share one title row.
   panel.innerHTML = `<div class="user-input-card user-input-single">
-    <div class="user-input-single-head">
-      ${request.reason ? `<p class="user-input-reason">${escapeHtml(request.reason)}</p>` : ""}
-      <b class="user-input-progress">${done + 1}/${total}</b>
-    </div>
-    <div class="user-input-questions">${renderUserInputQuestion(firstPending, request.questions.indexOf(firstPending))}</div>
+    <div class="user-input-questions">${renderUserInputQuestion(firstPending, request.questions.indexOf(firstPending), {
+      progress: `${done + 1}/${total}`,
+      reason: request.reason || "",
+    })}</div>
     <p class="user-input-hint">${escapeHtml(t("questionnaireHint"))}</p>
   </div>`;
   panel.classList.remove("hidden");
+  panel.querySelectorAll?.("[data-user-input-other]")?.forEach((textarea) => {
+    syncUserInputOtherTextarea(textarea);
+  });
 }
 
 function getUserInputQuestionElement(questionId) {
@@ -8931,6 +8962,21 @@ async function resolveUserInputQuestion(questionId, action) {
   return true;
 }
 
+function syncUserInputOtherTextarea(textarea) {
+  if (!textarea?.matches?.("[data-user-input-other]")) return false;
+  const counter = textarea.closest?.(".user-input-other-wrap")
+    ?.querySelector?.("[data-user-input-other-count]");
+  if (counter) {
+    counter.textContent = `${String(textarea.value || "").length}/${USER_INPUT_OTHER_MAX_LENGTH}`;
+  }
+  textarea.style.height = "auto";
+  const contentHeight = Math.max(USER_INPUT_OTHER_MIN_HEIGHT, Number(textarea.scrollHeight) || 0);
+  const height = Math.min(contentHeight, USER_INPUT_OTHER_MAX_HEIGHT);
+  textarea.style.height = `${height}px`;
+  textarea.style.overflowY = contentHeight > USER_INPUT_OTHER_MAX_HEIGHT ? "auto" : "hidden";
+  return true;
+}
+
 function bindUserInputPanel() {
   const panel = els.userInputPanel;
   if (!panel) return;
@@ -8952,11 +8998,15 @@ function bindUserInputPanel() {
   };
   // Prevent interaction with the questionnaire from triggering the composer's focus highlight
   panel.addEventListener("mousedown", (e) => { e.stopPropagation(); });
+  panel.addEventListener("input", (event) => {
+    syncUserInputOtherTextarea(event.target);
+  });
   panel.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     const retryButton = event.target.closest("[data-user-input-retry]");
     const questionElement = event.target.closest("[data-question-id]");
     if (!retryButton && !questionElement) return;
+    if (event.shiftKey && event.target.matches?.("textarea[data-user-input-other]")) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;

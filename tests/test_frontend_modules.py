@@ -27758,7 +27758,8 @@ class Code043DiffSuggestionFlatteningTests(unittest.TestCase):
 
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return source.split("/* CODE-043 phase 2: flat human intervention */", 1)[0]
 
     @staticmethod
     def rule(source, selector):
@@ -27899,6 +27900,680 @@ class Code043DiffSuggestionFlatteningTests(unittest.TestCase):
             ".user-bubble",
             ".tool-process",
             ".authorization-panel",
+        ):
+            self.assertNotIn(forbidden, source)
+
+
+class Code043HumanInterventionFlatteningTests(unittest.TestCase):
+    MARKER = "/* CODE-043 phase 2: flat human intervention */"
+    TEXT_INPUT_FOCUS_GROUP = (
+        ".user-input-text:focus,\n"
+        ".user-input-text:focus-visible,\n"
+        ".user-input-other:focus,\n"
+        ".user-input-other:focus-visible {"
+    )
+    COMPOSER_REST_GROUP = (
+        ".composer:not(:focus-within):not(.drag-active),\n"
+        ".chat-pane.empty-chat .composer:not(:focus-within):not(.drag-active) {"
+    )
+    DARK_COMPOSER_REST_GROUP = (
+        "body.theme-dark .composer:not(:focus-within):not(.drag-active),\n"
+        "body.theme-dark .chat-pane.empty-chat .composer:not(:focus-within):not(.drag-active) {"
+    )
+    TITLE_TYPE_GROUP = (
+        ".authorization-head strong,\n"
+        ".user-input-question-head strong {"
+    )
+    INTERNAL_FLAT_GROUP = (
+        ".authorization-head,\n"
+        ".authorization-group + .authorization-group,\n"
+        ".authorization-row,\n"
+        ".authorization-actions,\n"
+        ".user-input-single-head,\n"
+        ".user-input-question,\n"
+        ".user-input-question + .user-input-question,\n"
+        ".user-input-question-actions {"
+    )
+    CONTROL_TYPE_GROUP = (
+        ".authorization-group-head strong,\n"
+        ".authorization-target,\n"
+        ".authorization-view,\n"
+        ".authorization-actions button,\n"
+        ".user-input-option b,\n"
+        ".user-input-question-actions button,\n"
+        ".user-input-reconcile button {"
+    )
+    META_TYPE_GROUP = (
+        ".authorization-head span,\n"
+        ".authorization-group-head span,\n"
+        ".authorization-kind,\n"
+        ".authorization-stats,\n"
+        ".user-input-reason,\n"
+        ".user-input-progress,\n"
+        ".user-input-question-progress,\n"
+        ".user-input-question-head em,\n"
+        ".user-input-option small,\n"
+        ".user-input-reconcile p {"
+    )
+    SECONDARY_ACTION_GROUP = (
+        ".authorization-reject-all,\n"
+        ".user-input-skip {"
+    )
+    PRIMARY_ACTION_GROUP = (
+        ".authorization-approve,\n"
+        ".user-input-confirm {"
+    )
+    FOCUS_GROUP = (
+        ".authorization-collapsed-bar:focus-visible,\n"
+        ".authorization-collapse:focus-visible,\n"
+        ".authorization-select-all input:focus-visible,\n"
+        ".authorization-view:focus-visible,\n"
+        ".authorization-actions button:focus-visible,\n"
+        ".authorization-group input:focus-visible,\n"
+        ".authorization-row > input:focus-visible,\n"
+        ".user-input-option:has(input:focus-visible),\n"
+        ".user-input-text:focus-visible,\n"
+        ".user-input-other:focus-visible,\n"
+        ".user-input-question-actions button:focus-visible,\n"
+        ".user-input-reconcile button:focus-visible {"
+    )
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    @staticmethod
+    def last_rule(source, selector):
+        start = source.rindex(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_authorization_and_questionnaire_keep_exactly_one_outer_surface(self):
+        source = self.phase_source()
+        for selector in (
+            ".authorization-collapsed-bar {",
+            ".authorization-card {",
+            ".user-input-card {",
+        ):
+            rule = self.rule(source, selector)
+            for declaration in (
+                "border: 1px solid var(--line);",
+                "background: var(--panel);",
+                "box-shadow: none;",
+            ):
+                self.assertIn(declaration, rule)
+        internal = self.rule(source, self.INTERNAL_FLAT_GROUP)
+        for declaration in (
+            "border: 0;",
+            "background: transparent;",
+            "box-shadow: none;",
+        ):
+            self.assertIn(declaration, internal)
+
+    def test_resting_composer_has_no_elevation_while_focus_and_drag_rings_remain(self):
+        source = self.phase_source()
+        for selector in (
+            self.COMPOSER_REST_GROUP,
+            self.DARK_COMPOSER_REST_GROUP,
+        ):
+            resting = self.rule(source, selector)
+            self.assertIn("box-shadow: none;", resting)
+        focus = self.rule(
+            STYLE_SOURCE,
+            ".composer:focus-within,\n.chat-pane.empty-chat .composer:focus-within {",
+        )
+        self.assertIn("box-shadow:", focus)
+        self.assertNotIn("box-shadow: none;", focus)
+        drag = self.rule(
+            STYLE_SOURCE,
+            ".composer.drag-active,\n.chat-pane.empty-chat .composer.drag-active {",
+        )
+        self.assertIn("box-shadow: 0 0 0 3px", drag)
+        self.assertIn(".composer .bar-btn:focus-visible", STYLE_SOURCE)
+
+    def test_question_title_combines_progress_and_prompt_without_duplicate_rows(self):
+        start = APP_SOURCE.index("function renderUserInputQuestion(")
+        end = APP_SOURCE.index("function getUserInputQuestionElement(", start)
+        source = APP_SOURCE[start:end]
+        self.assertIn(
+            "function renderUserInputQuestion(question, index, display = {})",
+            source,
+        )
+        self.assertIn('const progress = String(display.progress || index + 1);', source)
+        self.assertIn('const reason = String(display.reason || "");', source)
+        self.assertIn(
+            '<span class="user-input-question-progress">${escapeHtml(progress)}</span>',
+            source,
+        )
+        self.assertNotIn('<span>${index + 1}</span>', source)
+        self.assertNotIn('class="user-input-single-head"', source)
+        self.assertIn(
+            "renderUserInputQuestion(firstPending, request.questions.indexOf(firstPending), {",
+            source,
+        )
+        self.assertIn('progress: `${done + 1}/${total}`', source)
+        self.assertIn('reason: request.reason || ""', source)
+        layout = source.index('<div class="user-input-question-layout">')
+        progress = source.index('class="user-input-question-progress"', layout)
+        content = source.index('<div class="user-input-question-content">', progress)
+        header = source.index('<header class="user-input-question-head">', content)
+        reason = source.index('${reason ? `<p class="user-input-reason">', header)
+        body = source.index('<div class="user-input-question-body">', reason)
+        self.assertLess(layout, progress)
+        self.assertLess(progress, content)
+        self.assertLess(content, header)
+        self.assertLess(header, reason)
+        self.assertLess(reason, body)
+
+    def test_question_text_inputs_use_one_accent_border_without_outer_focus_ring(self):
+        source = self.phase_source()
+        focus = self.rule(source, self.TEXT_INPUT_FOCUS_GROUP)
+        self.assertIn("border-color: var(--accent) !important;", focus)
+        self.assertIn("outline: none;", focus)
+        self.assertIn("box-shadow: none;", focus)
+        option_focus = self.rule(source, self.FOCUS_GROUP)
+        self.assertIn(".user-input-option:has(input:focus-visible)", option_focus)
+        self.assertIn("outline: 2px solid", option_focus)
+        self.assertIn(".user-input-option input:checked {", STYLE_SOURCE)
+
+    def test_type_scale_matches_question_decision_and_supporting_information(self):
+        source = self.phase_source()
+        self.assertIn("font-size: 16px;", self.rule(source, self.TITLE_TYPE_GROUP))
+        self.assertIn("font-size: 14px;", self.rule(source, self.CONTROL_TYPE_GROUP))
+        self.assertIn("font-size: 12px;", self.rule(source, self.META_TYPE_GROUP))
+        text_inputs = self.rule(
+            source,
+            ".user-input-text,\n.user-input-other {",
+        )
+        self.assertIn("font-size: 16px;", text_inputs)
+
+    def test_question_metadata_is_plain_text_and_options_are_flat_but_selectable(self):
+        source = self.phase_source()
+        number = self.rule(source, ".user-input-question-progress {")
+        for declaration in (
+            "width: auto;",
+            "height: auto;",
+            "border-radius: 0;",
+            "background: transparent;",
+        ):
+            self.assertIn(declaration, number)
+        for selector in (
+            ".user-input-progress {",
+            ".user-input-recommended {",
+        ):
+            rule = self.rule(source, selector)
+            for declaration in (
+                "padding: 0;",
+                "border-radius: 0;",
+                "background: transparent;",
+            ):
+                self.assertIn(declaration, rule)
+
+        option = self.rule(source, ".user-input-option {")
+        for declaration in (
+            "min-height: 42px;",
+            "border: 0;",
+            "background: transparent;",
+        ):
+            self.assertIn(declaration, option)
+        hover = self.rule(source, ".user-input-option:hover {")
+        checked = self.rule(source, ".user-input-option:has(input:checked) {")
+        self.assertIn("background:", hover)
+        self.assertIn("background:", checked)
+        control = self.rule(STYLE_SOURCE, ".user-input-option input {")
+        self.assertIn("border: 1.5px solid var(--line);", control)
+        self.assertIn(".user-input-option input:checked {", STYLE_SOURCE)
+
+    def test_authorization_projection_hides_only_redundant_main_groups(self):
+        start = APP_SOURCE.index("function authorizationGroupingProjection(")
+        end = APP_SOURCE.index("function renderAuthorizationPanel()", start)
+        projection_source = APP_SOURCE[start:end]
+        script = f"""
+{projection_source}
+const main = (id) => ({{id, sourceKey: "main"}});
+const sub = (id, key = "sub:one") => ({{id, sourceKey: key}});
+process.stdout.write(JSON.stringify({{
+  singleMain: authorizationGroupingProjection([main("m1")]),
+  multiMain: authorizationGroupingProjection([main("m1"), main("m2")]),
+  mixed: authorizationGroupingProjection([main("m1"), sub("s1")]),
+  subOnly: authorizationGroupingProjection([sub("s1"), sub("s2", "sub:two")]),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "singleMain": {"showGroups": False, "showHeaderSelectAll": False},
+            "multiMain": {"showGroups": False, "showHeaderSelectAll": True},
+            "mixed": {"showGroups": True, "showHeaderSelectAll": False},
+            "subOnly": {"showGroups": True, "showHeaderSelectAll": False},
+        })
+
+        render_start = APP_SOURCE.index("function renderAuthorizationPanel()")
+        render_end = APP_SOURCE.index("function markServerAuthorizationProjection", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        for fragment in (
+            "const grouping = authorizationGroupingProjection(items);",
+            "const groups = groupAuthorizations(items);",
+            "grouping.showHeaderSelectAll",
+            'data-auth-group="main"',
+            'aria-label="${escapeHtml(t("authorizationSelectAll"))}"',
+            "grouping.showGroups",
+            "groups.map((group) =>",
+            "items.map(renderAuthorizationRow)",
+        ):
+            self.assertIn(fragment, render_source)
+        self.assertEqual(I18N_SOURCE.count("authorizationSelectAll:"), 2)
+        self.assertIn('authorizationSelectAll: "全选操作"', I18N_SOURCE)
+        self.assertIn('authorizationSelectAll: "Select all operations"', I18N_SOURCE)
+        self.assertIn(
+            'pendingAuthorizations().filter((item) => item.sourceKey === groupKey)',
+            APP_SOURCE,
+        )
+
+    def test_question_uses_two_columns_and_bounded_multiline_other_answer(self):
+        start = APP_SOURCE.index("const USER_INPUT_OTHER_MAX_LENGTH = 2000;")
+        end = APP_SOURCE.index("function renderUserInputPanel()", start)
+        source = APP_SOURCE[start:end]
+        for fragment in (
+            "const USER_INPUT_OTHER_MAX_LENGTH = 2000;",
+            '<div class="user-input-question-layout">',
+            '<span class="user-input-question-progress">${escapeHtml(progress)}</span>',
+            '<div class="user-input-question-content">',
+            '<textarea class="user-input-other" data-user-input-other rows="1"',
+            'maxlength="${USER_INPUT_OTHER_MAX_LENGTH}"',
+            '${escapeHtml(otherValue)}</textarea>',
+            'data-user-input-other-count>${otherValue.length}/${USER_INPUT_OTHER_MAX_LENGTH}',
+        ):
+            self.assertIn(fragment, source)
+        self.assertNotIn('type="text" placeholder="${escapeHtml(t("questionnaireOtherPlaceholder"))}"', source)
+        self.assertNotIn(".slice(", source)
+
+        phase = self.phase_source()
+        layout = self.rule(phase, ".user-input-question-layout {")
+        self.assertIn("grid-template-columns: max-content minmax(0, 1fr);", layout)
+        content = self.rule(phase, ".user-input-question-content {")
+        self.assertIn("min-width: 0;", content)
+        textarea = self.last_rule(phase, ".user-input-other {")
+        for declaration in (
+            "resize: none;",
+            "overflow-y: hidden;",
+        ):
+            self.assertIn(declaration, textarea)
+        self.assertRegex(textarea, r"max-height:\s*\d+px;")
+        counter = self.rule(phase, ".user-input-other-count {")
+        self.assertIn("font-size: 12px;", counter)
+
+    def test_other_count_and_enter_shift_enter_contracts_are_deterministic(self):
+        start = APP_SOURCE.index("function syncUserInputOtherTextarea(")
+        end = APP_SOURCE.index("async function resumePersistedRuns()", start)
+        source = APP_SOURCE[start:end]
+        for fragment in (
+            'textarea?.matches?.("[data-user-input-other]")',
+            'querySelector?.("[data-user-input-other-count]")',
+            "String(textarea.value || \"\").length",
+            'panel.addEventListener("input", (event) => {',
+            "syncUserInputOtherTextarea(event.target);",
+            'event.target.matches?.("textarea[data-user-input-other]")',
+            "event.shiftKey",
+            "event.preventDefault();",
+            "event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.repeat",
+        ):
+            self.assertIn(fragment, source)
+        shift_guard = source.index(
+            'event.shiftKey && event.target.matches?.("textarea[data-user-input-other]")'
+        )
+        prevent = source.index("event.preventDefault();", shift_guard)
+        modifiers = source.index(
+            "event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.repeat",
+            prevent,
+        )
+        submit = source.index("runQuestionAction(questionElement, action, trigger);", modifiers)
+        self.assertLess(shift_guard, prevent)
+        self.assertLess(prevent, modifiers)
+        self.assertLess(modifiers, submit)
+
+        resolve_start = APP_SOURCE.index("async function resolveUserInputQuestion(")
+        resolve_end = APP_SOURCE.index("function bindUserInputPanel()", resolve_start)
+        resolve_source = APP_SOURCE[resolve_start:resolve_end]
+        self.assertIn(
+            'const other = String(element.querySelector("[data-user-input-other]")?.value || "").trim();',
+            resolve_source,
+        )
+        self.assertNotIn("slice(0, USER_INPUT_OTHER_MAX_LENGTH)", resolve_source)
+        for fragment in (
+            'other: ""',
+            'other: String(question.other || "").trim()',
+            "const { abortSignal, abortHandler, _finishing, ...serializable } = request;",
+        ):
+            self.assertIn(fragment, QUESTIONNAIRE_SOURCE)
+
+    def test_other_textarea_autogrows_from_one_to_three_lines_and_shrinks(self):
+        constants_start = APP_SOURCE.index("const USER_INPUT_OTHER_MIN_HEIGHT = 42;")
+        constants_end = APP_SOURCE.index("function renderUserInputQuestion(", constants_start)
+        sync_start = APP_SOURCE.index("function syncUserInputOtherTextarea(")
+        sync_end = APP_SOURCE.index("function bindUserInputPanel()", sync_start)
+        script = f"""
+{APP_SOURCE[constants_start:constants_end]}
+{APP_SOURCE[sync_start:sync_end]}
+const counter = {{textContent: ""}};
+let scrollHeight = 42;
+const textarea = {{
+  value: "a",
+  style: {{}},
+  get scrollHeight() {{ return scrollHeight; }},
+  matches(selector) {{ return selector === "[data-user-input-other]"; }},
+  closest(selector) {{
+    return selector === ".user-input-other-wrap"
+      ? {{querySelector: () => counter}}
+      : null;
+  }},
+}};
+function snapshot(nextScrollHeight, value) {{
+  scrollHeight = nextScrollHeight;
+  textarea.value = value;
+  const result = syncUserInputOtherTextarea(textarea);
+  return {{result, height: textarea.style.height, overflowY: textarea.style.overflowY, count: counter.textContent}};
+}}
+process.stdout.write(JSON.stringify({{
+  one: snapshot(42, "a"),
+  two: snapshot(65, "a\\nb"),
+  capped: snapshot(140, "a\\nb\\nc\\nd"),
+  shrunk: snapshot(42, ""),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "one": {"result": True, "height": "42px", "overflowY": "hidden", "count": "1/2000"},
+            "two": {"result": True, "height": "65px", "overflowY": "hidden", "count": "3/2000"},
+            "capped": {"result": True, "height": "88px", "overflowY": "auto", "count": "7/2000"},
+            "shrunk": {"result": True, "height": "42px", "overflowY": "hidden", "count": "0/2000"},
+        })
+
+        render_start = APP_SOURCE.index("function renderUserInputQuestion(")
+        render_end = APP_SOURCE.index("function renderUserInputPanel()", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        self.assertIn('rows="1"', render_source)
+        self.assertNotIn('rows="3"', render_source)
+        self.assertIn('maxlength="${USER_INPUT_OTHER_MAX_LENGTH}"', render_source)
+        self.assertIn("syncUserInputOtherTextarea(textarea);", APP_SOURCE)
+        self.assertIn("syncUserInputOtherTextarea(event.target);", APP_SOURCE)
+
+        phase = self.phase_source()
+        textarea_rule = self.last_rule(phase, ".user-input-other {")
+        for declaration in (
+            "min-height: 42px;",
+            "max-height: 88px;",
+            "resize: none;",
+            "overflow-y: hidden;",
+        ):
+            self.assertIn(declaration, textarea_rule)
+
+    def test_multiple_question_title_preserves_only_the_model_prompt(self):
+        start = APP_SOURCE.index("function renderUserInputQuestion(")
+        end = APP_SOURCE.index("function renderUserInputPanel()", start)
+        source = APP_SOURCE[start:end]
+        self.assertIn('<strong>${escapeHtml(question.prompt)}</strong>', source)
+        self.assertNotIn('t("multiSelect")', source)
+        self.assertNotIn("replace(", source)
+        self.assertIn('question.type === "multiple" ? "checkbox" : "radio"', source)
+
+    def test_long_questionnaire_summary_is_answer_only_local_and_accessible(self):
+        script = r"""
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/ui/messages.js");
+const create = window.Code.ui.messages.createMessagesFeature;
+const labels = {
+  questionnaireSummary: "Questionnaire result",
+  questionCanceled: "Skipped",
+  expandQuestionnaireAnswers: "Expand answers",
+  collapseQuestionnaireAnswers: "Collapse answers",
+};
+const options = {
+  escapeHtml: (value) => String(value ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
+  t: (key) => labels[key] || key,
+};
+const feature = create(options);
+const make = (requestId, prompt, answer) => ({
+  role: "user",
+  content: "persisted summary",
+  meta: {kind: "user-input-summary", requestId, title: "Decision", answers: [{id: "q1", prompt, answer}]},
+});
+const render = (msg) => feature.renderUserInputSummaryProjection(msg, 4);
+const short = make("short", "P".repeat(500), "short answer");
+const exact = make("exact", "Prompt", "x".repeat(240));
+const long = make("long", "Prompt", "x".repeat(241));
+const twoLines = make("two", "Prompt", "a\nb");
+const threeLines = make("three", "Prompt", "a\nb\nc");
+const before = JSON.stringify(long);
+const longCollapsed = render(long);
+
+const listeners = {};
+const root = {
+  addEventListener(type, listener) { listeners[type] = listener; },
+  contains() { return true; },
+};
+feature.bindInteractions(root);
+const attrs = new Map();
+const classSet = new Set(["is-collapsed"]);
+const answers = {classList: {toggle(name, value) { value ? classSet.add(name) : classSet.delete(name); }}};
+const label = {textContent: "Expand answers"};
+const article = {
+  classList: {toggle() {}},
+  querySelector(selector) {
+    if (selector === "[data-user-input-summary-answers]") return answers;
+    if (selector === "[data-user-input-summary-label]") return label;
+    return null;
+  },
+};
+const toggle = {
+  dataset: {userInputSummaryToggle: "long"},
+  closest(selector) { return selector === "[data-user-input-summary]" ? article : null; },
+  setAttribute(name, value) { attrs.set(name, value); },
+};
+const target = {closest(selector) { return selector === "[data-user-input-summary-toggle]" ? toggle : null; }};
+listeners.click({target});
+const longExpanded = render(long);
+const reloaded = create(options).renderUserInputSummaryProjection(long, 4);
+process.stdout.write(JSON.stringify({
+  short: render(short),
+  exact: render(exact),
+  longCollapsed,
+  twoLines: render(twoLines),
+  threeLines: render(threeLines),
+  longExpanded,
+  reloaded,
+  click: {aria: attrs.get("aria-expanded"), label: label.textContent, expandedClass: classSet.has("is-expanded")},
+  unchanged: before === JSON.stringify(long),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertNotIn("data-user-input-summary-toggle", data["short"])
+        self.assertNotIn("data-user-input-summary-toggle", data["exact"])
+        self.assertNotIn("data-user-input-summary-toggle", data["twoLines"])
+        self.assertIn("data-user-input-summary-toggle", data["longCollapsed"])
+        self.assertIn("data-user-input-summary-toggle", data["threeLines"])
+        self.assertIn('aria-expanded="false"', data["longCollapsed"])
+        self.assertIn("Expand answers", data["longCollapsed"])
+        self.assertIn('aria-expanded="true"', data["longExpanded"])
+        self.assertIn("Collapse answers", data["longExpanded"])
+        self.assertIn('aria-expanded="false"', data["reloaded"])
+        self.assertIn("a\nb\nc", data["threeLines"])
+        self.assertEqual(data["click"], {"aria": "true", "label": "Collapse answers", "expandedClass": True})
+        self.assertTrue(data["unchanged"])
+
+        self.assertEqual(I18N_SOURCE.count("expandQuestionnaireAnswers:"), 2)
+        self.assertEqual(I18N_SOURCE.count("collapseQuestionnaireAnswers:"), 2)
+        phase = self.phase_source()
+        collapsed = self.rule(phase, ".user-input-summary-answers.is-collapsed {")
+        self.assertIn("max-height: calc(1.5em * 3);", collapsed)
+        self.assertIn("overflow: hidden;", collapsed)
+        expanded = self.rule(phase, ".user-input-summary-answers.is-expanded {")
+        self.assertIn("max-height: none;", expanded)
+        toggle_rule = self.rule(phase, ".user-input-summary-toggle {")
+        self.assertIn("background: transparent;", toggle_rule)
+        focus_rule = self.rule(phase, ".user-input-summary-toggle:focus-visible {")
+        self.assertIn("outline: 2px solid", focus_rule)
+
+    def test_primary_secondary_focus_disabled_retry_and_submitting_are_distinct(self):
+        source = self.phase_source()
+        secondary = self.rule(source, self.SECONDARY_ACTION_GROUP)
+        for declaration in (
+            "border: 0;",
+            "background: transparent;",
+            "font-size: 14px;",
+        ):
+            self.assertIn(declaration, secondary)
+        secondary_hover = self.rule(
+            source,
+            ".authorization-reject-all:hover,\n.user-input-skip:hover {",
+        )
+        self.assertIn("text-decoration: underline;", secondary_hover)
+        self.assertIn("background: transparent;", secondary_hover)
+
+        primary = self.rule(source, self.PRIMARY_ACTION_GROUP)
+        for declaration in (
+            "border: 1px solid var(--accent);",
+            "background: var(--accent);",
+            "color: #fff;",
+            "font-size: 14px;",
+        ):
+            self.assertIn(declaration, primary)
+        focus = self.rule(source, self.FOCUS_GROUP)
+        self.assertIn("outline: 2px solid", focus)
+        self.assertIn("outline-offset: 2px;", focus)
+        submitting = self.rule(source, ".authorization-row.is-submitting {")
+        self.assertIn("opacity:", submitting)
+        self.assertIn("cursor: progress;", submitting)
+        auth_disabled = self.rule(source, ".authorization-approve:disabled {")
+        self.assertIn("cursor: not-allowed;", auth_disabled)
+        question_disabled = self.rule(
+            source,
+            ".user-input-question-actions button:disabled,\n.user-input-reconcile button:disabled {",
+        )
+        self.assertIn("cursor: progress;", question_disabled)
+        retry = self.rule(source, ".user-input-reconcile {")
+        self.assertIn("display: flex;", retry)
+        self.assertIn("gap:", retry)
+
+    def test_long_authorization_targets_questions_and_scroll_remain_safe(self):
+        source = self.phase_source()
+        target = self.rule(STYLE_SOURCE, ".authorization-target {")
+        for declaration in (
+            "overflow: hidden;",
+            "text-overflow: ellipsis;",
+            "white-space: nowrap;",
+        ):
+            self.assertIn(declaration, target)
+        groups = self.rule(STYLE_SOURCE, ".authorization-groups {")
+        self.assertIn("max-height: 290px;", groups)
+        self.assertIn("overflow: auto;", groups)
+        card = self.rule(STYLE_SOURCE, ".user-input-card {")
+        self.assertIn("overflow: auto;", card)
+        self.assertIn("max-height: inherit;", card)
+        question = self.rule(source, self.TITLE_TYPE_GROUP)
+        self.assertIn("overflow-wrap: anywhere;", question)
+        option_text = self.rule(source, ".user-input-option > span {")
+        self.assertIn("min-width: 0;", option_text)
+
+    def test_authorization_dom_group_selection_and_resolution_contracts_are_unchanged(self):
+        for fragment in (
+            'class="authorization-collapsed-bar"',
+            'class="authorization-card"',
+            'class="authorization-group-head"',
+            'class="authorization-row${item._finishing ? " is-submitting" : ""}"',
+            'data-auth-action="toggle"',
+            'data-auth-group="${escapeHtml(group.key)}"',
+            'data-auth-select="${escapeHtml(item.id)}"',
+            'data-auth-view="${escapeHtml(item.editId)}"',
+            'data-auth-action="reject-all"',
+            'data-auth-action="approve"',
+            'panel.addEventListener("change", (event) => {',
+            'panel.addEventListener("click", async (event) => {',
+            'state.authorizationPanelCollapsed = !state.authorizationPanelCollapsed;',
+            'pendingAuthorizations().filter((item) => item.sourceKey === groupKey)',
+            'await Promise.allSettled(selected.map((item) => resolveAuthorization(item, true)));',
+            'await Promise.allSettled(pending.map((item) => resolveAuthorization(item, false)));',
+            'revealAuthorizationEdit(viewButton.dataset.authView);',
+            'if (!item || item.status !== "pending" || item._finishing)',
+            'showToast(item.error, "error");',
+        ):
+            self.assertIn(fragment, APP_SOURCE)
+
+    def test_questionnaire_dom_validation_keyboard_retry_and_recovery_contracts_are_unchanged(self):
+        for fragment in (
+            'class="user-input-card user-input-reconcile" role="status"',
+            'data-user-input-retry',
+            'class="user-input-card user-input-single"',
+            'class="user-input-option"',
+            'type="${inputType}"',
+            'data-user-input-text',
+            'data-user-input-other',
+            'data-user-input-action="cancel"',
+            'data-user-input-action="confirm"',
+            'panel.addEventListener("keydown", (event) => {',
+            'if (event.key !== "Enter") return;',
+            'if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;',
+            'showToast(t("fillRequired"));',
+            'await persistUserInputProgress(request);',
+            'const finished = await finishUserInputRequest(request);',
+            'await reconcilePersistedUserInputRequest(',
+            'resumePersistedSessionRun(summary).catch',
+        ):
+            self.assertIn(fragment, APP_SOURCE)
+        self.assertEqual(APP_SOURCE.count('showToast(t("fillRequired"));'), 2)
+
+    def test_phase_is_scoped_to_the_two_human_intervention_surfaces(self):
+        source = self.phase_source()
+        self.assertNotIn("@media", source)
+        self.assertNotRegex(
+            source,
+            r"(?m)^\.(?!authorization|user-input|composer|chat-pane)",
+        )
+        for selector in re.findall(r"(?m)^body\.[^{,]+", source):
+            self.assertTrue(selector.startswith((
+                "body.theme-dark .composer",
+                "body.theme-dark .chat-pane.empty-chat .composer",
+            )))
+        for forbidden in (
+            ".msg ",
+            ".bubble",
+            ".edit-suggestion",
+            ".tool-process",
+            ".execution-trace",
+            ".settings",
+            ".session-search",
+            ".preview",
+            ".notification",
+            ".onboarding",
         ):
             self.assertNotIn(forbidden, source)
 

@@ -1211,6 +1211,7 @@
     const onLayoutChange = options.onLayoutChange || (() => {});
     const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
     const boundInteractionRoots = new WeakSet();
+    const expandedUserInputSummaries = new Set();
 
     function visibleAssistantToolCalls(msg) {
       return (Array.isArray(msg?.meta?.toolCalls) ? msg.meta.toolCalls : []).filter((call) => (
@@ -1339,6 +1340,32 @@
       });
 
       root.addEventListener("click", (event) => {
+        const userInputSummaryToggle = event.target?.closest?.("[data-user-input-summary-toggle]");
+        if (userInputSummaryToggle && (!root.contains || root.contains(userInputSummaryToggle))) {
+          const requestId = String(userInputSummaryToggle.dataset.userInputSummaryToggle || "");
+          if (!requestId) return;
+          const expanded = !expandedUserInputSummaries.has(requestId);
+          if (expanded) expandedUserInputSummaries.add(requestId);
+          else expandedUserInputSummaries.delete(requestId);
+          const article = userInputSummaryToggle.closest?.("[data-user-input-summary]");
+          const answers = article?.querySelector?.("[data-user-input-summary-answers]");
+          const label = article?.querySelector?.("[data-user-input-summary-label]");
+          const labelKey = expanded ? "collapseQuestionnaireAnswers" : "expandQuestionnaireAnswers";
+          article?.classList?.toggle?.("is-expanded", expanded);
+          answers?.classList?.toggle?.("is-collapsed", !expanded);
+          answers?.classList?.toggle?.("is-expanded", expanded);
+          userInputSummaryToggle.setAttribute("aria-expanded", String(expanded));
+          userInputSummaryToggle.setAttribute("aria-label", t(labelKey));
+          userInputSummaryToggle.setAttribute("title", t(labelKey));
+          userInputSummaryToggle.setAttribute("data-i18n-aria-label", labelKey);
+          userInputSummaryToggle.setAttribute("data-i18n-title", labelKey);
+          if (label) {
+            label.textContent = t(labelKey);
+            label.setAttribute?.("data-i18n", labelKey);
+          }
+          onLayoutChange();
+          return;
+        }
         const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
         if (traceToggle && (!root.contains || root.contains(traceToggle))) {
           const trace = traceToggle.closest("[data-execution-trace]");
@@ -1622,13 +1649,32 @@
       return textArticle;
     }
 
+    function isLongUserInputSummary(answers) {
+      const texts = (Array.isArray(answers) ? answers : [])
+        .map((answer) => String(answer?.answer || ""));
+      const answerCharacters = texts.reduce((total, text) => total + text.length, 0);
+      return answerCharacters > 240
+        || texts.some((text) => text.split(/\r\n|\r|\n/).length >= 3);
+    }
+
     function renderUserInputSummaryProjection(msg, index) {
       const answers = Array.isArray(msg.meta?.answers) ? msg.meta.answers : [];
-      return `<article class="msg msg-flow-event user-input-flow" data-msg-index="${index}">
+      const requestId = String(msg.meta?.requestId || "");
+      const collapsible = Boolean(requestId && isLongUserInputSummary(answers));
+      const expanded = collapsible && expandedUserInputSummaries.has(requestId);
+      const labelKey = expanded ? "collapseQuestionnaireAnswers" : "expandQuestionnaireAnswers";
+      const safeRequestId = requestId.replace(/[^A-Za-z0-9_-]/g, "-") || String(index);
+      const answersId = `user-input-summary-answers-${safeRequestId}-${index}`;
+      const toggle = collapsible
+        ? `<button class="user-input-summary-toggle" type="button" data-user-input-summary-toggle="${escapeHtml(requestId)}" aria-controls="${escapeHtml(answersId)}" aria-expanded="${expanded}" aria-label="${escapeHtml(t(labelKey))}" title="${escapeHtml(t(labelKey))}" data-i18n-aria-label="${labelKey}" data-i18n-title="${labelKey}"><span data-user-input-summary-label data-i18n="${labelKey}">${escapeHtml(t(labelKey))}</span><span class="user-input-summary-chevron" aria-hidden="true"></span></button>`
+        : "";
+      return `<article class="msg msg-flow-event user-input-flow${expanded ? " is-expanded" : ""}" data-msg-index="${index}" data-user-input-summary="${escapeHtml(requestId)}">
         <span class="msg-flow-icon" aria-hidden="true">?</span>
         <div class="msg-flow-body">
-          <strong>${escapeHtml(msg.meta?.title || t("questionnaireSummary"))}</strong>
-          ${answers.map((answer) => `<span><b>${escapeHtml(answer.prompt || "")}</b> ${escapeHtml(answer.answer || t("questionCanceled"))}</span>`).join("")}
+          <div class="user-input-summary-head"><strong>${escapeHtml(msg.meta?.title || t("questionnaireSummary"))}</strong>${toggle}</div>
+          <div class="user-input-summary-answers${collapsible ? (expanded ? " is-expanded" : " is-collapsed") : ""}" id="${escapeHtml(answersId)}" data-user-input-summary-answers>
+            ${answers.map((answer) => `<span class="user-input-summary-answer"><b>${escapeHtml(answer.prompt || "")}</b> ${escapeHtml(answer.answer || t("questionCanceled"))}</span>`).join("")}
+          </div>
         </div>
       </article>`;
     }

@@ -10575,3 +10575,427 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .edit-suggestion .write-file-preview code {
   font-size: 14px;
 }
+
+/* CODE-043 phase 2: flat human intervention */
+.authorization-collapsed-bar {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: none;
+  font-size: 14px;
+}
+
+.authorization-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: none;
+}
+
+.user-input-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: none;
+}
+
+.composer:not(:focus-within):not(.drag-active),
+.chat-pane.empty-chat .composer:not(:focus-within):not(.drag-active) {
+  box-shadow: none;
+}
+
+body.theme-dark .composer:not(:focus-within):not(.drag-active),
+body.theme-dark .chat-pane.empty-chat .composer:not(:focus-within):not(.drag-active) {
+  box-shadow: none;
+}
+
+.authorization-head,
+.authorization-group + .authorization-group,
+.authorization-row,
+.authorization-actions,
+.user-input-single-head,
+.user-input-question,
+.user-input-question + .user-input-question,
+.user-input-question-actions {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.authorization-head {
+  padding: 14px 16px 9px;
+}
+
+.authorization-head-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.authorization-head-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.authorization-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.authorization-select-all input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.authorization-head .authorization-select-all span {
+  display: inline;
+  margin-top: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.authorization-groups {
+  padding: 2px 16px 7px;
+}
+
+.authorization-group + .authorization-group {
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.authorization-row {
+  min-width: 0;
+  min-height: 40px;
+  padding: 4px 2px;
+  border-radius: 6px;
+}
+
+.authorization-row:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.authorization-actions {
+  padding: 8px 16px 14px;
+}
+
+.user-input-single-head {
+  padding: 14px 17px 0;
+}
+
+.user-input-question {
+  padding: 12px 17px 14px;
+}
+
+.authorization-head strong,
+.user-input-question-head strong {
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.authorization-group-head strong,
+.authorization-target,
+.authorization-view,
+.authorization-actions button,
+.user-input-option b,
+.user-input-question-actions button,
+.user-input-reconcile button {
+  font-size: 14px;
+}
+
+.authorization-head span,
+.authorization-group-head span,
+.authorization-kind,
+.authorization-stats,
+.user-input-reason,
+.user-input-progress,
+.user-input-question-progress,
+.user-input-question-head em,
+.user-input-option small,
+.user-input-reconcile p {
+  font-size: 12px;
+}
+
+.user-input-text,
+.user-input-other {
+  min-height: 38px;
+  font-size: 16px;
+}
+
+.user-input-question-layout {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.user-input-question-content {
+  min-width: 0;
+}
+
+.user-input-question-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.user-input-question-progress {
+  display: inline;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+.user-input-question-head + .user-input-reason {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.user-input-question-content > .user-input-question-body,
+.user-input-question-content > .user-input-question-actions {
+  margin-left: 0;
+}
+
+.user-input-progress {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.user-input-recommended {
+  display: inline;
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: inherit;
+  vertical-align: baseline;
+}
+
+.user-input-option {
+  min-height: 42px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  transition: background .15s ease, box-shadow .15s ease;
+}
+
+.user-input-option:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.user-input-option:has(input:checked) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent-bg) 72%, transparent);
+}
+
+.user-input-option:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: .68;
+}
+
+.user-input-option > span {
+  min-width: 0;
+}
+
+.user-input-option b,
+.user-input-option small {
+  overflow-wrap: anywhere;
+}
+
+.user-input-other-wrap {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.user-input-other {
+  min-height: 42px;
+  max-height: 88px;
+  padding: 8px 9px;
+  resize: none;
+  overflow-y: hidden;
+}
+
+.user-input-other-count {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.authorization-reject-all,
+.user-input-skip {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.authorization-reject-all:hover,
+.user-input-skip:hover {
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.authorization-approve,
+.user-input-confirm {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+}
+
+.authorization-collapsed-bar:focus-visible,
+.authorization-collapse:focus-visible,
+.authorization-select-all input:focus-visible,
+.authorization-view:focus-visible,
+.authorization-actions button:focus-visible,
+.authorization-group input:focus-visible,
+.authorization-row > input:focus-visible,
+.user-input-option:has(input:focus-visible),
+.user-input-text:focus-visible,
+.user-input-other:focus-visible,
+.user-input-question-actions button:focus-visible,
+.user-input-reconcile button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.user-input-text:focus,
+.user-input-text:focus-visible,
+.user-input-other:focus,
+.user-input-other:focus-visible {
+  border-color: var(--accent) !important;
+  outline: none;
+  box-shadow: none;
+}
+
+.authorization-row.is-submitting {
+  cursor: progress;
+  opacity: .58;
+}
+
+.authorization-approve:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.user-input-question-actions button:disabled,
+.user-input-reconcile button:disabled {
+  cursor: progress;
+  opacity: .5;
+}
+
+.user-input-reconcile {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 15px 17px;
+}
+
+.user-input-reconcile p {
+  min-width: 0;
+  margin: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.user-input-summary-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.user-input-summary-head > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.user-input-summary-answers {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.user-input-summary-answer {
+  display: block;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.user-input-summary-answers.is-collapsed {
+  max-height: calc(1.5em * 3);
+  overflow: hidden;
+}
+
+.user-input-summary-answers.is-expanded {
+  max-height: none;
+  overflow: visible;
+}
+
+.user-input-summary-toggle {
+  display: inline-flex;
+  min-height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.user-input-summary-toggle:hover {
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.user-input-summary-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.user-input-summary-chevron {
+  width: 5px;
+  height: 5px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  transform-origin: center;
+}
+
+.user-input-summary-toggle[aria-expanded="true"] .user-input-summary-chevron {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
