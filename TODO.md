@@ -190,8 +190,14 @@ _上次更新：2026-08-30_
 ### CODE-011 · 统一委托 Context Envelope
 
 - **类型 / 优先级 / 风险**：Agent 架构 / P1 / STRICT
-- **下一动作**：为模型子任务与用户并行任务定义受限、可预算、可审计的上下文边界、继承规则和敏感信息过滤。
-- **完成定义**：普通/并行/Child 的上下文最小且可解释，预算、授权和隔离可验证，旧 AgentRun/会话兼容并可回退。
+- **当前事实**：模型 `task` Child 当前只有专用 system prompt 与 `task.prompt`；用户显式 `/parallel` 后台任务当前只有主任务开头约 150 字与新请求。两路已分别沿既有路径继承模型路由、permission / tool、workspace、上下文上限和恢复边界，但尚无统一、版本化的任务语义 Envelope。
+- **兼容基线**：`CODE-052` 已完成普通主 / 子 worker 无固定模型轮次终止，旧 `maxRounds=5/8` 只作兼容读取且无需迁移；该事实不属于本项未完成工作。Envelope 的 Token / 字节 / 条目 / 证据预算不得重新解释为 5 / 8 轮硬上限，也不得削弱用户取消、工具预算、重复失败 / 副作用和无进展保护。
+- **下一动作**：设计由服务端白名单唯一构建、模型 Child 与用户显式并行任务共用的版本化 Envelope；模型或前端只提交任务意图 / 提示，不得自行选择敏感字段。待冻结内容至少覆盖子任务目标、父目标 / 阶段、已确认事实与决策、相关文件 / 生成资产的受控身份和来源、少量可见轮次、约束、预期输出，以及 permission / tool / workspace / route 快照。
+- **安全与预算边界**：Envelope 不得包含 Key、Authorization、workbar 登录 Token、隐藏推理、内部凭据、原始敏感工具输出或无关完整会话；必须定义独立 Token / 字节 / 条目预算、确定性裁剪优先级、每项来源与省略原因、schema 版本和摘要。Envelope 不能扩大父任务的权限、工具、工作区、模型路由，或图片 / PPT 等 Child 隔离边界。
+- **兼容与恢复**：旧 AgentRun / 会话没有 Envelope 字段时继续旧行为且不批量迁移；新 Child / background 在 reload、服务重启与恢复中复用同一冻结 Envelope，不重新读取已经变化的父上下文。
+- **阶段顺序**：先按当前 v0.6.6 调用图重基线旧设计并冻结协议，再接入模型 Child，再接入 `/parallel` 与 checkpoint / recovery，最后完成安全、预算、恢复及 bundle / direct classic 验收；每一实施阶段均须另行取得 STRICT 审批，本阶段不启动实现。
+- **完成定义**：服务端版本化 Envelope 成为两类委托的唯一任务语义事实源，白名单、预算、确定性裁剪、来源 / 省略说明、摘要与权限不扩张均有可复核证据；旧记录继续兼容，新记录跨 reload / 重启稳定复用冻结 Envelope，模型 Child 与 `/parallel` 的安全、恢复和双入口验收闭合，且不改变 `CODE-052` 已完成的无固定模型轮次语义。
+- **related**：[`CODE-020`](#code-020--agentrun-生命周期-hook)、[`CODE-026`](#code-026--不同会话-agent-通信能力调研)
 
 ### CODE-020 · AgentRun 生命周期 Hook
 
