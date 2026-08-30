@@ -27552,7 +27552,8 @@ class Code043CompactDisclosureTests(unittest.TestCase):
 
     def compact_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        source = STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return source.split("/* CODE-043 phase 2: flat edit suggestions */", 1)[0]
 
     @staticmethod
     def rule(source, selector):
@@ -27727,6 +27728,177 @@ class Code043CompactDisclosureTests(unittest.TestCase):
             'command: "code043-compact-disclosures-selfcheck"',
             "3010",
             "3011",
+        ):
+            self.assertNotIn(forbidden, source)
+
+
+class Code043DiffSuggestionFlatteningTests(unittest.TestCase):
+    MARKER = "/* CODE-043 phase 2: flat edit suggestions */"
+    CODE_SURFACE_GROUP = (
+        ".edit-suggestion .tool-edit-diff .diff-block,\n"
+        ".edit-suggestion .tool-edit-diff .write-file-preview {"
+    )
+    SUPPORTING_TYPE_GROUP = (
+        ".edit-suggestion .tool-edit-title,\n"
+        ".edit-suggestion .tool-edit-status,\n"
+        ".edit-suggestion .diff-stat,\n"
+        ".edit-suggestion .edit-diff-toggle {"
+    )
+    CODE_TYPE_GROUP = (
+        ".edit-suggestion .diff-lines,\n"
+        ".edit-suggestion .diff-line,\n"
+        ".edit-suggestion .write-file-preview code {"
+    )
+    STATUS_GROUP = (
+        ".edit-suggestion .tool-edit-status,\n"
+        ".edit-suggestion .tool-edit-status.is-review,\n"
+        ".edit-suggestion .tool-edit-status.is-applied,\n"
+        ".edit-suggestion .tool-edit-status.is-rejected {"
+    )
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    @staticmethod
+    def last_rule(source, selector):
+        start = source.rindex(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_outer_card_and_header_are_flat_while_authorization_ring_remains(self):
+        source = self.phase_source()
+        for selector in (
+            ".edit-suggestion .tool-edit-card {",
+            ".edit-suggestion .tool-edit-head {",
+        ):
+            rule = self.rule(source, selector)
+            for declaration in (
+                "border: 0;",
+                "background: transparent;",
+                "box-shadow: none;",
+            ):
+                self.assertIn(declaration, rule)
+        head = self.rule(source, ".edit-suggestion .tool-edit-head {")
+        self.assertIn("border-radius: 0;", head)
+        focus_head = self.rule(
+            source,
+            ".edit-suggestion.is-authorization-view-target .tool-edit-head {",
+        )
+        self.assertIn("background: transparent;", focus_head)
+        self.assertIn(
+            ".edit-suggestion.is-authorization-view-target .tool-edit-card",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            "box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 26%, transparent);",
+            STYLE_SOURCE,
+        )
+
+    def test_diff_code_area_is_the_only_persistent_visual_surface(self):
+        rule = self.rule(self.phase_source(), self.CODE_SURFACE_GROUP)
+        for declaration in (
+            "border: 0;",
+            "border-radius: 8px;",
+            "background: var(--code-bg);",
+            "box-shadow: none;",
+        ):
+            self.assertIn(declaration, rule)
+        self.assertIn(".diff-stat-add { color: var(--green); }", STYLE_SOURCE)
+        self.assertIn(".diff-stat-remove { color: var(--red); }", STYLE_SOURCE)
+        self.assertIn(".diff-add,", STYLE_SOURCE)
+        self.assertIn(".diff-remove,", STYLE_SOURCE)
+        self.assertIn(".diff-hunk {", STYLE_SOURCE)
+
+    def test_filename_supporting_metadata_and_code_use_the_frozen_scale(self):
+        source = self.phase_source()
+        target = self.rule(source, ".edit-suggestion .tool-edit-target {")
+        supporting = self.rule(source, self.SUPPORTING_TYPE_GROUP)
+        code = self.rule(source, self.CODE_TYPE_GROUP)
+        self.assertIn("font-size: 14px;", target)
+        self.assertIn("font-size: 12px;", supporting)
+        self.assertIn("font-size: 14px;", code)
+
+        existing_target = self.rule(STYLE_SOURCE, ".tool-edit-target {")
+        for declaration in (
+            "min-width: 0;",
+            "overflow: hidden;",
+            "text-overflow: ellipsis;",
+            "white-space: nowrap;",
+        ):
+            self.assertIn(declaration, existing_target)
+        self.assertRegex(
+            STYLE_SOURCE,
+            r"\.tool-edit-summary\s*\{[^}]*flex:\s*0\s+0\s+auto;",
+        )
+
+    def test_statuses_are_text_only_and_keep_semantic_colors(self):
+        source = self.phase_source()
+        status = self.rule(source, self.STATUS_GROUP)
+        for declaration in (
+            "padding: 0;",
+            "border: 0;",
+            "border-radius: 0;",
+            "background: transparent;",
+        ):
+            self.assertIn(declaration, status)
+        self.assertIn(
+            ".tool-edit-status.is-review { color: var(--accent);",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".tool-edit-status.is-applied { color: var(--green);",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".tool-edit-status.is-rejected { color: var(--red);",
+            STYLE_SOURCE,
+        )
+
+    def test_disclosure_is_borderless_compact_and_keyboard_visible(self):
+        source = self.phase_source()
+        toggle = self.last_rule(source, ".edit-suggestion .edit-diff-toggle {")
+        for declaration in (
+            "min-height: 24px;",
+            "border: 0;",
+            "background: transparent;",
+        ):
+            self.assertIn(declaration, toggle)
+        hover = self.rule(source, ".edit-suggestion .edit-diff-toggle:hover {")
+        self.assertIn("background: transparent;", hover)
+        self.assertIn("text-decoration: underline;", hover)
+        chevron = self.rule(source, ".edit-suggestion .edit-diff-toggle-chevron {")
+        for declaration in (
+            "width: 5px;",
+            "height: 5px;",
+            "border-right: 1.4px solid currentColor;",
+            "border-bottom: 1.4px solid currentColor;",
+        ):
+            self.assertIn(declaration, chevron)
+        self.assertIn(".edit-diff-toggle:focus-visible", STYLE_SOURCE)
+        self.assertIn('aria-expanded="${diffExpanded}"', DIFF_SOURCE)
+
+    def test_phase_is_strictly_scoped_away_from_other_surfaces(self):
+        source = self.phase_source()
+        self.assertNotIn("@media", source)
+        self.assertNotRegex(source, r"(?m)^\.(?!edit-suggestion)")
+        for forbidden in (
+            ".settings",
+            ".session-search",
+            ".archived-session",
+            ".modal",
+            ".notification",
+            ".onboarding",
+            ".preview-pane",
+            ".user-bubble",
+            ".tool-process",
+            ".authorization-panel",
         ):
             self.assertNotIn(forbidden, source)
 

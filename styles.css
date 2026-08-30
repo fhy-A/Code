@@ -10475,3 +10475,103 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .tool-process-item[open] > summary .tool-process-chevron {
   transform: rotate(45deg);
 }
+
+/* CODE-043 phase 2: flat edit suggestions */
+.edit-suggestion .tool-edit-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.edit-suggestion .tool-edit-head {
+  min-height: 36px;
+  padding: 0 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.edit-suggestion.is-authorization-view-target .tool-edit-head {
+  background: transparent;
+}
+
+.edit-suggestion .tool-edit-heading {
+  flex: 1 1 auto;
+}
+
+.edit-suggestion .tool-edit-target {
+  font-size: 14px;
+}
+
+.edit-suggestion .tool-edit-title,
+.edit-suggestion .tool-edit-status,
+.edit-suggestion .diff-stat,
+.edit-suggestion .edit-diff-toggle {
+  font-size: 12px;
+}
+
+.edit-suggestion .tool-edit-status,
+.edit-suggestion .tool-edit-status.is-review,
+.edit-suggestion .tool-edit-status.is-applied,
+.edit-suggestion .tool-edit-status.is-rejected {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.edit-suggestion .tool-edit-head .msg-copy-btn {
+  border-color: transparent;
+  background: transparent;
+}
+
+.edit-suggestion .tool-edit-head .msg-copy-btn:hover,
+.edit-suggestion .tool-edit-head .msg-copy-btn:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+}
+
+.edit-suggestion .edit-diff-toggle {
+  min-height: 24px;
+  gap: 5px;
+  padding: 2px 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.edit-suggestion .edit-diff-toggle:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.edit-suggestion .edit-diff-toggle-chevron {
+  width: 5px;
+  height: 5px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+}
+
+.edit-suggestion .tool-edit-diff {
+  padding: 8px 0 0;
+}
+
+.edit-suggestion .tool-edit-diff .diff-block,
+.edit-suggestion .tool-edit-diff .write-file-preview {
+  border: 0;
+  border-radius: 8px;
+  background: var(--code-bg);
+  box-shadow: none;
+}
+
+.edit-suggestion .diff-lines,
+.edit-suggestion .diff-line,
+.edit-suggestion .write-file-preview code {
+  font-size: 14px;
+}
