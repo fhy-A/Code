@@ -169,11 +169,11 @@ _上次更新：2026-08-30_
 - **下一动作**：后续另行分析真实站点 favicon 仍不完整、部分站点稳定回落地球图标的来源，区分站点本身无有效图标、既有 provider 覆盖不足、上游超时与安全策略拒绝，再决定是否值得增加受控 provider 或脱敏诊断；不得预设放宽 SSRF、浏览器直连、HTML discovery、图片校验或无限重试。本轮已完成的同源安全代理增强、1×1 退化图拒绝、临时失败恢复、客户端 4 槽 FIFO 与统一 tooltip 继续保留，不在本轮继续追修。
 - **完成定义**：代表性真实站点在不弱化 DNS/IP/redirect/TLS/MIME/magic/大小等安全边界、不引入浏览器第三方直连或请求风暴的前提下，可稳定恢复真实 favicon；稳定无效站点有可解释地球图标回退。正负缓存、容量淘汰、同 host 合并、刷新/重绘、临时失败恢复和 provider 覆盖有确定性证据；外链与本地文件共用唯一无原生 `title` 重叠的自定义 tooltip，并通过 bundle/direct classic、主题、窄屏、刷新及真实站点人工验收。
 
-### CODE-012 · 模型上下文上限事实源
+### CODE-012 · 连接级上下文能力覆盖与校准管理
 
 - **类型 / 优先级 / 风险**：能力与配置 / P1 / STRICT
-- **下一动作**：按 [`docs/context-window-budget-development-guide.md`](docs/context-window-budget-development-guide.md) 对尚未实现的 connection-specific verified override 另行决策/调研：明确可信配置入口、权限、同 scope 冲突合并、删除与回退；同时决定现有自动校准记录的用户可见检查和显式重置入口。D-lite 自动向下校准已经完成，未经新审批不扩展为人工提高或强制覆盖。
-- **完成定义**：连接级覆盖有唯一可信入口、权限和可解释的冲突/删除回退；用户可在不暴露 Key、指纹、原始错误或内部路径的前提下检查校准来源/有效期并显式重置，删除、过期或重置后安全回到 metadata → official → family/unknown 能力链。
+- **下一动作**：既有服务端唯一 resolver、官方能力目录、设置页“最大上下文窗口”、AgentRun 能力冻结及 desired `contextBudgetTokens` / actual `contextLimit` 分离、D-lite 自动向下校准均已完成，后续不重复实施。未完成工作仅限两组：connection-specific verified override 的可信入口、权限、同 scope 冲突合并与删除回退；自动校准记录的脱敏查看、来源 / 有效期检查和显式重置。底层 `ContextCalibrationStore.reset()` 已存在但没有用户 API / UI，verified override 也尚未实现，不得把校准重置、专家覆盖或人工提高能力描述为现有功能。
+- **完成定义**：连接级 verified override 具备唯一可信入口和明确权限，同 scope 冲突可解释合并，删除后安全回退；用户可通过受控 API / UI 脱敏查看自动校准的来源与有效期并显式重置，且不暴露 Key、指纹、原始错误或内部路径。覆盖删除、过期或重置后必须安全回到 metadata → official → family / unknown 能力链，并以独立验证证明权限、冲突、回退和脱敏边界。
 
 ### CODE-007 · Agent 剪贴板工具
 
