@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-30 | `CODE-035` 多分组路由待办完成映射：既有 `CODE-046` Route Registry 与提交 `6655055` 已以 `connectionId + modelId` 生成不透明 `routeRef`，为每个 Workbar `platformTokenId` 建立独立 `wc1_` 连接，并闭合同名模型精确选择、reload 持久化及禁用连接零跨组回退；后续 Key 删除 / 禁用即时撤销证据补强 fail-closed 边界。`modelKeyMap` 仅保留为 `routing_v1` 回退兼容，不是 `routing_v2` 权威事实；本次只做文档收口，未使用真实 Key、模型或外网 | [查看](2026/2026-08-30.md) |
 | 2026-08-29 | `CODE-051` 更新下载状态恢复与重复任务防护完成：官方 Release 固定资产的 name/URL/size/SHA-256 形成服务端可信描述，同版本/目标 single-flight 与版本化原子 sidecar 保证设置页/服务重启接管同一 job；严格 Range/Content-Range/ETag 有界续传，size/digest/PE/非 reparse 单链接路径校验后才发布，restart 只接受已验证 job 且只启动一次。前端 generation 清除旧 poll 并投影下载、失败重试、完成、安装及 installed 状态；直接矩阵 `23 passed`、前端 `295 passed`、server/security/dev-server `362 passed`，构建/freshness 与语法/diff 通过 | [查看](2026/2026-08-29.md) |
 | 2026-08-29 | Code 开发任务复用与命名规则正式收口：小任务、单个阶段和正式发布完成继续复用当前开发任务；只有累计多个中大型任务并出现真实上下文/恢复问题时才建议轮换，新建仍需用户明确授权。开发任务标题固定为 `code开发·[目前具体任务]`，阶段切换只重命名原任务；根目录与 `code` 四份协作规则已同步，当前任务继续承接 `CODE-051` | [查看](2026/2026-08-29.md) |
 | 2026-08-29 | `CODE-052` 子 Agent 固定轮次语义收敛：持久 Child 的兼容 `maxRounds` 改为原样继承父 Run，不再专属夹到 8；普通主/子 worker 均无固定模型轮次终止，旧 5/8 记录无需迁移且可在重启后跨界继续。全仓调用图证明旧同步 `run_subagent` 5 轮实现无产品/API/插件调用者后删除；AgentRuntime `137 passed + 81 subtests`，Goal/server/Session/协议/取消相关扩大回归 `398 passed + 245 subtests`，doctor `10/10` | [查看](2026/2026-08-29.md) |
