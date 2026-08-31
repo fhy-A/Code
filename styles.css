@@ -4412,14 +4412,34 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .project-header {
+  --project-action-surface: var(--panel);
   display: flex;
   align-items: center;
+  position: relative;
   min-height: 32px;
-  padding: 4px 5px 4px 6px;
+  padding: 0;
   border-radius: 6px;
-  cursor: pointer;
   user-select: none;
   color: var(--text);
+  gap: 0;
+}
+
+.project-toggle {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 32px;
+  width: 100%;
+  padding: 4px 5px 4px 6px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   gap: 4px;
 }
 
@@ -4458,16 +4478,53 @@ body.theme-dark .syn-fn { color: #61afef; }
   color: var(--muted);
 }
 
-.project-header-action {
-  width: 22px;
-  height: 22px;
+.project-header > .project-new-session {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  z-index: 2;
+  min-width: var(--shell-control-sm);
+  min-height: var(--shell-control-sm);
+  width: var(--shell-control-sm);
+  height: var(--shell-control-sm);
+  transform: translateY(-50%);
   opacity: 0;
   font-size: 15px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
-.project-header:hover .project-header-action,
-.project-header-action:focus-visible {
+.project-header > .project-new-session::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 -16px;
+  z-index: -1;
+  border-radius: 5px;
+  background: var(--project-action-surface);
+  pointer-events: none;
+}
+
+.project-header:hover,
+.project-header:focus-within {
+  --project-action-surface: color-mix(in srgb, var(--panel-2) 78%, var(--panel));
+  background: var(--project-action-surface);
+}
+
+.project-header:hover > .project-new-session,
+.project-header:focus-within > .project-new-session,
+.project-header > .project-new-session:focus-visible {
   opacity: 1;
+}
+
+.project-header > .project-new-session:hover {
+  background: transparent;
+}
+
+.project-header > .project-new-session:focus-visible {
+  background: transparent;
+  outline: 2px solid color-mix(in srgb, var(--accent) 68%, transparent);
+  outline-offset: -2px;
 }
 
 .project-children.collapsed {
@@ -4523,7 +4580,42 @@ body.theme-dark .syn-fn { color: #61afef; }
   white-space: nowrap;
 }
 
+.project-toggle > .project-name {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.project-toggle > .project-name > .project-name-scroll-text {
+  display: inline-block;
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
+  transform: translateX(0);
+  transition: none;
+  white-space: nowrap;
+}
+
 .session-main > .session-title-text.is-overflowing:not(.is-scroll-complete) {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+.project-toggle > .project-name.is-overflowing:not(.is-scroll-complete) {
   -webkit-mask-image: linear-gradient(
     to right,
     #000 0,
@@ -4545,8 +4637,18 @@ body.theme-dark .syn-fn { color: #61afef; }
   transition: transform var(--session-title-scroll-duration) linear;
 }
 
+.project-name.is-scrolling > .project-name-scroll-text {
+  transform: translateX(calc(-1 * var(--session-title-scroll-distance)));
+  transition: transform var(--session-title-scroll-duration) linear;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .session-title-text.is-scrolling > .session-title-scroll-text {
+    transition: none !important;
+    transform: translateX(0) !important;
+  }
+
+  .project-name.is-scrolling > .project-name-scroll-text {
     transition: none !important;
     transform: translateX(0) !important;
   }
@@ -4728,6 +4830,15 @@ body.theme-dark .syn-fn { color: #61afef; }
   overflow: visible;
 }
 
+.project-pin-indicator .pin-icon {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.9;
+  transform: rotate(38deg);
+  transform-origin: center;
+  overflow: visible;
+}
+
 .session-row.active .session-pin-badge {
   color: color-mix(in srgb, var(--accent) 72%, var(--muted));
 }
@@ -4758,7 +4869,9 @@ body.theme-dark .syn-fn { color: #61afef; }
 .project-context-menu {
   position: fixed;
   z-index: 200;
-  min-width: 132px;
+  width: max-content;
+  min-width: 108px;
+  max-width: min(220px, calc(100vw - 16px));
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -4772,7 +4885,8 @@ body.theme-dark .syn-fn { color: #61afef; }
 .project-context-item {
   display: block;
   width: 100%;
-  padding: 6px 12px;
+  min-height: 30px;
+  padding: 6px 10px;
   font-size: 12px;
   text-align: left;
   border: none;
@@ -4780,14 +4894,21 @@ body.theme-dark .syn-fn { color: #61afef; }
   color: var(--text);
   cursor: pointer;
   border-radius: 4px;
+  white-space: nowrap;
 }
 
-.project-context-item:hover {
-  background: var(--panel-1);
+.project-context-item:hover,
+.project-context-item:focus-visible {
+  background: color-mix(in srgb, var(--text) 10%, var(--panel-2));
+}
+
+.project-context-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 62%, transparent);
+  outline-offset: -2px;
 }
 
 @media (hover: none), (max-width: 700px) {
-  .project-header-action {
+  .project-header > .project-new-session {
     opacity: 1;
   }
 
@@ -10089,13 +10210,24 @@ body.theme-dark .chat-pane.empty-chat .composer {
 
 .project-header {
   min-height: 34px;
-  gap: 5px;
-  padding: 3px 5px;
+  gap: 0;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: var(--shell-radius-sm);
 }
 
+.project-toggle {
+  min-height: 32px;
+  gap: 5px;
+  padding: 3px 5px;
+}
+
 .project-header:hover,
+.project-header:focus-within {
+  border-color: color-mix(in srgb, var(--line) 76%, transparent);
+  background: var(--project-action-surface);
+}
+
 .project-block.pending-project > .project-header {
   border-color: color-mix(in srgb, var(--line) 76%, transparent);
   background: var(--shell-state-hover);
@@ -10448,7 +10580,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .session-search-trigger:focus-visible,
 .new-session-bar:focus-visible,
 .project-create-btn:focus-visible,
-.project-header:focus-visible,
+.project-toggle:focus-visible,
 .project-header-action:focus-visible,
 .session-main:focus-visible,
 .section-head:focus-visible,

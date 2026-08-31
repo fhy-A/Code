@@ -5005,6 +5005,15 @@ function refreshSessionStatusSlot(sessionId) {
 }
 
 const sessionTitleMarquee = createSessionTitleMarqueeController();
+const projectTitleMarquee = createSessionTitleMarqueeController({
+  innerSelector: ":scope > .project-name-scroll-text",
+  getOperationSurfaceLeft(title) {
+    const header = title?.closest?.(".project-header");
+    const firstAction = header?.querySelector?.(".project-header-action");
+    const left = Number(firstAction?.getBoundingClientRect?.().left);
+    return Number.isFinite(left) ? left : Number.NaN;
+  },
+});
 let sessionTitleOverflowFrame = 0;
 
 function cancelSessionTitleOverflowRefresh() {
@@ -5020,6 +5029,9 @@ function scheduleSessionTitleOverflowRefresh() {
     sessionTitleOverflowFrame = 0;
     sessionTitleMarquee.refresh(
       els.sessionList?.querySelectorAll(".session-title-text") || [],
+    );
+    projectTitleMarquee.refresh(
+      els.sessionList?.querySelectorAll(".project-name") || [],
     );
   });
   return sessionTitleOverflowFrame;
@@ -5081,25 +5093,25 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   const headerTitle = isUnassigned
     ? t("unassignedSessionsHint")
     : projectRootPaths(project).join("\n");
+  const projectNameAria = [name, headerTitle].filter(Boolean).join("\n");
   html += '<div class="project-header" data-project-key="' + escapeHtml(sectionKey) + '"' +
-    (projectId ? ' data-project-id="' + escapeHtml(projectId) + '"' : '') +
-    (headerTitle ? ' title="' + escapeHtml(headerTitle) + '"' : '') + '>';
+    (projectId ? ' data-project-id="' + escapeHtml(projectId) + '"' : '') + '>';
+  html += '<button class="project-toggle" type="button" aria-expanded="' +
+    String(!collapsed) + '" aria-label="' + escapeHtml(projectNameAria) + '">';
   html += '<span class="project-arrow">' +
     uiIcon(collapsed ? "chevronRight" : "chevronDown", 14, "shell-action-icon") + '</span>';
   if (isProjectPinned) {
     html += '<span class="project-pin-indicator" title="' + t("pinnedLabel") +
       '">' + renderPinIcon() + '</span>';
   }
-  html += '<span class="project-name">' + escapeHtml(name) + '</span>';
+  html += '<span class="project-name">' +
+    '<span class="project-name-scroll-text">' + escapeHtml(name) + '</span></span>';
+  html += '</button>';
   if (!isUnassigned) {
     html += '<button class="project-header-action project-new-session" type="button" data-project-id="' +
       escapeHtml(projectId) + '" title="' + t("newSessionInProject") +
       '" aria-label="' + t("newSessionInProject") + '">' +
       uiIcon("plus", 15, "shell-action-icon") + '</button>';
-    html += '<button class="project-header-action project-more-btn" type="button" data-project-id="' +
-      escapeHtml(projectId) + '" title="' + t("projectActions") +
-      '" aria-label="' + t("projectActions") + '">' +
-      uiIcon("more", 16, "shell-action-icon") + '</button>';
   }
   html += '</div>';
   html += '<div class="project-children' + (collapsed ? ' collapsed' : '') +
@@ -5126,6 +5138,7 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
 function renderSessions() {
   cancelSessionTitleOverflowRefresh();
   sessionTitleMarquee.reset();
+  projectTitleMarquee.reset();
   attachSessionTitleMarqueeListeners();
   const projects = orderProjects(state.projects, getPinnedProjects());
   if (!state.sessions.length && !projects.length) {
@@ -5249,24 +5262,68 @@ function renderSessions() {
   scheduleSessionTitleOverflowRefresh();
 }
 
-function openProjectContextMenu(projectId, rect) {
+function resolveProjectContextMenuPosition(anchor = {}, menuSize = {}, viewport = {}, margin = 8) {
+  const offset = 2;
+  const viewportWidth = Math.max(0, Number(viewport.width) || 0);
+  const viewportHeight = Math.max(0, Number(viewport.height) || 0);
+  const menuWidth = Math.max(0, Number(menuSize.width) || 0);
+  const menuHeight = Math.max(0, Number(menuSize.height) || 0);
+  const anchorX = Number(anchor.x) || 0;
+  const anchorY = Number(anchor.y) || 0;
+  const maxLeft = Math.max(margin, viewportWidth - margin - menuWidth);
+  const maxTop = Math.max(margin, viewportHeight - margin - menuHeight);
+  const left = Math.min(Math.max(anchorX, margin), maxLeft);
+  let top = anchorY + offset;
+  let flipped = false;
+  if (top + menuHeight > viewportHeight - margin) {
+    top = anchorY - menuHeight - offset;
+    flipped = true;
+  }
+  top = Math.min(Math.max(top, margin), maxTop);
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    flipped,
+  };
+}
+
+function openProjectContextMenu(projectId, anchor = {}) {
   closeProjectMenus();
   const isPinned = getPinnedProjects().includes(projectId);
   const menu = document.createElement("div");
   menu.className = "project-context-menu";
-  menu.style.left = rect.left + "px";
-  menu.style.top = (rect.bottom + 2) + "px";
-  menu.innerHTML = '<button class="project-context-item" data-action="edit">' + t("editProject") + '</button>' +
-    '<button class="project-context-item" data-action="pin">' +
+  menu.setAttribute("role", "menu");
+  menu.style.left = "-10000px";
+  menu.style.top = "-10000px";
+  menu.style.visibility = "hidden";
+  menu.innerHTML = '<button class="project-context-item" type="button" role="menuitem" data-action="edit">' + t("editProject") + '</button>' +
+    '<button class="project-context-item" type="button" role="menuitem" data-action="pin">' +
     (isPinned ? t("unpin") : t("pin")) + '</button>';
+  projectMenuReturnFocus = anchor.returnFocus || null;
   menu.querySelectorAll(".project-context-item").forEach((item) => {
     item.addEventListener("click", () => {
+      closeProjectMenus();
       if (item.dataset.action === "edit") openProjectEditModal(projectId);
       if (item.dataset.action === "pin") togglePinProject(projectId);
-      menu.remove();
     });
   });
   document.body.appendChild(menu);
+  const menuRect = menu.getBoundingClientRect();
+  const position = resolveProjectContextMenuPosition(
+    { x: anchor.x, y: anchor.y },
+    { width: menuRect.width, height: menuRect.height },
+    {
+      width: document.documentElement.clientWidth || window.innerWidth,
+      height: document.documentElement.clientHeight || window.innerHeight,
+    },
+  );
+  menu.style.left = position.left + "px";
+  menu.style.top = position.top + "px";
+  menu.style.visibility = "visible";
+  if (anchor.focusFirst) {
+    menu.querySelector('[role="menuitem"]')?.focus({ preventScroll: true });
+  }
+  return menu;
 }
 
 function attachSessionTitleMarqueeListeners() {
@@ -5275,43 +5332,72 @@ function attachSessionTitleMarqueeListeners() {
   root._sessionTitleMarqueeBound = true;
 
   const titleFromEvent = (event) => {
-    const title = event.target?.closest?.(".session-title-text");
+    const title = event.target?.closest?.(".session-title-text, .project-name");
     return title && root.contains(title) ? title : null;
   };
+  const controllerForTitle = (title) => (
+    title?.matches?.(".project-name") ? projectTitleMarquee : sessionTitleMarquee
+  );
   root.addEventListener("mouseover", (event) => {
     const title = titleFromEvent(event);
     if (!title || title.contains(event.relatedTarget)) return;
-    sessionTitleMarquee.enter(title);
+    controllerForTitle(title).enter(title);
   });
   root.addEventListener("mouseout", (event) => {
     const title = titleFromEvent(event);
     if (!title || title.contains(event.relatedTarget)) return;
-    sessionTitleMarquee.leave(title);
+    controllerForTitle(title).leave(title);
   });
   root.addEventListener("transitionend", (event) => {
     const title = titleFromEvent(event);
-    if (title) sessionTitleMarquee.finish(title, event);
+    if (title) controllerForTitle(title).finish(title, event);
   });
   return true;
 }
 
 function attachProjectSessionListeners() {
+  const toggleProjectHeader = (header) => {
+    const projectKey = header.dataset.projectKey;
+    if (!projectKey) return false;
+    let collapsed = {};
+    try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-projects") || "{}"); } catch (e) {}
+    collapsed[projectKey] = !collapsed[projectKey];
+    localStorage.setItem("code-collapsed-projects", JSON.stringify(collapsed));
+    renderSessions();
+    return true;
+  };
+
   document.querySelectorAll(".project-header").forEach((header) => {
-    header.addEventListener("click", (event) => {
-      if (event.target.closest(".project-header-action")) return;
-      const projectKey = header.dataset.projectKey;
-      if (!projectKey) return;
-      let collapsed = {};
-      try { collapsed = JSON.parse(localStorage.getItem("code-collapsed-projects") || "{}"); } catch (e) {}
-      collapsed[projectKey] = !collapsed[projectKey];
-      localStorage.setItem("code-collapsed-projects", JSON.stringify(collapsed));
-      renderSessions();
+    const toggle = header.querySelector(".project-toggle");
+    toggle?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleProjectHeader(header);
     });
     header.addEventListener("contextmenu", (event) => {
       const projectId = header.dataset.projectId;
       if (!projectId) return;
       event.preventDefault();
-      openProjectContextMenu(projectId, header.getBoundingClientRect());
+      openProjectContextMenu(projectId, {
+        x: event.clientX,
+        y: event.clientY,
+        returnFocus: toggle,
+        focusFirst: false,
+      });
+    });
+    toggle?.addEventListener("keydown", (event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        const projectId = header.dataset.projectId;
+        if (!projectId) return;
+        event.preventDefault();
+        const nameRect = header.querySelector(".project-name")?.getBoundingClientRect() ||
+          header.getBoundingClientRect();
+        openProjectContextMenu(projectId, {
+          x: nameRect.left,
+          y: nameRect.bottom,
+          returnFocus: toggle,
+          focusFirst: true,
+        });
+      }
     });
   });
 
@@ -5319,16 +5405,6 @@ function attachProjectSessionListeners() {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       beginNewConversation(button.dataset.projectId || null);
-    });
-  });
-
-  document.querySelectorAll(".project-more-btn").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openProjectContextMenu(
-        button.dataset.projectId,
-        button.getBoundingClientRect(),
-      );
     });
   });
 
@@ -5371,8 +5447,15 @@ function closeAllSessionMenus() {
 
 }
 
-function closeProjectMenus() {
+let projectMenuReturnFocus = null;
+
+function closeProjectMenus({ restoreFocus = false } = {}) {
   document.querySelectorAll(".project-context-menu").forEach(function (m) { m.remove(); });
+  const returnFocus = projectMenuReturnFocus;
+  projectMenuReturnFocus = null;
+  if (restoreFocus && returnFocus?.isConnected) {
+    returnFocus.focus({ preventScroll: true });
+  }
 }
 
 let editingProjectId = null;
@@ -5589,11 +5672,17 @@ function projectIdForNewConversation() {
 
 // Close any context menu on outside click
 document.addEventListener("click", function (e) {
-  if (!e.target.closest(".project-context-menu") && !e.target.closest(".project-header")) {
+  if (!e.target.closest(".project-context-menu")) {
     closeProjectMenus();
   }
   if (!e.target.closest(".session-more-menu") && !e.target.closest(".session-more-btn")) {
     closeAllSessionMenus();
+  }
+});
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape" && document.querySelector(".project-context-menu")) {
+    event.preventDefault();
+    closeProjectMenus({ restoreFocus: true });
   }
 });
 

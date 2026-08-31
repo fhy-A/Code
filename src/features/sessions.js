@@ -158,6 +158,9 @@
     const hoverDelayMs = Math.max(0, Number(options.hoverDelayMs ?? 420) || 0);
     const pixelsPerSecond = Math.max(1, Number(options.pixelsPerSecond ?? 24) || 24);
     const endGapPx = Math.max(0, Number(options.endGapPx ?? 4) || 0);
+    const innerSelector = String(
+      options.innerSelector || ":scope > .session-title-scroll-text",
+    );
     const getOperationSurfaceLeft = options.getOperationSurfaceLeft || ((title) => {
       const row = title?.closest?.(".session-row");
       const moreWrap = row?.querySelector?.(".session-more-wrap");
@@ -177,7 +180,7 @@
     let timerId = null;
 
     function innerFor(title) {
-      return title?.querySelector?.(":scope > .session-title-scroll-text") || null;
+      return title?.querySelector?.(innerSelector) || null;
     }
 
     function clearTimer() {

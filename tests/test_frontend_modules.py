@@ -25631,6 +25631,142 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(data["edge"]["afterLeaveClasses"], [])
         self.assertEqual(data["edge"]["afterLeaveStyle"], {})
 
+    def test_project_title_reuses_marquee_with_an_independent_owner_and_action_boundary(self):
+        script = r"""
+global.window = {setTimeout, clearTimeout};
+require("./src/core/namespace.js");
+require("./src/features/sessions.js");
+const createController = window.Code.features.sessions.createSessionTitleMarqueeController;
+
+function makeClassList() {
+  const values = new Set();
+  return {
+    add(...names) { names.forEach((name) => values.add(name)); },
+    remove(...names) { names.forEach((name) => values.delete(name)); },
+    contains(name) { return values.has(name); },
+    values() { return [...values].sort(); },
+  };
+}
+
+function makeProjectTitle({left, clientWidth, scrollWidth, operationLeft}) {
+  const properties = new Map();
+  const inner = {
+    scrollWidth,
+    getBoundingClientRect: () => ({left, right: left + scrollWidth}),
+  };
+  return {
+    clientWidth,
+    operationLeft,
+    inner,
+    classList: makeClassList(),
+    style: {
+      setProperty(name, value) { properties.set(name, String(value)); },
+      removeProperty(name) { properties.delete(name); },
+      values() { return Object.fromEntries(properties); },
+    },
+    getBoundingClientRect: () => ({left, right: left + clientWidth}),
+    querySelector(selector) {
+      return selector === ":scope > .project-name-scroll-text" ? inner : null;
+    },
+  };
+}
+
+function reducedSample(spec) {
+  const controller = createController({
+    innerSelector: ":scope > .project-name-scroll-text",
+    getOperationSurfaceLeft: (title) => title.operationLeft,
+    prefersReducedMotion: () => true,
+    pixelsPerSecond: 24,
+    endGapPx: 4,
+  });
+  const title = makeProjectTitle(spec);
+  const accepted = controller.enter(title);
+  const style = title.style.values();
+  const distance = Number.parseFloat(style["--session-title-scroll-distance"] || "0");
+  const durationMs = Number.parseFloat(style["--session-title-scroll-duration"] || "0");
+  return {accepted, distance, durationMs, classes: title.classList.values()};
+}
+
+const short = reducedSample({left: 100, clientWidth: 100, scrollWidth: 80, operationLeft: 230});
+const long = reducedSample({left: 100, clientWidth: 100, scrollWidth: 180, operationLeft: 190});
+const pinned = reducedSample({left: 114, clientWidth: 86, scrollWidth: 180, operationLeft: 190});
+const unassigned = reducedSample({left: 100, clientWidth: 100, scrollWidth: 80, operationLeft: Number.NaN});
+
+let nextTimerId = 1;
+const timers = new Map();
+const motionController = createController({
+  innerSelector: ":scope > .project-name-scroll-text",
+  getOperationSurfaceLeft: (title) => title.operationLeft,
+  setTimeout(callback, delay) {
+    const id = nextTimerId++;
+    timers.set(id, {callback, delay});
+    return id;
+  },
+  clearTimeout(id) { timers.delete(id); },
+  prefersReducedMotion: () => false,
+  pixelsPerSecond: 24,
+  endGapPx: 4,
+});
+const motion = makeProjectTitle({left: 100, clientWidth: 100, scrollWidth: 180, operationLeft: 190});
+const staticMarked = motionController.refresh([motion]);
+const entered = motionController.enter(motion);
+const delay = [...timers.values()][0]?.delay || 0;
+const timer = [...timers.entries()][0];
+timer[1].callback();
+timers.delete(timer[0]);
+const finished = motionController.finish(motion, {target: motion.inner, propertyName: "transform"});
+const afterFinish = motion.classList.values();
+const left = motionController.leave(motion);
+
+process.stdout.write(JSON.stringify({
+  short,
+  long,
+  pinned,
+  unassigned,
+  motion: {
+    staticMarked,
+    entered,
+    delay,
+    finished,
+    afterFinish,
+    left,
+    afterLeaveClasses: motion.classList.values(),
+  },
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertFalse(data["short"]["accepted"])
+        self.assertEqual(data["short"]["classes"], [])
+        self.assertFalse(data["unassigned"]["accepted"])
+        self.assertEqual(data["long"]["distance"], 94)
+        self.assertEqual(data["pinned"]["distance"], 108)
+        for name in ("long", "pinned"):
+            sample = data[name]
+            self.assertTrue(sample["accepted"])
+            self.assertAlmostEqual(
+                sample["distance"] / (sample["durationMs"] / 1000),
+                24,
+                places=2,
+            )
+        self.assertEqual(data["motion"]["staticMarked"], 1)
+        self.assertTrue(data["motion"]["entered"])
+        self.assertEqual(data["motion"]["delay"], 420)
+        self.assertTrue(data["motion"]["finished"])
+        self.assertEqual(
+            data["motion"]["afterFinish"],
+            ["is-overflowing", "is-scroll-complete", "is-scrolling"],
+        )
+        self.assertTrue(data["motion"]["left"])
+        self.assertEqual(data["motion"]["afterLeaveClasses"], ["is-overflowing"])
+
     def test_markup_wiring_and_css_preserve_row_ownership(self):
         row_start = APP_SOURCE.index("function renderProjectSessionRow(")
         row_end = APP_SOURCE.index("function renderProjectSection(", row_start)
@@ -25870,9 +26006,16 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn("project?.label || project?.name", APP_SOURCE)
 
     def test_project_actions_are_keyboard_and_touch_reachable(self):
+        project_start = APP_SOURCE.index("function renderProjectSection(")
+        project_end = APP_SOURCE.index("function renderSessions()", project_start)
+        project_source = APP_SOURCE[project_start:project_end]
         self.assertIn("function attachProjectSessionListeners", APP_SOURCE)
-        self.assertIn("project-more-btn", APP_SOURCE)
         self.assertIn("project-new-session", APP_SOURCE)
+        self.assertNotIn("project-more-btn", APP_SOURCE)
+        self.assertIn('class="project-toggle"', project_source)
+        self.assertNotIn(' role="button"', project_source)
+        self.assertNotIn(' tabindex="0"', project_source)
+        self.assertIn('aria-expanded="', project_source)
         self.assertIn("@media (hover: none), (max-width: 700px)", STYLE_SOURCE)
 
     def test_pinned_state_uses_a_shared_outline_pin_icon(self):
@@ -25880,6 +26023,236 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn('class="pin-icon"', APP_SOURCE)
         self.assertIn(".pin-icon", STYLE_SOURCE)
         self.assertNotIn("&#9733;", APP_SOURCE)
+
+    def test_project_title_marquee_wiring_css_and_path_accessibility(self):
+        project_start = APP_SOURCE.index("function renderProjectSection(")
+        project_end = APP_SOURCE.index("function renderSessions()", project_start)
+        project_source = APP_SOURCE[project_start:project_end]
+        render_start = APP_SOURCE.index("function renderSessions()")
+        render_end = APP_SOURCE.index("function openProjectContextMenu", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        wiring_start = APP_SOURCE.index("function attachSessionTitleMarqueeListeners(")
+        wiring_end = APP_SOURCE.index("function attachProjectSessionListeners(", wiring_start)
+        wiring_source = APP_SOURCE[wiring_start:wiring_end]
+        scheduler_start = APP_SOURCE.index("function scheduleSessionTitleOverflowRefresh(")
+        scheduler_end = APP_SOURCE.index("const sessionStatusTicker", scheduler_start)
+        scheduler_source = APP_SOURCE[scheduler_start:scheduler_end]
+
+        self.assertIn('<button class="project-toggle" type="button"', project_source)
+        self.assertIn('aria-label="', project_source)
+        self.assertIn("escapeHtml(projectNameAria)", project_source)
+        self.assertNotIn('role="button"', project_source)
+        self.assertNotIn('tabindex="0"', project_source)
+        self.assertIn('<span class="project-name">', project_source)
+        self.assertIn(
+            '<span class="project-name-scroll-text">',
+            project_source,
+        )
+        self.assertNotIn("' title='", project_source)
+        self.assertNotIn("' title=\"'", project_source)
+        self.assertNotIn("headerTitle ? ' title=", project_source)
+        self.assertIn("projectRootPaths(project).join", project_source)
+        self.assertIn('[name, headerTitle].filter(Boolean).join', project_source)
+        self.assertIn('uiIcon(collapsed ? "chevronRight" : "chevronDown"', project_source)
+        self.assertIn("if (!isUnassigned)", project_source)
+        self.assertEqual(
+            project_source.count('<button class="project-header-action'),
+            1,
+        )
+        self.assertNotIn("project-more-btn", project_source)
+        toggle_open = project_source.index('<button class="project-toggle"')
+        toggle_close = project_source.index("html += '</button>';", toggle_open)
+        new_action = project_source.index(
+            '<button class="project-header-action project-new-session"'
+        )
+        self.assertLess(toggle_close, new_action)
+
+        self.assertIn("const projectTitleMarquee = createSessionTitleMarqueeController({", APP_SOURCE)
+        self.assertIn(
+            'innerSelector: ":scope > .project-name-scroll-text"',
+            APP_SOURCE,
+        )
+        self.assertIn('querySelector?.(".project-header-action")', APP_SOURCE)
+        self.assertIn("projectTitleMarquee.reset();", render_source)
+        self.assertIn('querySelectorAll(".project-name")', scheduler_source)
+        self.assertIn("projectTitleMarquee.refresh(", scheduler_source)
+        self.assertIn('closest?.(".session-title-text, .project-name")', wiring_source)
+        self.assertIn(
+            'title?.matches?.(".project-name") ? projectTitleMarquee : sessionTitleMarquee',
+            wiring_source,
+        )
+        self.assertIn("controllerForTitle(title).enter(title)", wiring_source)
+        self.assertIn("controllerForTitle(title).leave(title)", wiring_source)
+        self.assertIn("controllerForTitle(title).finish(title, event)", wiring_source)
+        for event_type in ("mouseover", "mouseout", "transitionend"):
+            self.assertEqual(wiring_source.count(f'addEventListener("{event_type}"'), 1)
+
+        toggle_rule_start = STYLE_SOURCE.index(".project-toggle {")
+        toggle_rule_end = STYLE_SOURCE.index("}", toggle_rule_start)
+        toggle_rule = STYLE_SOURCE[toggle_rule_start:toggle_rule_end]
+        for contract in (
+            "display: flex;",
+            "flex: 1 1 auto;",
+            "min-width: 0;",
+            "width: 100%;",
+            "border: 0;",
+            "background: transparent;",
+        ):
+            self.assertIn(contract, toggle_rule)
+
+        project_name_start = STYLE_SOURCE.index(".project-toggle > .project-name {")
+        project_name_end = STYLE_SOURCE.index("}", project_name_start)
+        project_name_rule = STYLE_SOURCE[project_name_start:project_name_end]
+        self.assertIn("text-overflow: clip;", project_name_rule)
+        self.assertNotIn("text-overflow: ellipsis;", project_name_rule)
+        self.assertIn(".project-name-scroll-text", STYLE_SOURCE)
+        self.assertIn(
+            ".project-toggle > .project-name.is-overflowing:not(.is-scroll-complete)",
+            STYLE_SOURCE,
+        )
+        self.assertIn(
+            ".project-name.is-scrolling > .project-name-scroll-text",
+            STYLE_SOURCE,
+        )
+        self.assertIn("@media (prefers-reduced-motion: reduce)", STYLE_SOURCE)
+
+        new_action_start = STYLE_SOURCE.index(".project-header > .project-new-session {")
+        new_action_end = STYLE_SOURCE.index("}", new_action_start)
+        new_action_rule = STYLE_SOURCE[new_action_start:new_action_end]
+        for contract in (
+            "position: absolute;",
+            "right: 5px;",
+            "top: 50%;",
+            "transform: translateY(-50%);",
+            "min-width: var(--shell-control-sm);",
+            "min-height: var(--shell-control-sm);",
+        ):
+            self.assertIn(contract, new_action_rule)
+        self.assertIn(".project-header:hover > .project-new-session", STYLE_SOURCE)
+        self.assertIn(".project-header:focus-within > .project-new-session", STYLE_SOURCE)
+        self.assertIn(".project-new-session::before", STYLE_SOURCE)
+        surface_start = STYLE_SOURCE.index(
+            ".project-header:hover,\n.project-header:focus-within {"
+        )
+        surface_end = STYLE_SOURCE.index("}", surface_start)
+        surface_rule = STYLE_SOURCE[surface_start:surface_end]
+        self.assertIn("--project-action-surface:", surface_rule)
+        self.assertIn("background: var(--project-action-surface);", surface_rule)
+
+    def test_project_context_menu_uses_pointer_keyboard_and_viewport_clamping(self):
+        helper_start = APP_SOURCE.index("function resolveProjectContextMenuPosition(")
+        helper_end = APP_SOURCE.index("function openProjectContextMenu(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+{helper_source}
+const samples = {{
+  center: resolveProjectContextMenuPosition({{x: 100, y: 100}}, {{width: 120, height: 70}}, {{width: 500, height: 400}}, 8),
+  right: resolveProjectContextMenuPosition({{x: 490, y: 100}}, {{width: 120, height: 70}}, {{width: 500, height: 400}}, 8),
+  bottom: resolveProjectContextMenuPosition({{x: 100, y: 390}}, {{width: 120, height: 70}}, {{width: 500, height: 400}}, 8),
+  corner: resolveProjectContextMenuPosition({{x: 2, y: 0}}, {{width: 120, height: 70}}, {{width: 500, height: 400}}, 8),
+}};
+process.stdout.write(JSON.stringify(samples));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "center": {"left": 100, "top": 102, "flipped": False},
+                "right": {"left": 372, "top": 102, "flipped": False},
+                "bottom": {"left": 100, "top": 318, "flipped": True},
+                "corner": {"left": 8, "top": 8, "flipped": False},
+            },
+        )
+
+        open_start = APP_SOURCE.index("function openProjectContextMenu(")
+        open_end = APP_SOURCE.index("function attachSessionTitleMarqueeListeners(", open_start)
+        open_source = APP_SOURCE[open_start:open_end]
+        for contract in (
+            "document.body.appendChild(menu);",
+            "menu.getBoundingClientRect()",
+            "document.documentElement.clientWidth",
+            "document.documentElement.clientHeight",
+            "resolveProjectContextMenuPosition(",
+            'menu.setAttribute("role", "menu")',
+            'role="menuitem"',
+            "focusFirst",
+        ):
+            self.assertIn(contract, open_source)
+
+        listeners_start = APP_SOURCE.index("function attachProjectSessionListeners(")
+        listeners_end = APP_SOURCE.index("function closeAllSessionMenus(", listeners_start)
+        listeners_source = APP_SOURCE[listeners_start:listeners_end]
+        self.assertIn("event.clientX", listeners_source)
+        self.assertIn("event.clientY", listeners_source)
+        self.assertIn('event.key === "ContextMenu"', listeners_source)
+        self.assertIn('event.shiftKey && event.key === "F10"', listeners_source)
+        self.assertIn('const toggle = header.querySelector(".project-toggle")', listeners_source)
+        self.assertIn('toggle?.addEventListener("click"', listeners_source)
+        self.assertIn('toggle?.addEventListener("keydown"', listeners_source)
+        self.assertNotIn('header.addEventListener("click"', listeners_source)
+        self.assertNotIn('event.key === "Enter" || event.key === " "', listeners_source)
+        self.assertIn("header.querySelector(\".project-name\")", listeners_source)
+        self.assertIn("returnFocus: toggle", listeners_source)
+        self.assertNotIn('querySelectorAll(".project-more-btn")', listeners_source)
+
+        outside_start = APP_SOURCE.index("// Close any context menu on outside click")
+        outside_end = APP_SOURCE.index("async function refreshSessions()", outside_start)
+        outside_source = APP_SOURCE[outside_start:outside_end]
+        self.assertIn('if (!e.target.closest(".project-context-menu"))', outside_source)
+        self.assertIn('event.key === "Escape"', outside_source)
+        self.assertIn("closeProjectMenus", outside_source)
+
+        menu_start = STYLE_SOURCE.index(".project-context-menu {")
+        menu_end = STYLE_SOURCE.index("}", menu_start)
+        menu_rule = STYLE_SOURCE[menu_start:menu_end]
+        for contract in (
+            "width: max-content;",
+            "min-width:",
+            "max-width:",
+        ):
+            self.assertIn(contract, menu_rule)
+        self.assertIn(".project-context-item:hover", STYLE_SOURCE)
+        self.assertIn(".project-context-item:focus-visible", STYLE_SOURCE)
+
+        feedback_start = STYLE_SOURCE.index(".project-context-item:hover,")
+        feedback_end = STYLE_SOURCE.index("}", feedback_start)
+        feedback_rule = STYLE_SOURCE[feedback_start:feedback_end]
+        self.assertIn(
+            "background: color-mix(in srgb, var(--text) 10%, var(--panel-2));",
+            feedback_rule,
+        )
+        self.assertNotIn("--panel-1", feedback_rule)
+
+        def theme_values(selector):
+            start = STYLE_SOURCE.index(selector)
+            end = STYLE_SOURCE.index("}", start)
+            block = STYLE_SOURCE[start:end]
+            values = {}
+            for name in ("text", "panel-2"):
+                match = re.search(rf"--{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}})", block)
+                self.assertIsNotNone(match, f"missing --{name} in {selector}")
+                values[name] = tuple(
+                    int(match.group(1)[offset:offset + 2], 16)
+                    for offset in (1, 3, 5)
+                )
+            return values
+
+        for selector in (":root {", "body.theme-dark {"):
+            values = theme_values(selector)
+            menu_rgb = values["panel-2"]
+            feedback_rgb = tuple(
+                round(text_channel * 0.1 + panel_channel * 0.9)
+                for text_channel, panel_channel in zip(values["text"], menu_rgb)
+            )
+            self.assertNotEqual(feedback_rgb, menu_rgb)
+            self.assertGreater(sum(abs(a - b) for a, b in zip(feedback_rgb, menu_rgb)), 20)
 
     def test_session_pin_uses_the_left_gutter_without_affecting_project_pin(self):
         row_start = APP_SOURCE.index("function renderProjectSessionRow(")
@@ -25929,6 +26302,19 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         project_badge_rule = STYLE_SOURCE[project_badge_start:project_badge_end]
         self.assertNotIn("position: absolute;", project_badge_rule)
         self.assertIn("flex-shrink: 0;", project_badge_rule)
+
+        project_icon_start = STYLE_SOURCE.index(".project-pin-indicator .pin-icon {")
+        project_icon_end = STYLE_SOURCE.index("}", project_icon_start)
+        project_icon_rule = STYLE_SOURCE[project_icon_start:project_icon_end]
+        for contract in (
+            "width: 13px;",
+            "height: 13px;",
+            "stroke-width: 1.9;",
+            "transform: rotate(38deg);",
+            "transform-origin: center;",
+            "overflow: visible;",
+        ):
+            self.assertIn(contract, project_icon_rule)
 
         shared_icon_start = STYLE_SOURCE.index(".pin-icon {")
         shared_icon_end = STYLE_SOURCE.index("}", shared_icon_start)
