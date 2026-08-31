@@ -53,6 +53,7 @@ const {
   createSessionSearchFeature,
   createSessionStartup,
   createSessionsFeature,
+  renderSessionSourceBadge,
   resolveSessionStatus,
 } = window.Code.features.sessions;
 const { createBranchesFeature } = window.Code.features.branches;
@@ -4958,20 +4959,6 @@ async function refreshProjects() {
   }
 }
 
-function renderSessionSourceBadge(session) {
-  if (session?.sourceBadgeVisible !== true) return "";
-  const source = String(session?.source || "").toLowerCase();
-  if (source === "codex") {
-    return '<span class="session-source-badge source-codex" title="' +
-      escapeHtml(t("sourceBadgeCodexTitle")) + '">Codex</span>';
-  }
-  if (source === "claude-code") {
-    return '<span class="session-source-badge source-claude" title="' +
-      escapeHtml(t("sourceBadgeClaudeTitle")) + '">Claude</span>';
-  }
-  return "";
-}
-
 function renderPinIcon() {
   return '<svg class="pin-icon" aria-hidden="true" viewBox="0 0 24 24">' +
     '<path d="M9 3.75h6M10 3.75V8.5l-2.5 3v1.75h9V11.5l-2.5-3V3.75M12 13.25v7"/>' +
@@ -5136,7 +5123,7 @@ function renderProjectSessionRow(session, pinnedIds) {
     escapeHtml(session.id) + '">' +
     pinBadge + '<span class="session-title-text"><span class="session-title-scroll-text">' +
     escapeHtml(title) + '</span></span>' +
-    renderSessionSourceBadge(session) + renderSessionStatusSlot(session) + '</button>' +
+    renderSessionSourceBadge(session, t, escapeHtml) + renderSessionStatusSlot(session) + '</button>' +
     '<div class="session-more-wrap"><button class="session-more-btn" type="button" title="' +
     t("more") + '" aria-label="' + t("more") + '" data-session-id="' + escapeHtml(session.id) + '">' +
     uiIcon("more", 16, "shell-action-icon") + '</button></div></div>';

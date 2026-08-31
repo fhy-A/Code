@@ -185,6 +185,9 @@
     const sessionArchive = options.sessionArchive || {};
     const onArchivedSessionsChanged = options.onArchivedSessionsChanged || (async () => {});
     const trashIcon = options.trashIcon || (() => "");
+    const uiIcon = options.uiIcon
+      || Code.core?.icons?.uiIcon
+      || ((_name, _size, _className) => trashIcon());
     const documentRef = options.document || global.document;
     const storage = options.storage || global.localStorage;
     const fetchFn = options.fetch || global.fetch?.bind(global);
@@ -1794,23 +1797,34 @@
       return [...groups.values()];
     }
 
+    function archivedSessionExternalSourceName(record) {
+      const source = String(record?.source || "code").trim().toLowerCase();
+      if (source === "codex") return t("sessionSourceCodex");
+      if (source === "claude-code") return t("sessionSourceClaude");
+      return "";
+    }
+
     function archiveRowHtml(record) {
       const sessionId = String(record?.id || "").trim();
       const pendingAction = archivedSessionPending.get(sessionId) || "";
       const pending = Boolean(pendingAction);
       const title = String(record?.title || "").trim() || t("untitledSession");
       const projectName = archivedSessionProjectName(record);
-      const source = String(record?.source || "local");
       const time = archivedSessionTime(record);
+      const metaParts = [projectName, t("archivedSessionTime", { time })];
+      const externalSource = archivedSessionExternalSourceName(record);
+      if (externalSource) metaParts.push(externalSource);
+      const deleting = pendingAction === "delete";
+      const deleteLabel = t(deleting ? "deletingArchivedSession" : "permanentlyDelete");
+      const deleteIcon = uiIcon("trash", 16, "archived-session-delete-icon");
       return `<article class="archived-session-row" data-session-id="${escapeHtml(sessionId)}">
         <div class="archived-session-copy">
           <strong class="archived-session-title">${escapeHtml(title)}</strong>
-          <span class="archived-session-meta">${escapeHtml(projectName)} · ${escapeHtml(t("archivedSessionTime", { time }))}</span>
-          <span class="archived-session-source">${escapeHtml(t("archivedSessionSource", { source }))}</span>
+          <span class="archived-session-meta">${escapeHtml(metaParts.join(" · "))}</span>
         </div>
         <div class="archived-session-actions">
           <button class="mini-btn archived-session-restore" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pendingAction === "restore" ? "restoringSession" : "restoreSession"))}</button>
-          <button class="mini-btn danger archived-session-delete" type="button"${pending ? " disabled" : ""}>${escapeHtml(t(pendingAction === "delete" ? "deletingArchivedSession" : "permanentlyDelete"))}</button>
+          <button class="mini-btn danger archived-session-delete${deleting ? " is-pending" : ""}" type="button" title="${escapeHtml(deleteLabel)}" aria-label="${escapeHtml(deleteLabel)}" aria-busy="${deleting ? "true" : "false"}"${pending ? " disabled" : ""}>${deleteIcon}</button>
         </div>
       </article>`;
     }

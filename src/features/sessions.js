@@ -331,6 +331,23 @@
     return streaming === true ? "running" : "idle";
   }
 
+  function renderSessionSourceBadge(
+    session,
+    t = (key) => key,
+    escapeHtml = (value) => String(value ?? ""),
+  ) {
+    if (session?.sourceBadgeVisible !== true) return "";
+    const source = String(session?.source || "").toLowerCase();
+    const badge = source === "codex"
+      ? { className: "source-codex", label: "Codex", titleKey: "sourceBadgeCodexTitle" }
+      : source === "claude-code"
+        ? { className: "source-claude", label: "Claude", titleKey: "sourceBadgeClaudeTitle" }
+        : null;
+    if (!badge) return "";
+    const title = escapeHtml(t(badge.titleKey));
+    return `<span class="session-source-badge ${badge.className}" title="${title}" aria-label="${title}">${badge.label}</span>`;
+  }
+
   function createSessionSearchFeature(options = {}) {
     const state = options.state || {};
     const elements = options.elements || {};
@@ -372,9 +389,10 @@
         const running = statusKind === "running";
         const status = t(running ? "sessionSearchRunning" : "sessionSearchIdle");
         const project = String(projectName(session) || "").trim() || t("sessionSearchNoProject");
+        const sourceBadge = renderSessionSourceBadge(session, t, escapeHtml);
         return `<button class="session-search-result" type="button" data-session-id="${escapeHtml(session.id)}">
           <span class="session-search-status${running ? " is-running" : ""}">${escapeHtml(status)}</span>
-          <strong class="session-search-result-title">${escapeHtml(title)}</strong>
+          <span class="session-search-title-slot"><strong class="session-search-result-title">${escapeHtml(title)}</strong>${sourceBadge}</span>
           <span class="session-search-result-project">${escapeHtml(project)}</span>
         </button>`;
       }).join("");
@@ -884,6 +902,7 @@
     compareSessionSearchRecords,
     selectSessionSearchResults,
     resolveSessionSearchStatus,
+    renderSessionSourceBadge,
     createSessionSearchFeature,
     createSessionsFeature,
     createSessionNavigation,

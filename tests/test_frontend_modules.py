@@ -19519,6 +19519,9 @@ const records = [
   {id: "delete-1", title: "Delete me", projectId: null, source: "local", archivedAt: "2026-08-28T08:00:00Z", archiveToken: "delete-token-current"},
   {id: "delete-fail", title: "Retry me", projectId: null, source: "local", archivedAt: "2026-08-28T07:00:00Z", archiveToken: "retry-token-current"},
   {id: "delete-refresh-fail", title: "Refresh warning", projectId: null, source: "local", archivedAt: "2026-08-28T06:00:00Z", archiveToken: "refresh-token-current"},
+  {id: "codex-display", title: "Codex archive", projectId: "p1", source: "codex", sourceBadgeVisible: false, archivedAt: "2026-08-28T05:00:00Z", archiveToken: "codex-token"},
+  {id: "claude-display", title: "Claude archive", projectId: null, source: "claude-code", sourceBadgeVisible: false, archivedAt: "2026-08-28T04:00:00Z", archiveToken: "claude-token"},
+  {id: "code-display", title: "Code archive", projectId: "p1", source: "code", archivedAt: "2026-08-28T03:00:00Z", archiveToken: "code-token"},
 ];
 let listCalls = 0;
 let resolveList;
@@ -19546,6 +19549,8 @@ const feature = window.Code.features.settings.createSettingsFeature({
     archivedSessionUnknownProject: "No project",
     archivedSessionTime: "Archived {time}",
     archivedSessionSource: "Source: {source}",
+    sessionSourceCodex: "From Codex",
+    sessionSourceClaude: "From Claude Code",
     untitledSession: "Untitled",
     restoreSession: "Restore",
     restoringSession: "Restoring",
@@ -19559,6 +19564,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
     archivedSessionRefreshFailed: "Deleted but refresh failed",
   }[key] || key)),
   escapeHtml: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
+  uiIcon: (name, size, className) => `<svg class="ui-icon ${className}" data-icon="${name}" width="${size}" height="${size}" aria-hidden="true"></svg>`,
   apiJson: async () => ({}),
   showToast: (...args) => toasts.push(args),
   document: documentStub,
@@ -19690,6 +19696,15 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertTrue(data["sameLoadPayload"])
         self.assertIn("Restore me", data["htmlAfterLoad"])
         self.assertIn("Project One", data["htmlAfterLoad"])
+        self.assertIn("From Codex", data["htmlAfterLoad"])
+        self.assertIn("From Claude Code", data["htmlAfterLoad"])
+        self.assertNotIn("Source:", data["htmlAfterLoad"])
+        self.assertNotIn("archived-session-source", data["htmlAfterLoad"])
+        self.assertIn('data-icon="trash"', data["htmlAfterLoad"])
+        self.assertIn('title="Delete permanently"', data["htmlAfterLoad"])
+        self.assertIn('aria-label="Delete permanently"', data["htmlAfterLoad"])
+        self.assertIn('aria-busy="false"', data["htmlAfterLoad"])
+        self.assertNotIn('>Delete permanently</button>', data["htmlAfterLoad"])
         self.assertNotIn("delete-token-current", data["htmlAfterLoad"])
         self.assertEqual(data["restoreCalls"], ["restore-1", "restore-fail"])
         self.assertFalse(data["restoreDuplicate"])
@@ -19711,6 +19726,9 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertIn("Restore", data["htmlWhileDeleteConfirm"])
         self.assertIn("Delete permanently", data["htmlWhileDeleteConfirm"])
         self.assertIn("Deleting", data["htmlWhileDeleting"])
+        self.assertIn('title="Deleting"', data["htmlWhileDeleting"])
+        self.assertIn('aria-label="Deleting"', data["htmlWhileDeleting"])
+        self.assertIn('aria-busy="true"', data["htmlWhileDeleting"])
         self.assertIn("Restore", data["htmlWhileDeleting"])
         self.assertNotIn("Restoring", data["htmlWhileDeleting"])
         self.assertNotIn("delete-1", data["htmlAfterDeleteAuthority"])
@@ -24332,9 +24350,9 @@ eval(saveSource);
         )
 
     def test_import_source_badge_explains_and_follows_snapshot_lifecycle(self):
-        badge_start = APP_SOURCE.index("function renderSessionSourceBadge(")
-        badge_end = APP_SOURCE.index("function renderPinIcon(", badge_start)
-        badge_source = APP_SOURCE[badge_start:badge_end]
+        badge_start = SESSIONS_SOURCE.index("function renderSessionSourceBadge(")
+        badge_end = SESSIONS_SOURCE.index("function createSessionSearchFeature(", badge_start)
+        badge_source = SESSIONS_SOURCE[badge_start:badge_end]
         sync_start = APP_SOURCE.index("function syncSessionSourceBadgeState(")
         sync_end = APP_SOURCE.index("async function saveSessionState(", sync_start)
         sync_source = APP_SOURCE[sync_start:sync_end]
@@ -24343,8 +24361,9 @@ eval(saveSource);
         render_source = APP_SOURCE[render_start:render_end]
 
         self.assertIn("session?.sourceBadgeVisible !== true", badge_source)
-        self.assertIn('t("sourceBadgeCodexTitle")', badge_source)
-        self.assertIn('t("sourceBadgeClaudeTitle")', badge_source)
+        self.assertIn('titleKey: "sourceBadgeCodexTitle"', badge_source)
+        self.assertIn('titleKey: "sourceBadgeClaudeTitle"', badge_source)
+        self.assertIn('aria-label="${title}"', badge_source)
         self.assertIn("SOURCE_BADGE_NOTICE_KEY", sync_source)
         self.assertIn(
             'showToast(t("importBadgeHiddenToast"), "info", { duration: 7000 })',
@@ -30270,7 +30289,10 @@ class Code043HumanInterventionFlatteningTests(unittest.TestCase):
 
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 session discovery surfaces */",
+            1,
+        )[0]
 
     @staticmethod
     def rule(source, selector):
@@ -30866,6 +30888,307 @@ process.stdout.write(JSON.stringify({
             ".onboarding",
         ):
             self.assertNotIn(forbidden, source)
+
+
+class Code043SessionDiscoverySurfaceTests(unittest.TestCase):
+    MARKER = "/* CODE-043 session discovery surfaces */"
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    def rule(self, source, selector):
+        match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
+        self.assertIsNotNone(match, selector)
+        return match.group("body")
+
+    def test_search_and_archive_typography_controls_and_states_share_scale(self):
+        source = self.phase_source()
+        for declaration in (
+            "--discovery-control-height: 40px;",
+            "font-size: 18px;",
+            "font-size: 14px;",
+            "font-size: 12px;",
+            "min-height: var(--discovery-control-height);",
+            "height: 32px;",
+            "min-height: 112px;",
+            "place-items: center;",
+        ):
+            self.assertIn(declaration, source)
+        for selector in (
+            ".session-search-header h2",
+            ".archived-sessions-panel .settings-section-header h3",
+            ".session-search-result-title",
+            ".archived-session-title",
+            ".session-search-status",
+            ".session-search-result-project",
+            ".archived-session-meta",
+            ".session-search-empty",
+            ".archived-session-state",
+            ".archived-session-retry",
+        ):
+            self.assertIn(selector, source)
+        self.assertIn("box-shadow: inset 0 0 0 1px", source)
+        self.assertIn("outline: 2px solid", source)
+
+    def test_desktop_actions_and_720px_wrapping_have_zero_overflow_guards(self):
+        source = self.phase_source()
+        self.assertIn("max-width: 100%;", source)
+        self.assertIn("min-width: 0;", source)
+        self.assertIn("justify-content: flex-end;", source)
+        self.assertIn("flex-wrap: nowrap;", source)
+        self.assertEqual(source.count("@media (max-width: 720px)"), 1)
+        responsive = source.split("@media (max-width: 720px)", 1)[1]
+        for declaration in (
+            "grid-template-columns: minmax(0, 1fr);",
+            "width: 100%;",
+            "justify-content: flex-start;",
+            "flex-wrap: wrap;",
+            "overflow-wrap: anywhere;",
+        ):
+            self.assertIn(declaration, responsive)
+
+    def test_search_navigation_and_archive_mutation_ownership_are_unchanged(self):
+        search_start = SESSIONS_SOURCE.index("function createSessionSearchFeature")
+        search_end = SESSIONS_SOURCE.index("function createSessionsFeature", search_start)
+        search = SESSIONS_SOURCE[search_start:search_end]
+        for fragment in (
+            "selectSessionSearchResults(state.sessions, query)",
+            'if (event.key === "Escape")',
+            'if (event.key === "ArrowDown"',
+            'else if (event.key === "ArrowUp"',
+            'else if (event.key === "Enter"',
+            "if (restoreFocus && typeof trigger?.focus",
+            "await loadSession(normalized);",
+        ):
+            self.assertIn(fragment, search)
+
+        archive_start = SETTINGS_SOURCE.index("function archiveRowHtml")
+        archive_end = SETTINGS_SOURCE.index("function switchSettingsPanel", archive_start)
+        archive = SETTINGS_SOURCE[archive_start:archive_end]
+        for fragment in (
+            "archivedSessionPending.has(sessionId)",
+            "archivedSessionConfirming.has(sessionId)",
+            "await sessionArchive.restoreArchivedSession(sessionId)",
+            "await sessionArchive.deleteArchivedSession(sessionId, archiveToken)",
+            "archiveSessionConfirmPermanent",
+        ):
+            self.assertIn(fragment, archive)
+
+    def test_search_rows_remain_flat_and_archives_remain_grouped_action_cards(self):
+        self.assertIn('class="session-search-result" type="button"', SESSIONS_SOURCE)
+        self.assertNotIn("archived-session", SESSIONS_SOURCE[
+            SESSIONS_SOURCE.index("function createSessionSearchFeature"):
+            SESSIONS_SOURCE.index("function createSessionsFeature")
+        ])
+        for fragment in (
+            '<section class="archived-session-group"',
+            '<article class="archived-session-row"',
+            'class="mini-btn archived-session-restore"',
+            'class="mini-btn danger archived-session-delete',
+        ):
+            self.assertIn(fragment, SETTINGS_SOURCE)
+        self.assertIn('width: min(680px, 100%);', STYLE_SOURCE)
+
+    def test_external_source_badges_share_one_lifecycle_aware_renderer(self):
+        self.assertIn("function renderSessionSourceBadge(", SESSIONS_SOURCE)
+        self.assertIn("session?.sourceBadgeVisible !== true", SESSIONS_SOURCE)
+        self.assertIn('titleKey: "sourceBadgeCodexTitle"', SESSIONS_SOURCE)
+        self.assertIn('titleKey: "sourceBadgeClaudeTitle"', SESSIONS_SOURCE)
+        self.assertIn('aria-label="', SESSIONS_SOURCE)
+        self.assertIn("renderSessionSourceBadge,", SESSIONS_SOURCE)
+        self.assertNotIn("function renderSessionSourceBadge(", APP_SOURCE)
+        self.assertIn("renderSessionSourceBadge,", APP_SOURCE[:2500])
+        self.assertIn("renderSessionSourceBadge(session, t, escapeHtml)", APP_SOURCE)
+
+        script = f"""
+const vm = require("vm");
+const context = {{window: {{Code: {{features: {{}}}}}}}};
+context.window.window = context.window;
+vm.runInNewContext(require("fs").readFileSync("src/features/sessions.js", "utf8"), context);
+const {{renderSessionSourceBadge}} = context.window.Code.features.sessions;
+const labels = {{
+  sourceBadgeCodexTitle: "Imported from Codex lifecycle",
+  sourceBadgeClaudeTitle: "Imported from Claude Code lifecycle",
+}};
+const t = (key) => labels[key] || key;
+const escapeHtml = (value) => String(value)
+  .replaceAll("&", "&amp;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;");
+const fixtures = [
+  {{source: "code", sourceBadgeVisible: true}},
+  {{source: "codex", sourceBadgeVisible: true}},
+  {{source: "claude-code", sourceBadgeVisible: true}},
+  {{source: "codex", sourceBadgeVisible: false}},
+  {{source: "claude-code", sourceBadgeVisible: false}},
+];
+process.stdout.write(JSON.stringify(fixtures.map((session) => (
+  renderSessionSourceBadge(session, t, escapeHtml)
+))));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        badges = json.loads(completed.stdout)
+        self.assertEqual(badges[0], "")
+        self.assertIn(">Codex</span>", badges[1])
+        self.assertIn('title="Imported from Codex lifecycle"', badges[1])
+        self.assertIn('aria-label="Imported from Codex lifecycle"', badges[1])
+        self.assertIn(">Claude</span>", badges[2])
+        self.assertIn('title="Imported from Claude Code lifecycle"', badges[2])
+        self.assertIn('aria-label="Imported from Claude Code lifecycle"', badges[2])
+        self.assertEqual(badges[3:], ["", ""])
+
+    def test_unarchived_search_projects_only_visible_external_source_badges(self):
+        search_start = SESSIONS_SOURCE.index("function createSessionSearchFeature")
+        search_end = SESSIONS_SOURCE.index("function createSessionsFeature", search_start)
+        search = SESSIONS_SOURCE[search_start:search_end]
+        for fragment in (
+            'class="session-search-title-slot"',
+            "renderSessionSourceBadge(session, t, escapeHtml)",
+            'class="session-search-result-project"',
+        ):
+            self.assertIn(fragment, search)
+
+        script = f"""
+const vm = require("vm");
+const context = {{window: {{Code: {{features: {{}}}}}}}};
+context.window.window = context.window;
+vm.runInNewContext(require("fs").readFileSync("src/features/sessions.js", "utf8"), context);
+const {{createSessionSearchFeature}} = context.window.Code.features.sessions;
+const results = {{innerHTML: "", querySelectorAll: () => []}};
+const feature = createSessionSearchFeature({{
+  state: {{sessions: [
+    {{id: "native", title: "Native Code", source: "code", sourceBadgeVisible: true}},
+    {{id: "codex-visible", title: "Visible Codex", source: "codex", sourceBadgeVisible: true}},
+    {{id: "claude-visible", title: "Visible Claude", source: "claude-code", sourceBadgeVisible: true}},
+    {{id: "codex-hidden", title: "Hidden Codex", source: "codex", sourceBadgeVisible: false}},
+  ]}},
+  elements: {{results, input: {{value: ""}}}},
+  t: (key) => ({{
+    sessionSearchIdle: "Idle",
+    sessionSearchNoProject: "No project",
+    sourceBadgeCodexTitle: "Imported from Codex lifecycle",
+    sourceBadgeClaudeTitle: "Imported from Claude Code lifecycle",
+  }}[key] || key),
+  escapeHtml: (value) => String(value),
+  projectName: () => "Project",
+  loadSession: async () => {{}},
+}});
+feature.refresh();
+process.stdout.write(results.innerHTML);
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        html = completed.stdout
+        self.assertEqual(html.count("session-source-badge"), 2)
+        self.assertIn('data-session-id="codex-visible"', html)
+        self.assertIn('data-session-id="claude-visible"', html)
+        native_row = html.split('data-session-id="native"', 1)[1].split("</button>", 1)[0]
+        hidden_row = html.split('data-session-id="codex-hidden"', 1)[1].split("</button>", 1)[0]
+        self.assertNotIn("session-source-badge", native_row)
+        self.assertNotIn("session-source-badge", hidden_row)
+
+    def test_archive_merges_only_external_source_names_into_the_meta_line(self):
+        archive_start = SETTINGS_SOURCE.index("function archiveRowHtml")
+        archive_end = SETTINGS_SOURCE.index("function archivedSessionsBodyHtml", archive_start)
+        archive = SETTINGS_SOURCE[archive_start:archive_end]
+        self.assertIn("archivedSessionExternalSourceName(record)", archive)
+        self.assertIn('t("sessionSourceCodex")', SETTINGS_SOURCE)
+        self.assertIn('t("sessionSourceClaude")', SETTINGS_SOURCE)
+        self.assertIn("metaParts.join(\" · \")", archive)
+        self.assertNotIn('class="archived-session-source"', archive)
+        self.assertNotIn('t("archivedSessionSource"', archive)
+
+    def test_source_badges_stay_outside_scrolling_titles_and_safe_at_720px(self):
+        source = self.phase_source()
+        for selector in (
+            ".session-main > .session-source-badge",
+            ".session-search-title-slot",
+            ".session-search-title-slot > .session-source-badge",
+        ):
+            self.assertIn(selector, source)
+        self.assertIn("font-size: 10.5px", STYLE_SOURCE)
+        title_slot = self.rule(source, ".session-search-title-slot {")
+        for declaration in (
+            "display: flex;",
+            "min-width: 0;",
+            "overflow: hidden;",
+        ):
+            self.assertIn(declaration, title_slot)
+        responsive = source.split("@media (max-width: 720px)", 1)[1]
+        self.assertIn(".session-search-title-slot", responsive)
+        self.assertIn("min-width: 0;", responsive)
+
+    def test_archived_delete_is_a_neutral_icon_control_with_danger_on_intent(self):
+        archive_start = SETTINGS_SOURCE.index("function archiveRowHtml")
+        archive_end = SETTINGS_SOURCE.index("function archivedSessionsBodyHtml", archive_start)
+        archive = SETTINGS_SOURCE[archive_start:archive_end]
+        for fragment in (
+            'uiIcon("trash", 16, "archived-session-delete-icon")',
+            'class="mini-btn danger archived-session-delete',
+            'title="${escapeHtml(deleteLabel)}"',
+            'aria-label="${escapeHtml(deleteLabel)}"',
+            'aria-busy="${deleting ? "true" : "false"}"',
+            'deletingArchivedSession',
+            ' disabled',
+        ):
+            self.assertIn(fragment, archive)
+        self.assertNotIn('>${escapeHtml(deleteLabel)}</button>', archive)
+
+        source = self.phase_source()
+        default_rule = self.rule(
+            source,
+            ".archived-session-actions .mini-btn.archived-session-delete {",
+        )
+        for declaration in (
+            "width: 32px;",
+            "min-width: 32px;",
+            "height: 32px;",
+            "padding: 0;",
+            "background: transparent;",
+            "color: var(--muted);",
+        ):
+            self.assertIn(declaration, default_rule)
+        self.assertNotIn("var(--red)", default_rule)
+        self.assertNotIn("var(--red-bg)", default_rule)
+
+        intent_start = source.index(
+            ".archived-session-actions .mini-btn.archived-session-delete:hover:not(:disabled),",
+        )
+        intent_end = source.index("}", intent_start)
+        intent_rule = source[intent_start:intent_end]
+        self.assertIn(":focus-visible:not(:disabled)", intent_rule)
+        self.assertIn("color: var(--red);", intent_rule)
+        self.assertIn("var(--red-bg)", intent_rule)
+
+        busy_start = source.index(
+            '.archived-session-actions .mini-btn.archived-session-delete[aria-busy="true"] {',
+        )
+        busy_end = source.index("}", busy_start)
+        busy_rule = source[busy_start:busy_end]
+        self.assertIn("cursor: progress;", busy_rule)
+        self.assertIn("opacity:", busy_rule)
+        self.assertIn(
+            '.archived-session-delete[aria-busy="true"]::after',
+            source,
+        )
+        responsive = source.split("@media (max-width: 720px)", 1)[1]
+        self.assertIn(".archived-session-delete", responsive)
+        self.assertIn("width: 32px;", responsive)
 
 
 if __name__ == "__main__":
