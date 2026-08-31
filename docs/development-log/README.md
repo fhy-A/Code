@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-08-31 | `CODE-043` workbar 账号设置页视觉优化完成：分散身份 / 用量 / 详情卡收敛为单一概览，紧凑身份与连接状态、三项无边框用量指标、扁平账户信息及自然同步 / 重试状态完成统一，登出仅在 hover / 焦点强化危险反馈，原认证、刷新、登出、用量格式、API 与持久化语义不变。doctor `10/10`、定向 `3 passed`、完整前端 `402 passed`及 build / freshness / 语法 / diff 通过；深浅主题、中英文、桌面 / `740px` Browser 复核后用户 `PASS`，真实登出与未登录态变更未执行 | [查看](2026/2026-08-31.md) |
 | 2026-08-31 | `CODE-043` Skills 高密度设置页完成：可搜索 `240px` 主从工作区、独立启用 / 依赖状态与扁平详情；启用、编辑、删除统一为 `40×40px` 纯图标并保留 pressed / tooltip / 焦点，关键词 / 工具 / 路径全宽纵向。新建 / 编辑 modal 固定头尾且仅中部滚动，高级依赖默认折叠并清理空提示条，CRUD / rename / 依赖 payload 不变。完整前端 `401 passed`、build / freshness / 语法 / diff 通过；深浅主题、中英文、桌面与 `740px` Browser 复核后用户 `PASS` | [查看](2026/2026-08-31.md) |
 | 2026-08-31 | Skill Runtime Binding v1 完成：AgentRun 冻结 active Skill / capability 并持久化可选能力级 binding，普通命令在授权前门禁、启动前实时重检，只向子进程注入可信受管 Python / Node 环境；stale、冲突、越界 / reparse 均零启动。受管安装继续要求用户授权且不使用未就绪 runtime，安装后须重新检查再绑定。最终绑定 / 依赖 `41 passed + 10 subtests`、AgentRuntime `137 passed + 81 subtests`、server `263 passed + 47 subtests`，此前恢复 / security 与 doctor `10/10` 证据保持；未使用真实用户 Skill、运行时、网络或 Browser，Skills 设置页仍未启动 | [查看](2026/2026-08-31.md) |
 | 2026-08-31 | `CODE-043` 模型与生图模型高密度设置页完成：模型页统一为连接 / 可用模型 / 模型参数三分区，workbar 次级操作与 `920px` 主体右沿对齐；生图页使用单层连接卡、轻量 focus 和统一 `40 / 32px` 控件，默认区最终为“标题+状态 / select+应用配置”两行并保留原保存+refresh+routeRef 语义。完整前端 `394 passed`，bundle / classic build、freshness、语法与 diff 通过；Notion 深色与 Codex 浅色经多轮 Browser 返修后用户 `PASS`。Skills 保留为下一独立阶段，`760px` 仅有确定性合同 | [查看](2026/2026-08-31.md) |

@@ -1682,6 +1682,78 @@ const feature = createGoalControlFeature({
         ):
             self.assertEqual(I18N_SOURCE.count(f"{field}:"), 2)
 
+    def test_workbar_account_page_uses_one_responsive_overview_without_changing_auth_flows(self):
+        start = SETTINGS_SOURCE.index("function renderAccountPanel(container")
+        end = SETTINGS_SOURCE.index("function isUpdateNoticeUnread", start)
+        account = SETTINGS_SOURCE[start:end]
+
+        for fragment in (
+            'class="settings-page-heading account-page-heading"',
+            'data-i18n="accountDescription"',
+            'class="settings-lite-card account-overview-card"',
+            'class="account-usage-overview"',
+            'class="account-metrics"',
+            'class="account-metric"',
+            'data-i18n="accountUsageOverview"',
+            'class="account-detail-list"',
+            'data-i18n="accountDetails"',
+            'class="settings-lite-card settings-empty-card account-empty-state"',
+            'data-i18n="accountSignedOutHint"',
+        ):
+            self.assertIn(fragment, account)
+        self.assertEqual(account.count('class="account-metric"'), 3)
+        self.assertNotIn('class="account-stats-grid"', account)
+        self.assertNotIn('class="account-stat-card"', account)
+        self.assertNotIn('class="settings-lite-card account-identity-card"', account)
+        self.assertNotIn('class="settings-lite-card account-details-card"', account)
+
+        for unchanged_flow in (
+            'clearPlatformAuth();',
+            'onPlatformLogout();',
+            'showPlatformAuthGate("missing");',
+            'openPlatformLogin();',
+            'if (refresh) refreshPlatformAccount(container, auth);',
+        ):
+            self.assertIn(unchanged_flow, account)
+        refresh_start = SETTINGS_SOURCE.index("async function refreshPlatformAccount(container, auth)")
+        refresh_end = SETTINGS_SOURCE.index("function renderAccountPanel(container", refresh_start)
+        refresh = SETTINGS_SOURCE[refresh_start:refresh_end]
+        for unchanged_refresh in (
+            'fetchFn("/api/code/auth/validate"',
+            'method: "POST"',
+            'response.status === 401 || response.status === 403',
+            'id="accountRefreshRetry"',
+            'refreshPlatformAccount(container, getPlatformAuth());',
+        ):
+            self.assertIn(unchanged_refresh, refresh)
+
+        for key in (
+            "accountDescription",
+            "accountUsageOverview",
+            "accountDetails",
+            "accountSignedOutHint",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+
+        for selector in (
+            ".account-overview-card",
+            ".account-usage-overview",
+            ".account-metrics",
+            ".account-metric + .account-metric",
+            ".account-detail-list",
+            ".account-empty-state",
+            ".account-logout:focus-visible",
+        ):
+            self.assertIn(selector, STYLE_SOURCE)
+        self.assertNotIn(".account-stats-grid", STYLE_SOURCE)
+        self.assertNotIn(".account-stat-card", STYLE_SOURCE)
+        responsive = STYLE_SOURCE.index("@media (max-width: 740px)")
+        responsive_end = STYLE_SOURCE.index("}", STYLE_SOURCE.index(".account-detail-row > strong", responsive)) + 1
+        account_responsive = STYLE_SOURCE[responsive:responsive_end]
+        self.assertIn(".account-metrics", account_responsive)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", account_responsive)
+        self.assertIn("overflow-wrap: anywhere;", account_responsive)
+
     def test_workbar_gate_keeps_api_key_phrase_on_its_own_line(self):
         for key in ("connectWorkbarDescPrimary", "connectWorkbarDescSecondary"):
             self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)

@@ -1196,28 +1196,41 @@
         const group = auth.group
           ? `<strong>${escapeHtml(auth.group)}</strong>`
           : `<strong data-i18n="notSet">${t("notSet")}</strong>`;
-        container.innerHTML = `<h3 class="settings-section-title" data-i18n="platformAccount">${t("platformAccount")}</h3>
-          <div class="settings-lite-page account-panel">
-            <section class="settings-lite-card account-identity-card">
-              <div class="account-avatar">${escapeHtml(displayName[0].toUpperCase())}</div>
-              <div class="account-info">
-                <div class="account-name">${escapeHtml(displayName)}</div>
-                <div class="account-handle">${escapeHtml(secondaryName)}</div>
-                <div class="account-connection"><span class="account-connection-dot" aria-hidden="true"></span><span data-i18n="accountLoggedIn">${t("accountLoggedIn")}</span></div>
-              </div>
-              <button id="accountLogout" class="mini-btn account-logout" type="button" data-i18n="logout">${t("logout")}</button>
-            </section>
-            <div class="account-stats-grid">
-              <section class="account-stat-card"><span data-i18n="accountBalance">${t("accountBalance")}</span><strong id="accountBalanceValue">${formatAccountQuota(auth.quota, auth.quotaDisplay)}</strong></section>
-              <section class="account-stat-card"><span data-i18n="accountUsedQuota">${t("accountUsedQuota")}</span><strong id="accountUsedQuotaValue">${formatAccountQuota(auth.usedQuota, auth.quotaDisplay)}</strong></section>
-              <section class="account-stat-card"><span data-i18n="accountRequests">${t("accountRequests")}</span><strong id="accountRequestsValue">${formatAccountNumber(auth.requestCount)}</strong></section>
+        container.innerHTML = `<div class="settings-page-heading account-page-heading">
+            <div class="settings-page-heading-copy">
+              <h3 class="settings-section-title" data-i18n="platformAccount">${t("platformAccount")}</h3>
+              <p class="settings-dense-description" data-i18n="accountDescription">${t("accountDescription")}</p>
             </div>
-            <section class="settings-lite-card account-details-card">
-              <div class="account-detail-row"><span data-i18n="accountEmail">${t("accountEmail")}</span>${email}</div>
-              <div class="account-detail-row"><span data-i18n="accountGroup">${t("accountGroup")}</span>${group}</div>
-              <div class="account-detail-row"><span data-i18n="accountUserId">${t("accountUserId")}</span><strong>${escapeHtml(auth.userId || "—")}</strong></div>
+          </div>
+          <div class="settings-lite-page account-panel">
+            <section class="settings-lite-card account-overview-card">
+              <header class="account-identity-card">
+                <div class="account-avatar">${escapeHtml(displayName[0].toUpperCase())}</div>
+                <div class="account-info">
+                  <div class="account-name">${escapeHtml(displayName)}</div>
+                  <div class="account-handle">${escapeHtml(secondaryName)}</div>
+                  <div class="account-connection"><span class="account-connection-dot" aria-hidden="true"></span><span data-i18n="accountLoggedIn">${t("accountLoggedIn")}</span></div>
+                </div>
+                <button id="accountLogout" class="mini-btn account-logout" type="button" data-i18n="logout">${t("logout")}</button>
+              </header>
+              <section class="account-usage-overview" aria-labelledby="accountUsageHeading">
+                <h4 class="account-section-heading" id="accountUsageHeading" data-i18n="accountUsageOverview">${t("accountUsageOverview")}</h4>
+                <div class="account-metrics">
+                  <div class="account-metric"><span data-i18n="accountBalance">${t("accountBalance")}</span><strong id="accountBalanceValue">${formatAccountQuota(auth.quota, auth.quotaDisplay)}</strong></div>
+                  <div class="account-metric"><span data-i18n="accountUsedQuota">${t("accountUsedQuota")}</span><strong id="accountUsedQuotaValue">${formatAccountQuota(auth.usedQuota, auth.quotaDisplay)}</strong></div>
+                  <div class="account-metric"><span data-i18n="accountRequests">${t("accountRequests")}</span><strong id="accountRequestsValue">${formatAccountNumber(auth.requestCount)}</strong></div>
+                </div>
+              </section>
+              <section class="account-details-section" aria-labelledby="accountDetailsHeading">
+                <h4 class="account-section-heading" id="accountDetailsHeading" data-i18n="accountDetails">${t("accountDetails")}</h4>
+                <div class="account-detail-list">
+                  <div class="account-detail-row"><span data-i18n="accountEmail">${t("accountEmail")}</span>${email}</div>
+                  <div class="account-detail-row"><span data-i18n="accountGroup">${t("accountGroup")}</span>${group}</div>
+                  <div class="account-detail-row"><span data-i18n="accountUserId">${t("accountUserId")}</span><strong>${escapeHtml(auth.userId || "—")}</strong></div>
+                </div>
+              </section>
+              <div class="account-refresh-state${refresh ? " is-loading" : ""}" id="accountRefreshState">${refresh ? `<span data-i18n="accountLoading">${t("accountLoading")}</span>` : ""}</div>
             </section>
-            <div class="account-refresh-state${refresh ? " is-loading" : ""}" id="accountRefreshState">${refresh ? `<span data-i18n="accountLoading">${t("accountLoading")}</span>` : ""}</div>
           </div>`;
         byId("accountLogout").addEventListener("click", () => {
           clearPlatformAuth();
@@ -1228,9 +1241,17 @@
         if (refresh) refreshPlatformAccount(container, auth);
         return;
       }
-      container.innerHTML = `<h3 class="settings-section-title" data-i18n="platformAccount">${t("platformAccount")}</h3>
-        <div class="settings-lite-page"><section class="settings-lite-card settings-empty-card"><p data-i18n="notLoggedIn">${t("notLoggedIn")}</p>
-          <button id="accountLoginNow" class="mini-btn primary-btn" type="button" data-i18n="loginPlatform">${t("loginPlatform")}</button></section></div>`;
+      container.innerHTML = `<div class="settings-page-heading account-page-heading">
+          <div class="settings-page-heading-copy">
+            <h3 class="settings-section-title" data-i18n="platformAccount">${t("platformAccount")}</h3>
+            <p class="settings-dense-description" data-i18n="accountDescription">${t("accountDescription")}</p>
+          </div>
+        </div>
+        <div class="settings-lite-page account-panel"><section class="settings-lite-card settings-empty-card account-empty-state">
+          <strong data-i18n="notLoggedIn">${t("notLoggedIn")}</strong>
+          <p data-i18n="accountSignedOutHint">${t("accountSignedOutHint")}</p>
+          <button id="accountLoginNow" class="mini-btn primary-btn" type="button" data-i18n="loginPlatform">${t("loginPlatform")}</button>
+        </section></div>`;
       byId("accountLoginNow").addEventListener("click", () => {
         openPlatformLogin();
       });
