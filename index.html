@@ -466,29 +466,48 @@
 
     <!-- Skill editor modal -->
     <div class="settings-modal hidden" id="skillEditorModal">
-      <div class="modal-card skill-editor-card">
-        <header>
+      <div class="modal-card skill-editor-card" role="dialog" aria-modal="true" aria-labelledby="skillEditorTitle">
+        <header class="skill-editor-header">
           <h2 id="skillEditorTitle" data-i18n="newSkillTitle">新建 Skill</h2>
-          <button id="closeSkillEditor" class="icon-btn" type="button">×</button>
+          <button id="closeSkillEditor" class="icon-btn" type="button" data-i18n-title="close" data-i18n-aria-label="close" title="关闭" aria-label="关闭">×</button>
         </header>
-        <label class="field"><span data-i18n="skillNameLabel">名称（英文标识）</span><input id="skillEditName" data-i18n="skillNamePlaceholder" placeholder="如 code-review" autocomplete="off" /></label>
-        <label class="field"><span data-i18n="description">描述</span><input id="skillEditDesc" data-i18n="skillDescPlaceholder" placeholder="用于自动匹配的简短描述" autocomplete="off" /></label>
-        <label class="field"><span data-i18n="skillKeywordsLabel">关键词（逗号分隔）</span><input id="skillEditKeywords" data-i18n="skillKeywordsPlaceholder" placeholder="review, 审查, bug" autocomplete="off" /></label>
-        <label class="field"><span data-i18n="skillToolsLabel">工具（逗号分隔）</span><input id="skillEditTools" data-i18n="skillToolsPlaceholder" placeholder="read_file, search_files" autocomplete="off" /></label>
-        <label class="field"><span data-i18n="skillBodyLabel">正文（Markdown）</span><textarea id="skillEditBody" rows="8" class="skill-edit-body" data-i18n="skillBodyPlaceholder" placeholder="Skill 的具体规范、流程、输出格式..." spellcheck="false"></textarea></label>
-        <details class="skill-dependency-editor" id="skillDependencyEditor">
-          <summary><span data-i18n="skillDependencyEditorTitle">依赖清单（高级）</span><span class="skill-dependency-editor-badge">JSON</span></summary>
-          <p data-i18n="skillDependencyEditorHint">标准依赖文件、脚本导入和 SKILL.md 中明确的安装命令会自动识别；仅在需要补充或覆盖时编辑。保存清单不会立即安装，模型会在首次使用前预检并按权限与你协作。</p>
-          <div class="skill-dependency-editor-actions">
-            <button id="skillDependencyTemplate" class="mini-btn" type="button" data-i18n="skillDependencyTemplate">插入示例</button>
-          </div>
-          <div id="skillDependencyEditorNotice" class="skill-dependency-editor-notice hidden"></div>
-          <textarea id="skillEditDependencies" rows="9" class="skill-dependency-json" data-i18n="skillDependencyEditorPlaceholder" placeholder='例如 {&quot;default&quot;:{&quot;required&quot;:[{&quot;type&quot;:&quot;python&quot;,&quot;name&quot;:&quot;requests&quot;}]}}' spellcheck="false"></textarea>
-          <div id="skillDependencyEditorError" class="skill-dependency-editor-error hidden" role="alert"></div>
-        </details>
-        <footer class="confirm-actions">
+        <div class="skill-editor-scroll-body">
+          <section class="skill-editor-section skill-editor-basic">
+            <h3 data-i18n="skillBasicInformation">基本信息</h3>
+            <label class="field"><span data-i18n="skillNameLabel">Skill ID</span><input id="skillEditName" data-i18n="skillNamePlaceholder" placeholder="如 code-review" autocomplete="off" /></label>
+            <label class="field"><span data-i18n="description">描述</span><input id="skillEditDesc" data-i18n="skillDescPlaceholder" placeholder="用于自动匹配的简短描述" autocomplete="off" /></label>
+          </section>
+          <section class="skill-editor-section skill-editor-matching">
+            <h3 data-i18n="skillMatchingAndTools">关键词与工具</h3>
+            <div class="skill-editor-field-grid">
+              <label class="field"><span data-i18n="skillKeywordsLabel">关键词（逗号分隔）</span><input id="skillEditKeywords" data-i18n="skillKeywordsPlaceholder" placeholder="review, 审查, bug" autocomplete="off" /></label>
+              <label class="field"><span data-i18n="skillToolsLabel">工具（逗号分隔）</span><input id="skillEditTools" data-i18n="skillToolsPlaceholder" placeholder="read_file, search_files" autocomplete="off" /></label>
+            </div>
+          </section>
+          <section class="skill-editor-section skill-editor-instructions">
+            <h3 data-i18n="skillInstructionsTitle">Markdown 指令</h3>
+            <label class="field skill-editor-body-field"><span class="sr-only" data-i18n="skillBodyLabel">正文（Markdown）</span><textarea id="skillEditBody" rows="10" class="skill-edit-body" data-i18n="skillBodyPlaceholder" data-i18n-aria-label="skillBodyLabel" aria-label="正文（Markdown）" placeholder="Skill 的具体规范、流程、输出格式..." spellcheck="false"></textarea></label>
+          </section>
+          <details class="skill-dependency-editor" id="skillDependencyEditor">
+            <summary>
+              <span class="skill-dependency-editor-summary-copy"><strong data-i18n="skillDependencyEditorTitle">依赖清单（高级）</strong><small data-i18n="skillDependencyEditorSummary">可选；用于补充或覆盖自动识别的依赖</small></span>
+              <span id="skillDependencyEditorStatus" class="skill-dependency-editor-status" data-i18n="skillDependencyNotConfigured">未配置</span>
+              <span class="skill-dependency-editor-badge">JSON</span>
+            </summary>
+            <div class="skill-dependency-editor-body">
+              <p data-i18n="skillDependencyEditorHint">标准依赖文件、脚本导入和 SKILL.md 中明确的安装命令会自动识别；仅在需要补充或覆盖时编辑。保存清单不会立即安装，模型会在首次使用前预检并按权限与你协作。</p>
+              <div id="skillDependencyEditorNotice" class="skill-dependency-editor-notice hidden"></div>
+              <div class="skill-dependency-editor-actions">
+                <button id="skillDependencyTemplate" class="mini-btn" type="button" data-i18n="skillDependencyTemplate">插入示例</button>
+              </div>
+              <textarea id="skillEditDependencies" rows="9" class="skill-dependency-json" data-i18n="skillDependencyEditorPlaceholder" placeholder='例如 {&quot;default&quot;:{&quot;required&quot;:[{&quot;type&quot;:&quot;python&quot;,&quot;name&quot;:&quot;requests&quot;}]}}' spellcheck="false"></textarea>
+              <div id="skillDependencyEditorError" class="skill-dependency-editor-error hidden" role="alert"></div>
+            </div>
+          </details>
+        </div>
+        <footer class="skill-editor-footer confirm-actions">
           <button id="cancelSkillEdit" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
-          <button id="saveSkillEdit" class="danger-btn" type="button" data-i18n="save">保存</button>
+          <button id="saveSkillEdit" class="primary-btn" type="button" data-i18n="save">保存</button>
         </footer>
       </div>
     </div>

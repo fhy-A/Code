@@ -159,6 +159,20 @@
       .slice(0, 3);
   }
 
+  function filterSettingsSkills(skills = [], query = "") {
+    const terms = String(query || "").trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return [...skills];
+    return skills.filter((skill) => {
+      const searchable = [
+        skill?.name,
+        skill?.description,
+        ...(Array.isArray(skill?.keywords) ? skill.keywords : []),
+        ...(Array.isArray(skill?.tools) ? skill.tools : []),
+      ].map((value) => String(value || "").toLocaleLowerCase()).join("\n");
+      return terms.every((term) => searchable.includes(term));
+    });
+  }
+
   function applySkillTaskPolicy(
     allowedToolNames,
     skills = [],
@@ -600,6 +614,9 @@
     const onPromptChanged = options.onPromptChanged || (() => {});
     const onMemoryChanged = options.onMemoryChanged || (() => {});
     const trashIcon = options.trashIcon || (() => "");
+    const uiIcon = options.uiIcon || Code.core?.icons?.uiIcon || ((name, size = 16, className = "") => (
+      `<span class="ui-icon${className ? ` ${className}` : ""}" aria-hidden="true"></span>`
+    ));
     const documentRef = options.document || global.document;
     const storage = options.storage || global.localStorage;
 
@@ -610,6 +627,7 @@
     let editingSkillDependencyOriginal = "";
     let editingSkillDependencySource = "";
     let settingsSelectedSkillName = null;
+    let settingsSkillQuery = "";
     let settingsMemoryRequestId = 0;
     let skillDependencySnapshot = null;
     let skillDependencyByName = new Map();
@@ -817,10 +835,20 @@
       byId("skillEditDependencies").value = dependencyText;
       const dependencyEditor = byId("skillDependencyEditor");
       if (dependencyEditor) {
-        dependencyEditor.open = Boolean(
-          skill?.dependencyManifestError
-          || (dependencyText && !["detected", "bundled"].includes(editingSkillDependencySource))
-        );
+        dependencyEditor.open = false;
+      }
+      const dependencyStatus = byId("skillDependencyEditorStatus");
+      if (dependencyStatus) {
+        const statusKey = skill?.dependencyManifestError
+          ? "skillDependencyNeedsAttention"
+          : ["detected", "bundled"].includes(editingSkillDependencySource)
+            ? "skillDependencyAutoDetected"
+            : dependencyText
+              ? "skillDependencyConfigured"
+              : "skillDependencyNotConfigured";
+        dependencyStatus.dataset.i18n = statusKey;
+        dependencyStatus.dataset.status = statusKey === "skillDependencyNeedsAttention" ? "warning" : "neutral";
+        dependencyStatus.textContent = t(statusKey);
       }
       const dependencyNotice = byId("skillDependencyEditorNotice");
       if (dependencyNotice) {
@@ -1331,21 +1359,41 @@
     }
 
     function renderSkillsInSettings(container) {
-      container.innerHTML = `<div class="skills-panel-heading">
-          <h3 data-i18n="skills">${t("skills")}</h3>
-          <button id="settingsSkillDependencyRefresh" class="mini-btn skill-dependency-refresh" type="button" data-i18n="skillDependencyCheck">${t("skillDependencyCheck")}</button>
-        </div>
-        <div id="settingsSkillDependencyOverview" class="skill-dependency-overview" aria-live="polite"></div>
-        <div class="skills-layout-inner">
-          <div class="skills-sidebar-inner">
-            <button id="settingsSkillAddBtn" style="display:flex;align-items:center;gap:4px;width:100%;padding:5px 12px;border:0;border-left:3px solid transparent;border-radius:0;background:transparent;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0" data-i18n="newSkill">+ 新建 Skill</button>
-            <div id="settingsSkillsSidebar" class="skill-list-scroll" style="padding:4px 0"></div>
+      container.innerHTML = `<section class="skills-settings-page">
+        <header class="skills-panel-heading">
+          <div class="skills-panel-heading-copy">
+            <h3 class="settings-section-title" data-i18n="skills">${t("skills")}</h3>
+            <p data-i18n="skillsSettingsDescription">${t("skillsSettingsDescription")}</p>
+            <div class="skills-summary-row">
+              <div id="settingsSkillsSummary" class="skills-installed-summary"></div>
+              <div id="settingsSkillDependencyOverview" class="skill-dependency-overview" aria-live="polite"></div>
+            </div>
           </div>
-          <div class="skills-detail-inner" id="settingsSkillsDetail"></div>
-        </div>`;
+          <button id="settingsSkillDependencyRefresh" class="mini-btn skill-dependency-refresh" type="button" data-i18n="skillDependencyCheck">${uiIcon("refresh", 15, "skill-refresh-icon")}<span data-ui-label>${t("skillDependencyCheck")}</span></button>
+        </header>
+        <div class="skills-layout-inner">
+          <nav class="skills-sidebar-inner" data-i18n-aria-label="skillsNavigatorLabel" aria-label="${escapeHtml(t("skillsNavigatorLabel"))}">
+            <div class="skills-sidebar-toolbar">
+              <label class="skills-search-field" for="settingsSkillSearch">
+                ${uiIcon("search", 16, "skills-search-icon")}
+                <span class="sr-only" data-i18n="skillsSearchLabel">${t("skillsSearchLabel")}</span>
+                <input id="settingsSkillSearch" type="search" autocomplete="off" data-i18n="skillsSearchPlaceholder" data-i18n-aria-label="skillsSearchLabel" placeholder="${escapeHtml(t("skillsSearchPlaceholder"))}" aria-label="${escapeHtml(t("skillsSearchLabel"))}" value="${escapeHtml(settingsSkillQuery)}">
+              </label>
+              <button id="settingsSkillAddBtn" class="skills-add-button" type="button" data-i18n="newSkillTitle">${uiIcon("plus", 15, "skill-add-icon")}<span data-ui-label>${t("newSkillTitle")}</span></button>
+            </div>
+            <div id="settingsSkillsSidebar" class="skill-list-scroll"></div>
+          </nav>
+          <section class="skills-detail-inner" id="settingsSkillsDetail" data-i18n-aria-label="skillDetailRegionLabel" aria-label="${escapeHtml(t("skillDetailRegionLabel"))}"></section>
+        </div>
+      </section>`;
       renderSkillDependencyOverview();
       renderSettingsSkillsSidebar();
       byId("settingsSkillAddBtn").addEventListener("click", () => openSkillEditor(null));
+      const search = byId("settingsSkillSearch");
+      search?.addEventListener("input", () => {
+        settingsSkillQuery = search.value;
+        renderSettingsSkillsSidebar(settingsSelectedSkillName);
+      });
       byId("settingsSkillDependencyRefresh").addEventListener("click", () => {
         loadSkillDependencyStatus({ force: true });
       });
@@ -1391,6 +1439,7 @@
       const overview = byId("settingsSkillDependencyOverview");
       const refresh = byId("settingsSkillDependencyRefresh");
       if (!overview) return;
+      renderSkillsSettingsSummary();
       if (refresh) refresh.disabled = skillDependencyLoading;
       if (skillDependencyLoading) {
         overview.className = "skill-dependency-overview is-loading";
@@ -1417,6 +1466,14 @@
       });
       const errorCount = Array.isArray(skillDependencySnapshot.errors) ? skillDependencySnapshot.errors.length : 0;
       if (errorCount) overview.textContent += ` · ${t("skillDependencyManifestErrors", { count: errorCount })}`;
+    }
+
+    function renderSkillsSettingsSummary() {
+      const summary = byId("settingsSkillsSummary");
+      if (!summary) return;
+      const skills = Array.isArray(state.skills) ? state.skills : [];
+      const enabled = skills.filter((skill) => !state.disabledSkills.has(skill.name)).length;
+      summary.innerHTML = `<span>${escapeHtml(t("skillsInstalledSummary", { count: skills.length }))}</span><span>${escapeHtml(t("skillsEnabledSummary", { count: enabled }))}</span>`;
     }
 
     function renderDependencyRequirement(requirement, optional) {
@@ -1887,22 +1944,35 @@
     function renderSettingsSkillsSidebar(preferredName = settingsSelectedSkillName) {
       const sidebar = byId("settingsSkillsSidebar");
       if (!sidebar) return;
-      const sorted = sortedSkills();
+      renderSkillsSettingsSummary();
+      const allSkills = sortedSkills();
+      const sorted = filterSettingsSkills(allSkills, settingsSkillQuery);
       const selectedSkill = sorted.find((skill) => skill.name === preferredName) || sorted[0] || null;
-      settingsSelectedSkillName = selectedSkill?.name || null;
+      if (selectedSkill) settingsSelectedSkillName = selectedSkill.name;
+      else if (!allSkills.length) settingsSelectedSkillName = null;
       sidebar.innerHTML = sorted.length ? sorted.map((skill) => {
         const enabled = !state.disabledSkills.has(skill.name);
         const dependency = skillDependencyByName.get(skill.name);
-        return `<div class="skill-list-item${skill.name === settingsSelectedSkillName ? " active" : ""}" data-skill-name="${escapeHtml(skill.name)}">
-          <span class="dot ${enabled ? "on" : "off"}"></span><span class="skill-list-name">${escapeHtml(skill.name)}</span>
-          ${dependency ? `<span class="skill-dependency-sidebar-status is-${escapeHtml(dependency.status)}" title="${escapeHtml(`${t("skillDependencyTitle")} · ${dependencyStatusLabel(dependency.status)}`)}"></span>` : ""}
-        </div>`;
-      }).join("") : `<div class="muted-line" style="padding:12px;font-size:12px">${t("noSkills")}</div>`;
+        return `<button class="skill-list-item${skill.name === settingsSelectedSkillName ? " active" : ""}" type="button" data-skill-name="${escapeHtml(skill.name)}" aria-current="${skill.name === settingsSelectedSkillName ? "true" : "false"}">
+          <span class="skill-list-copy">
+            <span class="skill-list-name">${escapeHtml(skill.name)}</span>
+            <span class="skill-list-description">${escapeHtml(skill.description || t("skillDescriptionUnavailable"))}</span>
+          </span>
+          <span class="skill-list-status-row">
+            <span class="skill-list-status-badge ${enabled ? "is-enabled" : "is-disabled"}">${escapeHtml(t(enabled ? "enabledStatus" : "disabledStatus"))}</span>
+            ${dependency ? `<span class="skill-dependency-sidebar-status is-${escapeHtml(dependency.status)}" title="${escapeHtml(`${t("skillDependencyTitle")} · ${dependencyStatusLabel(dependency.status)}`)}">${escapeHtml(dependencyStatusLabel(dependency.status))}</span>` : ""}
+          </span>
+        </button>`;
+      }).join("") : `<div class="skills-list-empty" role="status">${escapeHtml(t(allSkills.length ? "skillsSearchNoResults" : "noSkills"))}</div>`;
       sidebar.querySelectorAll(".skill-list-item").forEach((item) => {
         item.addEventListener("click", () => {
           settingsSelectedSkillName = item.dataset.skillName;
-          sidebar.querySelectorAll(".skill-list-item").forEach((element) => element.classList.remove("active"));
+          sidebar.querySelectorAll(".skill-list-item").forEach((element) => {
+            element.classList.remove("active");
+            element.setAttribute("aria-current", "false");
+          });
           item.classList.add("active");
+          item.setAttribute("aria-current", "true");
           showSkillDetailInSettings(state.skills.find((skill) => skill.name === item.dataset.skillName));
         });
       });
@@ -1926,24 +1996,39 @@
       await ensureSkillBody(skill);
       if (skill.name !== settingsSelectedSkillName) return;
       const enabled = !state.disabledSkills.has(skill.name);
-      panel.innerHTML = `<div class="skill-detail-head">
-        <div class="skill-detail-name">${escapeHtml(skill.name)}</div>
-        <div class="skill-detail-head-actions">
-          <label class="toggle-switch" title="${enabled ? t("enabledStatus") : t("disabledStatus")}">
-            <input type="checkbox" ${enabled ? "checked" : ""} id="settingsSkillToggle" />
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          </label>
-          <button class="skill-edit-icon" id="settingsSkillEdit" title="${t("edit")}">${editIcon()}</button>
+      const dependency = skillDependencyByName.get(skill.name);
+      const keywordHtml = (skill.keywords || []).length
+        ? skill.keywords.map((keyword) => `<span>${escapeHtml(keyword)}</span>`).join("")
+        : "<span>—</span>";
+      const toolHtml = (skill.tools || []).length
+        ? skill.tools.map((tool) => `<span>${escapeHtml(tool)}</span>`).join("")
+        : "<span>—</span>";
+      panel.innerHTML = `<article class="skill-detail-surface">
+        <header class="skill-detail-head">
+          <div class="skill-detail-heading-copy">
+            <h4 class="skill-detail-name">${escapeHtml(skill.name)}</h4>
+            <p class="skill-detail-description">${escapeHtml(skill.description || t("skillDescriptionUnavailable"))}</p>
+            <div class="skill-detail-meta">
+              <span class="skill-detail-meta-chip ${enabled ? "is-enabled" : "is-disabled"}">${escapeHtml(t(enabled ? "enabledStatus" : "disabledStatus"))}</span>
+              ${dependency ? `<span class="skill-detail-meta-chip is-${escapeHtml(dependency.status)}">${escapeHtml(dependencyStatusLabel(dependency.status))}</span>` : ""}
+              ${EXPLICIT_ONLY_SET.has(skill.name) ? `<span class="skill-detail-meta-chip">/${escapeHtml(skill.name)}</span>` : ""}
+            </div>
+          </div>
+          <div class="skill-detail-head-actions">
+            <button class="skill-icon-action skill-enable-icon${enabled ? " is-active" : ""}" type="button" id="settingsSkillToggle" aria-pressed="${enabled ? "true" : "false"}" title="${escapeHtml(t(enabled ? "skillDisableAction" : "skillEnableAction"))}" aria-label="${escapeHtml(t(enabled ? "skillDisableAction" : "skillEnableAction"))}">${uiIcon("power", 18, "skill-action-svg")}</button>
+            <button class="skill-icon-action skill-edit-icon" type="button" id="settingsSkillEdit" title="${escapeHtml(t("edit"))}" aria-label="${escapeHtml(t("edit"))}">${uiIcon("pencil", 18, "skill-action-svg")}</button>
+          </div>
+        </header>
+        ${EXPLICIT_ONLY_SET.has(skill.name) ? `<div class="skill-detail-note">${escapeHtml(t("skillExplicitHint").replace("{name}", skill.name))}</div>` : ""}
+        ${renderSkillDependencySection(skill.name)}
+        <div class="skill-detail-info-grid">
+          <section class="skill-detail-section"><div class="skill-detail-label">${escapeHtml(t("skillKeywords"))}</div><div class="skill-detail-value skill-detail-token-list">${keywordHtml}</div></section>
+          <section class="skill-detail-section"><div class="skill-detail-label">${escapeHtml(t("skillTools"))}</div><div class="skill-detail-value skill-detail-token-list">${toolHtml}</div></section>
+          <section class="skill-detail-section is-path"><div class="skill-detail-label">${escapeHtml(t("skillPathLabel"))}</div><code class="skill-detail-value">${escapeHtml(skill.path || `data/skills/${skill.dir || skill.name}/SKILL.md`)}</code></section>
         </div>
-      </div>
-      ${EXPLICIT_ONLY_SET.has(skill.name) ? `<div class="skill-detail-note">${t("skillExplicitHint").replace("{name}", escapeHtml(skill.name))}</div>` : ""}
-      ${renderSkillDependencySection(skill.name)}
-      <div class="skill-detail-section"><div class="skill-detail-label">${t("skillDesc")}</div><div class="skill-detail-value">${escapeHtml(skill.description || "-")}</div></div>
-      <div class="skill-detail-section"><div class="skill-detail-label">${t("skillKeywords")}</div><div class="skill-detail-value">${escapeHtml((skill.keywords || []).join(", ") || "-")}</div></div>
-      <div class="skill-detail-section"><div class="skill-detail-label">${t("skillTools")}</div><div class="skill-detail-value">${escapeHtml((skill.tools || []).join(", ") || "-")}</div></div>
-      <div class="skill-detail-section"><div class="skill-detail-label">${t("skillPathLabel")}</div><div class="skill-detail-value">${escapeHtml(skill.path || `data/skills/${skill.dir || skill.name}/SKILL.md`)}</div></div>
-      <div class="skill-detail-actions"><button class="skill-delete-icon" id="settingsSkillDelete" title="${t("deleteSkill")}">${t("delete")}</button></div>`;
-      byId("settingsSkillToggle").addEventListener("change", () => {
+        <div class="skill-detail-actions"><button class="skill-icon-action skill-delete-icon" type="button" id="settingsSkillDelete" title="${escapeHtml(t("deleteSkill"))}" aria-label="${escapeHtml(t("deleteSkill"))}">${uiIcon("trash", 18, "skill-action-svg")}</button></div>
+      </article>`;
+      byId("settingsSkillToggle").addEventListener("click", () => {
         toggleSkill(skill.name);
         renderSettingsSkillsSidebar(skill.name);
       });
@@ -2021,6 +2106,7 @@
     mergeGoalModelContext,
     EXPLICIT_ONLY_SKILLS,
     createSkillsMemoryFeature,
+    filterSettingsSkills,
     formatSkillInstructions,
     getSlashSuggestionGroups,
     getSkillToolBudgets,

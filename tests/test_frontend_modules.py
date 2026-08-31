@@ -31409,7 +31409,10 @@ class Code043ModelImageSettingsTests(unittest.TestCase):
 
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 Skills settings workspace */",
+            1,
+        )[0]
 
     def rule(self, source, selector):
         match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
@@ -31680,6 +31683,354 @@ class Code043ModelImageSettingsTests(unittest.TestCase):
         model_row_start = SETTINGS_SOURCE.index("function renderImageModelRow")
         model_row_end = SETTINGS_SOURCE.index("function renderImageConnectionCard", model_row_start)
         self.assertIn('t("imageModelIdPlaceholder")', SETTINGS_SOURCE[model_row_start:model_row_end])
+
+
+class Code043SkillsSettingsWorkspaceTests(unittest.TestCase):
+    MARKER = "/* CODE-043 Skills settings workspace */"
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    def rule(self, source, selector):
+        match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
+        self.assertIsNotNone(match, selector)
+        return match.group("body")
+
+    def test_search_filters_name_and_descriptive_metadata_without_server_calls(self):
+        script = r"""
+global.window = {Code: {features: {}}};
+require("./src/features/skills-memory.js");
+const {filterSettingsSkills} = window.Code.features.skillsMemory;
+const skills = [
+  {name: "deck-builder", description: "Create presentations", keywords: ["slides"], tools: ["read_file"]},
+  {name: "data-audit", description: "Validate tables", keywords: ["quality"], tools: ["search_files"]},
+];
+const result = {
+  name: filterSettingsSkills(skills, "deck").map((skill) => skill.name),
+  description: filterSettingsSkills(skills, "presentations").map((skill) => skill.name),
+  keyword: filterSettingsSkills(skills, "quality").map((skill) => skill.name),
+  tool: filterSettingsSkills(skills, "search_files").map((skill) => skill.name),
+  whitespace: filterSettingsSkills(skills, "  ").map((skill) => skill.name),
+  thirtyTwo: filterSettingsSkills(Array.from({length: 32}, (_, index) => ({name: `skill-${index}`})), "").length,
+};
+process.stdout.write(JSON.stringify(result));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["name"], ["deck-builder"])
+        self.assertEqual(data["description"], ["deck-builder"])
+        self.assertEqual(data["keyword"], ["data-audit"])
+        self.assertEqual(data["tool"], ["data-audit"])
+        self.assertEqual(data["whitespace"], ["deck-builder", "data-audit"])
+        self.assertEqual(data["thirtyTwo"], 32)
+
+    def test_renderer_is_searchable_master_detail_and_preserves_skill_handlers(self):
+        render_start = SKILLS_MEMORY_SOURCE.index("function renderSkillsInSettings(container)")
+        render_end = SKILLS_MEMORY_SOURCE.index("function refreshSettingsLanguage", render_start)
+        renderer = SKILLS_MEMORY_SOURCE[render_start:render_end]
+        sidebar_start = SKILLS_MEMORY_SOURCE.index("function renderSettingsSkillsSidebar", render_end)
+        detail_start = SKILLS_MEMORY_SOURCE.index("async function showSkillDetailInSettings", sidebar_start)
+        sidebar = SKILLS_MEMORY_SOURCE[sidebar_start:detail_start]
+        detail_end = SKILLS_MEMORY_SOURCE.index("function bind()", detail_start)
+        detail = SKILLS_MEMORY_SOURCE[detail_start:detail_end]
+
+        for fragment in (
+            'class="skills-settings-page"',
+            'class="skills-panel-heading"',
+            'data-i18n="skillsSettingsDescription"',
+            'id="settingsSkillsSummary"',
+            'id="settingsSkillSearch"',
+            'type="search"',
+            'class="skills-layout-inner"',
+            'aria-label="${escapeHtml(t("skillsNavigatorLabel"))}"',
+            'data-i18n-aria-label="skillsNavigatorLabel"',
+            'data-i18n-aria-label="skillDetailRegionLabel"',
+        ):
+            self.assertIn(fragment, renderer)
+        self.assertIn('addEventListener("input"', renderer)
+        self.assertIn("settingsSkillQuery = search.value", renderer)
+        self.assertNotIn("apiJson(", renderer)
+
+        self.assertIn("const allSkills = sortedSkills()", sidebar)
+        self.assertIn("renderSkillsSettingsSummary()", sidebar)
+        self.assertIn("filterSettingsSkills(allSkills, settingsSkillQuery)", sidebar)
+        self.assertIn('<button class="skill-list-item', sidebar)
+        self.assertIn('aria-current="${skill.name === settingsSelectedSkillName ? "true" : "false"}"', sidebar)
+        self.assertIn('class="skill-list-description"', sidebar)
+        self.assertIn('class="skill-list-status-badge', sidebar)
+        self.assertIn('class="skill-dependency-sidebar-status', sidebar)
+        self.assertIn('"skillsSearchNoResults"', sidebar)
+
+        for behavior in (
+            'id="settingsSkillToggle"',
+            "toggleSkill(skill.name)",
+            "openSkillEditor(skill)",
+            'deleteSkillConfirm(skill.name, "settingsSkillDelete")',
+            "bindSkillDependencyInteractions(panel, skill.name)",
+        ):
+            self.assertIn(behavior, detail)
+        for fragment in (
+            'class="skill-detail-surface"',
+            'class="skill-detail-description"',
+            'class="skill-detail-meta"',
+            'class="skill-detail-info-grid"',
+            "skill-icon-action",
+        ):
+            self.assertIn(fragment, detail)
+
+    def test_visual_scale_status_semantics_editor_and_narrow_stack_are_scoped(self):
+        source = self.phase_source()
+        for selector in (
+            ".skills-settings-page",
+            ".skills-panel-heading",
+            ".skills-layout-inner",
+            ".skills-sidebar-inner",
+            ".skills-search-field",
+            ".skill-list-item",
+            ".skill-list-status-badge",
+            ".skills-detail-inner",
+            ".skill-detail-surface",
+            ".skill-detail-meta-chip",
+            ".skill-dependency-card",
+            ".skill-editor-card",
+        ):
+            self.assertIn(selector, source)
+        for scale in (
+            "font-size: 18px;",
+            "font-size: 14px;",
+            "font-size: 12px;",
+            "height: 40px;",
+            "height: 32px;",
+            "grid-template-columns: 240px minmax(0, 1fr);",
+        ):
+            self.assertIn(scale, source)
+        self.assertIn("@media (max-width: 760px)", source)
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", narrow)
+        self.assertIn("overflow-x: hidden;", narrow)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", source)
+        icon_action = self.rule(source, ".skill-icon-action {")
+        self.assertIn("display: inline-grid;", icon_action)
+
+        self.assertIn('id="saveSkillEdit" class="primary-btn"', INDEX_SOURCE)
+        self.assertNotIn('id="saveSkillEdit" class="danger-btn"', INDEX_SOURCE)
+        for key in (
+            "skillsSettingsDescription",
+            "skillsSearchLabel",
+            "skillsSearchPlaceholder",
+            "skillsSearchNoResults",
+            "skillsNavigatorLabel",
+            "skillsInstalledSummary",
+            "skillsEnabledSummary",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+        for translation in (
+            'skillsSettingsDescription: "管理已安装的 Skill、启用状态与本地依赖。"',
+            'skillsSettingsDescription: "Manage installed Skills, enabled state, and local dependencies."',
+            'skillsSearchPlaceholder: "搜索 Skill"',
+            'skillsSearchPlaceholder: "Search Skills"',
+        ):
+            self.assertIn(translation, I18N_SOURCE)
+
+    def test_user_refinement_copy_and_detail_layout_are_exact(self):
+        for key in (
+            "skillBasicInformation",
+            "skillMatchingAndTools",
+            "skillInstructionsTitle",
+            "skillDependencyEditorSummary",
+            "skillDependencyNotConfigured",
+            "skillDependencyConfigured",
+            "skillDependencyAutoDetected",
+            "skillDependencyNeedsAttention",
+        ):
+            self.assertEqual(I18N_SOURCE.count(f"{key}:"), 2)
+        for translation in (
+            'skillDependencySummary: "依赖声明 {declared} · {ready} 可用 · {partial} 部分可用 · {unavailable} 不可用"',
+            'skillDependencySummary: "Dependency declarations {declared} · {ready} ready · {partial} partially ready · {unavailable} unavailable"',
+            'skillsSearchPlaceholder: "搜索 Skill"',
+            'skillsSearchPlaceholder: "Search Skills"',
+            'skillNameLabel: "Skill ID"',
+        ):
+            self.assertIn(translation, I18N_SOURCE)
+
+        source = self.phase_source()
+        info_grid = self.rule(source, ".skill-detail-info-grid {")
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", info_grid)
+        detail_actions = self.rule(source, ".skill-detail-head-actions {")
+        self.assertIn("flex-direction: column;", detail_actions)
+        self.assertIn("align-items: stretch;", detail_actions)
+        self.assertIn(".skill-detail-info-grid .skill-detail-section + .skill-detail-section", source)
+        self.assertIn(".skill-dependency-editor-notice.hidden", source)
+        hidden_notice = self.rule(source, ".skill-dependency-editor-notice.hidden {")
+        self.assertIn("display: none;", hidden_notice)
+
+    def test_skill_editor_has_fixed_chrome_and_only_form_body_scrolls(self):
+        modal_start = INDEX_SOURCE.index('id="skillEditorModal"')
+        modal_end = INDEX_SOURCE.index('id="memoryModal"', modal_start)
+        modal = INDEX_SOURCE[modal_start:modal_end]
+        for fragment in (
+            'class="modal-card skill-editor-card"',
+            'class="skill-editor-header"',
+            'class="skill-editor-scroll-body"',
+            'class="skill-editor-section skill-editor-basic"',
+            'class="skill-editor-section skill-editor-matching"',
+            'class="skill-editor-section skill-editor-instructions"',
+            'class="skill-editor-footer confirm-actions"',
+            'id="skillDependencyEditorStatus"',
+        ):
+            self.assertIn(fragment, modal)
+        self.assertLess(modal.index('class="skill-editor-header"'), modal.index('class="skill-editor-scroll-body"'))
+        self.assertLess(modal.index('class="skill-editor-scroll-body"'), modal.index('class="skill-editor-footer confirm-actions"'))
+        self.assertLess(modal.index("skill-editor-basic"), modal.index("skill-editor-matching"))
+        self.assertLess(modal.index("skill-editor-matching"), modal.index("skill-editor-instructions"))
+        self.assertLess(modal.index('id="skillEditBody"'), modal.index('id="skillDependencyEditor"'))
+        self.assertEqual(modal.count('id="skillEditorModal"'), 1)
+
+        source = self.phase_source()
+        card = self.rule(source, ".skill-editor-card {")
+        self.assertIn("display: flex;", card)
+        self.assertIn("flex-direction: column;", card)
+        self.assertIn("overflow: hidden;", card)
+        scroll_body = self.rule(source, ".skill-editor-scroll-body {")
+        self.assertIn("flex: 1 1 auto;", scroll_body)
+        self.assertIn("min-height: 0;", scroll_body)
+        self.assertIn("overflow-y: auto;", scroll_body)
+        self.assertIn("overflow-x: hidden;", scroll_body)
+        for selector in (".skill-editor-header {", ".skill-editor-footer {"):
+            chrome = self.rule(source, selector)
+            self.assertIn("flex: 0 0 auto;", chrome)
+            self.assertIn("overflow: hidden;", chrome)
+
+        open_start = SKILLS_MEMORY_SOURCE.index("function openSkillEditor(skill)")
+        open_end = SKILLS_MEMORY_SOURCE.index("function closeSkillEditor", open_start)
+        opening = SKILLS_MEMORY_SOURCE[open_start:open_end]
+        self.assertIn("dependencyEditor.open = false", opening)
+        self.assertIn('byId("skillDependencyEditorStatus")', opening)
+        self.assertNotIn("apiJson(", opening)
+        self.assertNotIn("storage", opening)
+
+        close_start = SKILLS_MEMORY_SOURCE.index("function closeSkillEditor()")
+        close_end = SKILLS_MEMORY_SOURCE.index("async function saveSkillEdit()", close_start)
+        closing = SKILLS_MEMORY_SOURCE[close_start:close_end]
+        self.assertNotIn("apiJson(", closing)
+        self.assertNotIn("storage", closing)
+
+        bind_start = SKILLS_MEMORY_SOURCE.index("function bind()")
+        bind_end = SKILLS_MEMORY_SOURCE.index("return Object.freeze", bind_start)
+        binding = SKILLS_MEMORY_SOURCE[bind_start:bind_end]
+        self.assertIn('byId("closeSkillEditor")?.addEventListener("click", closeSkillEditor)', binding)
+        self.assertIn('byId("cancelSkillEdit")?.addEventListener("click", closeSkillEditor)', binding)
+        self.assertIn('byId("saveSkillEdit")?.addEventListener("click", saveSkillEdit)', binding)
+        self.assertNotIn('byId("skillDependencyEditor")?.addEventListener("toggle"', binding)
+
+        save_start = SKILLS_MEMORY_SOURCE.index("async function saveSkillEdit()")
+        save_end = SKILLS_MEMORY_SOURCE.index("async function deleteSkillConfirm", save_start)
+        saving = SKILLS_MEMORY_SOURCE[save_start:save_end]
+        for behavior in (
+            'originalName: editingSkillName || ""',
+            "payload.dependencies = dependencies",
+            'apiJson("/api/skills"',
+            'method: "POST"',
+            "await loadSkills()",
+        ):
+            self.assertIn(behavior, saving)
+
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".skill-editor-card", narrow)
+        self.assertIn(".skill-editor-scroll-body", narrow)
+        self.assertIn("overflow-x: hidden;", narrow)
+
+    def test_detail_actions_are_icon_only_accessible_and_share_hit_area(self):
+        detail_start = SKILLS_MEMORY_SOURCE.index("async function showSkillDetailInSettings")
+        detail_end = SKILLS_MEMORY_SOURCE.index("function bind()", detail_start)
+        detail = SKILLS_MEMORY_SOURCE[detail_start:detail_end]
+        for fragment in (
+            'id="settingsSkillToggle"',
+            'aria-pressed="${enabled ? "true" : "false"}"',
+            'uiIcon("power", 18',
+            'id="settingsSkillEdit"',
+            'uiIcon("pencil", 18',
+            'id="settingsSkillDelete"',
+            'uiIcon("trash", 18',
+            'aria-label="${escapeHtml(t(enabled ? "skillDisableAction" : "skillEnableAction"))}"',
+            'title="${escapeHtml(t(enabled ? "skillDisableAction" : "skillEnableAction"))}"',
+            'title="${escapeHtml(t("edit"))}" aria-label="${escapeHtml(t("edit"))}"',
+            'title="${escapeHtml(t("deleteSkill"))}" aria-label="${escapeHtml(t("deleteSkill"))}"',
+            'addEventListener("click"',
+        ):
+            self.assertIn(fragment, detail)
+        self.assertNotIn('id="settingsSkillToggle" aria-label', detail)
+        for element_id in ("settingsSkillToggle", "settingsSkillEdit", "settingsSkillDelete"):
+            match = re.search(
+                rf'<button[^>]*id="{element_id}"[^>]*>(?P<body>.*?)</button>',
+                detail,
+                re.S,
+            )
+            self.assertIsNotNone(match, element_id)
+            self.assertNotIn("<span", match.group("body"), element_id)
+
+        for translation in (
+            'skillEnableAction: "启用 Skill"',
+            'skillDisableAction: "禁用 Skill"',
+            'skillEnableAction: "Enable Skill"',
+            'skillDisableAction: "Disable Skill"',
+        ):
+            self.assertIn(translation, I18N_SOURCE)
+
+        source = self.phase_source()
+        common = self.rule(source, ".skill-icon-action {")
+        for declaration in (
+            "width: 40px;",
+            "height: 40px;",
+            "min-width: 40px;",
+            "padding: 0;",
+        ):
+            self.assertIn(declaration, common)
+        pressed = self.rule(source, '.skill-enable-icon[aria-pressed="true"] {')
+        self.assertIn("box-shadow: inset", pressed)
+        self.assertIn("background:", pressed)
+        delete_default = self.rule(source, ".skill-delete-icon {")
+        self.assertIn("color: var(--muted);", delete_default)
+        self.assertNotIn("color: var(--red);", delete_default)
+        self.assertIn(".skill-delete-icon:hover", source)
+        self.assertIn(".skill-delete-icon:focus-visible", source)
+        delete_feedback = self.rule(
+            source,
+            ".skill-delete-icon:hover,\n.skill-delete-icon:focus-visible {",
+        )
+        self.assertIn("color: var(--red);", delete_feedback)
+        delete_row = self.rule(source, ".skill-detail-actions {")
+        self.assertIn("justify-content: flex-end;", delete_row)
+
+    def test_keyword_and_tool_editor_fields_are_full_width_vertical_rows(self):
+        modal_start = INDEX_SOURCE.index('id="skillEditorModal"')
+        modal_end = INDEX_SOURCE.index('id="memoryModal"', modal_start)
+        modal = INDEX_SOURCE[modal_start:modal_end]
+        keyword_index = modal.index('id="skillEditKeywords"')
+        tool_index = modal.index('id="skillEditTools"')
+        self.assertLess(keyword_index, tool_index)
+        self.assertEqual(modal.count('id="skillEditKeywords"'), 1)
+        self.assertEqual(modal.count('id="skillEditTools"'), 1)
+
+        source = self.phase_source()
+        field_grid = self.rule(source, ".skill-editor-field-grid {")
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", field_grid)
+        self.assertIn("width: 100%;", field_grid)
+        self.assertNotIn("repeat(2", field_grid)
+        field = self.rule(source, ".skill-editor-field-grid .field {")
+        self.assertIn("width: 100%;", field)
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".skill-editor-field-grid", narrow)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", narrow)
+        self.assertIn("overflow-x: hidden;", narrow)
 
 
 if __name__ == "__main__":
