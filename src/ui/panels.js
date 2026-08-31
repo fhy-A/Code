@@ -165,12 +165,34 @@
       });
     }
 
-    function closeTopPanels() {
-      elements.statsPanel?.classList.remove("open");
-      elements.branchPanel?.classList.remove("open");
-      elements.usageStrip?.classList.remove("active");
-      elements.toggleBranches?.classList.remove("active");
+    function syncDisclosure(panel, trigger, open) {
+      panel?.classList.toggle("open", open);
+      if (panel) {
+        panel.hidden = !open;
+        panel.setAttribute?.("aria-hidden", String(!open));
+      }
+      trigger?.classList.toggle("active", open);
+      trigger?.setAttribute?.("aria-expanded", String(open));
+    }
+
+    function closeStatsPanel() {
+      syncDisclosure(elements.statsPanel, elements.usageStrip, false);
+    }
+
+    function closeBranchPanel() {
+      syncDisclosure(elements.branchPanel, elements.toggleBranches, false);
       onBranchPanelOpenChanged(false);
+    }
+
+    function closeTopPanels({ restoreFocus = false } = {}) {
+      const focusTarget = elements.branchPanel?.classList.contains("open")
+        ? elements.toggleBranches
+        : elements.statsPanel?.classList.contains("open")
+          ? elements.usageStrip
+          : null;
+      closeStatsPanel();
+      closeBranchPanel();
+      if (restoreFocus) focusTarget?.focus?.();
     }
 
     function updateStatsPanel() {
@@ -190,6 +212,7 @@
       const contextSummary = `${contextPercent} · ${formatCompact(stats.ctxLimit || 128000)}`;
       elements.statContext.textContent = contextPercent;
       elements.usageStrip.title = t("viewSessionInfo");
+      elements.usageStrip.setAttribute?.("aria-label", t("viewSessionInfo"));
 
       const ring = elements.ctxRingFill;
       if (ring) {
@@ -254,28 +277,25 @@
     function toggleBranchPanel() {
       const open = !elements.branchPanel.classList.contains("open");
       closeTopPanels();
-      elements.branchPanel.classList.toggle("open", open);
-      elements.toggleBranches.classList.toggle("active", open);
-      onBranchPanelOpenChanged(open);
-      if (open) onRenderBranchTree();
+      if (open) {
+        syncDisclosure(elements.branchPanel, elements.toggleBranches, true);
+        onBranchPanelOpenChanged(true);
+        onRenderBranchTree();
+      }
     }
 
     function toggleStatsPanel() {
       const open = !elements.statsPanel.classList.contains("open");
       closeTopPanels();
-      elements.statsPanel.classList.toggle("open", open);
-      elements.usageStrip.classList.toggle("active", open);
+      if (open) syncDisclosure(elements.statsPanel, elements.usageStrip, true);
     }
 
     function dismissPanelsForTarget(target) {
       if (!target?.closest?.("#statsPanel") && !target?.closest?.("#usageStrip")) {
-        elements.statsPanel?.classList.remove("open");
-        elements.usageStrip?.classList.remove("active");
+        closeStatsPanel();
       }
       if (!target?.closest?.("#branchPanel") && !target?.closest?.("#toggleBranches")) {
-        elements.branchPanel?.classList.remove("open");
-        elements.toggleBranches?.classList.remove("active");
-        onBranchPanelOpenChanged(false);
+        closeBranchPanel();
       }
     }
 
@@ -293,7 +313,18 @@
       elements.toggleBranches?.addEventListener("click", toggleBranchPanel);
       elements.usageStrip?.addEventListener("click", toggleStatsPanel);
       elements.copySessionPath?.addEventListener("click", copySessionPath);
-      getDocument()?.addEventListener("click", (event) => dismissPanelsForTarget(event.target));
+      const documentRef = getDocument();
+      documentRef?.addEventListener("click", (event) => dismissPanelsForTarget(event.target));
+      documentRef?.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        if (
+          !elements.statsPanel?.classList.contains("open")
+          && !elements.branchPanel?.classList.contains("open")
+        ) return;
+        event.preventDefault?.();
+        closeTopPanels({ restoreFocus: true });
+      });
+      closeTopPanels();
     }
 
     return Object.freeze({

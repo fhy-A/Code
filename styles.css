@@ -5356,28 +5356,6 @@ body.theme-dark .syn-fn { color: #61afef; }
 .sidebar-icon-btn {
   position: relative;
 }
-.sidebar-icon-btn::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: 14px;
-  height: 14px;
-  border: 1.5px solid currentColor;
-  border-radius: 2px;
-}
-.sidebar-icon-btn::after {
-  content: "";
-  position: absolute;
-  left: calc(50% - 4px);
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1.5px;
-  height: 8px;
-  background: currentColor;
-  border-radius: 1px;
-}
 
 .settings-theme-row {
   display: grid;
@@ -10664,6 +10642,72 @@ body.theme-dark .chat-pane.empty-chat .composer {
   background: transparent;
   color: var(--faint);
   opacity: .58;
+}
+
+/* CODE-043 top toolbar final audit */
+.top-panel[hidden] {
+  display: none;
+}
+
+.toolbar {
+  flex-wrap: nowrap;
+  overflow: visible;
+}
+
+.toolbar-spacer {
+  min-width: 0;
+}
+
+.toolbar .tool-btn,
+.usage-strip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 1120px) {
+  #toggleBranches,
+  #togglePreview {
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  #toggleBranches .responsive-tool-label,
+  #togglePreview [data-ui-label] {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .session-transfer-actions {
+    margin-right: 0;
+    padding-right: 2px;
+    padding-left: 2px;
+  }
+
+  .usage-strip {
+    min-width: 0;
+    gap: 6px;
+    padding-right: 7px;
+    padding-left: 7px;
+  }
+
+  .usage-strip > span:not(.ctx-ring-wrap):not(.live-timer) {
+    display: none;
+  }
+
+  .usage-strip .ctx-ring-wrap,
+  .usage-strip .live-timer.visible {
+    flex: 0 0 auto;
+  }
+
+  .top-panel {
+    top: 50px;
+    right: 8px;
+    left: 8px;
+    max-height: calc(100vh - 64px);
+  }
 }
 
 /* CODE-043 typography scale: scoped main interface */

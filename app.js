@@ -279,6 +279,9 @@ function projectPhaseOneShellIcons() {
   iconOnly("toggleSidebar", "panel");
   iconOnly("attachFile", "paperclip");
   iconLabel("togglePreview", "preview");
+  const previewToggle = document.getElementById("togglePreview");
+  previewToggle?.setAttribute("data-i18n-aria-label", "filePreview");
+  previewToggle?.setAttribute("aria-label", previewToggle.title || "filePreview");
 
   const cwdIcon = document.querySelector(".cwd-icon");
   if (cwdIcon) cwdIcon.innerHTML = uiIcon("folderOpen");
@@ -1597,6 +1600,7 @@ const sessionNavigation = createSessionNavigation({
     cancelSessionTransition: (sessionId, token) => (
       goalFeature?.cancelSessionTransition(sessionId, token) ?? false
     ),
+    closeTopPanels,
     resetRenderCache,
     renderMessages,
     renderSessions,

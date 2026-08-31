@@ -93,10 +93,10 @@
     </aside>
 
     <section class="pi-stage">
-      <nav class="toolbar">
-        <button id="toggleSidebar" class="tool-btn sidebar-icon-btn" type="button" title="收起/展开侧栏" data-i18n-title="toggleSidebar"></button>
+      <nav class="toolbar" aria-label="会话工具栏" data-i18n-aria-label="topToolbar">
+        <button id="toggleSidebar" class="tool-btn sidebar-icon-btn" type="button" title="收起/展开侧栏" data-i18n-title="toggleSidebar" aria-label="收起/展开侧栏" data-i18n-aria-label="toggleSidebar"></button>
 
-<button id="toggleBranches" class="tool-btn text-tool" type="button" data-i18n="branchesBtn" data-i18n-title="branchesBtnTip"><svg class="tool-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg> Branches</button>
+<button id="toggleBranches" class="tool-btn text-tool" type="button" data-i18n="branchesBtn" data-i18n-title="branchesBtnTip" data-i18n-aria-label="branchesBtnTip" aria-label="查看和切换当前会话的分支" aria-expanded="false" aria-controls="branchPanel"><svg class="tool-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg><span class="responsive-tool-label" data-ui-label>Branches</span></button>
         <div class="toolbar-spacer"></div>
         <div class="session-transfer-actions" role="group" data-i18n-aria-label="sessionTransferActions" aria-label="会话导入与导出">
           <button id="importSessions" class="tool-btn transfer-icon-btn import-entry-btn" type="button"
@@ -117,7 +117,7 @@
             </svg>
           </button>
         </div>
-        <button class="usage-strip" id="usageStrip" type="button" data-i18n-title="viewSessionInfo" title="查看 Session Info">
+        <button class="usage-strip" id="usageStrip" type="button" data-i18n-title="viewSessionInfo" data-i18n-aria-label="viewSessionInfo" title="查看会话信息" aria-label="查看会话信息" aria-expanded="false" aria-controls="statsPanel">
           <span data-i18n-title="statInputTitle" title="总输入 token"><svg class="stat-icon stat-arrow-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M478.3 927.5V175.2L259 394.5c-10.7 10.7-28.1 10.7-38.7 0l-6.5-6.5c-10.7-10.7-10.7-28.1 0-38.7L481.6 81.4c4.5-9.2 13.4-16 23.9-17.6 7.1-1.5 14.7-0.1 21 4 4 2.4 7.5 5.6 10.1 9.4l0.5 0.5c2.6 2.6 4.6 5.6 5.9 8.8l266.7 266.7c10.7 10.7 10.7 28.1 0 38.7l-6.5 6.5c-10.7 10.7-28.1 10.7-38.7 0l-222.3-222v751.1c0 17.6-14.4 32-32 32-17.5 0-31.9-14.4-31.9-32z" fill="currentColor"/></svg> <b id="statInput">0</b></span>
           <span data-i18n-title="statOutputTitle" title="输出 token"><svg class="stat-icon stat-arrow-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M512 858.7a32 32 0 01-32-32V124.8a32 32 0 1164 0v701.9a32 32 0 01-32 32z" fill="currentColor"/><path d="M512 901.7L234.9 624.6a32 32 0 1145.3-45.3L512 811.2l231.8-231.8a32 32 0 0145.3 45.3z" fill="currentColor"/></svg> <b id="statOutput">0</b></span>
           <span data-i18n-title="statCacheTitle" title="缓存读取 token"><svg class="stat-icon stat-cache-svg" viewBox="0 0 1024 1024" width="14" height="14"><path d="M241.8 881.5a127 127 0 01-127-127v-85.3a13 13 0 0113-13h14.3a13 13 0 0113 13v85.3a86.6 86.6 0 0086.5 86.5h540.4a86.6 86.6 0 0086.5-86.5v-85.4a13 13 0 0113-13H896a13 13 0 0113 13v85.4a127 127 0 01-126.9 126.9zM273.4 455.7a13 13 0 010-18.5l10.2-10.3a13 13 0 0118.5 0l164.9 164.3a15.4 15.4 0 0026.2-10.9v-404.5a13 13 0 0113-13h14.3a13 13 0 0113 13v404.5a15.4 15.4 0 009.5 14.2 15.4 15.4 0 0016.7-3.3l166.3-164.6a13 13 0 0118.5 0l10.2 10.2a13 13 0 010 18.5L512 695z" fill="currentColor"/></svg> <b id="statCache">0</b> <b id="statCacheHit" class="stat-cache-hit" hidden></b></span>
@@ -131,7 +131,7 @@
             </nav>
 
 
-      <section class="top-panel stats-panel" id="statsPanel">
+      <section class="top-panel stats-panel" id="statsPanel" role="region" aria-labelledby="usageStrip" hidden>
         <div class="sys-col wide">
           <h3 data-i18n="sessionInfo">会话信息</h3>
           <div class="kv"><span data-i18n="sessionName">名称</span><input id="sessionTitle" value="新会话" data-i18n="sessionTitleDefault" /></div>
@@ -161,7 +161,7 @@
       </section>
 
       <!-- 分支面板 -->
-      <section class="top-panel branch-panel" id="branchPanel">
+      <section class="top-panel branch-panel" id="branchPanel" role="region" aria-labelledby="toggleBranches" hidden>
         <div class="sys-col wide">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
             <h3 style="margin:0" data-i18n="branches">分支</h3>

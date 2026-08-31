@@ -19847,6 +19847,177 @@ const feature = window.Code.features.settings.createSettingsFeature({
         self.assertNotIn("Code is restarting...", SETTINGS_SOURCE)
         self.assertEqual(I18N_SOURCE.count("scanningConversation:"), 2)
 
+    def test_top_toolbar_has_responsive_accessible_disclosure_contract(self):
+        toolbar_start = INDEX_SOURCE.index('<nav class="toolbar"')
+        toolbar_end = INDEX_SOURCE.index('</nav>', toolbar_start)
+        toolbar = INDEX_SOURCE[toolbar_start:toolbar_end]
+        for fragment in (
+            'data-i18n-aria-label="topToolbar"',
+            'id="toggleSidebar"',
+            'data-i18n-aria-label="toggleSidebar"',
+            'id="toggleBranches"',
+            'aria-expanded="false" aria-controls="branchPanel"',
+            'data-i18n-aria-label="branchesBtnTip"',
+            'class="responsive-tool-label"',
+            'id="usageStrip"',
+            'aria-expanded="false" aria-controls="statsPanel"',
+            'data-i18n-aria-label="viewSessionInfo"',
+            'id="togglePreview"',
+        ):
+            self.assertIn(fragment, toolbar)
+        for panel_id, label_id in (("statsPanel", "usageStrip"), ("branchPanel", "toggleBranches")):
+            panel_start = INDEX_SOURCE.index(f'id="{panel_id}"')
+            panel_tag = INDEX_SOURCE[INDEX_SOURCE.rfind("<section", 0, panel_start):INDEX_SOURCE.index(">", panel_start) + 1]
+            self.assertIn('role="region"', panel_tag)
+            self.assertIn(f'aria-labelledby="{label_id}"', panel_tag)
+            self.assertIn("hidden", panel_tag)
+
+        self.assertEqual(I18N_SOURCE.count("topToolbar:"), 2)
+        icon_source = (ROOT / "src" / "core" / "icons.js").read_text(encoding="utf-8")
+        self.assertEqual(icon_source.count("panel: '<rect"), 1)
+        phase_icons_start = APP_SOURCE.index("function projectPhaseOneShellIcons()")
+        phase_icons_end = APP_SOURCE.index("function projectEditorIcons", phase_icons_start)
+        phase_icons = APP_SOURCE[phase_icons_start:phase_icons_end]
+        self.assertIn('previewToggle?.setAttribute("data-i18n-aria-label", "filePreview")', phase_icons)
+        self.assertIn('previewToggle?.setAttribute("aria-label", previewToggle.title', phase_icons)
+        self.assertNotIn(".sidebar-icon-btn::before", STYLE_SOURCE)
+        self.assertNotIn(".sidebar-icon-btn::after", STYLE_SOURCE)
+        marker = "/* CODE-043 top toolbar final audit */"
+        self.assertIn(marker, STYLE_SOURCE)
+        source = STYLE_SOURCE.split(marker, 1)[1].split(
+            "/* CODE-043 typography scale: scoped main interface */",
+            1,
+        )[0]
+        for fragment in (
+            ".top-panel[hidden] {",
+            ".toolbar {",
+            "flex-wrap: nowrap;",
+            ".toolbar .tool-btn,",
+            ".usage-strip {",
+            "flex: 0 0 auto;",
+            "@media (max-width: 1120px)",
+            "#toggleBranches .responsive-tool-label",
+            "#togglePreview [data-ui-label]",
+            "@media (max-width: 760px)",
+            ".usage-strip > span:not(.ctx-ring-wrap):not(.live-timer)",
+            "display: none;",
+            ".top-panel",
+            "max-height: calc(100vh - 64px);",
+        ):
+            self.assertIn(fragment, source)
+        self.assertIn("view.closeTopPanels?.();", SESSIONS_SOURCE)
+        navigation_start = APP_SOURCE.index("const sessionNavigation = createSessionNavigation({")
+        navigation_end = APP_SOURCE.index("sessionSearchFeature =", navigation_start)
+        self.assertIn("closeTopPanels,", APP_SOURCE[navigation_start:navigation_end])
+
+    def test_top_panels_sync_hidden_aria_escape_outside_click_and_focus(self):
+        script = r"""
+global.window = {Code: {ui: {}}, setTimeout: (callback) => callback()};
+require("./src/ui/panels.js");
+const {createPanelsFeature} = window.Code.ui.panels;
+const focused = [];
+const makeElement = (id) => {
+  const classes = new Set();
+  const listeners = {};
+  const attrs = {};
+  return {
+    id,
+    hidden: true,
+    classes,
+    listeners,
+    attrs,
+    classList: {
+      add: (...names) => names.forEach((name) => classes.add(name)),
+      remove: (...names) => names.forEach((name) => classes.delete(name)),
+      contains: (name) => classes.has(name),
+      toggle: (name, force) => {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name); else classes.delete(name);
+        return next;
+      },
+    },
+    addEventListener: (type, callback) => { listeners[type] = callback; },
+    setAttribute: (name, value) => { attrs[name] = String(value); },
+    focus: () => focused.push(id),
+  };
+};
+const elements = Object.fromEntries([
+  "statsPanel", "branchPanel", "usageStrip", "toggleBranches", "copySessionPath",
+].map((id) => [id, makeElement(id)]));
+const documentListeners = {};
+const document = {addEventListener: (type, callback) => { documentListeners[type] = callback; }};
+let branchOpen = false;
+const feature = createPanelsFeature({
+  elements,
+  getDocument: () => document,
+  onBranchPanelOpenChanged: (open) => { branchOpen = open; },
+});
+feature.bind();
+const snapshot = () => ({
+  stats: {
+    open: elements.statsPanel.classes.has("open"),
+    hidden: elements.statsPanel.hidden,
+    expanded: elements.usageStrip.attrs["aria-expanded"],
+    active: elements.usageStrip.classes.has("active"),
+  },
+  branch: {
+    open: elements.branchPanel.classes.has("open"),
+    hidden: elements.branchPanel.hidden,
+    expanded: elements.toggleBranches.attrs["aria-expanded"],
+    active: elements.toggleBranches.classes.has("active"),
+    state: branchOpen,
+  },
+});
+const initial = snapshot();
+feature.toggleStatsPanel();
+const statsOpen = snapshot();
+feature.toggleBranchPanel();
+const branchOpenSnapshot = snapshot();
+let prevented = 0;
+documentListeners.keydown({key: "Escape", preventDefault: () => { prevented += 1; }});
+const afterEscape = snapshot();
+feature.toggleStatsPanel();
+documentListeners.click({target: {closest: () => null}});
+const afterOutside = snapshot();
+process.stdout.write(JSON.stringify({
+  initial,
+  statsOpen,
+  branchOpen: branchOpenSnapshot,
+  afterEscape,
+  afterOutside,
+  focused,
+  prevented,
+  listeners: Object.keys(documentListeners).sort(),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        closed = {
+            "stats": {"open": False, "hidden": True, "expanded": "false", "active": False},
+            "branch": {"open": False, "hidden": True, "expanded": "false", "active": False, "state": False},
+        }
+        self.assertEqual(data["initial"], closed)
+        self.assertEqual(data["statsOpen"], {
+            "stats": {"open": True, "hidden": False, "expanded": "true", "active": True},
+            "branch": closed["branch"],
+        })
+        self.assertEqual(data["branchOpen"], {
+            "stats": closed["stats"],
+            "branch": {"open": True, "hidden": False, "expanded": "true", "active": True, "state": True},
+        })
+        self.assertEqual(data["afterEscape"], closed)
+        self.assertEqual(data["afterOutside"], closed)
+        self.assertEqual(data["focused"], ["toggleBranches"])
+        self.assertEqual(data["prevented"], 1)
+        self.assertEqual(data["listeners"], ["click", "keydown"])
+
     def test_panels_ui_owns_session_stats_fields_and_top_panel_interactions(self):
         self.assertIn("Code.ui.panels = Object.freeze", PANELS_SOURCE)
         for removed_id in (

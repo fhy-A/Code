@@ -639,8 +639,19 @@
       storage.setItem("code-last-session", sessionId);
     }
 
+    function closeNavigationPanels() {
+      const ownerClosesPanels = typeof view.closeTopPanels === "function";
+      view.closeTopPanels?.();
+      if (!ownerClosesPanels && state.branchPanelOpen) {
+        elements.branchPanel?.classList.remove("open");
+        elements.toggleBranches?.classList.remove("active");
+        state.branchPanelOpen = false;
+      }
+    }
+
     function beginNewConversation(projectId = null) {
       view.cacheActiveSessionState();
+      closeNavigationPanels();
       invalidateForegroundSessionNavigation();
       state.pendingProjectId = projectId || null;
       state.sessionId = null;
@@ -728,11 +739,7 @@
       const foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
       state._foregroundNavigationSeq = foregroundNavigationSeq;
 
-      if (state.branchPanelOpen && !state._keepBranchOpen) {
-        elements.branchPanel.classList.remove("open");
-        elements.toggleBranches.classList.remove("active");
-        state.branchPanelOpen = false;
-      }
+      if (!state._keepBranchOpen) closeNavigationPanels();
       state._keepBranchOpen = false;
 
       if (sessionId === state.sessionId) {
