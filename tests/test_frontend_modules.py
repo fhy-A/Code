@@ -24383,7 +24383,7 @@ eval(saveSource);
         self.assertIn('data-import-filter="importable"', html)
         self.assertIn('data-import-filter="all"', html)
         self.assertIn('id="importSelectionSummary"', html)
-        self.assertIn('id="importDismissBtn"', html)
+        self.assertNotIn('id="importDismissBtn"', html)
         self.assertIn(
             "从本机 Claude Code 或 Codex 导入历史会话",
             html,
@@ -24556,6 +24556,169 @@ eval(saveSource);
         self.assertIsNotNone(footer_css)
         self.assertIn("flex: 0 0 auto", footer_css.group("body"))
 
+    def test_import_dialog_uses_compact_accessible_single_window_contract(self):
+        modal_start = INDEX_SOURCE.index('id="importModal"')
+        modal_end = INDEX_SOURCE.index('<!-- code-frontend-runtime:start -->', modal_start)
+        modal = INDEX_SOURCE[modal_start:modal_end]
+        self.assertIn('id="importSourcePanel"', modal)
+        self.assertIn('role="tabpanel"', modal)
+        self.assertIn('aria-labelledby="importSourceClaude"', modal)
+        self.assertEqual(modal.count('aria-controls="importSourcePanel"'), 2)
+        self.assertIn('id="importList"', modal)
+        self.assertIn('role="list"', modal)
+        self.assertNotIn('id="importDismissBtn"', modal)
+        self.assertNotIn('&times;', modal)
+        refresh_start = modal.index('id="importRefreshBtn"')
+        refresh_end = modal.index('</button>', refresh_start)
+        refresh_markup = modal[refresh_start:refresh_end]
+        self.assertNotIn('<span data-i18n="importRefresh">', refresh_markup)
+        self.assertNotIn('class="import-filter-count"', modal)
+
+        self.assertIn("function projectImportDialogIcons()", APP_SOURCE)
+        icon_start = APP_SOURCE.index("function projectImportDialogIcons()")
+        icon_end = APP_SOURCE.index("projectImportDialogIcons();", icon_start)
+        icon_source = APP_SOURCE[icon_start:icon_end]
+        self.assertIn('iconOnly("importClose", "close")', icon_source)
+        self.assertIn('iconOnly("importRefreshBtn", "refresh")', icon_source)
+
+        bind_start = APP_SOURCE.index("function _bindImportEvents()")
+        bind_end = APP_SOURCE.index("async function openImportModal()", bind_start)
+        bind_source = APP_SOURCE[bind_start:bind_end]
+        self.assertIn("if (e.target === modal) closeImportModal();", bind_source)
+        self.assertIn('if (event.key === "Escape")', bind_source)
+        self.assertIn("closeImportModal();", bind_source)
+        close_start = APP_SOURCE.index("function closeImportModal()")
+        close_end = APP_SOURCE.index("async function loadImportSessions", close_start)
+        close_source = APP_SOURCE[close_start:close_end]
+        self.assertIn("_importReturnFocus.focus()", close_source)
+
+        dialog_css = re.search(
+            r"\.modal-panel\.import-dialog\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(dialog_css)
+        self.assertIn("width: min(760px, calc(100vw - 32px))", dialog_css.group("body"))
+
+    def test_import_scanning_keeps_cache_visible_but_locks_every_mutable_control(self):
+        controls_start = APP_SOURCE.index("function syncImportSourceTabs()")
+        controls_end = APP_SOURCE.index("function _bindImportEvents()", controls_start)
+        controls = APP_SOURCE[controls_start:controls_end]
+        self.assertIn("function importControlsLocked()", APP_SOURCE)
+        self.assertIn("return _importBusy || _importLoading;", APP_SOURCE)
+        self.assertIn("function importSelectionLocked()", APP_SOURCE)
+        self.assertIn(
+            "return importControlsLocked() || _importLoadFailed;",
+            APP_SOURCE,
+        )
+        self.assertIn("tab.disabled = importControlsLocked();", controls)
+        self.assertIn("button.disabled = importControlsLocked();", controls)
+
+        bind_start = APP_SOURCE.index("function _bindImportEvents()")
+        bind_end = APP_SOURCE.index("async function openImportModal()", bind_start)
+        bind_source = APP_SOURCE[bind_start:bind_end]
+        self.assertGreaterEqual(bind_source.count("if (importControlsLocked()) return;"), 3)
+        self.assertIn("var shouldRestoreSourceFocus = document.activeElement === tab;", bind_source)
+        self.assertIn('document.getElementById("importClose")?.focus();', bind_source)
+        self.assertIn("tab.focus();", bind_source)
+
+        render_start = APP_SOURCE.index("function renderImportList()")
+        render_end = APP_SOURCE.index("function updateImportButton()", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        self.assertIn("function renderImportSkeleton(list)", APP_SOURCE)
+        self.assertIn('list.classList.toggle("is-refreshing",', render_source)
+        self.assertIn('list.setAttribute("aria-disabled",', render_source)
+        self.assertIn("_importLoading && !_importSessions.length", render_source)
+        self.assertIn("renderImportSkeleton(list);", render_source)
+        self.assertIn("cb.disabled = !canImport || importSelectionLocked();", render_source)
+        self.assertIn('list.setAttribute("aria-disabled", importSelectionLocked()', render_source)
+        self.assertIn('(_importLoadFailed ? " is-stale" : "")', render_source)
+        self.assertIn('row.classList.toggle("is-selected", cb.checked);', render_source)
+
+        update_start = APP_SOURCE.index("function updateImportButton()")
+        update_end = APP_SOURCE.index("function setImportBusy", update_start)
+        update_source = APP_SOURCE[update_start:update_end]
+        self.assertIn("selAll.disabled = importSelectionLocked()", update_source)
+        self.assertIn("doBtn.disabled = selectedCount === 0 || importSelectionLocked();", update_source)
+        self.assertIn("refreshBtn.disabled = importControlsLocked();", update_source)
+        self.assertIn('refreshBtn.setAttribute("aria-label", refreshText);', update_source)
+        load_start = APP_SOURCE.index("async function loadImportSessions(force)")
+        load_end = APP_SOURCE.index("async function refreshImportSessions()", load_start)
+        load_source = APP_SOURCE[load_start:load_end]
+        self.assertEqual(
+            load_source.count("if (generation !== _importLoadGeneration) return;"),
+            2,
+        )
+        refresh_start = APP_SOURCE.index("async function refreshImportSessions()")
+        refresh_end = APP_SOURCE.index("function renderImportSkeleton", refresh_start)
+        refresh_source = APP_SOURCE[refresh_start:refresh_end]
+        self.assertIn("var shouldRestoreRefreshFocus", refresh_source)
+        self.assertIn("refreshBtn?.focus();", refresh_source)
+
+    def test_import_rows_and_summary_keep_only_decision_relevant_information(self):
+        render_start = APP_SOURCE.index("function renderImportList()")
+        render_end = APP_SOURCE.index("function updateImportButton()", render_start)
+        render_source = APP_SOURCE[render_start:render_end]
+        self.assertIn('if (importState !== "available")', render_source)
+        self.assertIn('row.classList.toggle("is-selected", cb.checked);', render_source)
+        self.assertIn("title.title = title.textContent;", render_source)
+
+        filter_start = APP_SOURCE.index("function updateImportFilterControls(")
+        filter_end = APP_SOURCE.index("function _bindImportEvents()", filter_start)
+        filter_source = APP_SOURCE[filter_start:filter_end]
+        self.assertIn("var resultsReduced =", filter_source)
+        self.assertIn("visibleSummary.hidden = !resultsReduced;", filter_source)
+        self.assertNotIn("[data-filter-count]", filter_source)
+
+        self.assertIn('importToCode: "导入所选"', I18N_SOURCE)
+        self.assertIn('importToCodeCount: "导入所选 ({count})"', I18N_SOURCE)
+        self.assertIn('importToCode: "Import selected"', I18N_SOURCE)
+        self.assertIn('importToCodeCount: "Import selected ({count})"', I18N_SOURCE)
+
+        title_css = re.search(
+            r"\.import-session-title\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        date_css = re.search(
+            r"\.import-session-date\s*\{(?P<body>.*?)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(title_css)
+        self.assertIsNotNone(date_css)
+        self.assertIn("font-size: 14px", title_css.group("body"))
+        self.assertIn("font-size: 12px", date_css.group("body"))
+
+    def test_import_dialog_responsive_scope_does_not_change_global_mobile_shell(self):
+        marker = "/* CODE-043 import session dialog optimization */"
+        self.assertIn(marker, STYLE_SOURCE)
+        scope = STYLE_SOURCE.split(marker, 1)[1].split(
+            "/* Lightweight settings pages */",
+            1,
+        )[0]
+        self.assertIn("@media (max-width: 780px)", scope)
+        self.assertIn("@media (max-width: 640px)", scope)
+        self.assertIn(".import-source-panel", scope)
+        self.assertIn(".import-list-shell", scope)
+        self.assertIn(".import-session-skeleton", scope)
+        self.assertNotIn(".pi-shell", scope)
+        self.assertNotIn(".sidebar", scope)
+        search_css = re.search(
+            r"\.import-search-field input\s*\{(?P<body>.*?)\}",
+            scope,
+            re.S,
+        )
+        self.assertIsNotNone(search_css)
+        self.assertIn("font-size: 14px", search_css.group("body"))
+        focus_css = re.search(
+            r"\.import-search-field:focus-within\s*\{(?P<body>.*?)\}",
+            scope,
+            re.S,
+        )
+        self.assertIsNotNone(focus_css)
+        self.assertIn("box-shadow: none", focus_css.group("body"))
+
     def test_session_transfer_toolbar_uses_distinct_accessible_icons(self):
         toolbar_start = INDEX_SOURCE.index('class="session-transfer-actions"')
         toolbar_end = INDEX_SOURCE.index('id="usageStrip"', toolbar_start)
@@ -24695,7 +24858,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("var sessionKey = importSessionKey(s);", render_source)
         self.assertIn('cb.dataset.importable = canImport ? "true" : "false";', render_source)
         self.assertIn("cb.dataset.sessionKey = sessionKey;", render_source)
-        self.assertIn("cb.disabled = !canImport || _importBusy;", render_source)
+        self.assertIn("cb.disabled = !canImport || importSelectionLocked();", render_source)
         self.assertIn('"update-conflict": "importStatusUpdateConflict"', render_source)
         self.assertIn('className = "import-session-state"', render_source)
         self.assertIn("_importSelectedKeys.add(c.dataset.sessionKey)", APP_SOURCE)
@@ -24903,7 +25066,7 @@ const {createImportBatchRunner} = window.Code.features.sessionImport;
         self.assertIn("_importSessions = _importCache[_importSource] || [];", open_source)
         self.assertIn("await loadImportSessions(true);", open_source)
         self.assertIn("_importSessions = _importCache[_importSource] || [];", bind_source)
-        self.assertIn("loadImportSessions(true);", bind_source)
+        self.assertIn("loadImportSessions(true)", bind_source)
 
 
 class TestSessionStatusSlot(unittest.TestCase):

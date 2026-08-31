@@ -310,6 +310,21 @@ function projectEditorIcons(root = document) {
 projectPhaseOneShellIcons();
 projectEditorIcons();
 
+function projectImportDialogIcons() {
+  const iconOnly = (id, name) => {
+    const element = document.getElementById(id);
+    if (!element) return;
+    element.innerHTML = uiIcon(name);
+    if (!element.getAttribute("aria-label")) {
+      element.setAttribute("aria-label", element.title || name);
+    }
+  };
+  iconOnly("importClose", "close");
+  iconOnly("importRefreshBtn", "refresh");
+}
+
+projectImportDialogIcons();
+
 const state = createAppState(localStorage);
 state._sessionRevisions = state._sessionRevisions || Object.create(null);
 state._foregroundRecoveryHydrated = true;
@@ -15740,13 +15755,29 @@ function filteredImportSessions() {
   });
 }
 
+function importControlsLocked() {
+  return _importBusy || _importLoading;
+}
+
+function importSelectionLocked() {
+  return importControlsLocked() || _importLoadFailed;
+}
+
 function syncImportSourceTabs() {
   document.querySelectorAll(".import-source-tab").forEach(function (tab) {
     var active = tab.dataset.source === _importSource;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
     tab.tabIndex = active ? 0 : -1;
+    tab.disabled = importControlsLocked();
   });
+  var panel = document.getElementById("importSourcePanel");
+  if (panel) {
+    panel.setAttribute(
+      "aria-labelledby",
+      _importSource === "codex" ? "importSourceCodex" : "importSourceClaude",
+    );
+  }
 }
 
 function updateImportFilterControls(visibleSessions) {
@@ -15755,22 +15786,26 @@ function updateImportFilterControls(visibleSessions) {
     var filter = button.dataset.importFilter;
     var active = filter === _importFilter;
     var label = button.querySelector("[data-filter-label]");
-    var count = button.querySelector("[data-filter-count]");
     if (label) {
       label.textContent = t(
         filter === "importable" ? "importFilterImportable" : "importFilterAll",
       );
     }
-    if (count) {
-      count.textContent = String(filter === "importable" ? importableCount : _importSessions.length);
-    }
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
-    button.disabled = _importBusy;
+    button.disabled = importControlsLocked();
   });
 
+  var search = document.getElementById("importSearch");
+  if (search) search.disabled = importControlsLocked();
   var visibleSummary = document.getElementById("importVisibleSummary");
   if (visibleSummary) {
+    var hasSearch = String(search?.value || "").trim().length > 0;
+    var hasFilterReduction = _importFilter === "importable"
+      && importableCount < _importSessions.length;
+    var resultsReduced = visibleSessions.length < _importSessions.length
+      && (hasSearch || hasFilterReduction);
+    visibleSummary.hidden = !resultsReduced;
     visibleSummary.textContent = t("importVisibleSummary", {
       visible: visibleSessions.length,
       total: _importSessions.length,
@@ -15786,8 +15821,6 @@ function _bindImportEvents() {
 
   var closeBtn = document.getElementById("importClose");
   if (closeBtn) closeBtn.addEventListener("click", closeImportModal);
-  var dismissBtn = document.getElementById("importDismissBtn");
-  if (dismissBtn) dismissBtn.addEventListener("click", closeImportModal);
   modal.addEventListener("click", function (e) {
     if (e.target === modal) closeImportModal();
   });
@@ -15832,8 +15865,10 @@ function _bindImportEvents() {
 
   modal.addEventListener("click", function (e) {
     var tab = e.target.closest(".import-source-tab");
-    if (!tab || _importBusy) return;
+    if (!tab) return;
+    if (importControlsLocked()) return;
     if (tab.dataset.source === _importSource) return;
+    var shouldRestoreSourceFocus = document.activeElement === tab;
     _importSource = tab.dataset.source;
     _importFilter = "importable";
     _importSelectedKeys.clear();
@@ -15842,32 +15877,42 @@ function _bindImportEvents() {
     if (search) search.value = "";
     syncImportSourceTabs();
     clearImportResult();
-    renderImportList();
-    loadImportSessions(true);
+    if (shouldRestoreSourceFocus) document.getElementById("importClose")?.focus();
+    loadImportSessions(true).then(function () {
+      if (
+        shouldRestoreSourceFocus
+        && modal.getAttribute("aria-hidden") === "false"
+        && !importControlsLocked()
+      ) {
+        tab.focus();
+      }
+    });
   });
 
   var search = document.getElementById("importSearch");
   if (search) search.addEventListener("input", function () {
-    if (_importBusy) return;
+    if (importControlsLocked()) return;
     renderImportList();
   });
 
   modal.addEventListener("click", function (event) {
     var filterBtn = event.target.closest(".import-filter-btn");
-    if (!filterBtn || _importBusy) return;
+    if (!filterBtn) return;
+    if (importControlsLocked()) return;
     _importFilter = filterBtn.dataset.importFilter === "all" ? "all" : "importable";
     renderImportList();
   });
 
   var selAll = document.getElementById("importSelectAll");
   if (selAll) selAll.addEventListener("change", function () {
-    if (_importBusy) return;
+    if (importControlsLocked()) return;
     var cbs = document.querySelectorAll("#importList input[type=checkbox]");
     cbs.forEach(function (c) {
       if (c.disabled) return;
       c.checked = selAll.checked;
       if (selAll.checked) _importSelectedKeys.add(c.dataset.sessionKey);
       else _importSelectedKeys.delete(c.dataset.sessionKey);
+      c.closest(".import-session-row")?.classList.toggle("is-selected", c.checked);
     });
     updateImportButton();
   });
@@ -15904,11 +15949,15 @@ async function openImportModal() {
   if (search) search.value = "";
   clearImportResult();
   _importSessions = _importCache[_importSource] || [];
-  renderImportList();
   requestAnimationFrame(function () {
-    search?.focus();
+    document.getElementById("importClose")?.focus();
   });
   await loadImportSessions(true);
+  if (modal.getAttribute("aria-hidden") === "false" && !importControlsLocked()) {
+    requestAnimationFrame(function () {
+      search?.focus();
+    });
+  }
 }
 
 function updateGroupBadge(session) {
@@ -15941,6 +15990,7 @@ async function loadImportSessions(force) {
   var generation = ++_importLoadGeneration;
   _importLoading = true;
   _importLoadFailed = false;
+  syncImportSourceTabs();
   renderImportList();
   try {
     var url = "/api/import/sessions?source=" + encodeURIComponent(source);
@@ -15948,10 +15998,12 @@ async function loadImportSessions(force) {
     if (!resp.ok) throw new Error("Import source scan failed");
     var data = await resp.json();
     if (!Array.isArray(data)) { data = []; }
+    if (generation !== _importLoadGeneration) return;
     _importCache[source] = data;
     _updateSourceTabCount(source);
     if (source === _importSource) _importSessions = data;
   } catch (e) {
+    if (generation !== _importLoadGeneration) return;
     if (source === _importSource) {
       _importSessions = Array.isArray(cached) ? cached : [];
       _importLoadFailed = true;
@@ -15959,14 +16011,42 @@ async function loadImportSessions(force) {
   } finally {
     if (generation === _importLoadGeneration) _importLoading = false;
   }
-  if (source === _importSource) renderImportList();
+  if (source === _importSource) {
+    syncImportSourceTabs();
+    renderImportList();
+  }
 }
 
 async function refreshImportSessions() {
-  if (_importBusy || _importLoading) return;
+  if (importControlsLocked()) return;
+  var refreshBtn = document.getElementById("importRefreshBtn");
+  var shouldRestoreRefreshFocus = document.activeElement === refreshBtn;
   _importSelectedKeys.clear();
   clearImportResult();
   await loadImportSessions(true);
+  var modal = document.getElementById("importModal");
+  if (
+    shouldRestoreRefreshFocus
+    && modal?.getAttribute("aria-hidden") === "false"
+    && !importControlsLocked()
+  ) {
+    refreshBtn?.focus();
+  }
+}
+
+function renderImportSkeleton(list) {
+  var status = document.createElement("span");
+  status.className = "sr-only";
+  status.textContent = t("importLoading");
+  list.appendChild(status);
+  for (var index = 0; index < 5; index++) {
+    var row = document.createElement("div");
+    row.className = "import-session-skeleton";
+    row.setAttribute("aria-hidden", "true");
+    row.innerHTML = '<span class="import-skeleton-check"></span>'
+      + '<span class="import-skeleton-copy"><span></span><span></span></span>';
+    list.appendChild(row);
+  }
 }
 
 function renderImportList() {
@@ -15975,19 +16055,33 @@ function renderImportList() {
   ["claude-code", "codex"].forEach(_updateSourceTabCount);
   list.innerHTML = "";
   list.setAttribute("aria-busy", _importLoading ? "true" : "false");
+  list.setAttribute("aria-disabled", importSelectionLocked() ? "true" : "false");
+  list.classList.toggle("is-refreshing", _importLoading && _importSessions.length > 0);
+  var scanOverlay = document.getElementById("importScanOverlay");
+  if (scanOverlay) scanOverlay.hidden = !_importLoading || !_importSessions.length;
   var visibleSessions = filteredImportSessions();
   updateImportFilterControls(visibleSessions);
-  if (_importLoading || !visibleSessions.length) {
+  if (_importLoading && !_importSessions.length) {
+    renderImportSkeleton(list);
+    updateImportButton();
+    return;
+  }
+  if (!visibleSessions.length) {
     var empty = document.createElement("div");
     empty.className = "import-session-empty";
-    empty.textContent = _importLoading
-      ? t("importLoading")
-      : (_importLoadFailed
-        ? t("importLoadFailed")
-        : (_importSessions.length ? t("importNoMatching") : t("importEmpty")));
+    empty.textContent = _importLoadFailed
+      ? t("importLoadFailed")
+      : (_importSessions.length ? t("importNoMatching") : t("importEmpty"));
     list.appendChild(empty);
     updateImportButton();
     return;
+  }
+  if (_importLoadFailed) {
+    var loadNotice = document.createElement("div");
+    loadNotice.className = "import-load-notice";
+    loadNotice.setAttribute("role", "listitem");
+    loadNotice.textContent = t("importLoadFailed");
+    list.appendChild(loadNotice);
   }
   var statusKeys = {
     "available": "importStatusAvailable",
@@ -16003,17 +16097,22 @@ function renderImportList() {
     var sessionKey = importSessionKey(s);
     if (!canImport) _importSelectedKeys.delete(sessionKey);
     var row = document.createElement("label");
-    row.className = "import-session-row" + (canImport ? "" : " is-disabled");
+    row.className = "import-session-row"
+      + (canImport ? "" : " is-disabled")
+      + (_importLoading ? " is-scanning" : "")
+      + (_importLoadFailed ? " is-stale" : "");
     row.setAttribute("role", "listitem");
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.dataset.sessionKey = sessionKey;
     cb.dataset.importable = canImport ? "true" : "false";
     cb.checked = canImport && _importSelectedKeys.has(sessionKey);
-    cb.disabled = !canImport || _importBusy;
+    cb.disabled = !canImport || importSelectionLocked();
+    row.classList.toggle("is-selected", cb.checked);
     cb.addEventListener("change", function () {
       if (cb.checked) _importSelectedKeys.add(sessionKey);
       else _importSelectedKeys.delete(sessionKey);
+      row.classList.toggle("is-selected", cb.checked);
       updateImportButton();
     });
     row.appendChild(cb);
@@ -16035,14 +16134,16 @@ function renderImportList() {
     main.appendChild(meta);
     row.appendChild(main);
 
-    var badge = document.createElement("span");
-    badge.className = "import-session-state";
-    badge.dataset.state = importState;
-    badge.textContent = t(statusKeys[importState] || "importStatusAvailable");
-    if (importState === "update-conflict") {
-      badge.title = t("importStatusUpdateConflictHint");
+    if (importState !== "available") {
+      var badge = document.createElement("span");
+      badge.className = "import-session-state";
+      badge.dataset.state = importState;
+      badge.textContent = t(statusKeys[importState] || "importStatusAvailable");
+      if (importState === "update-conflict") {
+        badge.title = t("importStatusUpdateConflictHint");
+      }
+      row.appendChild(badge);
     }
-    row.appendChild(badge);
     list.appendChild(row);
   });
   updateImportButton();
@@ -16063,7 +16164,7 @@ function updateImportButton() {
   });
   var selAll = document.getElementById("importSelectAll");
   if (selAll) {
-    selAll.disabled = _importBusy || _importLoading || cbs.length === 0;
+    selAll.disabled = importSelectionLocked() || cbs.length === 0;
     selAll.checked = cbs.length > 0 && visibleChecked.length === cbs.length;
     selAll.indeterminate = visibleChecked.length > 0 && visibleChecked.length < cbs.length;
   }
@@ -16075,7 +16176,7 @@ function updateImportButton() {
 
   var doBtn = document.getElementById("importDoBtn");
   if (doBtn) {
-    doBtn.disabled = selectedCount === 0 || _importBusy || _importLoading;
+    doBtn.disabled = selectedCount === 0 || importSelectionLocked();
     doBtn.textContent = _importBusy
       ? t("importProcessing")
       : (selectedCount
@@ -16085,24 +16186,21 @@ function updateImportButton() {
 
   var refreshBtn = document.getElementById("importRefreshBtn");
   if (refreshBtn) {
-    refreshBtn.disabled = _importBusy || _importLoading;
+    refreshBtn.disabled = importControlsLocked();
     refreshBtn.classList.toggle("is-loading", _importLoading);
-    var refreshLabel = refreshBtn.querySelector("span");
-    if (refreshLabel) {
-      refreshLabel.textContent = t(_importLoading ? "importRefreshing" : "importRefresh");
-    }
+    var refreshText = t(_importLoading ? "importRefreshing" : "importRefreshTip");
+    refreshBtn.title = refreshText;
+    refreshBtn.setAttribute("aria-label", refreshText);
   }
 }
 
 function setImportBusy(busy) {
   _importBusy = !!busy;
-  document.querySelectorAll(".import-source-tab").forEach(function (tab) {
-    tab.disabled = _importBusy;
-  });
+  syncImportSourceTabs();
   var search = document.getElementById("importSearch");
-  if (search) search.disabled = _importBusy;
+  if (search) search.disabled = importControlsLocked();
   document.querySelectorAll("#importList input[type=checkbox]").forEach(function (checkbox) {
-    checkbox.disabled = _importBusy || checkbox.dataset.importable !== "true";
+    checkbox.disabled = importSelectionLocked() || checkbox.dataset.importable !== "true";
   });
   updateImportFilterControls(filteredImportSessions());
   updateImportButton();

@@ -705,33 +705,30 @@
         </div>
         <button id="importClose" class="modal-close-btn" type="button"
           data-i18n-title="closeImport" data-i18n-aria-label="closeImport"
-          title="关闭导入窗口" aria-label="关闭导入窗口">&times;</button>
+          title="关闭导入窗口" aria-label="关闭导入窗口"></button>
       </header>
 
-      <div class="import-dialog-controls">
+      <div class="import-dialog-controls import-source-controls">
         <div class="import-source-row">
           <div class="import-source-tabs" role="tablist" data-i18n-aria-label="importSourceTabsLabel" aria-label="导入来源">
             <button id="importSourceClaude" class="import-source-tab active" type="button"
-              role="tab" aria-selected="true" aria-controls="importList" data-source="claude-code">
+              role="tab" aria-selected="true" aria-controls="importSourcePanel" data-source="claude-code">
               <span>Claude Code</span><span class="import-source-count" aria-hidden="true">0</span>
             </button>
             <button id="importSourceCodex" class="import-source-tab" type="button"
-              role="tab" aria-selected="false" aria-controls="importList" data-source="codex" tabindex="-1">
+              role="tab" aria-selected="false" aria-controls="importSourcePanel" data-source="codex" tabindex="-1">
               <span>Codex</span><span class="import-source-count" aria-hidden="true">0</span>
             </button>
           </div>
-          <button id="importRefreshBtn" class="ghost-btn import-refresh-btn" type="button"
+          <button id="importRefreshBtn" class="ghost-btn import-refresh-btn icon-only" type="button"
             data-i18n-title="importRefreshTip" data-i18n-aria-label="importRefreshTip"
-            title="重新扫描当前来源" aria-label="重新扫描当前来源">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/>
-              <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/>
-            </svg>
-            <span data-i18n="importRefresh">重新扫描</span>
-          </button>
+            title="重新扫描当前来源" aria-label="重新扫描当前来源"></button>
         </div>
+      </div>
 
+      <div id="importSourcePanel" class="import-source-panel" role="tabpanel"
+        aria-labelledby="importSourceClaude">
+        <div class="import-dialog-controls import-source-panel-controls">
         <div class="import-search-filter-row">
           <label class="import-search-field">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -744,10 +741,10 @@
           </label>
           <div class="import-filter-tabs" role="group" data-i18n-aria-label="importFilterLabel" aria-label="会话筛选">
             <button class="import-filter-btn active" type="button" data-import-filter="importable" aria-pressed="true">
-              <span data-filter-label></span><span class="import-filter-count" data-filter-count>0</span>
+              <span data-filter-label></span>
             </button>
             <button class="import-filter-btn" type="button" data-import-filter="all" aria-pressed="false">
-              <span data-filter-label></span><span class="import-filter-count" data-filter-count>0</span>
+              <span data-filter-label></span>
             </button>
           </div>
         </div>
@@ -757,36 +754,43 @@
             <input type="checkbox" id="importSelectAll">
             <span data-i18n="importSelectVisible">全选当前结果</span>
           </label>
-          <span id="importVisibleSummary" class="import-visible-summary"></span>
+          <span id="importVisibleSummary" class="import-visible-summary" hidden></span>
         </div>
-      </div>
+        </div>
 
-      <div id="importProgress" class="import-progress" hidden>
-        <div class="import-progress-header">
-          <span id="importProgressText"></span>
-          <button id="importCancelBtn" class="ghost-btn import-cancel-btn" type="button" data-i18n="importCancel">停止导入</button>
+        <div id="importProgress" class="import-progress" hidden>
+          <div class="import-progress-header">
+            <span id="importProgressText"></span>
+            <button id="importCancelBtn" class="ghost-btn import-cancel-btn" type="button" data-i18n="importCancel">停止导入</button>
+          </div>
+          <div id="importProgressTrack" class="import-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+            <span id="importProgressBar" class="import-progress-bar"></span>
+          </div>
         </div>
-        <div id="importProgressTrack" class="import-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
-          <span id="importProgressBar" class="import-progress-bar"></span>
-        </div>
-      </div>
 
-      <div id="importList" class="import-list" role="list" aria-live="polite" aria-busy="false"></div>
-
-      <div class="import-feedback">
-        <div id="importStatus" class="import-result" aria-live="polite"></div>
-        <div id="importBadgeHint" class="import-badge-hint" hidden data-i18n="importBadgeLifecycleHint"></div>
-        <div id="importResultActions" class="import-result-actions" hidden>
-          <button id="importRetryBtn" class="mini-btn" type="button"></button>
+        <div class="import-list-shell">
+          <div id="importList" class="import-list" role="list" aria-live="polite"
+            aria-busy="false" aria-disabled="false"></div>
+          <div id="importScanOverlay" class="import-scan-overlay" hidden>
+            <span class="import-scan-spinner" aria-hidden="true"></span>
+            <span class="sr-only" data-i18n="importRefreshing">扫描中...</span>
+          </div>
         </div>
-        <div id="importFailures" class="import-failures"></div>
+
+        <div class="import-feedback">
+          <div id="importStatus" class="import-result" aria-live="polite"></div>
+          <div id="importBadgeHint" class="import-badge-hint" hidden data-i18n="importBadgeLifecycleHint"></div>
+          <div id="importResultActions" class="import-result-actions" hidden>
+            <button id="importRetryBtn" class="mini-btn" type="button"></button>
+          </div>
+          <div id="importFailures" class="import-failures"></div>
+        </div>
       </div>
 
       <footer class="import-dialog-footer">
         <span id="importSelectionSummary" class="import-selection-summary" aria-live="polite"></span>
         <div class="import-dialog-actions">
-          <button id="importDismissBtn" class="ghost-btn" type="button" data-i18n="close">关闭</button>
-          <button id="importDoBtn" class="primary-btn" type="button" data-i18n="importToCode" disabled>导入到 Code</button>
+          <button id="importDoBtn" class="primary-btn" type="button" data-i18n="importToCode" disabled>导入所选</button>
         </div>
       </footer>
     </section>
