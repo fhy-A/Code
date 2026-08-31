@@ -26734,6 +26734,124 @@ class ComposerThemeAndFileDragTests(unittest.TestCase):
 
 
 class LongTextDisplayTests(unittest.TestCase):
+    FOOTER_MARKER = "/* CODE-043 long user message single footer */"
+    ORDINARY_USER = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.user:not([data-background-message-id])"
+        ":not([data-queued-message-id]):not(.execution-trace-persistent) "
+    )
+    LONG_FOOTER = (
+        ORDINARY_USER
+        + ".user-message-hover-area:has(> .user-message-text.is-overflowing)"
+    )
+    BATCH_FOOTER = (
+        ORDINARY_USER
+        + ".user-message-hover-area.user-message-batch"
+        ":has(> .user-message-text.is-overflowing)"
+    )
+
+    def footer_source(self):
+        self.assertIn(self.FOOTER_MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.FOOTER_MARKER, 1)[1].split(
+            "/* CODE-043 compact three-level disclosures */",
+            1,
+        )[0]
+
+    @staticmethod
+    def footer_rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_long_user_footer_uses_one_overflow_only_grid_row(self):
+        source = self.footer_source()
+        container_rule = self.footer_rule(source, self.LONG_FOOTER)
+        for declaration in (
+            "--user-message-footer-row: 2;",
+            "display: grid;",
+            "grid-template-columns: minmax(0, 1fr) auto;",
+            "width: fit-content;",
+            "max-width: min(660px, 92%);",
+            "column-gap: 8px;",
+            "row-gap: 2px;",
+        ):
+            self.assertIn(declaration, container_rule)
+        self.assertIn(":has(> .user-message-text.is-overflowing)", self.LONG_FOOTER)
+        self.assertNotIn(".is-collapsed", source)
+        self.assertNotIn(".is-expanded", source)
+
+        batch_rule = self.footer_rule(source, self.BATCH_FOOTER)
+        self.assertIn("--user-message-footer-row: 3;", batch_rule)
+
+    def test_long_user_toggle_and_meta_share_the_declared_footer_row(self):
+        source = self.footer_source()
+        toggle_rule = self.footer_rule(source, f"{self.LONG_FOOTER} > .user-message-toggle")
+        for declaration in (
+            "grid-column: 1;",
+            "grid-row: var(--user-message-footer-row);",
+            "justify-self: start;",
+            "align-self: center;",
+            "min-height: var(--user-message-meta-height);",
+            "margin: 0 0 0 4px;",
+        ):
+            self.assertIn(declaration, toggle_rule)
+
+        meta_rule = self.footer_rule(source, f"{self.LONG_FOOTER} > .msg-meta")
+        for declaration in (
+            "position: static;",
+            "top: auto;",
+            "right: auto;",
+            "grid-column: 2;",
+            "grid-row: var(--user-message-footer-row);",
+            "justify-self: end;",
+            "align-self: center;",
+            "margin-top: 0;",
+        ):
+            self.assertIn(declaration, meta_rule)
+
+    def test_short_messages_keep_existing_meta_and_keyboard_visibility(self):
+        source = self.footer_source()
+        self.assertNotIn(".user-message-hover-area {", source)
+        self.assertNotIn(".msg.assistant", source)
+        self.assertNotIn(".user-input-", source)
+        self.assertNotIn(".tool-", source)
+        global_meta = re.search(r"\.msg-meta \{([^}]+)\}", STYLE_SOURCE)
+        self.assertIsNotNone(global_meta)
+        self.assertIn("position: absolute", global_meta.group(1))
+        self.assertIn("top: 100%", global_meta.group(1))
+        self.assertIn(
+            ".user-message-hover-area:is(:hover, :focus-within) .msg-meta",
+            STYLE_SOURCE,
+        )
+
+    def test_image_long_text_and_narrow_width_keep_footer_inside_message(self):
+        source = self.footer_source()
+        content_group = (
+            f"{self.LONG_FOOTER} > .user-message-text,\n"
+            f"{self.BATCH_FOOTER} > .msg-image-group {{"
+        )
+        content_rule = self.footer_rule(source, content_group)
+        for declaration in (
+            "grid-column: 1 / -1;",
+            "min-width: 0;",
+            "max-width: 100%;",
+            "justify-self: end;",
+        ):
+            self.assertIn(declaration, content_rule)
+        image_selector = f"{self.BATCH_FOOTER} > .msg-image-group"
+        image_start = source.rindex(image_selector)
+        image_rule = source[image_start:source.index("}", image_start) + 1]
+        self.assertIn("margin-bottom: 6px;", image_rule)
+        toggle_rule = self.footer_rule(source, f"{self.LONG_FOOTER} > .user-message-toggle")
+        for declaration in (
+            "min-width: 0;",
+            "max-width: 100%;",
+            "overflow: hidden;",
+            "text-overflow: ellipsis;",
+            "white-space: nowrap;",
+        ):
+            self.assertIn(declaration, toggle_rule)
+
     def test_long_text_display_uses_real_overflow_and_page_local_state(self):
         script = r"""
 global.window = global;

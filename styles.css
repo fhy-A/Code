@@ -10794,6 +10794,62 @@ body.theme-dark .chat-pane.empty-chat .composer {
   font-size: var(--type-caption);
 }
 
+/* CODE-043 long user message single footer */
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area:has(> .user-message-text.is-overflowing) {
+  --user-message-footer-row: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: fit-content;
+  max-width: min(660px, 92%);
+  column-gap: 8px;
+  row-gap: 2px;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area.user-message-batch:has(> .user-message-text.is-overflowing) {
+  --user-message-footer-row: 3;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area:has(> .user-message-text.is-overflowing) > .user-message-text,
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area.user-message-batch:has(> .user-message-text.is-overflowing) > .msg-image-group {
+  grid-column: 1 / -1;
+  min-width: 0;
+  max-width: 100%;
+  justify-self: end;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area.user-message-batch:has(> .user-message-text.is-overflowing) > .msg-image-group {
+  margin-bottom: 6px;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area:has(> .user-message-text.is-overflowing) > .user-message-toggle {
+  display: inline-flex;
+  grid-column: 1;
+  grid-row: var(--user-message-footer-row);
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--user-message-meta-height);
+  align-items: center;
+  align-self: center;
+  justify-self: start;
+  margin: 0 0 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area:has(> .user-message-text.is-overflowing) > .msg-meta {
+  position: static;
+  top: auto;
+  right: auto;
+  grid-column: 2;
+  grid-row: var(--user-message-footer-row);
+  min-width: 0;
+  align-self: center;
+  justify-self: end;
+  margin-top: 0;
+}
+
 /* CODE-043 compact three-level disclosures */
 .execution-trace-summary,
 .tool-process-stage > summary,
