@@ -291,7 +291,20 @@ function projectPhaseOneShellIcons() {
   return true;
 }
 
+function projectEditorIcons(root = document) {
+  const slots = root.querySelectorAll?.("[data-project-editor-icon]") || [];
+  slots.forEach((slot) => {
+    slot.innerHTML = uiIcon(
+      slot.dataset.projectEditorIcon,
+      16,
+      "project-editor-icon",
+    );
+  });
+  return slots.length;
+}
+
 projectPhaseOneShellIcons();
+projectEditorIcons();
 
 const state = createAppState(localStorage);
 state._sessionRevisions = state._sessionRevisions || Object.create(null);
@@ -5475,7 +5488,7 @@ function renderProjectEditFolders() {
   list.innerHTML = editingProjectRootPaths.map((path, index) => (
     '<div class="project-source-folder-row" title="' + escapeHtml(path) + '">' +
       '<span class="project-edit-folder-icon" aria-hidden="true">' +
-        '<svg viewBox="0 0 24 24"><path d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.8 2h7.6a1.75 1.75 0 0 1 1.75 1.75v8.5A1.75 1.75 0 0 1 18.75 19H5.25a1.75 1.75 0 0 1-1.75-1.75Z"/></svg>' +
+        uiIcon("folder", 16, "project-editor-icon") +
       '</span>' +
       '<span class="project-source-folder-name">' + escapeHtml(projectFolderName(path)) + '</span>' +
       (index === 0
@@ -5484,7 +5497,8 @@ function renderProjectEditFolders() {
           index + '">' + escapeHtml(t("makePrimary")) + '</button>') +
       '<button class="project-source-folder-remove" type="button" data-project-folder-action="remove" data-index="' +
         index + '" title="' + escapeHtml(t("removeSourceFolder")) + '" aria-label="' +
-        escapeHtml(t("removeSourceFolder")) + '"' + (onlyOne ? ' disabled' : '') + '>&times;</button>' +
+        escapeHtml(t("removeSourceFolder")) + '"' + (onlyOne ? ' disabled' : '') + '>' +
+        uiIcon("close", 16, "project-editor-icon") + '</button>' +
     '</div>'
   )).join("");
 }
@@ -6183,30 +6197,90 @@ function applySidebarWidth(width = state.sidebarWidth, persist = true) {
 
 }
 
+function resolveSidebarExplorerHeight({
+  requestedHeight = 0,
+  sidebarHeight = 0,
+  fixedHeight = 0,
+  sessionsMinHeight = 80,
+  explorerMinHeight = 80,
+  fallbackHeight = 230,
+} = {}) {
+  const min = Math.max(0, Math.round(Number(explorerMinHeight) || 0));
+  const reserved = Math.max(0, Math.round(Number(fixedHeight) || 0))
+    + Math.max(0, Math.round(Number(sessionsMinHeight) || 0));
+  const max = Math.max(
+    min,
+    Math.round(Math.max(0, Number(sidebarHeight) || 0) - reserved),
+  );
+  const requested = Number(requestedHeight);
+  const fallback = Math.max(min, Math.round(Number(fallbackHeight) || 230));
+  const desired = Number.isFinite(requested) && requested > 0
+    ? Math.round(requested)
+    : fallback;
+  return {
+    height: Math.min(Math.max(desired, min), max),
+    min,
+    max,
+    reserved,
+  };
+}
+
+function measureOuterBlockHeight(element, fallback = 0) {
+  if (!element) return Math.max(0, Number(fallback) || 0);
+  const rectHeight = Number(element.getBoundingClientRect?.().height);
+  const ownHeight = Number.isFinite(rectHeight) && rectHeight > 0
+    ? rectHeight
+    : Number(element.offsetHeight) || Number(fallback) || 0;
+  const computed = window.getComputedStyle?.(element);
+  const marginTop = Number.parseFloat(computed?.marginTop || "0") || 0;
+  const marginBottom = Number.parseFloat(computed?.marginBottom || "0") || 0;
+  return Math.max(0, ownHeight + marginTop + marginBottom);
+}
+
 
 
 function applySidebarSessionHeight(height = state.sidebarSessionHeight) {
 
   const explorerEl = document.querySelector(".explorer");
 
-  if (explorerEl?.classList.contains("collapsed")) return;
-
   const sidebar = document.querySelector(".pi-sidebar");
+
+  if (!explorerEl || !sidebar) return null;
+  if (explorerEl.classList.contains("collapsed")) return state.sidebarSessionHeight;
 
   // minimum = section-head + cwd-inline so the project root selector stays visible
   const headEl = explorerEl?.querySelector(".section-head");
   const cwdEl = explorerEl?.querySelector(".cwd-inline");
-  const min = (headEl?.offsetHeight || 36) + (cwdEl?.offsetHeight || 44);
-
-  const max = Math.max(120, sidebar.clientHeight - 260);
-
-  const next = Math.min(Math.max(Number(height) || 230, min), max);
+  const explorerMinHeight = measureOuterBlockHeight(headEl, 36)
+    + measureOuterBlockHeight(cwdEl, 44);
+  const sessionsEl = sidebar.querySelector(".sessions");
+  const sessionsStyle = window.getComputedStyle?.(sessionsEl);
+  const sessionsMinHeight = Number.parseFloat(sessionsStyle?.minHeight || "80") || 80;
+  const fixedHeight = [
+    [sidebar.querySelector(".side-header"), 54],
+    [sidebar.querySelector("#newChat"), 56],
+    [sidebar.querySelector(".project-toolbar"), 31],
+    [sidebar.querySelector(".sidebar-splitter"), 3],
+    [sidebar.querySelector(".side-footer"), 50],
+  ].reduce((total, [element, fallback]) => (
+    total + measureOuterBlockHeight(element, fallback)
+  ), 0);
+  const resolved = resolveSidebarExplorerHeight({
+    requestedHeight: height,
+    sidebarHeight: sidebar.clientHeight,
+    fixedHeight,
+    sessionsMinHeight,
+    explorerMinHeight,
+  });
+  const next = resolved.height;
 
   state.sidebarSessionHeight = next;
 
   document.documentElement.style.setProperty("--explorer-height", `${next}px`);
 
   localStorage.setItem("code-session-height", String(next));
+
+  return next;
 
 }
 
@@ -15260,9 +15334,11 @@ document.getElementById("explorerHead").addEventListener("click", () => {
 
   const explorer = document.querySelector(".explorer");
 
-  explorer.classList.toggle("collapsed");
+  const collapsed = explorer.classList.toggle("collapsed");
 
-  localStorage.setItem("code-explorer-collapsed", explorer.classList.contains("collapsed") ? "1" : "0");
+  localStorage.setItem("code-explorer-collapsed", collapsed ? "1" : "0");
+
+  if (!collapsed) applySidebarSessionHeight(state.sidebarSessionHeight);
 
 });
 

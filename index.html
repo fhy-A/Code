@@ -385,24 +385,25 @@
       <div class="modal-card project-edit-card" role="dialog" aria-modal="true" aria-labelledby="projectEditTitle">
         <header>
           <h2 id="projectEditTitle" data-i18n="editProject">编辑项目</h2>
-          <button id="closeProjectEdit" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">&times;</button>
+          <button id="closeProjectEdit" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close"><span data-project-editor-icon="close" aria-hidden="true"></span></button>
         </header>
-        <label class="project-edit-name">
-          <span class="project-edit-folder-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.8 2h7.6a1.75 1.75 0 0 1 1.75 1.75v8.5A1.75 1.75 0 0 1 18.75 19H5.25a1.75 1.75 0 0 1-1.75-1.75Z"/></svg>
-          </span>
-          <input id="projectEditName" type="text" maxlength="60" autocomplete="off" data-i18n-aria-label="projectName" aria-label="项目名称" />
-        </label>
+        <div class="project-edit-name-field">
+          <label class="project-edit-name-label" for="projectEditName" data-i18n="projectName">项目名称</label>
+          <div class="project-edit-name">
+            <span class="project-edit-folder-icon" data-project-editor-icon="folder" aria-hidden="true"></span>
+            <input id="projectEditName" type="text" maxlength="60" autocomplete="off" data-i18n-aria-label="projectName" aria-label="项目名称" />
+          </div>
+        </div>
         <div class="project-edit-section-label" data-i18n="sourceFolders">源文件夹</div>
         <div class="project-source-folder-card">
           <div id="projectSourceFolderList" class="project-source-folder-list"></div>
           <button id="addProjectFolder" class="project-source-folder-add" type="button">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7A2 2 0 0 1 5.5 5h3.75L11 7h7.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2ZM15.5 11.5v5M13 14h5"/></svg>
+            <span data-project-editor-icon="folderPlus" aria-hidden="true"></span>
             <span data-i18n="addSourceFolder">添加文件夹</span>
           </button>
         </div>
         <footer class="project-edit-actions">
-          <button id="deleteProjectFromEdit" class="danger-btn" type="button" data-i18n="deleteProject">删除项目</button>
+          <button id="deleteProjectFromEdit" class="danger-btn" type="button"><span data-project-editor-icon="trash" aria-hidden="true"></span><span data-i18n="deleteProject">删除项目</span></button>
           <div class="project-edit-actions-right">
             <button id="cancelProjectEdit" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
             <button id="saveProjectEdit" class="primary-btn" type="button" data-i18n="save">保存</button>

@@ -26364,12 +26364,160 @@ process.stdout.write(JSON.stringify(samples));
         self.assertIn("project-edit-card", STYLE_SOURCE)
         self.assertIn("project-delete-confirm-card", STYLE_SOURCE)
 
-    def test_add_folder_uses_a_conventional_folder_plus_icon(self):
+    def test_project_editor_visual_scale_uses_shared_icons_and_visible_name_label(self):
+        modal_start = INDEX_SOURCE.index('id="projectEditModal"')
+        modal_end = INDEX_SOURCE.index('id="projectDeleteConfirmModal"', modal_start)
+        modal_source = INDEX_SOURCE[modal_start:modal_end]
+        folder_start = APP_SOURCE.index("function renderProjectEditFolders()")
+        folder_end = APP_SOURCE.index("function closeProjectEditModal()", folder_start)
+        folder_source = APP_SOURCE[folder_start:folder_end]
+
         self.assertIn(
-            "M3.5 7A2 2 0 0 1 5.5 5h3.75L11 7h7.5a2 2 0 0 1 2 2v8",
+            '<label class="project-edit-name-label" for="projectEditName" data-i18n="projectName">',
+            modal_source,
+        )
+        for name in ("close", "folder", "folderPlus", "trash"):
+            self.assertIn(f'data-project-editor-icon="{name}"', modal_source)
+        self.assertNotIn("&times;", modal_source)
+        self.assertNotIn("&times;", folder_source)
+        self.assertIn('uiIcon("folder", 16, "project-editor-icon")', folder_source)
+        self.assertIn('uiIcon("close", 16, "project-editor-icon")', folder_source)
+        self.assertIn("function projectEditorIcons(", APP_SOURCE)
+
+        card_start = STYLE_SOURCE.index(".project-edit-card {")
+        card_end = STYLE_SOURCE.index("}", card_start)
+        card_rule = STYLE_SOURCE[card_start:card_end]
+        for contract in (
+            "width: min(560px, calc(100vw - 28px));",
+            "max-height: calc(100vh - 24px);",
+            "overflow-x: hidden;",
+            "overflow-y: auto;",
+            "padding: 22px;",
+            "border-radius: 14px;",
+        ):
+            self.assertIn(contract, card_rule)
+
+        heading_start = STYLE_SOURCE.index(".project-edit-card h2 {")
+        heading_end = STYLE_SOURCE.index("}", heading_start)
+        self.assertIn("font-size: 18px;", STYLE_SOURCE[heading_start:heading_end])
+
+        label_start = STYLE_SOURCE.index(".project-edit-name-label {")
+        label_end = STYLE_SOURCE.index("}", label_start)
+        self.assertIn("font-size: 12px;", STYLE_SOURCE[label_start:label_end])
+
+        name_start = STYLE_SOURCE.index(".project-edit-name {")
+        name_end = STYLE_SOURCE.index("}", name_start)
+        name_rule = STYLE_SOURCE[name_start:name_end]
+        self.assertIn("min-height: 40px;", name_rule)
+        self.assertIn("border: 1px solid var(--line);", name_rule)
+        self.assertNotIn("border: 1px solid var(--accent);", name_rule)
+
+        name_focus_start = STYLE_SOURCE.index(".project-edit-name:focus-within {")
+        name_focus_end = STYLE_SOURCE.index("}", name_focus_start)
+        self.assertIn("border-color: var(--accent);", STYLE_SOURCE[name_focus_start:name_focus_end])
+
+        row_start = STYLE_SOURCE.index(
+            ".project-source-folder-row,\n.project-source-folder-add {"
+        )
+        row_end = STYLE_SOURCE.index("}", row_start)
+        self.assertIn("min-height: 40px;", STYLE_SOURCE[row_start:row_end])
+
+        remove_start = STYLE_SOURCE.index(".project-source-folder-remove {\n  width:")
+        remove_end = STYLE_SOURCE.index("}", remove_start)
+        remove_rule = STYLE_SOURCE[remove_start:remove_end]
+        self.assertIn("width: 28px;", remove_rule)
+        self.assertIn("height: 28px;", remove_rule)
+
+        action_start = STYLE_SOURCE.index(
+            ".project-edit-actions .primary-btn,\n.project-edit-actions .ghost-btn,\n.project-edit-actions .danger-btn {"
+        )
+        action_end = STYLE_SOURCE.index("}", action_start)
+        action_rule = STYLE_SOURCE[action_start:action_end]
+        self.assertIn("min-height: 34px;", action_rule)
+        self.assertIn("font-size: 14px;", action_rule)
+
+    def test_sidebar_explorer_height_uses_measured_budget_and_reclamps_on_expand(self):
+        helper_start = APP_SOURCE.index("function resolveSidebarExplorerHeight(")
+        helper_end = APP_SOURCE.index("function measureOuterBlockHeight(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+{helper_source}
+const metrics = {{sidebarHeight: 800, fixedHeight: 194, sessionsMinHeight: 80, explorerMinHeight: 80}};
+process.stdout.write(JSON.stringify({{
+  max: resolveSidebarExplorerHeight({{...metrics, requestedHeight: 2000}}),
+  min: resolveSidebarExplorerHeight({{...metrics, requestedHeight: 20}}),
+  valid: resolveSidebarExplorerHeight({{...metrics, requestedHeight: 420}}),
+  fallback: resolveSidebarExplorerHeight({{...metrics, requestedHeight: 0}}),
+  short: resolveSidebarExplorerHeight({{
+    sidebarHeight: 420,
+    fixedHeight: 194,
+    sessionsMinHeight: 80,
+    explorerMinHeight: 80,
+    requestedHeight: 9999,
+  }}),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "max": {"height": 526, "min": 80, "max": 526, "reserved": 274},
+                "min": {"height": 80, "min": 80, "max": 526, "reserved": 274},
+                "valid": {"height": 420, "min": 80, "max": 526, "reserved": 274},
+                "fallback": {"height": 230, "min": 80, "max": 526, "reserved": 274},
+                "short": {"height": 146, "min": 80, "max": 146, "reserved": 274},
+            },
+        )
+
+        apply_start = APP_SOURCE.index("function applySidebarSessionHeight(")
+        apply_end = APP_SOURCE.index("async function copyText(", apply_start)
+        apply_source = APP_SOURCE[apply_start:apply_end]
+        for selector in (
+            '".side-header"',
+            '"#newChat"',
+            '".project-toolbar"',
+            '".sidebar-splitter"',
+            '".side-footer"',
+            '".sessions"',
+        ):
+            self.assertIn(selector, apply_source)
+        self.assertIn("resolveSidebarExplorerHeight({", apply_source)
+        self.assertIn('localStorage.setItem("code-session-height", String(next))', apply_source)
+        self.assertNotIn("sidebar.clientHeight - 260", apply_source)
+
+        resize_start = APP_SOURCE.index('window.addEventListener("resize", () => {')
+        resize_end = APP_SOURCE.index("document.addEventListener(\"click\"", resize_start)
+        self.assertIn(
+            "applySidebarSessionHeight(state.sidebarSessionHeight)",
+            APP_SOURCE[resize_start:resize_end],
+        )
+
+        explorer_start = APP_SOURCE.index(
+            'document.getElementById("explorerHead").addEventListener("click", () => {'
+        )
+        explorer_end = APP_SOURCE.index("});", explorer_start) + 3
+        explorer_source = APP_SOURCE[explorer_start:explorer_end]
+        self.assertIn("if (!collapsed) applySidebarSessionHeight", explorer_source)
+
+    def test_add_folder_uses_a_conventional_folder_plus_icon(self):
+        icon_source = (ROOT / "src" / "core" / "icons.js").read_text(encoding="utf-8")
+        self.assertIn(
+            'data-project-editor-icon="folderPlus"',
             INDEX_SOURCE,
         )
-        self.assertIn("M15.5 11.5v5M13 14h5", INDEX_SOURCE)
+        self.assertIn(
+            'folderPlus: \'<path d="M3 7V6.5A1.5 1.5 0 0 1 4.5 5h5l2 2H20',
+            icon_source,
+        )
+        self.assertIn('uiIcon(name', icon_source)
+        self.assertIn("projectEditorIcons();", APP_SOURCE)
 
     def test_sidebar_does_not_render_session_counts(self):
         render_start = APP_SOURCE.index("function renderProjectSection")

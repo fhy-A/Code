@@ -4919,33 +4919,54 @@ body.theme-dark .syn-fn { color: #61afef; }
 
 /* Project editor */
 .project-edit-card {
-  width: min(640px, calc(100vw - 28px));
-  padding: 26px 28px 24px;
-  border-radius: 18px;
+  width: min(560px, calc(100vw - 28px));
+  max-height: calc(100vh - 24px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 22px;
+  border-radius: 14px;
+  overscroll-behavior: contain;
 }
 
 .project-edit-card header {
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
-.project-edit-card h2,
+.project-edit-card h2 {
+  font-size: 18px;
+  letter-spacing: -.2px;
+}
+
 .project-delete-confirm-card h2 {
   font-size: 24px;
   letter-spacing: -.4px;
 }
 
+.project-edit-name-field {
+  margin-bottom: 18px;
+}
+
+.project-edit-name-label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
 .project-edit-name {
   display: flex;
   align-items: center;
-  min-height: 54px;
-  margin-bottom: 22px;
-  border: 1px solid var(--accent);
-  border-radius: 14px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   background: var(--panel);
   overflow: hidden;
 }
 
 .project-edit-name:focus-within {
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
@@ -4953,30 +4974,29 @@ body.theme-dark .syn-fn { color: #61afef; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 58px;
+  width: 40px;
   align-self: stretch;
   flex-shrink: 0;
   border-right: 1px solid var(--line);
   color: var(--muted);
-  font-size: 24px;
+  font-size: 16px;
 }
 
-.project-edit-folder-icon svg,
-.project-source-folder-add svg {
-  width: 21px;
-  height: 21px;
+.project-edit-card .project-editor-icon {
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 1.6;
+  stroke-width: 1.8;
 }
 
 .project-edit-name input {
   min-width: 0;
   flex: 1;
-  height: 52px;
-  padding: 0 14px;
+  height: 38px;
+  padding: 0 10px;
   border: 0;
   outline: 0;
   background: transparent;
@@ -4986,7 +5006,7 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .project-edit-section-label {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   color: var(--text);
   font-size: 14px;
   font-weight: 700;
@@ -5134,7 +5154,7 @@ body.theme-dark .syn-fn { color: #61afef; }
 .project-source-folder-card {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 13px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--panel) 72%, transparent);
 }
 
@@ -5143,12 +5163,12 @@ body.theme-dark .syn-fn { color: #61afef; }
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 54px;
+  min-height: 40px;
 }
 
 .project-source-folder-row {
-  gap: 10px;
-  padding: 0 12px 0 0;
+  gap: 8px;
+  padding: 0 8px 0 0;
 }
 
 .project-source-folder-row + .project-source-folder-row {
@@ -5156,16 +5176,16 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .project-source-folder-row .project-edit-folder-icon {
-  width: 56px;
+  width: 36px;
   border-right: 0;
-  font-size: 21px;
+  font-size: 16px;
 }
 
 .project-source-folder-name {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 15px;
+  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5187,7 +5207,7 @@ body.theme-dark .syn-fn { color: #61afef; }
 
 .project-primary-badge,
 .project-make-primary {
-  padding: 7px 10px;
+  padding: 5px 8px;
   font-size: 12px;
   font-weight: 700;
 }
@@ -5208,9 +5228,8 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .project-source-folder-remove {
-  width: 32px;
-  height: 32px;
-  font-size: 21px;
+  width: 28px;
+  height: 28px;
   line-height: 1;
 }
 
@@ -5220,8 +5239,8 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 
 .project-source-folder-add {
-  gap: 12px;
-  padding: 0 20px;
+  gap: 8px;
+  padding: 0 12px;
   border: 0;
   border-top: 1px solid var(--line);
   background: transparent;
@@ -5232,7 +5251,7 @@ body.theme-dark .syn-fn { color: #61afef; }
   font-size: 14px;
 }
 
-.project-source-folder-add svg {
+.project-source-folder-add .ui-icon {
   flex-shrink: 0;
 }
 
@@ -5250,8 +5269,8 @@ body.theme-dark .syn-fn { color: #61afef; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  margin-top: 28px;
+  gap: 12px;
+  margin-top: 20px;
 }
 
 .project-edit-actions-right {
@@ -5262,9 +5281,20 @@ body.theme-dark .syn-fn { color: #61afef; }
 .project-edit-actions .primary-btn,
 .project-edit-actions .ghost-btn,
 .project-edit-actions .danger-btn {
-  min-height: 42px;
-  padding: 0 20px;
-  border-radius: 11px;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.project-edit-actions .ui-icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.8;
 }
 
 .project-edit-actions .primary-btn {
@@ -5304,16 +5334,18 @@ body.theme-dark .syn-fn { color: #61afef; }
   }
 
   .project-edit-actions {
-    align-items: stretch;
-    flex-direction: column-reverse;
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 
   .project-edit-actions-right {
     justify-content: flex-end;
+    margin-left: auto;
   }
 
   .project-edit-actions > .danger-btn {
-    align-self: flex-start;
+    align-self: center;
   }
 }
 
