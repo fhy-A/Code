@@ -27129,6 +27129,46 @@ process.stdout.write(JSON.stringify(orderProjects(projects, ["c"]).map((item) =>
 
 
 class ComposerThemeAndFileDragTests(unittest.TestCase):
+    LIGHT_SURFACE_MARKER = "/* CODE-043 light composer surface cleanup */"
+
+    def test_light_composer_matches_canvas_without_toolbar_divider(self):
+        self.assertIn(self.LIGHT_SURFACE_MARKER, STYLE_SOURCE)
+        source = STYLE_SOURCE.split(self.LIGHT_SURFACE_MARKER, 1)[1].split(
+            ".authorization-head,",
+            1,
+        )[0]
+
+        toolbar = re.search(r"\.composer-bar\s*\{([^}]+)\}", source)
+        self.assertIsNotNone(toolbar)
+        self.assertIn("border-top: 0;", toolbar.group(1))
+
+        light_canvas = re.search(
+            r'html\[data-theme-mode="light"\] \.chat-pane\s*\{([^}]+)\}',
+            source,
+        )
+        self.assertIsNotNone(light_canvas)
+        for declaration in (
+            "--composer-surface: var(--bg);",
+            "--composer-surface-hover: var(--bg);",
+            "--composer-surface-disabled: var(--bg);",
+        ):
+            self.assertIn(declaration, light_canvas.group(1))
+
+        light_rest = re.search(
+            r'html\[data-theme-mode="light"\] \.composer:not\(:focus-within\)'
+            r':not\(\.drag-active\):not\(:has\(textarea:disabled\)\),\s*'
+            r'html\[data-theme-mode="light"\] \.chat-pane\.empty-chat '
+            r'\.composer:not\(:focus-within\):not\(\.drag-active\)'
+            r':not\(:has\(textarea:disabled\)\)\s*\{([^}]+)\}',
+            source,
+        )
+        self.assertIsNotNone(light_rest)
+        self.assertRegex(light_rest.group(1), r"box-shadow:\s*(?!none)[^;]+;")
+
+        self.assertNotIn('data-theme-mode="dark"', source)
+        self.assertNotIn("body.theme-dark", source)
+        self.assertNotRegex(source, r"\b(?:width|height|padding|margin|border-radius):")
+
     def test_composer_surfaces_follow_the_active_theme(self):
         for declaration in (
             "--composer-surface: color-mix(in srgb, var(--bg) 94%, var(--text) 6%);",

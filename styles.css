@@ -11484,6 +11484,22 @@ body.theme-dark .chat-pane.empty-chat .composer:not(:focus-within):not(.drag-act
   box-shadow: none;
 }
 
+/* CODE-043 light composer surface cleanup */
+.composer-bar {
+  border-top: 0;
+}
+
+html[data-theme-mode="light"] .chat-pane {
+  --composer-surface: var(--bg);
+  --composer-surface-hover: var(--bg);
+  --composer-surface-disabled: var(--bg);
+}
+
+html[data-theme-mode="light"] .composer:not(:focus-within):not(.drag-active):not(:has(textarea:disabled)),
+html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within):not(.drag-active):not(:has(textarea:disabled)) {
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--text) 10%, transparent);
+}
+
 .authorization-head,
 .authorization-group + .authorization-group,
 .authorization-row,
