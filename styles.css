@@ -10850,6 +10850,76 @@ body.theme-dark .chat-pane.empty-chat .composer {
   margin-top: 0;
 }
 
+/* CODE-043 ordinary Markdown typography and contrast */
+.pi-shell {
+  --message-prose-muted: #5c6674;
+  --message-prose-link: #0063bd;
+  --message-prose-strong: #384150;
+  --message-prose-quote-bg: #f4f6f8;
+}
+
+html[data-theme-mode="dark"] .pi-shell,
+body.theme-dark .pi-shell {
+  --message-prose-muted: #adb5c3;
+  --message-prose-link: #89b9ff;
+  --message-prose-strong: #d7dce3;
+  --message-prose-quote-bg: #20252b;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > :first-child,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > :first-child {
+  margin-top: 0;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) .admonition-title {
+  color: var(--message-prose-strong);
+  font-size: var(--type-interface);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) .admonition-body {
+  color: var(--message-prose-muted);
+  font-size: var(--type-interface);
+  line-height: 1.6;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) blockquote {
+  background: var(--message-prose-quote-bg);
+  color: var(--message-prose-muted);
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) a.ext-link {
+  color: var(--message-prose-link);
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) a.ext-link .link-ext-icon {
+  color: currentColor;
+  opacity: .82;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) :is(.code-head, .line-no, .copy-code, .table-overflow-hint) {
+  color: var(--message-prose-muted);
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble) :is(.copy-code, .table-overflow-hint) {
+  font-size: var(--type-caption);
+  line-height: 1.4;
+  opacity: 1;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent),
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result)) :is(.msg-meta, .msg-time, .user-message-toggle, .role, .response-info) {
+  color: var(--message-prose-muted);
+}
+
 /* CODE-043 compact three-level disclosures */
 .execution-trace-summary,
 .tool-process-stage > summary,

@@ -16,6 +16,7 @@ SERVER_SOURCE = (ROOT / "server.py").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
 STATE_SOURCE = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
 I18N_SOURCE = (ROOT / "src" / "core" / "i18n.js").read_text(encoding="utf-8")
+THEME_ENGINE_SOURCE = (ROOT / "src" / "core" / "theme-engine.js").read_text(encoding="utf-8")
 PLATFORM_SOURCE = (ROOT / "src" / "core" / "platform.js").read_text(encoding="utf-8")
 API_CLIENT_SOURCE = (ROOT / "src" / "services" / "api-client.js").read_text(encoding="utf-8")
 PERSISTENCE_SOURCE = (ROOT / "src" / "services" / "persistence.js").read_text(encoding="utf-8")
@@ -26753,7 +26754,7 @@ class LongTextDisplayTests(unittest.TestCase):
     def footer_source(self):
         self.assertIn(self.FOOTER_MARKER, STYLE_SOURCE)
         return STYLE_SOURCE.split(self.FOOTER_MARKER, 1)[1].split(
-            "/* CODE-043 compact three-level disclosures */",
+            "/* CODE-043 ordinary Markdown typography and contrast */",
             1,
         )[0]
 
@@ -29410,6 +29411,214 @@ class Code043OrdinaryMessageFinalTests(unittest.TestCase):
             ".preview-",
         ):
             self.assertNotIn(forbidden, source)
+
+
+class Code043MarkdownTypographyContrastTests(unittest.TestCase):
+    MARKER = "/* CODE-043 ordinary Markdown typography and contrast */"
+    USER = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.user:not([data-background-message-id])"
+        ":not([data-queued-message-id]):not(.execution-trace-persistent)"
+    )
+    USER_TEXT = USER + " .user-message-text > .bubble"
+    ASSISTANT = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.assistant:not(.agent-commentary):not(.tool-process)"
+        ":not(.edit-suggestion):not(.generated-image-result)"
+    )
+    ASSISTANT_TEXT = ASSISTANT + " > .bubble"
+    MESSAGE_TEXT = f":is({USER_TEXT},\n  {ASSISTANT_TEXT})"
+    MESSAGE = f":is({USER},\n  {ASSISTANT})"
+
+    def contrast_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 compact three-level disclosures */",
+            1,
+        )[0]
+
+    @staticmethod
+    def rule(source, selector, *, last=False):
+        start = source.rindex(selector) if last else source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    @staticmethod
+    def variables(rule):
+        return {
+            name: value.lower()
+            for name, value in re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})", rule)
+        }
+
+    @staticmethod
+    def relative_luminance(hex_color):
+        channels = [int(hex_color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+
+        def linear(channel):
+            return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+        red, green, blue = (linear(channel) for channel in channels)
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+    @classmethod
+    def contrast_ratio(cls, foreground, background):
+        brighter, darker = sorted(
+            (cls.relative_luminance(foreground), cls.relative_luminance(background)),
+            reverse=True,
+        )
+        return (brighter + 0.05) / (darker + 0.05)
+
+    def theme_matrix(self):
+        script = r"""
+global.window = global;
+global.Code = { core: {} };
+require("./src/core/theme-engine.js");
+const theme = global.Code.core.theme;
+const modes = [
+  ["light", theme.LIGHT_THEMES, false],
+  ["dark", theme.DARK_THEMES, true],
+];
+const matrix = {};
+for (const [mode, registry, isDark] of modes) {
+  matrix[mode] = Object.entries(registry).map(([name, base]) => ({
+    name,
+    vars: theme.deriveTheme(base, isDark),
+  }));
+}
+process.stdout.write(JSON.stringify(matrix));
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_first_direct_markdown_child_wins_after_heading_and_block_rules(self):
+        source = self.contrast_source()
+        selector = f"{self.USER_TEXT} > :first-child,\n{self.ASSISTANT_TEXT} > :first-child"
+        first_rule = self.rule(source, selector)
+        self.assertIn("margin-top: 0;", first_rule)
+        self.assertGreater(
+            STYLE_SOURCE.index(self.MARKER),
+            STYLE_SOURCE.index(f"{self.USER_TEXT} > :is(h1, h2, h3, h4, h5, h6)"),
+        )
+        self.assertEqual(selector.count("> :first-child"), 2)
+        self.assertNotIn("> :is(", selector)
+
+    def test_admonitions_use_readable_fourteen_pixel_hierarchy(self):
+        source = self.contrast_source()
+        title_rule = self.rule(source, f"{self.MESSAGE_TEXT} .admonition-title")
+        for declaration in (
+            "font-size: var(--type-interface);",
+            "font-weight: 600;",
+            "line-height: 1.5;",
+            "color: var(--message-prose-strong);",
+        ):
+            self.assertIn(declaration, title_rule)
+        body_rule = self.rule(source, f"{self.MESSAGE_TEXT} .admonition-body")
+        for declaration in (
+            "font-size: var(--type-interface);",
+            "line-height: 1.6;",
+            "color: var(--message-prose-muted);",
+        ):
+            self.assertIn(declaration, body_rule)
+
+    def test_quotes_links_code_and_message_auxiliary_text_use_scoped_tokens(self):
+        source = self.contrast_source()
+        quote_rule = self.rule(source, f"{self.MESSAGE_TEXT} blockquote")
+        self.assertIn("background: var(--message-prose-quote-bg);", quote_rule)
+        self.assertIn("color: var(--message-prose-muted);", quote_rule)
+        link_rule = self.rule(source, f"{self.MESSAGE_TEXT} a.ext-link")
+        self.assertIn("color: var(--message-prose-link);", link_rule)
+
+        code_aux = f"{self.MESSAGE_TEXT} :is(.code-head, .line-no, .copy-code, .table-overflow-hint)"
+        code_rule = self.rule(source, code_aux)
+        self.assertIn("color: var(--message-prose-muted);", code_rule)
+        compact_aux = f"{self.MESSAGE_TEXT} :is(.copy-code, .table-overflow-hint)"
+        compact_rule = self.rule(source, compact_aux)
+        self.assertIn("font-size: var(--type-caption);", compact_rule)
+        self.assertIn("opacity: 1;", compact_rule)
+
+        message_rule = self.rule(
+            source,
+            f"{self.MESSAGE} :is(.msg-meta, .msg-time, .user-message-toggle, .role, .response-info)",
+        )
+        self.assertIn("color: var(--message-prose-muted);", message_rule)
+        for forbidden in (".preview-", ".tool-edit-", ".tool-inline-", ".settings", ".user-input-"):
+            self.assertNotIn(forbidden, source)
+
+    def test_dark_tokens_follow_the_runtime_html_theme_mount(self):
+        source = self.contrast_source()
+        dark_selector = (
+            'html[data-theme-mode="dark"] .pi-shell,\n'
+            "body.theme-dark .pi-shell {"
+        )
+        self.assertIn(dark_selector, source)
+        self.assertEqual(source.count('html[data-theme-mode="dark"] .pi-shell'), 1)
+        self.assertEqual(source.count("body.theme-dark .pi-shell"), 1)
+        self.assertIn(
+            'root.setAttribute("data-theme-mode", isDark ? "dark" : "light");',
+            THEME_ENGINE_SOURCE,
+        )
+
+    def test_message_theme_tokens_meet_wcag_contrast_across_registered_palettes(self):
+        source = self.contrast_source()
+        dark_selector = (
+            'html[data-theme-mode="dark"] .pi-shell,\n'
+            "body.theme-dark .pi-shell {"
+        )
+        light_tokens = self.variables(self.rule(source, ".pi-shell {"))
+        dark_tokens = self.variables(self.rule(source, dark_selector))
+        matrix = self.theme_matrix()
+
+        for tokens in (light_tokens, dark_tokens):
+            for name in (
+                "--message-prose-muted",
+                "--message-prose-link",
+                "--message-prose-strong",
+                "--message-prose-quote-bg",
+            ):
+                self.assertRegex(tokens[name], r"^#[0-9a-f]{6}$")
+
+        self.assertEqual(len(matrix["light"]), 15)
+        self.assertEqual(len(matrix["dark"]), 26)
+        notion_dark = next(item for item in matrix["dark"] if item["name"] == "notion")
+        self.assertEqual(notion_dark["vars"]["--bg"].lower(), "#191919")
+        self.assertEqual(notion_dark["vars"]["--user-bubble-bg"].lower(), "#262626")
+        self.assertEqual(notion_dark["vars"]["--code-bg"].lower(), "#282828")
+
+        for mode, tokens in (("light", light_tokens), ("dark", dark_tokens)):
+            for foreground_name in (
+                "--message-prose-muted",
+                "--message-prose-link",
+                "--message-prose-strong",
+            ):
+                ratios = []
+                for palette in matrix[mode]:
+                    backgrounds = {
+                        name: palette["vars"][name].lower()
+                        for name in ("--bg", "--user-bubble-bg", "--code-bg")
+                    }
+                    backgrounds["--message-prose-quote-bg"] = tokens[
+                        "--message-prose-quote-bg"
+                    ]
+                    ratios.extend(
+                        (
+                            self.contrast_ratio(tokens[foreground_name], background),
+                            palette["name"],
+                            background_name,
+                        )
+                        for background_name, background in backgrounds.items()
+                    )
+                weakest = min(ratios)
+                self.assertGreaterEqual(
+                    weakest[0],
+                    4.7,
+                    f"{mode} {foreground_name} weakest contrast was {weakest}",
+                )
 
 
 class Code043CompactDisclosureTests(unittest.TestCase):
