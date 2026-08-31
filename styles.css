@@ -12205,3 +12205,433 @@ body.theme-dark .chat-pane.empty-chat .composer:not(:focus-within):not(.drag-act
     flex-direction: column;
   }
 }
+
+/* CODE-043 model and image settings */
+.settings-models-heading,
+.settings-image-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.settings-models-heading {
+  width: min(920px, 100%);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.settings-page-heading-copy {
+  min-width: 0;
+}
+
+.settings-dense-description {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-models-heading .settings-section-title,
+.settings-image-heading .settings-section-title {
+  font-size: 18px;
+}
+
+.settings-models-heading .key-workbar-btn {
+  height: 32px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-models-heading .key-workbar-btn:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.settings-models-heading .key-workbar-btn:focus-visible,
+.model-settings-panel button:focus-visible,
+.image-settings-panel button:focus-visible,
+.model-settings-panel input:focus-visible,
+.model-settings-panel select:focus-visible,
+.image-settings-panel input:focus-visible,
+.image-settings-panel select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.settings-models-page,
+.settings-image-page {
+  width: min(920px, 100%);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.settings-models-page {
+  display: grid;
+}
+
+.model-settings-section {
+  min-width: 0;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.model-settings-section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.model-settings-section-heading,
+.image-connection-head,
+.image-models-head {
+  min-width: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.model-settings-section-heading {
+  margin-bottom: 10px;
+}
+
+.model-connections-section .key-list {
+  gap: 0;
+  border-top: 1px solid var(--line);
+}
+
+.model-settings-panel .key-row {
+  min-width: 0;
+  padding: 7px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.model-settings-panel .key-row:hover {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+}
+
+.model-settings-panel .key-row .key-name-input,
+.model-settings-panel .key-row .key-value-input {
+  height: 32px;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.model-settings-panel .key-row .key-value-input {
+  font-size: 12px;
+}
+
+.model-settings-panel .key-act-btn,
+.model-settings-panel .key-add-btn,
+.model-settings-panel .model-refresh-btn {
+  height: 32px;
+}
+
+.model-settings-panel .key-act-btn,
+.model-settings-panel .model-refresh-btn {
+  width: 32px;
+}
+
+.model-connections-section #settingsKeyAddArea {
+  margin-top: 10px;
+}
+
+.model-settings-panel #settingsKeyAddRow,
+.image-settings-panel #imageConnectionAdd {
+  width: auto;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-settings-panel #settingsKeyAddRow:hover,
+.image-settings-panel #imageConnectionAdd:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.model-catalog-section .model-list-header {
+  min-height: 32px;
+  margin: 0 0 8px;
+}
+
+.model-catalog-section .model-list-title > strong {
+  font-size: 14px;
+}
+
+.model-catalog-section .model-list-display {
+  max-height: 260px;
+  margin: 0;
+}
+
+.model-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.model-parameter-grid .field,
+.image-connection-grid .field,
+.image-default-route-field {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.model-parameter-grid input,
+.model-parameter-grid select,
+.image-connection-grid input,
+.image-default-route-field select {
+  width: 100%;
+  height: 40px;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.settings-image-page {
+  display: grid;
+  gap: 16px;
+}
+
+.image-settings-panel .image-connection-list {
+  min-width: 0;
+  gap: 12px;
+}
+
+.image-settings-panel .image-connection-card {
+  min-width: 0;
+  padding: 16px;
+  border-radius: 10px;
+}
+
+.image-settings-panel .image-connection-actions {
+  flex: 0 0 auto;
+}
+
+.image-settings-panel .image-connection-actions .key-act-btn,
+.image-settings-panel .image-key-eye,
+.image-settings-panel .image-model-delete {
+  width: 32px;
+  height: 32px;
+}
+
+.image-settings-panel .image-connection-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.image-settings-panel .image-key-input-wrap {
+  min-width: 0;
+}
+
+.image-models-section {
+  min-width: 0;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.image-settings-panel .image-models-head {
+  margin: 0 0 10px;
+}
+
+.image-settings-panel .image-model-add,
+.image-settings-panel .image-connection-add-row .key-add-btn {
+  height: 32px;
+  font-size: 12px;
+}
+
+.image-settings-panel .image-model-list {
+  min-width: 0;
+  gap: 8px;
+}
+
+.image-settings-panel .image-model-row {
+  grid-template-columns: minmax(0, 1fr) 32px;
+  min-width: 0;
+}
+
+.image-settings-panel .image-model-row > input {
+  width: 100%;
+  height: 40px;
+  min-width: 0;
+  padding: 0 11px;
+  font-size: 14px;
+}
+
+.image-settings-panel input:is([type="text"], [type="url"], [type="password"]):focus,
+.image-settings-panel input:is([type="text"], [type="url"], [type="password"]):focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.image-connection-add-row {
+  min-width: 0;
+}
+
+.image-default-section {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.image-default-heading-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.image-default-controls {
+  width: fit-content;
+  max-width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.image-settings-panel .image-default-route-field {
+  width: clamp(320px, 42vw, 420px);
+  max-width: 100%;
+}
+
+.image-settings-panel .image-default-route-field select {
+  width: 100%;
+  height: 40px;
+  padding: 0 36px 0 12px;
+}
+
+.image-settings-panel #imageDefaultRoute:focus,
+.image-settings-panel #imageDefaultRoute:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.image-settings-panel .image-settings-footer {
+  min-width: 0;
+}
+
+.image-default-heading-row .field-hint {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.image-default-heading-row .field-hint[data-tone="success"] {
+  color: var(--green);
+}
+
+.image-default-heading-row .field-hint[data-tone="warning"] {
+  color: var(--yellow);
+}
+
+.image-settings-panel #imageSettingsSave {
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 0 16px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 20%, transparent);
+  cursor: pointer;
+}
+
+.image-settings-panel #imageSettingsSave:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+.image-settings-panel #imageSettingsSave:disabled {
+  border-color: color-mix(in srgb, var(--accent) 20%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--muted);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+@media (max-width: 760px) {
+  .settings-models-heading,
+  .settings-image-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-models-heading .key-workbar-btn {
+    align-self: flex-start;
+  }
+
+  .model-parameter-grid,
+  .image-connection-grid {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+  }
+
+  .image-settings-panel .image-connection-grid .image-key-field {
+    grid-column: auto;
+  }
+
+  .image-settings-panel .image-connection-head,
+  .image-settings-panel .image-models-head,
+  .image-settings-panel .image-settings-footer {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .image-settings-panel .image-settings-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .image-default-heading-row,
+  .image-default-controls {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .image-default-controls {
+    width: 100%;
+    align-items: center;
+  }
+
+  .image-settings-panel .image-default-route-field {
+    flex: 1 1 320px;
+    width: min(420px, 100%);
+  }
+
+  .image-settings-panel #imageSettingsSave {
+    align-self: flex-start;
+  }
+}

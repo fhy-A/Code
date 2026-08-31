@@ -31199,7 +31199,10 @@ class Code043SettingsShellLightPageTests(unittest.TestCase):
 
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 model and image settings */",
+            1,
+        )[0]
 
     def rule(self, source, selector):
         match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
@@ -31399,6 +31402,284 @@ class Code043SettingsShellLightPageTests(unittest.TestCase):
             start = module.index(start_marker)
             end = module.index(end_marker, start)
             self.assertNotIn("settings-light-page", module[start:end], start_marker)
+
+
+class Code043ModelImageSettingsTests(unittest.TestCase):
+    MARKER = "/* CODE-043 model and image settings */"
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    def rule(self, source, selector):
+        match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
+        self.assertIsNotNone(match, selector)
+        return match.group("body")
+
+    def test_models_page_has_three_flat_sections_without_changing_handlers(self):
+        start = SETTINGS_SOURCE.index("function renderModelsPanel(container)")
+        end = SETTINGS_SOURCE.index("function renderSystemPanel", start)
+        source = SETTINGS_SOURCE[start:end]
+        for fragment in (
+            'class="settings-page-heading settings-models-heading"',
+            'data-i18n="modelSettingsHint"',
+            'class="settings-models-page model-settings-panel"',
+            'class="model-settings-section model-connections-section"',
+            'class="model-settings-section model-catalog-section"',
+            'class="model-settings-section model-parameters-section"',
+            'data-i18n="modelParameters"',
+            'class="model-parameter-grid context-settings-primary"',
+            'id="settingsConnectPlatform"',
+            'id="settingsKeyList"',
+            'id="settingsKeyAddRow"',
+            'id="settingsModelCount"',
+            'id="settingsRefreshModels"',
+            'id="settingsModelList"',
+            'id="settingsTemperature"',
+            'id="settingsMaxTokens"',
+            'id="settingsContextBudget"',
+        ):
+            self.assertIn(fragment, source)
+        self.assertLess(source.index("model-connections-section"), source.index("model-catalog-section"))
+        self.assertLess(source.index("model-catalog-section"), source.index("model-parameters-section"))
+        for behavior in (
+            'byId("settingsConnectPlatform")?.addEventListener("click"',
+            "syncKeysFromPlatform();",
+            'byId("settingsRefreshModels")?.addEventListener("click", refreshSettingsModelList)',
+            'byId("settingsTemperature")?.addEventListener("change"',
+            "saveLocalSettings();",
+            "saveLocalSettings({ contextBudgetReportAdjustment: true });",
+            "bindKeyEditorEvents(keyList);",
+        ):
+            self.assertIn(behavior, source)
+
+    def test_image_page_uses_single_layer_connections_and_scoped_scale(self):
+        card_start = SETTINGS_SOURCE.index("function renderImageConnectionCard")
+        card_end = SETTINGS_SOURCE.index("function populateImageConnectionSecrets", card_start)
+        card = SETTINGS_SOURCE[card_start:card_end]
+        page_start = SETTINGS_SOURCE.index("function renderImagePanel(container)")
+        page_end = SETTINGS_SOURCE.index("function renderModelsPanel", page_start)
+        page = SETTINGS_SOURCE[page_start:page_end]
+        for fragment in (
+            'class="settings-lite-card image-connection-card',
+            'class="image-connection-head"',
+            'class="image-connection-actions"',
+            'class="image-connection-grid"',
+            'class="image-models-section"',
+            'class="image-models-head"',
+            'class="image-model-list"',
+            'class="settings-page-heading settings-image-heading"',
+            'data-i18n="imageGenerationSettingsHint"',
+            'class="settings-image-page image-settings-panel"',
+            'class="image-connection-add-row"',
+            'class="image-default-section"',
+            'id="imageConnectionAdd"',
+            'id="imageDefaultRoute"',
+            'id="imageSettingsSave"',
+        ):
+            self.assertIn(fragment, card + page)
+        for behavior in (
+            "loadImageConnectionConfig(storage)",
+            "populateImageConnectionSecrets(container, config);",
+            "collectImagePanelConfig(container)",
+            "saveImageConnectionConfig(current, storage);",
+            "saveImageConnectionConfig(collectImagePanelConfig(container), storage);",
+            "refreshImageRoutes({ notify: true, rerender: true })",
+            'event.target.matches(".image-connection-enabled")',
+        ):
+            self.assertIn(behavior, page)
+
+        source = self.phase_source()
+        for selector in (
+            ".settings-models-page",
+            ".model-settings-section",
+            ".model-settings-panel .key-row",
+            ".model-parameter-grid",
+            ".settings-image-page",
+            ".image-settings-panel .image-connection-card",
+            ".image-models-section",
+            ".image-default-section",
+        ):
+            self.assertIn(selector, source)
+        for scale in (
+            "font-size: 18px;",
+            "font-size: 14px;",
+            "font-size: 12px;",
+            "height: 40px;",
+            "height: 32px;",
+        ):
+            self.assertIn(scale, source)
+        self.assertEqual(source.count("@media (max-width: 760px)"), 1)
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        for fragment in (
+            ".model-parameter-grid",
+            ".image-connection-grid",
+            "grid-template-columns: minmax(0, 1fr);",
+            "min-width: 0;",
+        ):
+            self.assertIn(fragment, narrow)
+        for forbidden in (
+            ".skills-layout-inner",
+            ".account-identity-card",
+            ".theme-picker",
+            ".archived-session-row",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_add_and_save_actions_have_local_secondary_and_primary_cascade(self):
+        source = self.phase_source()
+        secondary_selector = (
+            ".model-settings-panel #settingsKeyAddRow,\n"
+            ".image-settings-panel #imageConnectionAdd {"
+        )
+        secondary = self.rule(source, secondary_selector)
+        for declaration in (
+            "display: inline-flex;",
+            "width: auto;",
+            "height: 32px;",
+            "border: 1px solid var(--line);",
+            "background: var(--panel-2);",
+            "color: var(--text);",
+        ):
+            self.assertIn(declaration, secondary)
+        self.assertNotIn("dashed", secondary)
+        self.assertGreater(
+            STYLE_SOURCE.index(secondary_selector),
+            STYLE_SOURCE.index(".key-add-btn {"),
+        )
+
+        primary = self.rule(source, ".image-settings-panel #imageSettingsSave {")
+        for declaration in (
+            "height: 40px;",
+            "border: 1px solid var(--accent);",
+            "background: var(--accent);",
+            "font-weight: 700;",
+        ):
+            self.assertIn(declaration, primary)
+        self.assertIn(
+            ".image-settings-panel #imageSettingsSave:hover:not(:disabled)",
+            source,
+        )
+        self.assertIn(
+            ".image-settings-panel #imageSettingsSave:disabled",
+            source,
+        )
+
+    def test_model_heading_matches_model_body_width_and_keeps_narrow_stack(self):
+        source = self.phase_source()
+        heading = self.rule(source, ".settings-models-heading {")
+        for declaration in (
+            "width: min(920px, 100%);",
+            "max-width: 100%;",
+            "min-width: 0;",
+        ):
+            self.assertIn(declaration, heading)
+        body = self.rule(source, ".settings-models-page,\n.settings-image-page {")
+        self.assertIn("width: min(920px, 100%);", body)
+        self.assertGreater(
+            STYLE_SOURCE.index(".settings-models-heading {"),
+            STYLE_SOURCE.index(".settings-page-heading {"),
+        )
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".settings-models-heading,", narrow)
+        self.assertIn("flex-direction: column;", narrow)
+        self.assertIn(".settings-models-heading .key-workbar-btn", narrow)
+        self.assertIn("align-self: flex-start;", narrow)
+
+    def test_image_focus_model_padding_and_default_route_row_are_compact(self):
+        page_start = SETTINGS_SOURCE.index("function renderImagePanel(container)")
+        page_end = SETTINGS_SOURCE.index("function renderModelsPanel", page_start)
+        page = SETTINGS_SOURCE[page_start:page_end]
+        self.assertIn('class="image-default-heading-row"', page)
+        self.assertIn('class="image-default-controls"', page)
+        heading_start = page.index('class="image-default-heading-row"')
+        controls_start = page.index('class="image-default-controls"', heading_start)
+        heading = page[heading_start:controls_start]
+        controls = page[controls_start:page.index("</section>", controls_start)]
+        self.assertIn('data-i18n="imageDefaultModel"', heading)
+        self.assertIn('id="imageRouteStatus"', heading)
+        self.assertNotIn('id="imageDefaultRoute"', heading)
+        self.assertNotIn('id="imageSettingsSave"', heading)
+        self.assertIn('id="imageDefaultRoute"', controls)
+        self.assertIn('id="imageSettingsSave"', controls)
+        self.assertNotIn('id="imageRouteStatus"', controls)
+        self.assertLess(controls.index('id="imageDefaultRoute"'), controls.index('id="imageSettingsSave"'))
+        self.assertIn('data-i18n="applyImageConfiguration"', controls)
+
+        source = self.phase_source()
+        focus_selector = (
+            '.image-settings-panel input:is([type="text"], [type="url"], [type="password"]):focus,\n'
+            '.image-settings-panel input:is([type="text"], [type="url"], [type="password"]):focus-visible {'
+        )
+        focus = self.rule(source, focus_selector)
+        self.assertIn("outline: none;", focus)
+        self.assertIn("border-color:", focus)
+        self.assertIn("box-shadow: 0 0 0 1px", focus)
+        self.assertNotIn("0 0 0 3px", focus)
+        self.assertNotIn("outline: 2px", focus)
+
+        select_focus_selector = (
+            ".image-settings-panel #imageDefaultRoute:focus,\n"
+            ".image-settings-panel #imageDefaultRoute:focus-visible {"
+        )
+        select_focus = self.rule(source, select_focus_selector)
+        self.assertIn("outline: none;", select_focus)
+        self.assertIn("border-color:", select_focus)
+        self.assertIn("box-shadow: 0 0 0 1px", select_focus)
+        self.assertNotIn("0 0 0 3px", select_focus)
+        self.assertNotIn("outline: 2px", select_focus)
+        select_control = self.rule(source, ".image-settings-panel .image-default-route-field select {")
+        self.assertIn("height: 40px;", select_control)
+        self.assertIn("padding: 0 36px 0 12px;", select_control)
+
+        model_input = self.rule(source, ".image-settings-panel .image-model-row > input {")
+        self.assertIn("padding: 0 11px;", model_input)
+
+        heading_rule = self.rule(source, ".image-default-heading-row {")
+        for declaration in (
+            "display: flex;",
+            "align-items: center;",
+            "flex-wrap: wrap;",
+            "gap: 8px;",
+        ):
+            self.assertIn(declaration, heading_rule)
+        controls_rule = self.rule(source, ".image-default-controls {")
+        for declaration in (
+            "display: flex;",
+            "width: fit-content;",
+            "max-width: 100%;",
+            "align-items: center;",
+            "justify-content: flex-start;",
+            "flex-wrap: wrap;",
+            "gap: 12px;",
+            "min-width: 0;",
+        ):
+            self.assertIn(declaration, controls_rule)
+        self.assertNotIn("1fr", controls_rule)
+        route_field = self.rule(source, ".image-settings-panel .image-default-route-field {")
+        self.assertIn("width: clamp(320px, 42vw, 420px);", route_field)
+        status = self.rule(source, ".image-default-heading-row .field-hint {")
+        self.assertIn("margin: 0;", status)
+        self.assertNotIn("flex: 1", status)
+        self.assertIn('.image-default-heading-row .field-hint[data-tone="success"]', source)
+        self.assertIn('.image-default-heading-row .field-hint[data-tone="warning"]', source)
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".image-default-controls", narrow)
+        self.assertIn("width: 100%;", narrow)
+
+        self.assertIn('imageExplicitModels: "支持的生图模型"', I18N_SOURCE)
+        self.assertIn('imageExplicitModels: "Supported image models"', I18N_SOURCE)
+        self.assertIn('imageModelIdPlaceholder: "生图模型 ID，例如 gpt-image-2"', I18N_SOURCE)
+        self.assertIn('imageModelIdPlaceholder: "Image model ID, e.g. gpt-image-2"', I18N_SOURCE)
+        self.assertIn('applyImageConfiguration: "应用配置"', I18N_SOURCE)
+        self.assertIn('applyImageConfiguration: "Apply configuration"', I18N_SOURCE)
+        self.assertIn('imageRoutesReadyShort: "已就绪"', I18N_SOURCE)
+        self.assertIn('imageRoutesReadyShort: "Ready"', I18N_SOURCE)
+        self.assertIn("function imageRouteStatusDisplayKey(statusKey)", SETTINGS_SOURCE)
+        self.assertIn('statusKey === "imageRoutesReady" ? "imageRoutesReadyShort" : statusKey', SETTINGS_SOURCE)
+        model_row_start = SETTINGS_SOURCE.index("function renderImageModelRow")
+        model_row_end = SETTINGS_SOURCE.index("function renderImageConnectionCard", model_row_start)
+        self.assertIn('t("imageModelIdPlaceholder")', SETTINGS_SOURCE[model_row_start:model_row_end])
 
 
 if __name__ == "__main__":

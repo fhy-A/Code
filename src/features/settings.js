@@ -264,6 +264,10 @@
       return "imageDefaultUnavailable";
     }
 
+    function imageRouteStatusDisplayKey(statusKey) {
+      return statusKey === "imageRoutesReady" ? "imageRoutesReadyShort" : statusKey;
+    }
+
     function applyImageRouteCatalog(catalog, config) {
       const routes = Array.isArray(catalog?.routes)
         ? catalog.routes.filter((route) => route && typeof route === "object").map((route) => ({ ...route }))
@@ -275,7 +279,7 @@
       state.imageRouteStatusKey = imageRouteStatusKey(config, catalog, selectedRoute);
       const status = byId("imageRouteStatus");
       if (status) {
-        status.textContent = t(state.imageRouteStatusKey);
+        status.textContent = t(imageRouteStatusDisplayKey(state.imageRouteStatusKey));
         status.dataset.tone = selectedRoute ? "success" : "warning";
       }
       return selectedRoute;
@@ -310,7 +314,7 @@
             : "imageRoutesNotConfigured";
           const status = byId("imageRouteStatus");
           if (status) {
-            status.textContent = t(state.imageRouteStatusKey);
+            status.textContent = t(imageRouteStatusDisplayKey(state.imageRouteStatusKey));
             status.dataset.tone = "warning";
           }
           if (options.notify === true) showToast(t("imageRoutesSaveFailed"), "error");
@@ -800,8 +804,10 @@
           <label class="field"><span>${t("imageConnectionBaseUrl")}</span><input class="image-connection-base-url" type="url" autocomplete="off" spellcheck="false" /></label>
           <label class="field image-key-field"><span>${t("imageConnectionKey")}</span><span class="image-key-input-wrap"><input class="image-connection-key" type="password" autocomplete="off" spellcheck="false" /><button class="key-act-btn image-key-eye" type="button" title="${t("toggleVisibility")}" data-i18n-title="toggleVisibility">${eyeIcon()}</button></span></label>
         </div>
-        <div class="image-models-head"><strong>${t("imageExplicitModels")}</strong><button class="mini-btn image-model-add" type="button">${t("imageAddModel")}</button></div>
-        <div class="image-model-list">${models.map(renderImageModelRow).join("")}</div>
+        <div class="image-models-section">
+          <div class="image-models-head"><strong>${t("imageExplicitModels")}</strong><button class="mini-btn image-model-add" type="button">${t("imageAddModel")}</button></div>
+          <div class="image-model-list">${models.map(renderImageModelRow).join("")}</div>
+        </div>
       </section>`;
     }
 
@@ -848,13 +854,25 @@
         const label = `${connection.name || t("imageConnectionUnnamed")} · ${model.id}`;
         return `<option value="${escapeHtml(value)}" ${value === defaultValue ? "selected" : ""}>${escapeHtml(label)}</option>`;
       })).join("");
-      container.innerHTML = `<h3 class="settings-section-title" data-i18n="imageGenerationSettings">${t("imageGenerationSettings")}</h3>
-        <div class="settings-lite-page image-settings-panel">
-          <p class="settings-panel-description">${t("imageGenerationSettingsHint")}</p>
+      container.innerHTML = `<div class="settings-page-heading settings-image-heading">
+          <div class="settings-page-heading-copy">
+            <h3 class="settings-section-title" data-i18n="imageGenerationSettings">${t("imageGenerationSettings")}</h3>
+            <p class="settings-dense-description" data-i18n="imageGenerationSettingsHint">${t("imageGenerationSettingsHint")}</p>
+          </div>
+        </div>
+        <div class="settings-image-page image-settings-panel">
           <div id="imageConnectionList" class="image-connection-list">${config.connections.map(renderImageConnectionCard).join("")}</div>
-          <button id="imageConnectionAdd" class="key-add-btn" type="button">${t("imageAddConnection")}</button>
-          <label class="field image-default-route-field"><span>${t("imageDefaultModel")}</span><select id="imageDefaultRoute"><option value="">${t("imageDefaultNone")}</option>${defaultOptions}</select></label>
-          <div class="image-settings-footer"><small id="imageRouteStatus" class="field-hint" data-tone="${state.selectedImageRoute ? "success" : "warning"}">${t(state.imageRouteStatusKey || "imageRoutesNotConfigured")}</small><button id="imageSettingsSave" class="primary-btn" type="button">${t("saveAndRefresh")}</button></div>
+          <div class="image-connection-add-row"><button id="imageConnectionAdd" class="key-add-btn" type="button">${t("imageAddConnection")}</button></div>
+          <section class="image-default-section">
+            <div class="image-default-heading-row">
+              <strong data-i18n="imageDefaultModel">${t("imageDefaultModel")}</strong>
+              <small id="imageRouteStatus" class="field-hint" data-tone="${state.selectedImageRoute ? "success" : "warning"}">${t(imageRouteStatusDisplayKey(state.imageRouteStatusKey || "imageRoutesNotConfigured"))}</small>
+            </div>
+            <div class="image-default-controls">
+              <div class="image-default-route-field"><select id="imageDefaultRoute" aria-label="${t("imageDefaultModel")}" data-i18n-aria-label="imageDefaultModel"><option value="">${t("imageDefaultNone")}</option>${defaultOptions}</select></div>
+              <button id="imageSettingsSave" class="primary-btn" type="button" data-i18n="applyImageConfiguration">${t("applyImageConfiguration")}</button>
+            </div>
+          </section>
         </div>`;
       populateImageConnectionSecrets(container, config);
 
@@ -916,18 +934,33 @@
           const emptyKey = keyConfig.some((entry) => entry.enabled !== false && String(entry.key || "").trim()) ? "noModelsFound" : "enterApiKey";
           return `<div class="model-list-empty" data-i18n="${emptyKey}">${t(emptyKey)}</div>`;
         })();
-      container.innerHTML = `<h3 style="margin:0 0 14px" data-i18n="models">${t("models")}</h3>
-        <div class="field"><div class="key-field-heading"><span data-i18n="apiKeys">${t("apiKeys")}</span><button id="settingsConnectPlatform" class="key-workbar-btn" type="button" title="${t("getFromWorkbar")}" data-i18n-title="getFromWorkbar"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v7m0 0L4.5 6M7 8.5L9.5 6M2 10.5v1.25c0 .41.34.75.75.75h8.5c.41 0 .75-.34.75-.75V10.5" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-i18n="getFromWorkbar">${t("getFromWorkbar")}</span></button></div>
-          <div class="key-list" id="settingsKeyList">${renderKeyEditor(els.apiKey.value)}</div>
-          <div id="settingsKeyAddArea"><button id="settingsKeyAddRow" class="key-add-btn" type="button" data-i18n="addKey">${t("addKey")}</button></div>
+      container.innerHTML = `<div class="settings-page-heading settings-models-heading">
+          <div class="settings-page-heading-copy">
+            <h3 class="settings-section-title" data-i18n="models">${t("models")}</h3>
+            <p class="settings-dense-description" data-i18n="modelSettingsHint">${t("modelSettingsHint")}</p>
+          </div>
+          <button id="settingsConnectPlatform" class="key-workbar-btn" type="button" title="${t("getFromWorkbar")}" data-i18n-title="getFromWorkbar"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v7m0 0L4.5 6M7 8.5L9.5 6M2 10.5v1.25c0 .41.34.75.75.75h8.5c.41 0 .75-.34.75-.75V10.5" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-i18n="getFromWorkbar">${t("getFromWorkbar")}</span></button>
         </div>
-        <div class="model-list-header"><div class="model-list-title"><span data-i18n="availableModels">${t("availableModels")}</span><span id="settingsModelCount" class="model-count-badge">${modelCount}</span></div><button id="settingsRefreshModels" class="model-refresh-btn" type="button" title="${t("detectAvailableModels")}" data-i18n-title="detectAvailableModels" aria-label="${t("detectAvailableModels")}"><svg width="15" height="15" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7a6 6 0 0111.1-3.5M13 7a6 6 0 01-11.1 3.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M12 1v3H9M2 13v-3h3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
-        <div id="settingsModelList" class="model-list-display">${initialModels}</div>
-        <div class="context-settings-primary">
-          <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
-          <label class="field"><span data-i18n="maxTokens">${t("maxTokens")}</span><select id="settingsMaxTokens">${els.maxTokens.innerHTML}</select></label>
+        <div class="settings-models-page model-settings-panel">
+          <section class="model-settings-section model-connections-section">
+            <div class="model-settings-section-heading"><strong data-i18n="apiKeys">${t("apiKeys")}</strong></div>
+            <div class="key-list" id="settingsKeyList">${renderKeyEditor(els.apiKey.value)}</div>
+            <div id="settingsKeyAddArea"><button id="settingsKeyAddRow" class="key-add-btn" type="button" data-i18n="addKey">${t("addKey")}</button></div>
+          </section>
+          <section class="model-settings-section model-catalog-section">
+            <div class="model-settings-section-heading model-list-header"><div class="model-list-title"><strong data-i18n="availableModels">${t("availableModels")}</strong><span id="settingsModelCount" class="model-count-badge">${modelCount}</span></div><button id="settingsRefreshModels" class="model-refresh-btn" type="button" title="${t("detectAvailableModels")}" data-i18n-title="detectAvailableModels" aria-label="${t("detectAvailableModels")}"><svg width="15" height="15" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7a6 6 0 0111.1-3.5M13 7a6 6 0 01-11.1 3.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M12 1v3H9M2 13v-3h3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+            <div id="settingsModelList" class="model-list-display">${initialModels}</div>
+          </section>
+          <section class="model-settings-section model-parameters-section">
+            <div class="model-settings-section-heading"><strong data-i18n="modelParameters">${t("modelParameters")}</strong></div>
+            <div class="model-parameter-grid context-settings-primary">
+              <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
+              <label class="field"><span data-i18n="maxTokens">${t("maxTokens")}</span><select id="settingsMaxTokens">${els.maxTokens.innerHTML}</select></label>
+              <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>
+            </div>
+          </section>
         </div>
-        <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>`;
+      `;
 
       byId("settingsConnectPlatform")?.addEventListener("click", () => {
         if (!getPlatformAuth()) {
