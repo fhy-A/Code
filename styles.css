@@ -13866,3 +13866,64 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
     transition: none;
   }
 }
+
+/* Unified form-control focus treatment */
+:root :is(
+  input:where(:not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"])),
+  select,
+  textarea
+):is(:focus, :focus-visible) {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: none;
+}
+
+.session-search-field:focus-within,
+.archived-session-search-field:focus-within,
+.import-search-field:focus-within,
+.project-edit-name:focus-within {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: none;
+}
+
+:root .session-search-field input:is(:focus, :focus-visible),
+:root .archived-session-search-field input:is(:focus, :focus-visible),
+:root .import-search-field input:is(:focus, :focus-visible),
+:root .project-edit-name input:is(:focus, :focus-visible),
+:root .composer textarea:is(:focus, :focus-visible) {
+  border-color: transparent;
+  outline: none;
+  box-shadow: none;
+}
+
+.image-settings-panel #imageDefaultRoute:is(:focus, :focus-visible) {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: none;
+}
+
+:root .image-settings-panel input:is([type="text"], [type="url"], [type="password"]):is(:focus, :focus-visible) {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: none;
+}
+
+:root .settings-editor-card .system-prompt-text:is(:focus, :focus-visible) {
+  border-color: transparent;
+  border-bottom-color: var(--accent);
+  outline: none;
+  box-shadow: none;
+}
+
+.composer:not(.drag-active):focus-within,
+.chat-pane.empty-chat .composer:not(.drag-active):focus-within {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: var(--shell-elevation);
+}
+
+.composer:has(#userInputPanel:not(.hidden)):focus-within {
+  border-color: var(--line);
+  box-shadow: none;
+}

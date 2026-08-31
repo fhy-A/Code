@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | `CODE-043` 全局表单焦点样式统一：独立 input / textarea / select 收敛为单一 `1px` 强调边框，搜索 / 项目编辑由外壳唯一描边，System Prompt 仅底线，composer 只保留中性表面阴影；按钮、checkbox / radio、drag / disabled 及语义状态不变。fail-first `4 failures`、直接兼容组 `15 tests`、完整前端 `413 tests`、build / freshness / bundle 语法 / diff 通过；3011 Browser 在 Notion 深浅主题验证代表控件的单层边界与零外扩 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | `CODE-043` 浅色输入框表面与工具栏分割线收口：空 / 普通会话底部工具栏顶边归零，Codex / Notion 浅色 composer 与页面同底色并仅保留轻阴影，focus / drag / disabled 层级与 Notion 深色原表面不变。直接组 `6 tests`、完整前端 `409 tests`、build / freshness / bundle 语法 / diff 通过；3011 Browser 完成三主题、空 / 普通会话的底色、边线、阴影与零布局位移复验 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | `CODE-043` 导入会话窗口优化完成：约 `760px` 固定头尾单窗口、共享 close / refresh SVG、无胶囊来源计数、精简筛选与条件 x/y 摘要、普通 available 行无徽标、`14 / 12px` 行层级及单一“导入所选”主按钮完成收敛；首次 5 行骨架、缓存重扫/失败只读锁定、generation 原子替换与 tab/tabpanel/焦点归还闭合，导入 API/协议不变。doctor `10/10`、导入组 `19 passed`、完整前端/P2 `464 passed + 4 subtests`、build/freshness/语法/diff 通过；中英文、Notion 深浅与 `1686 / 740 / 390px` Browser H4 零溢出且未执行真实导入 | [查看](2026/2026-09-01.md) |
 | 2026-08-31 | `CODE-043` 顶部工具信息栏最终审计完成：侧栏开关收敛为单一共享 SVG，桌面保留完整标签与统计、中等宽度图标化、窄宽状态摘要；Session Info / 分支补齐 disclosure、互斥、外部点击、Escape 焦点归还和切会话同步。doctor `10/10`、完整前端 `404 passed`、build / freshness / 语法 / diff 通过；Notion 深浅、中英文及 `1686 / 740 / 390px`（390px 折叠侧栏）Browser H4 零溢出并恢复中文 Notion 深色现场 | [查看](2026/2026-08-31.md) |

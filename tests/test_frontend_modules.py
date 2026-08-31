@@ -27234,6 +27234,151 @@ class ComposerThemeAndFileDragTests(unittest.TestCase):
         self.assertIn("queueImageFile(file);", handler_source)
 
 
+class FormControlFocusStyleTests(unittest.TestCase):
+    MARKER = "/* Unified form-control focus treatment */"
+    CONTROL_GROUP = (
+        ":root :is(\n"
+        '  input:where(:not([type="button"]):not([type="submit"]):not([type="reset"])'
+        ':not([type="image"]):not([type="hidden"]):not([type="checkbox"])'
+        ':not([type="radio"]):not([type="range"]):not([type="color"])'
+        ':not([type="file"])),\n'
+        "  select,\n"
+        "  textarea\n"
+        "):is(:focus, :focus-visible) {"
+    )
+    SHELL_GROUP = (
+        ".session-search-field:focus-within,\n"
+        ".archived-session-search-field:focus-within,\n"
+        ".import-search-field:focus-within,\n"
+        ".project-edit-name:focus-within {"
+    )
+    NESTED_CONTROL_GROUP = (
+        ":root .session-search-field input:is(:focus, :focus-visible),\n"
+        ":root .archived-session-search-field input:is(:focus, :focus-visible),\n"
+        ":root .import-search-field input:is(:focus, :focus-visible),\n"
+        ":root .project-edit-name input:is(:focus, :focus-visible),\n"
+        ":root .composer textarea:is(:focus, :focus-visible) {"
+    )
+    COMPOSER_GROUP = (
+        ".composer:not(.drag-active):focus-within,\n"
+        ".chat-pane.empty-chat .composer:not(.drag-active):focus-within {"
+    )
+
+    def focus_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_standalone_text_controls_use_one_inset_border_without_outer_ring(self):
+        source = self.focus_source()
+        rule = self.rule(source, self.CONTROL_GROUP)
+        for declaration in (
+            "border-color: var(--accent);",
+            "outline: none;",
+            "box-shadow: none;",
+        ):
+            self.assertIn(declaration, rule)
+        for excluded_type in (
+            "button",
+            "submit",
+            "reset",
+            "image",
+            "hidden",
+            "checkbox",
+            "radio",
+            "range",
+            "color",
+            "file",
+        ):
+            self.assertIn(f':not([type="{excluded_type}"])', rule)
+        self.assertNotIn("!important", source)
+        self.assertNotIn("*:focus", source)
+
+    def test_search_and_project_shells_own_the_only_visible_focus_border(self):
+        source = self.focus_source()
+        shell = self.rule(source, self.SHELL_GROUP)
+        for declaration in (
+            "border-color: var(--accent);",
+            "outline: none;",
+            "box-shadow: none;",
+        ):
+            self.assertIn(declaration, shell)
+        nested = self.rule(source, self.NESTED_CONTROL_GROUP)
+        for declaration in (
+            "border-color: transparent;",
+            "outline: none;",
+            "box-shadow: none;",
+        ):
+            self.assertIn(declaration, nested)
+
+    def test_settings_skills_image_system_prompt_and_composer_have_scoped_focus(self):
+        source = self.focus_source()
+        image_route = self.rule(
+            source,
+            ".image-settings-panel #imageDefaultRoute:is(:focus, :focus-visible) {",
+        )
+        self.assertIn("border-color: var(--accent);", image_route)
+        self.assertIn("box-shadow: none;", image_route)
+        self.assertIn("outline: none;", image_route)
+
+        image_text = self.rule(
+            source,
+            ':root .image-settings-panel input:is([type="text"], [type="url"], '
+            '[type="password"]):is(:focus, :focus-visible) {',
+        )
+        self.assertIn("border-color: var(--accent);", image_text)
+        self.assertIn("box-shadow: none;", image_text)
+        self.assertIn("outline: none;", image_text)
+
+        system_prompt = self.rule(
+            source,
+            ":root .settings-editor-card .system-prompt-text:is(:focus, :focus-visible) {",
+        )
+        self.assertIn("border-color: transparent;", system_prompt)
+        self.assertIn("border-bottom-color: var(--accent);", system_prompt)
+        self.assertIn("box-shadow: none;", system_prompt)
+
+        composer = self.rule(source, self.COMPOSER_GROUP)
+        self.assertIn("border-color: var(--accent);", composer)
+        self.assertIn("box-shadow: var(--shell-elevation);", composer)
+        self.assertNotIn("--shell-focus-ring", composer)
+        self.assertNotIn("0 0 0", composer)
+
+        for legacy_selector in (
+            ".settings-light-page button:focus-visible",
+            ".model-settings-panel input:focus-visible",
+            ".image-settings-panel input:focus-visible",
+            ".skills-search-field input:focus-visible",
+            ".image-settings-panel #imageDefaultRoute:focus-visible",
+            ".settings-editor-card .system-prompt-text:focus-visible",
+            ".project-edit-name:focus-within",
+            ".composer:focus-within",
+        ):
+            self.assertGreater(STYLE_SOURCE.index(self.MARKER), STYLE_SOURCE.index(legacy_selector))
+
+    def test_non_form_button_drag_disabled_and_status_focus_rules_stay_out_of_scope(self):
+        source = self.focus_source()
+        for forbidden in (
+            ".model-pill-btn",
+            ".settings-light-page button",
+            ".skill-icon-action",
+            ".user-input-option",
+            ".authorization-",
+            "var(--red)",
+            "var(--yellow)",
+        ):
+            self.assertNotIn(forbidden, source)
+        self.assertIn(".composer.drag-active,", STYLE_SOURCE)
+        self.assertIn("box-shadow: 0 0 0 3px", STYLE_SOURCE)
+        self.assertIn(".model-pill-btn:focus-visible", STYLE_SOURCE)
+        self.assertIn(".settings-nav-item:focus-visible", STYLE_SOURCE)
+
+
 class LongTextDisplayTests(unittest.TestCase):
     FOOTER_MARKER = "/* CODE-043 long user message single footer */"
     ORDINARY_USER = (
