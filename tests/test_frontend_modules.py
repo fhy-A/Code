@@ -11443,7 +11443,7 @@ out.admonitionWarning = admonition.includes('admonition-warning') && admonition.
 const quote = feature.renderMarkdownLite('> 普通引用');
 out.plainQuote = quote.includes('<blockquote>') && !quote.includes('admonition');
 const table = feature.renderMarkdownLite('| 名称 | 值 |\n|---|---|\n| a | 1 |');
-out.tableWrap = table.includes('table-wrap') && table.includes('<th>名称</th>') && table.includes('<td>1</td>');
+out.tableWrap = table.includes('table-wrap') && table.includes('<th scope="col">名称</th>') && table.includes('<td>1</td>');
 const codeBlock = feature.renderMarkdownLite('```js\nconst x = 1;\n```');
 out.langLabelJs = codeBlock.includes('lang-label') && codeBlock.includes('JavaScript');
 const extLink = feature.renderMarkdownLite('[site](https://example.com/a)');
@@ -16208,6 +16208,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('align="left" data-align="left" class="md-align-left"', data["table"])
         self.assertIn('align="center" data-align="center" class="md-align-center"', data["table"])
         self.assertIn('align="right" data-align="right" class="md-align-right"', data["table"])
+        self.assertEqual(data["table"].count('scope="col"'), 3)
         self.assertIn("左 &amp; 列", data["table"])
         self.assertIn("A &lt; B", data["table"])
         self.assertIn('class="table-scroll" tabindex="-1"', data["table"])
@@ -16227,25 +16228,49 @@ process.stdout.write(JSON.stringify({
         source = APP_SOURCE[start:end]
         script = f"""
 const source = {json.dumps(source)};
-const narrowScroll = {{scrollWidth: 240, clientWidth: 240, tabIndex: 99}};
-const wideScroll = {{scrollWidth: 640, clientWidth: 320, tabIndex: 99}};
-const narrowWrap = {{dataset: {{}}, querySelector: () => narrowScroll}};
-const wideWrap = {{dataset: {{}}, querySelector: () => wideScroll}};
+function makeScroll(scrollWidth, clientWidth) {{
+  return {{
+    scrollWidth,
+    clientWidth,
+    tabIndex: 99,
+    attrs: {{}},
+    setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+    removeAttribute(name) {{ delete this.attrs[name]; }},
+  }};
+}}
+const narrowScroll = makeScroll(240, 240);
+const wideScroll = makeScroll(640, 320);
+narrowScroll.attrs = {{
+  role: "region",
+  "aria-label": "stale",
+  "data-i18n-aria-label": "scrollableMarkdownTable",
+}};
+const outsideScroll = makeScroll(640, 320);
+const narrowWrap = {{dataset: {{}}, querySelector: () => narrowScroll, closest: () => ({{}})}};
+const wideWrap = {{dataset: {{}}, querySelector: () => wideScroll, closest: () => ({{}})}};
+const outsideWrap = {{dataset: {{}}, querySelector: () => outsideScroll, closest: () => null}};
 let resizeBindings = 0;
 let frames = 0;
-global.document = {{querySelectorAll: (selector) => selector === ".table-wrap" ? [narrowWrap, wideWrap] : []}};
+global.document = {{querySelectorAll: (selector) => selector === ".table-wrap" ? [narrowWrap, wideWrap, outsideWrap] : []}};
 global.window = {{
   requestAnimationFrame(callback) {{ frames += 1; callback(); return frames; }},
   addEventListener(type) {{ if (type === "resize") resizeBindings += 1; }},
 }};
+global.t = (key) => key;
+const ORDINARY_ASSISTANT_BUBBLE_SELECTOR = ".msg.assistant > .bubble";
 eval(source);
 bindStructuredMarkdownTables();
 bindStructuredMarkdownTables();
 process.stdout.write(JSON.stringify({{
   narrowOverflow: narrowWrap.dataset.overflow,
   narrowTabIndex: narrowScroll.tabIndex,
+  narrowAttrs: narrowScroll.attrs,
   wideOverflow: wideWrap.dataset.overflow,
   wideTabIndex: wideScroll.tabIndex,
+  wideAttrs: wideScroll.attrs,
+  outsideOverflow: outsideWrap.dataset.overflow,
+  outsideTabIndex: outsideScroll.tabIndex,
+  outsideAttrs: outsideScroll.attrs,
   resizeBindings,
 }}));
 """
@@ -16260,8 +16285,18 @@ process.stdout.write(JSON.stringify({{
         data = json.loads(completed.stdout)
         self.assertEqual(data["narrowOverflow"], "false")
         self.assertEqual(data["narrowTabIndex"], -1)
+        self.assertEqual(data["narrowAttrs"], {})
         self.assertEqual(data["wideOverflow"], "true")
         self.assertEqual(data["wideTabIndex"], 0)
+        self.assertEqual(data["wideAttrs"]["role"], "region")
+        self.assertEqual(data["wideAttrs"]["aria-label"], "scrollableMarkdownTable")
+        self.assertEqual(
+            data["wideAttrs"]["data-i18n-aria-label"],
+            "scrollableMarkdownTable",
+        )
+        self.assertEqual(data["outsideOverflow"], "true")
+        self.assertEqual(data["outsideTabIndex"], 0)
+        self.assertEqual(data["outsideAttrs"], {})
         self.assertEqual(data["resizeBindings"], 1)
 
     def test_plain_file_cards_are_lightweight_without_changing_image_cards(self):
@@ -29619,6 +29654,172 @@ process.stdout.write(JSON.stringify(matrix));
                     4.7,
                     f"{mode} {foreground_name} weakest contrast was {weakest}",
                 )
+
+
+class Code043RenderAccessibilityTests(unittest.TestCase):
+    MARKER = "// CODE-043 ordinary message render accessibility"
+    ORDINARY_ASSISTANT = (
+        ".msg.assistant:not(.agent-commentary):not(.tool-process)"
+        ":not(.edit-suggestion):not(.generated-image-result) > .bubble"
+    )
+
+    def accessibility_source(self):
+        self.assertIn(self.MARKER, APP_SOURCE)
+        return APP_SOURCE.split(self.MARKER, 1)[1].split(
+            "// Admonition titles come from i18n",
+            1,
+        )[0]
+
+    def test_inline_image_preview_keyboard_activation_is_scoped_and_exactly_once(self):
+        source = self.accessibility_source()
+        script = f"""
+const source = {json.dumps(source)};
+let keydown = null;
+let bindings = 0;
+let clicks = 0;
+let prevented = 0;
+let stopped = 0;
+const slot = {{dataset: {{imgName: "preview.png"}}}};
+const image = {{
+  alt: "preview.png",
+  tabIndex: -1,
+  attrs: {{}},
+  setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+  closest(selector) {{
+    if (selector === ".msg-inline-img-slot") return slot;
+    if (selector.includes("[data-message-image-preview]")) return this;
+    return null;
+  }},
+  click() {{ clicks += 1; }},
+}};
+const root = {{
+  querySelectorAll(selector) {{
+    if (!selector.includes(".msg.assistant") || !selector.includes("[data-message-image-preview]")) throw new Error("unscoped selector");
+    return [image];
+  }},
+  addEventListener(type, callback) {{
+    if (type !== "keydown") throw new Error("unexpected listener");
+    bindings += 1;
+    keydown = callback;
+  }},
+  contains(node) {{ return node === image; }},
+}};
+global.els = {{messageList: root}};
+global.t = (key, params = {{}}) => `${{key}}:${{params.name || ""}}`;
+eval(source);
+bindOrdinaryMessageRenderAccessibility();
+bindOrdinaryMessageRenderAccessibility();
+const send = (key, repeat = false) => keydown({{
+  key,
+  repeat,
+  target: image,
+  preventDefault() {{ prevented += 1; }},
+  stopPropagation() {{ stopped += 1; }},
+}});
+send("Enter");
+send(" ");
+send("Enter", true);
+send("Escape");
+process.stdout.write(JSON.stringify({{
+  bindings,
+  clicks,
+  prevented,
+  stopped,
+  tabIndex: image.tabIndex,
+  attrs: image.attrs,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["bindings"], 1)
+        self.assertEqual(data["clicks"], 2)
+        self.assertEqual(data["prevented"], 2)
+        self.assertEqual(data["stopped"], 2)
+        self.assertEqual(data["tabIndex"], 0)
+        self.assertEqual(data["attrs"]["role"], "button")
+        self.assertEqual(
+            data["attrs"]["aria-label"],
+            "openImagePreviewAccessible:preview.png",
+        )
+        self.assertEqual(APP_SOURCE.count("bindOrdinaryMessageRenderAccessibility();"), 1)
+
+    def test_file_and_image_path_cards_use_native_scoped_controls(self):
+        start = APP_SOURCE.index("function maybeRenderFileCard")
+        end = APP_SOURCE.index("// ── Compact tool card labels", start)
+        source = APP_SOURCE[start:end]
+        self.assertIn("ORDINARY_ASSISTANT_BUBBLE_SELECTOR", source)
+        self.assertIn('document.createElement(isAccessibleAnswer ? "button" : "span")', source)
+        self.assertGreaterEqual(source.count('.type = "button";'), 3)
+        self.assertIn('t("openFileAccessible", { name: accessibleName })', source)
+        self.assertIn('t("openImagePreviewAccessible", { name: accessibleName })', source)
+        self.assertEqual(source.count('addEventListener("click"'), 3)
+        self.assertNotIn('addEventListener("keydown"', source)
+        self.assertIn("openReferencedPath(p, projectRoot, line);", source)
+        self.assertIn("showImageOverlay(apiUrl);", source)
+        self.assertIn("openReferencedPath(p, projectRoot);", source)
+
+    def test_focus_styles_and_labels_are_local_to_ordinary_assistant_controls(self):
+        marker = "/* CODE-043 ordinary message render accessibility */"
+        self.assertIn(marker, STYLE_SOURCE)
+        source = STYLE_SOURCE.split(marker, 1)[1].split(
+            "/* CODE-043 compact three-level disclosures */",
+            1,
+        )[0]
+        self.assertIn(self.ORDINARY_ASSISTANT, source)
+        self.assertIn(":focus-visible", source)
+        self.assertIn("outline: 2px solid var(--accent);", source)
+        for forbidden in (".msg.user", ".settings", ".tool-inline-"):
+            self.assertNotIn(forbidden, source)
+        for expected in (
+            'openFileAccessible: "打开文件：{name}"',
+            'openImagePreviewAccessible: "打开图片预览：{name}"',
+            'scrollableMarkdownTable: "可横向滚动的表格"',
+            'openFileAccessible: "Open file: {name}"',
+            'openImagePreviewAccessible: "Open image preview: {name}"',
+            'scrollableMarkdownTable: "Horizontally scrollable table"',
+        ):
+            self.assertIn(expected, I18N_SOURCE)
+
+        script = r"""
+global.window = global;
+global.Code = {core: {}};
+require("./src/core/i18n.js");
+const translate = global.Code.core.i18n.translate;
+process.stdout.write(JSON.stringify({
+  zhFile: translate("openFileAccessible", {name: "报告.md"}, "zh"),
+  zhImage: translate("openImagePreviewAccessible", {name: "截图.png"}, "zh"),
+  zhTable: translate("scrollableMarkdownTable", {}, "zh"),
+  enFile: translate("openFileAccessible", {name: "report.md"}, "en"),
+  enImage: translate("openImagePreviewAccessible", {name: "screen.png"}, "en"),
+  enTable: translate("scrollableMarkdownTable", {}, "en"),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "zhFile": "打开文件：报告.md",
+                "zhImage": "打开图片预览：截图.png",
+                "zhTable": "可横向滚动的表格",
+                "enFile": "Open file: report.md",
+                "enImage": "Open image preview: screen.png",
+                "enTable": "Horizontally scrollable table",
+            },
+        )
 
 
 class Code043CompactDisclosureTests(unittest.TestCase):

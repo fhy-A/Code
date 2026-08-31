@@ -3018,6 +3018,35 @@ function bindTooltips() {
   window.addEventListener("resize", hide, { passive: true });
 }
 
+// CODE-043 ordinary message render accessibility
+const ORDINARY_ASSISTANT_BUBBLE_SELECTOR = ".msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble";
+let _renderAccessibilityBound = false;
+function bindOrdinaryMessageRenderAccessibility() {
+  const root = els.messageList;
+  if (!root) return;
+  root.querySelectorAll(`${ORDINARY_ASSISTANT_BUBBLE_SELECTOR} [data-message-image-preview]`).forEach((image) => {
+    const slot = image.closest(".msg-inline-img-slot");
+    const accessibleName = String(
+      image.alt || slot?.dataset.imgName || slot?.dataset.path || t("unnamedFile"),
+    ).trim() || t("unnamedFile");
+    image.tabIndex = 0;
+    image.setAttribute("role", "button");
+    image.setAttribute("aria-label", t("openImagePreviewAccessible", { name: accessibleName }));
+  });
+  if (_renderAccessibilityBound) return;
+  _renderAccessibilityBound = true;
+  root.addEventListener("keydown", (event) => {
+    if (event.repeat || !["Enter", " "].includes(event.key)) return;
+    const preview = event.target?.closest?.(
+      `${ORDINARY_ASSISTANT_BUBBLE_SELECTOR} [data-message-image-preview][role="button"]`,
+    );
+    if (!preview || !root.contains(preview)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    preview.click();
+  });
+}
+
 // Admonition titles come from i18n (the markdown renderer only emits the type).
 function bindAdmonitions() {
   document.querySelectorAll(".admonition-title[data-admonition]").forEach((el) => {
@@ -3034,8 +3063,18 @@ function syncStructuredMarkdownTables() {
     const scroll = wrap.querySelector(":scope > .table-scroll");
     if (!scroll) return;
     const overflowing = scroll.scrollWidth > scroll.clientWidth + 1;
+    const isOrdinaryAssistant = Boolean(wrap.closest?.(ORDINARY_ASSISTANT_BUBBLE_SELECTOR));
     wrap.dataset.overflow = overflowing ? "true" : "false";
     scroll.tabIndex = overflowing ? 0 : -1;
+    if (overflowing && isOrdinaryAssistant) {
+      scroll.setAttribute("role", "region");
+      scroll.setAttribute("aria-label", t("scrollableMarkdownTable"));
+      scroll.setAttribute("data-i18n-aria-label", "scrollableMarkdownTable");
+    } else {
+      scroll.removeAttribute("role");
+      scroll.removeAttribute("aria-label");
+      scroll.removeAttribute("data-i18n-aria-label");
+    }
   });
 }
 
@@ -3209,12 +3248,18 @@ function maybeRenderFileCard(el, p, projectRoot) {
   if (!markdownApi?.isImagePath) return;
   if (isOutOfRootPath(p, projectRoot)) return; // out of root: keep text alias
   const apiUrl = `/api/file?path=${encodeURIComponent(p)}&raw=1`;
+  const isAccessibleAnswer = Boolean(el.closest?.(ORDINARY_ASSISTANT_BUBBLE_SELECTOR));
+  const accessibleName = String(el.textContent || p.split("/").pop() || p).trim() || p;
   if (!markdownApi.isImagePath(p)) {
     // Non-image file card: type icon + file name; click opens the file.
-    const card = document.createElement("span");
+    const card = document.createElement(isAccessibleAnswer ? "button" : "span");
     card.className = "path-file-card answer-local-path";
     card.setAttribute("data-path", p);
     card.setAttribute("data-tooltip", p);
+    if (isAccessibleAnswer) {
+      card.type = "button";
+      card.setAttribute("aria-label", t("openFileAccessible", { name: accessibleName }));
+    }
     const line = el.dataset.line ? Number(el.dataset.line) : undefined;
     if (line && line > 0) card.setAttribute("data-line", String(line));
     const icon = document.createElement("span");
@@ -3248,18 +3293,30 @@ function maybeRenderFileCard(el, p, projectRoot) {
     img.className = "path-image-thumb";
     img.src = apiUrl;
     img.alt = el.textContent || "";
-    img.addEventListener("click", (e) => {
+    let previewControl = img;
+    if (isAccessibleAnswer) {
+      previewControl = document.createElement("button");
+      previewControl.type = "button";
+      previewControl.className = "path-image-preview-action";
+      previewControl.setAttribute("aria-label", t("openImagePreviewAccessible", { name: accessibleName }));
+      previewControl.appendChild(img);
+    }
+    previewControl.addEventListener("click", (e) => {
       e.stopPropagation();
       showImageOverlay(apiUrl);
     });
-    const name = document.createElement("span");
+    const name = document.createElement(isAccessibleAnswer ? "button" : "span");
     name.className = "path-image-name";
     name.textContent = el.textContent || "";
+    if (isAccessibleAnswer) {
+      name.type = "button";
+      name.setAttribute("aria-label", t("openFileAccessible", { name: accessibleName }));
+    }
     name.addEventListener("click", (e) => {
       e.stopPropagation();
       openReferencedPath(p, projectRoot);
     });
-    card.append(img, name);
+    card.append(previewControl, name);
     el.replaceWith(card);
   };
   probe.onerror = () => { /* degrade: keep the text alias */ };
@@ -4412,6 +4469,7 @@ function renderMessages() {
   bindMessageImages();
   bindMessageActions();
   bindClickablePaths();
+  bindOrdinaryMessageRenderAccessibility();
   bindLinkContextMenus();
   updateStatsPanel();
   renderTimeline();

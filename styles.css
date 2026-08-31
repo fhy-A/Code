@@ -10920,6 +10920,45 @@ body.theme-dark .pi-shell {
   color: var(--message-prose-muted);
 }
 
+/* CODE-043 ordinary message render accessibility */
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble :is(
+  .path-file-card.answer-local-path:is(button),
+  .path-image-preview-action,
+  button.path-image-name
+) {
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  appearance: none;
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble .path-image-preview-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble button.path-image-name {
+  padding: 0;
+  text-align: left;
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble :is(
+  .path-file-card.answer-local-path,
+  .path-image-preview-action,
+  button.path-image-name,
+  [data-message-image-preview][role="button"],
+  .table-scroll[role="region"]
+):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
 /* CODE-043 compact three-level disclosures */
 .execution-trace-summary,
 .tool-process-stage > summary,

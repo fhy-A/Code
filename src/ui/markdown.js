@@ -614,7 +614,7 @@
     }
 
     renderer.table = function renderTable(token) {
-      const header = token.header.map((cell) => `<th${tableCellAttributes(cell)}>${parseInlineSafe(this.parser, cell.tokens)}</th>`).join("");
+      const header = token.header.map((cell) => `<th scope="col"${tableCellAttributes(cell)}>${parseInlineSafe(this.parser, cell.tokens)}</th>`).join("");
       const body = token.rows.map((row) => `<tr>${row.map((cell) => `<td${tableCellAttributes(cell)}>${parseInlineSafe(this.parser, cell.tokens)}</td>`).join("")}</tr>`).join("");
       return `<div class="table-wrap" data-overflow="false"><div class="table-scroll" tabindex="-1"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div><span class="table-overflow-hint" aria-hidden="true">↔</span></div>`;
     };
