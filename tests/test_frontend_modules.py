@@ -28978,7 +28978,7 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
     MARKER = "/* CODE-043 typography scale: scoped main interface */"
     USER_TEXT = (
         ".chat-pane:not(.empty-chat) "
-        ".msg.user:not(.msg-image-batch):not([data-background-message-id])"
+        ".msg.user:not([data-background-message-id])"
         ":not([data-queued-message-id]):not(.execution-trace-persistent) "
         ".user-message-text > .bubble"
     )
@@ -28992,7 +28992,7 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
         return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
-            "/* CODE-043 compact three-level disclosures */",
+            "/* CODE-043 ordinary message final refinement */",
             1,
         )[0]
 
@@ -29023,7 +29023,8 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
         for selector, token in (
             (self.USER_TEXT, "--type-content"),
             (self.ROOT, "--type-content"),
-            (self.ROLE, "--type-content"),
+            (self.ROLE, "--type-interface"),
+            (".chat-pane:not(.empty-chat) .response-model", "--type-interface"),
             (f"{self.ROOT} > h1", "--type-page"),
             (f"{self.ROOT} > h2", "--type-section"),
             (f"{self.ROOT} > :is(h3, h4, h5, h6)", "--type-content"),
@@ -29040,6 +29041,7 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
             self.assert_token_size(phase_source, selector, token)
         for selector in (
             ".chat-pane:not(.empty-chat) .msg-meta",
+            ".chat-pane:not(.empty-chat) .msg-time",
             ".chat-pane:not(.empty-chat) .response-time",
             ".chat-pane:not(.empty-chat) .response-info",
             ".chat-pane:not(.empty-chat) .run-status",
@@ -29056,12 +29058,12 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
         phase_source = self.phase_source()
         self.assert_token_size(phase_source, self.USER_TEXT, "--type-content")
         for exclusion in (
-            ":not(.msg-image-batch)",
             ":not([data-background-message-id])",
             ":not([data-queued-message-id])",
             ":not(.execution-trace-persistent)",
         ):
             self.assertIn(exclusion, self.USER_TEXT)
+        self.assertNotIn(":not(.msg-image-batch)", self.USER_TEXT)
         self.assertNotIn(
             ".chat-pane:not(.empty-chat) .msg.user .user-message-text,",
             phase_source,
@@ -29147,6 +29149,149 @@ class Code043MainInterfaceTypographyScaleTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden_declaration, phase_source)
         self.assertNotIn("@media", phase_source)
+
+
+class Code043OrdinaryMessageFinalTests(unittest.TestCase):
+    MARKER = "/* CODE-043 ordinary message final refinement */"
+    USER = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.user:not([data-background-message-id])"
+        ":not([data-queued-message-id]):not(.execution-trace-persistent)"
+    )
+    USER_TEXT = USER + " .user-message-text > .bubble"
+    ASSISTANT = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.assistant:not(.agent-commentary):not(.tool-process)"
+        ":not(.edit-suggestion):not(.generated-image-result)"
+    )
+    ASSISTANT_TEXT = ASSISTANT + " > .bubble"
+
+    def refinement_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 compact three-level disclosures */",
+            1,
+        )[0]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_plain_and_image_text_messages_share_reading_rhythm(self):
+        source = self.refinement_source()
+        body_group = f"{self.USER_TEXT},\n{self.ASSISTANT_TEXT} {{"
+        self.assertIn(body_group, source)
+        body_rule = self.rule(source, body_group)
+        self.assertIn("line-height: 1.68;", body_rule)
+        self.assertNotIn(":not(.msg-image-batch)", self.USER_TEXT)
+        self.assertIn(
+            '<article class="msg user msg-image-batch${traceClass}"',
+            MESSAGES_SOURCE,
+        )
+
+        paragraph_group = f"{self.USER_TEXT} > p,\n{self.ASSISTANT_TEXT} > p {{"
+        paragraph_rule = self.rule(source, paragraph_group)
+        self.assertIn("margin-bottom: .68em;", paragraph_rule)
+        list_group = (
+            f"{self.USER_TEXT} > :is(ul, ol),\n"
+            f"{self.ASSISTANT_TEXT} > :is(ul, ol) {{"
+        )
+        list_rule = self.rule(source, list_group)
+        self.assertIn("margin: .48em 0 .76em;", list_rule)
+
+    def test_user_headings_and_ordinary_code_tables_use_bounded_scale(self):
+        source = self.refinement_source()
+        h1_rule = self.rule(source, f"{self.USER_TEXT} > h1")
+        self.assertIn("font-size: var(--type-section);", h1_rule)
+        lower_rule = self.rule(source, f"{self.USER_TEXT} > :is(h2, h3, h4, h5, h6)")
+        self.assertIn("font-size: var(--type-content);", lower_rule)
+
+        content_group = (
+            f"{self.USER_TEXT} :is(table, th, td, .code-lines, .ansi-block, code:not(.line-code)),\n"
+            f"{self.ASSISTANT_TEXT} :is(table, th, td, .code-lines, .ansi-block, code:not(.line-code)) {{"
+        )
+        content_rule = self.rule(source, content_group)
+        self.assertIn("font-size: var(--type-interface);", content_rule)
+
+    def test_assistant_local_file_name_inherits_body_without_global_expansion(self):
+        source = self.refinement_source()
+        selector = (
+            f"{self.ASSISTANT_TEXT} "
+            ".path-file-card.answer-local-path .path-file-name"
+        )
+        file_name_rule = self.rule(source, selector)
+        self.assertIn("font-size: inherit;", file_name_rule)
+        self.assertIn("line-height: inherit;", file_name_rule)
+
+        global_file_name = re.search(r"\.path-file-name\{([^}]+)\}", STYLE_SOURCE)
+        global_image_name = re.search(r"\.path-image-name\{([^}]+)\}", STYLE_SOURCE)
+        self.assertIsNotNone(global_file_name)
+        self.assertIsNotNone(global_image_name)
+        for global_rule in (global_file_name.group(1), global_image_name.group(1)):
+            self.assertIn("font-size:12px", global_rule)
+            self.assertIn("line-height:18px", global_rule)
+        self.assertNotIn(".tool-edit-target", source)
+
+    def test_copy_targets_and_keyboard_meta_visibility_are_consistent(self):
+        source = self.refinement_source()
+        copy_group = (
+            f":is({self.USER},\n  {self.ASSISTANT}) .msg-copy-btn {{"
+        )
+        copy_rule = self.rule(source, copy_group)
+        for declaration in (
+            "width: 28px;",
+            "height: 28px;",
+            "flex-basis: 28px;",
+        ):
+            self.assertIn(declaration, copy_rule)
+        svg_rule = self.rule(source, copy_group.replace(" .msg-copy-btn {", " .msg-copy-btn svg {"))
+        self.assertIn("width: 16px;", svg_rule)
+        self.assertIn("height: 16px;", svg_rule)
+
+        visibility_selector = (
+            f"{self.USER} .user-message-hover-area:is(:hover, :focus-within) .msg-meta"
+        )
+        visibility_rule = self.rule(source, visibility_selector)
+        self.assertIn("opacity: 1;", visibility_rule)
+        self.assertIn("pointer-events: auto;", visibility_rule)
+
+    def test_user_meta_uses_one_non_additive_followup_gap(self):
+        source = self.refinement_source()
+        user_rule = self.rule(source, self.USER)
+        self.assertIn("--user-message-meta-height: 28px;", user_rule)
+        self.assertIn("margin-bottom: max(", user_rule)
+        self.assertIn("var(--message-stack-gap)", user_rule)
+        self.assertIn(
+            "calc(var(--user-message-meta-offset) + var(--user-message-meta-height))",
+            user_rule,
+        )
+        self.assertNotRegex(user_rule, r"var\(--message-stack-gap\)\s*\+")
+        toggle_rule = self.rule(source, f"{self.USER} .user-message-toggle")
+        self.assertIn("font-size: var(--type-caption);", toggle_rule)
+
+    def test_refinement_keeps_special_message_surfaces_out_of_scope(self):
+        source = self.refinement_source()
+        for required in (
+            ":not([data-background-message-id])",
+            ":not([data-queued-message-id])",
+            ":not(.execution-trace-persistent)",
+            ":not(.agent-commentary)",
+            ":not(.tool-process)",
+            ":not(.edit-suggestion)",
+            ":not(.generated-image-result)",
+        ):
+            self.assertIn(required, source)
+        for forbidden in (
+            ".authorization-",
+            ".user-input-",
+            ".tool-inline-",
+            ".composer",
+            ".sidebar",
+            ".preview-",
+        ):
+            self.assertNotIn(forbidden, source)
 
 
 class Code043CompactDisclosureTests(unittest.TestCase):

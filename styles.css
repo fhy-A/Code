@@ -10649,9 +10649,8 @@ body.theme-dark .chat-pane.empty-chat .composer {
   --type-page: 20px;
 }
 
-.chat-pane:not(.empty-chat) .msg.user:not(.msg-image-batch):not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
 .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble,
-.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .role,
 .composer textarea {
   font-size: var(--type-content);
 }
@@ -10677,6 +10676,8 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .chat-pane:not(.empty-chat) .tool-process-stage-heading,
 .chat-pane:not(.empty-chat) .tool-process-row-heading,
 .chat-pane:not(.empty-chat) .tool-process-detail pre,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .role,
+.chat-pane:not(.empty-chat) .response-model,
 .composer .bar-btn,
 .composer .bar-icon-btn,
 .composer .model-pill-btn,
@@ -10699,6 +10700,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
 }
 
 .chat-pane:not(.empty-chat) .msg-meta,
+.chat-pane:not(.empty-chat) .msg-time,
 .chat-pane:not(.empty-chat) .response-time,
 .chat-pane:not(.empty-chat) .response-info,
 .chat-pane:not(.empty-chat) .run-status,
@@ -10715,6 +10717,80 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .session-main .session-status-slot,
 .path-line,
 .file-item small {
+  font-size: var(--type-caption);
+}
+
+/* CODE-043 ordinary message final refinement */
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) {
+  --user-message-meta-height: 28px;
+  margin-bottom: max(
+    var(--message-stack-gap),
+    calc(var(--user-message-meta-offset) + var(--user-message-meta-height))
+  );
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble {
+  line-height: 1.68;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > p,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > p {
+  margin-bottom: .68em;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > :is(ul, ol),
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > :is(ul, ol) {
+  margin: .48em 0 .76em;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > :last-child,
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > :is(h1, h2, h3, h4, h5, h6),
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble > :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1em 0 .5em;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > h1 {
+  font-size: var(--type-section);
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble > :is(h2, h3, h4, h5, h6) {
+  font-size: var(--type-content);
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble :is(table, th, td, .code-lines, .ansi-block, code:not(.line-code)),
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble :is(table, th, td, .code-lines, .ansi-block, code:not(.line-code)) {
+  font-size: var(--type-interface);
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble .path-file-card.answer-local-path .path-file-name {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent),
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result)) .msg-copy-btn {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+}
+
+:is(.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent),
+  .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result)) .msg-copy-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-hover-area:is(:hover, :focus-within) .msg-meta {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-toggle {
   font-size: var(--type-caption);
 }
 
