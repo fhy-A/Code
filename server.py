@@ -3410,6 +3410,12 @@ def _agent_run_record(run):
                isinstance(run.get("skill_evidence_observer"), dict)
                or bool(run.get("skill_evidence_observers"))
            ) else {}),
+        **({"activeSkillNames": list(run.get("active_skill_names") or [])}
+           if run.get("active_skill_names") else {}),
+        **({"activeSkillDependencies": _agent_active_skill_dependencies_record(run)}
+           if run.get("active_skill_names") else {}),
+        **({"skillRuntimeBindings": _agent_skill_runtime_bindings_record(run)}
+           if run.get("skill_runtime_bindings") else {}),
         "usage": _json_clone(run.get("usage") or {}),
         "result": result,
         "events": events,
@@ -3648,6 +3654,8 @@ def _agent_snapshot(run, cursor=0):
             ],
             "toolExecutions": _agent_public_tool_executions(run),
             "skillEvidence": _agent_skill_evidence_snapshot(run),
+            "activeSkillNames": list(run.get("active_skill_names") or []),
+            "skillRuntimeBindings": _agent_skill_runtime_bindings_public(run),
             "usage": _json_clone(run.get("usage") or {}),
             "compactions": _json_clone(run.get("compactions") or []),
             "recoveryState": _agent_public_recovery_state(run),
@@ -4553,6 +4561,15 @@ def _agent_run_from_record(record):
         record.get("cwd"),
         record.get("workspaceRoots") if int(record.get("version") or 1) >= 2 else None,
     )
+    active_skill_names = _normalize_agent_active_skill_names(
+        record.get("activeSkillNames")
+    )
+    active_skill_dependencies = _restore_agent_active_skill_dependencies(
+        record.get("activeSkillDependencies"), active_skill_names,
+    )
+    skill_runtime_bindings = _restore_agent_skill_runtime_bindings(
+        record.get("skillRuntimeBindings"), active_skill_names,
+    )
     return {
         "id": run_id,
         "session_id": str(record.get("sessionId") or ""),
@@ -4645,6 +4662,9 @@ def _agent_run_from_record(record):
             restored_tools,
         ),
         "skill_evidence_observer": None,
+        "active_skill_names": active_skill_names,
+        "active_skill_dependencies": active_skill_dependencies,
+        "skill_runtime_bindings": skill_runtime_bindings,
         "usage": dict(record.get("usage") or {}),
         "result": dict(record.get("result") or {}),
         "events": events,
@@ -8224,6 +8244,10 @@ def _execute_agent_pending_tools(run):
                             "report the result or ask the user for help."
                         )
                     if (permission_profile == "accept" or dependency_install) and not resuming_command:
+                        if not dependency_install:
+                            runtime_preflight = _agent_prepare_skill_runtime_environment(run)
+                            if not runtime_preflight.get("ok"):
+                                raise _AgentToolResult(runtime_preflight)
                         pending_authorization = _agent_command_authorization_request(run, call)
                         execution["status"] = "waiting_authorization"
                         execution["result"] = None
@@ -8240,6 +8264,16 @@ def _execute_agent_pending_tools(run):
                         raise ValueError(
                             f"permission profile does not allow commands: {permission_profile}"
                         )
+                    if dependency_install:
+                        runtime_preflight = {
+                            "ok": True,
+                            "environment": None,
+                            "summary": None,
+                        }
+                    else:
+                        runtime_preflight = _agent_prepare_skill_runtime_environment(run)
+                        if not runtime_preflight.get("ok"):
+                            raise _AgentToolResult(runtime_preflight)
                     execution["status"] = "running"
                     execution["startedAt"] = now_iso()
                     execution["stdout"] = str(execution.get("stdout") or "")[-20000:]
@@ -8267,11 +8301,19 @@ def _execute_agent_pending_tools(run):
                             run["active_process"] = process
                             run["active_command_call_id"] = call_id if process is not None else ""
 
+                    command_execution_options = {
+                        "cancel_event": run["cancel_event"],
+                        "output_callback": on_output,
+                        "process_callback": set_process,
+                    }
+                    if runtime_preflight.get("summary") is not None:
+                        command_execution_options.update({
+                            "process_environment": runtime_preflight.get("environment"),
+                            "runtime_summary": runtime_preflight.get("summary"),
+                        })
                     result = execute_run_command_tool(
                         arguments,
-                        cancel_event=run["cancel_event"],
-                        output_callback=on_output,
-                        process_callback=set_process,
+                        **command_execution_options,
                     )
                 elif spec.get("effect") == "image_generation":
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
@@ -8436,6 +8478,14 @@ def _execute_agent_pending_tools(run):
                         pass
                 else:
                     _agent_workspace_context.workspace_roots = previous_workspace_roots
+            if (
+                not reused_execution
+                and name in {"check_skill_dependencies", "use_skill"}
+                and isinstance(result, dict)
+            ):
+                _agent_bind_skill_runtime_from_result(
+                    run, name, call.get("arguments") or {}, result,
+                )
         with run["condition"]:
             if (
                 run["cancel_event"].is_set()
@@ -9822,6 +9872,12 @@ def _create_agent_run(
     skill_evidence_observers = _freeze_skill_evidence_observers(
         active_skill_names, active_skill_name, tools,
     )
+    frozen_active_skill_names = _agent_active_skill_names_from_observers(
+        skill_evidence_observers,
+    )
+    frozen_active_skill_dependencies = _freeze_agent_active_skill_dependencies(
+        frozen_active_skill_names,
+    )
     try:
         rounds_limit = int(max_rounds or _AGENT_RUN_DEFAULT_MAX_ROUNDS)
     except (TypeError, ValueError):
@@ -9907,6 +9963,9 @@ def _create_agent_run(
         "tool_executions": {},
         "skill_evidence_observers": skill_evidence_observers,
         "skill_evidence_observer": None,
+        "active_skill_names": frozen_active_skill_names,
+        "active_skill_dependencies": frozen_active_skill_dependencies,
+        "skill_runtime_bindings": {},
         "usage": {},
         "result": {},
         "events": [],
@@ -14318,6 +14377,495 @@ def get_single_skill_dependency_status(name, capability=""):
     return _apply_ppt_master_dependency_integrity(
         SKILLS_DIR / skill["dir"], inspection, capability,
     )
+
+
+_SKILL_RUNTIME_BINDING_VERSION = 1
+
+
+def _normalize_agent_active_skill_names(value):
+    if not isinstance(value, list) or len(value) > 3:
+        return []
+    names = []
+    seen = set()
+    for item in value:
+        name = str(item or "").strip() if isinstance(item, str) else ""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name) or name in seen:
+            return []
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _agent_active_skill_names_from_observers(observers):
+    names = []
+    for observer in observers or []:
+        active = observer.get("activeSkill") if isinstance(observer, dict) else None
+        name = str((active or {}).get("name") or "")
+        if name and name not in names:
+            names.append(name)
+    return _normalize_agent_active_skill_names(names)
+
+
+def _freeze_agent_active_skill_dependencies(active_skill_names):
+    frozen = {}
+    for name in active_skill_names or []:
+        try:
+            skill = read_skill(name)
+        except ValueError:
+            frozen[name] = None
+            continue
+        if skill.get("dependencyManifestError"):
+            frozen[name] = None
+            continue
+        capabilities = skill.get("dependencyCapabilities")
+        if not isinstance(capabilities, dict):
+            frozen[name] = None
+            continue
+        normalized = sorted(
+            str(capability).strip()
+            for capability in capabilities
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(capability).strip())
+        )
+        frozen[name] = normalized
+    return frozen
+
+
+def _agent_active_skill_dependencies_record(run):
+    dependencies = run.get("active_skill_dependencies") or {}
+    return {
+        "version": _SKILL_RUNTIME_BINDING_VERSION,
+        "skills": [
+            {
+                "skill": name,
+                "capabilities": list(dependencies.get(name) or []),
+                **({"invalid": True} if dependencies.get(name) is None else {}),
+            }
+            for name in run.get("active_skill_names") or []
+        ],
+    }
+
+
+def _restore_agent_active_skill_dependencies(value, active_skill_names):
+    if not isinstance(value, dict) or value.get("version") != _SKILL_RUNTIME_BINDING_VERSION:
+        return {}
+    sources = value.get("skills")
+    if not isinstance(sources, list) or len(sources) > 3:
+        return {}
+    restored = {}
+    allowed_names = set(active_skill_names or [])
+    for item in sources:
+        if not isinstance(item, dict):
+            return {}
+        name = str(item.get("skill") or "")
+        if name not in allowed_names or name in restored:
+            return {}
+        if item.get("invalid") is True:
+            restored[name] = None
+            continue
+        capabilities = item.get("capabilities")
+        if not isinstance(capabilities, list) or len(capabilities) > 64:
+            return {}
+        normalized = []
+        for capability in capabilities:
+            capability = str(capability or "") if isinstance(capability, str) else ""
+            if (
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", capability)
+                or capability in normalized
+            ):
+                return {}
+            normalized.append(capability)
+        restored[name] = normalized
+    if set(restored) != allowed_names:
+        return {}
+    return restored
+
+
+def _normalize_agent_skill_runtime(value):
+    if not isinstance(value, dict):
+        return {}
+    runtime = {}
+    python = value.get("python")
+    if isinstance(python, dict):
+        source = str(python.get("source") or "")
+        executable = str(python.get("executable") or "")
+        if source in {"managed", "system", "app", "missing", ""} and len(executable) <= 4096:
+            runtime["python"] = {
+                "source": source,
+                "executable": executable,
+            }
+    node = value.get("node")
+    if isinstance(node, dict):
+        source = str(node.get("source") or "")
+        node_path = str(node.get("nodePath") or "")
+        if source in {"managed", "system", "app", "missing", ""} and len(node_path) <= 4096:
+            runtime["node"] = {
+                "source": source,
+                "nodePath": node_path,
+            }
+    return runtime
+
+
+def _agent_skill_runtime_identity(skill_name):
+    skill = read_skill(skill_name)
+    skill_dir = SKILLS_DIR / str(skill.get("dir") or "")
+    manifest = resolve_skill_manifest(
+        skill_dir,
+        bundled_skills_dir=APP_DIR / "data" / "skills",
+    )
+    if not manifest:
+        return None
+    skill_bytes = (skill_dir / "SKILL.md").read_bytes()
+    canonical_manifest = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "skillContentHash": "sha256:" + hashlib.sha256(skill_bytes).hexdigest(),
+        "manifestHash": "sha256:" + hashlib.sha256(canonical_manifest).hexdigest(),
+    }
+
+
+def _normalize_agent_skill_runtime_binding(value):
+    if not isinstance(value, dict) or value.get("version") != _SKILL_RUNTIME_BINDING_VERSION:
+        return None
+    skill = str(value.get("skill") or "")
+    capability = str(value.get("capability") or "")
+    content_hash = str(value.get("skillContentHash") or "")
+    manifest_hash = str(value.get("manifestHash") or "")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", skill)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", capability)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_hash)
+        or value.get("checkedStatus") != "ready"
+    ):
+        return None
+    return {
+        "version": _SKILL_RUNTIME_BINDING_VERSION,
+        "skill": skill,
+        "capability": capability,
+        "checkedStatus": "ready",
+        "skillContentHash": content_hash,
+        "manifestHash": manifest_hash,
+        "runtime": _normalize_agent_skill_runtime(value.get("runtime")),
+        "checkedAt": str(value.get("checkedAt") or "")[:64],
+    }
+
+
+def _agent_skill_runtime_bindings_record(run):
+    return {
+        "version": _SKILL_RUNTIME_BINDING_VERSION,
+        "bindings": [
+            _json_clone(binding)
+            for name in run.get("active_skill_names") or []
+            if (binding := _normalize_agent_skill_runtime_binding(
+                (run.get("skill_runtime_bindings") or {}).get(name)
+            ))
+        ],
+    }
+
+
+def _restore_agent_skill_runtime_bindings(value, active_skill_names):
+    if not isinstance(value, dict) or value.get("version") != _SKILL_RUNTIME_BINDING_VERSION:
+        return {}
+    sources = value.get("bindings")
+    if not isinstance(sources, list) or len(sources) > 3:
+        return {}
+    allowed_names = set(active_skill_names or [])
+    restored = {}
+    for source in sources:
+        binding = _normalize_agent_skill_runtime_binding(source)
+        if not binding or binding["skill"] not in allowed_names or binding["skill"] in restored:
+            return {}
+        restored[binding["skill"]] = binding
+    return restored
+
+
+def _agent_skill_runtime_bindings_public(run):
+    public = []
+    for name in run.get("active_skill_names") or []:
+        binding = _normalize_agent_skill_runtime_binding(
+            (run.get("skill_runtime_bindings") or {}).get(name)
+        )
+        if not binding:
+            continue
+        runtime = binding.get("runtime") or {}
+        public.append({
+            "skill": name,
+            "capability": binding["capability"],
+            "managedPython": (runtime.get("python") or {}).get("source") == "managed",
+            "managedNode": (runtime.get("node") or {}).get("source") == "managed",
+        })
+    return public
+
+
+def _skill_runtime_status_ready(status, capability):
+    if not isinstance(status, dict):
+        return False
+    guidance = status.get("installGuidance")
+    if (
+        not isinstance(guidance, dict)
+        or guidance.get("selectionRequired") is not False
+        or str(guidance.get("selectedCapability") or "") != capability
+        or bool(guidance.get("requiredMissing"))
+    ):
+        return False
+    selected = next((
+        item for item in status.get("capabilities") or []
+        if isinstance(item, dict) and str(item.get("id") or "") == capability
+    ), None)
+    return bool(selected and selected.get("status") == "ready")
+
+
+def _agent_bind_skill_runtime_from_result(run, action, arguments, result):
+    if action not in {"check_skill_dependencies", "use_skill"} or not isinstance(result, dict):
+        return False
+    skill_name = str(
+        (arguments or {}).get("name")
+        or result.get("skill")
+        or result.get("name")
+        or ""
+    ).strip()
+    if result.get("ok") is not True or skill_name not in (run.get("active_skill_names") or []):
+        return False
+    status = result.get("dependencies") if action == "use_skill" else result
+    if not isinstance(status, dict):
+        return False
+    guidance = status.get("installGuidance")
+    if not isinstance(guidance, dict) or guidance.get("selectionRequired") is not False:
+        return False
+    capability = str(guidance.get("selectedCapability") or "")
+    if action == "use_skill" and len(guidance.get("availableCapabilities") or []) != 1:
+        return False
+    declared = (run.get("active_skill_dependencies") or {}).get(skill_name)
+    if not isinstance(declared, list) or capability not in declared:
+        return False
+    if not _skill_runtime_status_ready(status, capability):
+        return False
+    try:
+        identity = _agent_skill_runtime_identity(skill_name)
+    except (OSError, UnicodeError, ValueError, DependencyManifestError):
+        return False
+    if not identity:
+        return False
+    binding = {
+        "version": _SKILL_RUNTIME_BINDING_VERSION,
+        "skill": skill_name,
+        "capability": capability,
+        "checkedStatus": "ready",
+        **identity,
+        "runtime": _normalize_agent_skill_runtime(guidance.get("runtime")),
+        "checkedAt": now_iso(),
+    }
+    with run["condition"]:
+        run.setdefault("skill_runtime_bindings", {})[skill_name] = binding
+        run["updated_at"] = now_iso()
+    result["runtimeBinding"] = {
+        "established": True,
+        "skill": skill_name,
+        "capability": capability,
+    }
+    return True
+
+
+def _agent_runtime_path_safe(path, root, *, expect_file):
+    try:
+        candidate = _absolute_lexical_path(path)
+        trusted_root = _absolute_lexical_path(root)
+        candidate.relative_to(trusted_root)
+        chain = list(reversed((candidate, *candidate.parents)))
+        for component in chain:
+            info = _lstat_or_none(component)
+            if info is None or stat.S_ISLNK(info.st_mode) or _path_stat_is_reparse(info):
+                return None
+            is_candidate = component == candidate
+            if is_candidate and expect_file:
+                if not stat.S_ISREG(info.st_mode):
+                    return None
+            elif not stat.S_ISDIR(info.st_mode):
+                return None
+        return candidate
+    except (OSError, ValueError):
+        return None
+
+
+def _agent_skill_runtime_error(run, reason, *, stale, skills):
+    if stale:
+        with run["condition"]:
+            bindings = run.setdefault("skill_runtime_bindings", {})
+            for skill in skills:
+                bindings.pop(skill, None)
+            run["updated_at"] = now_iso()
+    return {
+        "ok": False,
+        "action": "run_command",
+        "blocked": True,
+        "errorCode": (
+            "skill_dependency_runtime_stale"
+            if stale else "skill_dependency_check_required"
+        ),
+        "retryable": False,
+        "reason": reason,
+        "pendingSkills": [
+            {
+                "skill": skill,
+                "capabilities": list(
+                    (run.get("active_skill_dependencies") or {}).get(skill) or []
+                ),
+            }
+            for skill in skills
+        ],
+        "error": (
+            "A checked Skill runtime changed or is no longer safe. Call "
+            "check_skill_dependencies again for the required capability before running a command."
+            if stale else
+            "An active Skill requires a successful capability-specific dependency check before "
+            "running a command. Call check_skill_dependencies first."
+        ),
+    }
+
+
+def _dedupe_environment_paths(values):
+    result = []
+    seen = set()
+    for value in values:
+        text = str(value or "")
+        if not text:
+            continue
+        key = os.path.normcase(os.path.normpath(text))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _agent_prepare_skill_runtime_environment(run):
+    active_names = list(run.get("active_skill_names") or [])
+    dependencies = run.get("active_skill_dependencies") or {}
+    dependent = [name for name in active_names if dependencies.get(name) is None or dependencies.get(name)]
+    if not dependent:
+        return {"ok": True, "environment": None, "summary": None}
+    bindings = run.get("skill_runtime_bindings") or {}
+    missing = [name for name in dependent if not _normalize_agent_skill_runtime_binding(bindings.get(name))]
+    if missing:
+        return _agent_skill_runtime_error(
+            run, "dependency_check_required", stale=False, skills=missing,
+        )
+
+    checked = []
+    for name in dependent:
+        binding = _normalize_agent_skill_runtime_binding(bindings.get(name))
+        declared = dependencies.get(name)
+        if not isinstance(declared, list) or binding["capability"] not in declared:
+            return _agent_skill_runtime_error(
+                run, "active_skill_dependency_changed", stale=True, skills=[name],
+            )
+        try:
+            identity = _agent_skill_runtime_identity(name)
+        except (OSError, UnicodeError, ValueError, DependencyManifestError):
+            identity = None
+        if not identity or any(
+            binding.get(field) != identity.get(field)
+            for field in ("skillContentHash", "manifestHash")
+        ):
+            return _agent_skill_runtime_error(
+                run, "skill_manifest_changed", stale=True, skills=[name],
+            )
+        try:
+            status = get_single_skill_dependency_status(name, binding["capability"])
+        except (OSError, UnicodeError, ValueError, DependencyManifestError):
+            return _agent_skill_runtime_error(
+                run, "dependency_recheck_failed", stale=True, skills=[name],
+            )
+        if not _skill_runtime_status_ready(status, binding["capability"]):
+            return _agent_skill_runtime_error(
+                run, "dependency_not_ready", stale=True, skills=[name],
+            )
+        current_runtime = _normalize_agent_skill_runtime(
+            (status.get("installGuidance") or {}).get("runtime")
+        )
+        if current_runtime != binding.get("runtime"):
+            return _agent_skill_runtime_error(
+                run, "managed_runtime_changed", stale=True, skills=[name],
+            )
+        checked.append(binding)
+
+    python_executables = _dedupe_environment_paths([
+        (binding.get("runtime", {}).get("python") or {}).get("executable")
+        for binding in checked
+        if (binding.get("runtime", {}).get("python") or {}).get("source") == "managed"
+    ])
+    node_paths = _dedupe_environment_paths([
+        (binding.get("runtime", {}).get("node") or {}).get("nodePath")
+        for binding in checked
+        if (binding.get("runtime", {}).get("node") or {}).get("source") == "managed"
+    ])
+    if len(python_executables) > 1 or len(node_paths) > 1:
+        return _agent_skill_runtime_error(
+            run, "managed_runtime_conflict", stale=True, skills=dependent,
+        )
+
+    path_prefix = []
+    environment = dict(os.environ)
+    if python_executables:
+        python_root = DATA_DIR / "runtime" / "python"
+        executable = _agent_runtime_path_safe(
+            python_executables[0], python_root, expect_file=True,
+        )
+        trusted_python_root = _agent_runtime_path_safe(
+            python_root, python_root, expect_file=False,
+        )
+        if executable is None or trusted_python_root is None:
+            return _agent_skill_runtime_error(
+                run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
+            )
+        environment["VIRTUAL_ENV"] = str(trusted_python_root)
+        path_prefix.extend([str(trusted_python_root), str(executable.parent)])
+    if node_paths:
+        node_root = DATA_DIR / "runtime" / "node" / "node_modules"
+        node_modules = _agent_runtime_path_safe(
+            node_paths[0], node_root, expect_file=False,
+        )
+        if node_modules is None:
+            return _agent_skill_runtime_error(
+                run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
+            )
+        node_bin = node_modules / ".bin"
+        if node_bin.exists():
+            safe_node_bin = _agent_runtime_path_safe(
+                node_bin, node_root, expect_file=False,
+            )
+            if safe_node_bin is None:
+                return _agent_skill_runtime_error(
+                    run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
+                )
+            path_prefix.append(str(safe_node_bin))
+        environment["NODE_PATH"] = os.pathsep.join(_dedupe_environment_paths([
+            str(node_modules),
+            *(str(environment.get("NODE_PATH") or "").split(os.pathsep)),
+        ]))
+    if path_prefix:
+        environment["PATH"] = os.pathsep.join(_dedupe_environment_paths([
+            *path_prefix,
+            *(str(environment.get("PATH") or "").split(os.pathsep)),
+        ]))
+    summary = {
+        "version": _SKILL_RUNTIME_BINDING_VERSION,
+        "skills": [
+            {"skill": binding["skill"], "capability": binding["capability"]}
+            for binding in checked
+        ],
+        "managedPythonApplied": bool(python_executables),
+        "managedNodeApplied": bool(node_paths),
+    }
+    return {
+        "ok": True,
+        "environment": environment if (python_executables or node_paths) else None,
+        "summary": summary,
+    }
 
 
 def _shared_skill_dependency_ids(skill_dir_name, capability_id):
@@ -19865,6 +20413,8 @@ def execute_run_command_tool(
     cancel_event=None,
     output_callback=None,
     process_callback=None,
+    process_environment=None,
+    runtime_summary=None,
 ):
     body = dict(body or {})
     command = (body.get("command") or "").strip()
@@ -19975,6 +20525,7 @@ def execute_run_command_tool(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            **({"env": process_environment} if process_environment is not None else {}),
             **_hidden_subprocess_kwargs(),
         )
         if callable(process_callback):
@@ -20012,6 +20563,8 @@ def execute_run_command_tool(
             "exitCode": None,
             "stdout": output["stdout"],
             "stderr": output["stderr"],
+            **({"skillRuntime": _json_clone(runtime_summary)}
+               if isinstance(runtime_summary, dict) else {}),
             "error": str(exc),
         }
     finally:
@@ -20040,6 +20593,8 @@ def execute_run_command_tool(
         "stderrTruncated": output["stderrChars"] > 20000,
         "cancelled": cancelled,
         "timedOut": timed_out,
+        **({"skillRuntime": _json_clone(runtime_summary)}
+           if isinstance(runtime_summary, dict) else {}),
         "error": error_text,
     }
 
