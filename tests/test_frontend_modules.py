@@ -30895,7 +30895,10 @@ class Code043SessionDiscoverySurfaceTests(unittest.TestCase):
 
     def phase_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(
+            "/* CODE-043 settings shell and light pages */",
+            1,
+        )[0]
 
     def rule(self, source, selector):
         match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
@@ -31189,6 +31192,213 @@ process.stdout.write(results.innerHTML);
         responsive = source.split("@media (max-width: 720px)", 1)[1]
         self.assertIn(".archived-session-delete", responsive)
         self.assertIn("width: 32px;", responsive)
+
+
+class Code043SettingsShellLightPageTests(unittest.TestCase):
+    MARKER = "/* CODE-043 settings shell and light pages */"
+
+    def phase_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+
+    def rule(self, source, selector):
+        match = re.search(re.escape(selector) + r"(?P<body>.*?)\}", source, re.S)
+        self.assertIsNotNone(match, selector)
+        return match.group("body")
+
+    def test_settings_shell_uses_shared_scale_focus_and_narrow_width_guards(self):
+        shell_start = INDEX_SOURCE.index('id="settingsPage"')
+        shell_end = INDEX_SOURCE.index('id="sessionSearchModal"', shell_start)
+        shell = INDEX_SOURCE[shell_start:shell_end]
+        for fragment in (
+            'class="settings-shell-header"',
+            'class="settings-shell-close"',
+            'data-i18n-title="close"',
+            'data-i18n-aria-label="close"',
+            'class="settings-layout"',
+            'class="settings-nav"',
+            'class="settings-detail"',
+        ):
+            self.assertIn(fragment, shell)
+
+        source = self.phase_source()
+        for declaration in (
+            "--settings-control-height: 40px;",
+            "--settings-secondary-control-height: 32px;",
+            "font-size: 18px;",
+            "font-size: 14px;",
+            "font-size: 12px;",
+        ):
+            self.assertIn(declaration, source)
+        nav = self.rule(source, ".settings-nav-item {")
+        self.assertIn("min-height: var(--settings-control-height);", nav)
+        self.assertIn("font-size: 14px;", nav)
+        close = self.rule(source, ".settings-shell-close {")
+        self.assertIn("width: var(--settings-secondary-control-height);", close)
+        self.assertIn("height: var(--settings-secondary-control-height);", close)
+        self.assertIn(":focus-visible", source)
+        self.assertEqual(source.count("@media (max-width: 760px)"), 1)
+        narrow = source.split("@media (max-width: 760px)", 1)[1]
+        for fragment in (
+            ".settings-page-card",
+            ".settings-layout",
+            ".settings-detail",
+            "minmax(0, 1fr)",
+            "overflow-wrap: anywhere;",
+        ):
+            self.assertIn(fragment, narrow)
+
+    def test_memory_page_uses_one_flat_workspace_with_list_and_form_modes(self):
+        start = SKILLS_MEMORY_SOURCE.index("function renderMemoryPanel(container)")
+        end = SKILLS_MEMORY_SOURCE.index("function renderSkillsInSettings", start)
+        source = SKILLS_MEMORY_SOURCE[start:end]
+        for fragment in (
+            'class="settings-page-heading settings-memory-heading"',
+            'data-i18n="memoryContextHint"',
+            'id="settingsNewMem"',
+            'class="settings-lite-page settings-light-page memory-settings-panel"',
+            'id="settingsMemoryWorkspace" class="settings-memory-workspace" data-mode="list"',
+            'id="settingsMemoryListView" class="settings-memory-list-view"',
+            'id="settingsMemoryList"',
+            'id="settingsMemoryForm" class="memory-form" hidden',
+            'id="memFormLabel"',
+            'class="memory-form-actions settings-card-actions"',
+            'id="memCancelBtn"',
+            'id="settingsSaveMem"',
+            'class="mini-btn primary-btn"',
+        ):
+            self.assertIn(fragment, source)
+        self.assertLess(source.index('id="settingsMemoryList"'), source.index('id="settingsMemoryForm"'))
+        self.assertLess(source.index('id="memCancelBtn"'), source.index('id="settingsSaveMem"'))
+        self.assertNotIn("settings-memory-list-card", source)
+        self.assertNotIn("settings-surface-card", source)
+        for behavior in (
+            'byId("settingsNewMem").addEventListener("click", () => showSettingsMemoryFormMode())',
+            'byId("settingsSaveMem").addEventListener("click"',
+            'byId("memCancelBtn").addEventListener("click", showSettingsMemoryListMode)',
+            'apiJson("/api/memory", {',
+            "showSettingsMemoryListMode();",
+            "showSettingsMemoryFormMode(memory);",
+            'workspace.dataset.mode = "list";',
+            'workspace.dataset.mode = "form";',
+            "listView.hidden = false;",
+            "listView.hidden = true;",
+            "form.hidden = true;",
+            "form.hidden = false;",
+        ):
+            self.assertIn(behavior, source)
+
+        save_start = source.index('byId("settingsSaveMem").addEventListener("click"')
+        save_end = source.index('byId("memCancelBtn")', save_start)
+        save_source = source[save_start:save_end]
+        self.assertLess(save_source.index("if (!name || !body"), save_source.index('apiJson("/api/memory", {'))
+        self.assertLess(save_source.index('apiJson("/api/memory", {'), save_source.index("showSettingsMemoryListMode();"))
+        edit_start = source.index('list.querySelectorAll("[data-edit]")')
+        edit_end = source.index('list.querySelectorAll("[data-del]")', edit_start)
+        edit_source = source[edit_start:edit_end]
+        self.assertLess(edit_source.index("await apiJson("), edit_source.index("showSettingsMemoryFormMode(memory);"))
+
+        phase = self.phase_source()
+        workspace_rule = self.rule(phase, ".settings-memory-workspace {")
+        for declaration in ("border: 0;", "background: transparent;"):
+            self.assertIn(declaration, workspace_rule)
+        item_rule = self.rule(phase, ".memory-settings-panel .memory-item {")
+        for declaration in ("border: 0;", "border-bottom: 1px solid var(--line);", "border-radius: 0;", "background: transparent;"):
+            self.assertIn(declaration, item_rule)
+        hidden_new_button = self.rule(phase, ".settings-memory-heading > .mini-btn[hidden] {")
+        self.assertIn("display: none;", hidden_new_button)
+        self.assertGreater(
+            phase.index(".settings-memory-heading > .mini-btn[hidden] {"),
+            phase.index(".settings-memory-heading > .mini-btn {"),
+        )
+        self.assertNotIn(".settings-memory-list-card", phase)
+
+    def test_system_editor_and_update_pages_share_structure_without_behavior_changes(self):
+        system_start = SETTINGS_SOURCE.index("function renderSystemPanel(container)")
+        system_end = SETTINGS_SOURCE.index("function renderEditorPanel", system_start)
+        system = SETTINGS_SOURCE[system_start:system_end]
+        for fragment in (
+            'class="settings-page-heading"',
+            'class="settings-lite-page settings-light-page system-settings-panel"',
+            'class="settings-lite-card settings-surface-card settings-editor-card"',
+            'id="settingsSystemText"',
+            'class="settings-card-actions system-prompt-actions"',
+            'data-i18n="systemPromptHint"',
+            'id="settingsResetSystem"',
+            'addEventListener("change"',
+            'saveSystemPrompt();',
+        ):
+            self.assertIn(fragment, system)
+
+        editor_start = SETTINGS_SOURCE.index("function renderEditorPanel(container)")
+        editor_end = SETTINGS_SOURCE.index("function updateLanguageControls", editor_start)
+        editor = SETTINGS_SOURCE[editor_start:editor_end]
+        for fragment in (
+            'class="settings-page-heading"',
+            'class="settings-lite-page settings-light-page editor-settings-panel"',
+            'class="settings-lite-card settings-surface-card follow-up-behavior-card"',
+            'role="radiogroup"',
+            'data-follow-up-behavior',
+            'saveFollowUpBehavior(',
+        ):
+            self.assertIn(fragment, editor)
+
+        update_start = SETTINGS_SOURCE.index("function renderUpdatePanel(container)")
+        update_end = SETTINGS_SOURCE.index("const bindCheck", update_start)
+        update = SETTINGS_SOURCE[update_start:update_end]
+        for fragment in (
+            'class="settings-page-heading"',
+            'class="settings-lite-page settings-light-page update-panel"',
+            'class="settings-lite-card settings-surface-card update-overview-card"',
+            'id="updateCurVer"',
+            'id="updateStatus"',
+            'id="updateActions"',
+            'id="updateProgressWrap"',
+        ):
+            self.assertIn(fragment, update)
+        for behavior in (
+            "disposeUpdatePanel();",
+            "const generation = updatePanelGeneration;",
+            "const isCurrent = () => generation === updatePanelGeneration;",
+        ):
+            self.assertIn(behavior, update)
+
+    def test_light_page_scale_is_scoped_away_from_dense_settings_renderers(self):
+        source = self.phase_source()
+        for selector in (
+            ".settings-light-page",
+            ".settings-page-heading",
+            ".settings-surface-card",
+            ".settings-card-heading",
+            ".settings-card-actions",
+            ".memory-settings-panel",
+            ".system-settings-panel",
+            ".editor-settings-panel",
+            ".update-panel",
+        ):
+            self.assertIn(selector, source)
+        for forbidden in (
+            ".key-row",
+            ".image-connection-card",
+            ".skills-layout-inner",
+            ".tp-picker",
+            ".account-identity-card",
+            ".archived-session-row",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        renderer_ranges = (
+            (SETTINGS_SOURCE, "function renderModelsPanel", "function renderSystemPanel"),
+            (SETTINGS_SOURCE, "function renderImagePanel", "function renderModelsPanel"),
+            (SETTINGS_SOURCE, "function renderThemePanel", "function renderAccountPanel"),
+            (SETTINGS_SOURCE, "function renderAccountPanel", "function isUpdateNoticeUnread"),
+            (SETTINGS_SOURCE, "function renderArchivedSessionsPanel", "function refreshArchivedSessions"),
+            (SKILLS_MEMORY_SOURCE, "function renderSkillsInSettings", "function renderSettingsSkillsSidebar"),
+        )
+        for module, start_marker, end_marker in renderer_ranges:
+            start = module.index(start_marker)
+            end = module.index(end_marker, start)
+            self.assertNotIn("settings-light-page", module[start:end], start_marker)
 
 
 if __name__ == "__main__":

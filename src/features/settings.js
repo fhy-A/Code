@@ -974,9 +974,13 @@
     }
 
     function renderSystemPanel(container) {
-      container.innerHTML = `<h3 style="margin:0 0 14px" data-i18n="system">${t("system")}</h3>
-        <textarea id="settingsSystemText" class="system-prompt-text" style="height:400px" spellcheck="false">${escapeHtml(els.systemPromptText.value)}</textarea>
-        <div class="panel-actions" style="margin-top:8px"><span data-i18n="systemPromptHint">${t("systemPromptHint")}</span><button id="settingsResetSystem" class="mini-btn" type="button" data-i18n="resetDefault">${t("resetDefault")}</button></div>`;
+      container.innerHTML = `<div class="settings-page-heading"><h3 class="settings-section-title" data-i18n="system">${t("system")}</h3></div>
+        <div class="settings-lite-page settings-light-page system-settings-panel">
+          <section class="settings-lite-card settings-surface-card settings-editor-card">
+            <textarea id="settingsSystemText" class="system-prompt-text" spellcheck="false">${escapeHtml(els.systemPromptText.value)}</textarea>
+            <div class="settings-card-actions system-prompt-actions"><span class="settings-card-hint" data-i18n="systemPromptHint">${t("systemPromptHint")}</span><button id="settingsResetSystem" class="mini-btn" type="button" data-i18n="resetDefault">${t("resetDefault")}</button></div>
+          </section>
+        </div>`;
       byId("settingsSystemText").addEventListener("change", (event) => {
         els.systemPromptText.value = event.currentTarget.value;
         saveSystemPrompt();
@@ -994,9 +998,9 @@
       const options = FOLLOW_UP_BEHAVIORS.map((behavior) => (
         `<button class="follow-up-behavior-option${behavior === current ? " active" : ""}" type="button" role="radio" aria-checked="${behavior === current}" data-follow-up-behavior="${behavior}">${t(behavior === "steer" ? "followUpSteer" : "followUpQueue")}</button>`
       )).join("");
-      container.innerHTML = `<h3 class="settings-section-title" data-i18n="editorSettings">${t("editorSettings")}</h3>
-        <div class="settings-lite-page editor-settings-panel">
-          <section class="settings-lite-card follow-up-behavior-card">
+      container.innerHTML = `<div class="settings-page-heading"><h3 class="settings-section-title" data-i18n="editorSettings">${t("editorSettings")}</h3></div>
+        <div class="settings-lite-page settings-light-page editor-settings-panel">
+          <section class="settings-lite-card settings-surface-card follow-up-behavior-card">
             <div class="follow-up-behavior-copy">
               <strong data-i18n="followUpBehavior">${t("followUpBehavior")}</strong>
               <span data-i18n="followUpBehaviorHint">${t("followUpBehaviorHint")}</span>
@@ -1298,9 +1302,9 @@
         if (byId("updatePct")) byId("updatePct").textContent = `${Math.floor(normalized)}%`;
       };
 
-      container.innerHTML = `<h3 class="settings-section-title" data-i18n="update">${t("update")}</h3>
-        <div class="settings-lite-page update-panel">
-          <section class="settings-lite-card update-overview-card">
+      container.innerHTML = `<div class="settings-page-heading"><h3 class="settings-section-title" data-i18n="update">${t("update")}</h3></div>
+        <div class="settings-lite-page settings-light-page update-panel">
+          <section class="settings-lite-card settings-surface-card update-overview-card">
             <div class="update-app-mark" aria-hidden="true"><svg viewBox="0 0 160 160" fill="none"><path d="M80 13A40 40 0 0 1 80 93"/><path d="M80 147A40 40 0 0 1 80 67"/></svg></div>
             <div class="update-overview-copy">
               <div class="update-product-name">Code</div>

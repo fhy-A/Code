@@ -1168,18 +1168,34 @@
 
     function renderMemoryPanel(container) {
       state._editingMemory = null;
-      container.innerHTML = `<h3 style="margin:0 0 14px" data-i18n="memory">${t("memory")}</h3><div id="settingsMemoryList" class="memory-list" style="max-height:300px; overflow:auto"></div>
-        <div id="settingsMemoryForm" class="memory-form">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;height:24px">
-            <span id="memFormLabel" style="font-weight:700;font-size:13px;color:var(--text)" data-i18n="newMemory">${t("newMemory")}</span>
-            <button id="memCancelBtn" class="mini-btn" type="button" style="visibility:hidden" data-i18n="cancel">${t("cancel")}</button>
+      container.innerHTML = `<div class="settings-page-heading settings-memory-heading">
+          <div class="settings-memory-heading-copy">
+            <h3 class="settings-section-title" data-i18n="memory">${t("memory")}</h3>
+            <p class="settings-memory-description" data-i18n="memoryContextHint">${t("memoryContextHint")}</p>
           </div>
-          <input id="settingsMemName" placeholder="${t("memNamePlaceholder")}" data-i18n="memNamePlaceholder" autocomplete="off" />
-          <input id="settingsMemDesc" placeholder="${t("memDescPlaceholder")}" data-i18n="memDescPlaceholder" autocomplete="off" />
-          <textarea id="settingsMemBody" rows="5" placeholder="${t("memBodyPlaceholder")}" data-i18n="memBodyPlaceholder" spellcheck="false"></textarea>
-          <div class="memory-form-actions"><button id="settingsSaveMem" class="mini-btn" type="button" data-i18n="save">${t("save")}</button></div>
+          <button id="settingsNewMem" class="mini-btn primary-btn" type="button" data-i18n="newMemory">${t("newMemory")}</button>
+        </div>
+        <div class="settings-lite-page settings-light-page memory-settings-panel">
+          <div id="settingsMemoryWorkspace" class="settings-memory-workspace" data-mode="list">
+            <section id="settingsMemoryListView" class="settings-memory-list-view" aria-hidden="false">
+              <div id="settingsMemoryList" class="memory-list"></div>
+            </section>
+            <section id="settingsMemoryForm" class="memory-form" hidden aria-hidden="true">
+              <div class="memory-form-heading">
+                <strong id="memFormLabel" data-i18n="newMemory">${t("newMemory")}</strong>
+              </div>
+              <input id="settingsMemName" placeholder="${t("memNamePlaceholder")}" data-i18n="memNamePlaceholder" autocomplete="off" />
+              <input id="settingsMemDesc" placeholder="${t("memDescPlaceholder")}" data-i18n="memDescPlaceholder" autocomplete="off" />
+              <textarea id="settingsMemBody" rows="5" placeholder="${t("memBodyPlaceholder")}" data-i18n="memBodyPlaceholder" spellcheck="false"></textarea>
+              <div class="memory-form-actions settings-card-actions">
+                <button id="memCancelBtn" class="mini-btn" type="button" data-i18n="cancel">${t("cancel")}</button>
+                <button id="settingsSaveMem" class="mini-btn primary-btn" type="button" data-i18n="save">${t("save")}</button>
+              </div>
+            </section>
+          </div>
         </div>`;
       refreshSettingsMemoryList();
+      byId("settingsNewMem").addEventListener("click", () => showSettingsMemoryFormMode());
       byId("settingsSaveMem").addEventListener("click", async () => {
         const name = byId("settingsMemName").value.trim();
         const description = byId("settingsMemDesc").value.trim();
@@ -1197,22 +1213,74 @@
           method: "POST",
           body: JSON.stringify({ name, meta: { description }, body }),
         });
-        clearMemoryForm();
+        showSettingsMemoryListMode();
         refreshSettingsMemoryList();
         loadMemoryContext();
       });
-      byId("memCancelBtn").addEventListener("click", clearMemoryForm);
+      byId("memCancelBtn").addEventListener("click", showSettingsMemoryListMode);
     }
 
     function clearMemoryForm() {
       state._editingMemory = null;
-      byId("settingsMemName").value = "";
-      byId("settingsMemDesc").value = "";
-      byId("settingsMemBody").value = "";
-      byId("memFormLabel").dataset.i18n = "newMemory";
-      byId("memFormLabel").textContent = t("newMemory");
-      byId("memCancelBtn").style.visibility = "hidden";
-      byId("settingsMemName").disabled = false;
+      const name = byId("settingsMemName");
+      const description = byId("settingsMemDesc");
+      const body = byId("settingsMemBody");
+      const label = byId("memFormLabel");
+      if (name) {
+        name.value = "";
+        name.disabled = false;
+      }
+      if (description) description.value = "";
+      if (body) body.value = "";
+      if (label) {
+        label.dataset.i18n = "newMemory";
+        label.textContent = t("newMemory");
+      }
+    }
+
+    function showSettingsMemoryListMode() {
+      clearMemoryForm();
+      const workspace = byId("settingsMemoryWorkspace");
+      const listView = byId("settingsMemoryListView");
+      const form = byId("settingsMemoryForm");
+      const newButton = byId("settingsNewMem");
+      if (!workspace || !listView || !form) return;
+      workspace.dataset.mode = "list";
+      listView.hidden = false;
+      listView.setAttribute("aria-hidden", "false");
+      form.hidden = true;
+      form.setAttribute("aria-hidden", "true");
+      if (newButton) newButton.hidden = false;
+    }
+
+    function showSettingsMemoryFormMode(memory = null) {
+      const workspace = byId("settingsMemoryWorkspace");
+      const listView = byId("settingsMemoryListView");
+      const form = byId("settingsMemoryForm");
+      const newButton = byId("settingsNewMem");
+      const name = byId("settingsMemName");
+      const description = byId("settingsMemDesc");
+      const body = byId("settingsMemBody");
+      const label = byId("memFormLabel");
+      if (!workspace || !listView || !form || !name || !description || !body || !label) return;
+      state._editingMemory = memory?.name || null;
+      name.value = memory?.name || "";
+      name.disabled = Boolean(memory);
+      description.value = (memory?.meta || {}).description || "";
+      body.value = memory?.body || "";
+      if (memory) {
+        label.removeAttribute("data-i18n");
+        label.textContent = t("editingMemory", { name: memory.name });
+      } else {
+        label.dataset.i18n = "newMemory";
+        label.textContent = t("newMemory");
+      }
+      workspace.dataset.mode = "form";
+      listView.hidden = true;
+      listView.setAttribute("aria-hidden", "true");
+      form.hidden = false;
+      form.setAttribute("aria-hidden", "false");
+      if (newButton) newButton.hidden = true;
     }
 
     async function refreshSettingsMemoryList() {
@@ -1234,17 +1302,7 @@
         </div>`).join("") : `<div class="muted-line" style="padding:12px" data-i18n="noMemory">${t("noMemory")}</div>`;
         list.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", async () => {
           const memory = await apiJson(`/api/memory?file=${encodeURIComponent(button.dataset.edit)}`);
-          state._editingMemory = memory.name;
-          byId("settingsMemName").value = memory.name || "";
-          byId("settingsMemName").disabled = true;
-          byId("settingsMemDesc").value = (memory.meta || {}).description || "";
-          byId("settingsMemBody").value = memory.body || "";
-          byId("memFormLabel").removeAttribute("data-i18n");
-          byId("memFormLabel").textContent = t("editingMemory", { name: memory.name });
-          byId("memCancelBtn").style.visibility = "";
-          list.querySelectorAll(".memory-item").forEach((element) => {
-            element.classList.toggle("editing", element.dataset.name === memory.name);
-          });
+          showSettingsMemoryFormMode(memory);
         }));
         list.querySelectorAll("[data-del]").forEach((button) => button.addEventListener("click", () => {
           const item = button.closest(".memory-item");
@@ -1259,7 +1317,7 @@
           confirm.querySelector(".key-confirm-yes").addEventListener("click", async () => {
             confirm.remove();
             await apiJson(`/api/memory?file=${encodeURIComponent(name)}`, { method: "DELETE" });
-            if (state._editingMemory === name) clearMemoryForm();
+            if (state._editingMemory === name) showSettingsMemoryListMode();
             refreshSettingsMemoryList();
             loadMemoryContext();
           });

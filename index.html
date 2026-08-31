@@ -605,9 +605,13 @@
   <!-- Unified Settings Page -->
   <div class="settings-modal hidden" id="settingsPage">
     <div class="modal-card settings-page-card">
-      <header>
+      <header class="settings-shell-header">
         <h2 data-i18n="settings">设置</h2>
-        <button id="closeSettingsPage" class="icon-btn" type="button">×</button>
+        <button id="closeSettingsPage" class="settings-shell-close" type="button"
+          data-i18n-title="close" data-i18n-aria-label="close" title="关闭" aria-label="关闭">
+          <svg class="settings-shell-close-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
       </header>
       <div class="settings-layout">
         <div class="settings-nav" id="settingsNav">
