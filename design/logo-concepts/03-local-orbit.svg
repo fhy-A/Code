@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title id="title">Portal A</title>
-  <path d="M32 5 60 57H4L32 5Z" fill="#2563EB"/>
-  <path d="M32 25.5 42.8 48H21.2L32 25.5Z" fill="#F8FAFC"/>
-  <rect x="23" y="46" width="18" height="11" rx="5.5" fill="#60A5FA"/>
-</svg>

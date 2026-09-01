@@ -4,7 +4,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 
-ROOT = Path(__file__).resolve().parents[2]
+DESIGN_DIR = Path(__file__).resolve().parent
+ROOT = DESIGN_DIR.parent.parent
 ASSETS = ROOT / "assets"
 ASSET_ICON_PNG = ASSETS / "code-icon.png"
 BLACK_MARK_PNG = ASSETS / "code-logo-black.png"

@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">Code Brackets</title>
-  <desc id="desc">A bold code bracket pair crossed by a precise slash.</desc>
-  <path d="M25.5 13 9.5 32l16 19" fill="none" stroke="#2563EB" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="m38.5 13 16 19-16 19" fill="none" stroke="#60A5FA" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M37 9 27 55" fill="none" stroke="#1D4ED8" stroke-width="6" stroke-linecap="round"/>
-</svg>

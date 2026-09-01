@@ -58,7 +58,8 @@ CODE043_COMPACT_DISCLOSURES_FINAL_STATE_SELFCHECK_SOURCE = (
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
 LOGO_SOURCE = (ROOT / "assets" / "code-logo.svg").read_text(encoding="utf-8")
-LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.py").read_text(encoding="utf-8")
+FINAL_LOGO_SOURCE_DIR = ROOT / "design" / "code-logo-final"
+LOGO_EXPORT_SOURCE = (FINAL_LOGO_SOURCE_DIR / "export_selected_logo.py").read_text(encoding="utf-8")
 
 
 class TestFrontendCoreModules(unittest.TestCase):
@@ -21077,6 +21078,26 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("code.bundle.meta.json", BUILD_SOURCE)
 
     def test_code_brand_mark_and_minimal_welcome_stay_in_sync(self):
+        self.assertEqual(
+            [path.name for path in (ROOT / "design").iterdir() if path.is_dir()],
+            ["code-logo-final"],
+        )
+        self.assertEqual(
+            sorted(path.name for path in FINAL_LOGO_SOURCE_DIR.iterdir() if path.is_file()),
+            [
+                "README.md",
+                "base-circles.svg",
+                "construction.svg",
+                "cut-diagram.svg",
+                "export_selected_logo.py",
+                "preview.html",
+                "stacked-dialogue-black.svg",
+                "stacked-dialogue-white.svg",
+                "stacked-dialogue.svg",
+            ],
+        )
+        self.assertIn("DESIGN_DIR = Path(__file__).resolve().parent", LOGO_EXPORT_SOURCE)
+        self.assertIn("ROOT = DESIGN_DIR.parent.parent", LOGO_EXPORT_SOURCE)
         upper_path = "M80 13A40 40 0 0 1 80 93"
         lower_path = "M80 147A40 40 0 0 1 80 67"
         for source in (INDEX_SOURCE, APP_SOURCE, LOGO_SOURCE):

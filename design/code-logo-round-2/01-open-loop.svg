@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">Open Loop</title>
-  <desc id="desc">A minimal C loop with a live cursor block.</desc>
-  <path d="M45.5 15.5A22 22 0 1 0 45.5 48.5" fill="none" stroke="#2563EB" stroke-width="9" stroke-linecap="round"/>
-  <rect x="43" y="27" width="12" height="10" rx="3" fill="#60A5FA"/>
-</svg>

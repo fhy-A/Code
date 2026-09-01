@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">Folded C</title>
-  <desc id="desc">An angular C built as a folded directional ribbon.</desc>
-  <path d="M52 9H25L8 24v16l17 15h27V43H30l-9-8v-6l9-8h22V9Z" fill="#2563EB"/>
-  <path d="M30 21 21 29v6l9 8h9L29 32l10-11h-9Z" fill="#60A5FA"/>
-  <path d="M43 21h9v22h-9L33 32l10-11Z" fill="#1D4ED8" opacity=".9"/>
-</svg>

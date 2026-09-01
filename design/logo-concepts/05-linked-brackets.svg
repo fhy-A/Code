@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title id="title">A Cursor</title>
-  <path d="M7 55 28.3 11.4c1.5-3.1 5.9-3.1 7.4 0L57 55H44.6L32 28.8 19.4 55H7Z" fill="#2563EB"/>
-  <path d="m32 28.8 5.8 12H26.2l5.8-12Z" fill="#DBEAFE"/>
-  <path d="M45 37.5 59 43l-6 3 3 6-4 2-3-6-4 5V37.5Z" fill="#60A5FA" stroke="#F8FAFC" stroke-width="1.5" stroke-linejoin="round"/>
-</svg>

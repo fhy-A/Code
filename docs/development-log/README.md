@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | Code 品牌设计源收敛：最终 7 个 stacked-circles 构造稿与导出器无损迁入唯一 `design/code-logo-final/`，增加目录说明，其余 68 个 tracked 历史候选从当前树删除且 Git 历史可追溯；导出器重跑后五个 PNG / ICO 哈希逐项不变、无生成资产差量，定向 `1 test`、完整前端 `415 tests`、AST / diff 与唯一目录清单通过，未改写历史日志或触碰发布 / 用户 data | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 发布构建移除版本化 PyInstaller spec：七份内容等价的 `Code-v0.6.1`～`v0.6.7.spec` 从当前树删除，`build_exe.py --specpath build/` 成为唯一生成路径，release 的未来元数据白名单 / 凭证 / 暂存不再含 spec，既有 published 凭证不变。fail-first `2 failures + 3 errors` 后 release / workflow / frontend `458 tests`、frontend freshness、语法 / diff 与一次非发布 PyInstaller 构建通过；EXE 仍为 v0.6.7 且唯一 spec 位于 ignored build | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | Code 项目目录保守整理第一阶段：七个精确白名单空目录 / Python / pytest 缓存经 containment、reparse、内容类型及 tracked=0 审计后删除，共 273 个文件、18,050,456 字节；新增唯一 `.pytest_cache/` 忽略规则。两个无引用的一次性 PPT 脚本以原字节迁入 `scripts/legacy/presentation/`，哈希与 AST 解析保持，README 明确非产品入口；未改变运行、构建、发布或用户 data | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 公开短期待办摘要边界测试加固：精确锁定唯一“近期方向”章节的四项与顺序，全文拒绝嵌入式 CODE / WB ID、渠道、供应商、安全缺口和具体日期，同时允许现有禁止承载字段说明；7 个纯内存对抗样本命中预期违规类别，定向 `6 tests` 与 diff 检查通过。公开 TODO blob、私有 TODO 哈希及全部规则 / handoff 均未改变 | [查看](2026/2026-09-01.md) |

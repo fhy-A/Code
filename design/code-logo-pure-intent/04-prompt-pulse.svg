@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">Prompt Pulse</title>
-  <desc id="desc">A prompt becomes a living reasoning pulse and a code cursor.</desc>
-  <defs><linearGradient id="pulse" x1="8" y1="16" x2="57" y2="48" gradientUnits="userSpaceOnUse"><stop stop-color="#8B5CF6"/><stop offset=".5" stop-color="#2563EB"/><stop offset="1" stop-color="#22D3EE"/></linearGradient></defs>
-  <path d="m8 17 13 15L8 47" fill="none" stroke="url(#pulse)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M25 32c5-17 9 17 15 0s10 17 16 0" fill="none" stroke="url(#pulse)" stroke-width="6" stroke-linecap="round"/>
-  <path d="M49 48h8" fill="none" stroke="#22D3EE" stroke-width="6" stroke-linecap="round"/>
-</svg>
