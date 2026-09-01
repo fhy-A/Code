@@ -2,7 +2,7 @@
 Code 自动发版脚本
 
 保留项目已有一次性发版流程，并提供可验证的两阶段发布：
-  1. 版本号同步（VERSION / file_version_info.txt / README.md / .spec）
+  1. 版本号同步（VERSION / file_version_info.txt / README.md）
   2. 一致性校验
   3. 全量测试 + 语法检查
   4. PyInstaller 构建 EXE
@@ -245,7 +245,6 @@ def _release_paths(version):
         "VERSION",
         "file_version_info.txt",
         "README.md",
-        f"Code-v{version}.spec",
         f"docs/releases/v{version}.md",
     )
 
@@ -555,28 +554,6 @@ def update_readme(new_version):
     ok(f"README.md -> {new_version}")
 
 
-def create_spec_file(new_version, old_version):
-    new_spec = ROOT / f"Code-v{new_version}.spec"
-
-    # Find the newest existing versioned spec file that is not the new one.
-    spec_files = sorted(ROOT.glob("Code-v*.spec"), reverse=True)
-    old_spec = None
-    for sf in spec_files:
-        if sf.stem != f"Code-v{new_version}":
-            old_spec = sf
-            break
-
-    if old_spec is None:
-        die(f"找不到旧版 spec 文件作为模板（搜索: Code-v*.spec，排除: {new_spec.name}）")
-
-    content = old_spec.read_text(encoding="utf-8")
-    content = content.replace(f"Code-v{old_spec.stem[5:]}", f"Code-v{new_version}")
-    content = content.replace(f"name='{old_spec.stem}'", f"name='Code-v{new_version}'")
-
-    new_spec.write_text(content, encoding="utf-8")
-    ok(f"{new_spec.name} 已创建（基于 {old_spec.name}）")
-
-
 # ═══════════════════════════════════════════════════════════════
 # Step 3: 一致性校验
 # ═══════════════════════════════════════════════════════════════
@@ -601,12 +578,6 @@ def verify_version_consistency(new_version, old_version, dry_run=False):
         readme = README_FILE.read_text(encoding="utf-8")
         _verify_readme_version_metadata(readme, old_version)
 
-        old_spec = ROOT / f"Code-v{old_version}.spec"
-        if old_spec.exists():
-            ok(f"旧 spec 文件存在: {old_spec.name}")
-        else:
-            die(f"找不到旧 spec 文件: {old_spec.name}")
-
         print("  预演模式一致性校验通过（将基于 v{0} 发版 v{1}）".format(old_version, new_version))
 
     else:
@@ -624,11 +595,6 @@ def verify_version_consistency(new_version, old_version, dry_run=False):
 
         readme = README_FILE.read_text(encoding="utf-8")
         _verify_readme_version_metadata(readme, new_version)
-
-        new_spec = ROOT / f"Code-v{new_version}.spec"
-        if not new_spec.exists():
-            die(f"找不到新 spec 文件: {new_spec.name}")
-        ok(f"spec 文件已创建: {new_spec.name}")
 
         print("  版本号一致性校验通过")
 
@@ -958,7 +924,7 @@ def _render_release_notes(new_version, body, sha256, exe_size, date_str):
 ## 打包信息
 
 - 版本已更新至 `{new_version}`。
-- `VERSION`、`file_version_info.txt`、`README.md` 与 PyInstaller spec 已同步。
+- `VERSION`、`file_version_info.txt` 与 `README.md` 已同步。
 - 构建命令：
 
 ```bash
@@ -1166,7 +1132,6 @@ def prepare_release(version):
         update_version_file(version)
         update_version_info(version, version_tuple)
         update_readme(version)
-        create_spec_file(version, old_version)
         verify_version_consistency(version, old_version, dry_run=False)
 
         run_release_quality_checks(dry_run=False, skip_tests=False)
@@ -1517,7 +1482,6 @@ def git_commit_and_tag(new_version, dry_run=False):
         "VERSION",
         "file_version_info.txt",
         "README.md",
-        f"Code-v{new_version}.spec",
         f"docs/releases/v{new_version}.md",
     ]
 
@@ -1821,8 +1785,6 @@ def main():
         update_version_file(new_version)
         update_version_info(new_version, version_tuple)
         update_readme(new_version)
-        create_spec_file(new_version, old_version)
-
     verify_version_consistency(new_version, old_version, dry_run=args.dry_run)
 
     # ── Phase 2: 代码质量检查 ──

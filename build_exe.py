@@ -38,6 +38,7 @@ cmd = [
     sys.executable, "-m", "PyInstaller",
     "--onefile",
     "--name", name,
+    "--specpath", str(APP_DIR / "build"),
     "--icon", str(APP_DIR / "code-icon.ico"),
     "--version-file", str(APP_DIR / "file_version_info.txt"),
     "--add-data", f"{APP_DIR / 'VERSION'}{';'}.",

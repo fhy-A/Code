@@ -90,7 +90,6 @@ class TestPrepareAtomicFailure(unittest.TestCase):
         (self.root / "VERSION").write_text("1.0.0\n", encoding="utf-8")
         (self.root / "file_version_info.txt").write_text("old-info\n", encoding="utf-8")
         (self.root / "README.md").write_text("old-readme\n", encoding="utf-8")
-        (self.root / "Code-v1.0.0.spec").write_text("old-spec\n", encoding="utf-8")
         self.credential_path = self.root / "credential.json"
         self.stack = ExitStack()
         self.stack.enter_context(mock.patch.object(release, "ROOT", self.root))
@@ -128,7 +127,6 @@ class TestPrepareAtomicFailure(unittest.TestCase):
                 mock.patch.object(release, "update_version_file", side_effect=update_version), \
                 mock.patch.object(release, "update_version_info"), \
                 mock.patch.object(release, "update_readme"), \
-                mock.patch.object(release, "create_spec_file"), \
                 mock.patch.object(release, "verify_version_consistency"), \
                 mock.patch.object(
                     release,
@@ -157,7 +155,6 @@ class TestPrepareAtomicFailure(unittest.TestCase):
 
     def test_success_creates_bound_prepared_credential_without_publication(self):
         events = []
-        target_spec = self.root / "Code-v1.0.1.spec"
         target_notes = self.root / "docs" / "releases" / "v1.0.1.md"
         artifact = self.root / "dist" / "Code-v1.0.1.exe"
 
@@ -175,9 +172,6 @@ class TestPrepareAtomicFailure(unittest.TestCase):
         def update_readme(version):
             release.README_FILE.write_text(f"readme {version}\n", encoding="utf-8")
 
-        def create_spec(version, old_version):
-            target_spec.write_text(f"spec {version}\n", encoding="utf-8")
-
         def build(version):
             artifact.parent.mkdir()
             artifact.write_bytes(b"prepared-exe")
@@ -194,7 +188,6 @@ class TestPrepareAtomicFailure(unittest.TestCase):
                 mock.patch.object(release, "update_version_file", side_effect=update_version), \
                 mock.patch.object(release, "update_version_info", side_effect=update_info), \
                 mock.patch.object(release, "update_readme", side_effect=update_readme), \
-                mock.patch.object(release, "create_spec_file", side_effect=create_spec), \
                 mock.patch.object(release, "verify_version_consistency"), \
                 mock.patch.object(release, "run_release_quality_checks") as quality, \
                 mock.patch.object(release, "build_exe", side_effect=build), \
@@ -231,6 +224,9 @@ class TestPrepareAtomicFailure(unittest.TestCase):
         self.assertEqual(credential["baseline"]["head"], "base-head")
         self.assertEqual(credential["publication"]["lastCompleted"], "prepared")
         self.assertIsNone(credential["publication"]["startedAt"])
+        recorded_paths = tuple(item["path"] for item in credential["releaseFiles"])
+        self.assertEqual(recorded_paths, release._release_paths("1.0.1"))
+        self.assertNotIn("Code-v1.0.1.spec", recorded_paths)
         self.assertNotIn("h4", credential["verification"]["checkIds"])
         pytest_manifest = next(
             item
@@ -393,7 +389,6 @@ class TestPublishResumeIntegration(unittest.TestCase):
         (self.root / "VERSION").write_text("1.0.0\n", encoding="utf-8")
         (self.root / "file_version_info.txt").write_text("version=1.0.0\n", encoding="utf-8")
         (self.root / "README.md").write_text("download 1.0.0\n", encoding="utf-8")
-        (self.root / "Code-v1.0.0.spec").write_text("spec 1.0.0\n", encoding="utf-8")
         git(self.root, "add", ".")
         git(self.root, "commit", "-m", "base")
         self.base_head = git(self.root, "rev-parse", "HEAD")
@@ -404,7 +399,6 @@ class TestPublishResumeIntegration(unittest.TestCase):
         (self.root / "VERSION").write_text("1.0.1\n", encoding="utf-8")
         (self.root / "file_version_info.txt").write_text("version=1.0.1\n", encoding="utf-8")
         (self.root / "README.md").write_text("download 1.0.1\n", encoding="utf-8")
-        (self.root / "Code-v1.0.1.spec").write_text("spec 1.0.1\n", encoding="utf-8")
         (self.root / "docs" / "releases" / "v1.0.1.md").write_text(
             "# Code v1.0.1 Release Notes\n\n已验证的测试发布说明。\n",
             encoding="utf-8",

@@ -56,8 +56,6 @@ CODE043_COMPACT_DISCLOSURES_FINAL_STATE_SELFCHECK_SOURCE = (
     ROOT / "tests" / "e2e" / "h4" / "code043-compact-disclosures-final-state-selfcheck.cjs"
 ).read_text(encoding="utf-8")
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-CURRENT_SPEC_SOURCE = (ROOT / f"Code-v{CURRENT_VERSION}.spec").read_text(encoding="utf-8")
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
 LOGO_SOURCE = (ROOT / "assets" / "code-logo.svg").read_text(encoding="utf-8")
 LOGO_EXPORT_SOURCE = (ROOT / "design" / "logo-concepts" / "export_selected_logo.py").read_text(encoding="utf-8")
@@ -6055,12 +6053,14 @@ process.stdout.write(JSON.stringify({{
         self.assertNotIn("code.bundle.js.map", BUILD_SOURCE)
         self.assertNotIn("code.bundle.meta.json", BUILD_SOURCE)
 
-        self.assertIn("dist\\\\frontend\\\\code.bundle.js", CURRENT_SPEC_SOURCE)
-        self.assertIn("dist\\\\frontend\\\\index.classic.html", CURRENT_SPEC_SOURCE)
-        self.assertIn("src', 'src'", CURRENT_SPEC_SOURCE)
-        self.assertNotIn("code.bundle.js.map", CURRENT_SPEC_SOURCE)
-        self.assertNotIn("code.bundle.meta.json", CURRENT_SPEC_SOURCE)
-        self.assertNotIn("code.bundle.state.json", CURRENT_SPEC_SOURCE)
+        self.assertIn('"--specpath"', BUILD_SOURCE)
+        self.assertIn('str(APP_DIR / "build")', BUILD_SOURCE)
+        self.assertIn("f\"{APP_DIR / 'src'}{';'}src\"", BUILD_SOURCE)
+        self.assertIn("f\"{FRONTEND_BUNDLE}{';'}dist/frontend\"", BUILD_SOURCE)
+        self.assertIn("f\"{FRONTEND_CLASSIC_FALLBACK}{';'}dist/frontend\"", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.js.map", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.meta.json", BUILD_SOURCE)
+        self.assertNotIn("code.bundle.state.json", BUILD_SOURCE)
 
         entry_imports = re.findall(
             r'^import "([^\"]+)";$',

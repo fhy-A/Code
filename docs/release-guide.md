@@ -37,7 +37,7 @@ python release.py 0.5.8 --skip-tests
 
 | 阶段 | 操作 | 校验 |
 |------|------|------|
-| 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md`，复制 `.spec` | 4 个文件版本号一致；README 徽章 URL / alt 与 EXE 下载名同版 |
+| 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md` | 3 个文件版本号一致；README 徽章 URL / alt 与 EXE 下载名同版 |
 | 2 | 前端门禁 → `pytest -q`（360 秒）→ `npm run verify:harness-replay`（30 秒）→ `git diff --check` → `node --check` / `py_compile` | 前端构建、完整回归、默认 replay CLI、差异与语法全部通过 |
 | 3 | `python build_exe.py` 打包 | EXE 文件生成 |
 | 4 | 读取 EXE 版本元数据 + 计算 SHA-256 | `ProductVersion` / `FileVersion` / `OriginalFilename` 正确 |
@@ -233,20 +233,19 @@ python release.py 0.5.8 --resume --yes
 
 如果脚本不可用，以下是手动操作清单：
 
-### 1. 改版本号（4 个文件）
+### 1. 改版本号（3 个文件）
 
 ```
 VERSION                              → 改内容为 "0.5.8"
 file_version_info.txt                → 改 filevers/prodvers/FileVersion/ProductVersion/OriginalFilename
 README.md                            → 同步版本徽章 URL / alt 和具体 EXE 下载名
-Code-v0.5.7.spec → Code-v0.5.8.spec  → 复制并替换内部的版本号
 ```
 
 ### 2. 验证一致性
 
 ```powershell
-# 确认四个文件中的版本号都指向 0.5.8
-findstr "0.5.8" VERSION file_version_info.txt README.md Code-v0.5.8.spec
+# 确认三个文件中的版本号都指向 0.5.8
+findstr "0.5.8" VERSION file_version_info.txt README.md
 ```
 
 ### 3. 质量检查
@@ -284,7 +283,7 @@ python build_exe.py
 ### 7. 提交 & 打标签
 
 ```powershell
-git add VERSION file_version_info.txt README.md Code-v0.5.8.spec docs/releases/v0.5.8.md
+git add VERSION file_version_info.txt README.md docs/releases/v0.5.8.md
 git commit -m "chore: prepare v0.5.8 release metadata"
 git tag v0.5.8
 ```
@@ -327,8 +326,7 @@ gh release create v0.5.8 dist/Code-v0.5.8.exe `
 | `VERSION` | 纯文本版本号 |
 | `file_version_info.txt` | Windows EXE 版本元数据 |
 | `README.md` | 项目首页（含版本徽章和下载链接） |
-| `Code-vX.Y.Z.spec` | PyInstaller 打包配置 |
-| `build_exe.py` | PyInstaller 构建入口 |
+| `build_exe.py` | canonical PyInstaller 打包入口；临时 spec 只生成到已忽略的 `build/` |
 | `docs/releases/vX.Y.Z.md` | 单版本发布说明 |
 | `docs/development-log/README.md` | 开发日志索引；详细记录位于同目录的日期文件，早期记录位于 `archive/` |
 | `TODO.md` | 用户批准的公开、脱敏、非执行短期待办摘要；内部 canonical 路线位于 `../../workbar-private/TODO.md`，摘要仅在用户明确批准后人工更新 |

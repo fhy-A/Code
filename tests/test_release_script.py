@@ -155,6 +155,19 @@ Date: 2026-07-27
         )
         self.assertIn("if initial_errors and args.yes", source)
 
+    def test_release_paths_exclude_generated_pyinstaller_spec(self):
+        paths = release._release_paths("1.2.3")
+        self.assertEqual(
+            paths,
+            (
+                "VERSION",
+                "file_version_info.txt",
+                "README.md",
+                "docs/releases/v1.2.3.md",
+            ),
+        )
+        self.assertTrue(all(not path.endswith(".spec") for path in paths))
+
     def test_release_command_diagnostics_are_safe_for_legacy_console_encoding(self):
         raw = tempfile.SpooledTemporaryFile()
         import io
@@ -257,10 +270,6 @@ class TestReadmeVersionMetadata(unittest.TestCase):
         release.VERSION_FILE.write_text(expected_version + "\n", encoding="utf-8")
         release.VERSION_INFO_FILE.write_text(
             f"OriginalFilename=Code-v{expected_version}.exe\n",
-            encoding="utf-8",
-        )
-        (self.root / f"Code-v{expected_version}.spec").write_text(
-            "synthetic spec\n",
             encoding="utf-8",
         )
 
@@ -473,7 +482,6 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
                 mock.patch.object(release, "update_version_file"), \
                 mock.patch.object(release, "update_version_info"), \
                 mock.patch.object(release, "update_readme"), \
-                mock.patch.object(release, "create_spec_file"), \
                 mock.patch.object(release, "verify_version_consistency"), \
                 mock.patch.object(release, "prepare_frontend_assets"), \
                 mock.patch.object(release, "run_tests") as run_tests, \
