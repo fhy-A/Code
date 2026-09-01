@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | 未接入运行时的 Goal v1 移除：调用图确认三个旧模块仅由三份专属测试消费后删除全部六文件且不留 shim；`data/goals/` 旧 sidecar 继续原地保留、不读不迁移。布局合同以 AST / 动态导入形态阻止运行时回流，fail-first `1 failure` 后 Goal v2、AgentRun、frontend、server / Session 组合回归 `363 tests` 与 diff 检查通过 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 重复品牌图标与 H4 配置收口：删除与根图标字节相同且无产品消费者的 `assets/code-icon.png`，导出器重跑后四个保留 PNG / ICO 哈希不变且副本未重建；Playwright 配置归位 `tests/e2e/h4/`，以显式路径保持原 test/output 位置和全部运行参数。fail-first `2 failures` 后定向 `2 tests`、完整前端 `416 tests`、H4 infra 与新配置 smoke 列表 `164 tests`、语法 / JSON / diff 通过，未运行真实 H4 或 Browser | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | Code 品牌设计源收敛：最终 7 个 stacked-circles 构造稿与导出器无损迁入唯一 `design/code-logo-final/`，增加目录说明，其余 68 个 tracked 历史候选从当前树删除且 Git 历史可追溯；导出器重跑后五个 PNG / ICO 哈希逐项不变、无生成资产差量，定向 `1 test`、完整前端 `415 tests`、AST / diff 与唯一目录清单通过，未改写历史日志或触碰发布 / 用户 data | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 发布构建移除版本化 PyInstaller spec：七份内容等价的 `Code-v0.6.1`～`v0.6.7.spec` 从当前树删除，`build_exe.py --specpath build/` 成为唯一生成路径，release 的未来元数据白名单 / 凭证 / 暂存不再含 spec，既有 published 凭证不变。fail-first `2 failures + 3 errors` 后 release / workflow / frontend `458 tests`、frontend freshness、语法 / diff 与一次非发布 PyInstaller 构建通过；EXE 仍为 v0.6.7 且唯一 spec 位于 ignored build | [查看](2026/2026-09-01.md) |
