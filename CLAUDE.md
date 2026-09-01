@@ -5,7 +5,7 @@
 用户可以在新会话中直接提出任务，不需要为已经完成的阶段提供人工交接消息。开始任何开发、测试或评审任务前，Agent 自行完成：
 
 1. 阅读 `docs/development-log/README.md`，按索引读取最新日期文件，以及与当前任务直接相关的日期文件；历史归档仅在追溯时按需读取。
-2. 内部工作区优先阅读 sibling `../workbar-private/TODO.md`，确认未完成事项、优先级和当前任务边界；`TODO.md` 只是公开兼容 stub。
+2. 内部工作区优先阅读 sibling `../workbar-private/TODO.md`，确认未完成事项、优先级和当前任务边界；`TODO.md` 只是公开、脱敏、非执行的短期待办摘要，不是内部计划事实源。
 3. 运行 `git status --short` 和 `git log -8 --oneline`，核对分支、提交和共享工作区现场。
 4. **跨运行时写入租约**：Codex/DSH Developer Agent 在对共享 `code` 工作区执行任何写入、暂存、提交或会产生持久副作用的测试前，必须按 canonical `code/docs/approval-relay-protocol.md` 使用唯一 helper `code/scripts/workspace_owner_lease.py` 取得并维护 owner lease；Approval Agent 保持只读且不申请。租约仅提供同一物理 worktree 写入互斥，不授予 push、tag、release、delete 或线上配置权限。
 5. 按任务需要读取实现、测试、规范和专题文档，不默认加载完整历史。
@@ -17,7 +17,9 @@
 
 新增、更新、移动或完成未完成事项时，必须遵守私有 TODO 顶部的 canonical 维护契约：保留稳定 ID、唯一主域与唯一执行状态，跨域只写依赖 / 关联引用，完成事实进入公共开发日志，活动 handoff 只引用任务 ID / 链接。不得在公开 `TODO.md`、公开 handoff 或协作规则中复制内部计划。
 
-私有事实源缺失时，外部 clone 仍可按用户当前显式任务、公共代码与完成日志工作，但必须停止恢复内部计划，不得创建、扩写或从历史推测重建公开 stub。
+公开 `TODO.md` 只展示用户批准的高层短期方向，顺序不代表优先级，也不构成排期或发布承诺；Agent 不得据此自动选择或启动任务。该摘要仅在用户明确批准后人工更新，不得从私有 TODO 自动同步。
+
+私有事实源缺失时，外部 clone 仍可按用户当前显式任务、公共代码、公开摘要与完成日志工作，但必须停止恢复或重建内部计划，不得把公开摘要扩写为执行计划。
 
 任务结束时：
 

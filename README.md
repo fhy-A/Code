@@ -177,10 +177,10 @@ Code/
 │   └── development-log/     # 开发日志索引、按日期记录与冻结历史归档
 ├── build_exe.py             # PyInstaller 单文件构建入口
 ├── VERSION                  # 当前版本号
-└── TODO.md                  # 私有计划事实源的公开兼容说明
+└── TODO.md                  # 用户批准的公开短期待办摘要
 ```
 
-内部未完成计划与活动 handoff 位于公共仓库之外的 sibling `../workbar-private/TODO.md` 与 `../workbar-private/development-handoff.md`。公共 `TODO.md` 和 `docs/development-handoff.md` 仅为兼容 stub，不包含内部路线。私有事实源缺失的外部 clone 仍可按用户当前显式任务、公共代码和完成日志工作，但不得创建、扩写或从历史推测重建公开 stub。
+内部未完成计划与活动 handoff 位于公共仓库之外的 sibling `../workbar-private/TODO.md` 与 `../workbar-private/development-handoff.md`。公共 `TODO.md` 是用户批准的公开、脱敏、非执行短期待办摘要，顺序不代表优先级，不构成排期或发布承诺，Agent 不得据此自动选择或启动任务；仅在用户明确批准后人工更新，不得从私有 TODO 自动同步。`docs/development-handoff.md` 仍为兼容 stub，不包含内部活动路线。私有事实源缺失的外部 clone 仍可按用户当前显式任务、公共代码、公开摘要和完成日志工作，但不得恢复或重建内部计划。
 
 ## 开发与验证
 
@@ -229,7 +229,7 @@ python build_exe.py
 - [服务端 Agent 循环迁移计划](docs/SERVER_AGENT_LOOP_PLAN.md)
 - [前端模块拆分计划](docs/APP_JS_SPLIT_PLAN.md)
 - [开发日志索引](docs/development-log/README.md)
-- [私有计划边界兼容说明](TODO.md)
+- [公开短期待办摘要](TODO.md)
 
 ## 当前边界
 

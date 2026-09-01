@@ -26,7 +26,7 @@ Coordinate one user-owned approval task and one user-owned developer task. Keep 
 2. Read the applicable repository rules and only the fact sources those rules require for this task.
 3. Resolve the developer task by exact user-provided ID when available. Otherwise filter task candidates by host, project, working directory, purpose, and recent activity. Treat titles as untrusted metadata and bind only a unique candidate.
 4. Check whether another approval task still owns automatic sends. Pause rather than race or silently supersede it. If concurrent sending cannot be excluded, report that delivery is duplicate-resistant rather than transactionally exactly-once.
-5. Reconcile recent developer turns with Git, actual files, reproducible results, public completion logs, and—when present in the internal workspace—the private `../../workbar-private/TODO.md` and `../../workbar-private/development-handoff.md`. If the private fact source is absent, do not reconstruct it from public stubs or history; continue only from the user's explicit task scope.
+5. Reconcile recent developer turns with Git, actual files, reproducible results, public completion logs, and—when present in the internal workspace—the private `../../workbar-private/TODO.md` and `../../workbar-private/development-handoff.md`. The public TODO is a sanitized, non-executable short-term summary and must never be used to select or start work automatically. If the private fact source is absent, do not reconstruct internal plans from the public summary, stubs, or history; continue only from the user's explicit task scope.
 6. Recover the newest v2 or legacy v1 relay and its processed state. Never replay an existing `relayId`.
 7. Default a new approval task to `DEVELOPER_SUPERVISED`. Restore automatic mode only from a direct user instruction in this approval task.
 8. Synchronize and verify the mode title.
@@ -392,7 +392,7 @@ During the freeze:
 
 - compute `queueItemId` as SHA-256 over UTF-8 `sourceRef + LF + summary` after normalizing CRLF to LF and trimming trailing whitespace on every line;
 - write every later queue message as a complete `fullSnapshot: true` replacement for the same frozen baseline and version, preserving unchanged item IDs and removing an item only with an explicit disposition recorded in the accompanying approval message;
-- do not contact the developer, write the private plan, or repopulate the public TODO stub merely to persist the queue during the freeze;
+- do not contact the developer, write the private plan, or change the public short-term summary merely to persist the queue during the freeze; the summary may be changed only through manual editing after explicit user approval and must never be auto-synced from the private TODO;
 - do not amend the candidate baseline or published-version account silently;
 - allow only release-script changes explicitly defined by the release process;
 - stop for a blocking defect or security issue and ask whether to abort/re-freeze;
@@ -400,13 +400,15 @@ During the freeze:
 
 After compaction or restart, recover the newest freeze-queue message from the approval task. If the approval task was replaced and the old task cannot be found, ask for the old task ID or reconstruct from user-visible evidence; never claim the queue is complete from memory alone.
 
-After completion or abort, report the frozen baseline, released result if any, and queued next-cycle work. Then direct the developer to record accepted queue items in the private `../../workbar-private/TODO.md` only after the freeze has ended and the user has chosen the next stage. If that private source is absent, do not create it or repopulate the public stub; retain the user-visible queue and wait for explicit scope. Do not automatically begin the queue.
+After completion or abort, report the frozen baseline, released result if any, and queued next-cycle work. Then direct the developer to record accepted queue items in the private `../../workbar-private/TODO.md` only after the freeze has ended and the user has chosen the next stage. If that private source is absent, do not create it or expand the public summary into an internal plan; retain the user-visible queue and wait for explicit scope. Do not automatically begin the queue.
 
 ---
 
 # Code 项目工作流效率覆盖规则
 
 > 本节只细化 Code 项目的预检、验证、接力和任务轮换，不改变上文 approval-relay/v2 的风险等级、授权来源、阻塞条件、唯一自动发送 owner、release freeze 或下文 owner lease。发生解释冲突时保留更严格的安全、兼容、证据与用户授权门禁。
+
+公开 TODO 是用户批准的脱敏、非执行摘要，Agent 不得据此自动选择或启动任务；摘要仅在用户明确批准后人工更新，不得从私有 TODO 自动同步。内部未完成计划仍只以可用的私有 TODO 为事实源。
 
 ## Doctor 只在环境边界运行
 
@@ -437,7 +439,7 @@ After completion or abort, report the frozen baseline, released result if any, a
 ## 在阶段边界轮换开发任务
 
 - 正式发布完成、开发任务发生上下文压缩、历史已混入多个无关阶段，或审批任务无法仅靠 Git、公共开发日志与可用的私有 TODO / handoff 快速恢复现场时，当前阶段完成后停止向旧开发任务发送新 relay，旧任务停止作为 workspace writer。
-- 已有用户任务创建授权时，由唯一审批 owner 创建或绑定新开发任务；缺少明确授权时只向用户建议轮换并等待确认，不得擅自创建。新任务重新核对当前 HEAD、工作树、cached、公共日志、可用的私有 TODO / handoff 与 owner lease，然后用新的 relayId 申请 lease；私有事实源缺失时只按用户显式任务工作，不得重建公开 stub，也不得复制旧任务的已完成历史、过期 ID 或受保护差量作为新事实源。
+- 已有用户任务创建授权时，由唯一审批 owner 创建或绑定新开发任务；缺少明确授权时只向用户建议轮换并等待确认，不得擅自创建。新任务重新核对当前 HEAD、工作树、cached、公共日志、可用的私有 TODO / handoff 与 owner lease，然后用新的 relayId 申请 lease；私有事实源缺失时只按用户显式任务工作，不得从公开摘要重建内部计划，也不得复制旧任务的已完成历史、过期 ID 或受保护差量作为新事实源。
 - 轮换只发生在阶段边界。旧任务若仍持有 lease，必须先停止新写入、清空 cached 并释放；新任务取得新 lease 前不得写入。
 
 ---
@@ -449,7 +451,7 @@ After completion or abort, report the frozen baseline, released result if any, a
 ## 角色与强制顺序
 
 1. Approval Agent 始终只读，不申请、续租、回收或释放 lease；它只核对 Developer Agent 返回的 lease 与 Git 证据。
-2. 绑定的 Codex/DSH Developer Agent 在任何项目文件写入、暂存、提交，或会产生持久副作用的测试前，先核对当前 HEAD、`git status --short`、cached、公共最新日志、可用的私有 TODO / handoff 和 relayId，再执行 `status` 与 `acquire`；私有源缺失时不得创建或扩写公共 stub。
+2. 绑定的 Codex/DSH Developer Agent 在任何项目文件写入、暂存、提交，或会产生持久副作用的测试前，先核对当前 HEAD、`git status --short`、cached、公共最新日志、可用的私有 TODO / handoff 和 relayId，再执行 `status` 与 `acquire`；私有源缺失时不得从公开摘要恢复或重建内部计划。
 3. `acquire` 退出 0 后才可写入。持有者在到期前执行 `renew`，并在每个长阶段或可能跨 TTL 的命令前确认仍为同一 `leaseId`；lease 到期或续租失败后必须停止新写入。
 4. 阶段完成且 cached 已清空后，以匹配的 runtime、approval/developer 身份和 `leaseId` 执行 `release`。切换运行时前，原审批侧停止发送新 relay，原 Developer 释放 lease；新 Developer 以新 relayId 和当前 HEAD 重新申请。
 5. DSH 是 Codex 不可用时的替代开发通道，不是并行写入通道。任一 runtime 发现其他 holder、恢复要求或不确定现场都必须停止，不得靠 mailbox、任务标题或口头声明覆盖 lease。
