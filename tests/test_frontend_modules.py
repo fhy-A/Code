@@ -14915,9 +14915,12 @@ process.stdout.write(JSON.stringify({{
 const state = {{
   routingV2: true,
   modelRoutes: [],
+  modelCatalogModels: [],
   selectedRouteRef: "",
   attachedImages: [],
   isStreaming: false,
+  _modelRouteRefreshActive: null,
+  _modelRouteRefreshPromise: null,
 }};
 const els = {{
   prompt: {{value: ""}},
@@ -14928,8 +14931,11 @@ const els = {{
     classList: {{toggle(name, value) {{ els.sendBtn.classes[name] = Boolean(value); }}}},
   }},
 }};
+const notices = [];
 const t = (key) => key;
-const getSelectedModel = () => "model-a";
+const showToast = (message, tone) => notices.push([message, tone]);
+let selectedModel = "model-a";
+const getSelectedModel = () => selectedModel;
 const selectedModelRoute = () => state.modelRoutes.find((route) => (
   route.routeRef === state.selectedRouteRef
 )) || null;
@@ -14970,46 +14976,93 @@ state.isStreaming = true;
 els.prompt.value = "queued";
 updateSendButtonState();
 cases.queueWithoutRoute = snapshot();
-process.stdout.write(JSON.stringify(cases));
+state.isStreaming = false;
+els.prompt.value = "draft stays";
+state._modelRouteRefreshActive = {{}};
+const refreshing = guardComposerRouteForNewMessage();
+state._modelRouteRefreshActive = null;
+selectedModel = "";
+state.modelRoutes = [];
+state.modelCatalogModels = [];
+const empty = guardComposerRouteForNewMessage();
+state.modelRoutes = [{{routeRef: "available", modelId: "model-a", enabled: true, credentialsAvailable: true}}];
+state.modelCatalogModels = ["model-a"];
+const unselected = guardComposerRouteForNewMessage();
+selectedModel = "model-a";
+state.selectedRouteRef = "disabled";
+state.modelRoutes = [{{routeRef: "disabled", modelId: "model-a", enabled: false, credentialsAvailable: true}}];
+const unavailable = guardComposerRouteForNewMessage();
+state.selectedRouteRef = "valid";
+state.modelRoutes = [{{routeRef: "valid", modelId: "model-a", enabled: true, credentialsAvailable: true}}];
+const ready = guardComposerRouteForNewMessage();
+process.stdout.write(JSON.stringify({{cases, refreshing, empty, unselected, unavailable, ready, notices, draft: els.prompt.value}}));
 """
         completed = subprocess.run(
             ["node", "-e", script], cwd=ROOT, capture_output=True,
             text=True, encoding="utf-8", check=True,
         )
         data = json.loads(completed.stdout)
-        for name in ("emptyRoute", "disabledRoute", "noCredentials", "queueWithoutRoute"):
-            self.assertTrue(data[name]["disabled"], name)
-            self.assertFalse(data[name]["ready"], name)
-        self.assertFalse(data["validRoute"]["disabled"])
-        self.assertTrue(data["validRoute"]["ready"])
-        self.assertFalse(data["routingV1"]["disabled"])
-        self.assertTrue(data["routingV1"]["ready"])
-        self.assertFalse(data["stopAction"]["disabled"])
-        self.assertTrue(data["stopAction"]["running"])
+        cases = data["cases"]
+        for name in ("emptyRoute", "disabledRoute", "noCredentials"):
+            self.assertFalse(cases[name]["disabled"], name)
+            self.assertFalse(cases[name]["ready"], name)
+        self.assertFalse(cases["validRoute"]["disabled"])
+        self.assertTrue(cases["validRoute"]["ready"])
+        self.assertFalse(cases["routingV1"]["disabled"])
+        self.assertTrue(cases["routingV1"]["ready"])
+        self.assertFalse(cases["stopAction"]["disabled"])
+        self.assertTrue(cases["stopAction"]["running"])
+        self.assertFalse(cases["queueWithoutRoute"]["disabled"])
+        self.assertTrue(cases["queueWithoutRoute"]["ready"])
+        self.assertEqual(
+            {key: data[key] for key in ("refreshing", "empty", "unselected", "unavailable", "ready")},
+            {"refreshing": False, "empty": False, "unselected": False, "unavailable": False, "ready": True},
+        )
+        self.assertEqual(data["draft"], "draft stays")
+        self.assertEqual(data["notices"], [
+            ["modelListRefreshingReminder", "warning"],
+            ["modelCatalogEmptyReminder", "warning"],
+            ["modelSelectionRequiredReminder", "warning"],
+            ["modelRouteUnavailableReminder", "warning"],
+        ])
         submit_source = APP_SOURCE[
             APP_SOURCE.index('els.chatForm.addEventListener("submit", async (event) => {'):
             APP_SOURCE.index('els.newChat.addEventListener("click"', APP_SOURCE.index('els.chatForm.addEventListener("submit", async (event) => {'))
         ]
+        self.assertIn("guardComposerRouteForNewMessage()", submit_source)
+        self.assertLess(
+            submit_source.index("handleUiSlashCommand(text)"),
+            submit_source.index("guardComposerRouteForNewMessage()"),
+        )
+        self.assertLess(
+            submit_source.index("guardComposerRouteForNewMessage()"),
+            submit_source.index("autoPermissionGate.requiresDispatchConfirmation()"),
+        )
         self.assertIn(
-            "if (!composerRouteReadyForNewMessage()) {\n"
-            "    updateSendButtonState();\n"
-            "    return;\n"
-            "  }",
+            "!isSessionStreaming(state.sessionId)\n"
+            "    && !guardComposerRouteForNewMessage()",
             submit_source,
         )
         self.assertLess(
-            submit_source.index("handleUiSlashCommand(text)"),
-            submit_source.index("if (!composerRouteReadyForNewMessage())"),
-        )
-        self.assertLess(
-            submit_source.index("if (!composerRouteReadyForNewMessage())"),
-            submit_source.index("if (isSessionStreaming(state.sessionId))"),
+            submit_source.index("guardComposerRouteForNewMessage()"),
+            submit_source.index('els.prompt.value = "";', submit_source.index("guardComposerRouteForNewMessage()")),
         )
         presentation_source = APP_SOURCE[
             APP_SOURCE.index("function applySelectedModelPresentation("):
             APP_SOURCE.index("function getThinkingLevel(", APP_SOURCE.index("function applySelectedModelPresentation("))
         ]
         self.assertIn("updateSendButtonState();", presentation_source)
+        for fragment in (
+            'modelListRefreshingReminder: "模型列表正在刷新，请稍候"',
+            'modelSelectionRequiredReminder: "请先选择模型"',
+            'modelCatalogEmptyReminder: "未找到可用模型，请检查 API Key"',
+            'modelRouteUnavailableReminder: "当前模型暂不可用，请刷新模型或检查 API Key"',
+            'modelListRefreshingReminder: "The model list is refreshing. Please wait."',
+            'modelSelectionRequiredReminder: "Select a model first."',
+            'modelCatalogEmptyReminder: "No available models found. Check your API Key."',
+            'modelRouteUnavailableReminder: "The current model is unavailable. Refresh models or check your API Key."',
+        ):
+            self.assertIn(fragment, I18N_SOURCE)
 
     def test_model_route_refresh_ownership_queues_one_latest_explicit_snapshot(self):
         refresh_start = APP_SOURCE.index("async function refreshModelRoutes(")
@@ -17083,6 +17136,134 @@ process.stdout.write(JSON.stringify({{
             STYLE_SOURCE,
         )
         self.assertIn("color-mix(in srgb, var(--accent) 26%, transparent)", STYLE_SOURCE)
+
+    def test_execution_trace_skill_chip_binds_to_user_turn_and_survives_projection_states(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+let messages = [];
+const feature = createMessagesFeature({
+  escapeHtml,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => `<md>${escapeHtml(value)}</md>`,
+  t: (key, vars = {}) => key === "executionTraceSkillsAria"
+    ? `Skills: ${vars.names}`
+    : key,
+  getMessageText: (message) => String(message?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => messages,
+  getSessionId: () => "session-skill-trace",
+  getSelectedModel: () => "model-1",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => `<answer>${escapeHtml(value)}</answer>`,
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+  getToolActionLabel: (action) => action,
+});
+const project = (skillNames, hasActiveRun = false) => {
+  messages = [
+    {role: "user", content: "use skills", ...(skillNames === undefined ? {} : {meta: {activeSkillNames: skillNames}})},
+    {role: "assistant", content: "checking", meta: {toolCalls: [{id: "call-1", function: {name: "read_file", arguments: "{}"}}]}},
+    {role: "tool-call", content: "", meta: {action: "read_file", toolCallId: "call-1"}},
+    {role: "tool-result", content: "ok", meta: {action: "read_file", toolCallId: "call-1", outcome: "completed", result: {ok: true}}},
+    {role: "assistant", content: "done", _responseTime: "2s"},
+  ];
+  return feature.projectMessages(messages, {hasActiveRun});
+};
+process.stdout.write(JSON.stringify({
+  singleCompleted: project(["imagegen"]),
+  singleActive: project(["imagegen"], true),
+  multiple: project(["imagegen", "documents", "imagegen", "  pdf  "]),
+  unsafe: project(["<unsafe>", "documents"]),
+  oldRecord: project(undefined),
+  invalid: project([null, "", 42, {}, []]),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        for key in ("singleCompleted", "singleActive"):
+            html = data[key]
+            self.assertIn('class="execution-trace-skill-chip"', html)
+            self.assertIn('>Skill · imagegen</span>', html)
+            self.assertIn('title="Skills: imagegen"', html)
+            self.assertIn('aria-label="Skills: imagegen"', html)
+            summary = html.index('class="execution-trace-summary"')
+            status = html.index(
+                "data-active-run-anchor" if key == "singleActive" else "data-completed-run-status",
+                summary,
+            )
+            chip = html.index('class="execution-trace-skill-chip"', summary)
+            chevron = html.index('class="execution-trace-chevron"', summary)
+            body = html.index('class="execution-trace-body"', summary)
+            self.assertLess(status, chip)
+            self.assertLess(chip, chevron)
+            self.assertLess(chevron, body)
+        self.assertIn('>Skill · imagegen +2</span>', data["multiple"])
+        self.assertIn('title="Skills: imagegen, documents, pdf"', data["multiple"])
+        self.assertIn('>Skill · &lt;unsafe&gt; +1</span>', data["unsafe"])
+        self.assertNotIn("<unsafe>", data["unsafe"])
+        self.assertNotIn("execution-trace-skill-chip", data["oldRecord"])
+        self.assertNotIn("execution-trace-skill-chip", data["invalid"])
+        self.assertIn('.execution-trace-skill-chip {', STYLE_SOURCE)
+        self.assertIn('text-overflow: ellipsis;', STYLE_SOURCE)
+        self.assertIn('executionTraceSkillsAria: "已启用 Skill：{names}"', I18N_SOURCE)
+        self.assertIn('executionTraceSkillsAria: "Enabled Skills: {names}"', I18N_SOURCE)
+
+    def test_foreground_skill_projection_uses_snapshot_metadata_without_schema_dependency(self):
+        helper_start = APP_SOURCE.index("function normalizeForegroundActiveSkillNames(")
+        helper_end = APP_SOURCE.index("async function resolveForegroundGoalContext(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+const renders = [];
+const sessionWrites = [];
+const state = {{sessionId: "session-a"}};
+const setSessionMessages = (sessionId, messages) => sessionWrites.push([sessionId, messages]);
+const renderSessionMessages = (sessionId) => renders.push(sessionId);
+eval({json.dumps(helper_source)});
+const origin = {{role: "user", content: "task", meta: {{pendingDispatch: {{id: "dispatch-1"}}}}}};
+const ctx = {{sessionId: "session-a", messages: [origin], foregroundOriginMessage: origin, activeSkillNames: []}};
+ctx.activeSkillNames = ["imagegen", " imagegen ", "documents", "", null, 42];
+const changed = syncForegroundActiveSkillProjection(ctx);
+const first = JSON.parse(JSON.stringify(origin));
+const unchanged = syncForegroundActiveSkillProjection(ctx);
+ctx.activeSkillNames = [];
+const removed = syncForegroundActiveSkillProjection(ctx);
+const final = JSON.parse(JSON.stringify(origin));
+const detached = {{sessionId: "session-a", messages: [origin], foregroundOriginMessage: origin, activeSkillNames: ["pdf"], isDetachedBackground: true}};
+const detachedChanged = syncForegroundActiveSkillProjection(detached);
+process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChanged, first, final, renders, writes: sessionWrites.length}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["changed"])
+        self.assertFalse(data["unchanged"])
+        self.assertTrue(data["removed"])
+        self.assertFalse(data["detachedChanged"])
+        self.assertEqual(data["first"]["meta"]["activeSkillNames"], ["imagegen", "documents"])
+        self.assertEqual(data["first"]["meta"]["pendingDispatch"]["id"], "dispatch-1")
+        self.assertNotIn("activeSkillNames", data["final"]["meta"])
+        self.assertEqual(data["renders"], ["session-a", "session-a"])
+        self.assertEqual(data["writes"], 2)
+        task_prompt = APP_SOURCE[
+            APP_SOURCE.index("async function getTaskSystemPrompt("):
+            APP_SOURCE.index("async function resolveForegroundGoalContext(")
+        ]
+        self.assertIn("syncForegroundActiveSkillProjection(ctx);", task_prompt)
+        self.assertNotIn("apiJson", helper_source)
+        self.assertNotIn("saveSessionState", helper_source)
 
     def test_messages_ui_owns_grouping_projection_and_response_status(self):
         self.assertIn("Code.ui.messages = Object.freeze", MESSAGES_SOURCE)

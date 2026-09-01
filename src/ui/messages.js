@@ -1600,6 +1600,31 @@
       </div>`;
     }
 
+    function executionTraceSkillNames(msg) {
+      const names = [];
+      const seen = new Set();
+      for (const value of Array.isArray(msg?.meta?.activeSkillNames)
+        ? msg.meta.activeSkillNames
+        : []) {
+        if (typeof value !== "string") continue;
+        const name = value.trim().slice(0, 80);
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+        if (names.length >= 32) break;
+      }
+      return names;
+    }
+
+    function renderExecutionTraceSkillChip(msg) {
+      const names = executionTraceSkillNames(msg);
+      if (!names.length) return "";
+      const summary = `Skill · ${names[0]}${names.length > 1 ? ` +${names.length - 1}` : ""}`;
+      const fullNames = names.join(", ");
+      const accessibleLabel = t("executionTraceSkillsAria", { names: fullNames });
+      return `<span class="execution-trace-skill-chip" title="${escapeHtml(accessibleLabel)}" aria-label="${escapeHtml(accessibleLabel)}">${escapeHtml(summary)}</span>`;
+    }
+
     function collectCompletedTurnStatuses(messages) {
       const statuses = new Map();
       let userIndex = -1;
@@ -2580,6 +2605,7 @@
         rows.push(`<section class="execution-trace completed${expanded ? " is-expanded" : ""}" data-execution-trace="${userIndex}">
           <div class="execution-trace-summary" role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle>
             ${renderCompletedRunHeader(elapsed)}
+            ${renderExecutionTraceSkillChip(messages[userIndex])}
             <span class="execution-trace-chevron" aria-hidden="true"></span>
           </div>
           <div class="execution-trace-body">`);
@@ -2590,6 +2616,7 @@
         rows.push(`<section class="execution-trace active${expanded ? " is-expanded" : ""}" data-execution-trace="${userIndex}">
           <div class="execution-trace-summary" role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle>
             ${takeActiveRunAnchor()}
+            ${renderExecutionTraceSkillChip(messages[userIndex])}
             <span class="execution-trace-chevron" aria-hidden="true"></span>
           </div>
           <div class="execution-trace-body">`);

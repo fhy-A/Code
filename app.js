@@ -2423,7 +2423,41 @@ async function getTaskSystemPrompt(ctx, options = {}) {
   );
   ctx.activeSkillNames = [...(snapshot.activeSkillNames || [])];
   ctx.activeSkillName = String(snapshot.activeSkillName || "");
+  syncForegroundActiveSkillProjection(ctx);
   return snapshot.prompt;
+}
+
+function normalizeForegroundActiveSkillNames(names) {
+  const normalized = [];
+  const seen = new Set();
+  for (const value of Array.isArray(names) ? names : []) {
+    if (typeof value !== "string") continue;
+    const name = value.trim().slice(0, 80);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    normalized.push(name);
+    if (normalized.length >= 32) break;
+  }
+  return normalized;
+}
+
+function syncForegroundActiveSkillProjection(ctx) {
+  if (!ctx || ctx.isSubAgent || ctx.isDetachedBackground) return false;
+  const message = ctx.foregroundOriginMessage;
+  if (!message || message.role !== "user") return false;
+  const next = normalizeForegroundActiveSkillNames(ctx.activeSkillNames);
+  const previous = normalizeForegroundActiveSkillNames(message.meta?.activeSkillNames);
+  if (
+    next.length === previous.length
+    && next.every((name, index) => name === previous[index])
+  ) return false;
+  message.meta = { ...(message.meta || {}) };
+  if (next.length) message.meta.activeSkillNames = next;
+  else delete message.meta.activeSkillNames;
+  if (Object.keys(message.meta).length === 0) delete message.meta;
+  setSessionMessages(ctx.sessionId, ctx.messages);
+  if (ctx.sessionId === state.sessionId) renderSessionMessages(ctx.sessionId);
+  return true;
 }
 
 async function resolveForegroundGoalContext(ctx) {
@@ -7525,27 +7559,51 @@ function stopLiveTimer() {
 
 
 function composerRouteReadyForNewMessage() {
+  const model = getSelectedModel();
+  if (!model) return false;
   if (state.routingV2 === false) return true;
   const route = selectedModelRoute();
   return Boolean(
     route
     && route.enabled !== false
     && route.credentialsAvailable === true
-    && route.modelId === getSelectedModel()
+    && route.modelId === model
   );
+}
+
+function composerModelReminderKey() {
+  if (state._modelRouteRefreshActive || state._modelRouteRefreshPromise) {
+    return "modelListRefreshingReminder";
+  }
+  const catalogHasModels = state.routingV2 === false
+    ? (Array.isArray(state.modelCatalogModels) && state.modelCatalogModels.length > 0)
+    : (Array.isArray(state.modelRoutes) && state.modelRoutes.some((route) => (
+        route && String(route.modelId || "").trim()
+      )));
+  if (!catalogHasModels) return "modelCatalogEmptyReminder";
+  if (!getSelectedModel() || (state.routingV2 !== false && !state.selectedRouteRef)) {
+    return "modelSelectionRequiredReminder";
+  }
+  return "modelRouteUnavailableReminder";
+}
+
+function guardComposerRouteForNewMessage() {
+  if (composerRouteReadyForNewMessage()) return true;
+  showToast(t(composerModelReminderKey()), "warning");
+  return false;
 }
 
 function updateSendButtonState() {
 
   const hasContent = els.prompt.value.trim().length > 0 || state.attachedImages.length > 0;
-  const routeReady = !hasContent || composerRouteReadyForNewMessage();
+  const routeReady = !hasContent || state.isStreaming || composerRouteReadyForNewMessage();
   const ready = hasContent && routeReady;
 
   els.sendBtn.classList.toggle("ready", ready);
   els.sendBtn.classList.toggle("running", state.isStreaming && !hasContent);
-  els.sendBtn.disabled = (!hasContent && !state.isStreaming) || !routeReady;
+  els.sendBtn.disabled = !hasContent && !state.isStreaming;
   els.sendBtn.title = !routeReady
-    ? t("selectModel")
+    ? t(composerModelReminderKey())
     : state.isStreaming
     ? (hasContent ? t("queueSendTip") : t("pauseBtn"))
     : (hasContent ? t("sendTip") : t("emptyTip"));
@@ -15512,7 +15570,10 @@ els.chatForm.addEventListener("submit", async (event) => {
     return;
   }
 
-  if (!composerRouteReadyForNewMessage()) {
+  if (
+    !isSessionStreaming(state.sessionId)
+    && !guardComposerRouteForNewMessage()
+  ) {
     updateSendButtonState();
     return;
   }

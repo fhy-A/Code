@@ -5044,6 +5044,23 @@ body.theme-dark .syn-fn { color: #61afef; }
   margin: 0;
 }
 
+.execution-trace-skill-chip {
+  max-width: min(220px, 42vw);
+  min-height: 20px;
+  padding: 1px 7px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: color-mix(in srgb, var(--accent) 76%, var(--text));
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+}
+
 .execution-trace-chevron {
   width: 8px;
   height: 8px;
