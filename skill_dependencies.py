@@ -53,6 +53,10 @@ _NODE_BUILTINS = {
     "tls", "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads",
     "zlib",
 }
+_WINDOWS_DEFAULT_COMMAND_INSTALL_HINTS = {
+    "bash": "winget install --id Git.Git --exact --source winget",
+    "qpdf": "winget install --id QPDF.QPDF --exact --source winget",
+}
 
 
 class DependencyManifestError(ValueError):
@@ -821,12 +825,36 @@ def _known_windows_command_candidates(name):
     elif name == "qpdf":
         for root in program_roots:
             candidates.extend(sorted(root.glob("qpdf*\\bin\\qpdf.exe"), reverse=True))
+    elif name == "bash":
+        git_roots = [root / "Git" for root in program_roots]
+        if local_app_data is not None:
+            git_roots.append(local_app_data / "Programs" / "Git")
+        for git_root in git_roots:
+            candidates.extend((
+                git_root / "bin" / "bash.exe",
+                git_root / "usr" / "bin" / "bash.exe",
+            ))
     elif name == "pdftoppm" and local_app_data is not None:
         winget_root = local_app_data / "Microsoft" / "WinGet" / "Packages"
         if winget_root.is_dir():
             for package_root in winget_root.glob("oschwartz10612.Poppler_*"):
                 candidates.extend(package_root.glob("poppler-*\\Library\\bin\\pdftoppm.exe"))
     return candidates
+
+
+def _bash_candidates_from_git_executable(executable):
+    if not executable:
+        return []
+    git_executable = Path(executable)
+    if git_executable.name.lower() not in {"git", "git.exe"}:
+        return []
+    if git_executable.parent.name.lower() != "cmd":
+        return []
+    git_root = git_executable.parent.parent
+    return [
+        git_root / "bin" / "bash.exe",
+        git_root / "usr" / "bin" / "bash.exe",
+    ]
 
 
 def _system_command_path(name):
@@ -838,7 +866,15 @@ def _system_command_path(name):
         executable = shutil.which(name, path=registered_path)
         if executable:
             return executable
-    for candidate in _known_windows_command_candidates(name):
+    candidates = []
+    if sys.platform == "win32" and name == "bash":
+        git_executables = [shutil.which("git")]
+        if registered_path:
+            git_executables.append(shutil.which("git", path=registered_path))
+        for git_executable in dict.fromkeys(filter(None, git_executables)):
+            candidates.extend(_bash_candidates_from_git_executable(git_executable))
+    candidates.extend(_known_windows_command_candidates(name))
+    for candidate in candidates:
         if candidate.is_file():
             return str(candidate.resolve())
     return ""
@@ -870,6 +906,20 @@ def _probe_commands(requirements, data_dir):
     return result
 
 
+def _inspection_requirement(requirement, detected):
+    result = {**requirement, **detected}
+    if (
+        sys.platform == "win32"
+        and result.get("type") == "command"
+        and not result.get("available")
+        and not result.get("installHint")
+    ):
+        install_hint = _WINDOWS_DEFAULT_COMMAND_INSTALL_HINTS.get(result.get("name"))
+        if install_hint:
+            result["installHint"] = install_hint
+    return result
+
+
 def inspect_manifest(manifest, *, app_dir, data_dir):
     requirements = {}
     for capability in manifest["capabilities"]:
@@ -889,9 +939,13 @@ def inspect_manifest(manifest, *, app_dir, data_dir):
         required = []
         optional = []
         for requirement in capability["required"]:
-            required.append({**requirement, **detected[requirement["id"]]})
+            required.append(
+                _inspection_requirement(requirement, detected[requirement["id"]]),
+            )
         for requirement in capability["optional"]:
-            optional.append({**requirement, **detected[requirement["id"]]})
+            optional.append(
+                _inspection_requirement(requirement, detected[requirement["id"]]),
+            )
         capabilities.append({
             "id": capability["id"],
             "status": "ready" if all(item["available"] for item in required) else "unavailable",

@@ -347,6 +347,113 @@ This paragraph discusses dependencies but does not declare another package.
 
 
 class TestDependencyInspection(unittest.TestCase):
+    @staticmethod
+    def _command_manifest(requirements):
+        return dependencies.normalize_manifest({
+            "schemaVersion": 1,
+            "skill": "system-tools",
+            "capabilities": {
+                "run": {"required": requirements},
+            },
+        }, expected_skill="system-tools")
+
+    @staticmethod
+    def _missing_command_results(*names):
+        return {
+            f"command:{name}": {
+                "installed": False,
+                "available": False,
+                "detectedVersion": "",
+                "source": "",
+                "executable": "",
+                "reason": "not_installed",
+            }
+            for name in names
+        }
+
+    def test_windows_missing_bash_and_qpdf_receive_trusted_default_hints(self):
+        manifest = self._command_manifest([
+            {"type": "command", "name": "bash"},
+            {"type": "command", "name": "qpdf"},
+            {"type": "command", "name": "renderer"},
+        ])
+        identity_before = json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+        with (
+            mock.patch.object(dependencies.sys, "platform", "win32"),
+            mock.patch.object(
+                dependencies,
+                "_probe_commands",
+                return_value=self._missing_command_results("bash", "qpdf", "renderer"),
+            ),
+            tempfile.TemporaryDirectory() as temp,
+        ):
+            result = dependencies.inspect_manifest(manifest, app_dir=temp, data_dir=temp)
+            guidance = dependencies.build_install_guidance(result, data_dir=temp)
+
+        required = {
+            item["name"]: item
+            for item in result["capabilities"][0]["required"]
+        }
+        self.assertEqual(
+            required["bash"]["installHint"],
+            "winget install --id Git.Git --exact --source winget",
+        )
+        self.assertEqual(
+            required["qpdf"]["installHint"],
+            "winget install --id QPDF.QPDF --exact --source winget",
+        )
+        self.assertNotIn("installHint", required["renderer"])
+        command_step = next(step for step in guidance["steps"] if step["type"] == "command")
+        self.assertEqual(command_step["commands"], [])
+        self.assertEqual(command_step["installHints"], [
+            {
+                "requirement": "command:bash",
+                "text": "winget install --id Git.Git --exact --source winget",
+            },
+            {
+                "requirement": "command:qpdf",
+                "text": "winget install --id QPDF.QPDF --exact --source winget",
+            },
+        ])
+        self.assertEqual(json.dumps(manifest, ensure_ascii=False, sort_keys=True), identity_before)
+
+    def test_manifest_install_hint_precedes_windows_default(self):
+        manifest = self._command_manifest([{
+            "type": "command",
+            "name": "bash",
+            "installHint": "Use the approved enterprise Git package",
+        }])
+        with (
+            mock.patch.object(dependencies.sys, "platform", "win32"),
+            mock.patch.object(
+                dependencies,
+                "_probe_commands",
+                return_value=self._missing_command_results("bash"),
+            ),
+        ):
+            result = dependencies.inspect_manifest(manifest, app_dir=".", data_dir=".")
+
+        requirement = result["capabilities"][0]["required"][0]
+        self.assertEqual(requirement["installHint"], "Use the approved enterprise Git package")
+
+    def test_non_windows_does_not_derive_windows_install_hints(self):
+        manifest = self._command_manifest([
+            {"type": "command", "name": "bash"},
+            {"type": "command", "name": "qpdf"},
+        ])
+        with (
+            mock.patch.object(dependencies.sys, "platform", "linux"),
+            mock.patch.object(
+                dependencies,
+                "_probe_commands",
+                return_value=self._missing_command_results("bash", "qpdf"),
+            ),
+        ):
+            result = dependencies.inspect_manifest(manifest, app_dir=".", data_dir=".")
+
+        for requirement in result["capabilities"][0]["required"]:
+            self.assertNotIn("installHint", requirement)
+
     def test_reports_partial_status_and_optional_gaps(self):
         manifest = dependencies.normalize_manifest(_manifest(), expected_skill="demo")
         manifest["source"] = "local"
@@ -422,6 +529,128 @@ class TestDependencyInspection(unittest.TestCase):
         self.assertEqual(Path(result["command:tesseract"]["executable"]), tesseract)
         self.assertTrue(result["command:qpdf"]["available"])
         self.assertEqual(Path(result["command:qpdf"]["executable"]), qpdf)
+
+    def test_bash_probe_finds_standard_git_for_windows_roots(self):
+        locations = (
+            ("ProgramFiles", Path("Git") / "bin" / "bash.exe"),
+            ("ProgramFiles", Path("Git") / "usr" / "bin" / "bash.exe"),
+            ("ProgramFiles(x86)", Path("Git") / "bin" / "bash.exe"),
+            ("ProgramFiles(x86)", Path("Git") / "usr" / "bin" / "bash.exe"),
+            ("LOCALAPPDATA", Path("Programs") / "Git" / "bin" / "bash.exe"),
+            ("LOCALAPPDATA", Path("Programs") / "Git" / "usr" / "bin" / "bash.exe"),
+        )
+        for root_name, relative in locations:
+            with self.subTest(root=root_name, relative=str(relative)), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                environment = {
+                    "ProgramFiles": str(root / "machine"),
+                    "ProgramFiles(x86)": str(root / "machine-x86"),
+                    "LOCALAPPDATA": str(root / "user"),
+                }
+                candidate = Path(environment[root_name]) / relative
+                candidate.parent.mkdir(parents=True)
+                candidate.write_text("", encoding="utf-8")
+                with (
+                    mock.patch.object(dependencies.sys, "platform", "win32"),
+                    mock.patch.object(dependencies.shutil, "which", return_value=None),
+                    mock.patch.object(dependencies, "_windows_registered_path", return_value=""),
+                    mock.patch.dict(dependencies.os.environ, environment, clear=False),
+                ):
+                    executable = dependencies._system_command_path("bash")
+
+                self.assertEqual(Path(executable), candidate)
+
+    def test_bash_probe_derives_git_root_from_fresh_registered_git(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            git_root = Path(temp) / "Custom Git"
+            git_executable = git_root / "cmd" / "git.exe"
+            bash_executable = git_root / "usr" / "bin" / "bash.exe"
+            git_executable.parent.mkdir(parents=True)
+            bash_executable.parent.mkdir(parents=True)
+            git_executable.write_text("", encoding="utf-8")
+            bash_executable.write_text("", encoding="utf-8")
+
+            def which(name, path=None):
+                calls.append((name, path))
+                if name == "git" and path == "fresh-registered-path":
+                    return str(git_executable)
+                return None
+
+            with (
+                mock.patch.object(dependencies.sys, "platform", "win32"),
+                mock.patch.object(dependencies.shutil, "which", side_effect=which),
+                mock.patch.object(
+                    dependencies,
+                    "_windows_registered_path",
+                    return_value="fresh-registered-path",
+                ),
+                mock.patch.dict(dependencies.os.environ, {
+                    "ProgramFiles": str(Path(temp) / "empty-machine"),
+                    "ProgramFiles(x86)": str(Path(temp) / "empty-x86"),
+                    "LOCALAPPDATA": str(Path(temp) / "empty-user"),
+                }, clear=False),
+            ):
+                executable = dependencies._system_command_path("bash")
+
+        self.assertEqual(Path(executable), bash_executable)
+        self.assertIn(("git", "fresh-registered-path"), calls)
+
+    def test_bash_probe_rechecks_fresh_state_without_system_side_effects(self):
+        manifest = self._command_manifest([{"type": "command", "name": "bash"}])
+        identity_before = json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+        state = {"installed": False}
+        registered_calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            git_root = root / "New Git"
+            git_executable = git_root / "cmd" / "git.exe"
+            bash_executable = git_root / "bin" / "bash.exe"
+
+            def registered_path():
+                registered_calls.append(state["installed"])
+                return "fresh-registered-path" if state["installed"] else ""
+
+            def which(name, path=None):
+                if name == "git" and path == "fresh-registered-path" and state["installed"]:
+                    return str(git_executable)
+                return None
+
+            environment = {
+                "PATH": "original-process-path",
+                "ProgramFiles": str(root / "empty-machine"),
+                "ProgramFiles(x86)": str(root / "empty-x86"),
+                "LOCALAPPDATA": str(root / "empty-user"),
+            }
+            with (
+                mock.patch.object(dependencies.sys, "platform", "win32"),
+                mock.patch.object(dependencies.shutil, "which", side_effect=which),
+                mock.patch.object(dependencies, "_windows_registered_path", side_effect=registered_path),
+                mock.patch.object(dependencies.subprocess, "run") as run_command,
+                mock.patch.dict(dependencies.os.environ, environment, clear=False),
+            ):
+                first = dependencies.inspect_manifest(manifest, app_dir=root, data_dir=root / "data")
+                git_executable.parent.mkdir(parents=True)
+                bash_executable.parent.mkdir(parents=True)
+                git_executable.write_text("", encoding="utf-8")
+                bash_executable.write_text("", encoding="utf-8")
+                state["installed"] = True
+                second = dependencies.inspect_manifest(manifest, app_dir=root, data_dir=root / "data")
+                process_path_after = dependencies.os.environ["PATH"]
+
+        first_requirement = first["capabilities"][0]["required"][0]
+        second_requirement = second["capabilities"][0]["required"][0]
+        self.assertFalse(first_requirement["available"])
+        self.assertEqual(
+            first_requirement["installHint"],
+            "winget install --id Git.Git --exact --source winget",
+        )
+        self.assertTrue(second_requirement["available"])
+        self.assertEqual(Path(second_requirement["executable"]), bash_executable)
+        self.assertEqual(registered_calls, [False, True])
+        self.assertEqual(process_path_after, "original-process-path")
+        run_command.assert_not_called()
+        self.assertEqual(json.dumps(manifest, ensure_ascii=False, sort_keys=True), identity_before)
 
     def test_command_probe_reads_fresh_registered_path_without_mutating_process_path(self):
         calls = []

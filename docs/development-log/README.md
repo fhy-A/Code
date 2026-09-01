@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | Skill 系统依赖指引与 Git Bash 无重启重检：Windows 缺失 bash/qpdf 且无 manifest 显式提示时派生精确 winget 协作命令，显式值仍最高优先；bash 在当前/注册表 PATH 后从 Git cmd 根及 Program Files、x86、LocalAppData 六个常见位置解析，每次检查读取新鲜环境且不改 PATH。fail-first `7 failures + 2 errors`、新增检查 `11 tests`、完整 Skill dependencies `33 tests`、doctor `10/10`、语法/diff 通过；未执行安装或改变 manifest/binding 身份 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 发版元数据自动同步：修正 v0.6.7 README badge 陈旧 alt，并让 canonical 更新/一致性门禁统一同步和校验 badge URL、`Version X.Y.Z` alt 与 `Code-vX.Y.Z.exe`；只作用于精确版本徽章和具体 EXE 名，其他图片 alt / 链接 / 正文不变，相同版本幂等。fail-first `11 failures`、直接 `3 tests`、两套 release 定向 `42 tests`、doctor `10/10`、语法/diff 通过；未修改已发布 tag/Release/EXE 或运行发布命令 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | v0.6.7 manual-compaction Harness UI 证据受控重基线：首次 prepare 的 `6 failed` 均定位为前端视觉演进后的冻结 UI 哈希漂移；D2 只刷新 `htmlHash/replayHash`，D3 只刷新 UI / pending UI 与派生 scenario / suite 链，v0.6.6 独立导出的 19 个非 UI 场景哈希逐项一致。D2+D3 定向连续两轮各 `13 tests`、全部 Harness `110 tests` 通过；未重新 prepare / publish，发布说明草稿保持冻结未暂存 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | `CODE-043` 全局表单焦点样式统一：独立 input / textarea / select 收敛为单一 `1px` 强调边框，搜索 / 项目编辑由外壳唯一描边，System Prompt 仅底线，composer 只保留中性表面阴影；按钮、checkbox / radio、drag / disabled 及语义状态不变。fail-first `4 failures`、直接兼容组 `15 tests`、完整前端 `413 tests`、build / freshness / bundle 语法 / diff 通过；3011 Browser 在 Notion 深浅主题验证代表控件的单层边界与零外扩 | [查看](2026/2026-09-01.md) |
