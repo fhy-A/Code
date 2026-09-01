@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-02 | `CODE-061` 自动模式范围引导与风险校准完成：工作区改为默认范围而非硬边界，用户明确外部路径可访问，模型不得自行扫描父级 / 用户目录 / 磁盘或在无明确意图时外部写删；中英文 Auto 风险提示不再承诺统一路径阻断，并明确并非完全安全。工具集、授权状态机、协议与持久化不变；doctor `10/10`、直接 `4 tests`、完整 frontend `417 tests`、build / freshness 通过。XLSX 缺失自有 `recalc` 资源另登记 `CODE-062`，`CODE-055` bypass 评测继续暂停 | [查看](2026/2026-09-02.md) |
 | 2026-09-01 | `CODE-043` 新手任务界面单层紧凑收敛：标题旁进度、内容驱动三步轨、仅当前步骤、短标签 / 完整 prompt 分离、共享 SVG 与无内滚动完成；absolute 锚定、`inset:auto` 和 `10px` 间距修复水平 / 纵向回归。doctor `10/10`、onboarding `5 passed`、完整 frontend / P2 `473 passed + 4 subtests`、build / freshness / 语法 / diff 通过；两套 H4 各两轮失败均按熔断停止且未记为通过，同源 ignored 审计页完成中英文 / 深浅 / 状态 / 布局验收后用户 `PASS` | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 发布与验证支持模块归位 `devtools/`：`release_state` / `verification` 以 Git rename 迁入轻量包，根 release / verify 用户命令不变且无 shim；verification ROOT、检查顺序、profile、definition fingerprint 与 manifest 哈希迁移前后逐项一致。布局、release script/workflow、verify profiles `66 tests`、doctor `10/10`、frontend freshness、AST / diff 通过，published 凭证与发布边界不变，未运行真实 release | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 后端实现模块归位 `code_runtime/`：13 个当前运行模块以 Git rename 迁入轻量包，入口 / first-party tests / mock patch 全部切换且无根 shim，PPT APP_ROOT 与全部资源目标保持。布局 `2 tests`、直接 `231 tests`、入口兼容 `666 tests`、完整 Python `1809 tests`、frontend build/freshness、doctor `10/10` 通过；非发布 PyInstaller 成功收集新包，用户原 EXE 按原哈希恢复，frontend / release notes 哈希不变，临时根与 build 清理 | [查看](2026/2026-09-01.md) |

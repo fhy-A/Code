@@ -7759,25 +7759,27 @@ class Storage {
             self.assertNotIn(removed_key, I18N_SOURCE)
 
         fallback_copy = (
-            "Code 将不再逐项等待您的确认，自动执行当前任务允许的文件、命令和工具操作。仅在您信任当前任务和工作区时启用。",
-            "读取、创建、修改或删除项目文件",
+            "不逐项确认；可能访问项目外路径，自动模式并非完全安全",
+            "Code 将不再逐项等待您的确认，并可能自动执行文件、命令、工具、网络以及项目外路径操作。仅在您信任当前任务及其访问范围时启用。",
+            "读取、创建、修改或删除文件；任务需要时可访问用户明确提供的项目外路径",
             "运行命令、使用 Skills，并启动子任务",
             "获取网页内容或调用已启用的联网能力",
-            "服务端安全限制仍然有效：越界路径、危险或系统级命令、破坏性 Git、工具预算和参数校验仍会被拦截。",
+            "自动模式并非完全安全。危险或系统级命令、破坏性 Git、工具预算与参数校验等基础限制仍然有效，但项目外路径不是统一硬阻断。",
         )
         for copy in fallback_copy:
             self.assertIn(copy, INDEX_SOURCE)
 
         translated_copy = (
+            'permBypassTip: "Runs without per-action approval and may access paths outside the project; Auto mode is not completely safe"',
             'autoPermissionRiskTitle: "Enable Auto mode?"',
-            'autoPermissionRiskLead: "Code will stop asking for approval for each action and automatically perform file, command, and tool operations allowed for the current task. Enable it only when you trust the current task and workspace."',
+            'autoPermissionRiskLead: "Code will stop asking for approval for each action and may automatically perform file, command, tool, network, and out-of-project path operations. Enable it only when you trust the task and its access scope."',
             'autoPermissionFilesTitle: "Files and edits"',
-            'autoPermissionFilesDescription: "Read, create, modify, or delete project files"',
+            'autoPermissionFilesDescription: "Read, create, modify, or delete files; the task may access user-specified paths outside the project when needed"',
             'autoPermissionCommandsTitle: "Commands and tools"',
             'autoPermissionCommandsDescription: "Run commands, use Skills, and start subtasks"',
             'autoPermissionNetworkTitle: "Network access"',
             'autoPermissionNetworkDescription: "Fetch web content or use enabled network capabilities"',
-            'autoPermissionRiskLimits: "Server-enforced safety limits still apply: out-of-scope paths, dangerous or system-level commands, destructive Git operations, tool budgets, and argument validation remain blocked."',
+            'autoPermissionRiskLimits: "Auto mode is not completely safe. Baseline limits for dangerous or system-level commands, destructive Git operations, tool budgets, and argument validation still apply, but paths outside the project are not universally blocked."',
             'autoPermissionKeepCurrent: "Cancel"',
             'autoPermissionEnable: "Enable Auto mode"',
         )
@@ -8191,9 +8193,23 @@ process.stdout.write(JSON.stringify({
                 "read": "权限策略：只读分析。只能列出、读取和搜索项目文件；遇到无法从上下文或文件中确认的关键决策时可以向用户提问。不能写入、删除、运行命令、访问网络或启动子 Agent。",
                 "plan": "权限策略：计划模式。可读取、搜索、生成修改方案，但不能运行命令或直接写入文件。",
                 "accept": "权限策略：接受编辑模式。可执行命令和写入文件，但操作前需用户确认。",
-                "bypass": "权限策略：自动模式。当前允许的操作会自动执行，不再逐项请求授权；危险命令、越界路径、破坏性 Git、系统级操作及其他服务端安全限制仍然生效。",
+                "bypass": "权限策略：自动模式。当前允许的操作会自动执行，不再逐项请求授权；自动模式不保证完全安全。工作区是默认操作范围而非硬边界，用户明确提供的工作区外路径可在任务需要时访问。除非用户明确要求，不得自行扩张到父目录、相邻目录、用户主目录或磁盘根，也不得为寻找工具、依赖或 Skill 脚本递归扫描用户主目录或磁盘根。对工作区外的写入、覆盖或删除必须有明确用户意图。发现范围风险时先缩小范围或改用更安全的策略；仍无法完成时在最终回答中说明，不得调用 request_user_input 等方式中断自动任务。危险命令、系统安装、破坏性 Git 及其他服务端安全限制仍然生效。",
             },
         )
+        bypass_instruction = data["instructions"]["bypass"]
+        for required_boundary in (
+            "工作区是默认操作范围而非硬边界",
+            "用户明确提供的工作区外路径可在任务需要时访问",
+            "不得自行扩张到父目录、相邻目录、用户主目录或磁盘根",
+            "不得为寻找工具、依赖或 Skill 脚本递归扫描用户主目录或磁盘根",
+            "工作区外的写入、覆盖或删除必须有明确用户意图",
+            "先缩小范围或改用更安全的策略",
+            "在最终回答中说明",
+            "不得调用 request_user_input 等方式中断自动任务",
+            "自动模式不保证完全安全",
+        ):
+            self.assertIn(required_boundary, bypass_instruction)
+        self.assertNotIn("越界路径", bypass_instruction)
         self.assertIsNone(data["unknownInstruction"])
         self.assertIsNone(data["nullSerialization"])
         self.assertEqual(

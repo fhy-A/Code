@@ -221,7 +221,7 @@
                     <button class="model-pill-option" type="button" data-value="read" data-i18n="permRead" title="仅分析项目，不修改任何内容" data-i18n-title="permReadTip">只读分析</button>
                     <button class="model-pill-option" type="button" data-value="plan" data-i18n="permPlan" title="仅规划，不执行写操作" data-i18n-title="permPlanTip">计划</button>
                     <button class="model-pill-option" type="button" data-value="accept" data-i18n="permAccept" title="可读写文件，编辑需用户确认" data-i18n-title="permAcceptTip">接受编辑</button>
-                    <button class="model-pill-option" type="button" data-value="bypass" data-i18n="permBypass" title="自动执行当前允许的操作，不再逐项授权；服务端安全限制仍然有效" data-i18n-title="permBypassTip">自动</button>
+                    <button class="model-pill-option" type="button" data-value="bypass" data-i18n="permBypass" title="不逐项确认；可能访问项目外路径，自动模式并非完全安全" data-i18n-title="permBypassTip">自动</button>
                   </div>
                 </div>
               </div>
@@ -565,7 +565,7 @@
           <button id="closeAutoPermissionConfirm" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">×</button>
         </header>
         <div class="confirm-body" id="autoPermissionRiskDescription">
-          <p class="auto-permission-risk-lead" data-i18n="autoPermissionRiskLead">Code 将不再逐项等待您的确认，自动执行当前任务允许的文件、命令和工具操作。仅在您信任当前任务和工作区时启用。</p>
+          <p class="auto-permission-risk-lead" data-i18n="autoPermissionRiskLead">Code 将不再逐项等待您的确认，并可能自动执行文件、命令、工具、网络以及项目外路径操作。仅在您信任当前任务及其访问范围时启用。</p>
           <div class="auto-permission-capabilities" role="list">
             <div class="auto-permission-capability" role="listitem">
               <span class="auto-permission-capability-icon" aria-hidden="true">
@@ -576,7 +576,7 @@
               </span>
               <span class="auto-permission-capability-copy">
                 <strong data-i18n="autoPermissionFilesTitle">文件与编辑</strong>
-                <span data-i18n="autoPermissionFilesDescription">读取、创建、修改或删除项目文件</span>
+                <span data-i18n="autoPermissionFilesDescription">读取、创建、修改或删除文件；任务需要时可访问用户明确提供的项目外路径</span>
               </span>
             </div>
             <div class="auto-permission-capability" role="listitem">
@@ -607,7 +607,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 3 4.5 6v5.4c0 4.6 3 8.2 7.5 9.6 4.5-1.4 7.5-5 7.5-9.6V6L12 3Z"/><path d="m9 12 2 2 4-4"/>
             </svg>
-            <p data-i18n="autoPermissionRiskLimits">服务端安全限制仍然有效：越界路径、危险或系统级命令、破坏性 Git、工具预算和参数校验仍会被拦截。</p>
+            <p data-i18n="autoPermissionRiskLimits">自动模式并非完全安全。危险或系统级命令、破坏性 Git、工具预算与参数校验等基础限制仍然有效，但项目外路径不是统一硬阻断。</p>
           </div>
         </div>
         <footer class="confirm-actions">
