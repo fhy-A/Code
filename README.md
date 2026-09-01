@@ -12,7 +12,7 @@
 <p align="center">让 AI 真正进入你的项目，而不是停在对话框里。</p>
 
 <p align="center">
-  <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.6.7-2563EB" alt="Version 0.5.30"></a>
+  <a href="https://github.com/fhy-A/Code/releases/latest"><img src="https://img.shields.io/badge/version-0.6.7-2563EB" alt="Version 0.6.7"></a>
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Windows">
   <img src="https://img.shields.io/badge/python-3.12+-3776AB" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/tests-842%20passed-16A34A" alt="842 tests passed">

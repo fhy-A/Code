@@ -2,6 +2,7 @@ import inspect
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -209,6 +210,129 @@ Date: 2026-07-27
             source.index("run_release_quality_checks"),
             source.index("build_exe"),
         )
+
+
+class TestReadmeVersionMetadata(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.stack = ExitStack()
+        self.stack.enter_context(mock.patch.object(release, "ROOT", self.root))
+        self.stack.enter_context(
+            mock.patch.object(release, "VERSION_FILE", self.root / "VERSION"),
+        )
+        self.stack.enter_context(
+            mock.patch.object(
+                release,
+                "VERSION_INFO_FILE",
+                self.root / "file_version_info.txt",
+            ),
+        )
+        self.stack.enter_context(
+            mock.patch.object(release, "README_FILE", self.root / "README.md"),
+        )
+
+    def tearDown(self):
+        self.stack.close()
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _badge(url_version, alt_version):
+        return (
+            '<img src="https://img.shields.io/badge/version-'
+            f'{url_version}-2563EB" alt="Version {alt_version}">'
+        )
+
+    def _write_readme(self, *, badge=None, exe_name=None):
+        parts = [
+            badge if badge is not None else self._badge("0.6.6", "0.6.6"),
+            '<img src="docs/brand.svg" alt="Unrelated Version 9.9.9">',
+        ]
+        if exe_name is not None:
+            parts.append(f"下载 `{exe_name}`。")
+        self.readme = "\n".join(parts) + "\n"
+        release.README_FILE.write_text(self.readme, encoding="utf-8")
+
+    def _prepare_consistency_files(self, expected_version):
+        release.VERSION_FILE.write_text(expected_version + "\n", encoding="utf-8")
+        release.VERSION_INFO_FILE.write_text(
+            f"OriginalFilename=Code-v{expected_version}.exe\n",
+            encoding="utf-8",
+        )
+        (self.root / f"Code-v{expected_version}.spec").write_text(
+            "synthetic spec\n",
+            encoding="utf-8",
+        )
+
+    def test_update_readme_synchronizes_badge_alt_and_exe_idempotently(self):
+        self._write_readme(
+            badge=self._badge("0.6.6", "0.5.30"),
+            exe_name="Code-v0.6.6.exe",
+        )
+
+        release.update_readme("0.6.7")
+        first = release.README_FILE.read_text(encoding="utf-8")
+        release.update_readme("0.6.7")
+        second = release.README_FILE.read_text(encoding="utf-8")
+
+        self.assertIn(self._badge("0.6.7", "0.6.7"), first)
+        self.assertIn("Code-v0.6.7.exe", first)
+        self.assertIn(
+            '<img src="docs/brand.svg" alt="Unrelated Version 9.9.9">',
+            first,
+        )
+        self.assertNotIn("Code-v0.6.6.exe", first)
+        self.assertEqual(second, first)
+
+    def test_consistency_rejects_missing_or_stale_readme_fields(self):
+        cases = {
+            "missing-badge-url": (
+                '<img src="docs/version.svg" alt="Version {version}">',
+                "Code-v{version}.exe",
+            ),
+            "stale-badge-url": (self._badge("0.5.30", "{version}"), "Code-v{version}.exe"),
+            "missing-badge-alt": (
+                '<img src="https://img.shields.io/badge/version-{version}-2563EB">',
+                "Code-v{version}.exe",
+            ),
+            "stale-badge-alt": (self._badge("{version}", "0.5.30"), "Code-v{version}.exe"),
+            "missing-exe": (self._badge("{version}", "{version}"), None),
+            "stale-exe": (self._badge("{version}", "{version}"), "Code-v0.5.30.exe"),
+        }
+
+        for dry_run in (True, False):
+            expected_version = "0.6.6" if dry_run else "0.6.7"
+            self._prepare_consistency_files(expected_version)
+            for case_id, (badge_template, exe_template) in cases.items():
+                with self.subTest(dry_run=dry_run, case=case_id):
+                    badge = badge_template.format(version=expected_version)
+                    exe_name = (
+                        exe_template.format(version=expected_version)
+                        if exe_template is not None
+                        else None
+                    )
+                    self._write_readme(badge=badge, exe_name=exe_name)
+                    with self.assertRaises(SystemExit):
+                        release.verify_version_consistency(
+                            "0.6.7",
+                            "0.6.6",
+                            dry_run=dry_run,
+                        )
+
+    def test_consistency_accepts_complete_readme_metadata(self):
+        for dry_run in (True, False):
+            expected_version = "0.6.6" if dry_run else "0.6.7"
+            with self.subTest(dry_run=dry_run):
+                self._prepare_consistency_files(expected_version)
+                self._write_readme(
+                    badge=self._badge(expected_version, expected_version),
+                    exe_name=f"Code-v{expected_version}.exe",
+                )
+                release.verify_version_consistency(
+                    "0.6.7",
+                    "0.6.6",
+                    dry_run=dry_run,
+                )
 
 
 class TestHarnessReplayReleaseGate(unittest.TestCase):

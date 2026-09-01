@@ -37,7 +37,7 @@ python release.py 0.5.8 --skip-tests
 
 | 阶段 | 操作 | 校验 |
 |------|------|------|
-| 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md`，复制 `.spec` | 4 个文件版本号一致 |
+| 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md`，复制 `.spec` | 4 个文件版本号一致；README 徽章 URL / alt 与 EXE 下载名同版 |
 | 2 | 前端门禁 → `pytest -q`（360 秒）→ `npm run verify:harness-replay`（30 秒）→ `git diff --check` → `node --check` / `py_compile` | 前端构建、完整回归、默认 replay CLI、差异与语法全部通过 |
 | 3 | `python build_exe.py` 打包 | EXE 文件生成 |
 | 4 | 读取 EXE 版本元数据 + 计算 SHA-256 | `ProductVersion` / `FileVersion` / `OriginalFilename` 正确 |
@@ -67,6 +67,8 @@ python release.py 0.5.8 --prepare --yes
 - 远端 `master` 是当前候选 HEAD 的祖先；
 - 目标本地/远端 tag、GitHub Release 和资产没有冲突；
 - 暂存区为空，当前分支是 `master`。
+
+README 的 canonical 版本元数据只包括 `img.shields.io` 版本徽章 URL、同一徽章的 `Version X.Y.Z` alt 和具体的 `Code-vX.Y.Z.exe` 下载名。版本同步会在该精确范围内同时更新三者，不改写其他图片 alt、链接或正文；重复同步同一版本不产生新内容差量。dry-run 必须确认三者均为当前旧版本，正式一致性校验必须确认三者均为目标版本；canonical 徽章或具体 EXE 名缺失、重复、陈旧或彼此不一致都会在构建前失败。
 
 预检通过后，脚本按原正式顺序同步版本号、运行完整共享 release 门禁、构建 EXE、严格核对 PE 元数据和 SHA-256、生成并校验发布说明。成功时：
 
@@ -236,7 +238,7 @@ python release.py 0.5.8 --resume --yes
 ```
 VERSION                              → 改内容为 "0.5.8"
 file_version_info.txt                → 改 filevers/prodvers/FileVersion/ProductVersion/OriginalFilename
-README.md                            → 改版本徽章和下载链接中的版本号
+README.md                            → 同步版本徽章 URL / alt 和具体 EXE 下载名
 Code-v0.5.7.spec → Code-v0.5.8.spec  → 复制并替换内部的版本号
 ```
 

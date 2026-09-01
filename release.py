@@ -70,6 +70,14 @@ GH_COMMAND = ("gh",)
 RELEASE_NOTES_PLACEHOLDER = "[发布说明待补充 -- 请在此描述本版本的主要改动]"
 RELEASE_NOTES_BODY_START = "<!-- code-release-notes:body:start -->"
 RELEASE_NOTES_BODY_END = "<!-- code-release-notes:body:end -->"
+README_VERSION_BADGE_PATTERN = re.compile(
+    r'(?P<prefix><img src="https://img\.shields\.io/badge/version-)'
+    r'(?P<url_version>\d+\.\d+\.\d+)'
+    r'(?P<middle>-2563EB" alt="Version )'
+    r'(?P<alt_version>\d+\.\d+\.\d+)'
+    r'(?P<suffix>">)'
+)
+README_VERSIONED_EXE_PATTERN = re.compile(r"Code-v(?P<version>\d+\.\d+\.\d+)\.exe")
 
 _RELEASE_NOTES_GENERATED_HEADINGS = (
     "\n## Packaging\n",
@@ -480,18 +488,70 @@ def update_version_info(new_version, version_tuple):
         ok(f"file_version_info.txt -> {new_version}")
 
 
+def _readme_version_metadata(content):
+    badge_matches = list(README_VERSION_BADGE_PATTERN.finditer(content))
+    if len(badge_matches) != 1:
+        die(
+            "README.md 必须恰好包含一个 canonical 版本徽章"
+            f"（实际 {len(badge_matches)} 个）",
+        )
+    exe_versions = [
+        match.group("version")
+        for match in README_VERSIONED_EXE_PATTERN.finditer(content)
+    ]
+    if not exe_versions:
+        die("README.md 中未找到版本化 EXE 下载名 Code-vX.Y.Z.exe")
+    return badge_matches[0], exe_versions
+
+
+def _verify_readme_version_metadata(content, expected_version):
+    badge, exe_versions = _readme_version_metadata(content)
+    url_version = badge.group("url_version")
+    alt_version = badge.group("alt_version")
+    if url_version != expected_version:
+        die(
+            "README.md 版本徽章 URL 不一致: "
+            f"{url_version} != {expected_version}",
+        )
+    if alt_version != expected_version:
+        die(
+            "README.md 版本徽章 alt 不一致: "
+            f"{alt_version} != {expected_version}",
+        )
+    mismatched_exe_versions = sorted(
+        {version for version in exe_versions if version != expected_version},
+    )
+    if mismatched_exe_versions:
+        die(
+            "README.md 版本化 EXE 下载名不一致: "
+            + ", ".join(mismatched_exe_versions)
+            + f" != {expected_version}",
+        )
+    ok(
+        "README.md 版本徽章 URL / alt 与 EXE 下载名均为 "
+        f"{expected_version}",
+    )
+
+
 def update_readme(new_version):
-    content = README_FILE.read_text(encoding="utf-8")
-
-    new_badge = f"version-{new_version}-2563EB"
-    if new_badge not in content:
-        content = re.sub(r"version-\d+\.\d+\.\d+-2563EB", new_badge, content)
-
-    new_dl = f"Code-v{new_version}.exe"
-    if new_dl not in content:
-        content = re.sub(r"Code-v\d+\.\d+\.\d+\.exe", new_dl, content)
-
-    README_FILE.write_text(content, encoding="utf-8")
+    original = README_FILE.read_text(encoding="utf-8")
+    content = original
+    badge, _ = _readme_version_metadata(content)
+    replacement = (
+        badge.group("prefix")
+        + new_version
+        + badge.group("middle")
+        + new_version
+        + badge.group("suffix")
+    )
+    content = content[:badge.start()] + replacement + content[badge.end():]
+    content = README_VERSIONED_EXE_PATTERN.sub(
+        f"Code-v{new_version}.exe",
+        content,
+    )
+    _verify_readme_version_metadata(content, new_version)
+    if content != original:
+        README_FILE.write_text(content, encoding="utf-8")
     ok(f"README.md -> {new_version}")
 
 
@@ -539,8 +599,7 @@ def verify_version_consistency(new_version, old_version, dry_run=False):
             ok(f"file_version_info.txt 包含 {expected}（旧版本号）")
 
         readme = README_FILE.read_text(encoding="utf-8")
-        if f"Code-v{old_version}.exe" in readme:
-            ok(f"README.md 包含 Code-v{old_version}.exe（旧版本号）")
+        _verify_readme_version_metadata(readme, old_version)
 
         old_spec = ROOT / f"Code-v{old_version}.spec"
         if old_spec.exists():
@@ -564,9 +623,7 @@ def verify_version_consistency(new_version, old_version, dry_run=False):
         ok(f"file_version_info.txt 包含 {expected}")
 
         readme = README_FILE.read_text(encoding="utf-8")
-        if f"Code-v{new_version}.exe" not in readme:
-            die(f"README.md 中未找到 Code-v{new_version}.exe")
-        ok(f"README.md 包含 Code-v{new_version}.exe")
+        _verify_readme_version_metadata(readme, new_version)
 
         new_spec = ROOT / f"Code-v{new_version}.spec"
         if not new_spec.exists():
