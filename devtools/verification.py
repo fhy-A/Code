@@ -15,7 +15,7 @@ import sys
 from typing import Callable, Iterable, TextIO
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 NPM = "npm.cmd" if os.name == "nt" else "npm"
 DOCTOR_SCHEMA = "code-development-doctor/v1"
 DOCTOR_NODE_SCHEMA = "code-development-doctor-node/v1"

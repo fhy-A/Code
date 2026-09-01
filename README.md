@@ -170,6 +170,7 @@ Code/
 ├── agent-runtime.js         # 浏览器侧任务运行时桥接
 ├── styles.css               # 主题与响应式样式
 ├── code_runtime/            # 后端协议、Goal、模型、Skill、图片与平台实现
+├── devtools/                # 发布凭证与共享验证定义等开发支持模块
 ├── src/                     # 已拆分的前端核心与服务模块
 ├── data/skills/             # 随程序分发的 Skills
 ├── assets/                  # Code 品牌与界面资产

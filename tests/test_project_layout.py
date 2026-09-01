@@ -24,6 +24,7 @@ RUNTIME_MODULES = (
     "skill_dependencies",
     "windows_explorer",
 )
+DEVTOOL_MODULES = ("release_state", "verification")
 
 
 def first_party_runtime_sources():
@@ -36,6 +37,24 @@ def first_party_runtime_sources():
 
 
 class TestProjectLayout(unittest.TestCase):
+    def test_development_support_modules_live_only_in_devtools(self):
+        devtools_root = ROOT / "devtools"
+        self.assertEqual(
+            sorted(path.name for path in devtools_root.iterdir() if path.is_file()),
+            ["__init__.py", *(f"{name}.py" for name in DEVTOOL_MODULES)],
+        )
+        for module_name in DEVTOOL_MODULES:
+            self.assertFalse((ROOT / f"{module_name}.py").exists())
+            module = importlib.import_module(f"devtools.{module_name}")
+            self.assertEqual(Path(module.__file__).resolve().parent, devtools_root.resolve())
+
+        package_source = (devtools_root / "__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("import *", package_source)
+        self.assertEqual(importlib.import_module("devtools.verification").ROOT, ROOT)
+        self.assertIn("from devtools.release_state import", (ROOT / "release.py").read_text(encoding="utf-8"))
+        self.assertIn("from devtools.verification import", (ROOT / "release.py").read_text(encoding="utf-8"))
+        self.assertIn("from devtools.verification import", (ROOT / "verify.py").read_text(encoding="utf-8"))
+
     def test_backend_runtime_modules_live_only_in_code_runtime(self):
         runtime_root = ROOT / "code_runtime"
         self.assertEqual(

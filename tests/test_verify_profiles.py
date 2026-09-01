@@ -6,7 +6,7 @@ from dataclasses import replace
 from unittest import mock
 
 import release
-import verification
+from devtools import verification
 import verify
 
 

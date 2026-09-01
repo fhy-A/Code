@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | 发布与验证支持模块归位 `devtools/`：`release_state` / `verification` 以 Git rename 迁入轻量包，根 release / verify 用户命令不变且无 shim；verification ROOT、检查顺序、profile、definition fingerprint 与 manifest 哈希迁移前后逐项一致。布局、release script/workflow、verify profiles `66 tests`、doctor `10/10`、frontend freshness、AST / diff 通过，published 凭证与发布边界不变，未运行真实 release | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 后端实现模块归位 `code_runtime/`：13 个当前运行模块以 Git rename 迁入轻量包，入口 / first-party tests / mock patch 全部切换且无根 shim，PPT APP_ROOT 与全部资源目标保持。布局 `2 tests`、直接 `231 tests`、入口兼容 `666 tests`、完整 Python `1809 tests`、frontend build/freshness、doctor `10/10` 通过；非发布 PyInstaller 成功收集新包，用户原 EXE 按原哈希恢复，frontend / release notes 哈希不变，临时根与 build 清理 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 未接入运行时的 Goal v1 移除：调用图确认三个旧模块仅由三份专属测试消费后删除全部六文件且不留 shim；`data/goals/` 旧 sidecar 继续原地保留、不读不迁移。布局合同以 AST / 动态导入形态阻止运行时回流，fail-first `1 failure` 后 Goal v2、AgentRun、frontend、server / Session 组合回归 `363 tests` 与 diff 检查通过 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 重复品牌图标与 H4 配置收口：删除与根图标字节相同且无产品消费者的 `assets/code-icon.png`，导出器重跑后四个保留 PNG / ICO 哈希不变且副本未重建；Playwright 配置归位 `tests/e2e/h4/`，以显式路径保持原 test/output 位置和全部运行参数。fail-first `2 failures` 后定向 `2 tests`、完整前端 `416 tests`、H4 infra 与新配置 smoke 列表 `164 tests`、语法 / JSON / diff 通过，未运行真实 H4 或 Browser | [查看](2026/2026-09-01.md) |

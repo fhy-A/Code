@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import release
-import verification
+from devtools import verification
 
 
 class TestReleaseNotesAutomation(unittest.TestCase):

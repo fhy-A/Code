@@ -90,7 +90,7 @@ python release.py 0.5.8 --publish-prepared --yes
 
 - 版本、基线 HEAD、`master`、index tree 与发布白名单外 tracked 差量摘要；
 - 五个发布白名单文件的大小、SHA-256 和 Git blob；
-- `verification.py` 中正式 release 检查的 ID、顺序、命令和超时指纹；
+- `devtools/verification.py` 中正式 release 检查的 ID、顺序、命令和超时指纹；
 - 发布说明正文与 EXE 大小、SHA-256、`ProductVersion`、`FileVersion`、`OriginalFilename`；
 - Git/gh/Python/平台和 GitHub 仓库身份；
 - origin 基线、目标 tag 与 Release 仍无冲突。
@@ -321,8 +321,8 @@ gh release create v0.5.8 dist/Code-v0.5.8.exe `
 | 文件 | 作用 |
 |------|------|
 | `release.py` | 自动发版脚本 |
-| `release_state.py` | prepared 凭证封印、原子写入和文件哈希校验 |
-| `verification.py` | 共享验证定义与 release 门禁指纹事实源 |
+| `devtools/release_state.py` | prepared 凭证封印、原子写入和文件哈希校验 |
+| `devtools/verification.py` | 共享验证定义与 release 门禁指纹事实源 |
 | `VERSION` | 纯文本版本号 |
 | `file_version_info.txt` | Windows EXE 版本元数据 |
 | `README.md` | 项目首页（含版本徽章和下载链接） |

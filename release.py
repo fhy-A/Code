@@ -37,7 +37,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from release_state import (
+from devtools.release_state import (
     CredentialError,
     SCHEMA as RELEASE_CREDENTIAL_SCHEMA,
     invalidate_credential,
@@ -49,7 +49,7 @@ from release_state import (
     sha256_file,
     validate_recorded_files,
 )
-from verification import (
+from devtools.verification import (
     CHECKS,
     SYNTAX_CHECK_IDS,
     get_release_check_ids,

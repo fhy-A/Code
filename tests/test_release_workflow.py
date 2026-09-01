@@ -8,8 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import release
-import release_state
-import verification
+from devtools import release_state, verification
 
 
 def git(cwd, *args):

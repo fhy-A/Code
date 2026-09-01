@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from verification import run_doctor, run_profile
+from devtools.verification import run_doctor, run_profile
 
 
 def main(argv: list[str] | None = None) -> int:
