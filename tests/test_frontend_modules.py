@@ -1855,6 +1855,121 @@ const feature = createGoalControlFeature({
             r'<section id="onboardingTasks"[^>]*></section>\s*</div>\s*$',
         )
 
+    def test_code043_onboarding_visual_system_is_flat_localized_and_layout_isolated(self):
+        for copy in (
+            "检查 workbar 连接",
+            "确认登录正常",
+            "准备 API Key",
+            "确认至少一个 Key 可用",
+            "开始第一个任务",
+            "选好模型后输入任务",
+            "了解 Code",
+            "整理网页",
+            "制作 HTML",
+            "点击填入，不会自动发送",
+            "Check the workbar connection",
+            "Confirm you're signed in",
+            "Prepare an API Key",
+            "Confirm at least one Key is available",
+            "Start your first task",
+            "Choose a model, then enter a task",
+            "Meet Code",
+            "Organize a webpage",
+            "Build HTML",
+            "Click to fill; it won't send automatically",
+        ):
+            self.assertIn(copy, I18N_SOURCE)
+        self.assertEqual(I18N_SOURCE.count('onboardingProgress: "{current}/{total}"'), 2)
+        self.assertIn("const FIRST_TASK_EXAMPLE_LABEL_KEYS = Object.freeze([", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("const labelKey = FIRST_TASK_EXAMPLE_LABEL_KEYS[index]", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("const promptKey = FIRST_TASK_EXAMPLE_KEYS[index]", ONBOARDING_TASKS_SOURCE)
+        self.assertIn("onExampleSelected(t(promptKey))", ONBOARDING_TASKS_SOURCE)
+        self.assertIn('class="onboarding-step-rail"', ONBOARDING_TASKS_SOURCE)
+        self.assertIn('class="onboarding-current-panel"', ONBOARDING_TASKS_SOURCE)
+        self.assertIn('class="onboarding-current-copy"', ONBOARDING_TASKS_SOURCE)
+        self.assertIn('uiIcon("check", 14, "onboarding-step-check")', ONBOARDING_TASKS_SOURCE)
+        self.assertIn('uiIcon("chevronRight", 13, "onboarding-step-chevron")', ONBOARDING_TASKS_SOURCE)
+        self.assertNotIn('class="onboarding-task-list"', ONBOARDING_TASKS_SOURCE)
+
+        marker = "/* CODE-043 phase 3: single-layer onboarding tasks */"
+        self.assertIn(marker, STYLE_SOURCE)
+        start = STYLE_SOURCE.index(marker)
+        end = STYLE_SOURCE.index("/* CODE-043 phase 1: scoped shell visual system */", start)
+        block = STYLE_SOURCE[start:end]
+        self.assertIn(".chat-pane.empty-chat .composer-stack > .onboarding-tasks", block)
+        empty_stack = re.search(
+            r"\.chat-pane\.empty-chat \.composer-stack\s*\{([^}]*)\}",
+            block,
+        )
+        self.assertIsNotNone(empty_stack)
+        self.assertIn("position: relative;", empty_stack.group(1))
+        self.assertIn("inset: auto;", empty_stack.group(1))
+        self.assertNotIn("left: auto;", empty_stack.group(1))
+        self.assertNotRegex(empty_stack.group(1), r"(?:top|right|bottom|left):\s*(?!auto\b)")
+        self.assertRegex(
+            block,
+            r"\.chat-pane\.empty-chat \.composer-stack > \.onboarding-tasks\s*\{[^}]*"
+            r"position:\s*absolute;[^}]*top:\s*calc\(100% \+ 10px\);",
+        )
+        self.assertIn(".onboarding-card-header strong { font-size: 14px;", block)
+        header_rule = re.search(r"\.onboarding-card-header\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(header_rule)
+        self.assertIn("justify-content: flex-start;", header_rule.group(1))
+        self.assertIn("gap: 8px;", header_rule.group(1))
+        progress_rule = re.search(r"\.onboarding-card-header small\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(progress_rule)
+        self.assertIn("font-variant-numeric: tabular-nums;", progress_rule.group(1))
+        rail_rule = re.search(r"\.onboarding-step-rail\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(rail_rule)
+        self.assertIn("display: flex;", rail_rule.group(1))
+        self.assertIn("justify-content: flex-start;", rail_rule.group(1))
+        self.assertIn("flex-wrap: wrap;", rail_rule.group(1))
+        self.assertNotIn("repeat(3, minmax(0, 1fr))", rail_rule.group(1))
+        step_rule = re.search(r"\.onboarding-step\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(step_rule)
+        self.assertIn("flex: 0 0 auto;", step_rule.group(1))
+        self.assertNotIn("minmax(0, 1fr)", step_rule.group(1))
+        step_label_rule = re.search(r"\.onboarding-step-label\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(step_label_rule)
+        self.assertIn("white-space: nowrap;", step_label_rule.group(1))
+        self.assertNotIn("overflow: hidden;", step_label_rule.group(1))
+        self.assertNotIn("text-overflow: ellipsis;", step_label_rule.group(1))
+        self.assertIn(".onboarding-current-copy strong { font-size: 14px;", block)
+        self.assertIn(".onboarding-current-copy small {", block)
+        self.assertIn("font-size: 12px;", block)
+        self.assertIn(".onboarding-example {", block)
+        self.assertIn("border: 0;", block)
+        self.assertNotIn(".onboarding-task + .onboarding-task", block)
+        self.assertNotRegex(
+            block,
+            r"(?ms)^\.onboarding-(?:tasks|card|step-rail|current-panel|examples)[^{]*\{"
+            r"[^}]*overflow(?:-y)?:\s*(?:auto|scroll)",
+        )
+        integration_start = H4_SMOKE_SOURCE.index(
+            "async function exerciseExplicitOnboardingTasks(",
+        )
+        integration_end = H4_SMOKE_SOURCE.index(
+            "async function pinH4BaseUrlAcrossReloads(",
+            integration_start,
+        )
+        integration_source = H4_SMOKE_SOURCE[integration_start:integration_end]
+        self.assertIn('onboarding.locator(".onboarding-step.is-current")', integration_source)
+        self.assertIn('onboarding.locator("[data-onboarding-task-action]")', integration_source)
+        self.assertIn("composerCenterDelta", integration_source)
+        self.assertIn("welcomeComposerCenterDelta", integration_source)
+        self.assertIn('document.querySelector(".chat-pane.empty-chat > .messages")', integration_source)
+        self.assertIn("configuredFlowGap", integration_source)
+        self.assertIn("stackFlowGap", integration_source)
+        self.assertIn("stackRect.top - messagesRect.bottom", integration_source)
+        self.assertIn("Math.abs(layout.stackFlowGap - layout.configuredFlowGap)", integration_source)
+        self.assertNotIn("stackTop", integration_source)
+        self.assertNotIn("stackBottom", integration_source)
+        self.assertIn("expectAnchorsStable", integration_source)
+        self.assertIn("Math.abs(layout.actualGap - 10)", integration_source)
+        self.assertIn("layout.inlineScroll", integration_source)
+        self.assertNotIn("exerciseOnboardingVisualSystemModelFree", H4_SMOKE_SOURCE)
+        self.assertNotIn("model-free onboarding visual system", H4_SMOKE_SOURCE)
+
     def test_onboarding_state_is_ordered_minimal_and_fail_closed(self):
         script = f"""
 global.window = {{Code: {{features: {{}}}}}};
@@ -2317,7 +2432,10 @@ setImmediate(() => {{
         self.assertIn("box-sizing: border-box;", shrink_rule.group(1))
         self.assertIn("min-width: 0;", shrink_rule.group(1))
         self.assertIn("max-width: 100%;", shrink_rule.group(1))
-        self.assertIn(".composer-stack > .onboarding-tasks { width: 100%; }", STYLE_SOURCE)
+        self.assertRegex(
+            STYLE_SOURCE,
+            r"\.composer-stack > \.onboarding-tasks\s*\{[^}]*width:\s*100%;",
+        )
         self.assertIn("width: var(--conversation-content-width);", STYLE_SOURCE)
         self.assertIn(".onboarding-example-list", STYLE_SOURCE)
         self.assertIn("box-shadow: none;", STYLE_SOURCE)

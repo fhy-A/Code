@@ -13,6 +13,11 @@
     "onboardingExampleAnalyzeProblems",
     "onboardingExampleSmallChange",
   ]);
+  const FIRST_TASK_EXAMPLE_LABEL_KEYS = Object.freeze([
+    "onboardingExampleProjectStructureLabel",
+    "onboardingExampleAnalyzeProblemsLabel",
+    "onboardingExampleSmallChangeLabel",
+  ]);
 
   function freshState() {
     return { version: ONBOARDING_VERSION, completedTaskIds: [], completed: false };
@@ -208,17 +213,18 @@
     let completionTimer = null;
     let welcomeVisible = false;
     let firstTaskReady = false;
+    const uiIcon = (...args) => Code.core?.icons?.uiIcon?.(...args) || "";
 
     const taskDefinitions = Object.freeze({
-      workbar: ["onboardingWorkbarTitle", "onboardingWorkbarDescription", "onboardingVerifyWorkbar"],
-      key: ["onboardingKeyTitle", "onboardingKeyDescription", "onboardingSetUpKey"],
-      "first-task": ["onboardingFirstTaskTitle", "onboardingFirstTaskDescription", "onboardingChooseModel"],
+      workbar: ["onboardingStepConnection", "onboardingWorkbarTitle", "onboardingWorkbarDescription", "onboardingVerifyWorkbar"],
+      key: ["onboardingStepKey", "onboardingKeyTitle", "onboardingKeyDescription", "onboardingSetUpKey"],
+      "first-task": ["onboardingStepStart", "onboardingFirstTaskTitle", "onboardingFirstTaskDescription", "onboardingChooseModel"],
     });
 
     function actionLabelKey(taskId) {
       if (taskId === "key" && hasEnabledKey()) return "onboardingConfirmKey";
       if (taskId === "first-task" && getSelectedModel()) return "onboardingConfirmModel";
-      return taskDefinitions[taskId]?.[2] || "onboardingContinue";
+      return taskDefinitions[taskId]?.[3] || "onboardingContinue";
     }
 
     function notifyLayoutChange() {
@@ -242,12 +248,12 @@
 
     function renderExamples() {
       if (!firstTaskReady || machine.currentTaskId() !== "first-task") return "";
-      const buttons = FIRST_TASK_EXAMPLE_KEYS.map((key, index) => (
-        `<button class="onboarding-example" type="button" data-onboarding-example="${index}">${escapeHtml(t(key))}</button>`
-      )).join("");
+      const buttons = FIRST_TASK_EXAMPLE_KEYS.map((promptKey, index) => {
+        const labelKey = FIRST_TASK_EXAMPLE_LABEL_KEYS[index];
+        return `<button class="onboarding-example" type="button" data-onboarding-example="${index}">${escapeHtml(t(labelKey))}</button>`;
+      }).join("");
       return `<div class="onboarding-examples" role="group" aria-labelledby="onboardingExamplesTitle">
-        <strong id="onboardingExamplesTitle">${escapeHtml(t("onboardingExamplesTitle"))}</strong>
-        <span>${escapeHtml(t("onboardingExamplesHint"))}</span>
+        <span class="onboarding-examples-copy"><strong id="onboardingExamplesTitle">${escapeHtml(t("onboardingExamplesTitle"))}</strong><small>${escapeHtml(t("onboardingExamplesHint"))}</small></span>
         <div class="onboarding-example-list">${buttons}</div>
       </div>`;
     }
@@ -276,7 +282,7 @@
       }
       if (celebrating) {
         root.innerHTML = `<div class="onboarding-celebration" role="status" aria-live="polite" data-onboarding-complete>
-          <span class="onboarding-celebration-halo" aria-hidden="true"><span class="onboarding-complete-mark">✓</span></span>
+          <span class="onboarding-celebration-halo" aria-hidden="true"><span class="onboarding-complete-mark">${uiIcon("check", 24, "onboarding-complete-icon")}</span></span>
           <span class="onboarding-celebration-copy"><strong>${escapeHtml(t("onboardingCompleteTitle"))}</strong><small>${escapeHtml(t("onboardingCompleteDescription"))}</small></span>
         </div>`;
         notifyLayoutChange();
@@ -285,31 +291,42 @@
 
       const currentTaskId = machine.currentTaskId();
       const completed = new Set(state.completedTaskIds);
-      const rows = ONBOARDING_TASK_IDS.map((taskId, index) => {
-        const [titleKey, descriptionKey] = taskDefinitions[taskId];
+      const currentTaskIndex = Math.max(0, ONBOARDING_TASK_IDS.indexOf(currentTaskId));
+      const steps = ONBOARDING_TASK_IDS.map((taskId, index) => {
+        const [stepLabelKey] = taskDefinitions[taskId];
         const isCompleted = completed.has(taskId);
         const isCurrent = currentTaskId === taskId;
-        const pending = machine.pendingIntent(taskId);
-        const marker = isCompleted ? "✓" : String(index + 1);
-        const disabled = busyTaskId === taskId ? " disabled" : "";
-        const actionKey = busyTaskId === taskId || (pending && taskId !== "first-task")
-          ? "onboardingWaitingAction"
-          : actionLabelKey(taskId);
-        const showAction = isCurrent && !(taskId === "first-task" && firstTaskReady);
-        const action = showAction
-          ? `<button class="onboarding-task-action" type="button" data-onboarding-task-action="${taskId}"${disabled}>${escapeHtml(t(actionKey))}</button>`
+        const marker = isCompleted
+          ? uiIcon("check", 14, "onboarding-step-check")
+          : `<span class="onboarding-step-number">${index + 1}</span>`;
+        const chevron = index < ONBOARDING_TASK_IDS.length - 1
+          ? uiIcon("chevronRight", 13, "onboarding-step-chevron")
           : "";
-        return `<li class="onboarding-task${isCompleted ? " is-completed" : ""}${isCurrent ? " is-current" : " is-future"}" data-onboarding-task="${taskId}"${isCurrent ? ' aria-current="step"' : ""}>
-          <span class="onboarding-task-marker" aria-hidden="true">${marker}</span>
-          <span class="onboarding-task-copy"><strong>${escapeHtml(t(titleKey))}</strong><small>${escapeHtml(t(descriptionKey))}</small></span>
-          ${action}
+        return `<li class="onboarding-step${isCompleted ? " is-completed" : ""}${isCurrent ? " is-current" : " is-future"}" data-onboarding-task="${taskId}"${isCurrent ? ' aria-current="step"' : ""}>
+          <span class="onboarding-step-state" aria-hidden="true">${marker}</span>
+          <span class="onboarding-step-label">${escapeHtml(t(stepLabelKey))}</span>
+          ${chevron}
         </li>`;
       }).join("");
+      const [, titleKey, descriptionKey] = taskDefinitions[currentTaskId];
+      const pending = machine.pendingIntent(currentTaskId);
+      const disabled = busyTaskId === currentTaskId ? " disabled" : "";
+      const actionKey = busyTaskId === currentTaskId || (pending && currentTaskId !== "first-task")
+        ? "onboardingWaitingAction"
+        : actionLabelKey(currentTaskId);
+      const showAction = !(currentTaskId === "first-task" && firstTaskReady);
+      const action = showAction
+        ? `<button class="onboarding-task-action" type="button" data-onboarding-task-action="${currentTaskId}"${disabled}>${escapeHtml(t(actionKey))}</button>`
+        : "";
       root.innerHTML = `<section class="onboarding-card" aria-labelledby="onboardingTasksTitle">
         <header class="onboarding-card-header">
-          <span><strong id="onboardingTasksTitle">${escapeHtml(t("onboardingTitle"))}</strong><small>${escapeHtml(t("onboardingProgress", { done: state.completedTaskIds.length, total: ONBOARDING_TASK_IDS.length }))}</small></span>
+          <strong id="onboardingTasksTitle">${escapeHtml(t("onboardingTitle"))}</strong><small>${escapeHtml(t("onboardingProgress", { current: currentTaskIndex + 1, total: ONBOARDING_TASK_IDS.length }))}</small>
         </header>
-        <ol class="onboarding-task-list" aria-label="${escapeHtml(t("onboardingTaskListLabel"))}">${rows}</ol>
+        <ol class="onboarding-step-rail" aria-label="${escapeHtml(t("onboardingTaskListLabel"))}">${steps}</ol>
+        <section class="onboarding-current-panel" data-onboarding-current="${currentTaskId}" aria-labelledby="onboardingCurrentTaskTitle">
+          <span class="onboarding-current-copy"><strong id="onboardingCurrentTaskTitle">${escapeHtml(t(titleKey))}</strong><small>${escapeHtml(t(descriptionKey))}</small></span>
+          ${action}
+        </section>
         ${renderExamples()}
       </section>`;
       notifyLayoutChange();
@@ -378,8 +395,8 @@
         const exampleButton = event.target.closest("[data-onboarding-example]");
         if (exampleButton && firstTaskReady && machine.currentTaskId() === "first-task") {
           const index = Number(exampleButton.dataset.onboardingExample);
-          const key = FIRST_TASK_EXAMPLE_KEYS[index];
-          if (key) onExampleSelected(t(key));
+          const promptKey = FIRST_TASK_EXAMPLE_KEYS[index];
+          if (promptKey) onExampleSelected(t(promptKey));
           return;
         }
         const taskId = event.target.closest("[data-onboarding-task-action]")?.dataset.onboardingTaskAction;
@@ -456,6 +473,7 @@
 
   Code.features.onboardingTasks = Object.freeze({
     FIRST_TASK_EXAMPLE_KEYS,
+    FIRST_TASK_EXAMPLE_LABEL_KEYS,
     LEGACY_V1_TASK_IDS,
     ONBOARDING_STORAGE_KEY,
     ONBOARDING_TASK_IDS,

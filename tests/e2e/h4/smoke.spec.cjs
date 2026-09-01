@@ -26498,21 +26498,52 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
   await page.bringToFront();
 
   const onboarding = page.locator("#onboardingTasks");
-  const currentTask = () => onboarding.locator(".onboarding-task.is-current");
+  const currentTask = () => onboarding.locator(".onboarding-step.is-current");
+  const currentAction = () => onboarding.locator("[data-onboarding-task-action]");
   const storedState = () => page.evaluate(() => {
     const raw = localStorage.getItem("code-onboarding-tasks-v1");
     return raw ? JSON.parse(raw) : null;
   });
+  const readAnchors = () => page.evaluate(() => {
+    const welcome = document.querySelector(".welcome-brand-lockup");
+    const composer = document.querySelector("#chatForm");
+    const rect = (element) => {
+      const value = element?.getBoundingClientRect();
+      return value ? { x: value.x, y: value.y, width: value.width, height: value.height } : null;
+    };
+    return { welcome: rect(welcome), composer: rect(composer) };
+  });
+  const expectAnchorsStable = (reference, current) => {
+    for (const target of ["welcome", "composer"]) {
+      expect(reference[target]).not.toBeNull();
+      expect(current[target]).not.toBeNull();
+      for (const key of ["x", "y", "width", "height"]) {
+        expect(Math.abs(current[target][key] - reference[target][key])).toBeLessThanOrEqual(0.5);
+      }
+    }
+  };
   const readOnboardingLayout = () => page.evaluate(() => {
     const stack = document.querySelector("#composerStack");
+    const chatPane = document.querySelector(".chat-pane");
+    const messages = document.querySelector(".chat-pane.empty-chat > .messages");
+    const welcome = document.querySelector(".welcome-brand-lockup");
     const form = document.querySelector("#chatForm");
     const onboarding = document.querySelector("#onboardingTasks");
+    const card = onboarding?.querySelector(".onboarding-card");
+    const rail = onboarding?.querySelector(".onboarding-step-rail");
     const toolPreset = document.querySelector("#toolPreset");
     const stopButton = document.querySelector("#stopBtn");
+    const chatRect = chatPane?.getBoundingClientRect();
+    const messagesRect = messages?.getBoundingClientRect();
+    const welcomeRect = welcome?.getBoundingClientRect();
+    const stackRect = stack?.getBoundingClientRect();
     const formRect = form?.getBoundingClientRect();
     const onboardingRect = onboarding?.getBoundingClientRect();
-    const stackStyle = stack ? getComputedStyle(stack) : null;
-    const configuredGap = Number.parseFloat(stackStyle?.rowGap || stackStyle?.gap || "0");
+    const cardRect = card?.getBoundingClientRect();
+    const chatStyle = chatPane ? getComputedStyle(chatPane) : null;
+    const onboardingStyle = onboarding ? getComputedStyle(onboarding) : null;
+    const cardStyle = card ? getComputedStyle(card) : null;
+    const railStyle = rail ? getComputedStyle(rail) : null;
     const actualGap = formRect && onboardingRect ? onboardingRect.top - formRect.bottom : null;
     return {
       childIds: Array.from(stack?.children || []).map((child) => child.id),
@@ -26522,12 +26553,25 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
       stopButtonOutsideStack: stopButton?.parentElement !== stack,
       xDelta: formRect && onboardingRect ? Math.abs(formRect.x - onboardingRect.x) : null,
       widthDelta: formRect && onboardingRect ? Math.abs(formRect.width - onboardingRect.width) : null,
-      configuredGap,
+      composerCenterDelta: chatRect && formRect
+        ? Math.abs((chatRect.left + chatRect.width / 2) - (formRect.left + formRect.width / 2))
+        : null,
+      welcomeComposerCenterDelta: welcomeRect && formRect
+        ? Math.abs((welcomeRect.left + welcomeRect.width / 2) - (formRect.left + formRect.width / 2))
+        : null,
+      configuredFlowGap: Number.parseFloat(chatStyle?.rowGap || chatStyle?.gap || "0"),
+      stackFlowGap: stackRect && messagesRect ? stackRect.top - messagesRect.bottom : null,
       actualGap,
       overlaps: formRect && onboardingRect ? onboardingRect.top < formRect.bottom : null,
       viewportOverflow: onboardingRect
         ? onboardingRect.left < -0.5 || onboardingRect.right > window.innerWidth + 0.5
         : null,
+      cardHeight: cardRect?.height || null,
+      inlineScroll: [onboardingStyle?.overflowX, onboardingStyle?.overflowY, cardStyle?.overflowX, cardStyle?.overflowY]
+        .some((value) => value === "auto" || value === "scroll"),
+      railColumns: railStyle?.gridTemplateColumns || "",
+      documentOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1
+        || document.body.scrollWidth > document.body.clientWidth + 1,
     };
   });
   const expectOnboardingLayout = (layout) => {
@@ -26538,16 +26582,26 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
     expect(layout.stopButtonOutsideStack).toBe(true);
     expect(layout.xDelta).toBeLessThanOrEqual(0.5);
     expect(layout.widthDelta).toBeLessThanOrEqual(0.5);
-    expect(layout.configuredGap).toBeGreaterThan(0);
-    expect(Math.abs(layout.actualGap - layout.configuredGap)).toBeLessThanOrEqual(1);
+    expect(layout.composerCenterDelta).toBeLessThanOrEqual(0.5);
+    expect(layout.welcomeComposerCenterDelta).toBeLessThanOrEqual(0.5);
+    expect(layout.configuredFlowGap).toBeGreaterThan(0);
+    expect(Math.abs(layout.stackFlowGap - layout.configuredFlowGap)).toBeLessThanOrEqual(1);
+    expect(Math.abs(layout.actualGap - 10)).toBeLessThanOrEqual(1);
     expect(layout.overlaps).toBe(false);
     expect(layout.viewportOverflow).toBe(false);
+    expect(layout.inlineScroll).toBe(false);
+    expect(layout.documentOverflow).toBe(false);
+    expect(layout.railColumns.split(" ")).toHaveLength(3);
   };
   const initialMetrics = await h4.metrics();
   await expect(onboarding).toHaveAttribute("data-onboarding-state", "active");
-  await expect(onboarding.locator(".onboarding-task")).toHaveCount(3);
+  await expect(onboarding.locator(".onboarding-step")).toHaveCount(3);
   await expect(currentTask()).toHaveAttribute("data-onboarding-task", "workbar");
-  await expect(onboarding.locator(".onboarding-task.is-future")).toHaveCount(2);
+  await expect(onboarding.locator(".onboarding-step.is-future")).toHaveCount(2);
+  await expect(onboarding.locator(".onboarding-current-panel")).toHaveAttribute("data-onboarding-current", "workbar");
+  await expect(onboarding.locator(".onboarding-current-copy strong")).toHaveText("Check the workbar connection");
+  await expect(onboarding.locator(".onboarding-card-header small")).toHaveText("1/3");
+  await expect(onboarding.locator(".onboarding-step-chevron")).toHaveCount(2);
   await expect(onboarding.locator("[data-onboarding-command]")).toHaveCount(0);
   expect(await storedState()).toEqual({
     version: 2,
@@ -26558,12 +26612,16 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
   expect(initialMetrics.chatRequests).toEqual([]);
 
   await page.setViewportSize({ width: 1280, height: 900 });
+  await expect(page.locator(".welcome-screen")).toHaveClass(/is-complete/);
   const desktopLayout = await readOnboardingLayout();
   expectOnboardingLayout(desktopLayout);
+  const desktopAnchors = await readAnchors();
   await page.setViewportSize({ width: 390, height: 844 });
   const narrowLayout = await readOnboardingLayout();
   expectOnboardingLayout(narrowLayout);
+  const narrowAnchors = await readAnchors();
   await page.setViewportSize({ width: 1280, height: 900 });
+  expectAnchorsStable(desktopAnchors, await readAnchors());
 
   await expect.poll(() => (
     h4.requestSummarySince(startupBoundary)["GET /proxy/models"] || 0
@@ -26596,34 +26654,58 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
   await page.locator("#newChat").click();
   await expect(onboarding).toHaveAttribute("data-onboarding-state", "active");
   await expect(currentTask()).toHaveAttribute("data-onboarding-task", "workbar");
+  await expect(page.locator(".welcome-screen")).toHaveClass(/is-complete/);
+  const transitionAnchors = await readAnchors();
+  expectAnchorsStable(desktopAnchors, transitionAnchors);
 
   const workbarBoundary = h4.requestBoundary();
-  await currentTask().locator(".onboarding-task-action").click();
+  await currentAction().click();
   await expect(currentTask()).toHaveAttribute("data-onboarding-task", "key");
+  await expect(onboarding.locator(".onboarding-current-panel")).toHaveAttribute("data-onboarding-current", "key");
+  await expect(onboarding.locator(".onboarding-card-header small")).toHaveText("2/3");
+  await expect(onboarding.locator(".onboarding-step-check")).toHaveCount(1);
+  expectAnchorsStable(transitionAnchors, await readAnchors());
   expect(h4.requestSummarySince(workbarBoundary)["POST /api/code/auth/validate"]).toBe(1);
   expect((await storedState()).completedTaskIds).toEqual(["workbar"]);
 
   const keyBoundary = h4.requestBoundary();
-  await currentTask().locator(".onboarding-task-action").click();
+  await currentAction().click();
   await expect(currentTask()).toHaveAttribute("data-onboarding-task", "first-task");
+  await expect(onboarding.locator(".onboarding-current-panel")).toHaveAttribute("data-onboarding-current", "first-task");
+  await expect(onboarding.locator(".onboarding-card-header small")).toHaveText("3/3");
+  await expect(onboarding.locator(".onboarding-step-check")).toHaveCount(2);
+  expectAnchorsStable(transitionAnchors, await readAnchors());
   expect(h4.requestSummarySince(keyBoundary)["GET /proxy/models"]).toBe(1);
   expect((await storedState()).completedTaskIds).toEqual(["workbar", "key"]);
 
-  await currentTask().locator(".onboarding-task-action").click();
+  await currentAction().click();
   await expect(page.locator("#prompt")).toBeFocused();
   const examples = onboarding.locator(".onboarding-example");
   await expect(examples).toHaveCount(3);
   expect(await examples.allTextContents()).toEqual([
-    "Please introduce what Code can do and recommend a few tasks that are good for a first try.",
-    "First ask what content and web address I want to organize, then access the web to read it and summarize the key conclusions and sources.",
-    "Use a questionnaire to understand the small HTML project I want to make, then create a Goal and generate and verify a single-file HTML page that I can open directly.",
+    "Meet Code",
+    "Organize a webpage",
+    "Build HTML",
   ]);
+  await expect(onboarding.locator(".onboarding-examples-copy small")).toHaveText("Click to fill; it won't send automatically");
   await expect(onboarding.locator(".onboarding-examples")).toHaveAttribute("role", "group");
+  expectAnchorsStable(transitionAnchors, await readAnchors());
+  const desktopReadyLayout = await readOnboardingLayout();
+  expectOnboardingLayout(desktopReadyLayout);
+  expect(desktopReadyLayout.cardHeight).toBeGreaterThanOrEqual(120);
+  expect(desktopReadyLayout.cardHeight).toBeLessThanOrEqual(190);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const narrowReadyLayout = await readOnboardingLayout();
+  expectOnboardingLayout(narrowReadyLayout);
+  expectAnchorsStable(narrowAnchors, await readAnchors());
+  await page.setViewportSize({ width: 1280, height: 900 });
+  expectAnchorsStable(transitionAnchors, await readAnchors());
   const exampleBoundary = h4.requestBoundary();
   await examples.nth(0).click();
   await expect(page.locator("#prompt")).toHaveValue(
     "Please introduce what Code can do and recommend a few tasks that are good for a first try.",
   );
+  expectAnchorsStable(transitionAnchors, await readAnchors());
   expect(Object.keys(h4.requestSummarySince(exampleBoundary)).filter((key) => key.startsWith("POST "))).toEqual([]);
   expect((await storedState()).completedTaskIds).toEqual(["workbar", "key"]);
   const customFillBoundary = h4.requestBoundary();
@@ -26739,6 +26821,8 @@ async function exerciseExplicitOnboardingTasks(h4, runtime) {
     settingsOnboardingEntryRemoved: true,
     desktopLayout,
     narrowLayout,
+    desktopReadyLayout,
+    narrowReadyLayout,
     storedKeys: Object.keys(completedState).sort(),
     modelRequests: metrics.chatRequests.length,
     toolExecutions: metrics.toolExecutions.length,
