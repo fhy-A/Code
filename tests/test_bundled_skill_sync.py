@@ -175,6 +175,41 @@ class TestBundledSkillSync(unittest.TestCase):
         self.assertTrue(healthy_exists)
         self.assertEqual(leftovers, [])
 
+    def test_copy_and_cleanup_failure_never_exposes_partial_skill_directory(self):
+        module = self._module()
+        original_rmtree = module.shutil.rmtree
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundled = root / "bundled"
+            installed = root / "data" / "skills"
+            bundled.mkdir()
+            installed.mkdir(parents=True)
+            self._write_skill(bundled, "broken", "broken-source")
+
+            def copytree(source, destination, *args, **kwargs):
+                (Path(destination) / "SKILL.md").write_text("partial-skill", encoding="utf-8")
+                raise OSError("synthetic copy failure after SKILL.md")
+
+            def rmtree(path, *args, **kwargs):
+                if "broken" in Path(path).name:
+                    raise OSError("synthetic cleanup failure")
+                return original_rmtree(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(module.shutil, "copytree", side_effect=copytree),
+                mock.patch.object(module.shutil, "rmtree", side_effect=rmtree),
+            ):
+                result = module.sync_missing_bundled_skills(bundled, installed)
+
+            installed_entries = [path.name for path in installed.iterdir()]
+            work_root = module.bundled_skill_work_root(installed)
+            quarantined_entries = [path.name for path in work_root.iterdir()]
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(installed_entries, [])
+        self.assertEqual(len(quarantined_entries), 1)
+        self.assertTrue(quarantined_entries[0].startswith("copy-broken-"))
+
     def test_state_write_failure_rolls_back_bundled_delete(self):
         module = self._module()
         with tempfile.TemporaryDirectory() as temp:
@@ -184,7 +219,8 @@ class TestBundledSkillSync(unittest.TestCase):
             bundled.mkdir(parents=True)
             installed.mkdir(parents=True)
             self._write_skill(bundled, "ppt-master", "bundled-ppt")
-            self._write_skill(installed, "ppt-master", "user-content")
+            installed_skill = self._write_skill(installed, "ppt-master", "user-content")
+            (installed_skill / "resource.txt").write_text("resource-bytes", encoding="utf-8")
             with mock.patch.object(
                 module,
                 "_atomic_write_state",
@@ -195,13 +231,15 @@ class TestBundledSkillSync(unittest.TestCase):
 
             leftovers = [path.name for path in installed.iterdir() if path.name.startswith(".")]
             installed_content = (installed / "ppt-master" / "SKILL.md").read_text()
+            resource_content = (installed / "ppt-master" / "resource.txt").read_text()
             state_exists = module.bundled_skill_state_path(installed).exists()
 
         self.assertEqual(installed_content, "user-content")
+        self.assertEqual(resource_content, "resource-bytes")
         self.assertFalse(state_exists)
         self.assertEqual(leftovers, [])
 
-    def test_delete_cleanup_failure_rolls_back_directory_and_tombstone(self):
+    def test_partial_delete_cleanup_keeps_tombstone_and_skill_invisible(self):
         module = self._module()
         original_rmtree = module.shutil.rmtree
         with tempfile.TemporaryDirectory() as temp:
@@ -211,24 +249,34 @@ class TestBundledSkillSync(unittest.TestCase):
             bundled.mkdir(parents=True)
             installed.mkdir(parents=True)
             self._write_skill(bundled, "imagegen", "bundled-imagegen")
-            self._write_skill(installed, "imagegen", "user-content")
+            installed_skill = self._write_skill(installed, "imagegen", "user-content")
+            (installed_skill / "resource.txt").write_text("resource-bytes", encoding="utf-8")
 
             def rmtree(path, *args, **kwargs):
-                if Path(path).name.startswith(".imagegen.delete-"):
-                    raise OSError("synthetic delete failure")
+                if "imagegen" in Path(path).name:
+                    (Path(path) / "resource.txt").unlink()
+                    raise OSError("synthetic delete failure after resource removal")
                 return original_rmtree(path, *args, **kwargs)
 
             with mock.patch.object(module.shutil, "rmtree", side_effect=rmtree):
-                with self.assertRaises(module.BundledSkillStateError):
-                    module.delete_installed_skill("imagegen", bundled, installed)
+                result = module.delete_installed_skill("imagegen", bundled, installed)
 
             state = module.load_bundled_skill_state(installed)
-            leftovers = [path.name for path in installed.iterdir() if path.name.startswith(".")]
-            installed_content = (installed / "imagegen" / "SKILL.md").read_text()
+            skill_visible = (installed / "imagegen").exists()
+            installed_entries = [path.name for path in installed.iterdir()]
+            work_root = module.bundled_skill_work_root(installed)
+            quarantine_entries = [path.name for path in work_root.iterdir()]
+            restarted = module.sync_missing_bundled_skills(bundled, installed)
+            quarantine_after_restart = list(work_root.iterdir()) if work_root.exists() else []
 
-        self.assertEqual(installed_content, "user-content")
-        self.assertEqual(state["tombstones"], [])
-        self.assertEqual(leftovers, [])
+        self.assertEqual(result, {"ok": True})
+        self.assertFalse(skill_visible)
+        self.assertEqual(installed_entries, [])
+        self.assertEqual(state["tombstones"], ["imagegen"])
+        self.assertEqual(len(quarantine_entries), 1)
+        self.assertTrue(quarantine_entries[0].startswith("delete-imagegen-"))
+        self.assertEqual(restarted["tombstoned"], ["imagegen"])
+        self.assertEqual(quarantine_after_restart, [])
 
 
 if __name__ == "__main__":
