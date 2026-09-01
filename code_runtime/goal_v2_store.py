@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from goal_v2_protocol import (
+from .goal_v2_protocol import (
     GoalV2FoldState,
     GoalV2ProtocolError,
     GoalV2TransitionError,

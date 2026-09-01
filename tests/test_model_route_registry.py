@@ -4,7 +4,7 @@ import tempfile
 import threading
 import unittest
 
-from model_route_registry import ModelRouteError, ModelRouteRegistry
+from code_runtime.model_route_registry import ModelRouteError, ModelRouteRegistry
 
 
 class ModelRouteRegistryTests(unittest.TestCase):

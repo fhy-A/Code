@@ -19,7 +19,7 @@ import re
 import threading
 import uuid
 
-import context_window
+from . import context_window
 
 
 SCHEMA = "code-context-calibration/v1"

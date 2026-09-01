@@ -5,9 +5,9 @@ import multiprocessing
 import os
 import pytest
 
-from goal_runtime import GoalCreationContext, GoalV2Runtime
-from goal_v2_protocol import build_event, canonical_json
-from goal_v2_store import (
+from code_runtime.goal_runtime import GoalCreationContext, GoalV2Runtime
+from code_runtime.goal_v2_protocol import build_event, canonical_json
+from code_runtime.goal_v2_store import (
     GOAL_V2_DIRECTORY_NAME,
     GoalV2ConflictError,
     GoalV2CorruptionError,

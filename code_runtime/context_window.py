@@ -9,7 +9,7 @@ import re
 import threading
 from urllib import parse
 
-from official_model_capabilities import CATALOG_JSON
+from .official_model_capabilities import CATALOG_JSON
 
 MIN_TOKENS = 1024
 MAX_TOKENS = 2_000_000

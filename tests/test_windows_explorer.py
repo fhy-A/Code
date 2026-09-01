@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import server
-import windows_explorer
+from code_runtime import windows_explorer
 
 
 class _Shell:

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import skill_dependencies as dependencies
+from code_runtime import skill_dependencies as dependencies
 
 
 def _manifest(skill="demo"):

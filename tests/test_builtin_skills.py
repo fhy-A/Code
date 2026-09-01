@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 import server as server_mod
-from skill_dependencies import load_skill_manifest
+from code_runtime.skill_dependencies import load_skill_manifest
 
 
 SKILLS_ROOT = Path(server_mod.SKILLS_DIR)

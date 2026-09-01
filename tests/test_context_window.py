@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest import mock
 
-import context_window
+from code_runtime import context_window
 
 
 class ContextWindowResolverTest(unittest.TestCase):

@@ -12,13 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from goal_v2_protocol import (
+from .goal_v2_protocol import (
     GOAL_V2_SOURCE_KINDS,
     build_event,
     canonical_json,
     require_identifier,
 )
-from goal_v2_store import GoalV2ConflictError, GoalV2Service
+from .goal_v2_store import GoalV2ConflictError, GoalV2Service
 
 
 class GoalV2ContextError(ValueError):

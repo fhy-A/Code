@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
-from goal_v2_protocol import (
+from code_runtime.goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
+from code_runtime.goal_v2_protocol import (
     GOAL_V2_PROTOCOL_VERSION,
     GoalV2FoldState,
     GoalV2ProtocolError,
@@ -11,7 +11,7 @@ from goal_v2_protocol import (
     apply_event,
     build_event,
 )
-from goal_v2_store import GoalV2ConflictError, GoalV2Service
+from code_runtime.goal_v2_store import GoalV2ConflictError, GoalV2Service
 
 
 SESSION_ID = "session-v2-alpha"

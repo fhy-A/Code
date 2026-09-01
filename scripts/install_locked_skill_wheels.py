@@ -22,7 +22,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-import skill_dependencies  # noqa: E402  (repository root is intentionally pinned first)
+from code_runtime import skill_dependencies  # noqa: E402  (repository root is intentionally pinned first)
 
 
 DATA_ROOT = REPOSITORY_ROOT / "data"

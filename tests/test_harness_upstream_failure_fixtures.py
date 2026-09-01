@@ -10,7 +10,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 
 import server as server_mod
-from agent_protocol import normalize_agent_event
+from code_runtime.agent_protocol import normalize_agent_event
 
 
 ROOT = Path(__file__).resolve().parent.parent

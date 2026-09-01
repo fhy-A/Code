@@ -18,7 +18,7 @@ from unittest import mock
 import requests
 
 import server as server_mod
-from agent_protocol import normalize_agent_event
+from code_runtime.agent_protocol import normalize_agent_event
 
 
 _H3_2C1_SUITE_PATH = (

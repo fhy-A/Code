@@ -30,11 +30,9 @@ import threading
 import time
 import webbrowser
 
-import agent_protocol
-from bundled_skills import delete_installed_skill
-import context_calibration
-import context_window
-from image_runtime import (
+from code_runtime import agent_protocol, context_calibration, context_window, windows_explorer
+from code_runtime.bundled_skills import delete_installed_skill
+from code_runtime.image_runtime import (
     GeneratedAssetRepository,
     ImageRouteRegistry,
     ImageRuntimeError,
@@ -44,22 +42,21 @@ from image_runtime import (
     normalize_generate_request,
     validate_image_bytes,
 )
-from model_route_registry import ModelRouteError, ModelRouteRegistry
-from ppt_master_runtime import (
+from code_runtime.model_route_registry import ModelRouteError, ModelRouteRegistry
+from code_runtime.ppt_master_runtime import (
     PptMasterRuntimeError,
     execute_ppt_master_tool,
     prepare_ppt_master_preview,
     validate_ppt_master_dependency_installation,
 )
-import windows_explorer
-from goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
-from goal_v2_protocol import GoalV2ProtocolError, require_identifier
-from goal_v2_store import (
+from code_runtime.goal_runtime import GoalCreationContext, GoalV2ContextError, GoalV2Runtime
+from code_runtime.goal_v2_protocol import GoalV2ProtocolError, require_identifier
+from code_runtime.goal_v2_store import (
     GoalV2ConflictError,
     GoalV2CorruptionError,
     GoalV2PersistenceError,
 )
-from skill_dependencies import (
+from code_runtime.skill_dependencies import (
     build_dependency_operation_plan,
     DependencyManifestError,
     execute_dependency_operation_plan,

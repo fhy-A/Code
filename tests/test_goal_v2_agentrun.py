@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-import image_runtime
+from code_runtime import image_runtime
 import server as server_mod
 
 

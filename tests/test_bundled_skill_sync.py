@@ -13,7 +13,7 @@ import server as server_mod
 class TestBundledSkillSync(unittest.TestCase):
     @staticmethod
     def _module():
-        return importlib.import_module("bundled_skills")
+        return importlib.import_module("code_runtime.bundled_skills")
 
     @staticmethod
     def _write_skill(root, name, content):

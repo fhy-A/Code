@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import context_calibration as calibration
+from code_runtime import context_calibration as calibration
 
 
 UTC = dt.timezone.utc
@@ -287,7 +287,7 @@ class ContextCalibrationStoreTests(unittest.TestCase):
 import datetime as dt
 import sys
 from pathlib import Path
-import context_calibration as c
+from code_runtime import context_calibration as c
 
 data_dir = Path(sys.argv[1])
 cap = int(sys.argv[2])

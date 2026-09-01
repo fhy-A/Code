@@ -28,7 +28,7 @@ from xml.etree import ElementTree as ET
 from scripts.validate_ppt_master_vendor import validate_vendor_package
 
 
-APP_ROOT = Path(__file__).resolve().parent
+APP_ROOT = Path(__file__).resolve().parent.parent
 SKILL_ROOT = APP_ROOT / "data" / "skills" / "ppt-master"
 MANAGED_PYTHON = APP_ROOT / "data" / "runtime" / "python" / (
     "Scripts/python.exe" if os.name == "nt" else "bin/python"

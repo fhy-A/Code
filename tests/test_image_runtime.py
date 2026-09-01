@@ -12,8 +12,8 @@ from unittest import mock
 
 from PIL import Image
 
-import image_runtime
-from image_runtime import (
+from code_runtime import image_runtime
+from code_runtime.image_runtime import (
     GeneratedAssetRepository,
     ImageRouteRegistry,
     ImageRuntimeError,
@@ -901,7 +901,7 @@ class GeneratedAssetRepositoryTests(unittest.TestCase):
                 raise PermissionError(13, "Permission denied", "generated-asset")
             return original_rmtree(path, *args, **kwargs)
 
-        with mock.patch("image_runtime.shutil.rmtree", side_effect=fail_second_delete):
+        with mock.patch("code_runtime.image_runtime.shutil.rmtree", side_effect=fail_second_delete):
             with self.assertRaises(ImageRuntimeError) as captured:
                 self.repository.delete_session_assets("session-a")
 

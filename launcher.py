@@ -9,7 +9,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from bundled_skills import sync_missing_bundled_skills
+from code_runtime.bundled_skills import sync_missing_bundled_skills
 
 
 def has_existing_browser(port=3010):

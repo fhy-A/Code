@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-import agent_protocol
+from code_runtime import agent_protocol
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -316,7 +316,7 @@ class TestAgentEventContract(unittest.TestCase):
         self.assertIn('"protocolVersion": 1', encoded)
         self.assertEqual(len(summary["eventTypes"]), 27)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
-        self.assertIn("import agent_protocol", server_source)
+        self.assertIn("from code_runtime import agent_protocol", server_source)
         self.assertNotIn("from agent_protocol", server_source)
 
 

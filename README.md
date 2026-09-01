@@ -169,6 +169,7 @@ Code/
 ├── app.js                   # 前端主流程与状态投影
 ├── agent-runtime.js         # 浏览器侧任务运行时桥接
 ├── styles.css               # 主题与响应式样式
+├── code_runtime/            # 后端协议、Goal、模型、Skill、图片与平台实现
 ├── src/                     # 已拆分的前端核心与服务模块
 ├── data/skills/             # 随程序分发的 Skills
 ├── assets/                  # Code 品牌与界面资产

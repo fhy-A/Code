@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-import ppt_master_runtime as runtime
+from code_runtime import ppt_master_runtime as runtime
 import server as server_mod
 from scripts import ppt_master_worker as worker
 

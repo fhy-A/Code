@@ -23,7 +23,7 @@ H1-1 将 H0 冻结的 22 类现有耐久事件转成可执行的版本 1 契约�
 
 ## 2. 唯一实现入口
 
-事实源：`agent_protocol.py`
+事实源：`code_runtime/agent_protocol.py`
 
 公开能力：
 
@@ -151,7 +151,7 @@ H1 后续正式运行接入必须先使用兼容/影子模式，只记录脱敏�
 
 ## 10. 回退与下一步
 
-H1-1 可通过删除 `agent_protocol.py`、契约测试和本说明整体回退，不需要修改或迁移任何 AgentRun、JSONL 或前端数据。
+H1-1 可通过删除 `code_runtime/agent_protocol.py`、契约测试和本说明整体回退，不需要修改或迁移任何 AgentRun、JSONL 或前端数据。
 
 下一小阶段 H1-2 建议：
 

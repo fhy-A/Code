@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import server
-from goal_runtime import GoalCreationContext, GoalV2Runtime
+from code_runtime.goal_runtime import GoalCreationContext, GoalV2Runtime
 
 
 class TestSessionPersistence(unittest.TestCase):
@@ -4357,7 +4357,7 @@ class TestSessionDeleteConsistency(unittest.TestCase):
 
         handler = self.make_handler(path=f"/api/sessions/{session_id}")
         with mock.patch(
-            "goal_v2_store.GoalV2Service.delete_sidecar",
+            "code_runtime.goal_v2_store.GoalV2Service.delete_sidecar",
             side_effect=PermissionError(13, "Permission denied", "goal-sidecar.jsonl"),
         ):
             server.CodeHandler.do_DELETE(handler)
