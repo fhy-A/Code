@@ -549,7 +549,7 @@ const nativeTools = [
 
       name: "use_skill",
 
-      description: "加载一个已安装的 Skill 来获取专业指导。必须单独调用并等待返回后，才能选择或调用其他工具；不要在同一轮并发调用 task。传入 name 参数指定 Skill 名称。",
+      description: "加载一个已安装的 Skill 来获取专业指导。必须单独调用并等待返回后，才能选择或调用其他工具；不要在同一轮并发调用 task。返回受信任的可执行 runtimeResources 时，只能使用其精确路径和所选依赖运行时，不得搜索或复制资源。传入 name 参数指定 Skill 名称。",
 
       parameters: {
 

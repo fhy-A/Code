@@ -10,6 +10,15 @@
         { "type": "python", "name": "pandas", "importName": "pandas" }
       ]
     },
+    "create-edit-formulas": {
+      "required": [
+        { "type": "python", "name": "openpyxl", "minimumVersion": "3.1.0" },
+        { "type": "command", "name": "soffice", "executableKind": "libreoffice" }
+      ],
+      "optional": [
+        { "type": "python", "name": "pandas", "importName": "pandas" }
+      ]
+    },
     "inspect": {
       "required": [
         { "type": "python", "name": "markitdown", "importName": "markitdown" }
@@ -20,7 +29,7 @@
     },
     "render": {
       "required": [
-        { "type": "command", "name": "soffice" }
+        { "type": "command", "name": "soffice", "executableKind": "libreoffice" }
       ]
     }
   }

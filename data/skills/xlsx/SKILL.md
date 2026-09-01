@@ -9,14 +9,15 @@ tools: list_files, read_file, glob_files, search_files, write_file, run_command
 
 | Task | Approach |
 |---|---|
-| **Create** or **edit** with formulas/formatting | `openpyxl` — see gotchas below |
+| **Create** or **edit** without formulas | `openpyxl` with dependency capability `create-edit` |
+| **Create** or **edit** with formulas | `openpyxl` + LibreOffice with dependency capability `create-edit-formulas` — see gotchas below |
 | **Bulk data** in or out | `pandas` (`read_excel`, `to_excel`) |
 | **Quick look** at a sheet | `markitdown file.xlsx` — `## SheetName` per sheet; reads `.xlsm` too. No cell coordinates, so don't plan edits from it |
 | **Read** a model (formulas *and* values) | two `load_workbook` passes — see gotchas |
 
-> `openpyxl`, `pandas`, and `markitdown` are preinstalled — do not run `pip install` first; write the script and import directly. Only if an import fails (or the `markitdown` command is missing): `pip install` the missing package.
+> Check only the dependency capability needed for this task. Formula work must use `create-edit-formulas`; plain edits use `create-edit`, inspection uses `inspect`, and render-only work uses `render`. Follow the returned managed-runtime or user-cooperation guidance instead of installing system dependencies yourself.
 
-> Script paths below are relative to this skill's directory.
+> `use_skill` returns a trusted `runtimeResources` entry for `recalculate`. Use its exact absolute `path` with the Python executable returned by `check_skill_dependencies`. Do not search parent folders, adjacent repositories, the user profile, or disk roots, and do not copy the resource into the project. A missing, conflicting, or unverifiable resource is a hard failure to report, not a reason to search elsewhere.
 
 ## Requirements for every output
 
@@ -35,7 +36,7 @@ formula cell reads back as `None` to anything reading cached values — `pandas`
 `load_workbook(data_only=True)`, and most previewers.
 
 ```bash
-python scripts/recalc.py output.xlsx [timeout_seconds]   # default 30
+"<dependency Python>" "<runtimeResources recalculate path>" output.xlsx [timeout_seconds]   # default 30
 ```
 
 LibreOffice computes every formula, the file is **rewritten in place**, and you get JSON:
@@ -55,9 +56,9 @@ then recalculate. Such a formula reads `='[1]Returns Analysis'!$B$2` — the `[1
 into the workbook's external-reference list, naming a *separate file on disk*, not a sheet.
 That file is rarely present here, so the cell's cached value is the only thing holding its
 data. openpyxl strips that value on save; LibreOffice then has to resolve the reference for
-real, fails, writes `#NAME?`, and deletes every link. `recalc.py` refuses to run in that state
-— copy those cells' values out of the original before you save over them (`--force` overrides,
-and accepts the loss).
+real, fails, writes `#NAME?`, and deletes every link. The Code-owned recalc resource refuses
+to run when it detects external-link package data. Preserve the original and copy the needed
+values before editing; use `--force` only when the user explicitly accepts link loss.
 
 ## Choosing formulas that survive verification
 
@@ -97,4 +98,4 @@ lone edited cell mid-row is the commonest silent error · guard denominators tha
 
 ## Dependencies
 
-`openpyxl`, `pandas`, `markitdown` (pip, preinstalled — install only if an import fails or the command is missing) · LibreOffice (`soffice`, auto-configured for sandboxed environments via `scripts/office/soffice.py`)
+`openpyxl`, `pandas`, `markitdown` (managed Python dependencies) · LibreOffice (`soffice`, a user-installed system dependency used only by the trusted Code-owned recalc resource)

@@ -15,10 +15,13 @@ import time
 import tomllib
 from pathlib import Path
 
+from .skill_resources import SkillResourceError, preferred_bundled_dependency_manifest
+
 
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "dependencies.json"
 SUPPORTED_TYPES = {"python", "node", "command"}
+SUPPORTED_EXECUTABLE_KINDS = {"libreoffice"}
 SUPPORTED_OPERATION_ACTIONS = {"install", "repair", "uninstall"}
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9@._/+:-]{1,128}$")
 _SAFE_PYTHON_PACKAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -103,6 +106,11 @@ def _normalize_requirement(raw, *, optional=False):
             if field in {"importName", "distribution"} and not _SAFE_NAME.fullmatch(value):
                 raise DependencyManifestError(f"invalid {field}: {value}")
             normalized[field] = value
+    executable_kind = str(raw.get("executableKind") or "").strip()
+    if executable_kind:
+        if dep_type != "command" or executable_kind not in SUPPORTED_EXECUTABLE_KINDS:
+            raise DependencyManifestError(f"invalid executableKind: {executable_kind}")
+        normalized["executableKind"] = executable_kind
     install_hint = re.sub(r"\s+", " ", str(raw.get("installHint") or "").strip())
     if install_hint:
         if len(install_hint) > 500:
@@ -152,7 +160,20 @@ def normalize_manifest(payload, *, expected_skill=""):
 def load_skill_manifest(skill_dir, bundled_skills_dir=None):
     """Load a local manifest, falling back to the current bundled Skill copy."""
     skill_dir = Path(skill_dir)
-    candidates = [(skill_dir / MANIFEST_NAME, "local")]
+    preferred_bundled = None
+    if bundled_skills_dir:
+        try:
+            preferred_bundled = preferred_bundled_dependency_manifest(
+                skill_dir,
+                bundled_skills_dir,
+            )
+        except SkillResourceError as exc:
+            raise DependencyManifestError(str(exc)) from exc
+    candidates = (
+        [(preferred_bundled, "bundled-compatible")]
+        if preferred_bundled is not None
+        else [(skill_dir / MANIFEST_NAME, "local")]
+    )
     if bundled_skills_dir:
         bundled = Path(bundled_skills_dir) / skill_dir.name / MANIFEST_NAME
         try:
@@ -842,6 +863,29 @@ def _known_windows_command_candidates(name):
     return candidates
 
 
+def _valid_windows_soffice(path):
+    path = Path(path)
+    return (
+        path.name.lower() == "soffice.exe"
+        and path.is_file()
+        and (path.parent / "soffice.bin").is_file()
+        and (path.parent / "fundamental.ini").is_file()
+    )
+
+
+def _system_libreoffice_path():
+    if sys.platform != "win32":
+        return _system_command_path("soffice")
+    candidates = [
+        *_known_windows_command_candidates("soffice"),
+        *(Path(value) for value in (shutil.which("soffice.exe"), shutil.which("soffice")) if value),
+    ]
+    for candidate in candidates:
+        if _valid_windows_soffice(candidate):
+            return str(candidate.resolve())
+    return ""
+
+
 def _bash_candidates_from_git_executable(executable):
     if not executable:
         return []
@@ -885,15 +929,22 @@ def _probe_commands(requirements, data_dir):
     result = {}
     for item in requirements:
         name = item["name"]
+        strict_libreoffice = item.get("executableKind") == "libreoffice"
         managed = next((
             candidate for candidate in (
                 runtime_bin / name,
                 runtime_bin / f"{name}.exe",
                 runtime_bin / f"{name}.cmd",
                 runtime_bin / f"{name}.bat",
-            ) if candidate.is_file()
+            ) if candidate.is_file() and not (
+                strict_libreoffice
+                and sys.platform == "win32"
+                and not _valid_windows_soffice(candidate)
+            )
         ), None)
-        system = "" if managed else _system_command_path(name)
+        system = "" if managed else (
+            _system_libreoffice_path() if strict_libreoffice else _system_command_path(name)
+        )
         available = bool(managed or system)
         result[item["id"]] = {
             "installed": available,

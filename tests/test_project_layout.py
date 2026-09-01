@@ -22,6 +22,7 @@ RUNTIME_MODULES = (
     "official_model_capabilities",
     "ppt_master_runtime",
     "skill_dependencies",
+    "skill_resources",
     "windows_explorer",
 )
 DEVTOOL_MODULES = ("release_state", "verification")

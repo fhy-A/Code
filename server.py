@@ -67,6 +67,7 @@ from code_runtime.skill_dependencies import (
     public_dependency_operation_plan,
     resolve_skill_manifest,
 )
+from code_runtime.skill_resources import SkillResourceError, resolve_skill_resources
 
 try:
     import pystray
@@ -15260,6 +15261,23 @@ def execute_use_skill_tool(body):
         "body": skill["body"],
         "tools": skill.get("tools", []),
     }
+    try:
+        runtime_resources = resolve_skill_resources(
+            str(skill.get("dir") or skill["name"]),
+            SKILLS_DIR,
+            APP_DIR / "data" / "skills",
+        )
+    except SkillResourceError as exc:
+        return {
+            "ok": False,
+            "action": "use_skill",
+            "name": skill["name"],
+            "errorCode": exc.error_code,
+            "retryable": False,
+            "error": str(exc),
+        }
+    if runtime_resources is not None:
+        result["runtimeResources"] = runtime_resources
     if skill.get("dependencyCapabilities"):
         result["dependencies"] = get_single_skill_dependency_status(skill["name"])
     return result
@@ -20736,7 +20754,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "use_skill",
-            "description": "Load an installed Skill by name. Call this tool alone and wait for its instructions before choosing or calling any other tool.",
+            "description": "Load an installed Skill by name. Call this tool alone and wait for its instructions before choosing or calling any other tool. When trusted executable runtimeResources are returned, use only their exact paths with the selected dependency runtime; never search for or copy them.",
             "parameters": {
                 "type": "object",
                 "properties": {

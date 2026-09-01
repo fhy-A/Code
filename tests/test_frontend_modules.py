@@ -7290,6 +7290,7 @@ process.stdout.write(JSON.stringify({
     byName.request_user_input.function.parameters.properties.questions.items.required,
   questionnaireOptionRequired:
     byName.request_user_input.function.parameters.properties.questions.items.properties.options.items.required,
+  useSkillDescription: byName.use_skill.function.description,
   runCommandProperties: Object.keys(byName.run_command.function.parameters.properties),
   saveMemoryRequired: byName.save_memory.function.parameters.required,
   imageProperties: Object.keys(byName.generate_image.function.parameters.properties),
@@ -7337,7 +7338,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "768d393eb938e34a9208af306b86638cc741de27c6f94723e6137c380d8a627b",
+            "83e9bffd34fb3ec11e564847df0751bd882ca8021dd405453dd8a61d58446d32",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
@@ -7356,6 +7357,9 @@ process.stdout.write(JSON.stringify({
             ["value", "label", "recommended"],
         )
         self.assertEqual(data["runCommandProperties"], ["command"])
+        self.assertIn("runtimeResources", data["useSkillDescription"])
+        self.assertIn("精确路径", data["useSkillDescription"])
+        self.assertIn("不得搜索或复制资源", data["useSkillDescription"])
         self.assertEqual(
             data["saveMemoryRequired"],
             ["name", "description", "body"],

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "skill": "xlsx",
+  "compatibleInstalled": {
+    "skillMdSha256": [
+      "ab298e2b3ec460156911f35ba165ff08d613eea1b0eac312044c36d7f683a4f0",
+      "c47c17fdf80352778b848bd4248fedd438c5fb81d30f5e482937a0c998e9fadf"
+    ],
+    "dependenciesSha256": [
+      "21ee561bdca559bab2f3b2ac9a9a94de07c759a859a9a8d46b2d8b0f74a4b9b9",
+      "2889a2c8ecd66c179b0261db9eca3f676c3d6299723f1aadfe079ebb129e5aec"
+    ]
+  },
+  "resources": [
+    {
+      "id": "recalculate",
+      "path": "scripts/recalc.py",
+      "sha256": "cb5754f45cb650cd46ace2772f4ad6b247ae8031994ea3e65e80dfb1f8d35a32",
+      "kind": "python",
+      "protocol": "code-xlsx-recalc/v1",
+      "modelVisible": true,
+      "arguments": [
+        "<workbook.xlsx>",
+        "[timeout_seconds]",
+        "[--force]"
+      ]
+    },
+    {
+      "id": "soffice-helper",
+      "path": "scripts/office/soffice.py",
+      "sha256": "dcae7993d0b89ce4091deef3f002c99166342018a16c41a1b1242f36115302b8",
+      "kind": "python-library",
+      "protocol": "code-xlsx-soffice/v1",
+      "modelVisible": false,
+      "arguments": []
+    }
+  ]
+}
