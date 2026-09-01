@@ -8,10 +8,10 @@ evidence profile 固定为 `h3-2d2-manual-compaction-visible-history` v1，scope
 
 ## 精确源码切片的执行边界
 
-`compactConversation()` 当前没有作为模块公开导出。测试因此从 `app.js` 的唯一 `async function compactConversation()` 起点，切到唯一 `function projectOptimisticFirstMessage(` 终点，执行当前 `app.js` 的精确源码切片；这不是公开模块 API 导入。两个边界标记各出现一次，切片包含实际 `hideCompactConfirm()`，字符数为 5732，SHA-256 为：
+`compactConversation()` 当前没有作为模块公开导出。测试因此从 `app.js` 的唯一 `async function compactConversation()` 起点，切到唯一 `function projectOptimisticFirstMessage(` 终点，执行当前 `app.js` 的精确源码切片；这不是公开模块 API 导入。两个边界标记各出现一次，切片包含实际 `hideCompactConfirm()`，字符数为 23499，SHA-256 为：
 
 ```text
-1264f4f9d7d46c15012b4d0d092d52819f2e8c41daf5c4561ec0286b733052b8
+75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710
 ```
 
 切片先在隔离 Node `vm` 中编译，再执行 `compactConversation()`，并由测试触发一次真实 confirm click。VM 同时固定 `new Date()` 与 `Date.now()`；保存完成后确认监听器已清理，再次 dispatch 不增加 compact、archive 或 save 调用。
@@ -53,18 +53,21 @@ sessions/archive/session-h3-2d2-synthetic_2026-08-06T10-00-00.000Z.jsonl
 
 | 对象 | SHA-256 |
 |---|---|
-| evidence fixture 文件 | `c3ea5a28bc980ef0bd60d12effeb442a6ce7032b77a41b6f34672f41e3cdee91` |
-| evidence schema 文件 | `3b1426da4a914ec89d72988636a18b515c2cbf3a72e66043664b4021fc52eba5` |
-| 精确源码切片 | `6df39b85c5ae94f31a1fa5ae2fe71d2c18eb688fea8c1a7fe102d75bf0d102f5` |
+| evidence fixture 文件 | `01b824a3a2bc8b7bbe0570304e3bcdf00bda520dea8e5345c14f9452055ba496` |
+| evidence schema 文件 | `30481fa949b1a74556944f98211d665070935796b050fb90f5adf2da93856ab1` |
+| evidence test 文件 | `39dea806aab8f0886c674dfd06c522da464855d78b5baf354b38ef6d0a317ef6` |
+| 精确源码切片 | `75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710` |
 | 源历史 / archive 复制历史 | `0ecd9f0f2ccacca9d5a4e3281dfabc1cf6d09c4c81da867977d302b0598e40bf` |
-| 确定性 replay 状态 | `a61a4b547574cd33c084695b4459d0aa36237a252198f06f403a97eb726cb85e` |
+| 确定性 replay 状态 | `5d3a49996f160f250357fac1c86c40b7980520209bbe64834760c99049f40429` |
 | 最终内存 messages | `a71218ce9c3bf1ea776dc170938c5aa918d8d23793bf34a7a3d27b9e0c5abd2e` |
 | archive payload / record | `dd417968b48653557514100ca51a99cb276070dbd610502745ef577c48ff39e9` / `0540ccaef10e329c8d212f8f5a8076d4cf2d04063af89fee71247b7ba83c0df1` |
 | 最终 JSONL 往返 | `3a8f9f210d9e5daccc56789cd4a1ef8c144d89a829f6f55f68eff8d32e58779f` |
 | 模型 context / API payload | `8d5972e4b0b9548099d2efbb95ecb1f14ff8d9dbe1bf62c603d3ec93d3108958` / `0e5dccd19e37ab2c5b814916035a27965b77121333605c65701707f0dc53b330` |
-| UI HTML / 可见文本 | `7c8f25181b67f43a364155790f7d889359e3600b75a77087328bbd4ad6195cd8` / `92145b03f68be59e0a83c45b0f7288d78c1a36faada1edc8e8833b4ed047b397` |
+| UI HTML / 可见文本 | `8d9b4937b1c477c89eb8398d42d7aa70fc27773d12d373efbb8ccc59d4d119ac` / `d34fea05af8e7ee5783ddd07b8c3c24d98b15048cf29e4364f9a3c1feb8de5b2` |
 
 2026-08-14 发布门禁复核把 HTML `hidden` 子树从可见文本解析中排除。连续两次生成得到相同证据：12 个可见历史哨兵、顺序、唯一性和可见文本哈希保持不变，仅 CODE-004 引入的原始 UI HTML 结构哈希及其派生 `replayHash` 变化；源历史、archive、保存、模型上下文、Session 所有权和零副作用字段均未变化。
+
+2026-09-01 v0.6.7 发布门禁在前端视觉演进后再次受控刷新。两次独立完整生成逐字段相同；结构化差异只允许 `expected.ui.htmlHash` 与其派生 `expected.replayHash` 变化。12 个可见哨兵、`visibleTextHash`、counts、source、slice、plan、execution、dispatch、archive、completed、save、model 和 sideEffects 全部保持原值，没有改写可见内容、压缩语义或副作用边界。
 
 默认单 Run `17/124/25/25/4`、H3-2C1、H3-2B1 与 H3-2B2 的计数和全部 fixture/replay/状态哈希均保持不变。
 

@@ -30,7 +30,7 @@
     {"id": "operation-lock-render-throws"}
   ],
   "expected": {
-    "sourceFixtureSha256": "f1a5ae6abcd16759c9a788349b91cd5887735859c23111d9df965003896b0fe5",
+    "sourceFixtureSha256": "01b824a3a2bc8b7bbe0570304e3bcdf00bda520dea8e5345c14f9452055ba496",
     "slice": {
       "sha256": "75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710",
       "characterLength": 23499
@@ -40,27 +40,27 @@
       "catalogRevision": 23
     },
     "scenarioHashes": {
-      "compact-throws": "385b8171d299c8cbe68ac05267f643ee29440b1c05fd290b233e49aa75ef4b1d",
-      "compact-ok-false": "f9d576fd3fbbfd612727ccb988e373390164e6f874d6ee884d6d39ef82f8d256",
-      "summary-build-throws": "9565e6930cc13f29902f53729c86523b449225e755d2708ef1dcca8d0c97024a",
-      "archive-fails": "87250ae61d685ea011a73ada84eaae0ee8dae61c77f4141dad25ef8f4a46fd75",
-      "first-save-fails-retry-succeeds": "1885bb653447b57227c10e654afbba30fb9d972850c0387ad3f03c2cfe34a20e",
-      "both-saves-fail": "6cc76f1ae2c30e2dda528bc54efe5c06fdde8842dea52f6726c61ca711a6d49c",
-      "apply-fails": "3ce3ce8469e28b21c49d587c0d98af7dd4f9ac4dd9909506cb1d0ca26adce26e",
-      "repeat-confirm": "82b90f9d7e85a08efa2d0278bda87b506f8291dd1a5c4d09af3b2b2dbc2fa2d9",
-      "switch-before-confirm": "8b388cc121163bdfcdd563c2ff1d64348fad225b7a8bdb5c6307ca7ba537ed4e",
-      "switch-during-compact": "9b2861c1ddeaf889fe7b128fc2701aaaafe28e80ec7ff6a9122f4a670be6d9be",
-      "target-changes-during-compact": "f81868ba9f94d56ea4aaab3a3582546830ea38817052ec6b215621203c3ed234",
-      "switch-during-save-retry": "f8409a09e27cfc73b22ee8ca59066a42926c5feaff0cc172990eb78f4bc250d9",
-      "state-appended-before-retry": "fa09f74abbfe625f892f2d8b5d27fb19da3d2e61f952c697c98ee16abf25c02a",
-      "save-response-lost-after-server-write": "c466ad2a08c06dafd58dd1e1ab30fab03653ea1ee3d7048c8705b10e941ac485",
-      "target-changes-during-retry": "6ada3289b0c91da120883f868d137fbf1a46e690ab8b5f1c45e8163e011d51a8",
-      "second-compaction-blocked-pending": "d3dcf882c4ea7d83ff4219350f28ef1350e1ad682b1cdd787d58f87a5a9c6aab",
-      "explicit-retry-succeeds": "dedf75a2be0a9604897cede1cdf80b60a2c8116608a2c284f0c48f7725c5b41e",
-      "failed-marker-persistence-retry-succeeds": "0c90b65389142d4d2a209ab6bf969daacdf203da34fe90af065e6ff5b2b0e0a5",
-      "operation-lock-render-throws": "545f6df40dacea52dcaade55026de3fe19a8941a35573724334afa01a5f73c93"
+      "compact-throws": "739341376c7235772fec230e1950259f0af344c29e26a20180a4e0d4e3feff0d",
+      "compact-ok-false": "255aaa1c3a1d109ac82ed7f79919e2fd7f9b8b2782d1d2e2a4a0e13844fe33ef",
+      "summary-build-throws": "c10fb1f7f18209690d74284572f70f67f11620b9eaf53e9edc8401883ec16983",
+      "archive-fails": "e9665f3f2c064311df8c4824dc711d154643dc2f8d575bc96baf0fcb6bf4b888",
+      "first-save-fails-retry-succeeds": "843e89688ebbba045eb529983b7afc837fe966ae173c2bb75e143dfaaefd70b2",
+      "both-saves-fail": "7cc2d702946b6ec61a6faf2082459dad8d0c09fa2c30b1b2e8c288b4b892124b",
+      "apply-fails": "b962e12132c74321f7ca71e9f2004be3b2ebd38c52606f5804e09849310d77c2",
+      "repeat-confirm": "5c94f50d0e716fc40e97e9023e2fbbbde8ab67532d798444b5940fbdbd01ce30",
+      "switch-before-confirm": "97783b2539e05cd1aafca34d1d1651ceeace565dacfe66de8289760cdbbb0e82",
+      "switch-during-compact": "50461874420c501818c828781788451e84248ab576f7a4d1c7c63bc74a03a089",
+      "target-changes-during-compact": "32ac4846ee8ec3263adb66e46c7d5b3fe4906e5bf6e024adec2c386f4ca88f77",
+      "switch-during-save-retry": "68dfae2533e0bff29259004d2c459af5d6df1ae13a656f886507262935012e4c",
+      "state-appended-before-retry": "94a1c17a5cf41f1a7cfa2bc5956239ef1e4cd95a4897c08e602ff5c69b0f6e67",
+      "save-response-lost-after-server-write": "58f5cb576317952dff73288adb39ca7888c1efc7ab49c842115bf93d9b41fbd7",
+      "target-changes-during-retry": "29e57a9e28d08dc1615556401890553e01423ab3601bee5d598e326eef44e01d",
+      "second-compaction-blocked-pending": "ceff6ec908b4cc8c807a3dd910f0a0dbcb3d7939181e830754d13ed84448284c",
+      "explicit-retry-succeeds": "3dee936e9d118210a57435337ad4f50600eb477b481d36a551d020834997eee0",
+      "failed-marker-persistence-retry-succeeds": "c209353acb27ab6e3bf16751e1c907146ae51252b148ef29c0aeb8aee98e8548",
+      "operation-lock-render-throws": "e3c9a8c8b0e473782c45db21b076f84f523bf5d3a180b52981d3d6806be50f4c"
     },
-    "suiteHash": "c9c61155a071365398a2b6d47fcd305757f19bba61e8889f8600440138121a97",
+    "suiteHash": "bf795a33b981e7034196b003088a5a82a73b7221d5ec6784680e7f5ea3dc4985",
     "mutationFirstDifferencePaths": {
       "caseOrder": "$.cases[0].id",
       "errorCode": "$.results.compact-throws.marker.errorCode",

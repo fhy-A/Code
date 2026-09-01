@@ -33,18 +33,20 @@ suite 按固定顺序执行以下 19 个场景：
 确定性 suite hash 为：
 
 ```text
-b586b27ea2f2c4330f3468f60d539cb92aa3e8b44beeb740eae449fb8aca5fa9
+bf795a33b981e7034196b003088a5a82a73b7221d5ec6784680e7f5ea3dc4985
 ```
 
 文件基线为：
 
 | 文件 | SHA-256 |
 |---|---|
-| failure-boundary fixture | `1b65532c2c30c7218e19a1237971debcea2a730c540fe55be51f23bb60cc37a4` |
-| failure-boundary schema | `09853dca0a91eec09b28b430ef1d45fee696ee19b1cff6fe0966bf828e5a47fc` |
-| failure-boundary test | `120cf3289e7a52e4b670fe8c2923e37589e667fce5db99d3341ae6243c14c246` |
+| failure-boundary fixture | `7fed5f8cd5334aebd04073e75c0dbf14ae31a267285f402bab47a984bf95d5c4` |
+| failure-boundary schema | `f95094620c0a8f42fe3c5845b5fab8b61104356160e33485abd561167aa68d9a` |
+| failure-boundary test | `9b852213c487e5dcf580ca85429644d423cbdd6041f0f6a4ab8e3854522b0bf0` |
 
 2026-08-14 发布门禁受控刷新连续生成两次相同证据。19 个场景的 marker、调用、目标 Session、保存重试、脱敏、锁恢复和副作用字段均保持不变；CODE-004 的 UI 结构只改变每个场景的 `uiHash`，两个带 pending 投影的场景同时改变 `pendingUiHash`，随后派生更新 19 个 `scenarioHash`、D2 source fixture 哈希和 suite hash。该刷新没有删除断言或扩大冻结边界。
+
+2026-09-01 v0.6.7 发布门禁再次受控刷新 UI 冻结证据。D2 source fixture 更新为 `01b824a3a2bc8b7bbe0570304e3bcdf00bda520dea8e5345c14f9452055ba496`；两次独立生成的 19 场景 suite 完全一致，只更新每个场景的 `uiHash`、既有两个 `pendingUiHash`、由它们派生的 `scenarioHash` 与 suite hash。对 v0.6.6 只读临时导出逐场景比较后，19 个移除 UI / pending UI / scenario hash 字段的规范哈希全部相等，固定 case 顺序、dispatch 身份和 8 条 mutation 首差异路径也相等；当前 slice 继续保持 `75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710`，没有删除断言或改变失败、保存、权限和副作用语义。
 
 ## Session 所有权与保存链
 
