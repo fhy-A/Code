@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | 公开短期待办摘要边界测试加固：精确锁定唯一“近期方向”章节的四项与顺序，全文拒绝嵌入式 CODE / WB ID、渠道、供应商、安全缺口和具体日期，同时允许现有禁止承载字段说明；7 个纯内存对抗样本命中预期违规类别，定向 `6 tests` 与 diff 检查通过。公开 TODO blob、私有 TODO 哈希及全部规则 / handoff 均未改变 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 公开短期待办摘要与私有计划边界：公开 TODO 仅列用户批准的四个高层方向，明确顺序非优先级、非排期 / 发布承诺且不可自动启动；摘要仅经用户明确批准人工更新，禁止从私有 TODO 自动同步。内部未完成事项仍只以仓库外 `workbar-private/TODO.md` 为 canonical，私有 TODO / handoff 字节与 SHA-256 不变，公开 handoff 仍为 marker stub；边界测试 `4 failures → 5 passed`，规则同步与 diff 检查通过，未运行产品验证或外部操作 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 私有计划事实源前向隔离：基线完整 TODO 与活动 handoff 先以原 SHA-256 / 字节 / 行数无损复制到公共子仓库之外的 `workbar-private/`，31 个稳定 ID、双域游标和活动差量均保留，且私有目录不是 Git 仓库；公开 TODO / handoff 改为 marker stub，根与 code 规则、README、日志规范、模板、发布和 approval-relay 指向私有源。私有源缺失的外部 clone 仍可按用户显式任务工作但不得重建公开计划；边界回归 `5 failures → 5 passed`、doctor `10/10` 通过 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 执行轨迹 Skill 标记与模型未选提醒：当前用户轮次的可选 `activeSkillNames` 元数据投影为标题轻量芯片并保留完整可访问名单，旧 Session / Tool 分组 / 协议不变；新消息提交前按刷新中、未选择、目录为空、路由不可用给出中英文无副作用提醒，停止与跟进队列不受影响。定向 `3 tests`、完整前端 `415 tests`、build / freshness / 语法 / diff 与 bundle/classic model-free H4 通过；3011 Browser 点击 / Enter 均保留草稿和 45 条会话，用户截图确认 `Skill · imagegen` 位置与顶部“请选择模型”提示并完成视觉 `PASS`。Skill 在 AgentRun 启动时冻结，同轮不动态追加；自动多 Skill 沿用最多三项并以首项 `+N` 展示 | [查看](2026/2026-09-01.md) |
