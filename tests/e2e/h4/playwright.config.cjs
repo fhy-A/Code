@@ -1,7 +1,10 @@
 const { defineConfig } = require("@playwright/test");
+const path = require("node:path");
+
+const ROOT = path.resolve(__dirname, "../../..");
 
 module.exports = defineConfig({
-  testDir: "./tests/e2e/h4",
+  testDir: __dirname,
   testMatch: "smoke.spec.cjs",
   fullyParallel: false,
   workers: 1,
@@ -10,7 +13,7 @@ module.exports = defineConfig({
   expect: {
     timeout: 8_000,
   },
-  outputDir: "output/h4-playwright",
+  outputDir: path.join(ROOT, "output", "h4-playwright"),
   reporter: [["line"]],
   use: {
     browserName: "chromium",

@@ -7,7 +7,6 @@ from PIL import Image, ImageDraw
 DESIGN_DIR = Path(__file__).resolve().parent
 ROOT = DESIGN_DIR.parent.parent
 ASSETS = ROOT / "assets"
-ASSET_ICON_PNG = ASSETS / "code-icon.png"
 BLACK_MARK_PNG = ASSETS / "code-logo-black.png"
 WHITE_MARK_PNG = ASSETS / "code-logo-white.png"
 ROOT_PNG = ROOT / "code-icon.png"
@@ -68,7 +67,6 @@ def render_transparent_mark(color, size=256):
 def main():
     ASSETS.mkdir(parents=True, exist_ok=True)
     icon = render_app_icon(256)
-    icon.save(ASSET_ICON_PNG, "PNG", optimize=True)
     icon.save(ROOT_PNG, "PNG", optimize=True)
     render_transparent_mark("#000000").save(BLACK_MARK_PNG, "PNG", optimize=True)
     render_transparent_mark("#FFFFFF").save(WHITE_MARK_PNG, "PNG", optimize=True)
@@ -78,7 +76,7 @@ def main():
         sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40),
                (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    for path in (ASSET_ICON_PNG, BLACK_MARK_PNG, WHITE_MARK_PNG, ROOT_PNG, ROOT_ICO):
+    for path in (BLACK_MARK_PNG, WHITE_MARK_PNG, ROOT_PNG, ROOT_ICO):
         print(path)
 
 

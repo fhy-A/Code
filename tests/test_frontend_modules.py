@@ -60,9 +60,67 @@ STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
 LOGO_SOURCE = (ROOT / "assets" / "code-logo.svg").read_text(encoding="utf-8")
 FINAL_LOGO_SOURCE_DIR = ROOT / "design" / "code-logo-final"
 LOGO_EXPORT_SOURCE = (FINAL_LOGO_SOURCE_DIR / "export_selected_logo.py").read_text(encoding="utf-8")
+H4_CONFIG_PATH = ROOT / "tests" / "e2e" / "h4" / "playwright.config.cjs"
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_h4_playwright_config_is_colocated_and_cwd_independent(self):
+        self.assertFalse((ROOT / "playwright.h4.config.cjs").exists())
+        self.assertTrue(H4_CONFIG_PATH.is_file())
+        self.assertEqual(
+            PACKAGE_JSON["scripts"]["test:h4:smoke"],
+            "playwright test --config tests/e2e/h4/playwright.config.cjs",
+        )
+        script = r"""
+const config = require(process.argv[1]);
+process.stdout.write(JSON.stringify({
+  testDir: config.testDir,
+  testMatch: config.testMatch,
+  fullyParallel: config.fullyParallel,
+  workers: config.workers,
+  retries: config.retries,
+  timeout: config.timeout,
+  expectTimeout: config.expect.timeout,
+  outputDir: config.outputDir,
+  reporter: config.reporter,
+  use: config.use,
+}));
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                ["node", "-e", script, str(H4_CONFIG_PATH)],
+                cwd=temp_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        config = json.loads(result.stdout)
+        self.assertEqual(Path(config["testDir"]), (ROOT / "tests" / "e2e" / "h4").resolve())
+        self.assertEqual(Path(config["outputDir"]), (ROOT / "output" / "h4-playwright").resolve())
+        self.assertEqual(config["testMatch"], "smoke.spec.cjs")
+        self.assertEqual(config["fullyParallel"], False)
+        self.assertEqual(config["workers"], 1)
+        self.assertEqual(config["retries"], 0)
+        self.assertEqual(config["timeout"], 30_000)
+        self.assertEqual(config["expectTimeout"], 8_000)
+        self.assertEqual(config["reporter"], [["line"]])
+        self.assertEqual(
+            config["use"],
+            {
+                "browserName": "chromium",
+                "headless": True,
+                "viewport": {"width": 1280, "height": 800},
+                "actionTimeout": 8_000,
+                "navigationTimeout": 10_000,
+                "acceptDownloads": False,
+                "serviceWorkers": "block",
+                "trace": "off",
+                "screenshot": "off",
+                "video": "off",
+            },
+        )
+
     def test_h4_model_route_refresh_audit_binds_each_page_exactly_once(self):
         start = H4_SMOKE_SOURCE.index("function installConnectionRouteRefreshAudit(")
         end = H4_SMOKE_SOURCE.index("async function expectConnectionRouteRefresh(", start)
@@ -21117,9 +21175,14 @@ process.stdout.write(JSON.stringify({
         )
         self.assertIn('render_transparent_mark("#000000")', LOGO_EXPORT_SOURCE)
         self.assertIn('render_transparent_mark("#FFFFFF")', LOGO_EXPORT_SOURCE)
+        self.assertNotIn("ASSET_ICON_PNG", LOGO_EXPORT_SOURCE)
         self.assertTrue((ROOT / "code-icon.ico").is_file())
         self.assertTrue((ROOT / "code-icon.png").is_file())
-        self.assertTrue((ROOT / "assets" / "code-icon.png").is_file())
+        self.assertFalse((ROOT / "assets" / "code-icon.png").exists())
+        self.assertNotIn(
+            "assets/code-icon.png",
+            (FINAL_LOGO_SOURCE_DIR / "README.md").read_text(encoding="utf-8"),
+        )
         self.assertTrue((ROOT / "assets" / "code-logo-black.svg").is_file())
         self.assertTrue((ROOT / "assets" / "code-logo-white.svg").is_file())
         self.assertTrue((ROOT / "assets" / "code-logo-black.png").is_file())
