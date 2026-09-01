@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | Code 项目目录保守整理第一阶段：七个精确白名单空目录 / Python / pytest 缓存经 containment、reparse、内容类型及 tracked=0 审计后删除，共 273 个文件、18,050,456 字节；新增唯一 `.pytest_cache/` 忽略规则。两个无引用的一次性 PPT 脚本以原字节迁入 `scripts/legacy/presentation/`，哈希与 AST 解析保持，README 明确非产品入口；未改变运行、构建、发布或用户 data | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 公开短期待办摘要边界测试加固：精确锁定唯一“近期方向”章节的四项与顺序，全文拒绝嵌入式 CODE / WB ID、渠道、供应商、安全缺口和具体日期，同时允许现有禁止承载字段说明；7 个纯内存对抗样本命中预期违规类别，定向 `6 tests` 与 diff 检查通过。公开 TODO blob、私有 TODO 哈希及全部规则 / handoff 均未改变 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 公开短期待办摘要与私有计划边界：公开 TODO 仅列用户批准的四个高层方向，明确顺序非优先级、非排期 / 发布承诺且不可自动启动；摘要仅经用户明确批准人工更新，禁止从私有 TODO 自动同步。内部未完成事项仍只以仓库外 `workbar-private/TODO.md` 为 canonical，私有 TODO / handoff 字节与 SHA-256 不变，公开 handoff 仍为 marker stub；边界测试 `4 failures → 5 passed`，规则同步与 diff 检查通过，未运行产品验证或外部操作 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 私有计划事实源前向隔离：基线完整 TODO 与活动 handoff 先以原 SHA-256 / 字节 / 行数无损复制到公共子仓库之外的 `workbar-private/`，31 个稳定 ID、双域游标和活动差量均保留，且私有目录不是 Git 仓库；公开 TODO / handoff 改为 marker stub，根与 code 规则、README、日志规范、模板、发布和 approval-relay 指向私有源。私有源缺失的外部 clone 仍可按用户显式任务工作但不得重建公开计划；边界回归 `5 failures → 5 passed`、doctor `10/10` 通过 | [查看](2026/2026-09-01.md) |

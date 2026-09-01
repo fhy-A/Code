@@ -18,6 +18,7 @@ data/model-route-registry.json.tmp
 
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 
