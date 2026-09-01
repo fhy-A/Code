@@ -1,15 +1,15 @@
 # Code 开发日志索引
 
-> 本目录与 `TODO.md` 共同构成项目状态事实源：这里记录已经完成的重要改动、产品决策和验证结果，`TODO.md` 只保留尚未完成的项目事项。`../development-handoff.md` 仅在阶段任务未完成或需要跨 Agent 接力时存在，只记录进行中差量。
+> 本目录是公共完成事实源：记录已经完成的重要改动、产品决策和验证结果。内部未完成事项与活动交接分别以 sibling 私有 `../../../workbar-private/TODO.md`、`../../../workbar-private/development-handoff.md` 为唯一事实源；公开 `../../TODO.md` 与 `../development-handoff.md` 只是兼容 stub。
 
 ## 阅读方式
 
 1. 开始任务时先阅读本索引。
 2. 默认只读取最新日期文件，以及与当前任务直接相关的日期文件。
 3. 只有需要追溯早期实现或决策时，才读取历史归档；不要在常规交接中加载完整归档。
-4. 阅读 `../../TODO.md`，并在项目根目录运行 `git status --short`、`git log -8 --oneline`。
-5. 检查 `../development-handoff.md` 是否存在；用户要求继续/接手或任务范围重叠时读取，无关任务不得覆盖。
-6. Git 现场、日志、TODO 和活动交接冲突时，以 Git 现场和可复现结果为准，并修正活动交接。
+4. 内部工作区读取 `../../../workbar-private/TODO.md`，并在项目根目录运行 `git status --short`、`git log -8 --oneline`；私有事实源缺失的外部 clone 只按用户显式范围工作，不得重建公开 stub。
+5. 检查 `../../../workbar-private/development-handoff.md` 是否存在；用户要求继续 / 接手或任务范围重叠时读取，无关任务不得覆盖。
+6. Git 现场、公共日志、私有 TODO 和私有活动交接冲突时，以 Git 现场和可复现结果为准，并修正私有交接。
 
 新会话可以直接接收用户任务并按以上流程自助入场，不要求上一会话为已经完成的阶段重复生成交接消息。
 
@@ -17,9 +17,9 @@
 
 - 新日志按本地日期写入 `YYYY/YYYY-MM-DD.md`；当天文件不存在时新建。
 - 同一天可以记录多个阶段，每条使用 `## YYYY-MM-DD HH:mm · 协作方` 标题并按时间倒序排列。
-- 只记录已经完成且有事实依据的内容；未完成事项写入项目根目录 `TODO.md`。
-- 阶段任务尚未完成、需要暂停或切换 Codex / Claude Code 等 Agent 时，按 `../development-handoff-template.md` 创建或更新 `../development-handoff.md`。
-- 阶段完成后，将长期事实写入日志、剩余事项写入 `TODO.md`，然后移除对应活动交接。
+- 只记录已经完成且有事实依据的内容；未完成事项只写入私有 TODO。
+- 阶段任务尚未完成、需要暂停或切换 Codex / Claude Code 等 Agent 时，按 `../development-handoff-template.md` 创建或更新私有 handoff。
+- 阶段完成后，将长期事实写入公共日志、剩余事项写入私有 TODO，然后移除私有 handoff 中对应活动差量。
 - 每次新增日期文件或改变当日主题时，同步更新下方索引。
 - 发布说明、更新摘要和开发日志默认使用中文，仅保留必要的英文技术字段。
 - `archive/CHANGELOG-through-2026-07-29.md` 是冻结的历史原文，不再追加或改写。
@@ -28,6 +28,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-01 | 私有计划事实源前向隔离：基线完整 TODO 与活动 handoff 先以原 SHA-256 / 字节 / 行数无损复制到公共子仓库之外的 `workbar-private/`，31 个稳定 ID、双域游标和活动差量均保留，且私有目录不是 Git 仓库；公开 TODO / handoff 改为 marker stub，根与 code 规则、README、日志规范、模板、发布和 approval-relay 指向私有源。私有源缺失的外部 clone 仍可按用户显式任务工作但不得重建公开计划；边界回归 `5 failures → 5 passed`、doctor `10/10` 通过 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | 执行轨迹 Skill 标记与模型未选提醒：当前用户轮次的可选 `activeSkillNames` 元数据投影为标题轻量芯片并保留完整可访问名单，旧 Session / Tool 分组 / 协议不变；新消息提交前按刷新中、未选择、目录为空、路由不可用给出中英文无副作用提醒，停止与跟进队列不受影响。定向 `3 tests`、完整前端 `415 tests`、build / freshness / 语法 / diff 与 bundle/classic model-free H4 通过；3011 Browser 点击 / Enter 均保留草稿和 45 条会话，用户截图确认 `Skill · imagegen` 位置与顶部“请选择模型”提示并完成视觉 `PASS`。Skill 在 AgentRun 启动时冻结，同轮不动态追加；自动多 Skill 沿用最多三项并以首项 `+N` 展示 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | Bundled Skill 升级补齐与删除持久化：launcher 逐目录只补缺失且未 tombstone 的 bundled Skill，29→31 明确补入 ppt-master/imagegen，现有 bundled/local/custom 字节不变；copy staging/delete quarantine 位于 skills 同级受控工作区，状态写前完整回滚，tombstone 提交后即使部分清理失败也不恢复残缺 Skill，所有残留不可枚举。R002 对抗 `2 errors → 10 tests`、Skills CRUD/Launcher `18 tests`、image runtime/builtin `49 tests`、doctor `10/10` 通过；imagegen 目录缺失不影响合法 generate_image 工具 | [查看](2026/2026-09-01.md) |
 | 2026-09-01 | Skill 系统依赖指引与 Git Bash 无重启重检：Windows 缺失 bash/qpdf 且无 manifest 显式提示时派生精确 winget 协作命令，显式值仍最高优先；bash 在当前/注册表 PATH 后从 Git cmd 根及 Program Files、x86、LocalAppData 六个常见位置解析，每次检查读取新鲜环境且不改 PATH。fail-first `7 failures + 2 errors`、新增检查 `11 tests`、完整 Skill dependencies `33 tests`、doctor `10/10`、语法/diff 通过；未执行安装或改变 manifest/binding 身份 | [查看](2026/2026-09-01.md) |

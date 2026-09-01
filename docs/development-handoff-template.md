@@ -1,7 +1,7 @@
 # 活动任务交接
 
-> 仅在阶段任务尚未完成、需要暂停或切换 Codex / Claude Code 等 Agent 时复制为 `docs/development-handoff.md`。  
-> 阶段完成后，先把长期事实写入开发日志、剩余事项写入 `TODO.md`，再移除活动交接文件。
+> 仅在阶段任务尚未完成、需要暂停或切换 Codex / Claude Code 等 Agent 时，用本模板创建或更新私有 `../../workbar-private/development-handoff.md`。公共 `docs/development-handoff.md` 只是兼容 stub，不得写入活动差量。
+> 阶段完成后，先把长期事实写入公共开发日志、剩余事项写入私有 `../../workbar-private/TODO.md`，再移除私有 handoff 中对应活动差量。
 
 ## 元数据
 
@@ -31,7 +31,7 @@
 - 专题规范或证据：
 - Git / 现场核对命令：
 
-> 本交接只记录进行中差量。与 Git、开发日志、TODO 或可复现结果冲突时，以现场为准，并先修正本文件。
+> 本交接只记录进行中差量。与 Git、公共开发日志、私有 TODO 或可复现结果冲突时，以现场为准，并先修正私有 handoff。
 
 ## 已完成
 
@@ -84,7 +84,6 @@
 ## 收口条件
 
 - 完成后需要写入的开发日志：
-- 需要保留在 `TODO.md` 的事项：
+- 需要保留在私有 `../../workbar-private/TODO.md` 的事项：
 - 需要恢复的临时状态：
 - 移除本交接文件前的检查：
-

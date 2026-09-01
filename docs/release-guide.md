@@ -126,7 +126,7 @@ python release.py 0.5.8 --resume --yes
 | 工作区干净 | `git status` — 不应有未提交的本阶段改动 |
 | 上一阶段已提交 | `git log --oneline -3` — 确认最近的提交是上一个功能阶段 |
 | 开发日志已更新 | 本版本的所有改动已记录到当天日期文件，且 `docs/development-log/README.md` 索引已同步 |
-| TODO.md 已更新 | 已完成条目已移除，新发现的待办已加入 |
+| 私有计划已核对 | 内部工作区的 `../../workbar-private/TODO.md` 已移除完成项并记录新发现待办；私有事实源缺失的外部 clone 不得创建或扩写公开 stub，只按用户显式发布范围核对 |
 | GitHub CLI 已安装 | `gh --version` |
 | GitHub CLI 已登录 | `gh auth status` |
 
@@ -331,4 +331,4 @@ gh release create v0.5.8 dist/Code-v0.5.8.exe `
 | `build_exe.py` | PyInstaller 构建入口 |
 | `docs/releases/vX.Y.Z.md` | 单版本发布说明 |
 | `docs/development-log/README.md` | 开发日志索引；详细记录位于同目录的日期文件，早期记录位于 `archive/` |
-| `TODO.md` | 待办路线 |
+| `TODO.md` | 私有计划事实源边界的公开兼容 stub；内部路线位于 `../../workbar-private/TODO.md` |
