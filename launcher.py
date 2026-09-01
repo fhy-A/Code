@@ -9,6 +9,8 @@ import sys
 import webbrowser
 from pathlib import Path
 
+from bundled_skills import sync_missing_bundled_skills
+
 
 def has_existing_browser(port=3010):
     """Check the old server before it is stopped so an existing tab can be reused."""
@@ -200,6 +202,24 @@ def ensure_dirs():
     return data_home
 
 
+def sync_bundled_skills_at_startup(base, data_dir):
+    """Fill missing bundled Skills without blocking startup on bad state/copies."""
+    try:
+        return sync_missing_bundled_skills(
+            Path(base) / "data" / "skills",
+            Path(data_dir) / "skills",
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "sync_failed",
+            "copied": [],
+            "existing": [],
+            "tombstoned": [],
+            "errors": [{"stage": "sync", "error": str(exc)}],
+        }
+
+
 def hide_console():
     """Hide the console window (--console build) so user only sees tray + browser."""
     if os.name != "nt":
@@ -252,18 +272,22 @@ def _main():
     if _ico_src.exists():
         shutil.copy2(_ico_src, _ico_dst)
 
-    # Copy bundled data files if this is first run
+    # Keep the legacy first-run-only memory copy. Bundled Skills use their own
+    # per-directory, tombstone-aware upgrade synchronizer.
     bundled_data = base / "data"
     if bundled_data.exists():
-        for sub in ["memory", "skills"]:
-            src = bundled_data / sub
-            dst = data_dir / sub
-            if src.exists() and not any(dst.iterdir()):
-                for item in src.iterdir():
-                    if item.is_file():
-                        (dst / item.name).write_text(item.read_text(encoding="utf-8-sig"), encoding="utf-8")
-                    elif item.is_dir():
-                        shutil.copytree(item, dst / item.name)
+        memory_src = bundled_data / "memory"
+        memory_dst = data_dir / "memory"
+        if memory_src.exists() and not any(memory_dst.iterdir()):
+            for item in memory_src.iterdir():
+                if item.is_file():
+                    (memory_dst / item.name).write_text(
+                        item.read_text(encoding="utf-8-sig"),
+                        encoding="utf-8",
+                    )
+                elif item.is_dir():
+                    shutil.copytree(item, memory_dst / item.name)
+        sync_bundled_skills_at_startup(base, data_dir)
 
     # Set environment for server
     os.environ["CODE_PORT"] = "3010"

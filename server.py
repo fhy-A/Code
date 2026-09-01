@@ -31,6 +31,7 @@ import time
 import webbrowser
 
 import agent_protocol
+from bundled_skills import delete_installed_skill
 import context_calibration
 import context_window
 from image_runtime import (
@@ -15433,12 +15434,13 @@ def update_skill(
 def delete_skill(name):
     """Delete a skill directory."""
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", name)[:32]
-    skill_dir = SKILLS_DIR / safe
-    if not skill_dir.exists():
-        raise ValueError("skill not found")
-    import shutil
-    shutil.rmtree(skill_dir)
-    return {"ok": True}
+    if not safe:
+        raise ValueError("invalid skill name")
+    return delete_installed_skill(
+        safe,
+        APP_DIR / "data" / "skills",
+        SKILLS_DIR,
+    )
 
 
 # ── Memory ────────────────────────────────────────────

@@ -249,6 +249,22 @@ class TestImageAgentRuntime(unittest.TestCase):
         with self.assertRaises(image_runtime.ImageRuntimeError):
             server_mod._resume_agent_run(run, [], image_route=self.route)
 
+    def test_generate_image_is_independent_of_imagegen_skill_directory(self):
+        for layout in ("missing", "empty"):
+            with self.subTest(layout=layout):
+                skills_dir = self.root / f"skills-{layout}"
+                if layout == "empty":
+                    skills_dir.mkdir()
+                with mock.patch.object(server_mod, "SKILLS_DIR", skills_dir):
+                    run = self._run(session_id=f"image-skill-independent-{layout}")
+                    self.assertIn(
+                        "generate_image",
+                        {item["function"]["name"] for item in run["tools"]},
+                    )
+                    call = self._queue(run, call_id=f"image-skill-independent-{layout}-call")
+                    self.assertTrue(server_mod._execute_agent_pending_tools(run))
+                    self.assertTrue(run["tool_executions"][call["id"]]["result"]["ok"])
+
     def test_bypass_generation_persists_assets_and_never_repeats_upstream(self):
         run = self._run()
         call = self._queue(run)
