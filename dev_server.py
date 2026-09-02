@@ -10,10 +10,13 @@ cleanup.
 import importlib
 import os
 import subprocess
+import sys
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib import parse
+
+from code_runtime import data_dir_owner
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -139,10 +142,11 @@ def run_dev_server(
     server_module=None,
     server_factory=ThreadingHTTPServer,
     ensure_frontend=ensure_frontend_build,
+    owner_acquire=data_dir_owner.acquire_data_dir_owner,
 ):
     """Run the source instance without invoking ``server.py`` cleanup."""
     port, data_dir = configure_dev_environment()
-    data_dir.mkdir(parents=True, exist_ok=True)
+    owner = owner_acquire(data_dir)
 
     rebuilt = ensure_frontend()
     if rebuilt:
@@ -151,6 +155,8 @@ def run_dev_server(
     if server_module is None:
         server_module = importlib.import_module("server")
 
+    server_module._ensure_runtime_data_directories()
+    server_module._initialize_runtime_data_services()
     server_factory.daemon_threads = True
     server_module._migrate_sessions_to_hierarchy()
     server_module._migrate_codex_project_sessions_support()
@@ -172,7 +178,28 @@ def run_dev_server(
         print("\nShutting down Code Dev...")
     finally:
         httpd.server_close()
+        # Keep the owner until process exit.  The server's background index
+        # builders can still be data writers after the HTTP socket closes.
+        _ = owner
+
+
+def main():
+    try:
+        run_dev_server()
+    except data_dir_owner.DataDirOwnerError as exc:
+        if isinstance(exc, data_dir_owner.DataDirInUseError):
+            print(
+                "Code Dev cannot start because this data directory is already in use.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Code Dev cannot start because its data directory is unavailable.",
+                file=sys.stderr,
+            )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    run_dev_server()
+    raise SystemExit(main())

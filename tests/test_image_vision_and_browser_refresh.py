@@ -419,16 +419,11 @@ class TestExistingBrowserRefresh(unittest.TestCase):
             self.assertTrue(launcher.should_reuse_browser(argv=["Code.exe", "--reuse-browser"]))
             self.assertFalse(launcher.should_reuse_browser(argv=["Code.exe"]))
 
-    def test_packaged_process_query_supports_versioned_executables(self):
-        process_list = mock.Mock(stdout="101\n202\n", returncode=0)
-        stopped = mock.Mock(returncode=0)
-        with mock.patch.object(launcher.os, "getpid", return_value=101), \
-             mock.patch.object(launcher.os, "getppid", return_value=100), \
-             mock.patch.object(launcher.subprocess, "run", side_effect=[process_list, stopped]) as run:
-            self.assertEqual(launcher.kill_existing(), 1)
-        query = run.call_args_list[0].args[0][-1]
-        self.assertIn("Code(?:-v[0-9.]+)?", query)
-        self.assertEqual(run.call_args_list[1].args[0], ["taskkill", "/PID", "202", "/T", "/F"])
+    def test_launcher_does_not_terminate_existing_processes(self):
+        source = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        self.assertNotIn("def kill_existing", source)
+        self.assertNotIn("taskkill", source)
+        self.assertNotIn("Win32_Process", source)
 
     def test_frontend_refreshes_when_server_instance_changes(self):
         source = (ROOT / "app.js").read_text(encoding="utf-8")

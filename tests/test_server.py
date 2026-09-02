@@ -9,15 +9,19 @@ from contextlib import contextmanager
 import datetime as dt
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import inspect
 import io
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -26,6 +30,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server
 import launcher
+from code_runtime import data_dir_owner
 
 
 def _fake_pe_bytes(size=8192):
@@ -1373,20 +1378,36 @@ class TestUpdaterHelpers(unittest.TestCase):
             descriptor = self._descriptor(url, payload)
             with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
                  mock.patch.object(server, "_read_windows_file_identity", return_value=identity):
-                started = server._start_or_attach_update_job(descriptor, target_dir=Path(temp_dir))
+                data_root = Path(temp_dir)
+                started = server._start_or_attach_update_job(descriptor, target_dir=data_root)
                 completed = self._wait_for_terminal(started["jobId"])
                 self.assertEqual(completed["status"], "completed")
                 handler = object.__new__(server.CodeHandler)
                 handler.read_body_json = mock.Mock(return_value={"jobId": completed["jobId"]})
                 handler.send_json = mock.Mock()
                 with mock.patch.object(server.sys, "frozen", True, create=True), \
-                     mock.patch.object(server, "_build_update_script", return_value=Path(temp_dir) / "update.bat"), \
+                     mock.patch.object(server, "DATA_DIR", data_root), \
+                     mock.patch.object(server, "_build_update_script", return_value=Path(temp_dir) / "update.bat") as build_script, \
                      mock.patch.object(server.subprocess, "Popen") as popen, \
+                     mock.patch.object(server.os, "getpid", return_value=8421), \
                      mock.patch.object(server.os, "_exit") as exit_process:
                     handler._handle_restart()
                     handler._handle_restart()
                 self.assertEqual(popen.call_count, 1)
                 self.assertEqual(exit_process.call_count, 1)
+                self.assertEqual(build_script.call_count, 1)
+                build_args = build_script.call_args
+                self.assertEqual(build_args.args[:4], (
+                    data_root,
+                    data_root / descriptor["name"],
+                    None,
+                    data_root / "update.log",
+                ))
+                self.assertEqual(build_args.kwargs["source_pid"], 8421)
+                self.assertEqual(
+                    build_args.kwargs["lock_path"],
+                    data_dir_owner.lock_path_for(data_root),
+                )
                 self.assertEqual(server._current_update_snapshot(completed["jobId"])["status"], "installing")
 
     def test_remote_version_selects_matching_code_asset(self):
@@ -1436,31 +1457,933 @@ class TestUpdaterHelpers(unittest.TestCase):
             bad.write_text("<html>download failed</html>", encoding="utf-8")
             self.assertFalse(server._is_valid_windows_executable(bad))
 
-    def test_update_script_keeps_new_version_and_removes_old_ones(self):
-        target_dir = Path(r"C:\Code")
-        new_exe = target_dir / "Code-v1.2.3.exe"
-        partial_exe = target_dir / "Code-v1.2.3.exe.part"
-        log_path = target_dir / "update.log"
-        bat_path = server._build_update_script(target_dir, new_exe, partial_exe, log_path)
+    @staticmethod
+    def _generated_power_shell(bat_path):
         script = Path(bat_path).read_text(encoding="utf-8")
-        # Batch-file updater — uses findstr to match versioned Code-v*.exe processes
-        self.assertIn("findstr /i Code-", script)
-        self.assertIn("taskkill", script)
-        self.assertIn("move /y", script)
-        self.assertIn("del /f", script)
+        match = re.search(r"-EncodedCommand\s+([A-Za-z0-9+/=]+)", script)
+        if not match:
+            raise AssertionError("generated updater is missing its PowerShell payload")
+        return script, base64.b64decode(match.group(1)).decode("utf-16le")
+
+    def test_update_script_waits_for_exact_pid_then_locks_before_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_dir = Path(temp_dir) / "data"
+            target_dir.mkdir()
+            new_exe = target_dir / "Code-v1.2.3.exe"
+            partial_exe = target_dir / "Code-v1.2.3.exe.part"
+            log_path = target_dir / "update.log"
+            lock_path = data_dir_owner.lock_path_for(target_dir)
+            bat_path = server._build_update_script(
+                target_dir,
+                new_exe,
+                partial_exe,
+                log_path,
+                source_pid=4242,
+                lock_path=lock_path,
+            )
+            script, payload = self._generated_power_shell(bat_path)
+
+        builder_source = inspect.getsource(server._build_update_script).lower()
+        for forbidden in (
+            "taskkill",
+            "tasklist",
+            "findstr",
+            "win32_process",
+            "get-ciminstance",
+            "stop-process",
+            "start-process",
+        ):
+            self.assertNotIn(forbidden, builder_source)
+            self.assertNotIn(forbidden, script.lower())
+            self.assertNotIn(forbidden, payload.lower())
+
+        self.assertIn("$sourcePid = 4242", payload)
+        self.assertIn("Get-Process -Id $sourcePid", payload)
+        self.assertEqual(
+            re.findall(r"Get-Process\s+-Id\s+\$sourcePid", payload),
+            ["Get-Process -Id $sourcePid"],
+        )
+        self.assertEqual(payload.count("Get-Process"), 1)
+        self.assertIn(str(lock_path.resolve()), payload)
+        self.assertIn("CreateFileW", payload)
+        self.assertIn("FileFlagOpenReparsePoint", payload)
+        self.assertIn("GetFileInformationByHandle", payload)
+        self.assertIn("NumberOfLinks", payload)
+        self.assertIn("FileIndexHigh", payload)
+        self.assertIn("FileIndexLow", payload)
+        self.assertIn("Open-VerifiedDataOwnerSidecar", payload)
+        self.assertIn("Assert-LockedDataOwnerSidecarIdentity", payload)
+        self.assertIn("[System.IO.FileStream]::new", payload)
+        self.assertNotIn("[System.IO.File]::Open", payload)
+        self.assertIn("$lockStream.Lock($lockOffset, $lockLength)", payload)
+        self.assertIn("$lockStream.Unlock($lockOffset, $lockLength)", payload)
+        self.assertIn("$lockStream.Dispose()", payload)
         self.assertIn('start "" "', script)
         self.assertIn("--reuse-browser", script)
 
-    def test_update_script_findstr_matches_versioned_process(self):
-        """The batch updater must find versioned names like Code-v0.5.24.exe."""
-        target_dir = Path(r"C:\Code")
-        new_exe = target_dir / "Code-v2.0.0.exe"
-        bat_path = server._build_update_script(target_dir, new_exe, None, target_dir / "update.log")
-        script = Path(bat_path).read_text(encoding="utf-8")
-        # findstr /i Code- catches "Code-v0.5.24.exe", "Code-v1.0.0.exe", etc.
-        self.assertIn("findstr /i Code-", script)
-        # Must NOT use the old exact-match filter that only caught "Code.exe"
-        self.assertNotIn("IMAGENAME eq Code.exe", script)
+        wait_at = payload.index("Get-Process -Id $sourcePid")
+        safe_open_at = payload.index("Open-VerifiedDataOwnerSidecar $lockPath")
+        lock_at = payload.index("$lockStream.Lock($lockOffset, $lockLength)")
+        locked_identity_at = payload.index(
+            "Assert-LockedDataOwnerSidecarIdentity $lockInformation $lockPath"
+        )
+        log_at = payload.index("Add-Content -LiteralPath $logPath")
+        move_at = payload.index("Move-Item -LiteralPath")
+        delete_at = payload.index("Remove-Item -LiteralPath")
+        unlock_at = payload.index("$lockStream.Unlock($lockOffset, $lockLength)")
+        dispose_at = payload.index("$lockStream.Dispose()")
+        self.assertLess(wait_at, lock_at)
+        self.assertLess(wait_at, safe_open_at)
+        self.assertLess(safe_open_at, lock_at)
+        self.assertLess(lock_at, locked_identity_at)
+        self.assertLess(locked_identity_at, log_at)
+        self.assertLess(lock_at, log_at)
+        self.assertLess(log_at, move_at)
+        self.assertLess(move_at, delete_at)
+        self.assertLess(delete_at, unlock_at)
+        self.assertLess(unlock_at, dispose_at)
+        self.assertLess(script.index("powershell.exe"), script.index('start "" "'))
+        self.assertLess(
+            script.index('if not "%result%"=="0" goto :cleanup'),
+            script.index('start "" "'),
+        )
+
+    def test_update_helper_rejects_install_root_outside_formal_data_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            target_dir = Path(temp_dir) / "install"
+            data_dir.mkdir()
+            target_dir.mkdir()
+            with mock.patch.object(server, "DATA_DIR", data_dir):
+                with self.assertRaises(server._UpdateFailure) as captured:
+                    server._update_data_dir_lock_path(target_dir)
+
+        self.assertEqual(captured.exception.code, "target_conflict")
+
+    def test_update_script_keeps_sidecar_path_lexical(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_dir = Path(temp_dir) / "data"
+            target_dir.mkdir()
+            lock_path = data_dir_owner.lock_path_for(target_dir)
+            original_resolve = Path.resolve
+
+            def resolve_except_sidecar(path, *args, **kwargs):
+                if path == lock_path:
+                    raise AssertionError("updater must not resolve the sidecar path")
+                return original_resolve(path, *args, **kwargs)
+
+            with mock.patch.object(
+                server.Path,
+                "resolve",
+                autospec=True,
+                side_effect=resolve_except_sidecar,
+            ):
+                bat_path = server._build_update_script(
+                    target_dir,
+                    target_dir / "Code-v1.2.3.exe",
+                    None,
+                    target_dir / "update.log",
+                    source_pid=4242,
+                    lock_path=lock_path,
+                )
+
+            _, payload = self._generated_power_shell(bat_path)
+            self.assertIn(str(lock_path.absolute()), payload)
+
+    @staticmethod
+    def _update_target_snapshot(target_dir):
+        target = Path(target_dir)
+        return {
+            str(path.relative_to(target)): (
+                "directory" if path.is_dir() else path.read_bytes()
+            )
+            for path in target.rglob("*")
+        }
+
+    @staticmethod
+    def _finished_source_pid():
+        source = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        source.wait(timeout=10)
+        return source.pid
+
+    @staticmethod
+    def _wait_for_path(path, timeout=10):
+        target = Path(path)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if target.exists():
+                return target
+            time.sleep(0.02)
+        raise AssertionError(f"timed out waiting for {target.name}")
+
+    @staticmethod
+    def _wait_for_path_absence(path, timeout=5):
+        target = Path(path)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not target.exists():
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"timed out waiting for removal of {target.name}")
+
+    @staticmethod
+    def _assert_path_absent_until(path, timeout=1.5):
+        target = Path(path)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if target.exists():
+                raise AssertionError(f"unexpected process marker: {target.name}")
+            time.sleep(0.02)
+        if target.exists():
+            raise AssertionError(f"unexpected process marker: {target.name}")
+
+    @staticmethod
+    def _cleanup_temp_context(temp_context, root, timeout=5):
+        target = Path(root)
+        deadline = time.monotonic() + timeout
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                temp_context.cleanup()
+            except OSError as exc:
+                last_error = exc
+            if not target.exists():
+                return
+            time.sleep(0.02)
+        if last_error is not None:
+            raise last_error
+        raise AssertionError(f"temporary root was not removed: {target.name}")
+
+    @staticmethod
+    def _stop_test_process(process):
+        if process is None or process.poll() is not None:
+            return
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    @classmethod
+    def _communicate_test_process(cls, process, timeout=20):
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            cls._stop_test_process(process)
+            raise AssertionError(f"test process {process.pid} timed out") from exc
+        return process.returncode, stdout, stderr
+
+    @staticmethod
+    def _start_latched_source(root, data_dir, *, owns_data_dir):
+        root = Path(root)
+        ready = root / "source-ready.marker"
+        release = root / "source-release.marker"
+        exited = root / "source-exited.marker"
+        helper_path = root / "source_helper.py"
+        helper_path.write_text(
+            """
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from code_runtime import data_dir_owner
+
+data_dir = Path(sys.argv[2])
+ready = Path(sys.argv[3])
+release = Path(sys.argv[4])
+exited = Path(sys.argv[5])
+owns_data_dir = sys.argv[6] == "owner"
+owner = None
+exit_code = 0
+try:
+    if owns_data_dir:
+        owner = data_dir_owner.acquire_data_dir_owner(data_dir)
+    ready.write_text(str(os.getpid()), encoding="utf-8")
+    deadline = time.monotonic() + 20
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            exit_code = 70
+            break
+        time.sleep(0.02)
+finally:
+    if owner is not None:
+        owner.release()
+    exited.write_text(str(exit_code), encoding="utf-8")
+raise SystemExit(exit_code)
+""".lstrip(),
+            encoding="utf-8",
+        )
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                str(helper_path),
+                str(Path(__file__).resolve().parent.parent),
+                str(data_dir),
+                str(ready),
+                str(release),
+                str(exited),
+                "owner" if owns_data_dir else "process",
+            ],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        return {
+            "process": process,
+            "ready": ready,
+            "release": release,
+            "exited": exited,
+        }
+
+    @staticmethod
+    def _compile_test_executable(source, output_path):
+        output = Path(output_path)
+        source_path = output.with_suffix(".cs")
+        source_path.write_text(source, encoding="utf-8")
+
+        def powershell_literal(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        command = (
+            "$ErrorActionPreference = 'Stop'; "
+            f"Add-Type -Path {powershell_literal(source_path)} "
+            f"-OutputAssembly {powershell_literal(output)} "
+            "-OutputType WindowsApplication"
+        )
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not output.is_file():
+            raise AssertionError(
+                "failed to compile replacement helper: "
+                f"stdout={result.stdout}\nstderr={result.stderr}"
+            )
+        return output
+
+    @staticmethod
+    def _write_replacement_helper(root, data_dir):
+        root = Path(root)
+        started = root / "replacement-started.marker"
+        ready = root / "replacement-ready.marker"
+        release = root / "replacement-release.marker"
+        exited = root / "replacement-exited.marker"
+        launcher_started = root / "replacement-launcher-started.marker"
+        launcher_exited = root / "replacement-launcher-exited.marker"
+        helper_path = root / "replacement_helper.py"
+        helper_path.write_text(
+            """
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from code_runtime import data_dir_owner
+
+data_dir = Path(sys.argv[2])
+started = Path(sys.argv[3])
+ready = Path(sys.argv[4])
+release = Path(sys.argv[5])
+exited = Path(sys.argv[6])
+owner = None
+exit_code = 0
+started.write_text(str(os.getpid()), encoding="utf-8")
+try:
+    owner = data_dir_owner.acquire_data_dir_owner(data_dir)
+    ready.write_text(str(os.getpid()), encoding="utf-8")
+    deadline = time.monotonic() + 20
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            exit_code = 70
+            break
+        time.sleep(0.02)
+except Exception as exc:
+    exit_code = 71
+finally:
+    if owner is not None:
+        owner.release()
+    exited.write_text(str(exit_code), encoding="utf-8")
+raise SystemExit(exit_code)
+""".lstrip(),
+            encoding="utf-8",
+        )
+        arguments = subprocess.list2cmdline([
+            "-u",
+            str(helper_path),
+            str(Path(__file__).resolve().parent.parent),
+            str(data_dir),
+            str(started),
+            str(ready),
+            str(release),
+            str(exited),
+        ])
+        launcher_path = Path(data_dir) / "replacement.exe"
+        launcher_source = f"""
+using System;
+using System.Diagnostics;
+using System.IO;
+
+public static class ReplacementLauncher {{
+    [STAThread]
+    public static int Main(string[] args) {{
+        int exitCode = 72;
+        try {{
+            File.WriteAllText(
+                {json.dumps(str(launcher_started))},
+                Process.GetCurrentProcess().Id.ToString());
+            var info = new ProcessStartInfo();
+            info.FileName = {json.dumps(str(sys.executable))};
+            info.Arguments = {json.dumps(arguments)};
+            info.WorkingDirectory = {json.dumps(str(root))};
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.EnvironmentVariables["PYTHONDONTWRITEBYTECODE"] = "1";
+            using (var child = Process.Start(info)) {{
+                if (child == null) {{
+                    exitCode = 72;
+                }} else if (!child.WaitForExit(25000)) {{
+                    child.Kill();
+                    child.WaitForExit(5000);
+                    exitCode = 73;
+                }} else {{
+                    exitCode = child.ExitCode;
+                }}
+            }}
+        }} catch {{
+            exitCode = 74;
+        }}
+        File.WriteAllText({json.dumps(str(launcher_exited))}, exitCode.ToString());
+        return exitCode;
+    }}
+}}
+""".lstrip()
+        TestUpdaterHelpers._compile_test_executable(
+            launcher_source,
+            launcher_path,
+        )
+        return {
+            "path": launcher_path,
+            "started": started,
+            "ready": ready,
+            "release": release,
+            "exited": exited,
+            "launcher_started": launcher_started,
+            "launcher_exited": launcher_exited,
+        }
+
+    @staticmethod
+    def _write_replacement_sentinel(root, data_dir):
+        root = Path(root)
+        started = root / "sentinel-started.marker"
+        exited = root / "sentinel-exited.marker"
+        sentinel_path = Path(data_dir) / "replacement-sentinel.exe"
+        sentinel_source = f"""
+using System;
+using System.Diagnostics;
+using System.IO;
+
+public static class ReplacementSentinel {{
+    [STAThread]
+    public static int Main(string[] args) {{
+        File.WriteAllText({json.dumps(str(started))}, Process.GetCurrentProcess().Id.ToString());
+        File.WriteAllText({json.dumps(str(exited))}, "0");
+        return 0;
+    }}
+}}
+""".lstrip()
+        TestUpdaterHelpers._compile_test_executable(
+            sentinel_source,
+            sentinel_path,
+        )
+        return {
+            "path": sentinel_path,
+            "started": started,
+            "exited": exited,
+            "launcher_started": started,
+            "launcher_exited": exited,
+        }
+
+    @staticmethod
+    def _wait_for_pid_exit(process_id, timeout=5):
+        if os.name != "nt":
+            return
+        import ctypes
+
+        synchronize = 0x00100000
+        wait_object_0 = 0
+        wait_timeout = 258
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        handle = kernel32.OpenProcess(synchronize, False, int(process_id))
+        if not handle:
+            error_code = ctypes.get_last_error()
+            if error_code in {0, 87, 1168}:
+                return
+            raise OSError(error_code, "unable to wait for replacement launcher")
+        try:
+            result = kernel32.WaitForSingleObject(handle, max(1, int(timeout * 1000)))
+        finally:
+            kernel32.CloseHandle(handle)
+        if result == wait_timeout:
+            raise AssertionError(f"replacement launcher {process_id} did not exit")
+        if result != wait_object_0:
+            raise OSError(int(result), "replacement launcher wait failed")
+
+    @staticmethod
+    def _stop_detached_pid(pid_marker):
+        try:
+            process_id = int(Path(pid_marker).read_text(encoding="utf-8").strip())
+        except (OSError, TypeError, ValueError):
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process_id), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            TestUpdaterHelpers._wait_for_pid_exit(process_id, timeout=5)
+            return
+        TestUpdaterHelpers._wait_for_pid_exit(process_id, timeout=5)
+
+    @staticmethod
+    def _start_generated_updater(bat_path, data_dir):
+        return subprocess.Popen(
+            ["cmd", "/c", str(bat_path)],
+            cwd=data_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    @classmethod
+    def _cleanup_managed_update_case(cls, case):
+        cleanup_errors = []
+
+        def attempt(label, action):
+            try:
+                action()
+            except Exception as exc:
+                exc.add_note(f"updater test cleanup step: {label}")
+                cleanup_errors.append(exc)
+
+        holder = case.get("holder")
+        if holder is not None:
+            attempt(
+                "holder release marker",
+                lambda: holder["release"].write_text("release", encoding="utf-8"),
+            )
+
+            def wait_for_holder_exit():
+                if holder["ready"].exists() and not holder["exited"].exists():
+                    cls._wait_for_path(holder["exited"], timeout=5)
+
+            attempt("holder exit marker", wait_for_holder_exit)
+            attempt(
+                "holder process wait",
+                lambda: cls._communicate_test_process(holder["process"], timeout=5),
+            )
+            attempt("holder forced stop", lambda: cls._stop_test_process(holder["process"]))
+
+        replacement = case.get("replacement")
+        if replacement is not None:
+            release_marker = replacement.get("release")
+            if release_marker is not None:
+                attempt(
+                    "replacement release marker",
+                    lambda: release_marker.write_text("release", encoding="utf-8"),
+                )
+
+            def wait_for_replacement_exit():
+                started = replacement.get("started")
+                exited = replacement.get("exited")
+                if (
+                    started is not None
+                    and exited is not None
+                    and started.exists()
+                    and not exited.exists()
+                ):
+                    cls._wait_for_path(exited, timeout=5)
+
+            attempt("replacement helper exit marker", wait_for_replacement_exit)
+
+            def wait_for_launcher_exit():
+                started = replacement.get("launcher_started")
+                exited = replacement.get("launcher_exited")
+                if (
+                    started is not None
+                    and exited is not None
+                    and started.exists()
+                    and not exited.exists()
+                ):
+                    cls._wait_for_path(exited, timeout=5)
+
+            attempt("replacement launcher exit marker", wait_for_launcher_exit)
+
+            def stop_launcher_if_needed():
+                started = replacement.get("launcher_started")
+                exited = replacement.get("launcher_exited")
+                if (
+                    started is not None
+                    and started.exists()
+                    and (exited is None or not exited.exists())
+                ):
+                    cls._stop_detached_pid(started)
+
+            attempt("replacement launcher forced stop", stop_launcher_if_needed)
+
+        updater = case.get("updater")
+        if updater is not None:
+            attempt(
+                "updater process wait",
+                lambda: cls._communicate_test_process(updater, timeout=5),
+            )
+            attempt("updater forced stop", lambda: cls._stop_test_process(updater))
+
+        owner = case.get("owner")
+        if owner is not None:
+            attempt("data owner release", owner.release)
+
+        bat_path = case.get("bat_path")
+        if bat_path is not None:
+            attempt("generated batch removal", lambda: Path(bat_path).unlink(missing_ok=True))
+
+        temp_context = case.get("temp_context")
+        root = case.get("root")
+        if temp_context is not None and root is not None:
+            attempt(
+                "temporary root removal",
+                lambda: cls._cleanup_temp_context(temp_context, root),
+            )
+
+            def assert_root_removed():
+                if Path(root).exists():
+                    raise AssertionError(f"temporary root was not removed: {Path(root).name}")
+
+            attempt("temporary root verification", assert_root_removed)
+        return cleanup_errors
+
+    @contextmanager
+    def _managed_update_case(self):
+        case = {
+            "temp_context": None,
+            "root": None,
+            "holder": None,
+            "replacement": None,
+            "updater": None,
+            "owner": None,
+            "bat_path": None,
+        }
+        test_error = None
+        test_traceback = None
+        cleanup_errors = []
+        try:
+            case["temp_context"] = tempfile.TemporaryDirectory()
+            case["root"] = Path(case["temp_context"].name)
+            yield case
+        except Exception as exc:
+            test_error = exc
+            test_traceback = exc.__traceback__
+        finally:
+            try:
+                cleanup_errors = self._cleanup_managed_update_case(case)
+            except Exception as exc:
+                exc.add_note("updater test cleanup coordinator")
+                cleanup_errors = [exc]
+
+        if test_error is not None:
+            if cleanup_errors:
+                raise ExceptionGroup(
+                    "updater test and cleanup both failed",
+                    [test_error, *cleanup_errors],
+                ) from None
+            raise test_error.with_traceback(test_traceback)
+        if cleanup_errors:
+            raise ExceptionGroup("updater test cleanup failed", cleanup_errors)
+
+    def _assert_update_failure_does_not_start_replacement(self, case_name, expected_code):
+        with self._managed_update_case() as case:
+            root = case["root"]
+            data_dir = root / "data"
+            data_dir.mkdir()
+            older = data_dir / "Code-v1.0.0.exe"
+            older.write_bytes(b"old")
+            sentinel = self._write_replacement_sentinel(root, data_dir)
+            case["replacement"] = sentinel
+            lock_path = data_dir_owner.lock_path_for(data_dir)
+            if case_name == "timeout":
+                source = self._start_latched_source(
+                    root,
+                    data_dir,
+                    owns_data_dir=False,
+                )
+                case["holder"] = source
+                self._wait_for_path(source["ready"])
+                source_pid = source["process"].pid
+            else:
+                source_pid = self._finished_source_pid()
+                if case_name == "busy":
+                    owner = data_dir_owner.acquire_data_dir_owner(data_dir)
+                    case["owner"] = owner
+                    lock_path = owner.lock_path
+                elif case_name == "unavailable":
+                    lock_path.mkdir()
+                else:
+                    raise AssertionError(f"unknown updater failure case: {case_name}")
+
+            before = self._update_target_snapshot(data_dir)
+            bat_path = server._build_update_script(
+                data_dir,
+                sentinel["path"],
+                None,
+                data_dir / "update.log",
+                source_pid=source_pid,
+                lock_path=lock_path,
+                wait_timeout_seconds=1,
+            )
+            case["bat_path"] = bat_path
+            updater = self._start_generated_updater(bat_path, data_dir)
+            case["updater"] = updater
+            returncode, stdout, stderr = self._communicate_test_process(updater)
+            self.assertEqual(
+                returncode,
+                expected_code,
+                f"stdout={stdout}\nstderr={stderr}",
+            )
+            self._assert_path_absent_until(sentinel["started"])
+            self.assertFalse(sentinel["exited"].exists())
+            self.assertEqual(self._update_target_snapshot(data_dir), before)
+            self.assertFalse((data_dir / "update.log").exists())
+            self._wait_for_path_absence(bat_path)
+            if case["owner"] is not None:
+                self.assertFalse(owner.released)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows updater handoff")
+    def test_update_helper_failure_paths_do_not_start_replacement(self):
+        for case_name, expected_code in (
+            ("timeout", 20),
+            ("busy", 22),
+            ("unavailable", 24),
+        ):
+            with self.subTest(case=case_name):
+                self._assert_update_failure_does_not_start_replacement(
+                    case_name,
+                    expected_code,
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows updater handoff")
+    def test_update_helper_handoff_starts_replacement_with_data_owner(self):
+        with self._managed_update_case() as case:
+            root = case["root"]
+            data_dir = root / "data"
+            data_dir.mkdir()
+            older = data_dir / "Code-v1.0.0.exe"
+            older.write_bytes(b"old")
+            replacement = self._write_replacement_helper(root, data_dir)
+            case["replacement"] = replacement
+            holder = self._start_latched_source(root, data_dir, owns_data_dir=True)
+            case["holder"] = holder
+            self._wait_for_path(holder["ready"])
+            self.assertEqual(
+                int(holder["ready"].read_text(encoding="utf-8")),
+                holder["process"].pid,
+            )
+            bat_path = server._build_update_script(
+                data_dir,
+                replacement["path"],
+                None,
+                data_dir / "update.log",
+                source_pid=holder["process"].pid,
+                lock_path=data_dir_owner.lock_path_for(data_dir),
+                wait_timeout_seconds=10,
+            )
+            case["bat_path"] = bat_path
+            updater = self._start_generated_updater(bat_path, data_dir)
+            case["updater"] = updater
+            self.assertFalse((data_dir / "update.log").exists())
+            self.assertTrue(older.exists())
+
+            holder["release"].write_text("release", encoding="utf-8")
+            self._wait_for_path(holder["exited"])
+            holder_code, holder_stdout, holder_stderr = self._communicate_test_process(
+                holder["process"]
+            )
+            self.assertEqual(
+                holder_code,
+                0,
+                f"stdout={holder_stdout}\nstderr={holder_stderr}",
+            )
+
+            self._wait_for_path(replacement["launcher_started"])
+            launcher_pid = int(
+                replacement["launcher_started"].read_text(encoding="utf-8")
+            )
+            self._wait_for_path(replacement["started"])
+            self._wait_for_path(replacement["ready"])
+            self.assertEqual(
+                replacement["started"].read_text(encoding="utf-8"),
+                replacement["ready"].read_text(encoding="utf-8"),
+            )
+            with self.assertRaises(data_dir_owner.DataDirInUseError):
+                data_dir_owner.acquire_data_dir_owner(data_dir)
+
+            self.assertFalse(older.exists())
+            self.assertIn(
+                "update completed",
+                (data_dir / "update.log").read_text(encoding="utf-8"),
+            )
+            replacement["release"].write_text("release", encoding="utf-8")
+            self._wait_for_path(replacement["exited"])
+            self.assertEqual(
+                replacement["exited"].read_text(encoding="utf-8"),
+                "0",
+            )
+            self._wait_for_path(replacement["launcher_exited"])
+            self.assertEqual(
+                replacement["launcher_exited"].read_text(encoding="utf-8"),
+                "0",
+            )
+            self._wait_for_pid_exit(launcher_pid, timeout=5)
+            updater_code, updater_stdout, updater_stderr = self._communicate_test_process(
+                updater
+            )
+            self.assertEqual(
+                updater_code,
+                0,
+                f"stdout={updater_stdout}\nstderr={updater_stderr}",
+            )
+            replacement_owner = data_dir_owner.acquire_data_dir_owner(data_dir)
+            replacement_owner.release()
+            self._wait_for_path_absence(bat_path)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows hard-link checks")
+    def test_update_helper_hardlinked_sidecar_leaves_data_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            partial = data_dir / "Code-v2.0.0.exe.part"
+            newest = data_dir / "Code-v2.0.0.exe"
+            older = data_dir / "Code-v1.0.0.exe"
+            partial.write_bytes(b"new")
+            older.write_bytes(b"old")
+            before = self._update_target_snapshot(data_dir)
+            backing_sidecar = root / "untrusted-sidecar.lock"
+            backing_sidecar.write_bytes(b"\0")
+            lock_path = data_dir_owner.lock_path_for(data_dir)
+            os.link(backing_sidecar, lock_path)
+            source_pid = self._finished_source_pid()
+            bat_path = server._build_update_script(
+                data_dir,
+                newest,
+                partial,
+                data_dir / "update.log",
+                source_pid=source_pid,
+                lock_path=lock_path,
+                wait_timeout_seconds=1,
+            )
+            result = subprocess.run(
+                ["cmd", "/c", str(bat_path)],
+                cwd=data_dir,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 24)
+            self.assertEqual(self._update_target_snapshot(data_dir), before)
+            self.assertEqual(backing_sidecar.read_bytes(), b"\0")
+            self.assertFalse((data_dir / "update.log").exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows reparse-point checks")
+    def test_update_helper_reparse_sidecar_leaves_data_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            partial = data_dir / "Code-v2.0.0.exe.part"
+            newest = data_dir / "Code-v2.0.0.exe"
+            older = data_dir / "Code-v1.0.0.exe"
+            partial.write_bytes(b"new")
+            older.write_bytes(b"old")
+            before = self._update_target_snapshot(data_dir)
+            lock_path = data_dir_owner.lock_path_for(data_dir)
+            lock_path.write_bytes(b"\0")
+            backing_sidecar = root / "reparse-target.lock"
+            backing_sidecar.write_bytes(b"\0")
+            lock_path.unlink()
+            try:
+                os.symlink(backing_sidecar, lock_path)
+            except OSError as exc:
+                self.skipTest(f"Windows file symlink unavailable: {exc}")
+            source_pid = self._finished_source_pid()
+            bat_path = server._build_update_script(
+                data_dir,
+                newest,
+                partial,
+                data_dir / "update.log",
+                source_pid=source_pid,
+                lock_path=lock_path,
+                wait_timeout_seconds=1,
+            )
+
+            result = subprocess.run(
+                ["cmd", "/c", str(bat_path)],
+                cwd=data_dir,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 24)
+            self.assertEqual(self._update_target_snapshot(data_dir), before)
+            self.assertEqual(backing_sidecar.read_bytes(), b"\0")
+            self.assertFalse((data_dir / "update.log").exists())
 
     def test_check_update_detects_newer_release(self):
         handler = object.__new__(server.CodeHandler)
@@ -2594,6 +3517,93 @@ class TestSafeCommandPrefixes(unittest.TestCase):
                            f"Only {len(server.SAFE_COMMAND_PREFIXES)} prefixes, expected 100+")
 
 
+class TestServerDataDirOwnerStartup(unittest.TestCase):
+    def test_run_server_acquires_owner_before_runtime_http_and_tray(self):
+        events = []
+        owner = mock.Mock()
+        owner_acquire = mock.Mock(side_effect=lambda data_dir: events.append("owner") or owner)
+
+        class FakeHttpServer:
+            daemon_threads = False
+
+            def __init__(self, address, handler):
+                events.append("http")
+                self.address = address
+                self.handler = handler
+                self.socket = mock.Mock()
+
+            def serve_forever(self):
+                events.append("serve")
+
+        def record(name):
+            return lambda: events.append(name)
+
+        with mock.patch.object(server.os, "chdir", side_effect=lambda path: events.append("chdir")), \
+             mock.patch.object(server, "_ensure_runtime_data_directories", side_effect=record("directories")), \
+             mock.patch.object(server, "_initialize_runtime_data_services", side_effect=record("route-catalogs")), \
+             mock.patch.object(server, "_restore_update_jobs", side_effect=record("restore")), \
+             mock.patch.object(server, "_migrate_sessions_to_hierarchy", side_effect=record("sessions")), \
+             mock.patch.object(server, "_migrate_codex_project_sessions_support", side_effect=record("projects")), \
+             mock.patch.object(server, "_migrate_project_root_paths", side_effect=record("roots")), \
+             mock.patch.object(server, "_start_agent_run_nonterminal_index_build", side_effect=record("nonterminal-index")), \
+             mock.patch.object(server, "_start_agent_run_session_index_build", side_effect=record("session-index")), \
+             mock.patch.object(server, "load_config", return_value={"projectRoot": "C:/workspace"}):
+            result = server.run_server(
+                owner_acquire=owner_acquire,
+                server_factory=FakeHttpServer,
+                tray_starter=lambda port, httpd: events.append("tray"),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                "chdir",
+                "owner",
+                "directories",
+                "route-catalogs",
+                "restore",
+                "sessions",
+                "projects",
+                "roots",
+                "nonterminal-index",
+                "session-index",
+                "http",
+                "tray",
+                "serve",
+            ],
+        )
+        owner.release.assert_not_called()
+
+    def test_run_server_busy_owner_stops_before_runtime_initialization(self):
+        owner_acquire = mock.Mock(
+            side_effect=data_dir_owner.DataDirInUseError("busy")
+        )
+        factory = mock.Mock()
+        stderr = io.StringIO()
+
+        with mock.patch.object(server.os, "chdir") as chdir, \
+             mock.patch.object(server, "_ensure_runtime_data_directories") as directories, \
+             mock.patch.object(server, "_initialize_runtime_data_services") as route_catalogs, \
+             mock.patch.object(server, "_restore_update_jobs") as restore, \
+             mock.patch("sys.stderr", stderr):
+            result = server.run_server(
+                owner_acquire=owner_acquire,
+                server_factory=factory,
+                tray_starter=mock.Mock(),
+            )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "Code cannot start because this data directory is already in use.\n",
+        )
+        directories.assert_not_called()
+        route_catalogs.assert_not_called()
+        restore.assert_not_called()
+        factory.assert_not_called()
+
+
 class TestLauncherInstall(unittest.TestCase):
     """Tests for launcher.py install and shortcut logic."""
 
@@ -2607,6 +3617,131 @@ class TestLauncherInstall(unittest.TestCase):
                          "Test must run in dev mode for this assertion")
         # Should return immediately without raising
         launcher.ensure_installed()
+
+    def test_relaunch_failure_after_owner_release_is_sanitized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_dir = Path(temp_dir) / ".code"
+            release_owner = mock.Mock()
+            with mock.patch.object(launcher.sys, "frozen", True, create=True), \
+                 mock.patch.object(launcher, "get_code_home", return_value=target_dir), \
+                 mock.patch.object(launcher.shutil, "copy2"), \
+                 mock.patch.object(launcher, "create_desktop_shortcut", return_value=True), \
+                 mock.patch.object(
+                     launcher.subprocess,
+                     "Popen",
+                     side_effect=OSError("launch failed"),
+                 ):
+                with self.assertRaises(data_dir_owner.DataDirOwnerUnavailableError):
+                    launcher.ensure_installed(before_relaunch=release_owner)
+
+        release_owner.assert_called_once_with()
+
+    def test_launcher_acquires_owner_before_browser_runtime_http_and_tray(self):
+        events = []
+        owner = mock.Mock()
+        data_dir = Path(tempfile.mkdtemp()) / ".code"
+        self.addCleanup(shutil.rmtree, data_dir.parent, ignore_errors=True)
+
+        class FakeHttpServer:
+            def __init__(self, address, handler):
+                events.append("http")
+                self.address = address
+                self.handler = handler
+                self.socket = mock.Mock()
+
+            def shutdown(self):
+                events.append("shutdown")
+
+            def server_close(self):
+                events.append("close")
+
+            def serve_forever(self):
+                events.append("serve")
+
+        class FakeThread:
+            def __init__(self, *, target, daemon, name):
+                events.append("thread")
+                self.target = target
+                self.daemon = daemon
+                self.name = name
+
+            def start(self):
+                events.append("thread-start")
+
+            def join(self, timeout=None):
+                events.append("thread-join")
+
+        fake_server = types.SimpleNamespace(
+            CodeHandler=object,
+            _ensure_runtime_data_directories=lambda: events.append("directories"),
+            _initialize_runtime_data_services=lambda: events.append("route-catalogs"),
+            run_tray_main_thread=lambda port, httpd: events.append("tray") or True,
+        )
+
+        def owner_acquire(target):
+            events.append("owner")
+            self.assertEqual(target, data_dir)
+            return owner
+
+        def http_factory(address, handler):
+            return FakeHttpServer(address, handler)
+
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(launcher, "get_code_home", return_value=data_dir), \
+             mock.patch.object(launcher, "migrate_old_data_dir", side_effect=lambda: events.append("migrate")), \
+             mock.patch.object(launcher, "ensure_installed", side_effect=lambda **kwargs: events.append("install")), \
+             mock.patch.object(launcher, "get_base_dir", return_value=data_dir.parent), \
+             mock.patch.object(launcher, "ensure_dirs", side_effect=lambda: events.append("dirs") or data_dir), \
+             mock.patch.object(launcher, "should_reuse_browser", side_effect=lambda port: events.append("browser-check") or False), \
+             mock.patch.object(launcher.os, "chdir", side_effect=lambda path: events.append("chdir")), \
+             mock.patch.object(launcher.webbrowser, "open", side_effect=lambda url: events.append("browser-open")), \
+             mock.patch("http.server.ThreadingHTTPServer", side_effect=http_factory), \
+             mock.patch("threading.Thread", FakeThread), \
+             mock.patch.dict(sys.modules, {"server": fake_server}):
+            result = launcher._main(owner_acquire=owner_acquire)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                "owner",
+                "migrate",
+                "install",
+                "dirs",
+                "browser-check",
+                "chdir",
+                "directories",
+                "route-catalogs",
+                "http",
+                "thread",
+                "thread-start",
+                "browser-open",
+                "tray",
+                "shutdown",
+                "close",
+                "thread-join",
+            ],
+        )
+        owner.release.assert_not_called()
+
+    def test_launcher_main_reports_busy_owner_without_creating_crash_log(self):
+        stderr = io.StringIO()
+        with mock.patch.object(launcher, "hide_console"), \
+             mock.patch.object(
+                 launcher,
+                 "_main",
+                 side_effect=data_dir_owner.DataDirInUseError("busy"),
+             ), \
+             mock.patch("builtins.open") as file_open, \
+             mock.patch("sys.stderr", stderr):
+            result = launcher.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "Code cannot start because this data directory is already in use.\n",
+        )
+        file_open.assert_not_called()
 
     def test_create_desktop_shortcut_ps_script(self):
         """The PowerShell script embeds the correct target path."""

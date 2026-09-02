@@ -10,6 +10,7 @@ import webbrowser
 from pathlib import Path
 
 from code_runtime.bundled_skills import sync_missing_bundled_skills
+from code_runtime import data_dir_owner
 
 
 def has_existing_browser(port=3010):
@@ -26,45 +27,6 @@ def should_reuse_browser(port=3010, argv=None):
     """Reuse a connected page, including after the updater stopped the old server."""
     args = sys.argv if argv is None else argv
     return "--reuse-browser" in args or has_existing_browser(port)
-
-
-def kill_existing():
-    """Stop older packaged/dev instances while preserving this PyInstaller process pair."""
-    protected_pids = {os.getpid(), os.getppid()}
-    killed = 0
-    try:
-        script = r"""
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    ($_.Name -match '^Code(?:-v[0-9.]+)?[.]exe$') -or
-    (($_.Name -match '^pythonw?(?:[0-9.]+)?[.]exe$') -and
-     ($_.CommandLine -match '(?i)(^|[\\/\s])server[.]py([\s\"]|$)'))
-} | ForEach-Object { $_.ProcessId }
-""".strip()
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        for line in result.stdout.splitlines():
-            pid_str = line.strip()
-            if not pid_str.isdigit():
-                continue
-            pid = int(pid_str)
-            if pid in protected_pids:
-                continue
-            stopped = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                timeout=5,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if stopped.returncode == 0:
-                killed += 1
-    except Exception:
-        pass
-    return killed
 
 
 def get_code_home():
@@ -131,7 +93,7 @@ def _append_log(log_path, message):
         pass
 
 
-def ensure_installed():
+def ensure_installed(before_relaunch=None):
     """Make sure the current executable lives under %USERPROFILE%\\.code.
 
     On first run from a downloaded location (Desktop, Downloads, etc.) the
@@ -161,10 +123,20 @@ def ensure_installed():
             return
         if not create_desktop_shortcut(target_exe):
             print("  Shortcut creation failed — see install.log for details.")
-        subprocess.Popen(
-            [str(target_exe), "--reuse-browser"],
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
-        )
+        if before_relaunch is not None:
+            before_relaunch()
+        try:
+            subprocess.Popen(
+                [str(target_exe), "--reuse-browser"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
+        except OSError as exc:
+            # The current process has intentionally handed the sidecar owner
+            # to its replacement.  Do not fall through to a crash-log write
+            # against that now-unowned data directory.
+            raise data_dir_owner.DataDirOwnerUnavailableError(
+                "replacement launch failed"
+            ) from exc
         os._exit(0)
 
     # Running from .code\\ — always keep the desktop shortcut pointed at us
@@ -236,8 +208,20 @@ def hide_console():
 def main():
     hide_console()
     try:
-        _main()
-    except Exception as e:
+        return _main()
+    except data_dir_owner.DataDirOwnerError as exc:
+        if isinstance(exc, data_dir_owner.DataDirInUseError):
+            print(
+                "Code cannot start because this data directory is already in use.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Code cannot start because its data directory is unavailable.",
+                file=sys.stderr,
+            )
+        return 1
+    except Exception:
         import traceback
         crash_log = Path.home() / ".code" / "crash.log"
         crash_log.parent.mkdir(parents=True, exist_ok=True)
@@ -246,24 +230,24 @@ def main():
         raise
 
 
-def _main():
+def _main(*, owner_acquire=data_dir_owner.acquire_data_dir_owner):
     port = 3010
-    had_browser = should_reuse_browser(port)
+    data_dir = get_code_home()
+    owner = owner_acquire(data_dir)
 
-    # Kill any existing Code processes before starting.
-    killed = kill_existing()
-    if killed:
-        import time
-        time.sleep(0.5)
+    # The sidecar owner must be acquired before this legacy migration checks
+    # whether ``.code`` exists.  In particular, the lock itself never creates
+    # that target directory.
+    migrate_old_data_dir()
 
     # On first run from a downloaded location, copy ourselves into
     # %USERPROFILE%\\.code\\Code.exe, create a desktop shortcut, and
     # relaunch from there.  In dev mode this is a no-op.
-    ensure_installed()
+    ensure_installed(before_relaunch=owner.release)
 
     base = get_base_dir()
-    migrate_old_data_dir()
     data_dir = ensure_dirs()
+    had_browser = should_reuse_browser(port)
 
     # Copy tray icon to data dir so pystray can load it reliably (PyInstaller
     # extraction can corrupt binary files in the temp directory)
@@ -307,9 +291,8 @@ def _main():
     server.ATTACHMENTS_DIR = data_dir / "attachments"
     server.FILE_BACKUP_DIR = data_dir / "file-backups"
     server.CONFIG_PATH = data_dir / "config.json"
-    for d in [server.DATA_DIR, server.SESSIONS_DIR, server.MEMORY_DIR,
-              server.SKILLS_DIR, server.ATTACHMENTS_DIR, server.FILE_BACKUP_DIR]:
-        d.mkdir(exist_ok=True)
+    server._ensure_runtime_data_directories()
+    server._initialize_runtime_data_services()
 
     port = int(os.environ.get("CODE_PORT", "3010"))
     server_obj = ThreadingHTTPServer(("127.0.0.1", port), server.CodeHandler)
@@ -338,7 +321,11 @@ def _main():
         server_obj.shutdown()
         server_obj.server_close()
         server_thread.join(timeout=5)
+    # Keep the owner until process exit.  The HTTP worker and daemon index
+    # builders can still be data writers while shutdown completes.
+    _ = owner
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

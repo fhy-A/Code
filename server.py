@@ -30,7 +30,13 @@ import threading
 import time
 import webbrowser
 
-from code_runtime import agent_protocol, context_calibration, context_window, windows_explorer
+from code_runtime import (
+    agent_protocol,
+    context_calibration,
+    context_window,
+    data_dir_owner,
+    windows_explorer,
+)
 from code_runtime.bundled_skills import delete_installed_skill
 from code_runtime.image_runtime import (
     GeneratedAssetRepository,
@@ -179,6 +185,31 @@ def _resolve_model_route_registry_enabled(environ=None):
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
 
 
+class _DeferredRuntimeService:
+    """Create a DATA_DIR-backed service only after an entrypoint owns it."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._instance = None
+        self._guard = threading.RLock()
+
+    def initialize(self):
+        with self._guard:
+            if self._instance is None:
+                self._instance = self._factory()
+            return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self.initialize(), name)
+
+
+def _initialize_runtime_data_services():
+    """Load durable route catalogs only while the DATA_DIR owner is held."""
+    for service in (_model_route_registry, _image_route_registry):
+        if isinstance(service, _DeferredRuntimeService):
+            service.initialize()
+
+
 _AGENT_PROTOCOL_SHADOW_ENABLED = _resolve_agent_protocol_shadow_enabled()
 _AGENT_PROTOCOL_SHADOW_DIAGNOSTIC_LIMIT = 64
 _AGENT_PROTOCOL_SHADOW_FINGERPRINT_LIMIT = 256
@@ -186,8 +217,12 @@ _AGENT_EVENT_PROTOCOL_V1_ENABLED = _resolve_agent_event_protocol_v1_enabled()
 _AGENT_PROJECTION_SHADOW_ENABLED = _resolve_agent_projection_shadow_enabled()
 _SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
 _MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
-_model_route_registry = ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
-_image_route_registry = ImageRouteRegistry(IMAGE_ROUTE_CATALOG_PATH)
+_model_route_registry = _DeferredRuntimeService(
+    lambda: ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
+)
+_image_route_registry = _DeferredRuntimeService(
+    lambda: ImageRouteRegistry(IMAGE_ROUTE_CATALOG_PATH)
+)
 _generated_asset_repository = GeneratedAssetRepository(GENERATED_ASSETS_DIR)
 _image_upstream_client = ImageUpstreamClient()
 _active_downloads = {}   # jobId -> authoritative updater job (public snapshots omit paths)
@@ -10544,65 +10579,280 @@ def _powershell_literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _build_update_script(target_dir, new_exe, partial_exe, log_path):
-    """Build a batch-file updater that runs detached after the app exits.
+def _build_update_script(
+    target_dir,
+    new_exe,
+    partial_exe,
+    log_path,
+    *,
+    source_pid=None,
+    lock_path=None,
+    wait_timeout_seconds=45,
+):
+    """Build a detached updater guarded by the formal DATA_DIR sidecar.
 
-    Returns the path to a temporary .bat file.  The caller spawns it via
-    ``cmd /c`` and then exits.
-
-    Uses only built-in Windows commands (taskkill, move, start) so the
-    relaunched process sees the same environment as an Explorer double-click.
-    PowerShell's Start-Process / CreateProcess interferes with PyInstaller's
-    bootloader extraction at %%TEMP%%.
+    The helper first waits only for the exact source PID.  Once that process
+    has exited, it acquires the same Windows byte-range lock used by the
+    formal server entrypoint before it can write ``DATA_DIR`` or change the
+    installed executables.  It releases the lock before the replacement is
+    started, so a newly started formal instance remains the sole owner.
     """
     target_dir = Path(target_dir).resolve()
     new_exe = Path(new_exe).resolve()
     partial_exe = Path(partial_exe).resolve() if partial_exe else None
     log_path = Path(log_path).resolve()
+    lock_path = Path(os.path.abspath(os.fspath(
+        lock_path or data_dir_owner.lock_path_for(DATA_DIR)
+    )))
+    try:
+        source_pid = int(os.getpid() if source_pid is None else source_pid)
+        wait_timeout_seconds = max(1, min(int(wait_timeout_seconds), 120))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid update handoff parameters") from exc
+    if source_pid <= 0:
+        raise ValueError("invalid update handoff parameters")
+
+    power_shell = f"""$ErrorActionPreference = 'Stop'
+$targetDir = {_powershell_literal(target_dir)}
+$newExe = {_powershell_literal(new_exe)}
+$partialExe = {_powershell_literal(partial_exe or '')}
+$logPath = {_powershell_literal(log_path)}
+$lockPath = {_powershell_literal(lock_path)}
+$sourcePid = {source_pid}
+$waitSeconds = {wait_timeout_seconds}
+$lockOffset = {data_dir_owner.WINDOWS_LOCK_OFFSET}
+$lockLength = {data_dir_owner.WINDOWS_LOCK_LENGTH}
+
+$deadline = [DateTime]::UtcNow.AddSeconds($waitSeconds)
+while ($null -ne (Get-Process -Id $sourcePid -ErrorAction SilentlyContinue)) {{
+    if ([DateTime]::UtcNow -ge $deadline) {{
+        exit 20
+    }}
+    Start-Sleep -Milliseconds 100
+}}
+
+try {{
+$null = Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace CodeUpdaterSidecar {{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FileInformation {{
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }}
+
+    public static class Native {{
+        public const uint GenericRead = 0x80000000;
+        public const uint GenericWrite = 0x40000000;
+        public const uint ShareRead = 0x00000001;
+        public const uint ShareWrite = 0x00000002;
+        public const uint OpenExisting = 3;
+        public const uint FileFlagOpenReparsePoint = 0x00200000;
+        public const uint FileAttributeDirectory = 0x00000010;
+        public const uint FileAttributeReparsePoint = 0x00000400;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out FileInformation information);
+
+        public static SafeFileHandle OpenSafeSidecar(string path) {{
+            return CreateFileW(
+                path,
+                GenericRead | GenericWrite,
+                ShareRead | ShareWrite,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+        }}
+
+        public static bool GetSafeFileInformation(
+            SafeFileHandle file,
+            out FileInformation information) {{
+            return GetFileInformationByHandle(file, out information)
+                && (information.FileAttributes
+                    & (FileAttributeDirectory | FileAttributeReparsePoint)) == 0
+                && information.NumberOfLinks == 1;
+        }}
+
+        public static bool SameSidecar(
+            FileInformation left,
+            FileInformation right) {{
+            return left.VolumeSerialNumber == right.VolumeSerialNumber
+                && left.FileIndexHigh == right.FileIndexHigh
+                && left.FileIndexLow == right.FileIndexLow;
+        }}
+    }}
+}}
+'@
+}} catch {{
+    exit 24
+}}
+
+function Open-SafeDataOwnerSidecar([string] $path) {{
+    $handle = [CodeUpdaterSidecar.Native]::OpenSafeSidecar($path)
+    if ($null -eq $handle -or $handle.IsInvalid) {{
+        if ($null -ne $handle) {{ $handle.Dispose() }}
+        throw [System.IO.IOException]::new('data directory lock is unavailable')
+    }}
+    try {{
+        [CodeUpdaterSidecar.FileInformation]$information = [CodeUpdaterSidecar.FileInformation]::new()
+        if (-not [CodeUpdaterSidecar.Native]::GetSafeFileInformation($handle, [ref]$information)) {{
+            throw [System.IO.IOException]::new('data directory lock is unsafe')
+        }}
+        return [pscustomobject]@{{ Handle = $handle; Information = $information }}
+    }} catch {{
+        $handle.Dispose()
+        throw
+    }}
+}}
+
+function Open-VerifiedDataOwnerSidecar([string] $path) {{
+    $primary = $null
+    $verification = $null
+    try {{
+        $primary = Open-SafeDataOwnerSidecar $path
+        $verification = Open-SafeDataOwnerSidecar $path
+        $sameFile = [CodeUpdaterSidecar.Native]::SameSidecar(
+            $primary.Information,
+            $verification.Information
+        )
+        if (-not $sameFile) {{
+            throw [System.IO.IOException]::new('data directory lock changed')
+        }}
+        $verification.Handle.Dispose()
+        $verification = $null
+        $handle = $primary.Handle
+        $information = $primary.Information
+        $primary = $null
+        return [pscustomobject]@{{ Handle = $handle; Information = $information }}
+    }} finally {{
+        if ($null -ne $verification) {{ $verification.Handle.Dispose() }}
+        if ($null -ne $primary) {{ $primary.Handle.Dispose() }}
+    }}
+}}
+
+function Assert-LockedDataOwnerSidecarIdentity($lockedInformation, [string] $path) {{
+    $verification = $null
+    try {{
+        $verification = Open-SafeDataOwnerSidecar $path
+        $sameFile = [CodeUpdaterSidecar.Native]::SameSidecar(
+            $lockedInformation,
+            $verification.Information
+        )
+        if (-not $sameFile) {{
+            throw [System.IO.IOException]::new('data directory lock changed')
+        }}
+    }} finally {{
+        if ($null -ne $verification) {{ $verification.Handle.Dispose() }}
+    }}
+}}
+
+$lockHandle = $null
+$lockInformation = $null
+$lockStream = $null
+$locked = $false
+$exitCode = 0
+try {{
+    $lockedSidecar = Open-VerifiedDataOwnerSidecar $lockPath
+    $lockHandle = $lockedSidecar.Handle
+    $lockInformation = $lockedSidecar.Information
+    $lockStream = [System.IO.FileStream]::new($lockHandle, [System.IO.FileAccess]::ReadWrite)
+    $lockHandle = $null
+    if ($lockStream.Length -lt $lockLength) {{
+        $exitCode = 21
+    }} else {{
+        try {{
+            $lockStream.Lock($lockOffset, $lockLength)
+        }} catch [System.IO.IOException] {{
+            $exitCode = 22
+        }}
+        if ($exitCode -eq 0) {{
+            $locked = $true
+            Assert-LockedDataOwnerSidecarIdentity $lockInformation $lockPath
+        }}
+    }}
+    if ($exitCode -eq 0) {{
+        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) update started" -Encoding utf8
+        if ($partialExe -ne '' -and (Test-Path -LiteralPath $partialExe -PathType Leaf)) {{
+            Move-Item -LiteralPath $partialExe -Destination $newExe -Force
+            Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) completed .part rename" -Encoding utf8
+        }}
+        if (-not (Test-Path -LiteralPath $newExe -PathType Leaf)) {{
+            Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) executable not found" -Encoding utf8
+            $exitCode = 23
+        }}
+    }}
+    if ($exitCode -eq 0) {{
+        $newFullName = [System.IO.Path]::GetFullPath($newExe)
+        Get-ChildItem -LiteralPath $targetDir -Filter 'Code-v*.exe' -File | ForEach-Object {{
+            if (-not [String]::Equals(
+                [System.IO.Path]::GetFullPath($_.FullName),
+                $newFullName,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {{
+                Remove-Item -LiteralPath $_.FullName -Force
+                Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) cleaned up: $($_.Name)" -Encoding utf8
+            }}
+        }}
+        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) update completed" -Encoding utf8
+    }}
+}} catch {{
+    $exitCode = 24
+}} finally {{
+    if ($locked) {{
+        try {{
+            $lockStream.Unlock($lockOffset, $lockLength)
+        }} catch {{
+            $exitCode = 25
+        }}
+    }}
+    if ($null -ne $lockStream) {{
+        $lockStream.Dispose()
+    }} elseif ($null -ne $lockHandle) {{
+        $lockHandle.Dispose()
+    }}
+}}
+exit $exitCode
+"""
+    encoded_power_shell = base64.b64encode(
+        power_shell.encode("utf-16le")
+    ).decode("ascii")
 
     import tempfile as _tempfile
     fd, bat_path = _tempfile.mkstemp(suffix=".bat", prefix="code-update-")
-    with os.fdopen(fd, "w") as _bat:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\r\n") as _bat:
         _bat.write(f"""@echo off
-set "targetDir={target_dir}"
-set "newExe={new_exe}"
-set "partialExe={partial_exe or ''}"
-set "logPath={log_path}"
-echo %date% %time% update started >> "%logPath%"
-timeout /t 2 /nobreak >nul
-
-:: Kill all old Code-v*.exe processes.
-for /l %%i in (1,1,40) do (
-    set "found="
-    for /f "tokens=2 delims=," %%p in ('tasklist /fo csv /nh 2^>nul ^| findstr /i Code-') do (
-        taskkill /pid %%~p /f >nul 2>&1
-        set "found=1"
-    )
-    if not defined found goto :replace
-    timeout /t 1 /nobreak >nul
-)
-
-:replace
-if exist "%partialExe%" (
-    move /y "%partialExe%" "%newExe%" >nul 2>&1
-    echo %date% %time% completed .part rename >> "%logPath%"
-)
-if not exist "%newExe%" (
-    echo %date% %time% executable not found >> "%logPath%"
-    exit /b 1
-)
-
-:: Clean up older versioned builds, keep only the new one.
-for %%f in ("%targetDir%\\Code-v*.exe") do (
-    if /i not "%%f"=="%newExe%" (
-        del /f "%%f" >nul 2>&1
-        if not errorlevel 1 echo %date% %time% cleaned up: %%~nxf >> "%logPath%"
-    )
-)
-
-start "" "%newExe%" --reuse-browser
-echo %date% %time% update completed >> "%logPath%"
-del "%~f0" & exit
+powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded_power_shell}
+set "result=%errorlevel%"
+if not "%result%"=="0" goto :cleanup
+start "" "{new_exe}" --reuse-browser
+:cleanup
+start "" /b cmd.exe /c del "%~f0" >nul 2>&1
+exit /b %result%
 """)
     return bat_path
 
@@ -10636,6 +10886,14 @@ _UPDATE_PUBLIC_ERRORS = {
 
 def _update_target_dir():
     return Path.home() / ".code" if getattr(sys, "frozen", False) else APP_DIR / "dist"
+
+
+def _update_data_dir_lock_path(target_dir):
+    """Require the updater's install root to be the formal DATA_DIR root."""
+    data_lock_path = data_dir_owner.lock_path_for(DATA_DIR)
+    if data_dir_owner.lock_path_for(target_dir) != data_lock_path:
+        raise _UpdateFailure("target_conflict", stage="installing")
+    return data_lock_path
 
 
 def _absolute_lexical_path(path):
@@ -11787,12 +12045,18 @@ def _set_dpi_aware():
 
 _set_dpi_aware()
 
-DATA_DIR.mkdir(exist_ok=True)
-SESSIONS_DIR.mkdir(exist_ok=True)
-FILE_BACKUP_DIR.mkdir(exist_ok=True)
-ATTACHMENTS_DIR.mkdir(exist_ok=True)
-MEMORY_DIR.mkdir(exist_ok=True)
-SKILLS_DIR.mkdir(exist_ok=True)
+
+def _ensure_runtime_data_directories():
+    """Create runtime directories only after an entrypoint owns DATA_DIR."""
+    for directory in (
+        DATA_DIR,
+        SESSIONS_DIR,
+        FILE_BACKUP_DIR,
+        ATTACHMENTS_DIR,
+        MEMORY_DIR,
+        SKILLS_DIR,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
 
 
 def now_iso():
@@ -25060,8 +25324,16 @@ class CodeHandler(BaseHTTPRequestHandler):
             current_exe = _absolute_lexical_path(sys.executable)
             if new_exe == current_exe:
                 raise _UpdateFailure("update_not_ready", stage="installing")
+            lock_path = _update_data_dir_lock_path(target_dir)
             log_path = DATA_DIR / "update.log"
-            bat_path = _build_update_script(target_dir, new_exe, None, log_path)
+            bat_path = _build_update_script(
+                target_dir,
+                new_exe,
+                None,
+                log_path,
+                source_pid=os.getpid(),
+                lock_path=lock_path,
+            )
             subprocess.Popen(
                 ["cmd", "/c", str(bat_path)],
                 creationflags=0x08000000,
@@ -25256,34 +25528,41 @@ def _complete_orphaned_parts(target_dir=None):
     return _restore_update_jobs(target_dir)
 
 
-if __name__ == "__main__":
+def _data_dir_owner_startup_message(exc):
+    if isinstance(exc, data_dir_owner.DataDirInUseError):
+        return "Code cannot start because this data directory is already in use."
+    return "Code cannot start because its data directory is unavailable."
+
+
+def run_server(
+    *,
+    owner_acquire=data_dir_owner.acquire_data_dir_owner,
+    server_factory=ThreadingHTTPServer,
+    tray_starter=start_tray,
+):
+    """Run the direct server entrypoint under one process-wide DATA_DIR owner."""
+    # A relative CODE_DATA_DIR must resolve against APP_DIR for both the lock
+    # and all subsequent data access.
     os.chdir(APP_DIR)
+    try:
+        owner = owner_acquire(DATA_DIR)
+    except data_dir_owner.DataDirOwnerError as exc:
+        print(_data_dir_owner_startup_message(exc), file=sys.stderr)
+        return 1
+
+    _ensure_runtime_data_directories()
+    _initialize_runtime_data_services()
     _restore_update_jobs()
 
-    # Kill any existing Code process using our port
-    import subprocess as _sp
-    try:
-        result = _sp.run(["netstat","-ano","-p","TCP"], capture_output=True, text=True, timeout=5)
-        for line in result.stdout.splitlines():
-            if "127.0.0.1:3010" in line and "LISTENING" in line:
-                parts = line.split()
-                pid = int(parts[-1])
-                if pid != os.getpid():
-                    _sp.run(["taskkill","/PID",str(pid),"/F"], capture_output=True, timeout=5)
-                    import time as _time
-                    _time.sleep(0.5)
-    except Exception:
-        pass
-
-    ThreadingHTTPServer.daemon_threads = True
+    server_factory.daemon_threads = True
     _migrate_sessions_to_hierarchy()
     _migrate_codex_project_sessions_support()
     _migrate_project_root_paths()
     _start_agent_run_nonterminal_index_build()
     _start_agent_run_session_index_build()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), CodeHandler)
+    server = server_factory(("127.0.0.1", PORT), CodeHandler)
     server.socket.settimeout(2.0)
-    start_tray(PORT, server)
+    tray_starter(PORT, server)
     print(f"Code is running: http://127.0.0.1:{PORT}")
     print(f"Proxy upstream: {NEW_API_BASE_URL}")
     print(f"Project root: {load_config()['projectRoot']}")
@@ -25292,3 +25571,12 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nShutting down...")
         server.shutdown()
+    # `owner` intentionally remains registered until process exit.  Index
+    # builders are daemon writers, so releasing on HTTP close would let a
+    # second process enter before every data writer has stopped.
+    _ = owner
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_server())

@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import subprocess
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import dev_server
+from code_runtime import data_dir_owner
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,11 +63,40 @@ class TestDevServer(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dev_server.configure_dev_environment({"CODE_DEV_PORT": value})
 
-    def test_runner_uses_dev_port_migrations_and_tray(self):
+    def test_runner_acquires_owner_before_frontend_migrations_and_tray(self):
+        events = []
         fake_module = mock.Mock()
         fake_module.CodeHandler = object
         fake_module.load_config.return_value = {"projectRoot": str(ROOT)}
-        ensure_frontend = mock.Mock(return_value=False)
+        owner = mock.Mock()
+        owner_acquire = mock.Mock(side_effect=lambda data_dir: events.append("owner") or owner)
+        ensure_frontend = mock.Mock(side_effect=lambda: events.append("frontend") or False)
+        fake_module._ensure_runtime_data_directories.side_effect = (
+            lambda: events.append("directories")
+        )
+        fake_module._initialize_runtime_data_services.side_effect = (
+            lambda: events.append("route-catalogs")
+        )
+        fake_module._migrate_sessions_to_hierarchy.side_effect = (
+            lambda: events.append("sessions")
+        )
+        fake_module._migrate_codex_project_sessions_support.side_effect = (
+            lambda: events.append("projects")
+        )
+        fake_module._migrate_project_root_paths.side_effect = (
+            lambda: events.append("roots")
+        )
+        fake_module._start_agent_run_nonterminal_index_build.side_effect = (
+            lambda: events.append("nonterminal-index")
+        )
+        fake_module._start_agent_run_session_index_build.side_effect = (
+            lambda: events.append("session-index")
+        )
+        fake_module.start_tray.side_effect = lambda port, httpd: events.append("tray")
+
+        def server_factory(address, handler):
+            events.append("http")
+            return _FakeHttpServer(address, handler)
 
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
             os.environ,
@@ -77,8 +108,9 @@ class TestDevServer(unittest.TestCase):
         ):
             dev_server.run_dev_server(
                 fake_module,
-                _FakeHttpServer,
+                server_factory,
                 ensure_frontend=ensure_frontend,
+                owner_acquire=owner_acquire,
             )
 
         instance = _FakeHttpServer.last_instance
@@ -94,6 +126,61 @@ class TestDevServer(unittest.TestCase):
         fake_module.start_tray.assert_called_once_with(3011, instance)
         ensure_frontend.assert_called_once_with()
         self.assertTrue(issubclass(instance.handler, fake_module.CodeHandler))
+        self.assertEqual(
+            events,
+            [
+                "owner",
+                "frontend",
+                "directories",
+                "route-catalogs",
+                "sessions",
+                "projects",
+                "roots",
+                "nonterminal-index",
+                "session-index",
+                "http",
+                "tray",
+            ],
+        )
+        owner.release.assert_not_called()
+
+    def test_busy_owner_stops_before_frontend_or_server_initialization(self):
+        owner_acquire = mock.Mock(
+            side_effect=data_dir_owner.DataDirInUseError("busy")
+        )
+        ensure_frontend = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
+            os.environ,
+            {
+                "CODE_DEV_PORT": "3011",
+                "CODE_DEV_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            with self.assertRaises(data_dir_owner.DataDirInUseError):
+                dev_server.run_dev_server(
+                    server_module=mock.Mock(),
+                    ensure_frontend=ensure_frontend,
+                    owner_acquire=owner_acquire,
+                )
+
+        ensure_frontend.assert_not_called()
+
+    def test_main_reports_busy_owner_with_a_stable_error(self):
+        stderr = io.StringIO()
+        with mock.patch.object(
+            dev_server,
+            "run_dev_server",
+            side_effect=data_dir_owner.DataDirInUseError("busy"),
+        ), mock.patch("sys.stderr", stderr):
+            result = dev_server.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "Code Dev cannot start because this data directory is already in use.\n",
+        )
 
     def test_frontend_build_check_returns_without_rebuilding_when_fresh(self):
         fresh = subprocess.CompletedProcess([], 0, "fresh", "")
