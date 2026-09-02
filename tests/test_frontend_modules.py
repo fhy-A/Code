@@ -18022,7 +18022,7 @@ process.stdout.write(JSON.stringify({
             data["emptyRecoveryHtml"].index("data-tool-process-block"),
         )
         pending_tail_summary = data["emptyRecoveryHtml"].split('<div class="tool-process-stage-body">', 1)[0]
-        self.assertIn('class="tool-process-stage running single-tool"', pending_tail_summary)
+        self.assertIn('class="tool-process-stage succeeded single-tool"', pending_tail_summary)
         self.assertNotIn("tool-active", pending_tail_summary)
         self.assertIn(
             "<strong>label:run_command</strong><code>git status --short</code>",
@@ -18058,7 +18058,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("<code>", grouped_stage_summary)
         self.assertNotIn("<details open", data["groupedStageHtml"])
         active_tail_summary = data["activeCompletedTailHtml"].split('<div class="tool-process-stage-body">', 1)[0]
-        self.assertIn('class="tool-process-stage running"', active_tail_summary)
+        self.assertIn('class="tool-process-stage succeeded"', active_tail_summary)
         self.assertNotIn("tool-active", active_tail_summary)
         self.assertIn(
             "<strong>label:run_command</strong><code>git status --short</code>",
@@ -18069,11 +18069,11 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-tool-process-key="0:1"', data["activeCompletedTailHtml"])
         self.assertNotRegex(
             data["activeCompletedTailHtml"],
-            r'<details class="tool-process-stage running"[^>]+ open>',
+            r'<details class="tool-process-stage succeeded"[^>]+ open>',
         )
         self.assertRegex(
             data["expandedActiveTailHtml"],
-            r'<details class="tool-process-stage running"[^>]+ open>',
+            r'<details class="tool-process-stage succeeded"[^>]+ open>',
         )
         self.assertNotRegex(
             data["completedCollapsedTailHtml"],
@@ -18089,23 +18089,29 @@ process.stdout.write(JSON.stringify({
             "<strong>toolProcessInspectedFile · toolProcessRanCommand</strong>",
             separated_first,
         )
-        self.assertIn('class="tool-process-stage running single-tool"', separated_second)
+        self.assertIn('class="tool-process-stage succeeded single-tool"', separated_second)
         self.assertNotIn("tool-active", separated_second.split('<div class="tool-process-stage-body">', 1)[0])
         self.assertIn(
             "<strong>label:run_command</strong><code>git status --short</code>",
             separated_second,
         )
-        for gap_html in (data["activeToolGapHtml"], data["activeFailedToolGapHtml"]):
+        for gap_html, outcome in (
+            (data["activeToolGapHtml"], "succeeded"),
+            (data["activeFailedToolGapHtml"], "failed"),
+        ):
             gap_summary = gap_html.split('<div class="tool-process-stage-body">', 1)[0]
-            self.assertIn('class="tool-process-stage running single-tool"', gap_summary)
+            self.assertIn(
+                f'class="tool-process-stage {outcome} single-tool"',
+                gap_summary,
+            )
             self.assertNotIn("tool-active", gap_summary)
             self.assertRegex(
                 gap_html,
-                r'<details class="tool-process-stage running single-tool"[^>]+ open>',
+                rf'<details class="tool-process-stage {outcome} single-tool"[^>]+ open>',
             )
             self.assertRegex(
                 gap_html,
-                r'<details class="tool-process-item (?:succeeded|failed)"[^>]+ open>',
+                rf'<details class="tool-process-item {outcome}"[^>]+ open>',
             )
         failed_then_retry_html = data["activeFailedThenRetryHtml"]
         self.assertEqual(failed_then_retry_html.count("data-tool-process-block"), 1)
@@ -18189,6 +18195,204 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-usage-kind="cache-read"', data["cacheStatus"])
         self.assertIn('data-usage-kind="cache-write"', data["cacheStatus"])
         self.assertIn('title="statCacheWriteTitle"', data["cacheStatus"])
+
+    def test_active_terminal_file_mutation_group_uses_results_not_run_liveness(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/messages.js");
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+const feature = createMessagesFeature({
+  escapeHtml,
+  formatCompact: (value) => String(value),
+  renderMarkdown: (value) => escapeHtml(value),
+  t: (key) => key,
+  getMessageText: (msg) => String(msg?.content || ""),
+  getBackgroundJob: () => null,
+  getMessages: () => [],
+  getSessionId: () => "code059-session",
+  getSelectedModel: () => "model",
+  renderNetworkRecoveryStatus: () => "",
+  renderAssistantContent: (value) => escapeHtml(value),
+  renderBranchFlow: () => "",
+  isEditSuggestionMessage: () => false,
+  renderEditSuggestion: () => "",
+  getToolActionLabel: (action) => action,
+});
+
+function toolItems(specs) {
+  const byRun = new Map();
+  for (const spec of specs) {
+    if (!byRun.has(spec.runId)) byRun.set(spec.runId, []);
+    byRun.get(spec.runId).push({
+      id: spec.id,
+      function: {name: spec.action, arguments: JSON.stringify({path: spec.path})},
+    });
+  }
+  let index = 1;
+  const items = [...byRun].map(([agentRunId, toolCalls]) => ({
+    msg: {role: "assistant", meta: {agentRunId, toolCalls}},
+    index: index++,
+  }));
+  for (const spec of specs) {
+    items.push({
+      msg: {role: "tool-call", meta: {
+        agentRunId: spec.runId,
+        action: spec.action,
+        toolCallId: spec.id,
+        tool: {action: spec.action, path: spec.path},
+      }},
+      index: index++,
+    });
+    if (spec.resultMeta) {
+      items.push({
+        msg: {role: "tool-result", content: spec.content || "result", meta: {
+          agentRunId: spec.runId,
+          action: spec.action,
+          toolCallId: spec.id,
+          ...spec.resultMeta,
+        }},
+        index: index++,
+      });
+    }
+  }
+  return items;
+}
+
+const terminal = (action, path, extra = {}) => ({
+  pendingEditId: `edit-${path}`,
+  serverManaged: true,
+  authorizationDecision: "approved",
+  outcome: "succeeded",
+  applied: true,
+  result: {ok: true, action, path, ...extra},
+});
+const write = [{
+  runId: "run-write", id: "write-1", action: "write_file", path: "output/report.md",
+  content: "wrote output/report.md", resultMeta: terminal("write_file", "output/report.md"),
+}];
+const deletes = [
+  {
+    runId: "run-delete", id: "delete-1", action: "delete_file", path: "output/a.tmp",
+    content: "deleted output/a.tmp originalSize=11 backupPath=backup-a",
+    resultMeta: terminal("delete_file", "output/a.tmp", {originalSize: 11, backupPath: "backup-a"}),
+  },
+  {
+    runId: "run-delete", id: "delete-2", action: "delete_file", path: "output/b.tmp",
+    content: "deleted output/b.tmp originalSize=22 backupPath=backup-b",
+    resultMeta: terminal("delete_file", "output/b.tmp", {originalSize: 22, backupPath: "backup-b"}),
+  },
+];
+const pendingAuthorization = [{
+  runId: "run-auth", id: "auth-1", action: "write_file", path: "output/pending.md",
+  resultMeta: {
+    pendingEditId: "edit-pending", serverManaged: true, authorizationDecision: "approved",
+  },
+}];
+const completedAuthorization = [{
+  ...pendingAuthorization[0],
+  resultMeta: terminal("write_file", "output/pending.md"),
+}];
+const mixedTerminal = [
+  write[0],
+  {
+    runId: "run-write", id: "delete-failed", action: "delete_file", path: "output/missing.tmp",
+    resultMeta: {outcome: "failed", result: {ok: false, action: "delete_file", error: "missing"}},
+  },
+];
+const cancelled = [{
+  runId: "run-cancel", id: "delete-cancelled", action: "delete_file", path: "output/cancel.tmp",
+  resultMeta: {outcome: "failed", result: {ok: false, action: "delete_file", cancelled: true}},
+}];
+const duplicateAcrossRuns = [
+  {
+    runId: "run-one", id: "shared-call", action: "write_file", path: "output/one.md",
+    resultMeta: terminal("write_file", "output/one.md"),
+  },
+  {
+    runId: "run-two", id: "shared-call", action: "write_file", path: "output/two.md",
+    resultMeta: {outcome: "failed", result: {ok: false, action: "write_file", error: "second"}},
+  },
+];
+const render = (specs, activeStage = true) => feature.renderToolProcessProjection(
+  toolItems(specs), 1, {activeStage, processKey: "0:1", allowExpanded: true},
+);
+const modelGapMessages = [
+  {role: "user", content: "keep working"},
+  ...toolItems(write).map(({msg}) => msg),
+  {role: "assistant", content: "checking next step", streaming: true, _streamProjection: "thinking"},
+];
+const writeHtml = render(write);
+const deleteHtml = render(deletes);
+process.stdout.write(JSON.stringify({
+  writeHtml,
+  writeRefreshHtml: render(JSON.parse(JSON.stringify(write))),
+  deleteHtml,
+  deleteRefreshHtml: render(JSON.parse(JSON.stringify(deletes))),
+  pendingAuthorizationHtml: render(pendingAuthorization),
+  completedAuthorizationHtml: render(completedAuthorization),
+  missingResultHtml: render([{
+    runId: "run-missing", id: "missing-1", action: "delete_file", path: "output/unknown.tmp",
+  }]),
+  mixedTerminalHtml: render(mixedTerminal),
+  cancelledHtml: render(cancelled),
+  duplicateAcrossRunsHtml: render(duplicateAcrossRuns, false),
+  modelGapHtml: feature.projectMessages(modelGapMessages, {hasActiveRun: true}),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        for key in ("writeHtml", "deleteHtml", "modelGapHtml"):
+            self.assertIn('class="tool-process-stage succeeded', data[key])
+            self.assertNotIn('class="tool-process-stage running', data[key])
+            self.assertNotIn("toolProcessRunning", data[key])
+        self.assertEqual(data["writeHtml"].count('class="tool-process-item succeeded"'), 1)
+        self.assertEqual(data["deleteHtml"].count('class="tool-process-item succeeded"'), 2)
+        self.assertIn("originalSize=11 backupPath=backup-a", data["deleteHtml"])
+        self.assertIn("originalSize=22 backupPath=backup-b", data["deleteHtml"])
+        self.assertEqual(data["writeHtml"], data["writeRefreshHtml"])
+        self.assertEqual(data["deleteHtml"], data["deleteRefreshHtml"])
+
+        self.assertIn(
+            'class="tool-process-stage running tool-active single-tool"',
+            data["pendingAuthorizationHtml"],
+        )
+        self.assertIn(
+            'class="tool-process-item running"',
+            data["pendingAuthorizationHtml"],
+        )
+        self.assertIn(
+            'class="tool-process-stage succeeded single-tool"',
+            data["completedAuthorizationHtml"],
+        )
+        self.assertIn(
+            'class="tool-process-stage running tool-active single-tool"',
+            data["missingResultHtml"],
+        )
+        self.assertIn('class="tool-process-stage failed"', data["mixedTerminalHtml"])
+        self.assertEqual(data["mixedTerminalHtml"].count('class="tool-process-item succeeded"'), 1)
+        self.assertEqual(data["mixedTerminalHtml"].count('class="tool-process-item failed"'), 1)
+        self.assertIn('class="tool-process-stage cancelled single-tool"', data["cancelledHtml"])
+        self.assertIn('class="tool-process-item cancelled"', data["cancelledHtml"])
+
+        duplicate_html = data["duplicateAcrossRunsHtml"]
+        self.assertEqual(duplicate_html.count('data-tool-call-id="shared-call"'), 2)
+        self.assertEqual(duplicate_html.count('data-agent-run-id="run-one"'), 1)
+        self.assertEqual(duplicate_html.count('data-agent-run-id="run-two"'), 1)
+        self.assertEqual(duplicate_html.count('class="tool-process-item succeeded"'), 1)
+        self.assertEqual(duplicate_html.count('class="tool-process-item failed"'), 1)
 
     def test_terminal_agent_started_projections_are_interrupted_without_mutation(self):
         script = r"""
@@ -22703,7 +22907,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("INTERNAL RESULT", completed_html)
         self.assertNotIn("goal_create", completed_html)
         self.assertEqual(completed_html.count('data-tool-call-id="read-1"'), 1)
-        self.assertIn('class="tool-process-stage running single-tool"', completed_html)
+        self.assertIn('class="tool-process-stage succeeded single-tool"', completed_html)
         self.assertNotIn('class="tool-process-stage running tool-active', completed_html)
         self.assertIn("RESTORED PUBLIC GOAL PROCESS", data["restoredHtml"])
         self.assertIn("RESTORED FINAL", data["restoredHtml"])

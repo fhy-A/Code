@@ -2136,15 +2136,15 @@
       const detectedOutcome = stageProcessOutcome(visibleCalls);
       const singleToolStage = visibleCalls.length === 1;
       const toolIsActive = detectedOutcome === "running" || detectedOutcome === "pending";
-      const stageIsActive = Boolean(options.activeStage)
+      const stageIsCurrent = Boolean(options.activeStage)
         || toolIsActive;
-      const processOutcome = stageIsActive ? "running" : detectedOutcome;
+      const processOutcome = toolIsActive ? "running" : detectedOutcome;
       const headingText = singleToolStage
         ? getToolActionLabel(currentCall.action)
-        : stageIsActive
+        : stageIsCurrent
         ? getToolActionLabel(currentCall.action)
         : completedProcessSummary(visibleCalls);
-      const headingTarget = singleToolStage || stageIsActive ? currentCall.target : "";
+      const headingTarget = singleToolStage || stageIsCurrent ? currentCall.target : "";
       const stageClasses = [
         processOutcome,
         toolIsActive ? "tool-active" : "",
