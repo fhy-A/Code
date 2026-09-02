@@ -9709,6 +9709,11 @@ body.theme-dark .chat-pane.empty-chat .composer {
   margin-bottom: 30px;
 }
 
+/* Current server-managed edit projections live inside the execution trace. */
+.execution-trace-body > .edit-suggestion {
+  margin-bottom: 12px;
+}
+
 .tool-edit-card {
   overflow: visible;
   border: 0;

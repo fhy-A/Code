@@ -31207,6 +31207,41 @@ class Code043DiffSuggestionFlatteningTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+class Code060EditSuggestionSpacingTests(unittest.TestCase):
+    @staticmethod
+    def rule_bodies(selector):
+        return re.findall(
+            rf"(?ms)^{re.escape(selector)}\s*\{{([^}}]*)\}}",
+            STYLE_SOURCE,
+        )
+
+    def test_server_managed_edit_suggestion_reuses_the_execution_trace_rhythm(self):
+        edit_suggestion_rules = self.rule_bodies(".edit-suggestion")
+        trace_edit_rules = self.rule_bodies(
+            ".execution-trace-body > .edit-suggestion"
+        )
+        commentary_rules = self.rule_bodies(".agent-commentary")
+        tool_process_rules = self.rule_bodies(".tool-process")
+
+        self.assertGreaterEqual(len(edit_suggestion_rules), 2)
+        self.assertEqual(len(trace_edit_rules), 1)
+        self.assertTrue(commentary_rules)
+        self.assertTrue(tool_process_rules)
+
+        legacy_spacing_rule = edit_suggestion_rules[-1]
+        self.assertIn("margin-top: 8px;", legacy_spacing_rule)
+        self.assertIn("margin-bottom: 30px;", legacy_spacing_rule)
+
+        trace_spacing_rule = trace_edit_rules[0]
+        self.assertIn("margin-bottom: 12px;", trace_spacing_rule)
+        self.assertTrue(
+            any("margin-bottom: 12px;" in rule for rule in commentary_rules)
+        )
+        self.assertTrue(
+            any("margin-bottom: 12px;" in rule for rule in tool_process_rules)
+        )
+
+
 class Code043HumanInterventionFlatteningTests(unittest.TestCase):
     MARKER = "/* CODE-043 phase 2: flat human intervention */"
     TEXT_INPUT_FOCUS_GROUP = (
