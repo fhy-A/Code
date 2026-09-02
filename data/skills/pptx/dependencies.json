@@ -23,7 +23,7 @@
     },
     "render": {
       "required": [
-        { "type": "command", "name": "soffice" },
+        { "type": "command", "name": "soffice", "executableKind": "libreoffice" },
         { "type": "command", "name": "pdftoppm" }
       ]
     }

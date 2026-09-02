@@ -1,4 +1,3 @@
-import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -14,21 +13,6 @@ from scripts.validate_ppt_master_vendor import (
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = ROOT / "data" / "skills" / "ppt-master"
 PPTX_DIR = ROOT / "data" / "skills" / "pptx"
-PPTX_BASELINE_DIGEST = "244147f3830a24502c2b6e9f1efe4006f9974929fb1d3c529e7dc0aca39b6e9c"
-
-
-def directory_digest(root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(
-        (item for item in root.rglob("*") if item.is_file()),
-        key=lambda item: item.relative_to(root).as_posix(),
-    ):
-        relative = path.relative_to(root).as_posix()
-        data = path.read_bytes()
-        digest.update(f"{relative}\t{len(data)}\t{hashlib.sha256(data).hexdigest()}\n".encode())
-    return digest.hexdigest()
-
-
 class TestPptMasterRuntimeSkill(unittest.TestCase):
     def test_fixed_vendor_slice_passes_static_validation(self):
         result = validate_vendor_package(SKILL_DIR)
@@ -85,13 +69,36 @@ class TestPptMasterRuntimeSkill(unittest.TestCase):
         }
         self.assertEqual(versions, {"skia-pathops": "0.9.2", "uharfbuzz": "0.50.0"})
 
-    def test_default_pptx_bytes_and_matching_stay_unchanged(self):
-        self.assertEqual(directory_digest(PPTX_DIR), PPTX_BASELINE_DIGEST)
-        self.assertEqual(len(list(PPTX_DIR.rglob("*"))), 2)
+    def test_default_pptx_skill_has_only_declared_clean_room_runtime_resources(self):
+        packaged = {
+            path.relative_to(PPTX_DIR).as_posix()
+            for path in PPTX_DIR.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        }
+        self.assertEqual(packaged, {
+            "SKILL.md",
+            "dependencies.json",
+            "code-resources.json",
+            "scripts/render.py",
+            "scripts/office/validate.py",
+        })
+        manifest = json.loads((PPTX_DIR / "code-resources.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["skill"], "pptx")
+        self.assertEqual(
+            {item["id"] for item in manifest["resources"]},
+            {"validate-deck", "render-pdf"},
+        )
+        skill_text = (PPTX_DIR / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("runtimeResources", skill_text)
+        self.assertNotIn("claude-skills", skill_text)
+        self.assertNotIn("scripts/", skill_text)
 
     def test_build_exe_recursively_packages_the_static_skill(self):
         source = (ROOT / "build_exe.py").read_text(encoding="utf-8")
         self.assertIn("APP_DIR / 'data' / 'skills'", source)
+        self.assertIn("prepare_bundled_skills_for_packaging", source)
+        self.assertIn('ignore_patterns("__pycache__", "*.pyc")', source)
+        self.assertIn('f"{PACKAGED_SKILLS_DIR}{\';\'}data/skills"', source)
         manifest = json.loads((SKILL_DIR / "vendor-manifest.json").read_text(encoding="utf-8"))
         packaged = {
             path.relative_to(ROOT / "data" / "skills").as_posix()

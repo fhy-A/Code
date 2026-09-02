@@ -2,6 +2,9 @@
 Build code into a standalone .exe with PyInstaller.
 Run: python build_exe.py
 """
+import os
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +14,53 @@ FRONTEND_BUILD_SCRIPT = APP_DIR / "scripts" / "build-frontend.mjs"
 FRONTEND_OUTPUT_DIR = APP_DIR / "dist" / "frontend"
 FRONTEND_BUNDLE = FRONTEND_OUTPUT_DIR / "code.bundle.js"
 FRONTEND_CLASSIC_FALLBACK = FRONTEND_OUTPUT_DIR / "index.classic.html"
+BUNDLED_SKILLS_DIR = APP_DIR / 'data' / 'skills'
+SKILL_PACKAGE_STAGE_DIR = APP_DIR / "build" / "skill-package-stage"
+
+
+def _is_link_or_reparse(path):
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400) or 0x400)
+    return bool(attributes & reparse_flag)
+
+
+def _validate_bundled_skill_tree(root):
+    """Reject links while walking only the Code-owned source bundle."""
+    root = Path(root)
+    if _is_link_or_reparse(root) or not root.is_dir():
+        raise RuntimeError("bundled Skill source is not a regular directory")
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        if _is_link_or_reparse(current_path):
+            raise RuntimeError("bundled Skill source contains a reparse directory")
+        for name in [*directories, *files]:
+            if _is_link_or_reparse(current_path / name):
+                raise RuntimeError("bundled Skill source contains a reparse entry")
+
+
+def prepare_bundled_skills_for_packaging():
+    """Stage a clean data/skills tree without interpreter bytecode artifacts."""
+    _validate_bundled_skill_tree(BUNDLED_SKILLS_DIR)
+    stage_parent = SKILL_PACKAGE_STAGE_DIR.parent
+    if _is_link_or_reparse(stage_parent):
+        raise RuntimeError("Skill package staging parent is unsafe")
+    stage_parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(SKILL_PACKAGE_STAGE_DIR):
+        if _is_link_or_reparse(SKILL_PACKAGE_STAGE_DIR):
+            raise RuntimeError("Skill package staging directory is unsafe")
+        shutil.rmtree(SKILL_PACKAGE_STAGE_DIR)
+    shutil.copytree(
+        BUNDLED_SKILLS_DIR,
+        SKILL_PACKAGE_STAGE_DIR,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return SKILL_PACKAGE_STAGE_DIR
 
 
 def build_frontend_assets():
@@ -26,6 +76,7 @@ def build_frontend_assets():
 
 
 build_frontend_assets()
+PACKAGED_SKILLS_DIR = prepare_bundled_skills_for_packaging()
 
 # Ensure data subdirs exist
 for d in ["data", "data/sessions", "data/memory", "data/skills", "data/attachments", "data/file-backups"]:
@@ -52,7 +103,7 @@ cmd = [
     "--add-data", f"{APP_DIR / 'code-icon.ico'}{';'}.",
     "--add-data", f"{APP_DIR / 'code-icon.png'}{';'}.",
     "--add-data", f"{APP_DIR / 'assets'}{';'}assets",
-    "--add-data", f"{APP_DIR / 'data' / 'skills'}{';'}data/skills",
+    "--add-data", f"{PACKAGED_SKILLS_DIR}{';'}data/skills",
     "--add-data", f"{APP_DIR / 'data' / 'memory'}{';'}data/memory",
     "--hidden-import", "json",
     "--hidden-import", "mimetypes",

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "skill": "pptx",
+  "compatibleInstalled": {
+    "skillMdSha256": [
+      "eadda10837c742231ab28fff581e9dbdf8c2c6cb83e21859563dd80de1e530cd",
+      "77fa7e47d5a75c3103202a5baf830ea904a609fe4495bafd5f742ce7442fb59b"
+    ],
+    "dependenciesSha256": [
+      "b762903b8058e4b692ea518eef86c512f85d9e897f7105a8d144d70811619792",
+      "2a1f568e0278c03ebd63b957f8fb6846cdbcf123228f3a1636e8c4c16671419d"
+    ]
+  },
+  "resources": [
+    {
+      "id": "validate-deck",
+      "path": "scripts/office/validate.py",
+      "sha256": "f7fff6b9c5d8d42d065c8a8228e6907085b1c9561c01f9ebf5d592db67b0cb53",
+      "kind": "python",
+      "protocol": "code-pptx-validate/v1",
+      "modelVisible": true,
+      "arguments": [
+        "<deck.pptx>"
+      ]
+    },
+    {
+      "id": "render-pdf",
+      "path": "scripts/render.py",
+      "sha256": "cc8dbfe08764d4f9923e819a7160f558cd7f6df539b141ec2424bc0910c2e252",
+      "kind": "python",
+      "protocol": "code-pptx-render/v1",
+      "modelVisible": true,
+      "arguments": [
+        "<deck.pptx>",
+        "<output-directory>",
+        "[--soffice <exact-executable>]",
+        "[--timeout <seconds>]"
+      ]
+    }
+  ]
+}

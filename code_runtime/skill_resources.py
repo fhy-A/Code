@@ -21,7 +21,7 @@ RESOURCE_MANIFEST_NAME = "code-resources.json"
 RESOURCE_SCHEMA_VERSION = 1
 MAX_RESOURCE_MANIFEST_BYTES = 128 * 1024
 MAX_EXECUTABLE_RESOURCE_BYTES = 2 * 1024 * 1024
-REQUIRED_RESOURCE_CONTRACTS = frozenset({"xlsx"})
+REQUIRED_RESOURCE_CONTRACTS = frozenset({"pptx", "xlsx"})
 
 _SAFE_SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SAFE_RESOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -40,6 +40,11 @@ _PUBLIC_ERRORS = {
     "bundled_resource_missing": "A required Code-owned Skill resource is missing from this installation.",
     "bundled_resource_hash_mismatch": "A required Code-owned Skill resource failed integrity verification.",
     "resource_path_unsafe": "A Skill resource path is not a regular, contained file.",
+    "custom_resource_contract_missing": "The custom Skill did not publish a trusted local resource contract.",
+    "custom_resource_contract_invalid": "The custom Skill local resource contract is invalid.",
+    "custom_resource_missing": "A declared custom Skill resource is missing.",
+    "custom_resource_hash_mismatch": "A declared custom Skill resource failed integrity verification.",
+    "custom_resource_path_unsafe": "A declared custom Skill resource path is not a regular, contained file.",
 }
 
 
@@ -74,7 +79,7 @@ def _is_link_or_reparse(path):
 
 def _contained_regular_file(root, relative_path, *, missing_code, mismatch_code=""):
     root = Path(root)
-    if not root.is_dir() or _is_link_or_reparse(root):
+    if _is_link_or_reparse(root) or not root.is_dir():
         raise SkillResourceError("resource_path_unsafe")
     candidate = root.joinpath(*relative_path.parts)
     current = root
@@ -98,19 +103,19 @@ def _contained_regular_file(root, relative_path, *, missing_code, mismatch_code=
     return candidate
 
 
-def _normalized_hash_list(value, field):
+def _normalized_hash_list(value, field, error_code="resource_contract_invalid"):
     if not isinstance(value, list) or not value:
-        raise SkillResourceError("resource_contract_invalid")
+        raise SkillResourceError(error_code)
     normalized = []
     for item in value:
         item = str(item or "").lower()
         if not _SHA256.fullmatch(item) or item in normalized:
-            raise SkillResourceError("resource_contract_invalid")
+            raise SkillResourceError(error_code)
         normalized.append(item)
     return tuple(normalized)
 
 
-def _normalized_relative_path(value):
+def _normalized_relative_path(value, error_code="resource_contract_invalid"):
     raw = str(value or "").replace("\\", "/")
     path = PurePosixPath(raw)
     if (
@@ -124,56 +129,78 @@ def _normalized_relative_path(value):
             for part in path.parts
         )
     ):
-        raise SkillResourceError("resource_contract_invalid")
+        raise SkillResourceError(error_code)
     return path
 
 
-def _load_resource_contract(skill_name, bundled_skill_dir):
-    bundled_skill_dir = Path(bundled_skill_dir)
-    manifest_path = bundled_skill_dir / RESOURCE_MANIFEST_NAME
-    if not manifest_path.exists():
-        if skill_name in REQUIRED_RESOURCE_CONTRACTS:
-            raise SkillResourceError("resource_contract_missing")
+def _load_resource_contract(skill_name, skill_dir, *, custom=False):
+    """Read one bounded resource contract without discovering filesystem paths.
+
+    Bundled contracts certify known Code copies and can provide a read-only
+    compatibility fallback.  Custom contracts deliberately omit that identity
+    list: their helpers live with the active custom Skill and never inherit a
+    bundled fallback, even when names collide.
+    """
+    skill_dir = Path(skill_dir)
+    missing_code = "custom_resource_contract_missing" if custom else "resource_contract_missing"
+    invalid_code = "custom_resource_contract_invalid" if custom else "resource_contract_invalid"
+    manifest_path = skill_dir / RESOURCE_MANIFEST_NAME
+    if not os.path.lexists(manifest_path):
+        if not custom and skill_name in REQUIRED_RESOURCE_CONTRACTS:
+            raise SkillResourceError(missing_code)
         return None
     manifest_relative = PurePosixPath(RESOURCE_MANIFEST_NAME)
-    manifest_path = _contained_regular_file(
-        bundled_skill_dir,
-        manifest_relative,
-        missing_code="resource_contract_missing",
-    )
+    try:
+        manifest_path = _contained_regular_file(
+            skill_dir,
+            manifest_relative,
+            missing_code=missing_code,
+        )
+    except SkillResourceError as exc:
+        if custom:
+            raise SkillResourceError(invalid_code) from exc
+        raise
     try:
         if manifest_path.stat().st_size > MAX_RESOURCE_MANIFEST_BYTES:
-            raise SkillResourceError("resource_contract_invalid")
+            raise SkillResourceError(invalid_code)
         payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except SkillResourceError:
         raise
     except Exception:
-        raise SkillResourceError("resource_contract_invalid")
+        raise SkillResourceError(invalid_code)
     if (
         not isinstance(payload, dict)
         or payload.get("schemaVersion") != RESOURCE_SCHEMA_VERSION
         or payload.get("skill") != skill_name
     ):
-        raise SkillResourceError("resource_contract_invalid")
-    compatible = payload.get("compatibleInstalled")
-    if not isinstance(compatible, dict):
-        raise SkillResourceError("resource_contract_invalid")
-    skill_hashes = _normalized_hash_list(compatible.get("skillMdSha256"), "skillMdSha256")
-    dependency_hashes = _normalized_hash_list(
-        compatible.get("dependenciesSha256"), "dependenciesSha256",
-    )
+        raise SkillResourceError(invalid_code)
+    if custom:
+        if "compatibleInstalled" in payload:
+            raise SkillResourceError(invalid_code)
+        skill_hashes = ()
+        dependency_hashes = ()
+    else:
+        compatible = payload.get("compatibleInstalled")
+        if not isinstance(compatible, dict):
+            raise SkillResourceError(invalid_code)
+        skill_hashes = _normalized_hash_list(
+            compatible.get("skillMdSha256"), "skillMdSha256", invalid_code,
+        )
+        dependency_hashes = _normalized_hash_list(
+            compatible.get("dependenciesSha256"), "dependenciesSha256", invalid_code,
+        )
     raw_resources = payload.get("resources")
     if not isinstance(raw_resources, list) or not raw_resources:
-        raise SkillResourceError("resource_contract_invalid")
+        raise SkillResourceError(invalid_code)
     resources = []
     seen_ids = set()
     seen_paths = set()
     visible_count = 0
     for raw in raw_resources:
         if not isinstance(raw, dict):
-            raise SkillResourceError("resource_contract_invalid")
+            raise SkillResourceError(invalid_code)
         resource_id = str(raw.get("id") or "")
-        relative = _normalized_relative_path(raw.get("path"))
+        relative = _normalized_relative_path(raw.get("path"), invalid_code)
         sha256 = str(raw.get("sha256") or "").lower()
         kind = str(raw.get("kind") or "")
         protocol = str(raw.get("protocol") or "")
@@ -190,7 +217,7 @@ def _load_resource_contract(skill_name, bundled_skill_dir):
             or len(arguments) > 16
             or any(not isinstance(item, str) or len(item) > 256 for item in arguments)
         ):
-            raise SkillResourceError("resource_contract_invalid")
+            raise SkillResourceError(invalid_code)
         seen_ids.add(resource_id)
         seen_paths.add(relative.as_posix())
         visible_count += int(visible)
@@ -204,16 +231,19 @@ def _load_resource_contract(skill_name, bundled_skill_dir):
             "arguments": list(arguments),
         })
     if visible_count < 1:
-        raise SkillResourceError("resource_contract_invalid")
+        raise SkillResourceError(invalid_code)
     return {
         "skillHashes": skill_hashes,
         "dependencyHashes": dependency_hashes,
         "resources": resources,
+        "custom": custom,
     }
 
 
 def _validate_installed_identity(skill_name, installed_skills_dir, contract):
     installed_skills_dir = Path(installed_skills_dir)
+    if _is_link_or_reparse(installed_skills_dir) or not installed_skills_dir.is_dir():
+        raise SkillResourceError("resource_path_unsafe")
     try:
         state = load_bundled_skill_state(installed_skills_dir)
     except BundledSkillStateError:
@@ -241,6 +271,121 @@ def _validate_installed_identity(skill_name, installed_skills_dir, contract):
     return installed_skill_dir
 
 
+def _active_skill_dir(skill_name, installed_skills_dir):
+    """Return the active Skill folder only when it is a contained regular tree."""
+    installed_skills_dir = Path(installed_skills_dir)
+    if _is_link_or_reparse(installed_skills_dir) or not installed_skills_dir.is_dir():
+        raise SkillResourceError("resource_path_unsafe")
+    skill_dir = installed_skills_dir / skill_name
+    if _is_link_or_reparse(skill_dir) or not skill_dir.is_dir():
+        raise SkillResourceError("skill_not_installed")
+    _contained_regular_file(
+        skill_dir,
+        PurePosixPath("SKILL.md"),
+        missing_code="skill_not_installed",
+    )
+    return skill_dir
+
+
+def _same_regular_skills_root(installed_skills_dir, bundled_skills_dir):
+    """Tell whether a source/dev active root is physically the bundled root."""
+    installed_skills_dir = Path(installed_skills_dir)
+    bundled_skills_dir = Path(bundled_skills_dir)
+    if (
+        _is_link_or_reparse(installed_skills_dir)
+        or _is_link_or_reparse(bundled_skills_dir)
+        or not installed_skills_dir.is_dir()
+        or not bundled_skills_dir.is_dir()
+    ):
+        return False
+    try:
+        return os.path.samefile(installed_skills_dir, bundled_skills_dir)
+    except OSError:
+        return False
+
+
+def _same_root_custom_contract(skill_name, installed_skills_dir, bundled_skills_dir):
+    """Load an explicit custom contract only from a shared source/dev root.
+
+    Code-owned resource Skills reserve their identity manifests.  A missing or
+    malformed identity contract for one of those names remains a bundled
+    integrity failure, never an inferred custom Skill.
+    """
+    if (
+        skill_name in REQUIRED_RESOURCE_CONTRACTS
+        or not _same_regular_skills_root(installed_skills_dir, bundled_skills_dir)
+    ):
+        return None
+    installed_skill_dir = _active_skill_dir(skill_name, installed_skills_dir)
+    if not os.path.lexists(installed_skill_dir / RESOURCE_MANIFEST_NAME):
+        return None
+    return _load_resource_contract(skill_name, installed_skill_dir, custom=True)
+
+
+def _public_runtime_resources(contract, source, source_paths):
+    public_resources = []
+    for resource in contract["resources"]:
+        if not resource["modelVisible"]:
+            continue
+        public_resources.append({
+            "id": resource["id"],
+            "kind": resource["kind"],
+            "protocol": resource["protocol"],
+            "path": str(source_paths[resource["id"]].resolve(strict=True)),
+            "sha256": resource["sha256"],
+            "arguments": list(resource["arguments"]),
+        })
+    return {
+        "schemaVersion": RESOURCE_SCHEMA_VERSION,
+        "source": source,
+        "resources": public_resources,
+        "instructions": (
+            "Use only the exact resource path returned here with the runtime selected by "
+            "check_skill_dependencies. Do not search parent folders, adjacent repositories, the "
+            "user profile, or disk roots, and do not copy the resource into the project."
+        ),
+    }
+
+
+def _resolve_custom_resources(skill_name, installed_skills_dir):
+    """Resolve explicit user-authored helpers from the active Skill folder only."""
+    installed_skill_dir = _active_skill_dir(skill_name, installed_skills_dir)
+    contract = _load_resource_contract(skill_name, installed_skill_dir, custom=True)
+    if contract is None:
+        return None
+    source_paths = {}
+    for resource in contract["resources"]:
+        try:
+            path = _contained_regular_file(
+                installed_skill_dir,
+                resource["relative"],
+                missing_code="custom_resource_missing",
+                mismatch_code="custom_resource_hash_mismatch",
+            )
+        except SkillResourceError as exc:
+            if exc.error_code == "resource_path_unsafe":
+                raise SkillResourceError("custom_resource_path_unsafe") from exc
+            raise
+        if _sha256_file(path) != resource["sha256"]:
+            raise SkillResourceError("custom_resource_hash_mismatch")
+        source_paths[resource["id"]] = path
+    return _public_runtime_resources(contract, "custom", source_paths)
+
+
+def _no_custom_resource_guidance():
+    """Return a stable fail-closed result when a custom Skill has no contract."""
+    return {
+        "schemaVersion": RESOURCE_SCHEMA_VERSION,
+        "source": "custom-no-resources",
+        "resources": [],
+        "instructions": (
+            "No trusted local helper resources were published for this custom Skill. Do not "
+            "search for or infer helper paths from parent folders, adjacent repositories, the "
+            "user profile, or disk roots. Report a missing resource contract if a helper is required."
+        ),
+    }
+
+
 def preferred_bundled_dependency_manifest(skill_dir, bundled_skills_dir):
     """Return the current bundled manifest for a verified legacy installation.
 
@@ -252,14 +397,39 @@ def preferred_bundled_dependency_manifest(skill_dir, bundled_skills_dir):
     skill_dir = Path(skill_dir)
     skill_name = skill_dir.name
     bundled_skill_dir = Path(bundled_skills_dir) / skill_name
-    contract = _load_resource_contract(skill_name, bundled_skill_dir)
+    try:
+        contract = _load_resource_contract(skill_name, bundled_skill_dir)
+    except SkillResourceError as exc:
+        if exc.error_code == "resource_contract_invalid":
+            custom_contract = _same_root_custom_contract(
+                skill_name,
+                skill_dir.parent,
+                bundled_skills_dir,
+            )
+            if custom_contract is not None:
+                return None
+        raise
     if contract is None:
         return None
-    installed_skill_dir = _validate_installed_identity(
-        skill_name,
-        skill_dir.parent,
-        contract,
-    )
+    try:
+        installed_skill_dir = _validate_installed_identity(
+            skill_name,
+            skill_dir.parent,
+            contract,
+        )
+    except SkillResourceError as exc:
+        if _same_regular_skills_root(skill_dir.parent, bundled_skills_dir):
+            raise
+        # A same-name custom Skill with its own explicit resource contract is
+        # not a legacy bundled copy.  Keep its local dependency manifest and
+        # let resolve_skill_resources validate the custom resource contract;
+        # never project the bundled dependency fallback into that Skill.
+        if (
+            exc.error_code in {"installed_skill_identity_unknown", "skill_tombstoned"}
+            and os.path.lexists(skill_dir / RESOURCE_MANIFEST_NAME)
+        ):
+            return None
+        raise
     bundled_skill_md = _contained_regular_file(
         bundled_skill_dir,
         PurePosixPath("SKILL.md"),
@@ -281,26 +451,14 @@ def preferred_bundled_dependency_manifest(skill_dir, bundled_skills_dir):
     return bundled_dependencies
 
 
-def resolve_skill_resources(skill_name, installed_skills_dir, bundled_skills_dir):
-    """Resolve model-visible Code-owned resources for one installed Skill.
-
-    Existing installations are never changed.  A complete exact installed
-    resource set is used in place; otherwise the current verified bundle is a
-    read-only fallback.  Any conflicting installed file fails closed.
-    """
-    skill_name = str(skill_name or "")
-    if not _SAFE_SKILL_NAME.fullmatch(skill_name):
-        raise SkillResourceError("resource_contract_invalid")
+def _resolve_bundled_resources(skill_name, installed_skills_dir, bundled_skills_dir, contract):
+    """Resolve a verified bundled Skill with its legacy read-only fallback."""
     bundled_skill_dir = Path(bundled_skills_dir) / skill_name
-    contract = _load_resource_contract(skill_name, bundled_skill_dir)
-    if contract is None:
-        return None
     installed_skill_dir = _validate_installed_identity(
         skill_name,
         installed_skills_dir,
         contract,
     )
-
     bundled_manifest_path = _contained_regular_file(
         bundled_skill_dir,
         PurePosixPath(RESOURCE_MANIFEST_NAME),
@@ -314,8 +472,8 @@ def resolve_skill_resources(skill_name, installed_skills_dir, bundled_skills_dir
                 PurePosixPath(RESOURCE_MANIFEST_NAME),
                 missing_code="installed_resource_conflict",
             )
-        except SkillResourceError:
-            raise SkillResourceError("installed_resource_conflict")
+        except SkillResourceError as exc:
+            raise SkillResourceError("installed_resource_conflict") from exc
         if _sha256_file(safe_installed_manifest) != _sha256_file(bundled_manifest_path):
             raise SkillResourceError("installed_resource_conflict")
 
@@ -344,33 +502,130 @@ def resolve_skill_resources(skill_name, installed_skills_dir, bundled_skills_dir
                 resource["relative"],
                 missing_code="installed_resource_conflict",
             )
-        except SkillResourceError:
-            raise SkillResourceError("installed_resource_conflict")
+        except SkillResourceError as exc:
+            raise SkillResourceError("installed_resource_conflict") from exc
         if _sha256_file(safe_path) != resource["sha256"]:
             raise SkillResourceError("installed_resource_conflict")
         installed_paths[resource["id"]] = safe_path
 
     use_installed = not installed_missing and len(installed_paths) == len(contract["resources"])
-    source_paths = installed_paths if use_installed else bundled_paths
-    public_resources = []
-    for resource in contract["resources"]:
-        if not resource["modelVisible"]:
-            continue
-        public_resources.append({
-            "id": resource["id"],
-            "kind": resource["kind"],
-            "protocol": resource["protocol"],
-            "path": str(source_paths[resource["id"]].resolve(strict=True)),
-            "sha256": resource["sha256"],
-            "arguments": list(resource["arguments"]),
-        })
-    return {
+    return _public_runtime_resources(
+        contract,
+        "installed" if use_installed else "bundled-fallback",
+        installed_paths if use_installed else bundled_paths,
+    )
+
+
+def resolve_skill_resources(skill_name, installed_skills_dir, bundled_skills_dir):
+    """Resolve one active Skill's explicit helper contract without path discovery.
+
+    A known bundled identity retains compatibility/tombstone semantics.  An
+    active custom Skill may instead opt in through its own complete manifest;
+    that path is never mixed with, or repaired from, a bundled Skill of the
+    same name.  An uncontracted custom Skill keeps existing no-resource
+    behavior rather than receiving guessed helper paths.
+    """
+    skill_name = str(skill_name or "")
+    if not _SAFE_SKILL_NAME.fullmatch(skill_name):
+        raise SkillResourceError("resource_contract_invalid")
+    bundled_skill_dir = Path(bundled_skills_dir) / skill_name
+    installed_skill_dir = _active_skill_dir(skill_name, installed_skills_dir)
+    installed_manifest_exists = os.path.lexists(installed_skill_dir / RESOURCE_MANIFEST_NAME)
+    try:
+        bundled_contract = _load_resource_contract(skill_name, bundled_skill_dir)
+    except SkillResourceError as exc:
+        if exc.error_code == "resource_contract_invalid":
+            custom_contract = _same_root_custom_contract(
+                skill_name,
+                installed_skills_dir,
+                bundled_skills_dir,
+            )
+            if custom_contract is not None:
+                return _resolve_custom_resources(skill_name, installed_skills_dir)
+        raise
+    if bundled_contract is None:
+        if installed_manifest_exists:
+            return _resolve_custom_resources(skill_name, installed_skills_dir)
+        if not bundled_skill_dir.is_dir():
+            return _no_custom_resource_guidance()
+        return None
+    try:
+        return _resolve_bundled_resources(
+            skill_name,
+            installed_skills_dir,
+            bundled_skills_dir,
+            bundled_contract,
+        )
+    except SkillResourceError as exc:
+        if exc.error_code not in {"installed_skill_identity_unknown", "skill_tombstoned"}:
+            raise
+        if _same_regular_skills_root(installed_skills_dir, bundled_skills_dir):
+            raise
+        if not installed_manifest_exists:
+            raise
+        return _resolve_custom_resources(skill_name, installed_skills_dir)
+
+
+def audit_bundled_skill_resources(bundled_skills_dir):
+    """Audit only explicit bundled resource contracts under one Code bundle.
+
+    The audit intentionally ignores prose, Markdown examples, and user Skill
+    folders.  A runnable local helper is a `code-resources.json` entry, so a
+    missing declared file is actionable while a documentation example is not.
+    """
+    bundled_skills_dir = Path(bundled_skills_dir)
+    result = {
         "schemaVersion": RESOURCE_SCHEMA_VERSION,
-        "source": "installed" if use_installed else "bundled-fallback",
-        "resources": public_resources,
-        "instructions": (
-            "Use only the exact resource path returned here with the Python runtime selected by "
-            "check_skill_dependencies. Do not search parent folders, adjacent repositories, the "
-            "user profile, or disk roots, and do not copy the resource into the project."
-        ),
+        "checkedSkills": [],
+        "contracts": [],
+        "findings": [],
     }
+    if _is_link_or_reparse(bundled_skills_dir) or not bundled_skills_dir.is_dir():
+        result["findings"].append({"skill": "", "errorCode": "resource_path_unsafe"})
+        result["ok"] = False
+        return result
+    try:
+        entries = tuple(sorted(bundled_skills_dir.iterdir(), key=lambda path: path.name.casefold()))
+    except OSError:
+        result["findings"].append({"skill": "", "errorCode": "resource_path_unsafe"})
+        result["ok"] = False
+        return result
+    for skill_dir in entries:
+        skill_name = skill_dir.name
+        if not _SAFE_SKILL_NAME.fullmatch(skill_name):
+            continue
+        if _is_link_or_reparse(skill_dir):
+            result["findings"].append({"skill": skill_name, "errorCode": "resource_path_unsafe"})
+            continue
+        if not skill_dir.is_dir():
+            continue
+        result["checkedSkills"].append(skill_name)
+        has_contract = os.path.lexists(skill_dir / RESOURCE_MANIFEST_NAME)
+        if not has_contract and skill_name not in REQUIRED_RESOURCE_CONTRACTS:
+            continue
+        try:
+            contract = _load_resource_contract(skill_name, skill_dir)
+        except SkillResourceError as exc:
+            result["findings"].append({"skill": skill_name, "errorCode": exc.error_code})
+            continue
+        if contract is None:
+            continue
+        result["contracts"].append(skill_name)
+        for resource in contract["resources"]:
+            try:
+                path = _contained_regular_file(
+                    skill_dir,
+                    resource["relative"],
+                    missing_code="bundled_resource_missing",
+                    mismatch_code="bundled_resource_hash_mismatch",
+                )
+                if _sha256_file(path) != resource["sha256"]:
+                    raise SkillResourceError("bundled_resource_hash_mismatch")
+            except SkillResourceError as exc:
+                result["findings"].append({
+                    "skill": skill_name,
+                    "resource": resource["id"],
+                    "errorCode": exc.error_code,
+                })
+    result["ok"] = not result["findings"]
+    return result

@@ -150,6 +150,7 @@ python server.py
 - Web 服务只监听 `127.0.0.1`，默认不向局域网暴露。
 - 项目文件和会话保存在本机；发送给模型的上下文仍会经过你配置的 API 网关及其上游模型服务。
 - Code 拥有真实文件和命令执行能力，请只选择可信项目并检查重要改动；关键项目建议同时使用 Git。
+- 自定义 Skill 若要把本地 helper 提供给模型，helper 与 `code-resources.json` 必须一同位于活动 Skill 目录；格式、迁移和哈希要求见[自定义 Skill 本地资源合同](docs/skill-resource-contract.md)。
 
 ## 会话与后台任务
 
