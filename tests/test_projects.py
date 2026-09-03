@@ -1,6 +1,7 @@
 """Tests for the Codex-style project/session data contract."""
 
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -162,6 +163,102 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(api_record["name"], api_record["label"])
         self.assertEqual(api_record["rootPath"], api_record["path"])
 
+    def test_shared_secondary_roots_survive_read_write_and_reload(self):
+        server.write_json(server.PROJECTS_PATH, [
+            {
+                "id": "project-1",
+                "label": "Alpha",
+                "rootPaths": [str(self.project_root), str(self.third_root)],
+            },
+            {
+                "id": "project-2",
+                "label": "Beta",
+                "rootPaths": [str(self.other_root), str(self.third_root)],
+            },
+        ])
+
+        projects = server._read_projects()
+        server._write_projects(projects)
+        reloaded = {project["id"]: project for project in server._read_projects()}
+
+        shared_root = str(self.third_root.resolve())
+        self.assertEqual(reloaded["project-1"]["rootPaths"][1], shared_root)
+        self.assertEqual(reloaded["project-2"]["rootPaths"][1], shared_root)
+
+    def test_project_storage_rejects_duplicate_primary_roots(self):
+        with self.assertRaisesRegex(ValueError, "same primary source folder"):
+            server._write_projects([
+                {
+                    "id": "project-1",
+                    "label": "Alpha",
+                    "rootPaths": [str(self.project_root)],
+                },
+                {
+                    "id": "project-2",
+                    "label": "Beta",
+                    "rootPaths": [str(self.project_root), str(self.other_root)],
+                },
+            ])
+
+    def test_primary_inference_uses_deepest_component_ancestor(self):
+        nested_root = self.project_root / "nested"
+        nested_leaf = nested_root / "child"
+        nested_leaf.mkdir(parents=True)
+        server._write_projects([
+            {
+                "id": "outer-project",
+                "label": "Outer",
+                "rootPaths": [str(self.project_root)],
+            },
+            {
+                "id": "inner-project",
+                "label": "Inner",
+                "rootPaths": [str(nested_root)],
+            },
+        ])
+
+        project = server._find_project_by_path(nested_leaf)
+        project_id, cwd = server._import_session_location(nested_leaf)
+
+        self.assertEqual(project["id"], "inner-project")
+        self.assertEqual(project_id, "inner-project")
+        self.assertEqual(cwd, str(nested_root.resolve()))
+
+    def test_secondary_only_path_never_infers_or_creates_a_project(self):
+        server._write_projects([
+            {
+                "id": "project-1",
+                "label": "Alpha",
+                "rootPaths": [str(self.project_root), str(self.third_root)],
+            },
+            {
+                "id": "project-2",
+                "label": "Beta",
+                "rootPaths": [str(self.other_root), str(self.third_root)],
+            },
+        ])
+
+        project_id, cwd = server._import_session_location(self.third_root)
+
+        self.assertIsNone(server._find_project_by_path(self.third_root))
+        self.assertIsNone(project_id)
+        self.assertEqual(cwd, str(self.third_root.resolve()))
+        self.assertEqual(len(server._read_projects()), 2)
+
+    def test_path_ancestry_is_component_aware_and_uses_host_case_rules(self):
+        child = self.project_root / "child"
+        prefix_sibling = Path(str(self.project_root) + "-copy") / "child"
+
+        self.assertTrue(server._path_is_same_or_descendant(child, self.project_root))
+        self.assertFalse(
+            server._path_is_same_or_descendant(prefix_sibling, self.project_root)
+        )
+        case_and_slash_variant = str(child).swapcase().replace("\\", "/")
+        self.assertEqual(
+            server._path_is_same_or_descendant(case_and_slash_variant, self.project_root),
+            os.name == "nt",
+        )
+
     def test_ensure_project_for_path_is_idempotent(self):
         first = server._ensure_project_for_path(self.project_root)
         second = server._ensure_project_for_path(self.project_root)
@@ -219,13 +316,36 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(renamed["label"], "Renamed")
         self.assertEqual(server._find_project(created["id"])["label"], "Renamed")
 
+    def test_create_allows_another_secondary_as_primary_but_rejects_duplicate_primary(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        shared_secondary_handler = self.make_handler({
+            "label": "Shared",
+            "rootPaths": [str(self.other_root), str(self.third_root)],
+        })
+
+        server.CodeHandler.create_project(shared_secondary_handler)
+
+        created = shared_secondary_handler.send_json.call_args.args[0]
+        self.assertEqual(shared_secondary_handler.send_json.call_args.args[1], 201)
+        self.assertEqual(created["rootPath"], str(self.other_root.resolve()))
+
+        duplicate_primary_handler = self.make_handler({
+            "label": "Duplicate",
+            "rootPaths": [str(self.project_root), str(self.third_root)],
+        })
+        server.CodeHandler.create_project(duplicate_primary_handler)
+
+        payload, status = duplicate_primary_handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "project_primary_conflict")
+
     def test_update_project_migrates_only_sessions_on_removed_roots(self):
         self.write_project(roots=[self.project_root, self.other_root])
         self.write_session(
             "session-on-removed-root",
             {
                 "projectId": "project-1",
-                "cwd": str(self.project_root),
+                "cwd": str(self.other_root),
                 "source": "codex",
             },
         )
@@ -233,13 +353,13 @@ class TestProjectSchema(ProjectSessionTestCase):
             "session-on-retained-root",
             {
                 "projectId": "project-1",
-                "cwd": str(self.other_root),
+                "cwd": str(self.project_root),
                 "source": "code",
             },
         )
         handler = self.make_handler({
             "label": "Moved workspace",
-            "rootPaths": [str(self.other_root), str(self.third_root)],
+            "rootPaths": [str(self.project_root), str(self.third_root)],
         })
 
         server.CodeHandler.update_project(handler, "project-1")
@@ -258,14 +378,56 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(project["label"], "Moved workspace")
         self.assertEqual(
             project["rootPaths"],
-            [str(self.other_root.resolve()), str(self.third_root.resolve())],
+            [str(self.project_root.resolve()), str(self.third_root.resolve())],
         )
-        self.assertEqual(response["rootPath"], str(self.other_root.resolve()))
-        self.assertEqual(session["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(response["rootPath"], str(self.project_root.resolve()))
+        self.assertEqual(session["cwd"], str(self.project_root.resolve()))
         self.assertEqual(session["revision"], 1)
-        self.assertEqual(retained_session["cwd"], str(self.other_root.resolve()))
-        self.assertEqual(index_entry["cwd"], str(self.other_root.resolve()))
-        self.assertEqual(server.load_config()["projectRoot"], str(self.other_root.resolve()))
+        self.assertEqual(retained_session["cwd"], str(self.project_root.resolve()))
+        self.assertEqual(index_entry["cwd"], str(self.project_root.resolve()))
+        self.assertEqual(server.load_config()["projectRoot"], str(self.project_root.resolve()))
+
+    def test_assigned_project_owns_session_when_removed_root_is_another_primary(self):
+        server._write_projects([
+            {
+                "id": "project-1",
+                "label": "Workspace",
+                "rootPaths": [str(self.project_root), str(self.other_root)],
+            },
+            {
+                "id": "project-2",
+                "label": "Other",
+                "rootPaths": [str(self.other_root)],
+            },
+        ])
+        server.save_config({"projectRoot": str(self.other_root)})
+        self.write_session(
+            "session-on-shared-root",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+                "revision": 2,
+            },
+        )
+        handler = self.make_handler({
+            "label": "Workspace",
+            "rootPaths": [str(self.project_root)],
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        session = server.read_json(
+            server.session_path("session-on-shared-root"),
+            {},
+        )
+        self.assertEqual(session["projectId"], "project-1")
+        self.assertEqual(session["cwd"], str(self.project_root.resolve()))
+        self.assertEqual(session["revision"], 3)
+        self.assertEqual(
+            server.load_config()["projectRoot"],
+            str(self.other_root.resolve()),
+        )
 
     def test_update_project_rejects_every_busy_session_that_would_move(self):
         for suffix, run_state in self.BUSY_RUN_STATES.items():
@@ -276,7 +438,7 @@ class TestProjectSchema(ProjectSessionTestCase):
                     "session-busy-root-update",
                     {
                         "projectId": "project-1",
-                        "cwd": str(self.project_root),
+                        "cwd": str(self.other_root),
                         "source": "code",
                         "revision": 3,
                         "runState": run_state,
@@ -291,7 +453,7 @@ class TestProjectSchema(ProjectSessionTestCase):
                 }
                 handler = self.make_handler({
                     "label": "Blocked update",
-                    "rootPaths": [str(self.other_root)],
+                    "rootPaths": [str(self.project_root)],
                 })
 
                 server.CodeHandler.update_project(handler, "project-1")
@@ -311,7 +473,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "session-busy-retained-root",
             {
                 "projectId": "project-1",
-                "cwd": str(self.other_root),
+                "cwd": str(self.project_root),
                 "source": "code",
                 "revision": 4,
                 "runState": {"status": "running"},
@@ -319,7 +481,7 @@ class TestProjectSchema(ProjectSessionTestCase):
         )
         handler = self.make_handler({
             "label": "Retained root",
-            "rootPaths": [str(self.other_root), str(self.third_root)],
+            "rootPaths": [str(self.project_root), str(self.third_root)],
         })
 
         server.CodeHandler.update_project(handler, "project-1")
@@ -327,7 +489,7 @@ class TestProjectSchema(ProjectSessionTestCase):
         stored = server.read_json(server.session_path("session-busy-retained-root"), {})
         self.assertEqual(handler.send_json.call_args.args[0]["label"], "Retained root")
         self.assertEqual(stored["projectId"], "project-1")
-        self.assertEqual(stored["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(stored["cwd"], str(self.project_root.resolve()))
         self.assertEqual(stored["revision"], 4)
 
     def test_update_project_write_failure_rolls_back_all_location_facts(self):
@@ -336,7 +498,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "session-project-update-rollback",
             {
                 "projectId": "project-1",
-                "cwd": str(self.project_root),
+                "cwd": str(self.other_root),
                 "source": "code",
                 "revision": 2,
                 "runState": {"status": "idle"},
@@ -351,7 +513,7 @@ class TestProjectSchema(ProjectSessionTestCase):
         }
         handler = self.make_handler({
             "label": "Rollback update",
-            "rootPaths": [str(self.other_root)],
+            "rootPaths": [str(self.project_root)],
         })
         original_write_json = server.write_json
 
@@ -372,7 +534,7 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(server._session_index_path().read_bytes(), before["index"])
         self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
 
-    def test_reordering_primary_preserves_session_cwds_and_active_config(self):
+    def test_reordering_without_explicit_primary_keeps_primary_and_session_bytes(self):
         self.write_project(roots=[self.project_root, self.other_root])
         self.write_session(
             "session-primary-reorder",
@@ -382,6 +544,10 @@ class TestProjectSchema(ProjectSessionTestCase):
                 "source": "code",
             },
         )
+        session_path = server.session_path("session-primary-reorder")
+        session_before = session_path.read_bytes()
+        index_before = server._session_index_path().read_bytes()
+        config_before = server.CONFIG_PATH.read_bytes()
         handler = self.make_handler({
             "label": "Reordered",
             "rootPaths": [str(self.other_root), str(self.project_root)],
@@ -389,15 +555,148 @@ class TestProjectSchema(ProjectSessionTestCase):
 
         server.CodeHandler.update_project(handler, "project-1")
 
-        session = server.read_json(server.session_path("session-primary-reorder"), {})
-        self.assertEqual(session["cwd"], str(self.project_root.resolve()))
-        self.assertEqual(server.load_config()["projectRoot"], str(self.project_root.resolve()))
         self.assertEqual(
             server._find_project("project-1")["rootPaths"],
+            [str(self.project_root.resolve()), str(self.other_root.resolve())],
+        )
+        self.assertEqual(session_path.read_bytes(), session_before)
+        self.assertEqual(server._session_index_path().read_bytes(), index_before)
+        self.assertEqual(server.CONFIG_PATH.read_bytes(), config_before)
+
+    def test_explicit_primary_switch_keeps_sessions_and_old_primary_as_secondary(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-primary-switch",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 7,
+                "runState": {"status": "running"},
+            },
+        )
+        session_path = server.session_path("session-primary-switch")
+        before = {
+            "session": session_path.read_bytes(),
+            "index": server._session_index_path().read_bytes(),
+            "config": server.CONFIG_PATH.read_bytes(),
+        }
+        handler = self.make_handler({
+            "label": "Switched",
+            "rootPaths": [str(self.other_root), str(self.project_root)],
+            "primaryRootPath": str(self.other_root),
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        self.assertEqual(
+            handler.send_json.call_args.args[0]["rootPaths"],
             [str(self.other_root.resolve()), str(self.project_root.resolve())],
         )
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(server._session_index_path().read_bytes(), before["index"])
+        self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
 
-    def test_update_project_rejects_a_source_folder_used_by_another_project(self):
+    def test_explicit_primary_switch_write_failure_restores_project_and_sessions(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-primary-switch-rollback",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 5,
+            },
+        )
+        session_path = server.session_path("session-primary-switch-rollback")
+        before = {
+            "projects": server.PROJECTS_PATH.read_bytes(),
+            "session": session_path.read_bytes(),
+            "index": server._session_index_path().read_bytes(),
+            "config": server.CONFIG_PATH.read_bytes(),
+        }
+        handler = self.make_handler({
+            "label": "Failed switch",
+            "rootPaths": [str(self.other_root), str(self.project_root)],
+            "primaryRootPath": str(self.other_root),
+        })
+        original_write_json = server.write_json
+        failed = False
+
+        def fail_first_project_write(path, payload):
+            nonlocal failed
+            if Path(path) == server.PROJECTS_PATH and not failed:
+                failed = True
+                raise OSError("synthetic primary switch write failure")
+            return original_write_json(path, payload)
+
+        with mock.patch.object(server, "write_json", side_effect=fail_first_project_write):
+            server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "project_session_migration_failed")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before["projects"])
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(server._session_index_path().read_bytes(), before["index"])
+        self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
+
+    def test_newly_added_folder_can_become_primary_without_dropping_old_primary(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        handler = self.make_handler({
+            "label": "Expanded",
+            "rootPaths": [
+                str(self.third_root),
+                str(self.project_root),
+                str(self.other_root),
+            ],
+            "primaryRootPath": str(self.third_root),
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        self.assertEqual(
+            handler.send_json.call_args.args[0]["rootPaths"],
+            [
+                str(self.third_root.resolve()),
+                str(self.project_root.resolve()),
+                str(self.other_root.resolve()),
+            ],
+        )
+
+    def test_primary_switch_cannot_remove_previous_primary_in_same_update(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        before = server.PROJECTS_PATH.read_bytes()
+        handler = self.make_handler({
+            "label": "Bypass",
+            "rootPaths": [str(self.other_root)],
+            "primaryRootPath": str(self.other_root),
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "project_primary_change_requires_explicit")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before)
+
+    def test_update_rejects_primary_marker_outside_requested_roots(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        before = server.PROJECTS_PATH.read_bytes()
+        handler = self.make_handler({
+            "label": "Invalid",
+            "rootPaths": [str(self.project_root), str(self.other_root)],
+            "primaryRootPath": str(self.third_root),
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["errorCode"], "project_primary_invalid")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before)
+
+    def test_update_allows_primary_and_secondary_roots_as_shared_secondaries(self):
         server._write_projects([
             {
                 "id": "project-1",
@@ -407,20 +706,60 @@ class TestProjectSchema(ProjectSessionTestCase):
             {
                 "id": "project-2",
                 "label": "Other",
-                "rootPaths": [str(self.other_root)],
+                "rootPaths": [str(self.other_root), str(self.third_root)],
             },
         ])
         handler = self.make_handler({
-            "label": "Duplicate",
-            "rootPaths": [str(self.other_root), str(self.third_root)],
+            "label": "Shared",
+            "rootPaths": [
+                str(self.project_root),
+                str(self.other_root),
+                str(self.third_root),
+            ],
         })
 
         server.CodeHandler.update_project(handler, "project-1")
 
+        self.assertEqual(handler.send_json.call_args.args[0]["label"], "Shared")
+        self.assertEqual(
+            server._find_project("project-1")["rootPaths"],
+            [
+                str(self.project_root.resolve()),
+                str(self.other_root.resolve()),
+                str(self.third_root.resolve()),
+            ],
+        )
+
+    def test_update_rejects_another_projects_primary_as_new_primary(self):
+        server._write_projects([
+            {
+                "id": "project-1",
+                "label": "Workspace",
+                "rootPaths": [str(self.project_root), str(self.third_root)],
+            },
+            {
+                "id": "project-2",
+                "label": "Other",
+                "rootPaths": [str(self.other_root)],
+            },
+        ])
+        before = server.PROJECTS_PATH.read_bytes()
+        handler = self.make_handler({
+            "label": "Duplicate",
+            "rootPaths": [str(self.other_root), str(self.project_root), str(self.third_root)],
+            "primaryRootPath": str(self.other_root),
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "project_primary_conflict")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before)
         self.assertEqual(handler.send_json.call_args.args[1], 409)
         self.assertEqual(
             server._find_project("project-1")["rootPaths"],
-            [str(self.project_root.resolve())],
+            [str(self.project_root.resolve()), str(self.third_root.resolve())],
         )
 
     def test_project_folder_picker_starts_from_the_project_source_folder(self):
@@ -1405,7 +1744,7 @@ class TestAgentRunWorkspace(ProjectSessionTestCase):
         def update_project():
             handler = self.make_handler({
                 "label": "Updated",
-                "rootPaths": [str(self.third_root)],
+                "rootPaths": [str(self.project_root), str(self.third_root)],
             })
             server.CodeHandler.update_project(handler, "project-1")
 
@@ -1414,8 +1753,11 @@ class TestAgentRunWorkspace(ProjectSessionTestCase):
             update_project,
         )
 
-        self.assertEqual(run["cwd"], str(self.third_root.resolve()))
-        self.assertEqual(run["workspace_roots"], [str(self.third_root.resolve())])
+        self.assertEqual(run["cwd"], str(self.project_root.resolve()))
+        self.assertEqual(
+            run["workspace_roots"],
+            [str(self.project_root.resolve()), str(self.third_root.resolve())],
+        )
 
     def test_agent_run_reloads_workspace_when_project_delete_wins_race(self):
         self.write_project(roots=[self.project_root, self.other_root])

@@ -28898,8 +28898,49 @@ process.stdout.write(JSON.stringify(samples));
         self.assertIn("editingProjectRootPaths", APP_SOURCE)
         self.assertIn("rootPaths: editingProjectRootPaths", APP_SOURCE)
         self.assertIn('data-project-folder-action="primary"', APP_SOURCE)
+        self.assertIn("editingProjectOriginalPrimaryPath", APP_SOURCE)
+        self.assertIn("editingProjectRequestedPrimaryPath", APP_SOURCE)
+        self.assertIn(
+            "update.primaryRootPath = editingProjectRequestedPrimaryPath;",
+            APP_SOURCE,
+        )
+        self.assertIn("projectFolderRemovalDisabled(index)", APP_SOURCE)
         self.assertIn("project-edit-card", STYLE_SOURCE)
         self.assertIn("project-delete-confirm-card", STYLE_SOURCE)
+
+    def test_project_inference_uses_only_the_deepest_primary_component_ancestor(self):
+        helper_start = APP_SOURCE.index("function normalizePathIdentity(")
+        helper_end = APP_SOURCE.index("function projectDisplayName(", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = helper_source + r'''
+const state = {projects: [
+  {id: "outer", rootPaths: ["C:/Work", "D:/Shared"]},
+  {id: "inner", rootPaths: ["C:/Work/Nested", "D:/Shared"]},
+]};
+process.stdout.write(JSON.stringify({
+  deepest: projectForRoot("c:/WORK/Nested/child")?.id || null,
+  secondaryOnly: projectForRoot("D:/Shared"),
+  boundary: pathIsSameOrDescendant("C:/Workspace-copy/child", "C:/Workspace"),
+  windowsCaseAndSlashes:
+    normalizePathIdentity("C:/WORK/Nested/") === normalizePathIdentity("c:\\work\\nested"),
+  posixCaseSensitive: pathIsSameOrDescendant("/Repo/child", "/repo"),
+}));
+'''
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "deepest": "inner",
+            "secondaryOnly": None,
+            "boundary": False,
+            "windowsCaseAndSlashes": True,
+            "posixCaseSensitive": False,
+        })
 
     def test_project_editor_visual_scale_uses_shared_icons_and_visible_name_label(self):
         modal_start = INDEX_SOURCE.index('id="projectEditModal"')
@@ -29124,6 +29165,9 @@ process.stdout.write(JSON.stringify({{
             "makePrimary",
             "removeSourceFolder",
             "sourceFolderAlreadyAdded",
+            "projectPrimaryConflict",
+            "projectPrimaryChangeRequiresExplicit",
+            "projectPrimaryInvalid",
             "sessionProjectMenu",
             "sessionProjectCurrent",
             "sessionProjectNewAndMove",

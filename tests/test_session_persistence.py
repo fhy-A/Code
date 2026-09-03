@@ -853,13 +853,23 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
                 old_root,
             )
             self.archive(session["id"])
-            updated = self.make_handler({
+            switched = self.make_handler({
+                "label": "Archived project",
+                "rootPaths": [str(new_root), str(old_root)],
+                "primaryRootPath": str(new_root),
+            })
+            server.CodeHandler.update_project(switched, "archived-project")
+            self.assertEqual(
+                switched.send_json.call_args.args[0]["rootPaths"],
+                [str(new_root.resolve()), str(old_root.resolve())],
+            )
+            removed = self.make_handler({
                 "label": "Archived project",
                 "rootPaths": [str(new_root)],
             })
-            server.CodeHandler.update_project(updated, "archived-project")
+            server.CodeHandler.update_project(removed, "archived-project")
             self.assertEqual(
-                updated.send_json.call_args.args[0]["rootPaths"],
+                removed.send_json.call_args.args[0]["rootPaths"],
                 [str(new_root.resolve())],
             )
 

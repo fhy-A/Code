@@ -46,11 +46,15 @@ async function seedContract(host) {
   const targetSecondary = path.join(host.root, "target-secondary");
   const longProjectRoot = path.join(host.root, "long-project-root");
   const newProjectRoot = path.join(host.root, "new-project-root");
+  const editorPrimary = path.join(host.root, "editor-primary");
+  const editorSecondary = path.join(host.root, "editor-secondary");
   await Promise.all([
     fs.mkdir(targetPrimary),
     fs.mkdir(targetSecondary),
     fs.mkdir(longProjectRoot),
     fs.mkdir(newProjectRoot),
+    fs.mkdir(editorPrimary),
+    fs.mkdir(editorSecondary),
     fs.mkdir(path.join(host.dataDir, "attachments"), { recursive: true }),
   ]);
   await Promise.all([
@@ -58,6 +62,8 @@ async function seedContract(host) {
     fs.writeFile(path.join(targetSecondary, "target-secondary.txt"), "secondary\n", "utf8"),
     fs.writeFile(path.join(longProjectRoot, "long-project.txt"), "long\n", "utf8"),
     fs.writeFile(path.join(newProjectRoot, "new-project.txt"), "new\n", "utf8"),
+    fs.writeFile(path.join(editorPrimary, "editor-primary.txt"), "primary\n", "utf8"),
+    fs.writeFile(path.join(editorSecondary, "editor-secondary.txt"), "secondary\n", "utf8"),
   ]);
 
   const existingProjects = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
@@ -87,6 +93,13 @@ async function seedContract(host) {
       rootPaths: [longProjectRoot],
     }),
   })).payload;
+  const editorProject = (await requestJson(host.ready.codeUrl, "/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      label: "Primary editor project",
+      rootPaths: [editorPrimary, editorSecondary],
+    }),
+  })).payload;
 
   const createSession = async (
     title,
@@ -110,9 +123,12 @@ async function seedContract(host) {
     targetSecondary,
     longProjectRoot,
     newProjectRoot,
+    editorPrimary,
+    editorSecondary,
     originalProject,
     targetProject,
     longProject,
+    editorProject,
     current: await createSession("CODE-071 current", {}, originalProject.id),
     longAssigned: await createSession(
       "CODE-071 long assigned",
@@ -129,6 +145,12 @@ async function seedContract(host) {
       {},
       longProject.id,
       longProjectRoot,
+    ),
+    editorSession: await createSession(
+      "CODE-071 primary editor",
+      {},
+      editorProject.id,
+      editorPrimary,
     ),
   };
 }
@@ -520,6 +542,75 @@ async function browseHome(page, host) {
   await waitForRoot(page, host.homeDir);
 }
 
+async function exercisePrimaryEditor(page, host, seed, { currentPrimary, nextPrimary }) {
+  const sessionBefore = await sessionRecord(host, seed.editorSession.id);
+  const header = page.locator(
+    `.project-header[data-project-id="${seed.editorProject.id}"]`,
+  );
+  await header.click({ button: "right" });
+  const menu = page.locator(".project-context-menu");
+  await menu.waitFor({ state: "visible" });
+  await menu.locator('[data-action="edit"]').click();
+
+  const modal = page.locator("#projectEditModal");
+  await modal.waitFor({ state: "visible" });
+  let rows = modal.locator(".project-source-folder-row");
+  assert.equal(await rows.count(), 2);
+  assert.equal(
+    await rows.nth(0).locator(".project-source-folder-name").textContent(),
+    path.basename(currentPrimary),
+  );
+  assert.equal(await rows.nth(0).locator(".project-source-folder-remove").isDisabled(), true);
+
+  await rows.nth(1).locator('[data-project-folder-action="primary"]').click();
+  rows = modal.locator(".project-source-folder-row");
+  assert.equal(
+    await rows.nth(0).locator(".project-source-folder-name").textContent(),
+    path.basename(nextPrimary),
+  );
+  assert.equal(await rows.nth(0).locator(".project-source-folder-remove").isDisabled(), true);
+  assert.equal(
+    await rows.nth(1).locator(".project-source-folder-name").textContent(),
+    path.basename(currentPrimary),
+  );
+  assert.equal(await rows.nth(1).locator(".project-source-folder-remove").isDisabled(), true);
+
+  const updateRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST"
+      && url.pathname === `/api/projects/${seed.editorProject.id}/update`;
+  });
+  await modal.locator("#saveProjectEdit").click();
+  const updateRequest = await updateRequestPromise;
+  const updateBody = updateRequest.postDataJSON();
+  assert.equal(path.resolve(updateBody.primaryRootPath), path.resolve(nextPrimary));
+  assert.deepEqual(
+    updateBody.rootPaths.map((rootPath) => path.resolve(rootPath)),
+    [path.resolve(nextPrimary), path.resolve(currentPrimary)],
+  );
+  await modal.waitFor({ state: "hidden" });
+
+  const updatedProject = await waitUntil(
+    async () => {
+      const projects = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
+      return projects.find((project) => project.id === seed.editorProject.id);
+    },
+    (project) => path.resolve(project?.rootPaths?.[0] || "") === path.resolve(nextPrimary),
+    "explicit primary switch did not persist",
+  );
+  const sessionAfter = await sessionRecord(host, seed.editorSession.id);
+  for (const key of ["projectId", "cwd", "revision", "updatedAt"]) {
+    assert.equal(sessionAfter[key], sessionBefore[key], `Session ${key} changed during primary switch`);
+  }
+  assert.equal(path.resolve(updatedProject.rootPaths[1]), path.resolve(currentPrimary));
+  return {
+    explicitIntent: "pass",
+    oldPrimaryRetained: "pass",
+    sameUpdateRemovalBlocked: "pass",
+    sessionLocationUnchanged: "pass",
+  };
+}
+
 async function exercise(page, host, seed, projectRequests) {
   await page.goto(new URL("/", host.ready.codeUrl).href, { waitUntil: "domcontentloaded" });
   await page.waitForFunction((sessionId) => (
@@ -769,6 +860,10 @@ async function main() {
       seed.current.id,
     ));
     const bundle = await exercise(page, host, seed, projectRequests);
+    const primaryEditorBundle = await exercisePrimaryEditor(page, host, seed, {
+      currentPrimary: seed.editorPrimary,
+      nextPrimary: seed.editorSecondary,
+    });
     await page.close();
     page = null;
     await context.close();
@@ -782,7 +877,18 @@ async function main() {
       seed.classic.id,
     ));
     const classic = await exerciseClassic(page, host, seed, projectRequests);
-    contract = { bundle, classic };
+    const primaryEditorClassic = await exercisePrimaryEditor(page, host, seed, {
+      currentPrimary: seed.editorSecondary,
+      nextPrimary: seed.editorPrimary,
+    });
+    contract = {
+      bundle,
+      classic,
+      primaryEditor: {
+        bundle: primaryEditorBundle,
+        classic: primaryEditorClassic,
+      },
+    };
     assert.deepEqual(pageErrors, []);
   } finally {
     if (page && !page.isClosed()) await page.close();

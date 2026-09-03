@@ -4992,11 +4992,31 @@ const PROJECT_SESSION_PREVIEW_LIMIT = 3;
 const UNASSIGNED_PROJECT_KEY = "__unassigned_sessions__";
 
 function normalizePathIdentity(path) {
-  return String(path || "")
-    .trim()
-    .replace(/\//g, "\\")
-    .replace(/\\+$/, "")
-    .toLowerCase();
+  const raw = String(path || "").trim();
+  if (!raw) return "";
+  const windowsPath = /^[a-z]:(?:[\\/]|$)/i.test(raw) || /^[\\/]{2}/.test(raw);
+  if (windowsPath) {
+    let normalized = raw.replace(/\//g, "\\").replace(/\\+$/, "");
+    if (/^[a-z]:$/i.test(normalized)) normalized += "\\";
+    return normalized.toLowerCase();
+  }
+  return raw.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+}
+
+function pathIsSameOrDescendant(path, rootPath) {
+  const pathKey = normalizePathIdentity(path);
+  const rootKey = normalizePathIdentity(rootPath);
+  if (!pathKey || !rootKey) return false;
+  const pathIsWindows = /^[a-z]:\\|^\\\\/i.test(pathKey);
+  const rootIsWindows = /^[a-z]:\\|^\\\\/i.test(rootKey);
+  if (pathIsWindows !== rootIsWindows) return false;
+  if (pathKey === rootKey) return true;
+  const separator = rootIsWindows ? "\\" : "/";
+  return pathKey.startsWith(rootKey.endsWith(separator) ? rootKey : rootKey + separator);
+}
+
+function pathComponentDepth(path) {
+  return normalizePathIdentity(path).split(/[\\/]+/).filter(Boolean).length;
 }
 
 function projectRootPaths(project) {
@@ -5024,7 +5044,14 @@ function projectContainsPath(project, path) {
 }
 
 function projectForRoot(path) {
-  return (state.projects || []).find((project) => projectContainsPath(project, path)) || null;
+  return (state.projects || []).reduce((best, project) => {
+    const primaryPath = projectPrimaryPath(project);
+    if (!pathIsSameOrDescendant(path, primaryPath)) return best;
+    if (!best || pathComponentDepth(primaryPath) > pathComponentDepth(projectPrimaryPath(best))) {
+      return project;
+    }
+    return best;
+  }, null);
 }
 
 function projectDisplayName(project) {
@@ -6026,6 +6053,8 @@ function closeProjectMenus({ restoreFocus = false } = {}) {
 
 let editingProjectId = null;
 let editingProjectRootPaths = [];
+let editingProjectOriginalPrimaryPath = "";
+let editingProjectRequestedPrimaryPath = "";
 let pendingProjectDeleteId = null;
 let projectModalListenersBound = false;
 
@@ -6034,10 +6063,20 @@ function projectFolderName(path) {
   return parts[parts.length - 1] || path || "";
 }
 
+function projectFolderRemovalDisabled(index) {
+  if (editingProjectRootPaths.length <= 1 || index === 0) return true;
+  const requestedKey = normalizePathIdentity(editingProjectRequestedPrimaryPath);
+  const originalKey = normalizePathIdentity(editingProjectOriginalPrimaryPath);
+  return Boolean(
+    requestedKey
+    && requestedKey !== originalKey
+    && normalizePathIdentity(editingProjectRootPaths[index]) === originalKey
+  );
+}
+
 function renderProjectEditFolders() {
   const list = document.getElementById("projectSourceFolderList");
   if (!list) return;
-  const onlyOne = editingProjectRootPaths.length <= 1;
   list.innerHTML = editingProjectRootPaths.map((path, index) => (
     '<div class="project-source-folder-row" title="' + escapeHtml(path) + '">' +
       '<span class="project-edit-folder-icon" aria-hidden="true">' +
@@ -6050,7 +6089,7 @@ function renderProjectEditFolders() {
           index + '">' + escapeHtml(t("makePrimary")) + '</button>') +
       '<button class="project-source-folder-remove" type="button" data-project-folder-action="remove" data-index="' +
         index + '" title="' + escapeHtml(t("removeSourceFolder")) + '" aria-label="' +
-        escapeHtml(t("removeSourceFolder")) + '"' + (onlyOne ? ' disabled' : '') + '>' +
+        escapeHtml(t("removeSourceFolder")) + '"' + (projectFolderRemovalDisabled(index) ? ' disabled' : '') + '>' +
         uiIcon("close", 16, "project-editor-icon") + '</button>' +
     '</div>'
   )).join("");
@@ -6060,6 +6099,8 @@ function closeProjectEditModal() {
   document.getElementById("projectEditModal")?.classList.add("hidden");
   editingProjectId = null;
   editingProjectRootPaths = [];
+  editingProjectOriginalPrimaryPath = "";
+  editingProjectRequestedPrimaryPath = "";
 }
 
 function closeProjectDeleteConfirm() {
@@ -6074,6 +6115,9 @@ function projectSessionMutationErrorMessage(error) {
     project_session_migration_unavailable: "projectSessionMigrationUnavailable",
     project_session_migration_failed: "projectSessionMigrationFailed",
     project_session_migration_recovery_failed: "projectSessionMigrationRecoveryFailed",
+    project_primary_conflict: "projectPrimaryConflict",
+    project_primary_change_requires_explicit: "projectPrimaryChangeRequiresExplicit",
+    project_primary_invalid: "projectPrimaryInvalid",
   })[code];
   return key ? t(key) : (error?.message || String(error));
 }
@@ -6085,9 +6129,10 @@ function setProjectEditBusy(busy) {
     if (element) element.disabled = busy;
   });
   document.querySelectorAll("[data-project-folder-action]").forEach((element) => {
+    const index = Number(element.dataset.index);
     element.disabled = busy || (
       element.dataset.projectFolderAction === "remove"
-      && editingProjectRootPaths.length <= 1
+      && projectFolderRemovalDisabled(index)
     );
   });
 }
@@ -6114,9 +6159,11 @@ function ensureProjectModalListeners() {
       const [primary] = next.splice(index, 1);
       next.unshift(primary);
       editingProjectRootPaths = next;
+      editingProjectRequestedPrimaryPath = primary;
     } else if (
       button.dataset.projectFolderAction === "remove"
       && editingProjectRootPaths.length > 1
+      && !projectFolderRemovalDisabled(index)
     ) {
       editingProjectRootPaths = editingProjectRootPaths.filter((_, itemIndex) => itemIndex !== index);
     }
@@ -6153,11 +6200,15 @@ function ensureProjectModalListeners() {
     }
     const projectId = editingProjectId;
     const oldRootPaths = projectRootPaths(project);
+    const update = { label, rootPaths: editingProjectRootPaths };
+    if (editingProjectRequestedPrimaryPath) {
+      update.primaryRootPath = editingProjectRequestedPrimaryPath;
+    }
     setProjectEditBusy(true);
     try {
       await apiJson("/api/projects/" + encodeURIComponent(projectId) + "/update", {
         method: "POST",
-        body: JSON.stringify({ label, rootPaths: editingProjectRootPaths }),
+        body: JSON.stringify(update),
       });
       closeProjectEditModal();
       await refreshSessions();
@@ -6191,6 +6242,8 @@ function ensureProjectModalListeners() {
     document.getElementById("projectEditModal")?.classList.add("hidden");
     editingProjectId = null;
     editingProjectRootPaths = [];
+    editingProjectOriginalPrimaryPath = "";
+    editingProjectRequestedPrimaryPath = "";
     document.getElementById("projectDeleteConfirmModal")?.classList.remove("hidden");
   });
 
@@ -6227,6 +6280,8 @@ function openProjectEditModal(projectId) {
   ensureProjectModalListeners();
   editingProjectId = projectId;
   editingProjectRootPaths = projectRootPaths(project);
+  editingProjectOriginalPrimaryPath = projectPrimaryPath(project);
+  editingProjectRequestedPrimaryPath = "";
   const input = document.getElementById("projectEditName");
   if (input) input.value = projectDisplayName(project);
   renderProjectEditFolders();

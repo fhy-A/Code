@@ -12681,6 +12681,24 @@ def _path_identity(value):
     return os.path.normcase(os.path.normpath(normalized))
 
 
+def _path_is_same_or_descendant(path, root_path):
+    """Return whether path is root_path or one of its component descendants."""
+    path_key = _path_identity(path)
+    root_key = _path_identity(root_path)
+    if not path_key or not root_key:
+        return False
+    try:
+        return os.path.commonpath((path_key, root_key)) == root_key
+    except (OSError, ValueError):
+        return False
+
+
+def _path_component_depth(path):
+    """Return a stable component depth used to choose the deepest root."""
+    path_key = _path_identity(path)
+    return len(Path(path_key).parts) if path_key else 0
+
+
 def _normalize_project_root_paths(project):
     """Return a project's ordered, unique source folders with primary first."""
     if not isinstance(project, dict):
@@ -12706,12 +12724,22 @@ def _project_primary_path(project):
     return roots[0] if roots else ""
 
 
-def _project_root_key_set(project):
-    return {
-        _path_identity(root_path)
-        for root_path in _normalize_project_root_paths(project)
-        if _path_identity(root_path)
-    }
+def _project_primary_key(project):
+    return _path_identity(_project_primary_path(project))
+
+
+def _validate_unique_project_primaries(projects):
+    """Fail closed when persisted projects contain ambiguous primary roots."""
+    seen = {}
+    for project in projects or []:
+        primary_key = _project_primary_key(project)
+        if not primary_key:
+            continue
+        previous_id = seen.get(primary_key)
+        project_id = str(project.get("id") or "")
+        if previous_id is not None and previous_id != project_id:
+            raise ValueError("Multiple projects cannot use the same primary source folder")
+        seen[primary_key] = project_id
 
 
 def _project_request_root_paths(body, current_project=None):
@@ -12783,25 +12811,15 @@ def _read_projects():
         return []
     projects = []
     seen_ids = set()
-    seen_paths = set()
     for item in raw:
         project = _normalize_project_record(item)
         if not project:
             continue
         if project["id"] in seen_ids:
             continue
-        unique_roots = []
-        for root_path in project["rootPaths"]:
-            path_key = _path_identity(root_path)
-            if not path_key or path_key in seen_paths:
-                continue
-            seen_paths.add(path_key)
-            unique_roots.append(root_path)
-        if not unique_roots:
-            continue
-        project["rootPaths"] = unique_roots
         seen_ids.add(project["id"])
         projects.append(project)
+    _validate_unique_project_primaries(projects)
     projects.sort(
         key=lambda item: (
             str(item.get("label") or "").casefold(),
@@ -12818,6 +12836,7 @@ def _write_projects(projects):
         project = _normalize_project_record(item)
         if project:
             normalized.append(project)
+    _validate_unique_project_primaries(normalized)
     write_json(PROJECTS_PATH, normalized)
 
 
@@ -12844,16 +12863,27 @@ def _find_project(project_id):
 
 
 def _find_project_by_path(path):
-    path_key = _path_identity(path)
-    if not path_key:
-        return None
+    """Infer a project from primary roots only, preferring the deepest ancestor."""
+    matches = []
     for project in _read_projects():
-        if any(
-            _path_identity(root_path) == path_key
-            for root_path in project.get("rootPaths") or []
-        ):
-            return project
-    return None
+        primary_path = _project_primary_path(project)
+        if _path_is_same_or_descendant(path, primary_path):
+            matches.append((
+                _path_component_depth(primary_path),
+                len(_project_primary_key(project)),
+                str(project.get("id") or ""),
+                project,
+            ))
+    return max(matches, key=lambda item: item[:3])[3] if matches else None
+
+
+def _path_is_covered_only_by_secondary_roots(path):
+    """Keep shared secondary roots from implicitly determining ownership."""
+    for project in _read_projects():
+        for secondary_path in _normalize_project_root_paths(project)[1:]:
+            if _path_is_same_or_descendant(path, secondary_path):
+                return True
+    return False
 
 
 def _ensure_project_for_path(path, label=None):
@@ -12864,17 +12894,20 @@ def _ensure_project_for_path(path, label=None):
     root = Path(normalized)
     if not root.exists() or not root.is_dir():
         return None
-    existing = _find_project_by_path(normalized)
-    if existing:
-        return existing
-    project = {
-        "id": uuid.uuid4().hex[:16],
-        "label": str(label or root.name or normalized).strip(),
-        "rootPaths": [normalized],
-    }
-    projects = _read_projects()
-    projects.append(project)
-    _write_projects(projects)
+    with _json_write_lock:
+        existing = _find_project_by_path(normalized)
+        if existing:
+            return existing
+        if _path_is_covered_only_by_secondary_roots(normalized):
+            return None
+        project = {
+            "id": uuid.uuid4().hex[:16],
+            "label": str(label or root.name or normalized).strip(),
+            "rootPaths": [normalized],
+        }
+        projects = _read_projects()
+        projects.append(project)
+        _write_projects(projects)
     return project
 
 
@@ -13027,7 +13060,9 @@ def _import_session_location(cwd=None, project_id=None):
         return _session_location(project_id, None)
     resolved_cwd = _normalize_local_path(cwd)
     project = _ensure_project_for_path(resolved_cwd)
-    return (project.get("id") if project else None), resolved_cwd
+    if project:
+        return project.get("id"), _project_primary_path(project)
+    return None, resolved_cwd
 
 
 def _session_revision(session):
@@ -23607,18 +23642,26 @@ class CodeHandler(BaseHTTPRequestHandler):
             str(body.get("label") or body.get("name") or "").strip()
             or Path(root_paths[0]).name
         )
-        projects = _read_projects()
-        existing_roots = set().union(*(_project_root_key_set(project) for project in projects))
-        if any(_path_identity(root_path) in existing_roots for root_path in root_paths):
-            self.send_json({"error": "Project already exists for one of these directories"}, 409)
-            return
-        proj = {
-            "id": uuid.uuid4().hex[:16],
-            "label": label,
-            "rootPaths": root_paths,
-        }
-        projects.append(proj)
-        _write_projects(projects)
+        with _json_write_lock:
+            projects = _read_projects()
+            primary_key = _path_identity(root_paths[0])
+            if any(
+                _project_primary_key(project) == primary_key
+                for project in projects
+            ):
+                self.send_json({
+                    "error": "Another project already uses this primary source folder",
+                    "errorCode": "project_primary_conflict",
+                    "retryable": False,
+                }, 409)
+                return
+            proj = {
+                "id": uuid.uuid4().hex[:16],
+                "label": label,
+                "rootPaths": root_paths,
+            }
+            projects.append(proj)
+            _write_projects(projects)
         self.send_json(_project_api_record(proj), 201)
 
     def rename_project(self, project_id):
@@ -23682,30 +23725,62 @@ class CodeHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "label required"}, 400)
             return None
 
+        old_root_paths = _normalize_project_root_paths(project)
+        old_root_keys = {_path_identity(root_path) for root_path in old_root_paths}
+        old_primary = old_root_paths[0] if old_root_paths else ""
+        old_primary_key = _path_identity(old_primary)
         try:
-            new_root_paths = _project_request_root_paths(body, project)
+            requested_root_paths = _project_request_root_paths(body, project)
         except ValueError as exc:
             self.send_json({"error": str(exc)}, 400)
             return None
+        requested_by_key = {
+            _path_identity(root_path): root_path
+            for root_path in requested_root_paths
+        }
+        explicit_primary_supplied = "primaryRootPath" in body
+        if explicit_primary_supplied:
+            requested_primary_key = _path_identity(body.get("primaryRootPath"))
+            if not requested_primary_key or requested_primary_key not in requested_by_key:
+                self.send_json({
+                    "error": "The requested primary folder must be one of the project source folders",
+                    "errorCode": "project_primary_invalid",
+                    "retryable": False,
+                }, 400)
+                return None
+        else:
+            requested_primary_key = old_primary_key
+
+        if old_primary_key not in requested_by_key:
+            self.send_json({
+                "error": "Make another folder primary first, then remove the previous primary folder separately",
+                "errorCode": "project_primary_change_requires_explicit",
+                "retryable": False,
+            }, 409)
+            return None
+
+        new_primary = requested_by_key[requested_primary_key]
+        new_root_paths = [new_primary] + [
+            root_path
+            for root_path in requested_root_paths
+            if _path_identity(root_path) != requested_primary_key
+        ]
         new_root_keys = {_path_identity(root_path) for root_path in new_root_paths}
         for other in projects:
             if other.get("id") == project_id:
                 continue
-            if new_root_keys & _project_root_key_set(other):
-                self.send_json(
-                    {"error": "Project already exists for one of these directories"},
-                    409,
-                )
+            if _path_identity(new_primary) == _project_primary_key(other):
+                self.send_json({
+                    "error": "Another project already uses this primary source folder",
+                    "errorCode": "project_primary_conflict",
+                    "retryable": False,
+                }, 409)
                 return None
 
-        old_root_paths = _normalize_project_root_paths(project)
-        old_root_keys = {_path_identity(root_path) for root_path in old_root_paths}
-        old_primary = old_root_paths[0] if old_root_paths else ""
-        new_primary = new_root_paths[0]
-        roots_changed = old_root_paths != new_root_paths
+        removed_root_keys = old_root_keys - new_root_keys
         index = _read_session_index()
         session_updates = []
-        if roots_changed:
+        if removed_root_keys:
             meta_paths = _session_meta_path_snapshot()
             candidate_ids = sorted(set(index) | set(meta_paths))
             for sid in candidate_ids:
@@ -23747,6 +23822,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                 location_changes = (
                     _path_identity(session_cwd) != _path_identity(next_cwd)
                 )
+                if not location_changes:
+                    continue
                 if location_changes and not _project_session_location_change_allowed(
                     safe_sid,
                     meta or {},
@@ -23779,13 +23856,32 @@ class CodeHandler(BaseHTTPRequestHandler):
                 })
 
         mutation_paths = [PROJECTS_PATH]
-        if roots_changed:
-            mutation_paths.extend((_session_index_path(), CONFIG_PATH))
+        config_root_moves = False
+        if removed_root_keys:
+            config_root = _normalize_local_path(load_config().get("projectRoot"))
+            config_root_key = _path_identity(config_root)
+            remains_under_a_primary = any(
+                _path_is_same_or_descendant(
+                    config_root,
+                    new_primary
+                    if item.get("id") == project_id
+                    else _project_primary_path(item),
+                )
+                for item in projects
+            )
+            config_root_moves = (
+                config_root_key in removed_root_keys
+                and not remains_under_a_primary
+            )
+        if session_updates:
+            mutation_paths.append(_session_index_path())
             mutation_paths.extend(
                 update["metaPath"]
                 for update in session_updates
                 if update["metaPath"] is not None
             )
+        if config_root_moves:
+            mutation_paths.append(CONFIG_PATH)
         try:
             snapshots = _project_session_mutation_snapshots(mutation_paths)
         except Exception as exc:
@@ -23795,7 +23891,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         project["rootPaths"] = new_root_paths
         try:
             _write_projects(projects)
-            if roots_changed:
+            if session_updates:
                 for update in session_updates:
                     meta = update["meta"]
                     entry = update["entry"]
@@ -23823,11 +23919,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                     json.dumps(entry, ensure_ascii=False) for entry in entries
                 ) + ("\n" if entries else "")
                 _write_session_index_payload(payload)
-
-                config = load_config()
-                config_root_key = _path_identity(config.get("projectRoot"))
-                if config_root_key in old_root_keys and config_root_key not in new_root_keys:
-                    save_config({"projectRoot": new_primary})
+            if config_root_moves:
+                save_config({"projectRoot": new_primary})
         except Exception as exc:
             recovery_failed = _restore_project_session_mutation_snapshots(snapshots)
             raise ProjectSessionMutationError(
