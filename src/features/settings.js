@@ -375,7 +375,6 @@
       return entries.map((entry, index) => {
         const isNew = newRow && index === entries.length - 1;
         return `<div class="key-row ${entry.enabled === false && !isNew ? "disabled" : ""}" data-idx="${index}" data-source="${entry.source === "platform" ? "platform" : "manual"}" data-platform-token-id="${escapeHtml(entry.platformTokenId || "")}" data-connection-id="${escapeHtml(entry.connectionId || "")}">
-          <span class="key-drag-handle" title="${t("dragSort")}" data-i18n-title="dragSort" draggable="true">⠿</span>
           <div class="key-main">
             <input class="key-name-input" placeholder="${t("keyNamePlaceholder")}" data-i18n="keyNamePlaceholder" value="${escapeHtml(entry.name)}" data-idx="${index}" />
             <div class="key-value-wrap"><input class="key-value-input" type="password" value="${escapeHtml(entry.key)}" data-idx="${index}" /></div>
@@ -441,38 +440,6 @@
 
     function bindKeyEditorEvents(container) {
       if (!container) return;
-      let dragSource = null;
-      container.querySelectorAll(".key-drag-handle").forEach((handle) => {
-        handle.addEventListener("dragstart", (event) => {
-          dragSource = handle.closest(".key-row");
-          dragSource.classList.add("dragging");
-          event.dataTransfer.effectAllowed = "move";
-        });
-        handle.addEventListener("dragend", () => {
-          dragSource?.classList.remove("dragging");
-          dragSource = null;
-          container.querySelectorAll(".key-row").forEach((row) => row.classList.remove("drag-over"));
-        });
-      });
-      container.querySelectorAll(".key-row").forEach((row) => {
-        row.addEventListener("dragover", (event) => {
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
-          row.classList.add("drag-over");
-        });
-        row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
-        row.addEventListener("drop", (event) => {
-          event.preventDefault();
-          row.classList.remove("drag-over");
-          if (!dragSource || dragSource === row) return;
-          const rows = [...container.querySelectorAll(".key-row")];
-          if (rows.indexOf(dragSource) < rows.indexOf(row)) row.after(dragSource);
-          else row.before(dragSource);
-          dragSource.classList.remove("dragging");
-          dragSource = null;
-          persistKeyEntries(container);
-        });
-      });
       container.querySelectorAll(".key-name-input, .key-value-input").forEach((input) => {
         input.addEventListener("change", () => persistKeyEntries(container));
       });

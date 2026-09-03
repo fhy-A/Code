@@ -7225,10 +7225,11 @@ body.theme-dark .syn-fn { color: #61afef; }
 .key-list { display: grid; gap: 8px; }
 .key-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
   gap: 8px;
   align-items: center;
-  padding: 7px 8px 7px 5px;
+  padding: 7px 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -7236,11 +7237,6 @@ body.theme-dark .syn-fn { color: #61afef; }
 }
 .key-row:hover { border-color: var(--line-strong); background: color-mix(in srgb, var(--panel-2) 50%, var(--panel)); }
 .key-row.disabled .key-main { opacity: .58; }
-.key-row.dragging { opacity: .4; }
-.key-row.drag-over { border-top: 2px solid var(--accent); }
-.key-drag-handle { cursor: grab; color: var(--faint); font-size: 16px; user-select: none; text-align: center; opacity: .55; }
-.key-row:hover .key-drag-handle { opacity: 1; color: var(--muted); }
-.key-drag-handle:active { cursor: grabbing; }
 .key-main { min-width: 0; display: grid; gap: 1px; }
 .settings-detail .key-row .key-name-input,
 .settings-detail .key-row .key-value-input {
@@ -7254,7 +7250,7 @@ body.theme-dark .syn-fn { color: #61afef; }
 .key-name-input:focus, .key-value-input:focus { border-color: var(--accent); background: var(--panel-3); }
 .key-value-wrap { position: relative; }
 .key-value-wrap .key-value-input { width: 100%; }
-.key-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.key-actions { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 8px; }
 .key-act-btn {
   width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted);

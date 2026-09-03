@@ -14201,6 +14201,10 @@ const feature = window.Code.features.settings.createSettingsFeature({
             check=True,
         )
         data = json.loads(completed.stdout)
+        self.assertEqual(
+            [entry["key"] for entry in data["config"]],
+            ["sk-manual", "sk-old", "sk-new"],
+        )
         config = {entry["key"]: entry for entry in data["config"]}
         self.assertTrue(data["result"]["ok"])
         self.assertEqual(data["result"]["status"], "synced")
@@ -14471,6 +14475,72 @@ const feature = window.Code.features.settings.createSettingsFeature({
         ):
             self.assertIn(expected, STYLE_SOURCE)
         self.assertIn('getFromWorkbar: "从 workbar 获取"', I18N_SOURCE)
+
+    def test_settings_key_editor_removes_drag_sort_without_reordering_controls(self):
+        render_start = SETTINGS_SOURCE.index("function keyNormalActions(")
+        render_end = SETTINGS_SOURCE.index("function collectKeyEntries(", render_start)
+        render_source = SETTINGS_SOURCE[render_start:render_end]
+        bind_start = SETTINGS_SOURCE.index("function bindKeyEditorEvents(")
+        bind_end = SETTINGS_SOURCE.index("function getPlatformUrl(", bind_start)
+        bind_source = SETTINGS_SOURCE[bind_start:bind_end]
+
+        for forbidden in (
+            "key-drag-handle",
+            'draggable="true"',
+            't("dragSort")',
+            'data-i18n-title="dragSort"',
+        ):
+            self.assertNotIn(forbidden, render_source)
+        for forbidden in (
+            "dragSource",
+            'addEventListener("dragstart"',
+            'addEventListener("dragend"',
+            'addEventListener("dragover"',
+            'addEventListener("dragleave"',
+            'addEventListener("drop"',
+            'classList.add("dragging")',
+            'classList.add("drag-over")',
+            "row.before(dragSource)",
+            "row.after(dragSource)",
+        ):
+            self.assertNotIn(forbidden, bind_source)
+
+        for retained in (
+            'class="key-main"',
+            'class="key-act-btn key-eye"',
+            'class="toggle-switch key-enable"',
+            'class="key-act-btn key-trash"',
+            'class="key-act-btn key-confirm"',
+            'class="key-act-btn key-cancel"',
+            'container.querySelectorAll(".key-name-input, .key-value-input")',
+            'container.querySelectorAll(".key-eye")',
+            'container.querySelectorAll(".key-enable input")',
+            'container.querySelectorAll(".key-confirm")',
+            'container.querySelectorAll(".key-cancel")',
+            'container.querySelectorAll(".key-trash")',
+            "row.remove();\n            persistKeyEntries(container);",
+            "const merged = [...collectKeyEntries(keyList), ...additions];",
+        ):
+            self.assertIn(retained, render_source + bind_source)
+
+        collect_start = SETTINGS_SOURCE.index("function collectKeyEntries(")
+        collect_end = SETTINGS_SOURCE.index("function syncKeyEditorFromStorage(", collect_start)
+        collect_source = SETTINGS_SOURCE[collect_start:collect_end]
+        self.assertIn('container?.querySelectorAll(".key-row").forEach((row) => {', collect_source)
+        self.assertNotIn("sort(", collect_source)
+        self.assertNotIn("reverse(", collect_source)
+
+        row_rule = re.search(r"\.key-row \{(?P<body>.*?)\}", STYLE_SOURCE, re.S)
+        self.assertIsNotNone(row_rule)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) auto;", row_rule.group("body"))
+        self.assertIn("min-width: 0;", row_rule.group("body"))
+        for forbidden in (
+            ".key-row.dragging",
+            ".key-row.drag-over",
+            ".key-drag-handle",
+        ):
+            self.assertNotIn(forbidden, STYLE_SOURCE)
+        self.assertNotIn("dragSort:", I18N_SOURCE)
 
     def test_key_connection_name_copy_and_delete_fallback_are_localized(self):
         self.assertIn('keyNamePlaceholder: "连接名称（可选）"', I18N_SOURCE)
