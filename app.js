@@ -375,6 +375,13 @@ function getSessionRevision(sessionId) {
   return normalizeSessionRevision(state._sessionRevisions[String(sessionId || "")]);
 }
 
+function hasSessionRevision(sessionId) {
+  return Object.prototype.hasOwnProperty.call(
+    state._sessionRevisions,
+    String(sessionId || ""),
+  );
+}
+
 function rememberSessionRevision(sessionId, session) {
   const normalizedId = String(sessionId || session?.id || "");
   if (!normalizedId || !session || !Object.prototype.hasOwnProperty.call(session, "revision")) {
@@ -450,6 +457,13 @@ function applyAuthoritativeSessionSnapshot(sessionId, session) {
   setSessionLastUsage(sessionId, session.lastUsage || null);
   const summary = state.sessions.find((candidate) => candidate.id === sessionId);
   if (summary) {
+    if (Object.prototype.hasOwnProperty.call(session, "projectId")) {
+      summary.projectId = session.projectId || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(session, "cwd")) {
+      summary.cwd = session.cwd || "";
+    }
+    if (session.source) summary.source = session.source;
     summary.runState = { ...(session.runState || {}) };
     summary.messageCount = messages.length;
     summary.updatedAt = session.updatedAt || summary.updatedAt;
@@ -520,6 +534,7 @@ const sessionDataFeature = Object.freeze({
   getSession: getSessionRecord,
   createSession: createSessionRecord,
   updateSession: updateSessionRecord,
+  moveSessionProject: rawSessionDataFeature.moveSessionProject,
   deleteSession: rawSessionDataFeature.deleteSession,
   listArchivedSessions: rawSessionDataFeature.listArchivedSessions,
   archiveSession: rawSessionDataFeature.archiveSession,
@@ -1856,6 +1871,70 @@ onboardingTasksFeature = createOnboardingTasksFeature({
     },
   },
 });
+
+function applySessionProjectLocation(sessionId, location = {}) {
+  const normalizedId = String(sessionId || "");
+  const summary = state.sessions.find((session) => session.id === normalizedId);
+  const responseSession = location.session && typeof location.session === "object"
+    ? location.session
+    : {};
+  const projectId = Object.prototype.hasOwnProperty.call(location, "projectId")
+    ? (location.projectId || null)
+    : (responseSession.projectId || null);
+  const cwd = String(location.cwd ?? responseSession.cwd ?? "");
+  const revision = normalizeSessionRevision(
+    location.revision ?? responseSession.revision ?? getSessionRevision(normalizedId),
+  );
+  if (summary) {
+    summary.projectId = projectId;
+    summary.cwd = cwd;
+  }
+  rememberSessionRevision(normalizedId, { revision });
+  const previous = authoritativeSessionSnapshots.get(normalizedId) || {};
+  rememberAuthoritativeSessionSnapshot(normalizedId, {
+    ...previous,
+    ...responseSession,
+    id: normalizedId,
+    projectId,
+    cwd,
+    revision,
+  });
+  if (normalizedId === state.sessionId) state.pendingProjectId = projectId;
+  renderSessions();
+  updateGroupBadge(summary || { id: normalizedId, projectId });
+  return { projectId, cwd, revision, summary };
+}
+
+async function moveSessionToProject(sessionId, projectId) {
+  const normalizedId = String(sessionId || "").trim();
+  if (!normalizedId) throw new TypeError("Session id is required");
+  let location;
+  try {
+    if (!hasSessionRevision(normalizedId)) await getSessionRecord(normalizedId);
+    location = await sessionDataFeature.moveSessionProject(normalizedId, {
+      projectId: projectId || null,
+      expectedRevision: getSessionRevision(normalizedId),
+    });
+  } catch (error) {
+    try {
+      const authoritative = await getSessionRecord(normalizedId);
+      applyAuthoritativeSessionSnapshot(normalizedId, authoritative);
+    } catch (recoveryError) {
+      error._sessionProjectRecoveryError = recoveryError;
+    }
+    throw error;
+  }
+  const applied = applySessionProjectLocation(normalizedId, location);
+  if (normalizedId === state.sessionId) {
+    try {
+      await saveProjectRoot(applied.cwd, { syncSession: false });
+    } catch (error) {
+      error._sessionProjectLocationApplied = applied;
+      throw error;
+    }
+  }
+  return { ...location, ...applied };
+}
 onboardingTasksFeature.bind();
 
 function clearPlatformLocalData() {
@@ -2493,10 +2572,13 @@ async function loadProjectContext() {
 
   try {
     const active = state.sessions.find((session) => session.id === state.sessionId);
-    const project = active?.projectId
-      ? state.projectsMap[active.projectId]
+    const project = active
+      ? (active.projectId ? state.projectsMap[active.projectId] : null)
       : (state.pendingProjectId ? state.projectsMap[state.pendingProjectId] : projectForCurrentRoot());
-    const contextRoot = projectPrimaryPath(project) || els.projectRoot?.value || "";
+    const contextRoot = projectPrimaryPath(project)
+      || active?.cwd
+      || els.projectRoot?.value
+      || "";
     state.projectContext = await loadProjectContextForRoot(contextRoot, true);
 
   } catch {
@@ -5191,7 +5273,7 @@ function renderProjectSessionRow(session, pinnedIds) {
     escapeHtml(title) + '</span></span>' +
     renderSessionSourceBadge(session, t, escapeHtml) + renderSessionStatusSlot(session) + '</button>' +
     '<div class="session-more-wrap"><button class="session-more-btn" type="button" title="' +
-    t("more") + '" aria-label="' + t("more") + '" data-session-id="' + escapeHtml(session.id) + '">' +
+    t("more") + '" aria-label="' + t("more") + '" aria-haspopup="menu" aria-expanded="false" data-session-id="' + escapeHtml(session.id) + '">' +
     uiIcon("more", 16, "shell-action-icon") + '</button></div></div>';
 }
 
@@ -5259,7 +5341,267 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   return html;
 }
 
+let sessionMenuReturnFocus = null;
+let sessionProjectSubmenuSerial = 0;
+
+function sessionMenuItems(menu) {
+  return Array.from(menu?.children || []).filter((item) => (
+    item.matches?.('[role="menuitem"]') && !item.disabled
+  ));
+}
+
+function focusSessionMenuItem(menu, current, delta) {
+  const items = sessionMenuItems(menu);
+  if (!items.length) return false;
+  const currentIndex = items.indexOf(current);
+  const nextIndex = currentIndex < 0
+    ? (delta < 0 ? items.length - 1 : 0)
+    : (currentIndex + delta + items.length) % items.length;
+  items[nextIndex].focus({ preventScroll: true });
+  return true;
+}
+
+function resolveSessionSubmenuPosition(anchor = {}, menuSize = {}, viewport = {}, margin = 8) {
+  const offset = 3;
+  const viewportWidth = Math.max(0, Number(viewport.width) || 0);
+  const viewportHeight = Math.max(0, Number(viewport.height) || 0);
+  const menuWidth = Math.max(0, Number(menuSize.width) || 0);
+  const menuHeight = Math.max(0, Number(menuSize.height) || 0);
+  const rightCandidate = (Number(anchor.right) || 0) + offset;
+  const leftCandidate = (Number(anchor.left) || 0) - menuWidth - offset;
+  const opensLeft = rightCandidate + menuWidth > viewportWidth - margin;
+  const desiredLeft = opensLeft ? leftCandidate : rightCandidate;
+  const maxLeft = Math.max(margin, viewportWidth - margin - menuWidth);
+  const maxTop = Math.max(margin, viewportHeight - margin - menuHeight);
+  return {
+    left: Math.round(Math.min(Math.max(desiredLeft, margin), maxLeft)),
+    top: Math.round(Math.min(Math.max(Number(anchor.top) || 0, margin), maxTop)),
+    opensLeft,
+  };
+}
+
+function sessionProjectMigrationErrorKey(error) {
+  if (error?._sessionProjectLocationApplied) return "sessionProjectTreeSyncFailed";
+  if (error?._sessionProjectRecoveryError) return "sessionProjectMigrationRecoveryFailed";
+  const code = String(error?.data?.errorCode || error?.errorCode || "");
+  if (code === "session_project_migration_busy") return "sessionProjectMigrationBusy";
+  if (code === "session_revision_conflict") return "sessionProjectMigrationConflict";
+  if (code === "session_archived") return "sessionProjectArchivedRestore";
+  return "sessionProjectMigrationFailed";
+}
+
+async function runSessionProjectMenuAction(sessionId, projectId, projectName = "") {
+  closeAllSessionMenus();
+  try {
+    await moveSessionToProject(sessionId, projectId);
+    showToast(
+      projectId
+        ? t("sessionProjectMoveSuccess", { name: projectName })
+        : t("sessionProjectRemoveSuccess"),
+      "success",
+    );
+    return true;
+  } catch (error) {
+    showToast(t(sessionProjectMigrationErrorKey(error)), "error");
+    return false;
+  }
+}
+
+function closeSessionProjectSubmenu(menu, { restoreFocus = false } = {}) {
+  const submenu = menu?._projectSubmenu;
+  const trigger = menu?._projectTrigger;
+  if (submenu?.isConnected) submenu.remove();
+  if (menu) menu._projectSubmenu = null;
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.removeAttribute("aria-controls");
+  }
+  if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+}
+
+function openSessionProjectSubmenu(menu, trigger, sessionId, { focusFirst = false } = {}) {
+  closeSessionProjectSubmenu(menu);
+  const session = state.sessions.find((candidate) => candidate.id === sessionId) || {};
+  const currentProject = session.projectId
+    ? (state.projectsMap[session.projectId] || { id: session.projectId, label: session.projectId })
+    : null;
+  const submenu = document.createElement("div");
+  submenu.className = "session-more-menu session-project-submenu";
+  submenu.id = `session-project-submenu-${++sessionProjectSubmenuSerial}`;
+  submenu.setAttribute("role", "menu");
+  submenu.setAttribute("aria-label", t("sessionProjectMenu"));
+  submenu.style.position = "fixed";
+  submenu.style.left = "-10000px";
+  submenu.style.top = "-10000px";
+  submenu.style.visibility = "hidden";
+
+  const projects = orderProjects(state.projects, getPinnedProjects());
+  submenu.innerHTML = projects.map((project) => {
+    const current = project.id === session.projectId;
+    const name = projectDisplayName(project);
+    return '<button class="session-more-item session-project-item" type="button" role="menuitem" data-project-id="' +
+      escapeHtml(project.id) + '" data-project-name="' + escapeHtml(name) + '"' +
+      (current ? ' disabled aria-current="true"' : '') + '><span>' + escapeHtml(name) + '</span>' +
+      (current ? '<span class="session-project-current">' + escapeHtml(t("sessionProjectCurrent")) + '</span>' : '') +
+      '</button>';
+  }).join("") +
+    (currentProject
+      ? '<div class="session-menu-separator" role="separator"></div>' +
+        '<button class="session-more-item" type="button" role="menuitem" data-project-action="remove">' +
+        escapeHtml(t("sessionProjectRemove", { name: projectDisplayName(currentProject) })) + '</button>'
+      : '') +
+    (!currentProject
+      ? '<div class="session-menu-separator" role="separator"></div>' +
+        '<button class="session-more-item" type="button" role="menuitem" data-project-action="create">' +
+        escapeHtml(t("sessionProjectNewAndMove")) + '</button>'
+      : '');
+
+  submenu.addEventListener("click", (event) => event.stopPropagation());
+  submenu.querySelectorAll('[role="menuitem"]').forEach((item) => {
+    item.addEventListener("click", async () => {
+      if (item.disabled) return;
+      const action = item.dataset.projectAction;
+      if (action === "create") {
+        closeAllSessionMenus();
+        try {
+          const project = await createProjectFromFolder();
+          if (project) {
+            await runSessionProjectMenuAction(
+              sessionId,
+              project.id,
+              projectDisplayName(project),
+            );
+          }
+        } catch (error) {
+          showToast(t("sessionProjectCreateFailed"), "error");
+        }
+        return;
+      }
+      if (action === "remove") {
+        await runSessionProjectMenuAction(sessionId, null);
+        return;
+      }
+      await runSessionProjectMenuAction(
+        sessionId,
+        item.dataset.projectId,
+        item.dataset.projectName,
+      );
+    });
+  });
+  submenu.addEventListener("keydown", (event) => {
+    const item = event.target.closest?.('[role="menuitem"]');
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusSessionMenuItem(submenu, item, event.key === "ArrowDown" ? 1 : -1);
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const items = sessionMenuItems(submenu);
+      items[event.key === "Home" ? 0 : items.length - 1]?.focus({ preventScroll: true });
+    } else if (event.key === "ArrowLeft" || event.key === "Escape") {
+      event.preventDefault();
+      closeSessionProjectSubmenu(menu, { restoreFocus: true });
+    }
+  });
+
+  document.body.appendChild(submenu);
+  menu._projectSubmenu = submenu;
+  menu._projectTrigger = trigger;
+  trigger.setAttribute("aria-expanded", "true");
+  trigger.setAttribute("aria-controls", submenu.id);
+  const triggerRect = trigger.getBoundingClientRect();
+  const submenuRect = submenu.getBoundingClientRect();
+  const position = resolveSessionSubmenuPosition(
+    triggerRect,
+    { width: submenuRect.width, height: submenuRect.height },
+    {
+      width: document.documentElement.clientWidth || window.innerWidth,
+      height: document.documentElement.clientHeight || window.innerHeight,
+    },
+  );
+  submenu.style.left = position.left + "px";
+  submenu.style.top = position.top + "px";
+  submenu.dataset.opensLeft = String(position.opensLeft);
+  submenu.style.visibility = "visible";
+  if (focusFirst) sessionMenuItems(submenu)[0]?.focus({ preventScroll: true });
+  return submenu;
+}
+
+function openSessionMoreMenu(button, { focusFirst = false } = {}) {
+  closeAllSessionMenus();
+  const sessionId = button.dataset.sessionId;
+  const menu = document.createElement("div");
+  menu.className = "session-more-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("more"));
+  menu.style.position = "fixed";
+  menu.style.left = "-10000px";
+  menu.style.top = "-10000px";
+  menu.style.visibility = "hidden";
+  const pinned = getPinnedSessions().includes(sessionId);
+  menu.innerHTML = '<button class="session-more-item pin ' + (pinned ? 'is-pinned' : '') + '" type="button" role="menuitem" data-action="pin">' + (pinned ? t("unpin") : t("pin")) + '</button>' +
+    '<button class="session-more-item" type="button" role="menuitem" data-action="rename">' + t("rename") + '</button>' +
+    '<button class="session-more-item session-project-trigger" type="button" role="menuitem" data-action="project" aria-haspopup="menu" aria-expanded="false"><span>' + escapeHtml(t("sessionProjectMenu")) + '</span><span aria-hidden="true">' + uiIcon("chevronRight", 14, "shell-action-icon") + '</span></button>' +
+    '<button class="session-more-item" type="button" role="menuitem" data-action="archive"' + (archiveSessionPending.has(sessionId) ? ' disabled' : '') + '>' + t(archiveSessionPending.has(sessionId) ? "archivingSession" : "archiveSession") + '</button>';
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  menu.querySelectorAll(':scope > [role="menuitem"]').forEach((item) => {
+    item.addEventListener("click", () => {
+      if (item.disabled) return;
+      if (item.dataset.action === "project") {
+        openSessionProjectSubmenu(menu, item, sessionId, { focusFirst: true });
+        return;
+      }
+      closeAllSessionMenus();
+      if (item.dataset.action === "rename") {
+        state.renamingSessionId = sessionId;
+        renderSessions();
+        document.querySelector(".session-rename-inline")?.select();
+      } else if (item.dataset.action === "pin") {
+        togglePinSession(sessionId);
+      } else if (item.dataset.action === "archive") {
+        void archiveSession(sessionId);
+      }
+    });
+  });
+  menu.addEventListener("keydown", (event) => {
+    const item = event.target.closest?.('[role="menuitem"]');
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusSessionMenuItem(menu, item, event.key === "ArrowDown" ? 1 : -1);
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const items = sessionMenuItems(menu);
+      items[event.key === "Home" ? 0 : items.length - 1]?.focus({ preventScroll: true });
+    } else if (event.key === "ArrowRight" && item?.dataset.action === "project") {
+      event.preventDefault();
+      openSessionProjectSubmenu(menu, item, sessionId, { focusFirst: true });
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeAllSessionMenus({ restoreFocus: true });
+    }
+  });
+
+  document.body.appendChild(menu);
+  sessionMenuReturnFocus = button;
+  button.setAttribute("aria-expanded", "true");
+  const buttonRect = button.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const position = resolveProjectContextMenuPosition(
+    { x: buttonRect.right - menuRect.width, y: buttonRect.bottom },
+    { width: menuRect.width, height: menuRect.height },
+    {
+      width: document.documentElement.clientWidth || window.innerWidth,
+      height: document.documentElement.clientHeight || window.innerHeight,
+    },
+  );
+  menu.style.left = position.left + "px";
+  menu.style.top = position.top + "px";
+  menu.style.visibility = "visible";
+  if (focusFirst) sessionMenuItems(menu)[0]?.focus({ preventScroll: true });
+  return menu;
+}
+
 function renderSessions() {
+  closeAllSessionMenus();
   cancelSessionTitleOverflowRefresh();
   sessionTitleMarquee.reset();
   projectTitleMarquee.reset();
@@ -5325,36 +5667,8 @@ function renderSessions() {
 
   document.querySelectorAll(".session-more-btn").forEach((button) => {
     button.addEventListener("click", (event) => {
-      const btn = button;
-      const e = event;
-      e.stopPropagation();
-      closeAllSessionMenus();
-      const id = btn.dataset.sessionId;
-      const rect = btn.getBoundingClientRect();
-      const menu = document.createElement("div");
-      menu.className = "session-more-menu";
-      menu.style.position = "fixed";
-      menu.style.left = (rect.right - 90) + "px";
-      menu.style.top = (rect.bottom + 2) + "px";
-      menu.innerHTML = '<button class="session-more-item pin ' + (getPinnedSessions().includes(id) ? 'is-pinned' : '') + '" data-action="pin">' + (getPinnedSessions().includes(id) ? t('unpin') : t('pin')) + '</button>' +
-        '<button class="session-more-item" data-action="rename">' + t("rename") + '</button>' +
-        '<button class="session-more-item" data-action="archive"' + (archiveSessionPending.has(id) ? ' disabled' : '') + '>' + t(archiveSessionPending.has(id) ? "archivingSession" : "archiveSession") + '</button>';
-      menu.querySelectorAll(".session-more-item").forEach((item) => {
-        item.addEventListener("click", () => {
-          if (item.dataset.action === "rename") {
-            state.renamingSessionId = id;
-            renderSessions();
-            const renameInput = document.querySelector(".session-rename-inline");
-            if (renameInput) renameInput.select();
-          } else if (item.dataset.action === "pin") {
-            togglePinSession(id);
-          } else if (item.dataset.action === "archive") {
-            void archiveSession(id);
-          }
-          menu.remove();
-        });
-      });
-      document.body.appendChild(menu);
+      event.stopPropagation();
+      openSessionMoreMenu(button, { focusFirst: true });
     });
   });
 
@@ -5479,6 +5793,17 @@ function attachSessionTitleMarqueeListeners() {
   return true;
 }
 
+async function createProjectFromFolder() {
+  const result = await apiJson("/api/pick-folder");
+  if (result.cancelled || !result.path) return null;
+  const project = await apiJson("/api/projects", {
+    method: "POST",
+    body: JSON.stringify({ path: result.path }),
+  });
+  await refreshProjects();
+  return state.projectsMap[project.id] || project;
+}
+
 function attachProjectSessionListeners() {
   const toggleProjectHeader = (header) => {
     const projectKey = header.dataset.projectKey;
@@ -5547,17 +5872,9 @@ function attachProjectSessionListeners() {
   if (createBtn && !createBtn._hasCreateHandler) {
     createBtn._hasCreateHandler = true;
     createBtn.addEventListener("click", () => {
-      apiJson("/api/pick-folder")
-        .then((result) => {
-          if (result.cancelled || !result.path) return;
-          return apiJson("/api/projects", {
-            method: "POST",
-            body: JSON.stringify({ path: result.path }),
-          });
-        })
+      createProjectFromFolder()
         .then(async (project) => {
           if (!project) return;
-          await refreshProjects();
           beginNewConversation(project.id);
         })
         .catch((err) => console.error("Create project failed:", err));
@@ -5565,10 +5882,14 @@ function attachProjectSessionListeners() {
   }
 }
 
-function closeAllSessionMenus() {
-
-  document.querySelectorAll(".session-more-menu").forEach((m) => m.remove());
-
+function closeAllSessionMenus({ restoreFocus = false } = {}) {
+  document.querySelectorAll(".session-more-menu").forEach((menu) => menu.remove());
+  const returnFocus = sessionMenuReturnFocus;
+  if (returnFocus) returnFocus.setAttribute("aria-expanded", "false");
+  sessionMenuReturnFocus = null;
+  if (restoreFocus && returnFocus?.isConnected) {
+    returnFocus.focus({ preventScroll: true });
+  }
 }
 
 let projectMenuReturnFocus = null;
@@ -5623,6 +5944,17 @@ function closeProjectEditModal() {
 function closeProjectDeleteConfirm() {
   document.getElementById("projectDeleteConfirmModal")?.classList.add("hidden");
   pendingProjectDeleteId = null;
+}
+
+function projectSessionMutationErrorMessage(error) {
+  const code = String(error?.data?.errorCode || "");
+  const key = ({
+    project_session_migration_busy: "projectSessionMigrationBusy",
+    project_session_migration_unavailable: "projectSessionMigrationUnavailable",
+    project_session_migration_failed: "projectSessionMigrationFailed",
+    project_session_migration_recovery_failed: "projectSessionMigrationRecoveryFailed",
+  })[code];
+  return key ? t(key) : (error?.message || String(error));
 }
 
 function setProjectEditBusy(busy) {
@@ -5723,7 +6055,7 @@ function ensureProjectModalListeners() {
       }
       showToast(t("projectSaved"), "success");
     } catch (error) {
-      showToast(error.message || String(error), "error");
+      showToast(projectSessionMutationErrorMessage(error), "error");
     } finally {
       setProjectEditBusy(false);
     }
@@ -5755,7 +6087,7 @@ function ensureProjectModalListeners() {
       await deleteProject(projectId);
       closeProjectDeleteConfirm();
     } catch (error) {
-      showToast(error.message || String(error), "error");
+      showToast(projectSessionMutationErrorMessage(error), "error");
     } finally {
       if (button) button.disabled = false;
     }
@@ -5808,6 +6140,9 @@ document.addEventListener("keydown", function (event) {
   if (event.key === "Escape" && document.querySelector(".project-context-menu")) {
     event.preventDefault();
     closeProjectMenus({ restoreFocus: true });
+  } else if (event.key === "Escape" && document.querySelector(".session-more-menu")) {
+    event.preventDefault();
+    closeAllSessionMenus({ restoreFocus: true });
   }
 });
 
@@ -6071,36 +6406,6 @@ async function saveProjectRoot(newPath, options = {}) {
   els.projectRootShort.title = config.projectRoot || t("manageProjectDir");
 
   addRecentFolder(config.projectRoot);
-
-  if (state.sessionId && options.syncSession !== false) {
-    const summary = state.sessions.find((session) => session.id === state.sessionId);
-    const currentProject = summary?.projectId
-      ? state.projectsMap[summary.projectId]
-      : null;
-    const nextProjectId = currentProject && projectContainsPath(currentProject, config.projectRoot)
-      ? currentProject.id
-      : null;
-    const location = await apiJson(
-      "/api/sessions/" + encodeURIComponent(state.sessionId) + "/project",
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          projectId: nextProjectId,
-          cwd: config.projectRoot || "",
-        }),
-      },
-    );
-    if (summary) {
-      summary.projectId = location.projectId || null;
-      summary.cwd = location.cwd || config.projectRoot || "";
-    }
-    state.pendingProjectId = location.projectId || null;
-    if (currentProject && !nextProjectId) {
-      showToast(t("sessionDetachedFromProject"), "warning");
-    }
-    renderSessions();
-    updateGroupBadge(summary || {});
-  }
 
   await loadFiles("");
 

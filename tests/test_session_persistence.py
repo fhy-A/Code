@@ -775,10 +775,137 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         server.CodeHandler.unarchive_session_lifecycle(handler, session_id)
         return handler
 
+    def attach_session_to_project(self, session_id, project_id, cwd):
+        meta_path = server.session_path(session_id)
+        meta = server.read_json(meta_path, {})
+        meta["projectId"] = project_id
+        meta["cwd"] = str(Path(cwd).resolve())
+        server.write_json(meta_path, meta)
+        server._write_session_index_from_meta(meta)
+        return meta
+
     def archive_summary(self):
         handler = self.make_handler()
         server.CodeHandler.get_archived_sessions(handler)
         return handler.send_json.call_args.args[0]["data"]
+
+    def test_restore_unassigns_archived_session_when_project_was_deleted(self):
+        project_path = self.root / "projects.json"
+        config_path = self.root / "config.json"
+        old_root = self.root / "archived-project-root"
+        old_root.mkdir()
+        with mock.patch.object(server, "PROJECTS_PATH", project_path), mock.patch.object(
+            server,
+            "CONFIG_PATH",
+            config_path,
+        ):
+            server.write_json(config_path, {"projectRoot": str(old_root)})
+            server._write_projects([{
+                "id": "archived-project",
+                "label": "Archived project",
+                "rootPaths": [str(old_root)],
+            }])
+            session = self.create_session(title="Deleted project restore")
+            before = self.attach_session_to_project(
+                session["id"],
+                "archived-project",
+                old_root,
+            )
+            self.archive(session["id"])
+            deleted = self.make_handler()
+            server.CodeHandler.delete_project(deleted, "archived-project")
+            self.assertEqual(deleted.send_json.call_args.args[0], {"ok": True})
+
+            restored = self.unarchive(session["id"])
+
+            payload = restored.send_json.call_args.args[0]
+            meta = server.read_json(server.session_path(session["id"]), {})
+            entry = server._read_session_index()[session["id"]]
+            self.assertEqual(payload, {"ok": True, "status": "active"})
+            self.assertIsNone(meta["projectId"])
+            self.assertEqual(meta["cwd"], str(old_root.resolve()))
+            self.assertEqual(meta["revision"], before["revision"] + 1)
+            self.assertIsNone(entry["projectId"])
+            self.assertEqual(entry["cwd"], str(old_root.resolve()))
+
+    def test_restore_rebinds_archived_session_to_current_project_primary_root(self):
+        project_path = self.root / "projects.json"
+        config_path = self.root / "config.json"
+        old_root = self.root / "old-project-root"
+        new_root = self.root / "new-project-root"
+        old_root.mkdir()
+        new_root.mkdir()
+        with mock.patch.object(server, "PROJECTS_PATH", project_path), mock.patch.object(
+            server,
+            "CONFIG_PATH",
+            config_path,
+        ):
+            server.write_json(config_path, {"projectRoot": str(old_root)})
+            server._write_projects([{
+                "id": "archived-project",
+                "label": "Archived project",
+                "rootPaths": [str(old_root)],
+            }])
+            session = self.create_session(title="Changed root restore")
+            before = self.attach_session_to_project(
+                session["id"],
+                "archived-project",
+                old_root,
+            )
+            self.archive(session["id"])
+            updated = self.make_handler({
+                "label": "Archived project",
+                "rootPaths": [str(new_root)],
+            })
+            server.CodeHandler.update_project(updated, "archived-project")
+            self.assertEqual(
+                updated.send_json.call_args.args[0]["rootPaths"],
+                [str(new_root.resolve())],
+            )
+
+            restored = self.unarchive(session["id"])
+
+            payload = restored.send_json.call_args.args[0]
+            meta = server.read_json(server.session_path(session["id"]), {})
+            entry = server._read_session_index()[session["id"]]
+            self.assertEqual(payload, {"ok": True, "status": "active"})
+            self.assertEqual(meta["projectId"], "archived-project")
+            self.assertEqual(meta["cwd"], str(new_root.resolve()))
+            self.assertEqual(meta["revision"], before["revision"] + 1)
+            self.assertEqual(entry["projectId"], "archived-project")
+            self.assertEqual(entry["cwd"], str(new_root.resolve()))
+
+    def test_restore_preserves_archived_cwd_when_it_is_still_a_project_root(self):
+        project_path = self.root / "projects.json"
+        primary_root = self.root / "primary-project-root"
+        retained_root = self.root / "retained-project-root"
+        primary_root.mkdir()
+        retained_root.mkdir()
+        with mock.patch.object(server, "PROJECTS_PATH", project_path):
+            server._write_projects([{
+                "id": "archived-project",
+                "label": "Archived project",
+                "rootPaths": [str(primary_root), str(retained_root)],
+            }])
+            session = self.create_session(title="Retained root restore")
+            before = self.attach_session_to_project(
+                session["id"],
+                "archived-project",
+                retained_root,
+            )
+            self.archive(session["id"])
+            server._write_projects([{
+                "id": "archived-project",
+                "label": "Archived project",
+                "rootPaths": [str(retained_root), str(primary_root)],
+            }])
+
+            self.unarchive(session["id"])
+
+            meta = server.read_json(server.session_path(session["id"]), {})
+            self.assertEqual(meta["projectId"], "archived-project")
+            self.assertEqual(meta["cwd"], str(retained_root.resolve()))
+            self.assertEqual(meta["revision"], before["revision"])
 
     def start_http_server(self):
         server.ThreadingHTTPServer.daemon_threads = True

@@ -55,6 +55,9 @@ CODE043_SHELL_SELFCHECK_SOURCE = (
 CODE043_COMPACT_DISCLOSURES_FINAL_STATE_SELFCHECK_SOURCE = (
     ROOT / "tests" / "e2e" / "h4" / "code043-compact-disclosures-final-state-selfcheck.cjs"
 ).read_text(encoding="utf-8")
+CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE = (
+    ROOT / "tests" / "e2e" / "h4" / "code071-session-project-migration-selfcheck.cjs"
+).read_text(encoding="utf-8")
 PACKAGE_JSON = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 STYLE_SOURCE = (ROOT / "styles.css").read_text(encoding="utf-8")
 LOGO_SOURCE = (ROOT / "assets" / "code-logo.svg").read_text(encoding="utf-8")
@@ -64,6 +67,37 @@ H4_CONFIG_PATH = ROOT / "tests" / "e2e" / "h4" / "playwright.config.cjs"
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_code071_session_project_migration_h4_is_packaged_and_cleans_up(self):
+        self.assertEqual(
+            PACKAGE_JSON["scripts"]["test:h4:session-project-migration"],
+            "node tests/e2e/h4/code071-session-project-migration-selfcheck.cjs",
+        )
+        for contract in (
+            'bundle: "pass"',
+            'directClassic: "pass"',
+            'menuKeyboard: "pass"',
+            'narrowSidebar: "pass"',
+            'browsingDoesNotMigrate: "pass"',
+            'assignedBrowsingRoundTrip: "pass"',
+            'unassignedCwdIndependent: "pass"',
+            'assignedCreateActionHidden: "pass"',
+            'currentTreeFollowsAuthoritativeCwd: "pass"',
+            'moveOutPreservesCwd: "pass"',
+            'browsingBackDoesNotReattach: "pass"',
+            'otherSessionKeepsCurrentTree: "pass"',
+            'busySessionRejected: "pass"',
+            'newProjectAndMove: "pass"',
+            "projectRequestBodiesExcludeCwd",
+        ):
+            self.assertIn(contract, CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE)
+        cleanup_start = CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE.index("} finally {")
+        cleanup_source = CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE[cleanup_start:]
+        self.assertIn("await page.close()", cleanup_source)
+        self.assertIn("await context.close()", cleanup_source)
+        self.assertIn("await browser.close()", cleanup_source)
+        self.assertIn("cleanup = await host.stop()", cleanup_source)
+        self.assertIn("assert.equal(getActiveChildCount(), 0)", cleanup_source)
+
     def test_h4_playwright_config_is_colocated_and_cwd_independent(self):
         self.assertFalse((ROOT / "playwright.h4.config.cjs").exists())
         self.assertTrue(H4_CONFIG_PATH.is_file())
@@ -9125,6 +9159,10 @@ const sessions = createSessionsFeature({requestJson});
   await sessions.getSession("alpha / beta");
   await sessions.createSession({title: "Created", projectId: "project-1"});
   await sessions.updateSession("alpha", {title: "Renamed", stats: {input: 2}});
+  await sessions.moveSessionProject("alpha / beta", {
+    projectId: "project-2",
+    expectedRevision: 7,
+  });
   await sessions.deleteSession("beta");
 
   const sourceMessages = [
@@ -9190,6 +9228,11 @@ const sessions = createSessionsFeature({requestJson});
                     "url": "/api/sessions/alpha",
                     "method": "PUT",
                     "body": {"title": "Renamed", "stats": {"input": 2}},
+                },
+                {
+                    "url": "/api/sessions/alpha%20%2F%20beta/project",
+                    "method": "PUT",
+                    "body": {"projectId": "project-2", "expectedRevision": 7},
                 },
                 {
                     "url": "/api/sessions/beta",
@@ -28212,6 +28255,167 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         """Project API endpoint is referenced in app.js."""
         self.assertIn("/api/projects", APP_SOURCE)
 
+    def test_session_project_migration_is_explicit_and_file_tree_browsing_is_decoupled(self):
+        save_start = APP_SOURCE.index("async function saveProjectRoot(")
+        save_end = APP_SOURCE.index("function formatSize(", save_start)
+        save_source = APP_SOURCE[save_start:save_end]
+        context_start = APP_SOURCE.index("async function loadProjectContext()")
+        context_end = APP_SOURCE.index("const projectContextCache", context_start)
+        context_source = APP_SOURCE[context_start:context_end]
+        menu_start = APP_SOURCE.index("function resolveSessionSubmenuPosition(")
+        menu_end = APP_SOURCE.index("function renderSessions()", menu_start)
+        menu_source = APP_SOURCE[menu_start:menu_end]
+
+        self.assertNotIn('/project"', save_source)
+        self.assertNotIn("sessionDetachedFromProject", save_source)
+        self.assertIn("active?.cwd", context_source)
+        self.assertIn('setAttribute("role", "menu")', menu_source)
+        self.assertIn('role="menuitem"', menu_source)
+        self.assertIn('aria-haspopup="menu"', menu_source)
+        self.assertIn('aria-expanded="false"', menu_source)
+        self.assertIn('event.key === "ArrowRight"', menu_source)
+        self.assertIn('event.key === "ArrowLeft"', menu_source)
+        self.assertIn("resolveSessionSubmenuPosition", menu_source)
+        self.assertIn("moveSessionToProject", menu_source)
+        self.assertIn("createProjectFromFolder", menu_source)
+        self.assertIn("(!currentProject", menu_source)
+        self.assertIn(".session-project-submenu", STYLE_SOURCE)
+        self.assertIn(".session-menu-separator", STYLE_SOURCE)
+        self.assertNotIn("sessionDetachedFromProject:", I18N_SOURCE)
+
+        for key in (
+            "sessionProjectMenu",
+            "sessionProjectCurrent",
+            "sessionProjectNewAndMove",
+            "sessionProjectRemove",
+            "projectSessionMigrationBusy",
+            "projectSessionMigrationUnavailable",
+            "projectSessionMigrationFailed",
+            "projectSessionMigrationRecoveryFailed",
+            "sessionProjectMoveSuccess",
+            "sessionProjectRemoveSuccess",
+            "sessionProjectMigrationBusy",
+            "sessionProjectMigrationConflict",
+            "sessionProjectMigrationFailed",
+        ):
+            self.assertEqual(I18N_SOURCE.count(key + ":"), 2)
+
+    def test_session_project_migration_updates_only_the_current_file_tree_and_recovers_failures(self):
+        start = APP_SOURCE.index("function applySessionProjectLocation(")
+        end = APP_SOURCE.index("onboardingTasksFeature.bind();", start)
+        migration_source = APP_SOURCE[start:end]
+        script = f"""
+const state = {{
+  sessionId: "current",
+  pendingProjectId: null,
+  sessions: [
+    {{id: "current", projectId: null, cwd: "C:/old-current"}},
+    {{id: "other", projectId: null, cwd: "C:/old-other"}},
+    {{id: "failed", projectId: "old", cwd: "C:/old-failed"}},
+  ],
+}};
+const revisions = {{current: 2, other: 4, failed: 6}};
+const authoritativeSessionSnapshots = new Map();
+const calls = [];
+function normalizeSessionRevision(value) {{ return Number.isInteger(value) && value >= 0 ? value : 0; }}
+function getSessionRevision(id) {{ return revisions[id] || 0; }}
+function hasSessionRevision(id) {{ return Object.prototype.hasOwnProperty.call(revisions, id); }}
+function rememberSessionRevision(id, session) {{ revisions[id] = normalizeSessionRevision(session.revision); }}
+function rememberAuthoritativeSessionSnapshot(id, session) {{ authoritativeSessionSnapshots.set(id, session); }}
+function renderSessions() {{ calls.push(["render"]); }}
+function updateGroupBadge(session) {{ calls.push(["badge", session.id, session.projectId]); }}
+async function saveProjectRoot(cwd, options) {{ calls.push(["tree", cwd, options]); }}
+async function getSessionRecord(id) {{
+  calls.push(["refresh", id]);
+  return {{id, projectId: "server-project", cwd: "C:/server", revision: 9, messages: []}};
+}}
+function applyAuthoritativeSessionSnapshot(id, session) {{
+  const summary = state.sessions.find((item) => item.id === id);
+  summary.projectId = session.projectId;
+  summary.cwd = session.cwd;
+  revisions[id] = session.revision;
+  calls.push(["authoritative", id, session.projectId, session.cwd]);
+}}
+const sessionDataFeature = {{
+  async moveSessionProject(id, payload) {{
+    calls.push(["request", id, payload]);
+    if (id === "failed") {{
+      const error = new Error("conflict");
+      error.data = {{errorCode: "session_revision_conflict"}};
+      throw error;
+    }}
+    return {{
+      projectId: id === "current" ? "project-a" : "project-b",
+      cwd: id === "current" ? "C:/project-a" : "C:/project-b",
+      revision: payload.expectedRevision + 1,
+      session: {{id, revision: payload.expectedRevision + 1}},
+    }};
+  }},
+}};
+{migration_source}
+(async () => {{
+  await moveSessionToProject("current", "project-a");
+  await moveSessionToProject("other", "project-b");
+  let failure = "";
+  try {{ await moveSessionToProject("failed", "project-c"); }} catch (error) {{ failure = error.message; }}
+  process.stdout.write(JSON.stringify({{state, revisions, calls, failure}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["state"]["sessions"][0]["projectId"], "project-a")
+        self.assertEqual(result["state"]["sessions"][0]["cwd"], "C:/project-a")
+        self.assertEqual(result["state"]["sessions"][1]["projectId"], "project-b")
+        self.assertEqual(result["state"]["sessions"][2]["projectId"], "server-project")
+        self.assertEqual(result["revisions"], {"current": 3, "other": 5, "failed": 9})
+        self.assertEqual(result["failure"], "conflict")
+        requests = [call for call in result["calls"] if call[0] == "request"]
+        self.assertEqual(requests, [
+            ["request", "current", {"projectId": "project-a", "expectedRevision": 2}],
+            ["request", "other", {"projectId": "project-b", "expectedRevision": 4}],
+            ["request", "failed", {"projectId": "project-c", "expectedRevision": 6}],
+        ])
+        self.assertEqual(
+            [call for call in result["calls"] if call[0] == "tree"],
+            [["tree", "C:/project-a", {"syncSession": False}]],
+        )
+        self.assertIn(["refresh", "failed"], result["calls"])
+        self.assertIn(
+            ["authoritative", "failed", "server-project", "C:/server"],
+            result["calls"],
+        )
+
+    def test_session_project_submenu_flips_and_clamps_in_narrow_viewports(self):
+        start = APP_SOURCE.index("function resolveSessionSubmenuPosition(")
+        end = APP_SOURCE.index("function sessionProjectMigrationErrorKey(", start)
+        helper_source = APP_SOURCE[start:end]
+        script = f"""
+{helper_source}
+process.stdout.write(JSON.stringify({{
+  left: resolveSessionSubmenuPosition(
+    {{left: 250, right: 280, top: 270}},
+    {{width: 210, height: 180}},
+    {{width: 300, height: 320}},
+  ),
+  right: resolveSessionSubmenuPosition(
+    {{left: 5, right: 20, top: 2}},
+    {{width: 210, height: 180}},
+    {{width: 300, height: 320}},
+  ),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "left": {"left": 37, "top": 132, "opensLeft": True},
+            "right": {"left": 23, "top": 8, "opensLeft": False},
+        })
+
     def test_agent_run_and_prompt_capture_the_session_workspace(self):
         self.assertIn("cwd: ctx.cwd ||", APP_SOURCE)
         self.assertIn("cwd: subCtx.cwd ||", APP_SOURCE)
@@ -28817,7 +29021,10 @@ process.stdout.write(JSON.stringify({{
             "makePrimary",
             "removeSourceFolder",
             "sourceFolderAlreadyAdded",
-            "sessionDetachedFromProject",
+            "sessionProjectMenu",
+            "sessionProjectCurrent",
+            "sessionProjectNewAndMove",
+            "sessionProjectRemove",
             "changeSourceFolder",
             "deleteProject",
             "removeProjectTitle",

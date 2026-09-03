@@ -6,6 +6,7 @@
     "verify:harness-replay": "node scripts/replay-agent-traces.cjs",
     "test:h4:infra": "node tests/e2e/h4/infrastructure-selfcheck.cjs",
     "test:h4:session-search": "node tests/e2e/h4/session-search-selfcheck.cjs",
+    "test:h4:session-project-migration": "node tests/e2e/h4/code071-session-project-migration-selfcheck.cjs",
     "test:h4:smoke": "playwright test --config tests/e2e/h4/playwright.config.cjs",
     "test:h4:e2e": "npm run test:h4:infra && npm run test:h4:smoke"
   },

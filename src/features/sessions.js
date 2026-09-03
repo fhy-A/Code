@@ -550,6 +550,13 @@
       });
     }
 
+    function moveSessionProject(sessionId, payload = {}) {
+      return requestJson(`${sessionUrl(sessionId)}/project`, {
+        method: "PUT",
+        body: JSON.stringify(payload || {}),
+      });
+    }
+
     function deleteSession(sessionId) {
       return requestJson(sessionUrl(sessionId), { method: "DELETE" });
     }
@@ -589,6 +596,7 @@
       getSession,
       createSession,
       updateSession,
+      moveSessionProject,
       deleteSession,
       listArchivedSessions,
       archiveSession,

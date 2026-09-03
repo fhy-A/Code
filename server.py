@@ -10055,6 +10055,19 @@ def _create_agent_run(
                     "Deleted sessions cannot start new Agent runs.",
                     http_status=410,
                 )
+            if inherited_resolution is None:
+                # A Session migration and top-level AgentRun admission share
+                # this lock. Resolve the workspace again only after winning
+                # admission so a migration completed in the meantime is
+                # authoritative. Child/continuation runs retain their
+                # parent's already-frozen workspace via inherited_resolution.
+                resolved_cwd, resolved_workspace_roots = _agent_run_workspace(
+                    session_id,
+                    cwd,
+                    None,
+                )
+                run["cwd"] = resolved_cwd
+                run["workspace_roots"] = resolved_workspace_roots
         existing = _agent_runs.get(run_id)
         if existing:
             return existing
@@ -12920,6 +12933,43 @@ def _session_location(project_id=None, cwd=None, use_config_fallback=False):
     if not resolved_cwd and use_config_fallback:
         resolved_cwd = _normalize_local_path(load_config().get("projectRoot"))
     return project_id, resolved_cwd
+
+
+def _normalize_restored_session_location(meta):
+    """Reconcile archived Session location with the current project catalog."""
+    if not isinstance(meta, dict):
+        raise ValueError("Session metadata must be an object")
+    current_project_id = str(
+        meta.get("projectId") or meta.get("project") or ""
+    ).strip() or None
+    current_cwd = _normalize_local_path(meta.get("cwd"))
+    next_project_id = current_project_id
+    next_cwd = current_cwd
+    if current_project_id:
+        project = _find_project(current_project_id)
+        if project is None:
+            next_project_id = None
+        else:
+            roots = _normalize_project_root_paths(project)
+            root_keys = {_path_identity(root) for root in roots}
+            if _path_identity(current_cwd) not in root_keys:
+                next_cwd = roots[0]
+    location_changed = (
+        current_project_id != next_project_id
+        or _path_identity(current_cwd) != _path_identity(next_cwd)
+    )
+    meta["projectId"] = next_project_id
+    meta["cwd"] = next_cwd
+    meta.pop("project", None)
+    if location_changed:
+        meta["revision"] = _session_revision(meta) + 1
+    return location_changed
+
+
+def _normalize_restored_session_file(path, meta):
+    if _normalize_restored_session_location(meta):
+        write_json(path, meta)
+    return meta
 
 
 def _agent_run_workspace(session_id=None, requested_cwd=None, requested_roots=None):
@@ -16745,6 +16795,50 @@ class SessionLifecycleConflictError(RuntimeError):
         }
 
 
+class SessionProjectMutationError(RuntimeError):
+    """Stable public projection for a rolled-back Session project migration."""
+
+    def __init__(self, *, recovery_failed=False):
+        super().__init__("Session project could not be updated safely.")
+        self.recovery_failed = bool(recovery_failed)
+        self.error_code = (
+            "session_project_migration_recovery_failed"
+            if recovery_failed
+            else "session_project_migration_failed"
+        )
+        self.retryable = not recovery_failed
+        self.http_status = 500 if recovery_failed else 503
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": self.retryable,
+        }
+
+
+class ProjectSessionMutationError(RuntimeError):
+    """Stable public projection for a rolled-back project/Session mutation."""
+
+    def __init__(self, *, recovery_failed=False):
+        super().__init__("Project Session locations could not be updated safely.")
+        self.recovery_failed = bool(recovery_failed)
+        self.error_code = (
+            "project_session_migration_recovery_failed"
+            if recovery_failed
+            else "project_session_migration_failed"
+        )
+        self.retryable = not recovery_failed
+        self.http_status = 500 if recovery_failed else 503
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": self.retryable,
+        }
+
+
 class SessionArchiveMutationError(RuntimeError):
     """Stable public projection for a rolled-back archive state mutation."""
 
@@ -17306,6 +17400,7 @@ def _recover_session_archive_transaction(session_id):
                 or not active_messages.exists()
             ):
                 raise SessionArchiveMutationError(recovery_failed=True)
+            _normalize_restored_session_file(active_session, meta)
             _write_session_index_from_meta(meta)
             journal_path.unlink(missing_ok=True)
             return
@@ -17334,6 +17429,7 @@ def _recover_session_archive_transaction(session_id):
             manifest["files"]["messages.jsonl"],
         )
         meta = _read_session_meta_strict(active_session) or {}
+        _normalize_restored_session_file(active_session, meta)
         _write_session_index_from_meta(meta)
         _remove_owned_archive_tree(bundle)
         journal_path.unlink(missing_ok=True)
@@ -17572,6 +17668,44 @@ def _session_nonterminal_agent_run_ids(session_id):
 
 def _session_has_nonterminal_agent_run(session_id):
     return bool(_session_nonterminal_agent_run_ids(session_id))
+
+
+def _project_session_location_change_allowed(session_id, meta):
+    """Reject implicit project mutations for every nonterminal Session state."""
+    if _session_run_state_has_nonterminal_work(meta):
+        return False
+    try:
+        return not _session_has_nonterminal_agent_run(session_id)
+    except SessionLifecycleConflictError as exc:
+        raise SessionLifecycleConflictError(
+            "project_session_migration_unavailable",
+            "Project Session migration eligibility is unavailable.",
+            http_status=503,
+            retryable=True,
+        ) from exc
+
+
+def _project_session_mutation_snapshots(paths):
+    snapshots = []
+    seen = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        key = os.path.normcase(str(path.resolve(strict=False)))
+        if key in seen:
+            continue
+        seen.add(key)
+        snapshots.append((path, _path_snapshot(path)))
+    return snapshots
+
+
+def _restore_project_session_mutation_snapshots(snapshots):
+    recovery_failed = False
+    for path, payload in reversed(tuple(snapshots or ())):
+        try:
+            _restore_path_snapshot(path, payload)
+        except Exception:
+            recovery_failed = True
+    return recovery_failed
 
 
 def _session_archive_preflight(session_id, *, stop_fence_owned=False):
@@ -17949,6 +18083,7 @@ def _mutate_session_archive_state(
                         "transactionId": transaction_id,
                     })
                     restored_meta = _read_session_meta_strict(active_session) or {}
+                    _normalize_restored_session_file(active_session, restored_meta)
                     _write_session_index_from_meta(restored_meta)
                     _remove_owned_archive_tree(bundle)
                     _session_archive_journal_path(session_id).unlink(missing_ok=True)
@@ -23505,11 +23640,37 @@ class CodeHandler(BaseHTTPRequestHandler):
     def update_project(self, project_id):
         """POST /api/projects/:id/update — update label and ordered source folders."""
         body = self.read_body_json()
+        try:
+            _ensure_agent_run_nonterminal_index_ready(wait=True)
+        except AgentRunIndexError:
+            self.send_json({
+                "error": "Project Session migration eligibility is unavailable.",
+                "errorCode": "project_session_migration_unavailable",
+                "retryable": True,
+            }, 503)
+            return
+        # Root changes and AgentRun admission observe one complete location.
+        # The JSON lock is re-entrant for all persistence helpers below.
+        with _agent_run_lock:
+            with _json_write_lock:
+                try:
+                    response = CodeHandler._update_project_unlocked(
+                        self,
+                        project_id,
+                        body,
+                    )
+                except (SessionLifecycleConflictError, ProjectSessionMutationError) as exc:
+                    self.send_json(exc.public_payload(), exc.http_status)
+                    return
+        if response is not None:
+            self.send_json(response)
+
+    def _update_project_unlocked(self, project_id, body):
         projects = _read_projects()
         project = next((p for p in projects if p.get("id") == project_id), None)
         if not project:
             self.send_json({"error": "project not found"}, 404)
-            return
+            return None
 
         label_value = (
             body.get("label")
@@ -23519,13 +23680,13 @@ class CodeHandler(BaseHTTPRequestHandler):
         label = str(label_value or "").strip()
         if not label:
             self.send_json({"error": "label required"}, 400)
-            return
+            return None
 
         try:
             new_root_paths = _project_request_root_paths(body, project)
         except ValueError as exc:
             self.send_json({"error": str(exc)}, 400)
-            return
+            return None
         new_root_keys = {_path_identity(root_path) for root_path in new_root_paths}
         for other in projects:
             if other.get("id") == project_id:
@@ -23535,116 +23696,283 @@ class CodeHandler(BaseHTTPRequestHandler):
                     {"error": "Project already exists for one of these directories"},
                     409,
                 )
-                return
+                return None
 
         old_root_paths = _normalize_project_root_paths(project)
         old_root_keys = {_path_identity(root_path) for root_path in old_root_paths}
         old_primary = old_root_paths[0] if old_root_paths else ""
         new_primary = new_root_paths[0]
+        roots_changed = old_root_paths != new_root_paths
+        index = _read_session_index()
+        session_updates = []
+        if roots_changed:
+            meta_paths = _session_meta_path_snapshot()
+            candidate_ids = sorted(set(index) | set(meta_paths))
+            for sid in candidate_ids:
+                try:
+                    safe_sid = safe_session_id(str(sid))
+                except ValueError as exc:
+                    raise ProjectSessionMutationError() from exc
+                entry = index.get(safe_sid)
+                meta_path = meta_paths.get(safe_sid)
+                if meta_path is None:
+                    fallback_meta_path = session_path(safe_sid)
+                    if fallback_meta_path.exists():
+                        meta_path = fallback_meta_path
+                meta = None
+                if meta_path is not None and meta_path.exists():
+                    try:
+                        meta = _read_session_meta_strict(meta_path)
+                    except Exception as exc:
+                        raise ProjectSessionMutationError() from exc
+                    if not isinstance(meta, dict) or str(meta.get("id") or "") != safe_sid:
+                        raise ProjectSessionMutationError()
+                authoritative_project_id = (
+                    str(meta.get("projectId") or meta.get("project") or "").strip()
+                    if meta is not None
+                    else str((entry or {}).get("projectId") or (entry or {}).get("project") or "").strip()
+                )
+                if authoritative_project_id != project_id:
+                    continue
+                session_cwd = _normalize_local_path(
+                    (meta or {}).get("cwd")
+                    or (entry or {}).get("cwd")
+                    or old_primary
+                )
+                next_cwd = (
+                    session_cwd
+                    if _path_identity(session_cwd) in new_root_keys
+                    else new_primary
+                )
+                location_changes = (
+                    _path_identity(session_cwd) != _path_identity(next_cwd)
+                )
+                if location_changes and not _project_session_location_change_allowed(
+                    safe_sid,
+                    meta or {},
+                ):
+                    raise SessionLifecycleConflictError(
+                        "project_session_migration_busy",
+                        "A Session that would move still has nonterminal work.",
+                        retryable=True,
+                    )
+                if entry is None and meta is not None:
+                    entry = {
+                        "id": safe_sid,
+                        "title": meta.get("title", ""),
+                        "updatedAt": meta.get("updatedAt", ""),
+                        "lastMessageTime": _session_effective_last_message_time(meta),
+                        "messageCount": meta.get("messageCount", 0),
+                        "_parentId": meta.get("_parentId"),
+                        "_branchDepth": meta.get("_branchDepth", 0),
+                        "sourceBadgeVisible": _source_badge_visible(meta),
+                        "interactionState": _session_interaction_state(meta),
+                    }
+                    index[safe_sid] = entry
+                session_updates.append({
+                    "id": safe_sid,
+                    "entry": entry,
+                    "meta": meta,
+                    "metaPath": meta_path,
+                    "cwd": next_cwd,
+                    "locationChanges": location_changes,
+                })
+
+        mutation_paths = [PROJECTS_PATH]
+        if roots_changed:
+            mutation_paths.extend((_session_index_path(), CONFIG_PATH))
+            mutation_paths.extend(
+                update["metaPath"]
+                for update in session_updates
+                if update["metaPath"] is not None
+            )
+        try:
+            snapshots = _project_session_mutation_snapshots(mutation_paths)
+        except Exception as exc:
+            raise ProjectSessionMutationError() from exc
+
         project["label"] = label
         project["rootPaths"] = new_root_paths
-        _write_projects(projects)
-
-        roots_changed = old_root_paths != new_root_paths
-        if roots_changed:
-            index = _read_session_index()
-            for sid, entry in index.items():
-                entry_project_id = entry.get("projectId") or entry.get("project")
-                if entry_project_id != project_id:
-                    continue
-                source = _normalize_session_source(
-                    entry.get("source"),
-                    entry.get("group"),
-                )
-                meta_path = session_path(sid)
-                session_cwd = _normalize_local_path(entry.get("cwd") or old_primary)
-                if meta_path.exists():
-                    meta = read_json(meta_path, {})
-                    session_cwd = _normalize_local_path(
-                        meta.get("cwd") or session_cwd or old_primary
+        try:
+            _write_projects(projects)
+            if roots_changed:
+                for update in session_updates:
+                    meta = update["meta"]
+                    entry = update["entry"]
+                    source = _normalize_session_source(
+                        (meta or entry or {}).get("source"),
+                        (meta or entry or {}).get("group"),
                     )
-                    if _path_identity(session_cwd) not in new_root_keys:
-                        session_cwd = new_primary
-                    meta["projectId"] = project_id
-                    meta["cwd"] = session_cwd
-                    meta["source"] = _normalize_session_source(
-                        meta.get("source"),
-                        meta.get("group"),
-                    )
-                    meta.pop("group", None)
-                    write_json(meta_path, meta)
-                    source = meta["source"]
-                elif _path_identity(session_cwd) not in new_root_keys:
-                    session_cwd = new_primary
-                entry["projectId"] = project_id
-                entry["cwd"] = session_cwd
-                entry["source"] = source
-                entry.pop("project", None)
-                entry.pop("group", None)
+                    if meta is not None:
+                        meta["projectId"] = project_id
+                        meta["cwd"] = update["cwd"]
+                        if update["locationChanges"]:
+                            meta["revision"] = _session_revision(meta) + 1
+                        meta["source"] = source
+                        meta.pop("group", None)
+                        write_json(update["metaPath"], meta)
+                    if entry is not None:
+                        entry["projectId"] = project_id
+                        entry["cwd"] = update["cwd"]
+                        entry["source"] = source
+                        entry.pop("project", None)
+                        entry.pop("group", None)
+                entries = list(index.values())
+                _sort_sessions_by_last_message(entries)
+                payload = "\n".join(
+                    json.dumps(entry, ensure_ascii=False) for entry in entries
+                ) + ("\n" if entries else "")
+                _write_session_index_payload(payload)
 
-            entries = sorted(
-                index.values(),
-                key=lambda entry: entry.get("updatedAt", ""),
-                reverse=True,
-            )
-            payload = "\n".join(
-                json.dumps(entry, ensure_ascii=False) for entry in entries
-            ) + ("\n" if entries else "")
-            with _json_write_lock:
-                _session_index_path().write_text(payload, encoding="utf-8")
+                config = load_config()
+                config_root_key = _path_identity(config.get("projectRoot"))
+                if config_root_key in old_root_keys and config_root_key not in new_root_keys:
+                    save_config({"projectRoot": new_primary})
+        except Exception as exc:
+            recovery_failed = _restore_project_session_mutation_snapshots(snapshots)
+            raise ProjectSessionMutationError(
+                recovery_failed=recovery_failed,
+            ) from exc
 
-            config = load_config()
-            config_root_key = _path_identity(config.get("projectRoot"))
-            if config_root_key in old_root_keys and config_root_key not in new_root_keys:
-                save_config({"projectRoot": new_primary})
-
-        self.send_json(_project_api_record(project))
+        return _project_api_record(project)
 
     def delete_project(self, project_id):
         """DELETE /api/projects/:id — unassign sessions, remove project."""
+        try:
+            _ensure_agent_run_nonterminal_index_ready(wait=True)
+        except AgentRunIndexError:
+            self.send_json({
+                "error": "Project Session migration eligibility is unavailable.",
+                "errorCode": "project_session_migration_unavailable",
+                "retryable": True,
+            }, 503)
+            return
+        with _agent_run_lock:
+            with _json_write_lock:
+                try:
+                    response = CodeHandler._delete_project_unlocked(self, project_id)
+                except (SessionLifecycleConflictError, ProjectSessionMutationError) as exc:
+                    self.send_json(exc.public_payload(), exc.http_status)
+                    return
+        if response is not None:
+            self.send_json(response)
+
+    def _delete_project_unlocked(self, project_id):
         projects = _read_projects()
         proj = next((p for p in projects if p.get("id") == project_id), None)
         if not proj:
             self.send_json({"error": "project not found"}, 404)
-            return
+            return None
         index = _read_session_index()
-        for sid, entry in index.items():
-            entry_project_id = entry.get("projectId") or entry.get("project")
-            source = _normalize_session_source(entry.get("source"), entry.get("group"))
-            cwd = _normalize_local_path(entry.get("cwd"))
-            if entry_project_id == project_id:
-                mp = session_path(sid)
-                if mp.exists():
-                    meta = read_json(mp, {})
+        meta_paths = _session_meta_path_snapshot()
+        session_updates = []
+        candidate_ids = sorted(set(index) | set(meta_paths))
+        for sid in candidate_ids:
+            try:
+                safe_sid = safe_session_id(str(sid))
+            except ValueError as exc:
+                raise ProjectSessionMutationError() from exc
+            entry = index.get(safe_sid)
+            meta_path = meta_paths.get(safe_sid)
+            if meta_path is None:
+                fallback_meta_path = session_path(safe_sid)
+                if fallback_meta_path.exists():
+                    meta_path = fallback_meta_path
+            meta = None
+            if meta_path is not None and meta_path.exists():
+                try:
+                    meta = _read_session_meta_strict(meta_path)
+                except Exception as exc:
+                    raise ProjectSessionMutationError() from exc
+                if not isinstance(meta, dict) or str(meta.get("id") or "") != safe_sid:
+                    raise ProjectSessionMutationError()
+            authoritative_project_id = (
+                str(meta.get("projectId") or meta.get("project") or "").strip()
+                if meta is not None
+                else str((entry or {}).get("projectId") or (entry or {}).get("project") or "").strip()
+            )
+            if authoritative_project_id != project_id:
+                continue
+            if not _project_session_location_change_allowed(safe_sid, meta or {}):
+                raise SessionLifecycleConflictError(
+                    "project_session_migration_busy",
+                    "An attached Session still has nonterminal work.",
+                    retryable=True,
+                )
+            if entry is None and meta is not None:
+                entry = {
+                    "id": safe_sid,
+                    "title": meta.get("title", ""),
+                    "updatedAt": meta.get("updatedAt", ""),
+                    "lastMessageTime": _session_effective_last_message_time(meta),
+                    "messageCount": meta.get("messageCount", 0),
+                    "_parentId": meta.get("_parentId"),
+                    "_branchDepth": meta.get("_branchDepth", 0),
+                    "sourceBadgeVisible": _source_badge_visible(meta),
+                    "interactionState": _session_interaction_state(meta),
+                }
+                index[safe_sid] = entry
+            session_updates.append({
+                "id": safe_sid,
+                "entry": entry,
+                "meta": meta,
+                "metaPath": meta_path,
+                "cwd": _normalize_local_path(
+                    (meta or {}).get("cwd")
+                    or (entry or {}).get("cwd")
+                    or _project_primary_path(proj)
+                ),
+            })
+
+        mutation_paths = [PROJECTS_PATH, _session_index_path()]
+        mutation_paths.extend(
+            update["metaPath"]
+            for update in session_updates
+            if update["metaPath"] is not None
+        )
+        try:
+            snapshots = _project_session_mutation_snapshots(mutation_paths)
+        except Exception as exc:
+            raise ProjectSessionMutationError() from exc
+
+        try:
+            for update in session_updates:
+                meta = update["meta"]
+                entry = update["entry"]
+                source = _normalize_session_source(
+                    (meta or entry or {}).get("source"),
+                    (meta or entry or {}).get("group"),
+                )
+                if meta is not None:
                     meta["projectId"] = None
-                    meta["cwd"] = _normalize_local_path(
-                        meta.get("cwd") or _project_primary_path(proj)
-                    )
-                    meta["source"] = _normalize_session_source(
-                        meta.get("source"),
-                        meta.get("group"),
-                    )
+                    meta["cwd"] = update["cwd"]
+                    meta["revision"] = _session_revision(meta) + 1
+                    meta["source"] = source
                     meta.pop("group", None)
-                    write_json(mp, meta)
-                    cwd = meta["cwd"]
-                    source = meta["source"]
-                entry_project_id = None
-            entry["projectId"] = entry_project_id
-            entry["cwd"] = cwd
-            entry["source"] = source
-            entry.pop("project", None)
-            entry.pop("group", None)
-        entries = list(index.values())
-        _sort_sessions_by_last_message(entries)
-        payload = "\n".join(
-            json.dumps(e, ensure_ascii=False) for e in entries
-        ) + ("\n" if entries else "")
-        with _json_write_lock:
-            _session_index_path().write_text(payload, encoding="utf-8")
-        # Remove project
-        projects = [p for p in projects if p.get("id") != project_id]
-        _write_projects(projects)
-        self.send_json({"ok": True})
+                    write_json(update["metaPath"], meta)
+                if entry is not None:
+                    entry["projectId"] = None
+                    entry["cwd"] = update["cwd"]
+                    entry["source"] = source
+                    entry.pop("project", None)
+                    entry.pop("group", None)
+            entries = list(index.values())
+            _sort_sessions_by_last_message(entries)
+            payload = "\n".join(
+                json.dumps(entry, ensure_ascii=False) for entry in entries
+            ) + ("\n" if entries else "")
+            _write_session_index_payload(payload)
+            _write_projects([
+                project for project in projects
+                if project.get("id") != project_id
+            ])
+        except Exception as exc:
+            recovery_failed = _restore_project_session_mutation_snapshots(snapshots)
+            raise ProjectSessionMutationError(
+                recovery_failed=recovery_failed,
+            ) from exc
+
+        return {"ok": True}
 
     def assign_session_project(self, session_id):
         session_id = safe_session_id(session_id)
@@ -23658,39 +23986,171 @@ class CodeHandler(BaseHTTPRequestHandler):
             return CodeHandler._assign_session_project_unlocked(self, session_id)
 
     def _assign_session_project_unlocked(self, session_id):
-        """PUT /api/sessions/:id/project — assign session to a project."""
+        """PUT /api/sessions/:id/project — explicitly migrate an idle Session."""
         body = self.read_body_json()
         requested_project_id = str(body.get("projectId") or "").strip() or None
         path = session_path(session_id)
         if not path.exists():
-            self.send_json({"error": "session not found"}, 404)
+            self.send_json({
+                "error": "session not found",
+                "errorCode": "session_not_found",
+                "retryable": False,
+            }, 404)
             return
-        meta = read_json(path, {})
-        requested_cwd = (
-            body.get("cwd")
-            if "cwd" in body
-            else (None if requested_project_id else meta.get("cwd"))
-        )
-        project_id, cwd = _session_location(
-            requested_project_id,
-            requested_cwd,
-        )
-        meta["projectId"] = project_id
-        meta["cwd"] = cwd
-        meta["source"] = _normalize_session_source(meta.get("source"), meta.get("group"))
-        meta.pop("group", None)
-        write_json(path, meta)
-        _write_session_index_entry(
-            session_id,
-            meta.get("title", ""),
-            meta.get("updatedAt", ""), meta.get("messageCount", 0),
-            meta.get("_parentId"), meta.get("_branchDepth", 0),
-            project_id=project_id,
-            cwd=cwd,
-            source=meta["source"],
-            source_badge_visible=_source_badge_visible(meta),
-        )
-        self.send_json({"ok": True, "projectId": project_id, "cwd": cwd})
+        expected_present = "expectedRevision" in body
+        expected_revision = body.get("expectedRevision")
+        if expected_present and (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            self.send_json({
+                "error": "expectedRevision must be a non-negative integer",
+                "errorCode": "session_revision_invalid",
+                "retryable": False,
+            }, 400)
+            return
+
+        # The index rebuild may need the AgentRun lock, so complete this
+        # readiness check before taking that lock (the same order as run
+        # admission). Once ready, registrations remain serialized by it.
+        try:
+            _ensure_agent_run_nonterminal_index_ready(wait=True)
+        except AgentRunIndexError:
+            self.send_json({
+                "error": "Session project migration eligibility is unavailable.",
+                "errorCode": "session_project_migration_unavailable",
+                "retryable": True,
+            }, 503)
+            return
+
+        with _agent_run_lock:
+            with _json_write_lock:
+                try:
+                    meta = _read_session_meta_strict(path)
+                except Exception:
+                    self.send_json(SessionProjectMutationError().public_payload(), 503)
+                    return
+                if meta is None:
+                    self.send_json({
+                        "error": "session not found",
+                        "errorCode": "session_not_found",
+                        "retryable": False,
+                    }, 404)
+                    return
+                if str(meta.get("id") or "") != session_id:
+                    self.send_json(SessionProjectMutationError().public_payload(), 503)
+                    return
+
+                if requested_project_id:
+                    project = _find_project(requested_project_id)
+                    if not project:
+                        self.send_json({
+                            "error": "project not found",
+                            "errorCode": "project_not_found",
+                            "retryable": False,
+                        }, 404)
+                        return
+                    project_id = requested_project_id
+                    cwd = _project_primary_path(project)
+                else:
+                    project_id = None
+                    cwd = _normalize_local_path(meta.get("cwd"))
+
+                current_project_id = str(meta.get("projectId") or "").strip() or None
+                current_cwd = _normalize_local_path(meta.get("cwd"))
+                current_revision = _session_revision(meta)
+                location_matches = (
+                    current_project_id == project_id
+                    and _path_identity(current_cwd) == _path_identity(cwd)
+                )
+
+                def migration_payload(record):
+                    return {
+                        "ok": True,
+                        "projectId": record.get("projectId"),
+                        "cwd": record.get("cwd", ""),
+                        "revision": _session_revision(record),
+                        "session": _session_api_record(record),
+                    }
+
+                if (
+                    _session_archive_stop_fence_active(session_id)
+                    or _session_run_state_has_nonterminal_work(meta)
+                ):
+                    self.send_json({
+                        "error": "Session has nonterminal work and cannot be moved.",
+                        "errorCode": "session_project_migration_busy",
+                        "retryable": True,
+                    }, 409)
+                    return
+                try:
+                    has_nonterminal_run = _session_has_nonterminal_agent_run(session_id)
+                except SessionLifecycleConflictError:
+                    self.send_json({
+                        "error": "Session project migration eligibility is unavailable.",
+                        "errorCode": "session_project_migration_unavailable",
+                        "retryable": True,
+                    }, 503)
+                    return
+                if has_nonterminal_run:
+                    self.send_json({
+                        "error": "Session has nonterminal work and cannot be moved.",
+                        "errorCode": "session_project_migration_busy",
+                        "retryable": True,
+                    }, 409)
+                    return
+
+                if expected_present and expected_revision != current_revision:
+                    if location_matches:
+                        self.send_json(migration_payload(meta))
+                        return
+                    self.send_json({
+                        "error": "Session revision conflict",
+                        "errorCode": "session_revision_conflict",
+                        "retryable": False,
+                        "expectedRevision": expected_revision,
+                        "currentRevision": current_revision,
+                        "revision": current_revision,
+                        "projectId": current_project_id,
+                        "cwd": current_cwd,
+                    }, 409)
+                    return
+
+                if location_matches:
+                    self.send_json(migration_payload(meta))
+                    return
+
+                index_path = _session_index_path()
+                session_snapshot = None
+                index_snapshot = None
+                try:
+                    session_snapshot = _path_snapshot(path)
+                    index_snapshot = _path_snapshot(index_path)
+                    meta["projectId"] = project_id
+                    meta["cwd"] = cwd
+                    meta["source"] = _normalize_session_source(
+                        meta.get("source"),
+                        meta.get("group"),
+                    )
+                    meta.pop("group", None)
+                    meta["revision"] = current_revision + 1
+                    write_json(path, meta)
+                    _write_session_index_from_meta(meta)
+                except Exception:
+                    recovery_failed = False
+                    try:
+                        _restore_path_snapshot(path, session_snapshot)
+                        _restore_path_snapshot(index_path, index_snapshot)
+                    except Exception:
+                        recovery_failed = True
+                    error = SessionProjectMutationError(
+                        recovery_failed=recovery_failed,
+                    )
+                    self.send_json(error.public_payload(), error.http_status)
+                    return
+
+                self.send_json(migration_payload(meta))
 
     def get_sessions(self):
         try:

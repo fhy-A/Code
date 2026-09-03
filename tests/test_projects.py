@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,6 +99,31 @@ class ProjectSessionTestCase(unittest.TestCase):
 
 
 class TestProjectSchema(ProjectSessionTestCase):
+    BUSY_RUN_STATES = {
+        "running": {"status": "running"},
+        "paused": {"status": "paused"},
+        "waiting-user": {
+            "status": "waiting_user_input",
+            "userInputRequest": {"status": "pending"},
+        },
+        "waiting-authorization": {
+            "status": "waiting_authorization",
+            "authorizationRequest": {"status": "pending"},
+        },
+        "waiting-skill": {
+            "status": "waiting_skill_evidence",
+            "skillEvidenceRequest": {"status": "pending"},
+        },
+        "queued": {
+            "status": "completed",
+            "queuedMessages": [{"status": "pending"}],
+        },
+        "background": {
+            "status": "completed",
+            "backgroundRuns": [{"status": "running"}],
+        },
+    }
+
     def test_legacy_records_are_normalized_and_magic_project_is_removed(self):
         server.write_json(server.PROJECTS_PATH, [
             {
@@ -236,9 +262,115 @@ class TestProjectSchema(ProjectSessionTestCase):
         )
         self.assertEqual(response["rootPath"], str(self.other_root.resolve()))
         self.assertEqual(session["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(session["revision"], 1)
         self.assertEqual(retained_session["cwd"], str(self.other_root.resolve()))
         self.assertEqual(index_entry["cwd"], str(self.other_root.resolve()))
         self.assertEqual(server.load_config()["projectRoot"], str(self.other_root.resolve()))
+
+    def test_update_project_rejects_every_busy_session_that_would_move(self):
+        for suffix, run_state in self.BUSY_RUN_STATES.items():
+            with self.subTest(suffix=suffix):
+                self.write_project(roots=[self.project_root, self.other_root])
+                server._write_session_index_payload("")
+                self.write_session(
+                    "session-busy-root-update",
+                    {
+                        "projectId": "project-1",
+                        "cwd": str(self.project_root),
+                        "source": "code",
+                        "revision": 3,
+                        "runState": run_state,
+                    },
+                )
+                session_path = server.session_path("session-busy-root-update")
+                before = {
+                    "projects": server.PROJECTS_PATH.read_bytes(),
+                    "session": session_path.read_bytes(),
+                    "index": server._session_index_path().read_bytes(),
+                    "config": server.CONFIG_PATH.read_bytes(),
+                }
+                handler = self.make_handler({
+                    "label": "Blocked update",
+                    "rootPaths": [str(self.other_root)],
+                })
+
+                server.CodeHandler.update_project(handler, "project-1")
+
+                payload, status = handler.send_json.call_args.args
+                self.assertEqual(status, 409)
+                self.assertEqual(payload["errorCode"], "project_session_migration_busy")
+                self.assertTrue(payload["retryable"])
+                self.assertEqual(server.PROJECTS_PATH.read_bytes(), before["projects"])
+                self.assertEqual(session_path.read_bytes(), before["session"])
+                self.assertEqual(server._session_index_path().read_bytes(), before["index"])
+                self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
+
+    def test_update_project_allows_busy_session_on_a_retained_root(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-busy-retained-root",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+                "revision": 4,
+                "runState": {"status": "running"},
+            },
+        )
+        handler = self.make_handler({
+            "label": "Retained root",
+            "rootPaths": [str(self.other_root), str(self.third_root)],
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        stored = server.read_json(server.session_path("session-busy-retained-root"), {})
+        self.assertEqual(handler.send_json.call_args.args[0]["label"], "Retained root")
+        self.assertEqual(stored["projectId"], "project-1")
+        self.assertEqual(stored["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(stored["revision"], 4)
+
+    def test_update_project_write_failure_rolls_back_all_location_facts(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-project-update-rollback",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 2,
+                "runState": {"status": "idle"},
+            },
+        )
+        session_path = server.session_path("session-project-update-rollback")
+        before = {
+            "projects": server.PROJECTS_PATH.read_bytes(),
+            "session": session_path.read_bytes(),
+            "index": server._session_index_path().read_bytes(),
+            "config": server.CONFIG_PATH.read_bytes(),
+        }
+        handler = self.make_handler({
+            "label": "Rollback update",
+            "rootPaths": [str(self.other_root)],
+        })
+        original_write_json = server.write_json
+
+        def fail_session_write(path, payload):
+            if Path(path) == session_path:
+                raise OSError("synthetic project Session write failure")
+            return original_write_json(path, payload)
+
+        with mock.patch.object(server, "write_json", side_effect=fail_session_write):
+            server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "project_session_migration_failed")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before["projects"])
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(server._session_index_path().read_bytes(), before["index"])
+        self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
 
     def test_reordering_primary_preserves_session_cwds_and_active_config(self):
         self.write_project(roots=[self.project_root, self.other_root])
@@ -503,7 +635,7 @@ class TestSessionContract(ProjectSessionTestCase):
         self.assertIsNone(unassigned["projectId"])
         self.assertEqual(unassigned["cwd"], str(self.other_root.resolve()))
 
-    def test_unassign_project_can_move_session_to_selected_file_tree_root(self):
+    def test_unassign_project_ignores_selected_file_tree_root(self):
         self.write_project()
         self.write_session(
             "session-unassign-cwd",
@@ -522,7 +654,7 @@ class TestSessionContract(ProjectSessionTestCase):
 
         stored = server.read_json(server.session_path("session-unassign-cwd"), {})
         self.assertIsNone(stored["projectId"])
-        self.assertEqual(stored["cwd"], str(self.third_root.resolve()))
+        self.assertEqual(stored["cwd"], str(self.project_root.resolve()))
 
     def test_delete_project_unassigns_sessions_without_losing_cwd(self):
         self.write_project()
@@ -543,9 +675,121 @@ class TestSessionContract(ProjectSessionTestCase):
         self.assertEqual(server._read_projects(), [])
         self.assertIsNone(stored["projectId"])
         self.assertEqual(stored["cwd"], str(self.project_root.resolve()))
+        self.assertEqual(stored["revision"], 1)
         self.assertEqual(entry["source"], "claude-code")
         self.assertNotIn("project", entry)
         self.assertNotIn("group", entry)
+
+    def test_delete_project_rejects_every_busy_attached_session_without_writes(self):
+        for suffix, run_state in TestProjectSchema.BUSY_RUN_STATES.items():
+            with self.subTest(suffix=suffix):
+                self.write_project()
+                server._write_session_index_payload("")
+                self.write_session(
+                    "session-busy-project-delete",
+                    {
+                        "projectId": "project-1",
+                        "cwd": str(self.project_root),
+                        "source": "code",
+                        "revision": 5,
+                        "runState": run_state,
+                    },
+                )
+                session_path = server.session_path("session-busy-project-delete")
+                before = {
+                    "projects": server.PROJECTS_PATH.read_bytes(),
+                    "session": session_path.read_bytes(),
+                    "index": server._session_index_path().read_bytes(),
+                    "config": server.CONFIG_PATH.read_bytes(),
+                }
+                handler = self.make_handler()
+
+                server.CodeHandler.delete_project(handler, "project-1")
+
+                payload, status = handler.send_json.call_args.args
+                self.assertEqual(status, 409)
+                self.assertEqual(payload["errorCode"], "project_session_migration_busy")
+                self.assertTrue(payload["retryable"])
+                self.assertEqual(server.PROJECTS_PATH.read_bytes(), before["projects"])
+                self.assertEqual(session_path.read_bytes(), before["session"])
+                self.assertEqual(server._session_index_path().read_bytes(), before["index"])
+                self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
+
+    def test_delete_project_rejects_a_nonterminal_agent_run_without_writes(self):
+        self.write_project()
+        self.write_session(
+            "session-project-delete-agent-busy",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 1,
+                "runState": {"status": "idle"},
+            },
+        )
+        run = server._create_agent_run(
+            "session-project-delete-agent-busy",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "test"}],
+            },
+            "https://gateway.example.test",
+            [],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        self.addCleanup(lambda: server._agent_runs.pop(run["id"], None))
+        session_path = server.session_path("session-project-delete-agent-busy")
+        before = {
+            "projects": server.PROJECTS_PATH.read_bytes(),
+            "session": session_path.read_bytes(),
+            "index": server._session_index_path().read_bytes(),
+        }
+        handler = self.make_handler()
+
+        server.CodeHandler.delete_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "project_session_migration_busy")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before["projects"])
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(server._session_index_path().read_bytes(), before["index"])
+
+    def test_delete_project_write_failure_rolls_back_all_location_facts(self):
+        self.write_project()
+        self.write_session(
+            "session-project-delete-rollback",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 2,
+                "runState": {"status": "idle"},
+            },
+        )
+        session_path = server.session_path("session-project-delete-rollback")
+        before = {
+            "projects": server.PROJECTS_PATH.read_bytes(),
+            "session": session_path.read_bytes(),
+            "index": server._session_index_path().read_bytes(),
+        }
+        handler = self.make_handler()
+
+        with mock.patch.object(
+            server,
+            "_write_projects",
+            side_effect=OSError("synthetic project catalog write failure"),
+        ):
+            server.CodeHandler.delete_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "project_session_migration_failed")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before["projects"])
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(server._session_index_path().read_bytes(), before["index"])
 
     def test_branch_inherits_project_cwd_and_source(self):
         self.write_project()
@@ -579,6 +823,366 @@ class TestSessionContract(ProjectSessionTestCase):
             server._read_session_index()["session004"]["sourceBadgeVisible"]
         )
         self.assertNotIn("group", stored)
+
+
+class TestSessionProjectMigration(ProjectSessionTestCase):
+    def test_move_uses_current_primary_root_and_advances_revision(self):
+        self.write_project(
+            project_id="target-project",
+            roots=[self.other_root, self.third_root],
+            label="Target",
+        )
+        self.write_session(
+            "session-move-primary",
+            {
+                "projectId": None,
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 7,
+                "runState": {"status": "completed"},
+            },
+        )
+        handler = self.make_handler({
+            "projectId": "target-project",
+            "cwd": str(self.third_root),
+            "expectedRevision": 7,
+        })
+
+        server.CodeHandler.assign_session_project(handler, "session-move-primary")
+
+        payload = handler.send_json.call_args.args[0]
+        stored = server.read_json(server.session_path("session-move-primary"), {})
+        entry = server._read_session_index()["session-move-primary"]
+        target_root = str(self.other_root.resolve())
+        self.assertEqual(stored["projectId"], "target-project")
+        self.assertEqual(stored["cwd"], target_root)
+        self.assertEqual(stored["revision"], 8)
+        self.assertEqual(entry["projectId"], "target-project")
+        self.assertEqual(entry["cwd"], target_root)
+        self.assertEqual(payload["projectId"], "target-project")
+        self.assertEqual(payload["cwd"], target_root)
+        self.assertEqual(payload["revision"], 8)
+        self.assertEqual(payload["session"]["revision"], 8)
+
+    def test_stale_retry_is_idempotent_only_when_location_already_matches(self):
+        self.write_project(root=self.other_root)
+        self.write_session(
+            "session-idempotent-move",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+                "revision": 4,
+                "runState": {"status": "idle"},
+            },
+        )
+        retry = self.make_handler({
+            "projectId": "project-1",
+            "expectedRevision": 3,
+        })
+
+        server.CodeHandler.assign_session_project(retry, "session-idempotent-move")
+
+        payload = retry.send_json.call_args.args[0]
+        self.assertEqual(payload["revision"], 4)
+        self.assertEqual(
+            server.read_json(server.session_path("session-idempotent-move"), {})["revision"],
+            4,
+        )
+
+        conflict = self.make_handler({"projectId": None, "expectedRevision": 3})
+        server.CodeHandler.assign_session_project(conflict, "session-idempotent-move")
+        conflict_payload, status = conflict.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(conflict_payload["errorCode"], "session_revision_conflict")
+        self.assertEqual(conflict_payload["revision"], 4)
+        self.assertEqual(conflict_payload["projectId"], "project-1")
+
+    def test_move_revision_fences_a_stale_message_save(self):
+        self.write_project(root=self.other_root)
+        self.write_session(
+            "session-move-save-fence",
+            {
+                "projectId": None,
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 2,
+                "runState": {"status": "idle"},
+            },
+        )
+        move = self.make_handler({
+            "projectId": "project-1",
+            "expectedRevision": 2,
+        })
+        server.CodeHandler.assign_session_project(move, "session-move-save-fence")
+
+        stale_save = self.make_handler({
+            "title": "Stale tab",
+            "messages": [{"role": "user", "content": "stale"}],
+            "expectedRevision": 2,
+        })
+        server.CodeHandler.save_session(stale_save, "session-move-save-fence")
+
+        payload, status = stale_save.send_json.call_args.args
+        stored = server.read_json(server.session_path("session-move-save-fence"), {})
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_revision_conflict")
+        self.assertEqual(payload["currentRevision"], 3)
+        self.assertEqual(stored["projectId"], "project-1")
+        self.assertEqual(stored["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(server.read_jsonl(server.messages_path("session-move-save-fence")), [])
+
+    def test_move_rejects_every_nonterminal_session_projection(self):
+        self.write_project(root=self.other_root)
+        cases = {
+            "running": {"status": "running"},
+            "paused": {"status": "paused"},
+            "waiting-user": {
+                "status": "waiting_user_input",
+                "userInputRequest": {"status": "pending"},
+            },
+            "waiting-authorization": {
+                "status": "waiting_authorization",
+                "authorizationRequest": {"status": "pending"},
+            },
+            "waiting-skill": {
+                "status": "waiting_skill_evidence",
+                "skillEvidenceRequest": {"status": "pending"},
+            },
+            "queued": {
+                "status": "completed",
+                "queuedMessages": [{"status": "pending"}],
+            },
+            "background": {
+                "status": "completed",
+                "backgroundRuns": [{"status": "running"}],
+            },
+        }
+        for suffix, run_state in cases.items():
+            with self.subTest(suffix=suffix):
+                session_id = f"session-busy-{suffix}"
+                self.write_session(
+                    session_id,
+                    {
+                        "projectId": None,
+                        "cwd": str(self.project_root),
+                        "source": "code",
+                        "revision": 2,
+                        "runState": run_state,
+                    },
+                )
+                handler = self.make_handler({
+                    "projectId": "project-1",
+                    "expectedRevision": 2,
+                })
+
+                server.CodeHandler.assign_session_project(handler, session_id)
+
+                payload, status = handler.send_json.call_args.args
+                self.assertEqual(status, 409)
+                self.assertEqual(payload["errorCode"], "session_project_migration_busy")
+                self.assertTrue(payload["retryable"])
+                stored = server.read_json(server.session_path(session_id), {})
+                self.assertIsNone(stored["projectId"])
+                self.assertEqual(stored["revision"], 2)
+
+        self.write_session(
+            "session-busy-same-location",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+                "revision": 5,
+                "runState": {"status": "running"},
+            },
+        )
+        same_location = self.make_handler({
+            "projectId": "project-1",
+            "expectedRevision": 5,
+        })
+        server.CodeHandler.assign_session_project(
+            same_location,
+            "session-busy-same-location",
+        )
+        payload, status = same_location.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_project_migration_busy")
+
+    def test_move_rejects_a_durable_nonterminal_agent_run(self):
+        self.write_project(root=self.other_root)
+        self.write_session(
+            "session-agent-busy",
+            {
+                "projectId": None,
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 0,
+                "runState": {"status": "idle"},
+            },
+        )
+        run = server._create_agent_run(
+            "session-agent-busy",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "test"}],
+            },
+            "https://gateway.example.test",
+            [],
+            allowed_tools=[],
+            start_worker=False,
+        )
+        self.addCleanup(lambda: server._agent_runs.pop(run["id"], None))
+        handler = self.make_handler({"projectId": "project-1", "expectedRevision": 0})
+
+        server.CodeHandler.assign_session_project(handler, "session-agent-busy")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "session_project_migration_busy")
+        self.assertIsNone(
+            server.read_json(server.session_path("session-agent-busy"), {})["projectId"]
+        )
+
+    def test_index_failure_rolls_back_session_and_index_together(self):
+        self.write_project(root=self.other_root)
+        self.write_session(
+            "session-move-rollback",
+            {
+                "projectId": None,
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 3,
+                "runState": {"status": "idle"},
+            },
+        )
+        session_path = server.session_path("session-move-rollback")
+        index_path = server._session_index_path()
+        before = {
+            "session": session_path.read_bytes(),
+            "index": index_path.read_bytes(),
+        }
+        handler = self.make_handler({
+            "projectId": "project-1",
+            "expectedRevision": 3,
+        })
+
+        with mock.patch.object(
+            server,
+            "_write_session_index_from_meta",
+            side_effect=OSError("synthetic index failure"),
+        ):
+            server.CodeHandler.assign_session_project(handler, "session-move-rollback")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["errorCode"], "session_project_migration_failed")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(session_path.read_bytes(), before["session"])
+        self.assertEqual(index_path.read_bytes(), before["index"])
+
+    def test_rollback_failure_is_sanitized_and_nonretryable(self):
+        self.write_project(root=self.other_root)
+        self.write_session(
+            "session-move-recovery-failure",
+            {
+                "projectId": None,
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 1,
+                "runState": {"status": "idle"},
+            },
+        )
+        handler = self.make_handler({
+            "projectId": "project-1",
+            "expectedRevision": 1,
+        })
+        sentinel = str(self.data_dir / "PRIVATE-SENTINEL")
+
+        with mock.patch.object(
+            server,
+            "_write_session_index_from_meta",
+            side_effect=OSError("synthetic index failure"),
+        ), mock.patch.object(
+            server,
+            "_restore_path_snapshot",
+            side_effect=PermissionError(sentinel),
+        ):
+            server.CodeHandler.assign_session_project(
+                handler,
+                "session-move-recovery-failure",
+            )
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertEqual(
+            payload["errorCode"],
+            "session_project_migration_recovery_failed",
+        )
+        self.assertFalse(payload["retryable"])
+        self.assertNotIn(sentinel, json.dumps(payload))
+
+    def test_agent_run_reloads_workspace_when_move_wins_admission_race(self):
+        self.write_project(root=self.other_root)
+        self.write_session(
+            "session-run-race",
+            {
+                "projectId": None,
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 0,
+                "runState": {"status": "idle"},
+            },
+        )
+        first_resolution_complete = threading.Event()
+        release_admission = threading.Event()
+        original_workspace = server._agent_run_workspace
+        calls = []
+
+        def gated_workspace(*args, **kwargs):
+            result = original_workspace(*args, **kwargs)
+            calls.append(result)
+            if len(calls) == 1:
+                first_resolution_complete.set()
+                self.assertTrue(release_admission.wait(timeout=5))
+            return result
+
+        outcome = {}
+
+        def create_run():
+            try:
+                outcome["run"] = server._create_agent_run(
+                    "session-run-race",
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "test"}],
+                    },
+                    "https://gateway.example.test",
+                    [],
+                    allowed_tools=[],
+                    start_worker=False,
+                )
+            except Exception as exc:  # surfaced by the assertions below
+                outcome["error"] = exc
+
+        with mock.patch.object(server, "_agent_run_workspace", side_effect=gated_workspace):
+            thread = threading.Thread(target=create_run)
+            thread.start()
+            self.assertTrue(first_resolution_complete.wait(timeout=5))
+            handler = self.make_handler({
+                "projectId": "project-1",
+                "expectedRevision": 0,
+            })
+            server.CodeHandler.assign_session_project(handler, "session-run-race")
+            release_admission.set()
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", outcome)
+        run = outcome["run"]
+        self.addCleanup(lambda: server._agent_runs.pop(run["id"], None))
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(run["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(run["workspace_roots"], [str(self.other_root.resolve())])
 
 
 class TestProjectMigration(ProjectSessionTestCase):
@@ -661,6 +1265,52 @@ class TestProjectMigration(ProjectSessionTestCase):
 
 
 class TestAgentRunWorkspace(ProjectSessionTestCase):
+    def create_run_across_location_mutation(self, session_id, mutate):
+        first_resolution_complete = threading.Event()
+        release_admission = threading.Event()
+        original_workspace = server._agent_run_workspace
+        calls = []
+        outcome = {}
+
+        def gated_workspace(*args, **kwargs):
+            result = original_workspace(*args, **kwargs)
+            calls.append(result)
+            if len(calls) == 1:
+                first_resolution_complete.set()
+                self.assertTrue(release_admission.wait(timeout=5))
+            return result
+
+        def create_run():
+            try:
+                outcome["run"] = server._create_agent_run(
+                    session_id,
+                    {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "test"}],
+                    },
+                    "https://gateway.example.test",
+                    [],
+                    allowed_tools=[],
+                    start_worker=False,
+                )
+            except Exception as exc:
+                outcome["error"] = exc
+
+        with mock.patch.object(server, "_agent_run_workspace", side_effect=gated_workspace):
+            thread = threading.Thread(target=create_run)
+            thread.start()
+            self.assertTrue(first_resolution_complete.wait(timeout=5))
+            mutate()
+            release_admission.set()
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", outcome)
+        self.assertGreaterEqual(len(calls), 2)
+        run = outcome["run"]
+        self.addCleanup(lambda: server._agent_runs.pop(run["id"], None))
+        return run
+
     def test_agent_run_uses_session_cwd_and_attached_project_roots(self):
         self.write_project(roots=[self.project_root, self.other_root])
         self.write_session(
@@ -739,6 +1389,57 @@ class TestAgentRunWorkspace(ProjectSessionTestCase):
             "secondary-only.txt",
             [item["name"] for item in result["items"]],
         )
+
+    def test_agent_run_reloads_workspace_when_project_root_update_wins_race(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-project-update-race",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+                "runState": {"status": "idle"},
+            },
+        )
+
+        def update_project():
+            handler = self.make_handler({
+                "label": "Updated",
+                "rootPaths": [str(self.third_root)],
+            })
+            server.CodeHandler.update_project(handler, "project-1")
+
+        run = self.create_run_across_location_mutation(
+            "session-project-update-race",
+            update_project,
+        )
+
+        self.assertEqual(run["cwd"], str(self.third_root.resolve()))
+        self.assertEqual(run["workspace_roots"], [str(self.third_root.resolve())])
+
+    def test_agent_run_reloads_workspace_when_project_delete_wins_race(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        self.write_session(
+            "session-project-delete-race",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.other_root),
+                "source": "code",
+                "runState": {"status": "idle"},
+            },
+        )
+
+        def delete_project():
+            handler = self.make_handler()
+            server.CodeHandler.delete_project(handler, "project-1")
+
+        run = self.create_run_across_location_mutation(
+            "session-project-delete-race",
+            delete_project,
+        )
+
+        self.assertEqual(run["cwd"], str(self.other_root.resolve()))
+        self.assertEqual(run["workspace_roots"], [str(self.other_root.resolve())])
 
 
 if __name__ == "__main__":
