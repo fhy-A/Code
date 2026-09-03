@@ -87,6 +87,13 @@ class TestFrontendCoreModules(unittest.TestCase):
             'otherSessionKeepsCurrentTree: "pass"',
             'busySessionRejected: "pass"',
             'newProjectAndMove: "pass"',
+            'longTooltipDelay: "pass"',
+            'shortTooltipAbsent: "pass"',
+            'keyboardTooltip: "pass"',
+            'longRemoveTooltip: "pass"',
+            'removeStillSucceeds: "pass"',
+            'tooltipViewportAvoidance: "pass"',
+            'tooltipDoesNotResizeMenu: "pass"',
             "projectRequestBodiesExcludeCwd",
         ):
             self.assertIn(contract, CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE)
@@ -28347,6 +28354,44 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertLessEqual(item_gap, 8)
         self.assertIsNotNone(item_padding)
         self.assertLessEqual(int(item_padding.group(2)), 8)
+
+    def test_session_project_tooltips_are_only_attached_after_real_overflow(self):
+        menu_start = APP_SOURCE.index("function resolveSessionSubmenuPosition(")
+        menu_end = APP_SOURCE.index("function renderSessions()", menu_start)
+        menu_source = APP_SOURCE[menu_start:menu_end]
+        tooltip_start = APP_SOURCE.index("let _tooltipsBound = false;")
+        tooltip_end = APP_SOURCE.index("// Admonition titles come from i18n", tooltip_start)
+        tooltip_source = APP_SOURCE[tooltip_start:tooltip_end]
+
+        for contract in (
+            "isSessionProjectLabelTruncated",
+            "syncSessionProjectOverflowTooltips",
+            "label.scrollWidth > label.clientWidth",
+            'querySelectorAll("[data-project-tooltip]")',
+            'setAttribute("data-tooltip"',
+            'classList.add("session-project-tooltip-target")',
+            'classList.remove("session-project-tooltip-target")',
+            "bindTooltips();",
+        ):
+            self.assertIn(contract, menu_source)
+        self.assertLess(
+            menu_source.index('submenu.style.visibility = "visible"'),
+            menu_source.index("syncSessionProjectOverflowTooltips(submenu);"),
+        )
+        self.assertIn("session-project-tooltip", tooltip_source)
+
+        tooltip_rule = re.search(
+            r"\.sb-path-tooltip\.session-project-tooltip\s*\{([^}]+)\}",
+            STYLE_SOURCE,
+            re.S,
+        )
+        self.assertIsNotNone(tooltip_rule)
+        tooltip_css = tooltip_rule.group(1)
+        self.assertIn("max-width: min(320px", tooltip_css)
+        self.assertIn("white-space: normal", tooltip_css)
+        self.assertIn("overflow-wrap: anywhere", tooltip_css)
+        self.assertIn("background: var(--panel-3)", tooltip_css)
+        self.assertIn("color: var(--text)", tooltip_css)
 
     def test_session_project_migration_updates_only_the_current_file_tree_and_recovers_failures(self):
         start = APP_SOURCE.index("function applySessionProjectLocation(")

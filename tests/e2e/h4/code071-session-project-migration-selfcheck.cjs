@@ -88,13 +88,18 @@ async function seedContract(host) {
     }),
   })).payload;
 
-  const createSession = async (title, runState = {}, projectId = null) => (
+  const createSession = async (
+    title,
+    runState = {},
+    projectId = null,
+    cwd = host.projectDir,
+  ) => (
     await requestJson(host.ready.codeUrl, "/api/sessions", {
       method: "POST",
       body: JSON.stringify({
         title,
         projectId,
-        cwd: host.projectDir,
+        cwd,
         runState,
       }),
     })
@@ -109,10 +114,22 @@ async function seedContract(host) {
     targetProject,
     longProject,
     current: await createSession("CODE-071 current", {}, originalProject.id),
+    longAssigned: await createSession(
+      "CODE-071 long assigned",
+      {},
+      longProject.id,
+      longProjectRoot,
+    ),
     other: await createSession("CODE-071 other"),
     busy: await createSession("CODE-071 busy", { status: "paused" }),
     createAndMove: await createSession("CODE-071 create and move"),
     classic: await createSession("CODE-071 classic", {}, originalProject.id),
+    classicLongAssigned: await createSession(
+      "CODE-071 classic long assigned",
+      {},
+      longProject.id,
+      longProjectRoot,
+    ),
   };
 }
 
@@ -316,6 +333,59 @@ async function exerciseProjectMenuAcceptance(page, seed, sessionId) {
   assert.equal(submenuMetrics.width <= 240.5, true);
   assert.equal(submenuMetrics.maxItemHeightFloor >= 30, true);
   assert.equal(submenuMetrics.longItemClipped, true);
+
+  const longItem = submenu.locator(`[data-project-id="${seed.longProject.id}"]`);
+  const shortItem = submenu.locator(`[data-project-id="${seed.targetProject.id}"]`);
+  assert.equal(await longItem.getAttribute("data-tooltip"), seed.longProject.label);
+  assert.equal(await longItem.evaluate((element) => (
+    element.classList.contains("session-project-tooltip-target")
+  )), true);
+  assert.equal(await shortItem.getAttribute("data-tooltip"), null);
+  assert.equal(await shortItem.evaluate((element) => (
+    element.classList.contains("session-project-tooltip-target")
+  )), false);
+  const menuBeforeTooltip = await submenu.boundingBox();
+  await longItem.hover();
+  await page.waitForTimeout(100);
+  let tooltip = page.locator(".sb-path-tooltip.session-project-tooltip:not([hidden])");
+  assert.equal(await tooltip.count(), 0);
+  await tooltip.waitFor({ state: "visible", timeout: 1_000 });
+  assert.equal(await tooltip.textContent(), seed.longProject.label);
+  const tooltipMetrics = await tooltip.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      width: rect.width,
+      height: rect.height,
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+      pointerEvents: getComputedStyle(element).pointerEvents,
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+    };
+  });
+  assert.equal(tooltipMetrics.width <= 320.5, true, JSON.stringify(tooltipMetrics));
+  assert.equal(tooltipMetrics.height > 34, true, JSON.stringify(tooltipMetrics));
+  assert.equal(tooltipMetrics.left >= 8, true);
+  assert.equal(tooltipMetrics.right <= tooltipMetrics.viewportWidth - 7.5, true);
+  assert.equal(tooltipMetrics.top >= 8, true);
+  assert.equal(tooltipMetrics.bottom <= tooltipMetrics.viewportHeight - 7.5, true);
+  assert.equal(tooltipMetrics.pointerEvents, "none");
+  const menuAfterTooltip = await submenu.boundingBox();
+  assert.deepEqual(menuAfterTooltip, menuBeforeTooltip);
+
+  // Keyboard focus shows the same non-interactive overlay immediately, then
+  // moving focus to another menu item hides it without disturbing the menu.
+  await submenu.locator(".session-menu-separator").hover();
+  await tooltip.waitFor({ state: "hidden" });
+  await longItem.focus();
+  tooltip = page.locator(".sb-path-tooltip.session-project-tooltip:not([hidden])");
+  await tooltip.waitFor({ state: "visible" });
+  await page.keyboard.press("ArrowDown");
+  await tooltip.waitFor({ state: "hidden" });
+  assert.deepEqual(await submenu.boundingBox(), menuBeforeTooltip);
+
   await submenu.hover();
   await page.waitForTimeout(120);
   assert.equal(await submenu.count(), 1);
@@ -367,7 +437,66 @@ async function exerciseProjectMenuAcceptance(page, seed, sessionId) {
     compactRootWidth: Math.round(menuBox.width),
     compactSubmenuMinWidth: submenuMetrics.minWidth,
     longNameEllipsis: "pass",
+    longTooltipDelay: "pass",
+    shortTooltipAbsent: "pass",
+    keyboardTooltip: "pass",
+    tooltipWidth: Math.round(tooltipMetrics.width),
+    tooltipWrap: "pass",
+    tooltipViewportAvoidance: "pass",
+    tooltipDoesNotResizeMenu: "pass",
     minimumItemHeight: submenuMetrics.maxItemHeightFloor,
+  };
+}
+
+async function exerciseLongRemoveTooltip(page, host, seed, sessionId) {
+  const { submenu } = await openProjectSubmenu(page, sessionId);
+  const remove = submenu.locator('[data-project-action="remove"]');
+  const expected = `Remove from "${seed.longProject.label}"`;
+  assert.equal(await remove.getAttribute("data-tooltip"), expected);
+  assert.equal(await remove.evaluate((element) => (
+    element.classList.contains("session-project-tooltip-target")
+  )), true);
+  const menuBeforeTooltip = await submenu.boundingBox();
+  await remove.hover();
+  const tooltip = page.locator(".sb-path-tooltip.session-project-tooltip:not([hidden])");
+  await tooltip.waitFor({ state: "visible" });
+  assert.equal(await tooltip.textContent(), expected);
+  const metrics = await tooltip.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      width: rect.width,
+      height: rect.height,
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+    };
+  });
+  assert.equal(metrics.width <= 320.5, true, JSON.stringify(metrics));
+  assert.equal(metrics.height > 34, true, JSON.stringify(metrics));
+  assert.equal(metrics.left >= 8, true);
+  assert.equal(metrics.right <= metrics.viewportWidth - 7.5, true);
+  assert.equal(metrics.top >= 8, true);
+  assert.equal(metrics.bottom <= metrics.viewportHeight - 7.5, true);
+  assert.deepEqual(await submenu.boundingBox(), menuBeforeTooltip);
+  await remove.focus();
+  await page.keyboard.press("Enter");
+  const removed = await waitForSession(
+    host,
+    sessionId,
+    (session) => session.projectId == null,
+    "long-name Session did not move out of its project",
+  );
+  assert.equal(path.resolve(removed.cwd), path.resolve(seed.longProjectRoot));
+  return {
+    longRemoveTooltip: "pass",
+    removeStillSucceeds: "pass",
+    tooltipWidth: Math.round(metrics.width),
+    tooltipWrap: "pass",
+    tooltipViewportAvoidance: "pass",
+    tooltipDoesNotResizeMenu: "pass",
   };
 }
 
@@ -409,6 +538,7 @@ async function exercise(page, host, seed, projectRequests) {
     seed,
     seed.current.id,
   );
+  let longRemoveTooltip = null;
 
   // Narrow-sidebar keyboard contract: nested menu stays in the viewport,
   // ArrowLeft returns to its trigger, then Escape returns to the row button.
@@ -479,6 +609,12 @@ async function exercise(page, host, seed, projectRequests) {
   );
   assert.equal(path.resolve(removed.cwd), path.resolve(seed.targetPrimary));
   await waitForRoot(page, seed.targetPrimary);
+  longRemoveTooltip = await exerciseLongRemoveTooltip(
+    page,
+    host,
+    seed,
+    seed.longAssigned.id,
+  );
 
   await browseHome(page, host);
   await page.locator("#projectRootShort").click();
@@ -546,6 +682,7 @@ async function exercise(page, host, seed, projectRequests) {
   return {
     bundle: "pass",
     menuAcceptance,
+    longRemoveTooltip,
     menuKeyboard: "pass",
     narrowSidebar: "pass",
     browsingDoesNotMigrate: "pass",
@@ -586,6 +723,7 @@ async function exerciseClassic(page, host, seed, projectRequests) {
     seed,
     seed.classic.id,
   );
+  let longRemoveTooltip = null;
   await browseHome(page, host);
   const browsed = await sessionRecord(host, seed.classic.id);
   assert.equal(browsed.projectId, seed.originalProject.id);
@@ -594,9 +732,16 @@ async function exerciseClassic(page, host, seed, projectRequests) {
   const moved = await moveToProject(page, host, seed.classic.id, seed.targetProject);
   assert.equal(path.resolve(moved.cwd), path.resolve(seed.targetPrimary));
   await waitForRoot(page, seed.targetPrimary);
+  longRemoveTooltip = await exerciseLongRemoveTooltip(
+    page,
+    host,
+    seed,
+    seed.classicLongAssigned.id,
+  );
   return {
     directClassic: "pass",
     menuAcceptance,
+    longRemoveTooltip,
     browsingDoesNotMigrate: "pass",
     menuKeyboard: "pass",
     currentTreeFollowsAuthoritativeCwd: "pass",

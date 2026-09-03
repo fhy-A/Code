@@ -3133,6 +3133,9 @@ function bindTooltips() {
       _tooltipOverlay.setAttribute("role", "tooltip");
       document.body.appendChild(_tooltipOverlay);
     }
+    _tooltipOverlay.className = el.matches?.(".session-project-tooltip-target")
+      ? "sb-path-tooltip session-project-tooltip"
+      : "sb-path-tooltip";
     _tooltipOverlay.textContent = text;
     _tooltipOverlay.hidden = false;
     const rect = el.getBoundingClientRect();
@@ -5452,6 +5455,28 @@ function scheduleSessionProjectSubmenuClose(menu) {
   }, SESSION_PROJECT_HOVER_CLOSE_DELAY_MS);
 }
 
+function isSessionProjectLabelTruncated(label) {
+  return Boolean(
+    label
+    && label.clientWidth > 0
+    && label.scrollWidth > label.clientWidth
+  );
+}
+
+function syncSessionProjectOverflowTooltips(submenu) {
+  submenu?.querySelectorAll("[data-project-tooltip]").forEach((item) => {
+    const label = item.querySelector(".session-project-label");
+    const tooltip = item.getAttribute("data-project-tooltip") || "";
+    if (tooltip && isSessionProjectLabelTruncated(label)) {
+      item.setAttribute("data-tooltip", tooltip);
+      item.classList.add("session-project-tooltip-target");
+    } else {
+      item.removeAttribute("data-tooltip");
+      item.classList.remove("session-project-tooltip-target");
+    }
+  });
+}
+
 function openSessionProjectSubmenu(
   menu,
   trigger,
@@ -5486,18 +5511,21 @@ function openSessionProjectSubmenu(
   const projectItems = availableProjects.map((project) => {
     const name = projectDisplayName(project);
     return '<button class="session-more-item session-project-item" type="button" role="menuitem" data-project-id="' +
-      escapeHtml(project.id) + '" data-project-name="' + escapeHtml(name) + '"><span>' +
-      escapeHtml(name) + '</span></button>';
+      escapeHtml(project.id) + '" data-project-name="' + escapeHtml(name) + '" data-project-tooltip="' +
+      escapeHtml(name) + '"><span class="session-project-label">' + escapeHtml(name) + '</span></button>';
   }).join("");
   const actionSeparator = projectItems
     ? '<div class="session-menu-separator" role="separator"></div>'
     : '';
+  const removeLabel = currentProject
+    ? t("sessionProjectRemove", { name: projectDisplayName(currentProject) })
+    : '';
   submenu.innerHTML = projectItems +
     (currentProject
       ? actionSeparator +
-        '<button class="session-more-item" type="button" role="menuitem" data-project-action="remove">' +
-        '<span>' + escapeHtml(t("sessionProjectRemove", { name: projectDisplayName(currentProject) })) +
-        '</span></button>'
+        '<button class="session-more-item" type="button" role="menuitem" data-project-action="remove"' +
+        ' data-project-tooltip="' + escapeHtml(removeLabel) + '"><span class="session-project-label">' +
+        escapeHtml(removeLabel) + '</span></button>'
       : '') +
     (!currentProject
       ? actionSeparator +
@@ -5593,6 +5621,8 @@ function openSessionProjectSubmenu(
   submenu.style.top = position.top + "px";
   submenu.dataset.opensLeft = String(position.opensLeft);
   submenu.style.visibility = "visible";
+  syncSessionProjectOverflowTooltips(submenu);
+  bindTooltips();
   if (focusFirst) sessionMenuItems(submenu)[0]?.focus({ preventScroll: true });
   return submenu;
 }
