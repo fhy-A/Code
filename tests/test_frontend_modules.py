@@ -16886,6 +16886,170 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(data["isEdit"])
         self.assertFalse(data["isNotEdit"])
 
+    def test_delete_file_renders_only_in_execution_trace_across_terminal_and_history_states(self):
+        script = r"""
+global.window = {Code: {ui: {}}};
+require("./src/ui/diff.js");
+require("./src/ui/messages.js");
+const {createDiffFeature, isEditSuggestionMessage} = window.Code.ui.diff;
+const {createMessagesFeature} = window.Code.ui.messages;
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;");
+const diffFeature = createDiffFeature({
+  escapeHtml,
+  renderMarkdown: (value) => escapeHtml(value),
+  t: (key) => key,
+  getMessageText: (message) => String(message?.content || ""),
+});
+const messagesFeature = createMessagesFeature({
+  escapeHtml,
+  renderMarkdown: (value) => escapeHtml(value),
+  renderAssistantContent: (value) => escapeHtml(value),
+  t: (key) => key,
+  getMessageText: (message) => String(message?.content || ""),
+  getSessionId: () => "code069-session",
+  getSelectedModel: () => "model",
+  isEditSuggestionMessage,
+  renderEditSuggestion: (message, index) => diffFeature.renderEditSuggestionProjection(message, index),
+  getToolActionLabel: (action) => action,
+});
+
+function projectDelete({name, result, outcome, content, rejected = false, historical = false}) {
+  const agentRunId = `run-${name}`;
+  const toolCallId = `call-${name}`;
+  const path = result.path;
+  const projection = {
+    role: "tool-result",
+    content,
+    meta: {
+      action: "delete_file",
+      path,
+      pendingEditId: `server-edit-${name}`,
+      toolCallId,
+      agentRunId,
+      outcome,
+      result,
+      rejected,
+      applied: outcome === "succeeded",
+      ...(historical ? {} : {serverManaged: true, native: true}),
+    },
+  };
+  const rows = [
+    {role: "user", content: `delete ${path}`},
+    {
+      role: "tool-call",
+      content: "",
+      meta: {
+        action: "delete_file",
+        toolCallId,
+        agentRunId,
+        tool: {action: "delete_file", path},
+      },
+    },
+    projection,
+    {role: "assistant", content: `finished ${name}`, meta: {agentRunId}},
+  ];
+  const html = messagesFeature.projectMessages(rows, {
+    runState: {status: "completed", agentRunId},
+  });
+  return {
+    html,
+    isEditSuggestion: isEditSuggestionMessage(projection),
+    directCard: diffFeature.renderEditSuggestionProjection(projection, 2),
+  };
+}
+
+const cases = {
+  success: projectDelete({
+    name: "success",
+    outcome: "succeeded",
+    result: {ok: true, action: "delete_file", path: "output/success.tmp", size: 41, backupPath: "backup/success.tmp"},
+    content: "deleted output/success.tmp originalSize=41 backupPath=backup/success.tmp",
+  }),
+  failure: projectDelete({
+    name: "failure",
+    outcome: "failed",
+    result: {ok: false, action: "delete_file", path: "output/failure.tmp", error: "permission denied"},
+    content: "permission denied",
+  }),
+  rejection: projectDelete({
+    name: "rejection",
+    outcome: "failed",
+    rejected: true,
+    result: {ok: false, action: "delete_file", path: "output/rejected.tmp", rejected: true, error: "User rejected delete_file."},
+    content: "User rejected delete_file.",
+  }),
+  history: projectDelete({
+    name: "history",
+    outcome: "succeeded",
+    historical: true,
+    result: {ok: true, action: "delete_file", path: "output/history.tmp", size: 73, backupPath: "backup/history.tmp", replayed: true},
+    content: "deleted output/history.tmp originalSize=73 backupPath=backup/history.tmp",
+  }),
+};
+const editActions = ["propose_edit", "apply_edit", "write_file", "manage_generated_image"];
+const preservedEditActions = Object.fromEntries(editActions.map((action) => [action, isEditSuggestionMessage({
+  role: "tool-result",
+  content: action === "write_file" ? "content" : "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new",
+  meta: {pendingEditId: `edit-${action}`, action, path: "a.txt"},
+})]));
+const legacyDeleteWithNewContent = {
+  role: "tool-result",
+  content: "legacy delete projection",
+  meta: {pendingEditId: "legacy-delete", tool: {action: "delete_file", path: "output/legacy.tmp"}, newContent: "legacy"},
+};
+process.stdout.write(JSON.stringify({
+  cases,
+  preservedEditActions,
+  legacyDeleteIsEdit: isEditSuggestionMessage(legacyDeleteWithNewContent),
+  legacyDeleteCard: diffFeature.renderEditSuggestionProjection(legacyDeleteWithNewContent, 3),
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+
+        for name, projection in data["cases"].items():
+            html = projection["html"]
+            self.assertFalse(projection["isEditSuggestion"], name)
+            self.assertEqual(projection["directCard"], "", name)
+            self.assertNotIn('class="msg assistant edit-suggestion"', html, name)
+            self.assertEqual(html.count('class="tool-process-item '), 1, name)
+            self.assertIn(f'data-tool-call-id="call-{name}"', html, name)
+            self.assertIn(f"output/{'rejected' if name == 'rejection' else name}.tmp", html, name)
+
+        self.assertIn('class="tool-process-item succeeded"', data["cases"]["success"]["html"])
+        self.assertIn("toolProcessSucceeded", data["cases"]["success"]["html"])
+        self.assertIn("originalSize=41", data["cases"]["success"]["html"])
+        self.assertIn("backupPath=backup/success.tmp", data["cases"]["success"]["html"])
+        self.assertIn('class="tool-process-item failed"', data["cases"]["failure"]["html"])
+        self.assertIn("permission denied", data["cases"]["failure"]["html"])
+        self.assertIn('class="tool-process-item failed"', data["cases"]["rejection"]["html"])
+        self.assertIn("User rejected delete_file.", data["cases"]["rejection"]["html"])
+        self.assertIn('class="tool-process-item succeeded"', data["cases"]["history"]["html"])
+        self.assertIn("originalSize=73", data["cases"]["history"]["html"])
+        self.assertIn("backupPath=backup/history.tmp", data["cases"]["history"]["html"])
+        self.assertEqual(
+            data["preservedEditActions"],
+            {
+                "propose_edit": True,
+                "apply_edit": True,
+                "write_file": True,
+                "manage_generated_image": True,
+            },
+        )
+        self.assertFalse(data["legacyDeleteIsEdit"])
+        self.assertEqual(data["legacyDeleteCard"], "")
+
     def test_edit_diff_disclosure_is_transient_independent_and_accessible(self):
         script = r"""
 global.window = {Code: {ui: {}}};

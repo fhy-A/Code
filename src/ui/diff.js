@@ -30,7 +30,8 @@
     if (!msg || msg.role !== "tool-result") return false;
     const meta = msg.meta || {};
     const action = meta.action || meta.tool?.action || "";
-    return !!meta.pendingEditId && (["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"].includes(action) || !!meta.newContent);
+    if (action === "delete_file") return false;
+    return !!meta.pendingEditId && (["propose_edit", "apply_edit", "write_file", "manage_generated_image"].includes(action) || !!meta.newContent);
   }
 
   function getEditSuggestionInstanceId(meta = {}) {
@@ -173,7 +174,7 @@
       const action = meta.action || meta.tool?.action || "propose_edit";
       const target = meta.path || meta.tool?.path || "";
       const content = getMessageText(msg).trim();
-      if (!pendingId || !content) return "";
+      if (!pendingId || action === "delete_file" || !content) return "";
 
       const pendingEdits = getPendingEdits() || {};
       const authorizationRequests = getAuthorizationRequests() || [];
