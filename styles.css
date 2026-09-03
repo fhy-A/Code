@@ -14002,3 +14002,131 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   border-color: var(--line);
   box-shadow: none;
 }
+
+/* CODE-070 trace and commentary density hierarchy */
+.chat-pane:not(.empty-chat) .msg.assistant.agent-commentary {
+  margin-bottom: 8px;
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant.agent-commentary > .bubble {
+  color: var(--text);
+  font-size: var(--type-content);
+  line-height: 1.68;
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant.agent-commentary > .bubble code:not(.line-code):not(.clickable-path) {
+  padding: .03em .18em;
+  border: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--code-bg) 36%, transparent);
+  color: var(--text);
+}
+
+.chat-pane:not(.empty-chat) .execution-trace :is(.completed-run-line, .active-run-line) {
+  font-size: var(--type-interface);
+  line-height: 1.45;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage .tool-process-stage-heading {
+  font-size: var(--type-interface);
+  line-height: 1.45;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage .tool-process-stage-heading code {
+  font-size: var(--type-interface);
+  line-height: 1.45;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item .tool-process-row-heading {
+  font-size: var(--type-interface);
+  line-height: 1.45;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item .tool-process-row-heading code {
+  font-size: var(--type-interface);
+  line-height: 1.45;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item .tool-process-outcome {
+  font-size: var(--type-interface);
+  line-height: 1.45;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage .tool-process-detail > strong,
+.chat-pane:not(.empty-chat) .tool-process-stage .tool-process-detail pre {
+  font-size: var(--type-interface);
+  line-height: 1.5;
+}
+
+.chat-pane:not(.empty-chat) .msg.assistant.tool-process:has(> .tool-process-stage:is(.succeeded, .completed)) {
+  margin-bottom: 6px;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) > .tool-process-stage-summary {
+  min-height: 28px;
+  padding: 1px 0;
+  gap: 5px;
+  color: color-mix(in srgb, var(--muted) 82%, var(--text));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading {
+  gap: 4px;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading strong {
+  font-weight: 580;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading code {
+  color: color-mix(in srgb, var(--muted) 88%, var(--text));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) > .tool-process-stage-body {
+  margin: 1px 0 0 3px;
+  padding: 1px 0 1px 10px;
+  border-left-color: color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-list {
+  gap: 0;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) > summary {
+  min-height: 28px;
+  padding: 1px 4px;
+  gap: 5px;
+  color: color-mix(in srgb, var(--muted) 84%, var(--text));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-indicator {
+  width: 5px;
+  height: 5px;
+  background: color-mix(in srgb, var(--green) 64%, var(--muted));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-row-heading {
+  gap: 5px;
+  color: color-mix(in srgb, var(--text) 58%, var(--muted));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-row-heading strong {
+  font-weight: 580;
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-row-heading code {
+  color: color-mix(in srgb, var(--muted) 84%, var(--text));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-outcome {
+  color: color-mix(in srgb, var(--green) 56%, var(--text));
+}
+
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) > summary:hover {
+  background: color-mix(in srgb, var(--panel-2) 64%, transparent);
+}
+
+.chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) > .tool-process-stage-summary:is(:hover, :focus-visible),
+.chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) > summary:is(:hover, :focus-visible) {
+  color: color-mix(in srgb, var(--text) 78%, var(--muted));
+}
+/* CODE-070 trace and commentary density hierarchy end */

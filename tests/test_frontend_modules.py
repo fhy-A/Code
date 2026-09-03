@@ -32505,6 +32505,203 @@ class Code043CompactDisclosureTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+class Code070TraceDensityVisualTests(unittest.TestCase):
+    MARKER = "/* CODE-070 trace and commentary density hierarchy */"
+    END_MARKER = "/* CODE-070 trace and commentary density hierarchy end */"
+    COMMENTARY = ".chat-pane:not(.empty-chat) .msg.assistant.agent-commentary"
+    TRACE = ".chat-pane:not(.empty-chat) .execution-trace"
+    TOOL_STAGE = ".chat-pane:not(.empty-chat) .tool-process-stage"
+    TOOL_ITEM = ".chat-pane:not(.empty-chat) .tool-process-item"
+    COMPLETED_STAGE = (
+        ".chat-pane:not(.empty-chat) "
+        ".tool-process-stage:is(.succeeded, .completed)"
+    )
+    COMPLETED_ITEM = (
+        ".chat-pane:not(.empty-chat) "
+        ".tool-process-item:is(.succeeded, .completed)"
+    )
+
+    def scoped_source(self):
+        if self.MARKER not in STYLE_SOURCE:
+            self.fail(f"missing style marker: {self.MARKER}")
+        if self.END_MARKER not in STYLE_SOURCE:
+            self.fail(f"missing style marker: {self.END_MARKER}")
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(self.END_MARKER, 1)[0]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_commentary_restores_reading_rhythm_with_high_contrast_inline_code(self):
+        source = self.scoped_source()
+        commentary = self.rule(source, f"{self.COMMENTARY} {{")
+        self.assertIn("margin-bottom: 8px;", commentary)
+        bubble = self.rule(source, f"{self.COMMENTARY} > .bubble {{")
+        for declaration in (
+            "color: var(--text);",
+            "font-size: var(--type-content);",
+            "line-height: 1.68;",
+        ):
+            self.assertIn(declaration, bubble)
+        self.assertNotIn(f"{self.COMMENTARY} > .bubble p {{", source)
+        self.assertNotIn(f"{self.COMMENTARY} > .bubble p:last-child {{", source)
+        inline_code = self.rule(
+            source,
+            f"{self.COMMENTARY} > .bubble code:not(.line-code):not(.clickable-path) {{",
+        )
+        for declaration in (
+            "padding: .03em .18em;",
+            "border: 0;",
+            "border-radius: 2px;",
+            "background: color-mix(in srgb, var(--code-bg) 36%, transparent);",
+            "color: var(--text);",
+        ):
+            self.assertIn(declaration, inline_code)
+
+    def test_completed_stage_and_items_use_compact_twenty_eight_pixel_targets(self):
+        source = self.scoped_source()
+        run_status = self.rule(
+            source,
+            f"{self.TRACE} :is(.completed-run-line, .active-run-line) {{",
+        )
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.45;"):
+            self.assertIn(declaration, run_status)
+        stage_typography = self.rule(
+            source,
+            f"{self.TOOL_STAGE} .tool-process-stage-heading {{",
+        )
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.45;"):
+            self.assertIn(declaration, stage_typography)
+        stage_target = self.rule(
+            source,
+            f"{self.TOOL_STAGE} .tool-process-stage-heading code {{",
+        )
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.45;"):
+            self.assertIn(declaration, stage_target)
+        item_typography = self.rule(
+            source,
+            f"{self.TOOL_ITEM} .tool-process-row-heading {{",
+        )
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.45;"):
+            self.assertIn(declaration, item_typography)
+        item_target = self.rule(
+            source,
+            f"{self.TOOL_ITEM} .tool-process-row-heading code {{",
+        )
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.45;"):
+            self.assertIn(declaration, item_target)
+        outcome_typography = self.rule(
+            source,
+            f"{self.TOOL_ITEM} .tool-process-outcome {{",
+        )
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.45;"):
+            self.assertIn(declaration, outcome_typography)
+        detail_typography = self.rule(
+            source,
+            f"{self.TOOL_STAGE} .tool-process-detail > strong,",
+        )
+        self.assertIn(f"{self.TOOL_STAGE} .tool-process-detail pre", detail_typography)
+        for declaration in ("font-size: var(--type-interface);", "line-height: 1.5;"):
+            self.assertIn(declaration, detail_typography)
+
+        process = self.rule(
+            source,
+            ".chat-pane:not(.empty-chat) .msg.assistant.tool-process:has(> .tool-process-stage:is(.succeeded, .completed)) {",
+        )
+        self.assertIn("margin-bottom: 6px;", process)
+        stage_summary = self.rule(source, f"{self.COMPLETED_STAGE} > .tool-process-stage-summary {{")
+        for declaration in (
+            "min-height: 28px;",
+            "padding: 1px 0;",
+            "gap: 5px;",
+            "color: color-mix(in srgb, var(--muted) 82%, var(--text));",
+        ):
+            self.assertIn(declaration, stage_summary)
+        stage_heading = self.rule(source, f"{self.COMPLETED_STAGE} .tool-process-stage-heading {{")
+        self.assertIn("gap: 4px;", stage_heading)
+        self.assertNotIn("font-size:", stage_heading)
+        self.assertNotIn("line-height:", stage_heading)
+        stage_body = self.rule(source, f"{self.COMPLETED_STAGE} > .tool-process-stage-body {{")
+        self.assertIn("margin: 1px 0 0 3px;", stage_body)
+        self.assertIn("padding: 1px 0 1px 10px;", stage_body)
+
+        item_summary = self.rule(source, f"{self.COMPLETED_ITEM} > summary {{")
+        for declaration in (
+            "min-height: 28px;",
+            "padding: 1px 4px;",
+            "gap: 5px;",
+            "color: color-mix(in srgb, var(--muted) 84%, var(--text));",
+        ):
+            self.assertIn(declaration, item_summary)
+        indicator = self.rule(source, f"{self.COMPLETED_ITEM} .tool-process-indicator {{")
+        self.assertIn("width: 5px;", indicator)
+        self.assertIn("height: 5px;", indicator)
+        heading = self.rule(source, f"{self.COMPLETED_ITEM} .tool-process-row-heading {{")
+        for declaration in (
+            "gap: 5px;",
+            "color: color-mix(in srgb, var(--text) 58%, var(--muted));",
+        ):
+            self.assertIn(declaration, heading)
+        self.assertNotIn("font-size:", heading)
+        self.assertNotIn("line-height:", heading)
+        outcome = self.rule(source, f"{self.COMPLETED_ITEM} .tool-process-outcome {{")
+        self.assertIn("color: color-mix(in srgb, var(--green) 56%, var(--text));", outcome)
+        self.assertNotIn("font-size:", outcome)
+        self.assertNotIn("line-height:", outcome)
+        hover = self.rule(source, f"{self.COMPLETED_ITEM} > summary:hover {{")
+        self.assertIn(
+            "background: color-mix(in srgb, var(--panel-2) 64%, transparent);",
+            hover,
+        )
+        for undersized in (
+            "font-size: 10.5px;",
+            "font-size: 11px;",
+            "font-size: 11.5px;",
+            "font-size: 12px;",
+            "font-size: 13px;",
+            "font-size: var(--type-caption);",
+        ):
+            self.assertNotIn(undersized, source)
+
+    def test_active_and_exception_states_disclosures_and_final_answer_stay_out_of_scope(self):
+        source = self.scoped_source()
+        for forbidden_state in (
+            ".running",
+            ".pending",
+            ".failed",
+            ".cancelled",
+            ".interrupted",
+            ".tool-active",
+        ):
+            self.assertNotIn(forbidden_state, source)
+        for forbidden_surface in (
+            ".msg.user",
+            ":not(.agent-commentary)",
+            ".edit-suggestion",
+            ".authorization-",
+            ".user-input-",
+            ".path-file-card",
+            ".skill-",
+        ):
+            self.assertNotIn(forbidden_surface, source)
+        for forbidden_behavior in (
+            "display: none",
+            "visibility:",
+            "max-height:",
+            "overflow:",
+            "animation:",
+            "white-space:",
+            "text-overflow:",
+        ):
+            self.assertNotIn(forbidden_behavior, source)
+        self.assertIn(".tool-process-stage.tool-active > .tool-process-stage-summary", STYLE_SOURCE)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", STYLE_SOURCE)
+        self.assertIn('if (!["Enter", " "].includes(event.key)) return;', MESSAGES_SOURCE)
+        self.assertIn('root.addEventListener("toggle"', MESSAGES_SOURCE)
+
+
 class Code043DiffSuggestionFlatteningTests(unittest.TestCase):
     MARKER = "/* CODE-043 phase 2: flat edit suggestions */"
     CODE_SURFACE_GROUP = (
