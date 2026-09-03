@@ -5426,11 +5426,509 @@ const sessionStatusTicker = createSessionStatusTicker({
   onRefresh: scheduleSessionTitleOverflowRefresh,
 });
 
+const SESSION_PROJECT_DRAG_MIME = "application/x-workbar-session-project-move";
+const SESSION_PROJECT_DRAG_PAYLOAD = "workbar-session-project-move";
+const SESSION_PROJECT_DRAG_HIT_TOLERANCE_PX = 8;
+const SESSION_PROJECT_DRAG_SCROLL_EDGE_PX = 52;
+const SESSION_PROJECT_DRAG_SCROLL_MAX_PX = 14;
+const sessionProjectMigrationPending = new Set();
+let sessionProjectDragState = null;
+let sessionProjectDragDocumentListenersBound = false;
+
+function resolveSessionProjectDropHit(
+  pointerX,
+  pointerY,
+  listRect,
+  blockRects,
+  tolerancePx = SESSION_PROJECT_DRAG_HIT_TOLERANCE_PX,
+) {
+  const x = Number(pointerX);
+  const y = Number(pointerY);
+  const listLeft = Number(listRect?.left);
+  const listRight = Number(listRect?.right);
+  const listTop = Number(listRect?.top);
+  const listBottom = Number(listRect?.bottom);
+  if (
+    ![x, y, listLeft, listRight, listTop, listBottom].every(Number.isFinite)
+    || listRight < listLeft
+    || listBottom < listTop
+    || x < listLeft
+    || x > listRight
+    || y < listTop
+    || y > listBottom
+  ) {
+    return null;
+  }
+  const visibleBlocks = (Array.isArray(blockRects) ? blockRects : [])
+    .map((rect, index) => {
+      const rawLeft = Number(rect?.left);
+      const rawRight = Number(rect?.right);
+      const rawTop = Number(rect?.top);
+      const rawBottom = Number(rect?.bottom);
+      if (![rawLeft, rawRight, rawTop, rawBottom].every(Number.isFinite)) return null;
+      const left = Math.max(listLeft, rawLeft);
+      const right = Math.min(listRight, rawRight);
+      const top = Math.max(listTop, rawTop);
+      const bottom = Math.min(listBottom, rawBottom);
+      if (right <= left || bottom <= top) return null;
+      return {
+        index,
+        key: String(rect?.key || ""),
+        left,
+        right,
+        top,
+        bottom,
+      };
+    })
+    .filter(Boolean);
+  for (const block of visibleBlocks) {
+    if (
+      x >= block.left
+      && x <= block.right
+      && y >= block.top
+      && y <= block.bottom
+    ) {
+      return { index: block.index, key: block.key, mode: "inside", distance: 0 };
+    }
+  }
+  if (visibleBlocks.some((block) => y >= block.top && y <= block.bottom)) {
+    return null;
+  }
+  const hasBlockAbove = visibleBlocks.some((block) => block.bottom < y);
+  const hasBlockBelow = visibleBlocks.some((block) => block.top > y);
+  if (!hasBlockAbove || !hasBlockBelow) return null;
+  const normalizedTolerance = Number(tolerancePx);
+  const tolerance = Number.isFinite(normalizedTolerance)
+    ? Math.max(0, normalizedTolerance)
+    : 0;
+  let best = null;
+  for (const block of visibleBlocks) {
+    const distance = y < block.top
+      ? block.top - y
+      : (y > block.bottom ? y - block.bottom : Number.POSITIVE_INFINITY);
+    if (distance <= tolerance && (!best || distance < best.distance)) {
+      best = {
+        index: block.index,
+        key: block.key,
+        mode: "snap",
+        distance,
+      };
+    }
+  }
+  return best;
+}
+
+function resolveSessionProjectDropIntent(
+  sessionId,
+  projectKey,
+  options = {},
+) {
+  const sessions = Array.isArray(options.sessions) ? options.sessions : (state.sessions || []);
+  const projects = Array.isArray(options.projects) ? options.projects : (state.projects || []);
+  const pending = options.pending && typeof options.pending.has === "function"
+    ? options.pending
+    : sessionProjectMigrationPending;
+  const normalizedSessionId = String(sessionId || "").trim();
+  const session = sessions.find((candidate) => String(candidate?.id || "") === normalizedSessionId);
+  if (!session) {
+    return { kind: "invalid", reason: "session", projectId: null, project: null };
+  }
+  if (pending.has(normalizedSessionId)) {
+    return { kind: "invalid", reason: "pending", projectId: null, project: null };
+  }
+  const normalizedProjectKey = String(projectKey || "");
+  let project = null;
+  let projectId = null;
+  if (normalizedProjectKey !== UNASSIGNED_PROJECT_KEY) {
+    project = projects.find(
+      (candidate) => String(candidate?.id || "") === normalizedProjectKey,
+    ) || null;
+    if (!project) {
+      return { kind: "invalid", reason: "project", projectId: null, project: null };
+    }
+    projectId = String(project.id);
+  }
+  const sourceProjectId = session.projectId ? String(session.projectId) : null;
+  return {
+    kind: sourceProjectId === projectId ? "noop" : "move",
+    reason: sourceProjectId === projectId ? "same-project" : "",
+    sessionId: normalizedSessionId,
+    sourceProjectId,
+    projectId,
+    project,
+  };
+}
+
+function ensureSessionProjectTemporaryDropTarget(sourceProjectId) {
+  const root = els.sessionList;
+  if (!root || sourceProjectId == null) return null;
+  if (root.querySelector(`.project-block[data-project-key="${UNASSIGNED_PROJECT_KEY}"]`)) {
+    return null;
+  }
+  const temporary = document.createElement("div");
+  temporary.className = "project-block unassigned-project session-project-drop-temporary";
+  temporary.dataset.projectKey = UNASSIGNED_PROJECT_KEY;
+  temporary.setAttribute("aria-label", t("sessionProjectDropUnassigned"));
+  temporary.innerHTML = `
+    <div class="project-header">
+      <div class="session-project-drop-temporary-label">
+        <span class="session-project-drop-temporary-name">${escapeHtml(t("otherSessions"))}</span>
+        <span class="session-project-drop-temporary-hint">${escapeHtml(t("sessionProjectDropUnassigned"))}</span>
+      </div>
+    </div>`;
+  root.appendChild(temporary);
+  return temporary;
+}
+
+function sessionProjectDropIntentForBlock(block) {
+  if (!sessionProjectDragState || !block || !els.sessionList?.contains(block)) {
+    return { kind: "invalid", reason: "target", projectId: null, project: null };
+  }
+  const projectKey = String(block.dataset.projectKey || "");
+  if (!projectKey) {
+    return { kind: "invalid", reason: "target", projectId: null, project: null };
+  }
+  return resolveSessionProjectDropIntent(
+    sessionProjectDragState.sessionId,
+    projectKey,
+  );
+}
+
+function resolveSessionProjectDropAtPointer(pointerX, pointerY) {
+  const root = els.sessionList;
+  const invalidIntent = {
+    kind: "invalid",
+    reason: "target",
+    projectId: null,
+    project: null,
+  };
+  if (!root || !sessionProjectDragState) {
+    return { block: null, intent: invalidIntent, hit: null };
+  }
+  const blocks = Array.from(root.querySelectorAll(".project-block[data-project-key]"));
+  const blockRects = blocks.map((block) => {
+    const rect = block.getBoundingClientRect();
+    return {
+      key: String(block.dataset.projectKey || ""),
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+    };
+  });
+  const hit = resolveSessionProjectDropHit(
+    pointerX,
+    pointerY,
+    root.getBoundingClientRect(),
+    blockRects,
+  );
+  const block = hit ? blocks[hit.index] || null : null;
+  return {
+    block,
+    intent: sessionProjectDropIntentForBlock(block),
+    hit,
+  };
+}
+
+function clearSessionProjectDropHover() {
+  els.sessionList?.querySelectorAll(".project-block.is-session-project-drop-over")
+    .forEach((block) => block.classList.remove("is-session-project-drop-over"));
+}
+
+function setSessionProjectDropHover(block) {
+  clearSessionProjectDropHover();
+  if (block) block.classList.add("is-session-project-drop-over");
+}
+
+function syncSessionProjectDropTargets() {
+  const root = els.sessionList;
+  if (!root || !sessionProjectDragState) return false;
+  ensureSessionProjectTemporaryDropTarget(sessionProjectDragState.sourceProjectId);
+  root.classList.add("is-session-project-dragging");
+  root.querySelectorAll(".project-block[data-project-key]").forEach((block) => {
+    const intent = sessionProjectDropIntentForBlock(block);
+    block.classList.toggle("is-session-project-drop-available", intent.kind === "move");
+    block.classList.toggle("is-session-project-drop-noop", intent.kind === "noop");
+    block.classList.toggle("is-session-project-drop-invalid", intent.kind === "invalid");
+    block.dataset.sessionProjectDropState = intent.kind;
+  });
+  return true;
+}
+
+function createSessionProjectDragGhost(row) {
+  const ghost = document.createElement("div");
+  const title = row?.querySelector(".session-title-scroll-text")?.textContent?.trim()
+    || t("untitledSession");
+  const sourceWidth = row?.querySelector(".session-main")?.getBoundingClientRect?.().width || 180;
+  ghost.className = "session-project-drag-ghost";
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.textContent = title;
+  ghost.style.width = `${Math.min(260, Math.max(156, sourceWidth))}px`;
+  document.body.appendChild(ghost);
+  return ghost;
+}
+
+function stopSessionProjectDragAutoScroll() {
+  if (!sessionProjectDragState) return;
+  if (sessionProjectDragState.autoScrollFrame != null) {
+    cancelAnimationFrame(sessionProjectDragState.autoScrollFrame);
+  }
+  sessionProjectDragState.autoScrollFrame = null;
+  sessionProjectDragState.autoScrollVelocity = 0;
+}
+
+function refreshSessionProjectDropTargetAtPointer() {
+  if (!els.sessionList || !sessionProjectDragState) return null;
+  const { pointerX, pointerY } = sessionProjectDragState;
+  if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) return null;
+  const resolution = resolveSessionProjectDropAtPointer(pointerX, pointerY);
+  setSessionProjectDropHover(resolution.block);
+  return resolution;
+}
+
+function runSessionProjectDragAutoScroll() {
+  const root = els.sessionList;
+  const dragState = sessionProjectDragState;
+  if (!root || !dragState || !dragState.autoScrollVelocity) {
+    if (dragState) dragState.autoScrollFrame = null;
+    return;
+  }
+  const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
+  const previous = root.scrollTop;
+  const next = Math.max(
+    0,
+    Math.min(maximum, previous + dragState.autoScrollVelocity),
+  );
+  root.scrollTop = next;
+  refreshSessionProjectDropTargetAtPointer();
+  if (root.scrollTop === previous || root.scrollTop <= 0 || root.scrollTop >= maximum) {
+    dragState.autoScrollVelocity = 0;
+    dragState.autoScrollFrame = null;
+    return;
+  }
+  dragState.autoScrollFrame = requestAnimationFrame(runSessionProjectDragAutoScroll);
+}
+
+function updateSessionProjectDragAutoScroll(pointerX, pointerY) {
+  const root = els.sessionList;
+  const dragState = sessionProjectDragState;
+  if (!root || !dragState) return;
+  dragState.pointerX = pointerX;
+  dragState.pointerY = pointerY;
+  const rect = root.getBoundingClientRect();
+  const inside = pointerX >= rect.left && pointerX <= rect.right
+    && pointerY >= rect.top && pointerY <= rect.bottom;
+  let velocity = 0;
+  if (inside && pointerY < rect.top + SESSION_PROJECT_DRAG_SCROLL_EDGE_PX) {
+    const depth = 1 - Math.max(0, pointerY - rect.top)
+      / SESSION_PROJECT_DRAG_SCROLL_EDGE_PX;
+    velocity = -Math.max(2, Math.ceil(SESSION_PROJECT_DRAG_SCROLL_MAX_PX * depth));
+  } else if (inside && pointerY > rect.bottom - SESSION_PROJECT_DRAG_SCROLL_EDGE_PX) {
+    const depth = 1 - Math.max(0, rect.bottom - pointerY)
+      / SESSION_PROJECT_DRAG_SCROLL_EDGE_PX;
+    velocity = Math.max(2, Math.ceil(SESSION_PROJECT_DRAG_SCROLL_MAX_PX * depth));
+  }
+  const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
+  if ((velocity < 0 && root.scrollTop <= 0) || (velocity > 0 && root.scrollTop >= maximum)) {
+    velocity = 0;
+  }
+  dragState.autoScrollVelocity = velocity;
+  if (!velocity) {
+    stopSessionProjectDragAutoScroll();
+  } else if (dragState.autoScrollFrame == null) {
+    dragState.autoScrollFrame = requestAnimationFrame(runSessionProjectDragAutoScroll);
+  }
+}
+
+function clearSessionProjectDragState() {
+  const root = els.sessionList;
+  const ghost = sessionProjectDragState?.ghost;
+  stopSessionProjectDragAutoScroll();
+  ghost?.remove();
+  if (root) {
+    root.classList.remove("is-session-project-dragging");
+    root.querySelectorAll(
+      ".is-session-project-drag-source, .is-session-project-drop-available, " +
+      ".is-session-project-drop-noop, .is-session-project-drop-invalid, " +
+      ".is-session-project-drop-over",
+    ).forEach((element) => {
+      element.classList.remove(
+        "is-session-project-drag-source",
+        "is-session-project-drop-available",
+        "is-session-project-drop-noop",
+        "is-session-project-drop-invalid",
+        "is-session-project-drop-over",
+      );
+      element.removeAttribute("data-session-project-drop-state");
+    });
+    const temporary = root.querySelector(".session-project-drop-temporary");
+    temporary?.remove();
+  }
+  sessionProjectDragState = null;
+}
+
+function syncSessionProjectMigrationPendingRow(sessionId, pending) {
+  const normalizedSessionId = String(sessionId || "");
+  els.sessionList?.querySelectorAll(".session-row[data-session-id]").forEach((row) => {
+    if (row.dataset.sessionId === normalizedSessionId) {
+      row.classList.toggle("is-session-project-migration-pending", Boolean(pending));
+      const source = row.querySelector(".session-main");
+      source?.setAttribute("draggable", String(!pending));
+    }
+  });
+}
+
+async function runSessionProjectDropAction(intent, returnFocus) {
+  if (!intent || intent.kind !== "move") return false;
+  const sessionId = intent.sessionId;
+  if (!sessionId || sessionProjectMigrationPending.has(sessionId)) return false;
+  sessionProjectMigrationPending.add(sessionId);
+  syncSessionProjectMigrationPendingRow(sessionId, true);
+  try {
+    return await runSessionProjectMenuAction(
+      sessionId,
+      intent.projectId,
+      intent.project ? projectDisplayName(intent.project) : "",
+      { returnFocus },
+    );
+  } finally {
+    sessionProjectMigrationPending.delete(sessionId);
+    syncSessionProjectMigrationPendingRow(sessionId, false);
+  }
+}
+
+function attachSessionProjectDragListeners() {
+  const root = els.sessionList;
+  if (!root) return false;
+  if (!root._sessionProjectDragListenersBound) {
+    root._sessionProjectDragListenersBound = true;
+    root.addEventListener("dragstart", (event) => {
+      const source = event.target?.closest?.(".session-main[draggable]");
+      const row = source?.closest?.(".session-row[data-session-id]");
+      if (!source || !row || !root.contains(row) || !event.dataTransfer) return;
+      if (source.getAttribute("draggable") !== "true") {
+        event.preventDefault();
+        return;
+      }
+      const intent = resolveSessionProjectDropIntent(
+        row.dataset.sessionId,
+        row.closest(".project-block")?.dataset.projectKey || "",
+      );
+      if (intent.reason === "session" || intent.reason === "pending") {
+        event.preventDefault();
+        return;
+      }
+      clearSessionProjectDragState();
+      closeAllSessionMenus();
+      sessionTitleMarquee.reset();
+      projectTitleMarquee.reset();
+      const ghost = createSessionProjectDragGhost(row);
+      sessionProjectDragState = {
+        sessionId: intent.sessionId,
+        sourceProjectId: intent.sourceProjectId,
+        sourceRow: row,
+        dropClaimed: false,
+        ghost,
+        pointerX: event.clientX,
+        pointerY: event.clientY,
+        autoScrollVelocity: 0,
+        autoScrollFrame: null,
+      };
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData(
+        SESSION_PROJECT_DRAG_MIME,
+        SESSION_PROJECT_DRAG_PAYLOAD,
+      );
+      if (typeof event.dataTransfer.setDragImage === "function") {
+        event.dataTransfer.setDragImage(ghost, 18, 18);
+      }
+      row.classList.add("is-session-project-drag-source");
+      syncSessionProjectDropTargets();
+    });
+    root.addEventListener("dragenter", (event) => {
+      if (!sessionProjectDragState) return;
+      sessionProjectDragState.pointerX = event.clientX;
+      sessionProjectDragState.pointerY = event.clientY;
+      const resolution = resolveSessionProjectDropAtPointer(event.clientX, event.clientY);
+      setSessionProjectDropHover(resolution.block);
+    });
+    root.addEventListener("dragover", (event) => {
+      if (!sessionProjectDragState) return;
+      updateSessionProjectDragAutoScroll(event.clientX, event.clientY);
+      const resolution = resolveSessionProjectDropAtPointer(event.clientX, event.clientY);
+      const { intent } = resolution;
+      setSessionProjectDropHover(resolution.block);
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = intent.kind === "invalid" ? "none" : "move";
+      }
+      if (intent.kind === "move" || intent.kind === "noop") event.preventDefault();
+    });
+    root.addEventListener("dragleave", (event) => {
+      if (!sessionProjectDragState) return;
+      const rect = root.getBoundingClientRect();
+      if (
+        event.clientX < rect.left
+        || event.clientX > rect.right
+        || event.clientY < rect.top
+        || event.clientY > rect.bottom
+      ) {
+        clearSessionProjectDropHover();
+        stopSessionProjectDragAutoScroll();
+      }
+    });
+    root.addEventListener("drop", (event) => {
+      if (!sessionProjectDragState) return;
+      sessionProjectDragState.pointerX = event.clientX;
+      sessionProjectDragState.pointerY = event.clientY;
+      const resolution = resolveSessionProjectDropAtPointer(event.clientX, event.clientY);
+      const { intent } = resolution;
+      if (intent.kind !== "move" && intent.kind !== "noop") {
+        clearSessionProjectDragState();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (sessionProjectDragState.dropClaimed) return;
+      sessionProjectDragState.dropClaimed = true;
+      const returnFocus = sessionProjectDragState.sourceRow?.querySelector(".session-main");
+      clearSessionProjectDragState();
+      if (intent.kind === "noop") return;
+      void runSessionProjectDropAction(intent, returnFocus);
+    });
+    root.addEventListener("dragend", () => {
+      clearSessionProjectDragState();
+    });
+  }
+  if (!sessionProjectDragDocumentListenersBound) {
+    sessionProjectDragDocumentListenersBound = true;
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && sessionProjectDragState) {
+        clearSessionProjectDragState();
+      }
+    });
+    document.addEventListener("dragover", (event) => {
+      if (!sessionProjectDragState || els.sessionList?.contains(event.target)) return;
+      clearSessionProjectDropHover();
+      stopSessionProjectDragAutoScroll();
+    });
+    document.addEventListener("drop", () => {
+      if (sessionProjectDragState) clearSessionProjectDragState();
+    });
+    window.addEventListener("blur", () => {
+      if (sessionProjectDragState) clearSessionProjectDragState();
+    });
+  }
+  return true;
+}
+
 function renderProjectSessionRow(session, pinnedIds) {
   const title = session.title || t("untitledSession");
   const active = session.id === state.sessionId;
+  const migrationPending = sessionProjectMigrationPending.has(session.id);
   if (state.renamingSessionId === session.id) {
-    return '<div class="session-row active" data-session-id="' + escapeHtml(session.id) + '">' +
+    return '<div class="session-row active' +
+      (migrationPending ? ' is-session-project-migration-pending' : '') +
+      '" data-session-id="' + escapeHtml(session.id) + '">' +
       '<input class="session-rename-inline" value="' + escapeHtml(title) +
       '" data-session-id="' + escapeHtml(session.id) +
       '" data-original="' + escapeHtml(title) +
@@ -5442,8 +5940,10 @@ function renderProjectSessionRow(session, pinnedIds) {
       renderPinIcon() + '</span>'
     : "";
   return '<div class="session-row' + (active ? ' active' : '') +
+    (migrationPending ? ' is-session-project-migration-pending' : '') +
     '" data-session-id="' + escapeHtml(session.id) + '">' +
-    '<button class="session-main" type="button" data-session-id="' +
+    '<button class="session-main" type="button" draggable="' +
+    String(!migrationPending) + '" data-session-id="' +
     escapeHtml(session.id) + '">' +
     pinBadge + '<span class="session-title-text"><span class="session-title-scroll-text">' +
     escapeHtml(title) + '</span></span>' +
@@ -5471,7 +5971,8 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   let html = '<div class="project-block' +
     (isUnassigned ? ' unassigned-project' : '') +
     (pending ? ' pending-project' : '') +
-    '" data-project-key="' + escapeHtml(sectionKey) + '">';
+    '" data-project-key="' + escapeHtml(sectionKey) + '"' +
+    (projectId ? ' data-project-id="' + escapeHtml(projectId) + '"' : '') + '>';
   const headerTitle = isUnassigned
     ? t("unassignedSessionsHint")
     : projectRootPaths(project).join("\n");
@@ -5915,6 +6416,8 @@ function openSessionMoreMenu(button, { focusFirst = false } = {}) {
 }
 
 function renderSessions() {
+  clearSessionProjectDragState();
+  attachSessionProjectDragListeners();
   closeAllSessionMenus();
   cancelSessionTitleOverflowRefresh();
   sessionTitleMarquee.reset();

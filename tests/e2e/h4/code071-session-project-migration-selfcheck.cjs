@@ -49,6 +49,10 @@ async function seedContract(host) {
   const editorPrimary = path.join(host.root, "editor-primary");
   const editorSecondary = path.join(host.root, "editor-secondary");
   const conflictEditorPrimary = path.join(host.root, "conflict-editor-primary");
+  const dragBundleTargetRoot = path.join(host.root, "drag-bundle-target");
+  const dragClassicTargetRoot = path.join(host.root, "drag-classic-target");
+  const dragBundleConflictRoot = path.join(host.root, "drag-bundle-conflict");
+  const dragClassicConflictRoot = path.join(host.root, "drag-classic-conflict");
   const duplicateRootA = path.join(host.root, "area-a", "shared-src");
   const duplicateRootB = path.join(host.root, "area-b", "shared-src");
   const conflictRoot = path.join(
@@ -64,6 +68,10 @@ async function seedContract(host) {
     fs.mkdir(editorPrimary),
     fs.mkdir(editorSecondary),
     fs.mkdir(conflictEditorPrimary),
+    fs.mkdir(dragBundleTargetRoot),
+    fs.mkdir(dragClassicTargetRoot),
+    fs.mkdir(dragBundleConflictRoot),
+    fs.mkdir(dragClassicConflictRoot),
     fs.mkdir(duplicateRootA, { recursive: true }),
     fs.mkdir(duplicateRootB, { recursive: true }),
     fs.mkdir(conflictRoot, { recursive: true }),
@@ -76,6 +84,8 @@ async function seedContract(host) {
     fs.writeFile(path.join(newProjectRoot, "new-project.txt"), "new\n", "utf8"),
     fs.writeFile(path.join(editorPrimary, "editor-primary.txt"), "primary\n", "utf8"),
     fs.writeFile(path.join(editorSecondary, "editor-secondary.txt"), "secondary\n", "utf8"),
+    fs.writeFile(path.join(dragBundleTargetRoot, "bundle-target.txt"), "bundle\n", "utf8"),
+    fs.writeFile(path.join(dragClassicTargetRoot, "classic-target.txt"), "classic\n", "utf8"),
   ]);
 
   const existingProjects = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
@@ -131,6 +141,20 @@ async function seedContract(host) {
       rootPaths: [conflictEditorPrimary, targetPrimary],
     }),
   })).payload;
+  const dragBundleTargetProject = (await requestJson(host.ready.codeUrl, "/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      label: "Bundle drag target",
+      rootPaths: [dragBundleTargetRoot],
+    }),
+  })).payload;
+  const dragClassicTargetProject = (await requestJson(host.ready.codeUrl, "/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      label: "Classic drag target",
+      rootPaths: [dragClassicTargetRoot],
+    }),
+  })).payload;
 
   const createSession = async (
     title,
@@ -149,6 +173,42 @@ async function seedContract(host) {
     })
   ).payload;
 
+  const createDragFixture = async (prefix, targetProject, conflictCwd) => {
+    const fixture = {
+      targetProject,
+      current: await createSession(`${prefix} current`, {}, originalProject.id),
+      other: await createSession(`${prefix} other`),
+      cancel: await createSession(`${prefix} cancel`, {}, longProject.id, longProjectRoot),
+      busy: await createSession(`${prefix} busy`, { status: "paused" }),
+      waiting: await createSession(`${prefix} waiting`, {
+        status: "waiting_user_input",
+        userInputRequest: {
+          requestId: `${prefix.toLowerCase().replaceAll(" ", "-")}-request`,
+          status: "pending",
+          questions: [],
+        },
+      }),
+      conflict: await createSession(`${prefix} conflict`, {}, null, conflictCwd),
+      archived: await createSession(`${prefix} archived`, {}, originalProject.id),
+    };
+    await requestJson(
+      host.ready.codeUrl,
+      `/api/session-archive/${encodeURIComponent(fixture.archived.id)}/archive`,
+      { method: "POST" },
+    );
+    return fixture;
+  };
+  const dragBundle = await createDragFixture(
+    "CODE-071 bundle drag",
+    dragBundleTargetProject,
+    dragBundleConflictRoot,
+  );
+  const dragClassic = await createDragFixture(
+    "CODE-071 classic drag",
+    dragClassicTargetProject,
+    dragClassicConflictRoot,
+  );
+
   return {
     targetPrimary,
     targetSecondary,
@@ -157,6 +217,8 @@ async function seedContract(host) {
     editorPrimary,
     editorSecondary,
     conflictEditorPrimary,
+    dragBundleTargetRoot,
+    dragClassicTargetRoot,
     duplicateRootA,
     duplicateRootB,
     conflictRoot,
@@ -165,6 +227,10 @@ async function seedContract(host) {
     longProject,
     editorProject,
     conflictEditorProject,
+    drag: {
+      bundle: dragBundle,
+      classic: dragClassic,
+    },
     current: await createSession("CODE-071 current", {}, originalProject.id),
     longAssigned: await createSession(
       "CODE-071 long assigned",
@@ -201,6 +267,7 @@ async function createContext(
   projectPreviews,
   pageErrors,
   currentSessionId,
+  themeMode = "light",
 ) {
   const context = await browser.newContext({
     viewport: { width: 460, height: 800 },
@@ -246,7 +313,13 @@ async function createContext(
     }
     await route.continue();
   });
-  await context.addInitScript(({ platformToken, currentSessionId, projectDir }) => {
+  await context.addInitScript(({
+    platformToken,
+    currentSessionId,
+    projectDir,
+    expandedProjectIds,
+    themeMode: initialThemeMode,
+  }) => {
     class OfflineRenderer {}
     window.marked = {
       Renderer: OfflineRenderer,
@@ -261,15 +334,32 @@ async function createContext(
     }));
     localStorage.setItem("code-permission-profile", "read");
     localStorage.setItem("code-lang", "en");
-    localStorage.setItem("code-theme-mode", "light");
+    localStorage.setItem("code-theme-mode", initialThemeMode);
     localStorage.setItem("code-sidebar-width", "190");
     localStorage.setItem("code-recent-folders", JSON.stringify([projectDir]));
-    localStorage.setItem("code-expanded-project-sessions", JSON.stringify({
-      __unassigned_sessions__: true,
-    }));
+    localStorage.setItem("code-expanded-project-sessions", JSON.stringify(
+      Object.fromEntries([
+        "__unassigned_sessions__",
+        ...expandedProjectIds,
+      ].map((projectId) => [projectId, true])),
+    ));
     localStorage.setItem("code-foreground-view", "session");
     localStorage.setItem("code-last-session", currentSessionId);
-  }, { platformToken: host.platformToken, currentSessionId, projectDir: host.projectDir });
+  }, {
+    platformToken: host.platformToken,
+    currentSessionId,
+    projectDir: host.projectDir,
+    expandedProjectIds: [
+      seed.originalProject.id,
+      seed.targetProject.id,
+      seed.longProject.id,
+      seed.editorProject.id,
+      seed.conflictEditorProject.id,
+      seed.drag.bundle.targetProject.id,
+      seed.drag.classic.targetProject.id,
+    ],
+    themeMode,
+  });
   const page = await context.newPage();
   page.on("pageerror", (error) => pageErrors.push(String(error?.stack || error)));
   return { context, page };
@@ -590,6 +680,362 @@ async function moveToProject(page, host, sessionId, project) {
     (session) => session.projectId === project.id,
     "Session did not move to target project",
   );
+}
+
+const SESSION_PROJECT_DRAG_MIME = "application/x-workbar-session-project-move";
+
+function projectDropBlock(page, projectId) {
+  return page.locator(
+    `.project-block[data-project-id="${projectId}"][data-project-key="${projectId}"]`,
+  );
+}
+
+function unassignedDropBlock(page) {
+  return page.locator(
+    '.project-block[data-project-key="__unassigned_sessions__"]',
+  );
+}
+
+async function sessionDragSource(page, sessionId) {
+  const source = page.locator(
+    `.session-row[data-session-id="${sessionId}"] .session-main[draggable="true"]`,
+  );
+  await source.scrollIntoViewIfNeeded();
+  await source.waitFor({ state: "visible" });
+  return source;
+}
+
+async function dragSessionToTargetWithNativeDrag(page, sessionId, target) {
+  const source = await sessionDragSource(page, sessionId);
+  await target.scrollIntoViewIfNeeded();
+  await source.dragTo(target);
+}
+
+async function dragSessionToVisibleTargetWithMouse(page, sessionId, target) {
+  const source = await sessionDragSource(page, sessionId);
+  await target.scrollIntoViewIfNeeded();
+  await source.scrollIntoViewIfNeeded();
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  assert.ok(sourceBox, `Missing visible native drag source for ${sessionId}`);
+  assert.ok(targetBox, `Missing visible native drag target for ${sessionId}`);
+  await target.evaluate((element) => { window.__code071NativeDropTarget = element; });
+  let pointerDown = false;
+  try {
+    const startX = sourceBox.x + Math.min(28, sourceBox.width / 3);
+    const startY = sourceBox.y + sourceBox.height / 2;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    pointerDown = true;
+    await page.mouse.move(startX + 12, startY, { steps: 4 });
+    await page.waitForFunction((id) => (
+      document.querySelector(
+        `.session-row[data-session-id="${CSS.escape(id)}"]`,
+      )?.classList.contains("is-session-project-drag-source")
+    ), sessionId);
+    await page.mouse.move(
+      targetBox.x + targetBox.width / 2,
+      targetBox.y + targetBox.height / 2,
+      { steps: 14 },
+    );
+    await page.waitForFunction(() => (
+      window.__code071NativeDropTarget?.closest(".project-block")?.classList.contains(
+        "is-session-project-drop-over",
+      )
+    ));
+  } finally {
+    if (pointerDown) await page.mouse.up();
+    await page.evaluate(() => { delete window.__code071NativeDropTarget; });
+  }
+}
+
+async function dragSessionToBlock(page, sessionId, block) {
+  await sessionDragSource(page, sessionId);
+  await block.scrollIntoViewIfNeeded();
+  const selector = await block.evaluate((element) => {
+    const projectId = element.dataset.projectId;
+    const projectKey = element.dataset.projectKey;
+    if (projectId) {
+      return `.project-block[data-project-id="${CSS.escape(projectId)}"]`;
+    }
+    return `.project-block[data-project-key="${CSS.escape(projectKey || "")}"]`;
+  });
+  await beginSyntheticSessionDrag(page, sessionId);
+  return dispatchSyntheticSessionDrop(page, selector);
+}
+
+async function beginSyntheticSessionDrag(page, sessionId) {
+  return page.evaluate(({ id, mime }) => {
+    const source = document.querySelector(
+      `.session-row[data-session-id="${CSS.escape(id)}"] .session-main[draggable]`,
+    );
+    if (!source) throw new Error(`Missing drag source for ${id}`);
+    const dataTransfer = new DataTransfer();
+    const event = new DragEvent("dragstart", {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer,
+    });
+    const dispatched = source.dispatchEvent(event);
+    window.__code071SessionDrag = { source, dataTransfer };
+    const ghost = document.querySelector(".session-project-drag-ghost");
+    return {
+      dispatched,
+      defaultPrevented: event.defaultPrevented,
+      types: Array.from(dataTransfer.types),
+      payload: dataTransfer.getData(mime),
+      text: dataTransfer.getData("text/plain"),
+      html: dataTransfer.getData("text/html"),
+      sourceActive: Boolean(source.closest(".session-row")?.classList.contains(
+        "is-session-project-drag-source",
+      )),
+      available: document.querySelectorAll(
+        ".project-block.is-session-project-drop-available",
+      ).length,
+      noop: document.querySelectorAll(
+        ".project-block.is-session-project-drop-noop",
+      ).length,
+      invalid: document.querySelectorAll(
+        ".project-block.is-session-project-drop-invalid",
+      ).length,
+      ghostCount: document.querySelectorAll(".session-project-drag-ghost").length,
+      ghostText: ghost?.textContent || "",
+      temporary: document.querySelectorAll(".session-project-drop-temporary").length,
+    };
+  }, { id: sessionId, mime: SESSION_PROJECT_DRAG_MIME });
+}
+
+async function exerciseSessionProjectPointerHitMatrix(page, sourceKey, targetKey) {
+  return page.evaluate(({ noopKey, moveKey }) => {
+    const root = document.querySelector("#sessionList");
+    const drag = window.__code071SessionDrag;
+    if (!root || !drag?.dataTransfer) throw new Error("Pointer hit matrix unavailable");
+    const existingBlocks = Array.from(root.querySelectorAll(".project-block"));
+    const savedDisplays = existingBlocks.map((block) => block.style.display);
+    existingBlocks.forEach((block) => { block.style.display = "none"; });
+    const listRect = root.getBoundingClientRect();
+    const baseTop = listRect.top + Math.max(64, Math.min(100, listRect.height / 3));
+    const blockHeight = 44;
+    const makeBlock = (key, top) => {
+      const block = document.createElement("div");
+      block.className = "project-block code071-pointer-hit-block";
+      block.dataset.projectKey = key;
+      block.style.position = "fixed";
+      block.style.left = `${listRect.left + 8}px`;
+      block.style.top = `${top}px`;
+      block.style.width = `${Math.max(24, listRect.width - 16)}px`;
+      block.style.height = `${blockHeight}px`;
+      block.style.margin = "0";
+      block.style.padding = "0";
+      root.appendChild(block);
+      return block;
+    };
+    const first = makeBlock(noopKey, baseTop);
+    const second = makeBlock(moveKey, baseTop + blockHeight + 16);
+    const setTop = (block, top) => { block.style.top = `${top}px`; };
+    const dispatch = (clientX, clientY) => {
+      const event = new DragEvent("dragover", {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+        dataTransfer: drag.dataTransfer,
+      });
+      root.dispatchEvent(event);
+      return {
+        defaultPrevented: event.defaultPrevented,
+        dropEffect: drag.dataTransfer.dropEffect,
+        hovered: Array.from(root.querySelectorAll(
+          ".project-block.is-session-project-drop-over",
+        )).map((block) => block.dataset.projectKey || ""),
+      };
+    };
+    const centerX = listRect.left + listRect.width / 2;
+    let result;
+    try {
+      let firstRect = first.getBoundingClientRect();
+      let secondRect = second.getBoundingClientRect();
+      const inside = dispatch(centerX, secondRect.top + secondRect.height / 2);
+      const snapUpper = dispatch(centerX, firstRect.bottom + 6);
+      const snapLower = dispatch(centerX, secondRect.top - 6);
+      const tie = dispatch(centerX, firstRect.bottom + 8);
+
+      setTop(second, firstRect.bottom + 20);
+      secondRect = second.getBoundingClientRect();
+      const beyond = dispatch(centerX, firstRect.bottom + 10);
+      const horizontalOutside = dispatch(listRect.left - 1, firstRect.top + 12);
+
+      setTop(first, baseTop);
+      setTop(second, baseTop + blockHeight + 16);
+      firstRect = first.getBoundingClientRect();
+      const stationaryY = firstRect.top + firstRect.height / 2;
+      const beforeRectChange = dispatch(centerX, stationaryY);
+      setTop(first, baseTop - blockHeight - 40);
+      setTop(second, stationaryY - blockHeight / 2);
+      const afterRectChange = dispatch(centerX, stationaryY);
+      result = {
+        inside,
+        snapUpper,
+        snapLower,
+        tie,
+        beyond,
+        horizontalOutside,
+        beforeRectChange,
+        afterRectChange,
+      };
+      dispatch(listRect.left - 1, listRect.top - 1);
+    } finally {
+      first.remove();
+      second.remove();
+      existingBlocks.forEach((block, index) => {
+        block.style.display = savedDisplays[index];
+      });
+    }
+    return result;
+  }, { noopKey: sourceKey, moveKey: targetKey });
+}
+
+async function hoverSyntheticSessionProjectTarget(page, selector) {
+  return page.evaluate((targetSelector) => {
+    const root = document.querySelector("#sessionList");
+    const target = document.querySelector(targetSelector);
+    const drag = window.__code071SessionDrag;
+    if (!root || !target || !drag?.dataTransfer) {
+      throw new Error(`Synthetic hover target unavailable: ${targetSelector}`);
+    }
+    target.scrollIntoView({ block: "center", inline: "nearest" });
+    const targetRect = target.getBoundingClientRect();
+    const targetStyle = getComputedStyle(target);
+    const text = target.querySelector(".project-name, .session-project-drop-temporary-name");
+    const background = targetStyle.backgroundColor;
+    const boxShadow = targetStyle.boxShadow;
+    const textColor = text ? getComputedStyle(text).color : "";
+    const clientX = targetRect.left + targetRect.width / 2;
+    const clientY = targetRect.top + targetRect.height / 2;
+    const dispatch = (type) => {
+      const event = new DragEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+        dataTransfer: drag.dataTransfer,
+      });
+      root.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    dispatch("dragenter");
+    const defaultPrevented = dispatch("dragover");
+    return {
+      defaultPrevented,
+      background,
+      boxShadow,
+      textColor,
+      rect: {
+        x: targetRect.x,
+        y: targetRect.y,
+        width: targetRect.width,
+        height: targetRect.height,
+      },
+      hovered: Array.from(root.querySelectorAll(
+        ".project-block.is-session-project-drop-over",
+      )).map((block) => block.dataset.projectKey || ""),
+    };
+  }, selector);
+}
+
+async function dispatchSyntheticSessionDrop(
+  page,
+  selector,
+  repeat = 1,
+  pointerSelector = selector,
+) {
+  return page.evaluate(({ targetSelector, pointerTargetSelector, dropCount }) => {
+    const target = document.querySelector(targetSelector);
+    const pointerTarget = document.querySelector(pointerTargetSelector);
+    const drag = window.__code071SessionDrag;
+    if (!target || !pointerTarget || !drag?.dataTransfer) {
+      throw new Error(`Synthetic drag target unavailable: ${targetSelector}`);
+    }
+    pointerTarget.scrollIntoView({ block: "center", inline: "nearest" });
+    const pointerRect = pointerTarget.getBoundingClientRect();
+    const clientX = pointerRect.left + pointerRect.width / 2;
+    const clientY = pointerRect.top + pointerRect.height / 2;
+    const dispatch = (type) => {
+      const event = new DragEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+        dataTransfer: drag.dataTransfer,
+      });
+      const dispatched = target.dispatchEvent(event);
+      return {
+        dispatched,
+        defaultPrevented: event.defaultPrevented,
+      };
+    };
+    const dragenter = dispatch("dragenter");
+    const dragover = dispatch("dragover");
+    const hoveredAfterDragover = Array.from(document.querySelectorAll(
+      ".project-block.is-session-project-drop-over",
+    )).map((block) => block.dataset.projectKey || "");
+    const drops = [];
+    for (let index = 0; index < dropCount; index += 1) drops.push(dispatch("drop"));
+    drag.source?.dispatchEvent(new DragEvent("dragend", {
+      bubbles: true,
+      cancelable: false,
+      dataTransfer: drag.dataTransfer,
+    }));
+    delete window.__code071SessionDrag;
+    return { dragenter, dragover, hoveredAfterDragover, drops };
+  }, {
+    targetSelector: selector,
+    pointerTargetSelector: pointerSelector,
+    dropCount: repeat,
+  });
+}
+
+async function endSyntheticSessionDrag(page) {
+  await page.evaluate(() => {
+    const drag = window.__code071SessionDrag;
+    drag?.source?.dispatchEvent(new DragEvent("dragend", {
+      bubbles: true,
+      cancelable: false,
+      dataTransfer: drag.dataTransfer,
+    }));
+    delete window.__code071SessionDrag;
+  });
+}
+
+async function assertSessionDragUiCleared(page, { includePending = true } = {}) {
+  await page.waitForFunction((checkPending) => {
+    const transientCount = document.querySelectorAll([
+      ".is-session-project-drag-source",
+      ".is-session-project-drop-available",
+      ".is-session-project-drop-noop",
+      ".is-session-project-drop-invalid",
+      ".is-session-project-drop-over",
+      ".session-project-drag-ghost",
+      ".session-project-drop-temporary",
+    ].join(", ")).length;
+    const rootActive = document.querySelector("#sessionList")?.classList.contains(
+      "is-session-project-dragging",
+    );
+    const pendingCount = checkPending
+      ? document.querySelectorAll(".is-session-project-migration-pending").length
+      : 0;
+    return transientCount === 0 && !rootActive && pendingCount === 0;
+  }, includePending);
+}
+
+function sessionMigrationRequestCounts(sessionId, projectRequests, projectPreviews) {
+  const encodedId = encodeURIComponent(sessionId);
+  const commitPath = `/api/sessions/${encodedId}/project`;
+  const previewPath = `${commitPath}/preview`;
+  return {
+    commits: projectRequests.filter((request) => request.path === commitPath).length,
+    previews: projectPreviews.filter((request) => request.path === previewPath).length,
+  };
 }
 
 async function browseHome(page, host) {
@@ -1070,6 +1516,800 @@ async function exerciseMigrationConflict(page, host, seed, projectRequests, proj
   };
 }
 
+async function exerciseSessionProjectDrag(
+  page,
+  host,
+  seed,
+  fixture,
+  projectRequests,
+  projectPreviews,
+  entryMode,
+  options = {},
+) {
+  const visualOnly = Boolean(options.visualOnly);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const targetProject = fixture.targetProject;
+  const targetSelector = `.project-block[data-project-id="${targetProject.id}"]`;
+  const originalSelector = `.project-block[data-project-id="${seed.originalProject.id}"]`;
+  const unassignedSelector = '.project-block[data-project-key="__unassigned_sessions__"]';
+  const currentMain = page.locator(
+    `.session-main[data-session-id="${fixture.current.id}"]`,
+  );
+  await currentMain.scrollIntoViewIfNeeded();
+  await currentMain.click();
+  await waitUntil(
+    () => page.locator("#sessionTitle").inputValue(),
+    (value) => value === fixture.current.title,
+    `${entryMode} drag current Session did not load`,
+  );
+  await waitForRoot(page, host.projectDir);
+
+  assert.equal(
+    await page.locator(".session-project-drag-handle").count(),
+    0,
+  );
+  assert.equal(
+    await page.locator(
+      `.session-row[data-session-id="${fixture.archived.id}"] .session-main[draggable]`,
+    ).count(),
+    0,
+  );
+  const actionAttributes = await page.locator(
+    `.session-row[data-session-id="${fixture.current.id}"]`,
+  ).evaluate((row) => ({
+    main: row.querySelector(".session-main")?.getAttribute("draggable"),
+    more: row.querySelector(".session-more-btn")?.getAttribute("draggable"),
+    title: row.querySelector(".session-title-text")?.getAttribute("draggable"),
+    handleCount: row.querySelectorAll(".session-project-drag-handle").length,
+  }));
+  assert.deepEqual(actionAttributes, {
+    main: "true",
+    more: null,
+    title: null,
+    handleCount: 0,
+  });
+
+  const requestCountBeforeVisual = projectRequests.length;
+  const previewCountBeforeVisual = projectPreviews.length;
+  const expansionBefore = await page.locator(".project-toggle").evaluateAll((toggles) => (
+    toggles.map((toggle) => ({
+      key: toggle.closest(".project-header")?.dataset.projectKey,
+      expanded: toggle.getAttribute("aria-expanded"),
+    }))
+  ));
+  const visualDrag = await beginSyntheticSessionDrag(page, fixture.current.id);
+  assert.equal(visualDrag.dispatched, true);
+  assert.equal(visualDrag.defaultPrevented, false);
+  assert.deepEqual(visualDrag.types, [SESSION_PROJECT_DRAG_MIME]);
+  assert.equal(visualDrag.payload, "workbar-session-project-move");
+  assert.equal(visualDrag.text, "");
+  assert.equal(visualDrag.html, "");
+  assert.equal(visualDrag.sourceActive, true);
+  assert.equal(visualDrag.available > 0, true);
+  assert.equal(visualDrag.noop > 0, true);
+  assert.equal(visualDrag.ghostCount, 1);
+  assert.equal(visualDrag.ghostText, fixture.current.title);
+  const visualState = await page.evaluate(({
+    targetId,
+    sourceId,
+    longProjectId,
+    expectedDark,
+  }) => {
+    const target = document.querySelector(
+      `.project-block[data-project-id="${CSS.escape(targetId)}"]`,
+    );
+    const sourceRow = window.__code071SessionDrag?.source?.closest(".session-row")
+      || document.querySelector(".session-row.is-session-project-drag-source");
+    const source = sourceRow?.closest(".project-block") || document.querySelector(
+      `.project-block[data-project-id="${CSS.escape(sourceId)}"]`,
+    );
+    const longName = document.querySelector(
+      `.project-header[data-project-id="${CSS.escape(longProjectId)}"] .project-name`,
+    );
+    const ghost = document.querySelector(".session-project-drag-ghost");
+    const list = document.querySelector("#sessionList");
+    const elements = { target, source, sourceRow, ghost, list };
+    const missing = Object.entries(elements)
+      .filter(([, element]) => !(element instanceof Element))
+      .map(([name]) => name);
+    if (missing.length) return { missing, expectedDark };
+    for (const element of [target, source, sourceRow]) {
+      element.getAnimations().forEach((animation) => animation.finish());
+    }
+    const targetStyle = getComputedStyle(target);
+    const sourceStyle = getComputedStyle(source);
+    const sourceRowStyle = getComputedStyle(sourceRow);
+    const ghostStyle = getComputedStyle(ghost);
+    const sourceRect = source.getBoundingClientRect();
+    const sourceRowRect = sourceRow.getBoundingClientRect();
+    return {
+      missing,
+      targetAvailable: target.classList.contains("is-session-project-drop-available"),
+      sourceNoop: source.classList.contains("is-session-project-drop-noop"),
+      targetShadow: targetStyle.boxShadow,
+      targetBackground: targetStyle.backgroundColor,
+      sourceOpacity: sourceStyle.opacity,
+      sourceRowOpacity: sourceRowStyle.opacity,
+      ghostWidth: ghost.getBoundingClientRect().width,
+      ghostWhiteSpace: ghostStyle.whiteSpace,
+      ghostTextOverflow: ghostStyle.textOverflow,
+      handleCount: document.querySelectorAll(".session-project-drag-handle").length,
+      sourceBlockContainsRow: sourceRect.top <= sourceRowRect.top
+        && sourceRect.bottom >= sourceRowRect.bottom,
+      longNameClipped: Boolean(longName && longName.scrollWidth > longName.clientWidth),
+      horizontalOverflow: list.scrollWidth > list.clientWidth + 1,
+      dark: document.documentElement.getAttribute("data-theme-mode") === "dark",
+      expectedDark,
+    };
+  }, {
+    targetId: targetProject.id,
+    sourceId: seed.originalProject.id,
+    longProjectId: seed.longProject.id,
+    expectedDark: entryMode === "classic",
+  });
+  assert.deepEqual(visualState.missing, [], JSON.stringify(visualState));
+  assert.equal(visualState.targetAvailable, true, JSON.stringify(visualState));
+  assert.equal(visualState.sourceNoop, true, JSON.stringify(visualState));
+  assert.notEqual(visualState.targetShadow, "none");
+  assert.notEqual(visualState.targetBackground, "rgba(0, 0, 0, 0)");
+  assert.equal(Number(visualState.sourceOpacity) < 1, true);
+  assert.equal(Number(visualState.sourceRowOpacity) < 1, true);
+  assert.equal(visualState.ghostWidth <= 260.5, true);
+  assert.equal(visualState.ghostWhiteSpace, "nowrap");
+  assert.equal(visualState.ghostTextOverflow, "ellipsis");
+  assert.equal(visualState.handleCount, 0);
+  assert.equal(visualState.sourceBlockContainsRow, true);
+  assert.equal(visualState.longNameClipped, true, JSON.stringify(visualState));
+  assert.equal(visualState.horizontalOverflow, false, JSON.stringify(visualState));
+  assert.equal(visualState.dark, visualState.expectedDark);
+
+  const targetHoverStart = await hoverSyntheticSessionProjectTarget(page, targetSelector);
+  assert.equal(targetHoverStart.defaultPrevented, true);
+  assert.deepEqual(targetHoverStart.hovered, [targetProject.id]);
+  assert.match(targetHoverStart.boxShadow, /0px 0px 0px 1px inset/);
+  const targetHoverVisual = await page.locator(targetSelector).evaluate((block) => {
+    block.getAnimations().forEach((animation) => animation.finish());
+    const blockRect = block.getBoundingClientRect();
+    const headerRect = block.querySelector(".project-header")?.getBoundingClientRect();
+    const childrenRect = block.querySelector(".project-children")?.getBoundingClientRect();
+    const text = block.querySelector(".project-name");
+    const style = getComputedStyle(block);
+    const list = document.querySelector("#sessionList");
+    return {
+      hovered: block.classList.contains("is-session-project-drop-over"),
+      background: style.backgroundColor,
+      boxShadow: style.boxShadow,
+      textColor: text ? getComputedStyle(text).color : "",
+      rect: {
+        x: blockRect.x,
+        y: blockRect.y,
+        width: blockRect.width,
+        height: blockRect.height,
+      },
+      containsWholeBlock: Boolean(
+        headerRect
+        && childrenRect
+        && blockRect.top <= headerRect.top
+        && blockRect.bottom >= childrenRect.bottom
+        && blockRect.left <= headerRect.left
+        && blockRect.right >= headerRect.right
+      ),
+      horizontalOverflow: Boolean(list && list.scrollWidth > list.clientWidth + 1),
+    };
+  });
+  assert.equal(targetHoverVisual.hovered, true);
+  assert.notEqual(targetHoverVisual.background, targetHoverStart.background);
+  assert.notEqual(targetHoverVisual.boxShadow, targetHoverStart.boxShadow);
+  assert.match(targetHoverVisual.boxShadow, /0px 0px 0px 2px inset/);
+  assert.equal(targetHoverVisual.textColor, targetHoverStart.textColor);
+  assert.equal(targetHoverVisual.containsWholeBlock, true);
+  assert.equal(targetHoverVisual.horizontalOverflow, false);
+  for (const dimension of ["x", "y", "width", "height"]) {
+    assert.equal(
+      Math.abs(targetHoverVisual.rect[dimension] - targetHoverStart.rect[dimension]) < 0.1,
+      true,
+      JSON.stringify({ dimension, targetHoverStart, targetHoverVisual }),
+    );
+  }
+
+  const noopHoverStart = await hoverSyntheticSessionProjectTarget(page, originalSelector);
+  const noopHoverVisual = await page.locator(originalSelector).evaluate((block) => {
+    block.getAnimations().forEach((animation) => animation.finish());
+    const text = block.querySelector(".project-name");
+    const style = getComputedStyle(block);
+    return {
+      hovered: block.classList.contains("is-session-project-drop-over"),
+      background: style.backgroundColor,
+      boxShadow: style.boxShadow,
+      textColor: text ? getComputedStyle(text).color : "",
+    };
+  });
+  assert.equal(noopHoverVisual.hovered, true);
+  assert.match(noopHoverVisual.boxShadow, /0px 0px 0px 1px inset/);
+  assert.notEqual(noopHoverVisual.background, targetHoverVisual.background);
+  assert.notEqual(noopHoverVisual.boxShadow, targetHoverVisual.boxShadow);
+  assert.equal(noopHoverVisual.textColor, noopHoverStart.textColor);
+  Object.assign(visualState, {
+    targetAvailableBackground: targetHoverStart.background,
+    targetAvailableShadow: targetHoverStart.boxShadow,
+    targetHoverBackground: targetHoverVisual.background,
+    targetHoverShadow: targetHoverVisual.boxShadow,
+    targetHighlightRectStable: true,
+    noopHoverBackground: noopHoverVisual.background,
+    noopHoverShadow: noopHoverVisual.boxShadow,
+  });
+  const pointerHitMatrix = await exerciseSessionProjectPointerHitMatrix(
+    page,
+    seed.originalProject.id,
+    targetProject.id,
+  );
+  assert.deepEqual(pointerHitMatrix.inside.hovered, [targetProject.id]);
+  assert.equal(pointerHitMatrix.inside.defaultPrevented, true);
+  assert.deepEqual(pointerHitMatrix.snapUpper.hovered, [seed.originalProject.id]);
+  assert.deepEqual(pointerHitMatrix.snapLower.hovered, [targetProject.id]);
+  assert.deepEqual(pointerHitMatrix.tie.hovered, [seed.originalProject.id]);
+  assert.deepEqual(pointerHitMatrix.beyond.hovered, []);
+  assert.equal(pointerHitMatrix.beyond.defaultPrevented, false);
+  assert.equal(pointerHitMatrix.beyond.dropEffect, "none");
+  assert.deepEqual(pointerHitMatrix.horizontalOutside.hovered, []);
+  assert.equal(pointerHitMatrix.horizontalOutside.defaultPrevented, false);
+  assert.deepEqual(pointerHitMatrix.beforeRectChange.hovered, [seed.originalProject.id]);
+  assert.deepEqual(pointerHitMatrix.afterRectChange.hovered, [targetProject.id]);
+  const expansionDuring = await page.locator(".project-toggle").evaluateAll((toggles) => (
+    toggles.map((toggle) => ({
+      key: toggle.closest(".project-header")?.dataset.projectKey,
+      expanded: toggle.getAttribute("aria-expanded"),
+    }))
+  ));
+  assert.deepEqual(expansionDuring, expansionBefore);
+
+  if (visualOnly) {
+    await page.keyboard.press("Escape");
+    await endSyntheticSessionDrag(page);
+    await assertSessionDragUiCleared(page);
+    assert.equal(projectRequests.length, requestCountBeforeVisual);
+    assert.equal(projectPreviews.length, previewCountBeforeVisual);
+    return {
+      entryMode,
+      twoLevelTargetHighlight: "pass",
+      fullBlockHighlightWithoutLayoutShift: "pass",
+      neutralNoopHighlight: "pass",
+      pointerHotspotTolerance: "pass",
+      noHorizontalOverflow: "pass",
+      theme: visualState.dark ? "dark" : "light",
+      visualState,
+    };
+  }
+
+  const readSessionListScroll = () => page.locator("#sessionList").evaluate((list) => ({
+    top: list.scrollTop,
+    maximum: Math.max(0, list.scrollHeight - list.clientHeight),
+  }));
+  const dispatchListEdgeDragOver = (edge) => page.evaluate((targetEdge) => {
+    const list = document.querySelector("#sessionList");
+    const drag = window.__code071SessionDrag;
+    if (!list || !drag?.dataTransfer) throw new Error("Synthetic edge drag unavailable");
+    const rect = list.getBoundingClientRect();
+    const clientX = rect.left + Math.min(80, rect.width / 2);
+    const clientY = targetEdge === "top" ? rect.top + 2 : rect.bottom - 2;
+    const target = document.elementFromPoint(clientX, clientY) || list;
+    const event = new DragEvent("dragover", {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      dataTransfer: drag.dataTransfer,
+    });
+    target.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, target: target.className || target.id };
+  }, edge);
+  const scrollContract = await page.locator("#sessionList").evaluate((list) => {
+    list.scrollTop = 0;
+    return {
+      top: list.scrollTop,
+      maximum: Math.max(0, list.scrollHeight - list.clientHeight),
+      bodyTop: document.scrollingElement?.scrollTop || 0,
+    };
+  });
+  assert.equal(scrollContract.maximum > 36, true, JSON.stringify(scrollContract));
+  await dispatchListEdgeDragOver("bottom");
+  await waitUntil(
+    readSessionListScroll,
+    (value) => value.top >= Math.min(24, value.maximum),
+    `${entryMode} Session list did not continuously auto-scroll down`,
+  );
+  await page.locator("#sessionList").evaluate((list) => {
+    list.scrollTop = Math.max(0, list.scrollHeight - list.clientHeight - 3);
+  });
+  await dispatchListEdgeDragOver("bottom");
+  const bottomBound = await waitUntil(
+    readSessionListScroll,
+    (value) => Math.abs(value.maximum - value.top) <= 1,
+    `${entryMode} Session list did not stop at the bottom bound`,
+  );
+  await page.waitForTimeout(100);
+  assert.deepEqual(await readSessionListScroll(), bottomBound);
+  await dispatchListEdgeDragOver("top");
+  await waitUntil(
+    readSessionListScroll,
+    (value) => value.top <= Math.max(0, value.maximum - 24),
+    `${entryMode} Session list did not continuously auto-scroll up`,
+  );
+  const topBound = await waitUntil(
+    readSessionListScroll,
+    (value) => value.top <= 1,
+    `${entryMode} Session list did not stop at the top bound`,
+  );
+  assert.equal(topBound.maximum, scrollContract.maximum);
+  assert.equal(
+    await page.evaluate(() => document.scrollingElement?.scrollTop || 0),
+    scrollContract.bodyTop,
+  );
+  await page.keyboard.press("Escape");
+  await endSyntheticSessionDrag(page);
+  await assertSessionDragUiCleared(page);
+  const stoppedScroll = await readSessionListScroll();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await readSessionListScroll(), stoppedScroll);
+  assert.equal(projectRequests.length, requestCountBeforeVisual);
+  assert.equal(projectPreviews.length, previewCountBeforeVisual);
+
+  await page.evaluate(() => {
+    const block = document.createElement("div");
+    block.className = "project-block code071-stale-project";
+    block.dataset.projectKey = "stale-project";
+    block.dataset.projectId = "stale-project";
+    block.innerHTML = '<div class="project-header"><span>Stale project</span></div>';
+    document.querySelector("#sessionList")?.appendChild(block);
+  });
+  await beginSyntheticSessionDrag(page, fixture.current.id);
+  assert.equal(
+    await page.locator(".code071-stale-project").evaluate((block) => (
+      block.classList.contains("is-session-project-drop-invalid")
+      && !block.classList.contains("is-session-project-drop-available")
+    )),
+    true,
+  );
+  const staleDrop = await dispatchSyntheticSessionDrop(
+    page,
+    ".code071-stale-project .project-header",
+  );
+  assert.equal(staleDrop.drops[0].defaultPrevented, false);
+  await assertSessionDragUiCleared(page);
+  await page.locator(".code071-stale-project").evaluate((block) => block.remove());
+  assert.equal(projectRequests.length, requestCountBeforeVisual);
+  assert.equal(projectPreviews.length, previewCountBeforeVisual);
+
+  await beginSyntheticSessionDrag(page, fixture.current.id);
+  await page.evaluate(() => {
+    const drag = window.__code071SessionDrag;
+    document.body.dispatchEvent(new DragEvent("drop", {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: drag.dataTransfer,
+    }));
+  });
+  await endSyntheticSessionDrag(page);
+  await assertSessionDragUiCleared(page);
+  assert.equal(projectRequests.length, requestCountBeforeVisual);
+  assert.equal(projectPreviews.length, previewCountBeforeVisual);
+
+  const successToastsBeforeNoop = await page.locator("#toastContainer .toast.success").count();
+  const sameBefore = sessionMigrationRequestCounts(
+    fixture.current.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await beginSyntheticSessionDrag(page, fixture.current.id);
+  const sameDrop = await dispatchSyntheticSessionDrop(
+    page,
+    targetSelector,
+    1,
+    originalSelector,
+  );
+  assert.equal(sameDrop.dragover.defaultPrevented, true);
+  assert.deepEqual(sameDrop.hoveredAfterDragover, [seed.originalProject.id]);
+  assert.equal(sameDrop.drops[0].defaultPrevented, true);
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.current.id, projectRequests, projectPreviews),
+    sameBefore,
+  );
+  assert.equal(
+    await page.locator("#toastContainer .toast.success").count(),
+    successToastsBeforeNoop,
+  );
+
+  const nativeChildNoopBefore = sessionMigrationRequestCounts(
+    fixture.current.id,
+    projectRequests,
+    projectPreviews,
+  );
+  const childSessionRow = page.locator(
+    `.project-block[data-project-id="${seed.originalProject.id}"] ` +
+    `.session-row[data-session-id="${fixture.current.id}"]`,
+  );
+  assert.equal(await childSessionRow.count(), 1);
+  await dragSessionToVisibleTargetWithMouse(
+    page,
+    fixture.current.id,
+    childSessionRow,
+  );
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.current.id, projectRequests, projectPreviews),
+    nativeChildNoopBefore,
+  );
+
+  const cancelBefore = sessionMigrationRequestCounts(
+    fixture.cancel.id,
+    projectRequests,
+    projectPreviews,
+  );
+  // The second native path crosses projects and lands on visible whitespace.
+  // Keeping this as the sole locator.dragTo path avoids Chromium's unstable
+  // second dragTo sequence while the child-row path above uses real mouse steps.
+  await dragSessionToTargetWithNativeDrag(
+    page,
+    fixture.cancel.id,
+    projectDropBlock(page, targetProject.id).locator(".project-empty-sessions"),
+  );
+  let modal = page.locator(".session-project-migration-modal");
+  await modal.waitFor({ state: "visible" });
+  await assertSessionDragUiCleared(page, { includePending: false });
+  assert.equal(
+    await page.locator(
+      `.session-row[data-session-id="${fixture.cancel.id}"]`,
+    ).evaluate((row) => row.classList.contains("is-session-project-migration-pending")),
+    true,
+  );
+  const pendingRetry = await beginSyntheticSessionDrag(page, fixture.cancel.id);
+  assert.equal(pendingRetry.defaultPrevented, true);
+  assert.deepEqual(pendingRetry.types, []);
+  assert.equal(pendingRetry.available, 0);
+  await endSyntheticSessionDrag(page);
+  await modal.locator(".session-project-migration-cancel").click();
+  await modal.waitFor({ state: "detached" });
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.cancel.id, projectRequests, projectPreviews),
+    { commits: cancelBefore.commits, previews: cancelBefore.previews + 1 },
+  );
+  const cancelAfter = await sessionRecord(host, fixture.cancel.id);
+  assert.equal(cancelAfter.projectId, seed.longProject.id);
+
+  const currentBefore = sessionMigrationRequestCounts(
+    fixture.current.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await dragSessionToBlock(
+    page,
+    fixture.current.id,
+    projectDropBlock(page, targetProject.id),
+  );
+  modal = page.locator(".session-project-migration-modal");
+  await modal.waitFor({ state: "visible" });
+  await modal.locator(".session-project-migration-confirm").click();
+  await modal.waitFor({ state: "detached" });
+  const movedCurrent = await waitForSession(
+    host,
+    fixture.current.id,
+    (session) => session.projectId === targetProject.id,
+    `${entryMode} drag current Session did not commit`,
+  );
+  assert.equal(path.resolve(movedCurrent.cwd), path.resolve(host.projectDir));
+  await waitForRoot(page, host.projectDir);
+  await assertSessionDragUiCleared(page);
+  const restoredCurrentSource = page.locator(
+    `.session-row[data-session-id="${fixture.current.id}"] .session-main`,
+  );
+  assert.equal(await restoredCurrentSource.count(), 1);
+  assert.equal(await restoredCurrentSource.getAttribute("draggable"), "true");
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.current.id, projectRequests, projectPreviews),
+    { commits: currentBefore.commits + 1, previews: currentBefore.previews + 1 },
+  );
+
+  const targetNoopBefore = sessionMigrationRequestCounts(
+    fixture.current.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await beginSyntheticSessionDrag(page, fixture.current.id);
+  await dispatchSyntheticSessionDrop(page, targetSelector);
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.current.id, projectRequests, projectPreviews),
+    targetNoopBefore,
+  );
+
+  const rootBeforeOtherMove = await page.locator("#projectRoot").inputValue();
+  const otherMoveBefore = sessionMigrationRequestCounts(
+    fixture.other.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await dragSessionToBlock(
+    page,
+    fixture.other.id,
+    projectDropBlock(page, targetProject.id),
+  );
+  assert.equal(await page.locator(".session-project-migration-modal").count(), 0);
+  await waitForSession(
+    host,
+    fixture.other.id,
+    (session) => session.projectId === targetProject.id,
+    `${entryMode} non-current drag did not commit`,
+  );
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.other.id, projectRequests, projectPreviews),
+    { commits: otherMoveBefore.commits + 1, previews: otherMoveBefore.previews + 1 },
+  );
+  assert.equal(
+    path.resolve(await page.locator("#projectRoot").inputValue()),
+    path.resolve(rootBeforeOtherMove),
+  );
+
+  await dragSessionToBlock(page, fixture.other.id, unassignedDropBlock(page));
+  await waitForSession(
+    host,
+    fixture.other.id,
+    (session) => session.projectId == null,
+    `${entryMode} drag to unassigned did not commit`,
+  );
+  await assertSessionDragUiCleared(page);
+  assert.equal(
+    path.resolve(await page.locator("#projectRoot").inputValue()),
+    path.resolve(rootBeforeOtherMove),
+  );
+
+  const failedPreviewPath = `/api/sessions/${encodeURIComponent(fixture.other.id)}/project/preview`;
+  const failedPreviewPattern = `**${failedPreviewPath}`;
+  let previewAborted = false;
+  const abortPreview = async (route) => {
+    previewAborted = true;
+    await route.abort("failed");
+  };
+  const networkBefore = sessionMigrationRequestCounts(
+    fixture.other.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await page.route(failedPreviewPattern, abortPreview, { times: 1 });
+  await dragSessionToBlock(
+    page,
+    fixture.other.id,
+    projectDropBlock(page, targetProject.id),
+  );
+  await page.locator("#toastContainer .toast.error").filter({
+    hasText: "could not be moved",
+  }).last().waitFor({ state: "visible" });
+  await page.unroute(failedPreviewPattern, abortPreview);
+  await assertSessionDragUiCleared(page);
+  assert.equal(previewAborted, true);
+  const networkAfter = sessionMigrationRequestCounts(
+    fixture.other.id,
+    projectRequests,
+    projectPreviews,
+  );
+  assert.equal(networkAfter.commits, networkBefore.commits);
+  assert.equal(networkAfter.previews, networkBefore.previews + 1);
+  assert.equal((await sessionRecord(host, fixture.other.id)).projectId, null);
+
+  const duplicateBefore = sessionMigrationRequestCounts(
+    fixture.other.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await beginSyntheticSessionDrag(page, fixture.other.id);
+  const duplicateDrop = await dispatchSyntheticSessionDrop(page, targetSelector, 2);
+  assert.equal(duplicateDrop.drops[0].defaultPrevented, true);
+  await waitForSession(
+    host,
+    fixture.other.id,
+    (session) => session.projectId === targetProject.id,
+    `${entryMode} duplicate drop did not finish`,
+  );
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.other.id, projectRequests, projectPreviews),
+    { commits: duplicateBefore.commits + 1, previews: duplicateBefore.previews + 1 },
+  );
+
+  await page.locator(".project-block.unassigned-project").evaluate((block) => block.remove());
+  const temporaryBefore = sessionMigrationRequestCounts(
+    fixture.current.id,
+    projectRequests,
+    projectPreviews,
+  );
+  const temporaryDrag = await beginSyntheticSessionDrag(page, fixture.current.id);
+  assert.equal(temporaryDrag.temporary, 1);
+  const temporary = page.locator(".session-project-drop-temporary");
+  assert.equal(await temporary.count(), 1);
+  assert.equal((await temporary.textContent()).includes("Drop here to remove from project"), true);
+  assert.equal(
+    await temporary.evaluate((block) => (
+      block.classList.contains("is-session-project-drop-available")
+    )),
+    true,
+  );
+  await temporary.scrollIntoViewIfNeeded();
+  await dispatchSyntheticSessionDrop(
+    page,
+    ".session-project-drop-temporary .project-header",
+  );
+  await waitForSession(
+    host,
+    fixture.current.id,
+    (session) => session.projectId == null,
+    `${entryMode} temporary unassigned drop did not commit`,
+  );
+  await waitForRoot(page, host.projectDir);
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.current.id, projectRequests, projectPreviews),
+    { commits: temporaryBefore.commits + 1, previews: temporaryBefore.previews + 1 },
+  );
+
+  for (const blockedSession of [fixture.busy, fixture.waiting]) {
+    const blockedBefore = sessionMigrationRequestCounts(
+      blockedSession.id,
+      projectRequests,
+      projectPreviews,
+    );
+    await dragSessionToBlock(
+      page,
+      blockedSession.id,
+      projectDropBlock(page, targetProject.id),
+    );
+    await page.locator("#toastContainer .toast.error").filter({
+      hasText: "still has running or waiting work",
+    }).last().waitFor({ state: "visible" });
+    await assertSessionDragUiCleared(page);
+    assert.deepEqual(
+      sessionMigrationRequestCounts(blockedSession.id, projectRequests, projectPreviews),
+      { commits: blockedBefore.commits, previews: blockedBefore.previews + 1 },
+    );
+    assert.equal((await sessionRecord(host, blockedSession.id)).projectId, null);
+  }
+
+  const broadBefore = sessionMigrationRequestCounts(
+    seed.wide.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await dragSessionToBlock(
+    page,
+    seed.wide.id,
+    projectDropBlock(page, targetProject.id),
+  );
+  await page.locator("#toastContainer .toast.error").filter({
+    hasText: "too broad",
+  }).last().waitFor({ state: "visible" });
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(seed.wide.id, projectRequests, projectPreviews),
+    { commits: broadBefore.commits, previews: broadBefore.previews + 1 },
+  );
+
+  const conflictBeforeRecord = await sessionRecord(host, fixture.conflict.id);
+  const conflictBefore = sessionMigrationRequestCounts(
+    fixture.conflict.id,
+    projectRequests,
+    projectPreviews,
+  );
+  await dragSessionToBlock(
+    page,
+    fixture.conflict.id,
+    projectDropBlock(page, targetProject.id),
+  );
+  modal = page.locator(".session-project-migration-modal");
+  await modal.waitFor({ state: "visible" });
+  await requestJson(
+    host.ready.codeUrl,
+    `/api/projects/${targetProject.id}/rename`,
+    {
+      method: "POST",
+      body: JSON.stringify({ label: `${entryMode} drag target refreshed` }),
+    },
+  );
+  await modal.locator(".session-project-migration-confirm").click();
+  await modal.waitFor({ state: "detached" });
+  await page.locator("#toastContainer .toast.error").filter({
+    hasText: "changed in another window",
+  }).last().waitFor({ state: "visible" });
+  await assertSessionDragUiCleared(page);
+  assert.deepEqual(
+    sessionMigrationRequestCounts(fixture.conflict.id, projectRequests, projectPreviews),
+    { commits: conflictBefore.commits + 1, previews: conflictBefore.previews + 1 },
+  );
+  const conflictAfterRecord = await sessionRecord(host, fixture.conflict.id);
+  assert.equal(conflictAfterRecord.projectId, conflictBeforeRecord.projectId);
+  assert.equal(conflictAfterRecord.revision, conflictBeforeRecord.revision);
+  assert.equal(path.resolve(conflictAfterRecord.cwd), path.resolve(conflictBeforeRecord.cwd));
+  const targetAfterConflict = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === targetProject.id);
+  assert.equal(
+    targetAfterConflict.rootPaths.some(
+      (rootPath) => path.resolve(rootPath) === path.resolve(conflictBeforeRecord.cwd),
+    ),
+    false,
+  );
+
+  const rerenderBeforeRequests = projectRequests.length;
+  const rerenderBeforePreviews = projectPreviews.length;
+  await beginSyntheticSessionDrag(page, fixture.cancel.id);
+  await page.locator(
+    `.project-header[data-project-id="${seed.longProject.id}"] .project-toggle`,
+  ).click();
+  await endSyntheticSessionDrag(page);
+  await assertSessionDragUiCleared(page);
+  assert.equal(projectRequests.length, rerenderBeforeRequests);
+  assert.equal(projectPreviews.length, rerenderBeforePreviews);
+
+  const searchBeforeRequests = projectRequests.length;
+  const searchBeforePreviews = projectPreviews.length;
+  await beginSyntheticSessionDrag(page, fixture.current.id);
+  await page.locator("#sessionSearchBtn").click();
+  await page.locator("#sessionSearchModal").waitFor({ state: "visible" });
+  assert.equal(await page.locator(".session-search-result[draggable]").count(), 0);
+  await page.keyboard.press("Escape");
+  await endSyntheticSessionDrag(page);
+  await page.locator("#sessionSearchModal").waitFor({ state: "hidden" });
+  await assertSessionDragUiCleared(page);
+  assert.equal(projectRequests.length, searchBeforeRequests);
+  assert.equal(projectPreviews.length, searchBeforePreviews);
+
+
+  return {
+    entryMode,
+    fixedOpaquePayload: "pass",
+    sensitivePayloadAbsent: "pass",
+    wholeRowDragSource: "pass",
+    childSessionRowDropTarget: "pass",
+    visibleBlockWhitespaceDropTarget: "pass",
+    pointerHotspotTolerance: "pass",
+    stableGapTieBreak: "pass",
+    pointerOverridesEventTarget: "pass",
+    scrollRectRecalculation: "pass",
+    twoLevelTargetHighlight: "pass",
+    fullBlockHighlightWithoutLayoutShift: "pass",
+    neutralNoopHighlight: "pass",
+    boundedSessionListAutoScroll: "pass",
+    realtimeDragPreview: "pass",
+    ordinaryClick: "pass",
+    sameProjectNoop: "pass",
+    authoritativeProjectTarget: "pass",
+    staleProjectRejected: "pass",
+    projectToProject: "pass",
+    unassignedToProject: "pass",
+    projectToUnassigned: "pass",
+    temporaryUnassignedTarget: "pass",
+    confirmCancelZeroCommit: "pass",
+    duplicateDropSingleChain: "pass",
+    busyRejected: "pass",
+    waitingRejected: "pass",
+    archivedNotDraggable: "pass",
+    broadRootRejected: "pass",
+    stalePlanRejected: "pass",
+    networkFailureRecovered: "pass",
+    currentTreeUpdated: "pass",
+    nonCurrentTreeUnchanged: "pass",
+    escapeCleanup: "pass",
+    externalDropCleanup: "pass",
+    rerenderCleanup: "pass",
+    searchCleanup: "pass",
+    noAutoCollapse: "pass",
+    narrowSidebar: "pass",
+    longProjectName: "pass",
+    theme: visualState.dark ? "dark" : "light",
+    visualState,
+  };
+}
+
 async function exercise(page, host, seed, projectRequests, projectPreviews) {
   await page.goto(new URL("/", host.ready.codeUrl).href, { waitUntil: "domcontentloaded" });
   await page.waitForFunction((sessionId) => (
@@ -1348,6 +2588,75 @@ async function main() {
   try {
     const seed = await seedContract(host);
     browser = await chromium.launch({ headless: true });
+    const visualOnly = process.env.CODE071_H4_VISUAL_ONLY === "1";
+    if (visualOnly) {
+      ({ context, page } = await createContext(
+        browser,
+        host,
+        seed,
+        projectRequests,
+        projectPreviews,
+        pageErrors,
+        seed.drag.bundle.current.id,
+      ));
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.goto(new URL("/", host.ready.codeUrl).href, {
+        waitUntil: "domcontentloaded",
+      });
+      await page.waitForFunction((sessionId) => (
+        document.documentElement.getAttribute("data-code-frontend-ready") === "true"
+        && document.querySelector(`.session-main[data-session-id="${sessionId}"]`)
+      ), seed.drag.bundle.current.id);
+      const bundleVisual = await exerciseSessionProjectDrag(
+        page,
+        host,
+        seed,
+        seed.drag.bundle,
+        projectRequests,
+        projectPreviews,
+        "bundle",
+        { visualOnly: true },
+      );
+      await page.close();
+      page = null;
+      await context.close();
+      context = null;
+      ({ context, page } = await createContext(
+        browser,
+        host,
+        seed,
+        projectRequests,
+        projectPreviews,
+        pageErrors,
+        seed.drag.classic.current.id,
+        "dark",
+      ));
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.goto(
+        new URL("/dist/frontend/index.classic.html", host.ready.codeUrl).href,
+        { waitUntil: "domcontentloaded" },
+      );
+      await page.waitForFunction((sessionId) => (
+        document.documentElement.getAttribute("data-frontend-runtime") === "classic-fallback"
+        && document.querySelector(`.session-main[data-session-id="${sessionId}"]`)
+      ), seed.drag.classic.current.id);
+      const classicVisual = await exerciseSessionProjectDrag(
+        page,
+        host,
+        seed,
+        seed.drag.classic,
+        projectRequests,
+        projectPreviews,
+        "classic",
+        { visualOnly: true },
+      );
+      contract = {
+        visualHighlight: {
+          bundle: bundleVisual,
+          classic: classicVisual,
+        },
+      };
+    } else {
     ({ context, page } = await createContext(
       browser,
       host,
@@ -1358,6 +2667,15 @@ async function main() {
       seed.current.id,
     ));
     const bundle = await exercise(page, host, seed, projectRequests, projectPreviews);
+    const sessionDragBundle = await exerciseSessionProjectDrag(
+      page,
+      host,
+      seed,
+      seed.drag.bundle,
+      projectRequests,
+      projectPreviews,
+      "bundle",
+    );
     const primaryEditorBundle = await exercisePrimaryEditor(page, host, seed, {
       currentPrimary: seed.editorPrimary,
       nextPrimary: seed.editorSecondary,
@@ -1375,6 +2693,7 @@ async function main() {
       projectPreviews,
       pageErrors,
       seed.classic.id,
+      "dark",
     ));
     const classic = await exerciseClassic(
       page,
@@ -1383,6 +2702,15 @@ async function main() {
       projectRequests,
       projectPreviews,
     );
+    const sessionDragClassic = await exerciseSessionProjectDrag(
+      page,
+      host,
+      seed,
+      seed.drag.classic,
+      projectRequests,
+      projectPreviews,
+      "classic",
+    );
     const primaryEditorClassic = await exercisePrimaryEditor(page, host, seed, {
       currentPrimary: seed.editorSecondary,
       nextPrimary: seed.editorPrimary,
@@ -1390,12 +2718,17 @@ async function main() {
     contract = {
       bundle,
       classic,
+      sessionDrag: {
+        bundle: sessionDragBundle,
+        classic: sessionDragClassic,
+      },
       primaryEditor: {
         bundle: primaryEditorBundle,
         classic: primaryEditorClassic,
       },
       primaryEditorConflict,
     };
+    }
     assert.deepEqual(pageErrors, []);
   } finally {
     if (page && !page.isClosed()) await page.close();

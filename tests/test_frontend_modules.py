@@ -28112,7 +28112,12 @@ process.stdout.write(JSON.stringify({
             '<span class="session-title-text"><span class="session-title-scroll-text">',
             row_source,
         )
-        self.assertNotIn("aria-hidden", row_source)
+        title_markup_start = row_source.index('<span class="session-title-text">')
+        title_markup_end = row_source.index("renderSessionSourceBadge", title_markup_start)
+        self.assertNotIn(
+            "aria-hidden",
+            row_source[title_markup_start:title_markup_end],
+        )
         self.assertIn("_sessionTitleMarqueeBound", wiring_source)
         for event_type in ("mouseover", "mouseout", "transitionend"):
             self.assertEqual(wiring_source.count(f'addEventListener("{event_type}"'), 1)
@@ -28289,6 +28294,254 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
     def test_project_api_referenced_in_app_js(self):
         """Project API endpoint is referenced in app.js."""
         self.assertIn("/api/projects", APP_SOURCE)
+
+    def test_session_project_drag_classifies_only_authoritative_targets(self):
+        resolver_start = APP_SOURCE.index(
+            "function resolveSessionProjectDropIntent("
+        )
+        resolver_end = APP_SOURCE.index(
+            "function ensureSessionProjectTemporaryDropTarget(", resolver_start
+        )
+        resolver_source = APP_SOURCE[resolver_start:resolver_end]
+        script = f"""
+const UNASSIGNED_PROJECT_KEY = "__unassigned_sessions__";
+{resolver_source}
+const sessions = [
+  {{id: "assigned", projectId: "project-a"}},
+  {{id: "unassigned", projectId: null}},
+  {{id: "pending", projectId: "project-a"}},
+];
+const projects = [
+  {{id: "project-a", label: "Project A"}},
+  {{id: "project-b", label: "Project B"}},
+];
+const pending = new Set(["pending"]);
+const options = {{sessions, projects, pending}};
+process.stdout.write(JSON.stringify({{
+  move: resolveSessionProjectDropIntent("assigned", "project-b", options),
+  same: resolveSessionProjectDropIntent("assigned", "project-a", options),
+  remove: resolveSessionProjectDropIntent("assigned", UNASSIGNED_PROJECT_KEY, options),
+  unassignedSame: resolveSessionProjectDropIntent("unassigned", UNASSIGNED_PROJECT_KEY, options),
+  unassignedMove: resolveSessionProjectDropIntent("unassigned", "project-b", options),
+  unknownProject: resolveSessionProjectDropIntent("assigned", "stale-project", options),
+  missingSession: resolveSessionProjectDropIntent("missing", "project-b", options),
+  pending: resolveSessionProjectDropIntent("pending", "project-b", options),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["move"]["kind"], "move")
+        self.assertEqual(result["move"]["projectId"], "project-b")
+        self.assertEqual(result["same"]["kind"], "noop")
+        self.assertEqual(result["remove"]["kind"], "move")
+        self.assertIsNone(result["remove"]["projectId"])
+        self.assertEqual(result["unassignedSame"]["kind"], "noop")
+        self.assertEqual(result["unassignedMove"]["kind"], "move")
+        self.assertEqual(result["unknownProject"]["reason"], "project")
+        self.assertEqual(result["missingSession"]["reason"], "session")
+        self.assertEqual(result["pending"]["reason"], "pending")
+
+    def test_session_project_drag_pointer_hit_geometry_is_bounded_and_stable(self):
+        geometry_start = APP_SOURCE.index(
+            "const SESSION_PROJECT_DRAG_HIT_TOLERANCE_PX ="
+        )
+        geometry_end = APP_SOURCE.index(
+            "function resolveSessionProjectDropIntent(", geometry_start
+        )
+        geometry_source = APP_SOURCE[geometry_start:geometry_end]
+        script = f"""
+{geometry_source}
+const list = {{left: 0, right: 200, top: 0, bottom: 240}};
+const blocks = [
+  {{key: "a", left: 8, right: 192, top: 10, bottom: 100}},
+  {{key: "b", left: 8, right: 192, top: 116, bottom: 210}},
+];
+const wideGap = [
+  {{key: "a", left: 8, right: 192, top: 10, bottom: 100}},
+  {{key: "b", left: 8, right: 192, top: 120, bottom: 210}},
+];
+const beforeScroll = [
+  {{key: "a", left: 8, right: 192, top: 40, bottom: 100}},
+  {{key: "b", left: 8, right: 192, top: 120, bottom: 190}},
+];
+const afterScroll = [
+  {{key: "a", left: 8, right: 192, top: -70, bottom: -10}},
+  {{key: "b", left: 8, right: 192, top: 60, bottom: 130}},
+];
+process.stdout.write(JSON.stringify({{
+  inside: resolveSessionProjectDropHit(60, 60, list, blocks),
+  snapUpper: resolveSessionProjectDropHit(60, 106, list, blocks),
+  snapLower: resolveSessionProjectDropHit(60, 110, list, blocks),
+  tie: resolveSessionProjectDropHit(60, 108, list, blocks),
+  beyond: resolveSessionProjectDropHit(60, 110, list, wideGap),
+  horizontalOutside: resolveSessionProjectDropHit(-1, 60, list, blocks),
+  verticalOutside: resolveSessionProjectDropHit(60, 244, list, blocks),
+  noVisibleCandidate: resolveSessionProjectDropHit(60, 60, list, []),
+  beforeScroll: resolveSessionProjectDropHit(60, 80, list, beforeScroll),
+  afterScroll: resolveSessionProjectDropHit(60, 80, list, afterScroll),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["inside"], {
+            "index": 0, "key": "a", "mode": "inside", "distance": 0,
+        })
+        self.assertEqual(result["snapUpper"]["key"], "a")
+        self.assertEqual(result["snapUpper"]["distance"], 6)
+        self.assertEqual(result["snapLower"]["key"], "b")
+        self.assertEqual(result["snapLower"]["distance"], 6)
+        self.assertEqual(result["tie"]["key"], "a")
+        self.assertEqual(result["tie"]["distance"], 8)
+        self.assertIsNone(result["beyond"])
+        self.assertIsNone(result["horizontalOutside"])
+        self.assertIsNone(result["verticalOutside"])
+        self.assertIsNone(result["noVisibleCandidate"])
+        self.assertEqual(result["beforeScroll"]["key"], "a")
+        self.assertEqual(result["afterScroll"]["key"], "b")
+
+    def test_session_project_drag_uses_whole_row_fixed_payload_and_existing_pipeline(self):
+        drag_start = APP_SOURCE.index("const SESSION_PROJECT_DRAG_MIME =")
+        drag_end = APP_SOURCE.index("function renderProjectSessionRow(", drag_start)
+        drag_source = APP_SOURCE[drag_start:drag_end]
+        row_end = APP_SOURCE.index("function renderProjectSection(", drag_end)
+        row_source = APP_SOURCE[drag_end:row_end]
+        render_start = APP_SOURCE.index("function renderSessions()")
+        render_end = APP_SOURCE.index(
+            "function resolveProjectContextMenuPosition(", render_start
+        )
+        render_source = APP_SOURCE[render_start:render_end]
+
+        self.assertNotIn("session-project-drag-handle", row_source)
+        self.assertNotIn('t("sessionProjectDragHandle")', row_source)
+        self.assertIn('class="session-main" type="button" draggable="\' +', row_source)
+        self.assertIn('String(!migrationPending)', row_source)
+        self.assertNotIn('session-more-btn" draggable=', row_source)
+        self.assertNotIn('session-rename-inline" draggable=', row_source)
+        self.assertIn(
+            'event.target?.closest?.(".session-main[draggable]")',
+            drag_source,
+        )
+        self.assertIn("event.dataTransfer.setData(", drag_source)
+        self.assertIn("SESSION_PROJECT_DRAG_MIME,", drag_source)
+        self.assertIn("SESSION_PROJECT_DRAG_PAYLOAD,", drag_source)
+        self.assertIn('SESSION_PROJECT_DRAG_PAYLOAD = "workbar-session-project-move"', drag_source)
+        self.assertNotIn("setData(SESSION_PROJECT_DRAG_MIME, sessionId", drag_source)
+        self.assertIn("runSessionProjectMenuAction(", drag_source)
+        self.assertNotIn("sessionDataFeature.previewSessionProject", drag_source)
+        self.assertNotIn("sessionDataFeature.moveSessionProject", drag_source)
+        self.assertIn("sessionProjectMigrationPending.add(sessionId)", drag_source)
+        self.assertIn("sessionProjectMigrationPending.delete(sessionId)", drag_source)
+        self.assertIn(
+            'source?.setAttribute("draggable", String(!pending))',
+            drag_source,
+        )
+        self.assertIn("createSessionProjectDragGhost", drag_source)
+        self.assertIn("event.dataTransfer.setDragImage(", drag_source)
+        self.assertIn("ghost?.remove()", drag_source)
+        self.assertIn('root.addEventListener("dragstart"', drag_source)
+        self.assertIn('root.addEventListener("dragend"', drag_source)
+        self.assertIn('root.addEventListener("drop"', drag_source)
+        self.assertIn('event.key === "Escape"', drag_source)
+        self.assertIn('document.addEventListener("drop"', drag_source)
+        self.assertIn("clearSessionProjectDragState();", render_source)
+        self.assertIn("attachSessionProjectDragListeners();", render_source)
+
+    def test_session_project_drag_uses_project_blocks_autoscroll_and_full_cleanup(self):
+        drag_start = APP_SOURCE.index("const SESSION_PROJECT_DRAG_MIME =")
+        drag_end = APP_SOURCE.index("function renderProjectSessionRow(", drag_start)
+        drag_source = APP_SOURCE[drag_start:drag_end]
+        for contract in (
+            "ensureSessionProjectTemporaryDropTarget",
+            "session-project-drop-temporary",
+            "UNASSIGNED_PROJECT_KEY",
+            't("otherSessions")',
+            't("sessionProjectDropUnassigned")',
+            "temporary?.remove()",
+            "is-session-project-drag-source",
+            "is-session-project-drop-available",
+            "is-session-project-drop-noop",
+            "is-session-project-drop-invalid",
+            "is-session-project-drop-over",
+            '.project-block[data-project-key]',
+            "SESSION_PROJECT_DRAG_HIT_TOLERANCE_PX = 8",
+            "resolveSessionProjectDropAtPointer",
+            "SESSION_PROJECT_DRAG_SCROLL_EDGE_PX",
+            "requestAnimationFrame",
+            "cancelAnimationFrame",
+            "root.scrollTop",
+            "sessionProjectDragState = null",
+        ):
+            self.assertIn(contract, drag_source)
+        self.assertNotIn('.project-header[data-project-key]', drag_source)
+        self.assertNotIn("sessionProjectDropBlockFromElement", drag_source)
+        self.assertNotIn("document.elementFromPoint", drag_source)
+        self.assertGreaterEqual(
+            drag_source.count("resolveSessionProjectDropAtPointer("),
+            4,
+        )
+        self.assertIn(
+            'event.dataTransfer.dropEffect = intent.kind === "invalid" ? "none" : "move"',
+            drag_source,
+        )
+
+    def test_session_project_drag_css_and_i18n_are_desktop_scoped(self):
+        self.assertEqual(I18N_SOURCE.count("sessionProjectDragHandle:"), 0)
+        self.assertEqual(I18N_SOURCE.count("sessionProjectDropUnassigned:"), 2)
+        for selector in (
+            '.session-main[draggable="true"]',
+            ".session-row.is-session-project-drag-source",
+            ".project-block.is-session-project-drop-available",
+            ".project-block.is-session-project-drop-noop",
+            ".is-session-project-drop-over",
+            ".session-project-drag-ghost",
+            ".session-project-drop-temporary",
+        ):
+            self.assertIn(selector, STYLE_SOURCE)
+        self.assertNotIn(".session-project-drag-handle", STYLE_SOURCE)
+        drag_css_start = STYLE_SOURCE.index('.session-main[draggable="true"]')
+        drag_css_end = STYLE_SOURCE.index("/* Project editor */", drag_css_start)
+        drag_css = STYLE_SOURCE[drag_css_start:drag_css_end]
+        self.assertIn("cursor: grab", drag_css)
+        self.assertIn("var(--accent)", drag_css)
+        self.assertNotIn("var(--red)", drag_css)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", drag_css)
+
+        search_start = SESSIONS_SOURCE.index("function createSessionSearchFeature(")
+        search_end = SESSIONS_SOURCE.index("function createSessionsFeature(", search_start)
+        self.assertNotIn("draggable", SESSIONS_SOURCE[search_start:search_end])
+
+    def test_session_project_drag_target_highlight_has_two_inset_levels(self):
+        available_start = STYLE_SOURCE.index(
+            ".project-block.is-session-project-drop-available {"
+        )
+        available_end = STYLE_SOURCE.index(
+            ".project-block.is-session-project-drop-noop {", available_start
+        )
+        available_css = STYLE_SOURCE[available_start:available_end]
+        hover_start = STYLE_SOURCE.index(
+            ".project-block.is-session-project-drop-available.is-session-project-drop-over {"
+        )
+        hover_end = STYLE_SOURCE.index(
+            ".project-block.is-session-project-drop-noop.is-session-project-drop-over {",
+            hover_start,
+        )
+        hover_css = STYLE_SOURCE[hover_start:hover_end]
+
+        self.assertIn("background: color-mix(in srgb, var(--accent-bg)", available_css)
+        self.assertIn("var(--panel)", available_css)
+        self.assertIn("inset 0 0 0 1px", available_css)
+        self.assertIn("background: color-mix(in srgb, var(--accent-bg)", hover_css)
+        self.assertIn("var(--panel)", hover_css)
+        self.assertIn("inset 0 0 0 2px", hover_css)
+        self.assertIn("0 4px 12px", hover_css)
+        self.assertNotIn("transform:", hover_css)
+        self.assertNotIn("var(--red)", available_css + hover_css)
 
     def test_session_project_migration_is_explicit_and_file_tree_browsing_is_decoupled(self):
         save_start = APP_SOURCE.index("async function saveProjectRoot(")

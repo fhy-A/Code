@@ -4962,6 +4962,161 @@ body.theme-dark .syn-fn { color: #61afef; }
   outline-offset: -2px;
 }
 
+.session-main[draggable="true"] {
+  cursor: grab;
+  -webkit-user-drag: element;
+}
+
+.session-main[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.session-row.is-session-project-drag-source {
+  z-index: 2;
+  opacity: .68;
+  transform: translateY(-1px);
+  transition: opacity .14s ease, transform .14s ease;
+}
+
+.session-row.is-session-project-drag-source .session-main {
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: color-mix(in srgb, var(--accent-bg) 68%, transparent);
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--text) 16%, transparent);
+}
+
+.session-row.is-session-project-migration-pending .session-main {
+  cursor: progress;
+  opacity: .72;
+}
+
+.session-row.is-session-project-migration-pending .session-main {
+  pointer-events: none;
+}
+
+.session-project-drag-ghost {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  z-index: 99999;
+  max-width: min(260px, calc(100vw - 32px));
+  min-height: 34px;
+  padding: 7px 12px 7px 16px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent-bg));
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--text) 22%, transparent);
+  font-size: var(--shell-type-control);
+  font-weight: 620;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.session-project-drag-ghost::before {
+  content: "";
+  position: absolute;
+  inset: 8px auto 8px 6px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.project-block.is-session-project-drop-available,
+.project-block.is-session-project-drop-noop,
+.project-block.is-session-project-drop-invalid {
+  position: relative;
+  border-radius: 8px;
+  transition:
+    background-color .14s ease,
+    box-shadow .14s ease,
+    opacity .14s ease;
+}
+
+.project-block.is-session-project-drop-available {
+  background: color-mix(in srgb, var(--accent-bg) 52%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 44%, var(--line));
+}
+
+.project-block.is-session-project-drop-noop {
+  opacity: .86;
+}
+
+.project-block.is-session-project-drop-invalid {
+  opacity: .58;
+}
+
+.project-block.is-session-project-drop-available.is-session-project-drop-over {
+  z-index: 1;
+  background: color-mix(in srgb, var(--accent-bg) 92%, var(--panel));
+  box-shadow:
+    inset 0 0 0 2px color-mix(in srgb, var(--accent) 82%, var(--line)),
+    0 4px 12px color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.project-block.is-session-project-drop-noop.is-session-project-drop-over {
+  opacity: 1;
+  background: color-mix(in srgb, var(--panel-2) 72%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 82%, transparent);
+}
+
+.session-project-drop-temporary {
+  margin: 4px 0 8px;
+}
+
+.session-project-drop-temporary > .project-header {
+  min-height: 42px;
+  border-style: dashed;
+}
+
+.session-project-drop-temporary-label {
+  display: grid;
+  min-width: 0;
+  padding: 5px 8px 5px 24px;
+  gap: 1px;
+}
+
+.session-project-drop-temporary-name,
+.session-project-drop-temporary-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-project-drop-temporary-name {
+  color: var(--text);
+  font-size: var(--shell-type-control);
+  font-weight: 660;
+}
+
+.session-project-drop-temporary-hint {
+  color: var(--muted);
+  font-size: var(--shell-type-caption);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .session-main[draggable="true"] {
+    cursor: pointer;
+    -webkit-user-drag: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-row.is-session-project-drag-source,
+  .project-block.is-session-project-drop-available,
+  .project-block.is-session-project-drop-noop,
+  .project-block.is-session-project-drop-invalid {
+    transition: none;
+  }
+
+  .session-row.is-session-project-drag-source,
+  .project-block.is-session-project-drop-over {
+    transform: none;
+  }
+}
+
 @media (hover: none), (max-width: 700px) {
   .project-header > .project-new-session {
     opacity: 1;
