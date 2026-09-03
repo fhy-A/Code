@@ -87,6 +87,23 @@ class TestFrontendCoreModules(unittest.TestCase):
             'otherSessionKeepsCurrentTree: "pass"',
             'busySessionRejected: "pass"',
             'newProjectAndMove: "pass"',
+            'cancelZeroWrite: "pass"',
+            'escapeZeroWrite: "pass"',
+            'closeZeroWrite: "pass"',
+            'compactSharedAccessCopy: "pass"',
+            'duplicateFoldersDistinguished: "pass"',
+            'blockedBeforeConfirm: "pass"',
+            'zeroPartialWrite: "pass"',
+            "createPrimaryConflict",
+            "editPrimaryConflict",
+            'exactFolder: "pass"',
+            'occupyingProject: "pass"',
+            'serverTokenOnly: "pass"',
+            'targetPrimaryRetained: "pass"',
+            'finalCwdExactRoot: "pass"',
+            'narrowLayout: "pass"',
+            'longPathWrap: "pass"',
+            'longFolderName: "pass"',
             'longTooltipDelay: "pass"',
             'shortTooltipAbsent: "pass"',
             'keyboardTooltip: "pass"',
@@ -95,6 +112,8 @@ class TestFrontendCoreModules(unittest.TestCase):
             'tooltipViewportAvoidance: "pass"',
             'tooltipDoesNotResizeMenu: "pass"',
             "projectRequestBodiesExcludeCwd",
+            "projectRequestsExcludeClientRoots",
+            "previewRequestCount",
         ):
             self.assertIn(contract, CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE)
         cleanup_start = CODE071_SESSION_PROJECT_MIGRATION_SELFCHECK_SOURCE.index("} finally {")
@@ -9166,6 +9185,10 @@ const sessions = createSessionsFeature({requestJson});
   await sessions.getSession("alpha / beta");
   await sessions.createSession({title: "Created", projectId: "project-1"});
   await sessions.updateSession("alpha", {title: "Renamed", stats: {input: 2}});
+  await sessions.previewSessionProject("alpha / beta", {
+    projectId: "project-2",
+    expectedRevision: 7,
+  });
   await sessions.moveSessionProject("alpha / beta", {
     projectId: "project-2",
     expectedRevision: 7,
@@ -9235,6 +9258,11 @@ const sessions = createSessionsFeature({requestJson});
                     "url": "/api/sessions/alpha",
                     "method": "PUT",
                     "body": {"title": "Renamed", "stats": {"input": 2}},
+                },
+                {
+                    "url": "/api/sessions/alpha%20%2F%20beta/project/preview",
+                    "method": "POST",
+                    "body": {"projectId": "project-2", "expectedRevision": 7},
                 },
                 {
                     "url": "/api/sessions/alpha%20%2F%20beta/project",
@@ -28310,6 +28338,12 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
             "sessionProjectMigrationBusy",
             "sessionProjectMigrationConflict",
             "sessionProjectMigrationFailed",
+            "sessionProjectMigrationBlocked",
+            "sessionProjectMigrationDirectoryUnavailable",
+            "sessionProjectMigrationConfirmTitle",
+            "sessionProjectMigrationConfirmIntro",
+            "sessionProjectMigrationFolderAria",
+            "sessionProjectMigrationConfirmAction",
         ):
             self.assertEqual(I18N_SOURCE.count(key + ":"), 2)
 
@@ -28394,13 +28428,15 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn("color: var(--text)", tooltip_css)
 
     def test_session_project_migration_updates_only_the_current_file_tree_and_recovers_failures(self):
-        start = APP_SOURCE.index("function applySessionProjectLocation(")
+        start = APP_SOURCE.index("function applyMigratedProjectRecord(")
         end = APP_SOURCE.index("onboardingTasksFeature.bind();", start)
         migration_source = APP_SOURCE[start:end]
         script = f"""
 const state = {{
   sessionId: "current",
   pendingProjectId: null,
+  projects: [],
+  projectsMap: {{}},
   sessions: [
     {{id: "current", projectId: null, cwd: "C:/old-current"}},
     {{id: "other", projectId: null, cwd: "C:/old-other"}},
@@ -28422,6 +28458,7 @@ async function getSessionRecord(id) {{
   calls.push(["refresh", id]);
   return {{id, projectId: "server-project", cwd: "C:/server", revision: 9, messages: []}};
 }}
+async function refreshProjects() {{ calls.push(["refresh-projects"]); return []; }}
 function applyAuthoritativeSessionSnapshot(id, session) {{
   const summary = state.sessions.find((item) => item.id === id);
   summary.projectId = session.projectId;
@@ -28430,6 +28467,10 @@ function applyAuthoritativeSessionSnapshot(id, session) {{
   calls.push(["authoritative", id, session.projectId, session.cwd]);
 }}
 const sessionDataFeature = {{
+  async previewSessionProject(id, payload) {{
+    calls.push(["preview", id, payload]);
+    return {{plan: {{status: "direct", rootsToAdd: [], planToken: `plan-${{id}}`}}}};
+  }},
   async moveSessionProject(id, payload) {{
     calls.push(["request", id, payload]);
     if (id === "failed") {{
@@ -28465,11 +28506,17 @@ const sessionDataFeature = {{
         self.assertEqual(result["state"]["sessions"][2]["projectId"], "server-project")
         self.assertEqual(result["revisions"], {"current": 3, "other": 5, "failed": 9})
         self.assertEqual(result["failure"], "conflict")
+        previews = [call for call in result["calls"] if call[0] == "preview"]
+        self.assertEqual(previews, [
+            ["preview", "current", {"projectId": "project-a", "expectedRevision": 2}],
+            ["preview", "other", {"projectId": "project-b", "expectedRevision": 4}],
+            ["preview", "failed", {"projectId": "project-c", "expectedRevision": 6}],
+        ])
         requests = [call for call in result["calls"] if call[0] == "request"]
         self.assertEqual(requests, [
-            ["request", "current", {"projectId": "project-a", "expectedRevision": 2}],
-            ["request", "other", {"projectId": "project-b", "expectedRevision": 4}],
-            ["request", "failed", {"projectId": "project-c", "expectedRevision": 6}],
+            ["request", "current", {"projectId": "project-a", "expectedRevision": 2, "planToken": "plan-current"}],
+            ["request", "other", {"projectId": "project-b", "expectedRevision": 4, "planToken": "plan-other"}],
+            ["request", "failed", {"projectId": "project-c", "expectedRevision": 6, "planToken": "plan-failed"}],
         ])
         self.assertEqual(
             [call for call in result["calls"] if call[0] == "tree"],
@@ -28480,6 +28527,213 @@ const sessionDataFeature = {{
             ["authoritative", "failed", "server-project", "C:/server"],
             result["calls"],
         )
+
+    def test_session_project_preview_gates_confirmation_cancel_block_and_conflict(self):
+        start = APP_SOURCE.index("function applyMigratedProjectRecord(")
+        end = APP_SOURCE.index("onboardingTasksFeature.bind();", start)
+        migration_source = APP_SOURCE[start:end]
+        script = f"""
+const state = {{
+  sessionId: "direct",
+  pendingProjectId: null,
+  projects: [],
+  projectsMap: {{}},
+  sessions: [
+    {{id: "direct", projectId: null, cwd: "C:/direct-old"}},
+    {{id: "confirm", projectId: null, cwd: "C:/confirm-old"}},
+    {{id: "cancel", projectId: null, cwd: "C:/cancel-old"}},
+    {{id: "blocked", projectId: null, cwd: "C:/blocked-old"}},
+    {{id: "conflict", projectId: null, cwd: "C:/conflict-old"}},
+  ],
+}};
+const revisions = {{direct: 1, confirm: 2, cancel: 3, blocked: 4, conflict: 5}};
+const authoritativeSessionSnapshots = new Map();
+const calls = [];
+function normalizeSessionRevision(value) {{ return Number.isInteger(value) && value >= 0 ? value : 0; }}
+function getSessionRevision(id) {{ return revisions[id] || 0; }}
+function hasSessionRevision(id) {{ return Object.prototype.hasOwnProperty.call(revisions, id); }}
+function rememberSessionRevision(id, session) {{ revisions[id] = normalizeSessionRevision(session.revision); }}
+function rememberAuthoritativeSessionSnapshot(id, session) {{ authoritativeSessionSnapshots.set(id, session); }}
+function renderSessions() {{ calls.push(["render"]); }}
+function updateGroupBadge(session) {{ calls.push(["badge", session.id]); }}
+async function saveProjectRoot(cwd, options) {{ calls.push(["tree", cwd, options]); }}
+async function refreshProjects() {{ calls.push(["refresh-projects"]); return []; }}
+async function getSessionRecord(id) {{
+  calls.push(["refresh", id]);
+  return {{id, projectId: null, cwd: `C:/server-${{id}}`, revision: revisions[id], messages: []}};
+}}
+function applyAuthoritativeSessionSnapshot(id, session) {{
+  const summary = state.sessions.find((item) => item.id === id);
+  summary.projectId = session.projectId;
+  summary.cwd = session.cwd;
+  calls.push(["authoritative", id]);
+}}
+const sessionDataFeature = {{
+  async previewSessionProject(id, payload) {{
+    calls.push(["preview", id, payload]);
+    const rootsToAdd = ["confirm", "cancel"].includes(id) ? [`C:/${{id}}-root`] : [];
+    return {{plan: {{
+      status: id === "blocked" ? "blocked" : (rootsToAdd.length ? "confirmation" : "direct"),
+      rootsToAdd,
+      planToken: `token-${{id}}`,
+      targetProject: {{id: "target", label: "Target"}},
+      sourceProject: null,
+      coveredRoots: [],
+      resultCwd: `C:/${{id}}-root`,
+    }}}};
+  }},
+  async moveSessionProject(id, payload) {{
+    calls.push(["commit", id, payload]);
+    if (id === "conflict") {{
+      const error = new Error("state changed");
+      error.data = {{errorCode: "session_project_plan_conflict"}};
+      throw error;
+    }}
+    return {{
+      projectId: "target",
+      cwd: `C:/${{id}}-root`,
+      revision: payload.expectedRevision + 1,
+      project: {{id: "target", label: "Target", rootPaths: [`C:/${{id}}-root`]}},
+      session: {{id, projectId: "target", cwd: `C:/${{id}}-root`, revision: payload.expectedRevision + 1}},
+    }};
+  }},
+}};
+{migration_source}
+showSessionProjectMigrationConfirm = async (plan) => {{
+  calls.push(["confirm-dialog", plan.planToken]);
+  return plan.planToken !== "token-cancel";
+}};
+(async () => {{
+  const direct = await moveSessionToProject("direct", "target");
+  const confirmed = await moveSessionToProject("confirm", "target");
+  const cancelled = await moveSessionToProject("cancel", "target");
+  let blockedCode = "";
+  try {{ await moveSessionToProject("blocked", "target"); }} catch (error) {{ blockedCode = error.data?.errorCode || ""; }}
+  let conflictCode = "";
+  try {{ await moveSessionToProject("conflict", "target"); }} catch (error) {{ conflictCode = error.data?.errorCode || ""; }}
+  process.stdout.write(JSON.stringify({{direct, confirmed, cancelled, blockedCode, conflictCode, state, calls}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["direct"]["projectId"], "target")
+        self.assertEqual(result["confirmed"]["projectId"], "target")
+        self.assertTrue(result["cancelled"]["cancelled"])
+        self.assertEqual(result["blockedCode"], "session_project_migration_blocked")
+        self.assertEqual(result["conflictCode"], "session_project_plan_conflict")
+        commits = [call for call in result["calls"] if call[0] == "commit"]
+        self.assertEqual([call[1] for call in commits], ["direct", "confirm", "conflict"])
+        self.assertEqual(commits[0][2], {
+            "projectId": "target",
+            "expectedRevision": 1,
+            "planToken": "token-direct",
+        })
+        self.assertNotIn("rootsToAdd", commits[1][2])
+        self.assertEqual(
+            [call for call in result["calls"] if call[0] == "confirm-dialog"],
+            [
+                ["confirm-dialog", "token-confirm"],
+                ["confirm-dialog", "token-cancel"],
+            ],
+        )
+        self.assertEqual(result["state"]["sessions"][2]["cwd"], "C:/cancel-old")
+        self.assertEqual(
+            len([call for call in result["calls"] if call[:2] == ["preview", "conflict"]]),
+            1,
+        )
+        self.assertEqual(
+            len([call for call in result["calls"] if call[:2] == ["commit", "conflict"]]),
+            1,
+        )
+
+    def test_session_project_confirmation_modal_has_accessible_cancel_contract(self):
+        start = APP_SOURCE.index("function sessionProjectFolderParentPath(")
+        end = APP_SOURCE.index("function sessionProjectMigrationPlanError(", start)
+        modal_source = APP_SOURCE[start:end]
+        for contract in (
+            'role="alertdialog"',
+            'aria-modal="true"',
+            'event.key === "Escape"',
+            'if (event.target === modal) finish(false)',
+            'cancelButton?.focus({ preventScroll: true })',
+            'previouslyFocused?.isConnected',
+            'if (settled) return',
+            'rootsToAdd.length',
+            'sessionProjectFolderList(rootsToAdd)',
+            'sessionProjectMigrationFolderAria',
+            'title="${escapeHtml(item.path)}"',
+            'aria-label="${escapeHtml(accessibleName)}"',
+        ):
+            self.assertIn(contract, modal_source)
+        for removed_contract in (
+            "plan.coveredRoots",
+            "plan.resultCwd",
+            "sessionProjectMigrationSourceRetained",
+            "sessionProjectMigrationNoDiskMove",
+        ):
+            self.assertNotIn(removed_contract, modal_source)
+        for copy in (
+            'sessionProjectMigrationConfirmTitle: "将文件夹添加到「{name}」？"',
+            'sessionProjectMigrationConfirmIntro: "「{name}」中的所有会话都将获得这些文件夹的访问权限："',
+            'sessionProjectMigrationConfirmAction: "继续"',
+            'sessionProjectMigrationConfirmTitle: "Add folders to \\"{name}\\"?"',
+            'sessionProjectMigrationConfirmIntro: "Every Session in \\"{name}\\" will gain access to these folders:"',
+            'sessionProjectMigrationConfirmAction: "Continue"',
+        ):
+            self.assertIn(copy, I18N_SOURCE)
+        for css_contract in (
+            ".session-project-migration-card",
+            "max-height: min(760px, calc(100vh - 36px))",
+            ".session-project-migration-body",
+            "overflow: auto",
+            "overflow-wrap: anywhere",
+            "width: calc(100vw - 20px)",
+        ):
+            self.assertIn(css_contract, STYLE_SOURCE)
+
+    def test_session_project_confirmation_folder_names_keep_full_and_duplicate_context(self):
+        start = APP_SOURCE.index("function sessionProjectFolderParentPath(")
+        end = APP_SOURCE.index("function showSessionProjectMigrationConfirm(", start)
+        helper_source = APP_SOURCE[start:end]
+        script = f"""
+function escapeHtml(value) {{
+  return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}}
+function t(key, values) {{ return `${{values.name}} | ${{values.path}}`; }}
+function projectFolderName(value) {{
+  const parts = String(value || "").replace(/[\\\\/]+$/, "").split(/[\\\\/]/);
+  return parts[parts.length - 1] || value || "";
+}}
+{helper_source}
+process.stdout.write(JSON.stringify({{
+  html: sessionProjectFolderList([
+    "C:/alpha/shared",
+    "D:/beta/shared",
+    "E:/gamma/unique",
+  ]),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        html = json.loads(completed.stdout)["html"]
+        self.assertEqual(html.count(">shared</span>"), 2)
+        self.assertEqual(html.count(">unique</span>"), 1)
+        self.assertIn(">C:/alpha</span>", html)
+        self.assertIn(">D:/beta</span>", html)
+        self.assertNotIn(">E:/gamma</span>", html)
+        for full_path in (
+            "C:/alpha/shared",
+            "D:/beta/shared",
+            "E:/gamma/unique",
+        ):
+            self.assertIn(f'title="{full_path}"', html)
+            self.assertIn(full_path, html)
 
     def test_session_project_submenu_flips_and_clamps_in_narrow_viewports(self):
         start = APP_SOURCE.index("function resolveSessionSubmenuPosition(")
@@ -28940,6 +29194,69 @@ process.stdout.write(JSON.stringify(samples));
             1,
         )
 
+    def test_project_primary_conflict_names_the_folder_and_occupying_project(self):
+        start = APP_SOURCE.index("function projectSessionMutationErrorMessage(")
+        end = APP_SOURCE.index("function setProjectEditBusy(", start)
+        helper_source = APP_SOURCE[start:end]
+        script = f"""
+function t(key, values = {{}}) {{
+  if (key === "projectPrimaryConflictDetail") {{
+    return `folder=${{values.path}}; project=${{values.name}}`;
+  }}
+  return key;
+}}
+{helper_source}
+process.stdout.write(JSON.stringify({{
+  detailed: projectSessionMutationErrorMessage({{
+    data: {{
+      errorCode: "project_primary_conflict",
+      conflictRootPath: "C:/Users/Admin",
+      conflictingProject: {{id: "project-1", label: "Northstar Sales"}},
+    }},
+  }}),
+  idFallback: projectSessionMutationErrorMessage({{
+    data: {{
+      errorCode: "project_primary_conflict",
+      conflictRootPath: "D:/Shared",
+      conflictingProject: {{id: "project-safe-id", label: ""}},
+    }},
+  }}),
+  legacy: projectSessionMutationErrorMessage({{
+    data: {{errorCode: "project_primary_conflict"}},
+  }}),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "detailed": "folder=C:/Users/Admin; project=Northstar Sales",
+            "idFallback": "folder=D:/Shared; project=project-safe-id",
+            "legacy": "projectPrimaryConflict",
+        })
+        self.assertIn(
+            'projectPrimaryConflictDetail: "文件夹「{path}」已被项目「{name}」设为主文件夹。"',
+            I18N_SOURCE,
+        )
+        self.assertIn(
+            'projectPrimaryConflictDetail: "Folder \\"{path}\\" is already the primary folder of project \\"{name}\\"."',
+            I18N_SOURCE,
+        )
+
+        menu_start = APP_SOURCE.index("function openSessionProjectSubmenu(")
+        menu_end = APP_SOURCE.index("function renderSessions()", menu_start)
+        menu_source = APP_SOURCE[menu_start:menu_end]
+        self.assertIn('error?.data?.errorCode === "project_primary_conflict"', menu_source)
+        self.assertIn("projectSessionMutationErrorMessage(error)", menu_source)
+        self.assertIn('t("sessionProjectCreateFailed")', menu_source)
+        toolbar_start = APP_SOURCE.index("const createBtn = document.getElementById")
+        toolbar_end = APP_SOURCE.index("function closeAllSessionMenus", toolbar_start)
+        self.assertIn(
+            'showToast(projectSessionMutationErrorMessage(error), "error");',
+            APP_SOURCE[toolbar_start:toolbar_end],
+        )
+
     def test_project_inference_uses_only_the_deepest_primary_component_ancestor(self):
         helper_start = APP_SOURCE.index("function normalizePathIdentity(")
         helper_end = APP_SOURCE.index("function projectDisplayName(", helper_start)
@@ -29198,6 +29515,7 @@ process.stdout.write(JSON.stringify({{
             "removeSourceFolder",
             "sourceFolderAlreadyAdded",
             "projectPrimaryConflict",
+            "projectPrimaryConflictDetail",
             "projectPrimaryChangeRequiresExplicit",
             "projectPrimaryInvalid",
             "projectStatePreconditionRequired",

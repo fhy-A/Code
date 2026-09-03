@@ -534,6 +534,7 @@ const sessionDataFeature = Object.freeze({
   getSession: getSessionRecord,
   createSession: createSessionRecord,
   updateSession: updateSessionRecord,
+  previewSessionProject: rawSessionDataFeature.previewSessionProject,
   moveSessionProject: rawSessionDataFeature.moveSessionProject,
   deleteSession: rawSessionDataFeature.deleteSession,
   listArchivedSessions: rawSessionDataFeature.listArchivedSessions,
@@ -1872,6 +1873,17 @@ onboardingTasksFeature = createOnboardingTasksFeature({
   },
 });
 
+function applyMigratedProjectRecord(project) {
+  if (!project || typeof project !== "object" || !project.id) return;
+  const projects = Array.isArray(state.projects) ? state.projects : [];
+  const index = projects.findIndex((item) => item.id === project.id);
+  if (index >= 0) projects[index] = project;
+  else projects.push(project);
+  state.projects = projects;
+  state.projectsMap = state.projectsMap || {};
+  state.projectsMap[project.id] = project;
+}
+
 function applySessionProjectLocation(sessionId, location = {}) {
   const normalizedId = String(sessionId || "");
   const summary = state.sessions.find((session) => session.id === normalizedId);
@@ -1885,6 +1897,7 @@ function applySessionProjectLocation(sessionId, location = {}) {
   const revision = normalizeSessionRevision(
     location.revision ?? responseSession.revision ?? getSessionRevision(normalizedId),
   );
+  applyMigratedProjectRecord(location.project);
   if (summary) {
     summary.projectId = projectId;
     summary.cwd = cwd;
@@ -1905,19 +1918,150 @@ function applySessionProjectLocation(sessionId, location = {}) {
   return { projectId, cwd, revision, summary };
 }
 
-async function moveSessionToProject(sessionId, projectId) {
+let sessionProjectMigrationConfirmSerial = 0;
+
+function sessionProjectFolderParentPath(value) {
+  const path = String(value || "").replace(/[\\/]+$/, "");
+  const separatorIndex = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return separatorIndex > 0 ? path.slice(0, separatorIndex) : path;
+}
+
+function sessionProjectFolderList(paths) {
+  const items = (Array.isArray(paths) ? paths : []).map((value) => {
+    const path = String(value || "");
+    const name = projectFolderName(path);
+    return { path, name, nameKey: name.toLowerCase() };
+  });
+  const nameCounts = items.reduce((counts, item) => {
+    counts[item.nameKey] = (counts[item.nameKey] || 0) + 1;
+    return counts;
+  }, {});
+  return `<ul class="session-project-migration-folders">${items.map((item) => {
+    const accessibleName = t("sessionProjectMigrationFolderAria", {
+      name: item.name,
+      path: item.path,
+    });
+    const duplicateContext = nameCounts[item.nameKey] > 1
+      ? `<span class="session-project-migration-folder-context">${escapeHtml(
+        sessionProjectFolderParentPath(item.path),
+      )}</span>`
+      : "";
+    return `<li class="session-project-migration-folder" title="${escapeHtml(item.path)}" aria-label="${escapeHtml(accessibleName)}">` +
+      `<span class="session-project-migration-folder-name">${escapeHtml(item.name)}</span>` +
+      duplicateContext +
+      `</li>`;
+  }).join("")}</ul>`;
+}
+
+function showSessionProjectMigrationConfirm(plan = {}, options = {}) {
+  const rootsToAdd = Array.isArray(plan.rootsToAdd) ? plan.rootsToAdd : [];
+  if (!rootsToAdd.length) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const previouslyFocused = options.returnFocus || document.activeElement;
+    const dialogSerial = ++sessionProjectMigrationConfirmSerial;
+    const titleId = `sessionProjectMigrationTitle-${dialogSerial}`;
+    const bodyId = `sessionProjectMigrationBody-${dialogSerial}`;
+    const targetName = String(plan.targetProject?.label || plan.targetProject?.id || "");
+    const modal = document.createElement("div");
+    modal.className = "settings-modal session-project-migration-modal";
+    modal.innerHTML = `
+      <div class="modal-card confirm-card session-project-migration-card" role="alertdialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}">
+        <header>
+          <h2 id="${titleId}">${escapeHtml(t("sessionProjectMigrationConfirmTitle", { name: targetName }))}</h2>
+          <button class="icon-btn session-project-migration-close" type="button" aria-label="${escapeHtml(t("close"))}">&times;</button>
+        </header>
+        <div class="confirm-body session-project-migration-body" id="${bodyId}">
+          <p class="session-project-migration-intro">${escapeHtml(t("sessionProjectMigrationConfirmIntro", { name: targetName }))}</p>
+          ${sessionProjectFolderList(rootsToAdd)}
+        </div>
+        <footer class="confirm-actions">
+          <button class="ghost-btn session-project-migration-cancel" type="button">${escapeHtml(t("cancel"))}</button>
+          <button class="primary-btn session-project-migration-confirm" type="button">${escapeHtml(t("sessionProjectMigrationConfirmAction"))}</button>
+        </footer>
+      </div>`;
+    const closeButton = modal.querySelector(".session-project-migration-close");
+    const cancelButton = modal.querySelector(".session-project-migration-cancel");
+    const confirmButton = modal.querySelector(".session-project-migration-confirm");
+    const focusable = [closeButton, cancelButton, confirmButton].filter(Boolean);
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      modal.remove();
+      if (previouslyFocused?.isConnected && typeof previouslyFocused.focus === "function") {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+      resolve(Boolean(confirmed));
+    };
+    closeButton?.addEventListener("click", () => finish(false));
+    cancelButton?.addEventListener("click", () => finish(false));
+    confirmButton?.addEventListener("click", () => finish(true));
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) finish(false);
+    });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length < 2) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    document.body.appendChild(modal);
+    cancelButton?.focus({ preventScroll: true });
+  });
+}
+
+function sessionProjectMigrationPlanError(plan = {}) {
+  const error = new Error("Session project migration is blocked");
+  error.data = {
+    errorCode: "session_project_migration_blocked",
+    retryable: false,
+    plan,
+  };
+  return error;
+}
+
+async function moveSessionToProject(sessionId, projectId, options = {}) {
   const normalizedId = String(sessionId || "").trim();
   if (!normalizedId) throw new TypeError("Session id is required");
   let location;
   try {
     if (!hasSessionRevision(normalizedId)) await getSessionRecord(normalizedId);
-    location = await sessionDataFeature.moveSessionProject(normalizedId, {
+    const request = {
       projectId: projectId || null,
       expectedRevision: getSessionRevision(normalizedId),
+    };
+    const preview = await sessionDataFeature.previewSessionProject(normalizedId, request);
+    const plan = preview?.plan;
+    if (!plan || typeof plan !== "object" || !plan.planToken) {
+      throw new Error("Session project migration preview is invalid");
+    }
+    if (plan.status === "blocked") throw sessionProjectMigrationPlanError(plan);
+    if (Array.isArray(plan.rootsToAdd) && plan.rootsToAdd.length) {
+      const confirmed = await showSessionProjectMigrationConfirm(plan, options);
+      if (!confirmed) return { cancelled: true, migrationPlan: plan };
+    }
+    location = await sessionDataFeature.moveSessionProject(normalizedId, {
+      ...request,
+      planToken: plan.planToken,
     });
   } catch (error) {
     try {
-      const authoritative = await getSessionRecord(normalizedId);
+      const [authoritative] = await Promise.all([
+        getSessionRecord(normalizedId),
+        typeof refreshProjects === "function" ? refreshProjects() : Promise.resolve(null),
+      ]);
       applyAuthoritativeSessionSnapshot(normalizedId, authoritative);
     } catch (recoveryError) {
       error._sessionProjectRecoveryError = recoveryError;
@@ -5427,15 +5571,32 @@ function sessionProjectMigrationErrorKey(error) {
   if (error?._sessionProjectRecoveryError) return "sessionProjectMigrationRecoveryFailed";
   const code = String(error?.data?.errorCode || error?.errorCode || "");
   if (code === "session_project_migration_busy") return "sessionProjectMigrationBusy";
-  if (code === "session_revision_conflict") return "sessionProjectMigrationConflict";
+  if ([
+    "session_revision_conflict",
+    "session_project_plan_conflict",
+    "session_project_confirmation_required",
+    "session_project_source_missing",
+    "project_not_found",
+  ].includes(code)) return "sessionProjectMigrationConflict";
+  if (code === "session_project_migration_blocked") return "sessionProjectMigrationBlocked";
+  if (code === "session_project_migration_directory_unavailable") {
+    return "sessionProjectMigrationDirectoryUnavailable";
+  }
   if (code === "session_archived") return "sessionProjectArchivedRestore";
   return "sessionProjectMigrationFailed";
 }
 
-async function runSessionProjectMenuAction(sessionId, projectId, projectName = "") {
+async function runSessionProjectMenuAction(
+  sessionId,
+  projectId,
+  projectName = "",
+  options = {},
+) {
+  const returnFocus = options.returnFocus || sessionMenuReturnFocus;
   closeAllSessionMenus();
   try {
-    await moveSessionToProject(sessionId, projectId);
+    const result = await moveSessionToProject(sessionId, projectId, { returnFocus });
+    if (result?.cancelled) return false;
     showToast(
       projectId
         ? t("sessionProjectMoveSuccess", { name: projectName })
@@ -5570,6 +5731,7 @@ function openSessionProjectSubmenu(
       if (item.disabled) return;
       const action = item.dataset.projectAction;
       if (action === "create") {
+        const returnFocus = sessionMenuReturnFocus;
         closeAllSessionMenus();
         try {
           const project = await createProjectFromFolder();
@@ -5578,10 +5740,16 @@ function openSessionProjectSubmenu(
               sessionId,
               project.id,
               projectDisplayName(project),
+              { returnFocus },
             );
           }
         } catch (error) {
-          showToast(t("sessionProjectCreateFailed"), "error");
+          showToast(
+            error?.data?.errorCode === "project_primary_conflict"
+              ? projectSessionMutationErrorMessage(error)
+              : t("sessionProjectCreateFailed"),
+            "error",
+          );
         }
         return;
       }
@@ -6023,7 +6191,12 @@ function attachProjectSessionListeners() {
           if (!project) return;
           beginNewConversation(project.id);
         })
-        .catch((err) => console.error("Create project failed:", err));
+        .catch((error) => {
+          console.error("Create project failed:", error);
+          if (error?.data?.errorCode === "project_primary_conflict") {
+            showToast(projectSessionMutationErrorMessage(error), "error");
+          }
+        });
     });
   }
 }
@@ -6124,12 +6297,25 @@ function closeProjectDeleteConfirm() {
 
 function projectSessionMutationErrorMessage(error) {
   const code = String(error?.data?.errorCode || "");
+  if (code === "project_primary_conflict") {
+    const conflictPath = String(error?.data?.conflictRootPath || "").trim();
+    const conflictProject = error?.data?.conflictingProject;
+    const conflictName = String(
+      conflictProject?.label || conflictProject?.id || "",
+    ).trim();
+    if (conflictPath && conflictName) {
+      return t("projectPrimaryConflictDetail", {
+        path: conflictPath,
+        name: conflictName,
+      });
+    }
+    return t("projectPrimaryConflict");
+  }
   const key = ({
     project_session_migration_busy: "projectSessionMigrationBusy",
     project_session_migration_unavailable: "projectSessionMigrationUnavailable",
     project_session_migration_failed: "projectSessionMigrationFailed",
     project_session_migration_recovery_failed: "projectSessionMigrationRecoveryFailed",
-    project_primary_conflict: "projectPrimaryConflict",
     project_primary_change_requires_explicit: "projectPrimaryChangeRequiresExplicit",
     project_primary_invalid: "projectPrimaryInvalid",
     project_state_precondition_required: "projectStatePreconditionRequired",

@@ -48,6 +48,14 @@ async function seedContract(host) {
   const newProjectRoot = path.join(host.root, "new-project-root");
   const editorPrimary = path.join(host.root, "editor-primary");
   const editorSecondary = path.join(host.root, "editor-secondary");
+  const conflictEditorPrimary = path.join(host.root, "conflict-editor-primary");
+  const duplicateRootA = path.join(host.root, "area-a", "shared-src");
+  const duplicateRootB = path.join(host.root, "area-b", "shared-src");
+  const conflictRoot = path.join(
+    host.root,
+    "a-very-long-session-source-folder-name-for-narrow-confirmation-layout",
+    "nested-source-folder-that-must-wrap-without-overflow",
+  );
   await Promise.all([
     fs.mkdir(targetPrimary),
     fs.mkdir(targetSecondary),
@@ -55,6 +63,10 @@ async function seedContract(host) {
     fs.mkdir(newProjectRoot),
     fs.mkdir(editorPrimary),
     fs.mkdir(editorSecondary),
+    fs.mkdir(conflictEditorPrimary),
+    fs.mkdir(duplicateRootA, { recursive: true }),
+    fs.mkdir(duplicateRootB, { recursive: true }),
+    fs.mkdir(conflictRoot, { recursive: true }),
     fs.mkdir(path.join(host.dataDir, "attachments"), { recursive: true }),
   ]);
   await Promise.all([
@@ -86,6 +98,18 @@ async function seedContract(host) {
       rootPaths: [targetPrimary, targetSecondary],
     }),
   })).payload;
+  originalProject = (await requestJson(
+    host.ready.codeUrl,
+    `/api/projects/${originalProject.id}/update`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        label: originalProject.label,
+        rootPaths: [host.projectDir, targetSecondary, duplicateRootA, duplicateRootB],
+        expectedStateToken: originalProject.stateToken,
+      }),
+    },
+  )).payload;
   const longProject = (await requestJson(host.ready.codeUrl, "/api/projects", {
     method: "POST",
     body: JSON.stringify({
@@ -98,6 +122,13 @@ async function seedContract(host) {
     body: JSON.stringify({
       label: "Primary editor project",
       rootPaths: [editorPrimary, editorSecondary],
+    }),
+  })).payload;
+  const conflictEditorProject = (await requestJson(host.ready.codeUrl, "/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      label: "Primary conflict editor",
+      rootPaths: [conflictEditorPrimary, targetPrimary],
     }),
   })).payload;
 
@@ -125,10 +156,15 @@ async function seedContract(host) {
     newProjectRoot,
     editorPrimary,
     editorSecondary,
+    conflictEditorPrimary,
+    duplicateRootA,
+    duplicateRootB,
+    conflictRoot,
     originalProject,
     targetProject,
     longProject,
     editorProject,
+    conflictEditorProject,
     current: await createSession("CODE-071 current", {}, originalProject.id),
     longAssigned: await createSession(
       "CODE-071 long assigned",
@@ -138,6 +174,8 @@ async function seedContract(host) {
     ),
     other: await createSession("CODE-071 other"),
     busy: await createSession("CODE-071 busy", { status: "paused" }),
+    wide: await createSession("CODE-071 wide", {}, null, host.homeDir),
+    conflict: await createSession("CODE-071 conflict", {}, null, conflictRoot),
     createAndMove: await createSession("CODE-071 create and move"),
     classic: await createSession("CODE-071 classic", {}, originalProject.id),
     classicLongAssigned: await createSession(
@@ -160,6 +198,7 @@ async function createContext(
   host,
   seed,
   projectRequests,
+  projectPreviews,
   pageErrors,
   currentSessionId,
 ) {
@@ -174,6 +213,11 @@ async function createContext(
       let body = null;
       try { body = request.postDataJSON(); } catch {}
       projectRequests.push({ path: url.pathname, body });
+    }
+    if (request.method() === "POST" && /^\/api\/sessions\/[^/]+\/project\/preview$/.test(url.pathname)) {
+      let body = null;
+      try { body = request.postDataJSON(); } catch {}
+      projectPreviews.push({ path: url.pathname, body });
     }
   });
   await context.route("**/*", async (route) => {
@@ -266,7 +310,7 @@ async function openProjectSubmenu(page, sessionId) {
   await page.keyboard.press("ArrowDown");
   const trigger = menu.locator('[data-action="project"]');
   assert.equal(await trigger.evaluate((element) => element === document.activeElement), true);
-  await page.keyboard.press("ArrowRight");
+  await trigger.press("ArrowRight");
   const submenu = page.locator(".session-project-submenu");
   await submenu.waitFor({ state: "visible" });
   assert.equal(await submenu.getAttribute("role"), "menu");
@@ -522,12 +566,24 @@ async function exerciseLongRemoveTooltip(page, host, seed, sessionId) {
   };
 }
 
-async function moveToProject(page, host, sessionId, project) {
+async function selectProjectFromMenu(page, sessionId, project) {
   const { submenu } = await openProjectSubmenu(page, sessionId);
   const item = submenu.locator(`[data-project-id="${project.id}"]`);
   assert.equal(await item.isDisabled(), false);
   await item.focus();
   await page.keyboard.press("Enter");
+}
+
+async function openMigrationConfirm(page, sessionId, project) {
+  await selectProjectFromMenu(page, sessionId, project);
+  const modal = page.locator(".session-project-migration-modal");
+  await modal.waitFor({ state: "visible" });
+  return modal;
+}
+
+async function moveToProject(page, host, sessionId, project) {
+  await selectProjectFromMenu(page, sessionId, project);
+  assert.equal(await page.locator(".session-project-migration-modal").count(), 0);
   return waitForSession(
     host,
     sessionId,
@@ -707,7 +763,314 @@ async function exerciseProjectEditorConflict(page, host, seed) {
   };
 }
 
-async function exercise(page, host, seed, projectRequests) {
+async function exerciseCreatePrimaryConflict(page, host, seed) {
+  const projectsBefore = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
+  const pickerPattern = "**/api/pick-folder*";
+  const pickerHandler = async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ cancelled: false, path: seed.targetPrimary }),
+    });
+  };
+  await page.route(pickerPattern, pickerHandler);
+  try {
+    await page.locator("#projectCreateBtn").click();
+    const toast = page.locator("#toastContainer .toast.error").filter({
+      hasText: seed.targetPrimary,
+    });
+    await toast.waitFor({ state: "visible" });
+    const text = await toast.textContent();
+    assert.equal(text.includes(seed.targetPrimary), true);
+    assert.equal(text.includes(seed.targetProject.label), true);
+  } finally {
+    await page.unroute(pickerPattern, pickerHandler);
+  }
+  const projectsAfter = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
+  assert.deepEqual(projectsAfter, projectsBefore);
+  return { exactFolder: "pass", occupyingProject: "pass", zeroWrite: "pass" };
+}
+
+async function exerciseEditPrimaryConflict(page, host, seed) {
+  const projectBefore = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === seed.conflictEditorProject.id);
+  const header = page.locator(
+    `.project-header[data-project-id="${seed.conflictEditorProject.id}"]`,
+  );
+  await header.scrollIntoViewIfNeeded();
+  await header.click({ button: "right" });
+  const menu = page.locator(".project-context-menu");
+  await menu.waitFor({ state: "visible" });
+  await menu.locator('[data-action="edit"]').click();
+  const modal = page.locator("#projectEditModal");
+  await modal.waitFor({ state: "visible" });
+  const rows = modal.locator(".project-source-folder-row");
+  assert.equal(await rows.count(), 2);
+  await rows.nth(1).locator('[data-project-folder-action="primary"]').click();
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST"
+      && url.pathname === `/api/projects/${seed.conflictEditorProject.id}/update`;
+  });
+  await modal.locator("#saveProjectEdit").click();
+  const response = await responsePromise;
+  assert.equal(response.status(), 409);
+  const payload = await response.json();
+  assert.equal(payload.errorCode, "project_primary_conflict");
+  assert.equal(payload.conflictRootPath, seed.targetPrimary);
+  assert.deepEqual(payload.conflictingProject, {
+    id: seed.targetProject.id,
+    label: seed.targetProject.label,
+  });
+  const toast = page.locator("#toastContainer .toast.error").filter({
+    hasText: seed.targetPrimary,
+  }).last();
+  await toast.waitFor({ state: "visible" });
+  const text = await toast.textContent();
+  assert.equal(text.includes(seed.targetPrimary), true);
+  assert.equal(text.includes(seed.targetProject.label), true);
+  const projectAfter = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === seed.conflictEditorProject.id);
+  assert.equal(projectAfter.stateToken, projectBefore.stateToken);
+  await modal.locator("#cancelProjectEdit").click();
+  await modal.waitFor({ state: "hidden" });
+  return { exactFolder: "pass", occupyingProject: "pass", zeroWrite: "pass" };
+}
+
+async function exerciseMigrationConfirmation(
+  page,
+  host,
+  seed,
+  projectRequests,
+  projectPreviews,
+) {
+  const sessionBefore = await sessionRecord(host, seed.current.id);
+  const projectsBefore = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
+  const sourceBefore = projectsBefore.find((project) => project.id === seed.originalProject.id);
+  const targetBefore = projectsBefore.find((project) => project.id === seed.targetProject.id);
+  const putCountBefore = projectRequests.length;
+  const previewCountBefore = projectPreviews.length;
+  let layout = null;
+
+  for (const action of ["cancel", "escape", "close"]) {
+    const modal = await openMigrationConfirm(
+      page,
+      seed.current.id,
+      seed.targetProject,
+    );
+    const cancel = modal.locator(".session-project-migration-cancel");
+    assert.equal(await cancel.evaluate((element) => element === document.activeElement), true);
+    if (!layout) {
+      assert.equal(await modal.getAttribute("class"), "settings-modal session-project-migration-modal");
+      const modalText = await modal.textContent();
+      assert.match(modalText, /Add folders to "Target project"\?/);
+      assert.match(modalText, /Every Session in "Target project" will gain access/);
+      for (const removedText of [
+        "Already covered by the target",
+        "Working directory after the move",
+        "remains unchanged",
+        "No files on disk",
+      ]) assert.equal(modalText.includes(removedText), false);
+      assert.equal(
+        await modal.locator(".session-project-migration-confirm").textContent(),
+        "Continue",
+      );
+      const folders = modal.locator(".session-project-migration-folder");
+      assert.equal(await folders.count(), 3);
+      assert.deepEqual(
+        await folders.locator(".session-project-migration-folder-name").allTextContents(),
+        [path.basename(host.projectDir), "shared-src", "shared-src"],
+      );
+      assert.deepEqual(
+        await folders.locator(".session-project-migration-folder-context").allTextContents(),
+        [path.dirname(seed.duplicateRootA), path.dirname(seed.duplicateRootB)],
+      );
+      const folderDetails = await folders.evaluateAll((items) => items.map((item) => ({
+        title: item.getAttribute("title"),
+        ariaLabel: item.getAttribute("aria-label"),
+      })));
+      for (const expectedPath of [host.projectDir, seed.duplicateRootA, seed.duplicateRootB]) {
+        const detail = folderDetails.find((item) => item.title === expectedPath);
+        assert.ok(detail);
+        assert.equal(detail.ariaLabel.includes(expectedPath), true);
+      }
+      layout = await modal.locator(".session-project-migration-card").evaluate((card) => {
+        const rect = card.getBoundingClientRect();
+        const folderNodes = [...card.querySelectorAll(".session-project-migration-folder")];
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          viewportWidth: innerWidth,
+          viewportHeight: innerHeight,
+          pathsFit: folderNodes.every((node) => node.scrollWidth <= node.clientWidth + 1),
+        };
+      });
+      assert.equal(layout.left >= 9.5, true, JSON.stringify(layout));
+      assert.equal(layout.right <= layout.viewportWidth - 9.5, true, JSON.stringify(layout));
+      assert.equal(layout.top >= 9.5, true, JSON.stringify(layout));
+      assert.equal(layout.bottom <= layout.viewportHeight - 9.5, true, JSON.stringify(layout));
+      assert.equal(layout.pathsFit, true, JSON.stringify(layout));
+    }
+    if (action === "cancel") await cancel.click();
+    if (action === "escape") await page.keyboard.press("Escape");
+    if (action === "close") await modal.locator(".session-project-migration-close").click();
+    await modal.waitFor({ state: "detached" });
+    const more = page.locator(`.session-more-btn[data-session-id="${seed.current.id}"]`);
+    assert.equal(await more.evaluate((element) => element === document.activeElement), true);
+    const unchanged = await sessionRecord(host, seed.current.id);
+    assert.equal(unchanged.projectId, sessionBefore.projectId);
+    assert.equal(unchanged.revision, sessionBefore.revision);
+    assert.equal(path.resolve(unchanged.cwd), path.resolve(sessionBefore.cwd));
+    assert.equal(projectRequests.length, putCountBefore);
+  }
+
+  const modal = await openMigrationConfirm(page, seed.current.id, seed.targetProject);
+  await modal.locator(".session-project-migration-confirm").click();
+  await modal.waitFor({ state: "detached" });
+  const moved = await waitForSession(
+    host,
+    seed.current.id,
+    (session) => session.projectId === seed.targetProject.id,
+    "confirmed Session migration did not commit",
+  );
+  assert.equal(path.resolve(moved.cwd), path.resolve(host.projectDir));
+  assert.equal(moved.revision, sessionBefore.revision + 1);
+  await waitForRoot(page, host.projectDir);
+  assert.equal(projectRequests.length, putCountBefore + 1);
+  assert.equal(projectPreviews.length, previewCountBefore + 4);
+  const commitBody = projectRequests.at(-1).body;
+  assert.deepEqual(Object.keys(commitBody).sort(), ["expectedRevision", "planToken", "projectId"]);
+  assert.match(commitBody.planToken, /^v1\.[A-Za-z0-9_-]+\.[0-9a-f]{64}$/);
+  assert.equal(Object.prototype.hasOwnProperty.call(commitBody, "rootsToAdd"), false);
+
+  const projectsAfter = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
+  const sourceAfter = projectsAfter.find((project) => project.id === seed.originalProject.id);
+  const targetAfter = projectsAfter.find((project) => project.id === seed.targetProject.id);
+  assert.deepEqual(sourceAfter.rootPaths, sourceBefore.rootPaths);
+  assert.equal(sourceAfter.stateToken, sourceBefore.stateToken);
+  assert.equal(path.resolve(targetAfter.rootPaths[0]), path.resolve(targetBefore.rootPaths[0]));
+  assert.deepEqual(
+    targetAfter.rootPaths.map((root) => path.resolve(root)),
+    [
+      path.resolve(seed.targetPrimary),
+      path.resolve(seed.targetSecondary),
+      path.resolve(host.projectDir),
+      path.resolve(seed.duplicateRootA),
+      path.resolve(seed.duplicateRootB),
+    ],
+  );
+  return {
+    cancelZeroWrite: "pass",
+    escapeZeroWrite: "pass",
+    closeZeroWrite: "pass",
+    focusDefault: "pass",
+    compactSharedAccessCopy: "pass",
+    duplicateFoldersDistinguished: "pass",
+    sourceRetained: "pass",
+    targetPrimaryRetained: "pass",
+    serverTokenOnly: "pass",
+    finalCwdExactRoot: "pass",
+    narrowLayout: "pass",
+    longPathWrap: "pass",
+    layout,
+  };
+}
+
+async function exerciseMigrationBlock(page, host, seed, projectRequests, projectPreviews) {
+  const sessionBefore = await sessionRecord(host, seed.wide.id);
+  const putCountBefore = projectRequests.length;
+  const previewCountBefore = projectPreviews.length;
+  await selectProjectFromMenu(page, seed.wide.id, seed.targetProject);
+  await page.locator("#toastContainer .toast.error").filter({
+    hasText: "too broad",
+  }).waitFor({ state: "visible" });
+  assert.equal(await page.locator(".session-project-migration-modal").count(), 0);
+  await page.waitForTimeout(150);
+  assert.equal(projectRequests.length, putCountBefore);
+  assert.equal(projectPreviews.length, previewCountBefore + 1);
+  const sessionAfter = await sessionRecord(host, seed.wide.id);
+  assert.equal(sessionAfter.projectId, sessionBefore.projectId);
+  assert.equal(sessionAfter.revision, sessionBefore.revision);
+  assert.equal(path.resolve(sessionAfter.cwd), path.resolve(sessionBefore.cwd));
+  return { blockedBeforeConfirm: "pass", zeroWrite: "pass", noAutomaticRetry: "pass" };
+}
+
+async function exerciseMigrationConflict(page, host, seed, projectRequests, projectPreviews) {
+  const sessionBefore = await sessionRecord(host, seed.conflict.id);
+  const putCountBefore = projectRequests.length;
+  const previewCountBefore = projectPreviews.length;
+  await page.setViewportSize({ width: 390, height: 720 });
+  const modal = await openMigrationConfirm(page, seed.conflict.id, seed.targetProject);
+  const longFolder = modal.locator(".session-project-migration-folder");
+  assert.equal(await longFolder.count(), 1);
+  assert.equal(
+    await longFolder.locator(".session-project-migration-folder-name").textContent(),
+    path.basename(seed.conflictRoot),
+  );
+  assert.equal(await longFolder.getAttribute("title"), seed.conflictRoot);
+  const narrowLayout = await modal.locator(".session-project-migration-card").evaluate((card) => {
+    const rect = card.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+      horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      folderOverflow: card.querySelector(".session-project-migration-folder").scrollWidth
+        > card.querySelector(".session-project-migration-folder").clientWidth + 1,
+    };
+  });
+  assert.equal(narrowLayout.left >= 9.5, true, JSON.stringify(narrowLayout));
+  assert.equal(narrowLayout.right <= narrowLayout.viewportWidth - 9.5, true, JSON.stringify(narrowLayout));
+  assert.equal(narrowLayout.top >= 9.5, true, JSON.stringify(narrowLayout));
+  assert.equal(narrowLayout.bottom <= narrowLayout.viewportHeight - 9.5, true, JSON.stringify(narrowLayout));
+  assert.equal(narrowLayout.horizontalOverflow, false);
+  assert.equal(narrowLayout.folderOverflow, false);
+  const renamed = (await requestJson(
+    host.ready.codeUrl,
+    `/api/projects/${seed.targetProject.id}/rename`,
+    {
+      method: "POST",
+      body: JSON.stringify({ label: "Target changed" }),
+    },
+  )).payload;
+  await modal.locator(".session-project-migration-confirm").click();
+  await modal.waitFor({ state: "detached" });
+  await page.locator("#toastContainer .toast.error").filter({
+    hasText: "changed in another window",
+  }).waitFor({ state: "visible" });
+  await page.waitForTimeout(250);
+  assert.equal(projectRequests.length, putCountBefore + 1);
+  assert.equal(projectPreviews.length, previewCountBefore + 1);
+  const sessionAfter = await sessionRecord(host, seed.conflict.id);
+  assert.equal(sessionAfter.projectId, sessionBefore.projectId);
+  assert.equal(sessionAfter.revision, sessionBefore.revision);
+  assert.equal(path.resolve(sessionAfter.cwd), path.resolve(sessionBefore.cwd));
+  const targetAfter = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === seed.targetProject.id);
+  assert.equal(targetAfter.stateToken, renamed.stateToken);
+  assert.equal(
+    targetAfter.rootPaths.some((root) => path.resolve(root) === path.resolve(seed.conflictRoot)),
+    false,
+  );
+  await page.setViewportSize({ width: 1280, height: 800 });
+  return {
+    staleRejected: "pass",
+    zeroPartialWrite: "pass",
+    noAutomaticRetry: "pass",
+    longFolderName: "pass",
+    narrowLayout: "pass",
+  };
+}
+
+async function exercise(page, host, seed, projectRequests, projectPreviews) {
   await page.goto(new URL("/", host.ready.codeUrl).href, { waitUntil: "domcontentloaded" });
   await page.waitForFunction((sessionId) => (
     document.documentElement.getAttribute("data-code-frontend-ready") === "true"
@@ -770,10 +1133,16 @@ async function exercise(page, host, seed, projectRequests) {
   assert.equal(path.resolve(browsedBackBeforeMove.cwd), path.resolve(host.projectDir));
   assert.equal(projectRequests.length, 0);
 
-  const movedCurrent = await moveToProject(page, host, seed.current.id, seed.targetProject);
-  assert.equal(path.resolve(movedCurrent.cwd), path.resolve(seed.targetPrimary));
-  await waitForRoot(page, seed.targetPrimary);
-  assert.deepEqual(Object.keys(projectRequests[0].body).sort(), ["expectedRevision", "projectId"]);
+  const migrationConfirmation = await exerciseMigrationConfirmation(
+    page,
+    host,
+    seed,
+    projectRequests,
+    projectPreviews,
+  );
+  const movedCurrent = await sessionRecord(host, seed.current.id);
+  assert.equal(path.resolve(movedCurrent.cwd), path.resolve(host.projectDir));
+  await waitForRoot(page, host.projectDir);
 
   const currentMenu = await openProjectSubmenu(page, seed.current.id);
   const currentItem = currentMenu.submenu.locator(
@@ -794,8 +1163,8 @@ async function exercise(page, host, seed, projectRequests) {
     (session) => session.projectId == null,
     "Session did not move out of its project",
   );
-  assert.equal(path.resolve(removed.cwd), path.resolve(seed.targetPrimary));
-  await waitForRoot(page, seed.targetPrimary);
+  assert.equal(path.resolve(removed.cwd), path.resolve(host.projectDir));
+  await waitForRoot(page, host.projectDir);
   longRemoveTooltip = await exerciseLongRemoveTooltip(
     page,
     host,
@@ -810,17 +1179,17 @@ async function exercise(page, host, seed, projectRequests) {
       .find((item) => item.dataset.path === targetPath);
     target?.click();
     return Boolean(target);
-  }, seed.targetPrimary);
+  }, host.projectDir);
   assert.equal(recentTargetClicked, true);
-  await waitForRoot(page, seed.targetPrimary);
+  await waitForRoot(page, host.projectDir);
   const browsedBack = await sessionRecord(host, seed.current.id);
   assert.equal(browsedBack.projectId, null);
-  assert.equal(path.resolve(browsedBack.cwd), path.resolve(seed.targetPrimary));
+  assert.equal(path.resolve(browsedBack.cwd), path.resolve(host.projectDir));
 
   await browseHome(page, host);
   const rootBeforeOtherMove = await page.locator("#projectRoot").inputValue();
   const movedOther = await moveToProject(page, host, seed.other.id, seed.targetProject);
-  assert.equal(path.resolve(movedOther.cwd), path.resolve(seed.targetPrimary));
+  assert.equal(path.resolve(movedOther.cwd), path.resolve(host.projectDir));
   assert.equal(path.resolve(await page.locator("#projectRoot").inputValue()), path.resolve(rootBeforeOtherMove));
 
   const busyMenu = await openProjectSubmenu(page, seed.busy.id);
@@ -836,6 +1205,23 @@ async function exercise(page, host, seed, projectRequests) {
   assert.equal(busy.projectId, null);
   assert.equal(path.resolve(busy.cwd), path.resolve(host.projectDir));
   assert.equal(path.resolve(await page.locator("#projectRoot").inputValue()), path.resolve(rootBeforeOtherMove));
+
+  const migrationBlock = await exerciseMigrationBlock(
+    page,
+    host,
+    seed,
+    projectRequests,
+    projectPreviews,
+  );
+  const createPrimaryConflict = await exerciseCreatePrimaryConflict(page, host, seed);
+  const editPrimaryConflict = await exerciseEditPrimaryConflict(page, host, seed);
+  const migrationConflict = await exerciseMigrationConflict(
+    page,
+    host,
+    seed,
+    projectRequests,
+    projectPreviews,
+  );
 
   const createMenu = await openProjectSubmenu(page, seed.createAndMove.id);
   assert.equal(
@@ -854,16 +1240,20 @@ async function exercise(page, host, seed, projectRequests) {
   assert.equal(await create.count(), 1);
   await create.focus();
   await page.keyboard.press("Enter");
+  const createMigrationModal = page.locator(".session-project-migration-modal");
+  await createMigrationModal.waitFor({ state: "visible" });
+  await createMigrationModal.locator(".session-project-migration-confirm").click();
   const newlyMoved = await waitForSession(
     host,
     seed.createAndMove.id,
-    (session) => session.projectId && path.resolve(session.cwd) === path.resolve(seed.newProjectRoot),
+    (session) => session.projectId && path.resolve(session.cwd) === path.resolve(host.projectDir),
     "new project and move did not complete",
   );
   const projects = (await requestJson(host.ready.codeUrl, "/api/projects")).payload.data;
   const createdProject = projects.find((project) => project.id === newlyMoved.projectId);
   assert.ok(createdProject);
   assert.equal(path.resolve(createdProject.rootPaths[0]), path.resolve(seed.newProjectRoot));
+  assert.equal(path.resolve(createdProject.rootPaths[1]), path.resolve(host.projectDir));
   assert.equal(path.resolve(await page.locator("#projectRoot").inputValue()), path.resolve(rootBeforeOtherMove));
 
   return {
@@ -877,6 +1267,11 @@ async function exercise(page, host, seed, projectRequests) {
     unassignedCwdIndependent: "pass",
     assignedCreateActionHidden: "pass",
     currentTreeFollowsAuthoritativeCwd: "pass",
+    migrationConfirmation,
+    migrationBlock,
+    createPrimaryConflict,
+    editPrimaryConflict,
+    migrationConflict,
     moveOutPreservesCwd: "pass",
     browsingBackDoesNotReattach: "pass",
     otherSessionKeepsCurrentTree: "pass",
@@ -886,10 +1281,14 @@ async function exercise(page, host, seed, projectRequests) {
     projectRequestBodiesExcludeCwd: projectRequests.every(
       (request) => !Object.prototype.hasOwnProperty.call(request.body || {}, "cwd"),
     ),
+    projectRequestsExcludeClientRoots: [...projectRequests, ...projectPreviews].every(
+      (request) => !Object.prototype.hasOwnProperty.call(request.body || {}, "rootsToAdd"),
+    ),
+    previewRequestCount: projectPreviews.length,
   };
 }
 
-async function exerciseClassic(page, host, seed, projectRequests) {
+async function exerciseClassic(page, host, seed, projectRequests, projectPreviews) {
   const requestCountBeforeBrowse = projectRequests.length;
   await page.goto(
     new URL("/dist/frontend/index.classic.html", host.ready.codeUrl).href,
@@ -917,8 +1316,8 @@ async function exerciseClassic(page, host, seed, projectRequests) {
   assert.equal(path.resolve(browsed.cwd), path.resolve(host.projectDir));
   assert.equal(projectRequests.length, requestCountBeforeBrowse);
   const moved = await moveToProject(page, host, seed.classic.id, seed.targetProject);
-  assert.equal(path.resolve(moved.cwd), path.resolve(seed.targetPrimary));
-  await waitForRoot(page, seed.targetPrimary);
+  assert.equal(path.resolve(moved.cwd), path.resolve(host.projectDir));
+  await waitForRoot(page, host.projectDir);
   longRemoveTooltip = await exerciseLongRemoveTooltip(
     page,
     host,
@@ -932,6 +1331,7 @@ async function exerciseClassic(page, host, seed, projectRequests) {
     browsingDoesNotMigrate: "pass",
     menuKeyboard: "pass",
     currentTreeFollowsAuthoritativeCwd: "pass",
+    previewPipeline: projectPreviews.length > 0 ? "pass" : "fail",
   };
 }
 
@@ -942,6 +1342,7 @@ async function main() {
   let page = null;
   let cleanup = null;
   const projectRequests = [];
+  const projectPreviews = [];
   const pageErrors = [];
   let contract = null;
   try {
@@ -952,10 +1353,11 @@ async function main() {
       host,
       seed,
       projectRequests,
+      projectPreviews,
       pageErrors,
       seed.current.id,
     ));
-    const bundle = await exercise(page, host, seed, projectRequests);
+    const bundle = await exercise(page, host, seed, projectRequests, projectPreviews);
     const primaryEditorBundle = await exercisePrimaryEditor(page, host, seed, {
       currentPrimary: seed.editorPrimary,
       nextPrimary: seed.editorSecondary,
@@ -970,10 +1372,17 @@ async function main() {
       host,
       seed,
       projectRequests,
+      projectPreviews,
       pageErrors,
       seed.classic.id,
     ));
-    const classic = await exerciseClassic(page, host, seed, projectRequests);
+    const classic = await exerciseClassic(
+      page,
+      host,
+      seed,
+      projectRequests,
+      projectPreviews,
+    );
     const primaryEditorClassic = await exercisePrimaryEditor(page, host, seed, {
       currentPrimary: seed.editorSecondary,
       nextPrimary: seed.editorPrimary,

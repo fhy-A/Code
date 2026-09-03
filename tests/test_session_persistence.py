@@ -1699,9 +1699,11 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         with mock.patch.object(server, "_session_location", return_value=("project-archive", "")):
             assigned = self.make_handler({"projectId": "project-archive"})
             server.CodeHandler.assign_session_project(assigned, session_id)
+        previewed = self.make_handler({"projectId": "project-archive"})
+        server.CodeHandler.preview_session_project(previewed, session_id)
         branched = self.make_handler({"title": "Branch from archived"})
         server.CodeHandler.branch_session(branched, session_id)
-        for handler in (saved, appended, assigned, branched):
+        for handler in (saved, appended, assigned, previewed, branched):
             payload, status = handler.send_json.call_args.args
             self.assertEqual(status, 409)
             self.assertEqual(payload["errorCode"], "session_archived")
@@ -1766,6 +1768,9 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
         assigned = self.make_handler({"projectId": "blocked"})
         server.CodeHandler.assign_session_project(assigned, session_id)
         handlers.append(assigned)
+        previewed = self.make_handler({"projectId": "blocked"})
+        server.CodeHandler.preview_session_project(previewed, session_id)
+        handlers.append(previewed)
         branched = self.make_handler({"title": "blocked"})
         server.CodeHandler.branch_session(branched, session_id)
         handlers.append(branched)

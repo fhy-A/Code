@@ -5399,10 +5399,102 @@ body.theme-dark .syn-fn { color: #61afef; }
   margin-top: 22px;
 }
 
+.session-project-migration-modal {
+  z-index: 70;
+  padding: 18px;
+}
+
+.session-project-migration-card {
+  width: min(560px, calc(100vw - 36px));
+  max-height: min(760px, calc(100vh - 36px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.session-project-migration-card > header,
+.session-project-migration-card > footer {
+  flex: 0 0 auto;
+}
+
+.session-project-migration-card > header h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.session-project-migration-close {
+  flex: 0 0 auto;
+}
+
+.session-project-migration-body {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.session-project-migration-intro {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.session-project-migration-folders {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-project-migration-folder {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-3);
+}
+
+.session-project-migration-folder-name {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.session-project-migration-folder-context {
+  color: var(--muted);
+  font: 12px/1.45 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.session-project-migration-card .confirm-actions {
+  margin-top: 18px;
+}
+
+.session-project-migration-card .primary-btn {
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--panel);
+  font-weight: 750;
+}
+
 @media (max-width: 560px) {
   .project-edit-card,
-  .project-delete-confirm-card {
+  .project-delete-confirm-card,
+  .session-project-migration-card {
     padding: 20px;
+  }
+
+  .session-project-migration-modal {
+    padding: 10px;
+  }
+
+  .session-project-migration-card {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
   }
 
   .project-edit-actions {

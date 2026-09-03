@@ -557,6 +557,13 @@
       });
     }
 
+    function previewSessionProject(sessionId, payload = {}) {
+      return requestJson(`${sessionUrl(sessionId)}/project/preview`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    }
+
     function deleteSession(sessionId) {
       return requestJson(sessionUrl(sessionId), { method: "DELETE" });
     }
@@ -596,6 +603,7 @@
       getSession,
       createSession,
       updateSession,
+      previewSessionProject,
       moveSessionProject,
       deleteSession,
       listArchivedSessions,

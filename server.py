@@ -12882,6 +12882,23 @@ def _project_api_record(project):
     }
 
 
+def _project_primary_conflict_payload(project):
+    """Return a stable additive projection for one occupied primary root."""
+    normalized = _normalize_project_record(project) or {}
+    project_id = str(normalized.get("id") or "")
+    project_label = str(normalized.get("label") or project_id)
+    return {
+        "error": "Another project already uses this primary source folder",
+        "errorCode": "project_primary_conflict",
+        "retryable": False,
+        "conflictRootPath": _project_primary_path(normalized),
+        "conflictingProject": {
+            "id": project_id,
+            "label": project_label,
+        },
+    }
+
+
 def _project_update_precondition_error(project, body):
     """Return a project CAS error payload/status, or None when allowed."""
     explicit_primary = "primaryRootPath" in body
@@ -13255,6 +13272,396 @@ def _session_api_record(session, *, include_revision=True):
             record[key] = _normalized_session_timestamp(record.get(key))
     record.pop("project", None)
     return record
+
+
+_SESSION_PROJECT_PLAN_TOKEN_RE = re.compile(
+    r"v1\.[A-Za-z0-9_-]{1,262144}\.[0-9a-f]{64}\Z"
+)
+
+
+def _project_from_catalog(projects, project_id):
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        return None
+    return next(
+        (project for project in projects or [] if project.get("id") == project_id),
+        None,
+    )
+
+
+def _deepest_covering_project_root(path, root_paths):
+    """Return the deepest root that is equal to or an ancestor of path."""
+    matches = [
+        root_path
+        for root_path in root_paths or []
+        if _path_is_same_or_descendant(path, root_path)
+    ]
+    if not matches:
+        return ""
+    return max(
+        matches,
+        key=lambda root_path: (
+            _path_component_depth(root_path),
+            len(_path_identity(root_path)),
+        ),
+    )
+
+
+def _current_user_home_path():
+    return _normalize_local_path(Path.home())
+
+
+def _session_project_wide_root_kind(path):
+    """Classify only exact filesystem/share roots and the exact user home."""
+    normalized = _normalize_local_path(path)
+    if not normalized:
+        return ""
+    slash_path = normalized.replace("\\", "/")
+    if re.fullmatch(r"/+", slash_path):
+        return "filesystem_root"
+    if re.fullmatch(r"[A-Za-z]:/+", slash_path):
+        return "drive_root"
+    if slash_path.startswith("//"):
+        unc_parts = [part for part in slash_path[2:].split("/") if part]
+        if len(unc_parts) == 2:
+            return "unc_share_root"
+    if _path_identity(normalized) == _path_identity(_current_user_home_path()):
+        return "user_home"
+    return ""
+
+
+def _session_project_plan_token(state):
+    payload = json.dumps(
+        state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    digest = hashlib.sha256(
+        b"code-session-project-plan/v1\0" + payload
+    ).hexdigest()
+    return f"v1.{encoded}.{digest}"
+
+
+def _session_project_plan_token_state(token):
+    """Validate and decode a server-issued opaque plan token."""
+    if not isinstance(token, str) or not _SESSION_PROJECT_PLAN_TOKEN_RE.fullmatch(token):
+        return None
+    try:
+        _, encoded, supplied_digest = token.split(".", 2)
+        padding = "=" * (-len(encoded) % 4)
+        payload = base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        expected_digest = hashlib.sha256(
+            b"code-session-project-plan/v1\0" + payload
+        ).hexdigest()
+        if not hmac.compare_digest(supplied_digest, expected_digest):
+            return None
+        state = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _session_project_migration_plan(session_id, meta, requested_project_id, projects):
+    """Build a server-authoritative, write-free Session migration plan."""
+    current_project_id = str(
+        meta.get("projectId") or meta.get("project") or ""
+    ).strip() or None
+    current_cwd = _normalize_local_path(meta.get("cwd"))
+    current_revision = _session_revision(meta)
+    requested_project_id = str(requested_project_id or "").strip() or None
+    source_project = _project_from_catalog(projects, current_project_id)
+    target_project = _project_from_catalog(projects, requested_project_id)
+
+    if requested_project_id and target_project is None:
+        raise SessionProjectPlanError(
+            "project_not_found",
+            "project not found",
+            http_status=404,
+        )
+    if current_project_id and source_project is None:
+        raise SessionProjectPlanError(
+            "session_project_source_missing",
+            "The Session source project no longer exists.",
+        )
+
+    source_roots = _normalize_project_root_paths(source_project)
+    target_roots = _normalize_project_root_paths(target_project)
+    if current_project_id:
+        candidate_roots = source_roots
+    else:
+        candidate_roots = [current_cwd] if current_cwd else []
+
+    source_record = _project_api_record(source_project)
+    target_record = _project_api_record(target_project)
+    base_state = {
+        "sessionId": session_id,
+        "revision": current_revision,
+        "sourceProjectId": current_project_id,
+        "sourceProjectStateToken": (
+            source_record.get("stateToken") if source_record else None
+        ),
+        "targetProjectId": requested_project_id,
+        "targetProjectStateToken": (
+            target_record.get("stateToken") if target_record else None
+        ),
+        "cwd": _path_identity(current_cwd),
+        "candidateRoots": [_path_identity(path) for path in candidate_roots],
+    }
+
+    def public_plan(
+        *,
+        status,
+        covered_roots=None,
+        roots_to_add=None,
+        blocked_roots=None,
+        result_cwd=None,
+    ):
+        covered_roots = list(covered_roots or [])
+        roots_to_add = list(roots_to_add or [])
+        blocked_roots = list(blocked_roots or [])
+        result_cwd = _normalize_local_path(
+            current_cwd if result_cwd is None else result_cwd
+        )
+        target_result_state_token = None
+        if target_project is not None:
+            target_result_project = {
+                **target_project,
+                "rootPaths": [*target_roots, *roots_to_add],
+            }
+            target_result_state_token = _project_state_token(target_result_project)
+        token_state = {
+            **base_state,
+            "status": status,
+            "coveredRoots": [
+                {
+                    "path": _path_identity(item.get("path")),
+                    "coveredBy": _path_identity(item.get("coveredBy")),
+                }
+                for item in covered_roots
+            ],
+            "rootsToAdd": [_path_identity(path) for path in roots_to_add],
+            "blockedRoots": [
+                {
+                    "path": _path_identity(item.get("path")),
+                    "kind": str(item.get("kind") or ""),
+                }
+                for item in blocked_roots
+            ],
+            "resultCwd": _path_identity(result_cwd),
+            "targetProjectResultStateToken": target_result_state_token,
+        }
+        return {
+            "status": status,
+            "requiresConfirmation": status == "confirmation",
+            "sourceProject": (
+                {
+                    "id": source_record["id"],
+                    "label": source_record["label"],
+                }
+                if source_record else None
+            ),
+            "targetProject": (
+                {
+                    "id": target_record["id"],
+                    "label": target_record["label"],
+                }
+                if target_record else None
+            ),
+            "candidateRoots": list(candidate_roots),
+            "coveredRoots": covered_roots,
+            "rootsToAdd": roots_to_add,
+            "blockedRoots": blocked_roots,
+            "resultCwd": result_cwd,
+            "revision": current_revision,
+            "sourceProjectStateToken": base_state["sourceProjectStateToken"],
+            "targetProjectStateToken": base_state["targetProjectStateToken"],
+            "targetProjectResultStateToken": target_result_state_token,
+            "sourceProjectRetained": bool(source_project),
+            "targetSessionsGainAccess": status == "confirmation" and bool(roots_to_add),
+            "planToken": _session_project_plan_token(token_state),
+        }
+
+    # Re-selecting the current project and removing a project are both
+    # write-free plans. Unassignment deliberately preserves the exact cwd.
+    if requested_project_id == current_project_id:
+        return public_plan(status="noop", result_cwd=current_cwd)
+    if requested_project_id is None:
+        return public_plan(status="direct", result_cwd=current_cwd)
+    if not candidate_roots:
+        raise SessionProjectPlanError(
+            "session_project_migration_cwd_unavailable",
+            "The Session has no persisted source folder to migrate.",
+        )
+
+    covered_roots = []
+    roots_to_add = []
+    for candidate in candidate_roots:
+        covering_root = _deepest_covering_project_root(candidate, target_roots)
+        if covering_root:
+            covered_roots.append({
+                "path": candidate,
+                "coveredBy": covering_root,
+            })
+        else:
+            roots_to_add.append(candidate)
+
+    blocked_roots = []
+    for root_path in roots_to_add:
+        kind = _session_project_wide_root_kind(root_path)
+        if kind:
+            blocked_roots.append({"path": root_path, "kind": kind})
+
+    final_roots = [*target_roots, *roots_to_add]
+    result_cwd = _deepest_covering_project_root(current_cwd, final_roots)
+    if not result_cwd:
+        raise SessionProjectPlanError(
+            "session_project_migration_cwd_unavailable",
+            "No target source folder can safely contain the Session cwd.",
+        )
+    if blocked_roots:
+        return public_plan(
+            status="blocked",
+            covered_roots=covered_roots,
+            roots_to_add=roots_to_add,
+            blocked_roots=blocked_roots,
+            result_cwd=result_cwd,
+        )
+
+    invalid_roots = []
+    invalid_root_keys = set()
+    for root_path in [*target_roots, *candidate_roots]:
+        try:
+            valid = Path(root_path).is_dir()
+        except (OSError, RuntimeError, ValueError):
+            valid = False
+        root_key = _path_identity(root_path)
+        if not valid and root_key not in invalid_root_keys:
+            invalid_root_keys.add(root_key)
+            invalid_roots.append(root_path)
+    if invalid_roots:
+        raise SessionProjectPlanError(
+            "session_project_migration_directory_unavailable",
+            "A persisted migration folder is no longer an available directory.",
+            details={"invalidRoots": invalid_roots},
+        )
+    return public_plan(
+        status="confirmation" if roots_to_add else "direct",
+        covered_roots=covered_roots,
+        roots_to_add=roots_to_add,
+        result_cwd=result_cwd,
+    )
+
+
+def _session_project_retry_matches(
+    session_id,
+    meta,
+    requested_project_id,
+    projects,
+    plan_state,
+):
+    """Recognize only the exact post-state described by a prior plan."""
+    if not isinstance(plan_state, dict):
+        return False
+    plan_status = str(plan_state.get("status") or "")
+    if plan_status not in {"direct", "confirmation"}:
+        return False
+    plan_session_id = str(plan_state.get("sessionId") or "")
+    plan_revision = plan_state.get("revision")
+    plan_target_id = str(plan_state.get("targetProjectId") or "").strip() or None
+    requested_project_id = str(requested_project_id or "").strip() or None
+    if (
+        plan_session_id != session_id
+        or isinstance(plan_revision, bool)
+        or not isinstance(plan_revision, int)
+        or plan_revision < 0
+        or plan_target_id != requested_project_id
+        or _session_revision(meta) != plan_revision + 1
+    ):
+        return False
+    current_project_id = str(
+        meta.get("projectId") or meta.get("project") or ""
+    ).strip() or None
+    if current_project_id != requested_project_id:
+        return False
+    if _path_identity(meta.get("cwd")) != str(plan_state.get("resultCwd") or ""):
+        return False
+
+    source_project_id = str(plan_state.get("sourceProjectId") or "").strip() or None
+    source_state_token = plan_state.get("sourceProjectStateToken")
+    if source_project_id:
+        source_project = _project_from_catalog(projects, source_project_id)
+        if (
+            source_project is None
+            or _project_state_token(source_project) != source_state_token
+        ):
+            return False
+    elif source_state_token is not None:
+        return False
+
+    target_result_token = plan_state.get("targetProjectResultStateToken")
+    if requested_project_id:
+        target_project = _project_from_catalog(projects, requested_project_id)
+        if (
+            target_project is None
+            or _project_state_token(target_project) != target_result_token
+        ):
+            return False
+    elif target_result_token is not None:
+        return False
+    return True
+
+
+def _parse_session_project_request(body, *, allow_plan_token=False):
+    if not isinstance(body, dict):
+        raise SessionProjectPlanError(
+            "session_project_request_invalid",
+            "Session project request must be an object.",
+            http_status=400,
+        )
+    if "rootsToAdd" in body:
+        raise SessionProjectPlanError(
+            "session_project_roots_client_forbidden",
+            "Migration folders are derived from persisted server state.",
+            http_status=400,
+        )
+    requested_project_id = str(body.get("projectId") or "").strip() or None
+    expected_present = "expectedRevision" in body
+    expected_revision = body.get("expectedRevision")
+    if expected_present and (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+    ):
+        raise SessionProjectPlanError(
+            "session_revision_invalid",
+            "expectedRevision must be a non-negative integer",
+            http_status=400,
+        )
+    plan_token = body.get("planToken") if allow_plan_token else None
+    plan_state = (
+        _session_project_plan_token_state(plan_token)
+        if allow_plan_token and "planToken" in body
+        else None
+    )
+    if allow_plan_token and "planToken" in body and plan_state is None:
+        raise SessionProjectPlanError(
+            "session_project_plan_token_invalid",
+            "planToken must be a valid migration plan token.",
+            http_status=400,
+        )
+    return {
+        "projectId": requested_project_id,
+        "expectedPresent": expected_present,
+        "expectedRevision": expected_revision,
+        "planToken": plan_token,
+        "planState": plan_state,
+    }
 
 
 _SESSION_INDEX_LAST_MESSAGE_UNSET = object()
@@ -16911,6 +17318,33 @@ class SessionProjectMutationError(RuntimeError):
             "error": str(self),
             "errorCode": self.error_code,
             "retryable": self.retryable,
+        }
+
+
+class SessionProjectPlanError(RuntimeError):
+    """Stable validation/conflict projection for migration planning."""
+
+    def __init__(
+        self,
+        error_code,
+        message,
+        *,
+        http_status=409,
+        retryable=False,
+        details=None,
+    ):
+        super().__init__(message)
+        self.error_code = str(error_code or "session_project_plan_invalid")
+        self.http_status = int(http_status)
+        self.retryable = bool(retryable)
+        self.details = dict(details or {})
+
+    def public_payload(self):
+        return {
+            "error": str(self),
+            "errorCode": self.error_code,
+            "retryable": self.retryable,
+            **self.details,
         }
 
 
@@ -23342,6 +23776,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             if self.path == "/api/tools/read_skill_resource":
                 self.tool_read_skill_resource()
                 return
+            if self.path.startswith("/api/sessions/") and self.path.endswith("/project/preview"):
+                self.preview_session_project(self.path.rsplit("/", 3)[-3])
+                return
             if self.path.startswith("/api/sessions/") and self.path.endswith("/messages"):
                 self.append_messages(self.path.rsplit("/", 2)[-2])
                 return
@@ -23707,15 +24144,15 @@ class CodeHandler(BaseHTTPRequestHandler):
         with _json_write_lock:
             projects = _read_projects()
             primary_key = _path_identity(root_paths[0])
-            if any(
-                _project_primary_key(project) == primary_key
-                for project in projects
-            ):
-                self.send_json({
-                    "error": "Another project already uses this primary source folder",
-                    "errorCode": "project_primary_conflict",
-                    "retryable": False,
-                }, 409)
+            conflict = next(
+                (
+                    project for project in projects
+                    if _project_primary_key(project) == primary_key
+                ),
+                None,
+            )
+            if conflict is not None:
+                self.send_json(_project_primary_conflict_payload(conflict), 409)
                 return
             proj = {
                 "id": uuid.uuid4().hex[:16],
@@ -23856,11 +24293,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             if other.get("id") == project_id:
                 continue
             if _path_identity(new_primary) == _project_primary_key(other):
-                self.send_json({
-                    "error": "Another project already uses this primary source folder",
-                    "errorCode": "project_primary_conflict",
-                    "retryable": False,
-                }, 409)
+                self.send_json(_project_primary_conflict_payload(other), 409)
                 return None
 
         removed_root_keys = old_root_keys - new_root_keys
@@ -24153,6 +24586,117 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         return {"ok": True}
 
+    def preview_session_project(self, session_id):
+        session_id = safe_session_id(session_id)
+        with _session_lifecycle_lock(session_id):
+            try:
+                _assert_session_active_location(session_id)
+            except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+                CodeHandler.consume_request_body(self)
+                self.send_json(exc.public_payload(), exc.http_status)
+                return
+            return CodeHandler._preview_session_project_unlocked(self, session_id)
+
+    def _preview_session_project_unlocked(self, session_id):
+        """POST /api/sessions/:id/project/preview — compute without writes."""
+        try:
+            request_state = _parse_session_project_request(self.read_body_json())
+        except SessionProjectPlanError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        path = session_path(session_id)
+        if not path.exists():
+            self.send_json({
+                "error": "session not found",
+                "errorCode": "session_not_found",
+                "retryable": False,
+            }, 404)
+            return
+        try:
+            _ensure_agent_run_nonterminal_index_ready(wait=True)
+        except AgentRunIndexError:
+            self.send_json({
+                "error": "Session project migration eligibility is unavailable.",
+                "errorCode": "session_project_migration_unavailable",
+                "retryable": True,
+            }, 503)
+            return
+
+        with _agent_run_lock:
+            with _json_write_lock:
+                try:
+                    meta = _read_session_meta_strict(path)
+                    projects = _read_projects()
+                except Exception:
+                    self.send_json(SessionProjectMutationError().public_payload(), 503)
+                    return
+                if meta is None:
+                    self.send_json({
+                        "error": "session not found",
+                        "errorCode": "session_not_found",
+                        "retryable": False,
+                    }, 404)
+                    return
+                if str(meta.get("id") or "") != session_id:
+                    self.send_json(SessionProjectMutationError().public_payload(), 503)
+                    return
+                if (
+                    _session_archive_stop_fence_active(session_id)
+                    or _session_run_state_has_nonterminal_work(meta)
+                ):
+                    self.send_json({
+                        "error": "Session has nonterminal work and cannot be moved.",
+                        "errorCode": "session_project_migration_busy",
+                        "retryable": True,
+                    }, 409)
+                    return
+                try:
+                    has_nonterminal_run = _session_has_nonterminal_agent_run(session_id)
+                except SessionLifecycleConflictError:
+                    self.send_json({
+                        "error": "Session project migration eligibility is unavailable.",
+                        "errorCode": "session_project_migration_unavailable",
+                        "retryable": True,
+                    }, 503)
+                    return
+                if has_nonterminal_run:
+                    self.send_json({
+                        "error": "Session has nonterminal work and cannot be moved.",
+                        "errorCode": "session_project_migration_busy",
+                        "retryable": True,
+                    }, 409)
+                    return
+
+                current_revision = _session_revision(meta)
+                if (
+                    request_state["expectedPresent"]
+                    and request_state["expectedRevision"] != current_revision
+                ):
+                    self.send_json({
+                        "error": "Session revision conflict",
+                        "errorCode": "session_revision_conflict",
+                        "retryable": False,
+                        "expectedRevision": request_state["expectedRevision"],
+                        "currentRevision": current_revision,
+                        "revision": current_revision,
+                        "projectId": str(
+                            meta.get("projectId") or meta.get("project") or ""
+                        ).strip() or None,
+                        "cwd": _normalize_local_path(meta.get("cwd")),
+                    }, 409)
+                    return
+                try:
+                    plan = _session_project_migration_plan(
+                        session_id,
+                        meta,
+                        request_state["projectId"],
+                        projects,
+                    )
+                except SessionProjectPlanError as exc:
+                    self.send_json(exc.public_payload(), exc.http_status)
+                    return
+                self.send_json({"ok": True, "plan": plan})
+
     def assign_session_project(self, session_id):
         session_id = safe_session_id(session_id)
         with _session_lifecycle_lock(session_id):
@@ -24165,9 +24709,16 @@ class CodeHandler(BaseHTTPRequestHandler):
             return CodeHandler._assign_session_project_unlocked(self, session_id)
 
     def _assign_session_project_unlocked(self, session_id):
-        """PUT /api/sessions/:id/project — explicitly migrate an idle Session."""
-        body = self.read_body_json()
-        requested_project_id = str(body.get("projectId") or "").strip() or None
+        """PUT /api/sessions/:id/project — atomically commit a current plan."""
+        try:
+            request_state = _parse_session_project_request(
+                self.read_body_json(),
+                allow_plan_token=True,
+            )
+        except SessionProjectPlanError as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+            return
+        requested_project_id = request_state["projectId"]
         path = session_path(session_id)
         if not path.exists():
             self.send_json({
@@ -24175,19 +24726,6 @@ class CodeHandler(BaseHTTPRequestHandler):
                 "errorCode": "session_not_found",
                 "retryable": False,
             }, 404)
-            return
-        expected_present = "expectedRevision" in body
-        expected_revision = body.get("expectedRevision")
-        if expected_present and (
-            isinstance(expected_revision, bool)
-            or not isinstance(expected_revision, int)
-            or expected_revision < 0
-        ):
-            self.send_json({
-                "error": "expectedRevision must be a non-negative integer",
-                "errorCode": "session_revision_invalid",
-                "retryable": False,
-            }, 400)
             return
 
         # The index rebuild may need the AgentRun lock, so complete this
@@ -24207,6 +24745,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             with _json_write_lock:
                 try:
                     meta = _read_session_meta_strict(path)
+                    projects = _read_projects()
                 except Exception:
                     self.send_json(SessionProjectMutationError().public_payload(), 503)
                     return
@@ -24221,37 +24760,27 @@ class CodeHandler(BaseHTTPRequestHandler):
                     self.send_json(SessionProjectMutationError().public_payload(), 503)
                     return
 
-                if requested_project_id:
-                    project = _find_project(requested_project_id)
-                    if not project:
-                        self.send_json({
-                            "error": "project not found",
-                            "errorCode": "project_not_found",
-                            "retryable": False,
-                        }, 404)
-                        return
-                    project_id = requested_project_id
-                    cwd = _project_primary_path(project)
-                else:
-                    project_id = None
-                    cwd = _normalize_local_path(meta.get("cwd"))
-
-                current_project_id = str(meta.get("projectId") or "").strip() or None
+                current_project_id = str(
+                    meta.get("projectId") or meta.get("project") or ""
+                ).strip() or None
                 current_cwd = _normalize_local_path(meta.get("cwd"))
                 current_revision = _session_revision(meta)
-                location_matches = (
-                    current_project_id == project_id
-                    and _path_identity(current_cwd) == _path_identity(cwd)
-                )
+                target_project = _project_from_catalog(projects, requested_project_id)
 
-                def migration_payload(record):
-                    return {
+                def migration_payload(record, *, project=None, plan=None):
+                    session_record = _session_api_record(record)
+                    payload = {
                         "ok": True,
-                        "projectId": record.get("projectId"),
-                        "cwd": record.get("cwd", ""),
+                        "projectId": session_record.get("projectId"),
+                        "cwd": session_record.get("cwd", ""),
                         "revision": _session_revision(record),
-                        "session": _session_api_record(record),
+                        "session": session_record,
                     }
+                    if project is not None:
+                        payload["project"] = _project_api_record(project)
+                    if plan is not None:
+                        payload["migrationPlan"] = plan
+                    return payload
 
                 if (
                     _session_archive_stop_fence_active(session_id)
@@ -24280,15 +24809,41 @@ class CodeHandler(BaseHTTPRequestHandler):
                     }, 409)
                     return
 
-                if expected_present and expected_revision != current_revision:
-                    if location_matches:
-                        self.send_json(migration_payload(meta))
+                # A stale duplicate after a successful commit is safe to
+                # recognize only when the opaque preview token's exact
+                # Session, source-project and target-project post-state still
+                # matches. No durable receipt or second revision bump is used.
+                location_matches = current_project_id == requested_project_id
+                supplied_plan_token = request_state["planToken"]
+                exact_retry = supplied_plan_token and _session_project_retry_matches(
+                    session_id,
+                    meta,
+                    requested_project_id,
+                    projects,
+                    request_state["planState"],
+                )
+                if exact_retry:
+                    self.send_json(migration_payload(meta, project=target_project))
+                    return
+                if requested_project_id and target_project is None:
+                    self.send_json({
+                        "error": "project not found",
+                        "errorCode": "project_not_found",
+                        "retryable": False,
+                    }, 404)
+                    return
+                if (
+                    request_state["expectedPresent"]
+                    and request_state["expectedRevision"] != current_revision
+                ):
+                    if not supplied_plan_token and location_matches:
+                        self.send_json(migration_payload(meta, project=target_project))
                         return
                     self.send_json({
                         "error": "Session revision conflict",
                         "errorCode": "session_revision_conflict",
                         "retryable": False,
-                        "expectedRevision": expected_revision,
+                        "expectedRevision": request_state["expectedRevision"],
                         "currentRevision": current_revision,
                         "revision": current_revision,
                         "projectId": current_project_id,
@@ -24296,18 +24851,64 @@ class CodeHandler(BaseHTTPRequestHandler):
                     }, 409)
                     return
 
-                if location_matches:
-                    self.send_json(migration_payload(meta))
+                try:
+                    plan = _session_project_migration_plan(
+                        session_id,
+                        meta,
+                        requested_project_id,
+                        projects,
+                    )
+                except SessionProjectPlanError as exc:
+                    self.send_json(exc.public_payload(), exc.http_status)
+                    return
+                if plan["status"] == "blocked":
+                    self.send_json({
+                        "error": "This source folder must be added to the target project manually.",
+                        "errorCode": "session_project_migration_blocked",
+                        "retryable": False,
+                        "plan": plan,
+                    }, 409)
+                    return
+                if supplied_plan_token and supplied_plan_token != plan["planToken"]:
+                    self.send_json({
+                        "error": "The Session or project state changed after preview.",
+                        "errorCode": "session_project_plan_conflict",
+                        "retryable": False,
+                        "plan": plan,
+                    }, 409)
+                    return
+                if plan["requiresConfirmation"] and not supplied_plan_token:
+                    self.send_json({
+                        "error": "This migration must be previewed and confirmed.",
+                        "errorCode": "session_project_confirmation_required",
+                        "retryable": False,
+                        "plan": plan,
+                    }, 409)
+                    return
+                if plan["status"] == "noop":
+                    self.send_json(migration_payload(meta, project=target_project, plan=plan))
                     return
 
-                index_path = _session_index_path()
-                session_snapshot = None
-                index_snapshot = None
+                roots_to_add = list(plan.get("rootsToAdd") or [])
+                mutation_paths = [path, _session_index_path()]
+                if roots_to_add:
+                    mutation_paths.insert(0, PROJECTS_PATH)
                 try:
-                    session_snapshot = _path_snapshot(path)
-                    index_snapshot = _path_snapshot(index_path)
-                    meta["projectId"] = project_id
-                    meta["cwd"] = cwd
+                    snapshots = _project_session_mutation_snapshots(mutation_paths)
+                except Exception:
+                    self.send_json(SessionProjectMutationError().public_payload(), 503)
+                    return
+
+                if roots_to_add:
+                    target_project["rootPaths"] = [
+                        *_normalize_project_root_paths(target_project),
+                        *roots_to_add,
+                    ]
+                try:
+                    if roots_to_add:
+                        _write_projects(projects)
+                    meta["projectId"] = requested_project_id
+                    meta["cwd"] = plan["resultCwd"]
                     meta["source"] = _normalize_session_source(
                         meta.get("source"),
                         meta.get("group"),
@@ -24317,19 +24918,18 @@ class CodeHandler(BaseHTTPRequestHandler):
                     write_json(path, meta)
                     _write_session_index_from_meta(meta)
                 except Exception:
-                    recovery_failed = False
-                    try:
-                        _restore_path_snapshot(path, session_snapshot)
-                        _restore_path_snapshot(index_path, index_snapshot)
-                    except Exception:
-                        recovery_failed = True
+                    recovery_failed = _restore_project_session_mutation_snapshots(
+                        snapshots
+                    )
                     error = SessionProjectMutationError(
                         recovery_failed=recovery_failed,
                     )
                     self.send_json(error.public_payload(), error.http_status)
                     return
 
-                self.send_json(migration_payload(meta))
+                self.send_json(
+                    migration_payload(meta, project=target_project, plan=plan)
+                )
 
     def get_sessions(self):
         try:
