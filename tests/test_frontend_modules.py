@@ -3458,6 +3458,10 @@ const createAgentRunWithImageRouteRebind = async (options) => ({{
 }});
 const resumePendingSessionSteers = async () => {{}};
 const recoverActiveAgentRuntimeProjection = async () => {{}};
+const recoverSupersededActiveServerProjection = () => null;
+const ACTIVE_SESSION_PROJECTION_RECOVERY_LIMIT = 3;
+const makeActiveSessionProjectionAuthorityError = () => new Error("projection recovery exhausted");
+const isActiveSessionProjectionConflict = () => false;
 const observeAgentProjectionSnapshot = () => {{}};
 const renderSessionMessages = () => {{}};
 const requestServerAgentInput = async () => {{}};
@@ -4023,7 +4027,7 @@ process.stdout.write(JSON.stringify({
             "if (request.agentRunId) return finishServerAgentUserInputRequest(request);",
             'role: "tool-result"',
             "resumedFromUserInput: true",
-            "resumePersistedSessionRun(summary).catch",
+            "resumePersistedSessionRun(summary, resumeOptions).catch",
             "function renderUserInputPanel(",
             "async function persistUserInputProgress(",
             "async function resolveUserInputQuestion(",
@@ -24710,6 +24714,1000 @@ eval(saveSource);
         self.assertEqual(data["writes"][1]["hasMessages"], True)
         self.assertEqual(data["writes"][1]["errors"], 0)
         self.assertEqual(data["writes"][1]["finals"], 1)
+
+    def test_active_agent_session_conflict_rebases_before_replay_and_commits_cursor_after_save(self):
+        rebase_start = APP_SOURCE.index("function rebaseActiveServerAgentProjection(")
+        rebase_end = APP_SOURCE.index("function recoverSupersededActiveServerProjection(", rebase_start)
+        rebase_source = APP_SOURCE[rebase_start:rebase_end]
+        summary_start = APP_SOURCE.index("function appendUserInputSummaryMessage(")
+        summary_end = APP_SOURCE.index("function appendUserInputSummary(", summary_start)
+        summary_source = APP_SOURCE[summary_start:summary_end]
+        event_start = APP_SOURCE.index("async function projectAgentEvent(")
+        event_end = APP_SOURCE.index("async function requestServerAgentInput(", event_start)
+        event_source = APP_SOURCE[event_start:event_end]
+        tool_completed_start = APP_SOURCE.index("function projectAgentToolCompleted(")
+        tool_completed_end = APP_SOURCE.index("async function projectAgentEvent(", tool_completed_start)
+        tool_completed_source = APP_SOURCE[tool_completed_start:tool_completed_end]
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(")
+        loop_end = APP_SOURCE.index("async function executeRunContext(", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+
+        persist_index = event_source.index("await persistRunCheckpoint(")
+        commit_index = event_source.index("ctx.agentEventCursor = nextAgentEventCursor")
+        self.assertLess(persist_index, commit_index)
+        self.assertIn("throw makeActiveSessionProjectionConflictError(ctx, authoritative);", event_source)
+        self.assertIn("recoverSupersededActiveServerProjection(ctx)", loop_source)
+        self.assertIn("if (isActiveSessionProjectionConflict(error)) continue;", loop_source)
+        self.assertIn('if (String(data.name || "") === "request_user_input")', tool_completed_source)
+        self.assertIn("appendUserInputSummaryMessage(ctx.messages, result);", tool_completed_source)
+        self.assertNotIn(
+            "ctx.agentEventCursor = Math.max(Number(ctx.agentEventCursor || 0), Number(event?.seq || 0));",
+            event_source,
+        )
+
+        script = f"""
+const rebaseSource = {json.dumps(rebase_source)};
+const summarySource = {json.dumps(summary_source)};
+const eventSource = {json.dumps(event_source)};
+const clone = (value) => structuredClone(value);
+const sessionId = "questionnaire-cas";
+const authority = {{
+  id: sessionId,
+  revision: 9,
+  messages: [
+    {{role: "user", content: "original request"}},
+    {{role: "assistant", content: "question", meta: {{agentRunId: "agent-1", agentEventSeq: 4}}}},
+    {{role: "user", content: "competing writer content", meta: {{kind: "queued-follow-up"}}}},
+  ],
+  runState: {{
+    status: "waiting-user-input",
+    executionOwner: "server-agent",
+    agentRunId: "agent-1",
+    agentEventCursor: 4,
+    runtimeRunId: "",
+    clientRequestId: "client-1",
+    modelRound: 1,
+  }},
+  stats: {{input: 7, output: 3, cache: 0, cost: 0}},
+}};
+let currentMessages = [];
+let currentStats = {{}};
+let currentRunState = {{}};
+function applyAuthoritativeSessionSnapshot(_sessionId, session) {{
+  currentMessages = clone(session.messages || []);
+  currentStats = clone(session.stats || {{}});
+  currentRunState = clone(session.runState || {{}});
+  return true;
+}}
+function prepareMessagesForRunRecovery(messages) {{ return clone(messages || []); }}
+function setSessionMessages(_sessionId, messages) {{ currentMessages = messages; }}
+function setSessionStats(_sessionId, stats) {{ currentStats = stats; }}
+function getSessionStats() {{ return currentStats; }}
+function setSessionRunState(_sessionId, runState) {{ currentRunState = clone(runState || {{}}); }}
+function renderSessionMessages() {{}}
+function hasRecoveredModelResponse() {{ return true; }}
+function makeActiveSessionProjectionAuthorityError() {{
+  const error = new Error("authority changed");
+  error.code = "active_session_projection_authority_changed";
+  return error;
+}}
+eval(rebaseSource);
+eval(summarySource);
+
+const staleMessages = [
+  {{role: "user", content: "original request"}},
+  {{role: "user", content: "local answer", meta: {{kind: "user-input-summary", requestId: "request-1"}}}},
+];
+const ctx = {{
+  sessionId,
+  messages: staleMessages,
+  stats: {{input: 99}},
+  agentRunId: "agent-1",
+  agentEventCursor: 7,
+  runtimeRunId: "stale-runtime",
+  clientRequestId: "client-1",
+  run: {{agentRunId: "agent-1", agentEventCursor: 7, runtimeRunId: "stale-runtime", modelRound: 4}},
+}};
+const recovery = rebaseActiveServerAgentProjection(ctx, authority);
+const rebasedMessages = ctx.messages;
+
+const result = {{
+  requestId: "request-1",
+  title: "Decision",
+  summary: "Target: safe",
+  answers: [{{id: "target", prompt: "Target", answer: "safe"}}],
+}};
+const firstSummary = appendUserInputSummaryMessage(ctx.messages, result);
+const secondSummary = appendUserInputSummaryMessage(ctx.messages, result);
+const consecutiveMessages = [];
+appendUserInputSummaryMessage(consecutiveMessages, result);
+appendUserInputSummaryMessage(consecutiveMessages, {{...result, requestId: "request-2", summary: "Target: fast"}});
+appendUserInputSummaryMessage(consecutiveMessages, result);
+
+const retired = new WeakSet();
+let persistenceMode = "conflict";
+const persistedCursors = [];
+let completedObservations = 0;
+function supersededSessionProjectionSnapshot(_sessionId, messages) {{
+  return retired.has(messages) ? authority : null;
+}}
+function makeActiveSessionProjectionConflictError(_ctx, authoritative) {{
+  const error = new Error("projection conflict");
+  error.code = "active_session_projection_conflict";
+  error.authoritativeSession = authoritative;
+  return error;
+}}
+function captureAgentProjectionUsageCheckpoint() {{ return null; }}
+function restoreAgentProjectionUsageCheckpoint() {{}}
+function beginAgentProjectionEvent() {{ return true; }}
+function completeAgentProjectionEvent() {{ completedObservations += 1; }}
+function isInternalGoalToolName() {{ return false; }}
+function internalCompactionRuntimeIds() {{ return new Set(); }}
+function snapshotActiveCompactionRuntimeId() {{ return ""; }}
+async function projectAgentModelStarted() {{}}
+function projectAgentModelCompleted() {{}}
+function projectAgentModelRecovery() {{}}
+function projectAgentToolStarted() {{}}
+function projectAgentToolCompleted(target, event) {{
+  const durableResult = event.data.result;
+  appendUserInputSummaryMessage(target.messages, durableResult);
+  target.messages.push({{
+    role: "tool-result",
+    content: durableResult.summary,
+    meta: {{
+      action: "request_user_input",
+      agentRunId: target.agentRunId,
+      agentEventSeq: event.seq,
+      toolCallId: event.data.toolCallId,
+    }},
+  }});
+}}
+function projectAgentContextCompaction() {{}}
+async function persistRunCheckpoint(target, _status, _phase, extra) {{
+  persistedCursors.push(extra.agentEventCursor);
+  if (persistenceMode === "conflict") retired.add(target.messages);
+}}
+const goalFeature = null;
+eval(eventSource);
+
+(async () => {{
+  const event = {{
+    seq: 5,
+    type: "tool_completed",
+    data: {{toolCallId: "question-call", name: "request_user_input", result}},
+  }};
+  let conflictCode = "";
+  const firstAttemptMessages = ctx.messages;
+  try {{
+    await projectAgentEvent(ctx, event);
+  }} catch (error) {{
+    conflictCode = String(error.code || "");
+  }}
+  const cursorAfterConflict = ctx.agentEventCursor;
+  rebaseActiveServerAgentProjection(ctx, authority);
+  persistenceMode = "success";
+  await projectAgentEvent(ctx, event);
+  process.stdout.write(JSON.stringify({{
+    recovery,
+    rebase: {{
+      freshArray: rebasedMessages !== staleMessages,
+      competitorCount: rebasedMessages.filter((message) => message.content === "competing writer content").length,
+      staleSummaryCount: rebasedMessages.filter((message) => message.content === "local answer").length,
+      cursor: recovery.cursor,
+      runCursor: ctx.run.agentEventCursor,
+      runtimeRunId: recovery.runtimeRunId,
+    }},
+    summary: {{
+      firstSummary,
+      secondSummary,
+      count: firstAttemptMessages.filter((message) => message.meta?.kind === "user-input-summary").length,
+      consecutiveIds: consecutiveMessages.map((message) => message.meta.requestId),
+    }},
+    replay: {{
+      conflictCode,
+      cursorAfterConflict,
+      committedCursor: ctx.agentEventCursor,
+      persistedCursors,
+      completedObservations,
+      summaries: ctx.messages.filter((message) => message.meta?.kind === "user-input-summary").length,
+      toolResults: ctx.messages.filter((message) => message.role === "tool-result").length,
+      competitorCount: ctx.messages.filter((message) => message.content === "competing writer content").length,
+    }},
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["rebase"], {
+            "freshArray": True,
+            "competitorCount": 1,
+            "staleSummaryCount": 0,
+            "cursor": 4,
+            "runCursor": 5,
+            "runtimeRunId": "",
+        })
+        self.assertEqual(data["summary"], {
+            "firstSummary": True,
+            "secondSummary": False,
+            "count": 1,
+            "consecutiveIds": ["request-1", "request-2"],
+        })
+        self.assertEqual(data["replay"], {
+            "conflictCode": "active_session_projection_conflict",
+            "cursorAfterConflict": 4,
+            "committedCursor": 5,
+            "persistedCursors": [5, 5],
+            "completedObservations": 1,
+            "summaries": 1,
+            "toolResults": 1,
+            "competitorCount": 1,
+        })
+
+    def test_terminal_checkpoint_clear_requires_confirmed_session_persistence(self):
+        clear_start = APP_SOURCE.index("async function clearRunCheckpoint(")
+        clear_end = APP_SOURCE.index("function resetRenderCache(", clear_start)
+        clear_source = APP_SOURCE[clear_start:clear_end]
+        self.assertIn("const previousRunState = getSessionRunState(ctx.sessionId);", clear_source)
+        self.assertIn("if (supersededSessionProjectionSnapshot(ctx.sessionId, msgs)) return false;", clear_source)
+        self.assertNotIn(").catch(() => null);", clear_source)
+
+        script = f"""
+const clearSource = {json.dumps(clear_source)};
+const sessionId = "terminal-clear";
+const state = {{sessionId, sessions: [{{id: sessionId, title: "Terminal"}}]}};
+const els = {{sessionTitle: {{value: "Terminal"}}}};
+const messages = [{{role: "user", content: "task"}}];
+const stats = {{input: 1}};
+const retired = new WeakSet();
+let runState = {{
+  status: "running",
+  executionOwner: "server-agent",
+  agentRunId: "agent-1",
+  agentEventCursor: 8,
+}};
+let mode = "success";
+function publishTerminalRunOwnership() {{ return true; }}
+function finalizeRunTiming() {{}}
+function getBackgroundRunCheckpoints() {{ return []; }}
+function getQueuedMessageCheckpoints() {{ return []; }}
+function findQueuedUserMessage() {{ return null; }}
+function getSessionRunState() {{ return runState; }}
+function setSessionRunState(_sessionId, value) {{ runState = {{...(value || {{}})}}; }}
+function getSessionMessages() {{ return messages; }}
+function getSessionStats() {{ return stats; }}
+function supersededSessionProjectionSnapshot(_sessionId, value) {{
+  return retired.has(value) ? {{id: sessionId, runState}} : null;
+}}
+async function saveSessionState(_sessionId, value) {{
+  if (mode === "network") throw new Error("offline");
+  if (mode === "conflict") {{
+    retired.add(value);
+    setSessionRunState(sessionId, {{
+      status: "running",
+      executionOwner: "server-agent",
+      agentRunId: "agent-1",
+      agentEventCursor: 8,
+    }});
+  }}
+  return {{id: sessionId}};
+}}
+eval(clearSource);
+
+(async () => {{
+  const ctx = {{sessionId, isSubAgent: false, queueItemId: ""}};
+  mode = "network";
+  let networkError = "";
+  try {{ await clearRunCheckpoint(ctx); }} catch (error) {{ networkError = error.message; }}
+  const afterNetwork = {{...runState}};
+
+  mode = "conflict";
+  const conflictResult = await clearRunCheckpoint(ctx);
+  const afterConflict = {{...runState}};
+
+  retired.delete(messages);
+  mode = "success";
+  const successResult = await clearRunCheckpoint(ctx);
+  const afterSuccess = {{...runState}};
+  process.stdout.write(JSON.stringify({{
+    networkError,
+    afterNetwork,
+    conflictResult,
+    afterConflict,
+    successResult,
+    afterSuccess,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        expected_active = {
+            "status": "running",
+            "executionOwner": "server-agent",
+            "agentRunId": "agent-1",
+            "agentEventCursor": 8,
+        }
+        self.assertEqual(data["networkError"], "offline")
+        self.assertEqual(data["afterNetwork"], expected_active)
+        self.assertFalse(data["conflictResult"])
+        self.assertEqual(data["afterConflict"], expected_active)
+        self.assertTrue(data["successResult"])
+        self.assertEqual(data["afterSuccess"], {})
+
+    def test_refreshed_questionnaire_cas_resumes_same_agent_from_authority(self):
+        finish_start = APP_SOURCE.index("async function finishServerAgentUserInputRequest(")
+        finish_end = APP_SOURCE.index("async function finishUserInputRequest(", finish_start)
+        finish_source = APP_SOURCE[finish_start:finish_end]
+        eligibility_start = APP_SOURCE.index("const PERSISTED_RUN_RECOVERY_STATUSES")
+        eligibility_end = APP_SOURCE.index("async function resumePersistedSessionRun(", eligibility_start)
+        eligibility_source = APP_SOURCE[eligibility_start:eligibility_end]
+        recovery_end = APP_SOURCE.index("function normalizeUserInputRequest(", eligibility_end)
+        recovery_source = APP_SOURCE[eligibility_end:recovery_end]
+        self.assertIn("canResumePersistedRunState(latestRunState, options)", recovery_source)
+        self.assertIn("userInputRequest: null, resumedFromUserInput: true", recovery_source)
+        eligibility_script = f"""
+{eligibility_source}
+const submittedUserInput = {{agentRunId: "agent-1", requestId: "request-1"}};
+const pending = {{
+  status: "waiting-user-input",
+  agentRunId: "agent-1",
+  userInputRequest: {{id: "request-1"}},
+}};
+process.stdout.write(JSON.stringify({{
+  matching: canResumePersistedRunState(pending, {{submittedUserInput}}),
+  withoutSubmission: canResumePersistedRunState(pending),
+  mismatchedRequest: canResumePersistedRunState(
+    {{...pending, userInputRequest: {{id: "request-2"}}}},
+    {{submittedUserInput}},
+  ),
+  mismatchedRun: canResumePersistedRunState(
+    {{...pending, agentRunId: "agent-2"}},
+    {{submittedUserInput}},
+  ),
+  normalRecovery: canResumePersistedRunState(
+    {{status: "resuming", agentRunId: "agent-1"}},
+    {{submittedUserInput}},
+  ),
+}}));
+"""
+        eligibility = subprocess.run(
+            ["node", "-e", eligibility_script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(eligibility.stdout), {
+            "matching": True,
+            "withoutSubmission": False,
+            "mismatchedRequest": False,
+            "mismatchedRun": False,
+            "normalRecovery": True,
+        })
+        script = f"""
+const finishSource = {json.dumps(finish_source)};
+const clone = (value) => structuredClone(value);
+const sessionId = "refreshed-questionnaire-cas";
+const authority = {{
+  id: sessionId,
+  revision: 7,
+  messages: [{{role: "user", content: "task"}}, {{role: "assistant", content: "question"}}],
+  runState: {{
+    status: "waiting-user-input",
+    phase: "tools",
+    executionOwner: "server-agent",
+    agentRunId: "agent-1",
+    agentEventCursor: 4,
+    userInputRequest: {{id: "request-1", status: "pending"}},
+  }},
+}};
+let messages = clone(authority.messages);
+let runState = clone(authority.runState);
+const retired = new WeakSet();
+const resumeCalls = [];
+let submitCalls = 0;
+const state = {{
+  sessionId,
+  sessions: [{{id: sessionId, title: "Question", runState}}],
+  userInputRequests: {{}},
+  _userInputResolvers: new Map(),
+}};
+const agentRuntime = {{
+  submitAgentInput: async (_agentRunId, payload) => {{
+    submitCalls += 1;
+    return {{result: payload}};
+  }},
+}};
+function buildUserInputResult() {{
+  return {{
+    ok: true,
+    action: "request_user_input",
+    requestId: "request-1",
+    title: "Question",
+    summary: "Target: safe",
+    answers: [{{id: "target", prompt: "Target", answer: "safe"}}],
+  }};
+}}
+function classifyAgentUserInputState() {{ return {{action: "retry"}}; }}
+async function invalidateServerUserInputRequest() {{}}
+function appendUserInputSummary(_request, result) {{
+  messages.push({{role: "user", content: result.summary, meta: {{kind: "user-input-summary", requestId: result.requestId}}}});
+}}
+function getSessionRunState() {{ return runState; }}
+function setSessionRunState(_sessionId, value) {{
+  runState = {{...(value || {{}})}};
+  state.sessions[0].runState = runState;
+}}
+function getSessionMessages() {{ return messages; }}
+function getSessionStats() {{ return {{input: 1}}; }}
+function refreshSessionStatusSlot() {{}}
+function clearPermissionNotify() {{}}
+function renderMessages() {{}}
+function supersededSessionProjectionSnapshot(_sessionId, value) {{
+  return retired.has(value) ? authority : null;
+}}
+async function saveSessionState(_sessionId, value) {{
+  retired.add(value);
+  messages = clone(authority.messages);
+  setSessionRunState(sessionId, authority.runState);
+  return authority;
+}}
+async function resumePersistedSessionRun(summary, options) {{
+  resumeCalls.push({{runState: clone(summary.runState || {{}}), options: clone(options || {{}})}});
+}}
+eval(finishSource);
+
+(async () => {{
+  const request = {{
+    id: "request-1",
+    sessionId,
+    agentRunId: "agent-1",
+    toolCallId: "question-call",
+    title: "Question",
+    status: "pending",
+    questions: [{{id: "target", status: "resolved"}}],
+  }};
+  state.userInputRequests[sessionId] = request;
+  const completed = await finishServerAgentUserInputRequest(request);
+  process.stdout.write(JSON.stringify({{
+    completed,
+    submitCalls,
+    resumeCalls,
+    roles: messages.map((message) => message.role),
+    summaries: messages.filter((message) => message.meta?.kind === "user-input-summary").length,
+    runState,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertTrue(data["completed"])
+        self.assertEqual(data["submitCalls"], 1)
+        self.assertEqual(data["roles"], ["user", "assistant"])
+        self.assertEqual(data["summaries"], 0)
+        self.assertEqual(data["runState"]["status"], "waiting-user-input")
+        self.assertEqual(data["runState"]["agentRunId"], "agent-1")
+        self.assertEqual(data["runState"]["agentEventCursor"], 4)
+        authority_run_state = {
+            "status": "waiting-user-input",
+            "phase": "tools",
+            "executionOwner": "server-agent",
+            "agentRunId": "agent-1",
+            "agentEventCursor": 4,
+            "userInputRequest": {"id": "request-1", "status": "pending"},
+        }
+        self.assertEqual(data["resumeCalls"], [{
+            "runState": authority_run_state,
+            "options": {
+                "submittedUserInput": {"agentRunId": "agent-1", "requestId": "request-1"},
+            },
+        }])
+        self.assertEqual(data["runState"], authority_run_state)
+
+    def test_model_completed_cas_replay_restores_transient_usage_before_retry(self):
+        usage_start = APP_SOURCE.index("function captureAgentProjectionUsageCheckpoint(")
+        event_start = APP_SOURCE.index("async function projectAgentEvent(", usage_start)
+        usage_source = APP_SOURCE[usage_start:event_start]
+        event_end = APP_SOURCE.index("async function requestServerAgentInput(", event_start)
+        event_source = APP_SOURCE[event_start:event_end]
+        self.assertLess(
+            event_source.index("const usageCheckpoint = captureAgentProjectionUsageCheckpoint(ctx, eventType);"),
+            event_source.index("projectAgentModelCompleted(ctx, projectionEvent)"),
+        )
+        self.assertLess(
+            event_source.index("restoreAgentProjectionUsageCheckpoint(ctx, usageCheckpoint);"),
+            event_source.index("throw makeActiveSessionProjectionConflictError(ctx, authoritative);"),
+        )
+
+        script = f"""
+const usageSource = {json.dumps(usage_source)};
+const eventSource = {json.dumps(event_source)};
+const state = {{responseUsage: {{input: 10, output: 2, cache: 0}}}};
+eval(usageSource);
+const authority = {{id: "session-usage", stats: {{input: 10, output: 2, cache: 0}}}};
+const retired = new WeakSet();
+let persistenceMode = "conflict";
+let completedObservations = 0;
+const ctx = {{
+  sessionId: "session-usage",
+  agentRunId: "agent-usage",
+  agentEventCursor: 4,
+  runtimeRunId: "runtime-1",
+  messages: [{{role: "user", content: "task"}}],
+  stats: {{input: 10, output: 2, cache: 0}},
+  taskUsage: {{input: 10, output: 2, cache: 0}},
+  responseUsage: null,
+  run: {{agentEventCursor: 4}},
+}};
+function isInternalGoalToolName() {{ return false; }}
+function beginAgentProjectionEvent() {{ return true; }}
+function completeAgentProjectionEvent() {{ completedObservations += 1; }}
+function internalCompactionRuntimeIds() {{ return new Set(); }}
+function snapshotActiveCompactionRuntimeId() {{ return ""; }}
+async function projectAgentModelStarted() {{}}
+function projectAgentModelCompleted(target, event) {{
+  const usage = event.data.usage;
+  target.stats.input += usage.input;
+  target.stats.output += usage.output;
+  target.taskUsage.input += usage.input;
+  target.taskUsage.output += usage.output;
+  state.responseUsage.input += usage.input;
+  state.responseUsage.output += usage.output;
+  target.messages.push({{role: "assistant", content: event.data.content, meta: {{agentRunId: target.agentRunId}}}});
+}}
+function projectAgentModelRecovery() {{}}
+function projectAgentToolStarted() {{}}
+function projectAgentToolCompleted() {{}}
+function projectAgentContextCompaction() {{}}
+function setSessionMessages() {{}}
+function renderSessionMessages() {{}}
+async function persistRunCheckpoint(target, _status, _phase, extra) {{
+  if (persistenceMode === "conflict") retired.add(target.messages);
+  return {{cursor: extra.agentEventCursor}};
+}}
+function supersededSessionProjectionSnapshot(_sessionId, messages) {{
+  return retired.has(messages) ? authority : null;
+}}
+function makeActiveSessionProjectionConflictError() {{
+  const error = new Error("conflict");
+  error.code = "active_session_projection_conflict";
+  return error;
+}}
+const goalFeature = null;
+eval(eventSource);
+
+(async () => {{
+  const event = {{
+    seq: 5,
+    type: "model_completed",
+    data: {{runtimeRunId: "runtime-1", content: "final", toolCalls: [], usage: {{input: 5, output: 3}}}},
+  }};
+  let conflictCode = "";
+  try {{ await projectAgentEvent(ctx, event); }} catch (error) {{ conflictCode = error.code; }}
+  const afterConflict = {{
+    cursor: ctx.agentEventCursor,
+    taskUsage: {{...ctx.taskUsage}},
+    responseUsage: {{...state.responseUsage}},
+  }};
+  ctx.messages = [{{role: "user", content: "task"}}];
+  ctx.stats = {{...authority.stats}};
+  persistenceMode = "success";
+  await projectAgentEvent(ctx, event);
+  process.stdout.write(JSON.stringify({{
+    conflictCode,
+    afterConflict,
+    final: {{
+      cursor: ctx.agentEventCursor,
+      stats: ctx.stats,
+      taskFooter: ctx.taskUsage,
+      responseUsage: state.responseUsage,
+      assistants: ctx.messages.filter((message) => message.role === "assistant").length,
+      completedObservations,
+    }},
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["conflictCode"], "active_session_projection_conflict")
+        self.assertEqual(data["afterConflict"], {
+            "cursor": 4,
+            "taskUsage": {"input": 10, "output": 2, "cache": 0},
+            "responseUsage": {"input": 10, "output": 2, "cache": 0},
+        })
+        expected_usage = {"input": 15, "output": 5, "cache": 0}
+        self.assertEqual(data["final"], {
+            "cursor": 5,
+            "stats": expected_usage,
+            "taskFooter": expected_usage,
+            "responseUsage": expected_usage,
+            "assistants": 1,
+            "completedObservations": 1,
+        })
+
+    def test_model_started_stream_usage_rolls_back_without_reconsuming_runtime(self):
+        consumer_start = APP_SOURCE.index("function findAgentAssistantByRuntime(")
+        consumer_end = APP_SOURCE.index("function snapshotHasPendingModelStarted(", consumer_start)
+        consumer_source = APP_SOURCE[consumer_start:consumer_end]
+        runtime_start = APP_SOURCE.index("function rebindRecoveredRuntimeAssistant(")
+        runtime_end = APP_SOURCE.index("async function recoverActiveAgentRuntimeProjection(", runtime_start)
+        runtime_source = APP_SOURCE[runtime_start:runtime_end]
+        completed_start = APP_SOURCE.index("function projectAgentModelCompleted(")
+        completed_end = APP_SOURCE.index("function findAgentCompactionProjection(", completed_start)
+        completed_source = APP_SOURCE[completed_start:completed_end]
+        usage_start = APP_SOURCE.index("function captureAgentProjectionUsageCheckpoint(")
+        event_start = APP_SOURCE.index("async function projectAgentEvent(", usage_start)
+        usage_source = APP_SOURCE[usage_start:event_start]
+        event_end = APP_SOURCE.index("async function requestServerAgentInput(", event_start)
+        event_source = APP_SOURCE[event_start:event_end]
+        self.assertIn('["model_started", "model_completed"].includes(eventType)', usage_source)
+        combined_source = (
+            consumer_source + runtime_source + completed_source + usage_source + event_source
+        )
+        script = f"""
+const source = {json.dumps(combined_source)};
+const clone = (value) => structuredClone(value);
+const authority = {{
+  id: "model-start-cas",
+  messages: [{{role: "user", content: "task"}}],
+  stats: {{input: 10, output: 2, cache: 0}},
+  runState: {{agentRunId: "agent-1", agentEventCursor: 4, runtimeRunId: ""}},
+}};
+const state = {{sessionId: authority.id, responseUsage: {{input: 10, output: 2, cache: 0}}}};
+const retired = new WeakSet();
+let persistenceCalls = 0;
+let runtimeConsumes = 0;
+let completedObservations = 0;
+const ctx = {{
+  sessionId: authority.id,
+  agentRunId: "agent-1",
+  agentEventCursor: 4,
+  runtimeRunId: "",
+  _activeRuntimeRunId: "",
+  messages: clone(authority.messages),
+  stats: clone(authority.stats),
+  taskUsage: clone(authority.stats),
+  responseUsage: {{input: 0, output: 0, cache: 0}},
+  run: {{
+    agentRunId: "agent-1",
+    agentEventCursor: 4,
+    runtimeRunId: "",
+    modelRound: 0,
+    abortController: new AbortController(),
+  }},
+  model: "model-1",
+}};
+function internalCompactionRuntimeIds() {{ return new Set(); }}
+function removeInternalCompactionRuntimeProjection() {{}}
+function getSelectedModel() {{ return "model-1"; }}
+function agentEventMeta(target, event, type = event.type) {{
+  return {{agentRunId: target.agentRunId, agentEventType: type, agentEventSeq: event.seq}};
+}}
+function setSessionMessages() {{}}
+function renderSessionMessages() {{}}
+function syncActiveRunBanner() {{}}
+function markModelResponseStarted() {{}}
+function toolProgressSummary() {{ return ""; }}
+function setSessionLastUsage() {{}}
+function updateUsage(usage, _sessionId, target) {{
+  for (const ledger of [target.stats, target.responseUsage || state.responseUsage, target.taskUsage]) {{
+    ledger.input = Number(ledger.input || 0) + Number(usage.input || 0);
+    ledger.output = Number(ledger.output || 0) + Number(usage.output || 0);
+    ledger.cache = Number(ledger.cache || 0) + Number(usage.cache || 0);
+  }}
+}}
+async function _callModelOnceAttempt(index, _native, target) {{
+  runtimeConsumes += 1;
+  const usage = {{input: 5, output: 3, cache: 0}};
+  updateUsage(usage, target.sessionId, target);
+  const assistant = target.messages[index];
+  if (assistant) {{
+    assistant.content = "stream final";
+    assistant.streaming = false;
+  }}
+  target.runtimeRunId = "";
+  target.run.runtimeRunId = "";
+  return {{content: "stream final", toolCalls: []}};
+}}
+async function persistRunCheckpoint(target) {{
+  persistenceCalls += 1;
+  if (persistenceCalls !== 1) return;
+  const stale = target.messages;
+  stale.splice(0, stale.length, ...clone(authority.messages));
+  retired.add(stale);
+}}
+function supersededSessionProjectionSnapshot(_sessionId, messages) {{
+  return retired.has(messages) ? authority : null;
+}}
+function makeActiveSessionProjectionConflictError() {{
+  const error = new Error("conflict");
+  error.code = "active_session_projection_conflict";
+  return error;
+}}
+function isInternalGoalToolName() {{ return false; }}
+function beginAgentProjectionEvent() {{ return true; }}
+function completeAgentProjectionEvent() {{ completedObservations += 1; }}
+function snapshotActiveCompactionRuntimeId() {{ return ""; }}
+function projectAgentModelRecovery() {{}}
+function projectAgentToolStarted() {{}}
+function projectAgentToolCompleted() {{}}
+function projectAgentContextCompaction() {{}}
+const goalFeature = null;
+eval(source);
+
+(async () => {{
+  const started = {{
+    seq: 5,
+    type: "model_started",
+    data: {{runtimeRunId: "runtime-1", round: 1}},
+  }};
+  let conflictCode = "";
+  try {{ await projectAgentEvent(ctx, started); }} catch (error) {{ conflictCode = error.code; }}
+  const afterConflict = {{
+    cursor: ctx.agentEventCursor,
+    taskUsage: {{...ctx.taskUsage}},
+    sharedUsage: {{...state.responseUsage}},
+  }};
+
+  ctx.messages = clone(authority.messages);
+  ctx.stats = clone(authority.stats);
+  ctx.runtimeRunId = "";
+  ctx.run.runtimeRunId = "";
+  await projectAgentEvent(ctx, started);
+  await projectAgentEvent(ctx, {{
+    seq: 6,
+    type: "model_completed",
+    data: {{
+      runtimeRunId: "runtime-1",
+      round: 1,
+      content: "final",
+      toolCalls: [],
+      usage: {{input: 5, output: 3, cache: 0}},
+    }},
+  }});
+  process.stdout.write(JSON.stringify({{
+    conflictCode,
+    afterConflict,
+    final: {{
+      cursor: ctx.agentEventCursor,
+      persistenceCalls,
+      runtimeConsumes,
+      assistants: ctx.messages.filter((message) => message.role === "assistant").length,
+      finalAnswers: ctx.messages.filter((message) => message.content === "final").length,
+      stats: ctx.stats,
+      taskFooter: ctx.taskUsage,
+      sharedUsage: state.responseUsage,
+      completedObservations,
+    }},
+  }}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        baseline_usage = {"input": 10, "output": 2, "cache": 0}
+        final_usage = {"input": 15, "output": 5, "cache": 0}
+        self.assertEqual(data["conflictCode"], "active_session_projection_conflict")
+        self.assertEqual(data["afterConflict"], {
+            "cursor": 4,
+            "taskUsage": baseline_usage,
+            "sharedUsage": baseline_usage,
+        })
+        self.assertEqual(data["final"], {
+            "cursor": 6,
+            "persistenceCalls": 4,
+            "runtimeConsumes": 1,
+            "assistants": 1,
+            "finalAnswers": 1,
+            "stats": final_usage,
+            "taskFooter": final_usage,
+            "sharedUsage": final_usage,
+            "completedObservations": 2,
+        })
+
+    def test_server_agent_loop_bounds_same_cursor_session_conflict_replay(self):
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(")
+        loop_end = APP_SOURCE.index("async function executeRunContext(", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+        self.assertLess(
+            loop_source.index("recoverSupersededActiveServerProjection(ctx)"),
+            loop_source.index("ctx.messages = Array.isArray(ctx.messages) ? ctx.messages.filter(Boolean) : [];"),
+        )
+        script = f"""
+const loopSource = {json.dumps(loop_source)};
+const clone = (value) => structuredClone(value);
+const state = {{sessionId: "session-1", skills: [], disabledSkills: new Set()}};
+const t = (key) => key;
+const getSelectedModel = () => "trusted-model";
+const getAllowedToolNamesForProfile = () => [];
+const applySkillTaskPolicy = (tools) => tools;
+const getSkillToolBudgets = () => [];
+const getNativeTools = () => [];
+const ensureSessionRun = () => ({{abortController: new AbortController()}});
+const claimActiveRunContext = () => true;
+const buildModelRequestPayload = async () => ({{payload: {{}}}});
+const getModelContextResolution = () => ({{inputBudgetInsufficient: false}});
+const getEffectiveMaxTokens = () => 128;
+const persistRunCheckpoint = async () => {{}};
+const settleForegroundDispatchAfterAgentRunCreated = async () => true;
+const createAgentRunWithImageRouteRebind = async () => ({{created: {{agentRunId: "unused"}}}});
+const refreshImageRoutes = async () => ({{routes: []}});
+const getModelDispatchCredentials = async () => ({{keys: [], baseUrl: "", routeRef: "", catalogRevision: 0}});
+const resumePendingSessionSteers = async () => {{}};
+const recoverActiveAgentRuntimeProjection = async () => {{}};
+const observeAgentProjectionSnapshot = () => {{}};
+const renderSessionMessages = () => {{}};
+const requestServerAgentInput = async () => {{}};
+const requestServerAgentAuthorization = async () => {{}};
+const requestServerAgentSkillEvidence = async () => {{}};
+const attachCompletedAgentUsage = () => {{}};
+const clearObservedAgentRun = () => {{}};
+const classifyModelRequestFailure = () => ({{code: ""}});
+const invalidateModelCatalogRoute = () => {{}};
+const refreshModels = async () => {{}};
+const getAgentUsageGroupId = () => "";
+const archiveAgentProjectionShadow = () => {{}};
+const setSessionMessages = () => {{}};
+const ACTIVE_SESSION_PROJECTION_RECOVERY_LIMIT = 3;
+const isActiveSessionProjectionConflict = (error) => error?.code === "active_session_projection_conflict";
+const makeActiveSessionProjectionAuthorityError = (_ctx, _authority, reason) => {{
+  const error = new Error(reason);
+  error.code = `active_session_projection_${{reason}}`;
+  return error;
+}};
+const authority = {{
+  id: "session-1",
+  messages: [
+    {{role: "user", content: "task"}},
+    {{role: "user", content: "competing writer content", meta: {{kind: "queued-follow-up"}}}},
+  ],
+  runState: {{agentRunId: "agent-1", agentEventCursor: 4}},
+}};
+let failuresRemaining = 0;
+let watches = 0;
+let recoveries = 0;
+let watchCursors = [];
+const retired = new WeakSet();
+const recoverSupersededActiveServerProjection = (ctx) => {{
+  if (!retired.has(ctx.messages)) return null;
+  recoveries += 1;
+  ctx.messages = clone(authority.messages);
+  ctx.agentEventCursor = 4;
+  ctx.run.agentRunId = "agent-1";
+  ctx.run.agentEventCursor = 4;
+  return {{authoritative: authority, cursor: 4, runtimeRunId: "", agentRunId: "agent-1"}};
+}};
+const projectAgentEvent = async (ctx, event) => {{
+  if (event.seq === 5) {{
+    ctx.messages.push({{role: "user", content: "answer", meta: {{kind: "user-input-summary", requestId: "request-1"}}}});
+    ctx.messages.push({{role: "tool-result", content: "answer", meta: {{agentRunId: "agent-1", toolCallId: "same-call"}}}});
+  }} else if (event.seq === 6) {{
+    ctx.messages.push({{role: "assistant", content: "final", meta: {{agentRunId: "agent-1"}}}});
+  }}
+  if (failuresRemaining > 0) {{
+    failuresRemaining -= 1;
+    retired.add(ctx.messages);
+    const error = new Error("conflict");
+    error.code = "active_session_projection_conflict";
+    throw error;
+  }}
+  ctx.agentEventCursor = event.seq;
+  ctx.run.agentEventCursor = event.seq;
+}};
+const events = [
+  {{seq: 5, type: "tool_completed"}},
+  {{seq: 6, type: "model_completed"}},
+];
+const agentRuntime = {{
+  createAgentRun: async () => ({{agentRunId: "unused"}}),
+  getAgentRun: async () => ({{status: "completed", activeRuntimeRunId: ""}}),
+  watchAgentRun: async (options) => {{
+    watches += 1;
+    watchCursors.push(Number(options.cursor || 0));
+    let cursor = Number(options.cursor || 0);
+    for (const event of events) {{
+      if (event.seq <= cursor) continue;
+      await options.onEvent(event, {{status: "completed"}});
+      cursor = event.seq;
+    }}
+    return {{status: "completed", nextCursor: cursor, result: {{content: "final"}}}};
+  }},
+}};
+eval(loopSource);
+
+async function scenario(conflicts, options = {{}}) {{
+  failuresRemaining = conflicts;
+  watches = 0;
+  recoveries = 0;
+  watchCursors = [];
+  const initialCursor = options.entryRetired ? 7 : 4;
+  const initialMessages = clone(authority.messages);
+  const ctx = {{
+    sessionId: "session-1",
+    messages: initialMessages,
+    stats: {{}},
+    model: "trusted-model",
+    toolPreset: "default",
+    permissionProfile: "accept",
+    run: {{abortController: new AbortController(), agentRunId: "agent-1", agentEventCursor: initialCursor}},
+    agentRunId: "agent-1",
+    agentEventCursor: initialCursor,
+  }};
+  if (options.entryRetired) retired.add(initialMessages);
+  let errorCode = "";
+  try {{ await runServerAgentLoop(ctx); }} catch (error) {{ errorCode = String(error.code || ""); }}
+  return {{
+    errorCode,
+    watches,
+    recoveries,
+    watchCursors,
+    cursor: ctx.agentEventCursor,
+    competitorCount: ctx.messages.filter((message) => message.content === "competing writer content").length,
+    summaries: ctx.messages.filter((message) => message.meta?.kind === "user-input-summary").length,
+    toolResults: ctx.messages.filter((message) => message.role === "tool-result").length,
+    finals: ctx.messages.filter((message) => message.content === "final").length,
+    roles: ctx.messages.map((message) => message.role),
+  }};
+}}
+
+(async () => {{
+  const recovered = await scenario(1);
+  const entryRecovered = await scenario(0, {{entryRetired: true}});
+  const exhausted = await scenario(10);
+  process.stdout.write(JSON.stringify({{recovered, entryRecovered, exhausted}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["recovered"], {
+            "errorCode": "",
+            "watches": 2,
+            "recoveries": 1,
+            "watchCursors": [4, 4],
+            "cursor": 6,
+            "competitorCount": 1,
+            "summaries": 1,
+            "toolResults": 1,
+            "finals": 1,
+            "roles": ["user", "user", "user", "tool-result", "assistant"],
+        })
+        self.assertEqual(data["entryRecovered"], {
+            "errorCode": "",
+            "watches": 1,
+            "recoveries": 1,
+            "watchCursors": [4],
+            "cursor": 6,
+            "competitorCount": 1,
+            "summaries": 1,
+            "toolResults": 1,
+            "finals": 1,
+            "roles": ["user", "user", "user", "tool-result", "assistant"],
+        })
+        self.assertEqual(data["exhausted"], {
+            "errorCode": "active_session_projection_recovery_exhausted",
+            "watches": 4,
+            "recoveries": 4,
+            "watchCursors": [4, 4, 4, 4],
+            "cursor": 4,
+            "competitorCount": 1,
+            "summaries": 0,
+            "toolResults": 0,
+            "finals": 0,
+            "roles": ["user", "user"],
+        })
 
     def test_deferred_first_send_sidebar_refresh_preserves_active_run(self):
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")

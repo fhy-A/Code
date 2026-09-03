@@ -422,14 +422,16 @@ function retireSessionMessageProjection(sessionId, messages, authoritative) {
   return true;
 }
 
-function restoreSupersededSessionProjection(sessionId, messages) {
+function supersededSessionProjectionSnapshot(sessionId, messages) {
   if (!Array.isArray(messages)) return null;
   const retired = supersededSessionMessageProjections.get(messages);
   if (!retired || retired.sessionId !== String(sessionId || "")) return null;
-  const authoritative = rememberAuthoritativeSessionSnapshot(
-    sessionId,
-    retired.authoritative,
-  );
+  return rememberAuthoritativeSessionSnapshot(sessionId, retired.authoritative);
+}
+
+function restoreSupersededSessionProjection(sessionId, messages) {
+  const authoritative = supersededSessionProjectionSnapshot(sessionId, messages);
+  if (!authoritative) return null;
   applyAuthoritativeSessionSnapshot(sessionId, authoritative);
   return authoritative;
 }
@@ -631,13 +633,13 @@ async function persistRunCheckpoint(
   const stats = options.currentProjection
     ? getSessionStats(ctx.sessionId)
     : ctx.stats;
-  await saveSessionState(ctx.sessionId, messages, stats, undefined, {
+  return saveSessionState(ctx.sessionId, messages, stats, undefined, {
     persistMessages: ctx.executionOwner === "server-agent",
   });
 }
 
 async function clearRunCheckpoint(ctx) {
-  if (!ctx?.sessionId || ctx.isSubAgent) return;
+  if (!ctx?.sessionId || ctx.isSubAgent) return false;
   publishTerminalRunOwnership(ctx);
   // Finalize timing before the completed message is serialized. Both normal
   // runs and reload recovery finish through this shared persistence boundary.
@@ -657,7 +659,9 @@ async function clearRunCheckpoint(ctx) {
     ...(backgroundRuns.length ? { backgroundRuns: backgroundRuns.map((item) => ({ ...item })) } : {}),
     ...(queuedMessages.length ? { queuedMessages: queuedMessages.map((item) => ({ ...item })) } : {}),
   };
+  const previousRunState = getSessionRunState(ctx.sessionId);
   setSessionRunState(ctx.sessionId, clearedRunState);
+  const stagedClearedRunState = getSessionRunState(ctx.sessionId);
   const local = state.sessions.find((session) => session.id === ctx.sessionId);
   const sessionTitle = ctx.sessionId === state.sessionId
     ? els.sessionTitle.value.trim()
@@ -665,14 +669,23 @@ async function clearRunCheckpoint(ctx) {
   // Write all messages to JSONL in one shot (stream is complete)
   const msgs = getSessionMessages(ctx.sessionId);
   if (msgs.length > 0) {
-    await saveSessionState(
-      ctx.sessionId,
-      msgs,
-      getSessionStats(ctx.sessionId),
-      sessionTitle || "Untitled",
-      { persistMessages: true },
-    ).catch(() => null);
+    try {
+      await saveSessionState(
+        ctx.sessionId,
+        msgs,
+        getSessionStats(ctx.sessionId),
+        sessionTitle || "Untitled",
+        { persistMessages: true },
+      );
+    } catch (error) {
+      if (getSessionRunState(ctx.sessionId) === stagedClearedRunState) {
+        setSessionRunState(ctx.sessionId, previousRunState);
+      }
+      throw error;
+    }
+    if (supersededSessionProjectionSnapshot(ctx.sessionId, msgs)) return false;
   }
+  return true;
 }
 
 function resetRenderCache() {
@@ -5989,6 +6002,7 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
   if (local) local.messageCount = (messages || []).length;
   syncPersistedSessionActivity(sessionId, savedSession, options);
 
+  return savedSession;
 }
 
 
@@ -8571,6 +8585,113 @@ function prepareMessagesForRunRecovery(messages, runState) {
   return cleaned;
 }
 
+const ACTIVE_SESSION_PROJECTION_RECOVERY_LIMIT = 3;
+const ACTIVE_SESSION_PROJECTION_CONFLICT_CODE = "active_session_projection_conflict";
+
+function makeActiveSessionProjectionConflictError(ctx, authoritative = null) {
+  const error = new Error("The active Session projection changed while its AgentRun was being saved.");
+  error.code = ACTIVE_SESSION_PROJECTION_CONFLICT_CODE;
+  error.errorCode = "session_revision_conflict";
+  error.sessionId = String(ctx?.sessionId || "");
+  error.agentRunId = String(ctx?.agentRunId || "");
+  error.authoritativeSession = authoritative || null;
+  return error;
+}
+
+function isActiveSessionProjectionConflict(error) {
+  return String(error?.code || "") === ACTIVE_SESSION_PROJECTION_CONFLICT_CODE;
+}
+
+function makeActiveSessionProjectionAuthorityError(ctx, authoritative, reason = "authority_changed") {
+  const error = new Error("The authoritative Session no longer owns this active AgentRun.");
+  error.code = `active_session_projection_${reason}`;
+  error.errorCode = "session_revision_conflict";
+  error.sessionId = String(ctx?.sessionId || "");
+  error.agentRunId = String(ctx?.agentRunId || "");
+  error.authoritativeSession = authoritative || null;
+  error.preservePublicProcess = true;
+  return error;
+}
+
+function rebaseActiveServerAgentProjection(ctx, authoritative) {
+  const sessionId = String(ctx?.sessionId || "");
+  if (!sessionId || !authoritative || String(authoritative.id || "") !== sessionId) {
+    throw makeActiveSessionProjectionAuthorityError(ctx, authoritative, "session_mismatch");
+  }
+  const runState = authoritative.runState && typeof authoritative.runState === "object"
+    ? authoritative.runState
+    : {};
+  const agentRunId = String(ctx.agentRunId || ctx.run?.agentRunId || "");
+  const authoritativeAgentRunId = String(runState.agentRunId || "");
+  if (!agentRunId || authoritativeAgentRunId !== agentRunId) {
+    throw makeActiveSessionProjectionAuthorityError(ctx, authoritative);
+  }
+  if (runState.executionOwner && runState.executionOwner !== "server-agent") {
+    throw makeActiveSessionProjectionAuthorityError(ctx, authoritative, "owner_changed");
+  }
+
+  applyAuthoritativeSessionSnapshot(sessionId, authoritative);
+  const sourceMessages = (Array.isArray(authoritative.messages) ? authoritative.messages : [])
+    .map((message) => ({
+      ...message,
+      meta: message?.meta && typeof message.meta === "object" ? { ...message.meta } : message?.meta,
+      _images: message?._images || undefined,
+    }));
+  const messages = prepareMessagesForRunRecovery(sourceMessages, runState);
+  const stats = { ...(authoritative.stats || {}) };
+  const cursor = Math.max(0, Number(runState.agentEventCursor || 0));
+  const runtimeRunId = String(runState.runtimeRunId || "");
+  const clientRequestId = String(runState.clientRequestId || ctx.clientRequestId || "");
+
+  ctx.messages = messages;
+  ctx.stats = stats;
+  ctx.agentRunId = authoritativeAgentRunId;
+  ctx.agentEventCursor = cursor;
+  ctx.runtimeRunId = runtimeRunId;
+  ctx.clientRequestId = clientRequestId;
+  ctx._activeRuntimeRunId = runtimeRunId;
+  if (ctx.run) {
+    ctx.run.agentRunId = authoritativeAgentRunId;
+    ctx.run.agentEventCursor = cursor;
+    ctx.run.runtimeRunId = runtimeRunId;
+    ctx.run.modelRound = Number(runState.modelRound || 0);
+    ctx.run.hasFirstModelResponseStarted = Boolean(
+      runState.hasFirstModelResponseStarted
+      || hasRecoveredModelResponse(messages, runState),
+    );
+  }
+
+  const originId = String(
+    ctx.foregroundOriginMessage?.meta?.goalOrigin?.messageId
+    || ctx.foregroundOriginMessage?.id
+    || "",
+  );
+  if (originId) {
+    const reboundOrigin = messages.find((message) => (
+      message?.role === "user"
+      && String(message.meta?.goalOrigin?.messageId || message.id || "") === originId
+    ));
+    if (reboundOrigin) ctx.foregroundOriginMessage = reboundOrigin;
+  }
+
+  setSessionMessages(sessionId, messages);
+  setSessionStats(sessionId, stats);
+  setSessionRunState(sessionId, runState);
+  renderSessionMessages(sessionId);
+  return {
+    authoritative,
+    cursor,
+    runtimeRunId,
+    agentRunId: authoritativeAgentRunId,
+  };
+}
+
+function recoverSupersededActiveServerProjection(ctx) {
+  const authoritative = supersededSessionProjectionSnapshot(ctx?.sessionId, ctx?.messages);
+  if (!authoritative) return null;
+  return rebaseActiveServerAgentProjection(ctx, authoritative);
+}
+
 function hasRecoveredModelResponse(messages, runState) {
   const agentRunId = String(runState?.agentRunId || "");
   if (!agentRunId) return false;
@@ -8659,14 +8780,36 @@ function finalizeLegacyBrowserRunMessages(messages) {
   return finalized;
 }
 
-async function resumePersistedSessionRun(summary) {
+const PERSISTED_RUN_RECOVERY_STATUSES = new Set(["running", "waiting-network", "resuming"]);
+
+function canResumePersistedRunState(runState, options = {}) {
+  const status = String(runState?.status || "");
+  const submittedUserInput = options.submittedUserInput;
+  if (!submittedUserInput) return PERSISTED_RUN_RECOVERY_STATUSES.has(status);
+  const agentRunId = String(runState?.agentRunId || "");
+  if (!agentRunId || agentRunId !== String(submittedUserInput.agentRunId || "")) return false;
+  if (PERSISTED_RUN_RECOVERY_STATUSES.has(status)) return true;
+  if (status !== "waiting-user-input") return false;
+  const pendingRequestId = String(
+    runState?.userInputRequest?.id
+    || runState?.userInputRequest?.requestId
+    || "",
+  );
+  return Boolean(
+    pendingRequestId
+    && pendingRequestId === String(submittedUserInput.requestId || ""),
+  );
+}
+
+async function resumePersistedSessionRun(summary, options = {}) {
   const runState = summary?.runState || {};
-  if (!summary?.id || !["running", "waiting-network", "resuming"].includes(runState.status)) return;
+  if (!summary?.id || !canResumePersistedRunState(runState, options)) return;
 
   await withSessionRecoveryLock(summary.id, async () => {
     const session = await getSessionRecord(summary.id);
     const latestRunState = session.runState || runState;
-    if (!["running", "waiting-network", "resuming"].includes(latestRunState.status)) return;
+    if (!canResumePersistedRunState(latestRunState, options)) return;
+    const resumingSubmittedUserInput = Boolean(options.submittedUserInput);
 
     if (latestRunState.executionOwner !== "server-agent") {
       const messages = finalizeLegacyBrowserRunMessages(session.messages);
@@ -8702,9 +8845,12 @@ async function resumePersistedSessionRun(summary) {
     ctx.run.taskElapsedResumedAt = resumedAt;
     setStreaming(true, summary.id);
     ctx.run.responseStartTime = resumedAt;
-    await persistRunCheckpoint(ctx, "resuming", latestRunState.phase || "model", {
+    await persistRunCheckpoint(ctx, "resuming", resumingSubmittedUserInput ? "model" : (latestRunState.phase || "model"), {
       recoveryCount,
       lastError: latestRunState.lastError || "",
+      ...(resumingSubmittedUserInput
+        ? { userInputRequest: null, resumedFromUserInput: true }
+        : {}),
     }).catch(() => {});
 
     let recoveryError = null;
@@ -9077,23 +9223,40 @@ function buildUserInputResult(request) {
   return buildUserInputResultData(request, t("questionCanceled"));
 }
 
-function appendUserInputSummary(request, result) {
-  const messages = getSessionMessages(request.sessionId);
-  if (messages.some((message) => message?.meta?.kind === "user-input-summary" && message.meta.requestId === request.id)) return;
+function appendUserInputSummaryMessage(messages, result = {}) {
+  if (!Array.isArray(messages)) return false;
+  const requestId = String(result.requestId || "");
+  if (!requestId) return false;
+  if (messages.some((message) => (
+    message?.meta?.kind === "user-input-summary"
+    && String(message.meta.requestId || "") === requestId
+  ))) return false;
   messages.push({
     role: "user",
-    content: result.summary,
+    content: String(result.summary || ""),
     meta: {
       _system: true,
       skipApi: true,
       kind: "user-input-summary",
-      requestId: request.id,
-      title: request.title,
-      answers: result.answers,
+      requestId,
+      title: String(result.title || ""),
+      answers: Array.isArray(result.answers) ? result.answers : [],
     },
     _time: new Date().toISOString(),
   });
+  return true;
+}
+
+function appendUserInputSummary(request, result) {
+  const messages = getSessionMessages(request.sessionId);
+  const appended = appendUserInputSummaryMessage(messages, {
+    ...result,
+    requestId: request.id,
+    title: request.title,
+  });
+  if (!appended) return false;
   setSessionMessages(request.sessionId, messages);
+  return true;
 }
 
 async function requestUserInput(tool, ctx = null) {
@@ -9183,12 +9346,17 @@ async function finishServerAgentUserInputRequest(request) {
   };
   setSessionRunState(request.sessionId, nextState);
   refreshSessionStatusSlot(request.sessionId);
+  const persistedMessages = getSessionMessages(request.sessionId);
   await saveSessionState(
     request.sessionId,
-    getSessionMessages(request.sessionId),
+    persistedMessages,
     getSessionStats(request.sessionId),
     undefined,
     { persistMessages: true },
+  );
+  const supersedingSnapshot = supersededSessionProjectionSnapshot(
+    request.sessionId,
+    persistedMessages,
   );
   if (request.sessionId === state.sessionId) {
     clearPermissionNotify();
@@ -9200,8 +9368,18 @@ async function finishServerAgentUserInputRequest(request) {
   }
 
   const summary = state.sessions.find((session) => session.id === request.sessionId) || { id: request.sessionId };
-  summary.runState = nextState;
-  resumePersistedSessionRun(summary).catch((error) => console.error("Failed to resume server questionnaire run:", error));
+  summary.runState = { ...getSessionRunState(request.sessionId) };
+  const resumeOptions = supersedingSnapshot
+    ? {
+        submittedUserInput: {
+          agentRunId: request.agentRunId,
+          requestId: request.id,
+        },
+      }
+    : {};
+  resumePersistedSessionRun(summary, resumeOptions).catch((error) => {
+    console.error("Failed to resume server questionnaire run:", error);
+  });
   return true;
 }
 
@@ -12383,6 +12561,9 @@ function projectAgentToolCompleted(ctx, event) {
   }
   const result = data.result || {};
   if (projectServerEditToolCompleted(ctx, event, callMessage, result)) return;
+  if (String(data.name || "") === "request_user_input") {
+    appendUserInputSummaryMessage(ctx.messages, result);
+  }
   ctx.messages.push({
     role: "tool-result",
     content: formatToolResult(result),
@@ -12398,6 +12579,40 @@ function projectAgentToolCompleted(ctx, event) {
       argumentAliases: Array.isArray(data.argumentAliases) ? data.argumentAliases : [],
     },
   });
+}
+
+function captureAgentProjectionUsageCheckpoint(ctx, eventType) {
+  if (!["model_started", "model_completed"].includes(eventType)) return null;
+  const cloneLedger = (value) => (
+    value && typeof value === "object" ? { ...value } : value
+  );
+  return {
+    eventType,
+    taskUsage: cloneLedger(ctx?.taskUsage),
+    responseUsage: cloneLedger(ctx?.responseUsage),
+    hasSharedResponseUsage: Object.prototype.hasOwnProperty.call(state, "responseUsage"),
+    sharedResponseUsage: cloneLedger(state.responseUsage),
+  };
+}
+
+function restoreAgentProjectionUsageCheckpoint(ctx, checkpoint) {
+  if (!checkpoint) return false;
+  const cloneLedger = (value) => (
+    value && typeof value === "object" ? { ...value } : value
+  );
+  ctx.taskUsage = cloneLedger(checkpoint.taskUsage);
+  // model_started waits for the attached Runtime stream to finish before the
+  // event checkpoint. Its normal post-stream state is null; replay reuses the
+  // cached consumer and therefore has no second finally block to restore it.
+  ctx.responseUsage = checkpoint.eventType === "model_started"
+    ? null
+    : cloneLedger(checkpoint.responseUsage);
+  if (checkpoint.hasSharedResponseUsage) {
+    state.responseUsage = cloneLedger(checkpoint.sharedResponseUsage);
+  } else {
+    delete state.responseUsage;
+  }
+  return true;
 }
 
 async function projectAgentEvent(ctx, event, snapshot = null) {
@@ -12425,6 +12640,7 @@ async function projectAgentEvent(ctx, event, snapshot = null) {
   const projectionObserved = internalToolEvent
     ? false
     : beginAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
+  const usageCheckpoint = captureAgentProjectionUsageCheckpoint(ctx, eventType);
   const compactionRuntimeRunId = eventType === "context_compaction_started"
     ? snapshotActiveCompactionRuntimeId(snapshot)
     : String(event?.data?.runtimeRunId || [...internalCompactionRuntimeIds(ctx)].at(-1) || "");
@@ -12441,9 +12657,10 @@ async function projectAgentEvent(ctx, event, snapshot = null) {
     projectAgentContextCompaction(ctx, event, "failed", compactionRuntimeRunId);
   }
 
-  if (projectionObserved) completeAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
-  ctx.agentEventCursor = Math.max(Number(ctx.agentEventCursor || 0), Number(event?.seq || 0));
-  ctx.run.agentEventCursor = ctx.agentEventCursor;
+  const nextAgentEventCursor = Math.max(
+    Number(ctx.agentEventCursor || 0),
+    Number(event?.seq || 0),
+  );
   setSessionMessages(ctx.sessionId, ctx.messages);
   renderSessionMessages(ctx.sessionId);
   const phase = eventType.startsWith("tool_")
@@ -12457,10 +12674,18 @@ async function projectAgentEvent(ctx, event, snapshot = null) {
       ? { internalCompactionRuntimeRunId: "" }
       : {});
   await persistRunCheckpoint(ctx, "running", phase, {
-    agentEventCursor: ctx.agentEventCursor,
+    agentEventCursor: nextAgentEventCursor,
     runtimeRunId: ctx.runtimeRunId || "",
     ...compactionCheckpoint,
   });
+  const authoritative = supersededSessionProjectionSnapshot(ctx.sessionId, ctx.messages);
+  if (authoritative) {
+    restoreAgentProjectionUsageCheckpoint(ctx, usageCheckpoint);
+    throw makeActiveSessionProjectionConflictError(ctx, authoritative);
+  }
+  ctx.agentEventCursor = nextAgentEventCursor;
+  ctx.run.agentEventCursor = nextAgentEventCursor;
+  if (projectionObserved) completeAgentProjectionEvent(ctx, projectionEvent, projectionReferenceTime);
   if (internalToolEvent && eventType === "tool_completed") {
     await goalFeature?.refresh(ctx.sessionId, { quiet: true });
   }
@@ -12743,7 +12968,13 @@ async function runServerAgentLoop(ctx) {
   if (!agentRuntime?.createAgentRun || !agentRuntime?.watchAgentRun) {
     throw new Error("Server Agent runtime is unavailable");
   }
-  ctx.messages = Array.isArray(ctx.messages) ? ctx.messages.filter(Boolean) : [];
+  // A recovery checkpoint can lose a Session CAS race immediately before this
+  // loop starts. Preserve the retired array identity until it has been rebound;
+  // filtering first would create an unmarked copy and silently skip recovery.
+  const entryProjectionRecovery = recoverSupersededActiveServerProjection(ctx);
+  if (!entryProjectionRecovery) {
+    ctx.messages = Array.isArray(ctx.messages) ? ctx.messages.filter(Boolean) : [];
+  }
   ctx.executionOwner = "server-agent";
   const profileAllowedToolNames = getAllowedToolNamesForProfile(
     ctx.permissionProfile || "read",
@@ -12779,6 +13010,28 @@ async function runServerAgentLoop(ctx) {
 
   let resolvedDispatch = null;
   let recoveryResumeAttempts = 0;
+  let projectionRecoveryCursor = Number(entryProjectionRecovery?.cursor ?? -1);
+  let projectionRecoveryAttempts = entryProjectionRecovery ? 1 : 0;
+  const recoverActiveProjectionIfNeeded = () => {
+    const recovered = recoverSupersededActiveServerProjection(ctx);
+    if (!recovered) return false;
+    if (recovered.cursor === projectionRecoveryCursor) {
+      projectionRecoveryAttempts += 1;
+    } else {
+      projectionRecoveryCursor = recovered.cursor;
+      projectionRecoveryAttempts = 1;
+    }
+    if (projectionRecoveryAttempts > ACTIVE_SESSION_PROJECTION_RECOVERY_LIMIT) {
+      const error = makeActiveSessionProjectionAuthorityError(
+        ctx,
+        recovered.authoritative,
+        "recovery_exhausted",
+      );
+      error.recoverable = true;
+      throw error;
+    }
+    return true;
+  };
   const resolveRunDispatch = async (routeRef = ctx.routeRef) => {
     if (!resolvedDispatch || (routeRef && resolvedDispatch.routeRef !== routeRef)) {
       resolvedDispatch = await getModelDispatchCredentials(
@@ -12865,6 +13118,7 @@ async function runServerAgentLoop(ctx) {
   }
 
   while (true) {
+    recoverActiveProjectionIfNeeded();
     await resumePendingSessionSteers(ctx);
     let snapshot = await agentRuntime.getAgentRun(ctx.agentRunId, {
       cursor: ctx.agentEventCursor || 0,
@@ -12904,32 +13158,40 @@ async function runServerAgentLoop(ctx) {
     // is authoritative and must be reattached before parent polling continues.
     // If model_started is still pending, the normal event replay path owns it.
     await recoverActiveAgentRuntimeProjection(ctx, snapshot);
+    if (recoverActiveProjectionIfNeeded()) continue;
 
-    snapshot = await agentRuntime.watchAgentRun({
-      agentRunId: ctx.agentRunId,
-      cursor: ctx.agentEventCursor || 0,
-      signal: ctx.run.abortController.signal,
-      onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot),
-      onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot),
-      onReconnect({ attempt, nextRetryAt, error }) {
-        ctx.run.recovery = {
-          source: "agent-poll",
-          attempt,
-          maxAttempts: 0,
-          nextRetryAt,
-          message: error?.message || String(error || ""),
-        };
-        if (ctx.sessionId === state.sessionId) renderSessionMessages(ctx.sessionId);
-      },
-      onReconnected() {
-        if (ctx.run.recovery?.source !== "agent-poll") return;
-        ctx.run.recovery = null;
-        if (ctx.sessionId === state.sessionId) renderSessionMessages(ctx.sessionId);
-      },
-    });
+    try {
+      snapshot = await agentRuntime.watchAgentRun({
+        agentRunId: ctx.agentRunId,
+        cursor: ctx.agentEventCursor || 0,
+        signal: ctx.run.abortController.signal,
+        onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot),
+        onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot),
+        onReconnect({ attempt, nextRetryAt, error }) {
+          ctx.run.recovery = {
+            source: "agent-poll",
+            attempt,
+            maxAttempts: 0,
+            nextRetryAt,
+            message: error?.message || String(error || ""),
+          };
+          if (ctx.sessionId === state.sessionId) renderSessionMessages(ctx.sessionId);
+        },
+        onReconnected() {
+          if (ctx.run.recovery?.source !== "agent-poll") return;
+          ctx.run.recovery = null;
+          if (ctx.sessionId === state.sessionId) renderSessionMessages(ctx.sessionId);
+        },
+      });
+    } catch (error) {
+      if (isActiveSessionProjectionConflict(error)) continue;
+      throw error;
+    }
 
     ctx.agentEventCursor = Number(snapshot.nextCursor ?? ctx.agentEventCursor ?? 0);
     ctx.run.agentEventCursor = ctx.agentEventCursor;
+    projectionRecoveryCursor = ctx.agentEventCursor;
+    projectionRecoveryAttempts = 0;
     if (snapshot.status === "waiting_credentials") continue;
     if (snapshot.status === "waiting_recovery") continue;
     if (snapshot.status === "waiting_user_input") {
