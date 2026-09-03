@@ -451,10 +451,16 @@ input:focus, select:focus, textarea:focus {
 
 .explorer {
   flex: 0 0 var(--explorer-height, 230px);
+  min-width: 0;
   min-height: 36px;
   overflow: hidden;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
+}
+
+.explorer > * {
+  min-width: 0;
 }
 
 .explorer.collapsed {

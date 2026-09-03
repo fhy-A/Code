@@ -28666,6 +28666,35 @@ process.stdout.write(JSON.stringify(samples));
         self.assertIn("min-height: 34px;", action_rule)
         self.assertIn("font-size: 14px;", action_rule)
 
+    def test_file_explorer_grid_and_rows_can_shrink_to_the_sidebar_track(self):
+        explorer_start = STYLE_SOURCE.index(".explorer {")
+        explorer_end = STYLE_SOURCE.index("}", explorer_start)
+        explorer_rule = STYLE_SOURCE[explorer_start:explorer_end]
+        self.assertIn("min-width: 0;", explorer_rule)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", explorer_rule)
+
+        child_start = STYLE_SOURCE.index(".explorer > * {")
+        child_end = STYLE_SOURCE.index("}", child_start)
+        child_rule = STYLE_SOURCE[child_start:child_end]
+        self.assertIn("min-width: 0;", child_rule)
+
+        for element_id in (
+            "explorerHead",
+            "goUp",
+            "newFolderBtn",
+            "refreshFiles",
+            "projectRootShort",
+            "fileSearch",
+            "fileSortBtn",
+            "filePathBar",
+            "fileTree",
+        ):
+            self.assertIn(f'id="{element_id}"', INDEX_SOURCE)
+        self.assertIn(".file-search-row .file-search { margin: 0; flex: 1; min-width: 0; }", STYLE_SOURCE)
+        self.assertIn("white-space: nowrap; flex-shrink: 0;", STYLE_SOURCE)
+        self.assertIn("const FILE_TIME_WIDE_SIDEBAR_MIN = 320;", FILES_SOURCE)
+        self.assertNotIn(".explorer {\n  overflow-x: auto;", STYLE_SOURCE)
+
     def test_sidebar_explorer_height_uses_measured_budget_and_reclamps_on_expand(self):
         helper_start = APP_SOURCE.index("function resolveSidebarExplorerHeight(")
         helper_end = APP_SOURCE.index("function measureOuterBlockHeight(", helper_start)
