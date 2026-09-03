@@ -31856,6 +31856,81 @@ class Code043OrdinaryMessageFinalTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+class Code057InlineCodeVisualTests(unittest.TestCase):
+    MARKER = "/* CODE-057 ordinary inline code visual hierarchy */"
+    END_MARKER = "/* CODE-057 ordinary inline code visual hierarchy end */"
+    USER_CODE = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.user:not([data-background-message-id])"
+        ":not([data-queued-message-id]):not(.execution-trace-persistent) "
+        ".user-message-text > .bubble code:not(.line-code):not(.clickable-path)"
+    )
+    ASSISTANT_CODE = (
+        ".chat-pane:not(.empty-chat) "
+        ".msg.assistant:not(.agent-commentary):not(.tool-process)"
+        ":not(.edit-suggestion):not(.generated-image-result) > .bubble "
+        "code:not(.line-code):not(.clickable-path)"
+    )
+
+    def scoped_source(self):
+        self.assertIn(self.MARKER, STYLE_SOURCE)
+        self.assertIn(self.END_MARKER, STYLE_SOURCE)
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split(self.END_MARKER, 1)[0]
+
+    @staticmethod
+    def rule(source, selector):
+        start = source.index(selector)
+        end = source.index("}", start) + 1
+        return source[start:end]
+
+    def test_plain_user_and_final_answer_code_use_lightweight_theme_tokens(self):
+        source = self.scoped_source()
+        selector_group = f"{self.USER_CODE},\n{self.ASSISTANT_CODE} {{"
+        self.assertIn(selector_group, source)
+        rule = self.rule(source, selector_group)
+        for declaration in (
+            "padding: .06em .24em;",
+            "border: 0;",
+            "border-radius: 3px;",
+            "background: color-mix(in srgb, var(--code-bg) 52%, transparent);",
+            "color: color-mix(in srgb, var(--text) 94%, var(--accent));",
+        ):
+            self.assertIn(declaration, rule)
+
+    def test_scope_excludes_clickable_paths_and_specialized_message_surfaces(self):
+        source = self.scoped_source()
+        self.assertEqual(source.count("{"), 1)
+        for exclusion in (
+            ":not([data-background-message-id])",
+            ":not([data-queued-message-id])",
+            ":not(.execution-trace-persistent)",
+            ":not(.agent-commentary)",
+            ":not(.tool-process)",
+            ":not(.edit-suggestion)",
+            ":not(.generated-image-result)",
+            ":not(.line-code)",
+            ":not(.clickable-path)",
+        ):
+            self.assertIn(exclusion, source)
+        for specialized_surface in (
+            ".assistant-inline-text",
+            ".tool-edit-markdown",
+            ".tool-process-stage-heading",
+            ".tool-process-row-heading",
+            ".code-block",
+            ".path-file-card",
+        ):
+            self.assertNotIn(specialized_surface, source)
+        self.assertIn(".clickable-path:hover {", STYLE_SOURCE)
+        self.assertIn('class="clickable-path answer-local-path"', MARKDOWN_SOURCE)
+        base_code_rule = re.search(
+            r"\.bubble code:not\(\.line-code\)\s*\{([^}]+)\}",
+            STYLE_SOURCE,
+        )
+        self.assertIsNotNone(base_code_rule)
+        self.assertIn('font-family: Consolas, "Cascadia Mono", monospace;', base_code_rule.group(1))
+
+
 class Code043MarkdownTypographyContrastTests(unittest.TestCase):
     MARKER = "/* CODE-043 ordinary Markdown typography and contrast */"
     USER = (

@@ -11176,6 +11176,17 @@ body.theme-dark .chat-pane.empty-chat .composer {
   font-size: var(--type-interface);
 }
 
+/* CODE-057 ordinary inline code visual hierarchy */
+.chat-pane:not(.empty-chat) .msg.user:not([data-background-message-id]):not([data-queued-message-id]):not(.execution-trace-persistent) .user-message-text > .bubble code:not(.line-code):not(.clickable-path),
+.chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble code:not(.line-code):not(.clickable-path) {
+  padding: .06em .24em;
+  border: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--code-bg) 52%, transparent);
+  color: color-mix(in srgb, var(--text) 94%, var(--accent));
+}
+/* CODE-057 ordinary inline code visual hierarchy end */
+
 .chat-pane:not(.empty-chat) .msg.assistant:not(.agent-commentary):not(.tool-process):not(.edit-suggestion):not(.generated-image-result) > .bubble .path-file-card.answer-local-path .path-file-name {
   font-size: inherit;
   line-height: inherit;
