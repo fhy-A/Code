@@ -403,21 +403,22 @@ input:focus, select:focus, textarea:focus {
 }
 .session-more-menu {
   z-index: 100;
-  min-width: 168px;
-  max-width: min(280px, calc(100vw - 16px));
+  min-width: 112px;
+  max-width: min(240px, calc(100vw - 16px));
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel-3);
   box-shadow: var(--shadow);
-  padding: 4px;
+  padding: 3px;
 }
 .session-more-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
   width: 100%;
-  padding: 6px 12px;
+  min-height: 32px;
+  padding: 5px 8px;
   border: 0;
   border-radius: 4px;
   text-align: left;
@@ -442,19 +443,16 @@ input:focus, select:focus, textarea:focus {
 }
 .session-project-submenu {
   z-index: 101;
-  min-width: 210px;
+  min-width: 152px;
+  max-width: min(240px, calc(100vw - 16px));
   max-height: min(420px, calc(100vh - 16px));
   overflow-x: hidden;
   overflow-y: auto;
 }
-.session-project-item > span:first-child {
+.session-more-item > span:first-child {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.session-project-current {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 10px;
 }
 .session-menu-separator {
   height: 1px;

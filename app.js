@@ -5343,6 +5343,7 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
 
 let sessionMenuReturnFocus = null;
 let sessionProjectSubmenuSerial = 0;
+const SESSION_PROJECT_HOVER_CLOSE_DELAY_MS = 80;
 
 function sessionMenuItems(menu) {
   return Array.from(menu?.children || []).filter((item) => (
@@ -5367,16 +5368,25 @@ function resolveSessionSubmenuPosition(anchor = {}, menuSize = {}, viewport = {}
   const viewportHeight = Math.max(0, Number(viewport.height) || 0);
   const menuWidth = Math.max(0, Number(menuSize.width) || 0);
   const menuHeight = Math.max(0, Number(menuSize.height) || 0);
-  const rightCandidate = (Number(anchor.right) || 0) + offset;
-  const leftCandidate = (Number(anchor.left) || 0) - menuWidth - offset;
-  const opensLeft = rightCandidate + menuWidth > viewportWidth - margin;
-  const desiredLeft = opensLeft ? leftCandidate : rightCandidate;
-  const maxLeft = Math.max(margin, viewportWidth - margin - menuWidth);
+  const anchorLeft = Number(anchor.left) || 0;
+  const anchorRight = Number(anchor.right) || 0;
+  const rightCandidate = anchorRight + offset;
+  const leftEdge = anchorLeft - offset;
+  const rightSpace = Math.max(0, viewportWidth - margin - rightCandidate);
+  const leftSpace = Math.max(0, leftEdge - margin);
+  const opensLeft = menuWidth <= rightSpace
+    ? false
+    : (menuWidth <= leftSpace || leftSpace > rightSpace);
+  const availableWidth = opensLeft ? leftSpace : rightSpace;
+  const positionedWidth = Math.min(menuWidth, availableWidth);
+  const desiredLeft = opensLeft ? leftEdge - positionedWidth : rightCandidate;
+  const maxLeft = Math.max(margin, viewportWidth - margin - positionedWidth);
   const maxTop = Math.max(margin, viewportHeight - margin - menuHeight);
   return {
     left: Math.round(Math.min(Math.max(desiredLeft, margin), maxLeft)),
     top: Math.round(Math.min(Math.max(Number(anchor.top) || 0, margin), maxTop)),
     opensLeft,
+    availableWidth: Math.floor(availableWidth),
   };
 }
 
@@ -5407,11 +5417,21 @@ async function runSessionProjectMenuAction(sessionId, projectId, projectName = "
   }
 }
 
+function cancelSessionProjectSubmenuClose(menu) {
+  if (!menu?._projectSubmenuCloseTimer) return;
+  clearTimeout(menu._projectSubmenuCloseTimer);
+  menu._projectSubmenuCloseTimer = null;
+}
+
 function closeSessionProjectSubmenu(menu, { restoreFocus = false } = {}) {
+  cancelSessionProjectSubmenuClose(menu);
   const submenu = menu?._projectSubmenu;
   const trigger = menu?._projectTrigger;
   if (submenu?.isConnected) submenu.remove();
-  if (menu) menu._projectSubmenu = null;
+  if (menu) {
+    menu._projectSubmenu = null;
+    menu._projectSubmenuLocked = false;
+  }
   if (trigger) {
     trigger.setAttribute("aria-expanded", "false");
     trigger.removeAttribute("aria-controls");
@@ -5419,8 +5439,34 @@ function closeSessionProjectSubmenu(menu, { restoreFocus = false } = {}) {
   if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
 }
 
-function openSessionProjectSubmenu(menu, trigger, sessionId, { focusFirst = false } = {}) {
-  closeSessionProjectSubmenu(menu);
+function scheduleSessionProjectSubmenuClose(menu) {
+  cancelSessionProjectSubmenuClose(menu);
+  if (!menu || menu._projectSubmenuLocked) return;
+  menu._projectSubmenuCloseTimer = setTimeout(() => {
+    menu._projectSubmenuCloseTimer = null;
+    const triggerHovered = menu._projectTrigger?.matches?.(":hover");
+    const submenuHovered = menu._projectSubmenu?.matches?.(":hover");
+    if (!menu._projectSubmenuLocked && !triggerHovered && !submenuHovered) {
+      closeSessionProjectSubmenu(menu);
+    }
+  }, SESSION_PROJECT_HOVER_CLOSE_DELAY_MS);
+}
+
+function openSessionProjectSubmenu(
+  menu,
+  trigger,
+  sessionId,
+  { focusFirst = false, locked = false } = {},
+) {
+  cancelSessionProjectSubmenuClose(menu);
+  if (menu?._projectSubmenu?.isConnected) {
+    if (locked) {
+      menu._projectSubmenuLocked = true;
+      menu._projectSubmenu.dataset.locked = "true";
+    }
+    if (focusFirst) sessionMenuItems(menu._projectSubmenu)[0]?.focus({ preventScroll: true });
+    return menu._projectSubmenu;
+  }
   const session = state.sessions.find((candidate) => candidate.id === sessionId) || {};
   const currentProject = session.projectId
     ? (state.projectsMap[session.projectId] || { id: session.projectId, label: session.projectId })
@@ -5436,27 +5482,32 @@ function openSessionProjectSubmenu(menu, trigger, sessionId, { focusFirst = fals
   submenu.style.visibility = "hidden";
 
   const projects = orderProjects(state.projects, getPinnedProjects());
-  submenu.innerHTML = projects.map((project) => {
-    const current = project.id === session.projectId;
+  const availableProjects = projects.filter((project) => project.id !== session.projectId);
+  const projectItems = availableProjects.map((project) => {
     const name = projectDisplayName(project);
     return '<button class="session-more-item session-project-item" type="button" role="menuitem" data-project-id="' +
-      escapeHtml(project.id) + '" data-project-name="' + escapeHtml(name) + '"' +
-      (current ? ' disabled aria-current="true"' : '') + '><span>' + escapeHtml(name) + '</span>' +
-      (current ? '<span class="session-project-current">' + escapeHtml(t("sessionProjectCurrent")) + '</span>' : '') +
-      '</button>';
-  }).join("") +
+      escapeHtml(project.id) + '" data-project-name="' + escapeHtml(name) + '"><span>' +
+      escapeHtml(name) + '</span></button>';
+  }).join("");
+  const actionSeparator = projectItems
+    ? '<div class="session-menu-separator" role="separator"></div>'
+    : '';
+  submenu.innerHTML = projectItems +
     (currentProject
-      ? '<div class="session-menu-separator" role="separator"></div>' +
+      ? actionSeparator +
         '<button class="session-more-item" type="button" role="menuitem" data-project-action="remove">' +
-        escapeHtml(t("sessionProjectRemove", { name: projectDisplayName(currentProject) })) + '</button>'
+        '<span>' + escapeHtml(t("sessionProjectRemove", { name: projectDisplayName(currentProject) })) +
+        '</span></button>'
       : '') +
     (!currentProject
-      ? '<div class="session-menu-separator" role="separator"></div>' +
+      ? actionSeparator +
         '<button class="session-more-item" type="button" role="menuitem" data-project-action="create">' +
-        escapeHtml(t("sessionProjectNewAndMove")) + '</button>'
+        '<span>' + escapeHtml(t("sessionProjectNewAndMove")) + '</span></button>'
       : '');
 
   submenu.addEventListener("click", (event) => event.stopPropagation());
+  submenu.addEventListener("pointerenter", () => cancelSessionProjectSubmenuClose(menu));
+  submenu.addEventListener("pointerleave", () => scheduleSessionProjectSubmenuClose(menu));
   submenu.querySelectorAll('[role="menuitem"]').forEach((item) => {
     item.addEventListener("click", async () => {
       if (item.disabled) return;
@@ -5497,20 +5548,26 @@ function openSessionProjectSubmenu(menu, trigger, sessionId, { focusFirst = fals
       event.preventDefault();
       const items = sessionMenuItems(submenu);
       items[event.key === "Home" ? 0 : items.length - 1]?.focus({ preventScroll: true });
-    } else if (event.key === "ArrowLeft" || event.key === "Escape") {
+    } else if (event.key === "ArrowLeft") {
       event.preventDefault();
       closeSessionProjectSubmenu(menu, { restoreFocus: true });
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeAllSessionMenus({ restoreFocus: true });
     }
   });
 
   document.body.appendChild(submenu);
   menu._projectSubmenu = submenu;
   menu._projectTrigger = trigger;
+  menu._projectSubmenuLocked = Boolean(locked);
+  submenu.dataset.locked = String(menu._projectSubmenuLocked);
   trigger.setAttribute("aria-expanded", "true");
   trigger.setAttribute("aria-controls", submenu.id);
   const triggerRect = trigger.getBoundingClientRect();
-  const submenuRect = submenu.getBoundingClientRect();
-  const position = resolveSessionSubmenuPosition(
+  let submenuRect = submenu.getBoundingClientRect();
+  let position = resolveSessionSubmenuPosition(
     triggerRect,
     { width: submenuRect.width, height: submenuRect.height },
     {
@@ -5518,6 +5575,20 @@ function openSessionProjectSubmenu(menu, trigger, sessionId, { focusFirst = fals
       height: document.documentElement.clientHeight || window.innerHeight,
     },
   );
+  if (position.availableWidth > 0 && submenuRect.width > position.availableWidth) {
+    const computedMinWidth = parseFloat(getComputedStyle(submenu).minWidth) || 0;
+    submenu.style.minWidth = Math.min(computedMinWidth, position.availableWidth) + "px";
+    submenu.style.width = position.availableWidth + "px";
+    submenuRect = submenu.getBoundingClientRect();
+    position = resolveSessionSubmenuPosition(
+      triggerRect,
+      { width: submenuRect.width, height: submenuRect.height },
+      {
+        width: document.documentElement.clientWidth || window.innerWidth,
+        height: document.documentElement.clientHeight || window.innerHeight,
+      },
+    );
+  }
   submenu.style.left = position.left + "px";
   submenu.style.top = position.top + "px";
   submenu.dataset.opensLeft = String(position.opensLeft);
@@ -5547,7 +5618,14 @@ function openSessionMoreMenu(button, { focusFirst = false } = {}) {
     item.addEventListener("click", () => {
       if (item.disabled) return;
       if (item.dataset.action === "project") {
-        openSessionProjectSubmenu(menu, item, sessionId, { focusFirst: true });
+        if (menu._projectSubmenu && menu._projectSubmenuLocked) {
+          closeSessionProjectSubmenu(menu, { restoreFocus: true });
+        } else {
+          openSessionProjectSubmenu(menu, item, sessionId, {
+            focusFirst: true,
+            locked: true,
+          });
+        }
         return;
       }
       closeAllSessionMenus();
@@ -5562,6 +5640,12 @@ function openSessionMoreMenu(button, { focusFirst = false } = {}) {
       }
     });
   });
+  const trigger = menu.querySelector('[data-action="project"]');
+  trigger.addEventListener("pointerenter", () => {
+    cancelSessionProjectSubmenuClose(menu);
+    openSessionProjectSubmenu(menu, trigger, sessionId);
+  });
+  trigger.addEventListener("pointerleave", () => scheduleSessionProjectSubmenuClose(menu));
   menu.addEventListener("keydown", (event) => {
     const item = event.target.closest?.('[role="menuitem"]');
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -5573,7 +5657,10 @@ function openSessionMoreMenu(button, { focusFirst = false } = {}) {
       items[event.key === "Home" ? 0 : items.length - 1]?.focus({ preventScroll: true });
     } else if (event.key === "ArrowRight" && item?.dataset.action === "project") {
       event.preventDefault();
-      openSessionProjectSubmenu(menu, item, sessionId, { focusFirst: true });
+      openSessionProjectSubmenu(menu, item, sessionId, {
+        focusFirst: true,
+        locked: true,
+      });
     } else if (event.key === "Escape") {
       event.preventDefault();
       closeAllSessionMenus({ restoreFocus: true });
@@ -5883,7 +5970,11 @@ function attachProjectSessionListeners() {
 }
 
 function closeAllSessionMenus({ restoreFocus = false } = {}) {
-  document.querySelectorAll(".session-more-menu").forEach((menu) => menu.remove());
+  document.querySelectorAll(".session-more-menu:not(.session-project-submenu)").forEach((menu) => {
+    closeSessionProjectSubmenu(menu);
+    menu.remove();
+  });
+  document.querySelectorAll(".session-project-submenu").forEach((menu) => menu.remove());
   const returnFocus = sessionMenuReturnFocus;
   if (returnFocus) returnFocus.setAttribute("aria-expanded", "false");
   sessionMenuReturnFocus = null;

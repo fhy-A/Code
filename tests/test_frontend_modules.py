@@ -28279,6 +28279,12 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
         self.assertIn("moveSessionToProject", menu_source)
         self.assertIn("createProjectFromFolder", menu_source)
         self.assertIn("(!currentProject", menu_source)
+        self.assertIn(
+            ".filter((project) => project.id !== session.projectId)",
+            menu_source,
+        )
+        self.assertNotIn('disabled aria-current="true"', menu_source)
+        self.assertNotIn("session-project-current", menu_source)
         self.assertIn(".session-project-submenu", STYLE_SOURCE)
         self.assertIn(".session-menu-separator", STYLE_SOURCE)
         self.assertNotIn("sessionDetachedFromProject:", I18N_SOURCE)
@@ -28299,6 +28305,48 @@ class TestSidebarProjectArchitecture(unittest.TestCase):
             "sessionProjectMigrationFailed",
         ):
             self.assertEqual(I18N_SOURCE.count(key + ":"), 2)
+
+    def test_session_project_menu_supports_hover_lock_and_compact_dimensions(self):
+        menu_start = APP_SOURCE.index("function resolveSessionSubmenuPosition(")
+        menu_end = APP_SOURCE.index("function renderSessions()", menu_start)
+        menu_source = APP_SOURCE[menu_start:menu_end]
+
+        for contract in (
+            "scheduleSessionProjectSubmenuClose",
+            "cancelSessionProjectSubmenuClose",
+            "menu._projectSubmenuLocked",
+            'trigger.addEventListener("pointerenter"',
+            'trigger.addEventListener("pointerleave"',
+            'submenu.addEventListener("pointerenter"',
+            'submenu.addEventListener("pointerleave"',
+        ):
+            self.assertIn(contract, menu_source)
+        self.assertIn(
+            "if (menu._projectSubmenu && menu._projectSubmenuLocked)",
+            menu_source,
+        )
+
+        menu_rule = re.search(r"\.session-more-menu\s*\{([^}]+)\}", STYLE_SOURCE, re.S)
+        submenu_rule = re.search(r"\.session-project-submenu\s*\{([^}]+)\}", STYLE_SOURCE, re.S)
+        item_rule = re.search(r"\.session-more-item\s*\{([^}]+)\}", STYLE_SOURCE, re.S)
+        self.assertIsNotNone(menu_rule)
+        self.assertIsNotNone(submenu_rule)
+        self.assertIsNotNone(item_rule)
+
+        menu_min = int(re.search(r"min-width:\s*(\d+)px", menu_rule.group(1)).group(1))
+        submenu_min = int(re.search(r"min-width:\s*(\d+)px", submenu_rule.group(1)).group(1))
+        item_min_height = int(re.search(r"min-height:\s*(\d+)px", item_rule.group(1)).group(1))
+        item_gap = int(re.search(r"gap:\s*(\d+)px", item_rule.group(1)).group(1))
+        item_padding = re.search(
+            r"padding:\s*(\d+)px\s+(\d+)px",
+            item_rule.group(1),
+        )
+        self.assertLess(menu_min, 168)
+        self.assertLess(submenu_min, 210)
+        self.assertGreaterEqual(item_min_height, 30)
+        self.assertLessEqual(item_gap, 8)
+        self.assertIsNotNone(item_padding)
+        self.assertLessEqual(int(item_padding.group(2)), 8)
 
     def test_session_project_migration_updates_only_the_current_file_tree_and_recovers_failures(self):
         start = APP_SOURCE.index("function applySessionProjectLocation(")
@@ -28412,8 +28460,18 @@ process.stdout.write(JSON.stringify({{
             text=True, encoding="utf-8", check=True,
         )
         self.assertEqual(json.loads(completed.stdout), {
-            "left": {"left": 37, "top": 132, "opensLeft": True},
-            "right": {"left": 23, "top": 8, "opensLeft": False},
+            "left": {
+                "left": 37,
+                "top": 132,
+                "opensLeft": True,
+                "availableWidth": 239,
+            },
+            "right": {
+                "left": 23,
+                "top": 8,
+                "opensLeft": False,
+                "availableWidth": 269,
+            },
         })
 
     def test_agent_run_and_prompt_capture_the_session_workspace(self):

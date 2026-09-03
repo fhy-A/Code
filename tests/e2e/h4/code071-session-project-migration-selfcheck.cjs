@@ -44,16 +44,19 @@ async function waitUntil(read, predicate, message, timeoutMs = 8_000) {
 async function seedContract(host) {
   const targetPrimary = path.join(host.root, "target-primary");
   const targetSecondary = path.join(host.root, "target-secondary");
+  const longProjectRoot = path.join(host.root, "long-project-root");
   const newProjectRoot = path.join(host.root, "new-project-root");
   await Promise.all([
     fs.mkdir(targetPrimary),
     fs.mkdir(targetSecondary),
+    fs.mkdir(longProjectRoot),
     fs.mkdir(newProjectRoot),
     fs.mkdir(path.join(host.dataDir, "attachments"), { recursive: true }),
   ]);
   await Promise.all([
     fs.writeFile(path.join(targetPrimary, "target-primary.txt"), "primary\n", "utf8"),
     fs.writeFile(path.join(targetSecondary, "target-secondary.txt"), "secondary\n", "utf8"),
+    fs.writeFile(path.join(longProjectRoot, "long-project.txt"), "long\n", "utf8"),
     fs.writeFile(path.join(newProjectRoot, "new-project.txt"), "new\n", "utf8"),
   ]);
 
@@ -77,6 +80,13 @@ async function seedContract(host) {
       rootPaths: [targetPrimary, targetSecondary],
     }),
   })).payload;
+  const longProject = (await requestJson(host.ready.codeUrl, "/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      label: "A very long project name that should be clipped in the submenu",
+      rootPaths: [longProjectRoot],
+    }),
+  })).payload;
 
   const createSession = async (title, runState = {}, projectId = null) => (
     await requestJson(host.ready.codeUrl, "/api/sessions", {
@@ -93,9 +103,11 @@ async function seedContract(host) {
   return {
     targetPrimary,
     targetSecondary,
+    longProjectRoot,
     newProjectRoot,
     originalProject,
     targetProject,
+    longProject,
     current: await createSession("CODE-071 current", {}, originalProject.id),
     other: await createSession("CODE-071 other"),
     busy: await createSession("CODE-071 busy", { status: "paused" }),
@@ -223,6 +235,142 @@ async function openProjectSubmenu(page, sessionId) {
   return { more, menu, trigger, submenu };
 }
 
+async function pointerPoint(page, locator) {
+  const box = await locator.boundingBox();
+  assert.ok(box);
+  const point = {
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+  };
+  await page.mouse.move(point.x, point.y);
+  return point;
+}
+
+async function clickPointerTarget(page, locator) {
+  const point = await pointerPoint(page, locator);
+  await page.mouse.click(point.x, point.y);
+  return point;
+}
+
+async function movePointerOutside(page, { click = false } = {}) {
+  const viewport = page.viewportSize();
+  assert.ok(viewport);
+  const point = { x: viewport.width - 6, y: viewport.height - 6 };
+  if (click) await page.mouse.click(point.x, point.y);
+  else await page.mouse.move(point.x, point.y);
+}
+
+async function exerciseProjectMenuAcceptance(page, seed, sessionId) {
+  const more = page.locator(`.session-more-btn[data-session-id="${sessionId}"]`);
+  await more.scrollIntoViewIfNeeded();
+  await more.click();
+  let menu = page.locator(".session-more-menu:not(.session-project-submenu)");
+  await menu.waitFor({ state: "visible" });
+  let trigger = menu.locator('[data-action="project"]');
+  const menuBox = await menu.boundingBox();
+  assert.ok(menuBox);
+  assert.equal(menuBox.width < 168, true);
+
+  // Hover opens a transient submenu. Crossing the short trigger/menu gap
+  // keeps it open, while leaving both regions closes it without sticky delay.
+  const triggerPoint = await pointerPoint(page, trigger);
+  let submenu = page.locator(".session-project-submenu");
+  await submenu.waitFor({ state: "visible" });
+  const triggerHit = await page.evaluate(({ x, y }) => {
+    const hit = document.elementFromPoint(x, y);
+    const triggerElement = document.querySelector('[data-action="project"]');
+    const submenuElement = document.querySelector(".session-project-submenu");
+    return {
+      matches: hit?.closest?.('[data-action="project"]') != null,
+      hit: hit?.tagName || "",
+      trigger: triggerElement?.getBoundingClientRect().toJSON(),
+      submenu: submenuElement?.getBoundingClientRect().toJSON(),
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+  }, triggerPoint);
+  assert.equal(triggerHit.matches, true, JSON.stringify(triggerHit));
+  assert.equal(await submenu.getAttribute("data-locked"), "false");
+  assert.equal(
+    await submenu.locator(`[data-project-id="${seed.originalProject.id}"]`).count(),
+    0,
+  );
+  assert.equal(
+    await submenu.locator(`[data-project-id="${seed.targetProject.id}"]`).count(),
+    1,
+  );
+  assert.equal(await submenu.locator('[data-project-action="remove"]').count(), 1);
+  assert.equal(await submenu.locator('[data-project-action="create"]').count(), 0);
+  const submenuMetrics = await submenu.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const longItem = element.querySelector('[data-project-name^="A very long"] span');
+    const itemHeights = [...element.querySelectorAll('[role="menuitem"]')]
+      .map((item) => item.getBoundingClientRect().height);
+    return {
+      width: element.getBoundingClientRect().width,
+      minWidth: parseFloat(style.minWidth),
+      maxItemHeightFloor: Math.min(...itemHeights),
+      longItemClipped: Boolean(longItem && longItem.scrollWidth > longItem.clientWidth),
+    };
+  });
+  assert.equal(submenuMetrics.minWidth < 210, true);
+  assert.equal(submenuMetrics.width <= 240.5, true);
+  assert.equal(submenuMetrics.maxItemHeightFloor >= 30, true);
+  assert.equal(submenuMetrics.longItemClipped, true);
+  await submenu.hover();
+  await page.waitForTimeout(120);
+  assert.equal(await submenu.count(), 1);
+  await movePointerOutside(page);
+  await submenu.waitFor({ state: "detached" });
+  assert.equal(await menu.count(), 1);
+
+  // Clicking a transient submenu locks it. Pointer exit no longer closes it;
+  // a second trigger click toggles it closed.
+  await pointerPoint(page, trigger);
+  submenu = page.locator(".session-project-submenu");
+  await submenu.waitFor({ state: "visible" });
+  await clickPointerTarget(page, trigger);
+  assert.equal(await submenu.getAttribute("data-locked"), "true");
+  await movePointerOutside(page);
+  await page.waitForTimeout(120);
+  assert.equal(await submenu.count(), 1);
+  await clickPointerTarget(page, trigger);
+  await submenu.waitFor({ state: "detached" });
+
+  // Outside click and Escape both close a locked submenu and its parent menu.
+  await clickPointerTarget(page, trigger);
+  submenu = page.locator(".session-project-submenu");
+  await submenu.waitFor({ state: "visible" });
+  assert.equal(await submenu.getAttribute("data-locked"), "true");
+  await movePointerOutside(page, { click: true });
+  await menu.waitFor({ state: "detached" });
+
+  await more.click();
+  menu = page.locator(".session-more-menu:not(.session-project-submenu)");
+  await menu.waitFor({ state: "visible" });
+  trigger = menu.locator('[data-action="project"]');
+  await clickPointerTarget(page, trigger);
+  submenu = page.locator(".session-project-submenu");
+  await submenu.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+  assert.equal(await more.evaluate((element) => element === document.activeElement), true);
+
+  return {
+    hoverOpen: "pass",
+    hoverBridge: "pass",
+    hoverExit: "pass",
+    clickLock: "pass",
+    clickToggle: "pass",
+    outsideClose: "pass",
+    escapeClose: "pass",
+    currentProjectHidden: "pass",
+    compactRootWidth: Math.round(menuBox.width),
+    compactSubmenuMinWidth: submenuMetrics.minWidth,
+    longNameEllipsis: "pass",
+    minimumItemHeight: submenuMetrics.maxItemHeightFloor,
+  };
+}
+
 async function moveToProject(page, host, sessionId, project) {
   const { submenu } = await openProjectSubmenu(page, sessionId);
   const item = submenu.locator(`[data-project-id="${project.id}"]`);
@@ -255,6 +403,12 @@ async function exercise(page, host, seed, projectRequests) {
     "current Session did not load",
   );
   await page.waitForLoadState("networkidle");
+
+  const menuAcceptance = await exerciseProjectMenuAcceptance(
+    page,
+    seed,
+    seed.current.id,
+  );
 
   // Narrow-sidebar keyboard contract: nested menu stays in the viewport,
   // ArrowLeft returns to its trigger, then Escape returns to the row button.
@@ -308,8 +462,7 @@ async function exercise(page, host, seed, projectRequests) {
   const currentItem = currentMenu.submenu.locator(
     `[data-project-id="${seed.targetProject.id}"]`,
   );
-  assert.equal(await currentItem.isDisabled(), true);
-  assert.equal(await currentItem.getAttribute("aria-current"), "true");
+  assert.equal(await currentItem.count(), 0);
   assert.equal(
     await currentMenu.submenu.locator('[data-project-action="create"]').count(),
     0,
@@ -362,6 +515,18 @@ async function exercise(page, host, seed, projectRequests) {
   assert.equal(path.resolve(await page.locator("#projectRoot").inputValue()), path.resolve(rootBeforeOtherMove));
 
   const createMenu = await openProjectSubmenu(page, seed.createAndMove.id);
+  assert.equal(
+    await createMenu.submenu.locator(`[data-project-id="${seed.originalProject.id}"]`).count(),
+    1,
+  );
+  assert.equal(
+    await createMenu.submenu.locator(`[data-project-id="${seed.targetProject.id}"]`).count(),
+    1,
+  );
+  assert.equal(
+    await createMenu.submenu.locator(`[data-project-id="${seed.longProject.id}"]`).count(),
+    1,
+  );
   const create = createMenu.submenu.locator('[data-project-action="create"]');
   assert.equal(await create.count(), 1);
   await create.focus();
@@ -380,6 +545,7 @@ async function exercise(page, host, seed, projectRequests) {
 
   return {
     bundle: "pass",
+    menuAcceptance,
     menuKeyboard: "pass",
     narrowSidebar: "pass",
     browsingDoesNotMigrate: "pass",
@@ -415,6 +581,11 @@ async function exerciseClassic(page, host, seed, projectRequests) {
     "classic Session did not load",
   );
   await page.waitForLoadState("networkidle");
+  const menuAcceptance = await exerciseProjectMenuAcceptance(
+    page,
+    seed,
+    seed.classic.id,
+  );
   await browseHome(page, host);
   const browsed = await sessionRecord(host, seed.classic.id);
   assert.equal(browsed.projectId, seed.originalProject.id);
@@ -425,6 +596,7 @@ async function exerciseClassic(page, host, seed, projectRequests) {
   await waitForRoot(page, seed.targetPrimary);
   return {
     directClassic: "pass",
+    menuAcceptance,
     browsingDoesNotMigrate: "pass",
     menuKeyboard: "pass",
     currentTreeFollowsAuthoritativeCwd: "pass",
