@@ -1064,11 +1064,15 @@
       const visibleModes = prefs.mode === "system" ? ["light", "dark"] : [resolvedMode];
       const variantGroups = visibleModes.map(renderVariantGroup).join("");
 
-      container.innerHTML = `<h3 style="margin:0 0 14px">${t("theme")}</h3>
-        <div class="tp-picker">
-          <div class="tp-picker-label">${t("themeMode")}</div>
-          <div class="tp-mode-switch" role="radiogroup" aria-label="${t("themeMode")}">${modeOptions}</div>
-          ${variantGroups}
+      container.innerHTML = `<div class="settings-page-heading settings-theme-heading"><h3 class="settings-section-title" data-i18n="theme">${t("theme")}</h3></div>
+        <div class="settings-theme-page">
+          <section class="settings-lite-card settings-surface-card theme-settings-panel">
+            <div class="tp-picker">
+              <div class="tp-picker-label">${t("themeMode")}</div>
+              <div class="tp-mode-switch" role="radiogroup" aria-label="${t("themeMode")}">${modeOptions}</div>
+              ${variantGroups}
+            </div>
+          </section>
         </div>`;
 
       /* event listeners */
@@ -1616,7 +1620,7 @@
           };
         }
         if (interactive) {
-          const presentation = showKeySyncModal(snapshot);
+          const presentation = showKeySyncModal(snapshot, button || documentRef.activeElement);
           return { ok: true, ...presentation };
         }
         const excludedTokenIds = platform.loadPlatformKeyExclusions(auth.userId, storage);
@@ -1651,7 +1655,7 @@
       return syncKeysFromPlatform({ interactive: false });
     }
 
-    function showKeySyncModal(snapshot) {
+    function showKeySyncModal(snapshot, returnFocus = documentRef.activeElement) {
       byId("keySyncOverlay")?.remove();
       const existingKeys = new Set(loadKeyConfig(storage)
         .map((entry) => platform.normalizeSyncedKey(entry.key))
@@ -1723,15 +1727,31 @@
             : newCount === 0
               ? "removedKeysHint"
               : "pasteKeysHint";
-      overlay.innerHTML = `<div class="modal-card key-sync-card">
-        <header><h3>${t("syncKeysTitle")}</h3><button class="icon-btn key-sync-close" type="button">&times;</button></header>
+      overlay.innerHTML = `<div class="modal-card key-sync-card" role="dialog" aria-modal="true" aria-labelledby="keySyncTitle">
+        <header><h3 id="keySyncTitle">${t("syncKeysTitle")}</h3><button class="icon-btn key-sync-close" type="button" aria-label="${escapeHtml(t("close"))}">&times;</button></header>
         <div class="key-sync-summary"><span>${summaryParts.join(t("keySummarySeparator"))}</span><button id="keySyncCopyAll" class="mini-btn primary" type="button"${enabledItems.length ? "" : " disabled"}>${t("copyAll")}</button></div>
         <div class="key-sync-list">${rows}</div>
         <div class="key-sync-footer"><span class="key-sync-note${footerKey === "allKeysAdded" ? " is-complete" : ""}">${t(footerKey)}</span></div>
       </div>`;
       documentRef.body.appendChild(overlay);
-      overlay.querySelector(".key-sync-close").addEventListener("click", () => overlay.remove());
-      overlay.addEventListener("click", (event) => { if (event.target === overlay) overlay.remove(); });
+      const closeButton = overlay.querySelector(".key-sync-close");
+      let closed = false;
+      const closeModal = () => {
+        if (closed) return;
+        closed = true;
+        overlay.remove();
+        if (returnFocus && returnFocus.isConnected !== false && typeof returnFocus.focus === "function") {
+          returnFocus.focus();
+        }
+      };
+      closeButton.addEventListener("click", closeModal);
+      overlay.addEventListener("click", (event) => { if (event.target === overlay) closeModal(); });
+      overlay.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        closeModal();
+      });
+      closeButton.focus?.();
       const copyAllButton = overlay.querySelector("#keySyncCopyAll");
       copyAllButton?.addEventListener("click", () => {
         if (!allText) return;

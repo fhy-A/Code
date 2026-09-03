@@ -5,6 +5,8 @@
     "check:frontend": "npm run build:frontend && npm run verify:frontend",
     "verify:harness-replay": "node scripts/replay-agent-traces.cjs",
     "test:h4:infra": "node tests/e2e/h4/infrastructure-selfcheck.cjs",
+    "test:h4:code043-final-core": "node tests/e2e/h4/code043-final-surfaces-selfcheck.cjs core",
+    "test:h4:code043-final-key-sync": "node tests/e2e/h4/code043-final-surfaces-selfcheck.cjs key-sync",
     "test:h4:session-search": "node tests/e2e/h4/session-search-selfcheck.cjs",
     "test:h4:session-project-migration": "node tests/e2e/h4/code071-session-project-migration-selfcheck.cjs",
     "test:h4:smoke": "playwright test --config tests/e2e/h4/playwright.config.cjs",

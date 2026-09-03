@@ -3902,6 +3902,8 @@ def _session_jsonl_evidence(code_server) -> dict:
 
 def _attachment_evidence(code_server) -> dict:
     files = []
+    if not code_server.ATTACHMENTS_DIR.is_dir():
+        return {"fileCount": 0, "files": files}
     for path in sorted(code_server.ATTACHMENTS_DIR.iterdir()):
         if not path.is_file():
             continue

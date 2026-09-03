@@ -52,6 +52,9 @@ H4_SMOKE_SOURCE = (ROOT / "tests" / "e2e" / "h4" / "smoke.spec.cjs").read_text(e
 CODE043_SHELL_SELFCHECK_SOURCE = (
     ROOT / "tests" / "e2e" / "h4" / "code043-shell-selfcheck.cjs"
 ).read_text(encoding="utf-8")
+CODE043_FINAL_SURFACES_SELFCHECK_SOURCE = (
+    ROOT / "tests" / "e2e" / "h4" / "code043-final-surfaces-selfcheck.cjs"
+).read_text(encoding="utf-8")
 CODE043_COMPACT_DISCLOSURES_FINAL_STATE_SELFCHECK_SOURCE = (
     ROOT / "tests" / "e2e" / "h4" / "code043-compact-disclosures-final-state-selfcheck.cjs"
 ).read_text(encoding="utf-8")
@@ -10703,7 +10706,9 @@ global.window = {
     createElement: (tagName) => ({
       tagName,
       style: {},
+      attributes: {},
       children: [],
+      setAttribute(name, value) { this.attributes[name] = String(value); },
       appendChild(child) { this.children.push(child); },
       remove: () => {},
     }),
@@ -10726,6 +10731,7 @@ process.stdout.write(JSON.stringify({
   emphasisTag: children[3].children[1].tagName,
   emphasisClass: children[3].children[1].className,
   emphasisText: children[3].children[1].textContent,
+  accessibility: children.map((child) => child.attributes),
 }));
 """
         completed = subprocess.run(
@@ -10744,8 +10750,72 @@ process.stdout.write(JSON.stringify({
                 "emphasisTag": "span",
                 "emphasisClass": "toast-emphasis",
                 "emphasisText": "Settings - Archived sessions",
+                "accessibility": [
+                    {"role": "alert", "aria-live": "assertive", "aria-atomic": "true"},
+                    {"role": "status", "aria-live": "polite", "aria-atomic": "true"},
+                    {"role": "status", "aria-live": "polite", "aria-atomic": "true"},
+                    {"role": "status", "aria-live": "polite", "aria-atomic": "true"},
+                ],
             },
         )
+
+    def test_code043_final_auxiliary_surfaces_have_accessible_dialog_contracts(self):
+        new_folder_start = INDEX_SOURCE.index('id="newFolderModal"')
+        new_folder_end = INDEX_SOURCE.index('id="compactConfirmModal"', new_folder_start)
+        new_folder = INDEX_SOURCE[new_folder_start:new_folder_end]
+        self.assertIn('aria-hidden="true"', new_folder)
+        self.assertIn('class="modal-card new-folder-card" role="dialog"', new_folder)
+        self.assertIn('aria-modal="true" aria-labelledby="newFolderTitle"', new_folder)
+        self.assertIn('id="newFolderTitle"', new_folder)
+        self.assertIn('data-i18n-aria-label="close"', new_folder)
+        self.assertIn('id="confirmNewFolder" class="primary-btn"', new_folder)
+        self.assertNotIn('style="width:360px"', new_folder)
+
+        compact_start = INDEX_SOURCE.index('id="compactConfirmModal"')
+        compact_end = INDEX_SOURCE.index('id="deleteConfirmModal"', compact_start)
+        compact = INDEX_SOURCE[compact_start:compact_end]
+        self.assertIn('aria-hidden="true"', compact)
+        self.assertIn('class="modal-card confirm-card compact-confirm-card" role="dialog"', compact)
+        self.assertIn('aria-modal="true" aria-labelledby="compactConfirmTitle"', compact)
+        self.assertIn('aria-describedby="compactConfirmBody"', compact)
+        self.assertIn('id="compactConfirmTitle"', compact)
+        self.assertIn('data-i18n-aria-label="close"', compact)
+
+        files_modal = FILES_SOURCE[FILES_SOURCE.index("function openNewFolder()"):
+                                  FILES_SOURCE.index("async function createNewFolder()")]
+        self.assertIn("documentRoot.activeElement", files_modal)
+        self.assertIn('setAttribute("aria-hidden", "false")', files_modal)
+        self.assertIn('setAttribute("aria-hidden", "true")', files_modal)
+        self.assertIn("returnFocus.focus()", files_modal)
+        self.assertIn('newFolderModal?.addEventListener("keydown"', FILES_SOURCE)
+
+        compact_source = APP_SOURCE[APP_SOURCE.index("async function compactConversation()"):
+                                    APP_SOURCE.index("function manualCompactionOperations()")]
+        self.assertIn("compactConfirmReturnFocus = document.activeElement", compact_source)
+        self.assertIn('modal.setAttribute("aria-hidden", "false")', compact_source)
+        self.assertIn('modal.addEventListener("keydown", onModalKeydown)', compact_source)
+        self.assertIn('modal.removeEventListener("keydown", onModalKeydown)', compact_source)
+        self.assertIn('modal.setAttribute("aria-hidden", "true")', compact_source)
+        self.assertIn("returnFocus.focus()", compact_source)
+
+        key_sync = SETTINGS_SOURCE[SETTINGS_SOURCE.index("function showKeySyncModal("):
+                                   SETTINGS_SOURCE.index("async function checkCodeCallback()")]
+        self.assertIn("function showKeySyncModal(snapshot, returnFocus = documentRef.activeElement)", key_sync)
+        self.assertIn("showKeySyncModal(snapshot, button || documentRef.activeElement)", SETTINGS_SOURCE)
+        self.assertIn('role="dialog" aria-modal="true"', key_sync)
+        self.assertIn('aria-labelledby="keySyncTitle"', key_sync)
+        self.assertIn('id="keySyncTitle"', key_sync)
+        self.assertIn('aria-label="${escapeHtml(t("close"))}"', key_sync)
+        self.assertIn('overlay.addEventListener("keydown"', key_sync)
+        self.assertIn("returnFocus.focus()", key_sync)
+
+        modal_style_start = STYLE_SOURCE.index("/* CODE-043 final auxiliary dialogs */")
+        modal_style_end = STYLE_SOURCE.index(".auto-permission-risk-card", modal_style_start)
+        modal_style = STYLE_SOURCE[modal_style_start:modal_style_end]
+        self.assertIn("visibility 0s linear .2s", modal_style)
+        self.assertIn("#newFolderModal:not(.hidden)", modal_style)
+        self.assertIn("#compactConfirmModal:not(.hidden)", modal_style)
+        self.assertIn("transition-delay: 0s;", modal_style)
 
     def test_api_client_exports_and_preserves_json_request_behavior(self):
         self.assertIn("services.apiClient = Object.freeze", API_CLIENT_SOURCE)
@@ -14329,8 +14399,16 @@ const writes = [];
 const toasts = [];
 const copyHandlers = [];
 let copyAllHandler = null;
+let closeHandler = null;
+let overlayKeydownHandler = null;
+let overlayRemoved = false;
+let escapePrevented = false;
+let focusReturns = 0;
 let appended = null;
-const closeButton = {addEventListener: () => {}};
+const returnFocus = {isConnected: true, focus: () => { focusReturns += 1; }};
+const closeButton = {
+  addEventListener: (type, handler) => { if (type === "click") closeHandler = handler; },
+};
 const copyAllButton = {
   textContent: "",
   addEventListener: (type, handler) => { if (type === "click") copyAllHandler = handler; },
@@ -14344,13 +14422,14 @@ const overlay = {
   id: "",
   className: "",
   innerHTML: "",
-  remove: () => {},
-  addEventListener: () => {},
+  remove: () => { overlayRemoved = true; },
+  addEventListener: (type, handler) => { if (type === "keydown") overlayKeydownHandler = handler; },
   querySelector: (selector) => selector === ".key-sync-close" ? closeButton
     : selector === "#keySyncCopyAll" ? copyAllButton : null,
   querySelectorAll: (selector) => selector === ".key-copy-one" ? copyButtons : [],
 };
 const documentStub = {
+  activeElement: returnFocus,
   body: {appendChild: (node) => { appended = node; }},
   createElement: () => overlay,
   getElementById: () => null,
@@ -14399,11 +14478,16 @@ const feature = window.Code.features.settings.createSettingsFeature({
   copyAllHandler();
   await Promise.resolve();
   await Promise.resolve();
+  overlayKeydownHandler({key: "Escape", preventDefault: () => { escapePrevented = true; }});
   process.stdout.write(JSON.stringify({
     result,
     html: appended.innerHTML,
     writes,
     toasts,
+    closeBound: typeof closeHandler === "function",
+    overlayRemoved,
+    escapePrevented,
+    focusReturns,
     copyButtonCount: (appended.innerHTML.match(/key-copy-one/g) || []).length,
   }));
 })().catch((error) => { console.error(error); process.exit(1); });
@@ -14441,6 +14525,10 @@ const feature = window.Code.features.settings.createSettingsFeature({
             "existing: sk-existing-secret\nnew key name: sk-new-secret",
         ])
         self.assertEqual(data["toasts"], [])
+        self.assertTrue(data["closeBound"])
+        self.assertTrue(data["overlayRemoved"])
+        self.assertTrue(data["escapePrevented"])
+        self.assertEqual(data["focusReturns"], 1)
 
     def test_settings_key_cards_and_model_detection_keep_existing_controls(self):
         for expected in (
@@ -16241,7 +16329,9 @@ process.stdout.write(JSON.stringify({staleBrowserValueCleared, keyUpdated, edito
         self.assertIn('detectAvailableModels: "重新检测可用模型"', I18N_SOURCE)
         self.assertIn(".key-sync-note.is-complete::before", STYLE_SOURCE)
         self.assertIn(".key-sync-card { width: min(720px, calc(100vw - 32px));", STYLE_SOURCE)
-        self.assertIn("grid-template-columns: minmax(160px, 1.35fr) minmax(150px, 0.8fr) minmax(132px, auto);", STYLE_SOURCE)
+        self.assertIn("grid-template-areas: \"name key actions\";", STYLE_SOURCE)
+        self.assertIn("@media (max-width: 640px)", STYLE_SOURCE)
+        self.assertIn('grid-template-areas: "name actions" "key key";', STYLE_SOURCE)
         self.assertNotIn('class="key-connect-btn"', SETTINGS_SOURCE)
         self.assertNotIn('class="key-enable-label"', SETTINGS_SOURCE)
 
@@ -16441,6 +16531,10 @@ process.stdout.write(JSON.stringify({staleBrowserValueCleared, keyUpdated, edito
         self.assertIn('const visibleModes = prefs.mode === "system" ? ["light", "dark"] : [resolvedMode]', source)
         self.assertIn('data-tp-variant-mode="${mode}"', source)
         self.assertIn('applyTheme(prefs.mode, variantMode === "light"', source)
+        self.assertIn('class="settings-page-heading settings-theme-heading"', source)
+        self.assertIn('class="settings-theme-page"', source)
+        self.assertNotIn('class="settings-lite-page settings-light-page settings-theme-page"', source)
+        self.assertIn('class="settings-lite-card settings-surface-card theme-settings-panel"', source)
 
         for selector in (
             ".tp-mode-switch",
@@ -16456,6 +16550,59 @@ process.stdout.write(JSON.stringify({staleBrowserValueCleared, keyUpdated, edito
             'themeSchemes: "Theme schemes"',
         ):
             self.assertIn(expected, I18N_SOURCE)
+
+        theme_marker = STYLE_SOURCE.index("/* ── Theme picker panel ── */")
+        theme_style = STYLE_SOURCE[theme_marker:STYLE_SOURCE.index(".model-list-header", theme_marker)]
+        self.assertIn("height: 40px;", theme_style)
+        self.assertIn("font-size: 14px;", theme_style)
+        self.assertIn(".tp-mode-btn:focus-visible", theme_style)
+        self.assertIn(".tp-row:focus-visible", theme_style)
+        self.assertIn("@media (max-width: 760px)", theme_style)
+
+    def test_code043_final_surfaces_have_isolated_dual_runtime_visual_evidence(self):
+        isolated_host_source = (ROOT / "tests" / "e2e" / "h4" / "isolated_host.py").read_text(encoding="utf-8")
+        self.assertIn("if not code_server.ATTACHMENTS_DIR.is_dir():", isolated_host_source)
+        self.assertIn('return {"fileCount": 0, "files": files}', isolated_host_source)
+        self.assertEqual(
+            PACKAGE_JSON["scripts"]["test:h4:code043-final-core"],
+            "node tests/e2e/h4/code043-final-surfaces-selfcheck.cjs core",
+        )
+        self.assertEqual(
+            PACKAGE_JSON["scripts"]["test:h4:code043-final-key-sync"],
+            "node tests/e2e/h4/code043-final-surfaces-selfcheck.cjs key-sync",
+        )
+        for required in (
+            'command: `code043-final-${scenario}-selfcheck-v3`',
+            '["core", "key-sync"].includes(scenario)',
+            'realRuntimeLoads: { bundle: 1, classic: 1 }',
+            'const NARROW = Object.freeze({ width: 390, height: 720 })',
+            'themes: ["light", "dark"]',
+            '["theme-picker", "toast-stack", "new-folder", "compact-confirm"]',
+            '["key-sync"]',
+            "captureTheme",
+            "captureToasts",
+            "exerciseNewFolder",
+            "captureCompactDialog",
+            "captureKeySync",
+            'page.keyboard.press("Tab")',
+            'page.keyboard.press("Escape")',
+            "listScrollable",
+            "bodyScrollable",
+            "productWriteRequests: 0",
+            "getActiveChildCount()",
+            "cleanup.rootRemoved",
+        ):
+            self.assertIn(required, CODE043_FINAL_SURFACES_SELFCHECK_SOURCE)
+        for forbidden in (
+            "releaseModel(",
+            "waitForTimeout(",
+            "/proxy/chat",
+            "/api/tools/",
+            "/api/agent/runs",
+            "3010",
+            "3011",
+        ):
+            self.assertNotIn(forbidden, CODE043_FINAL_SURFACES_SELFCHECK_SOURCE)
 
     def test_markdown_ui_uses_one_source_preserving_render_pipeline(self):
         self.assertIn("Code.ui.markdown = Object.freeze", MARKDOWN_SOURCE)
@@ -33298,6 +33445,14 @@ process.stdout.write(JSON.stringify({{
             'scrollableMarkdownTable: "Horizontally scrollable table"',
         ):
             self.assertIn(expected, I18N_SOURCE)
+
+        theme_style = STYLE_SOURCE[STYLE_SOURCE.index("/* ── Theme picker panel ── */"):
+                                   STYLE_SOURCE.index(".model-list-header", STYLE_SOURCE.index("/* ── Theme picker panel ── */"))]
+        self.assertIn("height: 40px;", theme_style)
+        self.assertIn("font-size: 14px;", theme_style)
+        self.assertIn(".tp-mode-btn:focus-visible", theme_style)
+        self.assertIn(".tp-row:focus-visible", theme_style)
+        self.assertIn("@media (max-width: 760px)", theme_style)
 
         script = r"""
 global.window = global;

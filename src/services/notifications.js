@@ -16,6 +16,10 @@
 
     const toast = global.document.createElement("div");
     toast.className = `toast ${type}`;
+    const urgent = type === "error";
+    toast.setAttribute("role", urgent ? "alert" : "status");
+    toast.setAttribute("aria-live", urgent ? "assertive" : "polite");
+    toast.setAttribute("aria-atomic", "true");
     const text = String(message ?? "");
     const emphasis = String(options.emphasis || "");
     const emphasisIndex = emphasis ? text.indexOf(emphasis) : -1;

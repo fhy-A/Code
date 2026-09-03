@@ -14503,6 +14503,8 @@ async function executeRunContext(ctx) {
   return runServerAgentLoop(ctx);
 }
 
+let compactConfirmReturnFocus = null;
+
 async function compactConversation() {
 
   const targetSessionId = state.sessionId;
@@ -14579,12 +14581,6 @@ async function compactConversation() {
 
   `;
 
-  document.getElementById("compactConfirmModal").classList.remove("hidden");
-
-
-
-  // Confirmation handler (one-shot)
-
   const confirmBtn = document.getElementById("confirmCompact");
 
   const cancelBtn = document.getElementById("cancelCompact");
@@ -14592,6 +14588,15 @@ async function compactConversation() {
   const cancelX = document.getElementById("cancelCompactX");
 
   const modal = document.getElementById("compactConfirmModal");
+
+  compactConfirmReturnFocus = document.activeElement;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  cancelBtn.focus();
+
+
+
+  // Confirmation handler (one-shot)
 
   const doCompact = async () => {
     let manualCompactionMarker = null;
@@ -14789,6 +14794,8 @@ async function compactConversation() {
 
     modal.removeEventListener("click", onModalClick);
 
+    modal.removeEventListener("keydown", onModalKeydown);
+
   }
 
 
@@ -14798,6 +14805,12 @@ async function compactConversation() {
   function onCancel() { cleanup(); cancelCompact(); }
 
   function onModalClick(e) { if (e.target === modal) onCancel(); }
+
+  function onModalKeydown(e) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    onCancel();
+  }
 
 
 
@@ -14809,13 +14822,22 @@ async function compactConversation() {
 
   modal.addEventListener("click", onModalClick);
 
+  modal.addEventListener("keydown", onModalKeydown);
+
 }
 
 
 
 function hideCompactConfirm() {
 
-  document.getElementById("compactConfirmModal").classList.add("hidden");
+  const modal = document.getElementById("compactConfirmModal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  const returnFocus = compactConfirmReturnFocus;
+  compactConfirmReturnFocus = null;
+  if (returnFocus && returnFocus.isConnected !== false && typeof returnFocus.focus === "function") {
+    returnFocus.focus();
+  }
 
 }
 

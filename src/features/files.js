@@ -218,6 +218,7 @@
 
     let fileContextMenu = null;
     let bound = false;
+    let newFolderReturnFocus = null;
 
     function getRecentFolders() {
       try {
@@ -871,13 +872,22 @@
     function openNewFolder() {
       const modal = documentRoot.getElementById("newFolderModal");
       const input = documentRoot.getElementById("newFolderName");
+      newFolderReturnFocus = documentRoot.activeElement || elements.newFolderBtn || null;
       modal.classList.remove("hidden");
+      modal.setAttribute("aria-hidden", "false");
       input.value = "";
       input.focus();
     }
 
     function hideNewFolder() {
-      documentRoot.getElementById("newFolderModal").classList.add("hidden");
+      const modal = documentRoot.getElementById("newFolderModal");
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+      const returnFocus = newFolderReturnFocus;
+      newFolderReturnFocus = null;
+      if (returnFocus && returnFocus.isConnected !== false && typeof returnFocus.focus === "function") {
+        returnFocus.focus();
+      }
     }
 
     async function createNewFolder() {
@@ -931,10 +941,14 @@
       newFolderModal?.addEventListener("click", (event) => {
         if (event.target === event.currentTarget) hideNewFolder();
       });
+      newFolderModal?.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        hideNewFolder();
+      });
       documentRoot.getElementById("confirmNewFolder")?.addEventListener("click", createNewFolder);
       newFolderName?.addEventListener("keydown", (event) => {
         if (event.key === "Enter") createNewFolder();
-        if (event.key === "Escape") hideNewFolder();
       });
 
       elements.refreshFiles?.addEventListener("click", (event) => {

@@ -334,11 +334,11 @@
       </div>
     </div>
 
-    <div class="settings-modal hidden" id="newFolderModal">
-      <div class="modal-card" style="width:360px">
+    <div class="settings-modal hidden" id="newFolderModal" aria-hidden="true">
+      <div class="modal-card new-folder-card" role="dialog" aria-modal="true" aria-labelledby="newFolderTitle">
         <header>
-          <h2 data-i18n="newFolder">新建文件夹</h2>
-          <button id="closeNewFolder" class="icon-btn" type="button">×</button>
+          <h2 id="newFolderTitle" data-i18n="newFolder">新建文件夹</h2>
+          <button id="closeNewFolder" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">×</button>
         </header>
         <label class="field">
           <span data-i18n="createInCurrentDir">在当前目录下创建</span>
@@ -346,16 +346,16 @@
         </label>
         <footer class="confirm-actions">
           <button id="cancelNewFolder" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
-          <button id="confirmNewFolder" class="danger-btn" type="button" data-i18n="create">创建</button>
+          <button id="confirmNewFolder" class="primary-btn" type="button" data-i18n="create">创建</button>
         </footer>
       </div>
     </div>
 
-    <div class="settings-modal hidden" id="compactConfirmModal">
-      <div class="modal-card confirm-card">
+    <div class="settings-modal hidden" id="compactConfirmModal" aria-hidden="true">
+      <div class="modal-card confirm-card compact-confirm-card" role="dialog" aria-modal="true" aria-labelledby="compactConfirmTitle" aria-describedby="compactConfirmBody">
         <header>
-          <h2 data-i18n="compactContext">压缩上下文</h2>
-          <button id="cancelCompactX" class="icon-btn" type="button">×</button>
+          <h2 id="compactConfirmTitle" data-i18n="compactContext">压缩上下文</h2>
+          <button id="cancelCompactX" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria-label="close">×</button>
         </header>
         <div class="confirm-body" id="compactConfirmBody"></div>
         <footer class="confirm-actions">
