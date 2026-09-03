@@ -69,6 +69,11 @@ class ProjectSessionTestCase(unittest.TestCase):
         server._write_projects([project])
         return server._find_project(project_id)
 
+    def project_state_token(self, project_id="project-1"):
+        return server._project_api_record(
+            server._find_project(project_id)
+        )["stateToken"]
+
     def write_session(self, session_id, meta, index_entry=None):
         date_dir = self.sessions_dir / "2026" / "07" / "20"
         date_dir.mkdir(parents=True, exist_ok=True)
@@ -162,6 +167,31 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(api_record["rootPaths"], [str(self.project_root.resolve())])
         self.assertEqual(api_record["name"], api_record["label"])
         self.assertEqual(api_record["rootPath"], api_record["path"])
+
+    def test_project_api_exposes_a_derived_state_token_without_persisting_it(self):
+        project = self.write_project(roots=[self.project_root, self.other_root])
+        before = server._project_api_record(project)
+
+        self.assertRegex(before["stateToken"], r"^[0-9a-f]{64}$")
+        server._write_projects(server._read_projects())
+        self.assertEqual(
+            server._project_api_record(server._find_project("project-1"))["stateToken"],
+            before["stateToken"],
+        )
+        self.assertNotIn(
+            "stateToken",
+            server.read_json(server.PROJECTS_PATH, [])[0],
+        )
+
+        renamed = self.make_handler({"label": "Renamed"})
+        server.CodeHandler.rename_project(renamed, "project-1")
+        after = renamed.send_json.call_args.args[0]
+
+        self.assertNotEqual(after["stateToken"], before["stateToken"])
+        self.assertNotIn(
+            "stateToken",
+            server.read_json(server.PROJECTS_PATH, [])[0],
+        )
 
     def test_shared_secondary_roots_survive_read_write_and_reload(self):
         server.write_json(server.PROJECTS_PATH, [
@@ -585,6 +615,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "label": "Switched",
             "rootPaths": [str(self.other_root), str(self.project_root)],
             "primaryRootPath": str(self.other_root),
+            "expectedStateToken": self.project_state_token(),
         })
 
         server.CodeHandler.update_project(handler, "project-1")
@@ -596,6 +627,162 @@ class TestProjectSchema(ProjectSessionTestCase):
         self.assertEqual(session_path.read_bytes(), before["session"])
         self.assertEqual(server._session_index_path().read_bytes(), before["index"])
         self.assertEqual(server.CONFIG_PATH.read_bytes(), before["config"])
+
+    def test_explicit_primary_switch_requires_a_state_precondition(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        before = server.PROJECTS_PATH.read_bytes()
+        handler = self.make_handler({
+            "label": "Missing precondition",
+            "rootPaths": [str(self.other_root), str(self.project_root)],
+            "primaryRootPath": str(self.other_root),
+        })
+
+        with mock.patch.object(
+            server,
+            "_ensure_agent_run_nonterminal_index_ready",
+            side_effect=AssertionError("invalid preconditions must stop before readiness"),
+        ):
+            server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 428)
+        self.assertEqual(payload["errorCode"], "project_state_precondition_required")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before)
+
+    def test_explicit_primary_switch_rejects_an_invalid_state_precondition(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        before = server.PROJECTS_PATH.read_bytes()
+        handler = self.make_handler({
+            "label": "Invalid precondition",
+            "rootPaths": [str(self.other_root), str(self.project_root)],
+            "primaryRootPath": str(self.other_root),
+            "expectedStateToken": "not-a-token",
+        })
+
+        with mock.patch.object(
+            server,
+            "_ensure_agent_run_nonterminal_index_ready",
+            side_effect=AssertionError("invalid preconditions must stop before readiness"),
+        ):
+            server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["errorCode"], "project_state_precondition_invalid")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before)
+
+    def test_stale_primary_switch_conflict_preserves_every_location_file(self):
+        project = self.write_project(
+            roots=[self.project_root, self.other_root, self.third_root],
+        )
+        self.write_session(
+            "session-primary-cas",
+            {
+                "projectId": "project-1",
+                "cwd": str(self.project_root),
+                "source": "code",
+                "revision": 9,
+            },
+        )
+        stale_token = server._project_api_record(project)["stateToken"]
+        first = self.make_handler({
+            "label": "First writer",
+            "rootPaths": [
+                str(self.other_root),
+                str(self.project_root),
+                str(self.third_root),
+            ],
+            "primaryRootPath": str(self.other_root),
+            "expectedStateToken": stale_token,
+        })
+
+        server.CodeHandler.update_project(first, "project-1")
+
+        first_payload = first.send_json.call_args.args[0]
+        self.assertEqual(first_payload["rootPath"], str(self.other_root.resolve()))
+        session_path = server.session_path("session-primary-cas")
+        before_stale_submit = {
+            "projects": server.PROJECTS_PATH.read_bytes(),
+            "session": session_path.read_bytes(),
+            "index": server._session_index_path().read_bytes(),
+            "config": server.CONFIG_PATH.read_bytes(),
+        }
+        stale = self.make_handler({
+            "label": "Stale writer",
+            "rootPaths": [
+                str(self.third_root),
+                str(self.project_root),
+                str(self.other_root),
+            ],
+            "primaryRootPath": str(self.third_root),
+            "expectedStateToken": stale_token,
+        })
+
+        with mock.patch.object(
+            server,
+            "_ensure_agent_run_nonterminal_index_ready",
+            side_effect=AssertionError("stale preconditions must stop before readiness"),
+        ):
+            server.CodeHandler.update_project(stale, "project-1")
+
+        payload, status = stale.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "project_state_conflict")
+        self.assertEqual(payload["project"]["stateToken"], first_payload["stateToken"])
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), before_stale_submit["projects"])
+        self.assertEqual(session_path.read_bytes(), before_stale_submit["session"])
+        self.assertEqual(server._session_index_path().read_bytes(), before_stale_submit["index"])
+        self.assertEqual(server.CONFIG_PATH.read_bytes(), before_stale_submit["config"])
+
+    def test_primary_switch_rechecks_state_after_readiness_before_mutation(self):
+        project = self.write_project(roots=[self.project_root, self.other_root])
+        state_token = server._project_api_record(project)["stateToken"]
+        server._write_session_index_payload("")
+        config_before = server.CONFIG_PATH.read_bytes()
+        index_before = server._session_index_path().read_bytes()
+        concurrent_state = {}
+
+        def concurrent_rename(wait=True):
+            self.assertTrue(wait)
+            projects = server._read_projects()
+            projects[0]["label"] = "Concurrent winner"
+            server._write_projects(projects)
+            concurrent_state["projects"] = server.PROJECTS_PATH.read_bytes()
+
+        handler = self.make_handler({
+            "label": "Stale switch",
+            "rootPaths": [str(self.other_root), str(self.project_root)],
+            "primaryRootPath": str(self.other_root),
+            "expectedStateToken": state_token,
+        })
+
+        with mock.patch.object(
+            server,
+            "_ensure_agent_run_nonterminal_index_ready",
+            side_effect=concurrent_rename,
+        ):
+            server.CodeHandler.update_project(handler, "project-1")
+
+        payload, status = handler.send_json.call_args.args
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "project_state_conflict")
+        self.assertEqual(payload["project"]["label"], "Concurrent winner")
+        self.assertEqual(server.PROJECTS_PATH.read_bytes(), concurrent_state["projects"])
+        self.assertEqual(server.CONFIG_PATH.read_bytes(), config_before)
+        self.assertEqual(server._session_index_path().read_bytes(), index_before)
+
+    def test_legacy_project_update_without_state_token_remains_compatible(self):
+        self.write_project(roots=[self.project_root, self.other_root])
+        handler = self.make_handler({
+            "label": "Legacy client",
+            "rootPaths": [str(self.project_root)],
+        })
+
+        server.CodeHandler.update_project(handler, "project-1")
+
+        payload = handler.send_json.call_args.args[0]
+        self.assertEqual(payload["label"], "Legacy client")
+        self.assertEqual(payload["rootPaths"], [str(self.project_root.resolve())])
 
     def test_explicit_primary_switch_write_failure_restores_project_and_sessions(self):
         self.write_project(roots=[self.project_root, self.other_root])
@@ -619,6 +806,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "label": "Failed switch",
             "rootPaths": [str(self.other_root), str(self.project_root)],
             "primaryRootPath": str(self.other_root),
+            "expectedStateToken": self.project_state_token(),
         })
         original_write_json = server.write_json
         failed = False
@@ -651,6 +839,7 @@ class TestProjectSchema(ProjectSessionTestCase):
                 str(self.other_root),
             ],
             "primaryRootPath": str(self.third_root),
+            "expectedStateToken": self.project_state_token(),
         })
 
         server.CodeHandler.update_project(handler, "project-1")
@@ -671,6 +860,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "label": "Bypass",
             "rootPaths": [str(self.other_root)],
             "primaryRootPath": str(self.other_root),
+            "expectedStateToken": self.project_state_token(),
         })
 
         server.CodeHandler.update_project(handler, "project-1")
@@ -687,6 +877,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "label": "Invalid",
             "rootPaths": [str(self.project_root), str(self.other_root)],
             "primaryRootPath": str(self.third_root),
+            "expectedStateToken": self.project_state_token(),
         })
 
         server.CodeHandler.update_project(handler, "project-1")
@@ -748,6 +939,7 @@ class TestProjectSchema(ProjectSessionTestCase):
             "label": "Duplicate",
             "rootPaths": [str(self.other_root), str(self.project_root), str(self.third_root)],
             "primaryRootPath": str(self.other_root),
+            "expectedStateToken": self.project_state_token(),
         })
 
         server.CodeHandler.update_project(handler, "project-1")

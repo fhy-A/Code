@@ -5132,8 +5132,10 @@ async function refreshProjects() {
         : projectForCurrentRoot();
       state.pendingProjectId = currentProject?.id || null;
     }
+    return state.projects;
   } catch (err) {
     console.error("Failed to refresh projects:", err);
+    return null;
   }
 }
 
@@ -6055,12 +6057,23 @@ let editingProjectId = null;
 let editingProjectRootPaths = [];
 let editingProjectOriginalPrimaryPath = "";
 let editingProjectRequestedPrimaryPath = "";
+let editingProjectStateToken = "";
 let pendingProjectDeleteId = null;
 let projectModalListenersBound = false;
 
 function projectFolderName(path) {
   const parts = String(path || "").replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || path || "";
+}
+
+function applyProjectEditState(project) {
+  editingProjectRootPaths = projectRootPaths(project);
+  editingProjectOriginalPrimaryPath = projectPrimaryPath(project);
+  editingProjectRequestedPrimaryPath = "";
+  editingProjectStateToken = String(project?.stateToken || "");
+  const input = document.getElementById("projectEditName");
+  if (input) input.value = projectDisplayName(project);
+  renderProjectEditFolders();
 }
 
 function projectFolderRemovalDisabled(index) {
@@ -6101,6 +6114,7 @@ function closeProjectEditModal() {
   editingProjectRootPaths = [];
   editingProjectOriginalPrimaryPath = "";
   editingProjectRequestedPrimaryPath = "";
+  editingProjectStateToken = "";
 }
 
 function closeProjectDeleteConfirm() {
@@ -6118,6 +6132,9 @@ function projectSessionMutationErrorMessage(error) {
     project_primary_conflict: "projectPrimaryConflict",
     project_primary_change_requires_explicit: "projectPrimaryChangeRequiresExplicit",
     project_primary_invalid: "projectPrimaryInvalid",
+    project_state_precondition_required: "projectStatePreconditionRequired",
+    project_state_precondition_invalid: "projectStatePreconditionRequired",
+    project_state_conflict: "projectStateConflict",
   })[code];
   return key ? t(key) : (error?.message || String(error));
 }
@@ -6200,7 +6217,11 @@ function ensureProjectModalListeners() {
     }
     const projectId = editingProjectId;
     const oldRootPaths = projectRootPaths(project);
-    const update = { label, rootPaths: editingProjectRootPaths };
+    const update = {
+      label,
+      rootPaths: editingProjectRootPaths,
+      expectedStateToken: editingProjectStateToken,
+    };
     if (editingProjectRequestedPrimaryPath) {
       update.primaryRootPath = editingProjectRequestedPrimaryPath;
     }
@@ -6227,6 +6248,19 @@ function ensureProjectModalListeners() {
       }
       showToast(t("projectSaved"), "success");
     } catch (error) {
+      if (error?.data?.errorCode === "project_state_conflict") {
+        const refreshed = await refreshProjects();
+        const authoritative = refreshed
+          ? state.projectsMap[projectId]
+          : error?.data?.project;
+        if (authoritative) {
+          editingProjectId = projectId;
+          applyProjectEditState(authoritative);
+          if (refreshed) renderSessions();
+        } else {
+          closeProjectEditModal();
+        }
+      }
       showToast(projectSessionMutationErrorMessage(error), "error");
     } finally {
       setProjectEditBusy(false);
@@ -6244,6 +6278,7 @@ function ensureProjectModalListeners() {
     editingProjectRootPaths = [];
     editingProjectOriginalPrimaryPath = "";
     editingProjectRequestedPrimaryPath = "";
+    editingProjectStateToken = "";
     document.getElementById("projectDeleteConfirmModal")?.classList.remove("hidden");
   });
 
@@ -6279,12 +6314,8 @@ function openProjectEditModal(projectId) {
   if (!project) return;
   ensureProjectModalListeners();
   editingProjectId = projectId;
-  editingProjectRootPaths = projectRootPaths(project);
-  editingProjectOriginalPrimaryPath = projectPrimaryPath(project);
-  editingProjectRequestedPrimaryPath = "";
+  applyProjectEditState(project);
   const input = document.getElementById("projectEditName");
-  if (input) input.value = projectDisplayName(project);
-  renderProjectEditFolders();
   setProjectEditBusy(false);
   document.getElementById("projectEditModal")?.classList.remove("hidden");
   setTimeout(() => input?.select(), 0);

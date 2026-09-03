@@ -544,6 +544,10 @@ async function browseHome(page, host) {
 
 async function exercisePrimaryEditor(page, host, seed, { currentPrimary, nextPrimary }) {
   const sessionBefore = await sessionRecord(host, seed.editorSession.id);
+  const projectBefore = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === seed.editorProject.id);
+  assert.match(projectBefore.stateToken, /^[0-9a-f]{64}$/);
   const header = page.locator(
     `.project-header[data-project-id="${seed.editorProject.id}"]`,
   );
@@ -583,6 +587,7 @@ async function exercisePrimaryEditor(page, host, seed, { currentPrimary, nextPri
   await modal.locator("#saveProjectEdit").click();
   const updateRequest = await updateRequestPromise;
   const updateBody = updateRequest.postDataJSON();
+  assert.equal(updateBody.expectedStateToken, projectBefore.stateToken);
   assert.equal(path.resolve(updateBody.primaryRootPath), path.resolve(nextPrimary));
   assert.deepEqual(
     updateBody.rootPaths.map((rootPath) => path.resolve(rootPath)),
@@ -603,10 +608,101 @@ async function exercisePrimaryEditor(page, host, seed, { currentPrimary, nextPri
     assert.equal(sessionAfter[key], sessionBefore[key], `Session ${key} changed during primary switch`);
   }
   assert.equal(path.resolve(updatedProject.rootPaths[1]), path.resolve(currentPrimary));
+  assert.notEqual(updatedProject.stateToken, projectBefore.stateToken);
   return {
     explicitIntent: "pass",
+    stateCas: "pass",
     oldPrimaryRetained: "pass",
     sameUpdateRemovalBlocked: "pass",
+    sessionLocationUnchanged: "pass",
+  };
+}
+
+async function exerciseProjectEditorConflict(page, host, seed) {
+  const projectBefore = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === seed.editorProject.id);
+  const sessionBefore = await sessionRecord(host, seed.editorSession.id);
+  const header = page.locator(
+    `.project-header[data-project-id="${seed.editorProject.id}"]`,
+  );
+  await header.click({ button: "right" });
+  const menu = page.locator(".project-context-menu");
+  await menu.waitFor({ state: "visible" });
+  await menu.locator('[data-action="edit"]').click();
+
+  const modal = page.locator("#projectEditModal");
+  await modal.waitFor({ state: "visible" });
+  const concurrentLabel = "Primary editor project refreshed";
+  const renamed = (await requestJson(
+    host.ready.codeUrl,
+    `/api/projects/${seed.editorProject.id}/rename`,
+    {
+      method: "POST",
+      body: JSON.stringify({ label: concurrentLabel }),
+    },
+  )).payload;
+  assert.notEqual(renamed.stateToken, projectBefore.stateToken);
+
+  let rows = modal.locator(".project-source-folder-row");
+  await rows.nth(1).locator('[data-project-folder-action="primary"]').click();
+  const conflictResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST"
+      && url.pathname === `/api/projects/${seed.editorProject.id}/update`;
+  });
+  const conflictRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST"
+      && url.pathname === `/api/projects/${seed.editorProject.id}/update`;
+  });
+  await modal.locator("#saveProjectEdit").click();
+  const [conflictRequest, conflictResponse] = await Promise.all([
+    conflictRequestPromise,
+    conflictResponsePromise,
+  ]);
+  assert.equal(conflictResponse.status(), 409);
+  assert.equal(
+    (await conflictResponse.json()).errorCode,
+    "project_state_conflict",
+  );
+  assert.equal(
+    conflictRequest.postDataJSON().expectedStateToken,
+    projectBefore.stateToken,
+  );
+
+  await waitUntil(
+    () => modal.locator("#projectEditName").inputValue(),
+    (value) => value === concurrentLabel,
+    "stale project editor did not load the authoritative label",
+  );
+  rows = modal.locator(".project-source-folder-row");
+  assert.equal(
+    await rows.nth(0).locator(".project-source-folder-name").textContent(),
+    path.basename(seed.editorSecondary),
+  );
+  assert.equal(await rows.nth(1).locator(".project-source-folder-remove").isDisabled(), false);
+  const conflictToast = page.locator(".toast.error").filter({
+    hasText: "This project changed elsewhere. The latest state is loaded; review it and try again",
+  });
+  await conflictToast.waitFor({ state: "visible" });
+
+  const projectAfter = (
+    await requestJson(host.ready.codeUrl, "/api/projects")
+  ).payload.data.find((project) => project.id === seed.editorProject.id);
+  assert.equal(path.resolve(projectAfter.rootPaths[0]), path.resolve(seed.editorSecondary));
+  assert.equal(projectAfter.label, concurrentLabel);
+  assert.equal(projectAfter.stateToken, renamed.stateToken);
+  const sessionAfter = await sessionRecord(host, seed.editorSession.id);
+  for (const key of ["projectId", "cwd", "revision", "updatedAt"]) {
+    assert.equal(sessionAfter[key], sessionBefore[key], `Session ${key} changed on CAS conflict`);
+  }
+  await modal.locator("#cancelProjectEdit").click();
+  await modal.waitFor({ state: "hidden" });
+  return {
+    staleRejected: "pass",
+    authoritativeStateReloaded: "pass",
+    noAutomaticRetry: "pass",
     sessionLocationUnchanged: "pass",
   };
 }
@@ -864,6 +960,7 @@ async function main() {
       currentPrimary: seed.editorPrimary,
       nextPrimary: seed.editorSecondary,
     });
+    const primaryEditorConflict = await exerciseProjectEditorConflict(page, host, seed);
     await page.close();
     page = null;
     await context.close();
@@ -888,6 +985,7 @@ async function main() {
         bundle: primaryEditorBundle,
         classic: primaryEditorClassic,
       },
+      primaryEditorConflict,
     };
     assert.deepEqual(pageErrors, []);
   } finally {

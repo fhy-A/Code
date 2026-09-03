@@ -28900,6 +28900,8 @@ process.stdout.write(JSON.stringify(samples));
         self.assertIn('data-project-folder-action="primary"', APP_SOURCE)
         self.assertIn("editingProjectOriginalPrimaryPath", APP_SOURCE)
         self.assertIn("editingProjectRequestedPrimaryPath", APP_SOURCE)
+        self.assertIn("editingProjectStateToken", APP_SOURCE)
+        self.assertIn("expectedStateToken: editingProjectStateToken", APP_SOURCE)
         self.assertIn(
             "update.primaryRootPath = editingProjectRequestedPrimaryPath;",
             APP_SOURCE,
@@ -28907,6 +28909,36 @@ process.stdout.write(JSON.stringify(samples));
         self.assertIn("projectFolderRemovalDisabled(index)", APP_SOURCE)
         self.assertIn("project-edit-card", STYLE_SOURCE)
         self.assertIn("project-delete-confirm-card", STYLE_SOURCE)
+
+    def test_project_editor_refreshes_authoritative_state_without_retrying_conflicts(self):
+        save_start = APP_SOURCE.index(
+            'document.getElementById("saveProjectEdit")?.addEventListener'
+        )
+        save_end = APP_SOURCE.index(
+            'document.getElementById("deleteProjectFromEdit")?.addEventListener',
+            save_start,
+        )
+        save_source = APP_SOURCE[save_start:save_end]
+
+        conflict = save_source.index(
+            'error?.data?.errorCode === "project_state_conflict"'
+        )
+        refresh = save_source.index("await refreshProjects();", conflict)
+        apply_state = save_source.index(
+            "applyProjectEditState(authoritative);",
+            refresh,
+        )
+        toast = save_source.index(
+            'showToast(projectSessionMutationErrorMessage(error), "error");',
+            apply_state,
+        )
+        self.assertLess(conflict, refresh)
+        self.assertLess(refresh, apply_state)
+        self.assertLess(apply_state, toast)
+        self.assertEqual(
+            save_source.count('apiJson("/api/projects/" + encodeURIComponent(projectId)'),
+            1,
+        )
 
     def test_project_inference_uses_only_the_deepest_primary_component_ancestor(self):
         helper_start = APP_SOURCE.index("function normalizePathIdentity(")
@@ -29168,6 +29200,8 @@ process.stdout.write(JSON.stringify({{
             "projectPrimaryConflict",
             "projectPrimaryChangeRequiresExplicit",
             "projectPrimaryInvalid",
+            "projectStatePreconditionRequired",
+            "projectStateConflict",
             "sessionProjectMenu",
             "sessionProjectCurrent",
             "sessionProjectNewAndMove",

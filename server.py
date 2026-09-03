@@ -12802,6 +12802,33 @@ def _normalize_project_record(project):
     }
 
 
+_PROJECT_STATE_TOKEN_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _project_state_token(project):
+    """Derive an opaque CAS token without adding persisted project state."""
+    normalized = _normalize_project_record(project)
+    if not normalized:
+        return ""
+    state = {
+        "id": normalized["id"],
+        "label": normalized["label"],
+        "rootPaths": [
+            _path_identity(root_path)
+            for root_path in normalized["rootPaths"]
+        ],
+    }
+    payload = json.dumps(
+        state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(
+        f"code-project-state/v1\0{payload}".encode("utf-8")
+    ).hexdigest()
+
+
 def _read_projects():
     """Return normalized Codex-style project records."""
     raw = read_json(PROJECTS_PATH, [])
@@ -12848,10 +12875,45 @@ def _project_api_record(project):
     primary_path = _project_primary_path(normalized)
     return {
         **normalized,
+        "stateToken": _project_state_token(normalized),
         "path": primary_path,
         "name": normalized["label"],
         "rootPath": primary_path,
     }
+
+
+def _project_update_precondition_error(project, body):
+    """Return a project CAS error payload/status, or None when allowed."""
+    explicit_primary = "primaryRootPath" in body
+    expected_present = "expectedStateToken" in body
+    expected_token = body.get("expectedStateToken")
+    current_project = _project_api_record(project)
+
+    if explicit_primary and not expected_present:
+        return ({
+            "error": "expectedStateToken is required for primary source folder changes",
+            "errorCode": "project_state_precondition_required",
+            "retryable": False,
+            "project": current_project,
+        }, 428)
+    if expected_present and (
+        not isinstance(expected_token, str)
+        or not _PROJECT_STATE_TOKEN_RE.fullmatch(expected_token)
+    ):
+        return ({
+            "error": "expectedStateToken must be a valid project state token",
+            "errorCode": "project_state_precondition_invalid",
+            "retryable": False,
+            "project": current_project,
+        }, 400)
+    if expected_present and expected_token != current_project["stateToken"]:
+        return ({
+            "error": "The project changed after this editor was opened",
+            "errorCode": "project_state_conflict",
+            "retryable": False,
+            "project": current_project,
+        }, 409)
+    return None
 
 
 def _find_project(project_id):
@@ -23671,18 +23733,37 @@ class CodeHandler(BaseHTTPRequestHandler):
         if not label:
             self.send_json({"error": "label required"}, 400)
             return
-        projects = _read_projects()
-        for p in projects:
-            if p.get("id") == project_id:
-                p["label"] = label
-                _write_projects(projects)
-                self.send_json(_project_api_record(p))
-                return
-        self.send_json({"error": "project not found"}, 404)
+        response = None
+        with _json_write_lock:
+            projects = _read_projects()
+            for project in projects:
+                if project.get("id") == project_id:
+                    project["label"] = label
+                    _write_projects(projects)
+                    response = _project_api_record(project)
+                    break
+        if response is None:
+            self.send_json({"error": "project not found"}, 404)
+            return
+        self.send_json(response)
 
     def update_project(self, project_id):
         """POST /api/projects/:id/update — update label and ordered source folders."""
         body = self.read_body_json()
+        if "primaryRootPath" in body or "expectedStateToken" in body:
+            with _json_write_lock:
+                project = _find_project(project_id)
+                if project is None:
+                    precondition_response = ({"error": "project not found"}, 404)
+                else:
+                    precondition_response = _project_update_precondition_error(
+                        project,
+                        body,
+                    )
+            if precondition_response is not None:
+                payload, status = precondition_response
+                self.send_json(payload, status)
+                return
         try:
             _ensure_agent_run_nonterminal_index_ready(wait=True)
         except AgentRunIndexError:
@@ -23713,6 +23794,11 @@ class CodeHandler(BaseHTTPRequestHandler):
         project = next((p for p in projects if p.get("id") == project_id), None)
         if not project:
             self.send_json({"error": "project not found"}, 404)
+            return None
+        precondition_response = _project_update_precondition_error(project, body)
+        if precondition_response is not None:
+            payload, status = precondition_response
+            self.send_json(payload, status)
             return None
 
         label_value = (

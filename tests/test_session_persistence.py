@@ -857,6 +857,9 @@ class TestSessionArchiveLifecycle(unittest.TestCase):
                 "label": "Archived project",
                 "rootPaths": [str(new_root), str(old_root)],
                 "primaryRootPath": str(new_root),
+                "expectedStateToken": server._project_api_record(
+                    server._find_project("archived-project")
+                )["stateToken"],
             })
             server.CodeHandler.update_project(switched, "archived-project")
             self.assertEqual(
