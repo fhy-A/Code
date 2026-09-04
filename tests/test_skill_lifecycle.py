@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 import server as server_mod
-from code_runtime import skill_lifecycle
+from code_runtime import skill_lifecycle, skill_outcome
 from code_runtime.skill_activation import SKILL_PROMPT_MARKER
 
 
@@ -569,6 +569,103 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
             record["activeSkillDependencies"],
         )
         self.assertEqual(persisted_again["skillEvidence"], record["skillEvidence"])
+
+    def test_skill_outcome_is_durable_canonical_shadow_but_never_public_or_authoritative(self):
+        original = self._create("outcome-shadow")
+        record = self._terminal_record(original)
+        expected = record["skillOutcome"]
+
+        self.assertEqual(expected["version"], 1)
+        self.assertEqual(expected["mode"], "shadow")
+        self.assertEqual(expected["aggregateState"], "terminal_gaps")
+        self.assertNotIn("skillOutcome", server_mod._agent_snapshot(original, 0))
+
+        stale = copy.deepcopy(record)
+        stale["skillOutcome"] = {"version": 999, "secret": "STALE_SHADOW_SENTINEL"}
+        restored_stale = server_mod._agent_run_from_record(stale)
+        stale_recomputed = server_mod._agent_run_record(restored_stale)["skillOutcome"]
+        self.assertEqual(stale_recomputed, expected)
+        self.assertNotIn("STALE_SHADOW_SENTINEL", json.dumps(stale_recomputed))
+
+        missing = copy.deepcopy(record)
+        missing.pop("skillOutcome")
+        restored_missing = server_mod._agent_run_from_record(missing)
+        self.assertEqual(
+            server_mod._agent_run_record(restored_missing)["skillOutcome"],
+            expected,
+        )
+
+        legacy = copy.deepcopy(record)
+        legacy.pop("skillLifecycle")
+        legacy.pop("skillOutcome")
+        restored_legacy = server_mod._agent_run_from_record(legacy)
+        legacy_record = server_mod._agent_run_record(restored_legacy)
+        self.assertNotIn("skillOutcome", legacy_record)
+        self.assertNotIn("skillOutcome", server_mod._agent_snapshot(restored_legacy, 0))
+
+    def test_skill_outcome_recomputes_after_interrupted_execution_recovery(self):
+        _write_skill(self.skills_dir, tool="run_command")
+        run = self._create(
+            "outcome-interrupted-command",
+            allowed_names=["run_command"],
+            permission_profile="accept",
+        )
+        run["tool_executions"] = {
+            "call-running": {
+                "name": "run_command",
+                "arguments": {"command": "never-executed"},
+                "command": "never-executed",
+                "status": "running",
+                "stdout": "",
+                "stderr": "",
+            },
+        }
+        record = server_mod._agent_run_record(run)
+        self.assertEqual(record["skillOutcome"]["summary"]["acceptedFailed"], 0)
+        record["skillOutcome"] = {"version": 1, "mode": "shadow", "stale": True}
+
+        restored = server_mod._agent_run_from_record(record)
+        execution = restored["tool_executions"]["call-running"]
+        self.assertEqual((execution["status"], execution["outcome"]), ("completed", "failed"))
+        recomputed = server_mod._agent_run_record(restored)["skillOutcome"]
+        requirement = recomputed["skills"][0]["requirements"][0]
+        self.assertEqual(requirement["acceptedFailed"], 1)
+        self.assertEqual(requirement["acceptedSucceeded"], 0)
+        self.assertEqual(requirement["missingCount"], 1)
+        self.assertEqual(recomputed["aggregateState"], "observing")
+        self.assertNotIn("stale", recomputed)
+
+    def test_skill_outcome_and_tool_executions_share_one_json_safe_record_source(self):
+        run = self._create("outcome-json-source")
+        run["tool_executions"] = {
+            7: {
+                "name": "read_file",
+                "status": "completed",
+                "outcome": "failed",
+                "result": {"ok": False},
+            },
+            "7": {
+                "name": "read_file",
+                "status": "completed",
+                "outcome": "succeeded",
+                "result": {"ok": True},
+            },
+        }
+
+        record = server_mod._agent_run_record(run)
+        reloaded = json.loads(json.dumps(record))
+        self.assertEqual(list(reloaded["toolExecutions"]), ["7"])
+        self.assertEqual(
+            reloaded["skillOutcome"]["summary"]["acceptedSucceeded"], 1,
+        )
+        self.assertEqual(
+            reloaded["skillOutcome"],
+            skill_outcome.project_skill_outcome(
+                reloaded["skillLifecycle"],
+                reloaded["toolExecutions"],
+                reloaded["status"],
+            ),
+        )
 
     def test_restart_loader_restores_lifecycle_and_does_not_reread_skill(self):
         original = self._create("restart-loader")

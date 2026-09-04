@@ -203,6 +203,7 @@ class TestHealthAndConfig(TestServerFixture):
             [skill_name, second_skill_name],
         )
         self.assertEqual(len(snapshot["skillEvidence"]["skills"]), 2)
+        self.assertNotIn("skillOutcome", snapshot)
         persisted = server_mod._agent_run_path(run_id).read_text(encoding="utf-8")
         self.assertEqual(json.loads(persisted)["version"], 5)
         self.assertNotIn(secret, persisted)

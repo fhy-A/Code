@@ -25,6 +25,7 @@ RUNTIME_MODULES = (
     "skill_activation",
     "skill_dependencies",
     "skill_lifecycle",
+    "skill_outcome",
     "skill_registry",
     "skill_resources",
     "windows_explorer",

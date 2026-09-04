@@ -36,6 +36,7 @@ from code_runtime import (
     context_window,
     data_dir_owner,
     skill_lifecycle,
+    skill_outcome,
     windows_explorer,
 )
 from code_runtime.bundled_skills import delete_installed_skill
@@ -3432,6 +3433,7 @@ def _agent_run_record(run):
     result = _json_clone(run.get("result") or {})
     if isinstance(result, dict):
         result.pop("reasoning", None)
+    tool_executions_record = _json_clone(run.get("tool_executions") or {})
     context_failure_attribution = context_calibration.normalize_context_failure_attribution(
         run.get("context_failure_attribution")
     )
@@ -3517,9 +3519,12 @@ def _agent_run_record(run):
            )) else {}),
         "pendingSteers": _json_clone(run.get("pending_steers") or []),
         "steerReceipts": _json_clone(run.get("steer_receipts") or []),
-        "toolExecutions": _json_clone(run.get("tool_executions") or {}),
+        "toolExecutions": tool_executions_record,
         **({"skillLifecycle": skill_lifecycle_record}
            if skill_lifecycle_record else {}),
+        **({"skillOutcome": skill_outcome.project_skill_outcome(
+            skill_lifecycle_record, tool_executions_record, run.get("status"),
+        )} if skill_lifecycle_record else {}),
         **({"skillEvidence": _agent_skill_evidence_record(run)}
            if (
                isinstance(run.get("skill_evidence_observer"), dict)
