@@ -80,9 +80,15 @@ from code_runtime.skill_activation import (
     normalize_allowed_tools_envelope,
     prepare_skill_activation,
 )
-from code_runtime.skill_resources import SkillResourceError, resolve_skill_resources
+from code_runtime.skill_resources import (
+    SkillResourceError,
+    resolve_skill_resources,
+    resolve_skill_resources_with_identity,
+)
 from code_runtime.skill_registry import (
+    SkillRegistryError,
     build_skill_registry_snapshot,
+    parse_skill_document,
     resolve_skill_shadow,
 )
 
@@ -8648,7 +8654,17 @@ def _execute_agent_pending_tools(run):
                 else:
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
-                    result = execute_registered_tool(name, call["arguments"])
+                    if (
+                        run.get("skill_lifecycle") is not None
+                        and name in {
+                            "use_skill", "check_skill_dependencies", "read_skill_resource",
+                        }
+                    ):
+                        result = _execute_agent_skill_lifecycle_tool(
+                            run, name, call["arguments"],
+                        )
+                    else:
+                        result = execute_registered_tool(name, call["arguments"])
             except _AgentToolResult as exc:
                 result = exc.result
                 execution["error"] = str(result.get("error") or "")
@@ -8672,6 +8688,7 @@ def _execute_agent_pending_tools(run):
                     _agent_workspace_context.workspace_roots = previous_workspace_roots
             if (
                 not reused_execution
+                and run.get("skill_lifecycle") is None
                 and name in {"check_skill_dependencies", "use_skill"}
                 and isinstance(result, dict)
             ):
@@ -15818,6 +15835,204 @@ def _agent_runtime_path_safe(path, root, *, expect_file):
         return candidate
     except (OSError, ValueError):
         return None
+
+
+def _agent_skill_lifecycle_error(action, code):
+    return {
+        "ok": False,
+        "action": action,
+        "errorCode": code,
+        "retryable": False,
+        "error": "Active Skill access failed its frozen lifecycle checks.",
+    }
+
+
+def _agent_skill_changed(kind):
+    return skill_lifecycle.SkillLifecycleError(
+        f"skill_lifecycle_{kind}_changed", f"Active Skill {kind} changed",
+    )
+
+
+def _agent_lifecycle_skill_snapshot(run, skill_name):
+    """Revalidate one selected Skill by its frozen exact path, without discovery."""
+    lifecycle = _agent_canonical_skill_lifecycle(run)
+    selected = skill_lifecycle.require_active_skill(lifecycle, skill_name)
+    directory = selected["source"]["directory"]
+    skill_dir = _agent_runtime_path_safe(
+        SKILLS_DIR / directory, SKILLS_DIR, expect_file=False,
+    )
+    skill_path = _agent_runtime_path_safe(
+        SKILLS_DIR / directory / "SKILL.md", SKILLS_DIR, expect_file=True,
+    )
+    if skill_dir is None or skill_path is None or skill_path.stat().st_size > MAX_TOOL_READ_BYTES:
+        raise _agent_skill_changed("identity")
+    try:
+        raw = skill_path.read_bytes()
+        parsed = parse_skill_document(raw.decode("utf-8-sig"))
+    except (OSError, UnicodeError, SkillRegistryError) as exc:
+        raise _agent_skill_changed("identity") from exc
+    meta = parsed.get("meta") or {}
+    metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    version = metadata.get("version") if isinstance(metadata.get("version"), str) else meta.get("version")
+    if version in (None, ""):
+        version = ""
+    elif isinstance(version, (str, int, float)) and not isinstance(version, bool):
+        version = str(version).strip()[:128]
+    else:
+        version = ""
+    content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+    descriptor_identity = {
+        "source": f"installed:{directory}",
+        "name": str(meta.get("name") or "").strip(),
+        "version": version,
+        "contentHash": content_hash,
+    }
+    descriptor_id = "sd1_" + hashlib.sha256(json.dumps(
+        descriptor_identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    if (
+        content_hash != selected["skillContentHash"]
+        or descriptor_identity["name"] != selected["name"]
+        or descriptor_id != selected["source"]["descriptorId"]
+    ):
+        raise _agent_skill_changed("identity")
+    try:
+        manifest = resolve_skill_manifest(
+            skill_dir, bundled_skills_dir=APP_DIR / "data" / "skills",
+        )
+    except DependencyManifestError as exc:
+        raise _agent_skill_changed("dependency") from exc
+    capabilities = sorted({
+        str(item.get("id") or "")
+        for item in (manifest or {}).get("capabilities") or []
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(item.get("id") or ""))
+    })
+    dependency = (
+        {
+            "state": "ready",
+            "manifestHash": "sha256:" + hashlib.sha256(json.dumps(
+                manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+            "capabilities": capabilities,
+        }
+        if manifest is not None else {"state": "missing", "capabilities": []}
+    )
+    if dependency != selected["dependency"]:
+        raise _agent_skill_changed("dependency")
+    try:
+        runtime_resources, resources = resolve_skill_resources_with_identity(
+            directory, SKILLS_DIR, APP_DIR / "data" / "skills",
+        )
+    except SkillResourceError as exc:
+        raise _agent_skill_changed("resource") from exc
+    expected_resources = selected["resources"]
+    if set(expected_resources) == {"state", "contractHash"}:
+        if any(
+            expected_resources.get(key) != resources.get(key)
+            for key in ("state", "contractHash")
+        ):
+            raise _agent_skill_changed("resource")
+        runtime_resources = None
+    elif resources != expected_resources:
+        raise _agent_skill_changed("resource")
+    return {
+        "selected": selected,
+        "skillDir": skill_dir,
+        "runtimeResources": runtime_resources,
+    }
+
+
+def _agent_lifecycle_dependency_status(snapshot, capability=""):
+    skill_dir = snapshot["skillDir"]
+    inspection = inspect_skill_directory(
+        skill_dir,
+        bundled_skills_dir=APP_DIR / "data" / "skills",
+        app_dir=APP_DIR,
+        data_dir=DATA_DIR,
+        capability_id=capability,
+    )
+    return _apply_ppt_master_dependency_integrity(skill_dir, inspection, capability)
+
+
+def _execute_agent_skill_lifecycle_tool(run, action, arguments):
+    target = str(arguments.get("skill" if action == "read_skill_resource" else "name") or "").strip()
+    try:
+        snapshot = _agent_lifecycle_skill_snapshot(run, target)
+        selected = snapshot["selected"]
+        if action == "read_skill_resource":
+            relative = skill_lifecycle.normalize_text_resource_path(arguments.get("file"))
+            path = _agent_runtime_path_safe(
+                snapshot["skillDir"].joinpath(*relative.split("/")),
+                snapshot["skillDir"],
+                expect_file=True,
+            )
+            if path is None or path.stat().st_size > MAX_TOOL_READ_BYTES:
+                raise skill_lifecycle.SkillLifecycleError(
+                    "skill_lifecycle_reference_invalid", "Skill reference is invalid",
+                )
+            raw = path.read_bytes()
+            content = raw.decode("utf-8-sig")
+            content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+            with run["persist_lock"]:
+                with run["condition"]:
+                    previous = run["skill_lifecycle"]
+                    previous_updated_at = run.get("updated_at")
+                    updated = skill_lifecycle.bind_text_resource(
+                        previous, selected["name"], relative, content_hash,
+                    )
+                    changed = updated != previous
+                    if changed:
+                        run["skill_lifecycle"] = updated
+                        run["_skill_lifecycle_view"] = updated
+                        run["updated_at"] = now_iso()
+                if changed:
+                    try:
+                        _persist_agent_run(run)
+                    except Exception as exc:
+                        with run["condition"]:
+                            run["skill_lifecycle"] = previous
+                            run["_skill_lifecycle_view"] = previous
+                            run["updated_at"] = previous_updated_at
+                        raise skill_lifecycle.SkillLifecycleError(
+                            "skill_lifecycle_persist_failed", "Skill reference was not persisted",
+                        ) from exc
+            return {
+                "ok": True,
+                "action": action,
+                "skill": selected["name"],
+                "file": relative,
+                "content": content,
+            }
+        if action == "check_skill_dependencies":
+            capability = str(arguments.get("capability") or "").strip()
+            status = _agent_lifecycle_dependency_status(snapshot, capability)
+            return {
+                "ok": True,
+                "action": action,
+                "skill": selected["name"],
+                **status,
+            }
+        result = {
+            "ok": True,
+            "action": action,
+            "name": selected["name"],
+            "alreadyActive": True,
+        }
+        if snapshot["runtimeResources"] is not None:
+            result["runtimeResources"] = snapshot["runtimeResources"]
+        if selected["dependency"]["state"] == "ready":
+            result["dependencies"] = _agent_lifecycle_dependency_status(snapshot)
+        return result
+    except skill_lifecycle.SkillLifecycleError as exc:
+        return _agent_skill_lifecycle_error(action, exc.code)
+    except (OSError, UnicodeError, DependencyManifestError):
+        return _agent_skill_lifecycle_error(action, "skill_lifecycle_access_failed")
 
 
 def _agent_skill_runtime_error(run, reason, *, stale, skills):

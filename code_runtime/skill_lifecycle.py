@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import json
+from pathlib import PurePosixPath
 import re
 
 from code_runtime.skill_registry import SAFE_DIRECTORY_RE, SAFE_NAME_RE
 
 LIFECYCLE_SCHEMA_VERSION = 1
 ACTIVATION_SCHEMA_VERSION = 1
-ACCESS_SCHEMA_VERSION = 1
+ACCESS_SCHEMA_VERSION = 2
+LEGACY_ACCESS_SCHEMA_VERSION = 1
 LIFECYCLE_MODE = "canonical-v1"
 MAX_SELECTED_SKILLS = 2
 MAX_CAPABILITIES = 64
+MAX_RESOURCE_BINDINGS = 64
 MAX_EVIDENCE_CONTRACT_BYTES = 64 * 1024
 MAX_LIFECYCLE_BYTES = 256 * 1024
 _HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _DESCRIPTOR_ID_RE = re.compile(r"sd1_[0-9a-f]{64}")
 _CAPABILITY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_RESOURCE_SOURCE = {"custom", "installed", "bundled-fallback"}
 
 
 class SkillLifecycleError(ValueError):
@@ -156,10 +160,74 @@ def _normalize_resources(value):
         return {"state": "missing"}
     if state != "ready":
         _invalid("Skill resource state is invalid")
-    _require_exact_keys(value, {"state", "contractHash"}, "Ready Skill resources")
-    return {"state": "ready", "contractHash": _normalize_hash(
+    keys = set(value)
+    if keys not in ({"state", "contractHash"}, {"state", "contractHash", "source"}):
+        _invalid("Ready Skill resources is invalid")
+    result = {"state": "ready", "contractHash": _normalize_hash(
         value.get("contractHash"), "Skill resource contract hash",
     )}
+    if "source" in value:
+        if value.get("source") not in _RESOURCE_SOURCE:
+            _invalid("Skill resource source is invalid")
+        result["source"] = value["source"]
+    return result
+
+
+def normalize_text_resource_path(value) -> str:
+    if not isinstance(value, str):
+        raise SkillLifecycleError(
+            "skill_lifecycle_reference_invalid", "Skill reference is invalid",
+        )
+    raw = value.replace("\\", "/")
+    path = PurePosixPath(raw)
+    if (
+        not raw
+        or raw.startswith("/")
+        or len(raw.encode("utf-8")) > 1024
+        or path.is_absolute()
+        or raw.casefold() == "skill.md"
+        or any(
+            part in {"", ".", ".."} or part.casefold() == "__pycache__"
+            or part.startswith(".")
+            or ":" in part
+            or part.rstrip(" .") != part
+            for part in path.parts
+        )
+    ):
+        raise SkillLifecycleError(
+            "skill_lifecycle_reference_invalid", "Skill reference is invalid",
+        )
+    return path.as_posix()
+
+
+def _normalize_resource_bindings(value, selected_names):
+    if not isinstance(value, list) or len(value) > MAX_RESOURCE_BINDINGS:
+        _invalid("Skill access bindings are invalid")
+    bindings = []
+    keys = set()
+    for item in value:
+        _require_exact_keys(
+            item, {"kind", "skill", "file", "contentHash"}, "Skill access binding",
+        )
+        skill = item.get("skill")
+        if item.get("kind") != "text" or skill not in selected_names:
+            _invalid("Skill access binding identity is invalid")
+        binding = {
+            "kind": "text",
+            "skill": skill,
+            "file": normalize_text_resource_path(item.get("file")),
+            "contentHash": _normalize_hash(
+                item.get("contentHash"), "Skill access binding content hash",
+            ),
+        }
+        key = (skill, binding["file"].casefold())
+        if key in keys:
+            _invalid("Skill access bindings are duplicated")
+        keys.add(key)
+        bindings.append(binding)
+    if bindings != sorted(bindings, key=lambda item: (item["skill"], item["file"].casefold())):
+        _invalid("Skill access bindings are not canonical")
+    return bindings
 
 
 def _normalize_selected(value, index):
@@ -240,14 +308,24 @@ def normalize_skill_lifecycle(value) -> dict:
     _require_exact_keys(
         access, {"schemaVersion", "resourceBindings"}, "Skill access lifecycle",
     )
-    _require_version(
-        access.get("schemaVersion"),
-        ACCESS_SCHEMA_VERSION,
-        "skill_lifecycle_access_version_unsupported",
-        "Skill access lifecycle version",
-    )
-    if access.get("resourceBindings") != []:
-        _invalid("Skill access bindings are reserved in lifecycle v1")
+    access_version = access.get("schemaVersion")
+    if isinstance(access_version, bool):
+        _require_version(access_version, ACCESS_SCHEMA_VERSION,
+                         "skill_lifecycle_access_version_unsupported",
+                         "Skill access lifecycle version")
+    if access_version == LEGACY_ACCESS_SCHEMA_VERSION:
+        if access.get("resourceBindings") != []:
+            _invalid("Legacy Skill access bindings must be empty")
+        bindings = []
+    elif access_version == ACCESS_SCHEMA_VERSION:
+        bindings = _normalize_resource_bindings(access.get("resourceBindings"), set(names))
+    else:
+        _require_version(
+            access_version,
+            ACCESS_SCHEMA_VERSION,
+            "skill_lifecycle_access_version_unsupported",
+            "Skill access lifecycle version",
+        )
 
     return _json_clone({
         "schemaVersion": LIFECYCLE_SCHEMA_VERSION,
@@ -258,7 +336,7 @@ def normalize_skill_lifecycle(value) -> dict:
             "outcome": outcome,
             "selected": selected,
         },
-        "access": {"schemaVersion": ACCESS_SCHEMA_VERSION, "resourceBindings": []},
+        "access": {"schemaVersion": access_version, "resourceBindings": bindings},
     })
 
 
@@ -302,6 +380,9 @@ def build_skill_lifecycle(activation, *, evidence_observers) -> dict:
             evidence_record = {"state": "missing"}
         else:
             _invalid("Canonical Skill evidence projection conflicts with its capture")
+        resource_identity = capture.get("resourceIdentity")
+        if (resource_identity or {}).get("state") == "ready" and "source" not in resource_identity:
+            _invalid("Canonical Skill resource identity is incomplete")
         selected.append({
             "name": capture.get("name"),
             "role": "owner" if index == 0 else "modifier",
@@ -309,7 +390,7 @@ def build_skill_lifecycle(activation, *, evidence_observers) -> dict:
             "skillContentHash": capture.get("contentHash"),
             "evidence": evidence_record,
             "dependency": capture.get("dependencyIdentity"),
-            "resources": capture.get("resourceIdentity"),
+            "resources": resource_identity,
         })
     return normalize_skill_lifecycle({
         "schemaVersion": LIFECYCLE_SCHEMA_VERSION,
@@ -322,6 +403,47 @@ def build_skill_lifecycle(activation, *, evidence_observers) -> dict:
         },
         "access": {"schemaVersion": ACCESS_SCHEMA_VERSION, "resourceBindings": []},
     })
+
+
+def require_active_skill(value, name) -> dict:
+    lifecycle = normalize_skill_lifecycle(value)
+    requested = str(name or "").strip()
+    for selected in lifecycle["activation"]["selected"]:
+        if selected["name"] == requested:
+            return _json_clone(selected)
+    raise SkillLifecycleError(
+        "skill_lifecycle_skill_not_active", "Requested Skill is not active",
+    )
+
+
+def bind_text_resource(value, skill, file, content_hash) -> dict:
+    lifecycle = normalize_skill_lifecycle(value)
+    selected = require_active_skill(lifecycle, skill)
+    normalized_file = normalize_text_resource_path(file)
+    normalized_hash = _normalize_hash(content_hash, "Skill reference content hash")
+    bindings = list(lifecycle["access"]["resourceBindings"])
+    for binding in bindings:
+        if binding["skill"] == selected["name"] and binding["file"].casefold() == normalized_file.casefold():
+            if binding["contentHash"] != normalized_hash:
+                raise SkillLifecycleError(
+                    "skill_lifecycle_reference_changed", "Skill reference changed",
+                )
+            return lifecycle
+    if len(bindings) >= MAX_RESOURCE_BINDINGS:
+        raise SkillLifecycleError(
+            "skill_lifecycle_reference_limit", "Skill reference limit is reached",
+        )
+    bindings.append({
+        "kind": "text",
+        "skill": selected["name"],
+        "file": normalized_file,
+        "contentHash": normalized_hash,
+    })
+    lifecycle["access"] = {
+        "schemaVersion": ACCESS_SCHEMA_VERSION,
+        "resourceBindings": sorted(bindings, key=lambda item: (item["skill"], item["file"].casefold())),
+    }
+    return normalize_skill_lifecycle(lifecycle)
 
 
 def project_skill_lifecycle(value) -> dict:

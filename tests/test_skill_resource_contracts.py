@@ -12,6 +12,7 @@ from code_runtime.skill_resources import (
     SkillResourceError,
     audit_bundled_skill_resources,
     resolve_skill_resources,
+    resolve_skill_resources_with_identity,
 )
 
 
@@ -115,6 +116,39 @@ class TestRelocatableSkillResourceContracts(unittest.TestCase):
         )
         self.assertIn("do not search", resolved["instructions"].lower())
         self.assertEqual(_snapshot(custom_skill), before)
+
+    def test_resource_identity_pins_effective_contract_without_persisting_paths(self):
+        custom_skill = _write_skill(self.installed, "custom-identity", custom=True)
+
+        resolved, identity = resolve_skill_resources_with_identity(
+            "custom-identity", self.installed, self.bundled,
+        )
+
+        expected = "sha256:" + hashlib.sha256(
+            (custom_skill / "code-resources.json").read_bytes()
+        ).hexdigest()
+        self.assertEqual(identity, {
+            "state": "ready",
+            "contractHash": expected,
+            "source": "custom",
+        })
+        self.assertEqual(resolved["source"], "custom")
+        self.assertNotIn(str(self.root), json.dumps(identity))
+
+    def test_uncontracted_custom_skill_has_missing_pinned_identity(self):
+        skill = self.installed / "custom-no-pinned-resources"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            "---\nname: custom-no-pinned-resources\ndescription: test\n---\nNo helpers.\n",
+            encoding="utf-8",
+        )
+
+        resolved, identity = resolve_skill_resources_with_identity(
+            "custom-no-pinned-resources", self.installed, self.bundled,
+        )
+
+        self.assertEqual(resolved["source"], "custom-no-resources")
+        self.assertEqual(identity, {"state": "missing"})
 
     def test_relocated_custom_contract_uses_only_its_moved_active_path(self):
         custom_skill = _write_skill(self.installed, "custom-tools", custom=True)

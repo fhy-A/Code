@@ -60,6 +60,15 @@ SKILL_EVIDENCE_USER = "H4_SKILL_EVIDENCE_USER"
 SKILL_EVIDENCE_CANDIDATE = "H4_SKILL_EVIDENCE_CANDIDATE"
 SKILL_EVIDENCE_FINAL = "H4_SKILL_EVIDENCE_FINAL"
 SKILL_EVIDENCE_CALL_ID = "h4-skill-evidence-read"
+SKILL_ACCESS_USER = "H4_SKILL_ACCESS_USER"
+SKILL_ACCESS_FINAL = "H4_SKILL_ACCESS_FINAL"
+SKILL_ACCESS_NAME = "h4-skill-access"
+SKILL_ACCESS_CALL_IDS = (
+    "h4-skill-access-use",
+    "h4-skill-access-read",
+    "h4-skill-access-check",
+    "h4-skill-access-nonactive",
+)
 IMAGE_MODEL_ID = "h4-image-model"
 IMAGE_GENERATION_USER = "H4_IMAGE_GENERATION_USER"
 IMAGE_GENERATION_FINAL = "H4_IMAGE_GENERATION_FINAL"
@@ -1100,6 +1109,11 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             for message in messages
         )
         return ("skill-evidence-call" if continued else "skill-evidence-candidate"), False
+    if SKILL_ACCESS_USER in joined_user_text:
+        completed = completed_tool_call_ids & set(SKILL_ACCESS_CALL_IDS)
+        if len(completed) >= len(SKILL_ACCESS_CALL_IDS):
+            return "skill-access-final", True
+        return f"skill-access-call-{len(completed) + 1}", bool(completed)
     if PARALLEL_VISUAL_PROTOCOL_USER in joined_user_text:
         completed = {
             str(message.get("tool_call_id") or "")
@@ -2939,7 +2953,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "image-history-first-call", "image-history-second-call",
             "image-history-export-first-call", "image-history-export-second-call",
             "image-history-process-call",
-        ) or scenario.startswith("repeated-range-failure-call-") \
+        ) or scenario.startswith("skill-access-call-") \
+                or scenario.startswith("repeated-range-failure-call-") \
                 or scenario.startswith("forced-final-model-failure-call-") \
                 or scenario.startswith("forced-final-unusable-tool-call-") \
                 or scenario.startswith("argument-isolation-call-") \
@@ -2991,7 +3006,29 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     "arguments": json.dumps({"path": READ_PATH}, separators=(",", ":")),
                 },
             }]
-            if scenario == "parallel-visual-protocol-call":
+            if scenario.startswith("skill-access-call-"):
+                call_number = int(scenario.rsplit("-", 1)[-1])
+                calls = (
+                    ("use_skill", {"name": SKILL_ACCESS_NAME}),
+                    ("read_skill_resource", {
+                        "skill": SKILL_ACCESS_NAME, "file": "references/guide.md",
+                    }),
+                    ("check_skill_dependencies", {
+                        "name": SKILL_ACCESS_NAME, "capability": "inspect",
+                    }),
+                    ("use_skill", {"name": "h4-nonactive"}),
+                )
+                name, arguments = calls[call_number - 1]
+                tool_calls = [{
+                    "index": 0,
+                    "id": SKILL_ACCESS_CALL_IDS[call_number - 1],
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, separators=(",", ":")),
+                    },
+                }]
+            elif scenario == "parallel-visual-protocol-call":
                 tool_calls = [
                     {
                         "index": index,
@@ -3646,6 +3683,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "runtime-recovery-final": RUNTIME_RECOVERY_FINAL,
                 "skill-evidence-candidate": SKILL_EVIDENCE_CANDIDATE,
                 "skill-evidence-final": SKILL_EVIDENCE_FINAL,
+                "skill-access-final": SKILL_ACCESS_FINAL,
                 "image-generation-final": IMAGE_GENERATION_FINAL,
                 "image-batch-final": IMAGE_BATCH_FINAL,
                 "image-batch-partial-final": IMAGE_BATCH_PARTIAL_FINAL,
@@ -4859,6 +4897,10 @@ def main() -> int:
                 })
 
     def counted_execute_registered_tool(action, payload, *, _arguments_validated=False):
+        if action == "use_skill" and payload == {"name": SKILL_ACCESS_NAME}:
+            return original_execute_registered_tool(
+                action, payload, _arguments_validated=_arguments_validated,
+            )
         if action == "propose_edit":
             if (
                 not isinstance(payload, dict)

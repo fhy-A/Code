@@ -566,6 +566,42 @@ def resolve_skill_resources(skill_name, installed_skills_dir, bundled_skills_dir
         return _resolve_custom_resources(skill_name, installed_skills_dir)
 
 
+def resolve_skill_resources_with_identity(skill_name, installed_skills_dir, bundled_skills_dir):
+    """Resolve runtime paths plus the credential-free effective contract identity."""
+    resolved = resolve_skill_resources(
+        skill_name, installed_skills_dir, bundled_skills_dir,
+    )
+    if resolved is None or resolved.get("source") == "custom-no-resources":
+        return resolved, {"state": "missing"}
+    source = resolved.get("source")
+    if source not in {"custom", "installed", "bundled-fallback"}:
+        raise SkillResourceError("resource_contract_invalid")
+    contract_root = (
+        Path(installed_skills_dir)
+        if source == "custom"
+        else Path(bundled_skills_dir)
+    )
+    contract_dir = contract_root / skill_name
+    contract = _load_resource_contract(
+        skill_name, contract_dir, custom=source == "custom",
+    )
+    if contract is None:
+        raise SkillResourceError("resource_contract_missing")
+    manifest = _contained_regular_file(
+        contract_dir,
+        PurePosixPath(RESOURCE_MANIFEST_NAME),
+        missing_code="resource_contract_missing",
+    )
+    raw = manifest.read_bytes()
+    if len(raw) > MAX_RESOURCE_MANIFEST_BYTES:
+        raise SkillResourceError("resource_contract_invalid")
+    return resolved, {
+        "state": "ready",
+        "contractHash": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "source": source,
+    }
+
+
 def audit_bundled_skill_resources(bundled_skills_dir):
     """Audit only explicit bundled resource contracts under one Code bundle.
 

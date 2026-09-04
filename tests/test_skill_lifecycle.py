@@ -50,7 +50,11 @@ def _capture(name="alpha", *, role_index=0, evidence=True, dependency=True, reso
             if dependency else {"state": "missing", "capabilities": []}
         ),
         "resourceIdentity": (
-            {"state": "ready", "contractHash": _sha(f"resources:{name}")}
+            {
+                "state": "ready",
+                "contractHash": _sha(f"resources:{name}"),
+                "source": "custom",
+            }
             if resources else {"state": "missing"}
         ),
     }
@@ -102,10 +106,23 @@ def _write_skill(root, name="alpha", *, sidecars=True, tool="read_file"):
                 "inspect": {"required": [], "optional": []},
             },
         }), encoding="utf-8")
+        helper = skill_dir / "scripts" / "run.py"
+        helper.parent.mkdir(exist_ok=True)
+        helper.write_text("print('lifecycle helper')\n", encoding="utf-8")
         (skill_dir / "code-resources.json").write_text(json.dumps({
             "schemaVersion": 1,
             "skill": name,
-            "resources": [],
+            "resources": [{
+                "id": "run-helper",
+                "path": "scripts/run.py",
+                "sha256": hashlib.sha256(
+                    helper.read_bytes().replace(b"\r\n", b"\n")
+                ).hexdigest(),
+                "kind": "python",
+                "protocol": "lifecycle-test/v1",
+                "modelVisible": True,
+                "arguments": [],
+            }],
         }), encoding="utf-8")
     return skill_dir
 
@@ -161,7 +178,7 @@ class TestSkillLifecycleContract(unittest.TestCase):
         )
         self.assertFalse(projection["explicit"])
         self.assertEqual(projection["captures"][0]["evidence"], activation["captures"][0]["evidence"])
-        self.assertEqual(lifecycle["access"], {"schemaVersion": 1, "resourceBindings": []})
+        self.assertEqual(lifecycle["access"], {"schemaVersion": 2, "resourceBindings": []})
         with self.assertRaises(skill_lifecycle.SkillLifecycleError):
             skill_lifecycle.build_skill_lifecycle(activation, evidence_observers=[])
 
@@ -220,7 +237,7 @@ class TestSkillLifecycleContract(unittest.TestCase):
             (
                 "access",
                 ("access", "schemaVersion"),
-                2,
+                3,
                 "skill_lifecycle_access_version_unsupported",
             ),
         ]
@@ -494,6 +511,7 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
         self.assertEqual(selected["dependency"]["state"], "ready")
         self.assertEqual(selected["dependency"]["capabilities"], ["inspect"])
         self.assertEqual(selected["resources"]["state"], "ready")
+        self.assertEqual(selected["resources"]["source"], "custom")
         self.assertEqual(lifecycle["access"]["resourceBindings"], [])
 
         projection = skill_lifecycle.project_skill_lifecycle(lifecycle)

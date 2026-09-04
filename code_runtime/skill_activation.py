@@ -26,6 +26,10 @@ from code_runtime.skill_registry import (
     project_skill_tools,
     resolve_skill_shadow,
 )
+from code_runtime.skill_resources import (
+    SkillResourceError,
+    resolve_skill_resources_with_identity,
+)
 
 
 ACTIVATION_PROTOCOL = "canonical-v1"
@@ -308,9 +312,17 @@ def _capture_selected_skill(
     _capture_sidecar(
         resolved_dir, descriptor, "dependencies", "dependencies.json",
     )
-    resource_summary, _ = _capture_sidecar(
+    _capture_sidecar(
         resolved_dir, descriptor, "resources", "code-resources.json",
     )
+    try:
+        _, resource_identity = resolve_skill_resources_with_identity(
+            directory, installed_root, bundled_root,
+        )
+    except SkillResourceError as exc:
+        raise SkillActivationError(
+            "activation_resources_invalid", "Selected Skill resources are invalid",
+        ) from exc
     stable_raw = _require_regular_file(
         resolved_dir / "SKILL.md", max_bytes=MAX_SKILL_BYTES, code="activation_skill_changed",
     )
@@ -348,14 +360,7 @@ def _capture_selected_skill(
         },
         "evidenceIdentity": evidence_identity,
         "dependencyIdentity": dependency_identity,
-        "resourceIdentity": (
-            {
-                "state": "ready",
-                "contractHash": resource_summary["contentHash"],
-            }
-            if resource_summary["state"] == "ready"
-            else {"state": "missing"}
-        ),
+        "resourceIdentity": resource_identity,
         "dependencyCapabilities": sorted(set(capability_ids)),
     }
 
@@ -393,14 +398,19 @@ def _instruction(captures: list[dict], *, explicit: bool) -> str:
     if explicit:
         capture = captures[0]
         return (
-            f'=== 已激活 Skill: {capture["name"]}（正文已加载，不要再次调用 use_skill） ===\n'
+            f'=== 已激活 Skill: {capture["name"]}（正文已加载） ===\n'
+            "不得激活其他 Skill；仅当正文明确需要受信任运行时资源时，才可为当前 Skill 调用 use_skill，且该工具不会重复返回正文。\n"
             f"{_format_skill(capture)}"
         )
     bodies = "\n\n---\n\n".join(
         f'[Skill: {capture["name"]}]\n{_format_skill(capture)}'
         for capture in captures
     )
-    return f"=== 匹配的 Skill（正文已加载，不要再次调用 use_skill） ===\n{bodies}"
+    return (
+        "=== 匹配的 Skill（正文已加载） ===\n"
+        "不得激活其他 Skill；仅当正文明确需要受信任运行时资源时，才可为已激活 Skill 调用 use_skill，且该工具不会重复返回正文。\n"
+        f"{bodies}"
+    )
 
 
 def _replace_segment(text: str, segment: str, replacement: str) -> str:
