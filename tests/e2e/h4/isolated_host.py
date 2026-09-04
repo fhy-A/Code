@@ -60,6 +60,10 @@ SKILL_EVIDENCE_USER = "H4_SKILL_EVIDENCE_USER"
 SKILL_EVIDENCE_CANDIDATE = "H4_SKILL_EVIDENCE_CANDIDATE"
 SKILL_EVIDENCE_FINAL = "H4_SKILL_EVIDENCE_FINAL"
 SKILL_EVIDENCE_CALL_ID = "h4-skill-evidence-read"
+SKILL_COMPLETION_USER = "H4_SKILL_COMPLETION_USER"
+SKILL_COMPLETION_CANDIDATE = "H4_SKILL_COMPLETION_CANDIDATE"
+SKILL_COMPLETION_FINAL = "H4_SKILL_COMPLETION_FINAL"
+SKILL_COMPLETION_CALL_ID = "h4-skill-completion-read"
 SKILL_ACCESS_USER = "H4_SKILL_ACCESS_USER"
 SKILL_ACCESS_FINAL = "H4_SKILL_ACCESS_FINAL"
 SKILL_ACCESS_NAME = "h4-skill-access"
@@ -1111,6 +1115,19 @@ def _scenario_for(payload: dict) -> tuple[str, bool]:
             for message in messages
         )
         return ("skill-evidence-call" if continued else "skill-evidence-candidate"), False
+    if SKILL_COMPLETION_USER in joined_user_text:
+        if any(
+            isinstance(message, dict) and message.get("role") == "system"
+            and "[Server-owned Skill completion final response]" in _message_text(message)
+            for message in messages
+        ):
+            return "skill-completion-final", True
+        continued = any(
+            isinstance(message, dict) and message.get("role") == "system"
+            and "[Server-owned Skill completion continuation]" in _message_text(message)
+            for message in messages
+        )
+        return ("skill-completion-call" if continued else "skill-completion-candidate"), False
     if SKILL_ACCESS_USER in joined_user_text:
         completed = completed_tool_call_ids & set(SKILL_ACCESS_CALL_IDS)
         if len(completed) >= len(SKILL_ACCESS_CALL_IDS):
@@ -2482,6 +2499,24 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     and str(message.get("tool_call_id") or "") == SKILL_EVIDENCE_CALL_ID
                 ),
             }
+        if scenario.startswith("skill-completion-"):
+            tool_names = [
+                str((item.get("function") or {}).get("name") or "")
+                for item in payload.get("tools") or [] if isinstance(item, dict)
+            ]
+            chat_metric["skillCompletion"] = {
+                "tools": tool_names,
+                "continuing": any(
+                    isinstance(message, dict) and message.get("role") == "system"
+                    and "[Server-owned Skill completion continuation]" in _message_text(message)
+                    for message in payload.get("messages") or []
+                ),
+                "finalizing": any(
+                    isinstance(message, dict) and message.get("role") == "system"
+                    and "[Server-owned Skill completion final response]" in _message_text(message)
+                    for message in payload.get("messages") or []
+                ),
+            }
         if scenario.startswith("image-"):
             tool_names = [
                 str((item.get("function") or {}).get("name") or "")
@@ -2944,6 +2979,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             "parallel-visual-protocol-call",
             "runtime-recovery-call",
             "skill-evidence-call",
+            "skill-completion-call",
             "image-generation-call",
             "image-batch-call", "image-batch-partial-call",
             "image-edit-call",
@@ -3063,6 +3099,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 tool_calls = [{
                     "index": 0,
                     "id": SKILL_EVIDENCE_CALL_ID,
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": READ_PATH}, separators=(",", ":"),
+                        ),
+                    },
+                }]
+            elif scenario == "skill-completion-call":
+                tool_calls = [{
+                    "index": 0,
+                    "id": SKILL_COMPLETION_CALL_ID,
                     "type": "function",
                     "function": {
                         "name": "read_file",
@@ -3686,6 +3734,8 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                 "runtime-recovery-final": RUNTIME_RECOVERY_FINAL,
                 "skill-evidence-candidate": SKILL_EVIDENCE_CANDIDATE,
                 "skill-evidence-final": SKILL_EVIDENCE_FINAL,
+                "skill-completion-candidate": SKILL_COMPLETION_CANDIDATE,
+                "skill-completion-final": SKILL_COMPLETION_FINAL,
                 "skill-access-final": SKILL_ACCESS_FINAL,
                 "image-generation-final": IMAGE_GENERATION_FINAL,
                 "image-batch-final": IMAGE_BATCH_FINAL,

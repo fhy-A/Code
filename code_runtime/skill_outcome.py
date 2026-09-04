@@ -13,6 +13,9 @@ SCHEMA_VERSION = 2
 RECEIPT_VERSION = 1
 MODE = "shadow"
 MAX_ACTUAL_CLAIMS = 16
+COMPLETION_CONTRACT_VERSION = 2
+COMPLETION_ENFORCEMENT_VERSION = 2
+COMPLETION_ENFORCEMENT_MODE = "owner_completion_once"
 
 _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
@@ -110,16 +113,65 @@ def _normalize_requirement(source):
     return item
 
 
+def normalize_completion_enforcement(value):
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion", "mode", "activationKinds",
+    }:
+        return None
+    version = value.get("schemaVersion")
+    kinds = value.get("activationKinds")
+    if (
+        isinstance(version, bool) or version != COMPLETION_ENFORCEMENT_VERSION
+        or value.get("mode") != COMPLETION_ENFORCEMENT_MODE
+        or not isinstance(kinds, list) or not kinds
+        or kinds != sorted(set(kinds))
+        or any(kind not in {"automatic", "explicit"} for kind in kinds)
+    ):
+        return None
+    return {
+        "schemaVersion": COMPLETION_ENFORCEMENT_VERSION,
+        "mode": COMPLETION_ENFORCEMENT_MODE,
+        "activationKinds": list(kinds),
+    }
+
+
+def normalize_completion_contract(value):
+    version = value.get("schemaVersion") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schemaVersion", "requirements", "enforcement"}
+        or isinstance(version, bool) or version != COMPLETION_CONTRACT_VERSION
+    ):
+        return None
+    sources = value.get("requirements")
+    if not isinstance(sources, list) or not sources or len(sources) > 20:
+        return None
+    requirements = [_normalize_requirement(item) for item in sources]
+    ids = [item.get("id") for item in requirements if isinstance(item, dict)]
+    enforcement = normalize_completion_enforcement(value.get("enforcement"))
+    if None in requirements or len(ids) != len(set(ids)) or enforcement is None:
+        return None
+    return {
+        "schemaVersion": COMPLETION_CONTRACT_VERSION,
+        "requirements": requirements,
+        "enforcement": enforcement,
+    }
+
+
 def _contract_requirements(evidence):
     if not isinstance(evidence, dict) or evidence.get("state") != "ready":
         return None
     contract = evidence.get("contract")
+    version = contract.get("schemaVersion") if isinstance(contract, dict) else None
     if (
         not isinstance(contract, dict)
-        or type(contract.get("schemaVersion")) is not int
-        or contract.get("schemaVersion") != 1
+        or type(version) is not int
+        or version not in {1, COMPLETION_CONTRACT_VERSION}
     ):
         return None
+    if version == COMPLETION_CONTRACT_VERSION:
+        normalized = normalize_completion_contract(contract)
+        return normalized["requirements"] if normalized else None
     sources = contract.get("requirements")
     if not isinstance(sources, list) or not sources or len(sources) > 20:
         return None

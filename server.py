@@ -35,6 +35,7 @@ from code_runtime import (
     context_calibration,
     context_window,
     data_dir_owner,
+    skill_completion,
     skill_lifecycle,
     skill_outcome,
     windows_explorer,
@@ -221,6 +222,15 @@ def _resolve_skill_activation_enabled(environ=None):
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_skill_completion_enforcement_enabled(environ=None):
+    """Keep canonical Skill completion enforcement explicitly opt-in."""
+    source = os.environ if environ is None else environ
+    raw = source.get("CODE_SKILL_COMPLETION_ENFORCEMENT_V1")
+    if raw is None or str(raw).strip() == "":
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class _DeferredRuntimeService:
     """Create a DATA_DIR-backed service only after an entrypoint owns it."""
 
@@ -255,6 +265,7 @@ _SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
 _MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
 _SKILL_REGISTRY_SHADOW_ENABLED = _resolve_skill_registry_shadow_enabled()
 _SKILL_ACTIVATION_ENABLED = _resolve_skill_activation_enabled()
+_SKILL_COMPLETION_ENFORCEMENT_ENABLED = _resolve_skill_completion_enforcement_enabled()
 _model_route_registry = _DeferredRuntimeService(
     lambda: ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 )
@@ -3417,6 +3428,39 @@ def _agent_canonical_skill_lifecycle(run):
     return lifecycle
 
 
+def _agent_skill_completion_tool_specs(definitions):
+    specs = {}
+    for definition in definitions or []:
+        name = str(((definition or {}).get("function") or {}).get("name") or "")
+        spec = _agent_tool_spec(name)
+        if name and spec:
+            specs[name] = {
+                "effect": str(spec.get("effect") or ""),
+                "idempotent": spec.get("idempotent") is True,
+            }
+    return specs
+
+
+def _agent_normalize_skill_completion(run, lifecycle):
+    value = run.get("skill_completion_enforcement")
+    if value is None:
+        return None
+    if lifecycle is None:
+        raise skill_completion.SkillCompletionError(
+            "skill_completion_state_invalid",
+            "Skill completion state requires a canonical lifecycle",
+        )
+    plan = skill_completion.normalize_plan(
+        value,
+        lifecycle,
+        _agent_skill_completion_tool_specs(run.get("tools")),
+        run.get("tool_budgets") or [],
+    )
+    return skill_completion.validate_runtime_state(
+        plan, len(run.get("rounds") or []), run.get("tool_executions") or {},
+    )
+
+
 def _agent_run_record(run):
     """Return the credential-free durable representation of an Agent run."""
     rounds = _json_clone(run.get("rounds") or [])
@@ -3441,6 +3485,9 @@ def _agent_run_record(run):
         run.get("pending_context_calibration")
     )
     skill_lifecycle_record = _agent_canonical_skill_lifecycle(run)
+    skill_completion_record = _agent_normalize_skill_completion(
+        run, skill_lifecycle_record,
+    )
     return {
         "version": 5,
         "id": run["id"],
@@ -3525,6 +3572,8 @@ def _agent_run_record(run):
         **({"skillOutcome": skill_outcome.project_skill_outcome(
             skill_lifecycle_record, tool_executions_record, run["id"], run.get("status"),
         )} if skill_lifecycle_record else {}),
+        **({"skillCompletionEnforcement": skill_completion_record}
+           if skill_completion_record else {}),
         **({"skillEvidence": _agent_skill_evidence_record(run)}
            if (
                isinstance(run.get("skill_evidence_observer"), dict)
@@ -4778,6 +4827,23 @@ def _agent_run_from_record(record):
             record.get("skillEvidence"),
         )
     )
+    restored_tool_budgets = _normalize_agent_tool_budgets(
+        record.get("toolBudgets") or [], restored_tools,
+    )
+    skill_completion_plan = None
+    if "skillCompletionEnforcement" in record:
+        if canonical_skill_lifecycle is None:
+            raise skill_completion.SkillCompletionError(
+                "skill_completion_state_invalid",
+                "Skill completion state requires a canonical lifecycle",
+            )
+        skill_completion_plan = skill_completion.validate_runtime_state(
+            skill_completion.normalize_plan(
+                record.get("skillCompletionEnforcement"), canonical_skill_lifecycle,
+                _agent_skill_completion_tool_specs(restored_tools), restored_tool_budgets,
+            ),
+            len(record.get("rounds") or []), tool_executions,
+        )
     return {
         "id": run_id,
         "session_id": str(record.get("sessionId") or ""),
@@ -4843,10 +4909,7 @@ def _agent_run_from_record(record):
         "request": request_options,
         "messages": list(record.get("messages") or []),
         "tools": restored_tools,
-        "tool_budgets": _normalize_agent_tool_budgets(
-            record.get("toolBudgets") or [],
-            restored_tools,
-        ),
+        "tool_budgets": restored_tool_budgets,
         "rounds": list(record.get("rounds") or []),
         "compactions": list(record.get("compactions") or []),
         "model_checkpoint": model_checkpoint,
@@ -4871,6 +4934,7 @@ def _agent_run_from_record(record):
         "active_skill_dependencies": active_skill_dependencies,
         "skill_lifecycle": canonical_skill_lifecycle,
         "_skill_lifecycle_view": lifecycle_view,
+        "skill_completion_enforcement": skill_completion_plan,
         "skill_runtime_bindings": skill_runtime_bindings,
         "usage": dict(record.get("usage") or {}),
         "result": dict(record.get("result") or {}),
@@ -8873,6 +8937,9 @@ def _agent_goal_final_response_pending(run):
 def _agent_model_payload(run):
     payload = dict(run["request"])
     force_final_round = bool(run.get("force_final_round"))
+    completion = _agent_normalize_skill_completion(
+        run, _agent_canonical_skill_lifecycle(run),
+    )
     goal_final_response = (
         not force_final_round and _agent_goal_final_response_pending(run)
     )
@@ -8926,6 +8993,12 @@ def _agent_model_payload(run):
         [] if force_final_round or goal_final_response
         else _agent_model_tools(run)
     )
+    if completion and completion["phase"] == "finalizing":
+        model_tools = []
+    elif completion and completion["phase"] == "continuing":
+        allowed = {item["tool"] for item in completion["allowedCalls"]}
+        model_tools = [item for item in model_tools if
+                       ((item.get("function") or {}).get("name") in allowed)]
     if model_tools:
         payload["tools"] = _json_clone(model_tools)
         payload["tool_choice"] = payload.get("tool_choice") or "auto"
@@ -9568,6 +9641,211 @@ def _agent_enter_recovery(
     return recovery
 
 
+def _agent_skill_completion_evaluate(run):
+    lifecycle = _agent_canonical_skill_lifecycle(run)
+    plan = _agent_normalize_skill_completion(
+        run, lifecycle,
+    )
+    if not plan:
+        return None, None
+    outcome = skill_outcome.project_skill_outcome(
+        lifecycle, _json_clone(run.get("tool_executions") or {}),
+        run["id"], run.get("status"),
+    )
+    return plan, skill_completion.evaluate(
+        plan, outcome, _agent_skill_completion_tool_specs(run.get("tools")),
+    )
+
+
+def _agent_skill_completion_finish(
+    run, passed, *, candidate=None, reasoning="", code="", error="",
+):
+    plan, _evaluation = _agent_skill_completion_evaluate(run)
+    updated = skill_completion.advance(
+        plan, "passed" if passed else "failed",
+    )
+    if passed and _enter_agent_skill_evidence_gate(
+        run, candidate, completion_plan=updated,
+    ):
+        return "done"
+    with run["condition"]:
+        if run.get("pending_steers"):
+            return "continue"
+        run["skill_completion_enforcement"] = updated
+        finished = _finish_agent_run_locked(
+            run, "completed" if passed else "failed", error, code,
+        )
+        if not finished:
+            run["skill_completion_enforcement"] = plan
+            return "continue"
+        if passed:
+            run["result"] = {**candidate, "reasoning": reasoning}
+    _persist_agent_run(run)
+    if passed:
+        _persist_agent_session_context_resolution(run)
+    with run["condition"]:
+        run["condition"].notify_all()
+    return "done"
+
+
+def _agent_skill_completion_candidate(run, candidate, reasoning="", *, kind="normal"):
+    plan, evaluation = _agent_skill_completion_evaluate(run)
+    if not plan:
+        return "none"
+    if run.get("pending_steers"):
+        return "continue"
+    if evaluation["status"] == "satisfied":
+        return _agent_skill_completion_finish(
+            run, True, candidate=candidate, reasoning=reasoning,
+        )
+    if evaluation["status"] == "invalid":
+        failure = ("skill_completion_contract_invalid", "Skill completion contract or state is invalid.")
+    elif kind == "forced":
+        failure = ("repeated_tool_failure", "Skill completion evidence is missing after repeated tool failure.")
+    elif plan["phase"] != "armed" or kind == "goal_final" or evaluation["status"] != "recoverable":
+        failure = ("skill_completion_evidence_unsatisfied", "Skill owner completion evidence is unsatisfied.")
+    else:
+        failure = None
+    if failure:
+        return _agent_skill_completion_finish(
+            run, False, code=failure[0], error=failure[1],
+        )
+    updated = skill_completion.begin_continuation(
+        plan, evaluation, run["id"], len(run.get("rounds") or []), candidate.get("content"),
+    )
+    missing = ", ".join(
+        f"{item['tool']} x{item['maxCalls']}" for item in updated["allowedCalls"]
+    )
+    with run["condition"]:
+        if run.get("pending_steers"):
+            return "continue"
+        run["skill_completion_enforcement"] = updated
+        run["messages"].append({
+            "role": "system",
+            "content": (
+                "[Server-owned Skill completion continuation]\n"
+                f"Continuation {updated['continuationId']} permits exactly one repair batch "
+                f"for these missing owner requirements only: {missing}. Do not call unrelated "
+                "tools or repeat completed side effects; then provide one complete final answer."
+            ),
+        })
+    _persist_agent_run(run)
+    return "continue"
+
+
+def _agent_skill_completion_tool_batch(run, calls):
+    plan, _evaluation = _agent_skill_completion_evaluate(run)
+    if not plan or plan["phase"] not in {"continuing", "finalizing"}:
+        return "none"
+    try:
+        call_ids = skill_completion.validate_repair_batch(
+            plan, calls, _agent_skill_completion_tool_specs(run.get("tools")),
+            run.get("tool_executions") or {},
+        )
+    except skill_completion.SkillCompletionError:
+        return _agent_skill_completion_finish(
+            run, False, code="skill_completion_evidence_unsatisfied",
+            error="Skill completion repair batch is invalid.",
+        )
+    with run["condition"]:
+        run["skill_completion_enforcement"] = skill_completion.advance(
+            plan, "continuing", call_ids,
+        )
+        run["pending_tool_calls"] = calls
+        run["status"] = "tools"
+        run["updated_at"] = now_iso()
+        run["condition"].notify_all()
+    _persist_agent_run(run)
+    return "continue"
+
+
+def _agent_skill_completion_after_tools(run):
+    plan, evaluation = _agent_skill_completion_evaluate(run)
+    if (
+        not plan or plan["phase"] != "continuing" or not plan["toolBatchCallIds"]
+        or run.get("pending_tool_calls")
+        or any((run.get("tool_executions") or {}).get(item, {}).get("status") != "completed"
+               for item in plan["toolBatchCallIds"])
+    ):
+        return "none"
+    if evaluation["status"] != "satisfied":
+        repeated = bool(run.get("force_final_round"))
+        return _agent_skill_completion_finish(
+            run, False,
+            code="repeated_tool_failure" if repeated else "skill_completion_evidence_unsatisfied",
+            error=("Skill completion repair hit the repeated tool failure limit."
+                   if repeated else "Skill owner completion evidence remains unsatisfied after repair."),
+        )
+    updated = skill_completion.advance(plan, "finalizing")
+    with run["condition"]:
+        run["skill_completion_enforcement"] = updated
+        run["messages"].append({
+            "role": "system",
+            "content": (
+                "[Server-owned Skill completion final response]\n"
+                f"Repair {updated['continuationId']} is satisfied. Call no tool and provide "
+                "one complete, self-contained final answer."
+            ),
+        })
+    _persist_agent_run(run)
+    return "continue"
+
+
+def _agent_skill_completion_round_kind(run, record):
+    if record.get("forcedFinal"):
+        return "forced"
+    assistants = [item for item in run.get("messages") or []
+                  if isinstance(item, dict) and item.get("role") == "assistant"]
+    prior = assistants[-2].get("tool_calls") or [] if len(assistants) >= 2 else []
+    call_ids = [str(item.get("id") or "") for item in prior
+                if (item.get("function") or {}).get("name") == "goal_complete_step"]
+    return "goal_final" if any(
+        ((run.get("tool_executions") or {}).get(item, {}).get("result") or {})
+        .get("goal", {}).get("lifecycle") == "completed" for item in call_ids
+    ) else "normal"
+
+
+def _agent_skill_completion_reconcile(run):
+    plan, _evaluation = _agent_skill_completion_evaluate(run)
+    if not plan:
+        return "none"
+    if plan["phase"] in {"passed", "failed"}:
+        if plan["phase"] == "passed" and _evaluation["status"] == "satisfied":
+            return "none"
+        raise skill_completion.SkillCompletionError(
+            "skill_completion_state_invalid", "Skill completion terminal state is invalid",
+        )
+    if plan["phase"] == "continuing" and plan["toolBatchCallIds"]:
+        return _agent_skill_completion_after_tools(run)
+    rounds = run.get("rounds") or []
+    last_message = (run.get("messages") or [{}])[-1]
+    threshold = plan["triggerRound"] + (plan["phase"] == "finalizing")
+    if (
+        len(rounds) <= threshold or run.get("pending_tool_calls")
+        or not isinstance(last_message, dict) or last_message.get("role") != "assistant"
+    ):
+        return "none"
+    latest = rounds[-1]
+    calls = _normalize_agent_tool_calls(
+        run, latest.get("toolCalls") or [], int(latest.get("round") or len(rounds)),
+    )
+    if calls:
+        return _agent_skill_completion_tool_batch(run, calls)
+    if latest.get("outcome") != "completed":
+        return "none" if plan["phase"] == "armed" else _agent_skill_completion_finish(
+            run, False, code="skill_completion_evidence_unsatisfied",
+            error="Skill completion continuation did not produce a usable answer.",
+        )
+    candidate = {
+        "content": str(latest.get("content") or ""),
+        "finishReason": str(latest.get("finishReason") or ""),
+        "usage": _json_clone(run.get("usage") or {}),
+    }
+    return _agent_skill_completion_candidate(
+        run, candidate, kind=_agent_skill_completion_round_kind(run, latest),
+    )
+
+
 def _agent_run_worker(run):
     current_worker = threading.current_thread()
     try:
@@ -9581,8 +9859,11 @@ def _agent_run_worker(run):
                 _finish_agent_run(run, "cancelled")
                 return
 
+            _agent_skill_completion_reconcile(run)
             if run["status"] == "tools" or run.get("pending_tool_calls"):
                 if not _execute_agent_pending_tools(run):
+                    return
+                if _agent_skill_completion_after_tools(run) == "done":
                     return
                 with run["condition"]:
                     vision_markers_added = _flush_agent_tool_vision_markers_locked(run)
@@ -9858,6 +10139,10 @@ def _agent_run_worker(run):
                     "finishReason": str(model_result.get("finishReason") or ""),
                     "usage": _json_clone(run["usage"]),
                 }
+                if _agent_skill_completion_candidate(
+                    run, candidate_result, reasoning, kind="forced",
+                ) != "none":
+                    continue
                 if _enter_agent_skill_evidence_gate(run, candidate_result):
                     return
                 run["result"] = {
@@ -9869,6 +10154,8 @@ def _agent_run_worker(run):
                 continue
 
             if tool_calls:
+                if _agent_skill_completion_tool_batch(run, tool_calls) != "none":
+                    continue
                 # A real tool call proves forward progress and clears any prior
                 # no-action recovery debt.
                 with run["condition"]:
@@ -9892,6 +10179,8 @@ def _agent_run_worker(run):
                 continue
 
             if non_action_reason:
+                if _agent_skill_completion_reconcile(run) != "none":
+                    continue
                 if _recover_agent_non_action(run, non_action_reason, model_run["id"]):
                     continue
                 _finish_agent_run(
@@ -9909,6 +10198,11 @@ def _agent_run_worker(run):
                 "finishReason": str(model_result.get("finishReason") or ""),
                 "usage": _json_clone(run["usage"]),
             }
+            if _agent_skill_completion_candidate(
+                run, candidate_result, reasoning,
+                kind=_agent_skill_completion_round_kind(run, round_record),
+            ) != "none":
+                continue
             if _enter_agent_skill_evidence_gate(run, candidate_result):
                 return
             run["result"] = {
@@ -10194,6 +10488,15 @@ def _create_agent_run(
         )
         active_skill_names = lifecycle_projection["activeSkillNames"]
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
+    try:
+        skill_completion_plan = skill_completion.build_plan(
+            canonical_skill_lifecycle,
+            _agent_skill_completion_tool_specs(tools),
+            normalized_tool_budgets,
+            enabled=bool(_SKILL_COMPLETION_ENFORCEMENT_ENABLED),
+        ) if canonical_skill_lifecycle else None
+    except skill_completion.SkillCompletionError as exc:
+        raise SkillActivationError(exc.code, str(exc)) from exc
     skill_evidence_observers = (
         _freeze_captured_skill_evidence_observers(
             lifecycle_projection, tools, require_registered_tools=False,
@@ -10295,6 +10598,7 @@ def _create_agent_run(
         "active_skill_dependencies": frozen_active_skill_dependencies,
         "skill_lifecycle": canonical_skill_lifecycle,
         "_skill_lifecycle_view": canonical_skill_lifecycle,
+        "skill_completion_enforcement": skill_completion_plan,
         "skill_runtime_bindings": {},
         "usage": {},
         "result": {},
@@ -14523,18 +14827,23 @@ def _skill_evidence_tool_names(tool_definitions):
 def _normalize_skill_evidence_contract(
     value, allowed_tool_names, *, require_registered_tools=True,
 ):
-    """Validate observer v1 without accepting prose or expanding tool access."""
-    if not isinstance(value, dict) or not set(value).issubset({
-        "schemaVersion", "requirements", "enforcement",
-    }) or not {"schemaVersion", "requirements"}.issubset(value):
+    """Validate evidence contracts without accepting prose or expanding tools."""
+    if not isinstance(value, dict):
         raise ValueError("invalid evidence contract envelope")
     schema_version = value.get("schemaVersion")
     if (
         isinstance(schema_version, bool)
         or not isinstance(schema_version, int)
-        or schema_version != 1
+        or schema_version not in {1, skill_completion.CONTRACT_VERSION}
     ):
         raise ValueError("unsupported evidence contract version")
+    if schema_version == 1:
+        if not set(value).issubset({
+            "schemaVersion", "requirements", "enforcement",
+        }) or not {"schemaVersion", "requirements"}.issubset(value):
+            raise ValueError("invalid evidence contract envelope")
+    elif set(value) != {"schemaVersion", "requirements", "enforcement"}:
+        raise ValueError("invalid evidence contract envelope")
     requirements = value.get("requirements")
     if (
         not isinstance(requirements, list)
@@ -14587,8 +14896,8 @@ def _normalize_skill_evidence_contract(
             raise ValueError("unsupported evidence requirement type")
         seen_ids.add(requirement_id)
         normalized.append(item)
-    contract = {"schemaVersion": 1, "requirements": normalized}
-    if "enforcement" in value:
+    contract = {"schemaVersion": schema_version, "requirements": normalized}
+    if schema_version == 1 and "enforcement" in value:
         enforcement = value.get("enforcement")
         if not isinstance(enforcement, dict) or set(enforcement) != {
             "schemaVersion", "mode",
@@ -14606,6 +14915,12 @@ def _normalize_skill_evidence_contract(
             "schemaVersion": 1,
             "mode": "explicit_only",
         }
+    elif schema_version == skill_completion.CONTRACT_VERSION:
+        contract["enforcement"] = skill_outcome.normalize_completion_enforcement(
+            value.get("enforcement")
+        )
+        if contract["enforcement"] is None:
+            raise ValueError("invalid evidence enforcement policy")
     return contract
 
 
@@ -15198,7 +15513,7 @@ def _normalize_agent_skill_evidence_actions(value):
     return normalized
 
 
-def _enter_agent_skill_evidence_gate(run, candidate_result):
+def _enter_agent_skill_evidence_gate(run, candidate_result, *, completion_plan=None):
     if run.get("pending_steers"):
         return None
     observer = _agent_skill_evidence_enforcement_observer(run)
@@ -15228,8 +15543,10 @@ def _enter_agent_skill_evidence_gate(run, candidate_result):
         "createdAt": now_iso(),
     }
     with run["condition"]:
-        if run["status"] in _AGENT_RUN_TERMINAL:
+        if run["status"] in _AGENT_RUN_TERMINAL or run.get("pending_steers"):
             return None
+        if completion_plan is not None:
+            run["skill_completion_enforcement"] = completion_plan
         run["pending_skill_evidence"] = pending
         run["status"] = "waiting_skill_evidence"
         run["resume_status"] = ""

@@ -23,6 +23,7 @@ RUNTIME_MODULES = (
     "official_model_capabilities",
     "ppt_master_runtime",
     "skill_activation",
+    "skill_completion",
     "skill_dependencies",
     "skill_lifecycle",
     "skill_outcome",

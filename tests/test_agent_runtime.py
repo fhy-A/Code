@@ -4,6 +4,7 @@ Run: python -m pytest tests/test_agent_runtime.py -v
 """
 
 import ast
+import copy
 import hashlib
 import json
 import tempfile
@@ -18,7 +19,9 @@ from unittest import mock
 import requests
 
 import server as server_mod
+from code_runtime import skill_completion
 from code_runtime.agent_protocol import normalize_agent_event
+from code_runtime.skill_activation import SKILL_PROMPT_MARKER
 
 
 _H3_2C1_SUITE_PATH = (
@@ -731,6 +734,107 @@ class TestDurableAgentRuntime(unittest.TestCase):
         while run.get("worker") is not None and time.time() < deadline:
             time.sleep(0.01)
         self.assertIsNone(run.get("worker"))
+
+    def _remove_completion_run_record(self, run, timeout=2):
+        target = server_mod._agent_run_path(run["id"])
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                target.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                time.sleep(0.02)
+        target.unlink(missing_ok=True)
+
+    def _write_completion_skill(
+        self, name="completion-skill", *, evidence_tool="read_file",
+        allowed_tools=None, activation_kinds=None,
+    ):
+        allowed = list(allowed_tools or [evidence_tool])
+        skill_dir = self.data_dir / "skills" / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join([
+                "---", f"name: {name}", "description: Completion fixture",
+                f"allowed-tools: {' '.join(allowed)}", "---", "", "Fixture.",
+            ]),
+            encoding="utf-8",
+        )
+        (skill_dir / "evidence.json").write_text(json.dumps({
+            "schemaVersion": 2,
+            "requirements": [{
+                "id": "owner-evidence",
+                "type": "tool_execution",
+                "tool": evidence_tool,
+                "minCount": 1,
+            }],
+            "enforcement": {
+                "schemaVersion": 2,
+                "mode": "owner_completion_once",
+                "activationKinds": activation_kinds or ["automatic", "explicit"],
+            },
+        }), encoding="utf-8")
+        return name, allowed
+
+    def _create_completion_run(
+        self, request_id, *, name="completion-skill", allowed_tools=None,
+        start_worker=True, keys=None, completion_enabled=True,
+    ):
+        allowed = list(allowed_tools or ["read_file"])
+        with mock.patch.object(server_mod, "_SKILL_ACTIVATION_ENABLED", True), \
+             mock.patch.object(
+                 server_mod, "_SKILL_COMPLETION_ENFORCEMENT_ENABLED",
+                 completion_enabled,
+             ):
+            return server_mod._create_agent_run(
+                "",
+                {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "system",
+                        "content": f"base\n\n{SKILL_PROMPT_MARKER}\n\npermission",
+                    }, {
+                        "role": "user",
+                        "content": "complete with owner evidence",
+                    }],
+                },
+                self.base_url,
+                list(keys or [f"{request_id}-key"]),
+                allowed_tools={"schemaVersion": 1, "names": allowed},
+                max_rounds=8,
+                permission_profile="bypass",
+                start_worker=start_worker,
+                client_request_id=request_id,
+                cwd=str(self.project_dir),
+                run_kind="foreground",
+                skill_activation_request={
+                    "schemaVersion": 1,
+                    "explicitSkill": name,
+                    "disabledNames": [],
+                },
+            )
+
+    @staticmethod
+    def _completion_content_round(content):
+        return [{"choices": [{
+            "delta": {"content": content},
+            "finish_reason": "stop",
+        }]}]
+
+    @staticmethod
+    def _completion_tool_round(call_id, name, arguments):
+        return [{"choices": [{
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments),
+                },
+            }]},
+            "finish_reason": "tool_calls",
+        }]}]
 
     def _assert_expected_subset(self, actual, expected, path):
         if isinstance(expected, dict):
@@ -4414,6 +4518,393 @@ class TestDurableAgentRuntime(unittest.TestCase):
         persisted = server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
         self.assertNotIn("network-skill-key", persisted)
         self.assertNotIn("network-skill-key", json.dumps(snapshot))
+
+    def test_skill_completion_repairs_once_and_finalizes_without_tools(self):
+        name, allowed = self._write_completion_skill()
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                self._completion_content_round("candidate before evidence"),
+                self._completion_tool_round(
+                    "completion-read-1", "read_file", {"path": "README.md"},
+                ),
+                self._completion_content_round("verified completion"),
+            ]
+        run = self._create_completion_run(
+            "completion-happy", name=name, allowed_tools=allowed,
+        )
+        self._wait_terminal(run)
+        self._wait_worker_idle(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        record = server_mod._agent_run_record(run)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["result"]["content"], "verified completion")
+        self.assertNotIn("skillCompletionEnforcement", snapshot)
+        self.assertEqual(record["skillCompletionEnforcement"]["phase"], "passed")
+        self.assertEqual(record["skillOutcome"]["aggregateState"], "satisfied")
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(len(run["rounds"]), 3)
+        prompts = [
+            item["content"] for item in run["messages"]
+            if item.get("role") == "system"
+            and "Server-owned Skill completion" in str(item.get("content") or "")
+        ]
+        self.assertEqual(len(prompts), 2)
+        repair_tools = [
+            item["function"]["name"]
+            for item in _AgentUpstream.payloads[1].get("tools") or []
+        ]
+        self.assertEqual(repair_tools, ["read_file"])
+        self.assertNotIn("tools", _AgentUpstream.payloads[2])
+
+    def test_skill_completion_flag_is_independent_and_default_off(self):
+        self.assertFalse(server_mod._resolve_skill_completion_enforcement_enabled({}))
+        self.assertFalse(server_mod._resolve_skill_completion_enforcement_enabled({
+            "CODE_SKILL_ACTIVATION_V1": "1",
+        }))
+        for value in ("1", "true", "YES", "on"):
+            with self.subTest(value=value):
+                self.assertTrue(server_mod._resolve_skill_completion_enforcement_enabled({
+                    "CODE_SKILL_COMPLETION_ENFORCEMENT_V1": value,
+                }))
+        for value in ("0", "false", "invalid", ""):
+            with self.subTest(value=value):
+                self.assertFalse(server_mod._resolve_skill_completion_enforcement_enabled({
+                    "CODE_SKILL_COMPLETION_ENFORCEMENT_V1": value,
+                }))
+
+    def test_skill_completion_flag_off_keeps_v2_observer_only(self):
+        name, allowed = self._write_completion_skill()
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                self._completion_content_round("observer-only completion"),
+            ]
+        run = self._create_completion_run(
+            "completion-off", name=name, allowed_tools=allowed,
+            completion_enabled=False,
+        )
+        self._wait_terminal(run)
+        self._wait_worker_idle(run)
+        record = server_mod._agent_run_record(run)
+        self.assertEqual(run["result"]["content"], "observer-only completion")
+        self.assertNotIn("skillCompletionEnforcement", record)
+        self.assertEqual(record["skillOutcome"]["aggregateState"], "terminal_gaps")
+        self.assertEqual(_AgentUpstream.calls, 1)
+        self.assertFalse(any(
+            "Server-owned Skill completion" in str(item.get("content") or "")
+            for item in run["messages"]
+        ))
+
+    def test_skill_completion_invalid_batch_is_rejected_before_any_dispatch(self):
+        name, allowed = self._write_completion_skill(
+            allowed_tools=["read_file", "search_files"],
+        )
+        invalid_batch = [{"choices": [{
+            "delta": {"tool_calls": [
+                {
+                    "index": 0,
+                    "id": "completion-valid-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "README.md"}),
+                    },
+                },
+                {
+                    "index": 1,
+                    "id": "completion-unrelated-search",
+                    "type": "function",
+                    "function": {
+                        "name": "search_files",
+                        "arguments": json.dumps({"query": "Durable"}),
+                    },
+                },
+            ]},
+            "finish_reason": "tool_calls",
+        }]}]
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                self._completion_content_round("candidate before invalid batch"),
+                invalid_batch,
+            ]
+        run = self._create_completion_run(
+            "completion-invalid-batch", name=name, allowed_tools=allowed,
+        )
+        self._wait_terminal(run)
+        self._wait_worker_idle(run)
+        record = server_mod._agent_run_record(run)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "skill_completion_evidence_unsatisfied")
+        self.assertEqual(run["tool_executions"], {})
+        self.assertEqual(record["skillCompletionEnforcement"]["phase"], "failed")
+        self.assertFalse(any(item["type"] == "tool_started" for item in run["events"]))
+        self.assertEqual([
+            item["function"]["name"]
+            for item in _AgentUpstream.payloads[1].get("tools") or []
+        ], ["read_file"])
+
+    def test_skill_completion_continuation_does_not_use_normal_nonaction_recovery(self):
+        name, allowed = self._write_completion_skill()
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                self._completion_content_round("candidate before empty repair"),
+                self._completion_content_round(""),
+            ]
+        run = self._create_completion_run(
+            "completion-no-action", name=name, allowed_tools=allowed,
+        )
+        self._wait_terminal(run)
+        self._wait_worker_idle(run)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "skill_completion_evidence_unsatisfied")
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertFalse(any(item["type"] == "model_recovery" for item in run["events"]))
+
+    def test_skill_completion_repair_preserves_repeated_tool_failure(self):
+        name, allowed = self._write_completion_skill()
+        failed_call_rounds = [
+            self._completion_tool_round(
+                f"completion-failed-read-{index}", "read_file", {"path": "missing.txt"},
+            )
+            for index in range(3)
+        ]
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                *failed_call_rounds,
+                self._completion_content_round("candidate after failed reads"),
+                self._completion_tool_round(
+                    "completion-blocked-repair", "read_file", {"path": "missing.txt"},
+                ),
+            ]
+        run = self._create_completion_run(
+            "completion-repeated-failure", name=name, allowed_tools=allowed,
+        )
+        self._wait_terminal(run)
+        self._wait_worker_idle(run)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "repeated_tool_failure")
+        self.assertEqual(_AgentUpstream.calls, 5)
+        self.assertEqual(
+            [item["type"] for item in run["events"]].count("tool_retry_blocked"), 1,
+        )
+        self.assertEqual(
+            server_mod._agent_run_record(run)["skillCompletionEnforcement"]["phase"],
+            "failed",
+        )
+
+    def test_skill_completion_steer_and_goal_precedence_do_not_strand_state(self):
+        name, allowed = self._write_completion_skill()
+        failed = self._create_completion_run(
+            "completion-steer-fail", name=name, allowed_tools=allowed,
+            start_worker=False,
+        )
+        failed["pending_steers"] = [{"content": "new direction"}]
+        candidate = {"content": "candidate", "finishReason": "stop", "usage": {}}
+        self.assertEqual(
+            server_mod._agent_skill_completion_candidate(
+                failed, candidate, kind="goal_final",
+            ),
+            "continue",
+        )
+        self.assertEqual(failed["skill_completion_enforcement"]["phase"], "armed")
+        failed["pending_steers"] = []
+        self.assertEqual(
+            server_mod._agent_skill_completion_candidate(
+                failed, candidate, kind="goal_final",
+            ),
+            "done",
+        )
+        self.assertEqual(failed["error_code"], "skill_completion_evidence_unsatisfied")
+
+        passed = self._create_completion_run(
+            "completion-steer-pass", name=name, allowed_tools=allowed,
+            start_worker=False,
+        )
+        passed["tool_executions"] = {"completion-read": {
+            "name": "read_file",
+            "arguments": json.dumps({"path": "README.md"}),
+            "fingerprint": hashlib.sha256(b"completion-read").hexdigest(),
+            "status": "completed",
+            "outcome": "succeeded",
+            "result": {"ok": True, "action": "read_file"},
+        }}
+        passed["pending_steers"] = [{"content": "extend the work"}]
+        self.assertEqual(
+            server_mod._agent_skill_completion_candidate(passed, candidate),
+            "continue",
+        )
+        self.assertEqual(passed["skill_completion_enforcement"]["phase"], "armed")
+        self.assertEqual(passed["status"], "model")
+
+    def test_skill_completion_reconciles_a_durable_candidate_after_restart(self):
+        name, allowed = self._write_completion_skill()
+        run = self._create_completion_run(
+            "completion-restart", name=name, allowed_tools=allowed,
+            start_worker=False,
+        )
+        run["messages"].append({"role": "assistant", "content": "durable candidate"})
+        round_record = {
+            "round": 1,
+            "runtimeRunId": "durable-runtime",
+            "content": "durable candidate",
+            "reasoning": "",
+            "toolCalls": [],
+            "finishReason": "stop",
+            "usage": {},
+            "completedAt": server_mod.now_iso(),
+            "outcome": "completed",
+        }
+        run["rounds"].append(round_record)
+        server_mod._append_agent_event(run, "model_completed", round_record)
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertEqual(restored["status"], "waiting_credentials")
+
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                self._completion_tool_round(
+                    "completion-restart-read", "read_file", {"path": "README.md"},
+                ),
+                self._completion_content_round("restart verified"),
+            ]
+        server_mod._resume_agent_run(restored, ["completion-restart-key"], self.base_url)
+        self._wait_terminal(restored)
+        self._wait_worker_idle(restored)
+        self.assertEqual(restored["status"], "completed")
+        self.assertEqual(restored["result"]["content"], "restart verified")
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(
+            server_mod._agent_run_record(restored)["skillCompletionEnforcement"]["phase"],
+            "passed",
+        )
+        self._remove_completion_run_record(restored)
+
+    def test_skill_completion_freezes_a_recovered_batch_before_dispatch(self):
+        name, allowed = self._write_completion_skill()
+        run = self._create_completion_run(
+            "completion-batch-restart", name=name, allowed_tools=allowed,
+            start_worker=False,
+        )
+        candidate = {
+            "round": 1,
+            "runtimeRunId": "candidate-runtime",
+            "content": "durable candidate",
+            "reasoning": "",
+            "toolCalls": [],
+            "finishReason": "stop",
+            "usage": {},
+            "completedAt": server_mod.now_iso(),
+            "outcome": "completed",
+        }
+        run["messages"].append({"role": "assistant", "content": candidate["content"]})
+        run["rounds"].append(candidate)
+        server_mod._append_agent_event(run, "model_completed", candidate)
+        self.assertEqual(
+            server_mod._agent_skill_completion_candidate(
+                run,
+                {"content": candidate["content"], "finishReason": "stop", "usage": {}},
+            ),
+            "continue",
+        )
+
+        calls = server_mod._normalize_agent_tool_calls(run, [{
+            "index": 0,
+            "id": "completion-durable-batch-read",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": json.dumps({"path": "README.md"}),
+            },
+        }], 2)
+        run["messages"].append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": server_mod._agent_assistant_tool_calls(calls),
+        })
+        repair_round = {
+            "round": 2,
+            "runtimeRunId": "repair-runtime",
+            "content": "",
+            "reasoning": "",
+            "toolCalls": server_mod._agent_assistant_tool_calls(calls),
+            "finishReason": "tool_calls",
+            "usage": {},
+            "completedAt": server_mod.now_iso(),
+            "outcome": "tool_calls",
+        }
+        run["rounds"].append(repair_round)
+        server_mod._append_agent_event(run, "model_completed", repair_round)
+        self.assertEqual(run["skill_completion_enforcement"]["toolBatchCallIds"], [])
+        self.assertEqual(run["pending_tool_calls"], [])
+
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                self._completion_content_round("batch restart verified"),
+            ]
+        server_mod._resume_agent_run(
+            restored, ["completion-batch-restart-key"], self.base_url,
+        )
+        self._wait_terminal(restored)
+        self._wait_worker_idle(restored)
+        self.assertEqual(restored["status"], "completed")
+        self.assertEqual(restored["result"]["content"], "batch restart verified")
+        self.assertEqual(_AgentUpstream.calls, 1)
+        self.assertEqual(list(restored["tool_executions"]), [
+            "completion-durable-batch-read",
+        ])
+        self.assertEqual(
+            [item["type"] for item in restored["events"]].count("tool_started"), 1,
+        )
+        self._remove_completion_run_record(restored)
+
+    def test_skill_completion_rejects_tampered_round_and_batch_state(self):
+        name, allowed = self._write_completion_skill()
+        run = self._create_completion_run(
+            "completion-tamper", name=name, allowed_tools=allowed,
+            start_worker=False,
+        )
+        base = server_mod._agent_run_record(run)
+        active = copy.deepcopy(base["skillCompletionEnforcement"])
+        active.update({
+            "phase": "continuing",
+            "triggerRound": 1,
+            "continuationId": "sce1_" + "a" * 64,
+            "allowedCalls": [{
+                "requirementId": "owner-evidence",
+                "tool": "read_file",
+                "maxCalls": 1,
+            }],
+        })
+
+        bad_trigger = copy.deepcopy(base)
+        bad_trigger["skillCompletionEnforcement"] = copy.deepcopy(active)
+        with self.assertRaises(skill_completion.SkillCompletionError):
+            server_mod._agent_run_from_record(bad_trigger)
+
+        too_many_rounds = copy.deepcopy(base)
+        too_many_rounds["skillCompletionEnforcement"] = copy.deepcopy(active)
+        too_many_rounds["rounds"] = [{"round": index} for index in range(1, 4)]
+        with self.assertRaises(skill_completion.SkillCompletionError):
+            server_mod._agent_run_from_record(too_many_rounds)
+
+        fake_batch = copy.deepcopy(base)
+        finalizing = copy.deepcopy(active)
+        finalizing["phase"] = "finalizing"
+        finalizing["toolBatchCallIds"] = ["missing-batch-call"]
+        fake_batch["skillCompletionEnforcement"] = finalizing
+        fake_batch["rounds"] = [{"round": 1}]
+        with self.assertRaises(skill_completion.SkillCompletionError):
+            server_mod._agent_run_from_record(fake_batch)
+
+        stranded = copy.deepcopy(base)
+        stranded["skillCompletionEnforcement"]["phase"] = "failed"
+        restored_stranded = server_mod._agent_run_from_record(stranded)
+        with self.assertRaises(skill_completion.SkillCompletionError):
+            server_mod._agent_skill_completion_reconcile(restored_stranded)
 
     def test_skill_evidence_observer_freezes_contract_and_recovers_exactly_once(self):
         skill_dir = self.data_dir / "skills" / "runtime-skill"

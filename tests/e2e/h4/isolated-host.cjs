@@ -237,6 +237,7 @@ async function startIsolatedGeneration(
     injectIndexBuildFailure = false,
     disableRoutingV2 = false,
     enableSkillActivation = false,
+    enableSkillCompletion = false,
   } = {},
 ) {
   const {
@@ -265,6 +266,7 @@ async function startIsolatedGeneration(
           : {}),
         ...(disableRoutingV2 ? { CODE_ROUTING_V2: "0" } : {}),
         ...(enableSkillActivation ? { CODE_SKILL_ACTIVATION_V1: "1" } : {}),
+        ...(enableSkillCompletion ? { CODE_SKILL_COMPLETION_ENFORCEMENT_V1: "1" } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
