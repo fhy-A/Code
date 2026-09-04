@@ -224,8 +224,9 @@ def normalize_revision_manifest(value):
     if "summary" in value and value.get("summary") != normalized["summary"]:
         _fail("revision_manifest_invalid")
     return normalized
-def _build_skill_revision_once(skill_dir):
+def _read_skill_revision_once(skill_dir):
     files = []
+    contents = {}
     raw_total = 0
     paths = _walk_package_files(skill_dir)
     if "SKILL.md" not in {relative for relative, _path in paths}:
@@ -236,19 +237,23 @@ def _build_skill_revision_once(skill_dir):
         if raw_total > MAX_TOTAL_BYTES:
             _fail("revision_total_size_exceeded")
         mode, canonical = _canonical_content(raw)
+        contents[relative] = canonical
         files.append({
             "path": relative,
             "size": len(canonical),
             "digest": _digest(canonical),
             "contentMode": mode,
         })
-    return normalize_revision_manifest({"schema": REVISION_SCHEMA, "files": files})
-def build_skill_revision(skill_dir):
-    first = _build_skill_revision_once(skill_dir)
-    second = _build_skill_revision_once(skill_dir)
-    if first != second:
+    return normalize_revision_manifest({"schema": REVISION_SCHEMA, "files": files}), contents
+def read_skill_revision(skill_dir):
+    """Return one stable revision manifest and its independent canonical bytes."""
+    first, contents = _read_skill_revision_once(skill_dir)
+    second, repeated = _read_skill_revision_once(skill_dir)
+    if first != second or contents != repeated:
         _fail("revision_changed_during_read")
-    return first
+    return first, contents
+def build_skill_revision(skill_dir):
+    return read_skill_revision(skill_dir)[0]
 def normalize_bundled_catalog(value):
     if not isinstance(value, dict) or set(value) != {"schema", "skills"} or value.get("schema") != CATALOG_SCHEMA:
         _fail("catalog_invalid")

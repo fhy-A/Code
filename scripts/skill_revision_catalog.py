@@ -48,7 +48,14 @@ def main(argv=None):
         if directory not in assignments:
             raise revisions.SkillRevisionError("catalog_assignment_invalid", f"Unknown catalog directory: {directory}")
         del assignments[directory]
-    assignments.update(_mapping(args.assign))
+    requested = _mapping(args.assign)
+    for directory, skill_id in requested.items():
+        if directory in assignments and assignments[directory] != skill_id:
+            raise revisions.SkillRevisionError(
+                "catalog_skill_id_reassignment",
+                f"Stable Skill id cannot be reassigned for: {directory}",
+            )
+    assignments.update(requested)
     if args.write:
         catalog = revisions.build_bundled_catalog(root, assignments)
         _atomic_write(path, revisions.render_bundled_catalog(catalog))

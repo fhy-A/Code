@@ -1,0 +1,450 @@
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+from code_runtime import skill_revisions as revisions
+from code_runtime import skill_store
+
+
+def _write_skill(root, name, body="body", extra=None, newline="\n"):
+    directory = root / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "SKILL.md").write_bytes(
+        newline.join(("---", f"name: {name}", "description: test", "---", "", body)).encode()
+    )
+    for relative, value in (extra or {}).items():
+        path = directory / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(value if isinstance(value, bytes) else value.encode())
+    return directory
+
+
+def _fixture(tmp_path, *, installed=True):
+    data = tmp_path / "profile"
+    bundle = tmp_path / "bundle"
+    data.mkdir(parents=True); bundle.mkdir(parents=True)
+    bundled = _write_skill(bundle, "alpha", extra={"nested/text.txt": "a\r\n"})
+    if installed:
+        (data / "skills").mkdir()
+        shutil.copytree(bundled, data / "skills" / "alpha")
+    catalog = revisions.build_bundled_catalog(bundle, {"alpha": "code.bundle/alpha"})
+    return data, bundle, catalog
+
+
+def _snapshot(root):
+    if not root.exists():
+        return None
+    return {
+        path.relative_to(root).as_posix(): ("dir" if path.is_dir() else path.read_bytes())
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix())
+        if not path.is_symlink()
+    }
+
+
+def _store(data, bundle, fault=None, timeout=5):
+    return skill_store.SkillStore(
+        data, bundle, write_enabled=True, fault_injector=fault, lock_timeout=timeout,
+    )
+
+
+def _by_alias(registry):
+    return {item["routingAlias"]: item for item in registry["bindings"]}
+
+
+def test_store_is_explicit_and_default_off(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    with pytest.raises(ValueError):
+        skill_store.SkillStore(None, bundle)
+    store = skill_store.SkillStore(data, bundle)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.bootstrap(catalog)
+    assert caught.value.code == "store_writes_disabled"
+    assert not (data / skill_store.STORE_DIRECTORY).exists()
+
+
+def test_invalid_legacy_state_is_zero_write_preflight(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    state = data / "bundled-skills-state.json"
+    state.write_text("{broken", encoding="utf-8")
+    before = _snapshot(data)
+    with pytest.raises(revisions.SkillRevisionError) as caught:
+        _store(data, bundle).bootstrap(catalog)
+    assert caught.value.code == "legacy_state_invalid"
+    assert _snapshot(data) == before
+    assert not (data / skill_store.STORE_DIRECTORY).exists()
+
+
+def test_invalid_catalog_is_zero_write_preflight(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    catalog["skills"][0]["skillId"] = "invalid"
+    before = _snapshot(data)
+    with pytest.raises(revisions.SkillRevisionError):
+        _store(data, bundle).bootstrap(catalog)
+    assert _snapshot(data) == before
+    assert not (data / skill_store.STORE_DIRECTORY).exists()
+
+
+def test_exact_and_custom_bootstrap_preserves_legacy_bytes(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    _write_skill(data / "skills", "custom", body="custom")
+    legacy_before = _snapshot(data / "skills")
+    registry = _store(data, bundle).bootstrap(catalog)
+    assert registry["schema"] == skill_store.REGISTRY_SCHEMA
+    assert registry["generation"] == 0
+    assert registry["registryHash"].startswith("sha256:")
+    bindings = _by_alias(registry)
+    assert bindings["alpha"]["state"] == "ready"
+    assert bindings["custom"]["state"] == "ready"
+    installations = {item["kind"]: item for item in registry["installations"]}
+    assert installations["bundled"]["skillId"] == "code.bundle/alpha"
+    assert installations["local"]["skillId"].startswith("local.skill/")
+    assert _snapshot(data / "skills") == legacy_before
+    assert not (data / "bundled-skills-state.json").exists()
+    assert _store(data, bundle).read_registry() == registry
+
+
+def test_stored_text_is_canonical_and_binary_is_raw(tmp_path):
+    data, bundle, _catalog = _fixture(tmp_path)
+    binary = b"\x00a\r\nb"
+    (data / "skills" / "alpha" / "binary.bin").write_bytes(binary)
+    shutil.rmtree(bundle / "alpha")
+    shutil.copytree(data / "skills" / "alpha", bundle / "alpha")
+    catalog = revisions.build_bundled_catalog(bundle, {"alpha": "code.bundle/alpha"})
+    registry = _store(data, bundle).bootstrap(catalog)
+    revision_id = registry["installations"][0]["revisionId"]
+    obj = _store(data, bundle)._object_path(revision_id)
+    assert (obj / "content" / "nested" / "text.txt").read_bytes() == b"a\n"
+    assert (obj / "content" / "binary.bin").read_bytes() == binary
+
+
+def test_same_name_modified_and_tombstone_conflicts_are_blocked(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    (data / "skills" / "alpha" / "SKILL.md").write_text("local modification", encoding="utf-8")
+    registry = _store(data, bundle).bootstrap(catalog)
+    binding = _by_alias(registry)["alpha"]
+    assert binding["state"] == "blocked"
+    assert binding["reasonCode"] == "same-name-modified"
+    assert binding["activeCandidate"] is None
+    assert len(binding["candidates"]) == 2
+
+    data2, bundle2, catalog2 = _fixture(tmp_path / "tombstone")
+    (data2 / "bundled-skills-state.json").write_text(json.dumps({
+        "schema": "code-bundled-skills/v1", "tombstones": ["alpha"],
+    }), encoding="utf-8")
+    registry2 = _store(data2, bundle2).bootstrap(catalog2)
+    assert _by_alias(registry2)["alpha"]["state"] == "blocked"
+    assert _by_alias(registry2)["alpha"]["reasonCode"] == "tombstone-conflict"
+
+
+def test_unmatched_tombstone_does_not_shadow_local_custom(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    _write_skill(data / "skills", "retired", body="unrelated local")
+    (data / "bundled-skills-state.json").write_text(json.dumps({
+        "schema": "code-bundled-skills/v1", "tombstones": ["retired"],
+    }), encoding="utf-8")
+    registry = _store(data, bundle).bootstrap(catalog)
+    assert _by_alias(registry)["retired"]["state"] == "ready"
+    tombstone = next(item for item in registry["bundledTombstones"] if item["legacyName"] == "retired")
+    assert tombstone == {
+        "legacyName": "retired", "skillId": None,
+        "catalogRevisionId": None, "state": "unmatched",
+    }
+
+
+def test_absent_bundled_tombstone_stays_tombstoned(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    shutil.rmtree(data / "skills" / "alpha")
+    (data / "bundled-skills-state.json").write_text(json.dumps({
+        "schema": "code-bundled-skills/v1", "tombstones": ["alpha"],
+    }), encoding="utf-8")
+    registry = _store(data, bundle).bootstrap(catalog)
+    binding = _by_alias(registry)["alpha"]
+    assert binding["state"] == "tombstoned"
+    assert binding["activeCandidate"] is None
+    assert not registry["installations"]
+
+
+def test_missing_root_never_becomes_active(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path, installed=False)
+    registry = _store(data, bundle).bootstrap(catalog)
+    binding = _by_alias(registry)["alpha"]
+    assert binding["state"] == "blocked"
+    assert binding["reasonCode"] == "legacy-root-missing"
+    assert binding["activeCandidate"] is None
+
+
+def test_invalid_skill_entry_is_observed_but_not_imported(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    invalid = data / "skills" / "broken"
+    invalid.mkdir()
+    (invalid / "not-skill.txt").write_text("opaque", encoding="utf-8")
+    registry = _store(data, bundle).bootstrap(catalog)
+    binding = _by_alias(registry)["broken"]
+    assert binding["state"] == "blocked"
+    assert binding["reasonCode"] == "source-invalid"
+    assert not binding["candidates"]
+    assert all(item["displayName"] != "broken" for item in registry["installations"])
+
+
+def test_shared_development_never_becomes_active(tmp_path):
+    data = tmp_path / "profile"
+    bundle = data / "skills"
+    data.mkdir(); _write_skill(bundle, "alpha")
+    catalog = revisions.build_bundled_catalog(bundle, {"alpha": "code.bundle/alpha"})
+    registry = _store(data, bundle).bootstrap(catalog)
+    binding = _by_alias(registry)["alpha"]
+    assert binding["state"] == "blocked"
+    assert binding["reasonCode"] == "shared-development-unconfirmed"
+
+
+def test_same_request_is_a_post_commit_noop_with_stable_ids(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    _write_skill(data / "skills", "custom")
+    store = _store(data, bundle)
+    first = store.bootstrap(catalog)
+    journal_path = next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))
+    journal_before = journal_path.read_bytes()
+    tree_before = _snapshot(data / skill_store.STORE_DIRECTORY)
+    second = store.bootstrap(catalog)
+    assert second == first
+    assert second["generation"] == 0
+    assert journal_path.read_bytes() == journal_before
+    assert _snapshot(data / skill_store.STORE_DIRECTORY) == tree_before
+
+
+def test_changed_logical_request_after_commit_fails_closed(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = _store(data, bundle)
+    first = store.bootstrap(catalog)
+    (data / "skills" / "alpha" / "SKILL.md").write_text("changed", encoding="utf-8")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.bootstrap(catalog)
+    assert caught.value.code == "bootstrap_already_committed_conflict"
+    assert store.read_registry() == first
+
+
+def test_different_catalog_request_cannot_create_second_bootstrap(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = _store(data, bundle)
+    first = store.bootstrap(catalog)
+    alternate = revisions.build_bundled_catalog(bundle, {"alpha": "code.bundle/alternate"})
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.bootstrap(alternate)
+    assert caught.value.code == "bootstrap_already_committed_conflict"
+    assert store.read_registry() == first
+    assert len(list((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))) == 1
+
+
+def test_request_hash_is_logical_and_base_is_separate(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    journal = json.loads(next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json")).read_text(encoding="utf-8"))
+    receipt = registry["operationReceipts"][0]
+    assert journal["requestHash"] == receipt["requestHash"]
+    assert journal["baseRegistry"] == {"generation": None, "registryHash": None}
+    assert receipt["resultStateHash"] == skill_store._state_hash(registry)
+
+
+class _CrashOnce:
+    def __init__(self, point):
+        self.point = point
+        self.seen = False
+
+    def __call__(self, point):
+        if point == self.point and not self.seen:
+            self.seen = True
+            raise skill_store.SkillStoreInterruption(point)
+
+
+@pytest.mark.parametrize("point", [
+    "after-skeleton",
+    "after-journal-prepared-temp",
+    "after-journal-prepared-publish",
+    "after-root-temp",
+    "after-root-publish",
+    "after-staging-file",
+    "after-journal-staged-verified-publish",
+    "after-object-publish",
+    "after-registry-temp",
+    "after-registry-publish",
+    "after-journal-committed-publish",
+])
+def test_every_crash_boundary_recovers_idempotently(tmp_path, point):
+    data, bundle, catalog = _fixture(tmp_path)
+    crash = _CrashOnce(point)
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, crash).bootstrap(catalog)
+    registry = _store(data, bundle).bootstrap(catalog)
+    assert _store(data, bundle).read_registry() == registry
+    assert registry["generation"] == 0
+    journals = list((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))
+    assert len(journals) == 1
+    assert json.loads(journals[0].read_text(encoding="utf-8"))["phase"] == "committed"
+
+
+def test_ids_recorded_at_prepare_survive_restart(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    _write_skill(data / "skills", "custom")
+    crash = _CrashOnce("after-journal-prepared-publish")
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, crash).bootstrap(catalog)
+    journal_path = next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))
+    prepared = json.loads(journal_path.read_text(encoding="utf-8"))
+    expected = {(item["installationId"], item["skillId"]) for item in prepared["targetRegistry"]["installations"]}
+    completed = _store(data, bundle).bootstrap(catalog)
+    assert {(item["installationId"], item["skillId"]) for item in completed["installations"]} == expected
+
+
+def test_explicit_local_identity_hint_is_durable(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    _write_skill(data / "skills", "custom")
+    hint = {"custom": {
+        "skillId": "local.skill/" + "1" * 32,
+        "installationId": "si1_" + "2" * 32,
+    }}
+    registry = _store(data, bundle).bootstrap(catalog, identity_hints=hint)
+    custom = next(item for item in registry["installations"] if item["kind"] == "local")
+    assert custom["skillId"] == hint["custom"]["skillId"]
+    assert custom["installationId"] == hint["custom"]["installationId"]
+    assert _store(data, bundle).bootstrap(catalog, identity_hints=hint) == registry
+
+
+def test_same_request_threads_share_one_transaction(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _item: _store(data, bundle).bootstrap(catalog), range(4)))
+    assert all(item == results[0] for item in results)
+    assert len(list((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))) == 1
+
+
+def test_same_request_processes_share_one_transaction(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(revisions.render_bundled_catalog(catalog), encoding="utf-8", newline="\n")
+    script = (
+        "import sys; from code_runtime import skill_revisions as r, skill_store as s; "
+        "c=r.load_bundled_catalog(sys.argv[3]); "
+        "x=s.SkillStore(sys.argv[1],sys.argv[2],write_enabled=True).bootstrap(c); "
+        "print(x['registryHash'])"
+    )
+    command = [sys.executable, "-c", script, str(data), str(bundle), str(catalog_path)]
+    processes = [subprocess.Popen(command, cwd=Path(__file__).parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    outputs = [process.communicate(timeout=30) for process in processes]
+    assert [process.returncode for process in processes] == [0, 0], outputs
+    assert outputs[0][0].strip() == outputs[1][0].strip()
+    assert len(list((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))) == 1
+
+
+def test_corrupt_referenced_object_has_no_fallback(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = _store(data, bundle)
+    registry = store.bootstrap(catalog)
+    revision_id = registry["installations"][0]["revisionId"]
+    content = store._object_path(revision_id) / "content" / "SKILL.md"
+    content.write_bytes(content.read_bytes() + b"tamper")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.read_registry()
+    assert caught.value.code == "object_corrupt"
+    assert (data / "skills" / "alpha" / "SKILL.md").exists()
+
+
+def test_corrupt_published_object_is_not_overwritten_on_recovery(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    crash = _CrashOnce("after-object-publish")
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, crash).bootstrap(catalog)
+    store = _store(data, bundle)
+    journal = json.loads(next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json")).read_text(encoding="utf-8"))
+    target = store._object_path(journal["objectRevisionIds"][0]) / "content" / "SKILL.md"
+    target.write_bytes(target.read_bytes() + b"corrupt")
+    corrupted = target.read_bytes()
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.bootstrap(catalog)
+    assert caught.value.code == "object_corrupt"
+    assert target.read_bytes() == corrupted
+
+
+def test_unknown_partial_staging_is_preserved(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    crash = _CrashOnce("after-staging-file")
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, crash).bootstrap(catalog)
+    journal = json.loads(next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json")).read_text(encoding="utf-8"))
+    unknown = data / skill_store.STORE_DIRECTORY / "staging" / journal["operationId"] / "objects" / "sha256" / journal["objectRevisionIds"][0][7:9] / journal["objectRevisionIds"][0][7:] / "unknown"
+    unknown.write_bytes(b"preserve")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        _store(data, bundle).bootstrap(catalog)
+    assert caught.value.code == "staging_unknown"
+    assert unknown.read_bytes() == b"preserve"
+
+
+def test_unknown_store_entry_is_preserved_and_blocks(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = _store(data, bundle)
+    store.bootstrap(catalog)
+    unknown = data / skill_store.STORE_DIRECTORY / "unknown.bin"
+    unknown.write_bytes(b"keep")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.bootstrap(catalog)
+    assert caught.value.code == "store_layout_unknown"
+    assert unknown.read_bytes() == b"keep"
+
+
+def test_store_file_lock_has_a_bounded_busy_result(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    script = (
+        "import sys; from code_runtime import skill_store as s; "
+        "x=s.SkillStore(sys.argv[1],sys.argv[2],write_enabled=True); "
+        "c=x._mutation_lock(); c.__enter__(); print('locked',flush=True); sys.stdin.read(1); c.__exit__(None,None,None)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(data), str(bundle)],
+        cwd=Path(__file__).parents[1], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        with pytest.raises(skill_store.SkillStoreError) as caught:
+            _store(data, bundle, timeout=0.05).bootstrap(catalog)
+        assert caught.value.code == "store_busy"
+    finally:
+        child.stdin.write("x"); child.stdin.flush()
+        child.communicate(timeout=10)
+
+
+def test_move_and_clone_preserve_lineage_without_path_identity(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path / "source")
+    registry = _store(data, bundle).bootstrap(catalog)
+    clone = tmp_path / "clone"
+    shutil.copytree(data, clone)
+    cloned = _store(clone, bundle).read_registry()
+    assert cloned["dataRootId"] == registry["dataRootId"]
+    assert cloned["registryHash"] == registry["registryHash"]
+    moved = tmp_path / "moved"
+    shutil.move(data, moved)
+    assert _store(moved, bundle).read_registry() == registry
+    assert _store(clone, bundle).root != _store(moved, bundle).root
+
+
+@pytest.mark.parametrize("mutation,code", [
+    (lambda value: value.update(extra=True), "registry_invalid"),
+    (lambda value: value.update(generation=-1), "registry_generation_invalid"),
+    (lambda value: value.update(registryHash="sha256:" + "0" * 64), "registry_hash_mismatch"),
+])
+def test_registry_schema_corruption_fails_closed(tmp_path, mutation, code):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = _store(data, bundle)
+    store.bootstrap(catalog)
+    path = data / skill_store.STORE_DIRECTORY / "registry.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutation(value)
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        store.read_registry()
+    assert caught.value.code == code

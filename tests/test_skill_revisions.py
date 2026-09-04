@@ -6,6 +6,7 @@ import shutil
 import pytest
 
 from code_runtime import skill_revisions as revisions
+from scripts import skill_revision_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,10 @@ def test_revision_is_order_root_and_line_ending_independent(tmp_path):
         "SKILL.md", "nested/a.txt", "z.txt",
     ]
     assert all(item["contentMode"] == "utf8-lf" for item in left["files"])
+
+    manifest, contents = revisions.read_skill_revision(first)
+    assert manifest == left
+    assert contents["nested/a.txt"] == b"a\n"
 
 
 @pytest.mark.parametrize(
@@ -295,6 +300,43 @@ def test_catalog_rename_requires_an_explicit_stable_id_mapping(tmp_path):
     second = _catalog_for(tmp_path, {"renamed": "code.bundle/stable-alpha"})
     assert second["skills"][0]["skillId"] == first["skills"][0]["skillId"]
     assert second["skills"][0]["revisionId"] == first["skills"][0]["revisionId"]
+
+
+def test_catalog_cli_rejects_stable_id_reassignment(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    skills = root / "data" / "skills"
+    _write_skill(skills, "alpha")
+    catalog = _catalog_for(skills, {"alpha": "code.bundle/stable-alpha"})
+    (skills / revisions.CATALOG_FILENAME).write_text(
+        revisions.render_bundled_catalog(catalog), encoding="utf-8", newline="\n",
+    )
+    monkeypatch.setattr(skill_revision_catalog, "ROOT", root)
+    with pytest.raises(revisions.SkillRevisionError) as caught:
+        skill_revision_catalog.main([
+            "--write", "--assign", "alpha=code.bundle/reassigned",
+        ])
+    assert caught.value.code == "catalog_skill_id_reassignment"
+    assert revisions.load_bundled_catalog(skills / revisions.CATALOG_FILENAME) == catalog
+    assert skill_revision_catalog.main([
+        "--write", "--assign", "alpha=code.bundle/stable-alpha",
+    ]) == 0
+
+
+def test_catalog_cli_explicit_rename_preserves_stable_id(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    skills = root / "data" / "skills"
+    original = _write_skill(skills, "alpha")
+    catalog = _catalog_for(skills, {"alpha": "code.bundle/stable-alpha"})
+    (skills / revisions.CATALOG_FILENAME).write_text(
+        revisions.render_bundled_catalog(catalog), encoding="utf-8", newline="\n",
+    )
+    original.rename(skills / "renamed")
+    monkeypatch.setattr(skill_revision_catalog, "ROOT", root)
+    assert skill_revision_catalog.main([
+        "--write", "--drop", "alpha", "--assign", "renamed=code.bundle/stable-alpha",
+    ]) == 0
+    updated = revisions.load_bundled_catalog(skills / revisions.CATALOG_FILENAME)
+    assert updated["skills"][0]["skillId"] == "code.bundle/stable-alpha"
 
 
 def test_catalog_round_trip_load_and_current_repo_freshness(tmp_path):

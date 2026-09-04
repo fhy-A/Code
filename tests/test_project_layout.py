@@ -30,6 +30,7 @@ RUNTIME_MODULES = (
     "skill_registry",
     "skill_resources",
     "skill_revisions",
+    "skill_store",
     "windows_explorer",
 )
 DEVTOOL_MODULES = ("release_state", "verification")
