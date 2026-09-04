@@ -13154,7 +13154,11 @@ function observeAgentProjectionSnapshot(ctx, snapshot, referenceTime = Date.now(
     && !ctx.isSubAgent
     && Array.isArray(snapshot?.activeSkillNames)
   ) {
-    applyForegroundActiveSkillNames(ctx, snapshot.activeSkillNames);
+    applyForegroundActiveSkillNames(
+      ctx,
+      snapshot.activeSkillNames,
+      ctx._canonicalSkillActivation === true,
+    );
   }
   if (!ctx.isDetachedBackground && Number(snapshot?.contextLimit) > 0) {
     const frozen = {

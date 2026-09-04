@@ -18276,13 +18276,19 @@ process.stdout.write(JSON.stringify({
         helper_start = APP_SOURCE.index("function normalizeForegroundActiveSkillNames(")
         helper_end = APP_SOURCE.index("async function resolveForegroundGoalContext(", helper_start)
         helper_source = APP_SOURCE[helper_start:helper_end]
+        snapshot_start = APP_SOURCE.index("function observeAgentProjectionSnapshot(")
+        snapshot_end = APP_SOURCE.index("function findAgentProjectionMessage(", snapshot_start)
+        snapshot_source = APP_SOURCE[snapshot_start:snapshot_end]
         script = f"""
 const renders = [];
 const sessionWrites = [];
 const state = {{sessionId: "session-a"}};
 const setSessionMessages = (sessionId, messages) => sessionWrites.push([sessionId, messages]);
 const renderSessionMessages = (sessionId) => renders.push(sessionId);
+const rememberFrozenSessionContextResolution = () => {{}};
+const ensureAgentProjectionShadow = () => null;
 eval({json.dumps(helper_source)});
+eval({json.dumps(snapshot_source)});
 const origin = {{role: "user", content: "task", meta: {{pendingDispatch: {{id: "dispatch-1"}}}}}};
 const ctx = {{sessionId: "session-a", messages: [origin], foregroundOriginMessage: origin, activeSkillNames: []}};
 ctx.activeSkillNames = ["imagegen", " imagegen ", "documents", "", null, 42];
@@ -18302,7 +18308,14 @@ const legacyLongOrigin = {{role: "user", content: "legacy-long"}};
 syncForegroundActiveSkillProjection({{sessionId: "session-a", messages: [legacyLongOrigin], foregroundOriginMessage: legacyLongOrigin, activeSkillNames: [longName]}});
 const canonicalLongOrigin = {{role: "user", content: "canonical-long"}};
 applyForegroundActiveSkillNames({{sessionId: "session-a", messages: [canonicalLongOrigin], foregroundOriginMessage: canonicalLongOrigin, explicitSkill: "", activeSkillNames: []}}, [longName], true);
-process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChanged, first, final, recoveredOrigin, legacyLongOrigin, canonicalLongOrigin, renders, writes: sessionWrites.length}}));
+const canonicalSnapshotOrigin = {{role: "user", content: "canonical-snapshot"}};
+const canonicalSnapshotCtx = {{sessionId: "session-a", messages: [canonicalSnapshotOrigin], foregroundOriginMessage: canonicalSnapshotOrigin, explicitSkill: "", activeSkillNames: [], _canonicalSkillActivation: true}};
+applyForegroundActiveSkillNames(canonicalSnapshotCtx, [longName], true);
+observeAgentProjectionSnapshot(canonicalSnapshotCtx, {{activeSkillNames: [longName]}});
+const legacySnapshotOrigin = {{role: "user", content: "legacy-snapshot"}};
+const legacySnapshotCtx = {{sessionId: "session-a", messages: [legacySnapshotOrigin], foregroundOriginMessage: legacySnapshotOrigin, explicitSkill: "", activeSkillNames: []}};
+observeAgentProjectionSnapshot(legacySnapshotCtx, {{activeSkillNames: [longName]}});
+process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChanged, first, final, recoveredOrigin, legacyLongOrigin, canonicalLongOrigin, canonicalSnapshotCtx, canonicalSnapshotOrigin, legacySnapshotCtx, legacySnapshotOrigin, renders, writes: sessionWrites.length}}));
 """
         completed = subprocess.run(
             ["node", "-e", script], cwd=ROOT, capture_output=True,
@@ -18319,19 +18332,19 @@ process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChang
         self.assertEqual(data["recoveredOrigin"]["meta"]["activeSkillNames"], ["pdf", "documents"])
         self.assertEqual(len(data["legacyLongOrigin"]["meta"]["activeSkillNames"][0]), 80)
         self.assertEqual(len(data["canonicalLongOrigin"]["meta"]["activeSkillNames"][0]), 128)
-        self.assertEqual(data["renders"], ["session-a"] * 5)
-        self.assertEqual(data["writes"], 5)
+        self.assertEqual(len(data["canonicalSnapshotCtx"]["activeSkillNames"][0]), 128)
+        self.assertEqual(len(data["canonicalSnapshotOrigin"]["meta"]["activeSkillNames"][0]), 128)
+        self.assertEqual(len(data["legacySnapshotCtx"]["activeSkillNames"][0]), 80)
+        self.assertEqual(len(data["legacySnapshotOrigin"]["meta"]["activeSkillNames"][0]), 80)
+        self.assertEqual(data["renders"], ["session-a"] * 8)
+        self.assertEqual(data["writes"], 8)
         task_prompt = APP_SOURCE[
             APP_SOURCE.index("async function getTaskSystemPrompt("):
             APP_SOURCE.index("async function resolveForegroundGoalContext(")
         ]
         self.assertIn("syncForegroundActiveSkillProjection(ctx);", task_prompt)
-        snapshot_source = APP_SOURCE[
-            APP_SOURCE.index("function observeAgentProjectionSnapshot("):
-            APP_SOURCE.index("function findAgentProjectionMessage(")
-        ]
         self.assertIn(
-            "applyForegroundActiveSkillNames(ctx, snapshot.activeSkillNames)",
+            "ctx._canonicalSkillActivation === true",
             snapshot_source,
         )
         self.assertNotIn("apiJson", helper_source)
