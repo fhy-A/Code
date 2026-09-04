@@ -1,5 +1,6 @@
 """H1-1 contract tests for canonical Agent events and state invariants."""
 
+import ast
 import json
 import unittest
 from pathlib import Path
@@ -316,7 +317,13 @@ class TestAgentEventContract(unittest.TestCase):
         self.assertIn('"protocolVersion": 1', encoded)
         self.assertEqual(len(summary["eventTypes"]), 27)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
-        self.assertIn("from code_runtime import agent_protocol", server_source)
+        runtime_imports = {
+            alias.name
+            for node in ast.parse(server_source).body
+            if isinstance(node, ast.ImportFrom) and node.module == "code_runtime"
+            for alias in node.names
+        }
+        self.assertIn("agent_protocol", runtime_imports)
         self.assertNotIn("from agent_protocol", server_source)
 
 

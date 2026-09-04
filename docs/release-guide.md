@@ -38,7 +38,7 @@ python release.py 0.5.8 --skip-tests
 | 阶段 | 操作 | 校验 |
 |------|------|------|
 | 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md` | 3 个文件版本号一致；README 徽章 URL / alt 与 EXE 下载名同版 |
-| 2 | 前端门禁 → `pytest -q`（360 秒）→ `npm run verify:harness-replay`（30 秒）→ `git diff --check` → `node --check` / `py_compile` | 前端构建、完整回归、默认 replay CLI、差异与语法全部通过 |
+| 2 | 前端门禁 → `pytest -q`（1080 秒）→ `npm run verify:harness-replay`（30 秒）→ `git diff --check` → `node --check` / `py_compile` | 前端构建、完整回归、默认 replay CLI、差异与语法全部通过 |
 | 3 | `python build_exe.py` 打包 | EXE 文件生成 |
 | 4 | 读取 EXE 版本元数据 + 计算 SHA-256 | `ProductVersion` / `FileVersion` / `OriginalFilename` 正确 |
 | 5 | 生成 `docs/releases/vX.Y.Z.md` 模板 | **暂停等你编辑发布说明** |

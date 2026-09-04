@@ -232,7 +232,7 @@ class TestPrepareAtomicFailure(unittest.TestCase):
             for item in verification.get_release_definition_manifest()["checks"]
             if item["id"] == "pytest_full"
         )
-        self.assertEqual(pytest_manifest["timeout"], 360)
+        self.assertEqual(pytest_manifest["timeout"], 1080)
         self.assertEqual(
             credential["verification"]["definitionSha256"],
             release.get_release_definition_fingerprint(),

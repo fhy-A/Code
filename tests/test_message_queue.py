@@ -93,16 +93,24 @@ class TestRunningMessageQueue(unittest.TestCase):
         )
         save_index = clear.index("await saveSessionState(")
         self.assertLess(set_run_state_index, save_index)
+        for expected in (
+            "await saveSessionState(",
+            "ctx.sessionId,",
+            "msgs,",
+            "getSessionStats(ctx.sessionId),",
+            'sessionTitle || "Untitled",',
+            "{ persistMessages: true },",
+        ):
+            self.assertIn(expected, clear)
+        self.assertIn("const previousRunState = getSessionRunState(ctx.sessionId);", clear)
+        self.assertIn("const stagedClearedRunState = getSessionRunState(ctx.sessionId);", clear)
         self.assertIn(
-            """await saveSessionState(
-      ctx.sessionId,
-      msgs,
-      getSessionStats(ctx.sessionId),
-      sessionTitle || "Untitled",
-      { persistMessages: true },
-    ).catch(() => null)""",
+            "if (getSessionRunState(ctx.sessionId) === stagedClearedRunState)",
             clear,
         )
+        self.assertIn("setSessionRunState(ctx.sessionId, previousRunState);", clear)
+        self.assertIn("throw error;", clear)
+        self.assertNotIn(").catch(() => null)", clear)
 
         save_start = APP_SOURCE.index("async function saveSessionState(")
         save_end = APP_SOURCE.index("async function saveCurrentSession()", save_start)

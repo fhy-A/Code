@@ -209,16 +209,19 @@ class TestSubAgentFrontend(unittest.TestCase):
         )
         save_index = clear.index("await saveSessionState(")
         self.assertLess(set_run_state_index, save_index)
-        self.assertIn(
-            """await saveSessionState(
-      ctx.sessionId,
-      msgs,
-      getSessionStats(ctx.sessionId),
-      sessionTitle || "Untitled",
-      { persistMessages: true },
-    ).catch(() => null)""",
-            clear,
-        )
+        for expected in (
+            "await saveSessionState(",
+            "ctx.sessionId,",
+            "msgs,",
+            "getSessionStats(ctx.sessionId),",
+            'sessionTitle || "Untitled",',
+            "{ persistMessages: true },",
+        ):
+            self.assertIn(expected, clear)
+        self.assertIn("const previousRunState = getSessionRunState(ctx.sessionId);", clear)
+        self.assertIn("setSessionRunState(ctx.sessionId, previousRunState);", clear)
+        self.assertIn("throw error;", clear)
+        self.assertNotIn(").catch(() => null)", clear)
         self.assertIn("async function resumePersistedBackgroundRuns()", self.source)
         self.assertIn("restoreBackgroundJobsForSession(summary)", self.source)
         restore_start = self.source.index("async function restoreBackgroundJobsForSession(summary)")

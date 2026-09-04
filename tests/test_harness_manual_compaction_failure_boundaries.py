@@ -132,6 +132,8 @@ class MinimalElement {
     this.value = "";
     this.disabled = false;
     this.dataset = {};
+    this.isConnected = true;
+    this.attributes = {};
     this._handlers = new Map();
     this._classes = new Set(["hidden"]);
     this.classList = {
@@ -147,6 +149,8 @@ class MinimalElement {
   removeEventListener(type, handler) {
     this._handlers.get(type)?.delete(handler);
   }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  focus() {}
   handlerCount(type) { return this._handlers.get(type)?.size || 0; }
   dispatch(type, event = null) {
     [...(this._handlers.get(type) || [])].forEach((handler) => handler(event || {target: this}));
@@ -160,7 +164,7 @@ const elements = new Map([
   ["cancelCompact", new MinimalElement("cancelCompact")],
   ["cancelCompactX", new MinimalElement("cancelCompactX")],
 ]);
-const document = {getElementById: (id) => elements.get(id)};
+const document = {activeElement: null, getElementById: (id) => elements.get(id)};
 const confirmBtn = elements.get("confirmCompact");
 const cancelBtn = elements.get("cancelCompact");
 const cancelX = elements.get("cancelCompactX");

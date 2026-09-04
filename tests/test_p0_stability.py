@@ -421,7 +421,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertNotIn("callModelOnce(", server_projection)
 
     def test_legacy_browser_checkpoint_fails_explicitly_without_replay(self):
-        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary)")
+        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary, options = {})")
         recovery_end = APP_SOURCE.index("async function resumePersistedRuns()", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
         legacy_branch_start = recovery.index('if (latestRunState.executionOwner !== "server-agent")')
@@ -448,7 +448,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         self.assertNotIn("async function executeToolWithDelegation(", APP_SOURCE)
 
     def test_refresh_restores_monotonic_elapsed_timer_with_short_lived_bridge(self):
-        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary)")
+        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary, options = {})")
         recovery_end = APP_SOURCE.index("async function resumePersistedRuns()", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
         presentation_index = recovery.index(
@@ -509,16 +509,18 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         save_index = clear_checkpoint.index("await saveSessionState(")
 
         self.assertLess(finalize_index, save_index)
-        self.assertIn(
-            """await saveSessionState(
-      ctx.sessionId,
-      msgs,
-      getSessionStats(ctx.sessionId),
-      sessionTitle || "Untitled",
-      { persistMessages: true },
-    ).catch(() => null)""",
-            clear_checkpoint,
-        )
+        for expected in (
+            "await saveSessionState(",
+            "ctx.sessionId,",
+            "msgs,",
+            "getSessionStats(ctx.sessionId),",
+            'sessionTitle || "Untitled",',
+            "{ persistMessages: true },",
+        ):
+            self.assertIn(expected, clear_checkpoint)
+        self.assertIn("const previousRunState = getSessionRunState(ctx.sessionId);", clear_checkpoint)
+        self.assertIn("setSessionRunState(ctx.sessionId, previousRunState);", clear_checkpoint)
+        self.assertNotIn(").catch(() => null)", clear_checkpoint)
 
         save_start = APP_SOURCE.index("async function saveSessionState(")
         save_end = APP_SOURCE.index("async function saveCurrentSession()", save_start)
@@ -563,7 +565,7 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         finalize_index = persist_source.index(
             "finalizeRunTiming(ctx.sessionId, options.finalizeTimingTarget)"
         )
-        save_index = persist_source.index("await saveSessionState(")
+        save_index = persist_source.index("return saveSessionState(")
 
         self.assertEqual(
             [checkpoint_index, run_state_index, finalize_index, save_index],

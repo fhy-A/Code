@@ -14,6 +14,7 @@ RUNTIME_MODULES = (
     "bundled_skills",
     "context_calibration",
     "context_window",
+    "data_dir_owner",
     "goal_runtime",
     "goal_v2_protocol",
     "goal_v2_store",

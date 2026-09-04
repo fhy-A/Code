@@ -59,7 +59,7 @@ console.log(JSON.stringify(result));
         builder = APP_SOURCE[builder_start:builder_end]
         self.assertNotIn("ctx.run._activeCtx = ctx", builder)
 
-        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary)")
+        recovery_start = APP_SOURCE.index("async function resumePersistedSessionRun(summary, options = {})")
         recovery_end = APP_SOURCE.index("function normalizeUserInputRequest", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
         self.assertIn("if (!claimActiveRunContext(ctx)) return;", recovery)

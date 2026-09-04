@@ -22,8 +22,8 @@ SCHEMA_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.schema.j
 FIXTURE_PATH = FIXTURE_DIR / "manual-compaction-visible-history-evidence.json"
 APP_PATH = ROOT / "app.js"
 
-EXPECTED_FIXTURE_SHA256 = "01b824a3a2bc8b7bbe0570304e3bcdf00bda520dea8e5345c14f9452055ba496"
-EXPECTED_SLICE_SHA256 = "75508cb263c790549546faa08adf3941d0964693b6d73e659c29fe3d38174710"
+EXPECTED_FIXTURE_SHA256 = "101b15517dd0290992e1b1ec3d6d1c8a908cbcb6c41b6c14cd01c3100e6ad39c"
+EXPECTED_SLICE_SHA256 = "8f302b695a7608ed39e3b2d0b53a659059b6bb803dd674c2e150176221baa1e8"
 EXPECTED_PROFILE = {
     "id": "h3-2d2-manual-compaction-visible-history",
     "version": 1,
@@ -121,6 +121,8 @@ class MinimalElement {
     this.innerHTML = "";
     this.textContent = "";
     this.disabled = false;
+    this.isConnected = true;
+    this.attributes = {};
     this._handlers = new Map();
     this._classes = new Set(["hidden"]);
     this.classList = {
@@ -136,6 +138,10 @@ class MinimalElement {
   removeEventListener(type, handler) {
     this._handlers.get(type)?.delete(handler);
   }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+  focus() {}
   handlerCount(type) {
     return this._handlers.get(type)?.size || 0;
   }
@@ -154,6 +160,7 @@ const elements = new Map([
   ["cancelCompactX", new MinimalElement("cancelCompactX")],
 ]);
 const document = {
+  activeElement: null,
   getElementById: (id) => {
     if (!elements.has(id)) throw new Error(`unexpected DOM lookup: ${id}`);
     return elements.get(id);
