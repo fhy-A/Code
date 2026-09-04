@@ -74,6 +74,10 @@ from code_runtime.skill_dependencies import (
     resolve_skill_manifest,
 )
 from code_runtime.skill_resources import SkillResourceError, resolve_skill_resources
+from code_runtime.skill_registry import (
+    build_skill_registry_snapshot,
+    resolve_skill_shadow,
+)
 
 try:
     import pystray
@@ -185,6 +189,15 @@ def _resolve_model_route_registry_enabled(environ=None):
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _resolve_skill_registry_shadow_enabled(environ=None):
+    """Keep Skill resolver v2 diagnostic-only and explicitly opt-in."""
+    source = os.environ if environ is None else environ
+    raw = source.get("CODE_SKILL_REGISTRY_SHADOW")
+    if raw is None or str(raw).strip() == "":
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class _DeferredRuntimeService:
     """Create a DATA_DIR-backed service only after an entrypoint owns it."""
 
@@ -217,6 +230,7 @@ _AGENT_EVENT_PROTOCOL_V1_ENABLED = _resolve_agent_event_protocol_v1_enabled()
 _AGENT_PROJECTION_SHADOW_ENABLED = _resolve_agent_projection_shadow_enabled()
 _SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
 _MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
+_SKILL_REGISTRY_SHADOW_ENABLED = _resolve_skill_registry_shadow_enabled()
 _model_route_registry = _DeferredRuntimeService(
     lambda: ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 )
@@ -16180,6 +16194,50 @@ def match_skills(user_message):
     return [skill for score, skill in candidates if score == best_score]
 
 
+def get_skill_registry_shadow_audit(
+    user_message,
+    *,
+    explicit_skill="",
+    disabled_names=None,
+    installed_skills_dir=None,
+    bundled_skills_dir=None,
+):
+    """Compare current matching with resolver v2 without activating its result."""
+    message = str(user_message or "")
+    if len(message) > 20_000:
+        raise ValueError("shadow audit message is too large")
+    explicit = str(explicit_skill or "").strip()
+    if explicit and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", explicit):
+        raise ValueError("invalid explicit skill name")
+    disabled = {
+        str(name or "").strip()
+        for name in disabled_names or []
+        if isinstance(name, str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", str(name).strip())
+    }
+    installed_root = Path(installed_skills_dir or SKILLS_DIR)
+    bundled_root = Path(bundled_skills_dir or (APP_DIR / "data" / "skills"))
+    registry = build_skill_registry_snapshot(installed_root, bundled_root)
+    shadow = resolve_skill_shadow(
+        registry,
+        message,
+        explicit_skill=explicit,
+        disabled_names=disabled,
+    )
+    return {
+        "schema": "code-skill-shadow-audit/v1",
+        "mode": "diagnostic-only",
+        "shadowApplied": False,
+        "productionBehaviorChanged": False,
+        "productionObservation": {
+            "available": False,
+            "reasonCode": "frontend_observation_required",
+        },
+        "registry": registry,
+        "shadow": shadow,
+    }
+
+
 def create_skill(name, description, body_text, tools="", keywords="", dependencies=None):
     """Create a new skill directory with SKILL.md and an optional dependency manifest."""
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", name)[:32]
@@ -23744,6 +23802,17 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/memory":
                 self.save_memory()
+                return
+            if self.path == "/api/skills/shadow-resolution" and _SKILL_REGISTRY_SHADOW_ENABLED:
+                body = self.read_body_json()
+                disabled_names = body.get("disabled") or []
+                if not isinstance(disabled_names, list) or len(disabled_names) > 128:
+                    raise ValueError("disabled must be a bounded array")
+                self.send_json(get_skill_registry_shadow_audit(
+                    body.get("message") or "",
+                    explicit_skill=body.get("explicitSkill") or "",
+                    disabled_names=disabled_names,
+                ))
                 return
             if self.path == "/api/skills":
                 self.create_skill_handler()
