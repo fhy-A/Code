@@ -266,6 +266,7 @@
     clientRequestId = "",
     activeSkillName = "",
     activeSkillNames = [],
+    skillActivationRequest = null,
     payload,
     baseUrl,
     keys,
@@ -288,8 +289,12 @@
       body: JSON.stringify({
         sessionId,
         clientRequestId,
-        activeSkillName: String(activeSkillName || ""),
-        activeSkillNames: Array.isArray(activeSkillNames) ? [...activeSkillNames] : [],
+        ...(skillActivationRequest ? {
+          skillActivationRequest,
+        } : {
+          activeSkillName: String(activeSkillName || ""),
+          activeSkillNames: Array.isArray(activeSkillNames) ? [...activeSkillNames] : [],
+        }),
         payload,
         ...(routeRef
           ? { routeRef, catalogRevision }

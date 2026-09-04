@@ -3380,9 +3380,401 @@ eval(source);
         self.assertEqual(data["body"]["toolBudgets"][0]["limit"], 4)
         self.assertEqual(data["body"]["contextLimit"], 128000)
 
+    def test_agent_runtime_canonical_skill_request_is_intent_only(self):
+        script = f"""
+global.window = {{Code: {{agent: {{}}}}}};
+const requests = [];
+global.fetch = async (_url, options) => {{
+  requests.push(JSON.parse(options.body));
+  return new Response(JSON.stringify({{agentRunId: "run-1", status: "model", activeSkillNames: ["alpha"]}}), {{
+    status: 201,
+    headers: {{"Content-Type": "application/json"}},
+  }});
+}};
+eval({json.dumps(RUNTIME_SOURCE)});
+(async () => {{
+  const base = {{
+    sessionId: "session-1",
+    clientRequestId: "request-1",
+    payload: {{model: "test-model", messages: [{{role: "user", content: "task"}}]}},
+    keys: [],
+  }};
+  await window.Code.agent.runtime.createAgentRun({{
+    ...base,
+    activeSkillName: "legacy",
+    activeSkillNames: ["legacy"],
+    allowedTools: ["read_file"],
+  }});
+  await window.Code.agent.runtime.createAgentRun({{
+    ...base,
+    clientRequestId: "request-2",
+    activeSkillName: "client-owner",
+    activeSkillNames: ["client-owner"],
+    skillActivationRequest: {{
+      schemaVersion: 1,
+      explicitSkill: "alpha",
+      disabledNames: ["disabled-one"],
+    }},
+    allowedTools: {{schemaVersion: 1, names: ["read_file"]}},
+  }});
+  process.stdout.write(JSON.stringify(requests));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        legacy, canonical = json.loads(completed.stdout)
+        self.assertEqual(legacy["activeSkillName"], "legacy")
+        self.assertEqual(legacy["activeSkillNames"], ["legacy"])
+        self.assertNotIn("skillActivationRequest", legacy)
+        self.assertEqual(canonical["skillActivationRequest"], {
+            "schemaVersion": 1,
+            "explicitSkill": "alpha",
+            "disabledNames": ["disabled-one"],
+        })
+        self.assertEqual(
+            canonical["allowedTools"],
+            {"schemaVersion": 1, "names": ["read_file"]},
+        )
+        for forbidden in (
+            "activeSkillName", "activeSkillNames", "owner", "body",
+            "contentHash", "evidence", "dependencies",
+        ):
+            self.assertNotIn(forbidden, canonical)
+
+    def test_canonical_prompt_uses_markers_without_loading_skill_body(self):
+        prompt_start = APP_SOURCE.index("async function buildSystemPromptSnapshot(")
+        prompt_end = APP_SOURCE.index("async function getSystemPrompt(", prompt_start)
+        prompt_source = APP_SOURCE[prompt_start:prompt_end]
+        script = f"""
+const SKILL_ACTIVATION_PROMPT_MARKER = "[[CODE_SKILL_ACTIVATION_CANONICAL_V1]]";
+const SKILL_ACTIVATION_DELEGATION_BEGIN = "[[CODE_TASK_DELEGATION_CANONICAL_V1_BEGIN]]";
+const SKILL_ACTIVATION_DELEGATION_END = "[[CODE_TASK_DELEGATION_CANONICAL_V1_END]]";
+const SYSTEM_SECURITY_LAYER = "security";
+const GOAL_AUTONOMOUS_AGENT_INSTRUCTION = "goal";
+const SUBAGENT_DELEGATION_RULES = "delegation rules";
+const defaultSystemPrompt = "behavior";
+const els = {{systemPromptText: {{value: "behavior"}}, toolPreset: {{value: "default"}}, projectRoot: {{value: "C:/work"}}}};
+const state = {{messages: [], explicitSkill: null, appVersion: "1", projectContext: null, memoryContext: null}};
+const mergeGoalModelContext = (base, extra) => extra ? `${{base}}\n\n${{extra}}` : base;
+const getPermissionProfile = () => "read";
+const getAllowedToolNames = () => new Set();
+const detectLanguage = () => "Chinese";
+const resolveLocalTimeZoneName = () => "UTC";
+const formatSystemPromptEnvironment = () => ({{instruction: "environment", capturedAt: "now", timeZone: "UTC"}});
+const getPermissionInstruction = () => "permission";
+let skillLoads = 0;
+const getSkillPromptSnapshot = async () => {{
+  skillLoads += 1;
+  return {{instruction: "LEGACY_SKILL_BODY", activeSkillNames: ["alpha"]}};
+}};
+const createSystemPromptSnapshotData = (values, metadata) => ({{
+  values,
+  ...metadata,
+  prompt: Object.values(values).filter(Boolean).join("\\n\\n"),
+}});
+{prompt_source}
+(async () => {{
+  const common = {{
+    messages: [{{role: "user", content: "use alpha"}}],
+    explicitSkill: "alpha",
+    capturedAt: new Date(0),
+    allowedToolNames: new Set(["task"]),
+  }};
+  const legacy = await buildSystemPromptSnapshot(common);
+  const canonical = await buildSystemPromptSnapshot({{...common, canonicalSkillActivation: true}});
+  const canonicalNoTask = await buildSystemPromptSnapshot({{
+    ...common,
+    canonicalSkillActivation: true,
+    allowedToolNames: new Set(),
+  }});
+  process.stdout.write(JSON.stringify({{legacy, canonical, canonicalNoTask, skillLoads}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["skillLoads"], 1)
+        self.assertIn("LEGACY_SKILL_BODY", data["legacy"]["prompt"])
+        self.assertNotIn("CODE_SKILL_ACTIVATION", data["legacy"]["prompt"])
+        self.assertNotIn("LEGACY_SKILL_BODY", data["canonical"]["prompt"])
+        self.assertEqual(
+            data["canonical"]["prompt"].count("[[CODE_SKILL_ACTIVATION_CANONICAL_V1]]"),
+            1,
+        )
+        self.assertEqual(
+            data["canonical"]["prompt"].count("[[CODE_TASK_DELEGATION_CANONICAL_V1_BEGIN]]"),
+            1,
+        )
+        self.assertEqual(
+            data["canonical"]["prompt"].count("[[CODE_TASK_DELEGATION_CANONICAL_V1_END]]"),
+            1,
+        )
+        self.assertNotIn(
+            "CODE_TASK_DELEGATION_CANONICAL",
+            data["canonicalNoTask"]["prompt"],
+        )
+
+    def test_canonical_foreground_create_is_authoritative_before_checkpoint(self):
+        loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
+        loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
+        loop_source = APP_SOURCE[loop_start:loop_end]
+        send_start = APP_SOURCE.index("async function sendMessage(userText, options = {})")
+        send_end = APP_SOURCE.index("async function resolveAtImages()", send_start)
+        send_source = APP_SOURCE[send_start:send_end]
+        freeze_line = "ctx._canonicalSkillActivation = _skillActivationCanonicalEnabled === true;"
+        deferred_checkpoint = (
+            "if (!ctx._canonicalSkillActivation) {\n"
+            '    await persistRunCheckpoint(ctx, "running", "model").catch(() => {});\n'
+            "  }"
+        )
+        self.assertIn(freeze_line, send_source)
+        self.assertIn(deferred_checkpoint, send_source)
+        self.assertLess(send_source.index(freeze_line), send_source.index(deferred_checkpoint))
+        self.assertIn(
+            "const skipRetry = ctx._canonicalSkillActivation === true\n"
+            "        || /rate.?limit|too.*(many|fast|frequent)|429|quota.*exceeded/i.test(err.message || \"\");",
+            send_source,
+        )
+        validator_start = APP_SOURCE.index("function requireCanonicalActiveSkillNames(")
+        validator_end = APP_SOURCE.index("function syncForegroundActiveSkillProjection(", validator_start)
+        validator_source = APP_SOURCE[validator_start:validator_end]
+        background_start = APP_SOURCE.index("async function runBackgroundSubAgentJob(job)")
+        background_end = APP_SOURCE.index("function pumpBackgroundDispatcher()", background_start)
+        self.assertNotIn(
+            "skillActivationRequest",
+            APP_SOURCE[background_start:background_end],
+        )
+        script = f"""
+{validator_source}
+let _skillActivationCanonicalEnabled = false;
+const state = {{sessionId: "session-1", skills: [{{name: "legacy"}}], disabledSkills: new Set(["disabled-one"])}};
+const t = (key) => key;
+const getSelectedModel = () => "test-model";
+const getAllowedToolNamesForProfile = () => new Set(["read_file", "task"]);
+let counters;
+const applySkillTaskPolicy = (tools) => {{ counters.matcher += 1; return tools; }};
+const getSkillToolBudgets = () => {{ counters.budgets += 1; return [{{name: "legacy"}}]; }};
+const getNativeTools = (_preset, names) => [...names].map((name) => ({{function: {{name}}}}));
+const ensureSessionRun = () => ({{abortController: new AbortController()}});
+const claimActiveRunContext = () => true;
+const buildModelRequestPayload = async (ctx) => {{
+  counters.builds += 1;
+  counters.promptCanonical = ctx._canonicalSkillActivation;
+  return {{payload: {{model: "test-model", messages: [{{role: "system", content: "prompt"}}]}}}};
+}};
+const getModelContextResolution = () => ({{inputBudgetInsufficient: false, contextBudgetTokens: 800}});
+const getEffectiveMaxTokens = () => 128;
+const persistRunCheckpoint = async (ctx) => {{
+  counters.checkpoints += 1;
+  counters.order.push(`checkpoint:${{(ctx.activeSkillNames || []).join(",")}}`);
+}};
+const settleForegroundDispatchAfterAgentRunCreated = async () => true;
+const refreshImageRoutes = async () => ({{catalogRevision: 0, routes: []}});
+const createAgentRunWithImageRouteRebind = async (options) => ({{
+  created: await options.createAgentRun(options.request),
+  imageRoute: null,
+  rebound: false,
+}});
+const resumePendingSessionSteers = async () => {{}};
+const recoverActiveAgentRuntimeProjection = async () => {{}};
+const recoverSupersededActiveServerProjection = () => null;
+const ACTIVE_SESSION_PROJECTION_RECOVERY_LIMIT = 3;
+const makeActiveSessionProjectionAuthorityError = () => new Error("projection recovery exhausted");
+const isActiveSessionProjectionConflict = () => false;
+const observeAgentProjectionSnapshot = () => {{}};
+const renderSessionMessages = () => {{}};
+const requestServerAgentInput = async () => {{}};
+const requestServerAgentAuthorization = async () => {{}};
+const requestServerAgentSkillEvidence = async () => {{}};
+const attachCompletedAgentUsage = () => {{}};
+const clearObservedAgentRun = () => {{}};
+const classifyModelRequestFailure = () => ({{code: ""}});
+const invalidateModelCatalogRoute = () => {{}};
+const refreshModels = async () => {{}};
+const getAgentUsageGroupId = () => "";
+const archiveAgentProjectionShadow = () => {{}};
+const setSessionMessages = () => {{}};
+const syncForegroundActiveSkillProjection = (ctx) => {{
+  counters.order.push(`sync:${{(ctx.activeSkillNames || []).join(",")}}`);
+}};
+const getModelDispatchCredentials = async () => ({{
+  routeRef: "", catalogRevision: 0, keys: [], baseUrl: "http://fixture.invalid",
+}});
+let responseMode = "valid";
+const agentRuntime = {{
+  async createAgentRun(request) {{
+    counters.creates += 1;
+    counters.requests.push(request);
+    if (responseMode === "protocol-error") {{
+      const error = new Error("activation disabled");
+      error.errorCode = "activation_protocol_disabled";
+      throw error;
+    }}
+    if (responseMode === "missing") return {{agentRunId: "new-agent"}};
+    if (responseMode === "duplicate") return {{agentRunId: "new-agent", activeSkillNames: ["alpha", "alpha"]}};
+    if (responseMode === "empty") return {{agentRunId: "new-agent", activeSkillNames: []}};
+    return {{agentRunId: "new-agent", activeSkillNames: ["alpha"]}};
+  }},
+  async getAgentRun() {{ counters.gets += 1; return {{status: "completed", result: {{}}, nextCursor: 0}}; }},
+  async watchAgentRun() {{ counters.watches += 1; return {{status: "completed", result: {{}}, nextCursor: 0}}; }},
+  async resumeAgentRun() {{ counters.resumes += 1; }},
+}};
+{loop_source}
+async function scenario({{capability, existing = false, detached = false, mode = "valid", frozen, explicit = "alpha"}}) {{
+  _skillActivationCanonicalEnabled = capability;
+  responseMode = mode;
+  counters = {{matcher: 0, budgets: 0, builds: 0, creates: 0, gets: 0, watches: 0, resumes: 0, checkpoints: 0, requests: [], order: [], promptCanonical: null}};
+  const ctx = {{
+    sessionId: "session-1",
+    messages: [{{role: "user", content: "task"}}],
+    stats: {{}},
+    model: "test-model",
+    toolPreset: "default",
+    permissionProfile: "accept",
+    run: {{abortController: new AbortController()}},
+    agentRunId: existing ? "existing-agent" : "",
+    agentEventCursor: 0,
+    activeSkillName: "predicted",
+    activeSkillNames: ["predicted"],
+    explicitSkill: explicit,
+    clientRequestId: "request-1",
+    imageRoute: null,
+    isDetachedBackground: detached,
+  }};
+  if (typeof frozen === "boolean") ctx._canonicalSkillActivation = frozen;
+  let error = "";
+  try {{ await runServerAgentLoop(ctx); }} catch (caught) {{ error = String(caught.errorCode || caught.message); }}
+  return {{...counters, activeSkillNames: ctx.activeSkillNames, canonical: ctx._canonicalSkillActivation === true, error}};
+}}
+(async () => {{
+  const legacy = await scenario({{capability: false}});
+  const canonical = await scenario({{capability: true}});
+  const implicit = await scenario({{capability: true, explicit: ""}});
+  const noMatch = await scenario({{capability: true, explicit: "", mode: "empty"}});
+  const existing = await scenario({{capability: true, existing: true}});
+  const frozenCanonical = await scenario({{capability: false, frozen: true}});
+  const frozenLegacy = await scenario({{capability: true, frozen: false}});
+  const detached = await scenario({{capability: true, detached: true, frozen: true}});
+  const missing = await scenario({{capability: true, mode: "missing"}});
+  const duplicate = await scenario({{capability: true, mode: "duplicate"}});
+  const protocolError = await scenario({{capability: true, mode: "protocol-error"}});
+  process.stdout.write(JSON.stringify({{legacy, canonical, implicit, noMatch, existing, frozenCanonical, frozenLegacy, detached, missing, duplicate, protocolError}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        data = json.loads(completed.stdout)
+        legacy_request = data["legacy"]["requests"][0]
+        self.assertEqual((data["legacy"]["matcher"], data["legacy"]["budgets"]), (1, 1))
+        self.assertIs(data["legacy"]["promptCanonical"], False)
+        self.assertEqual(legacy_request["activeSkillNames"], ["predicted"])
+        self.assertIsInstance(legacy_request["allowedTools"], list)
+        self.assertNotIn("skillActivationRequest", legacy_request)
+
+        canonical = data["canonical"]
+        canonical_request = canonical["requests"][0]
+        self.assertEqual((canonical["matcher"], canonical["budgets"], canonical["creates"]), (0, 0, 1))
+        self.assertIs(canonical["promptCanonical"], True)
+        self.assertEqual(canonical_request["skillActivationRequest"], {
+            "schemaVersion": 1,
+            "explicitSkill": "alpha",
+            "disabledNames": ["disabled-one"],
+        })
+        self.assertEqual(
+            canonical_request["allowedTools"],
+            {"schemaVersion": 1, "names": ["read_file", "task"]},
+        )
+        self.assertNotIn("activeSkillNames", canonical_request)
+        self.assertEqual(canonical["activeSkillNames"], ["alpha"])
+        self.assertLess(canonical["order"].index("sync:alpha"), canonical["order"].index("checkpoint:alpha"))
+        self.assertEqual(
+            data["implicit"]["requests"][0]["skillActivationRequest"]["explicitSkill"],
+            "",
+        )
+        self.assertEqual(data["implicit"]["activeSkillNames"], ["alpha"])
+        self.assertEqual(data["noMatch"]["activeSkillNames"], [])
+        self.assertLess(
+            data["noMatch"]["order"].index("sync:"),
+            data["noMatch"]["order"].index("checkpoint:"),
+        )
+
+        self.assertEqual(
+            (data["existing"]["matcher"], data["existing"]["budgets"], data["existing"]["builds"], data["existing"]["creates"]),
+            (0, 0, 0, 0),
+        )
+        self.assertIs(data["existing"]["canonical"], False)
+        self.assertIs(data["frozenCanonical"]["canonical"], True)
+        self.assertIn("skillActivationRequest", data["frozenCanonical"]["requests"][0])
+        self.assertIs(data["frozenLegacy"]["canonical"], False)
+        self.assertNotIn("skillActivationRequest", data["frozenLegacy"]["requests"][0])
+        self.assertIs(data["detached"]["canonical"], False)
+        self.assertNotIn("skillActivationRequest", data["detached"]["requests"][0])
+        for key in ("missing", "duplicate", "protocolError"):
+            self.assertEqual(data[key]["creates"], 1)
+            self.assertEqual(data[key]["checkpoints"], 0)
+            self.assertEqual(data[key]["matcher"], 0)
+        self.assertIn("invalid canonical activeSkillNames", data["missing"]["error"])
+        self.assertIn("invalid canonical activeSkillNames", data["duplicate"]["error"])
+        self.assertEqual(data["protocolError"]["error"], "activation_protocol_disabled")
+
+    def test_browser_heartbeat_recognizes_only_exact_skill_protocol(self):
+        start = APP_SOURCE.index("const sendBrowserHeartbeat = async () =>")
+        end = APP_SOURCE.index("setInterval(sendBrowserHeartbeat", start)
+        heartbeat_source = APP_SOURCE[start:end]
+        script = f"""
+const SKILL_ACTIVATION_PROTOCOL = "canonical-v1";
+let _skillActivationCanonicalEnabled = false;
+let browserServerInstanceId = null;
+let browserInstanceMode = null;
+let next = {{serverInstanceId: "server-1", instanceMode: "release"}};
+let heartbeatFails = false;
+const fetch = async () => {{
+  if (heartbeatFails) throw new Error("offline");
+  return {{json: async () => next}};
+}};
+const location = {{reload() {{ throw new Error("unexpected reload"); }}}};
+const applyInstanceIdentity = () => {{}};
+const setAgentProjectionShadowEnabled = () => {{}};
+{heartbeat_source}
+(async () => {{
+  await sendBrowserHeartbeat();
+  const absent = _skillActivationCanonicalEnabled;
+  next = {{...next, skillActivationProtocol: "canonical-v1"}};
+  await sendBrowserHeartbeat();
+  const canonical = _skillActivationCanonicalEnabled;
+  next = {{...next, skillActivationProtocol: "canonical-v2"}};
+  await sendBrowserHeartbeat();
+  const unknown = _skillActivationCanonicalEnabled;
+  next = {{...next, skillActivationProtocol: "canonical-v1"}};
+  await sendBrowserHeartbeat();
+  heartbeatFails = true;
+  await sendBrowserHeartbeat();
+  const failed = _skillActivationCanonicalEnabled;
+  process.stdout.write(JSON.stringify({{absent, canonical, unknown, failed}}));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "absent": False,
+            "canonical": True,
+            "unknown": False,
+            "failed": False,
+        })
+
     def test_server_agent_questionnaire_uses_durable_submit_and_reload_path(self):
         self.assertIn('name: "request_user_input"', TOOLS_SOURCE)
-        self.assertIn("const skillAllowedToolNames = new Set(applySkillTaskPolicy(", APP_SOURCE)
+        self.assertIn("const skillAllowedToolNames = canonicalSkillActivation || !creatingAgentRun", APP_SOURCE)
+        self.assertIn(": new Set(applySkillTaskPolicy(", APP_SOURCE)
         self.assertIn("const serverTools = getNativeTools(ctx.toolPreset, skillAllowedToolNames)", APP_SOURCE)
         self.assertIn('if (snapshot.status === "waiting_user_input")', APP_SOURCE)
         self.assertIn("await requestServerAgentInput(ctx, snapshot.pendingInput)", APP_SOURCE)
@@ -3492,6 +3884,7 @@ eval(source);
         )
         script = f"""
 const loopSource = {json.dumps(loop_source)};
+const _skillActivationCanonicalEnabled = false;
 const state = {{sessionId: "session-1", skills: [], disabledSkills: new Set()}};
 const els = {{baseUrl: {{value: "http://isolated.invalid"}}}};
 const MAX_TOOL_ROUNDS = 4;
@@ -17901,7 +18294,15 @@ const removed = syncForegroundActiveSkillProjection(ctx);
 const final = JSON.parse(JSON.stringify(origin));
 const detached = {{sessionId: "session-a", messages: [origin], foregroundOriginMessage: origin, activeSkillNames: ["pdf"], isDetachedBackground: true}};
 const detachedChanged = syncForegroundActiveSkillProjection(detached);
-process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChanged, first, final, renders, writes: sessionWrites.length}}));
+const recoveredOrigin = {{role: "user", content: "recovered"}};
+const recovered = {{sessionId: "session-a", messages: [recoveredOrigin], foregroundOriginMessage: recoveredOrigin, explicitSkill: "", activeSkillNames: []}};
+applyForegroundActiveSkillNames(recovered, ["pdf", "documents"]);
+const longName = "a".repeat(128);
+const legacyLongOrigin = {{role: "user", content: "legacy-long"}};
+syncForegroundActiveSkillProjection({{sessionId: "session-a", messages: [legacyLongOrigin], foregroundOriginMessage: legacyLongOrigin, activeSkillNames: [longName]}});
+const canonicalLongOrigin = {{role: "user", content: "canonical-long"}};
+applyForegroundActiveSkillNames({{sessionId: "session-a", messages: [canonicalLongOrigin], foregroundOriginMessage: canonicalLongOrigin, explicitSkill: "", activeSkillNames: []}}, [longName], true);
+process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChanged, first, final, recoveredOrigin, legacyLongOrigin, canonicalLongOrigin, renders, writes: sessionWrites.length}}));
 """
         completed = subprocess.run(
             ["node", "-e", script], cwd=ROOT, capture_output=True,
@@ -17915,13 +18316,24 @@ process.stdout.write(JSON.stringify({{changed, unchanged, removed, detachedChang
         self.assertEqual(data["first"]["meta"]["activeSkillNames"], ["imagegen", "documents"])
         self.assertEqual(data["first"]["meta"]["pendingDispatch"]["id"], "dispatch-1")
         self.assertNotIn("activeSkillNames", data["final"]["meta"])
-        self.assertEqual(data["renders"], ["session-a", "session-a"])
-        self.assertEqual(data["writes"], 2)
+        self.assertEqual(data["recoveredOrigin"]["meta"]["activeSkillNames"], ["pdf", "documents"])
+        self.assertEqual(len(data["legacyLongOrigin"]["meta"]["activeSkillNames"][0]), 80)
+        self.assertEqual(len(data["canonicalLongOrigin"]["meta"]["activeSkillNames"][0]), 128)
+        self.assertEqual(data["renders"], ["session-a"] * 5)
+        self.assertEqual(data["writes"], 5)
         task_prompt = APP_SOURCE[
             APP_SOURCE.index("async function getTaskSystemPrompt("):
             APP_SOURCE.index("async function resolveForegroundGoalContext(")
         ]
         self.assertIn("syncForegroundActiveSkillProjection(ctx);", task_prompt)
+        snapshot_source = APP_SOURCE[
+            APP_SOURCE.index("function observeAgentProjectionSnapshot("):
+            APP_SOURCE.index("function findAgentProjectionMessage(")
+        ]
+        self.assertIn(
+            "applyForegroundActiveSkillNames(ctx, snapshot.activeSkillNames)",
+            snapshot_source,
+        )
         self.assertNotIn("apiJson", helper_source)
         self.assertNotIn("saveSessionState", helper_source)
 
@@ -23788,6 +24200,7 @@ process.stdout.write(JSON.stringify({{
         source = APP_SOURCE[helper_start:helper_end]
         script = f"""
 const source = {json.dumps(source)};
+let _skillActivationCanonicalEnabled = false;
 const state = {{
   sessionId: "session-1",
   messages: [],
@@ -23802,6 +24215,8 @@ let saves = [];
 let routePromise = null;
 let routeReachedResolve = null;
 let routeReached = null;
+let runError = null;
+let hasImage = false;
 const els = {{
   sessionTitle: {{value: "Existing session"}},
 }};
@@ -23885,12 +24300,13 @@ function modelRouteFailureCode() {{ return ""; }}
 function invalidateModelRoute() {{}}
 async function persistRunCheckpoint() {{}}
 async function clearRunCheckpoint() {{}}
-async function executeRunContext() {{ agentRunCreates += 1; }}
+async function executeRunContext() {{ agentRunCreates += 1; if (runError) throw runError; }}
 function scheduleTerminalFileTreeRefresh() {{}}
 function renderSessions() {{}}
 function notifyTaskComplete() {{}}
 function archiveAgentProjectionShadow() {{}}
-function hasImageContent() {{ return false; }}
+function hasImageContent() {{ return hasImage; }}
+function _formatAgentError(error) {{ return String(error?.errorCode || error?.message || error); }}
 eval(source);
 
 function prepareRoute() {{
@@ -23908,6 +24324,9 @@ function resetScenario() {{
   renderCount = 0;
   agentRunCreates = 0;
   saves = [];
+  runError = null;
+  hasImage = false;
+  _skillActivationCanonicalEnabled = false;
 }}
 
 (async () => {{
@@ -23971,6 +24390,18 @@ function resetScenario() {{
     pendingCleared: !failedMessage.meta?.pendingDispatch,
   }};
 
+  resetScenario();
+  _skillActivationCanonicalEnabled = true;
+  hasImage = true;
+  runError = new Error("activation disabled");
+  runError.errorCode = "activation_protocol_disabled";
+  const canonicalRoute = prepareRoute();
+  const canonicalPromise = sendMessage("canonical image").catch((error) => error);
+  await routeReached;
+  canonicalRoute.resolveRoute(["synthetic-trusted-key"]);
+  const canonicalError = await canonicalPromise;
+  const canonicalFailure = {{agentRunCreates, errorCode: canonicalError.errorCode}};
+
   process.stdout.write(JSON.stringify({{
     beforeRelease,
     afterSuccess,
@@ -23984,6 +24415,7 @@ function resetScenario() {{
     }},
     beforeRetryRelease,
     afterRetry,
+    canonicalFailure,
   }}));
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
@@ -24018,6 +24450,10 @@ function resetScenario() {{
             "userMessages": 1,
             "agentRunCreates": 1,
             "pendingCleared": True,
+        })
+        self.assertEqual(data["canonicalFailure"], {
+            "agentRunCreates": 1,
+            "errorCode": "activation_protocol_disabled",
         })
 
     def test_foreground_dispatch_reload_reconciles_success_without_duplicate_errors(self):
@@ -25984,6 +26420,7 @@ eval(source);
         )
         script = f"""
 const loopSource = {json.dumps(loop_source)};
+const _skillActivationCanonicalEnabled = false;
 const clone = (value) => structuredClone(value);
 const state = {{sessionId: "session-1", skills: [], disabledSkills: new Set()}};
 const t = (key) => key;

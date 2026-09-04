@@ -2217,6 +2217,11 @@ Windows + PowerShell。创建目录用 mkdir 或 python os.makedirs。
 save_memory 保存偏好或决策到长期记忆。先在回复末尾询问”是否将「xxx」写入记忆？”，用户确认后再调。不要静默写入。name 用 kebab-case，body 写完整。不记琐碎信息。
 `.trim();
 
+const SKILL_ACTIVATION_PROTOCOL = "canonical-v1";
+const SKILL_ACTIVATION_PROMPT_MARKER = "[[CODE_SKILL_ACTIVATION_CANONICAL_V1]]";
+const SKILL_ACTIVATION_DELEGATION_BEGIN = "[[CODE_TASK_DELEGATION_CANONICAL_V1_BEGIN]]";
+const SKILL_ACTIVATION_DELEGATION_END = "[[CODE_TASK_DELEGATION_CANONICAL_V1_END]]";
+
 
 
 
@@ -2231,6 +2236,7 @@ let _baseDocumentTitle = document.title;
 let _instanceProductName = "Code";
 let _pendingPermNotify = false;
 let _agentProjectionShadowEnabled = false;
+let _skillActivationCanonicalEnabled = false;
 
 function applyInstanceIdentity(instanceMode) {
   const isDev = instanceMode === "dev";
@@ -2566,6 +2572,7 @@ async function buildSystemPromptSnapshot(options = {}) {
   const sourceFolders = Array.isArray(options.rootPaths)
     ? options.rootPaths.map((path) => String(path || "").trim()).filter(Boolean)
     : (activeCwd ? [activeCwd] : []);
+  const canonicalSkillActivation = options.canonicalSkillActivation === true;
 
   // Detect user language from the latest user message
   const lastUserMsg = [...promptMessages].reverse().find((m) => m.role === "user");
@@ -2589,7 +2596,9 @@ async function buildSystemPromptSnapshot(options = {}) {
     : "";
   // Legacy source-contract mapping: if (allowedToolNames.has("task")) { parts.push(SUBAGENT_DELEGATION_RULES); }
   const delegationInstruction = allowedToolNames.has("task")
-    ? SUBAGENT_DELEGATION_RULES
+    ? (canonicalSkillActivation
+      ? `${SKILL_ACTIVATION_DELEGATION_BEGIN}\n${SUBAGENT_DELEGATION_RULES}\n${SKILL_ACTIVATION_DELEGATION_END}`
+      : SUBAGENT_DELEGATION_RULES)
     : "";
   const responseLanguageInstruction = userLang !== "Chinese"
     ? `## Response Language\nThe user is writing in ${userLang}. Reply in ${userLang} unless the user explicitly asks for another language.`
@@ -2618,7 +2627,9 @@ async function buildSystemPromptSnapshot(options = {}) {
   let activeSkillNames = [];
 
   // Inject explicit skill first, then auto-matched
-  if (_loadSkills) {
+  if (_loadSkills && canonicalSkillActivation) {
+    skillInstruction = SKILL_ACTIVATION_PROMPT_MARKER;
+  } else if (_loadSkills) {
     const skillSnapshot = await getSkillPromptSnapshot(
       lastUserMsg?.content || "", explicitSkill || "", {
         skills: options.skills,
@@ -2677,11 +2688,41 @@ function normalizeForegroundActiveSkillNames(names) {
   return normalized;
 }
 
-function syncForegroundActiveSkillProjection(ctx) {
+function requireCanonicalActiveSkillNames(value) {
+  if (!Array.isArray(value) || value.length > 2) {
+    throw new Error("Server returned invalid canonical activeSkillNames");
+  }
+  const names = [];
+  for (const item of value) {
+    if (
+      typeof item !== "string"
+      || item !== item.trim()
+      || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(item)
+      || names.includes(item)
+    ) throw new Error("Server returned invalid canonical activeSkillNames");
+    names.push(item);
+  }
+  return names;
+}
+
+function applyForegroundActiveSkillNames(ctx, value, strict = false) {
+  const names = strict
+    ? requireCanonicalActiveSkillNames(value)
+    : normalizeForegroundActiveSkillNames(value);
+  ctx.activeSkillNames = names;
+  ctx.activeSkillName = (
+    names.length === 1 && names[0] === String(ctx.explicitSkill || "")
+  ) ? names[0] : "";
+  syncForegroundActiveSkillProjection(ctx, strict ? names : null);
+}
+
+function syncForegroundActiveSkillProjection(ctx, authoritativeNames = null) {
   if (!ctx || ctx.isSubAgent || ctx.isDetachedBackground) return false;
   const message = ctx.foregroundOriginMessage;
   if (!message || message.role !== "user") return false;
-  const next = normalizeForegroundActiveSkillNames(ctx.activeSkillNames);
+  const next = Array.isArray(authoritativeNames)
+    ? [...authoritativeNames]
+    : normalizeForegroundActiveSkillNames(ctx.activeSkillNames);
   const previous = normalizeForegroundActiveSkillNames(message.meta?.activeSkillNames);
   if (
     next.length === previous.length
@@ -11000,6 +11041,10 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     projectContext: ctx?.projectContext,
     goalContextInstruction: ctx?.goalContextInstruction,
     goalOperationsEnabled: Boolean(ctx && !ctx.isSubAgent && !ctx.isDetachedBackground),
+    canonicalSkillActivation: Boolean(
+      ctx && !ctx.isSubAgent && !ctx.isDetachedBackground
+      && ctx._canonicalSkillActivation === true
+    ),
   };
   const systemPrompt = ctx?.isSubAgent
     ? ""
@@ -13104,6 +13149,13 @@ function archiveAgentProjectionShadow(ctx) {
 }
 
 function observeAgentProjectionSnapshot(ctx, snapshot, referenceTime = Date.now()) {
+  if (
+    !ctx.isDetachedBackground
+    && !ctx.isSubAgent
+    && Array.isArray(snapshot?.activeSkillNames)
+  ) {
+    applyForegroundActiveSkillNames(ctx, snapshot.activeSkillNames);
+  }
   if (!ctx.isDetachedBackground && Number(snapshot?.contextLimit) > 0) {
     const frozen = {
       contextLimit: Number(snapshot.contextLimit),
@@ -14182,20 +14234,32 @@ async function runServerAgentLoop(ctx) {
     ctx.toolPreset,
   );
   const latestUserMessage = [...ctx.messages].reverse().find((message) => message?.role === "user");
-  const skillAllowedToolNames = new Set(applySkillTaskPolicy(
-    profileAllowedToolNames,
-    state.skills || [],
-    state.disabledSkills || new Set(),
-    latestUserMessage?.content || "",
-    ctx.explicitSkill || "",
-  ));
+  const creatingAgentRun = !ctx.agentRunId;
+  const canonicalEligible = creatingAgentRun && !ctx.isSubAgent && !ctx.isDetachedBackground;
+  if (!canonicalEligible) {
+    ctx._canonicalSkillActivation = false;
+  } else if (typeof ctx._canonicalSkillActivation !== "boolean") {
+    ctx._canonicalSkillActivation = _skillActivationCanonicalEnabled;
+  }
+  const canonicalSkillActivation = canonicalEligible && ctx._canonicalSkillActivation === true;
+  const skillAllowedToolNames = canonicalSkillActivation || !creatingAgentRun
+    ? new Set(profileAllowedToolNames)
+    : new Set(applySkillTaskPolicy(
+      profileAllowedToolNames,
+      state.skills || [],
+      state.disabledSkills || new Set(),
+      latestUserMessage?.content || "",
+      ctx.explicitSkill || "",
+    ));
   if (!ctx.imageRoute) skillAllowedToolNames.delete("generate_image");
-  const skillToolBudgets = getSkillToolBudgets(
-    state.skills || [],
-    state.disabledSkills || new Set(),
-    latestUserMessage?.content || "",
-    ctx.explicitSkill || "",
-  );
+  const skillToolBudgets = canonicalSkillActivation || !creatingAgentRun
+    ? undefined
+    : getSkillToolBudgets(
+      state.skills || [],
+      state.disabledSkills || new Set(),
+      latestUserMessage?.content || "",
+      ctx.explicitSkill || "",
+    );
   const serverTools = getNativeTools(ctx.toolPreset, skillAllowedToolNames);
   const serverToolNames = serverTools.map((tool) => String(tool.function?.name || "")).filter(Boolean);
   ctx.allowedToolNames = new Set(serverToolNames);
@@ -14266,15 +14330,25 @@ async function runServerAgentLoop(ctx) {
     const createRequest = {
       sessionId: ctx.sessionId,
       clientRequestId: ctx.clientRequestId || "",
-      activeSkillName: ctx.activeSkillName || "",
-      activeSkillNames: ctx.activeSkillNames || [],
+      ...(canonicalSkillActivation ? {
+        skillActivationRequest: {
+          schemaVersion: 1,
+          explicitSkill: String(ctx.explicitSkill || ""),
+          disabledNames: [...(state.disabledSkills || new Set())],
+        },
+      } : {
+        activeSkillName: ctx.activeSkillName || "",
+        activeSkillNames: ctx.activeSkillNames || [],
+      }),
       payload: prepared.payload,
       baseUrl: dispatch.baseUrl,
       keys: dispatch.keys,
       routeRef: dispatch.routeRef,
       catalogRevision: dispatch.catalogRevision,
       imageRoute: ctx.imageRoute,
-      allowedTools: serverToolNames,
+      allowedTools: canonicalSkillActivation
+        ? { schemaVersion: 1, names: serverToolNames }
+        : serverToolNames,
       toolBudgets: skillToolBudgets,
       permissionProfile: ctx.permissionProfile || "read",
       runKind: "foreground",
@@ -14292,6 +14366,9 @@ async function runServerAgentLoop(ctx) {
       ctx.imageRoute = creation.imageRoute;
       const pendingDispatch = ctx.foregroundOriginMessage?.meta?.pendingDispatch;
       if (pendingDispatch) pendingDispatch.imageRoute = { ...ctx.imageRoute };
+    }
+    if (canonicalSkillActivation) {
+      applyForegroundActiveSkillNames(ctx, created.activeSkillNames, true);
     }
     ctx.agentRunId = String(created.agentRunId || "");
     if (!ctx.agentRunId) throw new Error("Server Agent did not return an agentRunId");
@@ -15373,6 +15450,7 @@ async function sendMessage(userText, options = {}) {
   }
   const run = ensureSessionRun(sessionId);
   const ctx = buildRunContext(sessionId, options);
+  ctx._canonicalSkillActivation = _skillActivationCanonicalEnabled === true;
   if (optimisticMessage?.meta?.pendingDispatch && ctx.imageRoute) {
     optimisticMessage.meta.pendingDispatch.imageRoute = { ...ctx.imageRoute };
   }
@@ -15619,7 +15697,9 @@ async function sendMessage(userText, options = {}) {
     });
   }
 
-  await persistRunCheckpoint(ctx, "running", "model").catch(() => {});
+  if (!ctx._canonicalSkillActivation) {
+    await persistRunCheckpoint(ctx, "running", "model").catch(() => {});
+  }
 
   let loopError = null;
   try {
@@ -15634,7 +15714,8 @@ async function sendMessage(userText, options = {}) {
     if (!routeFailureCode && hasImageContent(lastUser ? [lastUser] : [])) {
       // If the request had images and failed, retry with text-only — unless
       // the error is clearly unrelated to multimodal (rate limit, quota).
-      const skipRetry = /rate.?limit|too.*(many|fast|frequent)|429|quota.*exceeded/i.test(err.message || "");
+      const skipRetry = ctx._canonicalSkillActivation === true
+        || /rate.?limit|too.*(many|fast|frequent)|429|quota.*exceeded/i.test(err.message || "");
       if (!skipRetry) {
         // Remove the failed assistant placeholder so retry adds a fresh one
         const placeholderIdx = ctx.messages.findIndex((m) => m && m.role === "assistant" && m.streaming && !m.content);
@@ -18099,7 +18180,12 @@ async function init() {
           applyInstanceIdentity(browserInstanceMode);
         }
         setAgentProjectionShadowEnabled(data.agentProjectionShadow === true);
-      } catch (_) { /* backend may be restarting */ }
+        _skillActivationCanonicalEnabled = (
+          data.skillActivationProtocol === SKILL_ACTIVATION_PROTOCOL
+        );
+      } catch (_) {
+        _skillActivationCanonicalEnabled = false;
+      }
     };
     setInterval(sendBrowserHeartbeat, 3000);
     sendBrowserHeartbeat();

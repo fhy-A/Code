@@ -236,6 +236,7 @@ async function startIsolatedGeneration(
     injectFailureAfterSpawn = false,
     injectIndexBuildFailure = false,
     disableRoutingV2 = false,
+    enableSkillActivation = false,
   } = {},
 ) {
   const {
@@ -263,6 +264,7 @@ async function startIsolatedGeneration(
           ? { CODE_H4_INJECT_AGENT_INDEX_BUILD_FAILURE: "1" }
           : {}),
         ...(disableRoutingV2 ? { CODE_ROUTING_V2: "0" } : {}),
+        ...(enableSkillActivation ? { CODE_SKILL_ACTIVATION_V1: "1" } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
