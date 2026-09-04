@@ -575,17 +575,22 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
         record = self._terminal_record(original)
         expected = record["skillOutcome"]
 
-        self.assertEqual(expected["version"], 1)
+        self.assertEqual(expected["version"], 2)
         self.assertEqual(expected["mode"], "shadow")
         self.assertEqual(expected["aggregateState"], "terminal_gaps")
         self.assertNotIn("skillOutcome", server_mod._agent_snapshot(original, 0))
 
-        stale = copy.deepcopy(record)
-        stale["skillOutcome"] = {"version": 999, "secret": "STALE_SHADOW_SENTINEL"}
-        restored_stale = server_mod._agent_run_from_record(stale)
-        stale_recomputed = server_mod._agent_run_record(restored_stale)["skillOutcome"]
-        self.assertEqual(stale_recomputed, expected)
-        self.assertNotIn("STALE_SHADOW_SENTINEL", json.dumps(stale_recomputed))
+        for version in (1, 2, 999):
+            with self.subTest(stale_version=version):
+                stale = copy.deepcopy(record)
+                stale["skillOutcome"] = {
+                    "version": version,
+                    "secret": "STALE_SHADOW_SENTINEL",
+                }
+                restored_stale = server_mod._agent_run_from_record(stale)
+                stale_recomputed = server_mod._agent_run_record(restored_stale)["skillOutcome"]
+                self.assertEqual(stale_recomputed, expected)
+                self.assertNotIn("STALE_SHADOW_SENTINEL", json.dumps(stale_recomputed))
 
         missing = copy.deepcopy(record)
         missing.pop("skillOutcome")
@@ -615,6 +620,7 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
                 "name": "run_command",
                 "arguments": {"command": "never-executed"},
                 "command": "never-executed",
+                "fingerprint": hashlib.sha256(b"interrupted-command").hexdigest(),
                 "status": "running",
                 "stdout": "",
                 "stderr": "",
@@ -622,7 +628,7 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
         }
         record = server_mod._agent_run_record(run)
         self.assertEqual(record["skillOutcome"]["summary"]["acceptedFailed"], 0)
-        record["skillOutcome"] = {"version": 1, "mode": "shadow", "stale": True}
+        record["skillOutcome"] = {"version": 2, "mode": "shadow", "stale": True}
 
         restored = server_mod._agent_run_from_record(record)
         execution = restored["tool_executions"]["call-running"]
@@ -642,12 +648,14 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
                 "name": "read_file",
                 "status": "completed",
                 "outcome": "failed",
+                "fingerprint": hashlib.sha256(b"failed-seven").hexdigest(),
                 "result": {"ok": False},
             },
             "7": {
                 "name": "read_file",
                 "status": "completed",
                 "outcome": "succeeded",
+                "fingerprint": hashlib.sha256(b"succeeded-seven").hexdigest(),
                 "result": {"ok": True},
             },
         }
@@ -663,9 +671,41 @@ class TestSkillLifecycleAgentRunIntegration(unittest.TestCase):
             skill_outcome.project_skill_outcome(
                 reloaded["skillLifecycle"],
                 reloaded["toolExecutions"],
+                reloaded["id"],
                 reloaded["status"],
             ),
         )
+
+    def test_noncanonical_run_kinds_never_gain_skill_outcome_authority(self):
+        cases = (
+            ("background", "", 0),
+            ("internal", "", 0),
+            ("child", "parent-run", 1),
+        )
+        for run_kind, parent_run_id, depth in cases:
+            with self.subTest(run_kind=run_kind):
+                run = server_mod._create_agent_run(
+                    "",
+                    {"model": "test-model", "messages": _messages()},
+                    "http://127.0.0.1:1",
+                    [],
+                    ["read_file"],
+                    4,
+                    "read",
+                    parent_run_id=parent_run_id,
+                    parent_tool_call_id="parent-call" if parent_run_id else "",
+                    agent_depth=depth,
+                    start_worker=False,
+                    client_request_id=f"noncanonical-{run_kind}",
+                    cwd=str(self.root),
+                    run_kind=run_kind,
+                    active_skill_name="alpha",
+                    active_skill_names=["alpha"],
+                )
+                record = server_mod._agent_run_record(run)
+                self.assertNotIn("skillLifecycle", record)
+                self.assertNotIn("skillOutcome", record)
+                self.assertNotIn("skillOutcome", server_mod._agent_snapshot(run, 0))
 
     def test_restart_loader_restores_lifecycle_and_does_not_reread_skill(self):
         original = self._create("restart-loader")

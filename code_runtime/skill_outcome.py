@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 
 from .skill_lifecycle import MAX_SELECTED_SKILLS
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+RECEIPT_VERSION = 1
 MODE = "shadow"
 MAX_ACTUAL_CLAIMS = 16
 
@@ -16,6 +18,12 @@ _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _SAFE_CALL_REF_RE = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
 _HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+_EXPLICIT_TARGET_FIELDS = {
+    "use_skill": "name",
+    "check_skill_dependencies": "name",
+    "read_skill_resource": "skill",
+}
 
 
 def _run_outcome(status):
@@ -26,9 +34,9 @@ def _run_outcome(status):
 def _safe_call_reference(value):
     raw = str(value or "")
     if _SAFE_CALL_REF_RE.fullmatch(raw):
-        return raw
+        return raw, True
     digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
-    return f"call-sha256:{digest}"
+    return f"call-sha256:{digest}", False
 
 
 def _empty_summary():
@@ -44,6 +52,9 @@ def _empty_summary():
         "ambiguousClaims": 0,
         "rejectedClaims": 0,
         "duplicateCallReferences": 0,
+        "unsafeCallReferences": 0,
+        "invalidExecutionFingerprints": 0,
+        "invalidRunIdentities": 0,
         "ignoredExecutions": 0,
     }
 
@@ -123,7 +134,7 @@ def _contract_requirements(evidence):
     return requirements
 
 
-def _new_requirement(requirement, skill_index, requirement_index):
+def _new_requirement(requirement, skill_index, requirement_index, skill_identity):
     public = {
         **requirement,
         "actual": [],
@@ -140,15 +151,18 @@ def _new_requirement(requirement, skill_index, requirement_index):
         "requirementIndex": requirement_index,
         "type": requirement["type"],
         "tool": requirement["tool"],
+        "qualification": (
+            "artifact_file" if requirement["type"] == "artifact"
+            else "tool_execution"
+        ),
+        "skill": skill_identity,
         "public": public,
     }
 
 
-def _append_claim(requirement, call_ref, outcome, claim_state, *, reason=""):
+def _append_diagnostic(requirement, call_ref, outcome, claim_state, reason):
     public = requirement["public"]
     counter = {
-        ("accepted", "succeeded"): "acceptedSucceeded",
-        ("accepted", "failed"): "acceptedFailed",
         ("ambiguous", "succeeded"): "ambiguous",
         ("ambiguous", "failed"): "ambiguous",
         ("rejected", "succeeded"): "rejected",
@@ -163,9 +177,47 @@ def _append_claim(requirement, call_ref, outcome, claim_state, *, reason=""):
         "outcome": outcome,
         "claimState": claim_state,
     }
-    if reason:
-        claim["reason"] = reason
+    claim["reason"] = reason
     public["actual"].append(claim)
+
+
+def _append_receipt(requirement, run_id, call_ref, fingerprint, outcome, source):
+    public = requirement["public"]
+    public[
+        "acceptedSucceeded" if outcome == "succeeded" else "acceptedFailed"
+    ] += 1
+    if len(public["actual"]) >= MAX_ACTUAL_CLAIMS:
+        public["actualTruncated"] += 1
+        return
+    skill = requirement["skill"]
+    evidence_hash = str(skill.get("evidenceContentHash") or "")
+    digest = hashlib.sha256("\0".join((
+        run_id,
+        skill["name"],
+        skill["role"],
+        skill["skillContentHash"],
+        evidence_hash,
+        public["id"],
+        public["tool"],
+        requirement["qualification"],
+        call_ref,
+        fingerprint,
+        outcome,
+        source,
+    )).encode("utf-8", errors="replace")).hexdigest()
+    public["actual"].append({
+        "version": RECEIPT_VERSION,
+        "receiptId": f"sr1_{digest}",
+        "skill": dict(skill),
+        "requirementId": public["id"],
+        "tool": public["tool"],
+        "callRef": call_ref,
+        "executionFingerprint": fingerprint,
+        "outcome": outcome,
+        "qualification": requirement["qualification"],
+        "source": source,
+        "claimState": "accepted",
+    })
 
 
 def _artifact_file_qualified(execution):
@@ -196,16 +248,98 @@ def _execution_groups(tool_executions):
     if not isinstance(tool_executions, dict):
         return [], 0, 1
     grouped = {}
+    safety = {}
     for key, execution in tool_executions.items():
-        grouped.setdefault(_safe_call_reference(key), []).append(execution)
+        call_ref, safe = _safe_call_reference(key)
+        grouped.setdefault(call_ref, []).append(execution)
+        safety[call_ref] = safety.get(call_ref, True) and safe
     duplicate_refs = sum(len(group) > 1 for group in grouped.values())
     unique = [
-        (call_ref, group[0])
+        (call_ref, safety[call_ref], group[0])
         for call_ref, group in grouped.items()
         if len(group) == 1
     ]
     unique.sort(key=lambda item: item[0])
     return unique, duplicate_refs, 0
+
+
+def _arguments_object(execution):
+    value = execution.get("arguments") if isinstance(execution, dict) else None
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _explicit_skill_target(name, execution):
+    field = _EXPLICIT_TARGET_FIELDS.get(name)
+    if field is None:
+        return None
+    arguments = _arguments_object(execution)
+    target = arguments.get(field) if isinstance(arguments, dict) else None
+    if not isinstance(target, str) or not _SAFE_NAME_RE.fullmatch(target.strip()):
+        return "", "explicit_skill_target_malformed"
+    return target.strip(), ""
+
+
+def _runtime_skill_target(name, execution):
+    if name != "run_command":
+        return None
+    result = execution.get("result") if isinstance(execution, dict) else None
+    if not isinstance(result, dict) or "skillRuntime" not in result:
+        return None
+    runtime = result.get("skillRuntime")
+    if (
+        not isinstance(runtime, dict)
+        or isinstance(runtime.get("version"), bool)
+        or runtime.get("version") != 1
+    ):
+        return "", "runtime_skill_identity_malformed"
+    skills = runtime.get("skills") if isinstance(runtime, dict) else None
+    if not isinstance(skills, list) or not skills:
+        return "", "runtime_skill_identity_malformed"
+    if len(skills) != 1:
+        return "", "runtime_skill_identity_ambiguous"
+    if not isinstance(skills[0], dict):
+        return "", "runtime_skill_identity_malformed"
+    target = skills[0].get("skill")
+    if not isinstance(target, str) or not _SAFE_NAME_RE.fullmatch(target.strip()):
+        return "", "runtime_skill_identity_malformed"
+    return target.strip(), ""
+
+
+def _select_candidate(candidates, skill_counts, execution, name):
+    explicit = _explicit_skill_target(name, execution)
+    runtime = _runtime_skill_target(name, execution)
+    signal = explicit if explicit is not None else runtime
+    source = "explicit_skill_target" if explicit is not None else "runtime_single_skill"
+    if signal is not None:
+        target, error = signal
+        if error:
+            return None, "rejected", error
+        if skill_counts.get(target, 0) != 1:
+            return None, "rejected", f"{source}_inactive"
+        narrowed = [item for item in candidates if item["skill"]["name"] == target]
+        if len(narrowed) == 1:
+            return narrowed[0], "accepted", source
+        if len(narrowed) > 1:
+            return None, "ambiguous", "same_skill_multiple_requirements"
+        return None, "rejected", f"{source}_conflict"
+    if len(candidates) == 1:
+        return candidates[0], "accepted", "server_unique"
+    if len(candidates) > 1:
+        reason = (
+            "cross_skill"
+            if len({item["skillIndex"] for item in candidates}) > 1
+            else "same_skill_multiple_requirements"
+        )
+        return None, "ambiguous", reason
+    return None, "ignored", ""
 
 
 def _skill_state(contract_state, requirements, run_outcome):
@@ -237,7 +371,7 @@ def _aggregate_state(skills, run_outcome):
     return "observing"
 
 
-def project_skill_outcome(lifecycle, tool_executions, run_status):
+def project_skill_outcome(lifecycle, tool_executions, run_id, run_status):
     """Derive bounded shadow evidence without mutating or authorizing a run."""
     run_outcome = _run_outcome(run_status)
     try:
@@ -246,6 +380,7 @@ def project_skill_outcome(lifecycle, tool_executions, run_status):
             return _invalid_projection(run_outcome)
         skills = []
         claims = []
+        skill_counts = {}
         for skill_index, source in enumerate(selected):
             if not isinstance(source, dict):
                 return _invalid_projection(run_outcome)
@@ -279,14 +414,29 @@ def project_skill_outcome(lifecycle, tool_executions, run_status):
                 evidence["contentHash"]
             ):
                 skill["evidenceContentHash"] = evidence["contentHash"]
+            skill_identity = {
+                key: skill[key]
+                for key in (
+                    "name", "role", "skillContentHash", "evidenceContentHash",
+                )
+                if key in skill
+            }
+            if name in skill_counts:
+                return _invalid_projection(run_outcome)
+            skill_counts[name] = 1
             for requirement_index, requirement in enumerate(requirements or []):
-                claim = _new_requirement(requirement, skill_index, requirement_index)
+                claim = _new_requirement(
+                    requirement, skill_index, requirement_index, skill_identity,
+                )
                 claims.append(claim)
                 skill["requirements"].append(claim["public"])
             skills.append(skill)
 
         executions, duplicate_refs, ignored = _execution_groups(tool_executions)
-        for call_ref, execution in executions:
+        unsafe_refs = 0
+        invalid_fingerprints = 0
+        invalid_run_ids = 0
+        for call_ref, safe_call_ref, execution in executions:
             completed = _completed_execution(execution)
             if completed is None:
                 ignored += 1
@@ -297,31 +447,59 @@ def project_skill_outcome(lifecycle, tool_executions, run_status):
             for claim in matched:
                 if (
                     claim["type"] == "artifact"
-                    and outcome == "succeeded"
                     and not _artifact_file_qualified(execution)
                 ):
-                    _append_claim(
+                    _append_diagnostic(
                         claim, call_ref, outcome, "rejected",
-                        reason="artifact_structure_invalid",
+                        "artifact_structure_invalid",
                     )
                     continue
                 candidates.append(claim)
-            if len(candidates) == 1:
-                _append_claim(candidates[0], call_ref, outcome, "accepted")
-            elif len(candidates) > 1:
-                reason = (
-                    "cross_skill"
-                    if len({claim["skillIndex"] for claim in candidates}) > 1
-                    else "same_skill_multiple_requirements"
-                )
+            if not candidates:
+                ignored += 1
+                continue
+            if not safe_call_ref:
+                unsafe_refs += 1
                 for claim in candidates:
-                    _append_claim(
-                        claim, call_ref, outcome, "ambiguous", reason=reason,
+                    _append_diagnostic(
+                        claim, call_ref, outcome, "rejected", "call_reference_unsafe",
+                    )
+                continue
+            fingerprint = execution.get("fingerprint")
+            if not isinstance(fingerprint, str) or not _FINGERPRINT_RE.fullmatch(fingerprint):
+                invalid_fingerprints += 1
+                for claim in candidates:
+                    _append_diagnostic(
+                        claim, call_ref, outcome, "rejected",
+                        "execution_fingerprint_invalid",
+                    )
+                continue
+            if not isinstance(run_id, str) or not _SAFE_CALL_REF_RE.fullmatch(run_id):
+                invalid_run_ids += 1
+                for claim in candidates:
+                    _append_diagnostic(
+                        claim, call_ref, outcome, "rejected", "run_identity_invalid",
+                    )
+                continue
+            accepted, claim_state, reason = _select_candidate(
+                candidates, skill_counts, execution, name,
+            )
+            if accepted is not None:
+                _append_receipt(
+                    accepted, run_id, call_ref, fingerprint, outcome, reason,
+                )
+            elif claim_state in {"ambiguous", "rejected"}:
+                for claim in candidates:
+                    _append_diagnostic(
+                        claim, call_ref, outcome, claim_state, reason,
                     )
 
         summary = _empty_summary()
         summary["selectedSkills"] = len(skills)
         summary["duplicateCallReferences"] = duplicate_refs
+        summary["unsafeCallReferences"] = unsafe_refs
+        summary["invalidExecutionFingerprints"] = invalid_fingerprints
+        summary["invalidRunIdentities"] = invalid_run_ids
         summary["ignoredExecutions"] = ignored
         for skill_index, skill in enumerate(skills):
             contract_state = skill["contractState"]

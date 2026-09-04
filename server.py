@@ -3523,7 +3523,7 @@ def _agent_run_record(run):
         **({"skillLifecycle": skill_lifecycle_record}
            if skill_lifecycle_record else {}),
         **({"skillOutcome": skill_outcome.project_skill_outcome(
-            skill_lifecycle_record, tool_executions_record, run.get("status"),
+            skill_lifecycle_record, tool_executions_record, run["id"], run.get("status"),
         )} if skill_lifecycle_record else {}),
         **({"skillEvidence": _agent_skill_evidence_record(run)}
            if (

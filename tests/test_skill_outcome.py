@@ -5,6 +5,9 @@ import unittest
 from code_runtime import skill_outcome
 
 
+_RUN_ID = "run-skill-outcome"
+
+
 def _sha(value):
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -45,13 +48,31 @@ def _lifecycle(*skills):
     return {"activation": {"selected": list(skills)}}
 
 
-def _execution(tool="read_file", *, outcome="succeeded", result=None):
-    return {
+def _execution(
+    tool="read_file", *, outcome="succeeded", result=None, arguments=None,
+    fingerprint=None,
+):
+    execution = {
         "name": tool,
         "status": "completed",
         "outcome": outcome,
+        "fingerprint": fingerprint or hashlib.sha256(
+            f"fixture:{tool}".encode("utf-8")
+        ).hexdigest(),
         "result": result if result is not None else {"ok": outcome == "succeeded"},
     }
+    if arguments is not None:
+        execution["arguments"] = (
+            json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(arguments, dict) else arguments
+        )
+    return execution
+
+
+def _project(lifecycle, executions, status, *, run_id=_RUN_ID):
+    return skill_outcome.project_skill_outcome(
+        lifecycle, executions, run_id, status,
+    )
 
 
 class TestSkillOutcomeProjection(unittest.TestCase):
@@ -60,7 +81,7 @@ class TestSkillOutcomeProjection(unittest.TestCase):
             _requirement("inspect"),
             _requirement("write", "write_file", kind="artifact"),
         ]))
-        initial = skill_outcome.project_skill_outcome(lifecycle, {}, "tools")
+        initial = _project(lifecycle, {}, "tools")
         self.assertEqual(initial["aggregateState"], "observing")
         self.assertEqual(
             [item["missingCount"] for item in initial["skills"][0]["requirements"]],
@@ -68,38 +89,41 @@ class TestSkillOutcomeProjection(unittest.TestCase):
         )
 
         executions = {
-            "call-read": {
-                "name": "read_file",
-                "status": "completed",
-                "result": {"ok": True},
-            },
+            "call-read": _execution(),
             "call-write-failed": _execution(
                 "write_file", outcome="failed",
                 result={"ok": False, "action": "write_file", "path": "failed.txt"},
             ),
         }
-        partial = skill_outcome.project_skill_outcome(lifecycle, executions, "model")
+        partial = _project(lifecycle, executions, "model")
         inspect, write = partial["skills"][0]["requirements"]
         self.assertEqual((inspect["acceptedSucceeded"], inspect["missingCount"]), (1, 0))
-        self.assertEqual((write["acceptedFailed"], write["missingCount"]), (1, 1))
+        self.assertEqual((write["acceptedFailed"], write["missingCount"]), (0, 1))
+        self.assertEqual(write["rejected"], 1)
         self.assertEqual(partial["aggregateState"], "observing")
 
         executions["call-write-ready"] = _execution(
             "write_file",
             result={"ok": True, "action": "write_file", "path": "ready.txt"},
         )
-        satisfied = skill_outcome.project_skill_outcome(lifecycle, executions, "completed")
+        satisfied = _project(lifecycle, executions, "completed")
         self.assertEqual(satisfied["aggregateState"], "satisfied")
         self.assertEqual(satisfied["summary"]["acceptedSucceeded"], 2)
-        self.assertEqual(satisfied["summary"]["acceptedFailed"], 1)
+        self.assertEqual(satisfied["summary"]["acceptedFailed"], 0)
         self.assertEqual(satisfied["summary"]["satisfiedRequirements"], 2)
+
+        receipt = inspect["actual"][0]
+        self.assertEqual(receipt["version"], 1)
+        self.assertEqual(receipt["source"], "server_unique")
+        self.assertEqual(receipt["qualification"], "tool_execution")
+        self.assertEqual(receipt["skill"]["name"], "alpha")
 
     def test_same_skill_multi_requirement_claim_is_ambiguous_and_counts_toward_none(self):
         lifecycle = _lifecycle(_selected("alpha", 0, [
             _requirement("inspect-a"),
             _requirement("inspect-b"),
         ]))
-        projection = skill_outcome.project_skill_outcome(
+        projection = _project(
             lifecycle, {"shared-call": _execution()}, "completed",
         )
         requirements = projection["skills"][0]["requirements"]
@@ -121,7 +145,7 @@ class TestSkillOutcomeProjection(unittest.TestCase):
             _selected("alpha", 0),
             _selected("beta", 1),
         )
-        projection = skill_outcome.project_skill_outcome(
+        projection = _project(
             lifecycle, {"shared-call": _execution()}, "model",
         )
         self.assertEqual(
@@ -137,7 +161,7 @@ class TestSkillOutcomeProjection(unittest.TestCase):
 
     def test_duplicate_normalized_call_references_are_quarantined(self):
         lifecycle = _lifecycle(_selected("alpha", 0))
-        projection = skill_outcome.project_skill_outcome(
+        projection = _project(
             lifecycle,
             {7: _execution(), "7": _execution()},
             "completed",
@@ -165,45 +189,210 @@ class TestSkillOutcomeProjection(unittest.TestCase):
                 result={"ok": True, "action": "write_file", "path": "ready-secret.txt"},
             ),
         }
-        projection = skill_outcome.project_skill_outcome(lifecycle, executions, "completed")
+        projection = _project(lifecycle, executions, "completed")
         requirement = projection["skills"][0]["requirements"][0]
         self.assertEqual(requirement["acceptedSucceeded"], 1)
-        self.assertEqual(requirement["acceptedFailed"], 1)
-        self.assertEqual(requirement["rejected"], 1)
+        self.assertEqual(requirement["acceptedFailed"], 0)
+        self.assertEqual(requirement["rejected"], 2)
         self.assertEqual(
             [item["claimState"] for item in requirement["actual"]],
-            ["accepted", "rejected", "accepted"],
+            ["rejected", "rejected", "accepted"],
         )
         serialized = json.dumps(projection)
         self.assertNotIn("failed-secret.txt", serialized)
         self.assertNotIn("ready-secret.txt", serialized)
 
+    def test_failed_receipt_is_auditable_but_never_satisfies_and_binds_run(self):
+        lifecycle = _lifecycle(_selected("alpha", 0))
+        execution = _execution(
+            outcome="failed",
+            arguments={"path": "SECRET_ARGUMENT.txt"},
+            result={"ok": False, "error": "SECRET_RESULT"},
+        )
+        first = _project(lifecycle, {"failed-call": execution}, "completed")
+        repeated = _project(lifecycle, {"failed-call": execution}, "completed")
+        other_run = _project(
+            lifecycle, {"failed-call": execution}, "completed", run_id="other-run",
+        )
+        requirement = first["skills"][0]["requirements"][0]
+        receipt = requirement["actual"][0]
+
+        self.assertEqual(first["version"], 2)
+        self.assertEqual((requirement["acceptedFailed"], requirement["missingCount"]), (1, 1))
+        self.assertRegex(receipt["receiptId"], r"^sr1_[0-9a-f]{64}$")
+        self.assertEqual(receipt["receiptId"], repeated["skills"][0]["requirements"][0]["actual"][0]["receiptId"])
+        self.assertNotEqual(receipt["receiptId"], other_run["skills"][0]["requirements"][0]["actual"][0]["receiptId"])
+        self.assertEqual(receipt["executionFingerprint"], execution["fingerprint"])
+        self.assertNotIn("SECRET", json.dumps(first))
+
+    def test_receipt_id_binds_every_authoritative_identity_component(self):
+        lifecycle = _lifecycle(_selected("alpha", 0))
+        execution = _execution()
+
+        def receipt_id(source, executions=None, *, run_id=_RUN_ID):
+            projection = _project(
+                source,
+                executions or {"call-a": execution},
+                "completed",
+                run_id=run_id,
+            )
+            return projection["skills"][0]["requirements"][0]["actual"][0][
+                "receiptId"
+            ]
+
+        baseline = receipt_id(lifecycle)
+        variants = []
+        for path, value in (
+            (("role",), "modifier"),
+            (("skillContentHash",), _sha("different-skill")),
+            (("evidence", "contentHash"), _sha("different-evidence")),
+            (("evidence", "contract", "requirements", 0, "id"), "different-id"),
+        ):
+            changed = json.loads(json.dumps(lifecycle))
+            target = changed["activation"]["selected"][0]
+            for component in path[:-1]:
+                target = target[component]
+            target[path[-1]] = value
+            variants.append(receipt_id(changed))
+        variants.extend((
+            receipt_id(lifecycle, {"call-b": execution}),
+            receipt_id(lifecycle, {"call-a": _execution(fingerprint="f" * 64)}),
+            receipt_id(lifecycle, {"call-a": _execution(outcome="failed")}),
+            receipt_id(lifecycle, run_id="different-run"),
+        ))
+        self.assertTrue(all(item != baseline for item in variants))
+        self.assertEqual(len(set(variants)), len(variants))
+
+    def test_each_explicit_skill_target_resolves_cross_skill_candidates(self):
+        for tool, field in (
+            ("use_skill", "name"),
+            ("check_skill_dependencies", "name"),
+            ("read_skill_resource", "skill"),
+        ):
+            with self.subTest(tool=tool):
+                lifecycle = _lifecycle(
+                    _selected("alpha", 0, [_requirement("alpha-use", tool)]),
+                    _selected("beta", 1, [_requirement("beta-use", tool)]),
+                )
+                projection = _project(lifecycle, {
+                    f"{tool}-call": _execution(tool, arguments={field: "beta"}),
+                }, "completed")
+                alpha = projection["skills"][0]["requirements"][0]
+                beta = projection["skills"][1]["requirements"][0]
+                self.assertEqual(alpha["acceptedSucceeded"], 0)
+                self.assertEqual(beta["acceptedSucceeded"], 1)
+                self.assertEqual(beta["actual"][0]["source"], "explicit_skill_target")
+
+    def test_explicit_target_malformed_inactive_and_conflicting_never_fall_back(self):
+        lifecycle = _lifecycle(
+            _selected("alpha", 0, [_requirement("alpha-read", "read_file")]),
+            _selected("beta", 1, [_requirement("beta-use", "use_skill")]),
+        )
+        cases = (
+            ("malformed", "{", "explicit_skill_target_malformed"),
+            ("inactive", {"name": "gamma"}, "explicit_skill_target_inactive"),
+            ("conflict", {"name": "alpha"}, "explicit_skill_target_conflict"),
+        )
+        for label, arguments, reason in cases:
+            with self.subTest(label=label):
+                projection = _project(lifecycle, {
+                    f"call-{label}": _execution("use_skill", arguments=arguments),
+                }, "completed")
+                requirement = projection["skills"][1]["requirements"][0]
+                self.assertEqual(requirement["acceptedSucceeded"], 0)
+                self.assertEqual(requirement["actual"][0]["reason"], reason)
+
+    def test_runtime_single_skill_resolves_but_bad_runtime_identity_never_falls_back(self):
+        lifecycle = _lifecycle(
+            _selected("alpha", 0, [_requirement("alpha-run", "run_command")]),
+            _selected("beta", 1, [_requirement("beta-run", "run_command")]),
+        )
+        result = {
+            "ok": True,
+            "skillRuntime": {
+                "version": 1,
+                "skills": [{"skill": "beta", "capability": "inspect"}],
+                "managedPythonApplied": False,
+                "managedNodeApplied": False,
+            },
+        }
+        projection = _project(lifecycle, {
+            "runtime-call": _execution("run_command", result=result),
+        }, "completed")
+        receipt = projection["skills"][1]["requirements"][0]["actual"][0]
+        self.assertEqual(receipt["source"], "runtime_single_skill")
+
+        for label, skills, reason in (
+            ("ambiguous", [{"skill": "alpha"}, {"skill": "beta"}], "runtime_skill_identity_ambiguous"),
+            ("inactive", [{"skill": "gamma"}], "runtime_single_skill_inactive"),
+            ("malformed", "not-a-list", "runtime_skill_identity_malformed"),
+        ):
+            with self.subTest(label=label):
+                bad_result = {"ok": True, "skillRuntime": {"version": 1, "skills": skills}}
+                bad = _project(lifecycle, {
+                    f"runtime-{label}": _execution("run_command", result=bad_result),
+                }, "completed")
+                requirements = [item["requirements"][0] for item in bad["skills"]]
+                self.assertEqual(sum(item["acceptedSucceeded"] for item in requirements), 0)
+                self.assertTrue(all(item["actual"][0]["reason"] == reason for item in requirements))
+
+        bad_version_result = {
+            "ok": True,
+            "skillRuntime": {"version": True, "skills": [{"skill": "beta"}]},
+        }
+        bad_version = _project(lifecycle, {
+            "runtime-version": _execution("run_command", result=bad_version_result),
+        }, "completed")
+        requirements = [item["requirements"][0] for item in bad_version["skills"]]
+        self.assertTrue(all(
+            item["actual"][0]["reason"] == "runtime_skill_identity_malformed"
+            for item in requirements
+        ))
+
+    def test_invalid_fingerprint_and_run_identity_produce_no_receipt(self):
+        lifecycle = _lifecycle(_selected("alpha", 0))
+        invalid_fingerprint = _project(lifecycle, {
+            "bad-fingerprint": _execution(fingerprint="SECRET_FINGERPRINT"),
+        }, "completed")
+        requirement = invalid_fingerprint["skills"][0]["requirements"][0]
+        self.assertEqual(requirement["acceptedSucceeded"], 0)
+        self.assertEqual(requirement["actual"][0]["reason"], "execution_fingerprint_invalid")
+        self.assertEqual(invalid_fingerprint["summary"]["invalidExecutionFingerprints"], 1)
+        self.assertNotIn("SECRET_FINGERPRINT", json.dumps(invalid_fingerprint))
+
+        invalid_run = _project(
+            lifecycle, {"bad-run": _execution()}, "completed", run_id="",
+        )
+        requirement = invalid_run["skills"][0]["requirements"][0]
+        self.assertEqual(requirement["actual"][0]["reason"], "run_identity_invalid")
+        self.assertEqual(invalid_run["summary"]["invalidRunIdentities"], 1)
+
     def test_aggregate_distinguishes_terminal_and_contract_states(self):
         ready = _lifecycle(_selected("alpha", 0))
         self.assertEqual(
-            skill_outcome.project_skill_outcome(ready, {}, "completed")["aggregateState"],
+            _project(ready, {}, "completed")["aggregateState"],
             "terminal_gaps",
         )
         self.assertEqual(
-            skill_outcome.project_skill_outcome(ready, {}, "failed")["aggregateState"],
+            _project(ready, {}, "failed")["aggregateState"],
             "failed",
         )
         self.assertEqual(
-            skill_outcome.project_skill_outcome(ready, {}, "cancelled")["aggregateState"],
+            _project(ready, {}, "cancelled")["aggregateState"],
             "cancelled",
         )
         missing = _lifecycle(_selected("alpha", 0, evidence_state="missing"))
         invalid = _lifecycle(_selected("alpha", 0, evidence_state="invalid"))
         self.assertEqual(
-            skill_outcome.project_skill_outcome(missing, {}, "model")["aggregateState"],
+            _project(missing, {}, "model")["aggregateState"],
             "missing_contract",
         )
         self.assertEqual(
-            skill_outcome.project_skill_outcome(invalid, {}, "model")["aggregateState"],
+            _project(invalid, {}, "model")["aggregateState"],
             "invalid_contract",
         )
         self.assertEqual(
-            skill_outcome.project_skill_outcome(_lifecycle(), {}, "completed")["aggregateState"],
+            _project(_lifecycle(), {}, "completed")["aggregateState"],
             "not_applicable",
         )
 
@@ -214,21 +403,23 @@ class TestSkillOutcomeProjection(unittest.TestCase):
             for index in range(40)
         }
         executions["SECRET\nCALL"] = _execution(outcome="failed")
-        projection = skill_outcome.project_skill_outcome(lifecycle, executions, "failed")
-        reversed_projection = skill_outcome.project_skill_outcome(
+        projection = _project(lifecycle, executions, "failed")
+        reversed_projection = _project(
             lifecycle, dict(reversed(list(executions.items()))), "failed",
         )
         self.assertEqual(projection, reversed_projection)
         requirement = projection["skills"][0]["requirements"][0]
-        self.assertEqual(requirement["acceptedFailed"], 41)
+        self.assertEqual(requirement["acceptedFailed"], 40)
+        self.assertEqual(requirement["rejected"], 1)
         self.assertEqual(len(requirement["actual"]), skill_outcome.MAX_ACTUAL_CLAIMS)
         self.assertEqual(requirement["actualTruncated"], 25)
+        self.assertEqual(projection["summary"]["unsafeCallReferences"], 1)
         serialized = json.dumps(projection)
         self.assertNotIn("SECRET", serialized)
         self.assertIn("call-sha256:", serialized)
 
     def test_malformed_input_is_total_and_contains_no_source_payload(self):
-        projection = skill_outcome.project_skill_outcome(
+        projection = _project(
             {"activation": {"selected": [{"secret": "DO_NOT_COPY"}]}},
             {"call": {"secret": "DO_NOT_COPY"}},
             "model",
@@ -241,7 +432,7 @@ class TestSkillOutcomeProjection(unittest.TestCase):
             "schemaVersion"
         ] = True
         self.assertEqual(
-            skill_outcome.project_skill_outcome(
+            _project(
                 boolean_version, {}, "model",
             )["aggregateState"],
             "invalid_contract",
@@ -253,9 +444,15 @@ class TestSkillOutcomeProjection(unittest.TestCase):
             _selected("gamma", 2),
         )
         self.assertEqual(
-            skill_outcome.project_skill_outcome(
+            _project(
                 too_many, {}, "model",
             )["aggregateState"],
+            "invalid_contract",
+        )
+
+        duplicate = _lifecycle(_selected("alpha", 0), _selected("alpha", 1))
+        self.assertEqual(
+            _project(duplicate, {"call": _execution()}, "completed")["aggregateState"],
             "invalid_contract",
         )
 
