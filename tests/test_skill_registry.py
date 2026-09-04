@@ -18,6 +18,10 @@ from code_runtime.skill_registry import (
 )
 
 
+ROOT = Path(__file__).resolve().parent.parent
+REPO_SKILLS_DIR = ROOT / "data" / "skills"
+
+
 def _write_skill(
     root,
     directory,
@@ -61,11 +65,15 @@ def _descriptor(snapshot, name, source="installed", directory=None):
 
 def _bundled_frontend_skills():
     """Build the exact metadata/body shape consumed by the existing JS path."""
+    with mock.patch.object(
+        server_mod, "SKILLS_DIR", REPO_SKILLS_DIR,
+    ), mock.patch.object(server_mod, "APP_DIR", ROOT):
+        listed = server_mod.list_skills(brief=True)
     skills = []
-    for item in server_mod.list_skills(brief=True):
-        text = (
-            Path(server_mod.SKILLS_DIR) / item["dir"] / "SKILL.md"
-        ).read_text(encoding="utf-8-sig")
+    for item in listed:
+        text = (REPO_SKILLS_DIR / item["dir"] / "SKILL.md").read_text(
+            encoding="utf-8-sig",
+        )
         _meta, body = server_mod.parse_memory_frontmatter(text)
         skills.append({
             **item,
@@ -125,7 +133,7 @@ function namesFromInstruction(instruction) {
 """
     completed = subprocess.run(
         ["node", "-e", script],
-        cwd=Path(server_mod.APP_DIR),
+        cwd=ROOT,
         input=json.dumps({"skills": skills, "cases": cases}, ensure_ascii=False),
         capture_output=True,
         text=True,
@@ -858,8 +866,8 @@ class TestBundledSkillShadowEvaluationCorpus(unittest.TestCase):
 
     def test_bundled_corpus_has_exact_production_and_shadow_deltas(self):
         snapshot = build_skill_registry_snapshot(
-            server_mod.SKILLS_DIR,
-            server_mod.APP_DIR / "data" / "skills",
+            REPO_SKILLS_DIR,
+            REPO_SKILLS_DIR,
         )
         self.assertEqual(
             {item["format"]["classification"] for item in snapshot["descriptors"]},
@@ -891,6 +899,19 @@ class TestBundledSkillShadowEvaluationCorpus(unittest.TestCase):
                 )
                 self.assertEqual(comparison["added"], case["added"])
                 self.assertEqual(comparison["removed"], case["removed"])
+
+    def test_bundled_corpus_ignores_mutable_server_roots(self):
+        with tempfile.TemporaryDirectory(prefix="skill_registry_decoy_") as temporary:
+            decoy = Path(temporary)
+            with mock.patch.object(server_mod, "APP_DIR", decoy), mock.patch.object(
+                server_mod, "SKILLS_DIR", decoy / "skills",
+            ):
+                skills = _bundled_frontend_skills()
+                observed = _frontend_skill_observations(
+                    skills, [{"prompt": "anything", "explicitSkill": "writing-plans"}],
+                )
+        self.assertTrue(skills)
+        self.assertEqual(observed[0]["activeSkillNames"], ["writing-plans"])
 
     def test_frontend_baseline_locks_explicit_disabled_cap_and_body_order(self):
         skills = [

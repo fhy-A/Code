@@ -35,6 +35,7 @@ from code_runtime import (
     context_calibration,
     context_window,
     data_dir_owner,
+    skill_lifecycle,
     windows_explorer,
 )
 from code_runtime.bundled_skills import delete_installed_skill
@@ -3369,6 +3370,43 @@ def _agent_wait_for_context_calibration_key(run):
     })
 
 
+def _agent_canonical_skill_lifecycle(run):
+    """Validate lifecycle authority against its in-memory compatibility views."""
+    source = run.get("skill_lifecycle")
+    if source is None:
+        return None
+    if (
+        run.get("run_kind") != "foreground"
+        or run.get("parent_agent_run_id")
+        or int(run.get("agent_depth") or 0) > 0
+    ):
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_lifecycle_scope_invalid",
+            "Canonical Skill lifecycle requires a foreground root AgentRun",
+        )
+    lifecycle = skill_lifecycle.normalize_skill_lifecycle(source)
+    projection = skill_lifecycle.project_skill_lifecycle(lifecycle)
+    expected_observers = _freeze_captured_skill_evidence_observers(
+        projection, run.get("tools") or [], require_registered_tools=False,
+    )
+    if list(run.get("active_skill_names") or []) != projection["activeSkillNames"]:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_lifecycle_projection_conflict",
+            "Canonical Skill names conflict with their compatibility projection",
+        )
+    if (run.get("active_skill_dependencies") or {}) != projection["dependencies"]:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_lifecycle_projection_conflict",
+            "Canonical Skill dependencies conflict with their compatibility projection",
+        )
+    if _agent_skill_evidence_observers(run) != expected_observers:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_lifecycle_projection_conflict",
+            "Canonical Skill evidence conflicts with its compatibility projection",
+        )
+    return lifecycle
+
+
 def _agent_run_record(run):
     """Return the credential-free durable representation of an Agent run."""
     rounds = _json_clone(run.get("rounds") or [])
@@ -3391,6 +3429,7 @@ def _agent_run_record(run):
     pending_context_calibration = _normalize_pending_context_calibration(
         run.get("pending_context_calibration")
     )
+    skill_lifecycle_record = _agent_canonical_skill_lifecycle(run)
     return {
         "version": 5,
         "id": run["id"],
@@ -3470,6 +3509,8 @@ def _agent_run_record(run):
         "pendingSteers": _json_clone(run.get("pending_steers") or []),
         "steerReceipts": _json_clone(run.get("steer_receipts") or []),
         "toolExecutions": _json_clone(run.get("tool_executions") or {}),
+        **({"skillLifecycle": skill_lifecycle_record}
+           if skill_lifecycle_record else {}),
         **({"skillEvidence": _agent_skill_evidence_record(run)}
            if (
                isinstance(run.get("skill_evidence_observer"), dict)
@@ -4448,6 +4489,7 @@ def _agent_run_from_record(record):
         "session_id": str(record.get("sessionId") or ""),
         "image_route": image_route_identity,
     }
+    persisted_tool_executions = _json_clone(record.get("toolExecutions") or {})
     tool_executions = dict(record.get("toolExecutions") or {})
     for execution_call_id, execution in tool_executions.items():
         if not isinstance(execution, dict):
@@ -4621,19 +4663,105 @@ def _agent_run_from_record(record):
             definition for definition in restored_tools
             if str((definition.get("function") or {}).get("name") or "") != "generate_image"
         ]
+    canonical_skill_lifecycle = None
+    lifecycle_projection = None
+    if "skillLifecycle" in record:
+        outer_version = record.get("version")
+        if (
+            isinstance(outer_version, bool)
+            or not isinstance(outer_version, int)
+            or outer_version != 5
+        ):
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_lifecycle_outer_version_unsupported",
+                "Canonical Skill lifecycle requires AgentRun v5",
+            )
+        if run_kind != "foreground" or parent_agent_run_id or agent_depth > 0:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_lifecycle_scope_invalid",
+                "Canonical Skill lifecycle requires a foreground root AgentRun",
+            )
+        canonical_skill_lifecycle = skill_lifecycle.normalize_skill_lifecycle(
+            record.get("skillLifecycle")
+        )
+        lifecycle_projection = skill_lifecycle.project_skill_lifecycle(
+            canonical_skill_lifecycle
+        )
+        expected_names = lifecycle_projection["activeSkillNames"]
+        expected_dependencies = {
+            "version": _SKILL_RUNTIME_BINDING_VERSION,
+            "skills": [
+                {
+                    "skill": name,
+                    "capabilities": list(
+                        lifecycle_projection["dependencies"].get(name) or []
+                    ),
+                }
+                for name in expected_names
+            ],
+        }
+        expected_observers = _freeze_captured_skill_evidence_observers(
+            lifecycle_projection, restored_tools, require_registered_tools=False,
+        )
+        expected_evidence = _agent_skill_evidence_record({
+            "skill_evidence_observers": expected_observers,
+            "skill_evidence_observer": None,
+            "tool_executions": persisted_tool_executions,
+            "status": persisted_status,
+        })
+        if expected_names:
+            compatibility_matches = (
+                record.get("activeSkillNames") == expected_names
+                and record.get("activeSkillDependencies") == expected_dependencies
+                and record.get("skillEvidence") == expected_evidence
+            )
+        else:
+            compatibility_matches = all(
+                key not in record
+                for key in (
+                    "activeSkillNames", "activeSkillDependencies", "skillEvidence",
+                )
+            )
+        if not compatibility_matches:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_lifecycle_projection_conflict",
+                "Canonical Skill lifecycle conflicts with persisted compatibility fields",
+            )
     cwd, workspace_roots = _agent_run_workspace(
         record.get("sessionId"),
         record.get("cwd"),
         record.get("workspaceRoots") if int(record.get("version") or 1) >= 2 else None,
     )
-    active_skill_names = _normalize_agent_active_skill_names(
-        record.get("activeSkillNames")
+    active_skill_names = (
+        list(lifecycle_projection["activeSkillNames"])
+        if lifecycle_projection is not None
+        else _normalize_agent_active_skill_names(record.get("activeSkillNames"))
     )
-    active_skill_dependencies = _restore_agent_active_skill_dependencies(
-        record.get("activeSkillDependencies"), active_skill_names,
+    active_skill_dependencies = (
+        _json_clone(lifecycle_projection["dependencies"])
+        if lifecycle_projection is not None
+        else _restore_agent_active_skill_dependencies(
+            record.get("activeSkillDependencies"), active_skill_names,
+        )
+    )
+    skill_evidence_observers = (
+        expected_observers
+        if lifecycle_projection is not None
+        else _restore_skill_evidence_observers(
+            record.get("skillEvidence"), restored_tools,
+        )
     )
     skill_runtime_bindings = _restore_agent_skill_runtime_bindings(
         record.get("skillRuntimeBindings"), active_skill_names,
+    )
+    lifecycle_view = (
+        canonical_skill_lifecycle
+        if canonical_skill_lifecycle is not None
+        else skill_lifecycle.adapt_legacy_skill_lifecycle(
+            active_skill_names,
+            active_skill_dependencies,
+            record.get("skillEvidence"),
+        )
     )
     return {
         "id": run_id,
@@ -4722,13 +4850,12 @@ def _agent_run_from_record(record):
         "pending_steers": list(record.get("pendingSteers") or []),
         "steer_receipts": list(record.get("steerReceipts") or []),
         "tool_executions": tool_executions,
-        "skill_evidence_observers": _restore_skill_evidence_observers(
-            record.get("skillEvidence"),
-            restored_tools,
-        ),
+        "skill_evidence_observers": skill_evidence_observers,
         "skill_evidence_observer": None,
         "active_skill_names": active_skill_names,
         "active_skill_dependencies": active_skill_dependencies,
+        "skill_lifecycle": canonical_skill_lifecycle,
+        "_skill_lifecycle_view": lifecycle_view,
         "skill_runtime_bindings": skill_runtime_bindings,
         "usage": dict(record.get("usage") or {}),
         "result": dict(record.get("result") or {}),
@@ -9978,6 +10105,8 @@ def _create_agent_run(
             if str((definition.get("function") or {}).get("name") or "") != "generate_image"
         ]
     activation = None
+    canonical_skill_lifecycle = None
+    lifecycle_projection = None
     if canonical_activation:
         activation = prepare_skill_activation(
             messages=messages,
@@ -10022,10 +10151,24 @@ def _create_agent_run(
             definition = _agent_registry_tool_definition(name)
             if definition:
                 tools.append(definition)
+    if activation is not None:
+        captured_evidence_observers = _freeze_captured_skill_evidence_observers(
+            activation, tools,
+        )
+        canonical_skill_lifecycle = skill_lifecycle.build_skill_lifecycle(
+            activation,
+            evidence_observers=captured_evidence_observers,
+        )
+        lifecycle_projection = skill_lifecycle.project_skill_lifecycle(
+            canonical_skill_lifecycle
+        )
+        active_skill_names = lifecycle_projection["activeSkillNames"]
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
     skill_evidence_observers = (
-        _freeze_captured_skill_evidence_observers(activation, tools)
-        if activation is not None
+        _freeze_captured_skill_evidence_observers(
+            lifecycle_projection, tools, require_registered_tools=False,
+        )
+        if lifecycle_projection is not None
         else _freeze_skill_evidence_observers(
             active_skill_names, active_skill_name, tools,
         )
@@ -10035,10 +10178,10 @@ def _create_agent_run(
     )
     frozen_active_skill_dependencies = (
         {
-            name: list((activation.get("dependencies") or {}).get(name) or [])
+            name: list((lifecycle_projection.get("dependencies") or {}).get(name) or [])
             for name in frozen_active_skill_names
         }
-        if activation is not None
+        if lifecycle_projection is not None
         else _freeze_agent_active_skill_dependencies(frozen_active_skill_names)
     )
     try:
@@ -10120,6 +10263,8 @@ def _create_agent_run(
         "skill_evidence_observer": None,
         "active_skill_names": frozen_active_skill_names,
         "active_skill_dependencies": frozen_active_skill_dependencies,
+        "skill_lifecycle": canonical_skill_lifecycle,
+        "_skill_lifecycle_view": canonical_skill_lifecycle,
         "skill_runtime_bindings": {},
         "usage": {},
         "result": {},
@@ -14551,7 +14696,9 @@ def _freeze_skill_evidence_observers(
     return observers
 
 
-def _freeze_captured_skill_evidence_observers(activation, tool_definitions):
+def _freeze_captured_skill_evidence_observers(
+    activation, tool_definitions, *, require_registered_tools=True,
+):
     """Freeze evidence from the canonical activation capture without rereading Skills."""
     captures = list((activation or {}).get("captures") or [])
     explicit = bool((activation or {}).get("explicit"))
@@ -14574,8 +14721,13 @@ def _freeze_captured_skill_evidence_observers(activation, tool_definitions):
             contract = _normalize_skill_evidence_contract(
                 source,
                 _skill_evidence_tool_names(tool_definitions),
+                require_registered_tools=require_registered_tools,
             )
         except ValueError:
+            if capture.get("evidenceState") == "ready":
+                raise skill_lifecycle.SkillLifecycleError(
+                    "skill_lifecycle_invalid", "Canonical Skill evidence is malformed",
+                )
             observers.append(_skill_evidence_invalid_observer(
                 "invalid_contract", active_skill,
             ))

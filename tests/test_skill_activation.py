@@ -498,7 +498,10 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
             )
         self.assertEqual(run["messages"], [{"role": "user", "content": "legacy"}])
         self.assertEqual(run["active_skill_names"], ["alpha"])
-        self.assertEqual(server_mod._agent_run_record(run)["version"], 5)
+        legacy_record = server_mod._agent_run_record(run)
+        self.assertEqual(legacy_record["version"], 5)
+        self.assertNotIn("skillLifecycle", legacy_record)
+        self.assertNotIn("skillLifecycle", server_mod._agent_snapshot(run, 0))
 
     def test_malformed_canonical_envelopes_fail_before_worker(self):
         with mock.patch.object(server_mod, "_start_agent_worker") as start_worker:
@@ -562,6 +565,10 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
                     "explicitSkill": "alpha",
                     "disabledNames": [],
                 }
+                body["skillLifecycle"] = {
+                    "schemaVersion": 999,
+                    "mode": "client-owned-must-be-ignored",
+                }
             return body
 
         try:
@@ -578,6 +585,19 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
                 )
                 self.assertEqual(status, 201)
                 self.assertEqual(canonical["activeSkillNames"], ["alpha"])
+                canonical_run = server_mod._get_agent_run(canonical["agentRunId"])
+                self.assertEqual(canonical_run["skill_lifecycle"]["schemaVersion"], 1)
+                self.assertEqual(canonical_run["skill_lifecycle"]["mode"], "canonical-v1")
+                lifecycle_evidence = canonical_run["skill_lifecycle"]["activation"]["selected"][0]["evidence"]
+                self.assertEqual(lifecycle_evidence["state"], "invalid")
+                self.assertNotIn("contract", lifecycle_evidence)
+                invalid_restored = server_mod._agent_run_from_record(
+                    server_mod._agent_run_record(canonical_run)
+                )
+                self.assertEqual(
+                    invalid_restored["skill_evidence_observers"][0]["contractState"],
+                    "invalid",
+                )
                 status, legacy = request(
                     "POST", "/api/agent/runs", create_body("http-legacy", canonical=False),
                 )
@@ -624,6 +644,7 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
         release = threading.Event()
         calls = []
         lifecycle = []
+        persisted_lifecycles = []
         real_persist = server_mod._persist_agent_run
 
         def counted_prepare(**kwargs):
@@ -634,6 +655,9 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
 
         def counted_persist(run):
             lifecycle.append("persist")
+            persisted_lifecycles.append(
+                server_mod._agent_run_record(run).get("skillLifecycle")
+            )
             return real_persist(run)
 
         def counted_start(run):
@@ -670,6 +694,8 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertIs(results[0], results[1])
         self.assertEqual(lifecycle, ["persist", "worker"])
+        self.assertEqual(len(persisted_lifecycles), 1)
+        self.assertEqual(persisted_lifecycles[0]["schemaVersion"], 1)
 
     def test_persisted_retry_and_reload_do_not_reread_registry_or_skill(self):
         original = self._create("durable-retry")
@@ -691,6 +717,7 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
         self.assertEqual(restored["id"], original["id"])
         self.assertEqual(restored["messages"], original["messages"])
         self.assertEqual(restored["active_skill_names"], ["alpha"])
+        self.assertEqual(restored["skill_lifecycle"], original_record["skillLifecycle"])
 
     def test_flag_off_rejects_new_canonical_run_without_legacy_fallback(self):
         with mock.patch.object(server_mod, "_SKILL_ACTIVATION_ENABLED", False):

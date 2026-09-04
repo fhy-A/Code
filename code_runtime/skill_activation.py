@@ -16,6 +16,7 @@ from code_runtime.skill_dependencies import (
     resolve_skill_manifest,
 )
 from code_runtime.skill_registry import (
+    MAX_SIDECAR_BYTES,
     MAX_SKILL_BYTES,
     SAFE_DIRECTORY_RE,
     SAFE_NAME_RE,
@@ -209,19 +210,37 @@ def _bounded_registry(installed_root: Path, bundled_root: Path) -> dict:
     return snapshot
 
 
-def _capture_evidence(skill_dir: Path, descriptor: dict):
-    summary = (descriptor.get("sidecars") or {}).get("evidence") or {}
+def _capture_sidecar(skill_dir: Path, descriptor: dict, key: str, filename: str):
+    summary = (descriptor.get("sidecars") or {}).get(key) or {}
     expected_state = str(summary.get("state") or "missing")
-    path = skill_dir / "evidence.json"
+    path = skill_dir / filename
     if expected_state == "missing":
-        if path.exists():
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return {"state": "missing"}, None
+        except OSError as exc:
+            raise SkillActivationError(
+                "activation_skill_changed", "Selected Skill changed or is unreadable",
+            ) from exc
+        else:
             raise SkillActivationError("activation_skill_changed", "Selected Skill changed")
-        return None
     raw = _require_regular_file(
-        path, max_bytes=MAX_EVIDENCE_BYTES, code="activation_skill_changed",
+        path,
+        max_bytes=min(MAX_SIDECAR_BYTES, MAX_EVIDENCE_BYTES) if key == "evidence" else MAX_SIDECAR_BYTES,
+        code="activation_skill_changed",
     )
     if expected_state != "ready" or _sha256(raw) != summary.get("contentHash"):
         raise SkillActivationError("activation_skill_changed", "Selected Skill changed")
+    return {"state": "ready", "contentHash": summary["contentHash"]}, raw
+
+
+def _capture_evidence(skill_dir: Path, descriptor: dict):
+    identity, raw = _capture_sidecar(
+        skill_dir, descriptor, "evidence", "evidence.json",
+    )
+    if raw is None:
+        return None, identity
     try:
         payload = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -232,7 +251,7 @@ def _capture_evidence(skill_dir: Path, descriptor: dict):
         raise SkillActivationError(
             "activation_evidence_invalid", "Selected Skill evidence contract is invalid",
         )
-    return payload
+    return payload, identity
 
 
 def _capture_selected_skill(
@@ -277,7 +296,7 @@ def _capture_selected_skill(
         raise SkillActivationError("activation_skill_changed", "Selected Skill changed")
     if len(body.encode("utf-8")) > MAX_BODY_BYTES or estimate_tokens(body) > MAX_BODY_TOKENS:
         raise SkillActivationError("activation_body_too_large", "Selected Skill body is too large")
-    evidence = _capture_evidence(resolved_dir, descriptor)
+    evidence, evidence_identity = _capture_evidence(resolved_dir, descriptor)
     try:
         manifest = resolve_skill_manifest(
             resolved_dir, bundled_skills_dir=bundled_root,
@@ -286,6 +305,12 @@ def _capture_selected_skill(
         raise SkillActivationError(
             "activation_dependencies_invalid", "Selected Skill dependencies are invalid",
         ) from exc
+    _capture_sidecar(
+        resolved_dir, descriptor, "dependencies", "dependencies.json",
+    )
+    resource_summary, _ = _capture_sidecar(
+        resolved_dir, descriptor, "resources", "code-resources.json",
+    )
     stable_raw = _require_regular_file(
         resolved_dir / "SKILL.md", max_bytes=MAX_SKILL_BYTES, code="activation_skill_changed",
     )
@@ -296,12 +321,41 @@ def _capture_selected_skill(
         capability_id = str(capability.get("id") or "").strip()
         if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", capability_id):
             capability_ids.append(capability_id)
+    dependency_identity = (
+        {
+            "state": "ready",
+            "manifestHash": _sha256(json.dumps(
+                manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")),
+            "capabilities": sorted(set(capability_ids)),
+        }
+        if manifest is not None
+        else {"state": "missing", "capabilities": []}
+    )
     return {
         "name": name,
         "body": body,
         "contentHash": descriptor["contentHash"],
         "descriptor": descriptor,
         "evidence": evidence,
+        "sourceIdentity": {
+            "kind": source["kind"],
+            "directory": directory,
+            "descriptorId": descriptor["descriptorId"],
+        },
+        "evidenceIdentity": evidence_identity,
+        "dependencyIdentity": dependency_identity,
+        "resourceIdentity": (
+            {
+                "state": "ready",
+                "contractHash": resource_summary["contentHash"],
+            }
+            if resource_summary["state"] == "ready"
+            else {"state": "missing"}
+        ),
         "dependencyCapabilities": sorted(set(capability_ids)),
     }
 

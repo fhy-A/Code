@@ -22,7 +22,10 @@ RUNTIME_MODULES = (
     "model_route_registry",
     "official_model_capabilities",
     "ppt_master_runtime",
+    "skill_activation",
     "skill_dependencies",
+    "skill_lifecycle",
+    "skill_registry",
     "skill_resources",
     "windows_explorer",
 )
