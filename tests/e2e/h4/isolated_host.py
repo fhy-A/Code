@@ -63,10 +63,12 @@ SKILL_EVIDENCE_CALL_ID = "h4-skill-evidence-read"
 SKILL_ACCESS_USER = "H4_SKILL_ACCESS_USER"
 SKILL_ACCESS_FINAL = "H4_SKILL_ACCESS_FINAL"
 SKILL_ACCESS_NAME = "h4-skill-access"
+SKILL_ACCESS_COMMAND = "python --version"
 SKILL_ACCESS_CALL_IDS = (
     "h4-skill-access-use",
     "h4-skill-access-read",
     "h4-skill-access-check",
+    "h4-skill-access-command",
     "h4-skill-access-nonactive",
 )
 IMAGE_MODEL_ID = "h4-image-model"
@@ -3016,6 +3018,7 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
                     ("check_skill_dependencies", {
                         "name": SKILL_ACCESS_NAME, "capability": "inspect",
                     }),
+                    ("run_command", {"command": SKILL_ACCESS_COMMAND}),
                     ("use_skill", {"name": "h4-nonactive"}),
                 )
                 name, arguments = calls[call_number - 1]
@@ -5088,9 +5091,38 @@ def main() -> int:
         cancel_event=None,
         output_callback=None,
         process_callback=None,
+        process_environment=None,
+        runtime_summary=None,
     ):
         payload = body if isinstance(body, dict) else {}
         command = str(payload.get("command") or "")
+        if command == SKILL_ACCESS_COMMAND and set(payload) == {"command"}:
+            expected_summary = {
+                "version": 1,
+                "skills": [{"skill": SKILL_ACCESS_NAME, "capability": "inspect"}],
+                "managedPythonApplied": False,
+                "managedNodeApplied": False,
+            }
+            if process_environment is not None or runtime_summary != expected_summary:
+                raise ValueError("H4 Skill runtime preflight projection changed")
+            METRICS.append("toolExecutions", {
+                "action": "run_command", "path": "skill-runtime-preflight",
+            })
+            return {
+                "ok": True,
+                "action": "run_command",
+                "command": command,
+                "cwd": str(project_dir),
+                "exitCode": 0,
+                "stdout": "H4_SKILL_RUNTIME_PREFLIGHT_OK",
+                "stderr": "",
+                "stdoutTruncated": False,
+                "stderrTruncated": False,
+                "cancelled": False,
+                "timedOut": False,
+                "error": None,
+                "runtime": runtime_summary,
+            }
         if command == IMAGE_HISTORY_PROCESS_COMMAND and set(payload) == {"command"}:
             first_path = project_dir / Path(*IMAGE_HISTORY_FIRST_PATH.split("/"))
             second_path = project_dir / Path(*IMAGE_HISTORY_SECOND_PATH.split("/"))

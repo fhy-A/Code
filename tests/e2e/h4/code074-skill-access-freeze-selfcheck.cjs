@@ -15,6 +15,7 @@ const CALL_IDS = [
   "h4-skill-access-use",
   "h4-skill-access-read",
   "h4-skill-access-check",
+  "h4-skill-access-command",
   "h4-skill-access-nonactive",
 ];
 
@@ -41,7 +42,7 @@ async function installSkill(host) {
     `name: ${SKILL}`,
     "description: H4 canonical active access fixture",
     "keywords: h4+skill+access",
-    "allowed-tools: use_skill, check_skill_dependencies, read_skill_resource",
+    "allowed-tools: use_skill, check_skill_dependencies, read_skill_resource, run_command",
     "---",
     "",
     BODY,
@@ -102,7 +103,8 @@ async function createContext(browser, host, runtime) {
       token: platformToken, userId: "7", username: "h4-user",
     }));
     localStorage.setItem("code-model", modelId);
-    localStorage.setItem("code-permission-profile", "plan");
+    localStorage.setItem("code-permission-profile", "bypass");
+    localStorage.setItem("code-auto-permission-risk-ack", "v1");
   }, {
     syntheticKey: host.syntheticKey,
     platformToken: host.platformToken,
@@ -135,13 +137,18 @@ function assertRun(record, host) {
   });
   assert.equal(record.skillLifecycle.activation.selected[0].resources.source, "custom");
   assert.equal(JSON.stringify(record.skillLifecycle).includes(host.root), false);
-  assert.equal(Object.hasOwn(record, "skillRuntimeBindings"), false);
+  assert.deepEqual(record.skillRuntimeBindings.bindings.map((binding) => ({
+    skill: binding.skill,
+    capability: binding.capability,
+    checkedStatus: binding.checkedStatus,
+  })), [{ skill: SKILL, capability: "inspect", checkedStatus: "ready" }]);
 
   const executions = record.toolExecutions || {};
   assert.deepEqual(Object.keys(executions), CALL_IDS);
   const use = executions[CALL_IDS[0]].result;
   assert.deepEqual(Object.keys(use).sort(), [
-    "action", "alreadyActive", "dependencies", "name", "ok", "runtimeResources",
+    "action", "alreadyActive", "dependencies", "name", "ok", "runtimeBinding",
+    "runtimeResources",
   ]);
   assert.equal(use.ok, true);
   assert.equal(use.runtimeResources.source, "custom");
@@ -153,8 +160,12 @@ function assertRun(record, host) {
   const check = executions[CALL_IDS[2]].result;
   assert.equal(check.ok, true);
   assert.equal(check.installGuidance.selectedCapability, "inspect");
-  assert.equal(Object.hasOwn(check, "runtimeBinding"), false);
-  const rejected = executions[CALL_IDS[3]].result;
+  assert.equal(check.runtimeBinding.established, true);
+  const command = executions[CALL_IDS[3]].result;
+  assert.equal(command.ok, true);
+  assert.equal(command.stdout, "H4_SKILL_RUNTIME_PREFLIGHT_OK");
+  assert.deepEqual(command.runtime.skills, [{ skill: SKILL, capability: "inspect" }]);
+  const rejected = executions[CALL_IDS[4]].result;
   assert.equal(rejected.ok, false);
   assert.equal(rejected.errorCode, "skill_lifecycle_skill_not_active");
   assert.equal(JSON.stringify(rejected).includes("Available"), false);

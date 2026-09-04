@@ -3410,6 +3410,9 @@ def _agent_canonical_skill_lifecycle(run):
             "skill_lifecycle_projection_conflict",
             "Canonical Skill evidence conflicts with its compatibility projection",
         )
+    _agent_validate_skill_runtime_bindings(
+        run.get("skill_runtime_bindings"), lifecycle,
+    )
     return lifecycle
 
 
@@ -4759,6 +4762,7 @@ def _agent_run_from_record(record):
     )
     skill_runtime_bindings = _restore_agent_skill_runtime_bindings(
         record.get("skillRuntimeBindings"), active_skill_names,
+        canonical_skill_lifecycle,
     )
     lifecycle_view = (
         canonical_skill_lifecycle
@@ -8688,13 +8692,17 @@ def _execute_agent_pending_tools(run):
                     _agent_workspace_context.workspace_roots = previous_workspace_roots
             if (
                 not reused_execution
-                and run.get("skill_lifecycle") is None
                 and name in {"check_skill_dependencies", "use_skill"}
                 and isinstance(result, dict)
             ):
-                _agent_bind_skill_runtime_from_result(
-                    run, name, call.get("arguments") or {}, result,
-                )
+                if run.get("skill_lifecycle") is not None:
+                    result = _agent_bind_skill_runtime_durably(
+                        run, name, call.get("arguments") or {}, result,
+                    )
+                else:
+                    _agent_bind_skill_runtime_from_result(
+                        run, name, call.get("arguments") or {}, result,
+                    )
         with run["condition"]:
             if (
                 run["cancel_event"].is_set()
@@ -15700,6 +15708,44 @@ def _normalize_agent_skill_runtime_binding(value):
     }
 
 
+def _agent_skill_runtime_binding_conflict():
+    raise skill_lifecycle.SkillLifecycleError(
+        "skill_lifecycle_runtime_binding_conflict",
+        "Skill runtime binding conflicts with its lifecycle identity",
+    )
+
+
+def _agent_validate_skill_runtime_binding(binding, lifecycle):
+    try:
+        selected = skill_lifecycle.require_active_skill(lifecycle, binding["skill"])
+    except skill_lifecycle.SkillLifecycleError:
+        _agent_skill_runtime_binding_conflict()
+    dependency = selected["dependency"]
+    if (
+        binding["skillContentHash"] != selected["skillContentHash"]
+        or dependency.get("state") != "ready"
+        or binding["manifestHash"] != dependency.get("manifestHash")
+        or binding["capability"] not in dependency.get("capabilities", [])
+    ):
+        _agent_skill_runtime_binding_conflict()
+
+
+def _agent_validate_skill_runtime_bindings(value, lifecycle):
+    if not isinstance(value, dict) or len(value) > 3:
+        _agent_skill_runtime_binding_conflict()
+    normalized = {}
+    for name, source in value.items():
+        binding = _normalize_agent_skill_runtime_binding(source)
+        if (
+            not binding or type(source.get("version")) is not int
+            or binding != source or name != binding["skill"] or name in normalized
+        ):
+            _agent_skill_runtime_binding_conflict()
+        _agent_validate_skill_runtime_binding(binding, lifecycle)
+        normalized[name] = binding
+    return normalized
+
+
 def _agent_skill_runtime_bindings_record(run):
     return {
         "version": _SKILL_RUNTIME_BINDING_VERSION,
@@ -15713,23 +15759,48 @@ def _agent_skill_runtime_bindings_record(run):
     }
 
 
-def _restore_agent_skill_runtime_bindings(value, active_skill_names):
-    if not isinstance(value, dict) or value.get("version") != _SKILL_RUNTIME_BINDING_VERSION:
+def _restore_agent_skill_runtime_bindings(value, active_skill_names, lifecycle=None):
+    if value is None:
+        return {}
+    if (
+        not isinstance(value, dict) or value.get("version") != _SKILL_RUNTIME_BINDING_VERSION
+        or (lifecycle is not None and type(value.get("version")) is not int)
+    ):
+        if lifecycle is not None:
+            _agent_skill_runtime_binding_conflict()
         return {}
     sources = value.get("bindings")
-    if not isinstance(sources, list) or len(sources) > 3:
+    if (
+        not isinstance(sources, list) or len(sources) > 3
+        or (lifecycle is not None and set(value) != {"version", "bindings"})
+    ):
+        if lifecycle is not None:
+            _agent_skill_runtime_binding_conflict()
         return {}
     allowed_names = set(active_skill_names or [])
     restored = {}
     for source in sources:
         binding = _normalize_agent_skill_runtime_binding(source)
-        if not binding or binding["skill"] not in allowed_names or binding["skill"] in restored:
+        if (
+            not binding or binding["skill"] not in allowed_names
+            or binding["skill"] in restored
+            or (
+                lifecycle is not None
+                and (type(source.get("version")) is not int or binding != source)
+            )
+        ):
+            if lifecycle is not None:
+                _agent_skill_runtime_binding_conflict()
             return {}
+        if lifecycle is not None:
+            _agent_validate_skill_runtime_binding(binding, lifecycle)
         restored[binding["skill"]] = binding
     return restored
 
 
 def _agent_skill_runtime_bindings_public(run):
+    if run.get("skill_lifecycle") is not None:
+        _agent_canonical_skill_lifecycle(run)
     public = []
     for name in run.get("active_skill_names") or []:
         binding = _normalize_agent_skill_runtime_binding(
@@ -15790,12 +15861,28 @@ def _agent_bind_skill_runtime_from_result(run, action, arguments, result):
         return False
     if not _skill_runtime_status_ready(status, capability):
         return False
-    try:
-        identity = _agent_skill_runtime_identity(skill_name)
-    except (OSError, UnicodeError, ValueError, DependencyManifestError):
-        return False
-    if not identity:
-        return False
+    lifecycle = run.get("skill_lifecycle")
+    if lifecycle is not None:
+        if action == "check_skill_dependencies" and str(
+            (arguments or {}).get("capability") or ""
+        ).strip() != capability:
+            return False
+        try:
+            selected = _agent_lifecycle_skill_snapshot(run, skill_name)["selected"]
+        except (OSError, UnicodeError, DependencyManifestError,
+                skill_lifecycle.SkillLifecycleError):
+            return False
+        identity = {
+            "skillContentHash": selected["skillContentHash"],
+            "manifestHash": selected["dependency"].get("manifestHash"),
+        }
+    else:
+        try:
+            identity = _agent_skill_runtime_identity(skill_name)
+        except (OSError, UnicodeError, ValueError, DependencyManifestError):
+            return False
+        if not identity:
+            return False
     binding = {
         "version": _SKILL_RUNTIME_BINDING_VERSION,
         "skill": skill_name,
@@ -15814,6 +15901,29 @@ def _agent_bind_skill_runtime_from_result(run, action, arguments, result):
         "capability": capability,
     }
     return True
+
+
+def _agent_bind_skill_runtime_durably(run, action, arguments, result):
+    previous = _json_clone(run.get("skill_runtime_bindings") or {})
+    if not _agent_bind_skill_runtime_from_result(run, action, arguments, result):
+        return result
+    try:
+        _persist_agent_run(run)
+        return result
+    except Exception:
+        target = str((arguments or {}).get("name") or "").strip()
+        previous.pop(target, None)
+        with run["condition"]:
+            run["skill_runtime_bindings"] = previous
+            run["updated_at"] = now_iso()
+        result.pop("runtimeBinding", None)
+        return {
+            "ok": False,
+            "action": action,
+            "errorCode": "skill_dependency_binding_persist_failed",
+            "retryable": True,
+            "error": "The checked Skill runtime binding was not persisted.",
+        }
 
 
 def _agent_runtime_path_safe(path, root, *, expect_file):
@@ -16089,6 +16199,16 @@ def _dedupe_environment_paths(values):
 def _agent_prepare_skill_runtime_environment(run):
     active_names = list(run.get("active_skill_names") or [])
     dependencies = run.get("active_skill_dependencies") or {}
+    lifecycle = None
+    if run.get("skill_lifecycle") is not None:
+        try:
+            lifecycle = _agent_canonical_skill_lifecycle(run)
+        except skill_lifecycle.SkillLifecycleError:
+            with run["condition"]:
+                run["skill_runtime_bindings"] = {}
+            return _agent_skill_runtime_error(
+                run, "skill_runtime_binding_conflict", stale=True, skills=active_names,
+            )
     dependent = [name for name in active_names if dependencies.get(name) is None or dependencies.get(name)]
     if not dependent:
         return {"ok": True, "environment": None, "summary": None}
@@ -16107,9 +16227,19 @@ def _agent_prepare_skill_runtime_environment(run):
             return _agent_skill_runtime_error(
                 run, "active_skill_dependency_changed", stale=True, skills=[name],
             )
+        snapshot = None
         try:
-            identity = _agent_skill_runtime_identity(name)
-        except (OSError, UnicodeError, ValueError, DependencyManifestError):
+            if lifecycle is not None:
+                snapshot = _agent_lifecycle_skill_snapshot(run, name)
+                selected = snapshot["selected"]
+                identity = {
+                    "skillContentHash": selected["skillContentHash"],
+                    "manifestHash": selected["dependency"].get("manifestHash"),
+                }
+            else:
+                identity = _agent_skill_runtime_identity(name)
+        except (OSError, UnicodeError, ValueError, DependencyManifestError,
+                skill_lifecycle.SkillLifecycleError):
             identity = None
         if not identity or any(
             binding.get(field) != identity.get(field)
@@ -16119,8 +16249,13 @@ def _agent_prepare_skill_runtime_environment(run):
                 run, "skill_manifest_changed", stale=True, skills=[name],
             )
         try:
-            status = get_single_skill_dependency_status(name, binding["capability"])
-        except (OSError, UnicodeError, ValueError, DependencyManifestError):
+            status = (
+                _agent_lifecycle_dependency_status(snapshot, binding["capability"])
+                if snapshot is not None
+                else get_single_skill_dependency_status(name, binding["capability"])
+            )
+        except (OSError, UnicodeError, ValueError, DependencyManifestError,
+                SkillResourceError, skill_lifecycle.SkillLifecycleError):
             return _agent_skill_runtime_error(
                 run, "dependency_recheck_failed", stale=True, skills=[name],
             )
