@@ -73,6 +73,12 @@ from code_runtime.skill_dependencies import (
     public_dependency_operation_plan,
     resolve_skill_manifest,
 )
+from code_runtime.skill_activation import (
+    ACTIVATION_PROTOCOL,
+    SkillActivationError,
+    normalize_allowed_tools_envelope,
+    prepare_skill_activation,
+)
 from code_runtime.skill_resources import SkillResourceError, resolve_skill_resources
 from code_runtime.skill_registry import (
     build_skill_registry_snapshot,
@@ -198,6 +204,15 @@ def _resolve_skill_registry_shadow_enabled(environ=None):
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_skill_activation_enabled(environ=None):
+    """Keep canonical Skill activation off until explicitly enabled."""
+    source = os.environ if environ is None else environ
+    raw = source.get("CODE_SKILL_ACTIVATION_V1")
+    if raw is None or str(raw).strip() == "":
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class _DeferredRuntimeService:
     """Create a DATA_DIR-backed service only after an entrypoint owns it."""
 
@@ -231,6 +246,7 @@ _AGENT_PROJECTION_SHADOW_ENABLED = _resolve_agent_projection_shadow_enabled()
 _SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
 _MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
 _SKILL_REGISTRY_SHADOW_ENABLED = _resolve_skill_registry_shadow_enabled()
+_SKILL_ACTIVATION_ENABLED = _resolve_skill_activation_enabled()
 _model_route_registry = _DeferredRuntimeService(
     lambda: ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 )
@@ -884,6 +900,7 @@ _MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT = 120.0
 _MODEL_RUNTIME_STREAM_IDLE_TIMEOUT = 180.0
 _agent_runs = {}
 _agent_run_lock = threading.RLock()
+_agent_run_admission_locks = tuple(threading.RLock() for _ in range(64))
 _agent_run_index_lock = threading.RLock()
 _agent_run_index_rebuild_lock = threading.Lock()
 _agent_run_session_index_rebuild_lock = threading.Lock()
@@ -9840,6 +9857,8 @@ def _create_agent_run(
     active_skill_name="",
     active_skill_names=None,
     image_route=None,
+    skill_activation_request=None,
+    _admission_run_id="",
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -9856,6 +9875,45 @@ def _create_agent_run(
     request_options = _agent_request_options(payload)
     if not str(request_options.get("model") or "").strip():
         raise ValueError("payload.model is required")
+    client_request_id = _agent_client_request_id(client_request_id)
+    if client_request_id and not _admission_run_id:
+        run_id = _agent_run_id_for_client_request(session_id, client_request_id)
+        admission_lock = _agent_run_admission_locks[
+            int(run_id[:8], 16) % len(_agent_run_admission_locks)
+        ]
+        with admission_lock:
+            existing = _get_agent_run(run_id)
+            if existing:
+                return existing
+            return _create_agent_run(
+                session_id,
+                payload,
+                base_url,
+                keys,
+                allowed_tools,
+                max_rounds,
+                permission_profile,
+                parent_run_id,
+                parent_tool_call_id,
+                agent_depth,
+                start_worker,
+                client_request_id,
+                tool_budgets,
+                cwd,
+                workspace_roots,
+                context_limit,
+                context_budget_tokens,
+                inherited_context,
+                run_kind,
+                continuation,
+                route_ref,
+                catalog_revision,
+                active_skill_name,
+                active_skill_names,
+                image_route,
+                skill_activation_request,
+                run_id,
+            )
     inherited_resolution = (
         dict(inherited_context) if isinstance(inherited_context, dict) else None
     )
@@ -9876,7 +9934,6 @@ def _create_agent_run(
             "and the safety margin"
         )
     normalized_context_limit = context_resolution["contextLimit"]
-    client_request_id = _agent_client_request_id(client_request_id)
     normalized_run_kind = _normalize_agent_run_kind(
         "child" if parent_run_id or int(agent_depth or 0) > 0 else run_kind
     )
@@ -9892,7 +9949,22 @@ def _create_agent_run(
         or ""
     )
     goal_operations_enabled = bool(origin_message_id)
-    tools = _agent_selected_tools(payload, allowed_tools, permission_profile)
+    canonical_activation = skill_activation_request is not None
+    if canonical_activation:
+        if not _SKILL_ACTIVATION_ENABLED:
+            raise SkillActivationError(
+                "activation_protocol_disabled",
+                "Canonical Skill activation is disabled.",
+            )
+        if normalized_run_kind != "foreground" or parent_run_id or int(agent_depth or 0) > 0:
+            raise SkillActivationError(
+                "activation_scope_invalid",
+                "Canonical Skill activation is limited to new foreground AgentRuns.",
+            )
+        requested_tool_names = normalize_allowed_tools_envelope(allowed_tools)
+        tools = _agent_selected_tools(payload, requested_tool_names, permission_profile)
+    else:
+        tools = _agent_selected_tools(payload, allowed_tools, permission_profile)
     image_route_identity = _normalize_agent_image_route_identity(image_route)
     if normalized_run_kind == "child":
         tools = [
@@ -9905,6 +9977,40 @@ def _create_agent_run(
             definition for definition in tools
             if str((definition.get("function") or {}).get("name") or "") != "generate_image"
         ]
+    activation = None
+    if canonical_activation:
+        activation = prepare_skill_activation(
+            messages=messages,
+            user_message=_agent_current_user_text(messages),
+            request=skill_activation_request,
+            installed_skills_dir=SKILLS_DIR,
+            bundled_skills_dir=APP_DIR / "data" / "skills",
+            initial_tool_names=[
+                str((definition.get("function") or {}).get("name") or "")
+                for definition in tools
+            ],
+            available_input_tokens=context_resolution["availableInputTokens"],
+            estimate_tokens=_agent_estimate_text_tokens,
+        )
+        allowed_after_activation = set(activation["toolNames"])
+        tools = [
+            definition for definition in tools
+            if str((definition.get("function") or {}).get("name") or "")
+            in allowed_after_activation
+        ]
+        messages = activation["messages"]
+        tool_budgets = activation["toolBudgets"]
+        active_skill_names = activation["activeSkillNames"]
+        active_skill_name = (
+            active_skill_names[0]
+            if activation["explicit"] and len(active_skill_names) == 1
+            else ""
+        )
+        if "imagegen" in active_skill_names and not image_route_identity:
+            raise ImageRuntimeError(
+                "image_route_not_configured",
+                "Image generation requires a configured image route.",
+            )
     if goal_operations_enabled:
         selected_names = {
             str((definition.get("function") or {}).get("name") or "")
@@ -9917,14 +10023,23 @@ def _create_agent_run(
             if definition:
                 tools.append(definition)
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
-    skill_evidence_observers = _freeze_skill_evidence_observers(
-        active_skill_names, active_skill_name, tools,
+    skill_evidence_observers = (
+        _freeze_captured_skill_evidence_observers(activation, tools)
+        if activation is not None
+        else _freeze_skill_evidence_observers(
+            active_skill_names, active_skill_name, tools,
+        )
     )
     frozen_active_skill_names = _agent_active_skill_names_from_observers(
         skill_evidence_observers,
     )
-    frozen_active_skill_dependencies = _freeze_agent_active_skill_dependencies(
-        frozen_active_skill_names,
+    frozen_active_skill_dependencies = (
+        {
+            name: list((activation.get("dependencies") or {}).get(name) or [])
+            for name in frozen_active_skill_names
+        }
+        if activation is not None
+        else _freeze_agent_active_skill_dependencies(frozen_active_skill_names)
     )
     try:
         rounds_limit = int(max_rounds or _AGENT_RUN_DEFAULT_MAX_ROUNDS)
@@ -9936,15 +10051,7 @@ def _create_agent_run(
         cwd,
         workspace_roots,
     )
-    run_id = (
-        _agent_run_id_for_client_request(session_id, client_request_id)
-        if client_request_id
-        else uuid.uuid4().hex
-    )
-    if client_request_id:
-        existing = _get_agent_run(run_id)
-        if existing:
-            return existing
+    run_id = str(_admission_run_id or uuid.uuid4().hex)
     timestamp = _agent_created_at_iso()
     run = {
         "id": run_id,
@@ -14441,6 +14548,45 @@ def _freeze_skill_evidence_observers(
         )
         if isinstance(observer, dict):
             observers.append(observer)
+    return observers
+
+
+def _freeze_captured_skill_evidence_observers(activation, tool_definitions):
+    """Freeze evidence from the canonical activation capture without rereading Skills."""
+    captures = list((activation or {}).get("captures") or [])
+    explicit = bool((activation or {}).get("explicit"))
+    observers = []
+    for capture in captures:
+        active_skill = {
+            "name": str(capture.get("name") or ""),
+            "contentHash": str(capture.get("contentHash") or ""),
+        }
+        source = capture.get("evidence")
+        if source is None:
+            observers.append({
+                "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+                "activeSkill": active_skill,
+                "contractState": "missing",
+                "diagnosticCode": "contract_missing",
+            })
+            continue
+        try:
+            contract = _normalize_skill_evidence_contract(
+                source,
+                _skill_evidence_tool_names(tool_definitions),
+            )
+        except ValueError:
+            observers.append(_skill_evidence_invalid_observer(
+                "invalid_contract", active_skill,
+            ))
+            continue
+        observers.append({
+            "version": _SKILL_EVIDENCE_OBSERVER_VERSION,
+            "activeSkill": active_skill,
+            "activationMode": "explicit" if explicit else "automatic",
+            "contractState": "valid",
+            "contract": contract,
+        })
     return observers
 
 
@@ -23298,12 +23444,15 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/browser-heartbeat":
                 _browser_heartbeat = int(dt.datetime.now().timestamp())
-                self.send_json({
+                heartbeat = {
                     "ok": True,
                     "serverInstanceId": _server_instance_id,
                     "instanceMode": INSTANCE_MODE,
                     "agentProjectionShadow": bool(_AGENT_PROJECTION_SHADOW_ENABLED),
-                })
+                }
+                if _SKILL_ACTIVATION_ENABLED:
+                    heartbeat["skillActivationProtocol"] = ACTIVATION_PROTOCOL
+                self.send_json(heartbeat)
                 return
             if route == "/api/check-path":
                 qs = parse.urlparse(self.path).query
@@ -23502,6 +23651,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                 return
             if route.rstrip("/") == "/api/agent/runs":
                 body = self.read_body_json()
+                if "skillActivationRequest" in body and body["skillActivationRequest"] is None:
+                    raise SkillActivationError("activation_intent_invalid", "Skill activation request is invalid")
                 payload = body.get("payload")
                 keys = body.get("keys")
                 route_ref = str(body.get("routeRef") or "").strip()
@@ -23573,12 +23724,16 @@ class CodeHandler(BaseHTTPRequestHandler):
                     active_skill_name=body.get("activeSkillName") or "",
                     active_skill_names=body.get("activeSkillNames"),
                     image_route=resolved_image_route,
+                    skill_activation_request=body.get("skillActivationRequest"),
                 )
-                self.send_json({
+                response = {
                     "agentRunId": run["id"],
                     "status": run["status"],
                     "clientRequestId": run.get("client_request_id", ""),
-                }, 201)
+                }
+                if body.get("skillActivationRequest") is not None:
+                    response["activeSkillNames"] = list(run.get("active_skill_names") or [])
+                self.send_json(response, 201)
                 return
             if route.startswith("/api/agent/runs/") and route.endswith("/resume"):
                 run_id = route.rsplit("/", 2)[-2]
@@ -23949,6 +24104,13 @@ class CodeHandler(BaseHTTPRequestHandler):
                 "route_catalog_unavailable", "route_credentials_unavailable",
             } else 409
             self.send_json(exc.public_payload(), status)
+            return
+        except SkillActivationError as exc:
+            self.send_json({
+                "error": str(exc),
+                "errorCode": exc.code,
+                "retryable": False,
+            }, 409)
             return
         except Exception as exc:
             self.send_json({"error": str(exc)}, 400)
