@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,12 @@ def _store(data, bundle, fault=None, timeout=5):
 
 def _by_alias(registry):
     return {item["routingAlias"]: item for item in registry["bindings"]}
+
+
+def _reseal(registry):
+    registry["operationReceipts"][0]["resultStateHash"] = skill_store._state_hash(registry)
+    registry["registryHash"] = skill_store._registry_hash(registry)
+    return registry
 
 
 def test_store_is_explicit_and_default_off(tmp_path):
@@ -301,6 +308,46 @@ def test_ids_recorded_at_prepare_survive_restart(tmp_path):
     assert {(item["installationId"], item["skillId"]) for item in completed["installations"]} == expected
 
 
+@pytest.mark.parametrize("point,remove_source", [
+    ("after-journal-staged-verified-publish", False),
+    ("after-object-publish", True),
+    ("after-registry-publish", False),
+])
+def test_late_recovery_uses_captured_objects_not_changed_legacy(tmp_path, point, remove_source):
+    data, bundle, catalog = _fixture(tmp_path)
+    custom = _write_skill(data / "skills", "custom", body="captured")
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, _CrashOnce(point)).bootstrap(catalog)
+    journal_path = next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))
+    target_registry = json.loads(journal_path.read_text(encoding="utf-8"))["targetRegistry"]
+    if remove_source:
+        shutil.rmtree(custom)
+    else:
+        (custom / "SKILL.md").write_text("changed after capture", encoding="utf-8")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        _store(data, bundle).bootstrap(catalog)
+    assert caught.value.code == "bootstrap_already_committed_conflict"
+    assert _store(data, bundle).read_registry() == target_registry
+    assert json.loads(journal_path.read_text(encoding="utf-8"))["phase"] == "committed"
+    assert not custom.exists() if remove_source else (custom / "SKILL.md").read_text(encoding="utf-8") == "changed after capture"
+
+
+@pytest.mark.parametrize("point", ["after-journal-prepared-publish", "after-staging-file"])
+def test_early_recovery_blocks_when_source_changed(tmp_path, point):
+    data, bundle, catalog = _fixture(tmp_path)
+    custom = _write_skill(data / "skills", "custom", body="prepared")
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, _CrashOnce(point)).bootstrap(catalog)
+    journal_path = next((data / skill_store.STORE_DIRECTORY / "transactions").glob("*.json"))
+    before = journal_path.read_bytes()
+    (custom / "SKILL.md").write_text("changed too early", encoding="utf-8")
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        _store(data, bundle).bootstrap(catalog)
+    assert caught.value.code == "bootstrap_recovery_source_conflict"
+    assert journal_path.read_bytes() == before
+    assert not (data / skill_store.STORE_DIRECTORY / "registry.json").exists()
+
+
 def test_explicit_local_identity_hint_is_durable(tmp_path):
     data, bundle, catalog = _fixture(tmp_path)
     _write_skill(data / "skills", "custom")
@@ -448,3 +495,61 @@ def test_registry_schema_corruption_fails_closed(tmp_path, mutation, code):
     with pytest.raises(skill_store.SkillStoreError) as caught:
         store.read_registry()
     assert caught.value.code == code
+
+
+@pytest.mark.parametrize("bad", ["unknown-code", {}, [], "x" * 500])
+def test_binding_reason_code_is_closed_and_bounded(tmp_path, bad):
+    data, bundle, catalog = _fixture(tmp_path)
+    (data / "skills" / "alpha" / "SKILL.md").write_text("modified", encoding="utf-8")
+    registry = _store(data, bundle).bootstrap(catalog)
+    candidate = copy.deepcopy(registry)
+    candidate["bindings"][0]["reasonCode"] = bad
+    _reseal(candidate)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        skill_store.normalize_registry(candidate)
+    assert caught.value.code == "registry_bindings_invalid"
+
+
+@pytest.mark.parametrize("state,bad", [
+    ("invalid", "unknown-code"),
+    ("invalid", {}),
+    ("invalid", []),
+    ("invalid", "x" * 500),
+    ("missing", "source-missing"),
+    ("missing", {}),
+    ("missing", []),
+    ("missing", "x" * 500),
+])
+def test_observation_error_code_is_closed_and_state_bound(tmp_path, state, bad):
+    data, bundle, catalog = _fixture(tmp_path)
+    invalid = data / "skills" / "broken"
+    invalid.mkdir(); (invalid / "not-skill.txt").write_text("x", encoding="utf-8")
+    registry = _store(data, bundle).bootstrap(catalog)
+    candidate = copy.deepcopy(registry)
+    index = next(i for i, item in enumerate(candidate["sourceObservations"]) if item["state"] == "invalid")
+    old = candidate["sourceObservations"][index]
+    replacement = skill_store._observation(
+        old["sourceKind"], old["locator"]["rootKind"], old["locator"]["directoryToken"],
+        state, None, old["catalogHash"], bad,
+    )
+    candidate["sourceObservations"][index] = replacement
+    candidate["sourceObservations"].sort(key=lambda item: item["sourceObservationId"])
+    _reseal(candidate)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        skill_store.normalize_registry(candidate)
+    assert caught.value.code == "registry_observations_invalid"
+
+
+def test_missing_observation_accepts_only_null_error(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    invalid = data / "skills" / "broken"
+    invalid.mkdir(); (invalid / "not-skill.txt").write_text("x", encoding="utf-8")
+    candidate = copy.deepcopy(_store(data, bundle).bootstrap(catalog))
+    index = next(i for i, item in enumerate(candidate["sourceObservations"]) if item["state"] == "invalid")
+    old = candidate["sourceObservations"][index]
+    candidate["sourceObservations"][index] = skill_store._observation(
+        old["sourceKind"], old["locator"]["rootKind"], old["locator"]["directoryToken"],
+        "missing", None, old["catalogHash"], None,
+    )
+    candidate["sourceObservations"].sort(key=lambda item: item["sourceObservationId"])
+    assert skill_store.normalize_registry(_reseal(candidate)) == candidate

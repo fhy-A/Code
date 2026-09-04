@@ -27,6 +27,8 @@ _OP_ID = re.compile(r"op1_[0-9a-f]{64}\Z")
 _OPAQUE = re.compile(r"~invalid-[0-9a-f]{16}\Z")
 _TEMP = re.compile(r"^\.(?:root\.json|registry\.json|op1_[0-9a-f]{64}\.json)\.(op1_[0-9a-f]{64})\.[0-9a-f]{32}\.tmp\Z")
 _PHASES = ("prepared", "root-bound", "copying", "staged-verified", "objects-published", "registry-published", "committed")
+_BINDING_REASONS = {"source-invalid", "shared-development-unconfirmed", "same-name-modified", "tombstone-conflict", "bundled-tombstoned", "legacy-root-missing", "legacy-bundled-missing", "unmatched-legacy-tombstone"}
+_OBSERVATION_ERRORS = {"invalid": "source-invalid", "unsafe": "source-unsafe", "unreadable": "source-unreadable"}
 _LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 class SkillStoreError(RuntimeError):
@@ -111,10 +113,13 @@ def normalize_registry(value):
         if item["sourceKind"] not in {"bundled-catalog", "legacy-installed", "workspace-development"} or item["locator"]["rootKind"] not in {"bundled", "legacy", "shared"}: _fail("registry_observations_invalid")
         expected = _observation(item["sourceKind"], item["locator"]["rootKind"], item["locator"]["directoryToken"], item["state"], item["revisionId"], item["catalogHash"], item["errorCode"])
         if item != expected or item["sourceObservationId"] in observation_ids: _fail("registry_observations_invalid")
-        if item["state"] == "ready":
-            if not _HASH.fullmatch(str(item["revisionId"])) or item["errorCode"] is not None: _fail("registry_observations_invalid")
-        elif item["state"] in {"missing", "invalid", "unsafe", "unreadable"}:
-            if item["revisionId"] is not None or (item["state"] != "missing" and not isinstance(item["errorCode"], str)): _fail("registry_observations_invalid")
+        state, error = item["state"], item["errorCode"]
+        if state == "ready":
+            if not _HASH.fullmatch(str(item["revisionId"])) or error is not None: _fail("registry_observations_invalid")
+        elif state == "missing":
+            if item["revisionId"] is not None or error is not None: _fail("registry_observations_invalid")
+        elif state in _OBSERVATION_ERRORS:
+            if item["revisionId"] is not None or error != _OBSERVATION_ERRORS[state]: _fail("registry_observations_invalid")
         else: _fail("registry_observations_invalid")
         if item["catalogHash"] is not None and not _HASH.fullmatch(str(item["catalogHash"])): _fail("registry_observations_invalid")
         observation_ids.add(item["sourceObservationId"]); observations.append(item)
@@ -142,7 +147,7 @@ def normalize_registry(value):
         if candidates != sorted(candidates, key=lambda item: (item["installationId"], item["revisionId"])) or len({item["installationId"] for item in candidates}) != len(candidates): _fail("registry_not_canonical")
         if item["state"] == "ready":
             if not candidates or item["activeCandidate"] not in candidates or item["reasonCode"] is not None: _fail("registry_bindings_invalid")
-        elif item["activeCandidate"] is not None or not isinstance(item["reasonCode"], str): _fail("registry_bindings_invalid")
+        elif item["activeCandidate"] is not None or not isinstance(item["reasonCode"], str) or item["reasonCode"] not in _BINDING_REASONS: _fail("registry_bindings_invalid")
         aliases.add(name.casefold()); candidate_count += len(candidates); bindings.append(item)
     if candidate_count > 1024 or bindings != sorted(bindings, key=lambda item: (item["routingAlias"].casefold(), item["routingAlias"])): _fail("registry_not_canonical")
     tombstones, tombstone_names = [], set()
@@ -453,7 +458,9 @@ class SkillStore:
             candidates, state, reason, active = [], "blocked", classification, None
             observed, bundled = entry["installed"].get("revisionId"), entry.get("bundledRevisionId")
             if classification == "invalid":
-                observe("legacy-installed", "legacy", name, entry["installed"].get("state", "invalid"), None, entry["installed"].get("errorCode", "revision_invalid"))
+                invalid_state = entry["installed"].get("state", "invalid")
+                invalid_state = invalid_state if invalid_state in _OBSERVATION_ERRORS else "invalid"
+                observe("legacy-installed", "legacy", name, invalid_state, None, _OBSERVATION_ERRORS[invalid_state])
                 if not name.startswith("~invalid-"): bindings.append({"routingAlias": name, "state": state, "reasonCode": "source-invalid", "candidates": [], "activeCandidate": None})
                 continue
             if classification in {"exact-bundled", "shared-development"} and observed == bundled:
@@ -521,15 +528,40 @@ class SkillStore:
         self._inspect_layout(); registry = self._load_registry()
         if registry is None and self.root.exists(): _fail("registry_missing")
         return registry
+    def _recover_captured(self, journal, root, registry):
+        operation_id, target = journal["operationId"], journal["targetRegistry"]
+        if root is None:
+            self._atomic_json(self.root / "root.json", {"schema": ROOT_SCHEMA, "dataRootId": journal["dataRootId"]}, operation_id, "root")
+            root = self._load_root()
+        if root["dataRootId"] != journal["dataRootId"]: _fail("root_mismatch")
+        phase_index, staged_index = _PHASES.index(journal["phase"]), _PHASES.index("staged-verified")
+        for revision_id in journal["objectRevisionIds"]:
+            final = self._object_path(revision_id)
+            if final.exists(): self._verify_object(final, revision_id)
+            elif phase_index == staged_index: self._verify_object(self._object_path(revision_id, staging=operation_id), revision_id)
+            else: _fail("bootstrap_recovery_capture_missing")
+        if phase_index == staged_index:
+            for revision_id in journal["objectRevisionIds"]: self._publish_object(operation_id, revision_id)
+            journal = self._write_journal(journal, "objects-published")
+        for revision_id in journal["objectRevisionIds"]: self._verify_object(self._object_path(revision_id), revision_id)
+        current = registry or (self._load_registry() if (self.root / "registry.json").exists() else None)
+        if current is None:
+            if _PHASES.index(journal["phase"]) > _PHASES.index("objects-published"): _fail("bootstrap_recovery_registry_missing")
+            self._atomic_json(self.root / "registry.json", target, operation_id, "registry"); current = self._load_registry()
+        if current != target: _fail("registry_cas_conflict")
+        if _PHASES.index(journal["phase"]) < _PHASES.index("registry-published"): journal = self._write_journal(journal, "registry-published")
+        if journal["phase"] != "committed": journal = self._write_journal(journal, "committed")
+        self._clean_stage(operation_id, set(journal["objectRevisionIds"])); return current
     def bootstrap(self, catalog, *, identity_hints=None):
         if not self.write_enabled: _fail("store_writes_disabled")
-        hints, first = _normalize_hints(identity_hints), None
-        first = self._preflight(catalog, hints)
+        hints = _normalize_hints(identity_hints)
+        new_store = revisions._path_kind(self.root) == "missing"
+        first = self._preflight(catalog, hints) if new_store else None
+        if not new_store: self._inspect_layout()
         with self._mutation_lock():
-            self._ensure_skeleton(); second = self._preflight(catalog, hints)
-            if first[1:] != second[1:]: _fail("bootstrap_preflight_changed")
-            _catalog, plan, legacy_hash, request_hash = second
+            self._ensure_skeleton()
             journals, root = self._journals(), self._load_root()
+            if len(journals) > 1: _fail("store_transaction_conflict")
             registry = self._load_registry() if (self.root / "registry.json").exists() else None
             active = [item for item in journals if item["phase"] != "committed"]
             known = {item["operationId"] for item in journals}
@@ -538,20 +570,27 @@ class SkillStore:
             referenced = {item["revisionId"] for item in (registry or {}).get("installations", [])}
             referenced.update(revision_id for item in journals for revision_id in item["objectRevisionIds"])
             if self._inspect_layout() - referenced: _fail("store_object_unknown")
-            root_id = active[0]["dataRootId"] if root is None and active else ("dr1_" + uuid.uuid4().hex if root is None else root["dataRootId"])
-            operation_id = _operation_id(root_id, request_hash)
+            late = journals[0] if journals and _PHASES.index(journals[0]["phase"]) >= _PHASES.index("staged-verified") else None
+            if late is not None:
+                self._clean_temps(known); current = self._recover_captured(late, root, registry)
+                try: current_request = self._preflight(catalog, hints)[3]
+                except (SkillStoreError, revisions.SkillRevisionError) as exc: raise SkillStoreError("bootstrap_already_committed_conflict") from exc
+                if current_request != late["requestHash"]: _fail("bootstrap_already_committed_conflict")
+                return current
+            try: second = self._preflight(catalog, hints)
+            except (SkillStoreError, revisions.SkillRevisionError) as exc:
+                if active: raise SkillStoreError("bootstrap_recovery_source_conflict") from exc
+                raise
+            if first is not None and first[1:] != second[1:]: _fail("bootstrap_preflight_changed")
+            _catalog, plan, legacy_hash, request_hash = second
+            matching = active[0] if active else None
+            if matching is not None and (matching["requestHash"] != request_hash or matching["planHash"] != plan["planHash"] or matching["legacySnapshotHash"] != legacy_hash): _fail("bootstrap_recovery_source_conflict")
+            if matching is None and (journals or root is not None or registry is not None): _fail("bootstrap_store_incomplete")
+            root_id = matching["dataRootId"] if matching else "dr1_" + uuid.uuid4().hex
+            operation_id = matching["operationId"] if matching else _operation_id(root_id, request_hash)
             self._clean_temps(known, empty=root is None and registry is None and not journals)
-            matching = next((item for item in journals if item["operationId"] == operation_id), None)
-            if active and matching is not active[0]: _fail("bootstrap_transaction_conflict")
-            if registry is not None and matching is None:
-                receipt = next((item for item in registry["operationReceipts"] if item["operationId"] == operation_id), None)
-                if receipt is not None and receipt["requestHash"] == request_hash and receipt["resultStateHash"] == _state_hash(registry): return registry
-                _fail("bootstrap_already_committed_conflict")
             target, materials = self._build_target(root_id, request_hash, plan, hints, matching["targetRegistry"] if matching else None)
             if len(_canonical(target)) + 1 > MAX_REGISTRY_BYTES: _fail("registry_size_limit")
-            if matching is not None and matching["phase"] == "committed":
-                if registry != matching["targetRegistry"] or matching["requestHash"] != request_hash: _fail("bootstrap_committed_result_conflict")
-                self._clean_stage(operation_id, set(matching["objectRevisionIds"])); return registry
             if matching is None:
                 object_ids = sorted(materials); new_bytes = sum(revisions.build_skill_revision(materials[item])["summary"]["totalSize"] for item in object_ids if not self._object_path(item).exists())
                 existing_ids = self._inspect_layout()
@@ -563,7 +602,7 @@ class SkillStore:
                 journal = self._write_journal(journal)
             else:
                 journal = matching
-                if journal["requestHash"] != request_hash or journal["targetRegistry"] != target or journal["planHash"] != plan["planHash"] or journal["legacySnapshotHash"] != legacy_hash: _fail("bootstrap_transaction_conflict")
+                if journal["targetRegistry"] != target: _fail("bootstrap_recovery_source_conflict")
             if root is None: self._atomic_json(self.root / "root.json", {"schema": ROOT_SCHEMA, "dataRootId": root_id}, operation_id, "root")
             elif root["dataRootId"] != root_id: _fail("root_mismatch")
             journal = self._write_journal(journal, "root-bound"); journal = self._write_journal(journal, "copying")
@@ -571,10 +610,5 @@ class SkillStore:
                 if not self._object_path(revision_id).exists() and revision_id not in materials: _fail("bootstrap_source_missing")
                 if revision_id in materials: self._stage_object(operation_id, revision_id, materials[revision_id])
             journal = self._write_journal(journal, "staged-verified")
-            for revision_id in journal["objectRevisionIds"]: self._publish_object(operation_id, revision_id)
-            journal = self._write_journal(journal, "objects-published")
-            current = self._load_registry() if (self.root / "registry.json").exists() else None
-            if current is None: self._atomic_json(self.root / "registry.json", journal["targetRegistry"], operation_id, "registry"); current = self._load_registry()
-            elif current != journal["targetRegistry"]: _fail("registry_cas_conflict")
-            journal = self._write_journal(journal, "registry-published"); self._write_journal(journal, "committed")
-            self._clean_stage(operation_id, set(journal["objectRevisionIds"])); self._hit("after-cleanup"); return current
+            current = self._recover_captured(journal, self._load_root(), None)
+            self._hit("after-cleanup"); return current
