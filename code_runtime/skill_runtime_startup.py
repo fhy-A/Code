@@ -113,11 +113,15 @@ class ImmutableSkillStartupRuntime:
                         )
                     )
                 elif state == "recoverable":
-                    store.bootstrap_from_catalog_loader(
-                        lambda: self._catalog_loader(
-                            Path(bundled_root) / skill_revisions.CATALOG_FILENAME
+                    if startup.get("management") is True:
+                        from .skill_store_management import SkillStoreManager
+                        SkillStoreManager(store, owner=owner).recover()
+                    else:
+                        store.bootstrap_from_catalog_loader(
+                            lambda: self._catalog_loader(
+                                Path(bundled_root) / skill_revisions.CATALOG_FILENAME
+                            )
                         )
-                    )
                 reader = self._reader_factory(Path(data_root))
                 reader.read_registry()
             except (skill_store.SkillStoreError,

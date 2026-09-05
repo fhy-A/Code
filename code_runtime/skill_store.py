@@ -24,8 +24,9 @@ _INSTALL_ID = re.compile(r"si1_[0-9a-f]{32}\Z")
 _LOCAL_ID = re.compile(r"local\.skill/[0-9a-f]{32}\Z")
 _BUNDLE_ID = re.compile(r"code\.bundle/[a-z0-9][a-z0-9._-]{0,127}\Z")
 _OP_ID = re.compile(r"op1_[0-9a-f]{64}\Z")
+_STORE_OP_ID = re.compile(r"op[12]_[0-9a-f]{64}\Z")
 _OPAQUE = re.compile(r"~invalid-[0-9a-f]{16}\Z")
-_TEMP = re.compile(r"^\.(?:root\.json|registry\.json|op1_[0-9a-f]{64}\.json)\.(op1_[0-9a-f]{64})\.[0-9a-f]{32}\.tmp\Z")
+_TEMP = re.compile(r"^\.(?:root\.json|registry\.json|op[12]_[0-9a-f]{64}\.json)\.(op[12]_[0-9a-f]{64})\.[0-9a-f]{32}\.tmp\Z")
 _PHASES = ("prepared", "root-bound", "copying", "staged-verified", "objects-published", "registry-published", "committed")
 _BINDING_REASONS = {"source-invalid", "shared-development-unconfirmed", "same-name-modified", "tombstone-conflict", "bundled-tombstoned", "legacy-root-missing", "legacy-bundled-missing", "unmatched-legacy-tombstone"}
 _OBSERVATION_ERRORS = {"invalid": "source-invalid", "unsafe": "source-unsafe", "unreadable": "source-unreadable"}
@@ -101,6 +102,9 @@ def _observation(source_kind, root_kind, directory, state, revision_id, catalog_
     base = {"sourceKind": source_kind, "locator": {"rootKind": root_kind, "directoryToken": directory}, "state": state, "revisionId": revision_id, "catalogHash": catalog_hash, "errorCode": error_code}
     return {"sourceObservationId": "so1_" + hashlib.sha256(_canonical(base)).hexdigest(), **base}
 def normalize_registry(value):
+    if isinstance(value, dict) and value.get("schema") == "code-skill-install-registry/v2":
+        from . import skill_store_v2
+        return skill_store_v2.normalize_registry(value)
     top = {"schema", "dataRootId", "generation", "installations", "bindings", "bundledTombstones", "sourceObservations", "operationReceipts", "registryHash"}
     _exact(value, top, "registry_invalid")
     if value.get("schema") != REGISTRY_SCHEMA or not _ROOT_ID.fullmatch(str(value.get("dataRootId"))): _fail("registry_invalid")
@@ -189,7 +193,7 @@ class SkillStore:
         if transactions.exists():
             count = 0
             for item in transactions.iterdir():
-                if _OP_ID.fullmatch(item.stem) and item.suffix == ".json": _safe_file(item); count += 1
+                if _STORE_OP_ID.fullmatch(item.stem) and item.suffix == ".json": _safe_file(item); count += 1
                 elif _TEMP.fullmatch(item.name): _safe_file(item)
                 else: _fail("store_layout_unknown")
             if count > MAX_TRANSACTIONS: _fail("store_transaction_limit")
@@ -198,7 +202,7 @@ class SkillStore:
             items = list(staging.iterdir())
             if len(items) > 1: _fail("store_transaction_conflict")
             for item in items:
-                if not _OP_ID.fullmatch(item.name): _fail("store_layout_unknown")
+                if not _STORE_OP_ID.fullmatch(item.name): _fail("store_layout_unknown")
                 _safe_dir(item)
         objects_root, objects, object_ids = self.root / "objects", self.root / "objects" / "sha256", set()
         if objects_root.exists() and {item.name for item in objects_root.iterdir()} - {"sha256"}: _fail("store_layout_unknown")
@@ -256,29 +260,52 @@ class SkillStore:
         return catalog, plan, legacy_hash, request_hash
     @contextmanager
     def _mutation_lock(self):
-        self.root.mkdir(exist_ok=True); _safe_dir(self.root); path = self.root / "registry.lock"
-        with _thread_lock(path):
-            flags = os.O_RDWR | os.O_CREAT
+        with self._store_lock(write=True):
+            yield
+    @contextmanager
+    def _read_lock(self):
+        if revisions._path_kind(self.root) == "missing":
+            yield
+            return
+        with self._store_lock(write=False):
+            yield
+    @contextmanager
+    def _store_lock(self, *, write):
+        if write:
+            self.root.mkdir(exist_ok=True)
+        _safe_dir(self.root)
+        path = self.root / "registry.lock"
+        guard = _thread_lock(path)
+        deadline = time.monotonic() + self.lock_timeout
+        if not guard.acquire(timeout=self.lock_timeout):
+            _fail("store_busy")
+        try:
+            flags = os.O_RDWR | os.O_CREAT if write else os.O_RDONLY
             if hasattr(os, "O_BINARY"): flags |= os.O_BINARY
             if hasattr(os, "O_NOFOLLOW"): flags |= os.O_NOFOLLOW
-            with os.fdopen(os.open(path, flags, 0o600), "r+b", closefd=True) as stream:
+            with os.fdopen(os.open(path, flags, 0o600), "r+b" if write else "rb", closefd=True) as stream:
                 after, current = os.fstat(stream.fileno()), os.lstat(path)
                 if revisions._path_kind(path) != "file" or not stat.S_ISREG(after.st_mode) or int(getattr(after, "st_nlink", 1)) != 1 or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino): _fail("store_lock_unsafe")
-                if after.st_size == 0: stream.write(b"\0"); stream.flush(); os.fsync(stream.fileno())
-                deadline = time.monotonic() + self.lock_timeout
+                if after.st_size == 0 and write: stream.write(b"\0"); stream.flush(); os.fsync(stream.fileno())
                 while True:
                     try:
                         if os.name == "nt":
                             import msvcrt
-                            stream.seek(0); msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                            stream.seek(0); msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK if write else msvcrt.LK_NBRLCK, 1)
                         else:
                             import fcntl
-                            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(stream.fileno(), (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                         break
                     except OSError as exc:
                         if time.monotonic() >= deadline: raise SkillStoreError("store_busy") from exc
                         time.sleep(0.01)
-                try: yield
+                try:
+                    locked_path = os.lstat(path)
+                    if (revisions._path_kind(path) != "file"
+                            or (after.st_dev, after.st_ino) != (locked_path.st_dev, locked_path.st_ino)
+                            or int(getattr(locked_path, "st_nlink", 1)) != 1):
+                        _fail("store_lock_unsafe")
+                    yield
                 finally:
                     try:
                         if os.name == "nt":
@@ -288,6 +315,8 @@ class SkillStore:
                             import fcntl
                             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                     except OSError: pass
+        finally:
+            guard.release()
     def _ensure_skeleton(self):
         for path in (self.root / "objects" / "sha256", self.root / "transactions", self.root / "staging"):
             path.mkdir(parents=True, exist_ok=True); _safe_dir(path)
@@ -365,10 +394,16 @@ class SkillStore:
         if raw != _canonical(registry) + b"\n": _fail("registry_not_canonical")
         root = self._load_root()
         if root is None or root["dataRootId"] != registry["dataRootId"]: _fail("registry_root_mismatch")
+        if registry["schema"] == "code-skill-install-registry/v2" and not self._uses_management():
+            _fail("management_lineage_invalid")
         if verify_objects:
-            for revision_id in sorted({item["revisionId"] for item in registry["installations"]}): self._verify_object(self._object_path(revision_id), revision_id)
+            from .skill_store_v2 import retained_ids
+            for revision_id in sorted(retained_ids(registry)): self._verify_object(self._object_path(revision_id), revision_id)
         return registry
     def _normalize_journal(self, value):
+        if isinstance(value, dict) and value.get("schema") == "code-skill-store-transaction/v2":
+            from . import skill_store_v2
+            return skill_store_v2.normalize_journal(value)
         fields = {"schema", "operationId", "operationKind", "phase", "journalGeneration", "dataRootId", "requestHash", "planHash", "catalogHash", "legacySnapshotHash", "baseRegistry", "targetRegistry", "objectRevisionIds", "newObjectBytes"}
         _exact(value, fields, "journal_invalid")
         hashes = ("requestHash", "planHash", "catalogHash", "legacySnapshotHash")
@@ -388,11 +423,11 @@ class SkillStore:
     def _journals(self):
         result, directory = [], self.root / "transactions"
         if not directory.exists(): return result
-        for path in sorted(directory.glob("op1_*.json")):
+        for path in sorted(directory.glob("op[12]_*.json")):
             raw, value = self._load_json(path, MAX_JOURNAL_BYTES, "journal_invalid"); journal = self._normalize_journal(value)
             if path.stem != journal["operationId"] or raw != _canonical(journal) + b"\n": _fail("journal_invalid")
             result.append(journal)
-        if len(result) > MAX_TRANSACTIONS or sum(item["phase"] != "committed" for item in result) > 1: _fail("store_transaction_conflict")
+        if len(result) > MAX_TRANSACTIONS or sum(item["phase"] not in {"committed", "aborted"} for item in result) > 1: _fail("store_transaction_conflict")
         return result
     def _write_journal(self, journal, phase=None):
         updated = dict(journal)
@@ -561,15 +596,26 @@ class SkillStore:
                     if match.group(1) not in known and not empty: _fail("store_temp_unknown")
                     _safe_file(item); item.unlink()
     def read_registry(self):
-        self._inspect_layout(); registry = self._load_registry()
-        if registry is None and self.root.exists(): _fail("registry_missing")
-        return registry
+        with self._read_lock():
+            objects = self._inspect_layout()
+            registry = self._load_registry()
+            if registry is None and self.root.exists(): _fail("registry_missing")
+            if self._uses_management(registry):
+                from .skill_store_management import inspect_managed_state
+                inspect_managed_state(self, self._journals(), objects)
+            return registry
+    def _uses_management(self, registry=None):
+        return (isinstance(registry, dict) and registry.get("schema") == "code-skill-install-registry/v2"
+                or next((self.root / "transactions").glob("op2_*.json"), None) is not None)
     def inspect_startup_state(self):
         """Classify startup without reading mutable Skill sources or writing state."""
         if self._initial_state() == "empty":
             return {"state": "empty"}
         object_ids = self._inspect_layout()
         journals = self._journals()
+        if self._uses_management():
+            from .skill_store_management import inspect_managed_state
+            return inspect_managed_state(self, journals, object_ids)
         if len(journals) > 1:
             _fail("store_transaction_conflict")
         active = [item for item in journals if item["phase"] != "committed"]
@@ -703,6 +749,7 @@ class SkillStore:
                 first = None
             self._ensure_skeleton()
             journals, root = self._journals(), self._load_root()
+            if self._uses_management(): _fail("management_legacy_write_blocked")
             if len(journals) > 1: _fail("store_transaction_conflict")
             registry = self._load_registry() if (self.root / "registry.json").exists() else None
             active = [item for item in journals if item["phase"] != "committed"]
@@ -770,42 +817,48 @@ class SkillStore:
 class SkillStoreReader:
     """Read exact immutable objects without creating or repairing store state."""
 
-    def __init__(self, data_root):
+    def __init__(self, data_root, *, lock_timeout=5.0):
         if data_root is None:
             raise ValueError("explicit data_root is required")
-        self._store = SkillStore(data_root, data_root)
+        self._store = SkillStore(data_root, data_root, lock_timeout=lock_timeout)
 
     def _root(self, expected=None):
-        self._store._inspect_layout()
+        objects = self._store._inspect_layout()
         root = self._store._load_root()
         if root is None:
             _fail("store_root_missing")
         if expected is not None and root["dataRootId"] != expected:
             _fail("store_data_root_mismatch")
+        if self._store._uses_management():
+            from .skill_store_management import inspect_managed_state
+            inspect_managed_state(self._store, self._store._journals(), objects)
         return root
 
     def read_registry(self, *, data_root_id=None, verify_objects=True):
-        object_ids = self._store._inspect_layout()
-        self._root(data_root_id)
-        registry = self._store._load_registry(verify_objects=bool(verify_objects))
-        if registry is None:
-            _fail("registry_missing")
-        referenced = {item["revisionId"] for item in registry["installations"]}
-        if object_ids != referenced:
-            _fail("store_object_unknown")
-        return json.loads(_canonical(registry))
+        with self._store._read_lock():
+            object_ids = self._store._inspect_layout()
+            self._root(data_root_id)
+            registry = self._store._load_registry(verify_objects=bool(verify_objects))
+            if registry is None:
+                _fail("registry_missing")
+            referenced = {item["revisionId"] for item in registry["installations"]}
+            if not self._store._uses_management(registry) and object_ids != referenced:
+                _fail("store_object_unknown")
+            return json.loads(_canonical(registry))
 
     def verify_root(self, data_root_id):
         """Verify only immutable root identity, including no-match recovery."""
-        return json.loads(_canonical(self._root(data_root_id)))
+        with self._store._read_lock():
+            return json.loads(_canonical(self._root(data_root_id)))
 
     def read_pinned(self, data_root_id, revision_id):
         if not _ROOT_ID.fullmatch(str(data_root_id)):
             _fail("store_data_root_invalid")
         if not _HASH.fullmatch(str(revision_id)):
             _fail("object_revision_invalid")
-        root = self._root(data_root_id)
-        return self._read_pinned_from_root(root, revision_id)
+        with self._store._read_lock():
+            root = self._root(data_root_id)
+            return self._read_pinned_from_root(root, revision_id)
 
     def _read_pinned_from_root(self, root, revision_id, *, runtime=False, paths=None):
         """Read one object while a caller already owns a verified root snapshot."""
@@ -844,8 +897,9 @@ class SkillStoreReader:
 
     def read_runtime(self, data_root_id, revision_id):
         """Return verified bytes plus the current non-authoritative object path."""
-        root = self._root(data_root_id)
-        return self._read_pinned_from_root(root, revision_id, runtime=True)
+        with self._store._read_lock():
+            root = self._root(data_root_id)
+            return self._read_pinned_from_root(root, revision_id, runtime=True)
 
     def begin_admission(self):
         """Create a request-scoped O(N + selected) immutable admission view."""

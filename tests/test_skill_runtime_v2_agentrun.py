@@ -11,8 +11,12 @@ import server as server_mod
 from code_runtime import skill_revisions
 from code_runtime import skill_runtime_v2
 from code_runtime import skill_store
+from code_runtime import data_dir_owner
+from code_runtime import skill_store_management
+from code_runtime import skill_lifecycle_v2
 from code_runtime.skill_activation import SKILL_PROMPT_MARKER
 from tests import test_skill_admission as admission_fixture
+from tests.test_skill_store_management import apply as apply_management
 
 
 def _runtime_fixture(tmp_path):
@@ -88,6 +92,141 @@ def _call(run, name, arguments, call_id="call-1"):
     run["status"] = "tools"
     server_mod._execute_agent_pending_tools(run)
     return run["tool_executions"].get(call_id), call
+
+
+def _managed_package(tmp_path, bundle, name, suffix):
+    package = tmp_path / suffix / name
+    shutil.copytree(bundle / "xlsx", package)
+    path = package / "SKILL.md"
+    text = path.read_text(encoding="utf-8").replace("name: xlsx", f"name: {name}")
+    path.write_text(text + f"\n{suffix}\n", encoding="utf-8", newline="\n")
+    for filename in ("dependencies.json", "code-resources.json"):
+        path = package / filename
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["skill"] = name
+        path.write_text(json.dumps(value), encoding="utf-8", newline="\n")
+    return package, skill_revisions.build_skill_revision(package)["revisionId"]
+
+
+def _freeze_managed_run(reader, waiting, request_id):
+    run = _run(reader, permission="accept" if waiting == "waiting_authorization" else "read",
+               request_id=request_id)
+    execution, _ = _call(run, "read_skill_resource", {"skill": "xlsx", "file": "private.txt"}, "completed-read")
+    assert execution["result"]["ok"] is True
+    if waiting == "waiting_authorization":
+        execution, _ = _call(run, "write_file", {"path": "book.xlsx", "content": "x"}, "pending-write")
+        assert execution["status"] == "waiting_authorization"
+    else:
+        run["status"] = waiting
+        run["resume_status"] = "model" if waiting == "waiting_credentials" else ""
+        if waiting == "waiting_user_input":
+            run["pending_input"] = {"version": 1, "requestId": "input-managed", "questions": []}
+        elif waiting == "waiting_skill_evidence":
+            selected = run["skill_lifecycle"]["activation"]["selected"][0]
+            run["pending_skill_evidence"] = {
+                "version": 2, "gateId": "skill-evidence-" + "b" * 40,
+                "authority": skill_runtime_v2.authority_from_selected(selected, evidence=True),
+                "candidateResult": {"content": "candidate", "finishReason": "stop", "usage": {}},
+                "evidenceStatus": "partial", "missing": [{
+                    "id": "write", "tool": "write_file", "minCount": 1, "succeededCount": 0, "failedCount": 0,
+                }], "createdAt": "2026-09-05T00:00:00Z",
+            }
+        elif waiting == "completed":
+            run["result"] = {"content": "done"}
+    server_mod._persist_agent_run(run)
+    record = server_mod._agent_run_record(run)
+    assert record["version"] == 6
+    original = server_mod._agent_run_from_record(copy.deepcopy(record), immutable_skill_reader=reader)
+    old_revision = record["skillLifecycle"]["activation"]["selected"][0]["revisionId"]
+    old_content_root = reader.read_runtime(record["skillLifecycle"]["activation"]["registry"]["dataRootId"], old_revision)["contentRoot"]
+    return run, record, original, old_revision, old_content_root
+
+
+@pytest.mark.parametrize("waiting", [
+    "waiting_authorization", "waiting_user_input", "waiting_skill_evidence", "waiting_credentials", "completed",
+])
+def test_old_v6_exact_recovery_survives_managed_mutations(runtime_env, tmp_path, waiting):
+    data, bundle, reader = runtime_env
+    frozen = [_freeze_managed_run(reader, waiting, "old-v1-registry-run")]
+    assert frozen[0][1]["skillLifecycle"]["activation"]["registry"]["schema"] == "code-skill-install-registry/v1"
+
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        manager = skill_store_management.SkillStoreManager(skill_store.SkillStore(data, bundle, write_enabled=True), owner=owner)
+
+        def change(key, request, package=None):
+            persisted = {entry[0]["id"]: server_mod._agent_run_path(entry[0]["id"]).read_bytes() for entry in frozen}
+            receipt = apply_management(manager, key, request, package=package)
+            for run, record, original, old_revision, old_content_root in frozen:
+                assert server_mod._agent_run_path(run["id"]).read_bytes() == persisted[run["id"]]
+                if waiting == "completed":
+                    restored = server_mod._agent_run_from_record(copy.deepcopy(record))
+                    assert restored["status"] == "completed"
+                else:
+                    restored = server_mod._agent_run_from_record(copy.deepcopy(record))
+                    assert restored["status"] == "waiting_recovery"
+                    assert server_mod._agent_restore_skill_recovery(restored, reader) is True
+                    assert restored["status"] == waiting
+                assert restored["skill_lifecycle"] == original["skill_lifecycle"]
+                assert restored["tool_executions"] == original["tool_executions"]
+                for field in ("pending_input", "pending_skill_evidence"):
+                    assert restored[field] == original[field]
+                if waiting == "waiting_authorization":
+                    assert {k: v for k, v in restored["pending_authorization"].items() if k != "submitting"} == {
+                        k: v for k, v in original["pending_authorization"].items() if k != "submitting"
+                    }
+                assert server_mod._agent_run_record(restored)["version"] == 6
+                assert reader.read_runtime(record["skillLifecycle"]["activation"]["registry"]["dataRootId"], old_revision)["contentRoot"] == old_content_root
+            return receipt
+
+        change("convert", {"kind": "convert-v2"})
+        bundled = next(item for item in manager.store.read_registry()["installations"] if item["displayName"] == "xlsx")
+        package, revision_id = _managed_package(tmp_path, bundle, "xlsx", "catalog-update")
+        change("update", {"kind": "update-bundled", "installationId": bundled["installationId"],
+                          "routingAlias": "xlsx", "revisionId": revision_id, "conflict": "reject",
+                          "catalog": skill_revisions.build_bundled_catalog(package.parent, {"xlsx": bundled["skillId"]})}, package)
+        package, revision_id = _managed_package(tmp_path, bundle, "xlsx", "local-fork")
+        fork = change("fork", {"kind": "fork-bundled", "installationId": bundled["installationId"],
+                               "routingAlias": "xlsx", "revisionId": revision_id, "conflict": "select-new"}, package)
+        iid = fork["result"]["installationId"]
+        local_run = _freeze_managed_run(reader, waiting, "old-local-managed-run")
+        local_selection = local_run[1]["skillLifecycle"]["activation"]["selected"][0]
+        assert local_selection["installationId"] == iid
+        assert local_run[1]["skillLifecycle"]["activation"]["registry"]["schema"] == "code-skill-install-registry/v2"
+        frozen.append(local_run)
+        package, revision_id = _managed_package(tmp_path, bundle, "custom-sheet", "local-rename")
+        change("rename", {"kind": "edit-local", "installationId": iid, "routingAlias": "custom-sheet",
+                          "revisionId": revision_id, "conflict": "reject"}, package)
+        change("disable", {"kind": "set-enabled", "installationId": iid, "enabled": False})
+        change("uninstall", {"kind": "uninstall", "installationId": iid})
+
+
+def test_new_v6_records_v2_registry_and_disabled_names_only_reduce(runtime_env):
+    data, bundle, reader = runtime_env
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        manager = skill_store_management.SkillStoreManager(skill_store.SkillStore(data, bundle, write_enabled=True), owner=owner)
+        apply_management(manager, "convert", {"kind": "convert-v2"})
+        run = _run(reader, request_id="managed-v6")
+        record = server_mod._agent_run_record(run)
+        assert record["version"] == 6
+        assert record["skillLifecycle"]["schemaVersion"] == 2
+        assert record["skillLifecycle"]["activation"]["registry"]["schema"] == "code-skill-install-registry/v2"
+        assert _run(reader, request_id="managed-v6") is run
+        selected = record["skillLifecycle"]["activation"]["selected"][0]
+        apply_management(manager, "disable", {"kind": "set-enabled", "installationId": selected["installationId"], "enabled": False})
+        with pytest.raises(ValueError):
+            _run(reader, request_id="disabled-managed")
+        ordinary = _run(reader, message="hello world", explicit="", request_id="ordinary-managed")
+        assert ordinary["skill_lifecycle"]["activation"]["outcome"] == "none"
+        assert _run(reader, request_id="managed-v6") is run
+        assert run["skill_lifecycle"] == record["skillLifecycle"]
+        invalid = copy.deepcopy(record["skillLifecycle"])
+        invalid["activation"]["registry"]["schema"] = "code-skill-install-registry/v3"
+        with pytest.raises(skill_lifecycle_v2.SkillLifecycleV2Error) as caught:
+            skill_lifecycle_v2.normalize_skill_lifecycle(invalid)
+        assert caught.value.code == "skill_lifecycle_v2_registry_invalid"
+        invalid["activation"]["registry"].update(schema="code-skill-install-registry/v2", generation=0)
+        with pytest.raises(skill_lifecycle_v2.SkillLifecycleV2Error):
+            skill_lifecycle_v2.normalize_skill_lifecycle(invalid)
 
 
 def test_v6_writer_no_match_and_terminal_reader_free(runtime_env):

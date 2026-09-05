@@ -35,6 +35,8 @@ RUNTIME_MODULES = (
     "skill_runtime_startup",
     "skill_runtime_v2",
     "skill_store",
+    "skill_store_management",
+    "skill_store_v2",
     "windows_explorer",
 )
 DEVTOOL_MODULES = ("release_state", "verification")

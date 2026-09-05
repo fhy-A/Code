@@ -1,12 +1,16 @@
 """Durable server-owned Agent run regression tests.
 
 Run: python -m pytest tests/test_agent_runtime.py -v
+For import-time isolation, set CODE_DATA_DIR to a temporary profile before Python.
 """
 
 import ast
 import copy
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +26,13 @@ import server as server_mod
 from code_runtime import skill_completion
 from code_runtime.agent_protocol import normalize_agent_event
 from code_runtime.skill_activation import SKILL_PROMPT_MARKER
+
+
+class _FixtureWriterTimeout(KeyboardInterrupt):
+    """Abort unittest/pytest rather than admit another root with live writers."""
+
+
+_FIXTURE_ROOT_POISONED = False
 
 
 _H3_2C1_SUITE_PATH = (
@@ -661,6 +672,9 @@ class TestDurableAgentRuntime(unittest.TestCase):
         cls.thread.join(timeout=2)
 
     def setUp(self):
+        if _FIXTURE_ROOT_POISONED:
+            raise _FixtureWriterTimeout("fixture writer did not exit; further roots are blocked")
+        self._fixture_closed = False
         self.temp_dir = tempfile.TemporaryDirectory(prefix="code_agent_runtime_")
         self.data_dir = Path(self.temp_dir.name) / "data"
         self.project_dir = Path(self.temp_dir.name) / "project"
@@ -704,16 +718,227 @@ class TestDurableAgentRuntime(unittest.TestCase):
             _AgentUpstream.scripted_rounds = []
 
     def tearDown(self):
+        if self._fixture_closed:
+            return
         _AgentUpstream.release_slow.set()
         _AgentUpstream.release_parallel.set()
-        with server_mod._agent_run_lock:
-            runs = list(server_mod._agent_runs.values())
-        deadline = time.time() + 2
-        while any(run.get("worker") is not None for run in runs) and time.time() < deadline:
-            time.sleep(0.01)
+        self._wait_fixture_writers()
+        # Keep every path patch active until this profile's writers are gone
+        # and its temporary files have actually been removed.
+        self.temp_dir.cleanup()
         for patcher in reversed(self.patchers):
             patcher.stop()
-        self.temp_dir.cleanup()
+        self._fixture_closed = True
+
+    def _wait_fixture_writers(self, timeout=2):
+        global _FIXTURE_ROOT_POISONED
+        deadline = time.monotonic() + timeout
+        index_keys = {
+            str((self.data_dir / "agent-runs" / directory / "index.json").resolve(strict=False))
+            for directory in (".nonterminal-index", ".session-index")
+        }
+        while True:
+            with server_mod._agent_run_lock:
+                workers = {run.get("worker") for run in server_mod._agent_runs.values()}
+            with server_mod._agent_run_index_builds_lock:
+                workers.update(server_mod._agent_run_index_builds.get(key) for key in index_keys)
+            active = [worker for worker in workers if worker is not None and worker.is_alive()]
+            if not active:
+                return
+            if time.monotonic() >= deadline:
+                _FIXTURE_ROOT_POISONED = True
+                # Preserve the root even when the runner exits: TemporaryDirectory
+                # would otherwise delete it at shutdown with the writer still live.
+                self.temp_dir._finalizer.detach()
+                raise _FixtureWriterTimeout("fixture writer did not exit before cleanup; aborting test runner")
+            for worker in active:
+                worker.join(timeout=max(0, deadline - time.monotonic()))
+
+    def test_fixture_waits_for_profile_index_writer_before_restoring_paths(self):
+        for directory in (".nonterminal-index", ".session-index"):
+            with self.subTest(directory=directory):
+                entered, release, writes = threading.Event(), threading.Event(), []
+                index_path = self.data_dir / "agent-runs" / directory / "index.json"
+                key = str(index_path.resolve(strict=False))
+
+                def delayed_index_writer():
+                    entered.set()
+                    if release.wait(timeout=2):
+                        # Write only this synthetic profile, even on failure.
+                        writes.append(server_mod.DATA_DIR)
+                        index_path.parent.mkdir(parents=True, exist_ok=True)
+                        index_path.write_text("{}", encoding="utf-8")
+
+                worker = threading.Thread(target=delayed_index_writer, daemon=True)
+                real_join = worker.join
+
+                def release_on_join(timeout=None):
+                    self.assertEqual(server_mod.DATA_DIR, self.data_dir)
+                    self.assertTrue(Path(self.temp_dir.name).exists())
+                    release.set()
+                    return real_join(timeout=timeout)
+
+                with server_mod._agent_run_index_builds_lock:
+                    self.assertNotIn(key, server_mod._agent_run_index_builds)
+                    server_mod._agent_run_index_builds[key] = worker
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(timeout=2))
+                    with mock.patch.object(worker, "join", side_effect=release_on_join) as joined:
+                        self._wait_fixture_writers()
+                    joined.assert_called_once()
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(writes, [self.data_dir])
+                    self.assertEqual(server_mod.DATA_DIR, self.data_dir)
+                finally:
+                    release.set()
+                    real_join(timeout=2)
+                    with server_mod._agent_run_index_builds_lock:
+                        if server_mod._agent_run_index_builds.get(key) is worker:
+                            server_mod._agent_run_index_builds.pop(key, None)
+
+    def test_fixture_cleanup_precedes_restoring_global_paths(self):
+        original = self.temp_dir.cleanup
+
+        def checked_cleanup():
+            self.assertEqual(server_mod.DATA_DIR, self.data_dir)
+            original()
+
+        with mock.patch.object(self.temp_dir, "cleanup", side_effect=checked_cleanup) as cleanup:
+            self.tearDown()
+        cleanup.assert_called_once()
+        self.assertFalse(Path(self.temp_dir.name).exists())
+        self.assertTrue(self._fixture_closed)
+
+    def test_fixture_writer_timeout_keeps_paths_and_files_isolated(self):
+        global _FIXTURE_ROOT_POISONED
+        key = str((self.data_dir / "agent-runs" / ".session-index" / "index.json").resolve(strict=False))
+        release = threading.Event()
+        worker = threading.Thread(target=lambda: release.wait(timeout=2), daemon=True)
+        with server_mod._agent_run_index_builds_lock:
+            server_mod._agent_run_index_builds[key] = worker
+        worker.start()
+        original_wait = self._wait_fixture_writers
+        try:
+            with mock.patch.object(self, "_wait_fixture_writers", side_effect=lambda: original_wait(timeout=0.01)), mock.patch.object(self.temp_dir, "cleanup") as cleanup:
+                with self.assertRaisesRegex(_FixtureWriterTimeout, "fixture writer did not exit"):
+                    self.tearDown()
+            cleanup.assert_not_called()
+            self.assertEqual(server_mod.DATA_DIR, self.data_dir)
+            self.assertTrue(Path(self.temp_dir.name).exists())
+            self.assertFalse(self._fixture_closed)
+            self.assertFalse(self.temp_dir._finalizer.alive)
+            next_fixture = type(self)("test_fixture_cleanup_precedes_restoring_global_paths")
+            with self.assertRaises(_FixtureWriterTimeout):
+                next_fixture.setUp()
+            self.assertFalse(hasattr(next_fixture, "temp_dir"))
+            self.assertEqual(server_mod.DATA_DIR, self.data_dir)
+        finally:
+            release.set()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive(), "fixture proof writer did not exit")
+            with server_mod._agent_run_index_builds_lock:
+                if server_mod._agent_run_index_builds.get(key) is worker:
+                    server_mod._agent_run_index_builds.pop(key, None)
+            original_wait()
+            _FIXTURE_ROOT_POISONED = False
+
+    def test_fixture_writer_timeout_stops_runner_before_next_root(self):
+        repo = Path(server_mod.__file__).resolve().parent
+        original_default = os.environ.get("CODE_DATA_DIR")
+        inherited_root = Path(self.temp_dir.name) / "runner-inherited-default"
+        inherited_root.mkdir()
+        executable = sys.executable
+        if os.name == "nt":
+            # The Windows Store sys.executable can be an execution alias.
+            # Launch this process's real image so timeout/exit tracks the child.
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.windll.kernel32.GetModuleFileNameW(None, buffer, len(buffer))
+            self.assertGreater(length, 0)
+            self.assertLess(length, len(buffer))
+            executable = buffer.value
+        for mode in ("inherited", "explicit-child"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, {"CODE_DATA_DIR": str(inherited_root)}):
+                child_root = Path(self.temp_dir.name) / ("fatal-fixture-proof-" + mode)
+                child_root.mkdir()
+                marker = child_root / "next-root-started"
+                env = os.environ.copy()
+                if mode == "explicit-child":
+                    env["CODE_DATA_DIR"] = str(child_root / "default-profile")
+                expected_default = str(Path(env["CODE_DATA_DIR"]).resolve())
+                # Explicit in-memory cases avoid unrelated filesystem collection.
+                script = f'''
+import os, sys, tempfile, threading, unittest
+from pathlib import Path
+assert "server" not in sys.modules
+expected_default = Path({expected_default!r})
+assert Path(os.environ["CODE_DATA_DIR"]).resolve() == expected_default
+tempfile.tempdir = {str(child_root)!r}
+import tests.test_agent_runtime as harness
+runtime = harness.server_mod
+assert runtime.DATA_DIR.resolve() == expected_default
+marker = Path({str(marker)!r})
+
+class BlockedWriter(unittest.TestCase):
+    base_url = "http://127.0.0.1:9"
+    setUp = harness.TestDurableAgentRuntime.setUp
+    tearDown = harness.TestDurableAgentRuntime.tearDown
+    def _wait_fixture_writers(self):
+        harness.TestDurableAgentRuntime._wait_fixture_writers(self, timeout=0.01)
+    def runTest(self):
+        self.gate = threading.Event()
+        self.worker = threading.Thread(target=self.gate.wait, daemon=True)
+        self.key = str((self.data_dir / "agent-runs" / ".session-index" / "index.json").resolve())
+        with runtime._agent_run_index_builds_lock:
+            runtime._agent_run_index_builds[self.key] = self.worker
+        self.worker.start()
+
+class NextRoot(unittest.TestCase):
+    def setUp(self):
+        marker.write_text("unsafe next fixture", encoding="utf-8")
+    def runTest(self):
+        pass
+
+first = BlockedWriter()
+interrupted = False
+try:
+    unittest.TextTestRunner(stream=sys.stdout).run(unittest.TestSuite([first, NextRoot()]))
+except harness._FixtureWriterTimeout as exc:
+    interrupted = True
+    assert first.worker.is_alive()
+    assert runtime.DATA_DIR == first.data_dir
+    assert Path(first.temp_dir.name).exists() and not first._fixture_closed
+    assert not first.temp_dir._finalizer.alive
+    assert not marker.exists()
+    print(str(exc))
+finally:
+    if hasattr(first, "worker"):
+        first.gate.set()
+        first.worker.join(timeout=2)
+        assert not first.worker.is_alive()
+        with runtime._agent_run_index_builds_lock:
+            assert runtime._agent_run_index_builds.pop(first.key) is first.worker
+        harness.TestDurableAgentRuntime._wait_fixture_writers(first)
+        first.tearDown()
+        assert runtime.DATA_DIR.resolve() == expected_default
+        assert not Path(first.temp_dir.name).exists()
+        harness._FIXTURE_ROOT_POISONED = False
+assert interrupted and not marker.exists()
+print("isolated import, fatal runner stop, writer exit, isolated restore: PASS")
+raise SystemExit(2)
+'''
+                result = subprocess.run(
+                    [executable, "-B", "-c", script], cwd=repo, env=env,
+                    capture_output=True, text=True, timeout=20,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 2, output)
+                self.assertIn("fixture writer did not exit", output)
+                self.assertIn("isolated import, fatal runner stop, writer exit, isolated restore: PASS", output)
+                self.assertFalse(marker.exists(), "runner admitted a second fixture while a writer was alive")
+                self.assertEqual(server_mod.DATA_DIR, self.data_dir)
+        self.assertTrue(os.environ.get("CODE_DATA_DIR") == original_default, "child proof did not restore its environment")
 
     def _wait_terminal(self, run, timeout=5):
         deadline = time.time() + timeout

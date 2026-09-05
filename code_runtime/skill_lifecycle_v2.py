@@ -202,8 +202,9 @@ def normalize_skill_lifecycle(value):
         _fail("skill_lifecycle_v2_activation_invalid")
     registry = activation["registry"]
     _exact(registry, {"schema", "dataRootId", "generation", "registryHash"})
-    if (registry.get("schema") != "code-skill-install-registry/v1" or not _ROOT_ID.fullmatch(str(registry.get("dataRootId")))
-            or type(registry.get("generation")) is not int or not 0 <= registry["generation"] <= 2**53 - 1):
+    if (registry.get("schema") not in ("code-skill-install-registry/v1", "code-skill-install-registry/v2") or not _ROOT_ID.fullmatch(str(registry.get("dataRootId")))
+            or type(registry.get("generation")) is not int or not 0 <= registry["generation"] <= 2**53 - 1
+            or registry["schema"] == "code-skill-install-registry/v2" and registry["generation"] == 0):
         _fail("skill_lifecycle_v2_registry_invalid")
     registry = {**registry, "registryHash": _hash(registry.get("registryHash"))}
     source = activation["selected"]

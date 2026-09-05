@@ -9,6 +9,8 @@ from code_runtime import data_dir_owner
 from code_runtime import skill_revisions
 from code_runtime import skill_runtime_startup
 from code_runtime import skill_store
+from code_runtime import skill_store_management
+from tests.test_skill_store_management import apply as apply_management, package_request
 
 
 def _write_skill(root, name="alpha", body="use alpha"):
@@ -69,6 +71,99 @@ def _initialize(runtime, owner, data, bundle, enabled, sync=None):
         admission_enabled=enabled,
         legacy_sync_result=sync,
     )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_startup_never_implicitly_converts_a_committed_v1_store(tmp_path, enabled):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = skill_store.SkillStore(data, bundle, write_enabled=True)
+    original = store.bootstrap(catalog)
+    before = _tree(data)
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        runtime = skill_runtime_startup.ImmutableSkillStartupRuntime(
+            catalog_loader=lambda *_: pytest.fail("committed startup must not read catalog"),
+        )
+        assert _initialize(runtime, owner, data, bundle, enabled)["status"] == "ready"
+        assert runtime.recovery_reader().read_registry() == original
+        assert _tree(data) == before
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("point", [
+    "after-journal-prepared-publish", "after-managed-registry-publish", "after-journal-committed-publish",
+])
+def test_startup_recovers_explicit_v2_conversion_without_sources(tmp_path, enabled, point):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = skill_store.SkillStore(data, bundle, write_enabled=True)
+    original = store.bootstrap(catalog)
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        manager = skill_store_management.SkillStoreManager(store, owner=owner)
+        store.fault_injector = _CrashOnce(point)
+        with pytest.raises(skill_store.SkillStoreInterruption):
+            apply_management(manager, "convert", {"kind": "convert-v2"})
+        runtime = skill_runtime_startup.ImmutableSkillStartupRuntime(
+            catalog_loader=lambda *_: pytest.fail("v2 recovery must not read catalog"),
+        )
+        assert _initialize(runtime, owner, data, bundle, enabled, {"ok": False})["status"] == "ready"
+        reader = runtime.recovery_reader()
+        managed = reader.read_registry()
+        assert managed["schema"] == "code-skill-install-registry/v2"
+        assert managed["dataRootId"] == original["dataRootId"]
+        assert managed["generation"] == original["generation"] + 1
+        assert (runtime.admission_reader() is reader) is enabled
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_startup_late_v2_update_is_captured_only(tmp_path, enabled):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = skill_store.SkillStore(data, bundle, write_enabled=True)
+    original = store.bootstrap(catalog)
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        manager = skill_store_management.SkillStoreManager(store, owner=owner)
+        apply_management(manager, "convert", {"kind": "convert-v2"})
+        item = original["installations"][0]
+        request, package = package_request(tmp_path / "new", "update-bundled", "alpha", "next",
+                                           iid=item["installationId"])
+        request["catalog"] = skill_revisions.build_bundled_catalog(package.parent, {"alpha": item["skillId"]})
+        store.fault_injector = _CrashOnce("after-journal-captured-publish")
+        with pytest.raises(skill_store.SkillStoreInterruption):
+            apply_management(manager, "update", request, package=package)
+        (package / "SKILL.md").write_text("source now differs", encoding="utf-8")
+        runtime = skill_runtime_startup.ImmutableSkillStartupRuntime(
+            catalog_loader=lambda *_: pytest.fail("late update must not read catalog"),
+        )
+        assert _initialize(runtime, owner, data, bundle, enabled)["status"] == "ready"
+        reader = runtime.recovery_reader()
+        assert reader.read_active("alpha")["installation"]["revisionId"] == request["revisionId"]
+        assert reader.read_pinned(original["dataRootId"], item["revisionId"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_startup_early_v2_update_requires_explicit_capture(tmp_path, enabled):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = skill_store.SkillStore(data, bundle, write_enabled=True)
+    original = store.bootstrap(catalog)
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        manager = skill_store_management.SkillStoreManager(store, owner=owner)
+        apply_management(manager, "convert", {"kind": "convert-v2"})
+        item = original["installations"][0]
+        request, package = package_request(tmp_path / "new", "fork-bundled", "local-alpha", "fork",
+                                           iid=item["installationId"])
+        store.fault_injector = _CrashOnce("after-journal-prepared-publish")
+        with pytest.raises(skill_store.SkillStoreInterruption):
+            apply_management(manager, "fork", request, package=package)
+        before = _tree(data)
+        runtime = skill_runtime_startup.ImmutableSkillStartupRuntime(
+            catalog_loader=lambda *_: pytest.fail("v2 recovery must not discover source"),
+        )
+        if enabled:
+            with pytest.raises(skill_runtime_startup.ImmutableSkillStartupError) as caught:
+                _initialize(runtime, owner, data, bundle, enabled)
+            assert caught.value.code == "management_capture_required"
+        else:
+            assert _initialize(runtime, owner, data, bundle, enabled)["errorCode"] == "management_capture_required"
+        assert runtime.recovery_reader() is None
+        assert _tree(data) == before
 
 
 def test_absent_flag_off_is_zero_write_and_has_no_reader(tmp_path):
