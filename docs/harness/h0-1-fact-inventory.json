@@ -13,7 +13,8 @@
     "recordVersion": 4,
     "currentRecordVersions": [
       5,
-      6
+      6,
+      7
     ],
     "eventEnvelopeFields": [
       "protocolVersion",

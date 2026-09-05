@@ -42,10 +42,12 @@ from code_runtime import (
     skill_dependency_operation,
     skill_lifecycle,
     skill_lifecycle_v2,
+    skill_loading,
     skill_management_api,
     skill_outcome,
     skill_runtime_startup,
     skill_runtime_v2,
+    skill_store,
     windows_explorer,
 )
 from code_runtime.bundled_skills import delete_installed_skill
@@ -248,6 +250,11 @@ def _resolve_skill_completion_enforcement_enabled(environ=None):
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_skill_model_loading_enabled(environ=None):
+    source = os.environ if environ is None else environ
+    return str(source.get("CODE_SKILL_MODEL_LOADING_V1") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class _DeferredRuntimeService:
     """Create a DATA_DIR-backed service only after an entrypoint owns it."""
 
@@ -284,6 +291,7 @@ _SKILL_REGISTRY_SHADOW_ENABLED = _resolve_skill_registry_shadow_enabled()
 _SKILL_ACTIVATION_ENABLED = _resolve_skill_activation_enabled()
 _SKILL_IMMUTABLE_ADMISSION_ENABLED = _resolve_skill_immutable_admission_enabled()
 _SKILL_COMPLETION_ENFORCEMENT_ENABLED = _resolve_skill_completion_enforcement_enabled()
+_SKILL_MODEL_LOADING_ENABLED = _resolve_skill_model_loading_enabled()
 _model_route_registry = _DeferredRuntimeService(
     lambda: ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 )
@@ -3688,7 +3696,9 @@ def _agent_run_record(run):
         run, skill_lifecycle_record,
     )
     return {
-        "version": 6 if immutable_skill_run else 5,
+        "version": 7 if run.get("skill_loading") is not None else 6 if immutable_skill_run else 5,
+        **({"skillLoading": skill_loading.normalize(run["skill_loading"])}
+           if run.get("skill_loading") is not None else {}),
         "id": run["id"],
         "sessionId": run["session_id"],
         "cwd": run.get("cwd", ""),
@@ -3815,6 +3825,8 @@ def _agent_run_record(run):
 
 
 def _persist_agent_run(run):
+    if run.get("_skill_loading_persist_uncertain"):
+        raise skill_loading.SkillLoadingError("skill_loading_persistence_uncertain")
     with run["persist_lock"]:
         with run["condition"]:
             record = _agent_run_record(run)
@@ -4672,12 +4684,18 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         outer_version = int(raw_outer_version or 1)
     except (TypeError, ValueError):
         raise ValueError("AgentRun version is invalid") from None
-    if outer_version == 6 and (
+    if outer_version in (6, 7) and (
         isinstance(raw_outer_version, bool) or type(raw_outer_version) is not int
     ):
-        raise ValueError("AgentRun v6 version is invalid")
+        raise ValueError(f"AgentRun v{outer_version} version is invalid")
     canonical_skill_lifecycle = None
-    immutable_skill_record = outer_version == 6
+    immutable_skill_record = outer_version in (6, 7)
+    loading_state = None
+    if outer_version == 7:
+        loading_state = skill_loading.normalize(record.get("skillLoading"))
+        skill_loading.validate_budget(loading_state, _agent_estimate_text_tokens)
+    elif "skillLoading" in record:
+        raise skill_loading.SkillLoadingError("skill_loading_outer_version_conflict")
     if immutable_skill_record:
         if "skillLifecycle" not in record:
             raise skill_lifecycle.SkillLifecycleError(
@@ -4698,6 +4716,14 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         canonical_skill_lifecycle = skill_lifecycle.normalize_skill_lifecycle(
             record.get("skillLifecycle")
         )
+    if loading_state is not None:
+        expected_lifecycle = skill_loading.projected_lifecycle(
+            loading_state, access=canonical_skill_lifecycle["access"],
+        )
+        if expected_lifecycle != canonical_skill_lifecycle:
+            raise skill_loading.SkillLoadingError("skill_loading_lifecycle_conflict")
+        if not record.get("messages") or record["messages"][0].get("content") != skill_loading.prompt(loading_state):
+            raise skill_loading.SkillLoadingError("skill_loading_prompt_conflict")
     model_checkpoint = _normalize_agent_model_checkpoint(record.get("modelCheckpoint"))
     recovery_state = _normalize_agent_recovery_state(record.get("recoveryState"))
     compaction_recovery = _normalize_agent_compaction_recovery(
@@ -4750,6 +4776,8 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
             skill_runtime_v2.verify_lifecycle(
                 immutable_skill_reader, canonical_skill_lifecycle,
             )
+            if loading_state is not None:
+                skill_loading.verify_loaded(loading_state, immutable_skill_reader)
         except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
             if not exc.temporary:
                 raise skill_lifecycle.SkillLifecycleError(
@@ -4887,6 +4915,18 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         "image_route": image_route_identity,
     }
     persisted_tool_executions = _json_clone(record.get("toolExecutions") or {})
+    if loading_state is not None:
+        for index, receipt in enumerate(loading_state["loads"]):
+            execution = persisted_tool_executions.get(receipt["callId"], {})
+            result = execution.get("result") or {}
+            capture = receipt["capture"]
+            if (execution.get("name") != "use_skill" or execution.get("status") != "completed"
+                    or execution.get("skillLoadCount") != index + 1
+                    or result.get("ok") is not True or result.get("bodyLoaded") is not True
+                    or result.get("newlyLoaded") is not True or result.get("loadOrigin") != receipt["origin"]
+                    or result.get("loadReceiptId") != receipt["receiptId"] or result.get("role") != receipt["role"]
+                    or any(result.get(key) != capture[key] for key in ("name", "installationId", "revisionId"))):
+                raise skill_loading.SkillLoadingError("skill_loading_execution_receipt_conflict")
     tool_executions = dict(record.get("toolExecutions") or {})
     if immutable_skill_record:
         for persisted_execution in tool_executions.values():
@@ -4895,21 +4935,25 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
                     "skill_execution_context_conflict", "Skill execution is invalid",
                 )
             try:
+                execution_lifecycle = (
+                    skill_loading.prefix(loading_state, persisted_execution.get("skillLoadCount"), canonical_skill_lifecycle)
+                    if loading_state is not None else canonical_skill_lifecycle
+                )
                 if skill_objects_available and persisted_status not in _AGENT_RUN_TERMINAL:
                     skill_runtime_v2.verify_execution_context(
                         immutable_skill_reader,
-                        canonical_skill_lifecycle,
+                        execution_lifecycle,
                         persisted_execution.get("skillExecutionContext"),
                     )
                 else:
                     skill_runtime_v2.normalize_execution_context(
                         persisted_execution.get("skillExecutionContext"),
-                        canonical_skill_lifecycle,
+                        execution_lifecycle,
                     )
                 if persisted_execution.get("name") == "run_command":
                     skill_runtime_v2.normalize_command_path_binding(
                         persisted_execution.get("skillRuntimePathBinding"),
-                        canonical_skill_lifecycle,
+                        execution_lifecycle,
                     )
             except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
                 raise skill_lifecycle.SkillLifecycleError(
@@ -5184,6 +5228,12 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         record.get("cwd"),
         record.get("workspaceRoots") if int(record.get("version") or 1) >= 2 else None,
     )
+    if loading_state is not None:
+        restored_names = [(definition.get("function") or {}).get("name") for definition in restored_tools]
+        if restored_names != skill_loading.effective_tools(loading_state):
+            raise skill_loading.SkillLoadingError("skill_loading_tools_conflict")
+        if any(_agent_tool_spec(name).get("effect") != "goal_metadata" for name in loading_state["controlTools"]):
+            raise skill_loading.SkillLoadingError("skill_loading_control_tools_invalid")
     active_skill_names = (
         list(lifecycle_projection["activeSkillNames"])
         if lifecycle_projection is not None
@@ -5325,6 +5375,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         "active_skill_names": active_skill_names,
         "active_skill_dependencies": active_skill_dependencies,
         "skill_lifecycle": canonical_skill_lifecycle,
+        "skill_loading": loading_state,
         "_skill_lifecycle_view": lifecycle_view,
         "_immutable_skill_reader": immutable_skill_reader,
         "skill_completion_enforcement": skill_completion_plan,
@@ -7675,6 +7726,9 @@ def _new_agent_delegation_execution(run, call):
         "startedAt": now_iso(),
         "completedAt": "",
     }
+    if run.get("skill_loading") is not None:
+        context, _ = _agent_immutable_execution_identity(run, call)
+        execution.update(skillLoadCount=len(run["skill_loading"]["loads"]), skillExecutionContext=context)
     run["tool_executions"][call_id] = execution
     _append_agent_event(run, "tool_started", {
         "toolCallId": call_id,
@@ -7800,6 +7854,8 @@ def _execute_agent_delegation_batch(run, calls, allowed_names):
                 continue
             execution = _new_agent_delegation_execution(run, call)
             try:
+                if run.get("skill_loading") is not None and call.get("validationErrors"):
+                    raise ValueError(", ".join(call["validationErrors"]))
                 if "task" not in allowed_names:
                     raise ValueError("tool is not allowed for this Agent run: task")
                 _ensure_agent_delegation_child(run, call, execution)
@@ -8993,6 +9049,18 @@ def _agent_image_retry_blocked_result():
 
 
 def _execute_agent_pending_tools(run):
+    if run.get("skill_loading") is not None:
+        pending = run.get("pending_tool_calls") or []
+        if len(pending) > 1 and any(
+            (item.get("function") or {}).get("name") == "use_skill"
+            and ("role" in (item.get("arguments") or {})
+                 or (item.get("arguments") or {}).get("name") not in run.get("active_skill_names", []))
+            and (run.get("tool_executions", {}).get(item.get("id"), {}).get("status") != "completed")
+            for item in pending
+        ):
+            for item in pending:
+                if item.get("id") not in run.get("tool_executions", {}):
+                    item["validationErrors"] = ["skill_loading_requires_standalone_call"]
     allowed_names = {
         str((definition.get("function") or {}).get("name") or "")
         for definition in run.get("tools") or []
@@ -9124,6 +9192,8 @@ def _execute_agent_pending_tools(run):
                         "error": "",
                         "startedAt": "" if immutable_context is not None else now_iso(),
                         "completedAt": "",
+                        **({"skillLoadCount": len(run["skill_loading"]["loads"])}
+                           if run.get("skill_loading") is not None else {}),
                         **({"skillExecutionContext": immutable_context}
                            if immutable_context is not None else {}),
                         **({"skillRuntimePathBinding": immutable_paths}
@@ -9526,7 +9596,12 @@ def _execute_agent_pending_tools(run):
                 else:
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
-                    if (
+                    if name == "use_skill" and run.get("skill_loading") is not None and (
+                        "role" in call["arguments"]
+                        or call["arguments"].get("name") not in run.get("active_skill_names", [])
+                    ):
+                        result = _execute_agent_skill_load(run, call["arguments"], call_id, execution=execution)
+                    elif (
                         run.get("skill_lifecycle") is not None
                         and name in {
                             "use_skill", "check_skill_dependencies", "read_skill_resource",
@@ -9542,6 +9617,13 @@ def _execute_agent_pending_tools(run):
             except skill_dependency_operation.DependencyOperationError as exc:
                 result = {"ok": False, "action": name, "errorCode": exc.code,
                           "error": "The dependency plan could not safely execute. Inspect the exact target, active work and unsettled operation before deciding the next step."}
+            except (skill_loading.SkillLoadingError, skill_admission.SkillAdmissionError,
+                    skill_store.SkillStoreError, skill_completion.SkillCompletionError) as exc:
+                if run.get("_skill_loading_persist_uncertain"):
+                    raise
+                result = {"ok": False, "action": name, "name": str((call.get("arguments") or {}).get("name") or ""),
+                          "errorCode": exc.code, "bodyLoaded": False,
+                          "error": "The Skill was not loaded. Use this exact availability, role, budget or persistence failure to decide whether to continue within current permissions, explain, or ask. Do not substitute a revision, role or runtime."}
             except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
                 if exc.temporary:
                     _agent_enter_skill_recovery(run, exc)
@@ -10720,6 +10802,10 @@ def _agent_immutable_execution_identity(run, call, execution=None):
     if not skill_runtime_v2.is_immutable(lifecycle):
         return None, None
     name = str((call.get("function") or {}).get("name") or "")
+    loading = run.get("skill_loading")
+    if loading is not None:
+        count = execution.get("skillLoadCount") if execution is not None else len(loading["loads"])
+        lifecycle = skill_loading.prefix(loading, count, lifecycle)
     if call.get("parseError") or call.get("validationErrors"):
         root_id = lifecycle["activation"]["registry"]["dataRootId"]
         context = {"version": 1, "dataRootId": root_id, "skills": []}
@@ -10739,6 +10825,14 @@ def _agent_immutable_execution_identity(run, call, execution=None):
     arguments = call.get("arguments")
     if not isinstance(arguments, dict):
         arguments = (call.get("function") or {}).get("arguments", "{}")
+    if loading is not None and name == "use_skill":
+        parsed = arguments if isinstance(arguments, dict) else json.loads(arguments)
+        target = str(parsed.get("name") or "")
+        if target not in [item["name"] for item in lifecycle["activation"]["selected"]]:
+            context = {"version": 1, "dataRootId": lifecycle["activation"]["registry"]["dataRootId"], "skills": []}
+            if execution is not None and execution.get("skillExecutionContext") != context:
+                raise skill_loading.SkillLoadingError("skill_loading_call_prefix_invalid")
+            return context, None
     try:
         context = skill_runtime_v2.build_execution_context(
             run.get("_immutable_skill_reader"), lifecycle, name, arguments,
@@ -10868,6 +10962,8 @@ def _agent_close_stale_skill_path_call(run, call, execution):
 def _agent_run_worker(run):
     current_worker = threading.current_thread()
     try:
+        if run.get("skill_loading") is not None and not _ensure_explicit_skill_load(run):
+            return
         while run["status"] not in _AGENT_RUN_TERMINAL:
             if run["cancel_event"].is_set():
                 pending = _normalize_pending_context_calibration(
@@ -11242,6 +11338,12 @@ def _agent_run_worker(run):
         pending = _normalize_pending_context_calibration(
             run.get("pending_context_calibration")
         )
+        if run.get("_skill_loading_persist_uncertain"):
+            with run["condition"]:
+                run["status"] = "waiting_recovery"
+                run["error_code"] = "skill_loading_persistence_uncertain"
+                run["error"] = "Skill loading persistence is uncertain. This process will not write or replay the Run; recover its exact record after restarting."
+            return
         if pending:
             try:
                 _agent_rollback_context_calibration(run, pending)
@@ -11259,6 +11361,8 @@ def _agent_run_worker(run):
 
 
 def _start_agent_worker(run):
+    if run.get("_skill_loading_persist_uncertain"):
+        raise skill_loading.SkillLoadingError("skill_loading_persistence_uncertain")
     with run["condition"]:
         existing = run.get("worker")
         if existing is not None:
@@ -11403,6 +11507,12 @@ def _create_agent_run(
             raise SkillActivationError("immutable_skill_admission_disabled", "New Skill admission is disabled.")
         if skill_activation_request is not None:
             _immutable_skill_reader = _agent_immutable_admission_reader(skill_activation_request)
+    model_skill_loading = isinstance(skill_activation_request, dict) and skill_activation_request.get("schemaVersion") == 2
+    if model_skill_loading and (not _SKILL_MODEL_LOADING_ENABLED or _immutable_skill_reader is None):
+        raise SkillActivationError("skill_loading_disabled", "Model-driven Skill loading is disabled.")
+    if (_SKILL_MODEL_LOADING_ENABLED and _immutable_skill_reader is not None
+            and not model_skill_loading):
+        raise SkillActivationError("skill_loading_protocol_required", "Refresh the client before starting a model-driven Skill Run.")
     inherited_resolution = (
         dict(inherited_context) if isinstance(inherited_context, dict) else None
     )
@@ -11472,6 +11582,7 @@ def _create_agent_run(
             if str((definition.get("function") or {}).get("name") or "") != "generate_image"
         ]
     activation = None
+    loading_state = None
     canonical_skill_lifecycle = None
     lifecycle_projection = None
     if canonical_activation:
@@ -11479,7 +11590,18 @@ def _create_agent_run(
             str((definition.get("function") or {}).get("name") or "")
             for definition in tools
         ]
-        activation = (
+        if model_skill_loading:
+            loading_state = skill_loading.prepare(
+                _immutable_skill_reader, skill_activation_request, messages[0].get("content"),
+                activation_input_tool_names, context_resolution["availableInputTokens"],
+                user_message=_agent_current_user_text(messages),
+            )
+            skill_loading.validate_budget(loading_state, _agent_estimate_text_tokens)
+        activation = ({
+            "intentKind": "automatic", "registry": loading_state["registry"],
+            "captures": [], "activeSkillNames": [], "allowedTools": activation_input_tool_names,
+            "instruction": skill_loading.instruction(loading_state),
+        } if loading_state is not None else (
             skill_admission.prepare_immutable_admission(
                 reader=_immutable_skill_reader,
                 messages=messages,
@@ -11499,7 +11621,7 @@ def _create_agent_run(
             available_input_tokens=context_resolution["availableInputTokens"],
             estimate_tokens=_agent_estimate_text_tokens,
             )
-        )
+        ))
         allowed_after_activation = set(
             activation["allowedTools"] if immutable_activation else activation["toolNames"]
         )
@@ -11564,6 +11686,12 @@ def _create_agent_run(
             )
         )
         active_skill_names = lifecycle_projection["activeSkillNames"]
+    if loading_state is not None:
+        loading_state["initialTools"] = [(definition.get("function") or {}).get("name") for definition in tools]
+        loading_state["controlTools"] = [name for name in loading_state["initialTools"]
+                                         if _agent_tool_spec(name).get("effect") == "goal_metadata"]
+        loading_state = skill_loading.normalize(loading_state)
+        messages[0]["content"] = skill_loading.prompt(loading_state)
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
     try:
         skill_completion_plan = skill_completion.build_plan(
@@ -11680,6 +11808,7 @@ def _create_agent_run(
         "active_skill_names": frozen_active_skill_names,
         "active_skill_dependencies": frozen_active_skill_dependencies,
         "skill_lifecycle": canonical_skill_lifecycle,
+        "skill_loading": loading_state,
         "_skill_lifecycle_view": canonical_skill_lifecycle,
         "_immutable_skill_reader": _immutable_skill_reader,
         "skill_completion_enforcement": skill_completion_plan,
@@ -11828,6 +11957,8 @@ def _resume_agent_run(
     catalog_revision=0,
     image_route=None,
 ):
+    if run.get("_skill_loading_persist_uncertain"):
+        raise skill_loading.SkillLoadingError("skill_loading_persistence_uncertain")
     if not isinstance(keys, list):
         raise ValueError("keys must be an array")
     if run.get("skill_recovery") is not None:
@@ -12027,6 +12158,8 @@ def _close_agent_tools_for_cancel_locked(run):
                 "error": result["error"],
                 "startedAt": "",
                 "completedAt": completed_at,
+                **({"skillLoadCount": len(run["skill_loading"]["loads"])}
+                   if run.get("skill_loading") is not None else {}),
                 **({"skillExecutionContext": cancellation_context}
                    if cancellation_context is not None else {}),
                 **({"skillRuntimePathBinding": cancellation_paths}
@@ -17506,6 +17639,151 @@ def _agent_skill_changed(kind):
     )
 
 
+@skill_dependency_operation.serialized
+def _execute_agent_skill_load(run, arguments, call_id, *, execution=None, origin="model"):
+    """Commit the body, identity, narrowed tools and original call receipt together."""
+    if run.get("skill_loading") is None:
+        raise skill_loading.SkillLoadingError("skill_loading_protocol_required")
+    with run["persist_lock"], run["condition"]:
+        state = skill_loading.normalize(run["skill_loading"])
+        name, role = arguments.get("name"), arguments.get("role")
+        if execution is not None and execution.get("status") == "completed" and (execution.get("result") or {}).get("loadReceiptId"):
+            stored = execution["result"]
+            if stored.get("name") != name or stored.get("role") != role:
+                raise skill_loading.SkillLoadingError("skill_loading_request_conflict")
+            return _json_clone(stored)
+        if run["cancel_event"].is_set() or run["status"] in _AGENT_RUN_TERMINAL:
+            raise skill_loading.SkillLoadingError("skill_loading_run_not_active")
+        pending = run.get("pending_tool_calls") or []
+        if ((origin == "model" and (len(pending) != 1 or pending[0].get("id") != call_id))
+                or origin == "explicit" and pending
+                or run.get("pending_authorization") or run.get("pending_input")
+                or run.get("pending_skill_evidence") or run.get("active_process")
+                or (run.get("skill_completion_enforcement") or {}).get("phase", "armed") != "armed"):
+            raise skill_loading.SkillLoadingError("skill_loading_requires_standalone_call")
+        if any(key != call_id and item.get("status") not in {"completed", "failed"}
+               for key, item in (run.get("tool_executions") or {}).items()):
+            raise skill_loading.SkillLoadingError("skill_loading_other_tool_pending")
+        if not isinstance(execution, dict) or run.get("tool_executions", {}).get(call_id) is not execution:
+            raise skill_loading.SkillLoadingError("skill_loading_execution_required")
+        existing = next((item for item in state["loads"] if item["capture"]["name"] == name), None)
+        if existing is None:
+            _managed_dependency_state().assert_available()
+        proposed, receipt, changed = skill_loading.propose(
+            state, run.get("_immutable_skill_reader"), name, role, call_id,
+            origin=origin, estimate_tokens=_agent_estimate_text_tokens,
+        )
+        result = {**skill_loading.result(receipt, changed), "loadOrigin": receipt["origin"]}
+        if not changed:
+            return result
+        previous_names = [(item.get("function") or {}).get("name") for item in run["tools"]]
+        allowed = skill_loading.effective_tools(proposed)
+        if not set(allowed) <= set(previous_names):
+            raise skill_loading.SkillLoadingError("skill_loading_tools_would_expand")
+        tools = [item for item in run["tools"] if (item.get("function") or {}).get("name") in allowed]
+        value = skill_loading.projected_lifecycle(proposed, access=run["skill_lifecycle"]["access"])
+        projection = skill_lifecycle_v2.project_skill_lifecycle(value)
+        budgets = _json_clone(run.get("tool_budgets") or [])
+        for budget in skill_activation._brainstorming_budgets(projection["activeSkillNames"], _agent_current_user_text(run["messages"])):
+            if not any(item.get("name") == budget.get("name") for item in budgets):
+                budgets.append(budget)
+        budgets = _normalize_agent_tool_budgets(budgets, tools)
+        old_plan = run.get("skill_completion_enforcement")
+        plan = (skill_completion.normalize_plan(old_plan, value, _agent_skill_completion_tool_specs(tools), budgets)
+                if old_plan is not None else skill_completion.build_plan(value, _agent_skill_completion_tool_specs(tools), budgets,
+                                                                       enabled=bool(_SKILL_COMPLETION_ENFORCEMENT_ENABLED)))
+        updates = {
+            "skill_loading": proposed, "skill_lifecycle": value, "_skill_lifecycle_view": value,
+            "active_skill_names": projection["activeSkillNames"], "active_skill_dependencies": projection["dependencies"],
+            "skill_evidence_observers": _agent_immutable_evidence_observers(value, projection, tools),
+            "skill_evidence_observer": None, "tools": tools, "tool_budgets": budgets,
+            "skill_completion_enforcement": plan, "messages": _json_clone(run["messages"]),
+            "updated_at": now_iso(),
+        }
+        updates["messages"][0]["content"] = skill_loading.prompt(proposed)
+        next_context = (skill_runtime_v2.build_execution_context(
+            run.get("_immutable_skill_reader"), value, "use_skill", {"name": name},
+            bindings=run.get("skill_runtime_bindings") or {},
+        ) if execution is not None else None)
+        before = {key: run.get(key) for key in updates}
+        before_execution = _json_clone(execution) if execution is not None else None
+        before_record = read_json(_agent_run_path(run["id"]), None)
+        run.update(updates)
+        if execution is not None:
+            execution["skillLoadCount"] = len(proposed["loads"])
+            execution["skillExecutionContext"] = next_context
+            _set_agent_execution_result(execution, result)
+        candidate_record = None
+        try:
+            candidate_record = _agent_run_record(run)
+            _persist_agent_run(run)
+        except Exception as exc:
+            try:
+                observed = read_json(_agent_run_path(run["id"]), None)
+            except Exception:
+                observed = None
+            if candidate_record is not None and observed == candidate_record:
+                # A response failure after the atomic replace must not undo it.
+                return result
+            if observed != before_record or before_record is None:
+                run["_skill_loading_persist_uncertain"] = True
+                run["error_code"] = "skill_loading_persistence_uncertain"
+                raise skill_loading.SkillLoadingError("skill_loading_persistence_uncertain") from exc
+            run.update(before)
+            if execution is not None:
+                execution.clear()
+                execution.update(before_execution)
+            raise skill_loading.SkillLoadingError("skill_loading_persist_failed") from exc
+        return result
+
+
+def _ensure_explicit_skill_load(run):
+    """A real user-requested load operation; never fabricate a model tool call."""
+    state = run.get("skill_loading")
+    if state is None or not state["explicitSkill"]:
+        return True
+    call_id = "explicit-skill:" + run["id"]
+    name = state["explicitSkill"]
+    arguments = {"name": name, "role": "owner"}
+    with run["persist_lock"], run["condition"]:
+        execution = run["tool_executions"].get(call_id)
+        if execution is None:
+            execution = {"name": "use_skill", "arguments": json.dumps(arguments, ensure_ascii=False),
+                         "argumentAliases": [], "fingerprint": hashlib.sha256((call_id + json.dumps(arguments, sort_keys=True)).encode()).hexdigest(),
+                         "status": "prepared", "outcome": "", "result": None, "error": "",
+                         "startedAt": now_iso(), "completedAt": "", "skillLoadOrigin": "explicit",
+                         "skillLoadCount": 0,
+                         "skillExecutionContext": {"version": 1, "dataRootId": state["registry"]["dataRootId"], "skills": []}}
+            run["tool_executions"][call_id] = execution
+            _append_agent_event_locked(run, "tool_started", {"toolCallId": call_id, "name": "use_skill", "arguments": execution["arguments"], "argumentAliases": []})
+            _persist_agent_run(run)
+    if execution["status"] != "completed":
+        try:
+            result = _execute_agent_skill_load(run, arguments, call_id, execution=execution, origin="explicit")
+        except (skill_loading.SkillLoadingError, skill_dependency_operation.DependencyOperationError,
+                skill_admission.SkillAdmissionError, skill_completion.SkillCompletionError,
+                skill_store.SkillStoreError) as exc:
+            if run.get("_skill_loading_persist_uncertain"):
+                raise
+            result = {"ok": False, "action": "use_skill", "name": name, "bodyLoaded": False,
+                      "loadOrigin": "explicit", "errorCode": getattr(exc, "code", "skill_loading_failed"),
+                      "error": "The explicitly selected Skill could not be loaded; no other Skill was substituted."}
+            _set_agent_execution_result(execution, result)
+            _persist_agent_run(run)
+    result = execution["result"]
+    with run["condition"]:
+        completed = _agent_has_tool_completed_event_locked(run, call_id)
+    if not completed:
+        _append_agent_event(run, "tool_completed", {"toolCallId": call_id, "name": "use_skill", "arguments": execution["arguments"],
+                                                    "result": result, "reused": False})
+    if not result.get("ok"):
+        run["error_code"] = result["errorCode"]
+        run["error"] = result["error"]
+        _finish_agent_run(run, "failed", result["error"], error_code=result["errorCode"])
+        return False
+    return True
+
+
 def _agent_lifecycle_skill_snapshot(run, skill_name):
     """Revalidate one selected Skill by its frozen exact path, without discovery."""
     lifecycle = _agent_canonical_skill_lifecycle(run)
@@ -17639,6 +17917,8 @@ def _agent_lifecycle_dependency_status(snapshot, capability=""):
 
 @skill_dependency_operation.serialized
 def _execute_agent_skill_lifecycle_tool(run, action, arguments):
+    if action == "use_skill" and "role" in arguments and run.get("skill_loading") is None:
+        return _agent_skill_lifecycle_error(action, "skill_loading_protocol_required")
     target = str(arguments.get("skill" if action == "read_skill_resource" else "name") or "").strip()
     try:
         snapshot = _agent_lifecycle_skill_snapshot(run, target)
@@ -18409,6 +18689,9 @@ def read_skill_file(name, rel_path):
 
 def execute_use_skill_tool(body):
     body = dict(body or {})
+    if "role" in body:
+        return {"ok": False, "action": "use_skill", "errorCode": "skill_loading_protocol_required",
+                "error": "Append-only Skill loading requires a model-driven AgentRun."}
     skill_name = (body.get("name") or "").strip()
     if not skill_name:
         raise ValueError("skill name is required")
@@ -24078,11 +24361,12 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "use_skill",
-            "description": "Load an installed Skill by name. Call this tool alone and wait for its instructions before choosing or calling any other tool. When trusted executable runtimeResources are returned, use only their exact paths with the selected dependency runtime; never search for or copy them.",
+            "description": "In model-driven-v1, choose a Skill from the name/description catalogue and explicitly pass role=owner for the first load or role=modifier for one additional helper. Call alone and wait before any other tool. For an already loaded Skill, omit role to inspect its trusted runtimeResources. Legacy Runs remain active-only. Never replace the owner, search for resource paths, or bypass dependency and permission gates.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Installed Skill name."},
+                    "role": {"type": "string", "enum": ["owner", "modifier"], "description": "Explicit append-only loading role in model-driven-v1."},
                 },
                 "required": ["name"],
                 "additionalProperties": False,
@@ -25780,6 +26064,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                     _immutable_skill_startup_runtime.admission_reader() is not None
                 )):
                     heartbeat["skillActivationProtocol"] = ACTIVATION_PROTOCOL
+                    if _SKILL_MODEL_LOADING_ENABLED and immutable_profile:
+                        heartbeat["skillLoadingProtocol"] = skill_loading.PROTOCOL
                 self.send_json(heartbeat)
                 return
             if route == "/api/check-path":

@@ -613,6 +613,7 @@
     const showToast = options.showToast || (() => {});
     const onPromptChanged = options.onPromptChanged || (() => {});
     const onMemoryChanged = options.onMemoryChanged || (() => {});
+    const isModelSkillLoadingEnabled = options.isModelSkillLoadingEnabled || (() => false);
     const trashIcon = options.trashIcon || (() => "");
     const uiIcon = options.uiIcon || Code.core?.icons?.uiIcon || ((name, size = 16, className = "") => (
       `<span class="ui-icon${className ? ` ${className}` : ""}" aria-hidden="true"></span>`
@@ -821,7 +822,7 @@
       const sorted = sortedSkills();
       list.innerHTML = sorted.length ? sorted.map((skill) => {
         const enabled = !state.disabledSkills.has(skill.name);
-        const explicitOnly = EXPLICIT_ONLY_SET.has(skill.name);
+        const explicitOnly = !isModelSkillLoadingEnabled() && EXPLICIT_ONLY_SET.has(skill.name);
         return `<div class="skill-list-item" data-skill-name="${escapeHtml(skill.name)}">
           <span class="dot ${enabled ? "on" : "off"}"></span>
           <span>${escapeHtml(skill.name)}</span>
@@ -2433,6 +2434,7 @@
       openSkillEditor,
       renderMemoryPanel,
       renderSkillsInSettings,
+      refreshLoadingProtocol: renderSkillsList,
       refreshSettingsLanguage,
       showMemoryPanel,
       showSkillsPanel,

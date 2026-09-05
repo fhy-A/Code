@@ -4,6 +4,8 @@
 
 本文末尾的 D2 接线合同描述在该引擎之上新增的显式管理入口；默认开关和真实 profile 操作授权仍独立保持。
 
+主模型选择与运行中加载见 [主模型按需加载 Skill 合同](skill-model-loading-contract.md)。该协议复用本文的 Store/D2 保护，不改变管理授权或对象保留规则。
+
 ## 所有权与显式边界
 
 - `SkillStoreManager` 必须取得当前进程仍持有、与 Store 根一致的 `DataDirOwner`；Store 还必须显式允许写入。管理操作串行取得同一个 registry 文件锁，线程与跨进程竞争均有超时。

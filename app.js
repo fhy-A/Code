@@ -1736,6 +1736,7 @@ const skillsMemoryFeature = createSkillsMemoryFeature({
   showToast,
   onPromptChanged: updateSendButtonState,
   onMemoryChanged: updateModePromptPreview,
+  isModelSkillLoadingEnabled: () => state.skillModelLoadingEnabled === true,
   trashIcon,
 });
 
@@ -2237,6 +2238,7 @@ let _instanceProductName = "Code";
 let _pendingPermNotify = false;
 let _agentProjectionShadowEnabled = false;
 let _skillActivationCanonicalEnabled = false;
+let _skillModelLoadingEnabled = false;
 
 function applyInstanceIdentity(instanceMode) {
   const isDev = instanceMode === "dev";
@@ -9717,6 +9719,8 @@ function toolProgressSummary(toolCalls) {
       case "task":         return t("progressTask", { target: (args.description || args.prompt || "").slice(0, 30) });
       case "request_user_input": return t("progressUserInput");
       case "generate_image": return t("progressGenerateImage");
+      // The real loading operation owns its normal tool row; do not add a raw function-name echo.
+      case "use_skill": return "";
       default:             return fn ? `→ ${fn}` : "";
     }
   }).filter(Boolean);
@@ -14246,6 +14250,9 @@ async function runServerAgentLoop(ctx) {
     ctx._canonicalSkillActivation = _skillActivationCanonicalEnabled;
   }
   const canonicalSkillActivation = canonicalEligible && ctx._canonicalSkillActivation === true;
+  if (creatingAgentRun && typeof ctx._skillModelLoading !== "boolean") {
+    ctx._skillModelLoading = canonicalSkillActivation && _skillModelLoadingEnabled;
+  }
   const skillAllowedToolNames = canonicalSkillActivation || !creatingAgentRun
     ? new Set(profileAllowedToolNames)
     : new Set(applySkillTaskPolicy(
@@ -14336,7 +14343,7 @@ async function runServerAgentLoop(ctx) {
       clientRequestId: ctx.clientRequestId || "",
       ...(canonicalSkillActivation ? {
         skillActivationRequest: {
-          schemaVersion: 1,
+          schemaVersion: ctx._skillModelLoading ? 2 : 1,
           explicitSkill: String(ctx.explicitSkill || ""),
           disabledNames: [...(state.disabledSkills || new Set())],
         },
@@ -18187,8 +18194,19 @@ async function init() {
         _skillActivationCanonicalEnabled = (
           data.skillActivationProtocol === SKILL_ACTIVATION_PROTOCOL
         );
+        const modelSkillLoadingEnabled = _skillActivationCanonicalEnabled && data.skillLoadingProtocol === "model-driven-v1";
+        if (_skillModelLoadingEnabled !== modelSkillLoadingEnabled) {
+          _skillModelLoadingEnabled = modelSkillLoadingEnabled;
+          state.skillModelLoadingEnabled = modelSkillLoadingEnabled;
+          skillsMemoryFeature.refreshLoadingProtocol();
+        }
       } catch (_) {
         _skillActivationCanonicalEnabled = false;
+        if (_skillModelLoadingEnabled) {
+          _skillModelLoadingEnabled = false;
+          state.skillModelLoadingEnabled = false;
+          skillsMemoryFeature.refreshLoadingProtocol();
+        }
       }
     };
     setInterval(sendBrowserHeartbeat, 3000);

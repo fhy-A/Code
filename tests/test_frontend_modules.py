@@ -3552,6 +3552,7 @@ const createSystemPromptSnapshotData = (values, metadata) => ({{
         script = f"""
 {validator_source}
 let _skillActivationCanonicalEnabled = false;
+let _skillModelLoadingEnabled = false;
 const state = {{sessionId: "session-1", skills: [{{name: "legacy"}}], disabledSkills: new Set(["disabled-one"])}};
 const t = (key) => key;
 const getSelectedModel = () => "test-model";
@@ -3731,6 +3732,10 @@ async function scenario({{capability, existing = false, detached = false, mode =
         script = f"""
 const SKILL_ACTIVATION_PROTOCOL = "canonical-v1";
 let _skillActivationCanonicalEnabled = false;
+let _skillModelLoadingEnabled = false;
+const state = {{}};
+let refreshCount = 0;
+const skillsMemoryFeature = {{refreshLoadingProtocol() {{ refreshCount += 1; }}}};
 let browserServerInstanceId = null;
 let browserInstanceMode = null;
 let next = {{serverInstanceId: "server-1", instanceMode: "release"}};
@@ -3754,10 +3759,16 @@ const setAgentProjectionShadowEnabled = () => {{}};
   const unknown = _skillActivationCanonicalEnabled;
   next = {{...next, skillActivationProtocol: "canonical-v1"}};
   await sendBrowserHeartbeat();
+  next = {{...next, skillLoadingProtocol: "future"}};
+  await sendBrowserHeartbeat();
+  const loadingUnknown = _skillModelLoadingEnabled;
+  next = {{...next, skillLoadingProtocol: "model-driven-v1"}};
+  await sendBrowserHeartbeat();
+  const loadingEnabled = _skillModelLoadingEnabled && state.skillModelLoadingEnabled;
   heartbeatFails = true;
   await sendBrowserHeartbeat();
   const failed = _skillActivationCanonicalEnabled;
-  process.stdout.write(JSON.stringify({{absent, canonical, unknown, failed}}));
+  process.stdout.write(JSON.stringify({{absent, canonical, unknown, failed, loadingUnknown, loadingEnabled, loadingOff:!_skillModelLoadingEnabled, refreshCount}}));
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         completed = subprocess.run(
@@ -3769,6 +3780,10 @@ const setAgentProjectionShadowEnabled = () => {{}};
             "canonical": True,
             "unknown": False,
             "failed": False,
+            "loadingUnknown": False,
+            "loadingEnabled": True,
+            "loadingOff": True,
+            "refreshCount": 2,
         })
 
     def test_server_agent_questionnaire_uses_durable_submit_and_reload_path(self):
@@ -7798,7 +7813,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "83e9bffd34fb3ec11e564847df0751bd882ca8021dd405453dd8a61d58446d32",
+            "e0cb9d3f008e2471c154536ed0ba354443796a1b0b773d807bb3a8b91fa669a9",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
@@ -18191,7 +18206,7 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn("color-mix(in srgb, var(--accent) 26%, transparent)", STYLE_SOURCE)
 
-    def test_execution_trace_skill_chip_binds_to_user_turn_and_survives_projection_states(self):
+    def test_execution_trace_does_not_fabricate_skill_loads_from_active_metadata(self):
         script = r"""
 global.window = {Code: {ui: {}}};
 require("./src/ui/messages.js");
@@ -18245,33 +18260,27 @@ process.stdout.write(JSON.stringify({
             text=True, encoding="utf-8", check=True,
         )
         data = json.loads(completed.stdout)
+        for key, html in data.items():
+            self.assertNotIn("execution-trace-skill-chip", html)
+            self.assertNotIn("use_skill", html)
+            self.assertNotIn("Skill ·", html)
         for key in ("singleCompleted", "singleActive"):
             html = data[key]
-            self.assertIn('class="execution-trace-skill-chip"', html)
-            self.assertIn('>Skill · imagegen</span>', html)
-            self.assertIn('title="Skills: imagegen"', html)
-            self.assertIn('aria-label="Skills: imagegen"', html)
             summary = html.index('class="execution-trace-summary"')
             status = html.index(
                 "data-active-run-anchor" if key == "singleActive" else "data-completed-run-status",
                 summary,
             )
-            chip = html.index('class="execution-trace-skill-chip"', summary)
             chevron = html.index('class="execution-trace-chevron"', summary)
             body = html.index('class="execution-trace-body"', summary)
-            self.assertLess(status, chip)
-            self.assertLess(chip, chevron)
+            self.assertLess(status, chevron)
             self.assertLess(chevron, body)
-        self.assertIn('>Skill · imagegen +2</span>', data["multiple"])
-        self.assertIn('title="Skills: imagegen, documents, pdf"', data["multiple"])
-        self.assertIn('>Skill · &lt;unsafe&gt; +1</span>', data["unsafe"])
         self.assertNotIn("<unsafe>", data["unsafe"])
         self.assertNotIn("execution-trace-skill-chip", data["oldRecord"])
         self.assertNotIn("execution-trace-skill-chip", data["invalid"])
-        self.assertIn('.execution-trace-skill-chip {', STYLE_SOURCE)
-        self.assertIn('text-overflow: ellipsis;', STYLE_SOURCE)
-        self.assertIn('executionTraceSkillsAria: "已启用 Skill：{names}"', I18N_SOURCE)
-        self.assertIn('executionTraceSkillsAria: "Enabled Skills: {names}"', I18N_SOURCE)
+        self.assertNotIn('.execution-trace-skill-chip {', STYLE_SOURCE)
+        self.assertIn('toolUseSkill: "加载 Skill"', I18N_SOURCE)
+        self.assertIn('toolUseSkill: "Load Skill"', I18N_SOURCE)
 
     def test_foreground_skill_projection_uses_snapshot_metadata_without_schema_dependency(self):
         helper_start = APP_SOURCE.index("function normalizeForegroundActiveSkillNames(")

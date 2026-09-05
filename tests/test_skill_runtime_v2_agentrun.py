@@ -52,12 +52,12 @@ def runtime_env(tmp_path, monkeypatch):
         server_mod._agent_runs.clear()
 
 
-def _run(reader, *, message="xlsx", explicit="xlsx", permission="read", tools=None, request_id=""):
+def _run(reader, *, message="xlsx", explicit="xlsx", permission="read", tools=None, request_id="", model_loading=False):
     names = tools or [
         "read_file", "write_file", "run_command", "use_skill",
         "check_skill_dependencies", "read_skill_resource",
     ]
-    return server_mod._create_agent_run(
+    run = server_mod._create_agent_run(
         "",
         {
             "model": "test-model",
@@ -75,10 +75,13 @@ def _run(reader, *, message="xlsx", explicit="xlsx", permission="read", tools=No
         client_request_id=request_id,
         run_kind="foreground",
         skill_activation_request={
-            "schemaVersion": 1, "explicitSkill": explicit, "disabledNames": [],
+            "schemaVersion": 2 if model_loading else 1, "explicitSkill": explicit, "disabledNames": [],
         },
         _immutable_skill_reader=reader,
     )
+    if model_loading and explicit:
+        assert server_mod._ensure_explicit_skill_load(run)
+    return run
 
 
 def _call(run, name, arguments, call_id="call-1"):

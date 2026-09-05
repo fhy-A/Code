@@ -140,9 +140,11 @@ def test_plan_forgery_cross_run_off_and_optional_are_closed(managed_env):
 
 
 @pytest.mark.parametrize("permission", ["accept", "read"])
-def test_non_bypass_retains_authorization(managed_env, permission):
+@pytest.mark.parametrize("model_loading", [False, True])
+def test_non_bypass_retains_authorization(managed_env, permission, monkeypatch, model_loading):
+    monkeypatch.setattr(server, "_SKILL_MODEL_LOADING_ENABLED", model_loading)
     _, _, reader, _ = managed_env
-    run = _run(reader, explicit="demo", permission=permission)
+    run = _run(reader, explicit="demo", permission=permission, model_loading=model_loading)
     checked, _ = _call(run, "check_skill_dependencies", {"name": "demo", "capability": "create"}, "check")
     execution, _ = _call(run, "run_command", checked["result"]["dependencyPlan"]["toolArguments"], "install")
     if permission == "accept":
@@ -202,6 +204,28 @@ def test_unknown_writer_and_mark_failure_do_not_replay_or_execute(managed_env):
     assert operation.DependencyOperation(data).read()["state"] == "running"
     with pytest.raises(operation.DependencyOperationError, match="unsettled"):
         operation.DependencyOperation(data).assert_available()
+
+
+def test_v7_new_load_cannot_cross_unsettled_writer_and_late_install_stays_closed(managed_env, monkeypatch):
+    data, _, reader, service = managed_env
+    monkeypatch.setattr(server, "_SKILL_MODEL_LOADING_ENABLED", True)
+    run = _run(reader, explicit="", permission="bypass", model_loading=True)
+    with mock.patch.object(server, "execute_registered_tool", return_value={"ok": True, "stdout": "synthetic", "exitCode": 0}):
+        _call(run, "run_command", {"command": "echo synthetic"}, "ordinary-before-load")
+    _call(run, "use_skill", {"name": "demo", "role": "owner"}, "load")
+    checked, _ = _call(run, "check_skill_dependencies", {"name": "demo", "capability": "create"}, "check")
+    plan = checked["result"]["dependencyPlan"]
+    with mock.patch.object(operation, "execute_contained") as install:
+        denied, _ = _call(run, "run_command", plan["toolArguments"], "too-late")
+    assert denied["result"]["errorCode"] == "dependency_requester_already_used_runtime"
+    install.assert_not_called()
+    other = _run(reader, explicit="", permission="bypass", model_loading=True)
+    entry = server._managed_dependency_entry(plan["reference"], run)
+    server._managed_dependency_state().begin(plan["target"], run["id"], entry["plan"], service.owner)
+    denied, _ = _call(other, "use_skill", {"name": "demo", "role": "owner"}, "during-writer")
+    assert denied["result"]["ok"] is False
+    assert not other["active_skill_names"] and not other["skill_loading"]["loads"]
+    assert operation.DependencyOperation(data).read()["state"] == "running"
 
 
 def test_concurrent_operations_have_one_marker_owner(tmp_path):
@@ -279,7 +303,9 @@ def test_cancel_and_timeout_after_effect_do_not_claim_rollback(tmp_path, cancel)
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows containment contract")
 @pytest.mark.parametrize("interrupt_binding", [False, True])
-def test_offline_real_install_recheck_bind_continue(managed_env, tmp_path, monkeypatch, interrupt_binding):
+@pytest.mark.parametrize("model_loading", [False, True])
+def test_offline_real_install_recheck_bind_continue(managed_env, tmp_path, monkeypatch, interrupt_binding, model_loading):
+    monkeypatch.setattr(server, "_SKILL_MODEL_LOADING_ENABLED", model_loading)
     data, _, reader, _ = managed_env
     wheels = tmp_path / "wheels"
     wheels.mkdir()
@@ -293,7 +319,10 @@ def test_offline_real_install_recheck_bind_continue(managed_env, tmp_path, monke
     monkeypatch.setenv("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     monkeypatch.setenv("PIP_CONFIG_FILE", os.devnull)
     monkeypatch.setenv("PIP_CACHE_DIR", str(tmp_path / "pip-cache"))
-    run = _run(reader, explicit="demo", permission="bypass")
+    run = _run(reader, explicit="" if model_loading else "demo", permission="bypass", model_loading=model_loading)
+    if model_loading:
+        loaded, _ = _call(run, "use_skill", {"name": "demo", "role": "owner"}, "load")
+        assert loaded["result"]["bodyLoaded"] is True
     checked, _ = _call(run, "check_skill_dependencies", {"name": "demo", "capability": "create"}, "check")
     plan = checked["result"]["dependencyPlan"]
     original_persist = server._persist_agent_run
@@ -320,7 +349,7 @@ def test_offline_real_install_recheck_bind_continue(managed_env, tmp_path, monke
     assert run["pending_authorization"] is None
     assert run["skill_runtime_bindings"]["demo"]["capability"] == "create"
     persisted = json.loads(server._agent_run_path(run["id"]).read_text(encoding="utf-8"))
-    assert persisted["version"] == 6
+    assert persisted["version"] == (7 if model_loading else 6)
     assert operation.DependencyOperation(data).read()["state"] == "settled"
     with pytest.raises(operation.DependencyOperationError, match="unavailable"):
         server._managed_dependency_entry(plan["reference"], run)

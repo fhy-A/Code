@@ -164,35 +164,24 @@ async function exerciseRuntime(browser, host, runtime, audit) {
     const projection = await installTraceProjection(page, runtime);
     const summary = page.locator(".execution-trace-summary");
     const chip = page.locator(".execution-trace-skill-chip");
-    const expectedChip = `Skill · ${projection.names[0]}${projection.names.length > 1 ? ` +${projection.names.length - 1}` : ""}`;
-    assert.equal(await chip.textContent(), expectedChip);
-    const accessible = await chip.getAttribute("aria-label");
-    for (const name of projection.names) assert.equal(accessible.includes(name), true);
+    assert.equal(await chip.count(), 0);
+    assert.equal(await page.locator('[data-current-action="use_skill"]').count(), 0);
     const geometry = await page.evaluate(() => {
       const rect = (selector) => {
         const box = document.querySelector(selector).getBoundingClientRect();
         return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
       };
       const status = rect(".completed-run-status");
-      const skill = rect(".execution-trace-skill-chip");
       const chevron = rect(".execution-trace-chevron");
-      const style = getComputedStyle(document.querySelector(".execution-trace-skill-chip"));
       return {
         status,
-        skill,
         chevron,
-        overflow: style.overflow,
-        textOverflow: style.textOverflow,
         documentWidth: document.documentElement.scrollWidth,
         bodyWidth: document.body.scrollWidth,
         viewportWidth: innerWidth,
       };
     });
-    assert.equal(geometry.status.right <= geometry.skill.left + 1, true);
-    assert.equal(geometry.skill.right <= geometry.chevron.left + 1, true);
-    assert.equal(geometry.skill.height >= 20, true);
-    assert.equal(geometry.overflow, "hidden");
-    assert.equal(geometry.textOverflow, "ellipsis");
+    assert.equal(geometry.status.right <= geometry.chevron.left + 1, true);
     assert.equal(geometry.documentWidth <= geometry.viewportWidth, true);
     assert.equal(geometry.bodyWidth <= geometry.viewportWidth, true);
 

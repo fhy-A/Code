@@ -589,7 +589,7 @@
       toolListFiles: "List Files", toolReadFile: "Read File", toolSearchFiles: "Search Files",
       toolGlobFiles: "Glob Files", toolProposeEdit: "Propose Edit", toolApplyEdit: "Apply Edit",
       toolRunCommand: "Run Command", toolWriteFile: "Write File", toolDeleteFile: "Delete File", toolManageGeneratedImage: "Export or rename image",
-      toolWebFetch: "Web Fetch", toolTask: "Sub Task", toolRequestUserInput: "Ask user", toolUseSkill: "Use Skill", toolCheckSkillDependencies: "Check Skill Dependencies", toolReadSkill: "Read Skill Resource", toolSaveMemory: "Save Memory",
+      toolWebFetch: "Web Fetch", toolTask: "Sub Task", toolRequestUserInput: "Ask user", toolUseSkill: "Load Skill", toolCheckSkillDependencies: "Check Skill Dependencies", toolReadSkill: "Read Skill Resource", toolSaveMemory: "Save Memory",
       newSession: "New Session", newSkill: "+ New Skill", sessionTitleDefault: "New Session", untitledSession: "Untitled",
       skillDesc: "Description", skillKeywords: "Keywords", skillTools: "Tools", skillPathLabel: "File Path",
       skillExplicitHint: "Can be invoked via /{name}", skillEmptyHint: "Click + New Skill or select one from the left",

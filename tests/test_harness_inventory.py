@@ -83,18 +83,22 @@ class HarnessFactInventoryTests(unittest.TestCase):
             for key, value in zip(returned.keys, returned.values):
                 if isinstance(key, ast.Constant) and key.value == "version":
                     self.assertIsInstance(value, ast.IfExp)
-                    self.assertIsInstance(value.test, ast.Name)
-                    self.assertEqual("immutable_skill_run", value.test.id)
+                    self.assertEqual('run.get("skill_loading") is not None', ast.get_source_segment(self.server_source, value.test))
+                    self.assertEqual(7, ast.literal_eval(value.body))
+                    legacy = value.orelse
+                    self.assertIsInstance(legacy, ast.IfExp)
+                    self.assertIsInstance(legacy.test, ast.Name)
+                    self.assertEqual("immutable_skill_run", legacy.test.id)
                     record_versions = {
-                        ast.literal_eval(value.body), ast.literal_eval(value.orelse),
+                        ast.literal_eval(value.body), ast.literal_eval(legacy.body), ast.literal_eval(legacy.orelse),
                     }
                     break
         historical_version = self.inventory["agentRun"]["recordVersion"]
         self.assertEqual(4, historical_version)
         self.assertEqual(
-            {5, 6}, set(self.inventory["agentRun"]["currentRecordVersions"]),
+            {5, 6, 7}, set(self.inventory["agentRun"]["currentRecordVersions"]),
         )
-        self.assertEqual({5, 6}, record_versions)
+        self.assertEqual({5, 6, 7}, record_versions)
         self.assertGreater(min(record_versions), historical_version)
         loader = next(
             node for node in self.server_tree.body

@@ -549,7 +549,7 @@ const nativeTools = [
 
       name: "use_skill",
 
-      description: "加载一个已安装的 Skill 来获取专业指导。必须单独调用并等待返回后，才能选择或调用其他工具；不要在同一轮并发调用 task。返回受信任的可执行 runtimeResources 时，只能使用其精确路径和所选依赖运行时，不得搜索或复制资源。传入 name 参数指定 Skill 名称。",
+      description: "按当前运行的 Skill 协议读取或加载 Skill。model-driven-v1 模式下从名称与描述目录自行选择；首次加载必须显式传 role=owner，仅可再追加一个 role=modifier。必须单独调用并等待返回后再调用其他工具。已加载 Skill 获取 runtimeResources 时可只传 name；只使用其精确路径和所选依赖运行时，不得搜索或复制资源。旧协议只允许访问已激活 Skill。",
 
       parameters: {
 
@@ -558,6 +558,8 @@ const nativeTools = [
         properties: {
 
           name: { type: "string", description: "Skill 名称，如 python-testing。" },
+
+          role: { type: "string", enum: ["owner", "modifier"], description: "仅用于 model-driven-v1 的追加加载，必须由模型明确选择角色；不能替换已有 owner。" },
 
         },
 
