@@ -13650,6 +13650,7 @@ const feature = createSkillsMemoryFeature({
   elements: {},
   apiJson: async (url) => {
     calls.push(url);
+    if (url === "/api/skill-management/v1") return {protocol: "skill-management/v1", mode: "legacy", serverInstanceId: "fixture"};
     if (url === "/api/skills?brief=1") return {data: [{name: "demo", body: null, keywords: ["demo"], tools: ["read_file"]}]};
     if (url === "/api/skills/demo") return {body: "Demo instructions", path: "skills/demo", resources: {}};
     if (url === "/api/memory-context") return {found: true, count: 2, content: "memory"};
@@ -13703,7 +13704,7 @@ const feature = createSkillsMemoryFeature({
         self.assertEqual(data["memory"], {"found": True, "count": 2, "content": "memory"})
         self.assertEqual(
             data["calls"],
-            ["/api/skills?brief=1", "/api/skills/demo", "/api/memory-context"],
+            ["/api/skill-management/v1", "/api/skills?brief=1", "/api/skills/demo", "/api/memory-context"],
         )
 
     def test_imagegen_and_local_image_generation_skills_route_without_overlap(self):

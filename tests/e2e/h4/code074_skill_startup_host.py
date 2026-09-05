@@ -116,7 +116,7 @@ def _store_snapshot(data):
     }
 
 
-def _serve(root, repo_root, enabled, sync_failed, delay_ready):
+def _serve(root, repo_root, enabled, sync_failed, delay_ready, ui=False):
     data, app, _project = _paths(root)
     os.environ.update({
         "CODE_DATA_DIR": str(data),
@@ -141,6 +141,12 @@ def _serve(root, repo_root, enabled, sync_failed, delay_ready):
     # Match the real entry points: ownership is process-lifetime and is
     # released by data_dir_owner's atexit hook only after all writers stop.
     server._ensure_runtime_data_directories()
+    if ui:
+        # UI acceptance must not use the default workspace or discover real
+        # local application profiles while loading the settings shell.
+        server.write_json(server.CONFIG_PATH, {"projectRoot": str(root / "project")})
+        server.PROJECTS_MIGRATION_FLAG.write_text("isolated", encoding="utf-8")
+        server.PROJECT_ROOTS_MIGRATION_FLAG.write_text("isolated", encoding="utf-8")
     try:
         startup = server._initialize_immutable_skill_runtime(
             owner,
@@ -161,6 +167,24 @@ def _serve(root, repo_root, enabled, sync_failed, delay_ready):
     class Handler(server.CodeHandler):
         def log_message(self, *_args):
             return
+
+        def do_GET(self):
+            route = self.path.split("?", 1)[0]
+            if ui and route.startswith("/api/") and not (
+                route.startswith("/api/skill-management/")
+                or route in {"/api/config", "/api/browser-heartbeat", "/api/projects", "/api/sessions"}
+            ):
+                self.send_json({"data": [], "files": [], "entries": [], "found": False})
+                return
+            return super().do_GET()
+
+        def do_POST(self):
+            if ui and not self.path.startswith("/api/skill-management/"):
+                self.consume_request_body(max_bytes=1024 * 1024)
+                self.send_json({"ok": True, "valid": self.path == "/api/code/auth/validate",
+                                "account": {"id": 7, "username": "h4-user"}})
+                return
+            return super().do_POST()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     httpd.daemon_threads = True
@@ -218,7 +242,7 @@ def main():
     options = set(sys.argv[4:])
     return _serve(
         root, repo_root, enabled,
-        "sync-failed" in options, "delay-ready" in options,
+        "sync-failed" in options, "delay-ready" in options, "ui" in options,
     )
 
 

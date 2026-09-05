@@ -272,6 +272,9 @@ def test_global_recovery_reader_is_separate_from_new_admission(runtime_env, monk
         def admission_reader(self):
             return reader
 
+        def management_owner(self, data_root):
+            return None
+
     monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
     monkeypatch.setattr(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", False)
     existing = _run(reader, request_id="global-recovery-v6")

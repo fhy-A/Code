@@ -105,6 +105,12 @@ cmd = [
     "--add-data", f"{APP_DIR / 'assets'}{';'}assets",
     "--add-data", f"{PACKAGED_SKILLS_DIR}{';'}data/skills",
     "--add-data", f"{APP_DIR / 'data' / 'memory'}{';'}data/memory",
+    # The gated dependency worker uses a real local Python, including when the
+    # application itself is a windowed executable. Package only its imports.
+    *[argument for filename in (
+        "__init__.py", "skill_dependency_operation.py", "skill_dependencies.py",
+        "skill_resources.py", "bundled_skills.py",
+    ) for argument in ("--add-data", f"{APP_DIR / 'code_runtime' / filename};dependency-worker/code_runtime")],
     "--hidden-import", "json",
     "--hidden-import", "mimetypes",
     "--hidden-import", "pystray",

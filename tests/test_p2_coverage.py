@@ -941,10 +941,13 @@ class TestMemoryCRUD(unittest.TestCase):
         cls.tmp_memory = cls.tmp_data / "memory"
         cls.tmp_memory.mkdir(parents=True)
         cls._patcher = mock.patch.object(server_mod, "MEMORY_DIR", cls.tmp_memory)
+        cls._index_patcher = mock.patch.object(server_mod, "MEMORY_INDEX_PATH", cls.tmp_memory / "MEMORY.md")
         cls._patcher.start()
+        cls._index_patcher.start()
 
     @classmethod
     def tearDownClass(cls):
+        cls._index_patcher.stop()
         cls._patcher.stop()
 
     def setUp(self):

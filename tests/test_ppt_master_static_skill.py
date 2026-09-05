@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import server as server_mod
 from scripts.validate_ppt_master_vendor import (
@@ -14,6 +15,19 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = ROOT / "data" / "skills" / "ppt-master"
 PPTX_DIR = ROOT / "data" / "skills" / "pptx"
 class TestPptMasterRuntimeSkill(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(server_mod, "SKILLS_DIR", ROOT / "data" / "skills")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        inspect = server_mod.inspect_skill_directory
+        def inspect_packaged_runtime(skill_dir, **options):
+            # These static assertions cover the packaged, locked runtime.
+            # Keep server DATA_DIR/config/session state in the synthetic root.
+            return inspect(skill_dir, **{**options, "data_dir": ROOT / "data"})
+        runtime_patcher = mock.patch.object(server_mod, "inspect_skill_directory", inspect_packaged_runtime)
+        runtime_patcher.start()
+        self.addCleanup(runtime_patcher.stop)
+
     def test_fixed_vendor_slice_passes_static_validation(self):
         result = validate_vendor_package(SKILL_DIR)
         self.assertTrue(result["ok"])

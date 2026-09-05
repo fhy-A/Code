@@ -194,7 +194,7 @@ class TestPptMasterRuntime(unittest.TestCase):
                 ).encode("utf-8")
             ).hexdigest(),
         )
-        with patches:
+        with patches, mock.patch.object(server_mod, "SKILLS_DIR", Path(__file__).resolve().parents[1] / "data" / "skills"):
             self.assertTrue(runtime.validate_ppt_master_dependency_installation()["ok"])
             files["skia-pathops"].write_text("tampered\n", encoding="utf-8")
             with mock.patch.object(

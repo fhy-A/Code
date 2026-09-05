@@ -6918,6 +6918,12 @@ body.theme-dark .syn-fn { color: #61afef; }
   border-top: 1px solid var(--line); min-height: 28px;
 }
 .skill-detail-actions:empty { display: none; }
+.skill-management-actions { flex-wrap: wrap; justify-content: flex-start; }
+.skill-management-actions .mini-btn { flex-shrink: 0; max-width: 100%; white-space: normal; height: auto; min-height: 30px; padding: 6px 10px; line-height: 1.35; }
+#settingsManagedActions { flex-shrink: 0; margin: 0; padding: 10px; }
+#settingsSkillsDetail pre.skill-detail-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+#skillEditorModal[data-managed-document-editor="true"] .skill-editor-basic,
+#skillEditorModal[data-managed-document-editor="true"] .skill-editor-matching { display: none; }
 
 /* Toggle switch */
 .toggle-switch { cursor: pointer; display: flex; align-items: center; }

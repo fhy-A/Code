@@ -2,12 +2,13 @@ import importlib.util
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import server as server_mod
 from code_runtime.skill_dependencies import load_skill_manifest
 
 
-SKILLS_ROOT = Path(server_mod.SKILLS_DIR)
+SKILLS_ROOT = Path(__file__).resolve().parents[1] / "data" / "skills"
 WORKFLOW_SKILLS = {
     "brainstorming",
     "dispatching-parallel-agents",
@@ -41,7 +42,14 @@ def load_skill_validator():
     return module.validate_skill
 
 
-class TestBuiltInSkillRouting(unittest.TestCase):
+class _BundledSkillTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(server_mod, "SKILLS_DIR", SKILLS_ROOT)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class TestBuiltInSkillRouting(_BundledSkillTest):
     def skill_names_for(self, prompt):
         return [skill["name"] for skill in server_mod.match_skills(prompt)]
 
@@ -78,7 +86,7 @@ class TestBuiltInSkillRouting(unittest.TestCase):
                 self.assertEqual(self.skill_names_for(prompt), [])
 
 
-class TestBuiltInSkillMetadata(unittest.TestCase):
+class TestBuiltInSkillMetadata(_BundledSkillTest):
     def test_declared_tools_are_available_in_code(self):
         available = set(server_mod.SERVER_TOOL_REGISTRY)
         for skill in server_mod.list_skills(brief=True):

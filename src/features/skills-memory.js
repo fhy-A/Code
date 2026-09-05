@@ -642,21 +642,75 @@
     let skillDependencyPreview = null;
     let skillDependencyPreviewRequestId = 0;
     let bound = false;
+    let managementEpoch = 0;
+    let managementLoadId = 0;
+    let managementDetailId = 0;
+    let managedDraft = null;
+    let managedPending = null;
+    let managedDependencyPoll = null;
+    const managementPath = "/api/skill-management/v1";
+    const managedMode = () => Boolean(state.skillManagement && state.skillManagement.mode !== "legacy");
+    const managementIdentity = (skill) => ({
+      dataRootId: state.skillManagement?.registry?.dataRootId,
+      installationId: skill.installationId,
+      revisionId: skill.revisionId,
+    });
+    const managedPost = (path, body) => apiJson(`${managementPath}/${path}`, {
+      method: "POST", body: JSON.stringify({ protocol: "skill-management/v1", ...body }),
+    });
+    const managedError = (error) => showToast(
+      /registry_cas_conflict|registry_changed/.test(error?.message || "")
+        ? t("skillManagementConflict") : error?.message || String(error), "error",
+    );
 
     const byId = (id) => documentRef.getElementById(id);
 
     async function loadSkills() {
+      const requestId = ++managementLoadId;
       try {
+        const snapshot = await apiJson(managementPath);
+        if (requestId !== managementLoadId) return state.skills;
+        if (snapshot?.protocol !== "skill-management/v1") throw new Error(t("skillManagementUnavailable"));
+        const rootKey = `${snapshot.serverInstanceId}:${snapshot.registry?.dataRootId || snapshot.mode}`;
+        if (rootKey !== state.skillManagementRootKey) {
+          managementEpoch += 1;
+          managementDetailId += 1;
+          managedPending = null;
+          state.skillManagementRootKey = rootKey;
+        }
+        state.skillManagement = snapshot;
+        if (snapshot.mode !== "legacy") {
+          state.managedSkills = (snapshot.installations || []).map((skill) => ({ ...skill, name: skill.displayName, description: skill.kind }));
+          state.skills = snapshot.admissionEnabled
+            ? state.managedSkills.filter((skill) => skill.selected && skill.enabled && !skill.uninstalled)
+            : [];
+          return state.skills;
+        }
         const data = await apiJson("/api/skills?brief=1");
+        if (requestId !== managementLoadId) return state.skills;
         state.skills = data.data || [];
       } catch {
+        if (requestId !== managementLoadId) return state.skills;
         state.skills = [];
+        state.managedSkills = [];
+        state.skillManagement = { mode: "unavailable", capabilities: {} };
       }
       return state.skills;
     }
 
     async function ensureSkillBody(skill) {
       if (!skill || skill.body != null) return skill;
+      if (skill.installationId) {
+        const epoch = managementEpoch;
+        const identity = managementIdentity(skill);
+        const query = new URLSearchParams({ dataRootId: identity.dataRootId, revision: identity.revisionId });
+        const full = await apiJson(`${managementPath}/installations/${encodeURIComponent(identity.installationId)}?${query}`);
+        if (epoch !== managementEpoch || full.dataRootId !== identity.dataRootId || full.revisionId !== identity.revisionId) {
+          throw new Error(t("skillManagementChanged"));
+        }
+        Object.assign(skill, full);
+        return skill;
+      }
       try {
         const full = await apiJson(`/api/skills/${encodeURIComponent(skill.name)}`);
         skill.body = full.body || "";
@@ -821,6 +875,10 @@
     }
 
     function openSkillEditor(skill) {
+      if (managedMode()) {
+        void openManagedEditor(skill).catch(managedError);
+        return;
+      }
       editingSkillName = skill ? skill.name : null;
       byId("skillEditorTitle").textContent = skill ? `${t("editing")} ${skill.name}` : t("newSkill");
       byId("skillEditName").value = skill ? skill.name : "";
@@ -873,6 +931,22 @@
     }
 
     function closeSkillEditor() {
+      if (managedDraft && (byId("skillEditBody").value !== managedDraft.document
+          || byId("skillEditDependencies").value !== managedDraft.dependencyDocument)
+          && !global.confirm(t("skillManagementDiscard"))) return;
+      managedDraft = null;
+      byId("skillEditorModal")?.removeAttribute("data-managed-document-editor");
+      const instructionsHeading = byId("skillEditorModal")?.querySelector(".skill-editor-instructions h3");
+      if (instructionsHeading) {
+        instructionsHeading.dataset.i18n = "skillInstructionsTitle";
+        instructionsHeading.textContent = t("skillInstructionsTitle");
+      }
+      byId("skillEditBody")?.setAttribute("data-i18n-aria-label", "skillBodyLabel");
+      setManagedDependencyEditorText(false);
+      ["skillEditName", "skillEditDesc", "skillEditKeywords", "skillEditTools"].forEach((id) => {
+        byId(id)?.closest("label")?.classList.remove("hidden");
+      });
+      if (byId("skillDependencyTemplate")) byId("skillDependencyTemplate").disabled = false;
       byId("skillEditorModal")?.classList.add("hidden");
       editingSkillName = null;
       editingSkillDependencyOriginal = "";
@@ -880,6 +954,10 @@
     }
 
     async function saveSkillEdit() {
+      if (managedDraft) {
+        await saveManagedEditor();
+        return;
+      }
       const name = byId("skillEditName").value.trim();
       const description = byId("skillEditDesc").value.trim();
       const keywords = byId("skillEditKeywords").value.trim();
@@ -1685,6 +1763,11 @@
     }
 
     async function loadSkillDependencyStatus({ force = false } = {}) {
+      if (managedMode()) {
+        if (force) await loadSkills();
+        renderManagedSkillsSidebar(settingsSelectedSkillName);
+        return null;
+      }
       if (skillDependencyLoading) return skillDependencySnapshot;
       if (skillDependencySnapshot && !force) return skillDependencySnapshot;
       const requestId = ++skillDependencyRequestId;
@@ -1805,6 +1888,7 @@
     }
 
     async function loadSkillDependencyOperations() {
+      if (managedMode()) return;
       if (skillDependencyOperationsLoading || skillDependencyOperationsLoaded) return;
       skillDependencyOperationsLoading = true;
       try {
@@ -1941,7 +2025,269 @@
       });
     }
 
+    async function managedOperation(kind, fields = {}, options = {}) {
+      const epoch = options.epoch ?? managementEpoch;
+      const base = options.base || state.skillManagement?.registry;
+      if (epoch !== managementEpoch || !base || base.dataRootId !== state.skillManagement?.registry?.dataRootId) {
+        throw new Error(t("skillManagementChanged"));
+      }
+      const intent = JSON.stringify({ kind, fields, base });
+      if (managedPending && managedPending.intent !== intent) throw new Error(t("skillManagementPending"));
+      if (!managedPending) {
+        const preview = await managedPost("preview", { kind, base, ...fields });
+        if (epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+        if (preview.confirmationRequired && !global.confirm(t(
+          kind === "convert-v2" ? "skillManagementConfirmConvert" : "skillManagementConfirmPreferences",
+          { count: preview.request.disabledNames?.length || 0 },
+        ))) return null;
+        managedPending = { intent, epoch, payload: {
+          base: preview.base, request: preview.request, material: preview.material,
+          confirmed: true, operationKey: global.crypto.randomUUID(),
+        } };
+      }
+      return finishManagedOperation(managedPending);
+    }
+
+    async function finishManagedOperation(pending) {
+      if (pending.epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+      const result = await managedPost("operations", pending.payload);
+      if (pending.epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+      managedPending = null;
+      await loadSkills();
+      renderManagedSkillsSidebar(result.receipt?.result?.installationId || settingsSelectedSkillName);
+      onPromptChanged();
+      return result;
+    }
+
+    async function openManagedEditor(skill) {
+      if (!state.skillManagement?.capabilities?.write) throw new Error(t("skillManagementReadOnly"));
+      if (managedDraft && !global.confirm(t("skillManagementDiscard"))) return;
+      const epoch = managementEpoch;
+      if (skill) await ensureSkillBody(skill);
+      if (epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+      const document = skill?.document || "---\nname: new-skill\ndescription: \n---\n\n";
+      managedDraft = { skill, epoch, base: { ...state.skillManagement.registry }, document,
+        dependencyDocument: skill?.dependencyDocument || "" };
+      byId("skillEditorModal").setAttribute("data-managed-document-editor", "true");
+      const instructionsHeading = byId("skillEditorModal").querySelector(".skill-editor-instructions h3");
+      instructionsHeading.dataset.i18n = "skillManagementDocument";
+      instructionsHeading.textContent = t("skillManagementDocument");
+      ["skillEditName", "skillEditDesc", "skillEditKeywords", "skillEditTools"].forEach((id) => {
+        byId(id)?.closest("label")?.classList.add("hidden");
+      });
+      byId("skillEditorTitle").textContent = t(skill?.kind === "bundled" ? "skillManagementFork" : skill ? "edit" : "newSkillTitle");
+      byId("skillEditBody").value = document;
+      byId("skillEditBody").setAttribute("aria-label", t("skillManagementDocument"));
+      byId("skillEditBody").setAttribute("data-i18n-aria-label", "skillManagementDocument");
+      byId("skillEditDependencies").value = managedDraft.dependencyDocument;
+      setManagedDependencyEditorText(true);
+      const statusKey = managedDraft.dependencyDocument ? "skillDependencyConfigured" : "skillDependencyNotConfigured";
+      byId("skillDependencyEditorStatus").dataset.i18n = statusKey;
+      byId("skillDependencyEditorStatus").textContent = t(statusKey);
+      byId("skillDependencyTemplate").disabled = true;
+      const modal = byId("skillEditorModal");
+      const draft = managedDraft;
+      const focusWhenVisible = (event) => {
+        if (event && event.target !== modal) return;
+        if (managedDraft !== draft || modal.classList.contains("hidden")) {
+          modal.removeEventListener("transitionend", focusWhenVisible);
+          return;
+        }
+        if (global.getComputedStyle(modal).visibility !== "visible") return;
+        modal.removeEventListener("transitionend", focusWhenVisible);
+        if (!modal.contains(documentRef.activeElement)) byId("skillEditBody").focus({ preventScroll: true });
+      };
+      modal.addEventListener("transitionend", focusWhenVisible);
+      modal.classList.remove("hidden");
+      global.requestAnimationFrame(() => focusWhenVisible());
+    }
+
+    function setManagedDependencyEditorText(managed) {
+      const editor = byId("skillDependencyEditor");
+      if (!editor) return;
+      const hint = editor.querySelector(".skill-dependency-editor-body > p");
+      const summary = editor.querySelector(".skill-dependency-editor-summary-copy small");
+      for (const element of [hint, summary]) {
+        if (!element) continue;
+        const key = managed ? "skillManagementDependencyDocument"
+          : element === hint ? "skillDependencyEditorHint" : "skillDependencyEditorSummary";
+        element.dataset.i18n = key;
+        element.textContent = t(key);
+      }
+      const key = managed ? "skillManagementDependencyPlaceholder" : "skillDependencyEditorPlaceholder";
+      byId("skillEditDependencies").dataset.i18n = key;
+      byId("skillEditDependencies").placeholder = t(key);
+    }
+
+    async function saveManagedEditor() {
+      const draft = managedDraft;
+      const document = byId("skillEditBody").value;
+      const dependencyDocument = byId("skillEditDependencies").value;
+      const skill = draft.skill;
+      const kind = skill ? (skill.kind === "bundled" ? "fork-bundled" : "edit-local") : "create-local";
+      try {
+        if (skill?.kind === "bundled" && !global.confirm(t("skillManagementForkConfirm"))) return;
+        const fields = { document };
+        if (skill) Object.assign(fields, { installationId: skill.installationId, revisionId: skill.revisionId });
+        if (kind === "fork-bundled") fields.conflict = "select-new";
+        if (dependencyDocument !== draft.dependencyDocument) fields.dependencyDocument = dependencyDocument || null;
+        byId("saveSkillEdit").disabled = true;
+        const result = await managedOperation(kind, fields, draft);
+        if (result && managedDraft === draft) {
+          managedDraft = null;
+          closeSkillEditor();
+        }
+      } catch (error) { managedError(error); }
+      finally { byId("saveSkillEdit").disabled = false; }
+    }
+
+    function renderManagedSkillsSidebar(preferred = settingsSelectedSkillName) {
+      const sidebar = byId("settingsSkillsSidebar");
+      if (!sidebar) return;
+      const snapshot = state.skillManagement || {};
+      const skills = filterSettingsSkills(state.managedSkills || [], settingsSkillQuery);
+      const selected = skills.find((skill) => skill.installationId === preferred) || skills[0] || null;
+      settingsSelectedSkillName = selected?.installationId || null;
+      const summary = byId("settingsSkillsSummary");
+      if (summary) summary.textContent = t(snapshot.capabilities?.write ? "skillManagementReady" : "skillManagementReadOnly");
+      const overview = byId("settingsSkillDependencyOverview");
+      if (overview) overview.textContent = snapshot.errorCode || "";
+      byId("settingsSkillAddBtn").disabled = !snapshot.capabilities?.write;
+      let actions = byId("settingsManagedActions");
+      if (!actions) {
+        actions = documentRef.createElement("div");
+        actions.id = "settingsManagedActions";
+        actions.className = "skill-detail-actions skill-management-actions";
+        sidebar.parentElement.querySelector(".skills-sidebar-toolbar").after(actions);
+      }
+      actions.innerHTML = `
+        ${snapshot.capabilities?.convert ? `<button class="mini-btn" id="managedConvert">${escapeHtml(t("skillManagementConvert"))}</button>` : ""}
+        ${snapshot.capabilities?.write ? `<button class="mini-btn" id="managedImport">${escapeHtml(t("skillManagementImport"))}</button>
+        <button class="mini-btn" id="managedPreferences">${escapeHtml(t("skillManagementPreferences"))}</button>` : ""}
+        ${managedPending ? `<button class="mini-btn" id="managedRetry">${escapeHtml(t("skillManagementRetry"))}</button>` : ""}`;
+      byId("managedConvert")?.addEventListener("click", () => { void managedOperation("convert-v2").catch(managedError); });
+      byId("managedImport")?.addEventListener("click", () => {
+        const sourceRoot = global.prompt(t("skillManagementImportPath"));
+        if (sourceRoot) void managedOperation("import-local", { sourceRoot }).catch(managedError);
+      });
+      byId("managedPreferences")?.addEventListener("click", () => {
+        const known = new Set((snapshot.bindings || []).map((item) => item.routingAlias));
+        void managedOperation("migrate-preferences", { confirmed: true,
+          disabledNames: [...state.disabledSkills].filter((name) => known.has(name)),
+        }).catch(managedError);
+      });
+      byId("managedRetry")?.addEventListener("click", () => { void finishManagedOperation(managedPending).catch(managedError); });
+      sidebar.innerHTML = skills.map((skill) => `<button class="skill-list-item${skill === selected ? " active" : ""}"
+        type="button" data-installation="${escapeHtml(skill.installationId)}" aria-current="${skill === selected}">
+        <span class="skill-list-copy"><span class="skill-list-name">${escapeHtml(skill.name)}</span>
+        <span class="skill-list-description">${escapeHtml(t(skill.kind === "bundled" ? "skillManagementBundled" : "skillManagementLocal"))} · ${escapeHtml(skill.revisionId.slice(7, 19))}</span></span>
+        <span class="skill-list-status-badge">${escapeHtml(t(skill.uninstalled ? "skillManagementUninstalled" : skill.enabled ? "enabledStatus" : "disabledStatus"))}</span></button>`).join("");
+      sidebar.querySelectorAll("[data-installation]").forEach((button) => button.addEventListener("click", () => {
+        renderManagedSkillsSidebar(button.dataset.installation);
+      }));
+      void showManagedSkillDetail(selected).catch(managedError);
+    }
+
+    async function showManagedSkillDetail(skill) {
+      if (managedDependencyPoll !== null) global.clearTimeout(managedDependencyPoll);
+      managedDependencyPoll = null;
+      const panel = byId("settingsSkillsDetail");
+      const requestId = ++managementDetailId;
+      const epoch = managementEpoch;
+      if (!panel) return;
+      delete panel.dataset.renderedInstallation;
+      if (!skill) { panel.textContent = t(state.skillManagement?.errorCode ? "skillManagementUnavailable" : "noSkills"); return; }
+      panel.textContent = t("skillManagementLoading");
+      await ensureSkillBody(skill);
+      if (requestId !== managementDetailId || epoch !== managementEpoch) return;
+      panel.dataset.renderedInstallation = skill.installationId;
+      const writable = Boolean(state.skillManagement?.capabilities?.write);
+      const disabled = writable ? "" : "disabled";
+      const button = (id, key) => `<button type="button" class="mini-btn" id="${id}" ${disabled}>${escapeHtml(t(key))}</button>`;
+      panel.innerHTML = `<article class="skill-detail-article">
+        <header class="skill-detail-head"><div class="skill-detail-heading-copy"><h3 class="skill-detail-name">${escapeHtml(skill.name)}</h3><p class="skill-detail-description">${escapeHtml(skill.description || "")}</p></div></header>
+        <div class="skill-detail-meta-row"><span class="skill-detail-meta-chip">${escapeHtml(t(skill.kind === "bundled" ? "skillManagementBundled" : "skillManagementLocal"))}</span>
+        <span class="skill-detail-meta-chip">${escapeHtml(t(skill.selected ? "skillManagementSelected" : "skillManagementUnselected"))}</span></div>
+        <div class="skill-detail-actions skill-management-actions">${button("managedEdit", skill.kind === "bundled" ? "skillManagementFork" : "edit")}
+        ${button("managedToggle", skill.enabled ? "skillDisableAction" : "skillEnableAction")}
+        ${button("managedRemove", skill.uninstalled ? "skillManagementRestore" : "skillManagementUninstall")}
+        ${button("managedSelect", "skillManagementSelect")}
+        ${skill.kind === "bundled" ? button("managedUpdate", "skillManagementUpdate") : ""}</div>
+        <label class="field"><span>${escapeHtml(t("skillManagementRevision"))}</span><select id="managedRevision">
+        ${(skill.retainedRevisionIds || [skill.revisionId]).map((revision) => `<option ${revision === skill.revisionId ? "selected" : ""} value="${escapeHtml(revision)}">${escapeHtml(revision.slice(7, 23))}</option>`).join("")}</select></label>
+        <div class="skill-detail-actions">${button("managedRollback", "skillManagementRollback")}</div>
+        <details class="skill-detail-section"><summary>${escapeHtml(t("skillManagementDocument"))}</summary><pre class="skill-detail-value">${escapeHtml(skill.document)}</pre></details>
+        <section class="skill-detail-section" id="managedDependencies"><h4>${escapeHtml(t("skillDependencyTitle"))}</h4>
+        <div id="managedDependencyStatus" role="status"></div>
+        <label class="field"><span>${escapeHtml(t("skillManagementCapability"))}</span><select id="managedCapability">${(skill.dependency?.capabilities || []).map((capability) => `<option value="${escapeHtml(capability)}">${escapeHtml(dependencyCapabilityLabel(capability))}</option>`).join("")}</select></label>
+        <div class="skill-detail-actions"><button class="mini-btn" id="managedCheck">${escapeHtml(t("skillDependencyCheck"))}</button>
+        ${button("managedInstall", "skillDependencyInstall")}${button("managedRepair", "skillDependencyRepair")}
+        ${button("managedRecheck", "skillManagementRecheck")}</div><div id="managedDependencyOperation" role="status"></div><div id="managedDependencyPlan"></div></section></article>`;
+      const perform = (kind, fields) => { void managedOperation(kind, { installationId: skill.installationId, ...fields }).catch(managedError); };
+      byId("managedEdit").addEventListener("click", () => { void openManagedEditor(skill).catch(managedError); });
+      byId("managedToggle").disabled = !writable || skill.uninstalled;
+      byId("managedToggle").addEventListener("click", () => perform("set-enabled", { enabled: !skill.enabled }));
+      byId("managedRemove").addEventListener("click", () => perform(skill.uninstalled ? "restore" : "uninstall", {}));
+      byId("managedSelect").addEventListener("click", () => perform("select-candidate", { routingAlias: skill.routingAlias }));
+      byId("managedUpdate")?.addEventListener("click", () => perform("update-bundled", {}));
+      byId("managedRollback").addEventListener("click", () => perform("rollback", { revisionId: byId("managedRevision").value }));
+      const identity = managementIdentity(skill);
+      const current = () => epoch === managementEpoch && requestId === managementDetailId;
+      const refreshOperation = async (poll = false) => {
+        const status = await apiJson(`${managementPath}/dependencies?dataRootId=${encodeURIComponent(identity.dataRootId)}`);
+        if (!current()) return;
+        const marker = status.operation;
+        const area = byId("managedDependencyOperation");
+        if (!marker || marker.state === "settled") { area.textContent = ""; return; }
+        area.textContent = `${t(marker.state === "running" && !status.writerKnownActive ? "skillManagementUnknownWriter" : "skillManagementUnsettled")} (${marker.operationId})`;
+        if (status.writerKnownActive) {
+          const cancel = documentRef.createElement("button");
+          cancel.className = "mini-btn";
+          cancel.type = "button";
+          cancel.textContent = t("cancel");
+          cancel.addEventListener("click", () => {
+            cancel.disabled = true;
+            void managedPost("dependencies/cancel", { operationId: marker.operationId, dataRootId: identity.dataRootId }).catch(managedError);
+          });
+          area.append(cancel);
+          if (poll) managedDependencyPoll = global.setTimeout(() => { void refreshOperation(true).catch(managedError); }, 1000);
+        }
+      };
+      void refreshOperation(true).catch(managedError);
+      const check = async (recheck = false) => {
+        const result = await managedPost(`dependencies/${recheck ? "recheck" : "check"}`, { identity, capability: byId("managedCapability").value });
+        if (current()) byId("managedDependencyStatus").textContent = result.errorCode || dependencyStatusLabel((result.dependency || result).status);
+      };
+      byId("managedCheck").addEventListener("click", () => { void check().catch(managedError); });
+      byId("managedRecheck").addEventListener("click", () => { void check(true).catch(managedError); });
+      const preview = async (action) => {
+        const plan = await managedPost("dependencies/plan", { identity, capability: byId("managedCapability").value, action });
+        if (!current()) return;
+        const area = byId("managedDependencyPlan");
+        area.innerHTML = `<pre class="skill-detail-value">${escapeHtml((plan.commandSummaries || []).join("\n"))}</pre>
+          <p role="status">${escapeHtml((plan.blockedReasons || []).join(", "))}</p>
+          <button class="mini-btn" id="managedExecute" ${plan.actionable ? "" : "disabled"}>${escapeHtml(t("skillManagementExecute"))}</button>`;
+        byId("managedExecute").addEventListener("click", async () => {
+          byId("managedExecute").disabled = true;
+          try {
+            if (managedDependencyPoll !== null) global.clearTimeout(managedDependencyPoll);
+            managedDependencyPoll = global.setTimeout(() => { void refreshOperation(true).catch(managedError); }, 1000);
+            const result = await managedPost("dependencies/execute", { reference: plan.reference, fingerprint: plan.fingerprint, confirmed: true });
+            if (current()) area.textContent = result.ok ? t("skillManagementDependencyDone") : (result.errorCode || t("skillManagementUnsettled"));
+          } catch (error) { if (current()) area.textContent = error.message; }
+          finally { if (current()) void refreshOperation().catch(managedError); }
+        });
+      };
+      byId("managedInstall").addEventListener("click", () => { void preview("install").catch(managedError); });
+      byId("managedRepair").addEventListener("click", () => { void preview("repair").catch(managedError); });
+      if (!skill.dependency?.capabilities?.length) byId("managedDependencies").classList.add("hidden");
+    }
+
     function renderSettingsSkillsSidebar(preferredName = settingsSelectedSkillName) {
+      if (managedMode()) {
+        renderManagedSkillsSidebar(preferredName);
+        return;
+      }
       const sidebar = byId("settingsSkillsSidebar");
       if (!sidebar) return;
       renderSkillsSettingsSummary();

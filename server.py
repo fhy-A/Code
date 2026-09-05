@@ -38,8 +38,11 @@ from code_runtime import (
     skill_activation,
     skill_admission,
     skill_completion,
+    skill_dependencies,
+    skill_dependency_operation,
     skill_lifecycle,
     skill_lifecycle_v2,
+    skill_management_api,
     skill_outcome,
     skill_runtime_startup,
     skill_runtime_v2,
@@ -5350,6 +5353,10 @@ def _agent_restore_skill_recovery(run, reader):
     recovery = run.get("skill_recovery")
     if not isinstance(recovery, dict) or reader is None:
         return False
+    try:
+        _managed_dependency_access(run)
+    except skill_dependency_operation.DependencyOperationError as exc:
+        raise skill_runtime_v2.ImmutableSkillRuntimeError(exc.code, temporary=True) from exc
     lifecycle = _agent_canonical_skill_lifecycle(run)
     skill_runtime_v2.verify_lifecycle(reader, lifecycle)
     normalized = _normalize_agent_skill_recovery(
@@ -5394,6 +5401,264 @@ def _agent_immutable_recovery_reader():
     return _immutable_skill_startup_runtime.recovery_reader()
 
 
+def _skill_management_service():
+    """No startup/migration or owner acquisition on a request path."""
+    return skill_management_api.SkillManagementService(
+        DATA_DIR, APP_DIR / "data" / "skills",
+        owner=_immutable_skill_startup_runtime.management_owner(DATA_DIR),
+        admission_enabled=_SKILL_IMMUTABLE_ADMISSION_ENABLED,
+        server_instance_id=_server_instance_id,
+    )
+
+
+_managed_dependency_plans = OrderedDict()
+_managed_dependency_cancel = None
+
+
+def _managed_dependency_state():
+    return skill_dependency_operation.DependencyOperation(DATA_DIR)
+
+
+def _managed_dependency_access(run=None):
+    if run is None or run.get("active_skill_names"):
+        _managed_dependency_state().assert_available()
+
+
+def _managed_dependency_quiescent(requester=None, call_id=""):
+    """Admission/recovery and this audit share GATE, including unloaded Runs."""
+    fail = skill_dependency_operation.fail
+    requester_id = str((requester or {}).get("id") or "")
+    with _agent_run_lock:
+        runs = dict(_agent_runs)
+    directory = _agent_runs_dir()
+    if directory.exists():
+        paths = list(directory.glob("*.json"))
+        if len(paths) > 4096:
+            fail("dependency_run_audit_unavailable")
+        for path in paths:
+            if path.stem in runs:
+                continue
+            try:
+                record = read_json(path, None)
+                if not isinstance(record, dict) or record.get("id") != path.stem:
+                    fail("dependency_run_audit_unavailable")
+                if record.get("status") not in _AGENT_RUN_TERMINAL:
+                    # Unknown persisted activity is not assumed to be harmless.
+                    if (record.get("activeSkillNames") or record.get("activeSkillName")
+                            or record.get("skillLifecycle") or record.get("runtimeBindings")):
+                        fail("dependency_runtime_in_use")
+            except (OSError, ValueError):
+                fail("dependency_run_audit_unavailable")
+    for run_id, candidate in runs.items():
+        if candidate.get("status") in _AGENT_RUN_TERMINAL:
+            continue
+        if run_id != requester_id:
+            if candidate.get("active_skill_names") or candidate.get("active_process"):
+                fail("dependency_runtime_in_use")
+            continue
+        if (candidate.get("skill_runtime_bindings") or candidate.get("active_process")
+                or candidate.get("run_kind") == "child"
+                or len(candidate.get("pending_tool_calls") or []) != 1):
+            fail("dependency_requester_not_quiescent")
+        for execution_id, execution in (candidate.get("tool_executions") or {}).items():
+            if execution_id == call_id:
+                continue
+            if execution.get("name") == "run_command" and not execution.get("dependencyPlan"):
+                fail("dependency_requester_already_used_runtime")
+            if execution.get("status") not in {"completed", "failed"}:
+                fail("dependency_requester_not_quiescent")
+    with _dependency_operation_lock:
+        if any(item.get("status") not in _DEPENDENCY_OPERATION_TERMINAL for item in _dependency_operations.values()):
+            fail("dependency_runtime_in_use")
+
+
+def _managed_dependency_inspection(identity, capability, run=None):
+    if run is not None:
+        lifecycle = _agent_canonical_skill_lifecycle(run)
+        if not skill_runtime_v2.is_immutable(lifecycle):
+            skill_dependency_operation.fail("dependency_immutable_run_required")
+        snapshot = _agent_lifecycle_skill_snapshot(run, identity)
+        selected = snapshot["selected"]
+        root_id = lifecycle["activation"]["registry"]["dataRootId"]
+        inspection = _agent_lifecycle_dependency_status(snapshot, capability)
+    else:
+        service = _skill_management_service()
+        if not isinstance(identity, dict) or set(identity) != {"dataRootId", "installationId", "revisionId"}:
+            skill_dependency_operation.fail("dependency_identity_invalid")
+        detail = service.detail(identity["installationId"], identity["revisionId"])
+        if detail["dataRootId"] != identity["dataRootId"]:
+            skill_dependency_operation.fail("dependency_identity_conflict")
+        selected, root_id = detail, detail["dataRootId"]
+        dependency = detail["dependency"]
+        if dependency.get("state") != "ready":
+            skill_dependency_operation.fail("dependency_manifest_required")
+        inspection = skill_dependencies.inspect_manifest(dependency["manifest"], app_dir=APP_DIR, data_dir=DATA_DIR)
+        inspection["installGuidance"] = skill_dependencies.build_install_guidance(
+            inspection, data_dir=DATA_DIR, capability_id=capability,
+        )
+    dependency = selected["dependency"]
+    if capability and capability not in dependency.get("capabilities", []):
+        skill_dependency_operation.fail("dependency_capability_required")
+    target = {"dataRootId": root_id, "installationId": selected["installationId"],
+              "revisionId": selected["revisionId"], "manifestHash": dependency["manifestHash"],
+              "capability": capability}
+    return target, inspection
+
+
+def _managed_dependency_fixed_plan(inspection, capability, action):
+    scoped = _json_clone(inspection)
+    for item in scoped["capabilities"]:
+        item["optional"] = []
+    plan = build_dependency_operation_plan(scoped, data_dir=DATA_DIR, capability_id=capability, action=action)
+    # A .cmd entry cannot serve as the process image in a shell-free worker.
+    # Use the installed npm CLI with its Node executable, never a shell string.
+    for step in plan["steps"]:
+        argv = step.get("_argv") or []
+        if step.get("type") == "node" and argv and Path(argv[0]).suffix.lower() in {".cmd", ".bat"}:
+            node = shutil.which("node")
+            cli = Path(argv[0]).parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+            if node and cli.is_file():
+                step["_argv"] = [node, str(cli), *argv[1:]]
+            else:
+                plan["blockedReasons"].append("npm_runtime_missing")
+                plan["actionable"] = False
+    return plan
+
+
+@skill_dependency_operation.serialized
+def _managed_dependency_plan(identity, capability, action="install", run=None):
+    if action not in {"install", "repair"} or not capability or capability == "*":
+        skill_dependency_operation.fail("dependency_action_invalid")
+    service = _skill_management_service()
+    service._writer()  # OFF and missing-owner profiles cannot mint install plans.
+    target, inspection = _managed_dependency_inspection(identity, capability, run)
+    previous = _managed_dependency_state().read()
+    if previous and previous["state"] != "settled":
+        if previous["state"] == "running":
+            skill_dependency_operation.fail("dependency_writer_unknown")
+        if previous["target"] != target:
+            skill_dependency_operation.fail("dependency_operation_target_conflict")
+    plan = _managed_dependency_fixed_plan(inspection, capability, action)
+    if any(not item.get("available") for item in plan.get("systemRequirements") or []):
+        plan["blockedReasons"].append("system_command_requires_user_installation")
+        plan["actionable"] = False
+    worker = skill_dependency_operation.worker_command(skill_dependencies._system_python_for_runtime(DATA_DIR))
+    if os.name != "nt" or not worker:
+        plan["blockedReasons"].append("dependency_writer_platform_unsupported")
+        plan["actionable"] = False
+    reference = "dp1_" + uuid.uuid4().hex
+    entry = {"target": target, "plan": plan, "identity": identity,
+             "requester": str((run or {}).get("id") or ""), "root": str(DATA_DIR.absolute()), "workerCommand": worker}
+    entry["fingerprint"] = skill_dependency_operation.fingerprint(entry)
+    _managed_dependency_plans[reference] = entry
+    while len(_managed_dependency_plans) > 32:
+        _managed_dependency_plans.popitem(last=False)
+    return {**public_dependency_operation_plan(plan), "reference": reference,
+            "fingerprint": entry["fingerprint"], "target": target,
+            "toolArguments": {"command": "", "dependencyPlan": reference}}
+
+
+def _managed_dependency_entry(reference, run=None):
+    if not isinstance(reference, str):
+        skill_dependency_operation.fail("dependency_plan_invalid")
+    entry = _managed_dependency_plans.get(reference)
+    if (not entry or entry["requester"] != str((run or {}).get("id") or "")
+            or entry["root"] != str(DATA_DIR.absolute())):
+        skill_dependency_operation.fail("dependency_plan_unavailable")
+    return entry
+
+
+def _managed_dependency_execute(reference, run=None, call_id=""):
+    global _managed_dependency_cancel
+    with skill_dependency_operation.GATE:
+        entry = _managed_dependency_entry(reference, run)
+        service = _skill_management_service()
+        manager = service._writer()
+        _managed_dependency_quiescent(run, call_id)
+        target, inspection = _managed_dependency_inspection(entry["identity"], entry["target"]["capability"], run)
+        if target != entry["target"]:
+            skill_dependency_operation.fail("dependency_plan_identity_changed")
+        current = _managed_dependency_fixed_plan(inspection, target["capability"], entry["plan"]["action"])
+        if current != entry["plan"] or not current.get("actionable"):
+            skill_dependency_operation.fail("dependency_plan_changed")
+        if skill_dependency_operation.worker_command(skill_dependencies._system_python_for_runtime(DATA_DIR)) != entry["workerCommand"]:
+            skill_dependency_operation.fail("dependency_worker_changed")
+        skill_dependency_operation.check_runtime_paths(DATA_DIR, current)
+        state = _managed_dependency_state()
+        marker = state.begin(target, entry["requester"], current, manager.owner)
+        _managed_dependency_plans.pop(reference, None)  # Consumed plans cannot replay.
+        cancellation = (run or {}).get("cancel_event") or threading.Event()
+        _managed_dependency_cancel = (marker["operationId"], cancellation)
+    try:
+        result = skill_dependency_operation.execute_contained(current, cancel_event=cancellation, worker_argv=entry["workerCommand"])
+    finally:
+        with skill_dependency_operation.GATE:
+            _managed_dependency_cancel = None
+    with skill_dependency_operation.GATE:
+        state.exited(marker["operationId"], result, manager.owner)
+        result.update(action="run_command", dependencyPlan=reference, operationId=marker["operationId"],
+                      environmentRestored=False, target=target)
+        if result.get("writerExited") is True:
+            checked_target, checked = _managed_dependency_inspection(entry["identity"], target["capability"], run)
+            result["dependency"] = checked
+            if checked_target != target:
+                skill_dependency_operation.fail("dependency_recheck_identity_changed")
+            if _skill_runtime_status_ready(checked, target["capability"]) and not (run or {}).get("cancel_event", threading.Event()).is_set():
+                binding = {"target": target, "runtime": checked["installGuidance"]["runtime"], "checkedAt": now_iso()}
+                if run is not None:
+                    checked = _agent_bind_skill_runtime_durably(run, "check_skill_dependencies",
+                        {"name": entry["identity"], "capability": target["capability"]}, {"ok": True, **checked}, _settling=True)
+                    if checked.get("ok") is not True:
+                        return {**checked, "operationId": marker["operationId"], "writerExited": True}
+                    binding = run["skill_runtime_bindings"][entry["identity"]]
+                state.settle(target, binding, manager.owner)
+                result["settled"] = True
+        if not result.get("settled"):
+            result.update(ok=False, errorCode=result.get("errorCode") or "dependency_recheck_required",
+                error="Dependency operation remains unsettled. Do not replay the old plan. Review the exact target and result before requesting a new repair plan; unknown writers require manual recovery.")
+        return result
+
+
+@skill_dependency_operation.serialized
+def _managed_dependency_recheck(identity, capability):
+    service = _skill_management_service()
+    manager = service._writer()
+    _managed_dependency_quiescent()
+    state = _managed_dependency_state()
+    marker = state.read()
+    target, inspection = _managed_dependency_inspection(identity, capability)
+    if not marker or marker["target"] != target or marker["state"] != "exited":
+        skill_dependency_operation.fail("dependency_operation_not_settleable")
+    if not _skill_runtime_status_ready(inspection, capability):
+        return {"ok": False, "errorCode": "dependency_recheck_required", "dependency": inspection}
+    binding = {"target": target, "runtime": inspection["installGuidance"]["runtime"], "checkedAt": now_iso()}
+    state.settle(target, binding, manager.owner)
+    return {"ok": True, "settled": True, "dependency": inspection}
+
+
+def _execute_agent_dependency_plan_call(run, call, execution, *, resuming):
+    arguments = call["arguments"]
+    if arguments.get("command"):
+        skill_dependency_operation.fail("dependency_plan_command_forbidden")
+    entry = _managed_dependency_entry(arguments["dependencyPlan"], run)
+    if not entry["plan"].get("actionable"):
+        skill_dependency_operation.fail("dependency_plan_not_actionable")
+    summary = "; ".join(entry["plan"]["commandSummaries"])
+    execution.update(command=summary, dependencyPlan=arguments["dependencyPlan"],
+                     dependencyInstall=True, dependencyInstallKind="managed", nonReplayable=True)
+    if run.get("permission_profile") != "bypass" and not resuming:
+        pending = _agent_command_authorization_request(run, call)
+        pending["command"] = summary
+        execution.update(status="waiting_authorization", result=None)
+        run["pending_authorization"] = pending
+        run["keys"] = []
+        _set_agent_status(run, "waiting_authorization")
+        _append_agent_event(run, "authorization_required", _agent_public_pending_authorization(run))
+        return None
+    _agent_mark_immutable_nonreplayable_dispatch(run, execution)
+    return _managed_dependency_execute(arguments["dependencyPlan"], run, call["id"])
+
+
 def _agent_immutable_admission_reader(activation_request):
     if activation_request is None or not _SKILL_IMMUTABLE_ADMISSION_ENABLED:
         return None
@@ -5406,6 +5671,7 @@ def _agent_immutable_admission_reader(activation_request):
     return reader
 
 
+@skill_dependency_operation.serialized
 def _get_agent_run(run_id, immutable_skill_reader=_DEFAULT_IMMUTABLE_SKILL_READER):
     if immutable_skill_reader is _DEFAULT_IMMUTABLE_SKILL_READER:
         immutable_skill_reader = _agent_immutable_recovery_reader()
@@ -8771,6 +9037,15 @@ def _execute_agent_pending_tools(run):
             raise
         if execution and execution.get("fingerprint") != call.get("fingerprint"):
             raise ValueError(f"tool call id {call_id} was reused with different arguments")
+        pending_authorization = run.get("pending_authorization")
+        if (execution and execution.get("status") == "waiting_authorization"
+                and isinstance(pending_authorization, dict)
+                and pending_authorization.get("toolCallId") == call_id
+                and pending_authorization.get("action") == "run_command"
+                and pending_authorization.get("decision") == "pending"):
+            # Preserve old path/identity validation before retaining this gate.
+            # A newly available bypass path does not decide an older request.
+            return False
 
         reused_execution = bool(execution and execution.get("status") == "completed")
         resuming_proposal = bool(
@@ -8987,6 +9262,13 @@ def _execute_agent_pending_tools(run):
                     if call.get("parseError") or not isinstance(call.get("arguments"), dict):
                         raise ValueError(call.get("parseError") or "tool arguments must be an object")
                     arguments = call["arguments"]
+                    if "dependencyPlan" in arguments:
+                        planned_result = _execute_agent_dependency_plan_call(
+                            run, call, execution, resuming=resuming_command,
+                        )
+                        if planned_result is None:
+                            return False
+                        raise _AgentToolResult(planned_result)
                     command = str(arguments.get("command") or "").strip()
                     safe, reason = is_safe_command(command)
                     if not safe:
@@ -8998,6 +9280,10 @@ def _execute_agent_pending_tools(run):
                         project_root=command_root,
                     )
                     dependency_install = dependency_install_kind == "managed"
+                    if dependency_install and _skill_management_service().has_store() and not resuming_command:
+                        raise _AgentToolResult({"ok": False, "action": "run_command",
+                            "errorCode": "dependency_server_plan_required",
+                            "error": "Use check_skill_dependencies and its server-owned dependencyPlan for this exact Skill."})
                     execution["command"] = command
                     execution["description"] = str(arguments.get("description") or "")
                     execution["dependencyInstall"] = dependency_install
@@ -9253,6 +9539,9 @@ def _execute_agent_pending_tools(run):
                         if spec.get("effect") == "memory_write":
                             _agent_mark_immutable_nonreplayable_dispatch(run, execution)
                         result = execute_registered_tool(name, call["arguments"])
+            except skill_dependency_operation.DependencyOperationError as exc:
+                result = {"ok": False, "action": name, "errorCode": exc.code,
+                          "error": "The dependency plan could not safely execute. Inspect the exact target, active work and unsettled operation before deciding the next step."}
             except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
                 if exc.temporary:
                     _agent_enter_skill_recovery(run, exc)
@@ -11012,6 +11301,7 @@ def _agent_image_route_public(run):
     return _normalize_agent_image_route_identity(run.get("image_route"))
 
 
+@skill_dependency_operation.serialized
 def _create_agent_run(
     session_id,
     payload,
@@ -11102,6 +11392,17 @@ def _create_agent_run(
                 run_id,
                 _immutable_skill_reader,
             )
+    management_plain = False
+    if _immutable_skill_reader is None:
+        immutable_profile = _skill_management_service().has_store()
+        if immutable_profile and skill_activation_request is None:
+            if active_skill_name or active_skill_names:
+                raise SkillActivationError("management_client_upgrade_required", "Refresh the client before using Skills.")
+            management_plain = True
+        elif immutable_profile and not _SKILL_IMMUTABLE_ADMISSION_ENABLED:
+            raise SkillActivationError("immutable_skill_admission_disabled", "New Skill admission is disabled.")
+        if skill_activation_request is not None:
+            _immutable_skill_reader = _agent_immutable_admission_reader(skill_activation_request)
     inherited_resolution = (
         dict(inherited_context) if isinstance(inherited_context, dict) else None
     )
@@ -11154,6 +11455,10 @@ def _create_agent_run(
         tools = _agent_selected_tools(payload, requested_tool_names, permission_profile)
     else:
         tools = _agent_selected_tools(payload, allowed_tools, permission_profile)
+    if management_plain:
+        tools = [definition for definition in tools if (definition.get("function") or {}).get("name")
+                 not in {"use_skill", "check_skill_dependencies", "read_skill_resource"}]
+        active_skill_name, active_skill_names = "", []
     image_route_identity = _normalize_agent_image_route_identity(image_route)
     if normalized_run_kind == "child":
         tools = [
@@ -11467,6 +11772,11 @@ def _create_agent_run(
                     "AgentRun admission is temporarily unavailable.",
                     http_status=503,
                 ) from exc
+        if run.get("active_skill_names"):
+            try:
+                _managed_dependency_access(run)
+            except skill_dependency_operation.DependencyOperationError as exc:
+                raise SkillActivationError(exc.code, "The Skill dependency runtime has an unsettled operation.") from exc
         _agent_runs[run_id] = run
     try:
         _append_agent_event(run, "created", {
@@ -17107,12 +17417,40 @@ def _agent_bind_skill_runtime_from_result(run, action, arguments, result):
     return True
 
 
-def _agent_bind_skill_runtime_durably(run, action, arguments, result):
+@skill_dependency_operation.serialized
+def _agent_bind_skill_runtime_durably(run, action, arguments, result, *, _settling=False):
+    if result.get("dependencyPlan"):
+        return result
+    settlement = None
+    if not _settling:
+        try:
+            _managed_dependency_access(run)
+        except skill_dependency_operation.DependencyOperationError as exc:
+            state = _managed_dependency_state()
+            try:
+                marker = state.read()
+                capability = str(arguments.get("capability") or "")
+                if (not marker or marker["state"] != "exited" or marker["requester"] != run.get("id")
+                        or action != "check_skill_dependencies" or result.get("ok") is not True or not capability):
+                    raise exc
+                target, checked = _managed_dependency_inspection(arguments["name"], capability, run)
+                if target != marker["target"] or not _skill_runtime_status_ready(checked, capability):
+                    raise exc
+                call_id = str((run.get("pending_tool_calls") or [{}])[0].get("id") or "")
+                _managed_dependency_quiescent(run, call_id)
+                settlement = (state, target, _skill_management_service()._writer().owner)
+                result = {"ok": True, "action": action, "skill": arguments["name"], **checked}
+            except (skill_dependency_operation.DependencyOperationError, skill_management_api.SkillManagementError) as error:
+                return {"ok": False, "action": action, "errorCode": error.code,
+                        "error": "The shared Skill dependency runtime is unsettled; no binding was created."}
     previous = _json_clone(run.get("skill_runtime_bindings") or {})
     if not _agent_bind_skill_runtime_from_result(run, action, arguments, result):
         return result
     try:
         _persist_agent_run(run)
+        if settlement is not None:
+            state, target, owner = settlement
+            state.settle(target, run["skill_runtime_bindings"][arguments["name"]], owner)
         return result
     except Exception:
         if not skill_runtime_v2.is_immutable(run.get("skill_lifecycle")):
@@ -17299,11 +17637,20 @@ def _agent_lifecycle_dependency_status(snapshot, capability=""):
     return _apply_ppt_master_dependency_integrity(skill_dir, inspection, capability)
 
 
+@skill_dependency_operation.serialized
 def _execute_agent_skill_lifecycle_tool(run, action, arguments):
     target = str(arguments.get("skill" if action == "read_skill_resource" else "name") or "").strip()
     try:
         snapshot = _agent_lifecycle_skill_snapshot(run, target)
         selected = snapshot["selected"]
+        marker = _managed_dependency_state().read()
+        if marker and marker["state"] != "settled":
+            expected = {"dataRootId": _agent_canonical_skill_lifecycle(run)["activation"]["registry"]["dataRootId"],
+                        "installationId": selected.get("installationId"), "revisionId": selected.get("revisionId"),
+                        "manifestHash": selected["dependency"].get("manifestHash"),
+                        "capability": str(arguments.get("capability") or "")}
+            if action != "check_skill_dependencies" or marker["state"] != "exited" or marker["target"] != expected:
+                skill_dependency_operation.fail("dependency_operation_unsettled")
         if action == "read_skill_resource":
             if snapshot.get("immutable"):
                 relative, content_hash, content = skill_runtime_v2.text_resource(
@@ -17364,6 +17711,23 @@ def _execute_agent_skill_lifecycle_tool(run, action, arguments):
         if action == "check_skill_dependencies":
             capability = str(arguments.get("capability") or "").strip()
             status = _agent_lifecycle_dependency_status(snapshot, capability)
+            if snapshot.get("immutable") and capability and (
+                not _skill_runtime_status_ready(status, capability) or arguments.get("operation") == "repair"
+            ):
+                # Commands are informational only; execution accepts a server reference.
+                status["installGuidance"]["steps"] = []
+                try:
+                    status["dependencyPlan"] = _managed_dependency_plan(target, capability,
+                        arguments.get("operation", "install"), run)
+                except (skill_dependency_operation.DependencyOperationError, skill_management_api.SkillManagementError) as exc:
+                    status["dependencyPlanError"] = exc.code
+                status["installGuidance"]["instructions"] = (
+                    "Use only an actionable dependencyPlan via its exact toolArguments for this task. "
+                    "The server executes its own plan, rechecks the same revision/capability and persists the binding. "
+                    "Bypass mode runs a valid plan without a required confirmation; other modes retain authorization. "
+                    "If unavailable, busy or uncertain, use the returned facts to decide whether to stop, explain or ask. "
+                    "Never substitute a shell installer or install optional/all capabilities."
+                )
             return {
                 "ok": True,
                 "action": action,
@@ -17381,6 +17745,9 @@ def _execute_agent_skill_lifecycle_tool(run, action, arguments):
         if selected["dependency"]["state"] == "ready":
             result["dependencies"] = _agent_lifecycle_dependency_status(snapshot)
         return result
+    except skill_dependency_operation.DependencyOperationError as exc:
+        return {"ok": False, "action": action, "errorCode": exc.code,
+                "error": "The shared Skill dependency runtime cannot be used until the exact operation is settled."}
     except skill_runtime_v2.ImmutableSkillRuntimeError:
         raise
     except skill_lifecycle.SkillLifecycleError as exc:
@@ -17579,7 +17946,13 @@ def _agent_immutable_runtime_environment(run, lifecycle):
     )
 
 
+@skill_dependency_operation.serialized
 def _agent_prepare_skill_runtime_environment(run):
+    try:
+        _managed_dependency_access(run)
+    except skill_dependency_operation.DependencyOperationError as exc:
+        return {"ok": False, "action": "run_command", "errorCode": exc.code,
+                "error": "Skill runtime has an unsettled dependency operation."}
     active_names = list(run.get("active_skill_names") or [])
     dependencies = run.get("active_skill_dependencies") or {}
     lifecycle = None
@@ -23720,12 +24093,13 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "check_skill_dependencies",
-            "description": "Check one installed Skill's dependencies for the capability needed by the current task. For multi-capability Skills, omit capability only to inspect statuses, then choose one capability; never install every capability. Python/Node packages may use the returned managed-runtime plan after authorization. System-command dependencies must be installed by the user outside Code: present supplied installHints but do not execute them, modify PATH, or create global wrappers. Call again after installation.",
+            "description": "Check one active Skill's dependencies for the capability needed by this task. Choose one capability; never install all capabilities or optional packages by default. An actionable dependencyPlan supplies exact run_command toolArguments for a server-controlled Python/Node installation and same-revision recheck/binding. Valid plans in bypass mode do not require a confirmation; other modes retain authorization. Decide whether to proceed, explain limitations or ask from the returned facts. System software, PATH and global wrappers remain outside this tool.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Installed Skill name."},
                     "capability": {"type": "string", "description": "Only the capability needed for the current task. Omit only to inspect available capability statuses without installing anything."},
+                    "operation": {"type": "string", "enum": ["install", "repair"], "description": "Optional explicit new repair plan after a known failed installation; never replay an old plan."},
                 },
                 "required": ["name"],
                 "additionalProperties": False,
@@ -23922,11 +24296,12 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a low-risk command for inspection, tests, builds, or version-control queries. Managed Python/Node dependency installs require authorization. System package-manager installs, persistent PATH changes, and global command wrappers are blocked and must be completed by the user outside Code.",
+            "description": "Run a low-risk command for inspection, tests, builds or version-control queries. For an active immutable Skill install, pass the exact dependencyPlan reference from check_skill_dependencies and an empty command: the server executes only its own plan. Valid plans in bypass mode need no forced confirmation; other modes retain authorization. System installations, persistent PATH changes and global wrappers are blocked.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "PowerShell command to run in the project root."},
+                    "dependencyPlan": {"type": "string", "description": "Optional exact server plan reference returned by check_skill_dependencies; command must be empty."},
                     "description": {"type": "string", "description": "Short explanation of the command."},
                     "timeout": {"type": "integer", "description": "Optional timeout in seconds, capped by the server."},
                 },
@@ -25130,6 +25505,134 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         super().handle()
 
+    def _guard_legacy_skill_http(self, route):
+        legacy_skill = route == "/api/skills" or route.startswith("/api/skills/") or route in {
+            "/api/tools/use_skill", "/api/tools/check_skill_dependencies", "/api/tools/read_skill_resource",
+        }
+        if legacy_skill and _skill_management_service().has_store():
+            self.close_connection = True
+            exc = skill_management_api.SkillManagementError("management_client_upgrade_required")
+            self.send_json(exc.public_payload(), exc.status)
+            return True
+        return False
+
+    def _read_skill_management_json(self):
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return self.read_body_json()
+        if any(len(headers.get_all(name, [])) != 1 for name in ("Host", "Content-Length")) or len(headers.get_all("Origin", [])) > 1:
+            self.close_connection = True
+            raise skill_management_api.SkillManagementError("management_headers_invalid", 400)
+        if headers.get_content_type() != "application/json" or headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            raise skill_management_api.SkillManagementError("management_content_type_invalid", 400)
+        origin, host = headers.get("Origin"), headers.get("Host", "")
+        if origin and (parse.urlsplit(origin).scheme != "http" or parse.urlsplit(origin).netloc != host):
+            self.close_connection = True
+            raise skill_management_api.SkillManagementError("management_origin_rejected", 403)
+        try:
+            length = int(headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self.close_connection = True
+            raise skill_management_api.SkillManagementError("management_headers_invalid", 400) from None
+        if not 0 < length <= skill_management_api.MAX_REQUEST_BYTES:
+            self.close_connection = True
+            raise skill_management_api.SkillManagementError("management_request_size_invalid", 413)
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise skill_management_api.SkillManagementError("management_request_incomplete", 400)
+        return json.loads(raw.decode("utf-8"))
+
+    def _handle_skill_management(self, method, route, query):
+        prefix = "/api/skill-management/v1"
+        if route != prefix and not route.startswith(prefix + "/"):
+            return False
+        try:
+            service = _skill_management_service()
+            parts = route[len(prefix):].strip("/").split("/")
+            if method == "GET" and parts == [""]:
+                result = service.snapshot()
+            elif method == "GET" and len(parts) == 2 and parts[0] == "receipts":
+                if set(query) != {"dataRootId"} or len(query["dataRootId"]) != 1 or query["dataRootId"][0] != service._registry()["dataRootId"]:
+                    raise skill_management_api.SkillManagementError("management_root_mismatch")
+                result = service.receipt(parse.unquote(parts[1]))
+            elif method == "GET" and len(parts) in {2, 3} and parts[0] == "installations":
+                expected_query = {"dataRootId", "revision"} | ({"path"} if parts[-1] == "files" else set())
+                if set(query) != expected_query or any(len(values) != 1 for values in query.values()):
+                    raise skill_management_api.SkillManagementError("management_identity_required", 400)
+                iid, revision = parse.unquote(parts[1]), (query.get("revision") or [None])[0]
+                root_id = (query.get("dataRootId") or [None])[0]
+                if root_id != service._registry()["dataRootId"] or not revision:
+                    raise skill_management_api.SkillManagementError("management_identity_required", 400)
+                if len(parts) == 2:
+                    result = service.detail(iid, revision)
+                elif parts[2] == "files":
+                    result = service.resource(iid, revision, (query.get("path") or [""])[0])
+                else:
+                    raise skill_management_api.SkillManagementError("management_endpoint_missing", 404)
+            elif method == "GET" and parts == ["dependencies"]:
+                if set(query) != {"dataRootId"} or len(query["dataRootId"]) != 1:
+                    raise skill_management_api.SkillManagementError("management_identity_required", 400)
+                root_id = (query.get("dataRootId") or [None])[0]
+                if root_id != service._registry()["dataRootId"]:
+                    raise skill_management_api.SkillManagementError("management_root_mismatch")
+                with skill_dependency_operation.GATE:
+                    marker = _managed_dependency_state().read()
+                    result = {"protocol": skill_management_api.PROTOCOL, "operation": marker,
+                              "writerKnownActive": bool(marker and _managed_dependency_cancel
+                                  and _managed_dependency_cancel[0] == marker["operationId"])}
+            elif method == "POST" and len(parts) == 2 and parts[0] == "dependencies":
+                body = self._read_skill_management_json()
+                skill_management_api._protocol(body)
+                operation = parts[1]
+                if operation in {"check", "plan", "recheck"}:
+                    fields = {"protocol", "identity", "capability"}
+                    if operation == "plan":
+                        fields.add("action")
+                    skill_management_api._shape(body, fields)
+                    if operation == "plan":
+                        result = _managed_dependency_plan(body["identity"], body["capability"], body["action"])
+                    elif operation == "recheck":
+                        result = _managed_dependency_recheck(body["identity"], body["capability"])
+                    else:
+                        with skill_dependency_operation.GATE:
+                            _managed_dependency_state().assert_available()
+                            _, result = _managed_dependency_inspection(body["identity"], body["capability"])
+                elif operation == "execute":
+                    skill_management_api._shape(body, {"protocol", "reference", "fingerprint", "confirmed"})
+                    with skill_dependency_operation.GATE:
+                        entry = _managed_dependency_entry(body["reference"])
+                        if body["confirmed"] is not True or body["fingerprint"] != entry["fingerprint"]:
+                            skill_dependency_operation.fail("dependency_plan_confirmation_required")
+                    result = _managed_dependency_execute(body["reference"])
+                elif operation == "cancel":
+                    skill_management_api._shape(body, {"protocol", "operationId", "dataRootId"})
+                    with skill_dependency_operation.GATE:
+                        marker = _managed_dependency_state().read()
+                        if (not marker or marker["operationId"] != body["operationId"]
+                                or marker["target"]["dataRootId"] != body["dataRootId"]
+                                or not _managed_dependency_cancel or _managed_dependency_cancel[0] != body["operationId"]):
+                            skill_dependency_operation.fail("dependency_writer_unknown")
+                        _managed_dependency_cancel[1].set()
+                    result = {"ok": True, "cancelRequested": True}
+                else:
+                    raise skill_management_api.SkillManagementError("management_endpoint_missing", 404)
+            elif method == "POST" and parts in (["preview"], ["operations"]):
+                body = self._read_skill_management_json()
+                result = service.preview(body) if parts[0] == "preview" else service.apply(body)
+            else:
+                raise skill_management_api.SkillManagementError("management_endpoint_missing", 404)
+            self.send_json(result)
+        except skill_dependency_operation.DependencyOperationError as exc:
+            self.send_json({"ok": False, "error": exc.code, "errorCode": exc.code,
+                           "protocol": skill_management_api.PROTOCOL}, 409)
+        except skill_management_api.SkillManagementError as exc:
+            self.send_json(exc.public_payload(), exc.status)
+        except (ValueError, TypeError) as exc:
+            error = skill_management_api.SkillManagementError("management_transport_invalid", 400)
+            self.send_json(error.public_payload(), error.status)
+        return True
+
     def do_GET(self):
         global _browser_heartbeat, _server_instance_id
         if self.path.startswith("/proxy/models"):
@@ -25141,6 +25644,8 @@ class CodeHandler(BaseHTTPRequestHandler):
         query = parse.parse_qs(parsed.query)
 
         try:
+            if self._handle_skill_management("GET", route, query) or self._guard_legacy_skill_http(route):
+                return
             if route == "/api/ping":
                 self.send_json({"pong": True})
                 return
@@ -25267,10 +25772,13 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "instanceMode": INSTANCE_MODE,
                     "agentProjectionShadow": bool(_AGENT_PROJECTION_SHADOW_ENABLED),
                 }
-                if _SKILL_ACTIVATION_ENABLED or (
-                    _SKILL_IMMUTABLE_ADMISSION_ENABLED
-                    and _immutable_skill_startup_runtime.admission_reader() is not None
-                ):
+                immutable_profile = _skill_management_service().has_store()
+                heartbeat["skillManagementProtocol"] = skill_management_api.PROTOCOL
+                heartbeat["skillManagementMode"] = "immutable" if immutable_profile else "legacy"
+                if ((_SKILL_ACTIVATION_ENABLED and not immutable_profile) or (
+                    _SKILL_IMMUTABLE_ADMISSION_ENABLED and
+                    _immutable_skill_startup_runtime.admission_reader() is not None
+                )):
                     heartbeat["skillActivationProtocol"] = ACTIVATION_PROTOCOL
                 self.send_json(heartbeat)
                 return
@@ -25402,6 +25910,8 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         try:
             route = parse.urlparse(self.path).path
+            if self._handle_skill_management("POST", route, {}) or self._guard_legacy_skill_http(route):
+                return
             if route.rstrip("/") == "/api/image-routes/refresh":
                 body = self.read_body_json()
                 connections = body.get("connections")
@@ -25545,9 +26055,6 @@ class CodeHandler(BaseHTTPRequestHandler):
                     active_skill_names=body.get("activeSkillNames"),
                     image_route=resolved_image_route,
                     skill_activation_request=body.get("skillActivationRequest"),
-                    _immutable_skill_reader=_agent_immutable_admission_reader(
-                        body.get("skillActivationRequest")
-                    ),
                 )
                 response = {
                     "agentRunId": run["id"],
@@ -25961,6 +26468,8 @@ class CodeHandler(BaseHTTPRequestHandler):
         try:
             parsed = parse.urlparse(self.path)
             route = parsed.path
+            if self._handle_skill_management("DELETE", route, {}) or self._guard_legacy_skill_http(route):
+                return
             if route.startswith("/api/session-archive/"):
                 parts = route.strip("/").split("/")
                 if len(parts) == 3 and parts[:2] == ["api", "session-archive"]:
@@ -26089,6 +26598,10 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(payload)))
+        if getattr(self, "close_connection", False):
+            # Early rejection may leave an unread request body. Tell HTTP/1.1
+            # clients that this socket cannot carry their next request.
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
 

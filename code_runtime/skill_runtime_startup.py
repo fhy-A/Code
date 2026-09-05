@@ -41,6 +41,7 @@ class ImmutableSkillStartupRuntime:
         self._admission_enabled = False
         self._reader = None
         self._error_code = ""
+        self._owner = None
 
     def snapshot(self):
         with self._guard:
@@ -58,6 +59,14 @@ class ImmutableSkillStartupRuntime:
     def admission_reader(self):
         with self._guard:
             return self._reader if self._admission_enabled else None
+
+    def management_owner(self, data_root):
+        """Expose the existing owner only; a request must never acquire one."""
+        with self._guard:
+            owner = self._owner
+            if owner is not None and not owner.released and _path_key(owner.data_dir) == _path_key(data_root):
+                return owner
+            return None
 
     def _unavailable(self, code, admission_enabled, cause=None):
         self._status = "unavailable"
@@ -90,6 +99,7 @@ class ImmutableSkillStartupRuntime:
             self._initialized = True
             self._identity = identity
             self._admission_enabled = enabled
+            self._owner = owner
             try:
                 store = self._store_factory(
                     Path(data_root), Path(bundled_root), write_enabled=True,
