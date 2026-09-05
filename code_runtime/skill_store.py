@@ -213,6 +213,38 @@ class SkillStore:
             if len(object_ids) > MAX_OBJECTS: _fail("store_object_limit")
         _safe_tree_bytes(self.root)
         return object_ids
+    def _initial_state(self, *, lock_held=False):
+        """Classify a store before any lock or skeleton write."""
+        if revisions._path_kind(self.root) == "missing":
+            return "empty"
+        _safe_dir(self.root)
+        allowed = {"registry.lock", "objects", "transactions", "staging"}
+        children = {item.name: item for item in self.root.iterdir()}
+        if set(children) - allowed:
+            return "existing"
+        lock = children.get("registry.lock")
+        if lock is not None and not lock_held:
+            _safe_file(lock)
+            if os.lstat(lock).st_size > 1:
+                return "existing"
+        for name in ("transactions", "staging"):
+            directory = children.get(name)
+            if directory is not None:
+                _safe_dir(directory)
+                if next(directory.iterdir(), None) is not None:
+                    return "existing"
+        objects = children.get("objects")
+        if objects is not None:
+            _safe_dir(objects)
+            object_children = {item.name: item for item in objects.iterdir()}
+            if set(object_children) - {"sha256"}:
+                return "existing"
+            hashes = object_children.get("sha256")
+            if hashes is not None:
+                _safe_dir(hashes)
+                if next(hashes.iterdir(), None) is not None:
+                    return "existing"
+        return "empty"
     def _preflight(self, catalog, hints):
         _safe_dir(self.data_root); _safe_dir(self.bundled_root); self._inspect_layout()
         catalog = revisions.normalize_bundled_catalog(catalog)
@@ -299,6 +331,9 @@ class SkillStore:
         base = self.root / "objects" if staging is None else self.root / "staging" / staging / "objects"
         return base / "sha256" / value[:2] / value
     def _verify_object(self, directory, expected_revision=None):
+        kind = revisions._path_kind(directory)
+        if kind == "missing": _fail("object_missing")
+        if kind != "directory": _fail("object_corrupt")
         _safe_dir(directory); children = {item.name: item for item in directory.iterdir()}
         if set(children) != {"manifest.json", "content"}: _fail("object_corrupt")
         _safe_dir(children["content"]); raw, value = self._load_json(children["manifest.json"], MAX_MANIFEST_BYTES, "object_corrupt")
@@ -555,10 +590,12 @@ class SkillStore:
     def bootstrap(self, catalog, *, identity_hints=None):
         if not self.write_enabled: _fail("store_writes_disabled")
         hints = _normalize_hints(identity_hints)
-        new_store = revisions._path_kind(self.root) == "missing"
-        first = self._preflight(catalog, hints) if new_store else None
-        if not new_store: self._inspect_layout()
+        initial_state = self._initial_state()
+        first = self._preflight(catalog, hints) if initial_state == "empty" else None
+        if initial_state != "empty": self._inspect_layout()
         with self._mutation_lock():
+            if first is not None and self._initial_state(lock_held=True) != "empty":
+                first = None
             self._ensure_skeleton()
             journals, root = self._journals(), self._load_root()
             if len(journals) > 1: _fail("store_transaction_conflict")
@@ -612,3 +649,83 @@ class SkillStore:
             journal = self._write_journal(journal, "staged-verified")
             current = self._recover_captured(journal, self._load_root(), None)
             self._hit("after-cleanup"); return current
+
+
+class SkillStoreReader:
+    """Read exact immutable objects without creating or repairing store state."""
+
+    def __init__(self, data_root):
+        if data_root is None:
+            raise ValueError("explicit data_root is required")
+        self._store = SkillStore(data_root, data_root)
+
+    def _root(self, expected=None):
+        self._store._inspect_layout()
+        root = self._store._load_root()
+        if root is None:
+            _fail("store_root_missing")
+        if expected is not None and root["dataRootId"] != expected:
+            _fail("store_data_root_mismatch")
+        return root
+
+    def read_registry(self, *, data_root_id=None):
+        object_ids = self._store._inspect_layout()
+        self._root(data_root_id)
+        registry = self._store._load_registry()
+        if registry is None:
+            _fail("registry_missing")
+        referenced = {item["revisionId"] for item in registry["installations"]}
+        if object_ids != referenced:
+            _fail("store_object_unknown")
+        return json.loads(_canonical(registry))
+
+    def read_pinned(self, data_root_id, revision_id):
+        if not _ROOT_ID.fullmatch(str(data_root_id)):
+            _fail("store_data_root_invalid")
+        if not _HASH.fullmatch(str(revision_id)):
+            _fail("object_revision_invalid")
+        root = self._root(data_root_id)
+        directory = self._store._object_path(revision_id)
+        if revisions._path_kind(directory) == "missing":
+            _fail("object_missing")
+        manifest = self._store._verify_object(directory, revision_id)
+        files = []
+        for item in manifest["files"]:
+            payload = revisions._stable_file(directory / "content" / item["path"])
+            files.append({**item, "content": payload})
+        if self._store._verify_object(directory, revision_id) != manifest:
+            _fail("object_changed")
+        if self._store._load_root() != root:
+            _fail("store_root_changed")
+        return {
+            "dataRootId": root["dataRootId"],
+            "revisionId": revision_id,
+            "manifest": manifest,
+            "files": files,
+        }
+
+    def read_active(self, routing_alias):
+        alias = _alias(routing_alias)
+        registry = self.read_registry()
+        matches = [item for item in registry["bindings"] if item["routingAlias"].casefold() == alias.casefold()]
+        if not matches:
+            _fail("store_binding_missing")
+        binding = matches[0]
+        if binding["state"] != "ready":
+            _fail("store_binding_unavailable")
+        candidate = binding["activeCandidate"]
+        installation = next(
+            (item for item in registry["installations"] if item["installationId"] == candidate["installationId"]),
+            None,
+        )
+        if installation is None or installation["revisionId"] != candidate["revisionId"]:
+            _fail("store_active_candidate_invalid")
+        pinned = self.read_pinned(registry["dataRootId"], candidate["revisionId"])
+        if self.read_registry() != registry:
+            _fail("registry_changed")
+        return {
+            "registry": {key: registry[key] for key in ("schema", "dataRootId", "generation", "registryHash")},
+            "routingAlias": binding["routingAlias"],
+            "installation": {key: installation[key] for key in ("skillId", "installationId", "displayName", "revisionId")},
+            "object": pinned,
+        }

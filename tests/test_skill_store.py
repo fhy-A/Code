@@ -553,3 +553,166 @@ def test_missing_observation_accepts_only_null_error(tmp_path):
     )
     candidate["sourceObservations"].sort(key=lambda item: item["sourceObservationId"])
     assert skill_store.normalize_registry(_reseal(candidate)) == candidate
+
+
+def test_read_only_store_reader_contract_exists():
+    assert hasattr(skill_store, "SkillStoreReader")
+
+
+_EMPTY_LAYOUTS = [
+    tuple(name for bit, name in enumerate((
+        "registry.lock", "objects/sha256", "transactions", "staging",
+    )) if mask & 1 << bit)
+    for mask in range(16)
+] + [("objects",)]
+
+
+@pytest.mark.parametrize("layout", _EMPTY_LAYOUTS)
+def test_invalid_catalog_preserves_partial_empty_skeleton_byte_for_byte(tmp_path, layout):
+    data, bundle, catalog = _fixture(tmp_path)
+    root = data / skill_store.STORE_DIRECTORY
+    root.mkdir()
+    for relative in layout:
+        path = root / relative
+        if relative == "registry.lock":
+            path.write_bytes(b"")
+        else:
+            path.mkdir(parents=True)
+    catalog["skills"][0]["skillId"] = "invalid"
+    before = _snapshot(root)
+    with pytest.raises(revisions.SkillRevisionError):
+        _store(data, bundle).bootstrap(catalog)
+    assert _snapshot(root) == before
+
+
+@pytest.mark.parametrize("layout", _EMPTY_LAYOUTS)
+def test_valid_bootstrap_completes_from_any_partial_empty_skeleton(tmp_path, layout):
+    data, bundle, catalog = _fixture(tmp_path)
+    root = data / skill_store.STORE_DIRECTORY
+    root.mkdir()
+    for relative in layout:
+        path = root / relative
+        path.write_bytes(b"") if relative == "registry.lock" else path.mkdir(parents=True)
+    assert _by_alias(_store(data, bundle).bootstrap(catalog))["alpha"]["state"] == "ready"
+
+
+def test_invalid_legacy_state_preserves_crash_lock_byte_for_byte(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    root = data / skill_store.STORE_DIRECTORY
+    root.mkdir(); (root / "registry.lock").write_bytes(b"\0")
+    (data / "bundled-skills-state.json").write_text("{broken", encoding="utf-8")
+    before = _snapshot(root)
+    with pytest.raises(revisions.SkillRevisionError):
+        _store(data, bundle).bootstrap(catalog)
+    assert _snapshot(root) == before
+
+
+def test_reader_active_and_pinned_reads_are_exact_and_zero_write(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    reader = skill_store.SkillStoreReader(data)
+    before = _snapshot(data / skill_store.STORE_DIRECTORY)
+    active = reader.read_active("ALPHA")
+    assert active["registry"] == {key: registry[key] for key in (
+        "schema", "dataRootId", "generation", "registryHash",
+    )}
+    assert active["routingAlias"] == "alpha"
+    assert active["installation"]["revisionId"] == active["object"]["revisionId"]
+    assert {item["path"] for item in active["object"]["files"]} == {
+        "SKILL.md", "nested/text.txt",
+    }
+    assert all(not str(data) in value for value in _all_strings(active))
+    assert _snapshot(data / skill_store.STORE_DIRECTORY) == before
+
+    (data / "skills" / "alpha" / "SKILL.md").write_text("mutable changed", encoding="utf-8")
+    (data / skill_store.STORE_DIRECTORY / "registry.json").write_text("{}\n", encoding="utf-8")
+    assert reader.read_pinned(registry["dataRootId"], active["object"]["revisionId"]) == active["object"]
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        reader.read_registry()
+    assert caught.value.code == "registry_invalid"
+
+
+def _all_strings(value):
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [item for key, child in value.items() for item in [key, *_all_strings(child)]]
+    if isinstance(value, (list, tuple)):
+        return [item for child in value for item in _all_strings(child)]
+    return []
+
+
+def test_reader_rejects_unavailable_and_unknown_bindings(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path / "blocked")
+    (data / "skills" / "alpha" / "SKILL.md").write_text("modified", encoding="utf-8")
+    _store(data, bundle).bootstrap(catalog)
+    reader = skill_store.SkillStoreReader(data)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        reader.read_active("alpha")
+    assert caught.value.code == "store_binding_unavailable"
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        reader.read_active("unknown")
+    assert caught.value.code == "store_binding_missing"
+
+    shared = tmp_path / "shared"
+    shared.mkdir(); _write_skill(shared / "skills", "alpha")
+    shared_catalog = revisions.build_bundled_catalog(shared / "skills", {"alpha": "code.bundle/alpha"})
+    _store(shared, shared / "skills").bootstrap(shared_catalog)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        skill_store.SkillStoreReader(shared).read_active("alpha")
+    assert caught.value.code == "store_binding_unavailable"
+
+    tomb_data, tomb_bundle, tomb_catalog = _fixture(tmp_path / "tombstone")
+    shutil.rmtree(tomb_data / "skills" / "alpha")
+    (tomb_data / "bundled-skills-state.json").write_text(json.dumps({
+        "schema": "code-bundled-skills/v1", "tombstones": ["alpha"],
+    }), encoding="utf-8")
+    _store(tomb_data, tomb_bundle).bootstrap(tomb_catalog)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        skill_store.SkillStoreReader(tomb_data).read_active("alpha")
+    assert caught.value.code == "store_binding_unavailable"
+
+
+def test_reader_missing_store_is_zero_write(tmp_path):
+    data = tmp_path / "profile"
+    data.mkdir()
+    before = _snapshot(data)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        skill_store.SkillStoreReader(data).read_registry()
+    assert caught.value.code == "store_root_missing"
+    assert _snapshot(data) == before
+
+
+@pytest.mark.parametrize("mutation,code", [
+    ("missing", "object_missing"),
+    ("corrupt", "object_corrupt"),
+    ("extra", "store_object_unknown"),
+])
+def test_reader_rejects_missing_corrupt_and_extra_objects(tmp_path, mutation, code):
+    data, bundle, catalog = _fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    revision_id = registry["installations"][0]["revisionId"]
+    obj = _store(data, bundle)._object_path(revision_id)
+    if mutation == "missing":
+        shutil.rmtree(obj)
+    elif mutation == "corrupt":
+        (obj / "content" / "SKILL.md").write_bytes(b"tampered")
+    else:
+        fake = "f" * 64
+        shutil.copytree(obj, obj.parents[1] / fake[:2] / fake)
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        skill_store.SkillStoreReader(data).read_registry()
+    assert caught.value.code == code
+
+
+def test_pinned_reader_rejects_wrong_root_and_revision(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    reader = skill_store.SkillStoreReader(data)
+    revision_id = registry["installations"][0]["revisionId"]
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        reader.read_pinned("dr1_" + "f" * 32, revision_id)
+    assert caught.value.code == "store_data_root_mismatch"
+    with pytest.raises(skill_store.SkillStoreError) as caught:
+        reader.read_pinned(registry["dataRootId"], "bad")
+    assert caught.value.code == "object_revision_invalid"
