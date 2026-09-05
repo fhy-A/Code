@@ -41,6 +41,7 @@ from code_runtime import (
     skill_lifecycle,
     skill_lifecycle_v2,
     skill_outcome,
+    skill_runtime_startup,
     skill_runtime_v2,
     windows_explorer,
 )
@@ -226,6 +227,15 @@ def _resolve_skill_activation_enabled(environ=None):
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_skill_immutable_admission_enabled(environ=None):
+    """Keep immutable Skill admission off until startup explicitly enables it."""
+    source = os.environ if environ is None else environ
+    raw = source.get("CODE_SKILL_IMMUTABLE_ADMISSION_V1")
+    if raw is None or str(raw).strip() == "":
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_skill_completion_enforcement_enabled(environ=None):
     """Keep canonical Skill completion enforcement explicitly opt-in."""
     source = os.environ if environ is None else environ
@@ -269,12 +279,16 @@ _SESSION_REVISION_CAS_ENABLED = _resolve_session_revision_cas_enabled()
 _MODEL_ROUTE_REGISTRY_ENABLED = _resolve_model_route_registry_enabled()
 _SKILL_REGISTRY_SHADOW_ENABLED = _resolve_skill_registry_shadow_enabled()
 _SKILL_ACTIVATION_ENABLED = _resolve_skill_activation_enabled()
+_SKILL_IMMUTABLE_ADMISSION_ENABLED = _resolve_skill_immutable_admission_enabled()
 _SKILL_COMPLETION_ENFORCEMENT_ENABLED = _resolve_skill_completion_enforcement_enabled()
 _model_route_registry = _DeferredRuntimeService(
     lambda: ModelRouteRegistry(MODEL_ROUTE_CATALOG_PATH)
 )
 _image_route_registry = _DeferredRuntimeService(
     lambda: ImageRouteRegistry(IMAGE_ROUTE_CATALOG_PATH)
+)
+_immutable_skill_startup_runtime = (
+    skill_runtime_startup.ImmutableSkillStartupRuntime()
 )
 _generated_asset_repository = GeneratedAssetRepository(GENERATED_ASSETS_DIR)
 _image_upstream_client = ImageUpstreamClient()
@@ -4447,6 +4461,9 @@ def _finish_agent_run_locked(run, status, error_message="", error_code=""):
     # Let the worker consume it instead of publishing a stale completion.
     if status == "completed" and run.get("pending_steers"):
         return False
+    # Terminal records are reader-free and cannot retain a recovery envelope
+    # whose pending-gate digest is about to be cleared by cancellation/failure.
+    run["skill_recovery"] = None
     run["status"] = status
     run["resume_status"] = ""
     run["error"] = _redact_agent_secrets(run, error_message)[:2000]
@@ -5370,7 +5387,28 @@ def _agent_restore_skill_recovery(run, reader):
     return True
 
 
-def _get_agent_run(run_id, immutable_skill_reader=None):
+_DEFAULT_IMMUTABLE_SKILL_READER = object()
+
+
+def _agent_immutable_recovery_reader():
+    return _immutable_skill_startup_runtime.recovery_reader()
+
+
+def _agent_immutable_admission_reader(activation_request):
+    if activation_request is None or not _SKILL_IMMUTABLE_ADMISSION_ENABLED:
+        return None
+    reader = _immutable_skill_startup_runtime.admission_reader()
+    if reader is None:
+        raise SkillActivationError(
+            "immutable_skill_runtime_unavailable",
+            "Immutable Skill admission is unavailable.",
+        )
+    return reader
+
+
+def _get_agent_run(run_id, immutable_skill_reader=_DEFAULT_IMMUTABLE_SKILL_READER):
+    if immutable_skill_reader is _DEFAULT_IMMUTABLE_SKILL_READER:
+        immutable_skill_reader = _agent_immutable_recovery_reader()
     try:
         safe_id = _safe_agent_run_id(run_id)
     except ValueError:
@@ -5380,8 +5418,17 @@ def _get_agent_run(run_id, immutable_skill_reader=None):
         if existing:
             if immutable_skill_reader is not None:
                 if existing.get("skill_recovery"):
-                    _agent_restore_skill_recovery(existing, immutable_skill_reader)
-                elif skill_runtime_v2.is_immutable(existing.get("skill_lifecycle")):
+                    try:
+                        _agent_restore_skill_recovery(
+                            existing, immutable_skill_reader,
+                        )
+                    except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+                        if not exc.temporary:
+                            raise
+                elif (
+                    skill_runtime_v2.is_immutable(existing.get("skill_lifecycle"))
+                    and existing.get("_immutable_skill_reader") is not immutable_skill_reader
+                ):
                     skill_runtime_v2.verify_lifecycle(
                         immutable_skill_reader, _agent_canonical_skill_lifecycle(existing),
                     )
@@ -11018,7 +11065,10 @@ def _create_agent_run(
         ]
         with admission_lock:
             existing = _get_agent_run(
-                run_id, immutable_skill_reader=_immutable_skill_reader,
+                run_id,
+                immutable_skill_reader=(
+                    _immutable_skill_reader or _agent_immutable_recovery_reader()
+                ),
             )
             if existing:
                 return existing
@@ -11699,6 +11749,7 @@ def _close_agent_tools_for_cancel_locked(run):
     run["pending_tool_calls"] = []
     run["pending_input"] = None
     run["pending_authorization"] = None
+    run["pending_skill_evidence"] = None
     run["active_process"] = None
     run["active_command_call_id"] = ""
 
@@ -25216,7 +25267,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "instanceMode": INSTANCE_MODE,
                     "agentProjectionShadow": bool(_AGENT_PROJECTION_SHADOW_ENABLED),
                 }
-                if _SKILL_ACTIVATION_ENABLED:
+                if _SKILL_ACTIVATION_ENABLED or (
+                    _SKILL_IMMUTABLE_ADMISSION_ENABLED
+                    and _immutable_skill_startup_runtime.admission_reader() is not None
+                ):
                     heartbeat["skillActivationProtocol"] = ACTIVATION_PROTOCOL
                 self.send_json(heartbeat)
                 return
@@ -25491,6 +25545,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                     active_skill_names=body.get("activeSkillNames"),
                     image_route=resolved_image_route,
                     skill_activation_request=body.get("skillActivationRequest"),
+                    _immutable_skill_reader=_agent_immutable_admission_reader(
+                        body.get("skillActivationRequest")
+                    ),
                 )
                 response = {
                     "agentRunId": run["id"],
@@ -28770,6 +28827,24 @@ def _data_dir_owner_startup_message(exc):
     return "Code cannot start because its data directory is unavailable."
 
 
+def _immutable_skill_startup_message(exc):
+    return (
+        "Code cannot start because immutable Skill startup is unavailable "
+        f"({exc.code})."
+    )
+
+
+def _initialize_immutable_skill_runtime(owner, legacy_sync_result=None):
+    """Initialize immutable Skill state only under the entrypoint's DATA_DIR owner."""
+    return _immutable_skill_startup_runtime.initialize(
+        owner=owner,
+        data_root=DATA_DIR,
+        bundled_root=APP_DIR / "data" / "skills",
+        admission_enabled=_SKILL_IMMUTABLE_ADMISSION_ENABLED,
+        legacy_sync_result=legacy_sync_result,
+    )
+
+
 def run_server(
     *,
     owner_acquire=data_dir_owner.acquire_data_dir_owner,
@@ -28787,6 +28862,11 @@ def run_server(
         return 1
 
     _ensure_runtime_data_directories()
+    try:
+        _initialize_immutable_skill_runtime(owner)
+    except skill_runtime_startup.ImmutableSkillStartupError as exc:
+        print(_immutable_skill_startup_message(exc), file=sys.stderr)
+        return 1
     _initialize_runtime_data_services()
     _restore_update_jobs()
 

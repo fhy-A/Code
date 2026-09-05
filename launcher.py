@@ -10,7 +10,7 @@ import webbrowser
 from pathlib import Path
 
 from code_runtime.bundled_skills import sync_missing_bundled_skills
-from code_runtime import data_dir_owner
+from code_runtime import data_dir_owner, skill_runtime_startup
 
 
 def has_existing_browser(port=3010):
@@ -221,6 +221,13 @@ def main():
                 file=sys.stderr,
             )
         return 1
+    except skill_runtime_startup.ImmutableSkillStartupError as exc:
+        print(
+            "Code cannot start because immutable Skill startup is unavailable "
+            f"({exc.code}).",
+            file=sys.stderr,
+        )
+        return 1
     except Exception:
         import traceback
         crash_log = Path.home() / ".code" / "crash.log"
@@ -259,6 +266,7 @@ def _main(*, owner_acquire=data_dir_owner.acquire_data_dir_owner):
     # Keep the legacy first-run-only memory copy. Bundled Skills use their own
     # per-directory, tombstone-aware upgrade synchronizer.
     bundled_data = base / "data"
+    skill_sync_result = None
     if bundled_data.exists():
         memory_src = bundled_data / "memory"
         memory_dst = data_dir / "memory"
@@ -271,7 +279,7 @@ def _main(*, owner_acquire=data_dir_owner.acquire_data_dir_owner):
                     )
                 elif item.is_dir():
                     shutil.copytree(item, memory_dst / item.name)
-        sync_bundled_skills_at_startup(base, data_dir)
+        skill_sync_result = sync_bundled_skills_at_startup(base, data_dir)
 
     # Set environment for server
     os.environ["CODE_PORT"] = "3010"
@@ -292,6 +300,9 @@ def _main(*, owner_acquire=data_dir_owner.acquire_data_dir_owner):
     server.FILE_BACKUP_DIR = data_dir / "file-backups"
     server.CONFIG_PATH = data_dir / "config.json"
     server._ensure_runtime_data_directories()
+    server._initialize_immutable_skill_runtime(
+        owner, legacy_sync_result=skill_sync_result,
+    )
     server._initialize_runtime_data_services()
 
     port = int(os.environ.get("CODE_PORT", "3010"))

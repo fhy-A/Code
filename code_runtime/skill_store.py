@@ -1,4 +1,4 @@
-"""Default-off immutable Skill storage for isolated Stage 4B bootstrap tests."""
+"""Default-off immutable Skill storage with journal-first startup recovery."""
 from __future__ import annotations
 from contextlib import contextmanager
 import hashlib, json
@@ -564,6 +564,110 @@ class SkillStore:
         self._inspect_layout(); registry = self._load_registry()
         if registry is None and self.root.exists(): _fail("registry_missing")
         return registry
+    def inspect_startup_state(self):
+        """Classify startup without reading mutable Skill sources or writing state."""
+        if self._initial_state() == "empty":
+            return {"state": "empty"}
+        object_ids = self._inspect_layout()
+        journals = self._journals()
+        if len(journals) > 1:
+            _fail("store_transaction_conflict")
+        active = [item for item in journals if item["phase"] != "committed"]
+        if active:
+            journal = active[0]
+            root = self._load_root()
+            if root is not None and root["dataRootId"] != journal["dataRootId"]:
+                _fail("root_mismatch")
+            registry = (
+                self._load_registry(verify_objects=False)
+                if (self.root / "registry.json").exists() else None
+            )
+            if registry is not None and registry != journal["targetRegistry"]:
+                _fail("registry_cas_conflict")
+            phase = _PHASES.index(journal["phase"])
+            if registry is not None and phase < _PHASES.index("objects-published"):
+                _fail("registry_cas_conflict")
+            if registry is None and phase >= _PHASES.index("registry-published"):
+                _fail("bootstrap_recovery_registry_missing")
+            expected = set(journal["objectRevisionIds"])
+            if object_ids - expected:
+                _fail("store_object_unknown")
+            staging_root = self.root / "staging"
+            staged_operations = (
+                {item.name for item in staging_root.iterdir()}
+                if staging_root.exists() else set()
+            )
+            if staged_operations - {journal["operationId"]}:
+                _fail("staging_unknown")
+            staged_operation = staging_root / journal["operationId"]
+            if staged_operation.exists():
+                _safe_dir(staged_operation)
+                if {item.name for item in staged_operation.iterdir()} - {"objects"}:
+                    _fail("staging_unknown")
+            staged_container = staged_operation / "objects"
+            if staged_container.exists():
+                _safe_dir(staged_container)
+                if {item.name for item in staged_container.iterdir()} - {"sha256"}:
+                    _fail("staging_unknown")
+            staged_objects = (
+                staged_container / "sha256"
+            )
+            if staged_objects.exists():
+                _safe_dir(staged_objects)
+                for prefix in staged_objects.iterdir():
+                    if not re.fullmatch(r"[0-9a-f]{2}", prefix.name):
+                        _fail("staging_unknown")
+                    _safe_dir(prefix)
+                    for item in prefix.iterdir():
+                        revision_id = "sha256:" + item.name
+                        if (
+                            not re.fullmatch(r"[0-9a-f]{64}", item.name)
+                            or revision_id not in expected
+                            or not item.name.startswith(prefix.name)
+                        ):
+                            _fail("staging_unknown")
+                        _safe_dir(item)
+            if phase >= _PHASES.index("staged-verified"):
+                for revision_id in expected:
+                    final = self._object_path(revision_id)
+                    staged = self._object_path(
+                        revision_id, staging=journal["operationId"],
+                    )
+                    if final.exists():
+                        self._verify_object(final, revision_id)
+                    elif staged.exists():
+                        self._verify_object(staged, revision_id)
+                    else:
+                        _fail("bootstrap_recovery_capture_missing")
+            if phase >= _PHASES.index("objects-published"):
+                for revision_id in expected:
+                    self._verify_object(self._object_path(revision_id), revision_id)
+            return {
+                "state": "recoverable",
+                "operationId": journal["operationId"],
+                "phase": journal["phase"],
+            }
+        root = self._load_root()
+        registry = (
+            self._load_registry(verify_objects=False)
+            if (self.root / "registry.json").exists() else None
+        )
+        if root is None or registry is None or len(journals) != 1:
+            _fail("bootstrap_store_incomplete")
+        if journals[0]["targetRegistry"] != registry:
+            _fail("registry_cas_conflict")
+        referenced = {item["revisionId"] for item in registry["installations"]}
+        if object_ids != referenced:
+            _fail("store_object_unknown")
+        staging = self.root / "staging"
+        if staging.exists() and next(staging.iterdir(), None) is not None:
+            _fail("staging_unknown")
+        return {
+            "state": "committed",
+            "dataRootId": root["dataRootId"],
+            "generation": registry["generation"],
+            "registryHash": registry["registryHash"],
+        }
     def _recover_captured(self, journal, root, registry):
         operation_id, target = journal["operationId"], journal["targetRegistry"]
         if root is None:
@@ -588,11 +692,11 @@ class SkillStore:
         if _PHASES.index(journal["phase"]) < _PHASES.index("registry-published"): journal = self._write_journal(journal, "registry-published")
         if journal["phase"] != "committed": journal = self._write_journal(journal, "committed")
         self._clean_stage(operation_id, set(journal["objectRevisionIds"])); return current
-    def bootstrap(self, catalog, *, identity_hints=None):
+    def _bootstrap_from_catalog_loader(self, catalog_loader, *, identity_hints=None):
         if not self.write_enabled: _fail("store_writes_disabled")
         hints = _normalize_hints(identity_hints)
         initial_state = self._initial_state()
-        first = self._preflight(catalog, hints) if initial_state == "empty" else None
+        first = self._preflight(catalog_loader(), hints) if initial_state == "empty" else None
         if initial_state != "empty": self._inspect_layout()
         with self._mutation_lock():
             if first is not None and self._initial_state(lock_held=True) != "empty":
@@ -611,11 +715,11 @@ class SkillStore:
             late = journals[0] if journals and _PHASES.index(journals[0]["phase"]) >= _PHASES.index("staged-verified") else None
             if late is not None:
                 self._clean_temps(known); current = self._recover_captured(late, root, registry)
-                try: current_request = self._preflight(catalog, hints)[3]
+                try: current_request = self._preflight(catalog_loader(), hints)[3]
                 except (SkillStoreError, revisions.SkillRevisionError) as exc: raise SkillStoreError("bootstrap_already_committed_conflict") from exc
                 if current_request != late["requestHash"]: _fail("bootstrap_already_committed_conflict")
                 return current
-            try: second = self._preflight(catalog, hints)
+            try: second = self._preflight(catalog_loader(), hints)
             except (SkillStoreError, revisions.SkillRevisionError) as exc:
                 if active: raise SkillStoreError("bootstrap_recovery_source_conflict") from exc
                 raise
@@ -650,6 +754,17 @@ class SkillStore:
             journal = self._write_journal(journal, "staged-verified")
             current = self._recover_captured(journal, self._load_root(), None)
             self._hit("after-cleanup"); return current
+    def bootstrap(self, catalog, *, identity_hints=None):
+        return self._bootstrap_from_catalog_loader(
+            lambda: catalog, identity_hints=identity_hints,
+        )
+    def bootstrap_from_catalog_loader(self, catalog_loader, *, identity_hints=None):
+        """Run bootstrap while deferring catalog IO until journal-first recovery permits it."""
+        if not callable(catalog_loader):
+            raise TypeError("catalog_loader must be callable")
+        return self._bootstrap_from_catalog_loader(
+            catalog_loader, identity_hints=identity_hints,
+        )
 
 
 class SkillStoreReader:

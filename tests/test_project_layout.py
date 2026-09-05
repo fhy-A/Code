@@ -32,6 +32,7 @@ RUNTIME_MODULES = (
     "skill_registry",
     "skill_resources",
     "skill_revisions",
+    "skill_runtime_startup",
     "skill_runtime_v2",
     "skill_store",
     "windows_explorer",

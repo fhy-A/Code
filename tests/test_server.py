@@ -3540,6 +3540,7 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
 
         with mock.patch.object(server.os, "chdir", side_effect=lambda path: events.append("chdir")), \
              mock.patch.object(server, "_ensure_runtime_data_directories", side_effect=record("directories")), \
+             mock.patch.object(server, "_initialize_immutable_skill_runtime", side_effect=lambda owner: events.append("skills")), \
              mock.patch.object(server, "_initialize_runtime_data_services", side_effect=record("route-catalogs")), \
              mock.patch.object(server, "_restore_update_jobs", side_effect=record("restore")), \
              mock.patch.object(server, "_migrate_sessions_to_hierarchy", side_effect=record("sessions")), \
@@ -3561,6 +3562,7 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
                 "chdir",
                 "owner",
                 "directories",
+                "skills",
                 "route-catalogs",
                 "restore",
                 "sessions",
@@ -3584,6 +3586,7 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
 
         with mock.patch.object(server.os, "chdir") as chdir, \
              mock.patch.object(server, "_ensure_runtime_data_directories") as directories, \
+             mock.patch.object(server, "_initialize_immutable_skill_runtime") as skills, \
              mock.patch.object(server, "_initialize_runtime_data_services") as route_catalogs, \
              mock.patch.object(server, "_restore_update_jobs") as restore, \
              mock.patch("sys.stderr", stderr):
@@ -3599,6 +3602,37 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
             "Code cannot start because this data directory is already in use.\n",
         )
         directories.assert_not_called()
+        skills.assert_not_called()
+        route_catalogs.assert_not_called()
+        restore.assert_not_called()
+        factory.assert_not_called()
+
+    def test_run_server_immutable_startup_failure_stops_before_listener(self):
+        owner = mock.Mock()
+        factory = mock.Mock()
+        stderr = io.StringIO()
+        failure = server.skill_runtime_startup.ImmutableSkillStartupError(
+            "store_object_unknown"
+        )
+        with mock.patch.object(server.os, "chdir"), \
+             mock.patch.object(server, "_ensure_runtime_data_directories") as directories, \
+             mock.patch.object(server, "_initialize_immutable_skill_runtime", side_effect=failure) as skills, \
+             mock.patch.object(server, "_initialize_runtime_data_services") as route_catalogs, \
+             mock.patch.object(server, "_restore_update_jobs") as restore, \
+             mock.patch("sys.stderr", stderr):
+            result = server.run_server(
+                owner_acquire=mock.Mock(return_value=owner),
+                server_factory=factory,
+                tray_starter=mock.Mock(),
+            )
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "Code cannot start because immutable Skill startup is unavailable "
+            "(store_object_unknown).\n",
+        )
+        directories.assert_called_once_with()
+        skills.assert_called_once_with(owner)
         route_catalogs.assert_not_called()
         restore.assert_not_called()
         factory.assert_not_called()
@@ -3674,6 +3708,7 @@ class TestLauncherInstall(unittest.TestCase):
         fake_server = types.SimpleNamespace(
             CodeHandler=object,
             _ensure_runtime_data_directories=lambda: events.append("directories"),
+            _initialize_immutable_skill_runtime=lambda owner, legacy_sync_result=None: events.append("skills"),
             _initialize_runtime_data_services=lambda: events.append("route-catalogs"),
             run_tray_main_thread=lambda port, httpd: events.append("tray") or True,
         )
@@ -3711,6 +3746,7 @@ class TestLauncherInstall(unittest.TestCase):
                 "browser-check",
                 "chdir",
                 "directories",
+                "skills",
                 "route-catalogs",
                 "http",
                 "thread",
@@ -3740,6 +3776,24 @@ class TestLauncherInstall(unittest.TestCase):
         self.assertEqual(
             stderr.getvalue(),
             "Code cannot start because this data directory is already in use.\n",
+        )
+        file_open.assert_not_called()
+
+    def test_launcher_main_reports_immutable_startup_without_crash_log(self):
+        stderr = io.StringIO()
+        failure = launcher.skill_runtime_startup.ImmutableSkillStartupError(
+            "catalog_stale"
+        )
+        with mock.patch.object(launcher, "hide_console"), \
+             mock.patch.object(launcher, "_main", side_effect=failure), \
+             mock.patch("builtins.open") as file_open, \
+             mock.patch("sys.stderr", stderr):
+            result = launcher.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "Code cannot start because immutable Skill startup is unavailable "
+            "(catalog_stale).\n",
         )
         file_open.assert_not_called()
 

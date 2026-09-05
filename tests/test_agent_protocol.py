@@ -173,6 +173,33 @@ class TestAgentEventContract(unittest.TestCase):
         with self.assertRaises(agent_protocol.AgentProtocolError):
             agent_protocol.normalize_agent_event(raw, strict=True)
 
+    def test_skill_recovery_restored_is_strict_and_allows_real_waiting_states(self):
+        normalized = agent_protocol.normalize_agent_event(
+            _strict_event("skill_recovery_restored"), strict=True,
+        )
+        self.assertTrue(normalized["knownType"])
+        self.assertEqual(normalized["diagnostics"], [])
+
+        for field in ("restoredStatus", "dataRootId"):
+            with self.subTest(missing=field):
+                invalid = _strict_event("skill_recovery_restored")
+                invalid["data"].pop(field)
+                with self.assertRaises(agent_protocol.AgentProtocolError):
+                    agent_protocol.normalize_agent_event(invalid, strict=True)
+
+        for current in (
+            "waiting_user_input",
+            "waiting_authorization",
+            "waiting_credentials",
+            "waiting_skill_evidence",
+        ):
+            with self.subTest(current=current):
+                transition = agent_protocol.validate_transition(
+                    "run", "waiting_recovery", current, strict=True,
+                )
+                self.assertTrue(transition["valid"])
+                self.assertEqual(transition["diagnostics"], [])
+
     def test_credentials_are_rejected_recursively(self):
         probes = [
             {"apiKey": "fixture-value"},
@@ -315,7 +342,7 @@ class TestAgentEventContract(unittest.TestCase):
         summary = agent_protocol.public_contract_summary()
         encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True)
         self.assertIn('"protocolVersion": 1', encoded)
-        self.assertEqual(len(summary["eventTypes"]), 27)
+        self.assertEqual(len(summary["eventTypes"]), 28)
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
         runtime_imports = {
             alias.name

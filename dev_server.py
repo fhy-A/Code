@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib import parse
 
-from code_runtime import data_dir_owner
+from code_runtime import data_dir_owner, skill_runtime_startup
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -156,6 +156,7 @@ def run_dev_server(
         server_module = importlib.import_module("server")
 
     server_module._ensure_runtime_data_directories()
+    server_module._initialize_immutable_skill_runtime(owner)
     server_module._initialize_runtime_data_services()
     server_factory.daemon_threads = True
     server_module._migrate_sessions_to_hierarchy()
@@ -197,6 +198,13 @@ def main():
                 "Code Dev cannot start because its data directory is unavailable.",
                 file=sys.stderr,
             )
+        return 1
+    except skill_runtime_startup.ImmutableSkillStartupError as exc:
+        print(
+            "Code Dev cannot start because immutable Skill startup is unavailable "
+            f"({exc.code}).",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

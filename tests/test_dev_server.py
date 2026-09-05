@@ -74,6 +74,9 @@ class TestDevServer(unittest.TestCase):
         fake_module._ensure_runtime_data_directories.side_effect = (
             lambda: events.append("directories")
         )
+        fake_module._initialize_immutable_skill_runtime.side_effect = (
+            lambda owner: events.append("skills")
+        )
         fake_module._initialize_runtime_data_services.side_effect = (
             lambda: events.append("route-catalogs")
         )
@@ -123,6 +126,7 @@ class TestDevServer(unittest.TestCase):
         fake_module._migrate_project_root_paths.assert_called_once_with()
         fake_module._start_agent_run_nonterminal_index_build.assert_called_once_with()
         fake_module._start_agent_run_session_index_build.assert_called_once_with()
+        fake_module._initialize_immutable_skill_runtime.assert_called_once_with(owner)
         fake_module.start_tray.assert_called_once_with(3011, instance)
         ensure_frontend.assert_called_once_with()
         self.assertTrue(issubclass(instance.handler, fake_module.CodeHandler))
@@ -132,6 +136,7 @@ class TestDevServer(unittest.TestCase):
                 "owner",
                 "frontend",
                 "directories",
+                "skills",
                 "route-catalogs",
                 "sessions",
                 "projects",
@@ -180,6 +185,22 @@ class TestDevServer(unittest.TestCase):
         self.assertEqual(
             stderr.getvalue(),
             "Code Dev cannot start because this data directory is already in use.\n",
+        )
+
+    def test_main_reports_immutable_startup_with_a_stable_error(self):
+        stderr = io.StringIO()
+        failure = dev_server.skill_runtime_startup.ImmutableSkillStartupError(
+            "registry_hash_mismatch"
+        )
+        with mock.patch.object(
+            dev_server, "run_dev_server", side_effect=failure,
+        ), mock.patch("sys.stderr", stderr):
+            result = dev_server.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "Code Dev cannot start because immutable Skill startup is unavailable "
+            "(registry_hash_mismatch).\n",
         )
 
     def test_frontend_build_check_returns_without_rebuilding_when_fresh(self):

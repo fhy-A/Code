@@ -86,6 +86,11 @@ AGENT_EVENT_SPECS = {
         "runtimeRunId",
         required=("resumeStatus", "reason", "errorCode"),
     ),
+    "skill_recovery_restored": _event_spec(
+        "restoredStatus",
+        "dataRootId",
+        required=("restoredStatus", "dataRootId"),
+    ),
     "waiting_skill_evidence": _event_spec(
         "gateId",
         "activeSkill",
@@ -286,6 +291,10 @@ AGENT_RUN_TRANSITIONS = {
         "waiting_recovery",
         "model",
         "tools",
+        "waiting_user_input",
+        "waiting_authorization",
+        "waiting_credentials",
+        "waiting_skill_evidence",
         "failed",
         "cancelled",
     }),

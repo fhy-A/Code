@@ -23,7 +23,7 @@ def _runtime_fixture(tmp_path):
         text = path.read_text(encoding="utf-8")
         text = text.replace(
             "allowed-tools: read_file, write_file",
-            "allowed-tools: read_file, write_file, run_command, use_skill, check_skill_dependencies, read_skill_resource, task",
+            "allowed-tools: read_file, write_file, run_command, use_skill, check_skill_dependencies, read_skill_resource, request_user_input, task",
         )
         path.write_text(text, encoding="utf-8", newline="\n")
     catalog = skill_revisions.build_bundled_catalog(bundle, {
@@ -121,6 +121,275 @@ def test_v6_no_match_client_request_is_idempotent(runtime_env):
     second = _run(reader, message="hello world", explicit="", request_id="immutable-no-match")
     assert second is first
     assert server_mod._agent_run_record(second)["version"] == 6
+
+
+def test_global_recovery_reader_is_separate_from_new_admission(runtime_env, monkeypatch):
+    _data, _bundle, reader = runtime_env
+
+    class Runtime:
+        def recovery_reader(self):
+            return reader
+
+        def admission_reader(self):
+            return reader
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
+    monkeypatch.setattr(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", False)
+    existing = _run(reader, request_id="global-recovery-v6")
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+    restored = server_mod._get_agent_run(existing["id"])
+    assert restored["skill_lifecycle"]["schemaVersion"] == 2
+    assert restored["_immutable_skill_reader"] is reader
+    assert server_mod._agent_immutable_admission_reader({"schemaVersion": 1}) is None
+
+    duplicate = server_mod._create_agent_run(
+        "", {"model": "test-model", "messages": [{"role": "user", "content": "plain"}]},
+        "http://127.0.0.1:9", [], ["read_file"], 2, "read",
+        start_worker=False, client_request_id="global-recovery-v6",
+    )
+    assert duplicate is restored
+    legacy = server_mod._create_agent_run(
+        "", {"model": "test-model", "messages": [{"role": "user", "content": "plain"}]},
+        "http://127.0.0.1:9", [], ["read_file"], 2, "read", start_worker=False,
+    )
+    assert server_mod._agent_run_record(legacy)["version"] == 5
+
+    monkeypatch.setattr(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", True)
+    assert server_mod._agent_immutable_admission_reader({"schemaVersion": 1}) is reader
+
+    class Unavailable(Runtime):
+        def admission_reader(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Unavailable())
+    with pytest.raises(server_mod.SkillActivationError) as raised:
+        server_mod._agent_immutable_admission_reader({"schemaVersion": 1})
+    assert raised.value.code == "immutable_skill_runtime_unavailable"
+
+
+def test_recovery_get_stays_visible_while_fixed_object_is_missing(runtime_env, tmp_path, monkeypatch):
+    data, _bundle, reader = runtime_env
+    run = _run(reader)
+    revision = run["skill_lifecycle"]["activation"]["selected"][0]["revisionId"]
+    digest = revision.removeprefix("sha256:")
+    object_path = data / skill_store.STORE_DIRECTORY / "objects" / "sha256" / digest[:2] / digest
+    backup = tmp_path / "get-visible-object"
+    shutil.move(str(object_path), str(backup))
+    call = server_mod._normalize_agent_tool_calls(run, [{
+        "index": 0, "id": "missing-use", "type": "function",
+        "function": {"name": "use_skill", "arguments": json.dumps({"name": "xlsx"})},
+    }], 1)[0]
+    run["pending_tool_calls"] = [call]
+    run["status"] = "tools"
+    assert server_mod._execute_agent_pending_tools(run) is False
+    assert run["status"] == "waiting_recovery"
+
+    class Runtime:
+        def recovery_reader(self):
+            return reader
+
+        def admission_reader(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
+    assert server_mod._get_agent_run(run["id"]) is run
+    assert server_mod._get_agent_run(run["id"]) is run
+    snapshot = server_mod._agent_snapshot(run)
+    assert snapshot["status"] == "waiting_recovery"
+    assert snapshot["recoveryState"]["errorCode"] == "skill_revision_unavailable"
+
+
+def test_missing_object_recovery_can_cancel_and_restart_reader_free(runtime_env, tmp_path, monkeypatch):
+    data, _bundle, reader = runtime_env
+    run = _run(reader, permission="accept")
+    execution, _call_value = _call(
+        run, "write_file", {"path": "cancelled.xlsx", "content": "x"}, "write-cancel",
+    )
+    assert execution["status"] == "waiting_authorization"
+    record = server_mod._agent_run_record(run)
+    revision = record["skillLifecycle"]["activation"]["selected"][0]["revisionId"]
+    digest = revision.removeprefix("sha256:")
+    object_path = data / skill_store.STORE_DIRECTORY / "objects" / "sha256" / digest[:2] / digest
+    shutil.move(str(object_path), str(tmp_path / "cancel-object"))
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+
+    class Runtime:
+        def recovery_reader(self):
+            return reader
+
+        def admission_reader(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
+    with mock.patch.object(server_mod, "execute_registered_tool") as dispatched, mock.patch.object(
+        server_mod, "_start_agent_worker",
+    ) as worker:
+        cancelled = server_mod._cancel_agent_run(run["id"])
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["skill_recovery"] is None
+    assert cancelled["pending_authorization"] is None
+    assert cancelled["pending_input"] is None
+    assert cancelled["pending_skill_evidence"] is None
+    dispatched.assert_not_called()
+    worker.assert_not_called()
+    persisted = json.loads(server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8"))
+    assert persisted["status"] == "cancelled"
+    assert "skillRecovery" not in persisted
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+    terminal = server_mod._get_agent_run(run["id"], immutable_skill_reader=None)
+    assert terminal["status"] == "cancelled"
+    assert terminal["skill_recovery"] is None
+
+
+@pytest.mark.parametrize("waiting", ["waiting_user_input", "waiting_skill_evidence"])
+def test_missing_object_recovery_cancel_clears_each_pending_gate(
+    runtime_env, tmp_path, monkeypatch, waiting,
+):
+    data, _bundle, reader = runtime_env
+    run = _run(reader)
+    run["status"] = waiting
+    if waiting == "waiting_user_input":
+        run["pending_input"] = {
+            "version": 1, "requestId": "cancel-input", "questions": [],
+        }
+    else:
+        owner = run["skill_lifecycle"]["activation"]["selected"][0]
+        run["pending_skill_evidence"] = {
+            "version": 2, "gateId": "skill-evidence-" + "c" * 40,
+            "authority": skill_runtime_v2.authority_from_selected(owner, evidence=True),
+            "candidateResult": {"content": "candidate", "finishReason": "stop", "usage": {}},
+            "evidenceStatus": "partial",
+            "missing": [{
+                "id": "write", "tool": "write_file", "minCount": 1,
+                "succeededCount": 0, "failedCount": 0,
+            }],
+            "createdAt": "2026-09-05T00:00:00Z",
+        }
+    server_mod._persist_agent_run(run)
+    revision = run["skill_lifecycle"]["activation"]["selected"][0]["revisionId"]
+    digest = revision.removeprefix("sha256:")
+    object_path = data / skill_store.STORE_DIRECTORY / "objects" / "sha256" / digest[:2] / digest
+    shutil.move(str(object_path), str(tmp_path / f"cancel-{waiting}"))
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+
+    class Runtime:
+        def recovery_reader(self):
+            return reader
+
+        def admission_reader(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
+    with mock.patch.object(server_mod, "execute_registered_tool") as dispatched:
+        cancelled = server_mod._cancel_agent_run(run["id"])
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["skill_recovery"] is None
+    assert cancelled["pending_input"] is None
+    assert cancelled["pending_skill_evidence"] is None
+    dispatched.assert_not_called()
+    persisted = json.loads(server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8"))
+    assert persisted["status"] == "cancelled"
+    assert "skillRecovery" not in persisted
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+    assert server_mod._get_agent_run(
+        run["id"], immutable_skill_reader=None,
+    )["status"] == "cancelled"
+
+
+def test_flag_off_recovery_reader_restores_user_input_action(runtime_env, monkeypatch):
+    _data, _bundle, reader = runtime_env
+    run = _run(reader, tools=[
+        "read_file", "write_file", "request_user_input",
+    ])
+    execution, _call_value = _call(run, "request_user_input", {
+        "questions": [{
+            "id": "target", "prompt": "Choose target", "type": "single",
+            "allowOther": True,
+            "options": [
+                {"value": "api", "label": "API", "description": "Use API", "recommended": True},
+                {"value": "ui", "label": "UI", "description": "Use UI", "recommended": False},
+            ],
+        }],
+    }, "input-recovery")
+    assert execution["status"] == "waiting_user_input"
+    request_id = run["pending_input"]["requestId"]
+    server_mod._persist_agent_run(run)
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+    unavailable = server_mod._get_agent_run(run["id"], immutable_skill_reader=None)
+    assert unavailable["status"] == "waiting_recovery"
+
+    class Runtime:
+        def recovery_reader(self):
+            return reader
+
+        def admission_reader(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
+    restored = server_mod._get_agent_run(run["id"])
+    assert restored["status"] == "waiting_user_input"
+    result = server_mod._submit_agent_input(
+        restored,
+        [{"id": "target", "status": "resolved", "values": ["api"], "other": ""}],
+        request_id=request_id,
+    )
+    assert result["ok"] is True
+    assert restored["status"] == "waiting_credentials"
+    assert restored["pending_input"] is None
+    assert restored["skill_recovery"] is None
+
+
+def test_flag_off_recovery_reader_restores_evidence_action_and_resume(runtime_env, monkeypatch):
+    _data, _bundle, reader = runtime_env
+    run = _run(reader)
+    owner = run["skill_lifecycle"]["activation"]["selected"][0]
+    run["status"] = "waiting_skill_evidence"
+    run["pending_skill_evidence"] = {
+        "version": 2,
+        "gateId": "skill-evidence-" + "b" * 40,
+        "authority": skill_runtime_v2.authority_from_selected(owner, evidence=True),
+        "candidateResult": {"content": "candidate", "finishReason": "stop", "usage": {}},
+        "evidenceStatus": "partial",
+        "missing": [{
+            "id": "write", "tool": "write_file", "minCount": 1,
+            "succeededCount": 0, "failedCount": 0,
+        }],
+        "createdAt": "2026-09-05T00:00:00Z",
+    }
+    server_mod._persist_agent_run(run)
+    with server_mod._agent_run_lock:
+        server_mod._agent_runs.clear()
+    unavailable = server_mod._get_agent_run(run["id"], immutable_skill_reader=None)
+    assert unavailable["status"] == "waiting_recovery"
+
+    class Runtime:
+        def recovery_reader(self):
+            return reader
+
+        def admission_reader(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "_immutable_skill_startup_runtime", Runtime())
+    restored = server_mod._get_agent_run(run["id"])
+    assert restored["status"] == "waiting_skill_evidence"
+    gate = restored["pending_skill_evidence"]["gateId"]
+    receipt = server_mod._submit_agent_skill_evidence_action(
+        restored, gate, "continue", "skill-evidence-continue-recovery",
+    )
+    assert receipt["resultStatus"] == "waiting_credentials"
+    assert restored["status"] == "waiting_credentials"
+    assert restored["pending_skill_evidence"] is None
+    assert restored["skill_recovery"] is None
+    with mock.patch.object(server_mod, "_start_agent_worker") as worker:
+        server_mod._resume_agent_run(restored, [])
+    assert restored["status"] == "model"
+    worker.assert_called_once_with(restored)
 
 
 def test_v6_exact_consumers_never_call_mutable_paths(runtime_env):
@@ -340,8 +609,10 @@ def test_runtime_preflight_rejects_unpersisted_new_executor(runtime_env):
     assert run["skill_runtime_bindings"] == {}
 
 
-def test_skill_recovery_round_trip_preserves_authorization_gate(runtime_env):
+def test_skill_recovery_round_trip_preserves_authorization_gate(runtime_env, monkeypatch):
     _data, _bundle, reader = runtime_env
+    monkeypatch.setattr(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True)
+    monkeypatch.setattr(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True)
     run = _run(reader, permission="accept")
     execution, _call_value = _call(
         run, "write_file", {"path": "book.xlsx", "content": "x"}, "write-1",
@@ -361,15 +632,17 @@ def test_skill_recovery_round_trip_preserves_authorization_gate(runtime_env):
     repeated = server_mod._agent_run_from_record(copy.deepcopy(recovery_record))
     assert server_mod._agent_run_record(repeated)["skillRecovery"] == recovery_record["skillRecovery"]
 
-    restored = server_mod._agent_run_from_record(
-        copy.deepcopy(recovery_record), immutable_skill_reader=reader,
-    )
+    restored = server_mod._agent_run_from_record(copy.deepcopy(recovery_record))
+    assert server_mod._agent_restore_skill_recovery(restored, reader) is True
     assert restored["status"] == "waiting_authorization"
     assert restored["skill_recovery"] is None
     assert {key: value for key, value in restored["pending_authorization"].items() if key != "submitting"} == {
         key: value for key, value in pending.items() if key != "submitting"
     }
     assert restored["tool_executions"]["write-1"]["status"] == "waiting_authorization"
+    shadow = server_mod._agent_protocol_shadow_snapshot(restored)
+    assert "unknown_event_type" not in shadow["diagnosticCounts"]
+    assert "illegal_state_transition" not in shadow["diagnosticCounts"]
 
 
 @pytest.mark.parametrize("failure", ["missing", "corrupt"])
@@ -429,8 +702,12 @@ def test_get_run_persists_and_clears_skill_recovery_idempotently(runtime_env, tm
 @pytest.mark.parametrize("waiting", [
     "waiting_user_input", "waiting_skill_evidence", "waiting_credentials",
 ])
-def test_skill_recovery_restores_each_prior_waiting_state(runtime_env, waiting):
+def test_skill_recovery_restores_each_prior_waiting_state(runtime_env, waiting, monkeypatch):
     _data, _bundle, reader = runtime_env
+    # The production observer is fail-open and may be disabled by instance
+    # mode; force it on here so each real recovery edge proves diagnostic-clean.
+    monkeypatch.setattr(server_mod, "_AGENT_PROTOCOL_SHADOW_ENABLED", True)
+    monkeypatch.setattr(server_mod, "_AGENT_EVENT_PROTOCOL_V1_ENABLED", True)
     run = _run(reader)
     run["status"] = waiting
     run["resume_status"] = "model" if waiting == "waiting_credentials" else ""
@@ -456,15 +733,17 @@ def test_skill_recovery_restores_each_prior_waiting_state(runtime_env, waiting):
     record = server_mod._agent_run_record(run)
     unavailable = server_mod._agent_run_from_record(copy.deepcopy(record))
     recovery_record = server_mod._agent_run_record(unavailable)
-    restored = server_mod._agent_run_from_record(
-        recovery_record, immutable_skill_reader=reader,
-    )
+    restored = server_mod._agent_run_from_record(recovery_record)
+    assert server_mod._agent_restore_skill_recovery(restored, reader) is True
     assert restored["status"] == waiting
     assert restored["skill_recovery"] is None
     if waiting == "waiting_user_input":
         assert restored["pending_input"] == run["pending_input"]
     elif waiting == "waiting_skill_evidence":
         assert restored["pending_skill_evidence"] == run["pending_skill_evidence"]
+    shadow = server_mod._agent_protocol_shadow_snapshot(restored)
+    assert "unknown_event_type" not in shadow["diagnosticCounts"]
+    assert "illegal_state_transition" not in shadow["diagnosticCounts"]
 
 
 @pytest.mark.parametrize("path_style", ["native", "slashes", "casefold"])
