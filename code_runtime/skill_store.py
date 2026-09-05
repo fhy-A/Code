@@ -350,10 +350,11 @@ class SkillStore:
                 if kind == "directory":
                     if relative not in expected_dirs: _fail("object_corrupt")
                     found_dirs.add(relative); pending.append(item)
-                elif kind == "file": _safe_file(item); found[relative] = revisions._stable_file(item)
+                elif kind == "file": _safe_file(item); found[relative] = item
                 else: _fail("object_corrupt")
         if set(found) != set(expected) or found_dirs != expected_dirs: _fail("object_corrupt")
-        for name, payload in found.items():
+        for name, path in found.items():
+            payload = revisions._stable_file(path)
             mode, canonical, item = *revisions._canonical_content(payload), expected[name]
             if canonical != payload or mode != item["contentMode"] or len(payload) != item["size"] or revisions._digest(payload) != item["digest"]: _fail("object_corrupt")
         return manifest
@@ -668,10 +669,10 @@ class SkillStoreReader:
             _fail("store_data_root_mismatch")
         return root
 
-    def read_registry(self, *, data_root_id=None):
+    def read_registry(self, *, data_root_id=None, verify_objects=True):
         object_ids = self._store._inspect_layout()
         self._root(data_root_id)
-        registry = self._store._load_registry()
+        registry = self._store._load_registry(verify_objects=bool(verify_objects))
         if registry is None:
             _fail("registry_missing")
         referenced = {item["revisionId"] for item in registry["installations"]}
@@ -679,18 +680,33 @@ class SkillStoreReader:
             _fail("store_object_unknown")
         return json.loads(_canonical(registry))
 
+    def verify_root(self, data_root_id):
+        """Verify only immutable root identity, including no-match recovery."""
+        return json.loads(_canonical(self._root(data_root_id)))
+
     def read_pinned(self, data_root_id, revision_id):
         if not _ROOT_ID.fullmatch(str(data_root_id)):
             _fail("store_data_root_invalid")
         if not _HASH.fullmatch(str(revision_id)):
             _fail("object_revision_invalid")
         root = self._root(data_root_id)
+        return self._read_pinned_from_root(root, revision_id)
+
+    def _read_pinned_from_root(self, root, revision_id, *, runtime=False, paths=None):
+        """Read one object while a caller already owns a verified root snapshot."""
+        if not isinstance(root, dict) or not _ROOT_ID.fullmatch(str(root.get("dataRootId"))):
+            _fail("store_data_root_invalid")
+        if not _HASH.fullmatch(str(revision_id)):
+            _fail("object_revision_invalid")
         directory = self._store._object_path(revision_id)
         if revisions._path_kind(directory) == "missing":
             _fail("object_missing")
         manifest = self._store._verify_object(directory, revision_id)
         files = []
+        selected_paths = None if paths is None else set(paths)
         for item in manifest["files"]:
+            if selected_paths is not None and item["path"] not in selected_paths:
+                continue
             payload = revisions._stable_file(directory / "content" / item["path"])
             mode, canonical = revisions._canonical_content(payload)
             if (canonical != payload or mode != item["contentMode"] or len(payload) != item["size"]
@@ -701,12 +717,24 @@ class SkillStoreReader:
             _fail("object_changed")
         if self._store._load_root() != root:
             _fail("store_root_changed")
-        return {
+        result = {
             "dataRootId": root["dataRootId"],
             "revisionId": revision_id,
             "manifest": manifest,
             "files": files,
         }
+        if runtime:
+            result["contentRoot"] = str(directory / "content")
+        return result
+
+    def read_runtime(self, data_root_id, revision_id):
+        """Return verified bytes plus the current non-authoritative object path."""
+        root = self._root(data_root_id)
+        return self._read_pinned_from_root(root, revision_id, runtime=True)
+
+    def begin_admission(self):
+        """Create a request-scoped O(N + selected) immutable admission view."""
+        return SkillStoreAdmissionSnapshot(self)
 
     def read_active(self, routing_alias):
         alias = _alias(routing_alias)
@@ -733,3 +761,100 @@ class SkillStoreReader:
             "installation": {key: installation[key] for key in ("skillId", "installationId", "displayName", "revisionId")},
             "object": pinned,
         }
+
+
+class SkillStoreAdmissionSnapshot:
+    """One bounded admission snapshot; never shared across requests."""
+
+    def __init__(self, reader):
+        if not isinstance(reader, SkillStoreReader):
+            raise TypeError("reader must be a SkillStoreReader")
+        self._reader = reader
+        self.registry = reader.read_registry(verify_objects=False)
+        self._root = {
+            "schema": ROOT_SCHEMA,
+            "dataRootId": self.registry["dataRootId"],
+        }
+        self._closed = False
+        self._route_reads = {}
+        self._capture_reads = {}
+        self._captured_revisions = set()
+
+    @property
+    def metrics(self):
+        return {
+            "registryReads": 1 + int(self._closed),
+            "routeObjectReads": dict(self._route_reads),
+            "captureObjectReads": dict(self._capture_reads),
+            "finalObjectReads": len(self._captured_revisions) if self._closed else 0,
+        }
+
+    def _binding(self, routing_alias):
+        if self._closed:
+            _fail("admission_snapshot_closed")
+        alias = _alias(routing_alias)
+        matches = [
+            item for item in self.registry["bindings"]
+            if item["routingAlias"].casefold() == alias.casefold()
+        ]
+        if not matches:
+            _fail("store_binding_missing")
+        binding = matches[0]
+        if binding["state"] != "ready":
+            _fail("store_binding_unavailable")
+        candidate = binding["activeCandidate"]
+        installation = next((
+            item for item in self.registry["installations"]
+            if item["installationId"] == candidate["installationId"]
+        ), None)
+        if installation is None or installation["revisionId"] != candidate["revisionId"]:
+            _fail("store_active_candidate_invalid")
+        return binding, installation
+
+    def _selection(self, routing_alias, counter, *, capture):
+        binding, installation = self._binding(routing_alias)
+        alias = binding["routingAlias"]
+        counter[alias] = counter.get(alias, 0) + 1
+        pinned = self._reader._read_pinned_from_root(
+            self._root, installation["revisionId"],
+            paths=None if capture else {
+                "SKILL.md", "evidence.json", "dependencies.json", "code-resources.json",
+            },
+        )
+        if capture:
+            self._captured_revisions.add(installation["revisionId"])
+        return {
+            "registry": {
+                key: self.registry[key]
+                for key in ("schema", "dataRootId", "generation", "registryHash")
+            },
+            "routingAlias": alias,
+            "installation": {
+                key: installation[key]
+                for key in ("skillId", "installationId", "displayName", "revisionId")
+            },
+            "object": pinned,
+        }
+
+    def read_active(self, routing_alias):
+        """Read a routing candidate exactly once for descriptor discovery."""
+        return self._selection(routing_alias, self._route_reads, capture=False)
+
+    def capture_active(self, routing_alias):
+        """Re-read a selected object so returned payload bytes are verified directly."""
+        return self._selection(routing_alias, self._capture_reads, capture=True)
+
+    def finish(self):
+        if self._closed:
+            return json.loads(_canonical(self.registry))
+        current = self._reader.read_registry(
+            data_root_id=self.registry["dataRootId"], verify_objects=False,
+        )
+        if current != self.registry:
+            _fail("registry_changed")
+        for revision_id in sorted(self._captured_revisions):
+            self._reader._read_pinned_from_root(
+                self._root, revision_id, paths=set(),
+            )
+        self._closed = True
+        return json.loads(_canonical(self.registry))

@@ -285,6 +285,19 @@ def project_skill_lifecycle(value):
             "explicit": lifecycle["activation"]["intentKind"] == "explicit"}
 
 
+def require_active_skill(value, name):
+    lifecycle = normalize_skill_lifecycle(value)
+    requested = str(name or "").strip()
+    for selected in lifecycle["activation"]["selected"]:
+        if selected["name"] == requested:
+            return _clone(selected, MAX_LIFECYCLE_BYTES)
+    _fail("skill_lifecycle_v2_skill_not_active")
+
+
+def normalize_text_resource_path(value):
+    return _relative(value)
+
+
 def bind_text_resource(value, installation_id, revision_id, file, content_hash):
     lifecycle = normalize_skill_lifecycle(value)
     bindings = list(lifecycle["access"]["resourceBindings"])

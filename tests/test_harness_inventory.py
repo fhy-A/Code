@@ -67,10 +67,10 @@ class HarnessFactInventoryTests(unittest.TestCase):
             item["type"] for item in self.inventory["agentRun"]["events"]
         }
         self.assertEqual(produced, listed)
-        self.assertEqual(27, len(listed))
+        self.assertEqual(28, len(listed))
 
     def test_agent_run_record_version_matches_inventory(self):
-        record_version = None
+        record_versions = set()
         for node in self.server_tree.body:
             if not isinstance(node, ast.FunctionDef) or node.name != "_agent_run_record":
                 continue
@@ -82,12 +82,20 @@ class HarnessFactInventoryTests(unittest.TestCase):
                 continue
             for key, value in zip(returned.keys, returned.values):
                 if isinstance(key, ast.Constant) and key.value == "version":
-                    record_version = ast.literal_eval(value)
+                    self.assertIsInstance(value, ast.IfExp)
+                    self.assertIsInstance(value.test, ast.Name)
+                    self.assertEqual("immutable_skill_run", value.test.id)
+                    record_versions = {
+                        ast.literal_eval(value.body), ast.literal_eval(value.orelse),
+                    }
                     break
         historical_version = self.inventory["agentRun"]["recordVersion"]
         self.assertEqual(4, historical_version)
-        self.assertEqual(5, record_version)
-        self.assertGreater(record_version, historical_version)
+        self.assertEqual(
+            {5, 6}, set(self.inventory["agentRun"]["currentRecordVersions"]),
+        )
+        self.assertEqual({5, 6}, record_versions)
+        self.assertGreater(min(record_versions), historical_version)
         loader = next(
             node for node in self.server_tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "_agent_run_from_record"

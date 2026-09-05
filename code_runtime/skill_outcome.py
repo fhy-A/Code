@@ -7,10 +7,14 @@ import json
 import re
 
 from .skill_lifecycle import MAX_SELECTED_SKILLS
+from . import skill_lifecycle_v2
+from . import skill_runtime_v2
 
 
 SCHEMA_VERSION = 2
 RECEIPT_VERSION = 1
+IMMUTABLE_SCHEMA_VERSION = 3
+IMMUTABLE_RECEIPT_VERSION = 2
 MODE = "shadow"
 MAX_ACTUAL_CLAIMS = 16
 COMPLETION_CONTRACT_VERSION = 2
@@ -584,3 +588,156 @@ def project_skill_outcome(lifecycle, tool_executions, run_id, run_status):
         }
     except (KeyError, TypeError, ValueError):
         return _invalid_projection(run_outcome)
+
+
+def _immutable_execution_for_skill(execution, selected, lifecycle):
+    if not isinstance(execution, dict):
+        return None
+    try:
+        context = skill_runtime_v2.normalize_execution_context(
+            execution.get("skillExecutionContext"), lifecycle,
+        )
+    except skill_runtime_v2.ImmutableSkillRuntimeError:
+        return None
+    authority = skill_runtime_v2.authority_from_selected(selected)
+    matching = [
+        item for item in context["skills"]
+        if all(item.get(key) == value for key, value in authority.items())
+    ]
+    if len(matching) != 1:
+        return None
+    name = str(execution.get("name") or "")
+    explicit = _explicit_skill_target(name, execution)
+    if explicit is not None and (explicit[1] or explicit[0] != selected["name"]):
+        return None
+    if explicit is None and len(context["skills"]) != 1:
+        return None
+    projected = json.loads(json.dumps(execution))
+    if name == "run_command":
+        result = projected.get("result")
+        if not isinstance(result, dict):
+            result = {}
+            projected["result"] = result
+        result["skillRuntime"] = {
+            "version": 1,
+            "skills": [{"skill": selected["name"]}],
+        }
+    return projected
+
+
+def _immutable_receipt(source, *, run_id, authority):
+    requirement = {
+        "id": source["requirementId"],
+        "tool": source["tool"],
+        "qualification": source["qualification"],
+    }
+    canonical = {
+        "version": IMMUTABLE_RECEIPT_VERSION,
+        "runId": run_id,
+        "callId": source["callRef"],
+        "fingerprint": source["executionFingerprint"],
+        "requirement": requirement,
+        "authority": authority,
+        "source": {
+            "runtime_single_skill": "runtime_exact_single",
+        }.get(source["source"], source["source"]),
+        "outcome": source["outcome"],
+        "claimState": "accepted",
+    }
+    if source.get("qualification") == "artifact_file":
+        canonical["artifact"] = {"kind": "file"}
+    digest = hashlib.sha256(json.dumps(
+        canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return {**canonical, "receiptId": f"sr2_{digest}"}
+
+
+def _immutable_summary(skills, projections):
+    summary = _empty_summary()
+    for projection in projections:
+        source = projection.get("summary") or {}
+        for key in summary:
+            if key in {
+                "selectedSkills", "duplicateCallReferences", "unsafeCallReferences",
+                "invalidExecutionFingerprints", "invalidRunIdentities",
+                "ignoredExecutions",
+            }:
+                continue
+            summary[key] += int(source.get(key) or 0)
+    summary["selectedSkills"] = len(skills)
+    for key in (
+        "duplicateCallReferences", "unsafeCallReferences",
+        "invalidExecutionFingerprints", "invalidRunIdentities",
+    ):
+        summary[key] = max(
+            (int((item.get("summary") or {}).get(key) or 0) for item in projections),
+            default=0,
+        )
+    summary["ignoredExecutions"] = max(
+        (int((item.get("summary") or {}).get("ignoredExecutions") or 0) for item in projections),
+        default=0,
+    )
+    return summary
+
+
+def project_immutable_skill_outcome(lifecycle, tool_executions, run_id, run_status):
+    """Derive outcome/v3 only from exact lifecycle/v2 execution contexts."""
+    run_outcome = _run_outcome(run_status)
+    try:
+        normalized = skill_lifecycle_v2.normalize_skill_lifecycle(lifecycle)
+        if not isinstance(run_id, str) or not _SAFE_CALL_REF_RE.fullmatch(run_id):
+            raise ValueError("invalid run id")
+        executions = tool_executions if isinstance(tool_executions, dict) else {}
+        skills, projections = [], []
+        for selected in normalized["activation"]["selected"]:
+            scoped = {}
+            for call_id, execution in executions.items():
+                projected = _immutable_execution_for_skill(execution, selected, normalized)
+                if projected is not None:
+                    scoped[call_id] = projected
+            base = project_skill_outcome(
+                {"activation": {"selected": [selected]}},
+                scoped, run_id, run_status,
+            )
+            projections.append(base)
+            source_skill = (base.get("skills") or [{}])[0]
+            authority = skill_runtime_v2.authority_from_selected(selected, evidence=True)
+            requirements = []
+            for requirement in source_skill.get("requirements") or []:
+                transformed = {**requirement, "actual": []}
+                for actual in requirement.get("actual") or []:
+                    if isinstance(actual, dict) and actual.get("version") == RECEIPT_VERSION and actual.get("claimState") == "accepted":
+                        transformed["actual"].append(_immutable_receipt(
+                            actual, run_id=run_id, authority=authority,
+                        ))
+                    else:
+                        transformed["actual"].append(actual)
+                requirements.append(transformed)
+            skills.append({
+                "authority": authority,
+                "contractState": source_skill.get("contractState", "invalid"),
+                "requirements": requirements,
+                "state": source_skill.get("state", "invalid_contract"),
+            })
+        summary = _immutable_summary(skills, projections)
+        return {
+            "version": IMMUTABLE_SCHEMA_VERSION,
+            "mode": "immutable",
+            "runOutcome": run_outcome,
+            "aggregateState": _aggregate_state([
+                {"state": item["state"]} for item in skills
+            ], run_outcome),
+            "skills": skills,
+            "summary": summary,
+        }
+    except (KeyError, TypeError, ValueError, skill_lifecycle_v2.SkillLifecycleV2Error):
+        summary = _empty_summary()
+        summary["invalidContracts"] = 1
+        return {
+            "version": IMMUTABLE_SCHEMA_VERSION,
+            "mode": "immutable",
+            "runOutcome": run_outcome,
+            "aggregateState": run_outcome if run_outcome in {"failed", "cancelled"} else "invalid_contract",
+            "skills": [],
+            "summary": summary,
+        }

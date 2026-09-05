@@ -35,9 +35,13 @@ from code_runtime import (
     context_calibration,
     context_window,
     data_dir_owner,
+    skill_activation,
+    skill_admission,
     skill_completion,
     skill_lifecycle,
+    skill_lifecycle_v2,
     skill_outcome,
+    skill_runtime_v2,
     windows_explorer,
 )
 from code_runtime.bundled_skills import delete_installed_skill
@@ -3338,6 +3342,139 @@ def _normalize_agent_recovery_state(value):
     }
 
 
+def _agent_skill_pending_gate(source, *, persisted=False):
+    names = (
+        (
+            ("authorization", "pendingAuthorization"),
+            ("user_input", "pendingInput"),
+            ("skill_evidence", "pendingSkillEvidence"),
+        ) if persisted else (
+            ("authorization", "pending_authorization"),
+            ("user_input", "pending_input"),
+            ("skill_evidence", "pending_skill_evidence"),
+        )
+    )
+    present = [(kind, source.get(key)) for kind, key in names if isinstance(source.get(key), dict)]
+    if len(present) > 1:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_recovery_pending_gate_invalid", "Skill recovery pending gate is ambiguous",
+        )
+    if not present:
+        return {"kind": "none", "digest": ""}
+    kind, pending = present[0]
+    pending = _json_clone(pending)
+    if kind == "authorization":
+        pending.pop("submitting", None)
+    digest = hashlib.sha256(json.dumps(
+        pending, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return {"kind": kind, "digest": f"sha256:{digest}"}
+
+
+def _normalize_agent_skill_recovery(value, lifecycle, *, pending_gate):
+    fields = {
+        "version", "kind", "phase", "dataRootId", "revisionIds", "errorCode",
+        "createdAt", "priorState", "pendingGate",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        return None
+    prior = value.get("priorState")
+    allowed_statuses = _AGENT_RUN_ACTIVE | {
+        "waiting_recovery", "waiting_credentials", "waiting_user_input",
+        "waiting_authorization", "waiting_skill_evidence",
+    }
+    expected_root = lifecycle["activation"]["registry"]["dataRootId"]
+    expected_revisions = sorted(
+        item["revisionId"] for item in lifecycle["activation"]["selected"]
+    )
+    if (
+        type(value.get("version")) is not int or value.get("version") != 1
+        or value.get("kind") != "skill_revision_unavailable"
+        or value.get("phase") != "skill_runtime"
+        or value.get("dataRootId") != expected_root
+        or value.get("revisionIds") != expected_revisions
+        or value.get("errorCode") not in {
+            "skill_revision_unavailable", "skill_runtime_path_rebind_required",
+        }
+        or not isinstance(value.get("createdAt"), str) or not value["createdAt"]
+        or not isinstance(prior, dict) or set(prior) != {"status", "resumeStatus"}
+        or prior.get("status") not in allowed_statuses
+        or not isinstance(prior.get("resumeStatus"), str)
+        or value.get("pendingGate") != pending_gate
+    ):
+        return None
+    return _json_clone(value)
+
+
+def _agent_new_skill_recovery(run, lifecycle, code="skill_revision_unavailable"):
+    return {
+        "version": 1,
+        "kind": "skill_revision_unavailable",
+        "phase": "skill_runtime",
+        "dataRootId": lifecycle["activation"]["registry"]["dataRootId"],
+        "revisionIds": sorted(
+            item["revisionId"] for item in lifecycle["activation"]["selected"]
+        ),
+        "errorCode": code,
+        "createdAt": now_iso(),
+        "priorState": {
+            "status": str(run.get("status") or "waiting_credentials"),
+            "resumeStatus": str(run.get("resume_status") or ""),
+        },
+        "pendingGate": _agent_skill_pending_gate(run),
+    }
+
+
+def _agent_skill_recovery_record(run, lifecycle):
+    source = run.get("skill_recovery")
+    if source is None:
+        return None
+    normalized = _normalize_agent_skill_recovery(
+        source, lifecycle, pending_gate=_agent_skill_pending_gate(run),
+    )
+    if normalized is None:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_recovery_state_invalid", "Skill recovery state is invalid",
+        )
+    return normalized
+
+
+def _agent_enter_skill_recovery(run, error):
+    lifecycle = _agent_canonical_skill_lifecycle(run)
+    existing = run.get("skill_recovery")
+    if existing:
+        return existing
+    code = str(getattr(error, "code", "skill_revision_unavailable"))
+    if code not in {"skill_revision_unavailable", "skill_runtime_path_rebind_required"}:
+        code = "skill_revision_unavailable"
+    recovery = _agent_new_skill_recovery(run, lifecycle, code)
+    prior = {
+        "status": run.get("status"), "resume_status": run.get("resume_status"),
+        "updated_at": run.get("updated_at"),
+    }
+    with run["condition"]:
+        run["skill_recovery"] = recovery
+        run["status"] = "waiting_recovery"
+        run["resume_status"] = recovery["priorState"]["status"]
+        run["keys"] = []
+        run["updated_at"] = recovery["createdAt"]
+    try:
+        _persist_agent_run(run)
+    except Exception:
+        with run["condition"]:
+            run["skill_recovery"] = None
+            run["status"] = prior["status"]
+            run["resume_status"] = prior["resume_status"]
+            run["updated_at"] = prior["updated_at"]
+        raise
+    _append_agent_event(run, "waiting_recovery", {
+        "resumeStatus": recovery["priorState"]["status"],
+        "reason": recovery["kind"],
+        "errorCode": recovery["errorCode"],
+    })
+    return recovery
+
+
 def _normalize_agent_compaction_recovery(value):
     if not isinstance(value, dict) or int(value.get("version") or 0) != 1:
         return None
@@ -3364,6 +3501,18 @@ def _normalize_agent_compaction_recovery(value):
 
 
 def _agent_public_recovery_state(run):
+    skill_recovery = run.get("skill_recovery")
+    if isinstance(skill_recovery, dict):
+        return {
+            "version": 1,
+            "kind": "skill_revision_unavailable",
+            "phase": "skill_runtime",
+            "errorCode": str(
+                skill_recovery.get("errorCode") or "skill_revision_unavailable"
+            ),
+            "createdAt": str(skill_recovery.get("createdAt") or ""),
+            "resumable": True,
+        }
     state = _normalize_agent_recovery_state(run.get("recovery_state"))
     if not state:
         return None
@@ -3388,6 +3537,18 @@ def _agent_wait_for_context_calibration_key(run):
     })
 
 
+def _agent_immutable_evidence_observers(lifecycle, projection, tools):
+    observers = _freeze_captured_skill_evidence_observers(
+        projection, tools, require_registered_tools=False,
+    )
+    selected = lifecycle["activation"]["selected"]
+    for observer, skill in zip(observers, selected):
+        observer["_immutableAuthority"] = skill_runtime_v2.authority_from_selected(
+            skill, evidence=True,
+        )
+    return observers
+
+
 def _agent_canonical_skill_lifecycle(run):
     """Validate lifecycle authority against its in-memory compatibility views."""
     source = run.get("skill_lifecycle")
@@ -3402,10 +3563,25 @@ def _agent_canonical_skill_lifecycle(run):
             "skill_lifecycle_scope_invalid",
             "Canonical Skill lifecycle requires a foreground root AgentRun",
         )
-    lifecycle = skill_lifecycle.normalize_skill_lifecycle(source)
-    projection = skill_lifecycle.project_skill_lifecycle(lifecycle)
-    expected_observers = _freeze_captured_skill_evidence_observers(
-        projection, run.get("tools") or [], require_registered_tools=False,
+    immutable = skill_runtime_v2.is_immutable(source)
+    try:
+        lifecycle = (
+            skill_lifecycle_v2.normalize_skill_lifecycle(source)
+            if immutable else skill_lifecycle.normalize_skill_lifecycle(source)
+        )
+        projection = (
+            skill_lifecycle_v2.project_skill_lifecycle(lifecycle)
+            if immutable else skill_lifecycle.project_skill_lifecycle(lifecycle)
+        )
+    except skill_lifecycle_v2.SkillLifecycleV2Error as exc:
+        raise skill_lifecycle.SkillLifecycleError(exc.code, str(exc)) from exc
+    expected_observers = (
+        _agent_immutable_evidence_observers(
+            lifecycle, projection, run.get("tools") or [],
+        )
+        if immutable else _freeze_captured_skill_evidence_observers(
+            projection, run.get("tools") or [], require_registered_tools=False,
+        )
     )
     if list(run.get("active_skill_names") or []) != projection["activeSkillNames"]:
         raise skill_lifecycle.SkillLifecycleError(
@@ -3422,9 +3598,14 @@ def _agent_canonical_skill_lifecycle(run):
             "skill_lifecycle_projection_conflict",
             "Canonical Skill evidence conflicts with its compatibility projection",
         )
-    _agent_validate_skill_runtime_bindings(
-        run.get("skill_runtime_bindings"), lifecycle,
-    )
+    if immutable:
+        skill_runtime_v2.runtime_bindings_record(
+            run.get("skill_runtime_bindings") or {}, lifecycle,
+        )
+    else:
+        _agent_validate_skill_runtime_bindings(
+            run.get("skill_runtime_bindings"), lifecycle,
+        )
     return lifecycle
 
 
@@ -3485,11 +3666,12 @@ def _agent_run_record(run):
         run.get("pending_context_calibration")
     )
     skill_lifecycle_record = _agent_canonical_skill_lifecycle(run)
+    immutable_skill_run = skill_runtime_v2.is_immutable(skill_lifecycle_record)
     skill_completion_record = _agent_normalize_skill_completion(
         run, skill_lifecycle_record,
     )
     return {
-        "version": 5,
+        "version": 6 if immutable_skill_run else 5,
         "id": run["id"],
         "sessionId": run["session_id"],
         "cwd": run.get("cwd", ""),
@@ -3545,6 +3727,12 @@ def _agent_run_record(run):
            if (recovery_state := _normalize_agent_recovery_state(
                run.get("recovery_state")
            )) else {}),
+        **({"skillRecovery": skill_recovery}
+           if immutable_skill_run and (
+               skill_recovery := _agent_skill_recovery_record(
+                   run, skill_lifecycle_record,
+               )
+           ) else {}),
         **({"compactionRecovery": compaction_recovery}
            if (compaction_recovery := _normalize_agent_compaction_recovery(
                run.get("compaction_recovery")
@@ -3569,22 +3757,34 @@ def _agent_run_record(run):
         "toolExecutions": tool_executions_record,
         **({"skillLifecycle": skill_lifecycle_record}
            if skill_lifecycle_record else {}),
-        **({"skillOutcome": skill_outcome.project_skill_outcome(
-            skill_lifecycle_record, tool_executions_record, run["id"], run.get("status"),
+        **({"skillOutcome": (
+            skill_outcome.project_immutable_skill_outcome(
+                skill_lifecycle_record, tool_executions_record, run["id"], run.get("status"),
+            ) if immutable_skill_run else skill_outcome.project_skill_outcome(
+                skill_lifecycle_record, tool_executions_record, run["id"], run.get("status"),
+            )
         )} if skill_lifecycle_record else {}),
         **({"skillCompletionEnforcement": skill_completion_record}
            if skill_completion_record else {}),
-        **({"skillEvidence": _agent_skill_evidence_record(run)}
-           if (
+        **({"skillEvidence": (
+            skill_runtime_v2.build_evidence(skill_lifecycle_record)
+            if immutable_skill_run else _agent_skill_evidence_record(run)
+        )}
+           if immutable_skill_run or (
                isinstance(run.get("skill_evidence_observer"), dict)
                or bool(run.get("skill_evidence_observers"))
            ) else {}),
         **({"activeSkillNames": list(run.get("active_skill_names") or [])}
-           if run.get("active_skill_names") else {}),
-        **({"activeSkillDependencies": _agent_active_skill_dependencies_record(run)}
-           if run.get("active_skill_names") else {}),
-        **({"skillRuntimeBindings": _agent_skill_runtime_bindings_record(run)}
-           if run.get("skill_runtime_bindings") else {}),
+           if immutable_skill_run or run.get("active_skill_names") else {}),
+        **({"activeSkillDependencies": (
+            skill_runtime_v2.build_dependencies(skill_lifecycle_record)
+            if immutable_skill_run else _agent_active_skill_dependencies_record(run)
+        )} if immutable_skill_run or run.get("active_skill_names") else {}),
+        **({"skillRuntimeBindings": (
+            skill_runtime_v2.runtime_bindings_record(
+                run.get("skill_runtime_bindings") or {}, skill_lifecycle_record,
+            ) if immutable_skill_run else _agent_skill_runtime_bindings_record(run)
+        )} if immutable_skill_run or run.get("skill_runtime_bindings") else {}),
         "usage": _json_clone(run.get("usage") or {}),
         "result": result,
         "events": events,
@@ -4444,9 +4644,40 @@ def _finish_agent_run(run, status, error_message="", error_code=""):
     return True
 
 
-def _agent_run_from_record(record):
+def _agent_run_from_record(record, immutable_skill_reader=None):
     run_id = _safe_agent_run_id(record.get("id"))
     persisted_status = str(record.get("status") or "failed")
+    raw_outer_version = record.get("version")
+    try:
+        outer_version = int(raw_outer_version or 1)
+    except (TypeError, ValueError):
+        raise ValueError("AgentRun version is invalid") from None
+    if outer_version == 6 and (
+        isinstance(raw_outer_version, bool) or type(raw_outer_version) is not int
+    ):
+        raise ValueError("AgentRun v6 version is invalid")
+    canonical_skill_lifecycle = None
+    immutable_skill_record = outer_version == 6
+    if immutable_skill_record:
+        if "skillLifecycle" not in record:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_lifecycle_missing", "AgentRun v6 requires lifecycle/v2",
+            )
+        try:
+            canonical_skill_lifecycle = skill_lifecycle_v2.normalize_skill_lifecycle(
+                record.get("skillLifecycle")
+            )
+        except skill_lifecycle_v2.SkillLifecycleV2Error as exc:
+            raise skill_lifecycle.SkillLifecycleError(exc.code, str(exc)) from exc
+    elif "skillLifecycle" in record:
+        if outer_version != 5:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_lifecycle_outer_version_unsupported",
+                "Canonical Skill lifecycle requires AgentRun v5 or v6",
+            )
+        canonical_skill_lifecycle = skill_lifecycle.normalize_skill_lifecycle(
+            record.get("skillLifecycle")
+        )
     model_checkpoint = _normalize_agent_model_checkpoint(record.get("modelCheckpoint"))
     recovery_state = _normalize_agent_recovery_state(record.get("recoveryState"))
     compaction_recovery = _normalize_agent_compaction_recovery(
@@ -4455,17 +4686,79 @@ def _agent_run_from_record(record):
     pending_skill_evidence = _normalize_agent_pending_skill_evidence(
         record.get("pendingSkillEvidence")
     )
-    if persisted_status in _AGENT_RUN_TERMINAL:
+    if immutable_skill_record and pending_skill_evidence:
+        selected = canonical_skill_lifecycle["activation"]["selected"]
+        expected_authority = (
+            skill_runtime_v2.authority_from_selected(selected[0], evidence=True)
+            if selected else None
+        )
+        if (
+            pending_skill_evidence.get("version") != 2
+            or pending_skill_evidence.get("authority") != expected_authority
+        ):
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_evidence_gate_identity_conflict",
+                "Skill evidence gate conflicts with lifecycle/v2",
+            )
+    elif not immutable_skill_record and pending_skill_evidence and pending_skill_evidence.get("version") != 1:
+        pending_skill_evidence = None
+    pending_gate = (
+        _agent_skill_pending_gate(record, persisted=True)
+        if immutable_skill_record else {"kind": "none", "digest": ""}
+    )
+    persisted_skill_recovery = None
+    if "skillRecovery" in record:
+        if not immutable_skill_record:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_recovery_version_conflict", "Skill recovery requires AgentRun v6",
+            )
+        persisted_skill_recovery = _normalize_agent_skill_recovery(
+            record.get("skillRecovery"), canonical_skill_lifecycle,
+            pending_gate=pending_gate,
+        )
+        if persisted_skill_recovery is None:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_recovery_state_invalid", "Persisted Skill recovery state is invalid",
+            )
+        if persisted_status in _AGENT_RUN_TERMINAL:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_recovery_state_invalid", "Terminal AgentRun cannot retain Skill recovery",
+            )
+    skill_objects_available = True
+    if immutable_skill_record and persisted_status not in _AGENT_RUN_TERMINAL:
+        try:
+            skill_runtime_v2.verify_lifecycle(
+                immutable_skill_reader, canonical_skill_lifecycle,
+            )
+        except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+            if not exc.temporary:
+                raise skill_lifecycle.SkillLifecycleError(
+                    exc.code, "Persisted immutable Skill contract conflicts with its pinned revision",
+                ) from exc
+            skill_objects_available = False
+    status_source = (
+        persisted_skill_recovery["priorState"]["status"]
+        if persisted_skill_recovery else persisted_status
+    )
+    resume_source = (
+        persisted_skill_recovery["priorState"]["resumeStatus"]
+        if persisted_skill_recovery else str(record.get("resumeStatus") or "")
+    )
+    if status_source in _AGENT_RUN_TERMINAL:
+        if persisted_status not in _AGENT_RUN_TERMINAL:
+            raise skill_lifecycle.SkillLifecycleError(
+                "skill_recovery_state_invalid", "Skill recovery cannot restore a terminal state",
+            )
         status = persisted_status
         resume_status = ""
-    elif persisted_status == "waiting_recovery" and recovery_state:
+    elif status_source == "waiting_recovery" and recovery_state:
         status = "waiting_recovery"
-        resume_status = str(record.get("resumeStatus") or "model")
+        resume_status = str(resume_source or "model")
         if resume_status not in _AGENT_RUN_ACTIVE:
             resume_status = "model"
-    elif persisted_status in _AGENT_RUN_ACTIVE and model_checkpoint:
+    elif status_source in _AGENT_RUN_ACTIVE and model_checkpoint:
         status = "waiting_recovery"
-        resume_status = str(record.get("resumeStatus") or persisted_status)
+        resume_status = str(resume_source or status_source)
         if resume_status not in _AGENT_RUN_ACTIVE:
             resume_status = "model"
         recovery_state = {
@@ -4481,22 +4774,43 @@ def _agent_run_from_record(record):
             "resumable": True,
         }
     elif (
-        persisted_status == "waiting_user_input"
+        status_source == "waiting_user_input"
         and isinstance(record.get("pendingInput"), dict)
     ) or (
-        persisted_status == "waiting_authorization"
+        status_source == "waiting_authorization"
         and isinstance(record.get("pendingAuthorization"), dict)
     ):
-        status = persisted_status
+        status = status_source
         resume_status = ""
-    elif persisted_status == "waiting_skill_evidence" and pending_skill_evidence:
+    elif status_source == "waiting_skill_evidence" and pending_skill_evidence:
         status = "waiting_skill_evidence"
         resume_status = ""
     else:
-        resume_status = str(record.get("resumeStatus") or persisted_status)
+        resume_status = str(resume_source or status_source)
         if resume_status not in _AGENT_RUN_ACTIVE:
             resume_status = "tools" if record.get("pendingToolCalls") else "model"
         status = "waiting_credentials"
+    skill_recovery = None
+    if immutable_skill_record and persisted_status not in _AGENT_RUN_TERMINAL:
+        if skill_objects_available:
+            skill_recovery = None
+        elif persisted_skill_recovery:
+            skill_recovery = persisted_skill_recovery
+            status = "waiting_recovery"
+            resume_status = persisted_skill_recovery["priorState"]["status"]
+        else:
+            recovery_source = {
+                "status": status,
+                "resume_status": resume_status,
+                "pending_authorization": record.get("pendingAuthorization"),
+                "pending_input": record.get("pendingInput"),
+                "pending_skill_evidence": record.get("pendingSkillEvidence"),
+            }
+            skill_recovery = _agent_new_skill_recovery(
+                recovery_source, canonical_skill_lifecycle,
+            )
+            status = "waiting_recovery"
+            resume_status = skill_recovery["priorState"]["status"]
     events = list(record.get("events") or [])
     next_seq = max(
         int(record.get("nextSeq") or 1),
@@ -4554,6 +4868,33 @@ def _agent_run_from_record(record):
     }
     persisted_tool_executions = _json_clone(record.get("toolExecutions") or {})
     tool_executions = dict(record.get("toolExecutions") or {})
+    if immutable_skill_record:
+        for persisted_execution in tool_executions.values():
+            if not isinstance(persisted_execution, dict):
+                raise skill_lifecycle.SkillLifecycleError(
+                    "skill_execution_context_conflict", "Skill execution is invalid",
+                )
+            try:
+                if skill_objects_available and persisted_status not in _AGENT_RUN_TERMINAL:
+                    skill_runtime_v2.verify_execution_context(
+                        immutable_skill_reader,
+                        canonical_skill_lifecycle,
+                        persisted_execution.get("skillExecutionContext"),
+                    )
+                else:
+                    skill_runtime_v2.normalize_execution_context(
+                        persisted_execution.get("skillExecutionContext"),
+                        canonical_skill_lifecycle,
+                    )
+                if persisted_execution.get("name") == "run_command":
+                    skill_runtime_v2.normalize_command_path_binding(
+                        persisted_execution.get("skillRuntimePathBinding"),
+                        canonical_skill_lifecycle,
+                    )
+            except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+                raise skill_lifecycle.SkillLifecycleError(
+                    "skill_execution_context_conflict", str(exc),
+                ) from exc
     for execution_call_id, execution in tool_executions.items():
         if not isinstance(execution, dict):
             continue
@@ -4689,6 +5030,23 @@ def _agent_run_from_record(record):
             execution["error"] = result["error"]
             execution["completedAt"] = now_iso()
             continue
+        if immutable_skill_record and execution.get("status") == "dispatching":
+            result = {
+                "ok": False,
+                "action": str(execution.get("name") or ""),
+                "unknownState": True,
+                "notReplayed": True,
+                "error": (
+                    "Tool dispatch was interrupted by a service restart; its external "
+                    "effects are unknown and it was not replayed."
+                ),
+            }
+            execution["status"] = "completed"
+            execution["outcome"] = "failed"
+            execution["result"] = result
+            execution["error"] = result["error"]
+            execution["completedAt"] = now_iso()
+            continue
         if execution.get("status") != "running":
             continue
         if spec.get("effect") != "command":
@@ -4726,53 +5084,64 @@ def _agent_run_from_record(record):
             definition for definition in restored_tools
             if str((definition.get("function") or {}).get("name") or "") != "generate_image"
         ]
-    canonical_skill_lifecycle = None
     lifecycle_projection = None
-    if "skillLifecycle" in record:
-        outer_version = record.get("version")
-        if (
-            isinstance(outer_version, bool)
-            or not isinstance(outer_version, int)
-            or outer_version != 5
-        ):
-            raise skill_lifecycle.SkillLifecycleError(
-                "skill_lifecycle_outer_version_unsupported",
-                "Canonical Skill lifecycle requires AgentRun v5",
-            )
+    if canonical_skill_lifecycle is not None:
         if run_kind != "foreground" or parent_agent_run_id or agent_depth > 0:
             raise skill_lifecycle.SkillLifecycleError(
                 "skill_lifecycle_scope_invalid",
                 "Canonical Skill lifecycle requires a foreground root AgentRun",
             )
-        canonical_skill_lifecycle = skill_lifecycle.normalize_skill_lifecycle(
-            record.get("skillLifecycle")
-        )
-        lifecycle_projection = skill_lifecycle.project_skill_lifecycle(
-            canonical_skill_lifecycle
+        lifecycle_projection = (
+            skill_lifecycle_v2.project_skill_lifecycle(canonical_skill_lifecycle)
+            if immutable_skill_record else skill_lifecycle.project_skill_lifecycle(
+                canonical_skill_lifecycle
+            )
         )
         expected_names = lifecycle_projection["activeSkillNames"]
-        expected_dependencies = {
-            "version": _SKILL_RUNTIME_BINDING_VERSION,
-            "skills": [
-                {
-                    "skill": name,
-                    "capabilities": list(
-                        lifecycle_projection["dependencies"].get(name) or []
-                    ),
-                }
-                for name in expected_names
-            ],
-        }
-        expected_observers = _freeze_captured_skill_evidence_observers(
-            lifecycle_projection, restored_tools, require_registered_tools=False,
+        expected_dependencies = (
+            skill_runtime_v2.build_dependencies(canonical_skill_lifecycle)
+            if immutable_skill_record else {
+                "version": _SKILL_RUNTIME_BINDING_VERSION,
+                "skills": [
+                    {
+                        "skill": name,
+                        "capabilities": list(
+                            lifecycle_projection["dependencies"].get(name) or []
+                        ),
+                    }
+                    for name in expected_names
+                ],
+            }
         )
-        expected_evidence = _agent_skill_evidence_record({
-            "skill_evidence_observers": expected_observers,
-            "skill_evidence_observer": None,
-            "tool_executions": persisted_tool_executions,
-            "status": persisted_status,
-        })
-        if expected_names:
+        expected_observers = (
+            _agent_immutable_evidence_observers(
+                canonical_skill_lifecycle, lifecycle_projection, restored_tools,
+            )
+            if immutable_skill_record else _freeze_captured_skill_evidence_observers(
+                lifecycle_projection, restored_tools, require_registered_tools=False,
+            )
+        )
+        expected_evidence = (
+            skill_runtime_v2.build_evidence(canonical_skill_lifecycle)
+            if immutable_skill_record else _agent_skill_evidence_record({
+                "skill_evidence_observers": expected_observers,
+                "skill_evidence_observer": None,
+                "tool_executions": persisted_tool_executions,
+                "status": persisted_status,
+            })
+        )
+        if immutable_skill_record:
+            compatibility_matches = (
+                record.get("activeSkillNames") == expected_names
+                and record.get("activeSkillDependencies") == expected_dependencies
+                and record.get("skillEvidence") == expected_evidence
+                and record.get("skillOutcome") == skill_outcome.project_immutable_skill_outcome(
+                    canonical_skill_lifecycle, persisted_tool_executions,
+                    run_id, persisted_status,
+                )
+                and isinstance(record.get("skillRuntimeBindings"), dict)
+            )
+        elif expected_names:
             compatibility_matches = (
                 record.get("activeSkillNames") == expected_names
                 and record.get("activeSkillDependencies") == expected_dependencies
@@ -4817,6 +5186,8 @@ def _agent_run_from_record(record):
     skill_runtime_bindings = _restore_agent_skill_runtime_bindings(
         record.get("skillRuntimeBindings"), active_skill_names,
         canonical_skill_lifecycle,
+    ) if not immutable_skill_record else skill_runtime_v2.restore_runtime_bindings(
+        record.get("skillRuntimeBindings"), canonical_skill_lifecycle,
     )
     lifecycle_view = (
         canonical_skill_lifecycle
@@ -4914,6 +5285,7 @@ def _agent_run_from_record(record):
         "compactions": list(record.get("compactions") or []),
         "model_checkpoint": model_checkpoint,
         "recovery_state": recovery_state,
+        "skill_recovery": skill_recovery,
         "compaction_recovery": compaction_recovery,
         "pending_tool_calls": list(record.get("pendingToolCalls") or []),
         "pending_input": _json_clone(record.get("pendingInput")) if isinstance(record.get("pendingInput"), dict) else None,
@@ -4934,6 +5306,7 @@ def _agent_run_from_record(record):
         "active_skill_dependencies": active_skill_dependencies,
         "skill_lifecycle": canonical_skill_lifecycle,
         "_skill_lifecycle_view": lifecycle_view,
+        "_immutable_skill_reader": immutable_skill_reader,
         "skill_completion_enforcement": skill_completion_plan,
         "skill_runtime_bindings": skill_runtime_bindings,
         "usage": dict(record.get("usage") or {}),
@@ -4956,7 +5329,48 @@ def _agent_run_from_record(record):
     }
 
 
-def _get_agent_run(run_id):
+def _agent_restore_skill_recovery(run, reader):
+    recovery = run.get("skill_recovery")
+    if not isinstance(recovery, dict) or reader is None:
+        return False
+    lifecycle = _agent_canonical_skill_lifecycle(run)
+    skill_runtime_v2.verify_lifecycle(reader, lifecycle)
+    normalized = _normalize_agent_skill_recovery(
+        recovery, lifecycle, pending_gate=_agent_skill_pending_gate(run),
+    )
+    if normalized is None:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_recovery_state_invalid", "Persisted Skill recovery state is invalid",
+        )
+    previous = {
+        "status": run.get("status"), "resume_status": run.get("resume_status"),
+        "reader": run.get("_immutable_skill_reader"),
+        "updated_at": run.get("updated_at"),
+    }
+    with run["condition"]:
+        run["_immutable_skill_reader"] = reader
+        run["status"] = normalized["priorState"]["status"]
+        run["resume_status"] = normalized["priorState"]["resumeStatus"]
+        run["skill_recovery"] = None
+        run["updated_at"] = now_iso()
+    try:
+        _persist_agent_run(run)
+    except Exception:
+        with run["condition"]:
+            run["status"] = previous["status"]
+            run["resume_status"] = previous["resume_status"]
+            run["_immutable_skill_reader"] = previous["reader"]
+            run["skill_recovery"] = normalized
+            run["updated_at"] = previous["updated_at"]
+        raise
+    _append_agent_event(run, "skill_recovery_restored", {
+        "restoredStatus": normalized["priorState"]["status"],
+        "dataRootId": normalized["dataRootId"],
+    })
+    return True
+
+
+def _get_agent_run(run_id, immutable_skill_reader=None):
     try:
         safe_id = _safe_agent_run_id(run_id)
     except ValueError:
@@ -4964,16 +5378,28 @@ def _get_agent_run(run_id):
     with _agent_run_lock:
         existing = _agent_runs.get(safe_id)
         if existing:
+            if immutable_skill_reader is not None:
+                if existing.get("skill_recovery"):
+                    _agent_restore_skill_recovery(existing, immutable_skill_reader)
+                elif skill_runtime_v2.is_immutable(existing.get("skill_lifecycle")):
+                    skill_runtime_v2.verify_lifecycle(
+                        immutable_skill_reader, _agent_canonical_skill_lifecycle(existing),
+                    )
+                    existing["_immutable_skill_reader"] = immutable_skill_reader
             return existing
     record = read_json(_agent_run_path(safe_id), None)
     if not isinstance(record, dict):
         return None
-    run = _agent_run_from_record(record)
+    run = _agent_run_from_record(record, immutable_skill_reader=immutable_skill_reader)
     if run["status"] == "waiting_recovery" and record.get("status") != "waiting_recovery":
-        recovery = _normalize_agent_recovery_state(run.get("recovery_state")) or {}
+        recovery = (
+            run.get("skill_recovery")
+            or _normalize_agent_recovery_state(run.get("recovery_state"))
+            or {}
+        )
         _append_agent_event(run, "waiting_recovery", {
             "resumeStatus": run["resume_status"],
-            "reason": "server_restarted",
+            "reason": str(recovery.get("kind") or "server_restarted"),
             "errorCode": recovery.get("errorCode") or "agent_recovery_required",
             "retryAfter": recovery.get("retryAfter") or "",
             "round": int(recovery.get("round") or 0),
@@ -4984,6 +5410,11 @@ def _get_agent_run(run_id):
             "resumeStatus": run["resume_status"],
             "reason": "server_restarted",
         })
+    skill_recovery_changed = (
+        (run.get("skill_recovery") is not None) != ("skillRecovery" in record)
+    )
+    if skill_recovery_changed:
+        _persist_agent_run(run)
     with _agent_run_lock:
         return _agent_runs.setdefault(safe_id, run)
 
@@ -6809,10 +7240,17 @@ def _ensure_agent_delegation_child(run, call, execution):
     if not child:
         child_tool_names = []
         child_tool_definitions = []
+        immutable_parent = skill_runtime_v2.is_immutable(run.get("skill_lifecycle"))
         for definition in run.get("tools") or []:
             function = definition.get("function") or {}
             name = str(function.get("name") or "")
-            if not name or name in {"task", "request_user_input"} or _agent_internal_tool(name):
+            if (
+                not name or name in {"task", "request_user_input"}
+                or _agent_internal_tool(name)
+                or immutable_parent and name in {
+                    "use_skill", "check_skill_dependencies", "read_skill_resource",
+                }
+            ):
                 continue
             child_tool_names.append(name)
             child_tool_definitions.append(_json_clone(definition))
@@ -8270,6 +8708,20 @@ def _execute_agent_pending_tools(run):
                 return False
             continue
         execution = run["tool_executions"].get(call_id)
+        immutable_context = None
+        immutable_paths = None
+        try:
+            immutable_context, immutable_paths = _agent_immutable_execution_identity(
+                run, call, execution,
+            )
+        except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+            if exc.code == "skill_runtime_path_rebind_required" and execution is not None:
+                _agent_close_stale_skill_path_call(run, call, execution)
+                continue
+            if exc.temporary:
+                _agent_enter_skill_recovery(run, exc)
+                return False
+            raise
         if execution and execution.get("fingerprint") != call.get("fingerprint"):
             raise ValueError(f"tool call id {call_id} was reused with different arguments")
 
@@ -8344,13 +8796,19 @@ def _execute_agent_pending_tools(run):
                             call.get("argumentAliases") or []
                         ),
                         "fingerprint": call.get("fingerprint", ""),
-                        "status": "running",
+                        "status": "prepared" if immutable_context is not None else "running",
                         "outcome": "",
                         "result": None,
                         "error": "",
-                        "startedAt": now_iso(),
+                        "startedAt": "" if immutable_context is not None else now_iso(),
                         "completedAt": "",
+                        **({"skillExecutionContext": immutable_context}
+                           if immutable_context is not None else {}),
+                        **({"skillRuntimePathBinding": immutable_paths}
+                           if immutable_paths is not None else {}),
                     }
+                    previous_event_count = len(run.get("events") or [])
+                    previous_next_seq = int(run.get("next_seq") or 1)
                     run["tool_executions"][call_id] = execution
                     _append_agent_event_locked(run, "tool_started", {
                         "toolCallId": call_id,
@@ -8360,7 +8818,14 @@ def _execute_agent_pending_tools(run):
                             execution.get("argumentAliases") or []
                         ),
                     })
-                _persist_agent_run(run)
+                try:
+                    _persist_agent_run(run)
+                except Exception:
+                    with run["condition"]:
+                        run["tool_executions"].pop(call_id, None)
+                        run["events"] = list(run.get("events") or [])[:previous_event_count]
+                        run["next_seq"] = previous_next_seq
+                    raise
             try:
                 previous_project_root = getattr(
                     _agent_workspace_context, "project_root", None,
@@ -8715,6 +9180,7 @@ def _execute_agent_pending_tools(run):
                     except PptMasterRuntimeError as exc:
                         raise _AgentToolResult(exc.tool_result()) from None
                 elif spec.get("effect") == "delegation":
+                    _agent_mark_immutable_nonreplayable_dispatch(run, execution)
                     result = _execute_agent_delegation(run, call, execution)
                     if result is None:
                         return False
@@ -8737,7 +9203,18 @@ def _execute_agent_pending_tools(run):
                             run, name, call["arguments"],
                         )
                     else:
+                        if spec.get("effect") == "memory_write":
+                            _agent_mark_immutable_nonreplayable_dispatch(run, execution)
                         result = execute_registered_tool(name, call["arguments"])
+            except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+                if exc.temporary:
+                    _agent_enter_skill_recovery(run, exc)
+                    return False
+                result = {
+                    "ok": False, "action": name, "errorCode": exc.code,
+                    "retryable": False, "error": str(exc)[:2000],
+                }
+                execution["error"] = result["error"]
             except _AgentToolResult as exc:
                 result = exc.result
                 execution["error"] = str(result.get("error") or "")
@@ -8765,9 +9242,18 @@ def _execute_agent_pending_tools(run):
                 and isinstance(result, dict)
             ):
                 if run.get("skill_lifecycle") is not None:
-                    result = _agent_bind_skill_runtime_durably(
-                        run, name, call.get("arguments") or {}, result,
-                    )
+                    try:
+                        result = _agent_bind_skill_runtime_durably(
+                            run, name, call.get("arguments") or {}, result,
+                        )
+                    except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+                        if exc.temporary:
+                            _agent_enter_skill_recovery(run, exc)
+                            return False
+                        result = {
+                            "ok": False, "action": name, "errorCode": exc.code,
+                            "retryable": False, "error": str(exc)[:2000],
+                        }
                 else:
                     _agent_bind_skill_runtime_from_result(
                         run, name, call.get("arguments") or {}, result,
@@ -9433,6 +9919,45 @@ def _agent_pause_stalled_continuation(run, projection, stalled_count):
     return _finish_agent_run(run, "completed")
 
 
+def _agent_pause_immutable_skill_continuation(run, projection):
+    existing = run.get("result") if isinstance(run.get("result"), dict) else {}
+    if (
+        existing.get("continuationReasonCode") == "skill_goal_continuation_unsupported"
+        and run.get("status") in _AGENT_RUN_TERMINAL
+    ):
+        return True
+    goal = (projection or {}).get("goal") or {}
+    goal_id = str(goal.get("goalId") or "")
+    if not goal_id:
+        return False
+    revision = int((projection or {}).get("revision") or 0)
+    key = "goal-skill-continuation-" + hashlib.sha256(
+        f"{run.get('id') or ''}\0{goal_id}\0{revision}".encode("utf-8")
+    ).hexdigest()[:40]
+    if goal.get("gate") is None:
+        session_id = safe_session_id(str(run.get("session_id") or ""))
+        with _session_lifecycle_lock(session_id):
+            if _session_archive_stop_fence_active(session_id):
+                return False
+            goal_v2_runtime().raise_gate(
+                session_id,
+                goal_id,
+                "waiting_user",
+                "当前固定修订 Skill 暂不支持跨 AgentRun 自动接续；已暂停，等待用户继续。",
+                source_run_id=str(run.get("id") or ""),
+                expected_revision=revision,
+                idempotency_key=key,
+            )
+    run["result"] = {
+        "content": "",
+        "usage": _json_clone(run.get("usage") or {}),
+        "continuationPaused": True,
+        "continuationReasonCode": "skill_goal_continuation_unsupported",
+        "continuationMessage": "Goal 自动接续已暂停：固定修订 Skill 尚未定义跨 Run 授权令牌。",
+    }
+    return _finish_agent_run(run, "completed")
+
+
 def _handoff_agent_goal_run(
     run, *, reason, hard_limit=False, terminal_error="", terminal_error_code="",
 ):
@@ -9440,6 +9965,8 @@ def _handoff_agent_goal_run(
     projection = _agent_goal_continuation_state(run)
     if not projection:
         return False
+    if skill_runtime_v2.is_immutable(run.get("skill_lifecycle")):
+        return _agent_pause_immutable_skill_continuation(run, projection)
     goal = projection.get("goal") or {}
     continuation = run.get("continuation") or {}
     baseline_revision = int(continuation.get("baselineGoalRevision") or 0)
@@ -9648,9 +10175,15 @@ def _agent_skill_completion_evaluate(run):
     )
     if not plan:
         return None, None
-    outcome = skill_outcome.project_skill_outcome(
-        lifecycle, _json_clone(run.get("tool_executions") or {}),
-        run["id"], run.get("status"),
+    outcome = (
+        skill_outcome.project_immutable_skill_outcome(
+            lifecycle, _json_clone(run.get("tool_executions") or {}),
+            run["id"], run.get("status"),
+        ) if skill_runtime_v2.is_immutable(lifecycle)
+        else skill_outcome.project_skill_outcome(
+            lifecycle, _json_clone(run.get("tool_executions") or {}),
+            run["id"], run.get("status"),
+        )
     )
     return plan, skill_completion.evaluate(
         plan, outcome, _agent_skill_completion_tool_specs(run.get("tools")),
@@ -9844,6 +10377,156 @@ def _agent_skill_completion_reconcile(run):
     return _agent_skill_completion_candidate(
         run, candidate, kind=_agent_skill_completion_round_kind(run, latest),
     )
+
+
+def _agent_immutable_execution_identity(run, call, execution=None):
+    lifecycle = _agent_canonical_skill_lifecycle(run)
+    if not skill_runtime_v2.is_immutable(lifecycle):
+        return None, None
+    name = str((call.get("function") or {}).get("name") or "")
+    if call.get("parseError") or call.get("validationErrors"):
+        root_id = lifecycle["activation"]["registry"]["dataRootId"]
+        context = {"version": 1, "dataRootId": root_id, "skills": []}
+        path_binding = (
+            {"version": 1, "dataRootId": root_id, "resources": []}
+            if name == "run_command" else None
+        )
+        if execution is not None:
+            if execution.get("skillExecutionContext") != context or (
+                name == "run_command"
+                and execution.get("skillRuntimePathBinding") != path_binding
+            ):
+                raise skill_lifecycle.SkillLifecycleError(
+                    "skill_execution_context_conflict", "Invalid call context changed",
+                )
+        return context, path_binding
+    arguments = call.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = (call.get("function") or {}).get("arguments", "{}")
+    try:
+        context = skill_runtime_v2.build_execution_context(
+            run.get("_immutable_skill_reader"), lifecycle, name, arguments,
+            bindings=run.get("skill_runtime_bindings") or {},
+        )
+    except skill_lifecycle_v2.SkillLifecycleV2Error as exc:
+        raise skill_runtime_v2.ImmutableSkillRuntimeError(
+            "skill_execution_context_invalid", str(exc),
+        ) from exc
+    path_binding = None
+    if name == "run_command":
+        path_binding = skill_runtime_v2.build_command_path_binding(
+            run.get("_immutable_skill_reader"), lifecycle, context,
+        )
+    if execution is None:
+        return context, path_binding
+    try:
+        existing_context = skill_runtime_v2.normalize_execution_context(
+            execution.get("skillExecutionContext"), lifecycle,
+        )
+    except skill_runtime_v2.ImmutableSkillRuntimeError as exc:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_execution_context_conflict", "Persisted Skill execution context is invalid",
+        ) from exc
+    if existing_context != context:
+        raise skill_lifecycle.SkillLifecycleError(
+            "skill_execution_context_conflict", "Skill execution context changed",
+        )
+    if name == "run_command":
+        existing_paths = skill_runtime_v2.normalize_command_path_binding(
+            execution.get("skillRuntimePathBinding"), lifecycle,
+        )
+        if existing_paths != path_binding and execution.get("status") != "completed":
+            command = str(execution.get("command") or "")
+            if not command:
+                try:
+                    parsed = json.loads(str(execution.get("arguments") or "{}"))
+                except (TypeError, ValueError):
+                    parsed = {}
+                command = str(parsed.get("command") or "") if isinstance(parsed, dict) else ""
+            normalized_command = command.replace("\\", "/").casefold()
+            if any(
+                str(item.get("path") or "").replace("\\", "/").casefold()
+                in normalized_command
+                for item in existing_paths["resources"]
+            ):
+                raise skill_runtime_v2.ImmutableSkillRuntimeError(
+                    "skill_runtime_path_rebind_required",
+                    "A prepared command retains an earlier immutable resource path",
+                    temporary=True,
+                )
+    return existing_context, existing_paths if name == "run_command" else None
+
+
+def _agent_mark_immutable_nonreplayable_dispatch(run, execution):
+    if (
+        not isinstance(execution.get("skillExecutionContext"), dict)
+        or execution.get("status") != "prepared"
+    ):
+        return
+    execution["status"] = "dispatching"
+    execution["nonReplayable"] = True
+    execution["startedAt"] = now_iso()
+    _persist_agent_run(run)
+
+
+def _agent_close_stale_skill_path_call(run, call, execution):
+    result = {
+        "ok": False,
+        "action": str(execution.get("name") or "run_command"),
+        "errorCode": "skill_runtime_path_rebind_required",
+        "retryable": False,
+        "notReplayed": True,
+        "error": (
+            "This pending command retains an earlier immutable Skill resource path. "
+            "It was not rewritten or dispatched; generate a new tool call from the current path."
+        ),
+    }
+    previous = {
+        "execution": _json_clone(execution),
+        "pendingToolCalls": _json_clone(run.get("pending_tool_calls") or []),
+        "pendingAuthorization": _json_clone(run.get("pending_authorization")),
+        "status": run.get("status"), "resumeStatus": run.get("resume_status"),
+        "messages": _json_clone(run.get("messages") or []),
+        "events": _json_clone(run.get("events") or []),
+        "nextSeq": run.get("next_seq"),
+    }
+    with run["condition"]:
+        _set_agent_execution_result(execution, result)
+        _append_agent_tool_message_locked(
+            run, str(call.get("id") or ""), execution.get("name") or "run_command", result,
+        )
+        run["pending_tool_calls"] = [
+            item for item in run.get("pending_tool_calls") or []
+            if item.get("id") != call.get("id")
+        ]
+        pending = run.get("pending_authorization")
+        if isinstance(pending, dict) and pending.get("toolCallId") == call.get("id"):
+            run["pending_authorization"] = None
+        if run.get("status") == "waiting_authorization":
+            run["status"] = "tools"
+            run["resume_status"] = ""
+        _append_agent_event_locked(run, "tool_completed", {
+            "toolCallId": str(call.get("id") or ""),
+            "name": execution.get("name") or "run_command",
+            "arguments": execution.get("arguments", "{}"),
+            "result": result,
+            "outcome": "failed",
+            "replayed": False,
+        })
+    try:
+        _persist_agent_run(run)
+    except Exception:
+        with run["condition"]:
+            execution.clear()
+            execution.update(previous["execution"])
+            run["pending_tool_calls"] = previous["pendingToolCalls"]
+            run["pending_authorization"] = previous["pendingAuthorization"]
+            run["status"] = previous["status"]
+            run["resume_status"] = previous["resumeStatus"]
+            run["messages"] = previous["messages"]
+            run["events"] = previous["events"]
+            run["next_seq"] = previous["nextSeq"]
+        raise
 
 
 def _agent_run_worker(run):
@@ -10310,6 +10993,7 @@ def _create_agent_run(
     image_route=None,
     skill_activation_request=None,
     _admission_run_id="",
+    _immutable_skill_reader=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -10333,7 +11017,9 @@ def _create_agent_run(
             int(run_id[:8], 16) % len(_agent_run_admission_locks)
         ]
         with admission_lock:
-            existing = _get_agent_run(run_id)
+            existing = _get_agent_run(
+                run_id, immutable_skill_reader=_immutable_skill_reader,
+            )
             if existing:
                 return existing
             return _create_agent_run(
@@ -10364,6 +11050,7 @@ def _create_agent_run(
                 image_route,
                 skill_activation_request,
                 run_id,
+                _immutable_skill_reader,
             )
     inherited_resolution = (
         dict(inherited_context) if isinstance(inherited_context, dict) else None
@@ -10400,9 +11087,10 @@ def _create_agent_run(
         or ""
     )
     goal_operations_enabled = bool(origin_message_id)
-    canonical_activation = skill_activation_request is not None
+    immutable_activation = _immutable_skill_reader is not None
+    canonical_activation = skill_activation_request is not None or immutable_activation
     if canonical_activation:
-        if not _SKILL_ACTIVATION_ENABLED:
+        if not _SKILL_ACTIVATION_ENABLED and not immutable_activation:
             raise SkillActivationError(
                 "activation_protocol_disabled",
                 "Canonical Skill activation is disabled.",
@@ -10432,31 +11120,57 @@ def _create_agent_run(
     canonical_skill_lifecycle = None
     lifecycle_projection = None
     if canonical_activation:
-        activation = prepare_skill_activation(
+        activation_input_tool_names = [
+            str((definition.get("function") or {}).get("name") or "")
+            for definition in tools
+        ]
+        activation = (
+            skill_admission.prepare_immutable_admission(
+                reader=_immutable_skill_reader,
+                messages=messages,
+                user_message=_agent_current_user_text(messages),
+                request=skill_activation_request,
+                initial_tool_names=activation_input_tool_names,
+                available_input_tokens=context_resolution["availableInputTokens"],
+                estimate_tokens=_agent_estimate_text_tokens,
+            )
+            if immutable_activation else prepare_skill_activation(
             messages=messages,
             user_message=_agent_current_user_text(messages),
             request=skill_activation_request,
             installed_skills_dir=SKILLS_DIR,
             bundled_skills_dir=APP_DIR / "data" / "skills",
-            initial_tool_names=[
-                str((definition.get("function") or {}).get("name") or "")
-                for definition in tools
-            ],
+            initial_tool_names=activation_input_tool_names,
             available_input_tokens=context_resolution["availableInputTokens"],
             estimate_tokens=_agent_estimate_text_tokens,
+            )
         )
-        allowed_after_activation = set(activation["toolNames"])
+        allowed_after_activation = set(
+            activation["allowedTools"] if immutable_activation else activation["toolNames"]
+        )
         tools = [
             definition for definition in tools
             if str((definition.get("function") or {}).get("name") or "")
             in allowed_after_activation
         ]
-        messages = activation["messages"]
-        tool_budgets = activation["toolBudgets"]
+        if immutable_activation:
+            messages = skill_activation._apply_prompt(
+                messages, activation["instruction"],
+                activation_input_tool_names, list(allowed_after_activation),
+            )
+            tool_budgets = skill_activation._brainstorming_budgets(
+                activation["activeSkillNames"], _agent_current_user_text(messages),
+            )
+        else:
+            messages = activation["messages"]
+            tool_budgets = activation["toolBudgets"]
         active_skill_names = activation["activeSkillNames"]
         active_skill_name = (
             active_skill_names[0]
-            if activation["explicit"] and len(active_skill_names) == 1
+            if (
+                (activation["intentKind"] == "explicit" if immutable_activation else activation["explicit"])
+                and len(active_skill_names) == 1
+            )
             else ""
         )
         if "imagegen" in active_skill_names and not image_route_identity:
@@ -10476,15 +11190,23 @@ def _create_agent_run(
             if definition:
                 tools.append(definition)
     if activation is not None:
-        captured_evidence_observers = _freeze_captured_skill_evidence_observers(
-            activation, tools,
+        captured_evidence_observers = (
+            [] if immutable_activation else _freeze_captured_skill_evidence_observers(
+                activation, tools,
+            )
         )
-        canonical_skill_lifecycle = skill_lifecycle.build_skill_lifecycle(
-            activation,
-            evidence_observers=captured_evidence_observers,
+        canonical_skill_lifecycle = (
+            skill_lifecycle_v2.build_skill_lifecycle(activation)
+            if immutable_activation else skill_lifecycle.build_skill_lifecycle(
+                activation,
+                evidence_observers=captured_evidence_observers,
+            )
         )
-        lifecycle_projection = skill_lifecycle.project_skill_lifecycle(
-            canonical_skill_lifecycle
+        lifecycle_projection = (
+            skill_lifecycle_v2.project_skill_lifecycle(canonical_skill_lifecycle)
+            if immutable_activation else skill_lifecycle.project_skill_lifecycle(
+                canonical_skill_lifecycle
+            )
         )
         active_skill_names = lifecycle_projection["activeSkillNames"]
     normalized_tool_budgets = _normalize_agent_tool_budgets(tool_budgets, tools)
@@ -10498,8 +11220,13 @@ def _create_agent_run(
     except skill_completion.SkillCompletionError as exc:
         raise SkillActivationError(exc.code, str(exc)) from exc
     skill_evidence_observers = (
-        _freeze_captured_skill_evidence_observers(
-            lifecycle_projection, tools, require_registered_tools=False,
+        (
+            _agent_immutable_evidence_observers(
+                canonical_skill_lifecycle, lifecycle_projection, tools,
+            )
+            if immutable_activation else _freeze_captured_skill_evidence_observers(
+                lifecycle_projection, tools, require_registered_tools=False,
+            )
         )
         if lifecycle_projection is not None
         else _freeze_skill_evidence_observers(
@@ -10582,6 +11309,7 @@ def _create_agent_run(
         "compactions": [],
         "model_checkpoint": None,
         "recovery_state": None,
+        "skill_recovery": None,
         "compaction_recovery": None,
         "pending_tool_calls": [],
         "pending_input": None,
@@ -10598,6 +11326,7 @@ def _create_agent_run(
         "active_skill_dependencies": frozen_active_skill_dependencies,
         "skill_lifecycle": canonical_skill_lifecycle,
         "_skill_lifecycle_view": canonical_skill_lifecycle,
+        "_immutable_skill_reader": _immutable_skill_reader,
         "skill_completion_enforcement": skill_completion_plan,
         "skill_runtime_bindings": {},
         "usage": {},
@@ -10741,6 +11470,10 @@ def _resume_agent_run(
 ):
     if not isinstance(keys, list):
         raise ValueError("keys must be an array")
+    if run.get("skill_recovery") is not None:
+        raise ValueError(
+            "Agent run cannot resume until its exact immutable Skill revision is restored"
+        )
     expected_route_ref = str(run.get("route_ref") or "")
     supplied_route_ref = str(route_ref or "")
     if expected_route_ref and supplied_route_ref != expected_route_ref:
@@ -10912,6 +11645,17 @@ def _close_agent_tools_for_cancel_locked(run):
             result = _agent_cancel_tool_result(
                 None, name, cancelled_before_start=True,
             )
+            cancellation_context = None
+            cancellation_paths = None
+            lifecycle = run.get("skill_lifecycle")
+            if skill_runtime_v2.is_immutable(lifecycle):
+                root_id = lifecycle["activation"]["registry"]["dataRootId"]
+                cancellation_context = {
+                    "version": 1, "dataRootId": root_id, "skills": [],
+                }
+                cancellation_paths = {
+                    "version": 1, "dataRootId": root_id, "resources": [],
+                } if name == "run_command" else None
             execution = {
                 "name": name,
                 "arguments": arguments,
@@ -10923,6 +11667,10 @@ def _close_agent_tools_for_cancel_locked(run):
                 "error": result["error"],
                 "startedAt": "",
                 "completedAt": completed_at,
+                **({"skillExecutionContext": cancellation_context}
+                   if cancellation_context is not None else {}),
+                **({"skillRuntimePathBinding": cancellation_paths}
+                   if cancellation_paths is not None else {}),
             }
             run["tool_executions"][call_id] = execution
         elif execution.get("status") not in {"completed", "cancelled"}:
@@ -15207,6 +15955,32 @@ def _agent_single_skill_evidence_snapshot(run, observer):
                 or str(execution.get("name") or "") != requirement["tool"]
             ):
                 continue
+            immutable_authority = observer.get("_immutableAuthority")
+            if isinstance(immutable_authority, dict):
+                try:
+                    context = skill_runtime_v2.normalize_execution_context(
+                        execution.get("skillExecutionContext"),
+                        _agent_canonical_skill_lifecycle(run),
+                    )
+                except (skill_runtime_v2.ImmutableSkillRuntimeError,
+                        skill_lifecycle.SkillLifecycleError):
+                    continue
+                base_authority = {
+                    key: value for key, value in immutable_authority.items()
+                    if key != "evidenceContentHash"
+                }
+                if not any(
+                    all(item.get(key) == value for key, value in base_authority.items())
+                    for item in context["skills"]
+                ):
+                    continue
+                if (
+                    execution.get("name") not in {
+                        "use_skill", "check_skill_dependencies", "read_skill_resource",
+                    }
+                    and len(context["skills"]) != 1
+                ):
+                    continue
             stable_call_id = str(call_id or "")
             relevant_completed_ids.add(stable_call_id)
             outcome = str(execution.get("outcome") or _agent_execution_outcome(
@@ -15397,7 +16171,13 @@ def _normalize_agent_skill_candidate_result(value):
 
 
 def _normalize_agent_pending_skill_evidence(value):
-    if not isinstance(value, dict) or value.get("version") != 1:
+    if not isinstance(value, dict) or value.get("version") not in {1, 2}:
+        return None
+    version = value.get("version")
+    if version == 2 and set(value) != {
+        "version", "gateId", "authority", "candidateResult",
+        "evidenceStatus", "missing", "createdAt",
+    }:
         return None
     gate_id = str(value.get("gateId") or "")
     if not re.fullmatch(r"skill-evidence-[0-9a-f]{40}", gate_id):
@@ -15405,16 +16185,34 @@ def _normalize_agent_pending_skill_evidence(value):
     candidate = _normalize_agent_skill_candidate_result(value.get("candidateResult"))
     if candidate is None:
         return None
-    active_source = value.get("activeSkill")
-    if not isinstance(active_source, dict):
-        return None
-    name = str(active_source.get("name") or "")
-    content_hash = str(active_source.get("contentHash") or "")
-    if (
-        name not in _SKILL_EVIDENCE_ENFORCEMENT_PILOT_SKILLS
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
-    ):
-        return None
+    if version == 2:
+        authority = value.get("authority")
+        fields = {
+            "name", "role", "skillId", "installationId", "revisionId",
+            "skillContentHash", "evidenceContentHash",
+        }
+        if (
+            not isinstance(authority, dict) or set(authority) != fields
+            or authority.get("role") != "owner"
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(authority.get("name") or ""))
+            or not re.fullmatch(r"(?:local\.skill/[0-9a-f]{32}|code\.bundle/[a-z0-9][a-z0-9._-]{0,127})", str(authority.get("skillId") or ""))
+            or not re.fullmatch(r"si1_[0-9a-f]{32}", str(authority.get("installationId") or ""))
+            or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", str(authority.get(key) or "")) for key in ("revisionId", "skillContentHash", "evidenceContentHash"))
+        ):
+            return None
+        name = authority["name"]
+        content_hash = authority["skillContentHash"]
+    else:
+        active_source = value.get("activeSkill")
+        if not isinstance(active_source, dict):
+            return None
+        name = str(active_source.get("name") or "")
+        content_hash = str(active_source.get("contentHash") or "")
+        if (
+            name not in _SKILL_EVIDENCE_ENFORCEMENT_PILOT_SKILLS
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
+        ):
+            return None
     missing_source = value.get("missing")
     if not isinstance(missing_source, list) or not missing_source:
         return None
@@ -15437,9 +16235,11 @@ def _normalize_agent_pending_skill_evidence(value):
             "failedCount": max(0, min(100, int(source.get("failedCount") or 0))),
         })
     return {
-        "version": 1,
+        "version": version,
         "gateId": gate_id,
-        "activeSkill": {"name": name, "contentHash": content_hash},
+        **({"authority": _json_clone(authority)} if version == 2 else {
+            "activeSkill": {"name": name, "contentHash": content_hash},
+        }),
         "candidateResult": candidate,
         "evidenceStatus": str(value.get("evidenceStatus") or "partial")[:64],
         "missing": missing,
@@ -15456,7 +16256,11 @@ def _agent_public_pending_skill_evidence(run):
     return {
         "version": 1,
         "gateId": pending["gateId"],
-        "activeSkill": _json_clone(pending["activeSkill"]),
+        "activeSkill": (
+            {"name": pending["authority"]["name"],
+             "contentHash": pending["authority"]["skillContentHash"]}
+            if pending["version"] == 2 else _json_clone(pending["activeSkill"])
+        ),
         "evidenceStatus": pending["evidenceStatus"],
         "missing": _json_clone(pending["missing"]),
         "actions": ["continue", "skip", "cancel"],
@@ -15527,16 +16331,23 @@ def _enter_agent_skill_evidence_gate(run, candidate_result, *, completion_plan=N
     )
     if existing:
         return existing
+    immutable_authority = observer.get("_immutableAuthority")
     fingerprint = hashlib.sha256(
         (
             f"{run.get('id') or ''}\0{len(run.get('rounds') or [])}\0"
             + hashlib.sha256(candidate["content"].encode("utf-8")).hexdigest()
+            + "\0" + json.dumps(
+                immutable_authority or {}, ensure_ascii=False,
+                sort_keys=True, separators=(",", ":"),
+            )
         ).encode("utf-8")
     ).hexdigest()[:40]
     pending = {
-        "version": 1,
+        "version": 2 if isinstance(immutable_authority, dict) else 1,
         "gateId": f"skill-evidence-{fingerprint}",
-        "activeSkill": gap["activeSkill"],
+        **({"authority": _json_clone(immutable_authority)}
+           if isinstance(immutable_authority, dict)
+           else {"activeSkill": gap["activeSkill"]}),
         "candidateResult": candidate,
         "evidenceStatus": gap["status"],
         "missing": gap["missing"],
@@ -15558,7 +16369,10 @@ def _enter_agent_skill_evidence_gate(run, candidate_result, *, completion_plan=N
         run["condition"].notify_all()
     _append_agent_event(run, "waiting_skill_evidence", {
         "gateId": pending["gateId"],
-        "activeSkill": pending["activeSkill"]["name"],
+        "activeSkill": (
+            pending["authority"]["name"] if pending["version"] == 2
+            else pending["activeSkill"]["name"]
+        ),
         "evidenceStatus": pending["evidenceStatus"],
         "missing": _json_clone(pending["missing"]),
     })
@@ -16121,13 +16935,19 @@ def _restore_agent_skill_runtime_bindings(value, active_skill_names, lifecycle=N
 
 
 def _agent_skill_runtime_bindings_public(run):
+    lifecycle = None
     if run.get("skill_lifecycle") is not None:
-        _agent_canonical_skill_lifecycle(run)
+        lifecycle = _agent_canonical_skill_lifecycle(run)
     public = []
     for name in run.get("active_skill_names") or []:
-        binding = _normalize_agent_skill_runtime_binding(
-            (run.get("skill_runtime_bindings") or {}).get(name)
-        )
+        source = (run.get("skill_runtime_bindings") or {}).get(name)
+        if skill_runtime_v2.is_immutable(lifecycle):
+            try:
+                binding = skill_runtime_v2.normalize_runtime_binding(source, lifecycle)
+            except skill_runtime_v2.ImmutableSkillRuntimeError:
+                binding = None
+        else:
+            binding = _normalize_agent_skill_runtime_binding(source)
         if not binding:
             continue
         runtime = binding.get("runtime") or {}
@@ -16194,10 +17014,16 @@ def _agent_bind_skill_runtime_from_result(run, action, arguments, result):
         except (OSError, UnicodeError, DependencyManifestError,
                 skill_lifecycle.SkillLifecycleError):
             return False
-        identity = {
-            "skillContentHash": selected["skillContentHash"],
-            "manifestHash": selected["dependency"].get("manifestHash"),
-        }
+        immutable = skill_runtime_v2.is_immutable(lifecycle)
+        identity = (
+            {
+                "authority": skill_runtime_v2.authority_from_selected(selected),
+                "manifestHash": selected["dependency"].get("manifestHash"),
+            } if immutable else {
+                "skillContentHash": selected["skillContentHash"],
+                "manifestHash": selected["dependency"].get("manifestHash"),
+            }
+        )
     else:
         try:
             identity = _agent_skill_runtime_identity(skill_name)
@@ -16206,8 +17032,13 @@ def _agent_bind_skill_runtime_from_result(run, action, arguments, result):
         if not identity:
             return False
     binding = {
-        "version": _SKILL_RUNTIME_BINDING_VERSION,
-        "skill": skill_name,
+        "version": (
+            skill_runtime_v2.RUNTIME_BINDINGS_VERSION
+            if lifecycle is not None and skill_runtime_v2.is_immutable(lifecycle)
+            else _SKILL_RUNTIME_BINDING_VERSION
+        ),
+        **({} if lifecycle is not None and skill_runtime_v2.is_immutable(lifecycle)
+           else {"skill": skill_name}),
         "capability": capability,
         "checkedStatus": "ready",
         **identity,
@@ -16233,8 +17064,9 @@ def _agent_bind_skill_runtime_durably(run, action, arguments, result):
         _persist_agent_run(run)
         return result
     except Exception:
-        target = str((arguments or {}).get("name") or "").strip()
-        previous.pop(target, None)
+        if not skill_runtime_v2.is_immutable(run.get("skill_lifecycle")):
+            target = str((arguments or {}).get("name") or "").strip()
+            previous.pop(target, None)
         with run["condition"]:
             run["skill_runtime_bindings"] = previous
             run["updated_at"] = now_iso()
@@ -16288,6 +17120,19 @@ def _agent_skill_changed(kind):
 def _agent_lifecycle_skill_snapshot(run, skill_name):
     """Revalidate one selected Skill by its frozen exact path, without discovery."""
     lifecycle = _agent_canonical_skill_lifecycle(run)
+    if skill_runtime_v2.is_immutable(lifecycle):
+        snapshot = skill_runtime_v2.skill_snapshot(
+            run.get("_immutable_skill_reader"), lifecycle, skill_name,
+        )
+        return {
+            "immutable": True,
+            "run": run,
+            "selected": snapshot["selected"],
+            "skillDir": Path(snapshot["object"]["contentRoot"]),
+            "runtimeResources": skill_runtime_v2.runtime_resources(
+                run.get("_immutable_skill_reader"), lifecycle, skill_name,
+            ),
+        }
     selected = skill_lifecycle.require_active_skill(lifecycle, skill_name)
     directory = selected["source"]["directory"]
     skill_dir = _agent_runtime_path_safe(
@@ -16381,6 +17226,17 @@ def _agent_lifecycle_skill_snapshot(run, skill_name):
 
 
 def _agent_lifecycle_dependency_status(snapshot, capability=""):
+    if snapshot.get("immutable"):
+        run = snapshot["run"]
+        inspection = skill_runtime_v2.dependency_status(
+            run.get("_immutable_skill_reader"),
+            _agent_canonical_skill_lifecycle(run),
+            snapshot["selected"]["name"],
+            app_dir=APP_DIR, data_dir=DATA_DIR, capability=capability,
+        )
+        return _apply_ppt_master_dependency_integrity(
+            snapshot["skillDir"], inspection, capability,
+        )
     skill_dir = snapshot["skillDir"]
     inspection = inspect_skill_directory(
         skill_dir,
@@ -16398,25 +17254,38 @@ def _execute_agent_skill_lifecycle_tool(run, action, arguments):
         snapshot = _agent_lifecycle_skill_snapshot(run, target)
         selected = snapshot["selected"]
         if action == "read_skill_resource":
-            relative = skill_lifecycle.normalize_text_resource_path(arguments.get("file"))
-            path = _agent_runtime_path_safe(
-                snapshot["skillDir"].joinpath(*relative.split("/")),
-                snapshot["skillDir"],
-                expect_file=True,
-            )
-            if path is None or path.stat().st_size > MAX_TOOL_READ_BYTES:
-                raise skill_lifecycle.SkillLifecycleError(
-                    "skill_lifecycle_reference_invalid", "Skill reference is invalid",
+            if snapshot.get("immutable"):
+                relative, content_hash, content = skill_runtime_v2.text_resource(
+                    run.get("_immutable_skill_reader"),
+                    _agent_canonical_skill_lifecycle(run),
+                    selected["name"], arguments.get("file"),
+                    maximum_bytes=MAX_TOOL_READ_BYTES,
                 )
-            raw = path.read_bytes()
-            content = raw.decode("utf-8-sig")
-            content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+            else:
+                relative = skill_lifecycle.normalize_text_resource_path(arguments.get("file"))
+                path = _agent_runtime_path_safe(
+                    snapshot["skillDir"].joinpath(*relative.split("/")),
+                    snapshot["skillDir"],
+                    expect_file=True,
+                )
+                if path is None or path.stat().st_size > MAX_TOOL_READ_BYTES:
+                    raise skill_lifecycle.SkillLifecycleError(
+                        "skill_lifecycle_reference_invalid", "Skill reference is invalid",
+                    )
+                raw = path.read_bytes()
+                content = raw.decode("utf-8-sig")
+                content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
             with run["persist_lock"]:
                 with run["condition"]:
                     previous = run["skill_lifecycle"]
                     previous_updated_at = run.get("updated_at")
-                    updated = skill_lifecycle.bind_text_resource(
-                        previous, selected["name"], relative, content_hash,
+                    updated = (
+                        skill_lifecycle_v2.bind_text_resource(
+                            previous, selected["installationId"],
+                            selected["revisionId"], relative, content_hash,
+                        ) if snapshot.get("immutable") else skill_lifecycle.bind_text_resource(
+                            previous, selected["name"], relative, content_hash,
+                        )
                     )
                     changed = updated != previous
                     if changed:
@@ -16461,6 +17330,8 @@ def _execute_agent_skill_lifecycle_tool(run, action, arguments):
         if selected["dependency"]["state"] == "ready":
             result["dependencies"] = _agent_lifecycle_dependency_status(snapshot)
         return result
+    except skill_runtime_v2.ImmutableSkillRuntimeError:
+        raise
     except skill_lifecycle.SkillLifecycleError as exc:
         return _agent_skill_lifecycle_error(action, exc.code)
     except (OSError, UnicodeError, DependencyManifestError):
@@ -16518,6 +17389,145 @@ def _dedupe_environment_paths(values):
     return result
 
 
+def _agent_runtime_environment_result(run, checked, dependent, version):
+    python_executables = _dedupe_environment_paths([
+        (binding.get("runtime", {}).get("python") or {}).get("executable")
+        for binding in checked
+        if (binding.get("runtime", {}).get("python") or {}).get("source") == "managed"
+    ])
+    node_paths = _dedupe_environment_paths([
+        (binding.get("runtime", {}).get("node") or {}).get("nodePath")
+        for binding in checked
+        if (binding.get("runtime", {}).get("node") or {}).get("source") == "managed"
+    ])
+    if len(python_executables) > 1 or len(node_paths) > 1:
+        return _agent_skill_runtime_error(
+            run, "managed_runtime_conflict", stale=True, skills=dependent,
+        )
+    path_prefix = []
+    environment = dict(os.environ)
+    if python_executables:
+        python_root = DATA_DIR / "runtime" / "python"
+        executable = _agent_runtime_path_safe(
+            python_executables[0], python_root, expect_file=True,
+        )
+        trusted_root = _agent_runtime_path_safe(
+            python_root, python_root, expect_file=False,
+        )
+        if executable is None or trusted_root is None:
+            return _agent_skill_runtime_error(
+                run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
+            )
+        environment["VIRTUAL_ENV"] = str(trusted_root)
+        path_prefix.extend([str(trusted_root), str(executable.parent)])
+    if node_paths:
+        node_root = DATA_DIR / "runtime" / "node" / "node_modules"
+        node_modules = _agent_runtime_path_safe(
+            node_paths[0], node_root, expect_file=False,
+        )
+        if node_modules is None:
+            return _agent_skill_runtime_error(
+                run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
+            )
+        node_bin = node_modules / ".bin"
+        if node_bin.exists():
+            safe_bin = _agent_runtime_path_safe(
+                node_bin, node_root, expect_file=False,
+            )
+            if safe_bin is None:
+                return _agent_skill_runtime_error(
+                    run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
+                )
+            path_prefix.append(str(safe_bin))
+        environment["NODE_PATH"] = os.pathsep.join(_dedupe_environment_paths([
+            str(node_modules), *(str(environment.get("NODE_PATH") or "").split(os.pathsep)),
+        ]))
+    if path_prefix:
+        environment["PATH"] = os.pathsep.join(_dedupe_environment_paths([
+            *path_prefix, *(str(environment.get("PATH") or "").split(os.pathsep)),
+        ]))
+    return {
+        "ok": True,
+        "environment": environment if (python_executables or node_paths) else None,
+        "summary": {
+            "version": version,
+            "skills": [{
+                "skill": (
+                    binding.get("skill")
+                    or (binding.get("authority") or {}).get("name")
+                ),
+                "capability": binding["capability"],
+            } for binding in checked],
+            "managedPythonApplied": bool(python_executables),
+            "managedNodeApplied": bool(node_paths),
+        },
+    }
+
+
+def _agent_immutable_runtime_environment(run, lifecycle):
+    active_names = list(run.get("active_skill_names") or [])
+    dependencies = run.get("active_skill_dependencies") or {}
+    dependent = [
+        name for name in active_names
+        if dependencies.get(name) is None or dependencies.get(name)
+    ]
+    if not dependent:
+        return {"ok": True, "environment": None, "summary": None}
+    bindings = run.get("skill_runtime_bindings") or {}
+    missing = []
+    checked = []
+    for name in dependent:
+        source = bindings.get(name)
+        if source is None:
+            missing.append(name)
+            continue
+        try:
+            binding = skill_runtime_v2.normalize_runtime_binding(source, lifecycle)
+        except skill_runtime_v2.ImmutableSkillRuntimeError:
+            return _agent_skill_runtime_error(
+                run, "skill_runtime_binding_conflict", stale=True, skills=[name],
+            )
+        if binding["authority"]["name"] != name:
+            return _agent_skill_runtime_error(
+                run, "skill_runtime_binding_conflict", stale=True, skills=[name],
+            )
+        declared = dependencies.get(name)
+        if not isinstance(declared, list) or binding["capability"] not in declared:
+            return _agent_skill_runtime_error(
+                run, "active_skill_dependency_changed", stale=True, skills=[name],
+            )
+        snapshot = skill_runtime_v2.skill_snapshot(
+            run.get("_immutable_skill_reader"), lifecycle, name,
+        )
+        status = skill_runtime_v2.dependency_status(
+            run.get("_immutable_skill_reader"), lifecycle, name,
+            app_dir=APP_DIR, data_dir=DATA_DIR,
+            capability=binding["capability"],
+        )
+        status = _apply_ppt_master_dependency_integrity(
+            Path(snapshot["object"]["contentRoot"]), status, binding["capability"],
+        )
+        if not _skill_runtime_status_ready(status, binding["capability"]):
+            return _agent_skill_runtime_error(
+                run, "dependency_not_ready", stale=True, skills=[name],
+            )
+        current_runtime = _normalize_agent_skill_runtime(
+            (status.get("installGuidance") or {}).get("runtime")
+        )
+        if current_runtime != binding.get("runtime"):
+            return _agent_skill_runtime_error(
+                run, "managed_runtime_changed", stale=True, skills=[name],
+            )
+        checked.append(binding)
+    if missing:
+        return _agent_skill_runtime_error(
+            run, "dependency_check_required", stale=False, skills=missing,
+        )
+    return _agent_runtime_environment_result(
+        run, checked, dependent, skill_runtime_v2.RUNTIME_BINDINGS_VERSION,
+    )
+
+
 def _agent_prepare_skill_runtime_environment(run):
     active_names = list(run.get("active_skill_names") or [])
     dependencies = run.get("active_skill_dependencies") or {}
@@ -16531,6 +17541,8 @@ def _agent_prepare_skill_runtime_environment(run):
             return _agent_skill_runtime_error(
                 run, "skill_runtime_binding_conflict", stale=True, skills=active_names,
             )
+    if skill_runtime_v2.is_immutable(lifecycle):
+        return _agent_immutable_runtime_environment(run, lifecycle)
     dependent = [name for name in active_names if dependencies.get(name) is None or dependencies.get(name)]
     if not dependent:
         return {"ok": True, "environment": None, "summary": None}
@@ -16594,79 +17606,9 @@ def _agent_prepare_skill_runtime_environment(run):
             )
         checked.append(binding)
 
-    python_executables = _dedupe_environment_paths([
-        (binding.get("runtime", {}).get("python") or {}).get("executable")
-        for binding in checked
-        if (binding.get("runtime", {}).get("python") or {}).get("source") == "managed"
-    ])
-    node_paths = _dedupe_environment_paths([
-        (binding.get("runtime", {}).get("node") or {}).get("nodePath")
-        for binding in checked
-        if (binding.get("runtime", {}).get("node") or {}).get("source") == "managed"
-    ])
-    if len(python_executables) > 1 or len(node_paths) > 1:
-        return _agent_skill_runtime_error(
-            run, "managed_runtime_conflict", stale=True, skills=dependent,
-        )
-
-    path_prefix = []
-    environment = dict(os.environ)
-    if python_executables:
-        python_root = DATA_DIR / "runtime" / "python"
-        executable = _agent_runtime_path_safe(
-            python_executables[0], python_root, expect_file=True,
-        )
-        trusted_python_root = _agent_runtime_path_safe(
-            python_root, python_root, expect_file=False,
-        )
-        if executable is None or trusted_python_root is None:
-            return _agent_skill_runtime_error(
-                run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
-            )
-        environment["VIRTUAL_ENV"] = str(trusted_python_root)
-        path_prefix.extend([str(trusted_python_root), str(executable.parent)])
-    if node_paths:
-        node_root = DATA_DIR / "runtime" / "node" / "node_modules"
-        node_modules = _agent_runtime_path_safe(
-            node_paths[0], node_root, expect_file=False,
-        )
-        if node_modules is None:
-            return _agent_skill_runtime_error(
-                run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
-            )
-        node_bin = node_modules / ".bin"
-        if node_bin.exists():
-            safe_node_bin = _agent_runtime_path_safe(
-                node_bin, node_root, expect_file=False,
-            )
-            if safe_node_bin is None:
-                return _agent_skill_runtime_error(
-                    run, "managed_runtime_path_unsafe", stale=True, skills=dependent,
-                )
-            path_prefix.append(str(safe_node_bin))
-        environment["NODE_PATH"] = os.pathsep.join(_dedupe_environment_paths([
-            str(node_modules),
-            *(str(environment.get("NODE_PATH") or "").split(os.pathsep)),
-        ]))
-    if path_prefix:
-        environment["PATH"] = os.pathsep.join(_dedupe_environment_paths([
-            *path_prefix,
-            *(str(environment.get("PATH") or "").split(os.pathsep)),
-        ]))
-    summary = {
-        "version": _SKILL_RUNTIME_BINDING_VERSION,
-        "skills": [
-            {"skill": binding["skill"], "capability": binding["capability"]}
-            for binding in checked
-        ],
-        "managedPythonApplied": bool(python_executables),
-        "managedNodeApplied": bool(node_paths),
-    }
-    return {
-        "ok": True,
-        "environment": environment if (python_executables or node_paths) else None,
-        "summary": summary,
-    }
+    return _agent_runtime_environment_result(
+        run, checked, dependent, _SKILL_RUNTIME_BINDING_VERSION,
+    )
 
 
 def _shared_skill_dependency_ids(skill_dir_name, capability_id):

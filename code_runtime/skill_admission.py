@@ -170,7 +170,7 @@ def _resources(selection, skill_name):
     return {"state": "ready", "contractHash": item["digest"], "contract": contract}
 
 
-def _capture(reader, selection, descriptor, body):
+def _capture(selection, descriptor, body):
     name = descriptor["name"]
     installation = selection["installation"]
     dependency = _dependency(selection, name)
@@ -189,8 +189,6 @@ def _capture(reader, selection, descriptor, body):
         "resources": _resources(selection, name),
         "descriptor": descriptor,
     }
-    if reader.read_active(selection["routingAlias"]) != selection:
-        _fail("immutable_capture_changed")
     return capture
 
 
@@ -198,7 +196,8 @@ def prepare_immutable_admission(*, reader, messages, user_message, request,
                                 initial_tool_names, available_input_tokens, estimate_tokens):
     """Resolve and capture at most owner+modifier from verified object bytes."""
     intent = activation.normalize_activation_request(request)
-    registry = reader.read_registry()
+    admission_snapshot = reader.begin_admission() if callable(getattr(reader, "begin_admission", None)) else None
+    registry = admission_snapshot.registry if admission_snapshot is not None else reader.read_registry()
     registry_bytes = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     if len(registry["bindings"]) > activation.MAX_REGISTRY_ENTRIES or len(registry_bytes) > activation.MAX_REGISTRY_METADATA_BYTES:
         _fail("immutable_registry_too_large")
@@ -206,10 +205,14 @@ def prepare_immutable_admission(*, reader, messages, user_message, request,
     for binding in registry["bindings"]:
         if binding["state"] != "ready":
             continue
-        selection = reader.read_active(binding["routingAlias"])
-        descriptor, body = _descriptor(selection)
+        selection = (admission_snapshot or reader).read_active(binding["routingAlias"])
+        descriptor, _body = _descriptor(selection)
         descriptors.append(descriptor)
-        records[descriptor["descriptorId"]] = (selection, descriptor, body)
+        records[descriptor["descriptorId"]] = {
+            "routingAlias": selection["routingAlias"],
+            "registry": selection["registry"],
+            "installation": selection["installation"],
+        }
     by_name = {}
     for descriptor in descriptors:
         if descriptor["executableCandidate"]:
@@ -218,9 +221,9 @@ def prepare_immutable_admission(*, reader, messages, user_message, request,
         if len(group) > 1:
             for descriptor in group:
                 registry_api._add_descriptor_diagnostic(descriptor, "active_name_conflict")
-    snapshot = {"schema": registry_api.REGISTRY_SCHEMA, "registryHash": registry["registryHash"], "descriptors": descriptors}
+    resolver_snapshot = {"schema": registry_api.REGISTRY_SCHEMA, "registryHash": registry["registryHash"], "descriptors": descriptors}
     try:
-        resolution = registry_api.resolve_skill_shadow(snapshot, str(user_message or ""),
+        resolution = registry_api.resolve_skill_shadow(resolver_snapshot, str(user_message or ""),
             explicit_skill=intent["explicitSkill"], disabled_names=intent["disabledNames"])
     except registry_api.SkillRegistryError as exc:
         raise SkillAdmissionError("immutable_resolution_failed") from exc
@@ -232,10 +235,19 @@ def prepare_immutable_admission(*, reader, messages, user_message, request,
     token_limit = min(activation.MAX_INSTRUCTION_TOKENS, max(0, int(available_input_tokens or 0) // 4))
     for index, candidate in enumerate(candidates[:activation.MAX_SELECTED_SKILLS]):
         try:
-            record = records.get(candidate.get("descriptorId"))
-            if record is None:
+            route_record = records.get(candidate.get("descriptorId"))
+            if route_record is None:
                 _fail("immutable_skill_unavailable")
-            capture = _capture(reader, *record)
+            selection = (
+                admission_snapshot.capture_active(route_record["routingAlias"])
+                if admission_snapshot is not None else reader.read_active(route_record["routingAlias"])
+            )
+            if any(selection.get(key) != route_record[key] for key in ("routingAlias", "registry", "installation")):
+                _fail("immutable_capture_changed")
+            descriptor, body = _descriptor(selection)
+            if descriptor.get("descriptorId") != candidate.get("descriptorId"):
+                _fail("immutable_capture_changed")
+            capture = _capture(selection, descriptor, body)
             if len(capture["body"].encode()) > activation.MAX_BODY_BYTES or estimate_tokens(capture["body"]) > activation.MAX_BODY_TOKENS:
                 _fail("immutable_body_too_large")
             proposed = [*captures, capture]
@@ -247,7 +259,8 @@ def prepare_immutable_admission(*, reader, messages, user_message, request,
             if index == 0:
                 raise
             exclusions.append({"name": str(candidate.get("name") or ""), "reasonCode": exc.code})
-    tools = list(dict.fromkeys(str(name or "").strip() for name in initial_tool_names or [] if str(name or "").strip()))
+    initial_tools = list(dict.fromkeys(str(name or "").strip() for name in initial_tool_names or [] if str(name or "").strip()))
+    tools = list(initial_tools)
     for capture in captures:
         tools = registry_api.project_skill_tools(capture["descriptor"], tools)["allowed"]
     if captures and "task" in tools and not activation._DELEGATION_REQUEST_RE.search(str(user_message or "")) and not any("task" in capture["descriptor"].get("allowedTools", []) for capture in captures):
@@ -260,7 +273,13 @@ def prepare_immutable_admission(*, reader, messages, user_message, request,
     public_captures = []
     for index, capture in enumerate(captures):
         public_captures.append({key: value for key, value in capture.items() if key not in {"descriptor", "dependencyCapabilities"}} | {"role": "owner" if index == 0 else "modifier"})
-    if reader.read_registry() != registry:
+    try:
+        current_registry = admission_snapshot.finish() if admission_snapshot is not None else reader.read_registry()
+    except Exception as exc:
+        if getattr(exc, "code", "") in {"registry_changed", "store_root_changed"}:
+            raise SkillAdmissionError("immutable_registry_changed") from exc
+        raise
+    if current_registry != registry:
         _fail("immutable_registry_changed")
     return {"intentKind": "explicit" if intent["explicitSkill"] else "automatic",
             "registry": {key: registry[key] for key in ("schema", "dataRootId", "generation", "registryHash")},

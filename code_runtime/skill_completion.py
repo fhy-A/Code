@@ -8,9 +8,11 @@ import json
 import re
 
 from . import skill_outcome
+from . import skill_runtime_v2
 
 
 PLAN_VERSION = 1
+IMMUTABLE_PLAN_VERSION = 2
 CONTRACT_VERSION = skill_outcome.COMPLETION_CONTRACT_VERSION
 ENFORCEMENT_MODE = skill_outcome.COMPLETION_ENFORCEMENT_MODE
 MAX_REPAIR_CALLS = 8
@@ -103,17 +105,22 @@ def build_plan(lifecycle, tool_specs, tool_budgets, *, enabled):
         ]
         if runtime_skills not in ([], [owner["name"]]):
             _error("skill_completion_contract_unenforceable", "Skill command runtime identity is ambiguous")
+    immutable = skill_runtime_v2.is_immutable(lifecycle)
+    owner_identity = (
+        skill_runtime_v2.authority_from_selected(owner, evidence=True)
+        if immutable else {
+            "name": owner["name"], "role": "owner",
+            "skillContentHash": owner["skillContentHash"],
+            "evidenceContentHash": evidence["contentHash"],
+        }
+    )
     return {
-        "version": PLAN_VERSION,
+        "version": IMMUTABLE_PLAN_VERSION if immutable else PLAN_VERSION,
         "policy": {
             "mode": ENFORCEMENT_MODE,
             "activationKind": activation_kind,
             "activationKinds": enforcement["activationKinds"],
-            "owner": {
-                "name": owner["name"], "role": "owner",
-                "skillContentHash": owner["skillContentHash"],
-                "evidenceContentHash": evidence["contentHash"],
-            },
+            "owner": owner_identity,
         },
         "phase": "armed",
         "triggerRound": 0,
@@ -204,17 +211,30 @@ def _evaluation(status, gaps, allowed=()):
 
 
 def evaluate(plan, outcome, tool_specs):
-    if not isinstance(outcome, dict) or outcome.get("version") != 2:
+    immutable = plan.get("version") == IMMUTABLE_PLAN_VERSION
+    expected_outcome_version = (
+        skill_outcome.IMMUTABLE_SCHEMA_VERSION if immutable else skill_outcome.SCHEMA_VERSION
+    )
+    if not isinstance(outcome, dict) or outcome.get("version") != expected_outcome_version:
         return {"status": "invalid", "gaps": [], "allowedCalls": [], "gapDigest": ""}
     owner_identity = plan["policy"]["owner"]
-    owners = [
-        item for item in outcome.get("skills") or []
-        if isinstance(item, dict) and item.get("role") == "owner"
-    ]
+    if immutable:
+        owners = [
+            item for item in outcome.get("skills") or []
+            if isinstance(item, dict)
+            and isinstance(item.get("authority"), dict)
+            and item["authority"].get("role") == "owner"
+        ]
+    else:
+        owners = [
+            item for item in outcome.get("skills") or []
+            if isinstance(item, dict) and item.get("role") == "owner"
+        ]
     observed = owners[0].get("requirements") if len(owners) == 1 else None
+    observed_identity = owners[0].get("authority") if immutable and len(owners) == 1 else (owners[0] if len(owners) == 1 else {})
     if (
         len(owners) != 1 or owners[0].get("contractState") != "valid"
-        or any(owners[0].get(key) != value for key, value in owner_identity.items())
+        or any(observed_identity.get(key) != value for key, value in owner_identity.items())
         or not isinstance(observed, list) or not observed
     ):
         return {"status": "invalid", "gaps": [], "allowedCalls": [], "gapDigest": ""}
