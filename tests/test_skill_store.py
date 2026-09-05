@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 import pytest
 
@@ -716,3 +717,28 @@ def test_pinned_reader_rejects_wrong_root_and_revision(tmp_path):
     with pytest.raises(skill_store.SkillStoreError) as caught:
         reader.read_pinned(registry["dataRootId"], "bad")
     assert caught.value.code == "object_revision_invalid"
+
+
+def test_pinned_reader_rejects_a_b_a_returned_byte_race_without_writes(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    reader = skill_store.SkillStoreReader(data)
+    revision_id = registry["installations"][0]["revisionId"]
+    before = _snapshot(data / skill_store.STORE_DIRECTORY)
+    original = skill_store.revisions._stable_file
+    skill_reads = 0
+
+    def alternating(path):
+        nonlocal skill_reads
+        if Path(path).name == "SKILL.md" and Path(path).parent.name == "content":
+            skill_reads += 1
+            if skill_reads == 2:
+                return b"different returned bytes"
+        return original(path)
+
+    with mock.patch.object(skill_store.revisions, "_stable_file", side_effect=alternating):
+        with pytest.raises(skill_store.SkillStoreError) as caught:
+            reader.read_pinned(registry["dataRootId"], revision_id)
+    assert caught.value.code == "object_changed"
+    assert skill_reads == 2
+    assert _snapshot(data / skill_store.STORE_DIRECTORY) == before

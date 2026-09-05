@@ -692,6 +692,10 @@ class SkillStoreReader:
         files = []
         for item in manifest["files"]:
             payload = revisions._stable_file(directory / "content" / item["path"])
+            mode, canonical = revisions._canonical_content(payload)
+            if (canonical != payload or mode != item["contentMode"] or len(payload) != item["size"]
+                    or revisions._digest(payload) != item["digest"]):
+                _fail("object_changed")
             files.append({**item, "content": payload})
         if self._store._verify_object(directory, revision_id) != manifest:
             _fail("object_changed")

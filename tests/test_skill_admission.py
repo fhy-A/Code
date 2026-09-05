@@ -528,3 +528,43 @@ def test_contract_and_lifecycle_bounds_are_not_broadened():
     with pytest.raises(lifecycle.SkillLifecycleV2Error) as caught:
         lifecycle.normalize_skill_lifecycle(value)
     assert caught.value.code == "skill_lifecycle_v2_size_limit"
+
+
+@pytest.mark.parametrize("captures", [None, {}, "invalid"])
+def test_lifecycle_builder_rejects_malformed_captures_instead_of_none(captures):
+    admission = {
+        "intentKind": "automatic",
+        "registry": _lifecycle(outcome="none")["activation"]["registry"],
+        "captures": captures,
+    }
+    with pytest.raises(lifecycle.SkillLifecycleV2Error) as caught:
+        lifecycle.build_skill_lifecycle(admission)
+    assert caught.value.code == "skill_lifecycle_v2_admission_invalid"
+    assert lifecycle.build_skill_lifecycle({**admission, "captures": []})["activation"]["outcome"] == "none"
+
+
+@pytest.mark.parametrize("mutation", [
+    _set(("schemaVersion",), 2.0),
+    _set(("activation", "schemaVersion"), 2.0),
+    _set(("access", "schemaVersion"), 3.0),
+    _set(("activation", "selected", 0, "evidence", "contract", "enforcement", "schemaVersion"), True),
+])
+def test_lifecycle_versions_require_integers(mutation):
+    value = _lifecycle()
+    mutation(value)
+    with pytest.raises(lifecycle.SkillLifecycleV2Error):
+        lifecycle.normalize_skill_lifecycle(value)
+
+
+@pytest.mark.parametrize("alias", ["", ".", "./SKILL.md", "references//guide.md", "references/./guide.md"])
+def test_bind_text_resource_rejects_noncanonical_path_aliases(alias):
+    value = lifecycle.normalize_skill_lifecycle(_lifecycle())
+    with pytest.raises(lifecycle.SkillLifecycleV2Error) as caught:
+        lifecycle.bind_text_resource(
+            value, "si1_" + "1" * 32, _hash("1"), alias, _hash("a"),
+        )
+    assert caught.value.code == "skill_lifecycle_v2_path_invalid"
+    compatible = lifecycle.bind_text_resource(
+        value, "si1_" + "1" * 32, _hash("1"), "references\\guide.md", _hash("a"),
+    )
+    assert compatible["access"]["resourceBindings"][0]["file"] == "references/guide.md"

@@ -66,7 +66,7 @@ def _relative(value, *, allow_skill=False):
         _fail("skill_lifecycle_v2_path_invalid")
     raw = value.replace("\\", "/")
     path = PurePosixPath(raw)
-    if (not raw or raw.startswith("/") or len(raw.encode()) > 1024 or path.is_absolute()
+    if (not raw or not path.parts or raw != path.as_posix() or raw.startswith("/") or len(raw.encode()) > 1024 or path.is_absolute()
             or not allow_skill and raw.casefold() == "skill.md"
             or any(part in {"", ".", ".."} or part.startswith(".") or ":" in part
                    or part.rstrip(" .") != part for part in path.parts)):
@@ -100,6 +100,8 @@ def normalize_evidence_contract(value):
     result = {"schemaVersion": version, "requirements": normalized}
     if "enforcement" in value:
         policy = value["enforcement"]
+        if not isinstance(policy, dict) or type(policy.get("schemaVersion")) is not int:
+            _fail("skill_lifecycle_v2_evidence_invalid")
         if version == 1:
             _exact(policy, {"schemaVersion", "mode"}, "skill_lifecycle_v2_evidence_invalid")
             if policy != {"schemaVersion": 1, "mode": "explicit_only"}:
@@ -192,11 +194,11 @@ def _component(value, skill, kind):
 
 def normalize_skill_lifecycle(value):
     _exact(value, {"schemaVersion", "mode", "activation", "access"})
-    if value.get("schemaVersion") != 2 or value.get("mode") != LIFECYCLE_MODE:
+    if type(value.get("schemaVersion")) is not int or value.get("schemaVersion") != 2 or value.get("mode") != LIFECYCLE_MODE:
         _fail("skill_lifecycle_v2_version_unsupported")
     activation = value["activation"]
     _exact(activation, {"schemaVersion", "intentKind", "outcome", "registry", "selected"})
-    if activation.get("schemaVersion") != 2 or activation.get("intentKind") not in {"explicit", "automatic"} or activation.get("outcome") not in {"activated", "none"}:
+    if type(activation.get("schemaVersion")) is not int or activation.get("schemaVersion") != 2 or activation.get("intentKind") not in {"explicit", "automatic"} or activation.get("outcome") not in {"activated", "none"}:
         _fail("skill_lifecycle_v2_activation_invalid")
     registry = activation["registry"]
     _exact(registry, {"schema", "dataRootId", "generation", "registryHash"})
@@ -231,7 +233,7 @@ def normalize_skill_lifecycle(value):
         _fail("skill_lifecycle_v2_activation_invalid")
     access = value["access"]
     _exact(access, {"schemaVersion", "resourceBindings"})
-    if access.get("schemaVersion") != 3 or not isinstance(access.get("resourceBindings"), list) or len(access["resourceBindings"]) > MAX_RESOURCE_BINDINGS:
+    if type(access.get("schemaVersion")) is not int or access.get("schemaVersion") != 3 or not isinstance(access.get("resourceBindings"), list) or len(access["resourceBindings"]) > MAX_RESOURCE_BINDINGS:
         _fail("skill_lifecycle_v2_access_invalid")
     allowed = {(item["installationId"], item["revisionId"]) for item in selected}
     bindings, keys = [], set()
@@ -255,10 +257,12 @@ def build_skill_lifecycle(admission):
     if not isinstance(admission, dict) or not {"intentKind", "registry", "captures"} <= set(admission):
         _fail("skill_lifecycle_v2_admission_invalid")
     captures = admission.get("captures")
+    if not isinstance(captures, list) or len(captures) > MAX_SELECTED_SKILLS:
+        _fail("skill_lifecycle_v2_admission_invalid")
     selected = []
     capture_fields = ("name", "routingAlias", "displayName", "skillId", "installationId",
                       "revisionId", "skillContentHash", "evidence", "dependency", "resources")
-    for index, capture in enumerate(captures if isinstance(captures, list) else ()):
+    for index, capture in enumerate(captures):
         if not isinstance(capture, dict) or not set(capture_fields) <= set(capture):
             _fail("skill_lifecycle_v2_admission_invalid")
         selected.append({key: capture[key] for key in capture_fields}
